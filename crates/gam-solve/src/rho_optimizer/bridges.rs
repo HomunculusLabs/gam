@@ -25,10 +25,18 @@ pub(crate) struct OuterFirstOrderBridge<'a> {
     /// (stores `0` = full `pirls_config.max_iterations`) before delegating, and
     /// `eval_grad`/`eval_hessian` restore the scheduled cap on the next call.
     pub(crate) outer_inner_cap: Option<InnerProgressFeedback>,
-    /// Counts gradient evaluations for logging only. Inner-PIRLS scheduling
-    /// uses `InnerProgressFeedback.accepted_iter` so rejected line-search
-    /// probes do not relax the inner work budget.
-    pub(crate) iter_count: usize,
+    /// Counts gradient EVALUATIONS, which is not the same thing as outer
+    /// iterations and is why this is no longer called `iter_count` (#2613): the
+    /// Strong-Wolfe search evaluates the gradient at every trial that clears
+    /// Armijo, so on #2392's recovery this reached 18 while `opt::Bfgs` had
+    /// completed exactly ZERO iterations — and the refusal message published
+    /// "after 18 outer iteration(s)". Accepted outer steps are counted by
+    /// `CostStallGuard::accepted_iters`, fed from `on_step_accepted`; the
+    /// inner-PIRLS schedule reads `InnerProgressFeedback.accepted_iter` from
+    /// the same signal. This counter is for logging and for the
+    /// "no gradient evaluation has ever succeeded on this seed" probe-refusal
+    /// gate, both of which want evaluations.
+    pub(crate) first_order_evals: usize,
     /// First observed `‖g‖` from `eval_grad`. Used by the schedule to
     /// compute the gradient-ratio (`last / initial`) — when the ratio
     /// drops, the optimizer is approaching convergence and the inner
@@ -90,7 +98,7 @@ pub(crate) struct OuterFirstOrderBridge<'a> {
     /// all fail — the non-termination reported in issue #NaN-outer-loop.
     ///
     /// Once this counter exceeds [`PROBE_REFUSAL_FATAL_THRESHOLD`] and no
-    /// gradient evaluation has ever been accepted on this seed (`iter_count ==
+    /// gradient evaluation has ever been accepted on this seed (`first_order_evals ==
     /// 0`), the bridge escalates to `Fatal` so BFGS exits immediately via
     /// `ObjectiveFailed`. The seed loop treats that outcome as a rejected seed
     /// and moves on, keeping the cascade bounded.
@@ -140,7 +148,7 @@ pub(crate) const VALUE_PROBE_REJECT_COST_FLOOR: f64 = 1.0e11;
 /// Number of consecutive recoverable `eval_cost` failures (every line-search
 /// probe infeasible) before the bridge escalates to `Fatal` and forces an
 /// immediate BFGS exit. This guard fires only before the first accepted
-/// gradient step (`iter_count == 0`): once BFGS has accepted at least one
+/// gradient step (`first_order_evals == 0`): once BFGS has accepted at least one
 /// outer iteration the current ρ is feasible and isolated probe refusals are
 /// normal line-search noise, not a stuck loop.
 ///
@@ -1587,36 +1595,36 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
         {
             let outcome_label = value_probe_outcome_label(&entry.outcome);
             log::info!(
-                "[STAGE] outer eval start order=Value dim={} trial_rho_distance={:.3e} (first-order bridge, iter={}, cached=true)",
+                "[STAGE] outer eval start order=Value dim={} trial_rho_distance={:.3e} (first-order bridge, eval={}, cached=true)",
                 x.len(),
                 trial_rho_distance,
-                self.iter_count
+                self.first_order_evals
             );
             match &entry.outcome {
                 CachedValueProbeOutcome::Cost(cost) => log::info!(
-                    "[STAGE] outer eval end order=Value elapsed={:.3}s cost={:.6e} trial_rho_distance={:.3e} (first-order bridge, iter={}, cached=true)",
+                    "[STAGE] outer eval end order=Value elapsed={:.3}s cost={:.6e} trial_rho_distance={:.3e} (first-order bridge, eval={}, cached=true)",
                     stage_start.elapsed().as_secs_f64(),
                     cost,
                     trial_rho_distance,
-                    self.iter_count
+                    self.first_order_evals
                 ),
                 CachedValueProbeOutcome::Recoverable(_) | CachedValueProbeOutcome::Fatal(_) => {
                     log::info!(
-                        "[STAGE] outer eval end order=Value elapsed={:.3}s outcome={} trial_rho_distance={:.3e} (first-order bridge, iter={}, cached=true)",
+                        "[STAGE] outer eval end order=Value elapsed={:.3}s outcome={} trial_rho_distance={:.3e} (first-order bridge, eval={}, cached=true)",
                         stage_start.elapsed().as_secs_f64(),
                         outcome_label,
                         trial_rho_distance,
-                        self.iter_count
+                        self.first_order_evals
                     );
                 }
             }
             return cached_value_probe_result(&entry.outcome);
         }
         log::info!(
-            "[STAGE] outer eval start order=Value dim={} trial_rho_distance={:.3e} (first-order bridge, iter={})",
+            "[STAGE] outer eval start order=Value dim={} trial_rho_distance={:.3e} (first-order bridge, eval={})",
             x.len(),
             trial_rho_distance,
-            self.iter_count
+            self.first_order_evals
         );
         let result = self
             .obj
@@ -1633,20 +1641,20 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                 // noise, not a globally-infeasible neighbourhood.
                 self.consecutive_probe_refusals = 0;
                 log::info!(
-                    "[STAGE] outer eval end order=Value elapsed={:.3}s cost={:.6e} trial_rho_distance={:.3e} (first-order bridge, iter={}) theta={}",
+                    "[STAGE] outer eval end order=Value elapsed={:.3}s cost={:.6e} trial_rho_distance={:.3e} (first-order bridge, eval={}) theta={}",
                     stage_start.elapsed().as_secs_f64(),
                     cost,
                     trial_rho_distance,
-                    self.iter_count,
+                    self.first_order_evals,
                     format_outer_theta(x),
                 );
             }
             Err(err) if err.is_recoverable() => {
                 log::info!(
-                    "[STAGE] outer eval end order=Value elapsed={:.3}s outcome=recoverable trial_rho_distance={:.3e} (first-order bridge, iter={})",
+                    "[STAGE] outer eval end order=Value elapsed={:.3}s outcome=recoverable trial_rho_distance={:.3e} (first-order bridge, eval={})",
                     stage_start.elapsed().as_secs_f64(),
                     trial_rho_distance,
-                    self.iter_count
+                    self.first_order_evals
                 );
                 if let Some(guard) = self.cost_stall.as_mut() {
                     match guard.observe_infeasible(x) {
@@ -1695,7 +1703,7 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                 }
                 // Non-termination guard (#NaN-outer-loop): when every
                 // line-search probe is infeasible and BFGS has never
-                // accepted a gradient step (`iter_count == 0`), the
+                // accepted a gradient step (`first_order_evals == 0`), the
                 // neighbourhood around the seed is globally degenerate.
                 // BFGS would otherwise spend its entire max_iterations ×
                 // line_search_budget doing inner solves that all fail.
@@ -1718,15 +1726,15 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                 } else {
                     PROBE_REFUSAL_FATAL_THRESHOLD
                 };
-                if self.iter_count == 0 && self.consecutive_probe_refusals >= threshold {
+                if self.first_order_evals == 0 && self.consecutive_probe_refusals >= threshold {
                     log::warn!(
                         "[OUTER] probe-refusal non-termination guard fired after {} consecutive \
                          infeasible cost probes with no accepted gradient step \
                          (nan_seed={}); escalating to Fatal to abort this seed \
-                         (first-order bridge, iter={})",
+                         (first-order bridge, eval={})",
                         self.consecutive_probe_refusals,
                         self.last_value_grad_rho.is_none(),
-                        self.iter_count,
+                        self.first_order_evals,
                     );
                     return Err(ObjectiveEvalError::fatal(format!(
                             "{PROBE_REFUSAL_FATAL_SENTINEL}: {consecutive} consecutive \
@@ -1737,10 +1745,10 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
             }
             Err(_err) => {
                 log::info!(
-                    "[STAGE] outer eval end order=Value elapsed={:.3}s outcome=fatal trial_rho_distance={:.3e} (first-order bridge, iter={})",
+                    "[STAGE] outer eval end order=Value elapsed={:.3}s outcome=fatal trial_rho_distance={:.3e} (first-order bridge, eval={})",
                     stage_start.elapsed().as_secs_f64(),
                     trial_rho_distance,
-                    self.iter_count
+                    self.first_order_evals
                 );
             }
         }
@@ -1793,7 +1801,7 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
                 log::info!(
                     "[OUTER schedule] inner-PIRLS cap transition accepted_iter={} eval_count={} g_ratio={} {} prev={} new={} ({})",
                     accepted_iter,
-                    self.iter_count,
+                    self.first_order_evals,
                     ratio_str,
                     snap_str,
                     prev,
@@ -1804,9 +1812,9 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
         }
         let stage_start = std::time::Instant::now();
         log::info!(
-            "[STAGE] outer eval start order=ValueAndGradient dim={} (first-order bridge, iter={})",
+            "[STAGE] outer eval start order=ValueAndGradient dim={} (first-order bridge, eval={})",
             x.len(),
-            self.iter_count
+            self.first_order_evals
         );
         let eval = self
             .obj
@@ -1829,15 +1837,15 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
         self.value_probe_cache
             .retain(|entry| value_probe_reject_outcome(&entry.outcome));
         log::info!(
-            "[STAGE] outer eval end order=ValueAndGradient elapsed={:.3}s cost={:.6e} |g|={:.3e} (first-order bridge, iter={}) theta={} g={}",
+            "[STAGE] outer eval end order=ValueAndGradient elapsed={:.3}s cost={:.6e} |g|={:.3e} (first-order bridge, eval={}) theta={} g={}",
             stage_start.elapsed().as_secs_f64(),
             eval.cost,
             g_norm,
-            self.iter_count,
+            self.first_order_evals,
             format_outer_theta(x),
             format_outer_theta(&gradient),
         );
-        self.iter_count = self.iter_count.saturating_add(1);
+        self.first_order_evals = self.first_order_evals.saturating_add(1);
         // Cost-stall bookkeeping (#1089, corrected by #2613). This evaluation
         // is NOT necessarily an accepted outer iterate. The premise that used
         // to sit here — "`eval_grad` is invoked by `opt::Bfgs` at each accepted
@@ -2127,7 +2135,7 @@ pub(crate) const INNER_CAP_CEILING: usize = 64;
 /// — Eisenstat-Walker style for the inner Newton.
 ///
 /// Inputs:
-/// - `iter_count`: outer iter index, used only as a fallback when no
+/// - `accepted_iters`: outer iter index, used only as a fallback when no
 ///   inner-progress feedback has arrived yet (first 1-2 outer iters).
 /// - `g_ratio`: outer gradient-norm decay `‖g_now‖ / ‖g_initial‖`. When
 ///   this drops below 1% the outer is essentially converged; we lift
@@ -2166,7 +2174,7 @@ pub(crate) fn inner_solve_converged(feedback: Option<&InnerProgressFeedback>) ->
 }
 
 pub(crate) fn first_order_inner_cap_schedule(
-    iter_count: usize,
+    accepted_iters: usize,
     g_ratio: Option<f64>,
     last: Option<InnerProgressSnapshot>,
 ) -> usize {
@@ -2243,7 +2251,7 @@ pub(crate) fn first_order_inner_cap_schedule(
     // bundle reset). Coarse iter-count fallback for the first 1-2
     // outer iters so the cold-start cap is shallow even before the
     // adaptive signal kicks in.
-    match iter_count {
+    match accepted_iters {
         0 => 3,
         1 => 5,
         _ => 10,

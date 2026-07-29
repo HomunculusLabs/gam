@@ -2016,7 +2016,7 @@ pub(crate) fn run_outer_with_plan(
                         obj,
                         layout,
                         outer_inner_cap: config.outer_inner_cap.clone(),
-                        iter_count: 0,
+                        first_order_evals: 0,
                         g_norm_initial: None,
                         last_g_norm: None,
                         last_value_grad_rho: None,
