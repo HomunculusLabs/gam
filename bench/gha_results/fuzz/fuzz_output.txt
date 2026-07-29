@@ -1,7 +1,6 @@
-gamfit solver log level set to 'info'
 Running 100 trials
-  Seed start:        1097021409 [auto]
-  Replay this run:   --seed-start 1097021409
+  Seed start:        122989505 [auto]
+  Replay this run:   --seed-start 122989505
   Scenario source:   /home/runner/work/gam/gam/bench/scenarios.json
   Filters: family=all model=all basis=all
   Gamfit timeout:    60s
@@ -12,9 +11,12 @@ Running 100 trials
   Metadata: /home/runner/work/gam/gam/bench/fuzz_results.meta.json
 
 Skipped 2 trial(s) above scenario cost cap 200000; max skipped cost=3950000
-  [  1/100] papuan_oce4_psperpc_k24        bino/gam/ps    auc:gamfit= FAIL auc:mgcv=0.8474 gap=+1.8474 n=  6000 p=  4 [G:ERR] !!! [FAIL]  gamfit=1121.4s mgcv=2.1s
+  [  1/100] continuous_order_boundary_roug gaus/gam/mater r2:gamfit=0.8786 r2:mgcv=0.8749 gap=-0.0037 n=   512 p=  1  gamfit=0.9s mgcv=0.1s
+  [  2/100] continuous_order_boundary_roug gaus/gamls/mater r2:gamfit=0.8750 r2:mgcv=0.8749 gap=-0.0001 n=   512 p=  1  gamfit=10.5s mgcv=0.7s
+  [  3/100] continuous_order_boundary_smoo gaus/gam/mater r2:gamfit=0.9988 r2:mgcv=0.9989 gap=+0.0001 n=   512 p=  1  gamfit=0.7s mgcv=0.1s
+  [  4/100] continuous_order_boundary_smoo gaus/gamls/mater r2:gamfit= FAIL r2:mgcv=0.9989 gap=+1.9989 n=   512 p=  1 [G:ERR] !!! [FAIL]  gamfit=1.2s mgcv=1.6s
     -- GAMFIT FAILURE --
-    error: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=2.597e5 |Pg|=2.597e5 bound=1.115e-1 (rung=curvature-resolvability derived_standard=true) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=2.597e5 > bound=1.115e-1); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=2.50 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 15 outer iteration(s); final objective -1.637865e3, projected gradient norm 2.597e5 against stationarity bound 1.115e-1 (rung=curvature-resolvability derived_standard=true). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [2.5].
+    error: exact two-block spatial optimization failed: Fatal outer-objective evaluation failure (outer ARC evaluation): REML smoothing optimization failed to converge: outer eval failed: REML smoothing optimization failed to converge: n-block exact-joint spatial evaluation failed: custom-family inner solve did not converge after 40 cycle(s); refusing to expose profile objective derivatives for theta_dim=6 (rho_dim=5, psi_dim=1). The analytic outer gradient/Hessian require the inner KKT equation F_beta(beta, theta)=0; returning a value with zero or shape-only derivatives is mathematically inconsistent. This trial point is infeasible; the outer search may step away from it.
     traceback: Traceback (most recent call last):
   File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
     model = gamfit.fit(train_df, formula, family=family_arg, config=config)
@@ -26,204 +28,5 @@ Skipped 2 trial(s) above scenario cost cap 200000; max skipped cost=3950000
     raise map_exception(exc) from exc
   File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
     rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=2.597e5 |Pg|=2.597e5 bound=1.115e-1 (rung=curvature-resolvability derived_standard=true) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=2.597e5 > bound=1.115e-1); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=2.50 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 15 outer iteration(s); final objective -1.637865e3, projected gradient norm 2.597e5 against stationarity bound 1.115e-1 (rung=curvature-resolvability derived_standard=true). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [2.5].
-
-  [  2/100] geo_subpop16_tp_k6             bino/gam/tps   auc:gamfit= FAIL auc:mgcv= FAIL gap= N/A  n=   960 p= 16 [G:ERR] [M:ERR]
-    -- GAMFIT FAILURE --
-    error: Underlying basis function generation failed: Indefinite penalty matrix in closed-form operator mass penalty: minimum eigenvalue -1.421e-19 is below tolerance 5.121e-24. supply the native energy factor for a PSD function penalty; negative curvature is not a penalty null direction
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 666, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1228, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Underlying basis function generation failed: Indefinite penalty matrix in closed-form operator mass penalty: minimum eigenvalue -1.421e-19 is below tolerance 5.121e-24. supply the native energy factor for a PSD function penalty; negative curvature is not a penalty null direction
-
-    -- MGCV FAILURE --
-    error: r_mgcv fold output missing/invalid prediction vector (got 0, expected 192)
-  [  3/100] geo_subpop16_tp_k12            bino/gam/tps   auc:gamfit= FAIL auc:mgcv= FAIL gap= N/A  n=   960 p= 16 [G:ERR] [M:ERR]
-    -- GAMFIT FAILURE --
-    error: Underlying basis function generation failed: Indefinite penalty matrix in closed-form operator mass penalty: minimum eigenvalue -4.126e-20 is below tolerance 8.599e-24. supply the native energy factor for a PSD function penalty; negative curvature is not a penalty null direction
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 666, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1228, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Underlying basis function generation failed: Indefinite penalty matrix in closed-form operator mass penalty: minimum eigenvalue -4.126e-20 is below tolerance 8.599e-24. supply the native energy factor for a PSD function penalty; negative curvature is not a penalty null direction
-
-    -- MGCV FAILURE --
-    error: r_mgcv fold output missing/invalid prediction vector (got 0, expected 192)
-  [  4/100] geo_subpop16_tp_k24            bino/gam/tps   auc:gamfit= FAIL auc:mgcv= FAIL gap= N/A  n=   960 p= 16 [G:ERR] [M:ERR]  gamfit=187.6s mgcv=0.0s
-    -- GAMFIT FAILURE --
-    error: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=3.421e0 |Pg|=3.421e0 bound=5.387e-2 (rung=probe-noise-floor derived_standard=false) hessian_psd=NO railed=[] → NOT STATIONARY (|Pg|=3.421e0 > bound=5.387e-2); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=-2.63 more than 18 e-folds inside the box; k=1: ρ=-2.67 more than 18 e-folds inside the box; k=2: ρ=-2.41 more than 18 e-folds inside the box; k=3: ρ=0.03 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 22 outer iteration(s); final objective 3.373965e2, projected gradient norm 3.421e0 against stationarity bound 5.387e-2 (rung=probe-noise-floor derived_standard=false). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [-2.6315803996771026, -2.668668250261068, -2.4067347771756045, 0.030917768184641453].
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 666, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1228, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=3.421e0 |Pg|=3.421e0 bound=5.387e-2 (rung=probe-noise-floor derived_standard=false) hessian_psd=NO railed=[] → NOT STATIONARY (|Pg|=3.421e0 > bound=5.387e-2); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=-2.63 more than 18 e-folds inside the box; k=1: ρ=-2.67 more than 18 e-folds inside the box; k=2: ρ=-2.41 more than 18 e-folds inside the box; k=3: ρ=0.03 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 22 outer iteration(s); final objective 3.373965e2, projected gradient norm 3.421e0 against stationarity bound 5.387e-2 (rung=probe-noise-floor derived_standard=false). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [-2.6315803996771026, -2.668668250261068, -2.4067347771756045, 0.030917768184641453].
-
-    -- MGCV FAILURE --
-    error: r_mgcv fold output missing/invalid prediction vector (got 0, expected 192)
-  [  5/100] geo_subpop16_duchon_k6         bino/gam/ducho auc:gamfit= FAIL auc:mgcv=0.5824 gap=+1.5824 n=   960 p= 16 [G:ERR] !!! [FAIL]  gamfit=139.8s mgcv=0.6s
-    -- GAMFIT FAILURE --
-    error: Outer smoothing-parameter optimization did not certify a stationary optimum (iso-kappa joint REML): gradient |g|=2.221e0 |Pg|=2.221e0 bound=3.291e-1 (rung=probe-noise-floor derived_standard=false) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=2.221e0 > bound=3.291e-1); tail-snap declined: candidate k=0 tail unconfirmed: no finite-difference-clean tail run; probes: coarse[(ρ=0.49, g=2.488e0, ĉ=1.520e0) (ρ=1.49, g=1.934e0, ĉ=4.349e-1) (ρ=2.49, g=1.014e0, ĉ=8.384e-2) (ρ=3.49, g=4.315e-1, ĉ=1.313e-2) (ρ=4.49, g=1.679e-1, ĉ=1.880e-3) (ρ=5.49, g=6.310e-2, ĉ=2.598e-4) (ρ=6.49, g=2.339e-2, ĉ=3.544e-5) (ρ=7.49, g=8.631e-3, ĉ=4.810e-6) (ρ=8.49, g=3.179e-3, ĉ=6.517e-7) (ρ=9.49, g=1.170e-3, ĉ=8.824e-8) (ρ=10.49, g=4.305e-4, ĉ=1.195e-8) (ρ=11.49, g=1.585e-4, ĉ=1.618e-9)] local[(ρ=-0.01, g=2.278e0, ĉ=2.295e0) (ρ=0.49, g=2.488e0, ĉ=1.520e0) (ρ=0.99, g=2.334e0, ĉ=8.654e-1) (ρ=1.49, g=1.934e0, ĉ=4.349e-1) (ρ=1.99, g=1.452e0, ĉ=1.980e-1) (ρ=2.49, g=1.014e0, ĉ=8.384e-2)]; solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 16 outer iteration(s); final objective 3.412536e2, projected gradient norm 2.221e0 against stationarity bound 3.291e-1 (rung=probe-noise-floor derived_standard=false). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [-0.5076362594230142, 1.126364168409911].
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 666, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1228, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Outer smoothing-parameter optimization did not certify a stationary optimum (iso-kappa joint REML): gradient |g|=2.221e0 |Pg|=2.221e0 bound=3.291e-1 (rung=probe-noise-floor derived_standard=false) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=2.221e0 > bound=3.291e-1); tail-snap declined: candidate k=0 tail unconfirmed: no finite-difference-clean tail run; probes: coarse[(ρ=0.49, g=2.488e0, ĉ=1.520e0) (ρ=1.49, g=1.934e0, ĉ=4.349e-1) (ρ=2.49, g=1.014e0, ĉ=8.384e-2) (ρ=3.49, g=4.315e-1, ĉ=1.313e-2) (ρ=4.49, g=1.679e-1, ĉ=1.880e-3) (ρ=5.49, g=6.310e-2, ĉ=2.598e-4) (ρ=6.49, g=2.339e-2, ĉ=3.544e-5) (ρ=7.49, g=8.631e-3, ĉ=4.810e-6) (ρ=8.49, g=3.179e-3, ĉ=6.517e-7) (ρ=9.49, g=1.170e-3, ĉ=8.824e-8) (ρ=10.49, g=4.305e-4, ĉ=1.195e-8) (ρ=11.49, g=1.585e-4, ĉ=1.618e-9)] local[(ρ=-0.01, g=2.278e0, ĉ=2.295e0) (ρ=0.49, g=2.488e0, ĉ=1.520e0) (ρ=0.99, g=2.334e0, ĉ=8.654e-1) (ρ=1.49, g=1.934e0, ĉ=4.349e-1) (ρ=1.99, g=1.452e0, ĉ=1.980e-1) (ρ=2.49, g=1.014e0, ĉ=8.384e-2)]; solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 16 outer iteration(s); final objective 3.412536e2, projected gradient norm 2.221e0 against stationarity bound 3.291e-1 (rung=probe-noise-floor derived_standard=false). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [-0.5076362594230142, 1.126364168409911].
-
-  [  6/100] geo_subpop16_duchon_k12        bino/gam/ducho auc:gamfit= FAIL auc:mgcv=0.5908 gap=+1.5908 n=   960 p= 16 [G:ERR] !!! [FAIL]  gamfit=42.7s mgcv=0.6s
-    -- GAMFIT FAILURE --
-    error: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=3.109e2 |Pg|=3.109e2 bound=7.178e-3 (rung=curvature-resolvability derived_standard=true) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=3.109e2 > bound=7.178e-3); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=1.88 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 26 outer iteration(s); final objective 3.248458e2, projected gradient norm 3.109e2 against stationarity bound 7.178e-3 (rung=curvature-resolvability derived_standard=true). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [1.8800310812220804].
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 666, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1228, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=3.109e2 |Pg|=3.109e2 bound=7.178e-3 (rung=curvature-resolvability derived_standard=true) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=3.109e2 > bound=7.178e-3); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=1.88 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 26 outer iteration(s); final objective 3.248458e2, projected gradient norm 3.109e2 against stationarity bound 7.178e-3 (rung=curvature-resolvability derived_standard=true). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [1.8800310812220804].
-
-  [  7/100] geo_subpop16_duchon_k24        bino/gam/ducho auc:gamfit= FAIL auc:mgcv=0.6240 gap=+1.6240 n=   960 p= 16 [G:ERR] !!! [FAIL]  gamfit=116.2s mgcv=0.7s
-    -- GAMFIT FAILURE --
-    error: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=1.550e4 |Pg|=1.550e4 bound=5.975e-3 (rung=curvature-resolvability derived_standard=true) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=1.550e4 > bound=5.975e-3); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=3.50 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 20 outer iteration(s); final objective 1.920504e2, projected gradient norm 1.550e4 against stationarity bound 5.975e-3 (rung=curvature-resolvability derived_standard=true). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [3.5].
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 666, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1228, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=1.550e4 |Pg|=1.550e4 bound=5.975e-3 (rung=curvature-resolvability derived_standard=true) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=1.550e4 > bound=5.975e-3); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=3.50 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 20 outer iteration(s); final objective 1.920504e2, projected gradient norm 1.550e4 against stationarity bound 5.975e-3 (rung=curvature-resolvability derived_standard=true). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [3.5].
-
-  [  8/100] geo_subpop16_matern_k6         bino/gam/mater auc:gamfit=0.6230 auc:mgcv=0.5672 gap=-0.0558 n=   960 p= 16  gamfit=21.6s mgcv=0.6s
-  [  9/100] geo_subpop16_matern_k12        bino/gam/mater auc:gamfit= FAIL auc:mgcv=0.5672 gap=+1.5672 n=   960 p= 16 [G:ERR] !!! [FAIL]  gamfit=36.5s mgcv=0.6s
-    -- GAMFIT FAILURE --
-    error: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=1.786e0 |Pg|=1.786e0 bound=1.144e-5 (rung=solver-band derived_standard=false) hessian_psd=NO railed=[] → NOT STATIONARY (|Pg|=1.786e0 > bound=1.144e-5); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=0.08 more than 18 e-folds inside the box; k=1: ρ=-4.65 more than 18 e-folds inside the box; k=2: ρ=-0.21 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 15 outer iteration(s); final objective 3.403673e2, projected gradient norm 1.786e0 against stationarity bound 1.144e-5 (rung=solver-band derived_standard=false). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [0.07610733154995697, -4.645552427307791, -0.21269130670434713].
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 666, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1228, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=1.786e0 |Pg|=1.786e0 bound=1.144e-5 (rung=solver-band derived_standard=false) hessian_psd=NO railed=[] → NOT STATIONARY (|Pg|=1.786e0 > bound=1.144e-5); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=0.08 more than 18 e-folds inside the box; k=1: ρ=-4.65 more than 18 e-folds inside the box; k=2: ρ=-0.21 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 15 outer iteration(s); final objective 3.403673e2, projected gradient norm 1.786e0 against stationarity bound 1.144e-5 (rung=solver-band derived_standard=false). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [0.07610733154995697, -4.645552427307791, -0.21269130670434713].
-
-  [ 10/100] geo_subpop16_matern_k24        bino/gam/mater auc:gamfit= FAIL auc:mgcv=0.6250 gap=+1.6250 n=   960 p= 16 [G:ERR] !!! [FAIL]  gamfit=529.1s mgcv=0.6s
-    -- GAMFIT FAILURE --
-    error: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=3.884e4 |Pg|=3.884e4 bound=1.079e-1 (rung=probe-noise-floor derived_standard=false) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=3.884e4 > bound=1.079e-1); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=-5.91 more than 18 e-folds inside the box; k=1: ρ=2.48 more than 18 e-folds inside the box; k=2: ρ=-1.18 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 32 outer iteration(s); final objective 1.387560e2, projected gradient norm 3.884e4 against stationarity bound 1.079e-1 (rung=probe-noise-floor derived_standard=false). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [-5.910974903509643, 2.481923031941162, -1.1832457991079162].
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 666, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1228, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=3.884e4 |Pg|=3.884e4 bound=1.079e-1 (rung=probe-noise-floor derived_standard=false) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=3.884e4 > bound=1.079e-1); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=-5.91 more than 18 e-folds inside the box; k=1: ρ=2.48 more than 18 e-folds inside the box; k=2: ρ=-1.18 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 32 outer iteration(s); final objective 1.387560e2, projected gradient norm 3.884e4 against stationarity bound 1.079e-1 (rung=probe-noise-floor derived_standard=false). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [-5.910974903509643, 2.481923031941162, -1.1832457991079162].
-
-  [ 11/100] geo_subpop16_psperpc_k6        bino/gam/ps    auc:gamfit= FAIL auc:mgcv=0.5807 gap=+1.5807 n=   960 p= 16 [G:ERR] !!! [FAIL]  gamfit=130.3s mgcv=0.6s
-    -- GAMFIT FAILURE --
-    error: Outer smoothing-parameter optimization did not certify a stationary optimum (iso-kappa joint REML): gradient |g|=2.221e0 |Pg|=2.221e0 bound=3.291e-1 (rung=probe-noise-floor derived_standard=false) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=2.221e0 > bound=3.291e-1); tail-snap declined: candidate k=0 tail unconfirmed: no finite-difference-clean tail run; probes: coarse[(ρ=0.49, g=2.488e0, ĉ=1.520e0) (ρ=1.49, g=1.934e0, ĉ=4.349e-1) (ρ=2.49, g=1.014e0, ĉ=8.384e-2) (ρ=3.49, g=4.315e-1, ĉ=1.313e-2) (ρ=4.49, g=1.679e-1, ĉ=1.880e-3) (ρ=5.49, g=6.310e-2, ĉ=2.598e-4) (ρ=6.49, g=2.339e-2, ĉ=3.544e-5) (ρ=7.49, g=8.631e-3, ĉ=4.810e-6) (ρ=8.49, g=3.179e-3, ĉ=6.517e-7) (ρ=9.49, g=1.170e-3, ĉ=8.824e-8) (ρ=10.49, g=4.305e-4, ĉ=1.195e-8) (ρ=11.49, g=1.585e-4, ĉ=1.618e-9)] local[(ρ=-0.01, g=2.278e0, ĉ=2.295e0) (ρ=0.49, g=2.488e0, ĉ=1.520e0) (ρ=0.99, g=2.334e0, ĉ=8.654e-1) (ρ=1.49, g=1.934e0, ĉ=4.349e-1) (ρ=1.99, g=1.452e0, ĉ=1.980e-1) (ρ=2.49, g=1.014e0, ĉ=8.384e-2)]; solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 16 outer iteration(s); final objective 3.412536e2, projected gradient norm 2.221e0 against stationarity bound 3.291e-1 (rung=probe-noise-floor derived_standard=false). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [-0.5076362594230142, 1.126364168409911].
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 666, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1228, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Outer smoothing-parameter optimization did not certify a stationary optimum (iso-kappa joint REML): gradient |g|=2.221e0 |Pg|=2.221e0 bound=3.291e-1 (rung=probe-noise-floor derived_standard=false) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=2.221e0 > bound=3.291e-1); tail-snap declined: candidate k=0 tail unconfirmed: no finite-difference-clean tail run; probes: coarse[(ρ=0.49, g=2.488e0, ĉ=1.520e0) (ρ=1.49, g=1.934e0, ĉ=4.349e-1) (ρ=2.49, g=1.014e0, ĉ=8.384e-2) (ρ=3.49, g=4.315e-1, ĉ=1.313e-2) (ρ=4.49, g=1.679e-1, ĉ=1.880e-3) (ρ=5.49, g=6.310e-2, ĉ=2.598e-4) (ρ=6.49, g=2.339e-2, ĉ=3.544e-5) (ρ=7.49, g=8.631e-3, ĉ=4.810e-6) (ρ=8.49, g=3.179e-3, ĉ=6.517e-7) (ρ=9.49, g=1.170e-3, ĉ=8.824e-8) (ρ=10.49, g=4.305e-4, ĉ=1.195e-8) (ρ=11.49, g=1.585e-4, ĉ=1.618e-9)] local[(ρ=-0.01, g=2.278e0, ĉ=2.295e0) (ρ=0.49, g=2.488e0, ĉ=1.520e0) (ρ=0.99, g=2.334e0, ĉ=8.654e-1) (ρ=1.49, g=1.934e0, ĉ=4.349e-1) (ρ=1.99, g=1.452e0, ĉ=1.980e-1) (ρ=2.49, g=1.014e0, ĉ=8.384e-2)]; solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 16 outer iteration(s); final objective 3.412536e2, projected gradient norm 2.221e0 against stationarity bound 3.291e-1 (rung=probe-noise-floor derived_standard=false). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [-0.5076362594230142, 1.126364168409911].
-
-  [ 12/100] geo_subpop16_psperpc_k12       bino/gam/ps    auc:gamfit= FAIL auc:mgcv=0.5959 gap=+1.5959 n=   960 p= 16 [G:ERR] !!! [FAIL]  gamfit=42.5s mgcv=0.6s
-    -- GAMFIT FAILURE --
-    error: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=3.109e2 |Pg|=3.109e2 bound=7.178e-3 (rung=curvature-resolvability derived_standard=true) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=3.109e2 > bound=7.178e-3); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=1.88 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 26 outer iteration(s); final objective 3.248458e2, projected gradient norm 3.109e2 against stationarity bound 7.178e-3 (rung=curvature-resolvability derived_standard=true). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [1.8800310812220804].
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 666, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1228, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=3.109e2 |Pg|=3.109e2 bound=7.178e-3 (rung=curvature-resolvability derived_standard=true) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=3.109e2 > bound=7.178e-3); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=1.88 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 26 outer iteration(s); final objective 3.248458e2, projected gradient norm 3.109e2 against stationarity bound 7.178e-3 (rung=curvature-resolvability derived_standard=true). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [1.8800310812220804].
-
-  [ 13/100] geo_subpop16_psperpc_k24       bino/gam/ps    auc:gamfit= FAIL auc:mgcv=0.6268 gap=+1.6268 n=   960 p= 16 [G:ERR] !!! [FAIL]  gamfit=118.5s mgcv=0.7s
-    -- GAMFIT FAILURE --
-    error: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=1.550e4 |Pg|=1.550e4 bound=5.975e-3 (rung=curvature-resolvability derived_standard=true) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=1.550e4 > bound=5.975e-3); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=3.50 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 20 outer iteration(s); final objective 1.920504e2, projected gradient norm 1.550e4 against stationarity bound 5.975e-3 (rung=curvature-resolvability derived_standard=true). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [3.5].
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 666, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1228, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=1.550e4 |Pg|=1.550e4 bound=5.975e-3 (rung=curvature-resolvability derived_standard=true) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=1.550e4 > bound=5.975e-3); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=3.50 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=<no opt solver produced this result> after 20 outer iteration(s); final objective 1.920504e2, projected gradient norm 1.550e4 against stationarity bound 5.975e-3 (rung=curvature-resolvability derived_standard=true). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [3.5].
-
-  [ 14/100] geo_subpop16_randomprev_random bino/gam/ducho auc:gamfit= FAIL auc:mgcv=0.6967 gap=+1.6967 n=   960 p= 16 [G:ERR] !!! [FAIL]  gamfit=342.4s mgcv=0.7s
-    -- GAMFIT FAILURE --
-    error: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=1.009e5 |Pg|=1.009e5 bound=6.767e-3 (rung=curvature-resolvability derived_standard=true) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=1.009e5 > bound=6.767e-3); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=4.00 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=line_search_failed(|g|=1.008757e5) [made no stationarity claim], stop_reason=Converged after 1 outer iteration(s); final objective -2.796026e2, projected gradient norm 1.009e5 against stationarity bound 6.767e-3 (rung=curvature-resolvability derived_standard=true). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [4.0].
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 396, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 666, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1228, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1225, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Outer smoothing-parameter optimization did not certify a stationary optimum (standard REML): gradient |g|=1.009e5 |Pg|=1.009e5 bound=6.767e-3 (rung=curvature-resolvability derived_standard=true) hessian_psd=yes railed=[] → NOT STATIONARY (|Pg|=1.009e5 > bound=6.767e-3); tail-snap declined: no candidate passed the curvature tie (k=0: ρ=4.00 more than 18 e-folds inside the box); solver provenance: claimed_converged=false, termination=line_search_failed(|g|=1.008757e5) [made no stationarity claim], stop_reason=Converged after 1 outer iteration(s); final objective -2.796026e2, projected gradient norm 1.009e5 against stationarity bound 6.767e-3 (rung=curvature-resolvability derived_standard=true). A fit is only minted from a converged optimization; the best iterate is carried as a checkpoint — resume by seeding the outer search at rho_checkpoint = [4.0].
+gamfit._rust.IntegrationError: exact two-block spatial optimization failed: Fatal outer-objective evaluation failure (outer ARC evaluation): REML smoothing optimization failed to converge: outer eval failed: REML smoothing optimization failed to converge: n-block exact-joint spatial evaluation failed: custom-family inner solve did not converge after 40 cycle(s); refusing to expose profile objective derivatives for theta_dim=6 (rho_dim=5, psi_dim=1). The analytic outer gradient/Hessian require the inner KKT equation F_beta(beta, theta)=0; returning a value with zero or shape-only derivatives is mathematically inconsistent. This trial point is infeasible; the outer search may step away from it.
 
