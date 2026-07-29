@@ -1107,6 +1107,19 @@ pub struct LamlFaceParts<'a> {
     /// basis — an iterative mode judged by the Gaussian path's `√ε` would be
     /// declined every time, converged or not.
     pub convergence_tolerance: f64,
+    /// The stabilization ridge `δ` the limit fit's own criterion carries, so
+    /// this form expands `H = XᵀWX + S_λ + δI` — the operator the criterion
+    /// actually used — rather than the bare `XᵀWX + S_λ`.
+    ///
+    /// This field exists because the two were allowed to differ. The inner
+    /// solver carries δ as `RidgePolicy::exact_full_objective()`, so it enters
+    /// the criterion through `½log|H|`, while this form rebuilt its own `H`
+    /// from the design and penalties and never added it. The gap was hidden
+    /// only because δ used to be zero whenever the bare Cholesky succeeded —
+    /// and that selector is itself the #1575/#2519 discontinuity, because it
+    /// makes δ a function of ρ. Carrying δ here is what lets that selector
+    /// become unconditional without making this form expand the wrong matrix.
+    pub stabilization_ridge: f64,
 }
 
 /// Build the analytic λ→∞ face-limit data for a fixed-unit-dispersion LAML
@@ -1172,7 +1185,19 @@ pub fn laml_rail_face_limit(
         row.mapv_inplace(|v| v * w);
     }
     let information = symmetrized(&design.t().dot(&x_by_w));
-    let k_matrix = &information + &split.s_rest;
+    // `H = XᵀWX + S_rest + δI`. The δ is the limit fit's own stabilization
+    // ridge, and it belongs here for the same reason it belongs in the
+    // criterion: the inner solver factors `XᵀWX + S_λ + δI` and reports
+    // `½log|·|` of THAT, so a face expansion of the bare matrix is expanding a
+    // different function. Adding δ to the diagonal shifts every eigenvalue of
+    // the pinned block by exactly δ, which is what the criterion saw.
+    let mut k_matrix = &information + &split.s_rest;
+    if parts.stabilization_ridge > 0.0 {
+        for i in 0..p {
+            k_matrix[[i, i]] += parts.stabilization_ridge;
+        }
+    }
+    let k_matrix = k_matrix;
 
     let pinned_block = match pinned_block_eigenpairs(&k_matrix, &bases.z_basis) {
         Ok(Some(block)) => block,
@@ -1190,7 +1215,16 @@ pub fn laml_rail_face_limit(
 
     // g_c = ∇ℓ(β̂_∞) − S_R β̂_∞: the Lagrange force the face carries.
     let grad_ell = design.t().dot(&parts.score_residuals);
-    let penalty_pull = split.s_rest.dot(&parts.limit_beta);
+    // The ridge pulls on the score exactly as it curves the Hessian. With
+    // `H = XᵀWX + S_rest + δI` the stationarity condition is
+    // `∇ℓ - S_restβ - δβ = 0`, so omitting the δβ term leaves a residual of
+    // order δ·|β| and the pinned-direction check reads a converged mode as
+    // non-stationary. Measured: residual 1.983e-8 against tolerance 1.490e-8,
+    // a 1.33x miss at exactly the δ = 1e-8 scale.
+    let mut penalty_pull = split.s_rest.dot(&parts.limit_beta);
+    if parts.stabilization_ridge > 0.0 {
+        penalty_pull = &penalty_pull + &(&parts.limit_beta * parts.stabilization_ridge);
+    }
     let limit_score = &grad_ell - &penalty_pull;
     let score_scale = grad_ell
         .dot(&grad_ell)
@@ -1572,6 +1606,7 @@ mod rail_face_tests {
                 score_residuals: u.view(),
                 weight_eta_derivatives: c.view(),
                 convergence_tolerance: f64::EPSILON,
+                stabilization_ridge: 0.0,
             },
         )
         .available()
@@ -1612,6 +1647,7 @@ mod rail_face_tests {
                 score_residuals: u.view(),
                 weight_eta_derivatives: zeros.view(),
                 convergence_tolerance: f64::EPSILON,
+                stabilization_ridge: 0.0,
             },
         )
         .available()

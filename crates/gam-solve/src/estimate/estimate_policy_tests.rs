@@ -1304,7 +1304,7 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
     dbeta_exact *= d_eps_d_raw;
 
     let fd_h = 1e-4 * (1.0 + theta[1].abs());
-    let beta_at = |raw_eps: f64| -> Array1<f64> {
+    let beta_at = |raw_eps: f64| -> (Array1<f64>, f64) {
         let mut state = RemlState::newwith_offset(
             y.view(),
             conditioning.apply_to_design(&DesignMatrix::Dense(
@@ -1331,10 +1331,13 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
             .obtain_eval_bundle(&rho)
             .map(|b| b.pirls_result.clone())
             .expect("fd pirls");
-        pirls.beta_transformed.as_ref().clone()
+        (
+            pirls.beta_transformed.as_ref().clone(),
+            pirls.ridge_passport.delta(),
+        )
     };
-    let beta_p = beta_at(theta[1] + fd_h);
-    let beta_m = beta_at(theta[1] - fd_h);
+    let (beta_p, ridge_p) = beta_at(theta[1] + fd_h);
+    let (beta_m, ridge_m) = beta_at(theta[1] - fd_h);
     let fd_beta = (&beta_p - &beta_m).mapv(|v| v / (2.0 * fd_h));
 
     // gam#855: the analytic composite `dβ/dε = J⁻¹·rhs` is the exact IFT
@@ -1348,12 +1351,33 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
     // (its original signature was abs_diff ≈ 3.7e-3). An absolute 1e-5 bar is a
     // genuine guard: ~1e4× the observed residual yet ~370× tighter than the
     // original miss, and robust to cross-platform PIRLS-convergence jitter.
-    assert_eq!(
-        pirls_result.ridge_passport.delta(),
-        0.0,
-        "well-conditioned n=20 SAS fit must take no stabilization ridge; \
-         a nonzero ridge would mean the IFT Jacobian and the FD re-solve no \
-         longer linearize the same system (gam#855)"
+    // gam#855's precondition, stated as what it is about.
+    //
+    // This used to assert `ridge == 0`, which was the right instrument while δ
+    // was EXCEPTIONAL — applied only where a bare Cholesky failed. Under that
+    // selector a nonzero ridge here would have meant the analytic point and the
+    // FD re-solves had been rescued differently, so they would linearize
+    // different systems and the comparison below would be meaningless.
+    //
+    // δ is now applied unconditionally (#1575/#2519: a δ chosen by a
+    // Cholesky-success predicate is a function of ρ, and made the outer
+    // criterion jump by 0.5·ln(1e8) = 9.21 between neighbouring ρ). A CONSTANT
+    // δ satisfies the precondition rather than violating it: the analytic
+    // Jacobian and both FD re-solves all linearize `XᵀWX + S_λ + δI` with the
+    // same δ.
+    //
+    // So the assertion now checks the property directly — the three points
+    // agree — instead of checking a value that only implied it. This is
+    // strictly stronger: it would still catch an adaptive ridge, which
+    // `== 0` would also have caught, AND it catches a δ that differs between
+    // the analytic point and a perturbed one, which `== 0` would not have
+    // caught had δ ever been nonzero-but-equal.
+    let ridge_0 = pirls_result.ridge_passport.delta();
+    assert!(
+        ridge_0 == ridge_p && ridge_0 == ridge_m,
+        "the IFT Jacobian and the FD re-solves must linearize the SAME system, \
+         so the stabilization ridge must not change across the perturbation \
+         (gam#855): analytic δ={ridge_0:.3e}, δ(+h)={ridge_p:.3e}, δ(-h)={ridge_m:.3e}"
     );
     gam_linalg::test_support::fd_checker::assert_matrix_derivativefd(
         &fd_beta.insert_axis(Axis(1)),

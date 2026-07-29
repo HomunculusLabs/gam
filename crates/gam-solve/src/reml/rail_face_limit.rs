@@ -274,12 +274,26 @@ impl RemlState<'_> {
                 ),
             });
         }
-        if limit_fit.ridge_passport.delta() != 0.0 {
+        // A stabilization ridge is no longer a reason to decline the face.
+        //
+        // It used to be, and the reason was sound at the time: the form
+        // rebuilt `H = XᵀWX + S_λ` from the design and penalties, so a limit
+        // fit whose criterion carried `+δI` was not the function this form
+        // expands. The repair is to expand the right function — `δ` now
+        // travels into `laml_rail_face_limit` through `LamlFaceParts` and is
+        // added to the same diagonal — rather than to refuse whenever it is
+        // present. Refusing was what made the unconditional-δ fix for
+        // #1575/#2519 unlandable: with δ applied at every ρ, EVERY limit fit
+        // carries one, so this gate would decline every face forever.
+        //
+        // A non-finite or negative δ is still a refusal: it is not a ridge,
+        // and `½log|H + δI|` is not defined by it.
+        let limit_ridge = limit_fit.ridge_passport.delta();
+        if !limit_ridge.is_finite() || limit_ridge < 0.0 {
             return Ok(RailFaceLimitOutcome::FaceUnavailable {
                 reason: format!(
-                    "the limit fit needed a stabilization ridge ({:.3e}), so its criterion is \
-                     not the plain LAML this form expands",
-                    limit_fit.ridge_passport.delta()
+                    "the limit fit reported a stabilization ridge of {limit_ridge:.3e}, which is \
+                     not a usable ridge for the face expansion"
                 ),
             });
         }
@@ -338,6 +352,7 @@ impl RemlState<'_> {
                 score_residuals: score_residuals.view(),
                 weight_eta_derivatives: limit_fit.solve_c_array.view(),
                 convergence_tolerance: pirls_config.convergence_tolerance,
+                stabilization_ridge: limit_ridge,
             },
         ))
     }

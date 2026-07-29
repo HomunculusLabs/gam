@@ -509,24 +509,32 @@ pub(crate) fn ensure_positive_definitewithridge(
     // nonzero δ broke the envelope identity because the derivative was taken on
     // the un-ridged surface while the value used `log|H + δI|`).
     //
-    // The real repair is therefore NOT this one line: it is to carry δ through
-    // the companion forms — re-deriving the rail-face λ→∞ expansion with
-    // `H = XᵀWX + S_λ + δI` — and only then make δ unconditional. Until that is
-    // done the discontinuity stands, and #1575 stays red for the reason
-    // measured above rather than for an unknown one.
-    if hess.cholesky(Side::Lower).is_ok() {
-        return Ok(0.0);
-    }
-
+    // THE COMPANION FORM NOW CARRIES δ, SO δ IS APPLIED UNCONDITIONALLY.
+    //
+    // The prerequisite this comment used to name — "carry δ through the
+    // companion forms, re-deriving the rail-face λ→∞ expansion with
+    // `H = XᵀWX + S_λ + δI`, and only then make δ unconditional" — is done.
+    // `LamlFaceParts::stabilization_ridge` carries δ into
+    // `laml_rail_face_limit`, which adds it to the same diagonal, so the face
+    // form and the criterion expand the same operator. The `rail_face_limit`
+    // gate that declined any nonzero δ is gone with it; declining was only
+    // ever a way of saying "this form does not know about δ".
+    //
+    // With that in place, applying δ always is what makes `∂δ/∂ρ = 0` hold
+    // identically, which is the invariant `FIXED_STABILIZATION_RIDGE`'s own doc
+    // states and which a Cholesky-success predicate breaks.
+    //
+    // On a well-conditioned Hessian this is numerically inert in the direction
+    // that matters: the criterion shifts by `½·Σ ln(1 + δ/λ_i) ≤ ½·δ·tr(H⁻¹)`,
+    // far below the convergence tolerances when `λ_i ≫ δ = 1e-8`. What it
+    // removes is the 9.21 jump, not the scale.
     if ridge > 0.0 {
         for i in 0..hess.nrows() {
             hess[[i, i]] += ridge;
         }
-
-        if hess.cholesky(Side::Lower).is_ok() {
-            log::debug!("{} stabilized with fixed ridge {:.1e}.", label, ridge);
-            return Ok(ridge);
-        }
+    }
+    if hess.cholesky(Side::Lower).is_ok() {
+        return Ok(ridge);
     }
 
     if let Ok((evals, _)) = hess.eigh(Side::Lower) {
