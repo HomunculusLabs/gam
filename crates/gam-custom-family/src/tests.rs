@@ -4955,20 +4955,37 @@ pub(crate) fn one_step_returned_saddle_specs() -> Vec<ParameterBlockSpec> {
         .collect()
 }
 
-/// The returned-saddle blocks, with one real smoothing coordinate on the
-/// convex `x` block.
+/// The returned-saddle blocks as a fixture a fit can actually be *assembled*
+/// from: one real smoothing coordinate, and two blocks that are separately
+/// identified.
 ///
-/// A certified outer optimum is a statement about an outer coordinate vector,
-/// so any test that finalizes a mode against one needs the mode to *have* an
-/// outer coordinate: the finalizer's identity guard compares the certified
-/// theta against the owned mode's `[rho | manifest values]`, and a mode carried
-/// out of a zero-dimensional outer problem can only match a zero-dimensional
-/// certificate. Penalizing `x` supplies that coordinate without disturbing the
-/// saddle the fixture exists to exhibit — the negative curvature lives in the
-/// unpenalized `y` block, so `H = diag(1 + lambda, -1)` at the returned point
-/// is still a strict saddle.
+/// Two things the curvature tests never need, because they stop at the inner
+/// solve, are required of anything that reaches the finalizer.
+///
+/// A certified outer optimum is a statement about an outer coordinate vector, so
+/// finalizing a mode against one needs the mode to *have* an outer coordinate:
+/// the identity guard compares the certified theta against the owned mode's
+/// `[rho | manifest values]`, and a mode carried out of a zero-dimensional outer
+/// problem can only match a zero-dimensional certificate. Penalizing `x` is what
+/// supplies it, and it leaves the saddle intact — the negative curvature lives
+/// in the unpenalized `y` block, so the returned point still has
+/// `H = diag(1 + lambda, -1)`.
+///
+/// The finalizer also audits identifiability, and `one_step_returned_saddle_specs`
+/// gives both blocks the same single-row design `[[1.0]]`, so `x[0]` and `y[0]`
+/// are the same direction: overlap 1.0, a fatal alias. That is invisible to the
+/// curvature tests, which read the family's hand-written β-space derivatives and
+/// never form the joint design. Two observations with one block on each separate
+/// the columns; the family reads `beta[0]` of each block, so the likelihood, its
+/// gradient and its Hessian are the same function of `(x, y)` as before.
 pub(crate) fn one_step_returned_saddle_specs_with_outer_coordinate() -> Vec<ParameterBlockSpec> {
     let mut specs = one_step_returned_saddle_specs();
+    for (index, spec) in specs.iter_mut().enumerate() {
+        let mut column = array![[0.0], [0.0]];
+        column[(index, 0)] = 1.0;
+        spec.design = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(column));
+        spec.offset = Array1::zeros(2);
+    }
     let penalized = specs
         .first_mut()
         .expect("the returned-saddle fixture has an x block");
