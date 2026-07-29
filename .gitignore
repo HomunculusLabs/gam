@@ -9,6 +9,10 @@ benchmarks/**/__pycache__/
 tests/**/__pycache__/
 tests/bench_tools/*.joblib
 benchmarks/results.cv_*.json
+AGENTS.md
+oversized_history.txt
+rustfmt.toml
+
 
 # Ad-hoc reproduction / debug scripts and build logs that occasionally get
 # created at the repo root during bug triage. Keep them out of commits and,
