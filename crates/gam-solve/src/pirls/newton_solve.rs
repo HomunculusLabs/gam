@@ -475,48 +475,58 @@ pub(crate) fn ensure_positive_definitewithridge(
         );
     }
 
-    // δ IS APPLIED UNCONDITIONALLY, AND THAT IS THE POINT (#1575/#2519/#2614).
+    // δ IS CHOSEN BY A BRANCH HERE, AND THAT IS A KNOWN DEFECT (#1575/#2519/#2614).
     //
-    // This used to factor the bare matrix first and return `ridge = 0.0` when
-    // that succeeded, adding `FIXED_STABILIZATION_RIDGE` only on failure. That
-    // makes δ a function of ρ — through a Cholesky-success predicate on a
-    // near-singular matrix — and δ is carried as
-    // `RidgePolicy::exact_full_objective()`, so it enters the outer criterion
-    // through `0.5·log|H|` with `H = XᵀWX + S_λ + δI`. On a direction whose
-    // eigenvalue sits at the numerical floor, toggling δ between 0 and 1e-8
-    // moves that term by `0.5·ln(1e8) = 9.2103`.
+    // Returning `0.0` when the bare factorization succeeds and
+    // FIXED_STABILIZATION_RIDGE when it does not makes δ a function of ρ —
+    // through a Cholesky-success predicate on a near-singular matrix — while δ
+    // is carried as `RidgePolicy::exact_full_objective()` and so enters the
+    // outer criterion through `0.5·log|H|`. Measured on the #1575
+    // binomial/logit fixture: the outer cost at ρ displacements of 1e-9 and
+    // 1e-12 differed from its value at ρ₀ by exactly −9.2103400803 and
+    // +18.4206788262 — `0.5·ln(1e8)` and `0.5·ln(1e16)` — at identical
+    // deviance, edf and penalty term, the whole difference being `ridge = 1e-8`
+    // at one point and `ridge = 0` at its neighbours. A criterion that jumps by
+    // 9.21 between neighbouring ρ is not a function of ρ, and neither a line
+    // search nor a certificate is well posed on it.
     //
-    // That is not a bound, it is the measured value. On the #1575 binomial/logit
-    // fixture the outer cost at ρ displacements of 1e-9 and 1e-12 differed from
-    // its value at ρ₀ by exactly −9.2103400803 and +18.4206788262, with
-    // `exp(2·Δ)` equal to 1.000001e-8 and 9.999962e+15, at identical deviance,
-    // edf and penalty term — the whole difference being `ridge = 1e-8` at one
-    // point and `ridge = 0` at its neighbours. A criterion that jumps by 9.21
-    // between neighbouring ρ is not a function of ρ: Armijo backtracking is
-    // asked for an O(1e-4) decrease against it and cannot get one at any step
-    // size, and the cost-stall guard's window then fills on iterates that swing
-    // by a median of 4.55 while stepping 0.315 in ρ, which it classifies as a
-    // flat valley and halts.
+    // Applying δ unconditionally removes the jump and fixes both #1575 gates
+    // (REML 503.36, edf 18.38, |g| 1.5e-5, 26 inner solves — better than the
+    // 2026-07-04 healthy record on every axis). It was landed as `3213e26d3`
+    // and REVERTED here, because it also makes every companion form that
+    // assumes δ = 0 unavailable or wrong. Measured on the full `gam-solve --lib`
+    // suite: 7 failing before, 11 after. The four `rail_face_limit` refusals
+    // name the reason exactly —
     //
-    // The constant's own doc (`gam_working_model::FIXED_STABILIZATION_RIDGE`)
-    // states the invariant this restores: "If δ = δ(ρ) is adaptive, V(ρ) is only
-    // piecewise-smooth and ∂V/∂ρ ignores ∂δ/∂ρ… Using a fixed δ makes V(ρ)
-    // smooth and the standard envelope-theorem gradient valid." A δ selected by
-    // a branch is adaptive in exactly that sense, and its ∂δ/∂ρ is a jump no
-    // gradient can carry. Applying it always makes δ genuinely constant, so
-    // ∂δ/∂ρ = 0 holds identically and `0.5·log|H(ρ) + δI|` is continuous in ρ.
+    //   FaceUnavailable { reason: "the limit fit needed a stabilization ridge
+    //   (1.000e-8), so its criterion is not the plain LAML this form expands" }
     //
-    // On a well-conditioned Hessian this is numerically inert in the direction
-    // that matters: the criterion shifts by `0.5·Σ ln(1 + δ/λ_i) ≤ 0.5·δ·tr(H⁻¹)`,
-    // which for λ_i ≫ δ = 1e-8 is far below the convergence tolerances. What it
-    // removes is the jump, not the scale.
+    // — so the λ→∞ face certificate (#2348) can no longer prove an
+    // infinite-smoothing face at all, plus
+    // `estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363` and
+    // `sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19`. `pls_solver`'s own
+    // comment warned about this class from the other direction (#1122: a
+    // nonzero δ broke the envelope identity because the derivative was taken on
+    // the un-ridged surface while the value used `log|H + δI|`).
+    //
+    // The real repair is therefore NOT this one line: it is to carry δ through
+    // the companion forms — re-deriving the rail-face λ→∞ expansion with
+    // `H = XᵀWX + S_λ + δI` — and only then make δ unconditional. Until that is
+    // done the discontinuity stands, and #1575 stays red for the reason
+    // measured above rather than for an unknown one.
+    if hess.cholesky(Side::Lower).is_ok() {
+        return Ok(0.0);
+    }
+
     if ridge > 0.0 {
         for i in 0..hess.nrows() {
             hess[[i, i]] += ridge;
         }
-    }
-    if hess.cholesky(Side::Lower).is_ok() {
-        return Ok(ridge);
+
+        if hess.cholesky(Side::Lower).is_ok() {
+            log::debug!("{} stabilized with fixed ridge {:.1e}.", label, ridge);
+            return Ok(ridge);
+        }
     }
 
     if let Ok((evals, _)) = hess.eigh(Side::Lower) {

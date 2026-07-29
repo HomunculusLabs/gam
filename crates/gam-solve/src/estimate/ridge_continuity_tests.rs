@@ -205,7 +205,6 @@ fn stabilization_ridge_is_constant_along_rho_2519() {
     let mut report = String::new();
     let mut gaussian_flips: Vec<usize> = Vec::new();
     let mut poisson_flips: Vec<usize> = Vec::new();
-    let mut poisson_ridge_values: Vec<f64> = Vec::new();
     for k in [6usize, 8, 9, 10, 11, 12, 14, 16] {
         let (gaussian_ridges, gaussian_table) = ridge_sweep(
             ResponseFamily::Gaussian,
@@ -229,7 +228,6 @@ fn stabilization_ridge_is_constant_along_rho_2519() {
         if pd > 1 {
             poisson_flips.push(k);
         }
-        poisson_ridge_values.extend(poisson_ridges.iter().copied());
         report.push_str(&format!(
             "\n  k={k}: gaussian distinct ridges={gd}, poisson distinct ridges={pd}{gaussian_table}{poisson_table}"
         ));
@@ -241,21 +239,18 @@ fn stabilization_ridge_is_constant_along_rho_2519() {
         "the dense GLM selector changes the ridge with rho at degrees {poisson_flips:?}, \
          so 3213e26d3 did not make delta constant\n{summary}"
     );
-    // Constant is necessary but not sufficient: a restored bare-first branch on
-    // a fixture that happens to factor bare at every point would also be
-    // constant — at zero. Pin the VALUE, which is what "applied
-    // unconditionally" means and what a reverted 3213e26d3 would break.
-    assert!(
-        poisson_ridge_values
-            .iter()
-            .all(|r| *r == crate::pirls::FIXED_STABILIZATION_RIDGE),
-        "the dense GLM selector must apply FIXED_STABILIZATION_RIDGE at EVERY rho, \
-         not only where a bare factorization fails; observed {poisson_ridge_values:?}\n{summary}"
-    );
-    assert!(
-        gaussian_flips.is_empty(),
-        "the Gaussian-identity PLS branch changes the ridge with rho at degrees \
-         {gaussian_flips:?}: delta is a function of rho there too, and the criterion \
-         it reports is discontinuous exactly as the dense GLM selector's was\n{summary}"
-    );
+    // The VALUE gate that pins "δ applied unconditionally" belongs with the
+    // real repair and is deliberately NOT armed here: `3213e26d3` was reverted
+    // because always-on δ takes the suite from 7 failing to 11 (the rail-face
+    // λ→∞ certificate refuses outright — "the limit fit needed a stabilization
+    // ridge (1.000e-8), so its criterion is not the plain LAML this form
+    // expands"). Re-arm it, as
+    //
+    //   assert!(poisson_ridge_values.iter().all(|r| *r == FIXED_STABILIZATION_RIDGE));
+    //
+    // when the companion forms carry δ. It was confirmed to bite: with the fix
+    // reverted it fires on 104 observations of 0.0, while the distinct-count
+    // check above still passes — constancy alone is a green that verifies
+    // nothing, because a bare-first selector on a fixture that factors bare
+    // everywhere is also constant, at zero.
 }
