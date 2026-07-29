@@ -3949,6 +3949,51 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         if k >= reseed.len() {
                             continue;
                         }
+                        // Freeze the KKT-ACTIVE set, not the proximity set
+                        // (#2454). `certificate_railed` is a DISTANCE test —
+                        // "within `CERTIFICATE_RAIL_MARGIN` of a bound" — and
+                        // being near a bound says nothing about whether the
+                        // constraint is active. The active set is the one the
+                        // projector already decided: at a bound it keeps only
+                        // the feasible-descent half, so a coordinate whose
+                        // projected component survives is one the search can
+                        // still move INWARD, and `interior_face_indices` (three
+                        // statements up) has already classified it as interior
+                        // for exactly that reason.
+                        //
+                        // Freezing it anyway pins the coordinate carrying the
+                        // descent that made `interior_not_stationary` true in
+                        // the first place, and the reduced solve then converges
+                        // everything ELSE around it. Measured on #2454's Matérn
+                        // monotone fixture, whose ψ seed sits on its box edge:
+                        // ψ is frozen at −2.4849 with `∂V/∂ψ = −4.3164`
+                        // (FD-confirmed), the three ρ converge to
+                        // `‖g_ρ‖ = 1.03e-4`, the solver reports
+                        // `claimed_converged=true` off that reduced norm, and
+                        // the re-certification under the original box then
+                        // refuses at `|Pg| = 4.316e0` against a `7.06e-4`
+                        // bound — with ψ bit-identical to its seed after 26
+                        // outer iterations, because it was never free to move.
+                        //
+                        // The un-freeze the reduction's contract promises ("a
+                        // frozen coordinate whose gradient turns inward
+                        // re-certifies under the ORIGINAL box") cannot rescue
+                        // this: the gradient had ALREADY turned inward when the
+                        // freeze was taken, so the reduced solve is asked to
+                        // polish a face that was never active.
+                        if projected_gradient
+                            .get(k)
+                            .is_some_and(|component| *component != 0.0)
+                        {
+                            log::info!(
+                                "[ACTIVE-SET] {context}: coordinate {k} is within the rail \
+                                 margin of its bound but its projected gradient is \
+                                 {:.6e} (feasible descent remains), so it is INTERIOR and \
+                                 stays free rather than being frozen (#2454)",
+                                projected_gradient[k],
+                            );
+                            continue;
+                        }
                         let rail = if (upper[k] - reseed[k]).abs() <= (reseed[k] - lower[k]).abs() {
                             upper[k]
                         } else {

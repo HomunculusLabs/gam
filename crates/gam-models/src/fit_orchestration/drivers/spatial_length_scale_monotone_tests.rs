@@ -544,6 +544,7 @@ mod spatial_length_scale_monotone_tests {
     /// point) rather than being read off a refusal string.
     #[test]
     fn zz_measure_joint_terminal_gradient_at_the_checkpoint_2454() {
+        use crate::fit_orchestration::drivers::test_support::SingleBlockExactJointDesignCacheTestExt;
         let n = 60usize;
         let d = 2usize;
         let mut data = Array2::<f64>::zeros((n, d));
