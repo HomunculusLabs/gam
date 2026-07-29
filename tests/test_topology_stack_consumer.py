@@ -47,10 +47,50 @@ class _CapturingRust:
         self._weights = weights
         self.captured_names = None
         self.captured_rows = None
+        self.captured_y = None
+        self.captured_means = None
+        self.captured_lowers = None
+        self.captured_uppers = None
+        self.captured_interval_level = None
 
     def stacking_weights_from_log_density(self, names, log_density_rows):
         self.captured_names = list(names)
         self.captured_rows = [list(row) for row in log_density_rows]
+        return self._stack_result()
+
+    def stack_topologies_gaussian(
+        self,
+        names,
+        y,
+        means,
+        lowers,
+        uppers,
+        interval_level,
+    ):
+        """The second binding `_select_topology` reaches for on this protocol.
+
+        `_TopologyRust` declares both `stacking_weights_from_log_density` and
+        `stack_topologies_gaussian`, and `stack_topologies` calls the latter.
+        This stub implemented only the first, so every test that monkeypatches
+        `_topology_rust` to it failed with
+
+            AttributeError: '_CapturingRust' object has no attribute
+                            'stack_topologies_gaussian'
+
+        before reaching its own assertions — a test double is a consumer of the
+        protocol like any other, and it was not enumerated when the protocol
+        grew. Captured under distinct names so a test can assert which binding
+        the consumer chose, which is the thing the missing method was hiding.
+        """
+        self.captured_names = list(names)
+        self.captured_y = list(y)
+        self.captured_means = [list(row) for row in means]
+        self.captured_lowers = [list(row) for row in lowers]
+        self.captured_uppers = [list(row) for row in uppers]
+        self.captured_interval_level = float(interval_level)
+        return self._stack_result()
+
+    def _stack_result(self):
         return json.dumps(
             {
                 "weights": dict(self._weights),
