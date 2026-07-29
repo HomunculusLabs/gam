@@ -474,6 +474,10 @@ pub(crate) fn unified_joint_cost_gradient(
     ),
     String,
 > {
+    let trace_skip = first_order_trace_skip
+        .as_ref()
+        .map(|v| v.len() as i64)
+        .unwrap_or(-1);
     let hessian_op: Arc<dyn HessianFactorization> = match first_order_trace_skip.as_ref() {
         Some(trace_values) if !trace_values.is_empty() => Arc::new(
             FirstOrderTraceSkipOperator::new(hessian_op, trace_values.len()),
@@ -537,9 +541,17 @@ pub(crate) fn unified_joint_cost_gradient(
         result.criterion_components.logdet_s,
         result.criterion_components.kkt,
     ];
+    let gradient_present = result.gradient.is_some();
     let gradient = result
         .gradient
         .unwrap_or_else(|| Array1::zeros(rho.len() + n_joint + ext_dim));
+    log::debug!(
+        "[UNIFIED-GRAD] mode={eval_mode:?} present={gradient_present} trace_skip={trace_skip} \
+         |g|={:.6e} len={} n_joint={n_joint} rho_len={} ext={ext_dim}",
+        gradient.iter().map(|g| g * g).sum::<f64>().sqrt(),
+        gradient.len(),
+        rho.len(),
+    );
 
     let hessian = result.hessian;
     let ext_mode_response_cols = result.ext_mode_response_cols;

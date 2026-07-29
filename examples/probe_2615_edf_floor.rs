@@ -251,7 +251,7 @@ struct ProbeLogger;
 
 impl log::Log for ProbeLogger {
     fn enabled(&self, meta: &log::Metadata<'_>) -> bool {
-        meta.level() <= log::Level::Debug
+        meta.level() <= log::Level::Trace
     }
     fn log(&self, record: &log::Record<'_>) {
         let msg = format!("{}", record.args());
@@ -259,6 +259,10 @@ impl log::Log for ProbeLogger {
             || msg.starts_with("[EDF-FLOOR]")
             || msg.starts_with("[#2615]")
             || msg.starts_with("[WARM-KEY]")
+            || msg.starts_with("[OUTER-EVAL]")
+            || msg.starts_with("[LABELED-EVAL]")
+            || msg.starts_with("[UNIFIED-GRAD]")
+            || msg.starts_with("[RHO-GRAD]")
         {
             eprintln!("{}: {msg}", record.level());
         }
@@ -270,7 +274,7 @@ static PROBE_LOGGER: ProbeLogger = ProbeLogger;
 
 fn main() {
     if log::set_logger(&PROBE_LOGGER).is_ok() {
-        log::set_max_level(log::LevelFilter::Debug);
+        log::set_max_level(log::LevelFilter::Trace);
     }
     init_parallelism();
     let rows = load_penguins();

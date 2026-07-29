@@ -169,7 +169,16 @@ pub(crate) fn pullback_labeled_outer_eval(
     if eval_mode == EvalMode::ValueOnly {
         result.gradient = Array1::<f64>::zeros(layout.initial_rho.len());
     } else {
+        let raw = result.gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
+        let raw_len = result.gradient.len();
+        let raw_head: Vec<f64> = result.gradient.iter().take(6).copied().collect();
         result.gradient = aggregate_labeled_gradient(&result.gradient, layout)?;
+        log::debug!(
+            "[LABELED-EVAL] mode={eval_mode:?} rho0={:.4} |g_physical|={raw:.6e} len={raw_len} \
+             head={raw_head:?} |g_outer|={:.6e}",
+            rho[0],
+            result.gradient.iter().map(|g| g * g).sum::<f64>().sqrt(),
+        );
     }
     if eval_mode == EvalMode::ValueGradientHessian {
         result.outer_hessian = match result.outer_hessian {

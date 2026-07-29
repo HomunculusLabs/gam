@@ -2336,6 +2336,13 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             hyper_values: Array1::zeros(0),
             inner: eval_result.inner,
         };
+        log::debug!(
+            "[OUTER-EVAL] order={order:?} request_hessian={request_hessian} cost={objective:.6e} \
+             |g|={:.6e} warm={} rho0={:.4}",
+            gradient.iter().map(|g| g * g).sum::<f64>().sqrt(),
+            outer.warm_cache.is_some(),
+            rho[0],
+        );
         outer.install_terminal_mode(rho, objective, &gradient, mode);
         Ok(OuterEval {
             cost: objective,

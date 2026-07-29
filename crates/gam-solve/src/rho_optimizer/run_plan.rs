@@ -1952,6 +1952,18 @@ pub(crate) fn run_outer_with_plan(
                     };
                     started_seeds += 1;
                     seed_slot = started_seeds;
+                    // The seed a BFGS run is handed, and the (cost, gradient)
+                    // it is handed WITH it. `with_initial_sample` below means
+                    // `opt::Bfgs` never re-evaluates here, so a zero gradient
+                    // in this sample is a zero-iteration "convergence" at
+                    // whatever rho this seed happens to be.
+                    log::info!(
+                        "[OUTER] {context}: BFGS seed {seed_idx} (slot {seed_slot}) cost={:.6e} \
+                         |g|={:.6e} rho={:?}",
+                        seed_eval.cost,
+                        seed_eval.gradient.iter().map(|g| g * g).sum::<f64>().sqrt(),
+                        seed.iter().map(|r| (r * 1e6).round() / 1e6).collect::<Vec<_>>(),
+                    );
                     let (lo, hi) = &bounds_template;
                     let bounds = outer_bounds(lo, hi)?;
                     let grad_tol = outer_gradient_tolerance(config);

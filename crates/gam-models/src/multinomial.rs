@@ -4638,6 +4638,199 @@ mod reference_class_invariance_tests {
         );
     }
 
+    /// #2615 diagnostic (zz_measure): profile the REML criterion along ONE
+    /// rank-1 null-space coordinate on the REAL penguins design, at the
+    /// production fit's own rho, with and without the Jeffreys/Firth term.
+    ///
+    /// On non-separable linear data (`zz_measure_2615_nullspace_outer_gradient_fd`)
+    /// REML has an interior optimum in this coordinate, so the effective-df
+    /// floor is redundant there. Penguins is near-separable and the production
+    /// fit rails every coordinate on its wall, so the question is what the
+    /// criterion looks like when the wall is removed: an interior optimum
+    /// (wall irrelevant, something else is wrong) or a monotone descent toward
+    /// total collapse (marginal likelihood genuinely prefers killing the
+    /// linear direction, which is the near-separation pathology the
+    /// Jeffreys/Firth arm exists for). The second profile arms that term, so
+    /// the two curves answer whether the floor is standing in for it.
+    ///
+    /// Prints only; never asserts a bound.
+    #[test]
+    fn zz_measure_2615_penguins_nullspace_criterion_profile() {
+        const PENGUINS_CSV: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../bench/datasets/penguins.csv"
+        );
+        let raw = match fs::read_to_string(PENGUINS_CSV) {
+            Ok(text) => text,
+            Err(err) => {
+                eprintln!("#2615 penguins profile SKIPPED: {PENGUINS_CSV}: {err}");
+                return;
+            }
+        };
+        let mut lines = raw.lines();
+        let header: Vec<&str> = lines.next().expect("penguins header").trim().split(',').collect();
+        let idx = |name: &str| header.iter().position(|c| *c == name).expect("column");
+        let (i_species, i_bl, i_bd, i_fl, i_bm) = (
+            idx("species"),
+            idx("bill_length_mm"),
+            idx("bill_depth_mm"),
+            idx("flipper_length_mm"),
+            idx("body_mass_g"),
+        );
+        // The quality test's stride-3 TRAIN split, so this profiles the exact
+        // design the reported numbers come from.
+        let mut kept = 0usize;
+        let mut csv = String::from("bill_length_mm,bill_depth_mm,flipper_length_mm,body_mass_g,species\n");
+        for line in lines {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let f: Vec<&str> = line.split(',').collect();
+            let num = |i: usize| f.get(i).and_then(|v| v.trim().parse::<f64>().ok());
+            let (Some(bl), Some(bd), Some(fl), Some(bm)) = (num(i_bl), num(i_bd), num(i_fl), num(i_bm))
+            else {
+                continue;
+            };
+            let species = f[i_species].trim().trim_matches('"');
+            if species.is_empty() || species == "NA" {
+                continue;
+            }
+            if kept % 3 == 0 {
+                kept += 1;
+                continue; // held out by the quality test
+            }
+            kept += 1;
+            writeln!(csv, "{bl},{bd},{fl},{bm},{species}").unwrap();
+        }
+        let td = tempdir().expect("tempdir");
+        let path = td.path().join("penguins_train.csv");
+        fs::write(&path, csv).expect("write penguins train csv");
+        let cols: Vec<String> = [
+            "bill_length_mm",
+            "bill_depth_mm",
+            "flipper_length_mm",
+            "body_mass_g",
+            "species",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let train = load_dataset_projected(&path, &cols).expect("load penguins train");
+
+        let config = FitConfig::default();
+        let request = MultinomialFitRequest {
+            init_lambda: 1.0,
+            max_iter: 100,
+            tol: 1e-8,
+            ..MultinomialFitRequest::new(
+                &train,
+                "species ~ s(bill_length_mm, k=10) + s(bill_depth_mm, k=10) \
+                 + s(flipper_length_mm, k=10) + s(body_mass_g, k=10)",
+                &config,
+            )
+        };
+        let parts = penalized_multinomial_formula_parts(&request)
+            .expect("production formula parts must build");
+        let mut probe_options = parts.options.clone();
+        probe_options.compute_covariance = false;
+
+        // The production fit's own rho (every coordinate ON its
+        // effective-df-floor wall), term-major with K=3 per-class copies:
+        //   t0 wiggle s1, t1 null s1, t2 wiggle s2, t3 null s2, ...
+        const WALL: [f64; 8] = [
+            8.498719656305731,
+            -2.802688029911322,
+            8.909882365327132,
+            0.0313034971834482,
+            8.69436831319073,
+            -0.6515139527220641,
+            8.897044748938537,
+            -0.5549484578569235,
+        ];
+        let base: Vec<f64> = WALL.iter().flat_map(|&r| [r, r, r]).collect();
+        assert_eq!(base.len(), 24, "4 smooths x 2 penalties x 3 classes");
+
+        // The null-space coordinate's own optimum is CONDITIONAL on how hard the
+        // wiggliness half is smoothed: an unsmoothed range space can absorb a
+        // linear trend over a bounded interval, which makes the null-space
+        // direction redundant and its lambda uninformative. The production
+        // search seeds at rho_wiggle ~ 1 and only reaches the wiggliness wall
+        // late, so sweep that dependence explicitly with the null coordinate
+        // held ON its wall -- the sign of g[3] there decides whether the
+        // projector is right to pin it.
+        eprintln!("#2615 penguins g[3] at the null-space WALL, as a function of rho_wiggle");
+        for step in 0..8 {
+            let rho_w = -4.0 + 2.0 * step as f64;
+            let mut rho = base.clone();
+            for (t, chunk) in rho.chunks_mut(3).enumerate() {
+                if t % 2 == 0 {
+                    for v in chunk {
+                        *v = rho_w;
+                    }
+                }
+            }
+            let fam = parts
+                .family
+                .clone()
+                .with_joint_initial_log_lambdas(rho.clone());
+            match crate::custom_family::evaluate_labeled_outer_criterion_for_diagnostics(
+                &fam,
+                &parts.blocks,
+                &probe_options,
+                &ndarray::Array1::from(rho.clone()),
+                gam_problem::EvalMode::ValueAndGradient,
+            ) {
+                Ok(d) => eprintln!(
+                    "#2615   rho_wiggle={rho_w:+.1}  V={:.9e}  g[3]={:+.9e}  g[0]={:+.6e}",
+                    d.objective, d.gradient[3], d.gradient[0]
+                ),
+                Err(e) => eprintln!(
+                    "#2615   rho_wiggle={rho_w:+.1}  REFUSED: {}",
+                    format!("{e}").chars().take(200).collect::<String>()
+                ),
+            }
+        }
+
+        for firth in [false, true] {
+            eprintln!(
+                "#2615 penguins null-space profile (coordinate 3 = null space of s(bill_length), \
+                 jeffreys={firth})"
+            );
+            for step in 0..12 {
+                let rho_n = -8.0 + 2.0 * step as f64;
+                let mut rho = base.clone();
+                for c in 3..6 {
+                    rho[c] = rho_n;
+                }
+                let mut fam = parts
+                    .family
+                    .clone()
+                    .with_joint_initial_log_lambdas(rho.clone());
+                if firth {
+                    fam = fam.with_joint_jeffreys_term(true);
+                }
+                match crate::custom_family::evaluate_labeled_outer_criterion_for_diagnostics(
+                    &fam,
+                    &parts.blocks,
+                    &probe_options,
+                    &ndarray::Array1::from(rho.clone()),
+                    gam_problem::EvalMode::ValueAndGradient,
+                ) {
+                    Ok(d) => eprintln!(
+                        "#2615   rho_null={rho_n:+.1}  V={:.9e}  g[3]={:+.6e}  \
+                         g[0]={:+.6e}  inner_conv={}",
+                        d.objective, d.gradient[3], d.gradient[0], d.inner_converged
+                    ),
+                    Err(e) => eprintln!(
+                        "#2615   rho_null={rho_n:+.1}  REFUSED: {}",
+                        format!("{e}").chars().take(200).collect::<String>()
+                    ),
+                }
+            }
+        }
+    }
+
     /// #2615 diagnostic (zz_measure): does the outer REML criterion SEE the
     /// rank-1 null-space smoothing coordinate at all?
     ///
