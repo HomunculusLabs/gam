@@ -6584,4 +6584,91 @@ mod tests {
             "separator discovery expanded a three-row vertex: {active:?}"
         );
     }
+
+    /// The KKT diagnostic's sign convention, pinned on the exact face that
+    /// produces `stat_rel = 1.000e0` in #2601.
+    ///
+    /// `[convex]` on clean linear data reports `primal=8.4e-13`,
+    /// `comp=4.4e-16`, `active=10/10`, every multiplier zero, and a
+    /// stationarity residual equal to the whole gradient. Multipliers
+    /// identically zero on a fully active face is not "slightly off": NNLS
+    /// leaves `λ ≡ 0` exactly when NO active row has positive correlation with
+    /// the target, so all ten rows failed the entry test at once. A gradient
+    /// merely falling outside a pointed cone would normally still recruit some
+    /// rows and leave `stat_rel < 1`. All of them failing together is what a
+    /// gradient sitting in the POLAR cone looks like — i.e. a flipped sign.
+    ///
+    /// Before hunting the sign at the four call sites, establish which sign the
+    /// projector itself expects. Constraints are `A β ≥ b`, so for a MINIMISED
+    /// objective the Lagrangian is `f − λᵀ(Aβ − b)` and stationarity is
+    /// `∇f = Aᵀλ, λ ≥ 0`. This test asserts exactly that, and asserts the
+    /// negation produces the observed pathology — so if the projector is ever
+    /// "fixed" by flipping it, this fails and says which direction is which.
+    ///
+    /// The face is the #2601 face: second-difference (convexity) rows, β
+    /// affine so every row is tight to the last bit and `A_active` is
+    /// rank-deficient by construction.
+    #[test]
+    fn the_kkt_cone_convention_is_grad_equals_a_transpose_lambda_2601() {
+        let p = 6usize;
+        let m = p - 2;
+        let mut a = Array2::<f64>::zeros((m, p));
+        for i in 0..m {
+            a[[i, i]] = 1.0;
+            a[[i, i + 1]] = -2.0;
+            a[[i, i + 2]] = 1.0;
+        }
+        // Affine β has exactly zero second differences, so all m rows are
+        // tight and the active face is the whole constraint set.
+        let beta = Array1::from_shape_fn(p, |j| 0.5 + 2.0 * (j as f64));
+        let constraints =
+            LinearInequalityConstraints::new(a.clone(), Array1::<f64>::zeros(m))
+                .expect("second-difference constraints");
+
+        // The diagnostic works in per-row-normalised units, so build the
+        // gradient from the SAME scaled rows its λ will be expressed in.
+        let row_norm = 6.0_f64.sqrt(); // ‖[1, −2, 1]‖
+        let a_scaled = a.mapv(|v| v / row_norm);
+        let lambda_true = Array1::from_vec(vec![0.25, 1.5, 0.0, 3.0]);
+        assert_eq!(lambda_true.len(), m);
+
+        let aligned = a_scaled.t().dot(&lambda_true);
+        let diag = compute_constraint_kkt_diagnostics(&beta, &aligned, &constraints);
+        assert_eq!(
+            diag.n_active, m,
+            "an affine β must make every second-difference row tight"
+        );
+        assert!(
+            diag.stationarity <= 1e-12 * diag.gradient_scale.max(1.0),
+            "∇f = Aᵀλ with λ ≥ 0 IS the stationarity condition for A β ≥ b; the cone \
+             projector must absorb it entirely (stat={:.6e}, ‖g‖∞={:.6e}, active={}/{})",
+            diag.stationarity,
+            diag.gradient_scale,
+            diag.n_active,
+            diag.n_constraints,
+        );
+        assert!(
+            diag.dual_feasibility <= 1e-12,
+            "recovered multipliers must stay nonnegative (dual={:.6e})",
+            diag.dual_feasibility,
+        );
+
+        // The negation is the #2601 signature, and it must be reproduced
+        // exactly: nothing absorbed, residual equal to the gradient.
+        let opposed = aligned.mapv(|v| -v);
+        let flipped = compute_constraint_kkt_diagnostics(&beta, &opposed, &constraints);
+        let opposed_scale = opposed.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+        assert!(
+            (flipped.stationarity - opposed_scale).abs() <= 1e-12 * opposed_scale,
+            "a gradient in the POLAR cone leaves λ ≡ 0 and stat_rel = 1 — the #2601 \
+             signature. If this ever absorbs anything the convention moved \
+             (stat={:.6e} vs ‖g‖∞={:.6e})",
+            flipped.stationarity,
+            opposed_scale,
+        );
+        assert_eq!(
+            flipped.n_active, m,
+            "the face is a property of β, not of the gradient's sign"
+        );
+    }
 }
