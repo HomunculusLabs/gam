@@ -749,6 +749,28 @@ fn main() -> Result<(), String> {
                         &format!("{out_dir}/heldout_recon.bin"),
                         recon.as_slice().ok_or("recon not contiguous")?,
                     )?;
+                    // The held-out routing itself, in the same layout as the
+                    // training-side `support.bin` / `coords.bin`: one atom
+                    // index and one coordinate block per routed slot, rows in
+                    // order. Without these, the support-versus-scalar
+                    // decomposition can only be computed on training rows.
+                    let mut te_support: Vec<f64> = Vec::with_capacity(te_rows * top_k);
+                    let mut te_coords: Vec<f64> = Vec::new();
+                    let mut te_coords_len: Vec<f64> = Vec::with_capacity(te_rows);
+                    for row in 0..te_rows {
+                        for &atom in te_term.assignment.support_indices(row) {
+                            te_support.push(atom as f64);
+                        }
+                        let rc = te_term.assignment.coords_row(row);
+                        te_coords_len.push(rc.len() as f64);
+                        te_coords.extend_from_slice(rc);
+                    }
+                    write_f64s(&format!("{out_dir}/heldout_support.bin"), &te_support)?;
+                    write_f64s(&format!("{out_dir}/heldout_coords.bin"), &te_coords)?;
+                    write_f64s(
+                        &format!("{out_dir}/heldout_coords_len.bin"),
+                        &te_coords_len,
+                    )?;
                     let sse: f64 = centered_test.iter().zip(recon.iter()).map(|(x, r)| (x - r).powi(2)).sum();
                     let ss: f64 = centered_test.iter().map(|x| x * x).sum();
                     println!(
