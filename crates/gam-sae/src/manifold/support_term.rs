@@ -2094,15 +2094,27 @@ impl SaeSupportSparseTerm {
         let mut pooled = lambda_smooth.to_vec();
         let mut usable: Vec<(usize, f64, f64, bool)> = Vec::new();
         for atom in 0..self.k_atoms() {
-            let (lam, df) = (lambda_smooth[atom], effective_df[atom]);
-            if !(lam.is_finite() && lam > 0.0 && df.is_finite() && df > 0.0) {
+            // Eligibility is membership in the evidence, not the size of it.
+            // An atom whose lambda has railed has its fit driven into the
+            // penalty null space, so its edf goes to zero -- and dropping it
+            // for having zero edf exempted the runaway atoms from the repair
+            // aimed at them. Atoms nothing routes to keep a lambda nothing
+            // reads.
+            if self.atom_rows[atom].is_empty() {
                 continue;
             }
+            let df = effective_df[atom];
+            if !df.is_finite() {
+                continue;
+            }
+            // `trace - null_dim` is non-negative in exact arithmetic and can
+            // land a hair below zero by rounding.
+            let df = df.max(0.0);
             let periodic = self
                 .atom_axis_periods(atom)
                 .iter()
                 .any(|period| period.is_some());
-            usable.push((atom, lam.ln(), df, periodic));
+            usable.push((atom, lambda_smooth[atom].ln(), df, periodic));
         }
         for group_periodic in [false, true] {
             let group: Vec<&(usize, f64, f64, bool)> = usable
@@ -2112,19 +2124,35 @@ impl SaeSupportSparseTerm {
             if group.is_empty() {
                 continue;
             }
-            let weight: f64 = group.iter().map(|entry| entry.2).sum();
+            // Only atoms with a finite log-lambda and positive df can speak
+            // to where the shared scale sits; a railed lambda has no finite
+            // log to average and a zero-df atom carries no weight. Every
+            // atom in the group still RECEIVES the pooled value.
+            let contributing: Vec<&(usize, f64, f64, bool)> = group
+                .iter()
+                .copied()
+                .filter(|entry| entry.1.is_finite() && entry.2 > 0.0)
+                .collect();
+            let weight: f64 = contributing.iter().map(|entry| entry.2).sum();
             if !(weight > 0.0) {
                 continue;
             }
-            let shared = group.iter().map(|entry| entry.1 * entry.2).sum::<f64>() / weight;
-            let mean_df = weight / group.len() as f64;
+            let shared =
+                contributing.iter().map(|entry| entry.1 * entry.2).sum::<f64>() / weight;
+            let mean_df = weight / contributing.len() as f64;
             for &(atom, log_lambda, df, _) in group {
                 // Unit-information shrinkage, the same rule the coordinate
                 // prior obeys: one average atom's worth of prior evidence.
-                // It lies strictly inside (0, 1) for positive df, so unlike a
-                // ratio-to-the-mean it needs no cap to stay a weight.
+                // It lies in [0, 1) with no cap, and is exactly 0 at df = 0,
+                // where the atom takes the shared scale outright.
                 let own = df / (df + mean_df);
-                pooled[atom] = (own * log_lambda + (1.0 - own) * shared).exp();
+                pooled[atom] = if own > 0.0 && log_lambda.is_finite() {
+                    (own * log_lambda + (1.0 - own) * shared).exp()
+                } else {
+                    // Avoids 0.0 * inf = NaN for a railed lambda, which is
+                    // the case this fix exists to bring into the pool.
+                    shared.exp()
+                };
             }
         }
         Ok(pooled)
@@ -2306,11 +2334,14 @@ impl SaeSupportSparseTerm {
             let (eigenvalues, eigenvectors) = symmetric
                 .eigh(Side::Lower)
                 .map_err(|error| format!("fellner_schall_smoothing: eigh: {error}"))?;
-            let scale = eigenvalues
-                .iter()
-                .map(|value| value.abs())
-                .fold(0.0_f64, f64::max);
-            let tolerance = f64::EPSILON * scale * m.max(1) as f64;
+            // The tolerance is set by the scale of what is DIVIDED, not by
+            // the scale of what it is divided by. `projected` is bounded by
+            // G's largest eigenvalue, which `trace(G)` bounds for PSD G; a
+            // tolerance taken from `max|eigenvalue(G + lambda*S)|` instead is
+            // dominated by lambda and discards the well-conditioned modes
+            // spanning S's null space, where the sum is simply G.
+            let gram_scale = (0..m).map(|mode| gram[[mode, mode]]).sum::<f64>();
+            let tolerance = f64::EPSILON * gram_scale * m.max(1) as f64;
             let projected = eigenvectors.t().dot(&gram).dot(&eigenvectors);
             let mut trace = 0.0_f64;
             for mode in 0..m {
@@ -2414,11 +2445,14 @@ impl SaeSupportSparseTerm {
             let (eigenvalues, eigenvectors) = symmetric
                 .eigh(Side::Lower)
                 .map_err(|error| format!("effective_curvature_df: eigh: {error}"))?;
-            let scale = eigenvalues
-                .iter()
-                .map(|value| value.abs())
-                .fold(0.0_f64, f64::max);
-            let tolerance = f64::EPSILON * scale * m.max(1) as f64;
+            // The tolerance is set by the scale of what is DIVIDED, not by
+            // the scale of what it is divided by. `projected` is bounded by
+            // G's largest eigenvalue, which `trace(G)` bounds for PSD G; a
+            // tolerance taken from `max|eigenvalue(G + lambda*S)|` instead is
+            // dominated by lambda and discards the well-conditioned modes
+            // spanning S's null space, where the sum is simply G.
+            let gram_scale = (0..m).map(|mode| gram[[mode, mode]]).sum::<f64>();
+            let tolerance = f64::EPSILON * gram_scale * m.max(1) as f64;
             let projected = eigenvectors.t().dot(&gram).dot(&eigenvectors);
             let mut trace = 0.0_f64;
             for mode in 0..m {
