@@ -1144,8 +1144,6 @@ impl OuterTermination {
     }
 }
 
-/// Result of a completed outer optimization.
-#[derive(Clone, Debug)]
 /// Which lane actually produced an [`OuterResult`].
 ///
 /// `OuterResult::solver_termination` is `None` whenever no `opt` solver
@@ -1185,6 +1183,8 @@ pub enum OuterResultOrigin {
     StationaryPointAudit,
 }
 
+/// Result of a completed outer optimization.
+#[derive(Clone, Debug)]
 pub struct OuterResult {
     /// Optimized log-smoothing parameters.
     pub rho: Array1<f64>,
