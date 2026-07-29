@@ -609,19 +609,26 @@ pub fn coalesce_antipodal(
 ///
 /// # Why κ alone is not the statistic
 ///
-/// κ is a weak discriminator against exactly this null. For a true ring
+/// κ has a small DYNAMIC RANGE against exactly this null. For a true ring
 /// `α = R cos θ`, `β = R sin θ` with `θ` uniform, `κ = 1`; permuting the same
 /// marginals against each other gives `E[α²β²] = E[α²]E[β²] = R⁴/4` and hence
-/// `κ = 1.25`. A whole ring buys 0.25 of separation, and the marginals — arcsine
-/// on each axis — are already hollow. So a κ-only test is valid and nearly
-/// powerless, which is the worst combination available: it refuses real circles
-/// while looking rigorous.
+/// `κ = 1.25`. A whole, clean ring is worth 0.25 — which at a few thousand rows
+/// is still many null sd, so a κ-only test does detect a clean planted circle
+/// (`structure_harvest::tests::curl_killer_demo_planted_circle_wins_race`).
 ///
-/// The discriminator the null cannot fake is ANGULAR. A ring's `θ` is uniform, so
-/// every circular harmonic vanishes; the product of two ring marginals piles mass
-/// at the four corners `(±R, ±R)`, which is a 4-fold pattern and shows up as a
-/// large fourth harmonic `R₄ = |E[e^{4iθ}]|`. The statistic is therefore the
-/// standardised sum of both channels,
+/// What it loses is the PARTIAL case, which is the only case a real dictionary
+/// offers. A plane that is somewhat shell-like moves κ by a fraction of that
+/// 0.25, and the arcsine marginals the null preserves are already hollow, so most
+/// of the ring signature has been handed to the null before the statistic is
+/// read.
+///
+/// The channel with room to move is angular. A ring's `θ` is uniform, so every
+/// circular harmonic vanishes; the product of two ring marginals piles mass at the
+/// four corners `(±R, ±R)`, a 4-fold pattern with a fourth harmonic near `0.5`.
+/// That is twice κ's entire range, on a quantity the null cannot fake, and it is
+/// where power on partial structure comes from.
+///
+/// The statistic is therefore the standardised sum of both channels,
 ///
 /// ```text
 ///   T = (κ̄_null − κ)/sd_null(κ) + (R̄₄_null − R₄)/sd_null(R₄) ,
@@ -1080,11 +1087,12 @@ mod tests {
         assert_eq!(signed.len(), 2, "overlapping gates must not coalesce");
     }
 
-    /// The claim that made the angular channel necessary, made executable: a
-    /// clean ring is NOT resolvable from its own permuted marginals by κ, and IS
-    /// resolvable once the fourth harmonic is in the statistic. Without this the
-    /// permutation test is valid and nearly powerless — it refuses real circles
-    /// while looking rigorous.
+    /// The claim that made the angular channel necessary, made executable: κ's
+    /// ENTIRE range against this null is under 0.3 nats of shape — a whole clean
+    /// ring against its own permuted marginals — so on partial structure there is
+    /// nothing left to read, while the fourth harmonic moves twice as far. The
+    /// power curve on planted circles is what measures the difference; this pins
+    /// the arithmetic the curve is expected to show.
     #[test]
     fn permutation_test_resolves_a_ring_its_marginals_cannot_fake() {
         let n = 600;
@@ -1119,8 +1127,9 @@ mod tests {
             / (m2 * m2);
         assert!(
             (kappa_indep - kappa_obs) < 0.3,
-            "κ's whole separation against this null is under 0.3 (ring {kappa_obs:.3} vs \
-             permuted marginals {kappa_indep:.3}) — that is why it cannot carry the test alone"
+            "κ's whole range against this null is under 0.3 (ring {kappa_obs:.3} vs \
+             permuted marginals {kappa_indep:.3}) — which is why partial structure \
+             needs the angular channel"
         );
 
         // The matched refusal: independent draws with the SAME arcsine marginals

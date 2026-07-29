@@ -3611,8 +3611,18 @@ impl SaeSupportSparseTerm {
             let mut objective_recurred = last_objective
                 .map(|previous: f64| (objective - previous).abs() <= tolerance * kkt_scale)
                 .unwrap_or(false);
-            let mut candidate =
-                objective_recurred && stationarity.max_abs() <= tolerance * kkt_scale;
+            // #2517 — the KKT limb is certified in PARAMETER space, not in
+            // gradient space. The decoder sweep solves `(G + λS)B = rhs`
+            // exactly, so near the fixed point the block gradient is
+            // `(G + λS)·Δ` and `G = Σ_rows φφᵀ` is extensive in rows-per-atom:
+            // measured, the raw gradient is 12x-75x the remaining parameter
+            // error across two decades of shape, so an absolute (or
+            // objective-relative) bound on it is a bound on `m·Δ` that tightens
+            // as data is ADDED. Dividing each block's gradient by its own
+            // curvature diagonal removes exactly that factor and leaves the
+            // Newton step, which is what a fixed point has to make small and is
+            // invariant to n, to rows-per-atom, and to basis scaling.
+            let mut candidate = objective_recurred && stationarity.scaled_max_abs() <= tolerance;
             if candidate && previous_candidate {
                 // About to certify: recompute the decode from scratch and
                 // re-evaluate both limbs on it. If the maintained state had
@@ -3628,8 +3638,7 @@ impl SaeSupportSparseTerm {
                 objective_recurred = previous_objective
                     .map(|previous: f64| (objective - previous).abs() <= tolerance * kkt_scale)
                     .unwrap_or(false);
-                candidate =
-                    objective_recurred && stationarity.max_abs() <= tolerance * kkt_scale;
+                candidate = objective_recurred && stationarity.scaled_max_abs() <= tolerance;
             }
             last_objective = Some(objective);
             if candidate && previous_candidate {
@@ -3876,6 +3885,8 @@ impl SaeSupportSparseTerm {
             "SaeSupportSparseTerm::solve_fixed_point did not recur within {max_iter} cycles \
              (raw KKT max={:.6e}, relative to objective {:.6e}: {:.6e}; \
              per block: decoder max={:.6e} l2={:.6e}, coordinate max={:.6e} l2={:.6e}; \
+             CERTIFIED QUANTITY (parameter-space Newton step) max={:.6e} vs tolerance {tolerance:.6e} \
+             (decoder {:.6e}, coordinate {:.6e}); \
              last parameter max_change={last_max_change:.6e}, gauge-invariant limbs required)",
             stationarity.max_abs(),
             objective,
@@ -3884,6 +3895,9 @@ impl SaeSupportSparseTerm {
             stationarity.decoder_l2,
             stationarity.coordinate_max_abs,
             stationarity.coordinate_l2,
+            stationarity.scaled_max_abs(),
+            stationarity.decoder_scaled_max_abs,
+            stationarity.coordinate_scaled_max_abs,
         ))
     }
 }
