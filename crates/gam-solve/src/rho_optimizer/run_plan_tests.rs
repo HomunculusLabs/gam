@@ -9467,3 +9467,180 @@ fn declared_objective_scale_preserves_the_score_relative_magnitude_2613() {
         "an undeclared route must get its own absolute tolerance, not a guess",
     );
 }
+
+// ─── #2458 the derived standard reaches routes with no analytic Hessian ───────
+
+/// One second-order-stationary point, certified twice: once by a route that
+/// declares a Dense analytic Hessian, once by a route that declares none.
+///
+/// `V(ρ) = ½ρ²` at `ρ = 2e-6` with `objective_scale = 80`. The arithmetic
+/// gradient floor is `80·√ε = 1.19e-6`, so `|Pg| = 2e-6` REFUSES on the raw
+/// band — while the Newton decrement `½·(2e-6)² = 2e-12` is orders below any
+/// outer objective tolerance, i.e. the point is stationary to second order and
+/// the curvature-resolvability rung is exactly what exists to say so.
+///
+/// `declares_hessian` is the ONLY difference between the two calls.
+fn certify_quadratic_without_declared_curvature_2458(
+    declares_hessian: bool,
+    theta: f64,
+    search_iterations: usize,
+) -> Result<OuterCriterionCertificate, EstimationError> {
+    let config = OuterConfig {
+        tolerance: 1.0e-12,
+        objective_scale: Some(80.0),
+        ..OuterConfig::default()
+    };
+    let mut obj = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(if declares_hessian {
+            DeclaredHessianForm::Dense
+        } else {
+            DeclaredHessianForm::Unavailable
+        })
+        .build_objective(
+            (),
+            move |_: &mut (), rho: &Array1<f64>| Ok(0.5 * rho[0] * rho[0]),
+            move |_: &mut (), rho: &Array1<f64>| {
+                Ok(OuterEval {
+                    cost: 0.5 * rho[0] * rho[0],
+                    gradient: array![rho[0]],
+                    hessian: if declares_hessian {
+                        HessianValue::Dense(array![[1.0]])
+                    } else {
+                        HessianValue::Unavailable
+                    },
+                    inner_beta_hint: None,
+                })
+            },
+            None::<fn(&mut ())>,
+            None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+        );
+    let mut result = OuterResult::new(
+        array![theta],
+        0.5 * theta * theta,
+        search_iterations,
+        true,
+        OuterPlan {
+            solver: Solver::Bfgs,
+            hessian_source: HessianSource::BfgsApprox,
+        },
+    );
+    certify_outer_optimality(&mut obj, &config, "fd-curvature-rung-2458", &mut result)
+}
+
+/// #2458 — the curvature-resolvability rung is no longer gated on which
+/// derivative machinery a route happens to implement.
+///
+/// The two certificates below judge the SAME point with the SAME criterion and
+/// differ only in `DeclaredHessianForm`. Before this, the second was held to
+/// the raw reproducibility band and refused — the route that knows the least
+/// judged the strictest, which is this issue's thesis. It now reaches the same
+/// standard by finite-differencing its own analytic gradient, and says so in
+/// its rung.
+#[test]
+fn a_route_without_declared_curvature_reaches_the_same_derived_standard_2458() {
+    let theta = 2.0e-6;
+    let with_hessian = certify_quadratic_without_declared_curvature_2458(true, theta, 1)
+        .expect("the declared-Hessian route certifies via the curvature rung");
+    let without_hessian = certify_quadratic_without_declared_curvature_2458(false, theta, 1)
+        .expect("and so must the route that declares none");
+
+    assert!(with_hessian.certifies(), "{}", with_hessian.summary());
+    assert!(without_hessian.certifies(), "{}", without_hessian.summary());
+
+    // The test proves nothing unless the raw band really would have refused.
+    let arithmetic_floor = 80.0 * f64::EPSILON.sqrt();
+    assert!(
+        without_hessian.stationarity.projected_norm() > arithmetic_floor,
+        "|Pg| must sit ABOVE the un-widened band, else no widening was needed: {}",
+        without_hessian.summary(),
+    );
+
+    assert_eq!(
+        with_hessian.stationarity.rung().label,
+        "curvature-resolvability",
+        "the declared-Hessian route's rung changed: {}",
+        with_hessian.summary(),
+    );
+    assert_eq!(
+        without_hessian.stationarity.rung().label,
+        "curvature-resolvability(fd-gradient)",
+        "the gradient-only route must name its curvature's provenance: {}",
+        without_hessian.summary(),
+    );
+    assert!(
+        without_hessian.stationarity.rung().derived_standard,
+        "a finite-differenced decrement test is still the derived standard: {}",
+        without_hessian.summary(),
+    );
+
+    // `V = ½ρ²` has H ≡ 1, so the forward difference of its exact gradient is
+    // exact and the two bounds must agree to roundoff — not merely to the same
+    // order. That is the strongest available statement that the two routes are
+    // being held to one standard rather than to two that happen to be close.
+    let relative_gap = (without_hessian.stationarity.bound() - with_hessian.stationarity.bound())
+        .abs()
+        / with_hessian.stationarity.bound();
+    assert!(
+        relative_gap <= 1.0e-9,
+        "one point, one standard: bounds {:.9e} (declared) vs {:.9e} (finite-differenced), \
+         relative gap {relative_gap:.3e}",
+        with_hessian.stationarity.bound(),
+        without_hessian.stationarity.bound(),
+    );
+}
+
+/// #2458 — the rung is still a genuine test, not a blanket loosening for
+/// gradient-only routes.
+///
+/// This is the finite-difference twin of
+/// `curvature_widening_still_rejects_genuine_nonstationarity`, and it works for
+/// the same reason: the widened bound is `|Pg|·√(τ/Δpred)`, which exceeds `|Pg|`
+/// **iff** `Δpred ≤ τ`. At a point with real available descent `Δpred ≫ τ`, so
+/// the rung still wins the ladder's max — it is the largest available bound —
+/// and still lands orders BELOW the gradient it is judging. Widening is not
+/// rescuing.
+#[test]
+fn finite_differenced_curvature_still_refuses_genuine_nonstationarity_2458() {
+    // |Pg| = 1 against a unit Hessian gives Δpred = 0.5 against
+    // τ = 1e-7·(1+0.5) = 1.5e-7, so the bound is √(3e-7) = 5.477e-4: the widest
+    // rung on the ladder, and 1826x below the gradient.
+    let refusal = certify_quadratic_without_declared_curvature_2458(false, 1.0, 1)
+        .expect_err("a point with a half-unit predicted decrease is not stationary");
+    let message = refusal.to_string();
+    assert!(
+        message.contains("NOT STATIONARY"),
+        "the refusal must be the ordinary non-stationarity one: {message}",
+    );
+    assert!(
+        message.contains("bound=5.477e-4"),
+        "the widened bound must be the decrement test's own answer, not a rescue: {message}",
+    );
+    // The point of the assertion: three orders of margin between the widest
+    // bound the ladder can produce here and the gradient it is judging.
+    assert!(
+        message.contains("|Pg|=1.000e0 > bound=5.477e-4"),
+        "the refusal must compare the two directly: {message}",
+    );
+}
+
+/// #2458 — and the escalation refuses to outspend the fit it is certifying.
+///
+/// Forming the Hessian costs `n_params` gradient evaluations. The certificate
+/// may spend that only when it does not exceed the outer iterations the search
+/// already spent: a search that has barely moved has not earned a certificate
+/// costing more than the search. With `search_iterations = 0` (clamped to 1)
+/// and one coordinate the gate is exactly at its boundary and admits; the
+/// negative side of the boundary is unreachable at `n_params = 1`, so this pins
+/// the admitting edge and the decline is pinned by the log at the call site.
+#[test]
+fn the_finite_difference_escalation_is_bounded_by_the_search_it_certifies_2458() {
+    let certificate = certify_quadratic_without_declared_curvature_2458(false, 2.0e-6, 0)
+        .expect("n_params = 1 <= max(iterations, 1) = 1 admits the rung");
+    assert_eq!(
+        certificate.stationarity.rung().label,
+        "curvature-resolvability(fd-gradient)",
+        "the boundary case must admit: {}",
+        certificate.summary(),
+    );
+}
