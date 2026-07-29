@@ -2172,8 +2172,27 @@ fn run_filter_ball_traced(
             // subtraction. See `ball_update_operator`: that single entry is
             // where the `d3` jet was losing everything, and the measurement
             // that found it is on #2614 (`F'''` at `+/-4.1e247` by node 62,
-            // ~`10^4` per node, with `d1`/`d2` clean). The same operator carries
-            // the VALUE covariance above, for the same reason.
+            // ~`10^4` per node). The same operator carries the VALUE covariance
+            // above, for the same reason.
+            //
+            // That measurement also reported `d1` and `d2` as clean, and this
+            // comment used to say so without qualification. THAT IS FALSE as a
+            // general statement, and it stood long enough to send a later lane
+            // looking inside the `d3` recursion for a defect that was never
+            // there. It was a reading at ONE rho. Measured at `rho = -13.8411`
+            // on the same nodes at order 2, the per-node enclosure WIDTHS over
+            // nodes 40..43 are
+            //
+            //     d1: 1.36e46  -> 2.34e49  -> 4.43e52   -> 9.18e55    (x1.7e3)
+            //     d2: 1.06e93  -> 3.12e99  -> 1.11e106  -> 4.80e112   (x3e6)
+            //     d3: 1.24e140 -> 6.23e149 -> 4.21e159  -> 3.76e169   (x6e9)
+            //
+            // — exponents exactly 1 : 2 : 3, so `d3` is `d1`'s growth CUBED and
+            // not a defect of its own. At node 40 the congruence `A D3 Aᵀ` is
+            // 5.17e133 against a predicted `d3` of 1.68e135, i.e. it CONTRACTS
+            // by 32x, while the two terms carrying `D1` are the large ones.
+            // Every value is stable to 15 digits throughout. The repair that
+            // followed is the carried factor below, not anything in this block.
 
             // dP⁺ = A · dP · Aᵀ  (the `dK` terms cancel exactly, since M⁺ = R·K)
             let mut p_new_d1 = ball_congruence(&a_operator, &d1_pred, &a_operator, order);
