@@ -5750,8 +5750,13 @@ pub(crate) fn failed_terminal_probe_clears_stale_owned_mode() {
 pub(crate) fn returned_mode_finalizer_preserves_owned_mode_without_family_replay() {
     let family = OneStepReturnedSaddleFamily::new(0.125);
     let specs = one_step_returned_saddle_specs_with_outer_coordinate();
+    // The cycle cap is deliberately NOT pinned to 2 here. Two cycles is the
+    // budget the saddle-escape tests measure -- it is exactly what the escape
+    // costs on the unpenalized geometry -- and it is a statement about the
+    // escape, not about this boundary. What this test needs from the inner solve
+    // is only that the mode it hands the finalizer is converged, so it uses the
+    // production budget.
     let options = BlockwiseFitOptions {
-        inner_max_cycles: 2,
         use_remlobjective: false,
         compute_covariance: true,
         ..BlockwiseFitOptions::default()
