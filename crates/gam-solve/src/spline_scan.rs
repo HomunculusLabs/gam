@@ -1050,6 +1050,93 @@ fn intersect_observed_covariance_exact_range(
     }
 }
 
+/// Intersect a general entry of the UPDATED covariance with the exact range of
+/// the Schur complement that defines it.
+///
+/// [`intersect_observed_covariance_exact_range`] is this argument at the
+/// observed coordinate, where the map collapses to one scalar variable. The
+/// general entry is
+///
+///     P⁺[i][j] = P[i][j] − P[i][0]·P[0][j] / (P[0][0] + R),
+///
+/// whose partials with respect to `(a, b, c, d) = (P[i][j], P[i][0], P[0][j],
+/// P[0][0])` are `1`, `−c/F`, `−b/F` and `bc/F²`. Whenever `b` and `c` have
+/// DEFINITE sign the sign of every partial is fixed over the whole box, so the
+/// range is attained at two corners and two evaluations bound it exactly. `R`
+/// enters like `d` and moves with it.
+///
+/// Treating the four as independent is conservative — they are entries of one
+/// PSD matrix — so this is a valid enclosure, and it is the tightest available
+/// without carrying that correlation. What it removes is the evaluation-order
+/// dependency: `F` appears in three factors of the componentwise form and
+/// `P[0][0]` in four, and interval arithmetic ranges each occurrence
+/// separately. When `b` or `c` straddles zero the monotonicity argument does
+/// not hold and nothing is claimed.
+fn intersect_updated_covariance_exact_range(
+    updated: &mut Ball,
+    entry: Ball,
+    row: Ball,
+    column: Ball,
+    observed: Ball,
+    observation_variance: Ball,
+) {
+    // `Some(true)` = nonnegative throughout, `Some(false)` = nonpositive
+    // throughout, `None` = straddles zero and the partials change sign.
+    let definite_sign = |ball: Ball| -> Option<bool> {
+        if ball.lo >= 0.0 {
+            Some(true)
+        } else if ball.hi <= 0.0 {
+            Some(false)
+        } else {
+            None
+        }
+    };
+    let (Some(row_nonnegative), Some(column_nonnegative)) =
+        (definite_sign(row), definite_sign(column))
+    else {
+        return;
+    };
+    // `∂/∂d = bc/F²` is nonnegative exactly when `b` and `c` agree in sign.
+    let product_nonnegative = row_nonnegative == column_nonnegative;
+    let corner = |minimizing: bool| -> Option<Ball> {
+        // `∂/∂a = 1`.
+        let a = Ball::exact(if minimizing { entry.lo } else { entry.hi });
+        // `∂/∂b = −c/F`: decreasing in `b` when `c ≥ 0`.
+        let b = Ball::exact(if minimizing == column_nonnegative {
+            row.hi
+        } else {
+            row.lo
+        });
+        // `∂/∂c = −b/F`, symmetrically.
+        let c = Ball::exact(if minimizing == row_nonnegative {
+            column.hi
+        } else {
+            column.lo
+        });
+        let take_low = minimizing == product_nonnegative;
+        let d = Ball::exact(if take_low { observed.lo } else { observed.hi }.max(0.0));
+        let variance = Ball::exact(if take_low {
+            observation_variance.lo
+        } else {
+            observation_variance.hi
+        });
+        let f = d.add(variance);
+        (f.lo > 0.0).then(|| a.sub(b.mul(c).div_positive(f)))
+    };
+    if let Some(low) = corner(true) {
+        let floor = low.lo.min(updated.value);
+        if floor.is_finite() && updated.lo < floor {
+            updated.lo = floor;
+        }
+    }
+    if let Some(high) = corner(false) {
+        let ceiling = high.hi.max(updated.value);
+        if ceiling.is_finite() && updated.hi > ceiling {
+            updated.hi = ceiling;
+        }
+    }
+}
+
 /// Intersect a proper covariance enclosure with its exact PSD invariant.
 ///
 /// Once the diffuse rank is exhausted, `P*` is the conditional covariance of
@@ -1670,9 +1757,21 @@ fn run_filter_ball_traced(
                     p_new[i][j] = p_new[i][j].add(gain[i].mul(gain[j]).mul(r));
                 }
             }
-            // ... and then tightened to the EXACT range of the scalar map it is,
-            // which the componentwise evaluation above cannot see because `A`,
-            // `K` and the middle factor all carry the same `P₀₀`.
+            // ... and then tightened to the EXACT range of the map each entry
+            // is, which the componentwise evaluation above cannot see because
+            // `A`, `K` and the middle factor all carry the same `P₀₀`.
+            for i in 0..order {
+                for j in 0..order {
+                    intersect_updated_covariance_exact_range(
+                        &mut p_new[i][j],
+                        p_star[i][j],
+                        m_star[i],
+                        m_star[j],
+                        m_star[0],
+                        r,
+                    );
+                }
+            }
             intersect_observed_covariance_exact_range(&mut p_new[0][0], m_star[0], r);
             // Derivative covariances through the JOSEPH form, which for the
             // derivative jets is not a reformulation but an exact cancellation
