@@ -42,8 +42,9 @@ fi
 cd "$HOME/gam"
 git fetch --depth 50 origin main && git checkout -f origin/main
 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-30} cargo build --release -p gam-sae \
-  --example curl_census_foreign
+  --example curl_census_foreign --example plane_replication
 BIN=$HOME/gam/target/release/examples/curl_census_foreign
+REPL=$HOME/gam/target/release/examples/plane_replication
 DUMP=$HOME/gam/experiments/issue-2502/gemma_scope_dump.py
 
 for L in $LAYERS; do
@@ -83,6 +84,8 @@ for W in ${WIDTHS:-65k}; do
   [ -f "$D/meta.json" ] || $PY "$DUMP" "$D" --layer "$FLAGSHIP" --width "$W" \
     --from "$HOME/gs2L$FLAGSHIP"
   $BIN "$D" "$ATOMS" "$MINCO" "$PARSE" 0 -0.85 "$DRAWS" "$ALPHA" "$OUT/cen_W$W.json"
+  $REPL "$OUT/cen_L$FLAGSHIP.planes.json" "$OUT/cen_W$W.planes.json" 20000 \
+    "$OUT/replication_$W.json" || true
   echo "WIDTH $W DONE"
 done
 
