@@ -91,6 +91,19 @@ pub struct CurlVerdict {
     pub net_evidence_nats: f64,
     /// True ⇒ recommend submitting the `CircleSeed` to the race.
     pub recommend_curl: bool,
+    /// The conjunction WITHOUT the κ gate: the rate–distortion screen pays, the
+    /// angle is covered (`R₁` small) and the plane is not a diameter (`R₂` small).
+    ///
+    /// These three are robust; the κ gate is not, and a census has to say so
+    /// separately. `κ = m₄/m₂²` is a FOURTH moment, so its breakdown point is
+    /// essentially zero: a planted ring of 3000 rows contaminated by 20 unrelated
+    /// co-firings at eight times the ring radius measures `κ = 194` while `R₁` and
+    /// `R₂` still read a clean, fully covered, non-degenerate circle. On a real
+    /// dictionary every co-firing pair carries that contamination, so a screen
+    /// that conjoins the κ gate refuses ground truth. Callers doing their own
+    /// calibrated test on a robust statistic should gate on this and let the test
+    /// decide, rather than paying for `κ`'s tail twice.
+    pub geometry_ok: bool,
 }
 
 /// Radius-law moments and their influence-function SEs over the paired coords.
@@ -227,7 +240,8 @@ pub fn curl_verdict(
     let not_diameter = resultant2 < 0.5;
 
     let rd_pays = radius > sigma * RD_CROSSOVER_FACTOR && net_evidence_nats > 0.0;
-    let recommend_curl = z_below_gaussian > CURL_Z && rd_pays && coverage_ok && not_diameter;
+    let geometry_ok = rd_pays && coverage_ok && not_diameter;
+    let recommend_curl = z_below_gaussian > CURL_Z && geometry_ok;
 
     Ok(CurlVerdict {
         kappa: law.kappa,
@@ -239,6 +253,7 @@ pub fn curl_verdict(
         gain_nats_per_row,
         net_evidence_nats,
         recommend_curl,
+        geometry_ok,
     })
 }
 
@@ -593,8 +608,7 @@ pub fn coalesce_antipodal(
 /// thousands of pairs, so "κ resolvably below 2" stops being a claim anyone can
 /// act on without a multiplicity account, and the influence-function SE — a
 /// first-order delta-method quantity on a fourth moment — is exactly the kind of
-/// asymptotic approximation whose tail is least trustworthy. Both problems have
-/// the same fix: calibrate against the permutation null, per pair, exactly.
+/// asymptotic approximation whose tail is least trustworthy.
 ///
 /// # The null
 ///
@@ -602,84 +616,120 @@ pub fn coalesce_antipodal(
 /// realised by permuting `beta` against `alpha`. It is the null a ring is a claim
 /// against, and it is much sharper than a Gaussian reference: it strips out
 /// everything about the ring signature that lives in the MARGINALS and asks only
-/// whether the pairing carries structure. It also controls, for free, the confound
+/// whether the PAIRING carries structure. It also controls, for free, the confound
 /// a gated dictionary manufactures — a JumpReLU threshold carves the low-amplitude
 /// corner out of every co-firing cloud, hollowing it near the origin, and the
 /// surrogates carry the identical hole.
 ///
-/// # An angular channel was tried, measured, and removed
+/// # The statistic is a RANK correlation, because κ has no breakdown point
 ///
-/// κ has a small dynamic range against this null. A true ring `α = R cos θ`,
-/// `β = R sin θ` sits at `κ = 1`; permuting that same ring's own marginals gives
-/// `E[α²β²] = E[α²]E[β²] = R⁴/4` and hence `κ = 1.25`. A whole clean circle is
-/// worth 0.25, because the arcsine marginals the null preserves are already
-/// hollow — most of the ring signature is handed to the null before the statistic
-/// is read.
+/// A ring is the statement `α² + β² = R²`: the two squared coordinates are
+/// perfectly, monotonically anti-dependent. That is a rank fact, and reading it as
+/// one is what makes the test survive contact with a real dictionary.
 ///
-/// That argues for adding the fourth circular harmonic `R₄ = |E[e^{4iθ}]|`, which
-/// vanishes for a uniform angle and sits near `0.5` for the corner-clumped product
-/// of two ring marginals: twice κ's whole range, on a quantity the null cannot
-/// fake. So the statistic was briefly the standardised sum of both channels.
+/// The moment version does not survive it. `κ = m₄/m₂²` is a FOURTH moment, so a
+/// handful of unrelated co-firings dominate it. Measured, on planted ground truth:
+/// a ring of 3000 rows planted in a public SAE's own code plane, contaminated by
+/// the ~20 rows where the two atoms co-fire naturally at several times the ring
+/// radius, reports `κ = 194` at a planted radius of 1σ and `κ = 4.0` at 4σ —
+/// while `R₁ = 0.017` and `R₂ = 0.028` on the same rows read a clean, fully
+/// covered, non-degenerate circle. The κ gate refused ground truth at every
+/// radius tested. Every co-firing pair in a real dictionary carries that
+/// contamination; it is the normal case, not a pathology.
 ///
-/// The spike-in power arm refuted it. At a matched replicate budget on the same
-/// Gemma Scope 2 layer-17 dump, κ alone returned 2 e-BH discoveries and κ + R₄
-/// returned 0 — at planted radii of 1σ, 2σ and 4σ alike. The reason is that a
-/// NONNEGATIVE GATE cannot carry a centred ring: every co-firing circle a real
-/// dictionary holds is offset into the positive quadrant, and after the plane
-/// parse re-centres it, what is left keeps 4-fold corner structure. `R₄` for those
-/// planes therefore sits ABOVE its null mean, the second standardised term goes
-/// negative, and a genuine circle is vetoed by the channel that was supposed to
-/// find it.
+/// So the statistic is Spearman's `ρ` between `a = α²` and `b = β²`:
 ///
-/// So the statistic is κ, and the harmonic channel is a documented negative
-/// result rather than a knob. It is the power arm that settled this; a statistic
-/// argued for on paper and never measured is how a screen acquires a veto nobody
-/// notices.
+/// ```text
+///   ρ = 1 − 6·Σᵢ (rank(aᵢ) − rank(b_{π(i)}))² / (n(n²−1)) ,
+/// ```
+///
+/// which is `−1` for a ring, `0` under independence, and bounded by construction —
+/// a dynamic range of 1 where κ's is 0.25, and immune to the tail that destroys κ.
+/// The lower tail is the ring tail.
+///
+/// An earlier attempt added the fourth circular harmonic `R₄ = |E[e^{4iθ}]|` to κ,
+/// on the argument that a uniform angle kills every harmonic while the product of
+/// two ring marginals piles mass at four corners. The spike-in arm refuted it: at
+/// a matched budget κ alone returned 2 e-BH discoveries and κ + R₄ returned 0, at
+/// every planted radius. A nonnegative gate cannot carry a CENTRED ring, so every
+/// co-firing circle a real dictionary holds is offset into the positive quadrant
+/// and keeps 4-fold corner structure after the parse re-centres it; `R₄` sits above
+/// its null mean and vetoes the circles it was added to find. A statistic argued
+/// for on paper and never measured is how a screen acquires a veto nobody notices.
 ///
 /// # Cost
 ///
-/// `m₂` is permutation-invariant and `m₄` moves only through `S = Σᵢ aᵢ·b_{π(i)}`
-/// (`a = α²`, `b = β²`), so κ is a strictly increasing affine function of `S` and
-/// its lower tail IS `S`'s lower tail: each surrogate is one shuffle and one dot
-/// product, with no fourth-moment recomputation and no cancellation.
+/// Ranks are computed once. Each surrogate is then one shuffle of the rank vector
+/// and one dot product — Spearman's `ρ` is Pearson's on ranks, and the rank
+/// marginals are permutation-invariant, so only `Σᵢ rank(aᵢ)·rank(b_{π(i)})` moves.
 ///
-/// Returns `(p_value, e_value, null_kappa_mean, null_kappa_sd)`. The p-value is the
-/// exact lower-tail Monte-Carlo value `(1 + #{S_null ≤ S_obs})/(B + 1)`; the
-/// e-value is the indicator `(B+1)·1{no surrogate reaches the observation}`, whose
-/// null mean is 1 under exchangeability with NO dependence assumption, and which is
-/// what an e-BH ledger consumes.
-pub fn kappa_permutation_evidence(
+/// Returns `(p_value, e_value, rho, null_rho_mean, null_rho_sd)`. The p-value is the
+/// exact lower-tail Monte-Carlo value; the e-value is the indicator
+/// `(B+1)·1{no surrogate reaches the observation}`, whose null mean is 1 under
+/// exchangeability with NO dependence assumption, and which is what an e-BH ledger
+/// consumes.
+pub fn ring_permutation_evidence(
     alpha: ArrayView1<f64>,
     beta: ArrayView1<f64>,
     replicates: usize,
     seed: u64,
-) -> Result<(f64, f64, f64, f64), String> {
+) -> Result<(f64, f64, f64, f64, f64), String> {
     let n = alpha.len();
     if beta.len() != n {
         return Err(format!(
-            "kappa_permutation_evidence: α len {n} != β len {}",
+            "ring_permutation_evidence: α len {n} != β len {}",
             beta.len()
         ));
     }
     if n < 2 {
-        return Err("kappa_permutation_evidence: need at least 2 rows".to_string());
+        return Err("ring_permutation_evidence: need at least 2 rows".to_string());
     }
     if replicates < 2 {
-        return Err("kappa_permutation_evidence: need at least 2 replicates".to_string());
+        return Err("ring_permutation_evidence: need at least 2 replicates".to_string());
     }
+    // Midrank of each squared coordinate; ties share their average rank so the
+    // statistic is well defined on the exactly-zero amplitudes a gate produces.
+    let midranks = |v: &[f64]| -> Vec<f64> {
+        let mut order: Vec<usize> = (0..v.len()).collect();
+        order.sort_by(|&i, &j| v[i].total_cmp(&v[j]).then(i.cmp(&j)));
+        let mut out = vec![0.0_f64; v.len()];
+        let mut i = 0usize;
+        while i < order.len() {
+            let mut j = i + 1;
+            while j < order.len() && v[order[j]] == v[order[i]] {
+                j += 1;
+            }
+            let mid = 0.5 * ((i + 1) as f64 + j as f64);
+            for slot in &order[i..j] {
+                out[*slot] = mid;
+            }
+            i = j;
+        }
+        out
+    };
     let a: Vec<f64> = alpha.iter().map(|&v| v * v).collect();
     let b: Vec<f64> = beta.iter().map(|&v| v * v).collect();
-    let inv = 1.0 / n as f64;
-    let mean_a: f64 = a.iter().sum::<f64>() * inv;
-    let mean_b: f64 = b.iter().sum::<f64>() * inv;
-    let m2 = mean_a + mean_b;
-    if !(m2 > 0.0) {
-        return Err("kappa_permutation_evidence: zero in-plane energy".to_string());
+    let ra = midranks(&a);
+    let rb = midranks(&b);
+    let nf = n as f64;
+    let mean_r = 0.5 * (nf + 1.0);
+    let centred_a: Vec<f64> = ra.iter().map(|r| r - mean_r).collect();
+    let mut centred_b: Vec<f64> = rb.iter().map(|r| r - mean_r).collect();
+    let ss_a: f64 = centred_a.iter().map(|r| r * r).sum();
+    let ss_b: f64 = centred_b.iter().map(|r| r * r).sum();
+    if !(ss_a > 0.0 && ss_b > 0.0) {
+        return Err("ring_permutation_evidence: a coordinate is constant".to_string());
     }
-    let mean_a2: f64 = a.iter().map(|&v| v * v).sum::<f64>() * inv;
-    let mean_b2: f64 = b.iter().map(|&v| v * v).sum::<f64>() * inv;
-    let kappa_of_s = |s: f64| (mean_a2 + mean_b2 + 2.0 * s * inv) / (m2 * m2);
-    let s_obs: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum();
+    // Both rank sums-of-squares are permutation-invariant, so only the cross term
+    // moves and ρ is an affine function of it.
+    let denom = (ss_a * ss_b).sqrt();
+    let rho_of = |cross: f64| cross / denom;
+    let cross_obs: f64 = centred_a
+        .iter()
+        .zip(centred_b.iter())
+        .map(|(x, y)| x * y)
+        .sum();
+    let rho_obs = rho_of(cross_obs);
 
     let mut state = seed;
     let mut next = move || {
@@ -689,29 +739,31 @@ pub fn kappa_permutation_evidence(
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     };
-    let mut perm: Vec<f64> = b.clone();
     let mut exceed = 0usize;
-    let (mut sum_k, mut sum_k2) = (0.0_f64, 0.0_f64);
+    let (mut sum_r, mut sum_r2) = (0.0_f64, 0.0_f64);
     for _draw in 0..replicates {
         for i in (1..n).rev() {
             let j = (next() % (i as u64 + 1)) as usize;
-            perm.swap(i, j);
+            centred_b.swap(i, j);
         }
-        let s_null: f64 = a.iter().zip(perm.iter()).map(|(&x, &y)| x * y).sum();
-        if s_null <= s_obs {
+        let cross: f64 = centred_a
+            .iter()
+            .zip(centred_b.iter())
+            .map(|(x, y)| x * y)
+            .sum();
+        if cross <= cross_obs {
             exceed += 1;
         }
-        let k = kappa_of_s(s_null);
-        sum_k += k;
-        sum_k2 += k * k;
+        let r = rho_of(cross);
+        sum_r += r;
+        sum_r2 += r * r;
     }
     let bf = replicates as f64;
-    let mk = sum_k / bf;
-    let sk = (sum_k2 / bf - mk * mk).max(0.0).sqrt();
-
+    let mk = sum_r / bf;
+    let sk = (sum_r2 / bf - mk * mk).max(0.0).sqrt();
     let p_value = (1.0 + exceed as f64) / (bf + 1.0);
     let e_value = if exceed == 0 { bf + 1.0 } else { 0.0 };
-    Ok((p_value, e_value, mk, sk))
+    Ok((p_value, e_value, rho_obs, mk, sk))
 }
 
 /// Co-occurring signed-direction pairs counted over EVERY row/// Co-occurring signed-direction pairs counted over EVERY row, from the SPARSE
@@ -1062,12 +1114,16 @@ mod tests {
             alpha[i] = th.cos();
             beta[i] = th.sin();
         }
-        let (p_ring, e_ring, _m, _s) =
-            kappa_permutation_evidence(alpha.view(), beta.view(), 400, 12345)
+        let (p_ring, e_ring, rho_ring, _m, _s) =
+            ring_permutation_evidence(alpha.view(), beta.view(), 400, 12345)
                 .expect("a clean ring must admit a permutation test");
         assert!(
             e_ring > 0.0,
-            "a clean ring must beat every surrogate; p = {p_ring}"
+            "a clean ring must beat every surrogate; p = {p_ring}, ρ = {rho_ring}"
+        );
+        assert!(
+            rho_ring < -0.9,
+            "a ring is α² + β² = R², i.e. ρ ≈ −1; got {rho_ring}"
         );
 
         // κ alone: the ring sits at 1.0 and its own permuted marginals at 1.25,
@@ -1101,12 +1157,13 @@ mod tests {
             a_sh[i] = th.cos();
             b_sh[i] = ph.sin();
         }
-        let (_p_prod, e_prod, _mm, _ss) =
-            kappa_permutation_evidence(a_sh.view(), b_sh.view(), 400, 999)
+        let (_p_prod, e_prod, rho_prod, _mm, _ss) =
+            ring_permutation_evidence(a_sh.view(), b_sh.view(), 400, 999)
                 .expect("the product arm must admit a permutation test");
         assert_eq!(
             e_prod, 0.0,
-            "a product of two ring marginals is not a ring and must not clear the test"
+            "a product of two ring marginals is not a ring and must not clear the test \
+             (ρ = {rho_prod})"
         );
     }
 

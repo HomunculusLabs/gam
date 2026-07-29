@@ -50,7 +50,7 @@ use rayon::prelude::*;
 
 use super::curl::{
     CurlVerdict, coalesce_antipodal, cooccurrence_pairs_sparse, curl_verdict,
-    kappa_permutation_evidence, orthonormal_pair_coords,
+    ring_permutation_evidence, orthonormal_pair_coords,
 };
 use super::pair_phase::ebh_reject;
 
@@ -188,15 +188,18 @@ pub struct CensusPair {
     /// reached the observed κ and `0` otherwise. Null mean `≤ 1` with no
     /// dependence assumption, which is what makes the e-BH ledger valid here.
     pub e_value: f64,
-    /// Mean and sd of κ under that pair's own permutation null.
-    pub null_kappa_mean: f64,
-    /// Standard deviation of κ under that pair's own permutation null.
-    pub null_kappa_sd: f64,
+    /// Spearman `ρ` between `α²` and `β²` — `−1` for a ring, `0` under
+    /// independence. The statistic the p-value and e-value are computed on.
+    pub rank_rho: f64,
+    /// Mean of `ρ` under that pair's own permutation null.
+    pub null_rho_mean: f64,
+    /// Standard deviation of `ρ` under that pair's own permutation null.
+    pub null_rho_sd: f64,
     /// True ⇒ this pair is an e-BH discovery at [`CurlCensusConfig::fdr_alpha`]
     /// over the WHOLE screened family. This, not the per-pair screen, is what a
     /// census is entitled to call a finding.
     pub fdr_discovery: bool,
-    /// Plane geometry, retained only when `verdict.recommend_curl`.
+    /// Plane geometry, retained whenever the robust geometry gate passed.
     pub accepted_geometry: Option<AcceptedPlane>,
 }
 
@@ -235,9 +238,12 @@ pub struct CurlCensus {
 }
 
 impl CurlCensus {
-    /// Pairs the derived screen accepted as shattered circles, BEFORE multiplicity.
+    /// Pairs whose ROBUST geometry gate passed — the population the calibrated
+    /// test was actually run on, before multiplicity. (`recommend_curl` adds the
+    /// κ gate, which has no breakdown point and refuses planted ground truth; see
+    /// [`super::curl::CurlVerdict::geometry_ok`].)
     pub fn screen_accepted(&self) -> usize {
-        self.pairs.iter().filter(|p| p.verdict.recommend_curl).count()
+        self.pairs.iter().filter(|p| p.verdict.geometry_ok).count()
     }
 
     /// e-BH discoveries: the pairs the census reports as shattered circles.
@@ -399,23 +405,19 @@ pub fn census_shattered_circles(
             // which is a valid e-value and keeps the multiplicity burden of the
             // WHOLE search on the books rather than quietly shrinking the family
             // to the candidates that happened to look good.
-            let (p_value, e_value, null_kappa_mean, null_kappa_sd) = if verdict.recommend_curl {
+            let (p_value, e_value, rank_rho, null_rho_mean, null_rho_sd) = if verdict.geometry_ok
+            {
                 // Seed from the atom identities so the null is reproducible and
                 // independent of how the pairs happened to be ordered.
                 let seed = (di.members[0] as u64)
                     .wrapping_mul(0x9E37_79B9_7F4A_7C15)
                     ^ (dj.members[0] as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-                kappa_permutation_evidence(
-                    alpha.view(),
-                    beta.view(),
-                    replicates,
-                    seed | 1,
-                )
-                .unwrap_or((1.0, 0.0, f64::NAN, f64::NAN))
+                ring_permutation_evidence(alpha.view(), beta.view(), replicates, seed | 1)
+                    .unwrap_or((1.0, 0.0, f64::NAN, f64::NAN, f64::NAN))
             } else {
-                (1.0, 0.0, f64::NAN, f64::NAN)
+                (1.0, 0.0, f64::NAN, f64::NAN, f64::NAN)
             };
-            let accepted_geometry = if verdict.recommend_curl {
+            let accepted_geometry = if verdict.geometry_ok {
                 Some(AcceptedPlane {
                     rows: co_fire,
                     alpha,
@@ -434,8 +436,9 @@ pub fn census_shattered_circles(
                 verdict,
                 p_value,
                 e_value,
-                null_kappa_mean,
-                null_kappa_sd,
+                rank_rho,
+                null_rho_mean,
+                null_rho_sd,
                 fdr_discovery: false,
                 accepted_geometry,
             })
