@@ -1191,8 +1191,24 @@ where
                 // healthy warm-started fits stay byte-identical. The Gaussian
                 // weight-anchored emit only applies on the non-caller-seeded origin.
                 if seed_moved || (run_gaussian_anchored_prepass && !caller_seeded_rho) {
+                    // "selected seed" was the wrong words and they cost a
+                    // misfiled issue (#2607). This line reports the winner of a
+                    // three-way `compute_cost` comparison among {base,
+                    // initial_sp, summed_diagonal}; that winner becomes
+                    // `config.initial_rho`, which is ONE candidate handed to the
+                    // seed-screening cascade in `run_outer_with_plan`. The
+                    // cascade ranks it against the generated lattice and decides
+                    // where the search actually starts, so this point is not the
+                    // optimizer's starting point unless the cascade also picks
+                    // it. On `hifreq_tensor_k10` this line reads `[0,0,0] ->
+                    // [30,30,30]` — the ρ ceiling in every coordinate — and the
+                    // fit nonetheless starts interior and converges in 26 outer
+                    // iterations to edf 194.97 of p = 576. Read as "selected
+                    // seed", that line says the fit began on the wall and
+                    // returned the intercept; it did neither.
                     log::info!(
-                        "[OUTER] standard REML initial.sp selected seed: {:?} -> {:?} \
+                        "[OUTER] standard REML initial.sp prepass candidate (ONE input to the \
+                         seed-screening cascade, not the optimizer's start): {:?} -> {:?} \
                          (scored: {scored_report}; bounds {:.3}..{:.3})",
                         base.as_slice().unwrap_or(&[]),
                         refined.as_slice().unwrap_or(&[]),

@@ -769,7 +769,7 @@ fn zz_measure_hifreq_tensor_k8_lambda_readout() {
 //
 //   [STAGE] PIRLS row-chunk generation chunks=1 n=1024 p=576 nnz=589824
 //   [STAGE] logdet S rho_dim=3 penalty_rank=575
-//   [OUTER] standard REML initial.sp selected seed: [0,0,0] -> [30,30,30]
+//   [OUTER] standard REML initial.sp prepass candidate: [0,0,0] -> [30,30,30]
 //           (scored: base=1.031664449e3 initial_sp=9.658386681e2
 //            summed_diagonal=7.590703143e2; bounds -12.000..30.000)
 //   [STAGE] standard REML: seed screening cascade start seeds=5 initial_cap=3
@@ -815,7 +815,7 @@ impl log::Log for SeedCostLogger {
         // inside the focused lane's 600s run budget even after #2585's 920x on
         // the branch-and-bound, and nothing currently says what replaced it as
         // the dominant cost.
-        if message.contains("initial.sp selected seed") || message.starts_with("[STAGE]") {
+        if message.contains("initial.sp prepass candidate") || message.starts_with("[STAGE]") {
             eprintln!("[zz:2607] {message}");
         }
     }
