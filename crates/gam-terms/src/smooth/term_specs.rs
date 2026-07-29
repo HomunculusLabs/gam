@@ -2890,9 +2890,12 @@ impl SpatialLogKappaCoords {
         }
     }
 
-    /// Isotropic lower bounds derived from per-term data geometry.
-    /// Each entry gets the ψ_lo bound returned by `spatial_term_psi_bounds`
-    /// for the corresponding term, intersected with the options window.
+    /// Isotropic lower bounds for the κ SEARCH BOX.
+    ///
+    /// Each entry gets the ψ_lo edge of [`spatial_term_psi_search_box`] — the
+    /// data-geometry window widened to contain the term's own incumbent length
+    /// scale, so the point the search starts at and is graded against is inside
+    /// the set being searched (#2454).
     pub fn lower_bounds_from_data(
         data: ArrayView2<'_, f64>,
         spec: &TermCollectionSpec,
@@ -2901,7 +2904,7 @@ impl SpatialLogKappaCoords {
     ) -> Result<Self, BasisError> {
         let mut values = Array1::<f64>::zeros(term_indices.len());
         for (slot, &term_idx) in term_indices.iter().enumerate() {
-            values[slot] = spatial_term_psi_bounds(data, spec, term_idx, options)?.0;
+            values[slot] = spatial_term_psi_search_box(data, spec, term_idx, options)?.0;
         }
         Ok(Self {
             values,
@@ -2909,7 +2912,8 @@ impl SpatialLogKappaCoords {
         })
     }
 
-    /// Isotropic upper bounds derived from per-term data geometry.
+    /// Isotropic upper bounds for the κ SEARCH BOX — the ψ_hi edge of
+    /// [`spatial_term_psi_search_box`]; see [`Self::lower_bounds_from_data`].
     pub fn upper_bounds_from_data(
         data: ArrayView2<'_, f64>,
         spec: &TermCollectionSpec,
@@ -2918,7 +2922,7 @@ impl SpatialLogKappaCoords {
     ) -> Result<Self, BasisError> {
         let mut values = Array1::<f64>::zeros(term_indices.len());
         for (slot, &term_idx) in term_indices.iter().enumerate() {
-            values[slot] = spatial_term_psi_bounds(data, spec, term_idx, options)?.1;
+            values[slot] = spatial_term_psi_search_box(data, spec, term_idx, options)?.1;
         }
         Ok(Self {
             values,
@@ -3014,7 +3018,11 @@ impl SpatialLogKappaCoords {
                 continue;
             }
             let psi_bound = {
-                let (lo, hi) = spatial_term_psi_bounds(data, spec, term_idx, options)?;
+                // The SEARCH box, not the bare geometry window: the same
+                // incumbent-containment argument applies per axis, because the
+                // axis offsets `η_a` are added to a common scalar ψ̄ bound
+                // (#2454).
+                let (lo, hi) = spatial_term_psi_search_box(data, spec, term_idx, options)?;
                 match end {
                     AnisoBoundEnd::Lower => lo,
                     AnisoBoundEnd::Upper => hi,
@@ -3965,6 +3973,72 @@ pub fn spatial_term_psi_bounds(
     Ok((psi_lo, psi_hi))
 }
 
+/// The ψ box the κ optimizer SEARCHES, as opposed to the data-geometry window
+/// [`spatial_term_psi_bounds`] describes.
+///
+/// # Why these are two objects and not one (#2454)
+///
+/// [`spatial_term_psi_bounds`] answers a question about the DATA: over what
+/// kernel ranges does this point cloud keep a well-conditioned radial basis? It
+/// is a pure function of the geometry, equivariant under rotation and dilation
+/// of the inputs, and it knows nothing about which length scale anyone has
+/// actually used.
+///
+/// A search box has to answer a second question the geometry cannot: is the
+/// point the search STARTS at, and whose fit its answer will be GRADED against,
+/// inside the set being searched? The term's own resolved `length_scale` is an
+/// incumbent, not a hypothesis — a design was built and a fit converged at it,
+/// which is direct evidence that the geometry is admissible there, and evidence
+/// outranks a heuristic that was trying to predict admissibility.
+///
+/// Excluding the incumbent is not the conservative choice; it silently poses a
+/// different problem. Every consumer seeds at the incumbent,
+/// [`SpatialLogKappaCoords::clamp_to_bounds`] projects that seed onto the
+/// window's edge, and the joint optimizer's answer is then compared against a
+/// baseline fit at the point the projection discarded. Measured on the fixture
+/// #2454 was opened against — `length_scale = 12` against a geometry window
+/// `[e^-5.719, e^+0.0118]` — ψ is projected from −2.4849 onto the bound
+/// −0.011839795303285494, the optimizer starts THERE, its gradient points into
+/// the excluded region at every iteration, and it terminates on that bound with
+/// a criterion 14.7 nats WORSE than the baseline (−53.75 against −68.41). The
+/// route then reports the monotonicity failure as a solver failure when it is a
+/// feasible-set failure: `min` over a set that excludes the incumbent is under
+/// no obligation to beat the incumbent.
+///
+/// So the box is the geometry window WIDENED — never narrowed — to contain the
+/// incumbent. `min_length_scale` / `max_length_scale` stay hard caps: those are
+/// the caller's own explicit constraint, and an incumbent outside them is a
+/// contradiction the caller stated, not one this function invented.
+pub fn spatial_term_psi_search_box(
+    data: ArrayView2<'_, f64>,
+    spec: &TermCollectionSpec,
+    term_idx: usize,
+    options: &SpatialLengthScaleOptimizationOptions,
+) -> Result<(f64, f64), BasisError> {
+    let (mut psi_lo, mut psi_hi) = spatial_term_psi_bounds(data, spec, term_idx, options)?;
+    // Constant-curvature terms carry a signed-κ chart, not a log-ℓ chart, so
+    // `-ln(length_scale)` is not their coordinate and the geometry bracket is
+    // already the feasible set. Leave that box exactly as it was.
+    if constant_curvature_term_spec(spec, term_idx).is_some() {
+        return Ok((psi_lo, psi_hi));
+    }
+    let options_window = (
+        -options.max_length_scale.ln(),
+        -options.min_length_scale.ln(),
+    );
+    if let Some(length_scale) = get_spatial_length_scale(spec, term_idx)
+        && length_scale.is_finite()
+        && length_scale > 0.0
+    {
+        let psi_incumbent = -length_scale.ln();
+        if psi_incumbent.is_finite() {
+            psi_lo = psi_lo.min(psi_incumbent.max(options_window.0));
+            psi_hi = psi_hi.max(psi_incumbent.min(options_window.1));
+        }
+    }
+    Ok((psi_lo, psi_hi))
+}
+
 #[cfg(test)]
 mod spatial_psi_bound_coordinate_tests {
     use super::*;
@@ -4027,6 +4101,109 @@ mod spatial_psi_bound_coordinate_tests {
         assert!(
             (left - right).abs() <= 1e-12,
             "coordinate-equivalent bounds differ: left={left:.16e}, right={right:.16e}"
+        );
+    }
+
+    /// The search box a κ optimizer is handed must contain the length scale it
+    /// is seeded at and graded against (#2454).
+    ///
+    /// Stated as containment rather than as a numeric window, because the point
+    /// is not where the edge lands — it is that `clamp_to_bounds` has nothing to
+    /// do. A window that excludes the incumbent makes `min` over the box free to
+    /// return something strictly worse than the incumbent, which is exactly the
+    /// "optimizing κ made the fit worse" refusal the monotone fixtures reported
+    /// as a solver failure.
+    ///
+    /// Both directions are pinned: an incumbent far OUTSIDE the geometry window
+    /// must be inside the search box, and an incumbent inside it must not move
+    /// the box at all (widened, never narrowed, and never gratuitously).
+    #[test]
+    fn psi_search_box_contains_the_incumbent_length_scale_2454() {
+        let source = array![
+            [-1.7, -0.4],
+            [-1.1, 0.8],
+            [-0.2, -1.3],
+            [0.5, 1.6],
+            [1.4, -0.7],
+            [2.1, 0.5],
+        ];
+        let options = SpatialLengthScaleOptimizationOptions::default();
+        let box_for = |length_scale: f64| -> ((f64, f64), (f64, f64)) {
+            let input_scale =
+                estimate_isotropic_scale(source.view()).expect("isotropic input scale");
+            let mut centers = source.clone();
+            input_scale.standardize(&mut centers);
+            let spec = TermCollectionSpec {
+                linear_terms: Vec::new(),
+                random_effect_terms: Vec::new(),
+                smooth_terms: vec![SmoothTermSpec {
+                    name: "matern".to_string(),
+                    basis: SmoothBasisSpec::Matern {
+                        feature_cols: vec![0, 1],
+                        spec: MaternBasisSpec {
+                            periodic: None,
+                            center_strategy: CenterStrategy::UserProvided(centers),
+                            length_scale: crate::basis::MaternLengthScale::fixed(length_scale),
+                            nu: MaternNu::FiveHalves,
+                            include_intercept: false,
+                            double_penalty: true,
+                            identifiability: MaternIdentifiability::CenterSumToZero,
+                            aniso_log_scales: None,
+                        },
+                        input_scale: Some(input_scale),
+                    },
+                    shape: ShapeConstraint::None,
+                    joint_null_rotation: None,
+                }],
+            };
+            let geometry = spatial_term_psi_bounds(source.view(), &spec, 0, &options)
+                .expect("finite geometry window");
+            let search = spatial_term_psi_search_box(source.view(), &spec, 0, &options)
+                .expect("finite search box");
+            (geometry, search)
+        };
+
+        // An incumbent far past the long-range edge of the geometry window —
+        // #2454's fixture shape, where `length_scale = 12` sits about six data
+        // diameters out.
+        let far = 1.0e3_f64;
+        let (geometry, search) = box_for(far);
+        let psi_far = -far.ln();
+        assert!(
+            psi_far < geometry.0,
+            "fixture must place the incumbent OUTSIDE the geometry window, got \
+             psi={psi_far} against [{}, {}]",
+            geometry.0,
+            geometry.1
+        );
+        assert!(
+            search.0 <= psi_far && psi_far <= search.1,
+            "the search box [{}, {}] must contain the incumbent psi={psi_far}; a seed \
+             the box excludes is projected onto its edge and the optimum is then taken \
+             over a set that does not contain the point it is graded against (#2454)",
+            search.0,
+            search.1
+        );
+        assert!(
+            search.1 == geometry.1 && search.0 <= geometry.0,
+            "the search box must be the geometry window WIDENED, never narrowed: \
+             geometry=[{}, {}] search=[{}, {}]",
+            geometry.0,
+            geometry.1,
+            search.0,
+            search.1
+        );
+
+        // An incumbent already inside the window must leave the box untouched.
+        let (geometry_mid, search_mid) = box_for((-0.5 * (geometry.0 + geometry.1)).exp());
+        assert!(
+            search_mid == geometry_mid,
+            "an incumbent inside the geometry window must not move the search box: \
+             geometry=[{}, {}] search=[{}, {}]",
+            geometry_mid.0,
+            geometry_mid.1,
+            search_mid.0,
+            search_mid.1
         );
     }
 

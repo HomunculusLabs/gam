@@ -2566,15 +2566,59 @@ fn try_exact_joint_spatial_length_scale_optimization(
     }
     // Project seed onto data-derived bounds; spec.length_scale is a hint,
     // not a hard constraint. BFGS requires theta0 ∈ [lower, upper].
+    // `{lower,upper}_bounds*_from_data` build the SEARCH box, which already
+    // contains the incumbent length scale (#2454), so this projection now only
+    // fires when the caller's own `min/max_length_scale` excludes the seed.
     let log_kappa0 = log_kappa0.clamp_to_bounds(&log_kappa_lower, &log_kappa_upper);
-    let setup = ExactJointHyperSetup::new(
-        best.fit.lambdas.mapv(f64::ln),
-        Array1::<f64>::from_elem(rho_dim, -JOINT_RHO_BOUND),
-        Array1::<f64>::from_elem(rho_dim, rho_upper_bound),
-        log_kappa0,
-        log_kappa_lower,
-        log_kappa_upper,
-    );
+
+    // The ρ half of the same invariant (#2454). This route grades
+    // `joint_final_value` against `fit_score(&best.fit)` — the incumbent fit,
+    // found by the standard scalar-ρ path over the WIDER ±`RHO_BOUND` box. If
+    // `ln λ̂` falls outside the joint ±`JOINT_RHO_BOUND` search box, the seed is
+    // silently clamped and the joint minimum is taken over a set that does not
+    // contain the point it is compared with — so "optimizing κ made the score
+    // worse" becomes reachable with the optimizer descending perfectly, and the
+    // certificate reports a solver failure for a feasible-set failure. Measured:
+    // `initial=5.692434e1, final=5.692477e1` with all three ρ terminating at
+    // 11.999994, i.e. pinned on the clamp.
+    //
+    // #1464 already discovered this for one term kind and widened the upper ρ
+    // bound to `RHO_BOUND` whenever a constant-curvature term is present. That
+    // is this rule for a special case; state the rule instead. The narrower
+    // joint box stays the DEFAULT search region — it is a good prior on where a
+    // joint [ρ, ψ] search stays well conditioned — and is widened per
+    // coordinate, never narrowed, only as far as the incumbent, and never past
+    // the engine's own `RHO_BOUND`.
+    let rho_seed = best.fit.lambdas.mapv(f64::ln);
+    let rho_lower = Array1::<f64>::from_shape_fn(rho_dim, |k| {
+        let seed = rho_seed[k];
+        if seed.is_finite() {
+            (-JOINT_RHO_BOUND).min(seed).max(-gam_solve::estimate::RHO_BOUND)
+        } else {
+            -JOINT_RHO_BOUND
+        }
+    });
+    let rho_upper = Array1::<f64>::from_shape_fn(rho_dim, |k| {
+        let seed = rho_seed[k];
+        if seed.is_finite() {
+            rho_upper_bound.max(seed).min(gam_solve::estimate::RHO_BOUND)
+        } else {
+            rho_upper_bound
+        }
+    });
+    let widened: Vec<usize> = (0..rho_dim)
+        .filter(|&k| rho_lower[k] < -JOINT_RHO_BOUND || rho_upper[k] > rho_upper_bound)
+        .collect();
+    if !widened.is_empty() {
+        log::info!(
+            "[spatial-kappa] joint rho box widened to contain the incumbent on \
+             coordinate(s) {widened:?}: seed={:?} box=[{:?}, {:?}]",
+            rho_seed.to_vec(),
+            rho_lower.to_vec(),
+            rho_upper.to_vec(),
+        );
+    }
+    let setup = ExactJointHyperSetup::new(rho_seed, rho_lower, rho_upper, log_kappa0, log_kappa_lower, log_kappa_upper);
 
     let theta0 = setup.theta0();
     let lower = setup.lower();
