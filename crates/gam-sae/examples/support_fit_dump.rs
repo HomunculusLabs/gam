@@ -345,6 +345,12 @@ fn main() -> Result<(), String> {
     // Optional support arg: "vark" makes L0 per-token under priced
     // admission -- the router admits atoms while the priced gain is
     // positive, so capacity follows token complexity instead of a constant.
+    // "usage" arms the usage amortization on top of pricing; the two terms
+    // are reported apart because they disagree by portfolio.
+    if args.iter().any(|arg| arg == "usage") {
+        term_seed.term.set_admission_usage_amortization(true);
+        println!("admission usage amortization: armed");
+    }
     let vark_arg = args.len() >= 19 && args[18] == "vark";
     if vark_arg {
         if !price_arg {
@@ -432,7 +438,13 @@ fn main() -> Result<(), String> {
         // than the measurement. Stopping when the movement is no longer
         // DECREASING detects that floor without naming it, so no stall count and
         // no floor constant enter the criterion.
-        if !(move_size > 1.0e-4) || move_size >= previous_move {
+        // Stop when the round's improvement is no longer resolvable against
+        // the inner solve's own relative tolerance: below that, "better" is
+        // indistinguishable from the certificate the fit was measured with.
+        let improvement = previous_move - move_size;
+        if !(move_size > 1.0e-4)
+            || improvement <= previous_move.min(move_size) * 1.0e-4
+        {
             break;
         }
         previous_move = move_size;
@@ -442,13 +454,23 @@ fn main() -> Result<(), String> {
         // solve refit the freed capacity on the arc the data owns. The edf
         // baseline is reset because converted atoms lawfully jump.
         if unroll_arg {
-            let unrolled = term_seed.term.convert_underoccupied_loops(2502)?;
-            if !unrolled.is_empty() {
-                println!(
-                    "topology reroute: unrolled {} under-occupied loops",
-                    unrolled.len()
-                );
-                previous_move = f64::INFINITY;
+            // To its own fixed point: each conversion changes routing enough
+            // to expose the next marginal loop, so a single pass leaves a
+            // drip that never ends and keeps resetting the stall baseline.
+            // Conversions are irreversible, so this terminates.
+            let mut total = 0usize;
+            loop {
+                let unrolled = term_seed.term.convert_underoccupied_loops(2502)?;
+                if unrolled.is_empty() {
+                    break;
+                }
+                total += unrolled.len();
+            }
+            if total > 0 {
+                // No stall-baseline reset: the conversion's edf jump is real
+                // movement and the relative rule above absorbs it. Resetting
+                // made a one-atom-per-round drip immortal.
+                println!("topology reroute: unrolled {total} under-occupied loops");
             }
         }
         if !ard_frozen && ard_move >= previous_ard_move {

@@ -424,6 +424,12 @@ pub struct SaeSupportSparseTerm {
     /// stopping rule is derived from the same description-length bill the
     /// ranking already pays -- no new constants.
     variable_priced_support: bool,
+    /// When true, the admission charge is amortized over each atom's OWN
+    /// firing count rather than the portfolio mean -- the usage prior, kept
+    /// separable from the parameter differential because the two have
+    /// opposite signs on different portfolios (+0.079 mixed, -0.167
+    /// homogeneous, both measured).
+    admission_usage_amortized: bool,
     /// `Some(sigma2)` arms DoF-priced admission (#2502): every support
     /// ranking expression subtracts the amortized description length of the
     /// atom's own parameters, `2*sigma2*ln2 * (m*P*(1/2)log2 N) / firings`,
@@ -513,6 +519,7 @@ impl SaeSupportSparseTerm {
             atom_rows,
             decoder_fista_passes: None,
             admission_dof_sigma2: None,
+            admission_usage_amortized: false,
             variable_priced_support: false,
             atom_axis_periods,
         })
@@ -998,8 +1005,12 @@ impl SaeSupportSparseTerm {
                         let bits = self.atoms[atom].basis_size() as f64
                             * self.output_dim as f64
                             * l_param;
-                        2.0 * sigma2 * std::f64::consts::LN_2 * bits
-                            / mean_firings.max(1.0)
+                        let denominator = if self.admission_usage_amortized {
+                            self.atom_rows[atom].len().max(1) as f64
+                        } else {
+                            mean_firings.max(1.0)
+                        };
+                        2.0 * sigma2 * std::f64::consts::LN_2 * bits / denominator
                     })
                     .collect()
             }
@@ -1148,6 +1159,7 @@ impl SaeSupportSparseTerm {
             routed.decoder_fista_passes = self.decoder_fista_passes;
             routed.admission_dof_sigma2 = self.admission_dof_sigma2;
             routed.variable_priced_support = self.variable_priced_support;
+            routed.admission_usage_amortized = self.admission_usage_amortized;
             return Ok(routed);
         }
         type RowRoute = (Vec<u32>, Vec<f64>, Vec<f64>);
@@ -1349,6 +1361,7 @@ impl SaeSupportSparseTerm {
         routed.decoder_fista_passes = self.decoder_fista_passes;
         routed.admission_dof_sigma2 = self.admission_dof_sigma2;
         routed.variable_priced_support = self.variable_priced_support;
+        routed.admission_usage_amortized = self.admission_usage_amortized;
         Ok(routed)
     }
 
@@ -2801,6 +2814,12 @@ impl SaeSupportSparseTerm {
     /// priced admission. No effect unless pricing is armed.
     pub fn set_variable_priced_support(&mut self, enabled: bool) {
         self.variable_priced_support = enabled;
+    }
+
+    /// See [`Self::admission_usage_amortized`]. No effect unless pricing is
+    /// armed.
+    pub fn set_admission_usage_amortization(&mut self, enabled: bool) {
+        self.admission_usage_amortized = enabled;
     }
 
     pub fn set_decoder_fista_passes(&mut self, passes: Option<usize>) {
