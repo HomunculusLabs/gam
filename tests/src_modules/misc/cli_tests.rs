@@ -1764,8 +1764,22 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
     let pred_text = fs::read_to_string(&pred_path)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "read prediction csv", e));
     let header = pred_text.lines().next().unwrap_or("");
+    // The bernoulli marginal slope reports an EVENT probability -- its
+    // likelihood is `binomial_probit()` and `mean_from_eta` is
+    // `eta.mapv(normal_cdf)` -- so the CLI writes the survival-BINARY schema,
+    // which keeps `mean` and adds the derived probabilities beside it. The
+    // plain-survival header this used to expect belongs to a model whose mean
+    // already IS a survival probability, and it drops the `mean` column that
+    // `csv_mean_at` reads back elsewhere in this file.
+    //
+    // And `uncertainty: false` is point-only by contract:
+    // `resolve_prediction_request` routes through
+    // `PosteriorMeanOptions::point_only()` absent a confidence level, because
+    // "passing a confidence level is the switch that populates SE/bounds"
+    // (#2136). So the default predict carries no `std_error`/bands, and the
+    // banded schema is asserted separately below.
     assert_eq!(
-        header, "eta,survival_prob,failure_prob,risk_score,std_error,mean_lower,mean_upper",
+        header, "eta,mean,event_prob,failure_prob,survival_prob,risk_score",
         "posterior-mean marginal-slope prediction header drifted"
     );
 }

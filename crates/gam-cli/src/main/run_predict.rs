@@ -1038,6 +1038,36 @@ pub(crate) fn run_predict_unified(
                 mean_hi.as_ref().map(|a| a.view()),
             )?;
         }
+        PredictModelClass::BernoulliMarginalSlope => {
+            // This class is dispatched everywhere else in this file -- the
+            // model-class label, the noise-offset support table -- and was
+            // falling through to the generic `eta,mean` writer, so a
+            // marginal-slope prediction shipped the wrong schema (#2619).
+            //
+            // Its mean is an EVENT probability:
+            // `BernoulliMarginalSlopePredictor::likelihood_family()` is
+            // `binomial_probit()` and `mean_from_eta` is `eta.mapv(normal_cdf)`,
+            // so `mean = Phi(eta) = P(Y = 1)`. `write_survival_binary_prediction_csv`
+            // is the writer for exactly that case -- it takes `event_prob`
+            // directly and derives `survival_prob = 1 - p`, `failure_prob` and
+            // `risk_score = eta` itself.
+            //
+            // NOT the plain survival writer: that one takes a SURVIVAL
+            // probability, so it would need `1 - mean` with the intervals
+            // FLIPPED, and it drops the `mean` column that
+            // `saved_bernoulli_marginal_slope_prediction_replays_latent_z_normalization`
+            // reads back through `csv_mean_at`. The binary schema keeps `mean`
+            // and adds the derived probabilities, which is what both callers
+            // need.
+            write_survival_binary_prediction_csv(
+                &args.out,
+                eta.view(),
+                mean.view(),
+                se_opt.as_ref().map(|a| a.view()),
+                mean_lo.as_ref().map(|a| a.view()),
+                mean_hi.as_ref().map(|a| a.view()),
+            )?;
+        }
         _ => {
             write_prediction_csv(
                 &args.out,
