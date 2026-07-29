@@ -198,9 +198,10 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("plane_replication: {e}");
-        std::process::exit(1);
-    }
+fn main() -> Result<(), String> {
+    // `std::process::exit` is banned by the root build script, and one hit in
+    // ANY crate aborts that script -- which means no root-package target builds
+    // at all: the whole integration-test suite and the wheel. Returning the
+    // error is the sanctioned idiom and keeps the same nonzero exit status.
+    run().map_err(|error| format!("plane_replication: {error}"))
 }
