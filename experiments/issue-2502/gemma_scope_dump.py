@@ -146,41 +146,98 @@ def finish(args, cfg, sae_dir, params, x, token_ids, tok):
         w_dec = w_dec.T.contiguous()
     k = w_dec.shape[0]
 
+    def encode(mat):
+        """Google's JumpReLU encoder, unchanged, over rows of `mat`."""
+        out_i, out_v, out_c = [], [], []
+        with torch.no_grad():
+            for s0 in range(0, len(mat), 8192):
+                xb = mat[s0 : s0 + 8192].to(dev)
+                pre = xb @ w_enc + b_enc
+                act = torch.where(pre > thresh, torch.relu(pre), torch.zeros_like(pre))
+                nzr, nzc = act.nonzero(as_tuple=True)
+                out_c.append(torch.bincount(nzr, minlength=xb.shape[0]).cpu())
+                out_i.append(nzc.to(torch.int32).cpu())
+                out_v.append(act[nzr, nzc].cpu())
+        return (
+            torch.cat(out_i).numpy().astype(np.int32),
+            torch.cat(out_v).numpy().astype(np.float32),
+            torch.cat(out_c).numpy().astype(np.int64),
+        )
+
     spike_atoms = None
     if args.spike > 0.0:
-        # Plant the circle in the plane of two atoms' ENCODER directions, not
-        # their decoder directions. Adding along w_dec does not move the
-        # pre-activations, so a decoder-space plant is invisible to the gate and
-        # the dictionary never parses it — the first version of this arm planted
-        # rings the SAE simply did not see, and reported the native census back
-        # unchanged. Along w_enc the pre-activation of each atom moves by
-        # R*cos(theta)*||w_enc||, which is the parse the theorem is about.
+        # Plant the ring in CODE space, by solving for the activation increment.
         #
-        # The ring is offset so BOTH coefficients stay positive across the whole
-        # angle: a nonnegative gate cannot represent a centred ring with only two
-        # atoms (it needs the four rectified halves that a random plane does not
-        # have), and a co-firing circle with a positive DC term is what a real one
-        # looks like anyway.
+        # Two earlier constructions failed silently. Adding along the atoms'
+        # DECODER directions does not move their pre-activations at all, so the
+        # gate never opens. Adding along their ENCODER directions does move the
+        # pre-activations, but by an amount scaled by ||w_enc||, which for this
+        # dictionary leaves them under the JumpReLU threshold: both planted atoms
+        # fired on 0 of 3000 planted rows, and the census dutifully reported the
+        # native result back as if the plant had been a null.
+        #
+        # So the plant now states what it wants and solves for it. Requiring
+        #   pre_a = thr_a + A(1.5 + cos t),   pre_b = thr_b + A(1.5 + sin t)
+        # fixes the two inner products of the added vector with (w_enc_a, w_enc_b);
+        # taking the vector in their span makes that a 2x2 Gram solve, exact. The
+        # 1.5 offset keeps both coefficients positive across the whole angle, which
+        # a nonnegative gate needs to carry a ring on two atoms at all.
+        #
+        # A is set so the ring's AMBIENT radius is `--spike` times the dictionary's
+        # own reconstruction sigma -- the same units the census reports its radius
+        # in, and the same units the derived rate-distortion crossover (1.814 sigma)
+        # is stated in. sigma is measured here, from an unspiked encode.
+        idx0, val0, cnt0 = encode(x)
+        ptr0 = np.zeros(n + 1, dtype=np.int64)
+        np.cumsum(cnt0, out=ptr0[1:])
+        sse = 0.0
+        wd = w_dec.cpu().double().numpy()
+        bd = b_dec.cpu().double().numpy()
+        step = 4096
+        for s0 in range(0, n, step):
+            s1 = min(n, s0 + step)
+            rec = np.repeat(bd[None, :], s1 - s0, axis=0)
+            for r in range(s0, s1):
+                lo, hi = ptr0[r], ptr0[r + 1]
+                rec[r - s0] += val0[lo:hi].astype(np.float64) @ wd[idx0[lo:hi]]
+            d0 = x[s0:s1].double().numpy() - rec
+            sse += float((d0 * d0).sum())
+        sigma = (sse / (n * p)) ** 0.5
+        print(f"SPIKE: dictionary reconstruction sigma = {sigma:.3f}", flush=True)
+
         g = torch.Generator().manual_seed(args.spike_seed)
-        pick = torch.randperm(k, generator=g)[:2]
-        u = w_enc[:, pick[0]].cpu().double()
-        v = w_enc[:, pick[1]].cpu().double()
-        u = u / u.norm()
-        v = v - (v @ u) * u
-        v = v / v.norm()
+        fire = np.bincount(idx0, minlength=k)
+        busy = np.argsort(-fire)[:2000]
+        pick = [int(busy[i]) for i in torch.randperm(len(busy), generator=g)[:2].tolist()]
+        ga = w_enc[:, pick[0]].double()
+        gb = w_enc[:, pick[1]].double()
+        gram = torch.tensor(
+            [
+                [float(ga @ ga), float(ga @ gb)],
+                [float(ga @ gb), float(gb @ gb)],
+            ],
+            dtype=torch.float64,
+        )
+        amp_a = args.spike * sigma / float(w_dec[pick[0]].double().norm())
+        amp_b = args.spike * sigma / float(w_dec[pick[1]].double().norm())
         rows = torch.randperm(n, generator=g)[: args.spike_rows]
         theta = torch.rand(len(rows), generator=g, dtype=torch.float64) * 2 * np.pi
-        scale = args.spike * float((x - x.mean(0, keepdim=True)).std())
-        offset = 1.5 * scale
-        add = offset * (u + v) + scale * (
-            torch.cos(theta)[:, None] * u + torch.sin(theta)[:, None] * v
-        )
+        xr = x[rows].to(dev)
+        pre_a = (xr.double() @ ga + b_enc[pick[0]].double()).cpu()
+        pre_b = (xr.double() @ gb + b_enc[pick[1]].double()).cpu()
+        want_a = thresh[pick[0]].double().cpu() + amp_a * (1.5 + torch.cos(theta))
+        want_b = thresh[pick[1]].double().cpu() + amp_b * (1.5 + torch.sin(theta))
+        need = torch.stack([want_a - pre_a, want_b - pre_b], dim=1)
+        coef = torch.linalg.solve(gram, need.T).T
+        add = (coef[:, 0:1] * ga.cpu()[None, :] + coef[:, 1:2] * gb.cpu()[None, :])
         x = x.clone()
         x[rows] = (x[rows].double() + add).float()
-        spike_atoms = (int(pick[0]), int(pick[1]), rows)
+        spike_atoms = (pick[0], pick[1], rows)
         print(
-            f"SPIKE: radius {args.spike}sd = {scale:.2f} (offset {offset:.2f}) on "
-            f"{len(rows)} rows, encoder plane of atoms {int(pick[0])},{int(pick[1])}",
+            f"SPIKE: ambient radius {args.spike} sigma on {len(rows)} rows, "
+            f"code plane of atoms {pick[0]},{pick[1]} "
+            f"(amplitudes {amp_a:.2f}/{amp_b:.2f}, fire counts "
+            f"{int(fire[pick[0]])}/{int(fire[pick[1]])})",
             flush=True,
         )
 
