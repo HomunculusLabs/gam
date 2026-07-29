@@ -7641,7 +7641,106 @@ impl<'a> RemlState<'a> {
                     pirls_elapsed.as_secs_f64(),
                 );
             }
-            result
+            // #2519/#2614: a warm-started inner solve that does not reach a
+            // valid minimum is retried ONCE from a cold start before its
+            // verdict is allowed to stand.
+            //
+            // Measured on the #1575 binomial/logit fixture (runs 30455350636
+            // and 30456083017): at rho displacements of 1e-7, 1e-9 and 1e-12
+            // from a mode certified to an inner gradient of 3.3e-14, the
+            // warm-started solve stops at ~6e-4 and the outer evaluation
+            // reports the infeasible +inf, while the identical rho solves in
+            // five iterations from a cold start. Counted over one ladder: 3/5
+            // refusals with the warm start, 0/5 with it disabled, and clearing
+            // the Levenberg-Marquardt damping hint instead changes nothing
+            // (3/5) -- so the initializer is the datum, not the damping.
+            //
+            // The consequence is not a slower search, it is a wrong criterion.
+            // The outer cost at ONE rho took three values 0.5*ln(1e8) = 9.21
+            // apart, so no step can achieve the O(1e-4) Armijo decrease the
+            // line search asks for, the first outer line search fails, and the
+            // fit is refused outright.
+            //
+            // This relaxes nothing. The retry solves the SAME inner problem
+            // with the SAME configuration and the SAME convergence tolerance;
+            // only the initializer changes, and a point that fails both ways
+            // keeps its original verdict. It costs one extra inner solve on
+            // exactly the path that today returns a wrong +inf. Two exclusions
+            // keep it from firing where a non-minimum is the intended outcome:
+            // seed screening deliberately runs a partial fit, and a solve
+            // stopped at the outer schedule's throttled cap is a budget event
+            // the schedule itself corrects on the next outer iteration
+            // (`inner_budget_exhaustion_was_scheduled`). The first-Fisher-step
+            // Gram is deliberately not carried into the retry: the flat variant
+            // is admissible only when a warm start supplied its frozen working
+            // weight.
+            let warm_started_non_minimum = warm_start_ref.is_some()
+                && !in_screening
+                && match &result {
+                    Ok((res, _)) => {
+                        !matches!(
+                            res.status,
+                            pirls::PirlsStatus::Converged
+                                | pirls::PirlsStatus::StalledAtValidMinimum
+                        ) && !inner_budget_exhaustion_was_scheduled(
+                            res.status,
+                            res.iteration,
+                            outer_cap,
+                            self.config.max_iterations,
+                        )
+                    }
+                    Err(_) => false,
+                };
+            if warm_started_non_minimum {
+                let problem_cold = pirls::PirlsProblem {
+                    x: &self.x,
+                    offset: self.offset.view(),
+                    y: self.y,
+                    priorweights: self.weights,
+                    covariate_se: None,
+                    gaussian_fixed_cache: cache_handle.as_deref(),
+                    glm_first_step_gram: None,
+                };
+                let penalty_cold = pirls::PenaltyConfig {
+                    canonical_penalties: &self.canonical_penalties,
+                    balanced_penalty_root: Some(&self.balanced_penalty_root),
+                    reparam_invariant: Some(&self.reparam_invariant),
+                    p: self.p,
+                    coefficient_lower_bounds: self.coefficient_lower_bounds.as_ref(),
+                    linear_constraints_original: self.linear_constraints.as_ref(),
+                    penalty_shrinkage_floor: self.penalty_shrinkage_floor,
+                    kronecker_factored: self.kronecker_factored.as_ref(),
+                };
+                let cold = pirls::fit_model_for_fixed_rho_with_adaptive_kkt(
+                    LogSmoothingParamsView::new(rho.view())?,
+                    problem_cold,
+                    penalty_cold,
+                    &pirls_config,
+                    None,
+                    adaptive_kkt_tolerance,
+                    false,
+                    cost_only_gaussian_rows.as_ref(),
+                );
+                let cold_reached_minimum = matches!(
+                    &cold,
+                    Ok((res, _)) if matches!(
+                        res.status,
+                        pirls::PirlsStatus::Converged
+                            | pirls::PirlsStatus::StalledAtValidMinimum
+                    )
+                );
+                if cold_reached_minimum {
+                    log::info!(
+                        "[PIRLS] the warm-started inner solve did not reach a valid minimum \
+                         and the cold retry did; taking the cold solve (#2519)"
+                    );
+                    cold
+                } else {
+                    result
+                }
+            } else {
+                result
+            }
         };
 
         if let Err(e) = &pirls_result {

@@ -1018,15 +1018,21 @@ fn binomial_logit_inner_refusal_names_its_carried_datum_1575() {
         format!("#1575/#2519 which carried datum makes the inner solve refuse{report}");
     eprintln!("{summary}");
 
-    let baseline = counts[0].1;
-    assert!(
-        baseline > 0,
-        "the untouched arm no longer reproduces the refusals this probe exists \
-         to attribute; re-measure before reading the other arms.\n{summary}"
-    );
-    assert!(
-        counts.iter().any(|(_, refusals)| *refusals == 0),
-        "no arm removes the refusals, so neither the LM damping hint nor the \
-         warm-start beta accounts for them on its own.\n{summary}"
+    // The attribution this probe was written to make is recorded above and in
+    // the commit that fixed it: as-is 3/5, LM hint cleared 3/5, warm start off
+    // 0/5. What it GUARDS now is the repair -- the outer objective must be
+    // feasible at every one of these trial points under every initializer,
+    // because a criterion whose value depends on which beta the inner solve
+    // started from is not a function of rho and cannot be line-searched.
+    let worst = counts
+        .iter()
+        .map(|(_, refusals)| *refusals)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        worst, 0,
+        "the outer objective still refuses solvable trial points under some \
+         initializer, so its value depends on the search path rather than on \
+         rho alone.\n{summary}"
     );
 }
