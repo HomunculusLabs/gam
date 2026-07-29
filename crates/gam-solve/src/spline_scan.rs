@@ -1035,6 +1035,17 @@ fn ball_cholesky(covariance: &BallMat, order: usize) -> Option<BallMat> {
     Some(factor)
 }
 
+/// `-M`, entrywise.
+fn ball_mat_neg(matrix: &BallMat, order: usize) -> BallMat {
+    let mut negated = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..order {
+        for j in 0..order {
+            negated[i][j] = matrix[i][j].neg();
+        }
+    }
+    negated
+}
+
 /// Number of columns in the prediction prearray `[F·L, L_Q]`.
 const PREARRAY_COLUMNS: usize = 2 * MAX_ORDER;
 
@@ -1068,6 +1079,21 @@ fn ball_factor_update(factor: &BallMat, beta: Ball, order: usize) -> BallMat {
         row[0] = row[0].mul(beta);
     }
     updated
+}
+
+/// `L Lᵀ` for a factor that need not be triangular.
+fn ball_factor_gram_full(factor: &BallMat, order: usize) -> BallMat {
+    let mut gram = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..order {
+        for j in 0..order {
+            let mut accumulator = Ball::ZERO;
+            for k in 0..order {
+                accumulator = accumulator.add(factor[i][k].mul(factor[j][k]));
+            }
+            gram[i][j] = accumulator;
+        }
+    }
+    gram
 }
 
 /// `L Lᵀ` for a lower-triangular factor.
@@ -1822,6 +1848,15 @@ fn run_filter_ball_traced(
     // matrix whose update and prediction contain no cancelling subtraction, and
     // the two are intersected. `None` means no evidence, never a refusal.
     let mut carried_factor: Option<BallMat> = None;
+    // ... and one for `−dP/dρ`, which obeys the SAME recursion.
+    //
+    // `P` is operator monotone increasing in the process-noise scale `q`, and
+    // `q = e^{−ρ}`, so `dP/dρ ⪯ 0` and `−dP/dρ` is PSD — at seeding it is `0`,
+    // the update carries it through the congruence `A(−D₁)Aᵀ` which preserves
+    // PSD, and the prediction is `F(−D₁)Fᵀ + Q` because `dQ/dρ = −Q`. Term for
+    // term the same recursion as the covariance, so the same carried factor
+    // applies, and `D₁`'s entries inherit the same freedom from cancellation.
+    let mut carried_d1_factor: Option<BallMat> = None;
     let mut sum_log_f = Ball::ZERO;
     let mut sum_log_f_d1 = Ball::ZERO;
     let mut sum_log_f_d2 = Ball::ZERO;
@@ -1936,6 +1971,7 @@ fn run_filter_ball_traced(
                     p_inf = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
                     intersect_proper_covariance_psd(&mut p_star, order)?;
                     carried_factor = ball_cholesky(&p_star, order);
+                    carried_d1_factor = ball_cholesky(&ball_mat_neg(&p_star_d1, order), order);
                 }
             }
         }
@@ -2068,6 +2104,7 @@ fn run_filter_ball_traced(
             } else {
                 carried_factor = None;
             }
+
             // Derivative covariances through the JOSEPH form, which for the
             // derivative jets is not a reformulation but an exact cancellation
             // (#2614).
@@ -2139,7 +2176,26 @@ fn run_filter_ball_traced(
             // the VALUE covariance above, for the same reason.
 
             // dP⁺ = A · dP · Aᵀ  (the `dK` terms cancel exactly, since M⁺ = R·K)
-            let p_new_d1 = ball_congruence(&a_operator, &d1_pred, &a_operator, order);
+            let mut p_new_d1 = ball_congruence(&a_operator, &d1_pred, &a_operator, order);
+            // `dP⁺ = A·dP·Aᵀ`, so on the factor of `−dP` the update is simply
+            // `L ↦ A·L`: no subtraction, and no triangularity required until
+            // the prediction re-triangularizes it.
+            if carried_d1_factor.is_none() {
+                carried_d1_factor = ball_cholesky(&ball_mat_neg(&p_star_d1, order), order);
+            }
+            carried_d1_factor = carried_d1_factor.map(|factor| {
+                let updated = ball_mat_mul(&a_operator, &factor, order);
+                let gram = ball_factor_gram_full(&updated, order);
+                for i in 0..order {
+                    for j in 0..order {
+                        intersect_with_independent_enclosure(
+                            &mut p_new_d1[i][j],
+                            gram[i][j].neg(),
+                        );
+                    }
+                }
+                updated
+            });
             let mut gain_d1 = [Ball::ZERO; MAX_ORDER];
             for i in 0..order {
                 gain_d1[i] = p_new_d1[i][0].div_positive(r);
@@ -2416,6 +2472,37 @@ fn run_filter_ball_traced(
                     for j in 0..order {
                         let evidence = gram[i][j].add(slack).mul(scale);
                         intersect_with_independent_enclosure(&mut p_star[i][j], evidence);
+                    }
+                }
+                Some(next_factor)
+            });
+            carried_d1_factor = carried_d1_factor.and_then(|factor| {
+                let transported = ball_mat_mul(&f_t, &factor, order);
+                let noise_factor = ball_cholesky(&q_noise, order)?;
+                let mut prearray = [[Ball::ZERO; PREARRAY_COLUMNS]; MAX_ORDER];
+                for i in 0..order {
+                    for j in 0..order {
+                        prearray[i][j] = transported[i][j];
+                        prearray[i][order + j] = noise_factor[i][j];
+                    }
+                }
+                let (next_factor, trailing, gram_scale) =
+                    ball_retriangularize(&mut prearray, order, 2 * order);
+                let gram = ball_factor_gram(&next_factor, order);
+                let slack = Ball {
+                    value: 0.0,
+                    lo: -trailing,
+                    hi: trailing,
+                };
+                let scale = Ball {
+                    value: 1.0,
+                    lo: next_down_ball(1.0 / gram_scale),
+                    hi: next_up_ball(gram_scale),
+                };
+                for i in 0..order {
+                    for j in 0..order {
+                        let evidence = gram[i][j].add(slack).mul(scale).neg();
+                        intersect_with_independent_enclosure(&mut p_star_d1[i][j], evidence);
                     }
                 }
                 Some(next_factor)
