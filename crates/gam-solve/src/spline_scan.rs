@@ -1515,43 +1515,9 @@ fn run_filter_ball(
             require_positive_innovation(t, SplineInnovationKind::Proper, f_star)?;
             let inv_f = Ball::ONE.div_positive(f_star);
             let mut gain = [Ball::ZERO; MAX_ORDER];
-            let mut gain_d1 = [Ball::ZERO; MAX_ORDER];
-            let mut gain_d2 = [Ball::ZERO; MAX_ORDER];
-            let mut gain_d3 = [Ball::ZERO; MAX_ORDER];
             for i in 0..order {
                 gain[i] = m_star[i].mul(inv_f);
-                gain_d1[i] = m_star_d1[i]
-                    .sub(gain[i].mul(f_star_d1))
-                    .mul(inv_f);
-                gain_d2[i] = m_star_d2[i]
-                    .sub(gain_d1[i].mul(f_star_d1).scale(2.0))
-                    .sub(gain[i].mul(f_star_d2))
-                    .mul(inv_f);
-                gain_d3[i] = m_star_d3[i]
-                    .sub(gain_d2[i].mul(f_star_d1).scale(3.0))
-                    .sub(gain_d1[i].mul(f_star_d2).scale(3.0))
-                    .sub(gain[i].mul(f_star_d3))
-                    .mul(inv_f);
             }
-            let a_old_d1 = a_d1;
-            let a_old_d2 = a_d2;
-            let a_old_d3 = a_d3;
-            for i in 0..order {
-                a[i] = a[i].add(gain[i].mul(v));
-                a_d1[i] = a_old_d1[i]
-                    .add(gain_d1[i].mul(v))
-                    .add(gain[i].mul(v_d1));
-                a_d2[i] = a_old_d2[i]
-                    .add(gain_d2[i].mul(v))
-                    .add(gain_d1[i].mul(v_d1).scale(2.0))
-                    .add(gain[i].mul(v_d2));
-                a_d3[i] = a_old_d3[i]
-                    .add(gain_d3[i].mul(v))
-                    .add(gain_d2[i].mul(v_d1).scale(3.0))
-                    .add(gain_d1[i].mul(v_d2).scale(3.0))
-                    .add(gain[i].mul(v_d3));
-            }
-
             let mut p_new = p_star;
             for i in 0..order {
                 for j in 0..order {
@@ -1594,9 +1560,51 @@ fn run_filter_ball(
             let d1_pred = p_star_d1;
             let d2_pred = p_star_d2;
             let d3_pred = p_star_d3;
+            // Gain jets from the UPDATED covariance, not from a subtractive
+            // recursion (#2614, second measurement).
+            //
+            // The identity that made `dP+ = A dP A^T` exact gives the gain
+            // derivatives for free. `M+ = R*K` with `R = 1/w_t` constant in rho,
+            // so `K = M+/R` and
+            //
+            //     d^k K / drho^k  =  (d^k M+ / drho^k) / R
+            //
+            // Every gain jet is a column of the corresponding UPDATED covariance
+            // jet divided by a constant: no subtraction, no division by `F`, no
+            // accumulation of derivative-times-derivative products.
+            //
+            // The measurement that forced this. After the covariance jets became
+            // congruences, the refusal -- now carrying its own evidence -- named
+            // the first accumulator to leave the finite range as
+            // `sum_v2_over_f_d3`, at node 63 of 179, q = 1.641e7, value
+            // 6.766e-5, enclosure [-inf, +inf]. That accumulator is fed by the
+            // MEAN derivative chain `a_d3 -> v_d3 -> vv_d3`, which consumes
+            // `gain_d3` -- the one recursion the congruence rewrite left alone,
+            // still built as three subtractions of derivative products divided
+            // by `F`, once per node.
+            //
+            // The staging is well founded, not circular: `d1` needs only `gain`;
+            // `gain_d1` is then `p_new_d1`'s first column; `d2` needs `gain_d1`;
+            // and so on. Each jet exists exactly when the next one needs it,
+            // which is also why the mean update now follows this block.
             let p_new_d1 = congruence_identity_minus_rank_one(&d1_pred, &gain, &gain, order);
+            let mut gain_d1 = [Ball::ZERO; MAX_ORDER];
+            for i in 0..order {
+                gain_d1[i] = p_new_d1[i][0].div_positive(r);
+            }
+
             let mut p_new_d2 = congruence_identity_minus_rank_one(&d2_pred, &gain, &gain, order);
             let d2_cross = congruence_rank_one_left_symmetrized(&d1_pred, &gain_d1, &gain, order);
+            for i in 0..order {
+                for j in 0..order {
+                    p_new_d2[i][j] = p_new_d2[i][j].add(d2_cross[i][j]);
+                }
+            }
+            let mut gain_d2 = [Ball::ZERO; MAX_ORDER];
+            for i in 0..order {
+                gain_d2[i] = p_new_d2[i][0].div_positive(r);
+            }
+
             let mut p_new_d3 = congruence_identity_minus_rank_one(&d3_pred, &gain, &gain, order);
             let d3_cross_second =
                 congruence_rank_one_left_symmetrized(&d2_pred, &gain_d1, &gain, order);
@@ -1605,13 +1613,36 @@ fn run_filter_ball(
             let d3_both = congruence_rank_one_both(&d1_pred, &gain_d1, &gain_d1, order);
             for i in 0..order {
                 for j in 0..order {
-                    p_new_d2[i][j] = p_new_d2[i][j].add(d2_cross[i][j]);
                     p_new_d3[i][j] = p_new_d3[i][j]
                         .add(d3_cross_second[i][j].scale(2.0))
                         .add(d3_both[i][j].scale(2.0))
                         .add(d3_cross_first[i][j]);
                 }
             }
+            let mut gain_d3 = [Ball::ZERO; MAX_ORDER];
+            for i in 0..order {
+                gain_d3[i] = p_new_d3[i][0].div_positive(r);
+            }
+
+            let a_old_d1 = a_d1;
+            let a_old_d2 = a_d2;
+            let a_old_d3 = a_d3;
+            for i in 0..order {
+                a[i] = a[i].add(gain[i].mul(v));
+                a_d1[i] = a_old_d1[i]
+                    .add(gain_d1[i].mul(v))
+                    .add(gain[i].mul(v_d1));
+                a_d2[i] = a_old_d2[i]
+                    .add(gain_d2[i].mul(v))
+                    .add(gain_d1[i].mul(v_d1).scale(2.0))
+                    .add(gain[i].mul(v_d2));
+                a_d3[i] = a_old_d3[i]
+                    .add(gain_d3[i].mul(v))
+                    .add(gain_d2[i].mul(v_d1).scale(3.0))
+                    .add(gain_d1[i].mul(v_d2).scale(3.0))
+                    .add(gain[i].mul(v_d3));
+            }
+
             p_star = p_new;
             p_star_d1 = p_new_d1;
             p_star_d2 = p_new_d2;
