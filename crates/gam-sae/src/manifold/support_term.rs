@@ -2600,13 +2600,13 @@ impl SaeSupportSparseTerm {
         let sse: f64 = residual.iter().map(|value| value * value).sum();
 
         // Per-atom effective df, and the roughness the fit actually spent.
-        let mut tau = vec![0.0_f64; self.k_atoms()];
-        let mut null_dim = vec![0.0_f64; self.k_atoms()];
-        let mut roughness = vec![0.0_f64; self.k_atoms()];
-        // The level at which `b'Sb` stops being distinguishable from zero,
-        // per atom, from the magnitudes that produced it.
-        let mut roughness_floor = vec![0.0_f64; self.k_atoms()];
-        for atom_idx in 0..self.k_atoms() {
+        // Same shape as the census: per atom, reading `&self`, writing only
+        // its own four numbers. This is the expensive half of a REML round --
+        // it accumulates every routed row's phi outer product before the
+        // eigen-decomposition -- so it is the half worth spreading.
+        let per_atom = (0..self.k_atoms())
+            .into_par_iter()
+            .map(|atom_idx| -> Result<(f64, f64, f64, f64), String> {
             let m = self.atoms[atom_idx].basis_size();
             let penalty = self.atoms[atom_idx].smooth_penalty().clone();
 
@@ -2629,12 +2629,9 @@ impl SaeSupportSparseTerm {
                 lambda_smooth[atom_idx],
                 "fellner_schall_smoothing",
             )?;
-            null_dim[atom_idx] = atom_null_dim;
-            tau[atom_idx] = trace;
-
             let decoder = self.atoms[atom_idx].decoder_coefficients();
             let penalized = penalty.dot(decoder);
-            roughness[atom_idx] = decoder
+            let atom_roughness = decoder
                 .iter()
                 .zip(penalized.iter())
                 .map(|(left, right)| left * right)
@@ -2647,8 +2644,22 @@ impl SaeSupportSparseTerm {
                 .map(|value| value.abs())
                 .fold(0.0_f64, f64::max);
             let decoder_sq = decoder.iter().map(|value| value * value).sum::<f64>();
-            roughness_floor[atom_idx] =
+            let atom_floor =
                 f64::EPSILON * penalty_scale * decoder_sq * m.max(1) as f64;
+            Ok((trace, atom_null_dim, atom_roughness, atom_floor))
+            })
+            .collect::<Result<Vec<(f64, f64, f64, f64)>, String>>()?;
+        let mut tau = vec![0.0_f64; self.k_atoms()];
+        let mut null_dim = vec![0.0_f64; self.k_atoms()];
+        let mut roughness = vec![0.0_f64; self.k_atoms()];
+        // The level at which `b'Sb` stops being distinguishable from zero,
+        // per atom, from the magnitudes that produced it.
+        let mut roughness_floor = vec![0.0_f64; self.k_atoms()];
+        for (atom_idx, (t, nd, r, fl)) in per_atom.into_iter().enumerate() {
+            tau[atom_idx] = t;
+            null_dim[atom_idx] = nd;
+            roughness[atom_idx] = r;
+            roughness_floor[atom_idx] = fl;
         }
 
         // Profiled scale: residual sum of squares over the residual degrees of
@@ -2693,8 +2704,16 @@ impl SaeSupportSparseTerm {
         lambda_smooth: &[f64],
     ) -> Result<Vec<f64>, String> {
         self.validate_smoothing(lambda_smooth)?;
-        let mut out = vec![0.0_f64; self.k_atoms()];
-        for atom_idx in 0..self.k_atoms() {
+        // Per atom, and independent per atom: each entry reads shared state
+        // through `&self`, writes only its own slot, and builds its own
+        // scratch. The census runs once per REML round over every atom, and
+        // at K=11010 the smoothing alternation cost 1.35x the wall clock of a
+        // fixed-lambda fit for a held-out difference of 0.0001 -- so the
+        // arithmetic here is worth spreading even though the verdict it
+        // produces is currently cheap to predict.
+        let out = (0..self.k_atoms())
+            .into_par_iter()
+            .map(|atom_idx| -> Result<f64, String> {
             // An atom no row routes to has NO evidence: its supported
             // curvature df is zero, full stop. Falling through computed
             // `0 - null_dim` = -1 for every such atom -- an impossible edf
@@ -2702,7 +2721,7 @@ impl SaeSupportSparseTerm {
             // support-move flip produced |d edf| = 1.0 EXACTLY, which is the
             // value the REML alternation kept stopping on.
             if self.atom_rows[atom_idx].is_empty() {
-                continue;
+                return Ok(0.0);
             }
             let m = self.atoms[atom_idx].basis_size();
             let penalty = self.atoms[atom_idx].smooth_penalty().clone();
@@ -2723,8 +2742,9 @@ impl SaeSupportSparseTerm {
                 lambda_smooth[atom_idx],
                 "effective_curvature_df",
             )?;
-            out[atom_idx] = trace - null_dim;
-        }
+            Ok(trace - null_dim)
+            })
+            .collect::<Result<Vec<f64>, String>>()?;
         Ok(out)
     }
 

@@ -79,7 +79,21 @@ fn main() -> Result<(), String> {
     // Which model this run fits must be legible from the command line. A
     // rebuild once changed it silently, and the resulting runs were reported as
     // a fixed-smoothing confirmation while actually alternating REML.
-    let reml_arg: bool = args.len() >= 13 && args[12] == "reml";
+    // Fixed smoothing is removed. It is not a selection: it pins every atom at
+    // lambda = 1, and measured at K=11010 that leaves 1223 atoms with zero
+    // effective df where per-atom REML leaves 569, for a dictionary that
+    // differs by 39% in norm. Passing `fixed` is now an ERROR rather than a
+    // silent downgrade -- a run that asked for one model and got another is
+    // how this campaign ended up reporting fixed-smoothing numbers from an
+    // alternating fit, which is why the mode is echoed on the line above.
+    if args.get(12).map(String::as_str) == Some("fixed") {
+        return Err(
+            "fixed smoothing was removed: it pins lambda = 1 for every atom, \
+             which is not a selection. Pass `reml`."
+                .into(),
+        );
+    }
+    let reml_arg: bool = true;
     // Coordinate-prior precision. Fixed at 1.0 for the whole campaign because
     // nothing selected it; `0` removes the prior entirely, which is the arm the
     // containment argument needs.
@@ -97,10 +111,7 @@ fn main() -> Result<(), String> {
         1.0
     };
     println!("alpha: {alpha_arg}  lambda: {lambda_arg}");
-    println!(
-        "mode: {}",
-        if reml_arg { "REML per-atom smoothing alternation" } else { "fixed smoothing" }
-    );
+    println!("mode: REML per-atom smoothing alternation");
     let rows: usize = args[2].parse().map_err(|e| format!("rows: {e}"))?;
     let cols: usize = args[3].parse().map_err(|e| format!("cols: {e}"))?;
     let k_atoms: usize = args[4].parse().map_err(|e| format!("k: {e}"))?;
