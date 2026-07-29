@@ -89,7 +89,43 @@ impl Default for MultinomialPosteriorIntegrationControl {
             absolute_tolerance: tolerance,
             relative_tolerance: tolerance,
             minimum_sparse_level: 2,
-            maximum_sparse_level: 16,
+            // NO tuned level ceiling. The evaluation budget is the cost guard.
+            //
+            // RAISED AGAIN, and that is the point (#2612). The history:
+            //   8 -> 12  (#2350): plateaued at ~1.6x tolerance having spent ~0.1% of the budget
+            //   12 -> 16 (#2612): stopped PREDICTING having spent 9633/2000000 = 0.5%
+            //   16 -> ?  (#2612): stops PREDICTING having spent 28033/2000000 = 1.4%
+            //
+            // Three raises, one argument each time -- "the LEVEL bound was
+            // binding, not the budget" -- and each time that was true. A
+            // constant whose justification is identical on every raise, and
+            // whose raise is triggered by whichever fixture next happens to be
+            // wide, is being fitted rather than derived. The previous comment
+            // here concluded "the ceiling, and not the evaluation budget, is
+            // the right thing to move"; it has now been moved three times on
+            // that reasoning, which is the evidence against it.
+            //
+            // There are TWO cost guards for one cost, and only one of them is
+            // denominated in the cost. Evaluations are what the integrand
+            // actually spends; a Smolyak level is an implementation detail of
+            // how it spends them, and the relationship between the two depends
+            // on the class count `k`, so no fixed level is the right budget for
+            // every problem. Keeping both means the wrong one always binds
+            // first -- measured at 0.1%, 0.5% and 1.4% of the real guard.
+            //
+            // So refine until the BUDGET is exhausted. This costs nothing where
+            // nothing is wrong -- the original reasoning holds and is now the
+            // only reasoning needed: a converged integrand certifies early and
+            // never visits the deeper levels, so the headroom is only ever
+            // spent by the wide posteriors that need it. What changes is that a
+            // wide posterior is now bounded by what it costs instead of by a
+            // number chosen against the last fixture to complain.
+            //
+            // The loop terminates through the budget: `evaluate_smolyak_level`
+            // is handed `maximum_function_evaluations` and refuses once
+            // `total_evaluations` would exceed it, and that refusal propagates.
+            // Callers wanting an explicit level rail may still set this field.
+            maximum_sparse_level: usize::MAX,
             maximum_function_evaluations: 2_000_000,
         }
     }
@@ -532,7 +568,9 @@ fn integrate_general(
     let mut last_max_difference = f64::INFINITY;
     let mut last_max_normalized_error = f64::INFINITY;
 
+    let mut last_level_attempted = 0usize;
     for level in 0..=control.maximum_sparse_level {
+        last_level_attempted = level;
         let required_rule_count = level.checked_add(1).ok_or_else(|| {
             EstimationError::InvalidInput(
                 "multinomial posterior sparse level overflowed usize".to_string(),
@@ -591,9 +629,15 @@ fn integrate_general(
         previous = Some(current);
     }
 
+    // Report the level REACHED, not the configured ceiling.
+    //
+    // With the ceiling no longer a tuned number, the ceiling is not the fact a
+    // reader needs; the depth actually attained before the budget ran out is.
+    // The old message printed `control.maximum_sparse_level`, which said what
+    // the cap was rather than what the integrand did -- and on a run that
+    // stopped at 1.4% of its evaluation budget those are different stories.
     Err(EstimationError::InvalidInput(format!(
-        "multinomial logistic-normal quadrature did not converge through Smolyak level {}: final max raw-moment level difference {last_max_difference:.6e}, max normalized error {last_max_normalized_error:.6e}, projection bound {:.6e}, evaluations {total_evaluations}/{}",
-        control.maximum_sparse_level,
+        "multinomial logistic-normal quadrature did not converge: reached Smolyak level {last_level_attempted} and exhausted the evaluation budget; final max raw-moment level difference {last_max_difference:.6e}, max normalized error {last_max_normalized_error:.6e}, projection bound {:.6e}, evaluations {total_evaluations}/{}",
         projected.projection_bound,
         control.maximum_function_evaluations
     )))
