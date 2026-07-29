@@ -868,7 +868,9 @@ where
     // representable reduction in the original residual, and inability to do so
     // is the typed numerical-stagnation certificate.
     let restart = admitted_gmres_restart(dim)?;
+    let started = std::time::Instant::now();
     let mut iterations = 0usize;
+    let mut cycles = 0usize;
     let mut solution = flatten_arrow_parts(initial.t.view(), initial.beta.view());
     if solution.iter().any(|value| !value.is_finite()) {
         return Err("solve_b_preconditioned_gmres: non-finite initial solution".to_string());
@@ -982,6 +984,21 @@ where
             iterations = iterations.checked_add(1).ok_or_else(|| {
                 "solve_b_preconditioned_gmres: iteration counter overflow".to_string()
             })?;
+            // #2472 — the only progress signal this solve has ever emitted is
+            // its return value, so a solve that is converging slowly and one
+            // that has stalled look identical from outside: both are silence.
+            // The cadence is powers of two, so the line count is logarithmic in
+            // the iteration count no matter how long a cycle runs, and the
+            // interval between lines grows with the cost already sunk.
+            if iterations.is_power_of_two() {
+                log::info!(
+                    "[SAE-GMRES] dim={dim} restart={restart} iter={iterations} \
+                     rel_residual={:.3e} target={:.3e} elapsed={:.1}s",
+                    g[j + 1].abs() / b_norm,
+                    relative_floor,
+                    started.elapsed().as_secs_f64(),
+                );
+            }
             if g[j + 1].abs() <= relative_floor * b_norm {
                 break;
             }
@@ -1019,6 +1036,14 @@ where
         // O(kappa*eps), so sqrt(eps) is the scalar-type-derived certification
         // floor rather than a last-iterate fallback.
         let roundoff_floor = relative_floor * rhs_norm;
+        cycles += 1;
+        log::info!(
+            "[SAE-GMRES] cycle {cycles} closed: dim={dim} restart={restart} iters={iterations} \
+             rel_original_residual={:.3e} floor={:.3e} elapsed={:.1}s",
+            original_norm / rhs_norm,
+            roundoff_floor / rhs_norm,
+            started.elapsed().as_secs_f64(),
+        );
         if original_norm <= roundoff_floor {
             return Ok((candidate, iterations));
         }

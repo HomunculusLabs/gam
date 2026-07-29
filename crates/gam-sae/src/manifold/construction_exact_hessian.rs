@@ -195,7 +195,19 @@ where
         };
         normalize_b(&mut v)?;
         let mut direction_converged = false;
-        for _ in 0..dim {
+        for power_step in 0..dim {
+            // #2472 — every turn of this loop is a FULL preconditioned GMRES
+            // solve (`A⁻¹Bv`), and the loop is bounded by the Krylov dimension,
+            // so the worst case here is `dim` solves inside one deflation turn
+            // inside one Newton step. Silence made that indistinguishable from a
+            // deadlock; the cadence is powers of two, so the line count is
+            // logarithmic in the work done.
+            if power_step.is_power_of_two() {
+                log::info!(
+                    "[SAE-DEFLATE] inverse-power step {power_step}/{dim} \
+                     (each step is one full A-inverse GMRES solve)"
+                );
+            }
             let bv = apply_b(&v)?;
             // #2253 — A⁻¹(Bv) is ILL-POSED along a near-null/indefinite pencil
             // direction (that is exactly the direction we are isolating), so the

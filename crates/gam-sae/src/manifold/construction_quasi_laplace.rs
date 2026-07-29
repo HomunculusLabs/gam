@@ -813,6 +813,7 @@ impl SaeManifoldTerm {
         // band, so a plateau above the band is a solver stall — reported
         // honestly at best-seen, never accepted past the band.
         let mut best_seen: Option<(f64, f64, SaeManifoldMutableState)> = None;
+        let refine_started = std::time::Instant::now();
         // #2228 Stage-2 / #2132 — whether the terminal exact-Newton polish
         // (`terminal_exact_newton_polish`) is armed for the NEXT objective-stall
         // plateau. Re-armed by any materially-descending refine round, so a
@@ -1434,6 +1435,17 @@ impl SaeManifoldTerm {
             *criterion_fixed_point = refine.fixed_point;
             total_inner_iter += refine_iter;
             refine_rounds += 1;
+            // #2472 — one line per refine round: the round budget is
+            // `inner_max_iter x 64` (>= 256), and each round is a full
+            // assembly + factorization + damped Newton sweep, so this loop is
+            // where a criterion evaluation spends its wall clock. Without it a
+            // running evaluation is indistinguishable from a hang.
+            log::info!(
+                "[SAE-REFINE] round {refine_rounds}/{progress_refine_iter} \
+                 refine_iter={refine_iter} inner_total={total_inner_iter} \
+                 elapsed={:.1}s",
+                refine_started.elapsed().as_secs_f64(),
+            );
             // #1051 — objective-stagnation fixed point. A whole refine round that
             // failed to lower the penalised objective by a meaningful FRACTION of
             // the total since-entry reduction means the Newton/LM iterate is at
@@ -1886,10 +1898,12 @@ impl SaeManifoldTerm {
         let mut made_progress = false;
         let mut prev_grad_norm = f64::INFINITY;
         let mut prev_decrement_sq = f64::INFINITY;
-        for _ in 0..max_steps {
+        for step in 0..max_steps {
+            let step_started = std::time::Instant::now();
             let mut sys = self
                 .assemble_arrow_schur(target, rho_fixed, registry)
                 .map_err(|err| format!("SaeManifoldTerm::terminal_exact_newton_polish: {err}"))?;
+            let assemble_seconds = step_started.elapsed().as_secs_f64();
             let grad_norm_sq = Self::system_grad_norm_sq(&sys);
             if !grad_norm_sq.is_finite() {
                 log::debug!("terminal Newton bail: non-finite ‖g‖² at entry");
@@ -1944,6 +1958,15 @@ impl SaeManifoldTerm {
             if cert.is_finite() && best_seen.as_ref().is_none_or(|(c, _, _)| cert < *c) {
                 *best_seen = Some((cert, grad_norm, self.snapshot_mutable_state()));
             }
+            // #2472 — one line per Newton step, so a criterion evaluation that
+            // has not returned can be read as "still contracting" or "grinding
+            // at a fixed ‖g‖" from the log alone. Bounded by `max_steps`.
+            log::info!(
+                "[SAE-NEWTON] polish step {}/{max_steps}: ‖g‖={grad_norm:.6e} \
+                 (quotient {quotient_grad_norm:.6e}, tol {grad_tolerance:.3e}) \
+                 λ²={decrement_sq:.6e} cert={cert:.6e}",
+                step + 1,
+            );
             if !(grad_norm < prev_grad_norm) && !(decrement_sq < prev_decrement_sq) {
                 log::debug!(
                     "terminal Newton bail: no contraction in either currency \
@@ -2031,7 +2054,10 @@ impl SaeManifoldTerm {
             let snapshot = self.snapshot_mutable_state();
             let mut accepted = false;
             let mut alpha = 1.0_f64;
+            let backtrack_started = std::time::Instant::now();
+            let mut backtracks = 0usize;
             for _ in 0..8 {
+                backtracks += 1;
                 if self
                     .apply_newton_step(newton.t.view(), newton.beta.view(), alpha)
                     .is_err()
@@ -2099,6 +2125,16 @@ impl SaeManifoldTerm {
                 self.restore_mutable_state(&snapshot)?;
                 alpha *= 0.5;
             }
+            // #2472 — the merit evaluation inside the backtrack loop re-assembles
+            // AND re-factors the whole arrow-Schur system per trial, so a step's
+            // cost is (1 + backtracks) systems, not one. This line prices that.
+            log::info!(
+                "[SAE-NEWTON] step {} phases: assemble={assemble_seconds:.2}s \
+                 backtracks={backtracks} in {:.2}s (accepted={accepted}) total={:.2}s",
+                step + 1,
+                backtrack_started.elapsed().as_secs_f64(),
+                step_started.elapsed().as_secs_f64(),
+            );
             if !accepted {
                 log::debug!(
                     "terminal Newton bail: all backtracks rejected at ‖g‖={grad_norm:.6e} \
