@@ -825,6 +825,13 @@ pub(crate) fn gaussian_log_sigma_irlsinfo_directional_derivative(
 pub(crate) struct GaussianDiagonalRowKernel {
     pub(crate) log_likelihood: f64,
     pub(crate) location_working_weight: f64,
+    /// The location block's IRLS working response for this row. Under the
+    /// identity location link this is `y`, except on a zero-weight row, where it
+    /// is the row's own location predictor: a zero-weight row must be inert in
+    /// EVERY channel of the working set, not only in its weight. The log-sigma
+    /// channel below has always neutralized this way; the location channel was
+    /// assembled at the call site as `y` wholesale and did not.
+    pub(crate) location_working_response: f64,
     pub(crate) log_sigma_working_weight: f64,
     pub(crate) log_sigma_working_response: f64,
     pub(crate) joint_w: f64,
@@ -865,6 +872,7 @@ pub(crate) fn gaussian_diagonal_row_kernel(
         return Ok(GaussianDiagonalRowKernel {
             log_likelihood: 0.0,
             location_working_weight: 0.0,
+            location_working_response: location_eta,
             log_sigma_working_weight: 0.0,
             log_sigma_working_response: eta_log_sigma,
             joint_w: 0.0,
@@ -1000,6 +1008,8 @@ pub(crate) fn gaussian_diagonal_row_kernel(
     Ok(GaussianDiagonalRowKernel {
         log_likelihood,
         location_working_weight,
+        // Identity location link: z = eta + (y - mu)/g'(mu) = y exactly.
+        location_working_response: y,
         log_sigma_working_weight,
         log_sigma_working_response,
         joint_w: location_working_weight,

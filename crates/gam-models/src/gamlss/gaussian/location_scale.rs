@@ -1161,7 +1161,12 @@ impl CustomFamily for GaussianLocationScaleFamily {
                 .into());
             }
         }
-        let zmu = self.y.clone();
+        // Take the location working response from the row kernel rather than
+        // cloning `y` wholesale, so a zero-weight row is inert in the response
+        // channel as well as the weight one — the same neutralization
+        // `log_sigma_working_response` has always applied. Rows with positive
+        // weight are unchanged (identity link ⇒ z = y exactly).
+        let zmu = Array1::from_iter(rows.iter().map(|row| row.location_working_response));
         let wmu = Array1::from_iter(rows.iter().map(|row| row.location_working_weight));
         let z_ls = Array1::from_iter(rows.iter().map(|row| row.log_sigma_working_response));
         let w_ls = Array1::from_iter(rows.iter().map(|row| row.log_sigma_working_weight));

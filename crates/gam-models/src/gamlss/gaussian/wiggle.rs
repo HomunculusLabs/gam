@@ -2137,8 +2137,17 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
                     }
                     .into());
                 }
-                let z_mu = self.y[i] - etaw[i];
-                let z_wiggle = self.y[i] - eta_mu[i];
+                // A zero-weight row must be inert in the response channel too,
+                // not only in its weight. Substituting the row's own predictor
+                // `q = eta_mu + etaw` for `y` does that for BOTH split channels
+                // at once: `q - etaw = eta_mu` and `q - eta_mu = etaw`, i.e.
+                // each block's working response collapses to that block's own
+                // eta, which is exactly the neutralization
+                // `log_sigma_working_response` applies in the row kernel. Rows
+                // with positive weight are bit-unchanged.
+                let response = if self.weights[i] == 0.0 { q } else { self.y[i] };
+                let z_mu = response - etaw[i];
+                let z_wiggle = response - eta_mu[i];
                 if !z_mu.is_finite() || !z_wiggle.is_finite() {
                     return Err(GamlssError::RowGeometryUnrepresentable {
                         row: i,
