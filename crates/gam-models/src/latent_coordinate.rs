@@ -694,8 +694,23 @@ fn optimize_one_restart<O: LatentCoordinateObjective + ?Sized>(
         max_iter: options.max_iterations,
         grad_tol: solver_tolerance,
     };
-    let optimized_result = trust_region.minimize(manifold, &mut bridge, start.view());
-    let optimized = translate_bridge_result(&mut bridge, restart_index, optimized_result)?;
+    // Take the terminal iterate even when it fails the trust region's own
+    // first-order certificate. `minimize` reports that case as
+    // `GeometryError::NonConvergence`, which `translate_bridge_result` maps to
+    // `LatentCoordinateOptimizationError::Geometry` — a variant carrying neither
+    // stationarity evidence nor a checkpoint. That laundered a plain
+    // non-convergence into a fatal geometry failure and made the
+    // `NonConverged { evidence, checkpoint }` path below unreachable whenever the
+    // trust region did not certify, i.e. in exactly the case a checkpoint is for:
+    // `checkpoint()` returned `None` and the run could not be resumed. The
+    // certification decision belongs to `evidence.certifies_stationarity()` in
+    // the caller, which measures the projected gradient against
+    // `stationarity_reference` under the ORIGINAL reference (preserved across a
+    // resume); a genuine failure — non-finite value, invalid radius, objective or
+    // manifold error — is still an error and still propagates here.
+    let optimized_result =
+        trust_region.minimize_reporting_termination(manifold, &mut bridge, start.view());
+    let optimized = translate_bridge_result(&mut bridge, restart_index, optimized_result)?.point;
     let final_evaluation_result = bridge.checked_value_gradient(optimized.view());
     let final_evaluation =
         translate_bridge_result(&mut bridge, restart_index, final_evaluation_result)?;

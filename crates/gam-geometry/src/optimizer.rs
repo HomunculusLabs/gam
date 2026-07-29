@@ -145,6 +145,35 @@ fn relative_stationarity(grad_norm: f64, grad0_norm: f64) -> f64 {
     grad_norm / grad0_norm.max(1.0)
 }
 
+/// The context string of the trust-region first-order certificate, shared by the
+/// refusal in [`RiemannianTrustRegion::minimize`] and by callers that re-report
+/// the same verdict from [`TrustRegionTermination`].
+pub const TRUST_REGION_RELATIVE_GRADIENT_CONTEXT: &str =
+    "Riemannian trust-region optimization (relative gradient norm)";
+
+/// Terminal state of a trust-region run: the iterate reached, and the numbers the
+/// first-order certificate was decided against.
+#[derive(Clone, Debug)]
+pub struct TrustRegionTermination {
+    /// The last iterate. Present whether or not the certificate holds — this is
+    /// the work a budget-exhausted run has to hand back.
+    pub point: Array1<f64>,
+    /// Iterations actually executed (zero when the budget was zero).
+    pub iterations: usize,
+    /// Relative stationarity `‖g_final‖ / max(‖g_0‖, 1)` at `point`.
+    pub residual: f64,
+    /// The bound `residual` was compared against.
+    pub tolerance: f64,
+}
+
+impl TrustRegionTermination {
+    /// Whether `point` satisfies the first-order certificate that controls the
+    /// loop. This is the same test `minimize` applies before returning a point.
+    pub fn certifies(&self) -> bool {
+        self.residual <= self.tolerance
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RiemannianTrustRegion {
     /// Initial trust-region radius Δ₀.
@@ -213,6 +242,37 @@ impl RiemannianTrustRegion {
         objective: &mut dyn RiemannianObjective,
         initial: ArrayView1<'_, f64>,
     ) -> GeometryResult<Array1<f64>> {
+        let termination = self.minimize_reporting_termination(manifold, objective, initial)?;
+        if termination.certifies() {
+            Ok(termination.point)
+        } else {
+            Err(crate::manifold::GeometryError::NonConvergence {
+                context: TRUST_REGION_RELATIVE_GRADIENT_CONTEXT,
+                iterations: termination.iterations,
+                residual: termination.residual,
+                tolerance: termination.tolerance,
+            })
+        }
+    }
+
+    /// As [`Self::minimize`], but reporting the terminal iterate alongside the
+    /// first-order verdict instead of discarding it.
+    ///
+    /// `minimize` returns `Err(NonConvergence)` when the terminal point fails the
+    /// relative-gradient certificate, and that error carries the residual but not
+    /// the POINT. A caller whose contract is checkpoint/resume cannot be served
+    /// by it: the work done before the budget ran out is exactly the iterate, and
+    /// with only a residual there is nothing to resume from. Genuine failures —
+    /// a non-finite value, an invalid radius, an objective or manifold error —
+    /// are still `Err` here; only the first-order test is demoted from an error
+    /// to a reported verdict, so `minimize` above reconstructs its own behavior
+    /// exactly and every existing caller is unaffected.
+    pub fn minimize_reporting_termination(
+        &self,
+        manifold: &dyn RiemannianManifold,
+        objective: &mut dyn RiemannianObjective,
+        initial: ArrayView1<'_, f64>,
+    ) -> GeometryResult<TrustRegionTermination> {
         // Trust-region acceptance and radius control come from `opt`, not
         // from constants re-declared here. SPEC-22 puts general outer
         // optimizer work in `opt`, and a trust-region rho-controller is
@@ -352,16 +412,12 @@ impl RiemannianTrustRegion {
         let grad_final_norm = g_norm(manifold, x.view(), grad_final.view())?;
         let grad0 = grad0_norm.unwrap_or(grad_final_norm);
         let residual = relative_stationarity(grad_final_norm, grad0);
-        if residual <= self.grad_tol {
-            Ok(x)
-        } else {
-            Err(crate::manifold::GeometryError::NonConvergence {
-                context: "Riemannian trust-region optimization (relative gradient norm)",
-                iterations,
-                residual,
-                tolerance: self.grad_tol,
-            })
-        }
+        Ok(TrustRegionTermination {
+            point: x,
+            iterations,
+            residual,
+            tolerance: self.grad_tol,
+        })
     }
 
     /// Solve `min_{‖η‖_g ≤ Δ} m(η)` and return `(η, m(0) − m(η), hit_boundary)`.

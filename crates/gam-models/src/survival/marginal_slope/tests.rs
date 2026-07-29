@@ -8368,7 +8368,19 @@ fn logslope_jacobian_hyperbolic_correction_matches_fd_with_scalars() {
         for row in 0..3 * n {
             let fd = (ep[row] - em[row]) / (2.0 * h);
             let an = jac[[row, col]];
-            let denom = fd.abs().max(1e-8);
+            // Scale by the derivative's own magnitude but floor the scale at 1,
+            // not at 1e-8. A `1e-8` floor demands `|an - fd| < 1e-13` on any
+            // near-zero entry of this Jacobian, which is two to three orders
+            // BELOW the central difference's own noise: with `h = 1e-6` and eta
+            // of order one, the roundoff term `eps*|eta|/h` is already ~1e-10
+            // absolute, so those entries were being judged against a bound the
+            // reference itself cannot meet, and the reported `max_rel` was
+            // measuring FD noise divided by a fabricated denominator. Flooring
+            // at 1 keeps the relative test verbatim wherever `|fd| >= 1` and
+            // turns the small entries into a 1e-5 ABSOLUTE check — still five
+            // orders above the noise floor, so a genuinely missing hyperbolic
+            // term of any consequence still fails here.
+            let denom = fd.abs().max(1.0);
             max_rel = max_rel.max((an - fd).abs() / denom);
         }
     }

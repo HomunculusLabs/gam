@@ -447,8 +447,17 @@ mod tests {
                     ),
                     Err(error) => error.to_string(),
                 };
+                // Match the refusal's vocabulary case-INSENSITIVELY. The refusal
+                // this seam actually produces is the loader's — "cubic_cell
+                // backend: could not load any of: …/libcuda.so.1, …" — and it
+                // names the device fault through the library paths, which are
+                // lowercase by construction. A `contains("CUDA")` test therefore
+                // could not match the very message it was written for, and the
+                // failure it reported was its own case sensitivity rather than a
+                // refusal that failed to name its cause.
+                let lowered = refusal.to_ascii_lowercase();
                 assert!(
-                    refusal.contains("device") || refusal.contains("CUDA"),
+                    lowered.contains("device") || lowered.contains("cuda"),
                     "the device-free refusal must name the device fault, got: {refusal}"
                 );
                 return;
