@@ -993,6 +993,63 @@ fn intersect_innovation_above_observation_variance(
     }
 }
 
+/// Intersect the observed coordinate of the UPDATED covariance with the exact
+/// range of its own defining map.
+///
+/// At the observed coordinate the Kalman update is the scalar map
+///
+///     P⁺₀₀ = P₀₀·R/(P₀₀ + R),
+///
+/// whose partial derivatives `(R/F)²` and `(P₀₀/F)²` are both strictly positive
+/// on `P₀₀ ≥ 0 < R`. A function monotone in each argument attains its range over
+/// a box at the corners, so `[g(P.lo, R.lo), g(P.hi, R.hi)]` is the EXACT range
+/// of this update over the input enclosure. Anything wider is dependency loss,
+/// not information about the filter.
+///
+/// The componentwise Joseph evaluation loses exactly that dependency: `A = R/F`
+/// and `K = P₀₀/F` are functions of the same `P₀₀` that appears in the middle
+/// factor, and interval arithmetic ranges the three independently. Measured on
+/// the #2300 nodes (order 1, ρ = 0, node 136, where `R = 1/9`, `P₀₀ = 0.062`,
+/// `F = 0.173`): the map's true width factor is `(R/F)² = 0.41`, while the
+/// componentwise width factor is
+///
+///     (R/F)² + 4·P₀₀·R²/F³ = 0.41 + 0.59 = 1.00,
+///
+/// so the contraction is cancelled EXACTLY and the per-node rounding then
+/// accumulates without ever being pulled back — the measured 1.28× per node
+/// that carries `P⁺₀₀`'s width from `1.6e-14` at node 8 to `2.4e2` at node 140
+/// on a value of `0.04`. With the range form the width contracts by `0.41` per
+/// node against an additive `Q` term, which has a bounded fixed point.
+///
+/// Only `lo`/`hi` move, and only inward, and never past `value`: this is an
+/// intersection of two valid enclosures of one quantity, so it cannot make a
+/// false statement true.
+#[inline]
+fn intersect_observed_covariance_exact_range(
+    updated: &mut Ball,
+    predicted: Ball,
+    observation_variance: Ball,
+) {
+    let corner = |p: f64, r: f64| -> Option<Ball> {
+        let p = Ball::exact(p.max(0.0));
+        let r = Ball::exact(r);
+        let f = p.add(r);
+        (f.lo > 0.0).then(|| p.mul(r).div_positive(f))
+    };
+    if let Some(low) = corner(predicted.lo, observation_variance.lo) {
+        let floor = low.lo.min(updated.value);
+        if floor.is_finite() && updated.lo < floor {
+            updated.lo = floor;
+        }
+    }
+    if let Some(high) = corner(predicted.hi, observation_variance.hi) {
+        let ceiling = high.hi.max(updated.value);
+        if ceiling.is_finite() && updated.hi > ceiling {
+            updated.hi = ceiling;
+        }
+    }
+}
+
 /// Intersect a proper covariance enclosure with its exact PSD invariant.
 ///
 /// Once the diffuse rank is exhausted, `P*` is the conditional covariance of
@@ -1613,6 +1670,10 @@ fn run_filter_ball_traced(
                     p_new[i][j] = p_new[i][j].add(gain[i].mul(gain[j]).mul(r));
                 }
             }
+            // ... and then tightened to the EXACT range of the scalar map it is,
+            // which the componentwise evaluation above cannot see because `A`,
+            // `K` and the middle factor all carry the same `P₀₀`.
+            intersect_observed_covariance_exact_range(&mut p_new[0][0], m_star[0], r);
             // Derivative covariances through the JOSEPH form, which for the
             // derivative jets is not a reformulation but an exact cancellation
             // (#2614).
