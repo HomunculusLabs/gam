@@ -65,6 +65,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use opt::constants::{ARMIJO_C1, BACKTRACK_CONTRACTION};
 use opt::{AcceptedStep, BacktrackConfig, backtracking_line_search};
 
+use crate::chart_coordinate_solve::PeriodicCurveExtrema;
 use crate::candidate_index::{AtomFrameSketch, SaeCandidateIndex, auto_candidate_budget};
 use crate::manifold::{
     AffineCoordinateEvaluator, AmbientSphereHarmonicEvaluator, CylinderHarmonicEvaluator,
@@ -713,6 +714,16 @@ pub struct AtomEncodeAtlas {
     pub latent_dim: usize,
     pub decoder_norm_sum: f64,
     pub charts: Vec<CertifiedChart>,
+    /// Exact global-fiber enumerator for this atom, when the family is the one
+    /// it is exactly right for: `latent_dim == 1` over the period-one harmonic
+    /// basis (#2518 item 1). `None` for every other family.
+    ///
+    /// The quadratic form `phi(t)ᵀ(D Dᵀ)phi(t)` is target-independent, so it is
+    /// distilled ONCE per atom here — beside `recon_center`, which is the same
+    /// kind of offline per-atom distillation — rather than rebuilt per row. The
+    /// per-row cost is then the `m`-vector `D x` and one companion eigensolve of
+    /// degree `2H`, not an `m × p` Gram.
+    pub(crate) periodic_fiber: Option<PeriodicCurveExtrema>,
 }
 
 /// Result of a certified encode over a batch of rows, carrying the honesty
@@ -2448,6 +2459,7 @@ impl EncodeAtlas {
             latent_dim: d,
             decoder_norm_sum,
             charts,
+            periodic_fiber: build_periodic_fiber(atom),
         })
     }
 
@@ -2692,6 +2704,68 @@ impl EncodeAtlas {
                 if let Some((_, _, e)) = best.as_ref() {
                     if *e <= CERTIFIED_GLOBAL_MIN_RECON_FLOOR * (1.0 + x.dot(&x).sqrt()) {
                         break;
+                    }
+                }
+            }
+        }
+        // #2518 item 1 — top-K ambient routing is sound only if the GLOBAL
+        // basin's chart is among the K nearest by reconstruction distance. That
+        // is a hope, not a bound: `CERTIFIED_ROUTING_TOPK` is a constant, and on
+        // a folded atom the right chart can be the fifth-nearest, which makes
+        // the row CERTIFIED AND WRONG — the one failure mode a certificate must
+        // not have.
+        //
+        // For `d == 1` periodic atoms — the DEFAULT overcomplete atom, not a
+        // corner case — the whole fiber is enumerable exactly, and the fit path
+        // has been doing it all along (`transport_law`, `fit_drivers` both route
+        // through `PeriodicCurveExtrema`); only the encode side was never wired
+        // to it. Take the UNION, not the replacement: the enumerated global
+        // data-fit minimiser becomes ONE MORE certified-refinement start, judged
+        // by the same certificate and the same reconstruction-error criterion as
+        // every chart candidate. The returned encode can therefore only improve
+        // or tie — no regression is possible by construction — while the missed
+        // basin is closed.
+        //
+        // The enumeration minimises the DATA term alone, so it is a start, not
+        // an answer: under a per-row metric or a coordinate prior the true
+        // minimiser moves, and what carries the result is the Kantorovich
+        // refinement under the full objective that follows. That is why this is
+        // sound for every `EncodeObjective` rather than only the Euclidean one.
+        if let Some(fiber) = atom_atlas.periodic_fiber.as_ref() {
+            if amplitude.is_finite() && amplitude > 0.0 {
+                let projected = atom.decoder_coefficients().dot(&x);
+                let linear: Vec<f64> = projected
+                    .iter()
+                    .map(|value| value / amplitude)
+                    .collect();
+                if let Ok(extremum) = fiber.minimize_squared_distance(&linear) {
+                    if let Some(chart_idx) =
+                        nearest_chart_to_periodic_coordinate(atom_atlas, extremum.coordinate)
+                    {
+                        let chart = &atom_atlas.charts[chart_idx];
+                        let start = Array1::from_elem(1, extremum.coordinate);
+                        let (coord, cert) = self.refine_certified_encode_start(
+                            atom,
+                            evaluator.as_ref(),
+                            chart,
+                            start,
+                            x,
+                            amplitude,
+                            objective,
+                        )?;
+                        if cert.certified() {
+                            let err = encode_reconstruction_error_core(
+                                atom,
+                                evaluator.as_ref(),
+                                coord.view(),
+                                x,
+                                amplitude,
+                                objective,
+                            );
+                            if best.as_ref().map(|(_, _, e)| err < *e).unwrap_or(true) {
+                                best = Some((coord, cert, err));
+                            }
+                        }
                     }
                 }
             }
@@ -4040,6 +4114,52 @@ pub(crate) fn nearest_chart(
 /// single result is `nearest_charts_topk(.., 1)[0]`. Used by the certified encode
 /// to refine the global basin on self-approaching atoms (see
 /// [`CERTIFIED_ROUTING_TOPK`]).
+/// The atom's exact stationary-point enumerator, for the one family where the
+/// whole fiber is enumerable in closed form: a period-one harmonic curve in one
+/// latent coordinate (#2518). `PeriodicHarmonicEvaluator` emits
+/// `[1, sin τt, cos τt, …]`, which is exactly the ordering
+/// [`PeriodicCurveExtrema`] assumes, so `G = D Dᵀ` makes its objective
+/// `phi(t)ᵀGphi(t) − 2cᵀphi(t)` the encode's own `‖x − z·phi(t)D‖²` up to the
+/// target-only constant `‖x‖²`.
+///
+/// `None` for every other family — including `d ≥ 1` products (torus, cylinder,
+/// Möbius), where the fiber is a system of trigonometric equations rather than
+/// one Laurent polynomial and the honest bound is the derived critical-point
+/// count, not this enumeration.
+fn build_periodic_fiber(atom: &SaeManifoldAtom) -> Option<PeriodicCurveExtrema> {
+    if atom.latent_dim() != 1 {
+        return None;
+    }
+    if !matches!(atom.basis_kind(), crate::manifold::SaeAtomBasisKind::Periodic) {
+        return None;
+    }
+    let decoder = atom.decoder_coefficients();
+    let gram = decoder.dot(&decoder.t());
+    PeriodicCurveExtrema::from_gram(gram.view()).ok()
+}
+
+/// The certifiable chart whose center is closest to `coordinate` on the unit
+/// circle. The enumerated global minimiser is a latent coordinate, not an
+/// ambient point, so it is routed by LATENT distance — which is exactly the
+/// quantity top-K ambient routing cannot see when the decoded manifold folds.
+fn nearest_chart_to_periodic_coordinate(
+    atom_atlas: &AtomEncodeAtlas,
+    coordinate: f64,
+) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (index, chart) in atom_atlas.charts.iter().enumerate() {
+        if !(chart.certified_radius > 0.0) || chart.region.center.len() != 1 {
+            continue;
+        }
+        let raw = coordinate - chart.region.center[0];
+        let wrapped = (raw - raw.round()).abs();
+        if best.map(|(_, d)| wrapped < d).unwrap_or(true) {
+            best = Some((index, wrapped));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
 pub(crate) fn nearest_charts_topk(
     atom_atlas: &AtomEncodeAtlas,
     x: ArrayView1<'_, f64>,
@@ -4937,6 +5057,7 @@ mod encode_fix_tests {
 
     fn atlas_two_charts(m1: f64, m2: f64) -> AtomEncodeAtlas {
         AtomEncodeAtlas {
+            periodic_fiber: None,
             atom_index: 0,
             latent_dim: 1,
             decoder_norm_sum: 1.0,
