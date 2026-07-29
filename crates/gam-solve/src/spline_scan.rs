@@ -307,6 +307,27 @@ pub enum SplineScoreProofError {
     InvalidArithmetic {
         context: &'static str,
     },
+    /// A certified filter accumulator left the finite range, reported with the
+    /// node it happened at and the enclosure that did it.
+    ///
+    /// The `InvalidArithmetic{"diffuse filter accumulator"}` refusal above named
+    /// a PHASE and nothing else: not which of the eight accumulators diverged,
+    /// not at which of the ~180 nodes, and not how wide it was when it went.
+    /// Diagnosing #2614 from it required adding a print, and the two repairs
+    /// attempted before that print existed were both aimed at the wrong term —
+    /// each exact, each landing a byte-identical failure. A verdict has to
+    /// carry the quantity it was decided against (#2465), and this is that
+    /// quantity: the first accumulator to leave the finite range, where, and
+    /// the `q = e^{−ρ}` it was evaluated at.
+    AccumulatorDiverged {
+        node: usize,
+        n_proper: usize,
+        accumulator: &'static str,
+        value: f64,
+        lo: f64,
+        hi: f64,
+        q_value: f64,
+    },
     InvalidInput(String),
     MissingEndpointCertificate {
         log_lambda: f64,
@@ -355,6 +376,22 @@ impl std::fmt::Display for SplineScoreProofError {
             ),
             Self::InvalidArithmetic { context } => {
                 write!(f, "spline scan: non-finite interval arithmetic in {context}")
+            }
+            Self::AccumulatorDiverged {
+                node,
+                n_proper,
+                accumulator,
+                value,
+                lo,
+                hi,
+                q_value,
+            } => {
+                write!(
+                    f,
+                    "spline scan: certified accumulator `{accumulator}` left the finite range at \
+                     node {node} (proper innovations so far {n_proper}, q = {q_value:.6e}): \
+                     value {value:.9e} in [{lo:.9e}, {hi:.9e}]"
+                )
             }
             Self::InvalidInput(reason) => f.write_str(reason),
             Self::MissingEndpointCertificate { log_lambda } => write!(
@@ -1615,6 +1652,37 @@ fn run_filter_ball(
             sum_v2_over_f_d2 = sum_v2_over_f_d2.add(t2);
             sum_v2_over_f_d3 = sum_v2_over_f_d3.add(t3);
             n_proper += 1;
+            // Refuse AT the node that diverged, not at the end of the pass.
+            //
+            // The end-of-pass check below reports that some accumulator is
+            // non-finite and nothing more, which is what made #2614 expensive:
+            // two exact repairs were aimed at the wrong term because the
+            // refusal could not say WHICH accumulator went, WHERE, or how wide
+            // it was. Checking here costs eight `is_finite` calls per proper
+            // node and turns the refusal into the measurement.
+            if let Some((accumulator, ball)) = [
+                ("sum_log_f", sum_log_f),
+                ("sum_log_f_d1", sum_log_f_d1),
+                ("sum_log_f_d2", sum_log_f_d2),
+                ("sum_log_f_d3", sum_log_f_d3),
+                ("sum_v2_over_f", sum_v2_over_f),
+                ("sum_v2_over_f_d1", sum_v2_over_f_d1),
+                ("sum_v2_over_f_d2", sum_v2_over_f_d2),
+                ("sum_v2_over_f_d3", sum_v2_over_f_d3),
+            ]
+            .into_iter()
+            .find(|(_, ball)| !ball.is_finite())
+            {
+                return Err(SplineScoreProofError::AccumulatorDiverged {
+                    node: t,
+                    n_proper,
+                    accumulator,
+                    value: ball.value,
+                    lo: ball.lo,
+                    hi: ball.hi,
+                    q_value: q.value,
+                });
+            }
         }
 
         if t + 1 < nodes.len() {
