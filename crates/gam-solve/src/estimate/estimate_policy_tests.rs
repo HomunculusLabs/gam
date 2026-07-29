@@ -2113,6 +2113,35 @@ fn estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363() {
     let mut failures: Vec<String> = Vec::new();
     for (name, family, y) in &cases {
         let cold = cache_invariance_arm(family, y, &w, &x, false);
+        // CONTROL, before the cache is involved at all: a second cold arm.
+        //
+        // Every difference below is attributed to the cache, and that
+        // attribution is only sound if the fit is bitwise reproducible with the
+        // cache held fixed. If cold-vs-cold already differs, the subject is not
+        // cache invariance at all and no amount of work on the cache would
+        // close it. Measured here rather than assumed, because this test's
+        // whole claim is an attribution.
+        let cold_again = cache_invariance_arm(family, y, &w, &x, false);
+        if let Some(gap) = first_bitwise_gap(
+            cold.beta.as_slice().expect("contiguous cold β"),
+            cold_again.beta.as_slice().expect("contiguous second cold β"),
+        ) {
+            failures.push(format!(
+                "[{name}] CONTROL FAILED — two COLD fits differ, so the differences below \
+                 are not attributable to the cache: {gap}"
+            ));
+        }
+        if let Some(gap) = first_bitwise_gap(
+            cold.log_lambdas.as_slice().expect("contiguous cold log-λ"),
+            cold_again
+                .log_lambdas
+                .as_slice()
+                .expect("contiguous second cold log-λ"),
+        ) {
+            failures.push(format!(
+                "[{name}] CONTROL FAILED — two COLD fits' log-λ differ: {gap}"
+            ));
+        }
         drop(cache_invariance_arm(family, y, &w, &x, true));
         let warm = cache_invariance_arm(family, y, &w, &x, true);
 
