@@ -349,7 +349,7 @@ fn main() -> Result<(), String> {
     // sweep -- a typed knob for the A/B, never an environment variable.
     // Optional topology arg: "unroll" arms the occupancy census between
     // REML rounds (#2502). Opt-in so an A/B pair shares this exact binary.
-    let unroll_arg = args.len() >= 17 && args[16] == "unroll";
+    let unroll_arg = args.iter().any(|arg| arg == "unroll");
     if unroll_arg {
         println!("topology unroll: armed");
     }
@@ -357,7 +357,19 @@ fn main() -> Result<(), String> {
     // the amortized description length of the atom's parameters, at the noise
     // floor certified by the initial solve (#2502: unpriced SSE admission is
     // why held-out EV degrades monotonically with the d>=2 atom share).
-    let price_arg = args.len() >= 18 && args[17] == "price";
+    // Every knob is matched anywhere in the argument list, so an unknown
+    // trailing token can only be a typo -- and a typo that is ignored
+    // disarms a mechanism while the arm still reports a number. Reject it.
+    const KNOB_TOKENS: [&str; 8] =
+        ["unroll", "pool", "joint", "price", "usage", "vark", "fista", "none"];
+    for arg in args.iter().skip(15) {
+        if !KNOB_TOKENS.contains(&arg.as_str()) {
+            return Err(format!(
+                "unrecognised trailing token {arg:?}; known knobs: {KNOB_TOKENS:?}"
+            ));
+        }
+    }
+    let price_arg = args.iter().any(|arg| arg == "price");
     if price_arg {
         let sigma2 = 2.0 * report.objective / ((rows * cols) as f64);
         term_seed.term.set_admission_dof_pricing(Some(sigma2));
@@ -372,7 +384,7 @@ fn main() -> Result<(), String> {
         term_seed.term.set_admission_usage_amortization(true);
         println!("admission usage amortization: armed");
     }
-    let vark_arg = args.len() >= 19 && args[18] == "vark";
+    let vark_arg = args.iter().any(|arg| arg == "vark");
     if vark_arg {
         if !price_arg {
             return Err("vark requires price".into());
@@ -380,7 +392,7 @@ fn main() -> Result<(), String> {
         term_seed.term.set_variable_priced_support(true);
         println!("variable priced L0: armed");
     }
-    if args.len() >= 16 && args[15] == "fista" {
+    if args.iter().any(|arg| arg == "fista") {
         term_seed.term.set_decoder_fista_passes(Some(6));
         println!("decoder strategy: FISTA (6 passes/cycle)");
     }
