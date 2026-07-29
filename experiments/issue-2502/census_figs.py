@@ -183,36 +183,36 @@ def fig_planes(planes, out, toks=None, ncol=4, nrow=2):
 
 
 def fig_power(d, out):
-    files = sorted(
-        (f for f in glob.glob(os.path.join(d, "spike_*.json")) if not f.endswith(".planes.json")),
-        key=lambda f: float(os.path.basename(f)[6:-5]),
-    )
-    if not files:
+    def curve(prefix):
+        fs = sorted(
+            (f for f in glob.glob(os.path.join(d, prefix + "*.json"))
+             if not f.endswith(".planes.json")),
+            key=lambda f: float(os.path.basename(f)[len(prefix):-5]),
+        )
+        rs = [float(os.path.basename(f)[len(prefix):-5]) for f in fs]
+        return rs, [json.load(open(f))["n_accepted"] for f in fs]
+
+    rc, dc = curve("power_comb_")
+    rk, dk = curve("power_konly_")
+    if not rc and not rk:
         return
-    rs, disc = [], []
-    for f in files:
-        j = json.load(open(f))
-        rs.append(float(os.path.basename(f)[6:-5]))
-        disc.append(j["n_accepted"])
-    base = json.load(open(os.path.join(d, f"cen_L{FLAGSHIP}.json")))["n_accepted"]
-    fig, ax = plt.subplots(figsize=(6.4, 3.8))
-    ax.plot(rs, disc, "-o", color=REAL, linewidth=2, markersize=7, label="planted + native")
-    ax.axhline(base, color=MUTED, linewidth=1.5, linestyle="--")
-    ax.annotate(
-        f"native discoveries ({base})",
-        (rs[0], base),
-        xytext=(0, 6),
-        textcoords="offset points",
-        fontsize=9,
-        color=MUTED,
-    )
-    ax.set_xlabel("planted circle radius  (units of the activations' centred per-coordinate sd)")
+    fig, ax = plt.subplots(figsize=(6.8, 3.9))
+    if rc:
+        ax.plot(rc, dc, "-o", color=REAL, linewidth=2, markersize=7,
+                label="kappa + fourth harmonic")
+    if rk:
+        ax.plot(rk, dk, "-s", color=NULL, linewidth=2, markersize=6,
+                label="kappa alone")
+    ax.axvline(1.8138, color=INK, linewidth=1.2, linestyle=":")
+    ax.annotate("derived rate-distortion\ncrossover  R = 1.814 sigma",
+                (1.8138, ax.get_ylim()[1] * 0.72), xytext=(4, 0),
+                textcoords="offset points", fontsize=8.5, color=INK, va="top")
+    ax.set_xscale("log", base=2)
+    ax.set_xlabel("planted ring radius  (units of the dictionary's own reconstruction sigma)")
     ax.set_ylabel("e-BH discoveries")
     ax.set_title(
-        "Power: a circle planted in the SAE's own decoder plane, re-encoded by its own encoder",
-        loc="left",
-        fontsize=11.5,
-        color=INK,
+        "Power: a ring planted in the SAE's own code plane, re-encoded by its own encoder",
+        loc="left", fontsize=11.5, color=INK,
     )
     ax.legend(frameon=False, fontsize=9)
     fig.tight_layout()
