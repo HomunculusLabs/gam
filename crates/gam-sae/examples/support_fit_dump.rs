@@ -25,6 +25,22 @@ fn write_f64s(path: &str, values: &[f64]) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(|error| format!("{path}: {error}"))
 }
 
+/// FNV-1a over raw bytes, with the published 64-bit offset basis and prime.
+///
+/// Identifies which array an arm actually read. Two charts of identical shape
+/// are indistinguishable by every count- or shape-based check, and this
+/// campaign compared two such charts as though they were one.
+fn chart_digest(bytes: &[u8]) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
@@ -75,6 +91,11 @@ fn main() -> Result<(), String> {
     if bytes.len() != rows * cols * 8 {
         return Err(format!("chart holds {} bytes != rows*cols*8", bytes.len()));
     }
+    println!(
+        "train chart: {} rows={rows} cols={cols} digest={}",
+        args[1],
+        chart_digest(&bytes)
+    );
     let data: Vec<f64> = bytes
         .chunks_exact(8)
         .map(|c| f64::from_le_bytes(c.try_into().expect("8-byte chunk")))
@@ -643,6 +664,7 @@ fn main() -> Result<(), String> {
         if te_bytes.len() != te_rows * cols * 8 {
             println!("HELDOUT skipped: bad size");
         } else {
+            let te_digest = chart_digest(&te_bytes);
             let te: Vec<f64> = te_bytes.chunks_exact(8)
                 .map(|c| f64::from_le_bytes(c.try_into().expect("8"))).collect();
             let x_test = Array2::from_shape_vec((te_rows, cols), te).map_err(|e| format!("{e}"))?;
@@ -703,7 +725,11 @@ fn main() -> Result<(), String> {
                     )?;
                     let sse: f64 = centered_test.iter().zip(recon.iter()).map(|(x, r)| (x - r).powi(2)).sum();
                     let ss: f64 = centered_test.iter().map(|x| x * x).sum();
-                    println!("HELDOUT rows={te_rows} recurred={} EV={:.4}", rep.recurred, 1.0 - sse / ss);
+                    println!(
+                        "HELDOUT rows={te_rows} recurred={} EV={:.4} chart={te_digest}",
+                        rep.recurred,
+                        1.0 - sse / ss
+                    );
                     // The held-out reconstruction itself. Chart EV alone cannot
                     // say whether the reconstructed directions are the ones the
                     // model computes with, so the ambient-space score and the
