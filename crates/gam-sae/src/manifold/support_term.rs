@@ -50,11 +50,45 @@ pub struct SaeSupportStationarity {
     pub decoder_max_abs: f64,
     pub coordinate_l2: f64,
     pub coordinate_max_abs: f64,
+    /// The decoder block's gradient divided by that block's OWN curvature
+    /// diagonal — the Jacobi-scaled Newton step, i.e. how far the coefficients
+    /// still have to move, in the units the coefficients live in.
+    ///
+    /// #2517. The raw gradient is not a free-floating number: the decoder sweep
+    /// solves `(G_k + λS_k) B_k = rhs_k` exactly per atom, so near the fixed
+    /// point `g ≈ (G + λS)·Δ`, and `G_k = Σ_rows φφᵀ` is a sum over the atom's
+    /// OWN rows. The gradient is therefore the parameter error multiplied by
+    /// **rows-per-atom** — measured at 12x to 75x across two decades of shape —
+    /// and an absolute (or objective-relative) threshold on it is a threshold
+    /// on `m·Δ`, which no amount of data quality can reach. Shrinking the
+    /// residual does not help, because the extensivity lives in the Gram and
+    /// not in `Σ_rows φ⊗r`: the in-class, 1e-4-residual arm stalls at the same
+    /// order as the noisy one.
+    ///
+    /// Dividing by the curvature diagonal removes exactly that factor and
+    /// leaves a quantity invariant to `n`, to rows-per-atom, and to basis
+    /// scaling — the same domain-space discipline as #2548's per-block split.
+    pub decoder_scaled_max_abs: f64,
+    /// The coordinate block's counterpart: its gradient divided by its own
+    /// curvature diagonal (`Σ_out J² + ARD curvature`), so both blocks are
+    /// certified in the space their parameters live in rather than in two
+    /// different gradient scales.
+    pub coordinate_scaled_max_abs: f64,
 }
 
 impl SaeSupportStationarity {
+    /// The raw (gradient-space) certificate, kept for reporting and for every
+    /// consumer that compares against a historical number.
     pub fn max_abs(self) -> f64 {
         self.decoder_max_abs.max(self.coordinate_max_abs)
+    }
+
+    /// The parameter-space certificate: the larger of the two blocks' scaled
+    /// Newton steps. This is what a fixed point should be certified on — see
+    /// [`Self::decoder_scaled_max_abs`] for why the raw gradient cannot be.
+    pub fn scaled_max_abs(self) -> f64 {
+        self.decoder_scaled_max_abs
+            .max(self.coordinate_scaled_max_abs)
     }
 }
 
@@ -3200,16 +3234,27 @@ impl SaeSupportSparseTerm {
                 self.output_dim
             ));
         }
-        let (decoder_sq, decoder_max) = (0..self.k_atoms())
+        let (decoder_sq, decoder_max, decoder_scaled_max) = (0..self.k_atoms())
             .into_par_iter()
-            .map_init(ActiveAtomScratch::default, |scratch, atom_idx| -> Result<(f64, f64), String> {
+            .map_init(ActiveAtomScratch::default, |scratch, atom_idx| -> Result<(f64, f64, f64), String> {
                 let atom = &self.atoms[atom_idx];
                 let mut gradient = atom.smooth_penalty().dot(atom.decoder_coefficients())
                     * lambda_smooth[atom_idx];
+                // #2517 — the block's OWN curvature diagonal, accumulated in the
+                // same pass at no extra cost: `G_bb = Σ_rows φ_b²` plus the
+                // penalty's `λ·S_bb`. Dividing the gradient by it converts the
+                // certificate from gradient space (extensive in rows-per-atom)
+                // to parameter space, which is where the fixed point actually
+                // has to recur.
+                let mut curvature = vec![0.0_f64; atom.basis_size()];
+                for basis in 0..atom.basis_size() {
+                    curvature[basis] = lambda_smooth[atom_idx] * atom.smooth_penalty()[[basis, basis]];
+                }
                 for &(row, slot) in &self.atom_rows[atom_idx] {
                     self.fill_active(row, slot, scratch)?;
                     let phi = scratch.phi_row();
                     for basis in 0..atom.basis_size() {
+                        curvature[basis] += phi[basis] * phi[basis];
                         for output in 0..self.output_dim {
                             gradient[[basis, output]] -= phi[basis] * residual[[row, output]];
                         }
@@ -3217,45 +3262,76 @@ impl SaeSupportSparseTerm {
                 }
                 let mut sq = 0.0_f64;
                 let mut max = 0.0_f64;
-                for value in gradient {
-                    sq += value * value;
-                    max = max.max(value.abs());
+                let mut scaled_max = 0.0_f64;
+                for basis in 0..atom.basis_size() {
+                    // A basis function that is identically zero on every row of
+                    // this atom's support carries no curvature AND no gradient;
+                    // its scaled step is zero, not a division by zero.
+                    let scale = curvature[basis];
+                    for output in 0..self.output_dim {
+                        let value = gradient[[basis, output]];
+                        sq += value * value;
+                        max = max.max(value.abs());
+                        if scale > 0.0 {
+                            scaled_max = scaled_max.max(value.abs() / scale);
+                        }
+                    }
                 }
-                Ok((sq, max))
+                Ok((sq, max, scaled_max))
             })
-            .try_reduce(|| (0.0, 0.0), |a, b| Ok((a.0 + b.0, a.1.max(b.1))))?;
-        let (coordinate_sq, coordinate_max) = (0..self.n_obs())
+            .try_reduce(
+                || (0.0, 0.0, 0.0),
+                |a, b| Ok((a.0 + b.0, a.1.max(b.1), a.2.max(b.2))),
+            )?;
+        let (coordinate_sq, coordinate_max, coordinate_scaled_max) = (0..self.n_obs())
             .into_par_iter()
-            .map_init(ActiveAtomScratch::default, |scratch, row| -> Result<(f64, f64), String> {
+            .map_init(ActiveAtomScratch::default, |scratch, row| -> Result<(f64, f64, f64), String> {
                 let mut sq = 0.0_f64;
                 let mut max = 0.0_f64;
+                let mut scaled_max = 0.0_f64;
                 for slot in 0..self.assignment.support_indices(row).len() {
                     let atom = self.assignment.support_indices(row)[slot] as usize;
                     self.fill_active(row, slot, scratch)?;
                     let periods = self.atom_axis_periods(atom);
                     for axis in 0..scratch.jacobian.nrows() {
                         let mut gradient = 0.0;
+                        // #2517 — the Gauss-Newton curvature of this coordinate,
+                        // in the same pass: `Σ_out J²` plus the ARD prior's own
+                        // curvature. Same discipline as the decoder block, so
+                        // both are certified in parameter space.
+                        let mut curvature = 0.0;
                         for output in 0..self.output_dim {
-                            gradient -= scratch.jacobian[[axis, output]] * residual[[row, output]];
+                            let jacobian = scratch.jacobian[[axis, output]];
+                            gradient -= jacobian * residual[[row, output]];
+                            curvature += jacobian * jacobian;
                         }
-                        gradient += ArdAxisPrior::eval(
+                        let prior = ArdAxisPrior::eval(
                             ard_precisions[atom][axis],
                             self.assignment.coords_for_slot(row, slot)[axis],
                             periods[axis],
-                        )
-                        .grad;
+                        );
+                        gradient += prior.grad;
+                        curvature += prior.psd_majorizer_hess();
                         sq += gradient * gradient;
                         max = max.max(gradient.abs());
+                        if curvature > 0.0 {
+                            scaled_max = scaled_max.max(gradient.abs() / curvature);
+                        }
                     }
                 }
-                Ok((sq, max))
+                Ok((sq, max, scaled_max))
             })
-            .try_reduce(|| (0.0, 0.0), |a, b| Ok((a.0 + b.0, a.1.max(b.1))))?;
+            .try_reduce(
+                || (0.0, 0.0, 0.0),
+                |a, b| Ok((a.0 + b.0, a.1.max(b.1), a.2.max(b.2))),
+            )?;
         Ok(SaeSupportStationarity {
             decoder_l2: decoder_sq.sqrt(),
             decoder_max_abs: decoder_max,
             coordinate_l2: coordinate_sq.sqrt(),
             coordinate_max_abs: coordinate_max,
+            decoder_scaled_max_abs: decoder_scaled_max,
+            coordinate_scaled_max_abs: coordinate_scaled_max,
         })
     }
 

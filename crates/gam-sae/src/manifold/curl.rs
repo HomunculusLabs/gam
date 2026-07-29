@@ -594,33 +594,57 @@ pub fn coalesce_antipodal(
 /// act on without a multiplicity account, and the influence-function SE — a
 /// first-order delta-method quantity on a fourth moment — is exactly the kind of
 /// asymptotic approximation whose tail is least trustworthy. Both problems have
-/// the same fix: calibrate κ against the permutation null, per pair, exactly.
+/// the same fix: calibrate against the permutation null, per pair, exactly.
 ///
-/// The null is "these two in-plane coordinates are independent given their own
-/// marginals", realised by permuting `beta` against `alpha`. It is the null a ring
-/// is a claim against: `κ = 1` says the pair is jointly confined to a shell, which
-/// no product of marginals produces. It also controls, for free, the confound a
-/// gated dictionary creates — a JumpReLU threshold carves the low-amplitude corner
-/// out of every co-firing cloud, hollowing it near the origin; the surrogates
-/// carry the identical hole because each marginal is preserved exactly.
+/// # The null
 ///
-/// The statistic collapses in closed form. With `a = α²`, `b = β²`,
+/// "These two in-plane coordinates are independent given their own marginals",
+/// realised by permuting `beta` against `alpha`. It is the null a ring is a claim
+/// against, and it is much sharper than a Gaussian reference: it strips out
+/// everything about the ring signature that lives in the MARGINALS and asks only
+/// whether the pairing carries structure. It also controls, for free, the confound
+/// a gated dictionary manufactures — a JumpReLU threshold carves the low-amplitude
+/// corner out of every co-firing cloud, hollowing it near the origin, and the
+/// surrogates carry the identical hole.
+///
+/// # Why κ alone is not the statistic
+///
+/// κ is a weak discriminator against exactly this null. For a true ring
+/// `α = R cos θ`, `β = R sin θ` with `θ` uniform, `κ = 1`; permuting the same
+/// marginals against each other gives `E[α²β²] = E[α²]E[β²] = R⁴/4` and hence
+/// `κ = 1.25`. A whole ring buys 0.25 of separation, and the marginals — arcsine
+/// on each axis — are already hollow. So a κ-only test is valid and nearly
+/// powerless, which is the worst combination available: it refuses real circles
+/// while looking rigorous.
+///
+/// The discriminator the null cannot fake is ANGULAR. A ring's `θ` is uniform, so
+/// every circular harmonic vanishes; the product of two ring marginals piles mass
+/// at the four corners `(±R, ±R)`, which is a 4-fold pattern and shows up as a
+/// large fourth harmonic `R₄ = |E[e^{4iθ}]|`. The statistic is therefore the
+/// standardised sum of both channels,
 ///
 /// ```text
-///   m₂ = mean(a) + mean(b)                       (permutation-INVARIANT)
-///   m₄ = mean(a²) + mean(b²) + 2·S/n ,  S = Σᵢ aᵢ·b_{π(i)}
+///   T = (κ̄_null − κ)/sd_null(κ) + (R̄₄_null − R₄)/sd_null(R₄) ,
 /// ```
 ///
-/// so `κ = m₄/m₂²` is a strictly increasing affine function of the permutation
-/// cross-sum `S`, and the lower tail of κ IS the lower tail of `S`. Each surrogate
-/// therefore costs one shuffle and one dot product, with no moment recomputation
-/// and no cancellation in the fourth moment.
+/// large when the plane is both more shell-like AND more rotationally uniform than
+/// its own permuted marginals. Any function of the data is a legitimate permutation
+/// statistic provided it is computed identically for the observation and every
+/// surrogate, which is why the null moments are estimated in a first pass and then
+/// held fixed across the second.
+///
+/// # Cost
+///
+/// `m₂` is permutation-invariant and `m₄` moves only through `S = Σᵢ aᵢ·b_{π(i)}`
+/// (`a = α²`, `b = β²`), so κ needs no moment recomputation. The harmonics need no
+/// trigonometry either: with `c₂ = (α² − β²)/r²` and `s₂ = 2αβ/r²`,
+/// `cos 4θ = c₂² − s₂²` and `sin 4θ = 2c₂s₂`. Each surrogate is one shuffle and one
+/// linear pass.
 ///
 /// Returns `(p_value, e_value, null_kappa_mean, null_kappa_sd)`. The p-value is the
-/// exact lower-tail Monte-Carlo value `(1 + #{S_null ≤ S_obs})/(B + 1)`; the e-value
-/// is the indicator `(B+1)·1{no surrogate reaches S_obs}`, whose null mean is 1
-/// under exchangeability with NO dependence assumption, and which is what an e-BH
-/// ledger over the whole census consumes.
+/// exact upper-tail Monte-Carlo value on `T`; the e-value is the indicator
+/// `(B+1)·1{no surrogate reaches T}`, whose null mean is 1 under exchangeability
+/// with NO dependence assumption, and which is what an e-BH ledger consumes.
 pub fn kappa_permutation_evidence(
     alpha: ArrayView1<f64>,
     beta: ArrayView1<f64>,
@@ -637,22 +661,44 @@ pub fn kappa_permutation_evidence(
     if n < 2 {
         return Err("kappa_permutation_evidence: need at least 2 rows".to_string());
     }
-    if replicates == 0 {
-        return Err("kappa_permutation_evidence: need at least 1 replicate".to_string());
+    if replicates < 2 {
+        return Err("kappa_permutation_evidence: need at least 2 replicates".to_string());
     }
-    let a: Vec<f64> = alpha.iter().map(|&v| v * v).collect();
-    let b: Vec<f64> = beta.iter().map(|&v| v * v).collect();
+    let al: Vec<f64> = alpha.to_vec();
+    let be: Vec<f64> = beta.to_vec();
+    let a: Vec<f64> = al.iter().map(|&v| v * v).collect();
+    let b: Vec<f64> = be.iter().map(|&v| v * v).collect();
     let inv = 1.0 / n as f64;
-    let mean_a: f64 = a.iter().sum::<f64>() * inv;
-    let mean_b: f64 = b.iter().sum::<f64>() * inv;
-    let m2 = mean_a + mean_b;
+    let m2 = (a.iter().sum::<f64>() + b.iter().sum::<f64>()) * inv;
     if !(m2 > 0.0) {
         return Err("kappa_permutation_evidence: zero in-plane energy".to_string());
     }
     let mean_a2: f64 = a.iter().map(|&v| v * v).sum::<f64>() * inv;
     let mean_b2: f64 = b.iter().map(|&v| v * v).sum::<f64>() * inv;
-    let kappa_of_s = |s: f64| (mean_a2 + mean_b2 + 2.0 * s * inv) / (m2 * m2);
-    let s_obs: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum();
+
+    // (κ, R₄) for a given pairing `beta[perm[i]]` against `alpha[i]`.
+    let channels = |perm: &[u32]| -> (f64, f64) {
+        let (mut s, mut c4, mut s4) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for i in 0..n {
+            let j = perm[i] as usize;
+            let (ai, bj) = (a[i], b[j]);
+            s += ai * bj;
+            let r2 = ai + bj;
+            if r2 <= 0.0 {
+                continue;
+            }
+            let c2 = (ai - bj) / r2;
+            let s2 = 2.0 * al[i] * be[j] / r2;
+            c4 += c2 * c2 - s2 * s2;
+            s4 += 2.0 * c2 * s2;
+        }
+        let kappa = (mean_a2 + mean_b2 + 2.0 * s * inv) / (m2 * m2);
+        let r4 = ((c4 * inv).powi(2) + (s4 * inv).powi(2)).sqrt();
+        (kappa, r4)
+    };
+
+    let identity: Vec<u32> = (0..n as u32).collect();
+    let (kappa_obs, r4_obs) = channels(&identity);
 
     let mut state = seed;
     let mut next = move || {
@@ -662,32 +708,46 @@ pub fn kappa_permutation_evidence(
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     };
-    let mut perm: Vec<f64> = b.clone();
-    let mut exceed = 0usize;
-    let mut sum_k = 0.0_f64;
-    let mut sum_k2 = 0.0_f64;
+    let mut perm: Vec<u32> = identity.clone();
+    let mut draws: Vec<(f64, f64)> = Vec::with_capacity(replicates);
     for _draw in 0..replicates {
         for i in (1..n).rev() {
             let j = (next() % (i as u64 + 1)) as usize;
             perm.swap(i, j);
         }
-        let s: f64 = a.iter().zip(perm.iter()).map(|(&x, &y)| x * y).sum();
-        if s <= s_obs {
-            exceed += 1;
-        }
-        let k = kappa_of_s(s);
-        sum_k += k;
-        sum_k2 += k * k;
+        draws.push(channels(&perm));
     }
+
     let bf = replicates as f64;
-    let null_mean = sum_k / bf;
-    let null_var = (sum_k2 / bf - null_mean * null_mean).max(0.0);
+    let (mut mk, mut mr) = (0.0_f64, 0.0_f64);
+    for &(k, r) in &draws {
+        mk += k;
+        mr += r;
+    }
+    mk /= bf;
+    mr /= bf;
+    let (mut vk, mut vr) = (0.0_f64, 0.0_f64);
+    for &(k, r) in &draws {
+        vk += (k - mk) * (k - mk);
+        vr += (r - mr) * (r - mr);
+    }
+    // The null spread of each channel, floored off zero so a degenerate channel
+    // simply contributes nothing rather than a division by zero.
+    let sk = (vk / bf).sqrt().max(f64::MIN_POSITIVE);
+    let sr = (vr / bf).sqrt().max(f64::MIN_POSITIVE);
+    let statistic = |k: f64, r: f64| (mk - k) / sk + (mr - r) / sr;
+    let t_obs = statistic(kappa_obs, r4_obs);
+    let exceed = draws
+        .iter()
+        .filter(|&&(k, r)| statistic(k, r) >= t_obs)
+        .count();
+
     let p_value = (1.0 + exceed as f64) / (bf + 1.0);
     let e_value = if exceed == 0 { bf + 1.0 } else { 0.0 };
-    Ok((p_value, e_value, null_mean, null_var.sqrt()))
+    Ok((p_value, e_value, mk, sk))
 }
 
-/// Co-occurring signed-direction pairs counted over EVERY row, from the SPARSE
+/// Co-occurring signed-direction pairs counted over EVERY row/// Co-occurring signed-direction pairs counted over EVERY row, from the SPARSE
 /// firing pattern rather than by scanning dense masks.
 ///
 /// The obvious spelling is `O(K²·|rows|)`: ask, for each of the `K(K−1)/2` pairs,
@@ -1018,6 +1078,68 @@ mod tests {
         let ids = [1usize, 2];
         let signed = coalesce_antipodal(&dirs, &active, &ids, -0.9, 0.1);
         assert_eq!(signed.len(), 2, "overlapping gates must not coalesce");
+    }
+
+    /// The claim that made the angular channel necessary, made executable: a
+    /// clean ring is NOT resolvable from its own permuted marginals by κ, and IS
+    /// resolvable once the fourth harmonic is in the statistic. Without this the
+    /// permutation test is valid and nearly powerless — it refuses real circles
+    /// while looking rigorous.
+    #[test]
+    fn permutation_test_resolves_a_ring_its_marginals_cannot_fake() {
+        let n = 600;
+        let mut alpha = Array1::<f64>::zeros(n);
+        let mut beta = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let th = TAU * (i as f64 + 0.5) / n as f64;
+            alpha[i] = th.cos();
+            beta[i] = th.sin();
+        }
+        let (p_ring, e_ring, _m, _s) =
+            kappa_permutation_evidence(alpha.view(), beta.view(), 400, 12345)
+                .expect("a clean ring must admit a permutation test");
+        assert!(
+            e_ring > 0.0,
+            "a clean ring must beat every surrogate; p = {p_ring}"
+        );
+
+        // κ alone: the ring sits at 1.0 and its own permuted marginals at 1.25,
+        // so the separation the angular channel supplies is what carries the test.
+        let a: Vec<f64> = alpha.iter().map(|v| v * v).collect();
+        let b: Vec<f64> = beta.iter().map(|v| v * v).collect();
+        let inv = 1.0 / n as f64;
+        let m2 = (a.iter().sum::<f64>() + b.iter().sum::<f64>()) * inv;
+        let kappa_obs = (a.iter().map(|v| v * v).sum::<f64>() * inv
+            + b.iter().map(|v| v * v).sum::<f64>() * inv
+            + 2.0 * a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f64>() * inv)
+            / (m2 * m2);
+        let kappa_indep = (a.iter().map(|v| v * v).sum::<f64>() * inv
+            + b.iter().map(|v| v * v).sum::<f64>() * inv
+            + 2.0 * (a.iter().sum::<f64>() * inv) * (b.iter().sum::<f64>() * inv))
+            / (m2 * m2);
+        assert!(
+            (kappa_indep - kappa_obs) < 0.3,
+            "κ's whole separation against this null is under 0.3 (ring {kappa_obs:.3} vs \
+             permuted marginals {kappa_indep:.3}) — that is why it cannot carry the test alone"
+        );
+
+        // The matched refusal: independent draws with the SAME arcsine marginals
+        // are a corner-clumped product, not a ring, and must not be accepted.
+        let mut a_sh = Array1::<f64>::zeros(n);
+        let mut b_sh = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let th = TAU * (i as f64 + 0.5) / n as f64;
+            let ph = TAU * ((i as f64 * 0.6180339887).fract());
+            a_sh[i] = th.cos();
+            b_sh[i] = ph.sin();
+        }
+        let (_p_prod, e_prod, _mm, _ss) =
+            kappa_permutation_evidence(a_sh.view(), b_sh.view(), 400, 999)
+                .expect("the product arm must admit a permutation test");
+        assert_eq!(
+            e_prod, 0.0,
+            "a product of two ring marginals is not a ring and must not clear the test"
+        );
     }
 
     #[test]

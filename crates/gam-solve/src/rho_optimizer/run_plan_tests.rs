@@ -3577,19 +3577,41 @@ fn cost_stall_productive_descent_replenishes_escape_budget_2253() {
     let stuck_grad = 10.9;
     guard.observe_seed(&seed, 10.0, stuck_grad);
 
-    // Consume the entire escape budget without any real improvement. Each
-    // three-probe infeasible window must be granted exactly one escape.
+    // Consume the entire escape budget on a MULTI-SHELF descent: each window
+    // improves the incumbent, but by less than the relative no-improvement
+    // floor, so the window still fills and each shelf is granted exactly one
+    // escape. That is the trajectory #2253 is about — the Qwen K=1 circle
+    // replay whose 7th escape bought a 36-point drop.
+    //
+    // The improvement per trial must sit strictly between two thresholds the
+    // guard already owns, and the whole budget mechanism lives in that gap:
+    //   * above `f64::EPSILON·(1+|best|)` -- the roundoff resolution the guard
+    //     uses to refuse REPEATING an escape that moved nothing at all (the
+    //     geo_latlon pathology: eight escapes fired back to back at a
+    //     bit-identical incumbent, each reopening a full window for nothing);
+    //   * at or below `rel_tol·(1+|best|)` -- the floor above which an
+    //     improvement counts as genuine descent and REPLENISHES the budget,
+    //     which is the second half of this test.
+    // Driving the shelves with infeasible probes instead leaves the incumbent
+    // bit-identical, which is precisely the case the guard must cut at escape
+    // one; it would measure the pathology, not the subject.
     let infeasible_probe = array![-10.0, -10.0];
+    let mut shelf_value = 10.0_f64;
+    const SUBFLOOR_STEP: f64 = 1.0e-9;
     for escape_idx in 0..STUCK_STALL_MAX_ESCAPES {
-        assert!(matches!(
-            guard.observe_infeasible(&infeasible_probe),
-            CostStallVerdict::Continue
-        ));
-        assert!(matches!(
-            guard.observe_infeasible(&infeasible_probe),
-            CostStallVerdict::Continue
-        ));
-        let verdict = guard.observe_infeasible(&infeasible_probe);
+        let floor = 1.0e-6 * (1.0 + shelf_value.abs());
+        let roundoff = f64::EPSILON * (1.0 + shelf_value.abs());
+        assert!(
+            SUBFLOOR_STEP > roundoff && SUBFLOOR_STEP <= floor,
+            "test premise: the per-trial step must be resolvable ({roundoff:.3e}) \
+             yet under the no-improvement floor ({floor:.3e})",
+        );
+        let mut verdict = CostStallVerdict::Continue;
+        for trial in 0..3 {
+            shelf_value -= SUBFLOOR_STEP;
+            let rho = array![escape_idx as f64, trial as f64];
+            verdict = guard.observe(&rho, shelf_value, stuck_grad, true);
+        }
         assert!(
             matches!(verdict, CostStallVerdict::StuckKeepDescending { .. }),
             "escape {} of {} must still keep descending",
