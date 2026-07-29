@@ -6365,7 +6365,14 @@ fn saved_baseline_timewiggle_reconstruction_keeps_requested_order_one_penalty() 
     assert_eq!(primary_order, 1);
     assert_eq!(extra_orders, vec![2, 3]);
     assert_eq!(block.penalties.len(), 3);
-    assert_eq!(block.nullspace_dims, vec![1, 2, 3]);
+    // Anchored I-spline value basis (#2306): the anchoring removes the constant
+    // direction, so the order-m roughness nullity is m-1 -- the order-1 penalty
+    // is positive definite (nullity 0). The old [1, 2, 3] encoded the
+    // UNANCHORED convention. `gam-models`'
+    // `survival_timewiggle_keeps_requested_order_one_penalty` was already moved
+    // to [0, 1, 2] with this reasoning; this copy of the same assertion was
+    // left behind.
+    assert_eq!(block.nullspace_dims, vec![0, 1, 2]);
 }
 
 #[test]
