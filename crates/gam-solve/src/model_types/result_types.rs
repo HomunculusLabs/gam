@@ -4669,7 +4669,7 @@ impl UnifiedFitResult {
 }
 
 #[cfg(test)]
-mod curvature_evidence_serialized_contract_2561 {
+mod curvature_evidence_serialized_contract_2561_tests {
     use super::{CurvatureAdmissibility, CurvatureEvidence};
 
     /// `hessian_psd` is a PUBLISHED contract with an external consumer
