@@ -492,9 +492,30 @@ pub(super) fn solve_penalized_least_squares_implicit(
     let bare_factor = match StableSolver::new().factorize(&penalized_hessian) {
         Ok(factor) => Some(factor),
         Err(err) => {
-            log::debug!(
-                "PLS: bare penalized-Hessian factorization failed, falling back to the \
-                 Tikhonov nugget: {err}"
+            // WARN, not DEBUG, and say what it means (#2614).
+            //
+            // The penalized Hessian `X'WX + S_λ` is mathematically PSD, so a
+            // bare factorization failure is a statement about the ASSEMBLY or
+            // the conditioning, not a routine event — and this is the only
+            // place that knows why the fit ends up carrying a ridge at all.
+            // Swallowing it at `debug` made "why is `ridge_passport.delta()`
+            // nonzero" unanswerable downstream: the passport records the
+            // magnitude and no reason, and no test target in this crate
+            // installs a logger, so in practice the message reached nobody.
+            //
+            // `sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19` is that
+            // gap in the field. It asserts `delta() == 0.0` on a deliberately
+            // well-conditioned n = 20 fixture whose comment records that the
+            // fit "takes NO stabilization ridge", and it now fails with
+            // `left: 1e-8`. Since the nugget is reached ONLY after this
+            // factorization has already failed, the defect being reported is a
+            // well-conditioned penalized Hessian that will not factorize — and
+            // the error text below is the only evidence of why.
+            log::warn!(
+                "PLS: bare penalized-Hessian factorization FAILED, falling back to the \
+                 Tikhonov nugget {FIXED_STABILIZATION_RIDGE:.3e}; the fit will report a \
+                 nonzero ridge from here. X'WX + S_lambda is mathematically PSD, so this \
+                 is the assembly or the conditioning, not routine: {err}"
             );
             None
         }
