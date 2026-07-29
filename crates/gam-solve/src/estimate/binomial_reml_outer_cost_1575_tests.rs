@@ -316,3 +316,190 @@ fn binomial_logit_reml_outer_cost_is_n_independent_1575() {
          n={n_large}→{outer_large}; the outer loop must be n-independent"
     );
 }
+
+/// #2519/#2614: WHY the first outer line search on this fixture fails.
+///
+/// The two gates above no longer reach their edf/REML assertions — the fit
+/// itself errors, with `termination=line_search_failed(|g|=1.484825e0)` and
+/// `line_search=MaxAttempts after 50 attempt(s)` after ONE outer iteration.
+/// No step was ever accepted, so the reported objective and `|g|` are the
+/// seed's.
+///
+/// If `g` really is the gradient of the function the line search evaluates,
+/// Armijo backtracking cannot fail: for small enough α the decrease along
+/// `d = −g/‖g‖` is `α‖g‖ + O(α²)`, which beats the Armijo target `c₁α‖g‖`
+/// with `c₁ = 1e-4`. Something in that sentence is false. This probe walks a
+/// decade α ladder along the SAME direction the optimizer takes at the SAME
+/// seed and prints, per α, the outcome of the value-only outer evaluation —
+/// including whether it is an error, an `OuterEval::infeasible` (+∞), or a
+/// finite cost — next to the Armijo target. It also compares a central
+/// finite difference of the directional derivative against the analytic
+/// `gᵀd = −‖g‖`.
+///
+/// Direction and metric are the optimizer's, not invented here: on the
+/// gradient-only BFGS path the initial metric is `InitialMetric::Scalar(1/‖g₀‖)`
+/// (`rho_optimizer/run_plan.rs`), so iterate 0's direction is exactly
+/// `−g/‖g‖`, unit norm. `c₁ = 1e-4` is `opt`'s `BfgsCore::c1` default; the
+/// real acceptance test adds an `eps_f(f_k)` slack on top, so a step that
+/// clears the target here would also clear it there.
+#[test]
+fn binomial_logit_first_outer_line_search_ladder_1575() {
+    let (x, y, s_list) = build_fixture();
+    let weights = Array1::<f64>::ones(N);
+    let offset = Array1::<f64>::zeros(N);
+    let p = x.ncols();
+
+    let specs: Vec<PenaltySpec> = s_list.iter().map(PenaltySpec::from_blockwise_ref).collect();
+    let ext = ExternalOptimOptions {
+        family: LikelihoodSpec::new(
+            ResponseFamily::Binomial,
+            InverseLink::Standard(StandardLink::Logit),
+        ),
+        latent_cloglog: None,
+        mixture_link: None,
+        optimize_mixture: false,
+        sas_link: None,
+        optimize_sas: false,
+        compute_inference: true,
+        skip_rho_posterior_inference: false,
+        max_iter: 300,
+        tol: 1e-7,
+        nullspace_dims: vec![2; N_SMOOTH],
+        linear_constraints: None,
+        firth_bias_reduction: Some(false),
+        penalty_shrinkage_floor: None,
+        rho_prior: Default::default(),
+        kronecker_penalty_system: None,
+        kronecker_factored: None,
+        persist_warm_start_disk: false,
+    };
+    let cfg = super::external_options::resolved_external_config(&ext)
+        .expect("the binomial/logit external config resolves")
+        .0;
+    let x_dm: DesignMatrix = x.clone().into();
+    let (canonical, active_nullspace_dims) = gam_terms::construction::canonicalize_penalty_specs(
+        &specs,
+        &ext.nullspace_dims,
+        p,
+        "binomial_logit_first_outer_line_search_ladder_1575",
+    )
+    .expect("the three P-spline penalties canonicalize");
+    let conditioning = ParametricColumnConditioning::infer_from_penalty_specs(&x_dm, &specs);
+    let x_fit = conditioning.apply_to_design(&x_dm);
+    let mut state = RemlState::newwith_offset(
+        y.view(),
+        x_fit,
+        weights.view(),
+        offset.view(),
+        canonical,
+        p,
+        &cfg,
+        Some(active_nullspace_dims),
+        None,
+        None,
+    )
+    .expect("the outer REML state builds on the #1575 fixture");
+    state.set_penalty_shrinkage_floor(ext.penalty_shrinkage_floor);
+    state.set_rho_prior(ext.rho_prior.clone());
+    state.set_link_states(
+        cfg.link_kind.mixture_state().cloned(),
+        cfg.link_kind.sas_state().copied(),
+    );
+
+    // The ρ the failing fit reported as its checkpoint (run 30452220660). The
+    // line search failed on outer iteration 1, so this IS the seed it started
+    // from, not a point it walked to.
+    let rho0 = Array1::from(vec![
+        -0.7060116450326054,
+        -0.11090597501554852,
+        0.6994622375684085,
+    ]);
+    let seed = state
+        .compute_outer_eval_with_order(&rho0, crate::rho_optimizer::OuterEvalOrder::ValueAndGradient)
+        .expect("the seed evaluates: the failing fit reported a finite objective and |g| there");
+    let f0 = seed.cost;
+    let g = seed.gradient.clone();
+    let gnorm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(
+        f0.is_finite() && gnorm.is_finite() && gnorm > 0.0,
+        "seed evaluation is degenerate: f0={f0}, |g|={gnorm}, g={g:.6e}",
+    );
+    // Unit-norm steepest descent in the optimizer's iterate-0 metric, so
+    // gᵀd = −‖g‖ exactly.
+    let d = g.mapv(|v| -v / gnorm);
+    let c1 = 1.0e-4_f64;
+
+    let value_at = |state: &RemlState<'_>, rho: &Array1<f64>| -> (Option<f64>, String) {
+        match state.compute_outer_eval_with_order(rho, crate::rho_optimizer::OuterEvalOrder::Value) {
+            Ok(eval) if eval.cost.is_finite() => (Some(eval.cost), format!("{:.12e}", eval.cost)),
+            Ok(eval) if eval.cost == f64::INFINITY => {
+                (None, "INFEASIBLE (+inf cost)".to_string())
+            }
+            Ok(eval) => (None, format!("NON-FINITE cost {}", eval.cost)),
+            Err(err) => (None, format!("ERR {err}")),
+        }
+    };
+
+    let mut ladder = String::new();
+    let mut accepting_alpha: Option<f64> = None;
+    let mut finite_probes = 0usize;
+    for alpha in [
+        1.0e0, 1.0e-1, 1.0e-2, 1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7, 1.0e-8, 1.0e-9, 1.0e-10,
+        1.0e-11, 1.0e-12,
+    ] {
+        let trial = &rho0 + &d.mapv(|v| v * alpha);
+        let (value, label) = value_at(&state, &trial);
+        let target = -c1 * alpha * gnorm;
+        let (delta_text, accepted) = match value {
+            Some(f) => {
+                finite_probes += 1;
+                let delta = f - f0;
+                (format!("{delta:+.6e}"), delta <= target)
+            }
+            None => ("n/a".to_string(), false),
+        };
+        if accepted && accepting_alpha.is_none() {
+            accepting_alpha = Some(alpha);
+        }
+        ladder.push_str(&format!(
+            "\n  alpha={alpha:.0e}  f={label}  f-f0={delta_text}  armijo_target={target:+.6e}  accept={accepted}"
+        ));
+    }
+
+    // Central finite difference of the directional derivative. The analytic
+    // value is gᵀd = −‖g‖ by construction of `d`. Step sizes span three
+    // decades so a disagreement that is a truncation artefact (shrinks with h)
+    // is distinguishable from a genuine gradient defect (does not).
+    let mut fd_report = String::new();
+    for h in [1.0e-3_f64, 1.0e-4, 1.0e-5] {
+        let (plus, plus_label) = value_at(&state, &(&rho0 + &d.mapv(|v| v * h)));
+        let (minus, minus_label) = value_at(&state, &(&rho0 - &d.mapv(|v| v * h)));
+        let fd_text = match (plus, minus) {
+            (Some(fp), Some(fm)) => {
+                let fd = (fp - fm) / (2.0 * h);
+                format!("fd={fd:+.9e}  fd/analytic={:+.6}", fd / (-gnorm))
+            }
+            _ => format!("fd=n/a (+: {plus_label}; -: {minus_label})"),
+        };
+        fd_report.push_str(&format!("\n  h={h:.0e}  {fd_text}"));
+    }
+
+    let summary = format!(
+        "#1575/#2519 first-outer-line-search ladder at the reported checkpoint\n\
+         rho0 = {rho0:.16e}\n\
+         f0 = {f0:.12e}   |g| = {gnorm:.9e}   g = {g:.9e}\n\
+         d = -g/|g| (unit norm; g'd = -|g| = {:.9e}), armijo c1 = {c1:.0e}\n\
+         finite probes on the ladder: {finite_probes}/13\n\
+         analytic directional derivative g'd = {:.9e}; central FD:{fd_report}\n\
+         alpha ladder:{ladder}",
+        -gnorm, -gnorm,
+    );
+    eprintln!("{summary}");
+
+    assert!(
+        accepting_alpha.is_some(),
+        "no alpha in [1e0, 1e-12] along the optimizer's own first search direction \
+         achieves the Armijo decrease the backtracking search demands, so the first \
+         outer line search cannot succeed and the fit cannot leave its seed.\n{summary}"
+    );
+}
