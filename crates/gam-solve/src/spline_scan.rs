@@ -1245,7 +1245,32 @@ fn run_filter<const RECORD_STEPS: bool>(
                     + 3.0 * gain_d1[i] * v_d2
                     + gain[i] * v_d3;
             }
-            let mut p_new = p_star;
+            // The VALUE covariance through the Joseph form, the same expression
+            // the certified pass runs (#2614).
+            //
+            // `P − M Mᵀ/F` subtracts near-equal quantities: on the #2300 nodes
+            // at `ρ = −24` both terms are `1.84e5` and their difference is `1`,
+            // so the result is accurate to `F/R` times the rounding of its own
+            // size. `P⁺ = A P Aᵀ + R K Kᵀ` with `A = I − K e₀ᵀ` is the same
+            // quantity as a sum of positive contributions at the observed
+            // coordinate. This is not only the certified pass's concern: the two
+            // passes must run the same expression, or the enclosure would be
+            // certifying arithmetic the scalar path does not perform.
+            let mut a_operator = [[0.0; MAX_ORDER]; MAX_ORDER];
+            for (i, row) in a_operator.iter_mut().enumerate().take(order) {
+                row[i] = 1.0;
+            }
+            a_operator[0][0] = r * inv_f;
+            for i in 1..order {
+                a_operator[i][0] = -gain[i];
+            }
+            let a_operator_t = mat_t(&a_operator, order);
+            let mut p_new = mat_mul(&mat_mul(&a_operator, &p_star, order), &a_operator_t, order);
+            for i in 0..order {
+                for j in 0..order {
+                    p_new[i][j] += gain[i] * gain[j] * r;
+                }
+            }
             let mut p_new_d1 = p_star_d1;
             let mut p_new_d2 = p_star_d2;
             let mut p_new_d3 = p_star_d3;
@@ -1268,7 +1293,6 @@ fn run_filter<const RECORD_STEPS: bool>(
                         - 3.0 * s1 * f_star_d2
                         - s0 * f_star_d3)
                         * inv_f;
-                    p_new[i][j] -= s0;
                     p_new_d1[i][j] -= s1;
                     p_new_d2[i][j] -= s2;
                     p_new_d3[i][j] -= s3;
@@ -1549,10 +1573,44 @@ fn run_filter_ball_traced(
             for i in 0..order {
                 gain[i] = m_star[i].mul(inv_f);
             }
-            let mut p_new = p_star;
+            // The VALUE covariance through the same Joseph form as its jets.
+            //
+            // `P⁺ = P − M Mᵀ/F` is the textbook update and it is a subtraction
+            // of near-equal quantities exactly where this filter lives. At
+            // `ρ = −24` on the #2300 nodes the predicted `P₀₀` is `1.84e5` and
+            // `M₀²/F` is `1.84e5`; their difference is `1.0`, so the enclosure
+            // of a quantity of size one is charged the rounding of quantities
+            // `1.8e5` times larger, and the ratio is `F/R = P₀₀/R + 1`, which
+            // GROWS with the process noise.
+            //
+            // The Joseph form `P⁺ = A P Aᵀ + R K Kᵀ` (`A = I − K e₀ᵀ`) is the
+            // same quantity, and at the observed coordinate it is
+            //
+            //     (A P Aᵀ)₀₀ + R K₀² = (R/F)²P₀₀ + R P₀₀²/F²
+            //                        = P₀₀ R (R + P₀₀)/F² = P₀₀ R/F,
+            //
+            // a sum of two POSITIVE terms — the exact `P⁺₀₀`, with no
+            // subtraction anywhere in it. `A[0][0] = R/F` is itself formed
+            // exactly rather than as `1 − K₀` (see `ball_update_operator`).
+            //
+            // The measurement that forced this (#2614, per-node trace at
+            // `ρ = −24`, order 2). `P⁺₀₀` holds the VALUE `0.99999456` at every
+            // node while its enclosure WIDTH runs `1.6e-1, 2.3e0, 3.1e1, 3.8e2,
+            // 4.7e3, 5.9e4, 9.2e5` over nodes 6..12 — a factor of ~13 per node,
+            // on a quantity of size one. `F` inherits it, so `inv_f`'s enclosure
+            // width reaches `1.0` at node 13 against a value of `5.4e-6`; at
+            // that node `A[0][0]` stops being a contraction and EVERY derivative
+            // jet leaves the finite range in a single step (`d3⁺₀₀` width
+            // `1.7e-3 → 4.5e19`). The `d3` recursion was never the defect: its
+            // own congruence contracts by `(R/F)² ≈ 3e-11` per node exactly as
+            // intended, and its VALUES are bit-stable throughout. It diverges
+            // because the value covariance it multiplies by had already lost its
+            // enclosure.
+            let a_operator = ball_update_operator(&gain, r.mul(inv_f), order);
+            let mut p_new = ball_congruence(&a_operator, &p_star, &a_operator, order);
             for i in 0..order {
                 for j in 0..order {
-                    p_new[i][j] = p_new[i][j].sub(m_star[i].mul(m_star[j]).mul(inv_f));
+                    p_new[i][j] = p_new[i][j].add(gain[i].mul(gain[j]).mul(r));
                 }
             }
             // Derivative covariances through the JOSEPH form, which for the
@@ -1622,8 +1680,8 @@ fn run_filter_ball_traced(
             // subtraction. See `ball_update_operator`: that single entry is
             // where the `d3` jet was losing everything, and the measurement
             // that found it is on #2614 (`F'''` at `+/-4.1e247` by node 62,
-            // ~`10^4` per node, with `d1`/`d2` clean).
-            let a_operator = ball_update_operator(&gain, r.mul(inv_f), order);
+            // ~`10^4` per node, with `d1`/`d2` clean). The same operator carries
+            // the VALUE covariance above, for the same reason.
 
             // dP⁺ = A · dP · Aᵀ  (the `dK` terms cancel exactly, since M⁺ = R·K)
             let p_new_d1 = ball_congruence(&a_operator, &d1_pred, &a_operator, order);
@@ -3418,6 +3476,8 @@ mod tests {
             let last_node = trace.last().map(|&(node, _, _)| node).unwrap_or(0);
             let columns = [
                 "p_upd_00",
+                "p_upd_11",
+                "p_next_00",
                 "d1_upd_00",
                 "d2_upd_00",
                 "d3_upd_00",
