@@ -9114,7 +9114,7 @@ fn line_search_probes_never_advance_the_cost_stall_window_2613() {
         (array![12.02577], -4996.7, STATIONARY_GRAD_2613),
         Some(Arc::default()),
         // No accepted steps: `opt` is still inside iteration 0.
-        |_, _| {},
+        |_, _| (),
     );
     assert_eq!(
         outcomes.len(),
@@ -9150,7 +9150,7 @@ fn line_search_probes_never_advance_the_cost_stall_window_2613() {
         schedule.clone(),
         (array![12.02577], -4996.7, STATIONARY_GRAD_2613),
         None,
-        |_, _| {},
+        |_, _| (),
     );
     // `COST_STALL_WINDOW − 1`, not `COST_STALL_WINDOW`: the inline fold has no
     // accept latency, so the sixth observation lands on the sixth evaluation
