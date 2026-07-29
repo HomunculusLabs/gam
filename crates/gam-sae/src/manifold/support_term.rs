@@ -2069,9 +2069,10 @@ impl SaeSupportSparseTerm {
     /// lambda at 6x overcompleteness and loses by 0.092 at 63x, with rows
     /// per atom held constant. The shared scale is the effective-df-weighted
     /// geometric mean; an atom's weight toward its own estimate is its share
-    /// of the portfolio's mean effective df, so an atom carrying little
     /// structure inherits the pooled value and a well-determined one keeps
-    /// its own. Nothing here is tuned.
+    /// its own. The shared scale is estimated WITHIN topology groups and the
+    /// shrinkage is unit-information, matching `mackay_ard_precisions` on
+    /// both counts. Nothing here is tuned.
     pub fn pooled_smoothing(
         &self,
         lambda_smooth: &[f64],
@@ -2085,31 +2086,48 @@ impl SaeSupportSparseTerm {
                 self.k_atoms()
             ));
         }
-        let usable: Vec<(f64, f64)> = lambda_smooth
-            .iter()
-            .zip(effective_df.iter())
-            .filter(|(lam, df)| lam.is_finite() && **lam > 0.0 && df.is_finite() && **df > 0.0)
-            .map(|(lam, df)| (lam.ln(), *df))
-            .collect();
-        if usable.is_empty() {
-            return Ok(lambda_smooth.to_vec());
+        // Grouped exactly as `mackay_ard_precisions` groups the coordinate
+        // prior, and for the reason stated there: a periodic atom's penalty
+        // scale is set by a bounded period and a Euclidean atom's is not, so
+        // one shared log-scale across both families is a mean of two
+        // incomparable quantities.
+        let mut pooled = lambda_smooth.to_vec();
+        let mut usable: Vec<(usize, f64, f64, bool)> = Vec::new();
+        for atom in 0..self.k_atoms() {
+            let (lam, df) = (lambda_smooth[atom], effective_df[atom]);
+            if !(lam.is_finite() && lam > 0.0 && df.is_finite() && df > 0.0) {
+                continue;
+            }
+            let periodic = self
+                .atom_axis_periods(atom)
+                .iter()
+                .any(|period| period.is_some());
+            usable.push((atom, lam.ln(), df, periodic));
         }
-        let weight: f64 = usable.iter().map(|(_, df)| df).sum();
-        let shared = usable.iter().map(|(l, df)| l * df).sum::<f64>() / weight;
-        let mean_df = weight / usable.len() as f64;
-        Ok(lambda_smooth
-            .iter()
-            .zip(effective_df.iter())
-            .map(|(lam, df)| {
-                if !(lam.is_finite() && *lam > 0.0 && df.is_finite() && *df > 0.0) {
-                    return *lam;
-                }
-                // Share of the portfolio's mean effective df, capped at one:
-                // the atom's own evidence about its own smoothness.
-                let own = (df / mean_df).min(1.0);
-                (own * lam.ln() + (1.0 - own) * shared).exp()
-            })
-            .collect())
+        for group_periodic in [false, true] {
+            let group: Vec<&(usize, f64, f64, bool)> = usable
+                .iter()
+                .filter(|entry| entry.3 == group_periodic)
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            let weight: f64 = group.iter().map(|entry| entry.2).sum();
+            if !(weight > 0.0) {
+                continue;
+            }
+            let shared = group.iter().map(|entry| entry.1 * entry.2).sum::<f64>() / weight;
+            let mean_df = weight / group.len() as f64;
+            for &(atom, log_lambda, df, _) in group {
+                // Unit-information shrinkage, the same rule the coordinate
+                // prior obeys: one average atom's worth of prior evidence.
+                // It lies strictly inside (0, 1) for positive df, so unlike a
+                // ratio-to-the-mean it needs no cap to stay a weight.
+                let own = df / (df + mean_df);
+                pooled[atom] = (own * log_lambda + (1.0 - own) * shared).exp();
+            }
+        }
+        Ok(pooled)
     }
 
     pub fn joint_hyperparameter_fixed_point(
