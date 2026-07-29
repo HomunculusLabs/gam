@@ -146,28 +146,41 @@ def finish(args, cfg, sae_dir, params, x, token_ids, tok):
         w_dec = w_dec.T.contiguous()
     k = w_dec.shape[0]
 
+    spike_atoms = None
     if args.spike > 0.0:
-        # Plant a circle in the plane of two of the SAE's OWN decoder directions,
-        # which is the premise the invisibility theorem is about: a dictionary that
-        # already owns u and v reconstructs a ring in span(u, v) exactly, leaving no
-        # residual to drive a birth. Radius is quoted against the activations'
-        # centred per-coordinate sd so it is comparable across layers.
+        # Plant the circle in the plane of two atoms' ENCODER directions, not
+        # their decoder directions. Adding along w_dec does not move the
+        # pre-activations, so a decoder-space plant is invisible to the gate and
+        # the dictionary never parses it — the first version of this arm planted
+        # rings the SAE simply did not see, and reported the native census back
+        # unchanged. Along w_enc the pre-activation of each atom moves by
+        # R*cos(theta)*||w_enc||, which is the parse the theorem is about.
+        #
+        # The ring is offset so BOTH coefficients stay positive across the whole
+        # angle: a nonnegative gate cannot represent a centred ring with only two
+        # atoms (it needs the four rectified halves that a random plane does not
+        # have), and a co-firing circle with a positive DC term is what a real one
+        # looks like anyway.
         g = torch.Generator().manual_seed(args.spike_seed)
         pick = torch.randperm(k, generator=g)[:2]
-        u = w_dec[pick[0]].cpu().double()
-        v = w_dec[pick[1]].cpu().double()
+        u = w_enc[:, pick[0]].cpu().double()
+        v = w_enc[:, pick[1]].cpu().double()
         u = u / u.norm()
         v = v - (v @ u) * u
         v = v / v.norm()
         rows = torch.randperm(n, generator=g)[: args.spike_rows]
         theta = torch.rand(len(rows), generator=g, dtype=torch.float64) * 2 * np.pi
         scale = args.spike * float((x - x.mean(0, keepdim=True)).std())
-        add = scale * (torch.cos(theta)[:, None] * u + torch.sin(theta)[:, None] * v)
+        offset = 1.5 * scale
+        add = offset * (u + v) + scale * (
+            torch.cos(theta)[:, None] * u + torch.sin(theta)[:, None] * v
+        )
         x = x.clone()
         x[rows] = (x[rows].double() + add).float()
+        spike_atoms = (int(pick[0]), int(pick[1]), rows)
         print(
-            f"SPIKE: radius {args.spike}sd = {scale:.2f} on {len(rows)} rows, "
-            f"plane of decoder atoms {int(pick[0])},{int(pick[1])}",
+            f"SPIKE: radius {args.spike}sd = {scale:.2f} (offset {offset:.2f}) on "
+            f"{len(rows)} rows, encoder plane of atoms {int(pick[0])},{int(pick[1])}",
             flush=True,
         )
 
@@ -188,6 +201,21 @@ def finish(args, cfg, sae_dir, params, x, token_ids, tok):
     indptr = np.zeros(n + 1, dtype=np.int64)
     np.cumsum(cnt, out=indptr[1:])
     print(f"codes: nnz={len(idx)} mean L0={len(idx)/n:.1f}", flush=True)
+    if spike_atoms is not None:
+        # Did the plant actually reach the dictionary? Without this the power arm
+        # can silently measure nothing and look like a null result.
+        pa, pb, rows = spike_atoms
+        lo = indptr[rows.numpy()]
+        hi = indptr[rows.numpy() + 1]
+        both = 0
+        for l, h in zip(lo, hi):
+            seg = idx[l:h]
+            if (seg == pa).any() and (seg == pb).any():
+                both += 1
+        print(
+            f"SPIKE CHECK: both planted atoms fire on {both}/{len(rows)} spiked rows",
+            flush=True,
+        )
 
     d = args.outdir
     x.numpy().astype(np.float32).tofile(f"{d}/x.f32")
