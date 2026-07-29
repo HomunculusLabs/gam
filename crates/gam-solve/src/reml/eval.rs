@@ -2576,13 +2576,24 @@ mod smoothing_correction_outcome_tests {
     ///
     /// This is the DETERMINISTIC companion to the first-order integration test
     /// `corrected_covariance_is_response_scale_equivariant`. A full `fit_gam`
-    /// will not reliably drive ρ̂ into `AUTO_CUBATURE_BOUNDARY_MARGIN` of the
-    /// box edge, so instead of hoping a fit lands there, this test calls
-    /// [`RemlState::compute_smoothing_correction_auto`] directly with a
-    /// `final_rho` FORCED to `RHO_BOUND − 1` (inside the 2.0 margin): the
-    /// `near_boundary` gate is then unconditionally `true` and the cubature
-    /// branch fires (asserted via the `SMOOTHING_CORRECTION_CUBATURE_COUNT`
-    /// delta). Running the same construction at response scales `1` and `c`
+    /// will not reliably land ρ̂ anywhere in particular, so instead of hoping,
+    /// this test calls [`RemlState::compute_smoothing_correction_auto`]
+    /// directly with a fixed `final_rho`.
+    ///
+    /// That ρ used to be `RHO_BOUND − 1`, chosen so the `near_boundary` arm of
+    /// the gate would be unconditionally true. It is now an INTERIOR ρ, because
+    /// the boundary arm and the cubature precondition turned out to be mutually
+    /// exclusive on this design: inside the 2.0 margin `λ ≳ e²⁸`, the ridge has
+    /// collapsed to its null space, ρ is unidentified (`active_rank = 0`), and
+    /// `compute_smoothing_correction_auto` correctly refuses to escalate rather
+    /// than impute variance the geometry does not support. An interior ρ keeps
+    /// ρ identified and reaches cubature through `max_rho_var` or the
+    /// high-gradient certificate — the arm the gate's own comment describes for
+    /// "broad-but-well-converged posteriors". The branch is still asserted to
+    /// have fired, via the `SMOOTHING_CORRECTION_CUBATURE_COUNT` delta, so the
+    /// coverage this test exists for cannot be lost silently.
+    ///
+    /// Running the same construction at response scales `1` and `c`
     /// then exercises the per-sigma φ̂ curvature scaling on the cubature path
     /// and asserts the `c²` (not `c⁴`) equivariance of the correction itself.
     ///
@@ -2629,10 +2640,32 @@ mod smoothing_correction_outcome_tests {
             s[[j, j]] = 1.0;
         }
 
-        // Force the near-boundary gate: ρ = RHO_BOUND − 1 is within
-        // AUTO_CUBATURE_BOUNDARY_MARGIN (= 2.0) of RHO_BOUND, so
-        // `near_boundary` is true regardless of where any optimizer would land.
-        let final_rho = Array1::from_vec(vec![RHO_BOUND - 1.0]);
+        // An INTERIOR rho at which rho is identified.
+        //
+        // This was `RHO_BOUND - 1.0`, forced so `near_boundary` would fire the
+        // cubature gate. Measured: that made the gate's own precondition fail.
+        // The near-boundary window is `rho in (RHO_BOUND - 2, RHO_BOUND]`, i.e.
+        // `lambda >~ e^28`, where a ridge on 3 of 4 columns over n = 24 has
+        // collapsed to its null space and the REML score is flat in rho. So
+        // `active_rank = 0`, and `compute_smoothing_correction_auto` correctly
+        // declines with `first-order V_rho rank-deficient: cubature would
+        // impute spurious variance` -- there is no rho-uncertainty to
+        // propagate, and cubature would invent some. Every rho in that window
+        // fails the precondition on this design, so no choice inside it works.
+        //
+        // The gate has a third arm the fixture was not using. Its own comment
+        // says so: "A fit can be perfectly interior and converged while the
+        // REML surface is still broad in rho ... continue to the rho-Hessian
+        // inversion below so `max_rhovar` can trigger cubature for those
+        // broad-but-well-converged posteriors." An interior rho keeps rho
+        // identified (so the rank check passes) and reaches cubature through
+        // `max_rho_var` or the high-gradient certificate instead.
+        //
+        // lambda = 1: a ridge that regularises without saturating, so the
+        // penalised directions retain support and the rho-Hessian is
+        // invertible -- which is what this fixture's own comment already
+        // claimed it needed.
+        let final_rho = Array1::from_vec(vec![0.0]);
 
         // Run the full cubature path at one response scale; return the returned
         // correction matrix plus the cubature-counter delta observed for THIS
@@ -2749,7 +2782,8 @@ mod smoothing_correction_outcome_tests {
         assert!(
             fired1 > 0,
             "sigma-cubature branch did not fire at scale 1 (delta {fired1}); \
-             the near-boundary gate should have forced it"
+             an interior identified rho should reach it via max_rho_var or the \
+             high-gradient certificate"
         );
         assert!(
             firedc > 0,
