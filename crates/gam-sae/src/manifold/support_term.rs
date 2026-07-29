@@ -1146,12 +1146,9 @@ impl SaeSupportSparseTerm {
                     // are used there because a periodic cell's endpoints are
                     // the same point and `tan` diverges at them.
                     //
-                    // Every other kind passes `raw` through unchanged, and for
-                    // those the closed interval is right: the previous
-                    // `g / width` excluded the upper endpoint, so a width-2
-                    // atom was ranked at {-1, 0} and never at its positive
-                    // extreme. `width` is `basis_size().max(2)`, so
-                    // `width - 1 >= 1`.
+                    // Every other kind passes `raw` through unchanged and
+                    // keeps the half-open sample; see the branch below for why
+                    // the closed interval is not an improvement there.
                     let periodic_chart = matches!(
                         atom.basis_kind(),
                         SaeAtomBasisKind::Periodic
@@ -1162,7 +1159,15 @@ impl SaeSupportSparseTerm {
                         let u = (g as f64 + 0.5) / width as f64;
                         (std::f64::consts::PI * (u - 0.5)).tan()
                     } else {
-                        -1.0 + 2.0 * (g as f64 / (width - 1) as f64)
+                        // Half-open, as it has always been. The closed form
+                        // drops `t = 0` at width 2, and `gamma(0) = b0` is the
+                        // grid point nearest every row's optimum for a `linear`
+                        // atom -- routed coordinates sit in about [-0.02, 0.02]
+                        // while this grid spans [-1, 1]. Its gain is a lower
+                        // bound on the exact gain, so removing it can only cost.
+                        // The real fix for these atoms is the closed-form
+                        // optimal-`t` gain, not a redistribution of two points.
+                        -1.0 + 2.0 * (g as f64 / width as f64)
                     };
                     let t = super::support_seed::chart_coordinate(atom.basis_kind(), 0, raw);
                     let coordinate = Array2::from_shape_vec((1, 1), vec![t])
