@@ -327,6 +327,18 @@ pub enum SplineScoreProofError {
         lo: f64,
         hi: f64,
         q_value: f64,
+        /// This node's own contribution to that accumulator. A finite running
+        /// sum plus an infinite total means the CONTRIBUTION diverged, so this
+        /// is the term to look at, not the sum.
+        contribution_lo: f64,
+        contribution_hi: f64,
+        /// The third covariance-derivative entry `F'''` every third-order chain
+        /// rule on this path divides by `F`. Reported alongside so a wide
+        /// contribution can be told from a wide INPUT: if `F'''` is already
+        /// unbounded the covariance jet is at fault, and if it is tight while
+        /// the contribution is not, the cancellation in the chain rule is.
+        f_star_d3_lo: f64,
+        f_star_d3_hi: f64,
     },
     InvalidInput(String),
     MissingEndpointCertificate {
@@ -385,12 +397,18 @@ impl std::fmt::Display for SplineScoreProofError {
                 lo,
                 hi,
                 q_value,
+                contribution_lo,
+                contribution_hi,
+                f_star_d3_lo,
+                f_star_d3_hi,
             } => {
                 write!(
                     f,
                     "spline scan: certified accumulator `{accumulator}` left the finite range at \
                      node {node} (proper innovations so far {n_proper}, q = {q_value:.6e}): \
-                     value {value:.9e} in [{lo:.9e}, {hi:.9e}]"
+                     value {value:.9e} in [{lo:.9e}, {hi:.9e}]; this node's contribution was \
+                     [{contribution_lo:.9e}, {contribution_hi:.9e}] and F''' was \
+                     [{f_star_d3_lo:.9e}, {f_star_d3_hi:.9e}]"
                 )
             }
             Self::InvalidInput(reason) => f.write_str(reason),
@@ -1691,18 +1709,18 @@ fn run_filter_ball(
             // refusal could not say WHICH accumulator went, WHERE, or how wide
             // it was. Checking here costs eight `is_finite` calls per proper
             // node and turns the refusal into the measurement.
-            if let Some((accumulator, ball)) = [
-                ("sum_log_f", sum_log_f),
-                ("sum_log_f_d1", sum_log_f_d1),
-                ("sum_log_f_d2", sum_log_f_d2),
-                ("sum_log_f_d3", sum_log_f_d3),
-                ("sum_v2_over_f", sum_v2_over_f),
-                ("sum_v2_over_f_d1", sum_v2_over_f_d1),
-                ("sum_v2_over_f_d2", sum_v2_over_f_d2),
-                ("sum_v2_over_f_d3", sum_v2_over_f_d3),
+            if let Some((accumulator, ball, contribution)) = [
+                ("sum_log_f", sum_log_f, f_star.ln_positive()),
+                ("sum_log_f_d1", sum_log_f_d1, logf_d1),
+                ("sum_log_f_d2", sum_log_f_d2, logf_d2),
+                ("sum_log_f_d3", sum_log_f_d3, logf_d3),
+                ("sum_v2_over_f", sum_v2_over_f, t0),
+                ("sum_v2_over_f_d1", sum_v2_over_f_d1, t1),
+                ("sum_v2_over_f_d2", sum_v2_over_f_d2, t2),
+                ("sum_v2_over_f_d3", sum_v2_over_f_d3, t3),
             ]
             .into_iter()
-            .find(|(_, ball)| !ball.is_finite())
+            .find(|(_, ball, _)| !ball.is_finite())
             {
                 return Err(SplineScoreProofError::AccumulatorDiverged {
                     node: t,
@@ -1712,6 +1730,10 @@ fn run_filter_ball(
                     lo: ball.lo,
                     hi: ball.hi,
                     q_value: q.value,
+                    contribution_lo: contribution.lo,
+                    contribution_hi: contribution.hi,
+                    f_star_d3_lo: f_star_d3.lo,
+                    f_star_d3_hi: f_star_d3.hi,
                 });
             }
         }
