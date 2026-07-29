@@ -429,6 +429,10 @@ pub struct SaeSupportSparseTerm {
     /// separable from the parameter differential because the two have
     /// opposite signs on different portfolios (+0.079 mixed, -0.167
     /// homogeneous, both measured).
+    /// Rank affine atoms at their exactly-optimal coordinate during greedy
+    /// selection instead of at the best grid point (#2502). Measured worth
+    /// 0.0103 held-out on a linear dictionary; opt-in until an A/B confirms.
+    exact_affine_ranking: bool,
     admission_usage_amortized: bool,
     /// `Some(sigma2)` arms DoF-priced admission (#2502): every support
     /// ranking expression subtracts the amortized description length of the
@@ -621,6 +625,7 @@ impl SaeSupportSparseTerm {
             atom_rows,
             decoder_fista_passes: None,
             admission_dof_sigma2: None,
+            exact_affine_ranking: false,
             admission_usage_amortized: false,
             variable_priced_support: false,
             atom_axis_periods,
@@ -1181,6 +1186,46 @@ impl SaeSupportSparseTerm {
                     theta[slot] = t;
                 }
             }
+            // Affine atoms (`gamma(t) = A + t*B`) admit a closed-form optimal
+            // coordinate, so they need no grid at all. A and B come from
+            // EVALUATING the atom at two coordinates rather than from its
+            // coefficients, which absorbs any affine reparameterisation the
+            // evaluator applies. `None` means "rank this atom from the grid".
+            let mut affine: Vec<Option<(Array1<f64>, Array1<f64>, f64, f64, f64)>> =
+                vec![None; k_atoms];
+            if self.exact_affine_ranking {
+                for (atom_index, atom) in self.atoms.iter().enumerate() {
+                    if atom.basis_size() != 2 {
+                        continue;
+                    }
+                    let Some(evaluator) = atom.basis_evaluator.as_ref() else {
+                        continue;
+                    };
+                    let decode = |t: f64| -> Result<Array1<f64>, String> {
+                        let coordinate = Array2::from_shape_vec((1, 1), vec![t])
+                            .map_err(|error| format!("exact affine probe: {error}"))?;
+                        let (phi, _) = evaluator.evaluate(coordinate.view())?;
+                        Ok(phi.row(0).dot(atom.decoder_coefficients()))
+                    };
+                    let base = decode(0.0)?;
+                    let slope = &decode(1.0)? - &base;
+                    let slope_norm = slope.dot(&slope).sqrt();
+                    let base_norm = base.dot(&base).sqrt();
+                    // Resolvable against the atom's own offset scale, not
+                    // merely non-zero: `t* = along / ||B||` is unbounded, so a
+                    // slope near the rounding of `A` produces an enormous
+                    // coordinate from a bounded contribution. Such atoms take
+                    // the grid path, which bounds the coordinate to the chart.
+                    if !(slope_norm > f64::EPSILON * base_norm * self.output_dim as f64) {
+                        continue;
+                    }
+                    let unit = &slope / slope_norm;
+                    let base_sq = base.dot(&base);
+                    let base_dot_unit = base.dot(&unit);
+                    affine[atom_index] =
+                        Some((base, unit, base_sq, base_dot_unit, slope_norm));
+                }
+            }
             let self_term: Vec<f64> = (0..slots)
                 .map(|slot| {
                     (0..self.output_dim).map(|c| gamma[[slot, c]] * gamma[[slot, c]]).sum::<f64>()
@@ -1213,24 +1258,58 @@ impl SaeSupportSparseTerm {
                         let mut best_atom = usize::MAX;
                         let mut best_theta = 0.0;
                         let mut best_slot = 0usize;
+                        // The vector the winner actually contributes. Under
+                        // exact ranking it is not a grid point, so the residual
+                        // cannot be updated from `gamma` alone.
+                        let mut best_decoded: Option<Array1<f64>> = None;
                         for atom_index in 0..k_atoms {
                             if taken[atom_index] {
                                 continue;
                             }
-                            for slot in grid_offset[atom_index]..grid_offset[atom_index + 1] {
-                                let mut cross = 0.0;
+                            if let Some((base, unit, base_sq, base_dot_unit, slope_norm)) =
+                                affine[atom_index].as_ref()
+                            {
+                                // `gain(t*) = 2<r,A> - ||A||^2 + (<r,u> - <A,u>)^2`,
+                                // the maximum over t, so it dominates any grid
+                                // point of this atom.
+                                let mut r_dot_base = 0.0;
+                                let mut r_dot_unit = 0.0;
                                 for c in 0..self.output_dim {
-                                    cross += residual[c] * gamma[[slot, c]];
+                                    r_dot_base += residual[c] * base[c];
+                                    r_dot_unit += residual[c] * unit[c];
                                 }
-                                let gain = 2.0 * cross
-                                    - self_term[slot]
-                                    - prior_term[slot]
+                                let along = r_dot_unit - base_dot_unit;
+                                // The prior is charged at the grid's own
+                                // resolution; taking this atom's first slot
+                                // keeps the charge identical to the grid path
+                                // rather than silently dropping it.
+                                let gain = 2.0 * r_dot_base - base_sq + along * along
+                                    - prior_term[grid_offset[atom_index]]
                                     - dof_charge[atom_index];
                                 if gain > best_gain {
                                     best_gain = gain;
                                     best_atom = atom_index;
-                                    best_theta = theta[slot];
-                                    best_slot = slot;
+                                    best_theta = along / slope_norm;
+                                    best_slot = grid_offset[atom_index];
+                                    best_decoded = Some(base + &(unit * along));
+                                }
+                            } else {
+                                for slot in grid_offset[atom_index]..grid_offset[atom_index + 1] {
+                                    let mut cross = 0.0;
+                                    for c in 0..self.output_dim {
+                                        cross += residual[c] * gamma[[slot, c]];
+                                    }
+                                    let gain = 2.0 * cross
+                                        - self_term[slot]
+                                        - prior_term[slot]
+                                        - dof_charge[atom_index];
+                                    if gain > best_gain {
+                                        best_gain = gain;
+                                        best_atom = atom_index;
+                                        best_theta = theta[slot];
+                                        best_slot = slot;
+                                        best_decoded = None;
+                                    }
                                 }
                             }
                         }
@@ -1245,8 +1324,17 @@ impl SaeSupportSparseTerm {
                             break;
                         }
                         taken[best_atom] = true;
-                        for c in 0..self.output_dim {
-                            residual[c] -= gamma[[best_slot, c]];
+                        match best_decoded.as_ref() {
+                            Some(decoded) => {
+                                for c in 0..self.output_dim {
+                                    residual[c] -= decoded[c];
+                                }
+                            }
+                            None => {
+                                for c in 0..self.output_dim {
+                                    residual[c] -= gamma[[best_slot, c]];
+                                }
+                            }
                         }
                         picked.push((best_atom, best_gain, best_theta));
                     }
@@ -1293,6 +1381,7 @@ impl SaeSupportSparseTerm {
             routed.admission_dof_sigma2 = self.admission_dof_sigma2;
             routed.variable_priced_support = self.variable_priced_support;
             routed.admission_usage_amortized = self.admission_usage_amortized;
+            routed.exact_affine_ranking = self.exact_affine_ranking;
             return Ok(routed);
         }
         type RowRoute = (Vec<u32>, Vec<f64>, Vec<f64>);
@@ -3137,6 +3226,11 @@ impl SaeSupportSparseTerm {
     /// priced admission. No effect unless pricing is armed.
     pub fn set_variable_priced_support(&mut self, enabled: bool) {
         self.variable_priced_support = enabled;
+    }
+
+    /// See [`Self::exact_affine_ranking`].
+    pub fn set_exact_affine_ranking(&mut self, enabled: bool) {
+        self.exact_affine_ranking = enabled;
     }
 
     /// See [`Self::admission_usage_amortized`]. No effect unless pricing is

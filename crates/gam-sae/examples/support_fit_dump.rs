@@ -386,14 +386,21 @@ fn main() -> Result<(), String> {
     // Every knob is matched anywhere in the argument list, so an unknown
     // trailing token can only be a typo -- and a typo that is ignored
     // disarms a mechanism while the arm still reports a number. Reject it.
-    const KNOB_TOKENS: [&str; 8] =
-        ["unroll", "pool", "joint", "price", "usage", "vark", "fista", "none"];
+    const KNOB_TOKENS: [&str; 9] =
+        ["unroll", "pool", "joint", "price", "usage", "vark", "fista", "exact", "none"];
     for arg in args.iter().skip(15) {
         if !KNOB_TOKENS.contains(&arg.as_str()) {
             return Err(format!(
                 "unrecognised trailing token {arg:?}; known knobs: {KNOB_TOKENS:?}"
             ));
         }
+    }
+    // "exact" ranks affine atoms at their closed-form optimal coordinate during
+    // greedy selection instead of at the best grid point. Measured worth 0.0103
+    // held-out on a linear dictionary; opt-in so the A/B shares this binary.
+    if args.iter().any(|arg| arg == "exact") {
+        term_seed.term.set_exact_affine_ranking(true);
+        println!("exact affine ranking: armed");
     }
     let price_arg = args.iter().any(|arg| arg == "price");
     if price_arg {
