@@ -34,19 +34,25 @@ fn frame_of(plane: &serde_json::Value, key: &str) -> Result<Vec<f64>, String> {
         .collect()
 }
 
-/// Principal angles (radians, ascending) between two 2-planes given orthonormal
-/// frames `(a1, a2)` and `(b1, b2)`. The `2×2` cross-Gram's singular values are
-/// the cosines, and a `2×2` SVD is closed form: the singular values of `M` are
-/// `√((t ± √(t² − 4d²))/2)` with `t = ‖M‖_F²` and `d = det M`.
+/// Principal angles `(θ_max, θ_min)` in radians between two 2-planes given
+/// orthonormal frames `(a1, a2)` and `(b1, b2)`. The `2×2` cross-Gram's singular
+/// values are the COSINES, and a `2×2` SVD is closed form: the singular values of
+/// `M` are `√((t ± √(t² − 4d²))/2)` with `t = ‖M‖_F²` and `d = det M`.
+///
+/// Note the inversion: `acos` is decreasing, so the LARGER singular value gives
+/// the SMALLER angle. `θ_max = acos(s_min)` is the summary that matters — two
+/// planes agree only if they agree in both directions, and a pair that shares one
+/// direction and is orthogonal in the other is a shared atom, not a shared
+/// circle.
 fn principal_angles(a1: &[f64], a2: &[f64], b1: &[f64], b2: &[f64]) -> (f64, f64) {
     let dot = |x: &[f64], y: &[f64]| x.iter().zip(y.iter()).map(|(p, q)| p * q).sum::<f64>();
     let m = [dot(a1, b1), dot(a1, b2), dot(a2, b1), dot(a2, b2)];
     let t = m.iter().map(|v| v * v).sum::<f64>();
     let d = m[0] * m[3] - m[1] * m[2];
     let disc = (t * t - 4.0 * d * d).max(0.0).sqrt();
-    let s1 = ((t + disc) * 0.5).max(0.0).sqrt().min(1.0);
-    let s2 = ((t - disc) * 0.5).max(0.0).sqrt().min(1.0);
-    (s1.acos(), s2.acos())
+    let s_max = ((t + disc) * 0.5).max(0.0).sqrt().min(1.0);
+    let s_min = ((t - disc) * 0.5).max(0.0).sqrt().min(1.0);
+    (s_min.acos(), s_max.acos())
 }
 
 /// A deterministic standard normal stream (splitmix64 + Box–Muller), so the null
@@ -131,9 +137,9 @@ fn run() -> Result<(), String> {
             if b1.len() != a1.len() {
                 return Err("the two censuses have different ambient dimensions".to_string());
             }
-            let (big, small) = principal_angles(&a1, &a2, &b1, &b2);
-            if big < best.0 {
-                best = (big, small, j);
+            let (theta_max, theta_min) = principal_angles(&a1, &a2, &b1, &b2);
+            if theta_max < best.0 {
+                best = (theta_max, theta_min, j);
             }
         }
         best_angles.push(best.0);
@@ -160,9 +166,9 @@ fn run() -> Result<(), String> {
         let (r1, r2) = rng.frame(ambient);
         let mut best = std::f64::consts::FRAC_PI_2;
         for (b1, b2) in &right {
-            let (big, _small) = principal_angles(&r1, &r2, b1, b2);
-            if big < best {
-                best = big;
+            let (theta_max, _theta_min) = principal_angles(&r1, &r2, b1, b2);
+            if theta_max < best {
+                best = theta_max;
             }
         }
         null_best.push(best);
