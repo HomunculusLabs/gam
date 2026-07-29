@@ -503,3 +503,180 @@ fn binomial_logit_first_outer_line_search_ladder_1575() {
          outer line search cannot succeed and the fit cannot leave its seed.\n{summary}"
     );
 }
+
+/// #2519/#2614: the outer objective must be a FUNCTION of rho.
+///
+/// The alpha ladder above (run 30453519953) measured the outer cost at rho
+/// displacements from 1e0 down to 1e-12 along one direction and found it takes
+/// three discrete values, not one continuous curve:
+///
+/// ```text
+///   alpha=1e-8   f = 5.091491164067e2   (f0 - 2.4e-6)
+///   alpha=1e-9   f = 4.999387787758e2   (f0 - 9.2103400803  = f0 - 0.5*ln(1e8))
+///   alpha=1e-12  f = 5.275697976823e2   (f0 + 18.4206788262 = f0 + 0.5*ln(1e16))
+/// ```
+///
+/// `exp(2*delta)` for those two offsets is `1.000001e-8` and `9.999962e+15` —
+/// a determinant inside a `0.5*log|.|` term differing by exactly `1e8` on one
+/// mode and by `1e8` on each of two modes. A 1e-12 change in rho cannot move a
+/// spectrum by 1e8, and the analytic gradient is fine (the h=1e-4 central FD
+/// gave -4.1497 against the analytic -4.1558, agreeing to 0.15%), so the
+/// gradient is not the defect: the same rho is being evaluated against
+/// different stabilizations. That is why no alpha satisfies Armijo — the
+/// decrease being asked for is O(1e-4) and the jump between branches is 9.21.
+///
+/// This probe names the term. It evaluates the same rho at the start and again
+/// at the end of a short ladder and reports, at every point, the cost beside
+/// the stabilization ridge actually used and the inner P-IRLS state that
+/// produced it (deviance, edf, penalty, iterations, inner gradient), so the
+/// 9.21 shows up in a named column rather than only in the total.
+#[test]
+fn binomial_logit_outer_objective_is_a_function_of_rho_1575() {
+    let (x, y, s_list) = build_fixture();
+    let weights = Array1::<f64>::ones(N);
+    let offset = Array1::<f64>::zeros(N);
+    let p = x.ncols();
+
+    let specs: Vec<PenaltySpec> = s_list.iter().map(PenaltySpec::from_blockwise_ref).collect();
+    let ext = ExternalOptimOptions {
+        family: LikelihoodSpec::new(
+            ResponseFamily::Binomial,
+            InverseLink::Standard(StandardLink::Logit),
+        ),
+        latent_cloglog: None,
+        mixture_link: None,
+        optimize_mixture: false,
+        sas_link: None,
+        optimize_sas: false,
+        compute_inference: true,
+        skip_rho_posterior_inference: false,
+        max_iter: 300,
+        tol: 1e-7,
+        nullspace_dims: vec![2; N_SMOOTH],
+        linear_constraints: None,
+        firth_bias_reduction: Some(false),
+        penalty_shrinkage_floor: None,
+        rho_prior: Default::default(),
+        kronecker_penalty_system: None,
+        kronecker_factored: None,
+        persist_warm_start_disk: false,
+    };
+    let cfg = super::external_options::resolved_external_config(&ext)
+        .expect("the binomial/logit external config resolves")
+        .0;
+    let x_dm: DesignMatrix = x.clone().into();
+    let (canonical, active_nullspace_dims) = gam_terms::construction::canonicalize_penalty_specs(
+        &specs,
+        &ext.nullspace_dims,
+        p,
+        "binomial_logit_outer_objective_is_a_function_of_rho_1575",
+    )
+    .expect("the three P-spline penalties canonicalize");
+    let conditioning = ParametricColumnConditioning::infer_from_penalty_specs(&x_dm, &specs);
+    let x_fit = conditioning.apply_to_design(&x_dm);
+    let mut state = RemlState::newwith_offset(
+        y.view(),
+        x_fit,
+        weights.view(),
+        offset.view(),
+        canonical,
+        p,
+        &cfg,
+        Some(active_nullspace_dims),
+        None,
+        None,
+    )
+    .expect("the outer REML state builds on the #1575 fixture");
+    state.set_penalty_shrinkage_floor(ext.penalty_shrinkage_floor);
+    state.set_rho_prior(ext.rho_prior.clone());
+    state.set_link_states(
+        cfg.link_kind.mixture_state().cloned(),
+        cfg.link_kind.sas_state().copied(),
+    );
+
+    let rho0 = Array1::from(vec![
+        -0.7060116450326054,
+        -0.11090597501554852,
+        0.6994622375684085,
+    ]);
+    let seed = state
+        .compute_outer_eval_with_order(&rho0, crate::rho_optimizer::OuterEvalOrder::ValueAndGradient)
+        .expect("the seed evaluates");
+    let f0 = seed.cost;
+    let g = seed.gradient.clone();
+    let gnorm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let d = g.mapv(|v| -v / gnorm);
+
+    let mut table = String::new();
+    let mut record = |state: &RemlState<'_>, label: &str, rho: &Array1<f64>, cost_text: String| {
+        let ridge = state.last_ridge_used();
+        let inner = state.obtain_eval_bundle(rho).map(|bundle| {
+            let pr = &bundle.pirls_result;
+            format!(
+                "dev={:.9e} edf={:.6} pen={:.9e} iters={} |g_inner|={:.3e} ridge_pirls={:.6e} ridge_bundle={:.6e} status={:?}",
+                pr.deviance,
+                pr.edf,
+                pr.stable_penalty_term,
+                pr.iteration,
+                pr.lastgradient_norm,
+                pr.ridge_passport.delta(),
+                bundle.ridge_passport.delta(),
+                pr.status,
+            )
+        });
+        let inner_text = match inner {
+            Ok(text) => text,
+            Err(err) => format!("bundle unavailable: {err}"),
+        };
+        let ridge_text = match ridge {
+            Some(value) => format!("{value:.9e}"),
+            None => "none".to_string(),
+        };
+        table.push_str(&format!(
+            "\n  {label:<12} cost={cost_text}  ridge={ridge_text}  {inner_text}"
+        ));
+    };
+
+    record(&state, "rho0 (first)", &rho0, format!("{f0:.12e}"));
+    for alpha in [1.0e-1_f64, 1.0e-4, 1.0e-7, 1.0e-9, 1.0e-12] {
+        let trial = &rho0 + &d.mapv(|v| v * alpha);
+        let cost_text = match state
+            .compute_outer_eval_with_order(&trial, crate::rho_optimizer::OuterEvalOrder::Value)
+        {
+            Ok(eval) => format!("{:.12e}", eval.cost),
+            Err(err) => format!("ERR {err}"),
+        };
+        record(&state, &format!("alpha={alpha:.0e}"), &trial, cost_text);
+    }
+    let repeat = state
+        .compute_outer_eval_with_order(&rho0, crate::rho_optimizer::OuterEvalOrder::Value)
+        .expect("re-evaluating the seed must still be feasible");
+    record(&state, "rho0 (again)", &rho0, format!("{:.12e}", repeat.cost));
+
+    let drift = repeat.cost - f0;
+    let summary = format!(
+        "#1575/#2519 outer objective at a FIXED rho, evaluated twice\n\
+         f(rho0) first = {f0:.12e}\n\
+         f(rho0) again = {:.12e}\n\
+         drift         = {drift:+.12e}   (0.5*ln(1e8) = 9.210340372)\n\
+         |g| at rho0   = {gnorm:.9e}{table}",
+        repeat.cost,
+    );
+    eprintln!("{summary}");
+
+    // Two evaluations at a BIT-IDENTICAL rho can differ only through where the
+    // inner P-IRLS stopped. The inner mode is certified to a relative gradient
+    // of `tol = 1e-7` (`logit_options`), and the outer cost is stationary in
+    // beta at the mode, so that inner slack enters the cost at SECOND order —
+    // below 1e-14 relative. A bound of 1e-6*(1+|f0|) is eight orders above that
+    // floor (so inner-tolerance jitter can never trip it) and four orders below
+    // the 9.21 branch jump the ladder measured, which is the thing this asserts
+    // is absent.
+    let bound = 1.0e-6 * (1.0 + f0.abs());
+    assert!(
+        drift.abs() <= bound,
+        "the outer REML objective is not a function of rho: the SAME rho gives \
+         two costs differing by {drift:+.6e} (bound {bound:.6e}). A line search \
+         cannot descend on a criterion that moves under it.\n{summary}"
+    );
+}
