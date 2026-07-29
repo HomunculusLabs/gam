@@ -138,7 +138,7 @@ def fig_kappa(real, nulls, out):
 
 
 def fig_planes(planes, out, toks=None, ncol=4, nrow=2):
-    planes = sorted(planes, key=lambda p: p["kappa"])[: ncol * nrow]
+    planes = sorted(planes, key=lambda p: p.get("rank_rho", p["kappa"]))[: ncol * nrow]
     fig, axes = plt.subplots(nrow, ncol, figsize=(3.1 * ncol, 3.25 * nrow))
     for ax, pl in zip(np.ravel(axes), planes):
         a = np.array(pl["alpha"])
@@ -153,7 +153,7 @@ def fig_planes(planes, out, toks=None, ncol=4, nrow=2):
         ids = pl["members_a"] + pl["members_b"]
         ax.set_title(
             f"atoms {'+'.join(str(i) for i in ids)}\n"
-            f"κ={pl['kappa']:.2f}  z={pl['z_below_gaussian']:.1f}σ  R̂={pl['radius_over_sigma']:.0f}σ",
+            f"ρ={pl.get('rank_rho', float('nan')):.2f}   R̂={pl['radius_over_sigma']:.0f}σ   n={len(a):,}",
             fontsize=8.5,
             color=INK,
         )
@@ -171,7 +171,7 @@ def fig_planes(planes, out, toks=None, ncol=4, nrow=2):
     for ax in np.ravel(axes)[len(planes) :]:
         ax.axis("off")
     fig.suptitle(
-        "Rings Google's SAE split into straight atoms — the plane parse of accepted pairs",
+        "Circles Google's SAE split into straight atoms — the plane parse of e-BH discoveries",
         fontsize=12,
         color=INK,
         x=0.02,
