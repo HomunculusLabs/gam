@@ -182,43 +182,68 @@ def fig_planes(planes, out, toks=None, ncol=4, nrow=2):
     print("wrote", out)
 
 
+PLANTED = os.environ.get("PLANTED", "")
+
+
 def fig_power(d, out):
+    """Power on planted ground truth: was the PLANTED pair itself discovered?
+
+    Total discoveries would be dominated by the dictionary's native circles, so
+    the curve tracks the planted pair specifically, found by the atom ids the
+    dump reported.
+    """
+    if not PLANTED:
+        return
+    want = {int(x) for x in PLANTED.split(",")}
+
     def curve(prefix):
         fs = sorted(
             (f for f in glob.glob(os.path.join(d, prefix + "*.json"))
              if not f.endswith(".planes.json")),
             key=lambda f: float(os.path.basename(f)[len(prefix):-5]),
         )
-        rs = [float(os.path.basename(f)[len(prefix):-5]) for f in fs]
-        return rs, [json.load(open(f))["n_accepted"] for f in fs]
+        rs, hit = [], []
+        for f in fs:
+            j = json.load(open(f))
+            rs.append(float(os.path.basename(f)[len(prefix):-5]))
+            found = [
+                p for p in j["pairs"]
+                if want <= set(p["members_a"]) | set(p["members_b"])
+            ]
+            hit.append(1 if (found and found[0]["accepted"]) else 0)
+        return rs, hit
 
-    rc, dc = curve("power_comb_")
-    rk, dk = curve("power_konly_")
-    rr, dr = curve("power_rank_")
-    if not rc and not rk and not rr:
+    series = [
+        ("rank complementarity", "power_rank_", "#1baf7a", "-^"),
+        ("kappa alone", "power_konly_", NULL, "-s"),
+        ("kappa + fourth harmonic", "power_comb_", REAL, "-o"),
+    ]
+    fig, ax = plt.subplots(figsize=(7.0, 3.9))
+    drew = False
+    for i, (label, prefix, colour, style) in enumerate(series):
+        rs, hit = curve(prefix)
+        if not rs:
+            continue
+        drew = True
+        ax.plot(rs, [h + 0.012 * i for h in hit], style, color=colour,
+                linewidth=2, markersize=7, label=label)
+    if not drew:
         return
-    fig, ax = plt.subplots(figsize=(6.8, 3.9))
-    if rc:
-        ax.plot(rc, dc, "-o", color=REAL, linewidth=2, markersize=7,
-                label="kappa + fourth harmonic")
-    if rk:
-        ax.plot(rk, dk, "-s", color=NULL, linewidth=2, markersize=6,
-                label="kappa alone")
-    if rr:
-        ax.plot(rr, dr, "-^", color="#1baf7a", linewidth=2, markersize=7,
-                label="rank complementarity")
     ax.axvline(1.8138, color=INK, linewidth=1.2, linestyle=":")
     ax.annotate("derived rate-distortion\ncrossover  R = 1.814 sigma",
-                (1.8138, ax.get_ylim()[1] * 0.72), xytext=(4, 0),
-                textcoords="offset points", fontsize=8.5, color=INK, va="top")
+                (1.8138, 0.55), xytext=(5, 0), textcoords="offset points",
+                fontsize=8.5, color=INK, va="center")
     ax.set_xscale("log", base=2)
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["refused", "discovered"])
+    ax.set_ylim(-0.25, 1.25)
     ax.set_xlabel("planted ring radius  (units of the dictionary's own reconstruction sigma)")
-    ax.set_ylabel("e-BH discoveries")
     ax.set_title(
-        "Power: a ring planted in the SAE's own code plane, re-encoded by its own encoder",
+        "Power on ground truth: a ring planted in the SAE's own code plane,\n"
+        "re-encoded by its own encoder, at FDR 0.05 over the whole search",
         loc="left", fontsize=11.5, color=INK,
     )
-    ax.legend(frameon=False, fontsize=9)
+    ax.legend(frameon=False, fontsize=9, loc="center right")
     fig.tight_layout()
     fig.savefig(out, bbox_inches="tight")
     print("wrote", out)
