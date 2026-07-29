@@ -649,6 +649,9 @@ fn validate_spec_rejects_coordinate_cone_without_guard_offset() {
 
 #[test]
 fn validate_spec_accepts_learned_gaussian_shift_sigma() {
+    // One value for the guard this spec declares AND the offset that must
+    // clear it, so the two cannot drift apart again.
+    const LEARNED_SHIFT_GUARD: f64 = 1e-4;
     let spec = SurvivalMarginalSlopeTermSpec {
         age_entry: array![0.0, 0.0],
         age_exit: array![1.0, 1.0],
@@ -661,7 +664,7 @@ fn validate_spec_accepts_learned_gaussian_shift_sigma() {
         frailty: FrailtySpec::GaussianShift {
             scale: FrailtyScale::Learned { initial_sigma: 0.5 },
         },
-        derivative_guard: 1e-4,
+        derivative_guard: LEARNED_SHIFT_GUARD,
         baseline_hyper: SurvivalMarginalSlopeBaselineHyperSpec::Linear {
             config: crate::survival::construction::SurvivalBaselineConfig {
                 target: crate::survival::construction::SurvivalBaselineTarget::Linear,
@@ -675,16 +678,20 @@ fn validate_spec_accepts_learned_gaussian_shift_sigma() {
         // rows, and `validate_spec` requires the time-block designs to have one
         // row per observation. Widen it so the frailty-scale claim under test is
         // what the validation actually reaches.
+        //
+        // The derivative offset must clear the guard THIS spec declares, not the
+        // crate default. `validate_spec` forms A·beta >= derivative_guard -
+        // derivative_offset_exit and checks `initial_beta` against it, so with
+        // `base_time_block()`'s beta = 0 an offset below the declared guard is
+        // infeasible by exactly their difference: carrying the crate default
+        // (1e-6) under a declared guard of 1e-4 left slack = -9.900e-5.
         time_block: TimeBlockInput {
             design_entry: DesignMatrix::from(Array2::zeros((2, 1))),
             design_exit: DesignMatrix::from(Array2::zeros((2, 1))),
             design_derivative_exit: DesignMatrix::from(Array2::ones((2, 1))),
             offset_entry: Array1::zeros(2),
             offset_exit: Array1::zeros(2),
-            derivative_offset_exit: Array1::from_elem(
-                2,
-                DEFAULT_SURVIVAL_MARGINAL_SLOPE_DERIVATIVE_GUARD,
-            ),
+            derivative_offset_exit: Array1::from_elem(2, LEARNED_SHIFT_GUARD),
             ..base_time_block()
         },
         timewiggle_block: None,
