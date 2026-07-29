@@ -4124,7 +4124,21 @@ mod tests {
             // owns: a β of the wrong width means the caller is slicing a
             // different block's coefficients into us, which a constant Jacobian
             // would otherwise absorb without complaint.
-            if state.beta.len() != self.p {
+            //
+            // An EMPTY β is not that error — it is the operating-point calling
+            // convention. `BlockJacobianAsRowOp` linearizes at the pilot
+            // geometry and passes `beta: &[]` deliberately, because the
+            // operating point travels entirely in `family_scalars`; its own
+            // comment records the inverse as the mistake ("a non-empty β with
+            // no scalars is the error the callbacks reject"). Requiring width
+            // `p` unconditionally made this double reject the very convention
+            // production uses, so the canonicalisation path panicked through
+            // `channel_flattened_rows`'s `expect` with "beta has 0 entries,
+            // expected p = 4" rather than exercising the redundancy audit.
+            //
+            // Only a NON-EMPTY β of the wrong width is a mis-sliced caller, so
+            // that is what this checks — the guard keeps its teeth.
+            if !state.beta.is_empty() && state.beta.len() != self.p {
                 return Err(format!(
                     "FixedMultiChannelJac linearization beta has {} entries, expected p = {}",
                     state.beta.len(),
