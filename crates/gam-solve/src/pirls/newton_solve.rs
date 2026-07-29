@@ -475,19 +475,48 @@ pub(crate) fn ensure_positive_definitewithridge(
         );
     }
 
-    if hess.cholesky(Side::Lower).is_ok() {
-        return Ok(0.0);
-    }
-
+    // δ IS APPLIED UNCONDITIONALLY, AND THAT IS THE POINT (#1575/#2519/#2614).
+    //
+    // This used to factor the bare matrix first and return `ridge = 0.0` when
+    // that succeeded, adding `FIXED_STABILIZATION_RIDGE` only on failure. That
+    // makes δ a function of ρ — through a Cholesky-success predicate on a
+    // near-singular matrix — and δ is carried as
+    // `RidgePolicy::exact_full_objective()`, so it enters the outer criterion
+    // through `0.5·log|H|` with `H = XᵀWX + S_λ + δI`. On a direction whose
+    // eigenvalue sits at the numerical floor, toggling δ between 0 and 1e-8
+    // moves that term by `0.5·ln(1e8) = 9.2103`.
+    //
+    // That is not a bound, it is the measured value. On the #1575 binomial/logit
+    // fixture the outer cost at ρ displacements of 1e-9 and 1e-12 differed from
+    // its value at ρ₀ by exactly −9.2103400803 and +18.4206788262, with
+    // `exp(2·Δ)` equal to 1.000001e-8 and 9.999962e+15, at identical deviance,
+    // edf and penalty term — the whole difference being `ridge = 1e-8` at one
+    // point and `ridge = 0` at its neighbours. A criterion that jumps by 9.21
+    // between neighbouring ρ is not a function of ρ: Armijo backtracking is
+    // asked for an O(1e-4) decrease against it and cannot get one at any step
+    // size, and the cost-stall guard's window then fills on iterates that swing
+    // by a median of 4.55 while stepping 0.315 in ρ, which it classifies as a
+    // flat valley and halts.
+    //
+    // The constant's own doc (`gam_working_model::FIXED_STABILIZATION_RIDGE`)
+    // states the invariant this restores: "If δ = δ(ρ) is adaptive, V(ρ) is only
+    // piecewise-smooth and ∂V/∂ρ ignores ∂δ/∂ρ… Using a fixed δ makes V(ρ)
+    // smooth and the standard envelope-theorem gradient valid." A δ selected by
+    // a branch is adaptive in exactly that sense, and its ∂δ/∂ρ is a jump no
+    // gradient can carry. Applying it always makes δ genuinely constant, so
+    // ∂δ/∂ρ = 0 holds identically and `0.5·log|H(ρ) + δI|` is continuous in ρ.
+    //
+    // On a well-conditioned Hessian this is numerically inert in the direction
+    // that matters: the criterion shifts by `0.5·Σ ln(1 + δ/λ_i) ≤ 0.5·δ·tr(H⁻¹)`,
+    // which for λ_i ≫ δ = 1e-8 is far below the convergence tolerances. What it
+    // removes is the jump, not the scale.
     if ridge > 0.0 {
         for i in 0..hess.nrows() {
             hess[[i, i]] += ridge;
         }
-
-        if hess.cholesky(Side::Lower).is_ok() {
-            log::debug!("{} stabilized with fixed ridge {:.1e}.", label, ridge);
-            return Ok(ridge);
-        }
+    }
+    if hess.cholesky(Side::Lower).is_ok() {
+        return Ok(ridge);
     }
 
     if let Ok((evals, _)) = hess.eigh(Side::Lower) {
