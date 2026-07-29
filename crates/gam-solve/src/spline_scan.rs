@@ -888,6 +888,18 @@ fn ball_symmetrize(a: &mut BallMat, m: usize) {
     }
 }
 
+/// Intersect a proper covariance enclosure with its exact PSD invariant.
+///
+/// Once the diffuse rank is exhausted, `P*` is the conditional covariance of
+/// the state. Its diagonal is therefore nonnegative at every measurement
+/// update and prediction. A componentwise interval evaluation of
+/// `P - PH'(HPH' + R)⁻¹HP` forgets that dependency and can widen a diagonal
+/// through zero after repeated rank-one subtractions, even though the exact
+/// innovation is bounded below by the positive observation variance `R`.
+///
+/// This intersection restores proof information supplied by the statistical
+/// model; it is not a numerical tolerance. A wholly negative or non-finite
+/// diagonal still signals an inconsistent enclosure and fails closed.
 /// `A = I − K e₀ᵀ`, built so its `(0,0)` entry is never a subtraction (#2614).
 ///
 /// The expanded per-entry form of the congruence `A X Aᵀ` evaluates
@@ -983,18 +995,6 @@ fn intersect_innovation_above_observation_variance(
     }
 }
 
-/// Intersect a proper covariance enclosure with its exact PSD invariant.
-///
-/// Once the diffuse rank is exhausted, `P*` is the conditional covariance of
-/// the state. Its diagonal is therefore nonnegative at every measurement
-/// update and prediction. A componentwise interval evaluation of
-/// `P - PH'(HPH' + R)⁻¹HP` forgets that dependency and can widen a diagonal
-/// through zero after repeated rank-one subtractions, even though the exact
-/// innovation is bounded below by the positive observation variance `R`.
-///
-/// This intersection restores proof information supplied by the statistical
-/// model; it is not a numerical tolerance. A wholly negative or non-finite
-/// diagonal still signals an inconsistent enclosure and fails closed.
 #[inline]
 fn intersect_proper_covariance_psd(
     covariance: &mut BallMat,
@@ -1633,23 +1633,46 @@ fn run_filter_ball(
                 gain_d3[i] = p_new_d3[i][0].div_positive(r);
             }
 
-            let a_old_d1 = a_d1;
-            let a_old_d2 = a_d2;
-            let a_old_d3 = a_d3;
+            // Mean update through the SAME operator, for the same reason.
+            //
+            // `a⁺ = a + K·v` with `v = y − a₀` expands at the first coordinate to
+            // `a₀ + K₀·y − K₀·a₀`, and in the saturated regime `K₀ = P₀₀/F → 1`
+            // that is `a₀ − a₀ + y`: the value is right and the interval width is
+            // not. Factored, it is the same operator the covariance jets use:
+            //
+            //     a⁺ = (I − K e₀ᵀ)·a + K·y = A·a + K·y
+            //
+            // and `A[0][0] = R/F` is exact (see `ball_update_operator`), so no
+            // subtraction of near-equal quantities occurs.
+            //
+            // Measured: after `A[0][0]` fixed the covariance jets, the divergence
+            // moved to `sum_v2_over_f` -- ORDER ZERO -- at node 129, whose
+            // contribution `t0 = v²·inv_f` had `hi = inf` while `inv_f ≤ w` is
+            // bounded by the `F̃ ≥ R` intersection. The unbounded factor was `v`,
+            // hence `a`. This is that same defect in the one recursion the
+            // operator rewrite had not reached.
+            //
+            // The jets follow from `a⁺⁽ᵏ⁾ = Σ_j C(k,j)·A⁽ʲ⁾a⁽ᵏ⁻ʲ⁾ + K⁽ᵏ⁾y` with
+            // `A⁽ʲ⁾ = −K⁽ʲ⁾e₀ᵀ` for `j ≥ 1` and `v⁽ᵐ⁾ = −a⁽ᵐ⁾₀`:
+            //
+            //     a⁺′   = A a′   + K′v
+            //     a⁺″   = A a″   + 2K′v′  + K″v
+            //     a⁺‴   = A a‴   + 3K′v″  + 3K″v′ + K‴v
+            let a_contracted = ball_mat_vec(&a_operator, &a, order);
+            let a_d1_contracted = ball_mat_vec(&a_operator, &a_d1, order);
+            let a_d2_contracted = ball_mat_vec(&a_operator, &a_d2, order);
+            let a_d3_contracted = ball_mat_vec(&a_operator, &a_d3, order);
+            let y_node = Ball::exact(nodes[t].y);
             for i in 0..order {
-                a[i] = a[i].add(gain[i].mul(v));
-                a_d1[i] = a_old_d1[i]
-                    .add(gain_d1[i].mul(v))
-                    .add(gain[i].mul(v_d1));
-                a_d2[i] = a_old_d2[i]
-                    .add(gain_d2[i].mul(v))
+                a[i] = a_contracted[i].add(gain[i].mul(y_node));
+                a_d1[i] = a_d1_contracted[i].add(gain_d1[i].mul(v));
+                a_d2[i] = a_d2_contracted[i]
                     .add(gain_d1[i].mul(v_d1).scale(2.0))
-                    .add(gain[i].mul(v_d2));
-                a_d3[i] = a_old_d3[i]
-                    .add(gain_d3[i].mul(v))
-                    .add(gain_d2[i].mul(v_d1).scale(3.0))
+                    .add(gain_d2[i].mul(v));
+                a_d3[i] = a_d3_contracted[i]
                     .add(gain_d1[i].mul(v_d2).scale(3.0))
-                    .add(gain[i].mul(v_d3));
+                    .add(gain_d2[i].mul(v_d1).scale(3.0))
+                    .add(gain_d3[i].mul(v));
             }
 
             p_star = p_new;
