@@ -2739,6 +2739,31 @@ struct CertifiedCriterionJet {
     third_source: BoundSource,
 }
 
+impl CertifiedCriterionJet {
+    /// Which bounds anchored this endpoint, when either is not the exact jet.
+    ///
+    /// `curvature_source` / `third_source` exist so a certificate that fell back
+    /// to a closed-form global constant NAMES ITSELF instead of quietly getting
+    /// wider. A field nobody reads cannot do that: written-and-never-read IS the
+    /// silent degradation these fields were added to prevent, and it is also a
+    /// hard `-D dead-code` failure in any build of this crate as a plain library
+    /// rather than a test target -- which `-p gam-solve --lib` never exercises,
+    /// so it broke every integration binary while the usual measurement stayed
+    /// green.
+    ///
+    /// `None` on the common path, so a reader only hears about a weakened anchor.
+    fn weakened_anchor(self) -> Option<(BoundSource, BoundSource)> {
+        if matches!(
+            (self.curvature_source, self.third_source),
+            (BoundSource::EndpointJet, BoundSource::EndpointJet)
+        ) {
+            None
+        } else {
+            Some((self.curvature_source, self.third_source))
+        }
+    }
+}
+
 /// Which bound anchored a derivative at this endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BoundSource {
@@ -2904,25 +2929,6 @@ fn certified_concentrated_criterion_jet(
         third,
         third_derivative_global_bound(proper_modes, residual_dof),
     );
-    // Announce a weakened anchor where a reader meets it.
-    //
-    // `curvature_source` / `third_source` exist so a certificate that fell back
-    // to a closed-form global constant names itself rather than quietly getting
-    // wider. That is only true if something READS them: written-and-never-read
-    // is exactly the silent degradation the fields were added to prevent, and
-    // it also fails `-D dead-code` in a non-test lib build, where the only
-    // reader was a test.
-    if !matches!(
-        (curvature_source, third_source),
-        (BoundSource::EndpointJet, BoundSource::EndpointJet)
-    ) {
-        log::debug!(
-            "spline scan certified jet at log_lambda {log_lambda}: curvature anchored by \
-             {curvature_source:?}, third order by {third_source:?}. A global-bound anchor \
-             keeps the search CERTIFIED and widens its tail cells -- half rate in place of \
-             cube rate -- so this costs cells, never soundness."
-        );
-    }
     Ok(CertifiedCriterionJet {
         jet: ScoreJet {
             value: value.value,
@@ -3027,6 +3033,24 @@ fn concentrated_criterion_enclosure(
         .max(right_certificate.third.lo.abs())
         .max(right_certificate.third.hi.abs())
         .min(third_bound);
+    // Announce a weakened anchor at the point it anchors.
+    //
+    // Both endpoints feed this radius, so either one falling back to a global
+    // constant is what widens the cell. Reported here rather than at
+    // construction so the message names the consequence and not just the fact.
+    for (side, weakened) in [
+        ("left", left_certificate.weakened_anchor()),
+        ("right", right_certificate.weakened_anchor()),
+    ] {
+        if let Some((curvature_source, third_source)) = weakened {
+            log::debug!(
+                "spline scan enclosure: {side} endpoint curvature anchored by \
+                 {curvature_source:?}, third order by {third_source:?}. A global-bound \
+                 anchor keeps the search CERTIFIED and widens its tail cells -- half rate \
+                 in place of cube rate -- so it costs cells, never soundness."
+            );
+        }
+    }
     let width2 = width.square();
     let width3 = width2.mul(width);
     let derivative_radius = Ball::exact(curvature_endpoint_abs)
