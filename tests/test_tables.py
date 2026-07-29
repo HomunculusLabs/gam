@@ -12,13 +12,37 @@ class _Pytest(Protocol):
 
 pytest = cast(_Pytest, import_module("pytest"))
 
-from gamfit._tables import PredictionResult, normalize_table, restore_output_table
+from gamfit._tables import (
+    CATEGORICAL_CELL_SENTINEL,
+    PredictionResult,
+    normalize_table,
+    restore_output_table,
+)
+
+
+def _rendered(table: Any) -> list[list[str]]:
+    """Materialize an encoded table's rendered rows.
+
+    `normalize_table` returns a native `_EncodedTable`, which is `frozen` and
+    defines no `__eq__`, so comparing two of them compares object IDENTITY.
+    Content comparisons must go through the rendered rows.
+    """
+    return [list(table[index]) for index in range(len(table))]
 
 
 def test_normalize_table_dict_of_numpy_float64_arrays_renders_native_numbers() -> None:
-    # Regression for #387: a dict of numpy float64 arrays must stringify to
-    # bare numeric text ("-3.0"), not the NumPy 2.x scalar repr
-    # ("np.float64(-3.0)") which the Rust core misreads as a categorical level.
+    # Regression for #387: a numpy scalar must never reach the Rust core
+    # carrying its NumPy 2.x repr ("np.float64(-3.0)"), which the core would
+    # misread as a categorical level.
+    #
+    # The representation this test was originally written against is gone.
+    # `normalize_table` no longer returns row-major Python strings: numeric
+    # columns travel as ONE typed f64 block into `encoded_table_from_columns`
+    # and are never stringified on the way in, so #387's hazard is now
+    # structurally impossible for them. `_EncodedTable.__getitem__` renders a
+    # row lazily, for display. What survives — and is asserted here — is the
+    # property itself: no rendered cell carries a NumPy repr, and a numpy
+    # column encodes identically to the equivalent Python-list column.
     np = pytest.importorskip("numpy")
 
     x = np.array([-3.0, 0.5, 2.25], dtype=np.float64)
@@ -35,16 +59,19 @@ def test_normalize_table_dict_of_numpy_float64_arrays_renders_native_numbers() -
             float(cell)  # must round-trip as a real number
 
     # Equivalent dict of Python-float lists must produce identical output.
+    # This must compare CONTENT: `rows_np == rows_list` compared identity and
+    # was therefore False for any two separately-built tables — an assertion
+    # that could never hold, and so could never have caught a real divergence.
     headers_list, rows_list, _ = normalize_table(
         {"x": x.tolist(), "y": y.tolist()}
     )
     assert headers_np == headers_list
-    assert rows_np == rows_list
+    assert _rendered(rows_np) == _rendered(rows_list)
 
 
 def test_normalize_table_numpy_float16_and_int_scalars_render_natively() -> None:
     # float16 also subclasses float with a type-named repr in NumPy 2.x;
-    # numpy integers must render as bare integers, not "np.int64(3)".
+    # numpy integers must not arrive as "np.int64(3)".
     np = pytest.importorskip("numpy")
 
     _, rows, _ = normalize_table(
@@ -56,9 +83,48 @@ def test_normalize_table_numpy_float16_and_int_scalars_render_natively() -> None
 
     flat = [cell for row in rows for cell in row]
     assert all("np." not in cell for cell in flat)
-    assert {rows[0][1], rows[1][1]} == {"3", "-7"}
     for cell in flat:
         float(cell)
+
+    # A numpy INTEGER column is a numeric covariate, not a factor: it carries no
+    # categorical sentinel, and its VALUE survives exactly.
+    #
+    # It renders "3.0", not "3". Every non-categorical column is held as f64 and
+    # rendered with Rust's `{:?}`, so an integral value shows a trailing `.0`.
+    # The old `{rows[0][1], rows[1][1]} == {"3", "-7"}` pinned the spelling of a
+    # row-major Python string table that no longer exists; against an f64 column
+    # it is unsatisfiable no matter how exact the value is. The property worth
+    # holding is exactness, and it is asserted numerically.
+    assert all(not cell.startswith(CATEGORICAL_CELL_SENTINEL) for cell in flat)
+    assert [float(rows[0][1]), float(rows[1][1])] == [3.0, -7.0]
+
+
+def test_numpy_scalars_in_a_categorical_column_carry_no_numpy_repr() -> None:
+    # #387's hazard has ONE surviving path, and this covers it. Numeric columns
+    # no longer stringify at all, but `stringify_cell` is still the renderer for
+    # genuinely categorical columns — and a column that mixes a string with
+    # numerics ("object" dtype in pandas) sends numpy scalars straight through
+    # it. That is where "np.int64(1)" could still reach the Rust core as a
+    # level name, so that is where the guard belongs.
+    np = pytest.importorskip("numpy")
+
+    headers, rows, _ = normalize_table(
+        {
+            "g": ["a", np.int64(1), np.float64(2.5)],
+            "x": np.array([0.0, 1.0, 2.0], dtype=np.float64),
+        }
+    )
+
+    g_index = headers.index("g")
+    cells = [row[g_index] for row in rows]
+    assert all(cell.startswith(CATEGORICAL_CELL_SENTINEL) for cell in cells), (
+        f"a string+numeric column is categorical; cells were {cells!r}"
+    )
+    levels = [cell[len(CATEGORICAL_CELL_SENTINEL):] for cell in cells]
+    assert levels == ["a", "1", "2.5"], (
+        f"numpy scalars in a categorical column must render as bare values, "
+        f"never a NumPy repr: {levels!r}"
+    )
 
 
 def test_normalize_table_rejects_zero_row_mapping() -> None:
