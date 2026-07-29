@@ -854,3 +854,179 @@ fn binomial_logit_inner_solve_refusal_is_carried_state_1575() {
          state the inner solve carries between calls, not by the point.\n{summary}"
     );
 }
+
+/// #2519/#2614: WHICH carried datum makes the stateful inner solve refuse.
+///
+/// Run 30455350636 settled that the trial points are not hard: at five rho
+/// displacements from 1e-1 to 1e-12 the STATELESS inner solve converged 5/5, in
+/// 5 iterations each, to an inner gradient of ~1e-14, while the ordinary
+/// stateful path refused 3 of the same 5 with `+inf`. Two things differ between
+/// those calls — the warm-start beta the inner solve begins from, and the
+/// Levenberg-Marquardt damping seeded from the previous solve's
+/// `final_lm_lambda` (the stateless solve cold-started at 4.115e-9 every time,
+/// while the stateful one carried 1.111e-7 and 1.235e-8 forward).
+///
+/// This walks the identical ladder on three independent states — untouched, LM
+/// hint cleared before every evaluation, warm start disabled — and counts the
+/// refusals in each. Whichever arm goes to 0/5 names the datum.
+#[test]
+fn binomial_logit_inner_refusal_names_its_carried_datum_1575() {
+    fn ladder_refusals(
+        y: &Array1<f64>,
+        w: &Array1<f64>,
+        offset: &Array1<f64>,
+        x_fit: DesignMatrix,
+        canonical: Vec<gam_terms::construction::CanonicalPenalty>,
+        dims: Vec<usize>,
+        p: usize,
+        cfg: &RemlConfig,
+        rho0: &Array1<f64>,
+        clear_lm_hint: bool,
+        disable_warm_start: bool,
+    ) -> (usize, String) {
+        let mut state = RemlState::newwith_offset(
+            y.view(),
+            x_fit,
+            w.view(),
+            offset.view(),
+            canonical,
+            p,
+            cfg,
+            Some(dims),
+            None,
+            None,
+        )
+        .expect("the outer REML state builds on the #1575 fixture");
+        state.set_link_states(
+            cfg.link_kind.mixture_state().cloned(),
+            cfg.link_kind.sas_state().copied(),
+        );
+        if disable_warm_start {
+            state
+                .warm_start_enabled
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        let seed = state
+            .compute_outer_eval_with_order(
+                rho0,
+                crate::rho_optimizer::OuterEvalOrder::ValueAndGradient,
+            )
+            .expect("the seed evaluates");
+        let g = seed.gradient.clone();
+        let gnorm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let d = g.mapv(|v| -v / gnorm);
+        let mut refusals = 0usize;
+        let mut detail = String::new();
+        for alpha in [1.0e-1_f64, 1.0e-4, 1.0e-7, 1.0e-9, 1.0e-12] {
+            if clear_lm_hint {
+                state
+                    .last_pirls_lm_lambda
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+            let trial = rho0 + &d.mapv(|v| v * alpha);
+            let text = match state
+                .compute_outer_eval_with_order(&trial, crate::rho_optimizer::OuterEvalOrder::Value)
+            {
+                Ok(eval) if eval.cost.is_finite() => format!("{:.12e}", eval.cost),
+                Ok(_) => {
+                    refusals += 1;
+                    "INFEASIBLE".to_string()
+                }
+                Err(err) => {
+                    refusals += 1;
+                    format!("ERR {err}")
+                }
+            };
+            detail.push_str(&format!("\n      alpha={alpha:.0e}  {text}"));
+        }
+        (refusals, detail)
+    }
+
+    let (x, y, s_list) = build_fixture();
+    let weights = Array1::<f64>::ones(N);
+    let offset = Array1::<f64>::zeros(N);
+    let p = x.ncols();
+    let specs: Vec<PenaltySpec> = s_list.iter().map(PenaltySpec::from_blockwise_ref).collect();
+    let ext = ExternalOptimOptions {
+        family: LikelihoodSpec::new(
+            ResponseFamily::Binomial,
+            InverseLink::Standard(StandardLink::Logit),
+        ),
+        latent_cloglog: None,
+        mixture_link: None,
+        optimize_mixture: false,
+        sas_link: None,
+        optimize_sas: false,
+        compute_inference: true,
+        skip_rho_posterior_inference: false,
+        max_iter: 300,
+        tol: 1e-7,
+        nullspace_dims: vec![2; N_SMOOTH],
+        linear_constraints: None,
+        firth_bias_reduction: Some(false),
+        penalty_shrinkage_floor: None,
+        rho_prior: Default::default(),
+        kronecker_penalty_system: None,
+        kronecker_factored: None,
+        persist_warm_start_disk: false,
+    };
+    let cfg = super::external_options::resolved_external_config(&ext)
+        .expect("the binomial/logit external config resolves")
+        .0;
+    let x_dm: DesignMatrix = x.clone().into();
+    let (canonical, dims) = gam_terms::construction::canonicalize_penalty_specs(
+        &specs,
+        &ext.nullspace_dims,
+        p,
+        "binomial_logit_inner_refusal_names_its_carried_datum_1575",
+    )
+    .expect("the three P-spline penalties canonicalize");
+    let conditioning = ParametricColumnConditioning::infer_from_penalty_specs(&x_dm, &specs);
+    let rho0 = Array1::from(vec![
+        -0.7060116450326054,
+        -0.11090597501554852,
+        0.6994622375684085,
+    ]);
+
+    let arms = [
+        ("as-is", false, false),
+        ("lm-hint cleared", true, false),
+        ("warm start off", false, true),
+        ("both removed", true, true),
+    ];
+    let mut report = String::new();
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for (label, clear_lm_hint, disable_warm_start) in arms {
+        let (refusals, detail) = ladder_refusals(
+            &y,
+            &weights,
+            &offset,
+            conditioning.apply_to_design(&x_dm),
+            canonical.clone(),
+            dims.clone(),
+            p,
+            &cfg,
+            &rho0,
+            clear_lm_hint,
+            disable_warm_start,
+        );
+        counts.push((label, refusals));
+        report.push_str(&format!("\n  {label:<16} refusals={refusals}/5{detail}"));
+    }
+
+    let summary =
+        format!("#1575/#2519 which carried datum makes the inner solve refuse{report}");
+    eprintln!("{summary}");
+
+    let baseline = counts[0].1;
+    assert!(
+        baseline > 0,
+        "the untouched arm no longer reproduces the refusals this probe exists \
+         to attribute; re-measure before reading the other arms.\n{summary}"
+    );
+    assert!(
+        counts.iter().any(|(_, refusals)| *refusals == 0),
+        "no arm removes the refusals, so neither the LM damping hint nor the \
+         warm-start beta accounts for them on its own.\n{summary}"
+    );
+}
