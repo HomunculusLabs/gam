@@ -10,7 +10,12 @@ the acceptance conjunction -- is computed by
 
 The `null` arm replaces the real activations with a Gaussian matched to their
 per-coordinate mean and standard deviation and pushes it through the SAME
-encoder, so the census's accept rate has a matched false-positive reference.
+encoder. The `spike` arm is the other half of the calibration: it PLANTS a
+circle of known radius in the plane of two of the SAE's own decoder directions,
+on a subset of real rows, and re-encodes -- so the census's power is measured on
+real activations through Google's real encoder rather than asserted. Both reuse a
+previous dump's activations via `--from`, so a power curve costs one encoder pass
+per radius and no model forward at all.
 
     python gemma_scope_dump.py <outdir> [--layer 17] [--width 16k] [--l0 medium]
                                [--rows 100000] [--null]
@@ -45,6 +50,13 @@ def main() -> None:
     ap.add_argument("--rows", type=int, default=100_000)
     ap.add_argument("--seq", type=int, default=256)
     ap.add_argument("--null", action="store_true")
+    ap.add_argument("--from", dest="reuse", default=None,
+                    help="reuse x.f32/tokens.i32 from an earlier dump dir")
+    ap.add_argument("--spike", type=float, default=0.0,
+                    help="planted circle radius, in units of the activations' "
+                         "centred per-coordinate sd")
+    ap.add_argument("--spike-rows", type=int, default=3000)
+    ap.add_argument("--spike-seed", type=int, default=2502)
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -57,6 +69,17 @@ def main() -> None:
     print("SAE tensors:", {k: tuple(v.shape) for k, v in params.items()}, flush=True)
 
     dev = "cuda"
+    if args.reuse:
+        meta0 = json.load(open(f"{args.reuse}/meta.json"))
+        n0, p0 = meta0["n"], meta0["p"]
+        x = torch.from_numpy(
+            np.fromfile(f"{args.reuse}/x.f32", dtype=np.float32).reshape(n0, p0)
+        )
+        token_ids = np.fromfile(f"{args.reuse}/tokens.i32", dtype=np.int32)
+        print("reused activations", tuple(x.shape), "from", args.reuse, flush=True)
+        finish(args, cfg, sae_dir, params, x, token_ids, tok=None)
+        return
+
     tok = AutoTokenizer.from_pretrained(MODEL_ID)
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID, torch_dtype=torch.bfloat16, device_map=dev
@@ -99,6 +122,12 @@ def main() -> None:
     n, p = x.shape
     print("activations", x.shape, flush=True)
 
+    finish(args, cfg, sae_dir, params, x, token_ids, tok)
+
+
+def finish(args, cfg, sae_dir, params, x, token_ids, tok):
+    dev = "cuda"
+    n, p = x.shape
     if args.null:
         g = torch.Generator().manual_seed(20502)
         x = torch.randn(x.shape, generator=g) * x.std(0, keepdim=True) + x.mean(
@@ -116,6 +145,31 @@ def main() -> None:
     if w_dec.shape[1] != p:
         w_dec = w_dec.T.contiguous()
     k = w_dec.shape[0]
+
+    if args.spike > 0.0:
+        # Plant a circle in the plane of two of the SAE's OWN decoder directions,
+        # which is the premise the invisibility theorem is about: a dictionary that
+        # already owns u and v reconstructs a ring in span(u, v) exactly, leaving no
+        # residual to drive a birth. Radius is quoted against the activations'
+        # centred per-coordinate sd so it is comparable across layers.
+        g = torch.Generator().manual_seed(args.spike_seed)
+        pick = torch.randperm(k, generator=g)[:2]
+        u = w_dec[pick[0]].cpu().double()
+        v = w_dec[pick[1]].cpu().double()
+        u = u / u.norm()
+        v = v - (v @ u) * u
+        v = v / v.norm()
+        rows = torch.randperm(n, generator=g)[: args.spike_rows]
+        theta = torch.rand(len(rows), generator=g, dtype=torch.float64) * 2 * np.pi
+        scale = args.spike * float((x - x.mean(0, keepdim=True)).std())
+        add = scale * (torch.cos(theta)[:, None] * u + torch.sin(theta)[:, None] * v)
+        x = x.clone()
+        x[rows] = (x[rows].double() + add).float()
+        print(
+            f"SPIKE: radius {args.spike}sd = {scale:.2f} on {len(rows)} rows, "
+            f"plane of decoder atoms {int(pick[0])},{int(pick[1])}",
+            flush=True,
+        )
 
     # Google's JumpReLU encoder, unchanged.
     rows_idx, rows_val, counts = [], [], []
@@ -140,10 +194,11 @@ def main() -> None:
     w_dec.cpu().numpy().astype(np.float32).tofile(f"{d}/w.f32")
     b_dec.cpu().numpy().astype(np.float32).tofile(f"{d}/b.f32")
     token_ids.tofile(f"{d}/tokens.i32")
-    json.dump(
-        {int(t): tok.decode([int(t)]) for t in np.unique(token_ids)},
-        open(f"{d}/vocab.json", "w"),
-    )
+    if tok is not None:
+        json.dump(
+            {int(t): tok.decode([int(t)]) for t in np.unique(token_ids)},
+            open(f"{d}/vocab.json", "w"),
+        )
     indptr.tofile(f"{d}/indptr.i64")
     idx.tofile(f"{d}/idx.i32")
     val.tofile(f"{d}/val.f32")
@@ -155,7 +210,9 @@ def main() -> None:
             "nnz": int(len(idx)),
             "sae": f"{SAE_REPO}/{sae_dir}",
             "model": MODEL_ID,
-            "arm": "null" if args.null else "real",
+            "arm": "null" if args.null else ("spike" if args.spike > 0 else "real"),
+            "spike_radius_sd": args.spike,
+            "spike_rows": args.spike_rows if args.spike > 0 else 0,
             "sae_config": cfg,
         },
         open(f"{d}/meta.json", "w"),

@@ -62,6 +62,18 @@ for L in $LAYERS; do
   echo "LAYER $L DONE"
 done
 
+# Power: plant a circle of known radius in the plane of two of the SAE's own
+# decoder atoms, on real rows, and re-encode with the real encoder. A census with
+# a null and no power curve reports how often it cries wolf and never how often it
+# would have seen the wolf.
+for R in ${SPIKES:-0.15 0.3 0.6 1.2}; do
+  D=$HOME/spike_$R
+  [ -f "$D/meta.json" ] || $PY "$DUMP" "$D" --layer "$FLAGSHIP" \
+    --from "$HOME/gs2L$FLAGSHIP" --spike "$R" 2>&1 | tee "$OUT/spike_$R.dump.log"
+  $BIN "$D" "$ATOMS" "$MINCO" "$PARSE" 0 -0.85 "$DRAWS" "$ALPHA" "$OUT/spike_$R.json"
+  echo "SPIKE $R DONE"
+done
+
 cp "$HOME/gs2L$FLAGSHIP/vocab.json" "$OUT/vocab.json"
 cp "$HOME/gs2L$FLAGSHIP/tokens.i32" "$OUT/tokens.i32"
 $PY "$HOME/gam/experiments/issue-2502/census_figs.py" "$OUT" "$OUT" "$OUT" || true
