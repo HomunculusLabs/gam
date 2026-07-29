@@ -78,10 +78,24 @@ fn seam_identity_majorizer_plus_remainder_is_the_exact_curvature() {
                     let reconstructed = curvature.psd_majorizer_hess()
                         + curvature.negative_hessian_remainder();
                     let exact = exact_curvature(strength, logit, threshold, inv_tau);
-                    assert_eq!(
-                        reconstructed, exact,
+                    // A few ULPs of the majorizer's own magnitude, not bit
+                    // equality: the remainder is FORMED as `exact − majorized`
+                    // and then added back, and `m + (e − m)` is not an identity
+                    // in IEEE-754 when the two differ in exponent. What the
+                    // contract needs is that `A = B + ΔC` reconstructs the
+                    // curvature to round-off, which is what this measures. The
+                    // independent `exact_curvature` above is also a DIFFERENT
+                    // expression than the one under test, so this compares two
+                    // evaluation orders rather than a value with itself.
+                    let scale = exact
+                        .abs()
+                        .max(curvature.psd_majorizer_hess().abs())
+                        .max(f64::MIN_POSITIVE);
+                    assert!(
+                        (reconstructed - exact).abs() <= 8.0 * f64::EPSILON * scale,
                         "seam identity broken at strength {strength}, logit {logit}, \
-                         threshold {threshold}, inv_tau {inv_tau}"
+                         threshold {threshold}, inv_tau {inv_tau}: \
+                         {reconstructed} vs {exact}"
                     );
                 }
             }
@@ -137,7 +151,12 @@ fn the_smoothing_deviation_stays_under_the_deflation_floor() {
                 let curvature =
                     ThresholdGateLogitCurvature::eval(strength, logit, 0.0, inv_tau);
                 let exact = exact_curvature(strength, logit, 0.0, inv_tau);
-                let magnitude = (exact / (1.0 - 2.0 * stable_logistic(logit * inv_tau))).abs();
+                // The clamp's prefactor, computed directly. Recovering it by
+                // dividing `exact` by `1 − 2a` is 0/0 at the seam (`logit == 0`,
+                // where `a = ½`) — exactly the point this test most wants to
+                // cover.
+                let a = stable_logistic(logit * inv_tau);
+                let magnitude = strength * a * (1.0 - a) * inv_tau * inv_tau;
                 let hard = if exact > 0.0 { exact } else { 0.0 };
                 let deviation = (curvature.psd_majorizer_hess() - hard).abs();
                 assert!(
