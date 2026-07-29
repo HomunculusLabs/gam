@@ -22,7 +22,26 @@
 //! <dir>/val.f32       nnz  coefficient per stored code
 //! ```
 //!
-//! Usage: `curl_census_foreign <dir> <max_atoms> <min_cooccur> <subsample_rows> <out.json>`
+//! Usage:
+//! `curl_census_foreign <dir> <max_atoms> <min_cooccur> <subsample_rows> <permute_seed>
+//!                      <coalesce_cos> <out.json>`
+//!
+//! `coalesce_cos` is the decoder cosine at or below which two rectified halves
+//! merge into one signed direction (`-0.85` is the engine's own default). Passing
+//! a value below `-1` disables coalescing entirely — the A/B control for the
+//! launch-blocker claim, since that is precisely the screen a transcription
+//! ships.
+//!
+//! `permute_seed = 0` censuses the dictionary as it is. Any other value runs the
+//! CALIBRATION NULL: each atom's coefficient column is independently permuted
+//! across rows, so every atom keeps its exact marginal amplitude law and firing
+//! rate while the JOINT law across atoms is destroyed. That is the null the
+//! witness statistics are about — κ = 1 is a claim that two coordinates are
+//! jointly confined to a shell, which independent marginals cannot produce — and
+//! it is the null a Gaussian-data arm cannot supply, because feeding a dictionary
+//! data it was not trained on moves σ and with it the rate–distortion screen.
+//! σ is measured on the UNPERMUTED codes and held fixed, so the null differs from
+//! the real arm in the joint law and in nothing else.
 //!
 //! Alongside `<out.json>` the binary writes `<out.json>.planes.json`: for every
 //! ACCEPTED pair, the ambient row indices and the in-plane parse `(α, β)`. That is
@@ -102,9 +121,10 @@ fn meta_usize(meta: &serde_json::Value, key: &str) -> Result<usize, String> {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 6 {
+    if args.len() != 8 {
         return Err(format!(
-            "usage: {} <dir> <max_atoms> <min_cooccur> <subsample_rows> <out.json>",
+            "usage: {} <dir> <max_atoms> <min_cooccur> <subsample_rows> <permute_seed> \
+             <coalesce_cos> <out.json>",
             args.first().map(String::as_str).unwrap_or("curl_census_foreign")
         ));
     }
@@ -118,7 +138,13 @@ fn run() -> Result<(), String> {
     let subsample_rows: usize = args[4]
         .parse()
         .map_err(|e| format!("subsample_rows must be a positive integer: {e}"))?;
-    let out_path = Path::new(&args[5]);
+    let permute_seed: u64 = args[5]
+        .parse()
+        .map_err(|e| format!("permute_seed must be a non-negative integer: {e}"))?;
+    let coalesce_cos: f64 = args[6]
+        .parse()
+        .map_err(|e| format!("coalesce_cos must be a float: {e}"))?;
+    let out_path = Path::new(&args[7]);
 
     let meta_text = fs::read_to_string(dir.join("meta.json"))
         .map_err(|e| format!("read meta.json: {e}"))?;
@@ -223,6 +249,28 @@ fn run() -> Result<(), String> {
         x_var.sqrt()
     );
 
+    if permute_seed != 0 {
+        // Fisher–Yates per atom with a splitmix64 stream, so the null is exactly
+        // reproducible from `permute_seed` and independent across atoms.
+        let mut state = permute_seed;
+        let mut next = move || {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        for slot in 0..kept.len() {
+            for i in (1..n).rev() {
+                let j = (next() % (i as u64 + 1)) as usize;
+                let tmp = coefs[[slot, i]];
+                coefs[[slot, i]] = coefs[[slot, j]];
+                coefs[[slot, j]] = tmp;
+            }
+        }
+        eprintln!("[census] CALIBRATION NULL: coefficient columns permuted (seed {permute_seed})");
+    }
+
     // The parse must be taken on the ambient rows the atoms live in, so every
     // kept atom's image is the rank-one `coef[r] · w_a` its own decoder writes.
     let dirs: Vec<Array1<f64>> = kept
@@ -246,7 +294,7 @@ fn run() -> Result<(), String> {
     let cfg = CurlCensusConfig {
         harmonics: 1,
         // The engine's own defaults for the antipodal merge (see `CurlConfig`).
-        coalesce_cos_threshold: -0.85,
+        coalesce_cos_threshold: coalesce_cos,
         coalesce_max_overlap: 0.25,
         min_cooccurrence: min_cooccur,
         subsample_rows,
@@ -325,6 +373,8 @@ fn run() -> Result<(), String> {
         "n_coalesced": census.n_coalesced,
         "n_pairs": census.pairs.len(),
         "n_accepted": census.accepted(),
+        "permute_seed": permute_seed,
+        "coalesce_cos_threshold": coalesce_cos,
         "pairs": rows,
     });
     let mut file =
