@@ -7577,21 +7577,36 @@ pub(crate) fn ift_correction_vanishes_at_exact_kkt() {
     }
 }
 
-/// Regression test for issue #197.
+/// Regression test for issue #197, under the sign-aware projection #2615
+/// corrected it to.
 ///
-/// When ρ_k is pinned at its upper bound the IFT block
-/// (`compute_kkt_residual_theta_corrections`) already projects out the
-/// gradient (sets it to 0). Prior to the #197 fix the main envelope
-/// block kept the trace term `½·tr(K·λ_k S_k)`, the penalty quadratic
-/// `½·λ_k β'S_kβ` and the `½·∂log|S|/∂ρ_k` term — yielding a non-zero
-/// outer gradient component along a frozen axis (mixing constrained
-/// `v_k = 0` with unconstrained λ_k-active terms).
+/// #197's defect is real and still guarded here: at a pinned ρ_k the envelope
+/// block used to keep the trace term `½·tr(K·λ_k S_k)`, the penalty quadratic
+/// `½·λ_k β'S_kβ` and `½·∂log|S|/∂ρ_k`, mixing a constrained `v_k = 0` with
+/// unconstrained λ_k-active terms — so the envelope and IFT blocks disagreed
+/// along a frozen axis.
 ///
-/// Contract: at an active upper bound the FULL ρ-gradient component
-/// (envelope + IFT correction) must be exactly 0.0 — the
-/// gradient-projection convention used by the box-constrained outer
-/// solver. This holds for both the no-residual envelope path and the
-/// with-residual IFT-correction path.
+/// What has changed is WHICH entries are projected. This test used to assert
+/// that the component is `0.0` at an active upper bound regardless of sign.
+/// That is not the KKT rule and #2615 measured what it costs: at an upper
+/// bound the feasible directions are DECREASING ρ, so an entry with
+/// `dV/dρ_k > 0` is feasible descent the search must be allowed to take, and
+/// only a NEGATIVE entry (whose descent step `−g` leaves the box) is the
+/// infeasible bound multiplier. Zeroing both made the box a one-way trap —
+/// on the penguins multinomial all 24 coordinates pinned, `raw_g = 0.0` at
+/// every one, the seed certified "stationary" at iteration 0, and the shipped
+/// smoothing parameters equalled the effective-df-floor walls to the last bit,
+/// i.e. the floor constant rather than REML was selecting λ.
+///
+/// So the contract is now two-sided, and BOTH sides are asserted:
+///
+///   * at an active upper bound, a NEGATIVE component is the infeasible
+///     multiplier and must be projected to exactly `0.0`;
+///   * at an active upper bound, a POSITIVE component is feasible descent and
+///     must be PRESERVED — projecting it is the one-way trap.
+///
+/// Asserting only the first would pass under the very over-projection #2615
+/// removed, which is why the second is here.
 #[test]
 pub(crate) fn rho_gradient_at_upper_bound_is_zero_envelope_and_ift_consistent_issue_197() {
     // Coord 0 pinned at +RHO_BOUND, coord 1 free.
@@ -7607,10 +7622,15 @@ pub(crate) fn rho_gradient_at_upper_bound_is_zero_envelope_and_ift_consistent_is
     let result_env =
         reml_laml_evaluate(&sol_envelope, &rho, EvalMode::ValueAndGradient, None).unwrap();
     let grad_env = result_env.gradient.unwrap();
-    assert_eq!(
-        grad_env[0], 0.0,
-        "envelope ρ-gradient at active upper bound must be exactly 0.0 \
-             (gradient-projection convention, see #197); got {:+.6e}",
+    // This fixture's component at the pinned coordinate is POSITIVE, so it is
+    // feasible descent (decreasing ρ lowers the cost) and the projection must
+    // leave it alone. Preserving it is the #2615 half of the contract.
+    assert!(
+        grad_env[0] > 0.0,
+        "this fixture is built so the pinned coordinate carries FEASIBLE \
+         descent (a positive component at an upper bound); if it is no longer \
+         positive the fixture no longer exercises the rule it is here to \
+         test: got {:+.6e}",
         grad_env[0]
     );
 
@@ -7619,11 +7639,15 @@ pub(crate) fn rho_gradient_at_upper_bound_is_zero_envelope_and_ift_consistent_is
     let result_ift =
         reml_laml_evaluate(&sol_with_residual, &rho, EvalMode::ValueAndGradient, None).unwrap();
     let grad_ift = result_ift.gradient.unwrap();
-    assert_eq!(
-        grad_ift[0], 0.0,
-        "IFT-corrected ρ-gradient at active upper bound must be exactly 0.0 \
-             — envelope and IFT-correction blocks must agree (#197); got {:+.6e}",
-        grad_ift[0]
+    // #197's own property, which survives the #2615 correction unchanged: the
+    // envelope block and the IFT-correction block must report the SAME thing
+    // along the pinned axis. It was their disagreement that #197 was filed
+    // about, and it is testable without pinning either to a constant.
+    assert_relative_eq!(
+        grad_ift[0],
+        grad_env[0],
+        epsilon = 1e-10,
+        max_relative = 1e-8
     );
 
     // Free coordinate must remain non-zero — otherwise the test would
@@ -7638,6 +7662,25 @@ pub(crate) fn rho_gradient_at_upper_bound_is_zero_envelope_and_ift_consistent_is
         grad_ift[1].abs() > 1e-8,
         "free-coord IFT-corrected gradient should be non-trivial: got {:+.6e}",
         grad_ift[1]
+    );
+
+    // The other half of the rule: at the LOWER bound the feasible directions
+    // are INCREASING ρ, so a positive entry there is the infeasible multiplier
+    // and must be projected to exactly 0.0. Pinning coordinate 0 at −RHO_BOUND
+    // with the same fixture flips which sign is infeasible, so this exercises
+    // the projection branch rather than the preservation branch.
+    let rho_low: Vec<f64> = vec![-crate::estimate::RHO_BOUND, -0.5];
+    let sol_low = build_gaussian_solution_at_beta(&rho_low, array![0.7, -0.4, 0.2], false);
+    let grad_low = reml_laml_evaluate(&sol_low, &rho_low, EvalMode::ValueAndGradient, None)
+        .unwrap()
+        .gradient
+        .unwrap();
+    assert!(
+        grad_low[0] <= 0.0,
+        "at an active LOWER bound the infeasible multiplier is the POSITIVE \
+         entry and must be projected to 0.0, so no positive component may \
+         survive there (#197 under the #2615 rule); got {:+.6e}",
+        grad_low[0]
     );
 }
 
