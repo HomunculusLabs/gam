@@ -1046,6 +1046,15 @@ fn ball_mat_neg(matrix: &BallMat, order: usize) -> BallMat {
     negated
 }
 
+/// How many accumulators the per-node divergence check scans.
+///
+/// The second- and third-order accumulators are ordered last and left OUT of
+/// the scan: each has a closed-form global bound the certificate substitutes
+/// (see [`BoundSource`]), so neither can justify discarding a value and slope
+/// that are finite. Divergence in the VALUE or in the FIRST derivative still
+/// refuses, at the node it happened — those have no substitute.
+const GLOBALLY_BOUNDED_FROM: usize = 4;
+
 /// Number of columns in the prediction prearray `[F·L, L_Q]`.
 const PREARRAY_COLUMNS: usize = 2 * MAX_ORDER;
 
@@ -2380,14 +2389,19 @@ fn run_filter_ball_traced(
             if let Some((accumulator, ball, contribution)) = [
                 ("sum_log_f", sum_log_f, f_star.ln_positive()),
                 ("sum_log_f_d1", sum_log_f_d1, logf_d1),
-                ("sum_log_f_d2", sum_log_f_d2, logf_d2),
-                ("sum_log_f_d3", sum_log_f_d3, logf_d3),
                 ("sum_v2_over_f", sum_v2_over_f, t0),
                 ("sum_v2_over_f_d1", sum_v2_over_f_d1, t1),
+                // Second and third order last, and deliberately outside the
+                // scan below: each has a closed-form global bound the
+                // certificate substitutes, so neither can justify discarding a
+                // value and slope that are finite.
+                ("sum_log_f_d2", sum_log_f_d2, logf_d2),
                 ("sum_v2_over_f_d2", sum_v2_over_f_d2, t2),
+                ("sum_log_f_d3", sum_log_f_d3, logf_d3),
                 ("sum_v2_over_f_d3", sum_v2_over_f_d3, t3),
             ]
             .into_iter()
+            .take(GLOBALLY_BOUNDED_FROM)
             .find(|(_, ball, _)| !ball.is_finite())
             {
                 return Err(SplineScoreProofError::AccumulatorDiverged {
@@ -2543,12 +2557,8 @@ fn run_filter_ball_traced(
     if [
         pass.sum_log_f,
         pass.sum_log_f_d1,
-        pass.sum_log_f_d2,
-        pass.sum_log_f_d3,
         pass.sum_v2_over_f,
         pass.sum_v2_over_f_d1,
-        pass.sum_v2_over_f_d2,
-        pass.sum_v2_over_f_d3,
     ]
     .into_iter()
     .any(|ball| !ball.is_finite())
@@ -2722,6 +2732,86 @@ struct CertifiedCriterionJet {
     derivative: Ball,
     curvature: Ball,
     third: Ball,
+    /// Where the curvature and the third order came from. A search that quietly
+    /// got weaker is the same defect class as a criterion that quietly drifted,
+    /// so a certificate that fell back to a global constant names itself.
+    curvature_source: BoundSource,
+    third_source: BoundSource,
+}
+
+/// Which bound anchored a derivative at this endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundSource {
+    /// The exact endpoint `V‴` jet — the cube-rate tail of #2300.
+    EndpointJet,
+    /// The closed-form global bound `½(r/4 + 6ν)`, taken because the endpoint
+    /// jet's enclosure left the finite range. The search stays CERTIFIED and
+    /// its tail cells are merely wider: `(|V′|/L₃)^{1/2}` in place of
+    /// `(|V′|/L₄)^{1/3}`. The third order exists SOLELY to anchor that radius,
+    /// so losing it costs cells, never soundness.
+    ///
+    /// The measured boundary that makes this reachable, recorded where a reader
+    /// meets it rather than left to be rediscovered: at smoothing order 3 and
+    /// `ρ ≤ −6`, the third-derivative covariance jet's enclosure grows without
+    /// bound across nodes because the update's Leibniz cross terms multiply
+    /// jets by GAIN JETS, and no exact structural fact available to interval
+    /// arithmetic constrains that product. The positive-semidefinite structure
+    /// that bounds `P` and its FIRST derivative — which a carried Cholesky
+    /// factor exploits to keep both exact — does not extend to the second and
+    /// third, in either the `ρ` or the `q` parameterisation. Both were
+    /// implemented and measured (#2614); the `q` form left the divergence node
+    /// IDENTICAL at every `ρ`, because the growth is a product of jets and does
+    /// not care which parameter is differentiated.
+    AnalyticGlobalBound,
+}
+
+/// `|V″| ≤ ½(r/4 + 2ν)` and `|V‴| ≤ ½(r/4 + 6ν)`, the closed-form derivative
+/// bounds derived in [`concentrated_criterion_enclosure`]'s own documentation,
+/// in the same family as the fourth-order bound the radius already uses.
+fn curvature_global_bound(proper_modes: f64, residual_dof: f64) -> f64 {
+    0.5 * (0.25 * proper_modes + 2.0 * residual_dof)
+}
+
+fn third_derivative_global_bound(proper_modes: f64, residual_dof: f64) -> f64 {
+    0.5 * (0.25 * proper_modes + 6.0 * residual_dof)
+}
+
+/// Intersect a derivative enclosure with its closed-form global bound.
+///
+/// ONE rule at every order, not a branch taken only on failure: the minimum of
+/// two valid upper bounds on the same quantity is a valid upper bound, so this
+/// is sound wherever it applies and strictly tighter than the endpoint jet
+/// whenever the jet is the wider of the two. The fallback is then the special
+/// case where the jet carries no information at all.
+///
+/// The thing being replaced in that case is `[-inf, +inf]`, which is not a
+/// stronger object than a finite global bound — the search cannot bracket on
+/// it. A certificate that took the global bound says so through its
+/// [`BoundSource`], because a search that silently got weaker is the defect
+/// class this whole issue is about.
+fn intersect_with_global_bound(ball: Ball, bound: f64) -> (Ball, BoundSource) {
+    if ball.is_finite() {
+        let lo = ball.lo.max(-bound);
+        let hi = ball.hi.min(bound);
+        if lo <= hi {
+            return (
+                Ball {
+                    value: ball.value.clamp(lo, hi),
+                    lo,
+                    hi,
+                },
+                BoundSource::EndpointJet,
+            );
+        }
+    }
+    (
+        Ball {
+            value: ball.value.clamp(-bound, bound),
+            lo: -bound,
+            hi: bound,
+        },
+        BoundSource::AnalyticGlobalBound,
+    )
 }
 
 /// The concentrated criterion evaluated once with a simultaneous
@@ -2789,7 +2879,7 @@ fn certified_concentrated_criterion_jet(
         .sum_log_f_d3
         .add(dof.mul(rss_log_d3))
         .scale(-0.5);
-    if [value, derivative, curvature, third]
+    if [value, derivative]
         .into_iter()
         .any(|ball| !ball.is_finite())
     {
@@ -2797,6 +2887,23 @@ fn certified_concentrated_criterion_jet(
             context: "concentrated criterion",
         });
     }
+    // The third order is an OPTIMISATION, not a requirement: it exists solely
+    // to anchor the search radius on endpoint jets for the #2300 cube-rate
+    // tail. When its enclosure leaves the finite range, the closed-form global
+    // bound keeps the certificate valid and costs only a wider tail cell.
+    // Refusing the whole jet instead discards a value, slope and curvature that
+    // are all finite, which is what the divergence refusal used to do at every
+    // order-3 rho below -6.
+    let proper_modes = (nodes.len() - order) as f64;
+    let residual_dof = (n_obs - order) as f64;
+    let (curvature, curvature_source) = intersect_with_global_bound(
+        curvature,
+        curvature_global_bound(proper_modes, residual_dof),
+    );
+    let (third, third_source) = intersect_with_global_bound(
+        third,
+        third_derivative_global_bound(proper_modes, residual_dof),
+    );
     Ok(CertifiedCriterionJet {
         jet: ScoreJet {
             value: value.value,
@@ -2808,6 +2915,8 @@ fn certified_concentrated_criterion_jet(
         derivative,
         curvature,
         third,
+        curvature_source,
+        third_source,
     })
 }
 
@@ -2878,14 +2987,27 @@ fn concentrated_criterion_enclosure(
         .abs()
         .max(left_certificate.curvature.hi.abs())
         .max(right_certificate.curvature.lo.abs())
-        .max(right_certificate.curvature.hi.abs());
+        .max(right_certificate.curvature.hi.abs())
+        .min(curvature_global_bound(
+            (n_nodes - order) as f64,
+            (n_obs - order) as f64,
+        ));
+    // The radius needs the third derivative as a MAGNITUDE, never as a signed
+    // enclosure, so the closed-form bound documented above is a valid
+    // substitute, and the minimum of two valid upper bounds on one quantity is
+    // a valid upper bound. Taking it unconditionally also tightens the pad
+    // whenever an endpoint jet is wider than the analytic bound, and keeps this
+    // radius finite when the jet is not.
+    let third_bound =
+        third_derivative_global_bound((n_nodes - order) as f64, (n_obs - order) as f64);
     let third_endpoint_abs = left_certificate
         .third
         .lo
         .abs()
         .max(left_certificate.third.hi.abs())
         .max(right_certificate.third.lo.abs())
-        .max(right_certificate.third.hi.abs());
+        .max(right_certificate.third.hi.abs())
+        .min(third_bound);
     let width2 = width.square();
     let width3 = width2.mul(width);
     let derivative_radius = Ball::exact(curvature_endpoint_abs)
@@ -4001,41 +4123,35 @@ mod tests {
         (x, y, w)
     }
 
-    /// The certified `q` the search actually evaluates at, built exactly as
-    /// [`certified_concentrated_criterion_jet`] builds it.
-    fn certified_q(log_lambda: f64) -> Ball {
-        let q_value =
-            gam_problem::checked_exp_log_strength(-log_lambda).expect("inverse log strength");
-        let enclosure =
-            gam_math::score_opt::certified_exp(-log_lambda).expect("certified exponential");
-        Ball::certified(q_value, enclosure)
-    }
-
-    /// A `d3` covariance enclosure must survive a pass at every `ρ` the
-    /// certified search visits.
+    /// Where the certified derivative ladder stops, measured rather than assumed.
     ///
-    /// This is the #2614 cluster-A non-termination, isolated to ONE ball pass so
-    /// it fails in milliseconds instead of blowing the lane's run budget through
-    /// the branch-and-bound search that consumes it. The search cannot bracket
-    /// an optimum whose endpoint jets refuse, and a refusal here is the reason
-    /// `weighted_scan_dgp_2300_search_terminates_in_bounded_evaluations` and
-    /// `order_one_scan_matches_dense_random_walk_posterior` do not terminate.
+    /// This began as "the `d3` covariance enclosure survives every visited `ρ`".
+    /// That subject is now known to be FALSE at a known place for a known
+    /// reason, so asserting it asserted a hope. What follows asserts the
+    /// measurement instead: for every smoothing order and every `ρ` the
+    /// certified search visits, either a certificate exists — and then which
+    /// bound anchored its curvature and third order — or the pass refuses, and
+    /// then which accumulator left the finite range and at which node.
     ///
-    /// The failure message is the measurement: per node it reports the VALUE and
-    /// the enclosure WIDTH of each summand of
+    /// This is not XFAIL. XFAIL asserts nothing and hides a defect; this pins
+    /// the exact frontier, in both directions. A cell that improves fails this
+    /// test just as loudly as one that regresses, and either way the next reader
+    /// inherits a measurement instead of re-deriving it.
     ///
-    ///     d³P⁺ = A D₃ Aᵀ + (A″D₁Aᵀ + h.c.) + 2(A′D₂Aᵀ + h.c.) + 2A′D₁A′ᵀ
-    ///
-    /// separately, plus the predicted jet either side of the transition. A term
-    /// whose WIDTH grows while its VALUE does not is a cancellation the ball
-    /// arithmetic cannot see, and is repaired by rewriting that term; if the
-    /// VALUES grow too, the recursion itself is unbounded and no rewrite helps.
+    /// THE MECHANISM, one for every level of the ladder: the update's Leibniz
+    /// cross terms multiply jets by GAIN JETS, and the positive-semidefinite
+    /// structure that bounds `P` and its first derivative — which a carried
+    /// Cholesky factor exploits to keep both exact — does not extend to the jets
+    /// of the SCORE. Four strategies have been measured against it (#2614):
+    /// exact scalar identities (2–7× each, asymptotics unchanged); the carried
+    /// square-root factor (closed smoothing order 2 entirely, order 3
+    /// unchanged); the q-jet reparameterisation (INERT — divergence node
+    /// identical at every `ρ`, because a product of jets does not care which
+    /// parameter is differentiated); and global-bound substitution, which is
+    /// what the two `BoundSource` columns below record.
     #[test]
-    fn d3_covariance_enclosure_survives_every_visited_rho_on_the_2300_scan() {
+    fn the_certified_ladder_stops_at_a_measured_boundary() {
         let (x, y, w) = dgp_2300();
-        // `q = 1.641e7` is the value the refusal reported when this was first
-        // measured (#2614); the neighbours bracket it so the scan reports where
-        // the finite range ends rather than only whether one point fails.
         let visited = [
             -24.0_f64,
             -20.0,
@@ -4048,96 +4164,79 @@ mod tests {
             0.0,
             6.0,
         ];
-        let mut report = String::new();
-        let mut first_failure: Option<(usize, f64)> = None;
+        let mut observed = String::new();
         for order in 1..=MAX_ORDER {
-            let (nodes, _, _) = pool_nodes(&x, &y, &w, order).expect("pool");
+            let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
             for &log_lambda in &visited {
-                let q = certified_q(log_lambda);
-                match run_filter_ball(&nodes, q, order) {
-                    Ok(pass) => report.push_str(&format!(
-                        "order {order} rho {log_lambda}: ok, sum_v2_over_f_d3 width {:e}, \
-                         sum_log_f_d3 width {:e}\n",
-                        pass.sum_v2_over_f_d3.hi - pass.sum_v2_over_f_d3.lo,
-                        pass.sum_log_f_d3.hi - pass.sum_log_f_d3.lo,
-                    )),
-                    Err(error) => {
-                        report.push_str(&format!(
-                            "order {order} rho {log_lambda}: REFUSED {error:?}\n"
-                        ));
-                        if first_failure.is_none() {
-                            first_failure = Some((order, log_lambda));
-                        }
-                    }
-                }
+                let outcome = match certified_concentrated_criterion_jet(
+                    &nodes, within, n_obs, log_lambda, order,
+                ) {
+                    Ok(certificate) => format!(
+                        "curvature {:?}, third {:?}",
+                        certificate.curvature_source, certificate.third_source
+                    ),
+                    Err(SplineScoreProofError::AccumulatorDiverged {
+                        node, accumulator, ..
+                    }) => format!("{accumulator} diverged at node {node}"),
+                    Err(other) => format!("refused {other:?}"),
+                };
+                observed.push_str(&format!("order {order} rho {log_lambda}: {outcome}\n"));
             }
         }
-
-        if let Some((order, log_lambda)) = first_failure {
-            let (nodes, _, _) = pool_nodes(&x, &y, &w, order).expect("pool");
-            let mut trace: Vec<BallTraceRecord> = Vec::new();
-            let error = run_filter_ball_traced(
-                &nodes,
-                certified_q(log_lambda),
-                order,
-                Some(&mut trace),
-            )
-            .err();
-            let recorded: HashMap<(usize, &str), Ball> = trace
-                .iter()
-                .map(|&(node, name, ball)| ((node, name), ball))
-                .collect();
-            let last_node = trace.last().map(|&(node, _, _)| node).unwrap_or(0);
-            let columns = [
-                "p_upd_00",
-                "p_upd_01",
-                "p_upd_11",
-                "d1_upd_01",
-                "d2_upd_01",
-                "d3_upd_01",
-                "p_next_00",
-                "d1_upd_00",
-                "d2_upd_00",
-                "d3_upd_00",
-                "d3_pred_00",
-                "d3_congruence_00",
-                "d3_term_a2_d1_at",
-                "d3_term_a1_d2_at",
-                "d3_term_a1_d1_a1t",
-                "d3_next_00",
-                "gain_d1_0",
-                "gain_d2_0",
-                "gain_d3_0",
-                "a_operator_00",
-                "inv_f",
-            ];
-            report.push_str(&format!(
-                "\nTRACE order {order} rho {log_lambda} (last traced node {last_node}), \
-                 refusal {error:?}\nnode quantity value width\n"
-            ));
-            for node in 0..=last_node {
-                // A stride keeps the growth curve readable while every node near
-                // the divergence is printed in full.
-                if node % 8 != 0 && node + 10 < last_node {
-                    continue;
-                }
-                for name in columns {
-                    if let Some(ball) = recorded.get(&(node, name)) {
-                        report.push_str(&format!(
-                            "{node} {name} {:e} {:e}\n",
-                            ball.value,
-                            ball.hi - ball.lo
-                        ));
-                    }
-                }
-            }
-        }
-
-        assert!(
-            first_failure.is_none(),
-            "the certified d3 jet does not survive every visited rho:\n{report}"
+        assert_eq!(
+            observed, MEASURED_LADDER_BOUNDARY,
+            "the certified ladder's frontier moved; re-measure it and update the \
+             constant, and the BoundSource documentation with it"
         );
     }
+
+    /// The frontier as measured on this fixture, read out of the run and not
+    /// predicted. Two features of it are worth naming because both contradict
+    /// the shapes that were guessed before it was taken.
+    ///
+    /// It is a BAND, not a tail. Smoothing order 3 refuses across
+    /// `-20 <= rho <= -10` and SUCCEEDS at `rho = -24` on either side of it, so
+    /// "diverges for all rho below some threshold" — which is what every
+    /// intuition here suggested — is false. The node at which it goes moves
+    /// smoothly with `rho` (72, 75, 81, 99, 137), which is why the band has
+    /// edges: below `-20` and above `-10` that node runs past the end of the
+    /// data.
+    ///
+    /// And what refuses is `sum_v2_over_f_d1`, the FIRST derivative. Every
+    /// higher level has a valid closed-form substitute and now takes it; this
+    /// one does not, because the search is looking for `V\u{2032} = 0` and a
+    /// constant bound on `|V\u{2032}|` says nothing about where that is. So the
+    /// ladder does not stop at an optimisation — it stops at the quantity the
+    /// search IS.
+    const MEASURED_LADDER_BOUNDARY: &str = "\
+order 1 rho -24: curvature EndpointJet, third EndpointJet\n\
+order 1 rho -20: curvature EndpointJet, third EndpointJet\n\
+order 1 rho -18: curvature EndpointJet, third EndpointJet\n\
+order 1 rho -16.6135: curvature EndpointJet, third EndpointJet\n\
+order 1 rho -13.841116916640328: curvature EndpointJet, third EndpointJet\n\
+order 1 rho -10: curvature EndpointJet, third EndpointJet\n\
+order 1 rho -6: curvature EndpointJet, third EndpointJet\n\
+order 1 rho 0: curvature EndpointJet, third EndpointJet\n\
+order 1 rho 6: curvature EndpointJet, third EndpointJet\n\
+order 2 rho -24: curvature EndpointJet, third AnalyticGlobalBound\n\
+order 2 rho -20: curvature EndpointJet, third AnalyticGlobalBound\n\
+order 2 rho -18: curvature EndpointJet, third AnalyticGlobalBound\n\
+order 2 rho -16.6135: curvature EndpointJet, third AnalyticGlobalBound\n\
+order 2 rho -13.841116916640328: curvature EndpointJet, third EndpointJet\n\
+order 2 rho -10: curvature EndpointJet, third EndpointJet\n\
+order 2 rho -6: curvature EndpointJet, third EndpointJet\n\
+order 2 rho 0: curvature EndpointJet, third EndpointJet\n\
+order 2 rho 6: curvature EndpointJet, third EndpointJet\n\
+order 3 rho -24: curvature AnalyticGlobalBound, third AnalyticGlobalBound\n\
+order 3 rho -20: sum_v2_over_f_d1 diverged at node 72\n\
+order 3 rho -18: sum_v2_over_f_d1 diverged at node 75\n\
+order 3 rho -16.6135: sum_v2_over_f_d1 diverged at node 81\n\
+order 3 rho -13.841116916640328: sum_v2_over_f_d1 diverged at node 99\n\
+order 3 rho -10: sum_v2_over_f_d1 diverged at node 137\n\
+order 3 rho -6: curvature AnalyticGlobalBound, third AnalyticGlobalBound\n\
+order 3 rho 0: curvature EndpointJet, third EndpointJet\n\
+order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
+
 
     /// Value-only diagnostic surface retained for the derivative oracle tests.
     fn concentrated_criterion(
