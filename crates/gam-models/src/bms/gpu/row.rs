@@ -3675,8 +3675,9 @@ mod tests {
     use crate::custom_family::{BlockwiseFitOptions, ExactNewtonJointHessianWorkspace};
     // Deliberately NOT importing `configure_global_policy`: the process-wide
     // policy is a first-writer-wins `OnceLock`, so a test that writes it decides
-    // the backend every other test in this binary selects.
-    use gam_gpu::GpuPolicy;
+    // the backend every other test in this binary selects. `GpuPolicy` itself is
+    // no longer named here either — the availability probe moved behind
+    // `gam_gpu::test_gate::gpu_for_test`, which owns the explicit `Auto`.
     use ndarray::{Array1, Array2};
     use std::hint::black_box;
     use std::sync::atomic::AtomicUsize;
@@ -3767,15 +3768,23 @@ mod tests {
     /// function, and a fix applied per-site is a fix that misses the next site
     /// the moment one is written.
     ///
-    /// It probes with an EXPLICIT `GpuPolicy::Auto` and never writes the
-    /// process-wide policy, because that policy is a first-writer-wins
-    /// `OnceLock` shared with every other test in this binary.
+    /// The availability question goes through `gam_gpu::test_gate::gpu_for_test`,
+    /// which probes with an EXPLICIT `GpuPolicy::Auto` and never writes the
+    /// process-wide policy — that policy is a first-writer-wins `OnceLock`
+    /// shared with every other test in this binary. Routing through the shared
+    /// gate adds two things this helper did not have: the skip is COUNTED, so a
+    /// suite can assert how many gated tests declined, and a
+    /// `GpuPolicy::Required` lane turns an absent device into a failure without
+    /// any per-test opt-in. The seam assertion below is this module's own and is
+    /// stronger than the gate's; it is kept.
     fn cuda_runtime_for_test(
         test_name: &str,
     ) -> Option<&'static gam_gpu::device_runtime::GpuRuntime> {
-        match gam_gpu::device_runtime::GpuRuntime::resolve(GpuPolicy::Auto) {
-            Ok(Some(runtime)) => Some(runtime),
-            Ok(None) => {
+        let skips_before = gam_gpu::test_gate::skipped_for_absent_device();
+        match gam_gpu::test_gate::gpu_for_test(test_name) {
+            gam_gpu::test_gate::GpuTestGate::Ready(runtime) => Some(runtime),
+            gam_gpu::test_gate::GpuTestGate::AbsentDevice => {
+                gam_gpu::test_gate::assert_absent_device_was_counted(skips_before);
                 eprintln!(
                     "[{test_name}] no CUDA device — asserting the device-free seam contract \
                      instead of skipping"
@@ -3783,7 +3792,6 @@ mod tests {
                 assert_row_kernel_seam_declines_without_cuda();
                 None
             }
-            Err(error) => panic!("[{test_name}] CUDA probe failed: {error}"),
         }
     }
 

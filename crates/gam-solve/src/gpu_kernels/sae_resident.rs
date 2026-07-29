@@ -3408,6 +3408,38 @@ mod tests {
         let probe = super::build_sweep_workspaces(&variants).expect("sweep workspaces");
         let any_device = probe.iter().any(|w| w.device_resident());
         if !any_device {
+            // Device-free host. Two things are still checkable, and asserting
+            // them is what stops this reporting `ok` for a bench that measured
+            // nothing (#2422):
+            //
+            //  1. the skip is RECORDED against the shared counter, and
+            //  2. the workspace builder agreed with the probe — it produced a
+            //     workspace per variant and not one of them claims device
+            //     residency. A workspace that claimed residency here would be
+            //     fabricated device state (the #1551 silent-fallback class),
+            //     which is exactly what a bare `return` could never see.
+            let floor = gam_gpu::test_gate::skipped_for_absent_device();
+            match gam_gpu::test_gate::gpu_for_test("#1017 mux-bench") {
+                gam_gpu::test_gate::GpuTestGate::AbsentDevice => {
+                    gam_gpu::test_gate::assert_absent_device_was_counted(floor);
+                }
+                gam_gpu::test_gate::GpuTestGate::Ready(runtime) => panic!(
+                    "no sweep workspace reported device residency, yet a CUDA runtime \
+                     resolved on this host ({}). The workspace builder and the device \
+                     probe disagree, so the bench would silently measure the CPU path \
+                     while a device sat idle (#2422/#1551).",
+                    runtime.selected_device().name,
+                ),
+            }
+            assert_eq!(
+                probe.len(),
+                variants.len(),
+                "the sweep builder must produce one workspace per variant even with no \
+                 device; got {} for {} variants, so the skip below would be hiding a \
+                 builder defect rather than an absent device",
+                probe.len(),
+                variants.len()
+            );
             println!(
                 "[#1017 mux-bench] no CUDA device — {} variants (K1..4 x 3 basis) \
                  skipped; run on the GPU node for cross-fit throughput",

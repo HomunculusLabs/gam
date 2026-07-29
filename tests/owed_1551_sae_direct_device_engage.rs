@@ -49,6 +49,23 @@ fn gpu_available_or_fail() -> bool {
         .is_some()
 }
 
+/// Gate a device-only assertion, recording the skip when there is no device.
+///
+/// Returns `false` when the caller must stop. Unlike the bare
+/// `if !gpu_available_or_fail() { return; }` it replaces, the device-free path
+/// leaves a counted trace and asserts that the trace was recorded, so the test
+/// no longer reports `ok` having executed zero assertions (#2422).
+fn device_present_or_record_skip(label: &str) -> bool {
+    let floor = gam::gpu::test_gate::skipped_for_absent_device();
+    match gam::gpu::test_gate::gpu_for_test(label) {
+        gam::gpu::test_gate::GpuTestGate::Ready(_) => true,
+        gam::gpu::test_gate::GpuTestGate::AbsentDevice => {
+            gam::gpu::test_gate::assert_absent_device_was_counted(floor);
+            false
+        }
+    }
+}
+
 /// Build a production-shaped framed SAE arrow system: few rows, wide factored
 /// border (`k >= DEVICE_LOOP_MIN_P`), modest per-row depth `d` — the LLM/SAE
 /// shape the device-offload policy admits. Mirrors the in-crate framed device
@@ -497,11 +514,11 @@ fn sae_direct_mode_routing_reachable_and_non_regressing_1551() {
 /// already pinned by `sae_direct_mode_routing_reachable_and_non_regressing_1551`.
 #[test]
 fn sae_direct_mode_device_engages_on_gpu_1551() {
-    if !gpu_available_or_fail() {
-        eprintln!(
-            "[owed_1551] no CUDA runtime present; the on-GPU engagement assertion is the \
-             GPU-gated remainder. CPU routing is pinned by the always-on gate above."
-        );
+    // The on-GPU engagement assertion is the GPU-gated remainder; CPU routing is
+    // pinned unconditionally by `sae_direct_mode_routing_reachable_and_non_regressing_1551`
+    // above, so the device-free contract is already owned by a sibling. What was
+    // missing is that this test's decline left no trace and executed nothing.
+    if !device_present_or_record_skip("owed_1551 sae_direct_mode_device_engages_on_gpu") {
         return;
     }
 

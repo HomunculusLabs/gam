@@ -14,29 +14,43 @@ fn close(got: f64, expected: f64, rel: f64) {
 }
 
 #[cfg(target_os = "linux")]
+/// Resolve the PIRLS-row device backend, or assert the device-free contract.
+///
+/// The availability question goes through [`gam_gpu::test_gate::gpu_for_test`]
+/// so an absent device is COUNTED and a `GpuPolicy::Required` lane turns it into
+/// a failure (#2422). The device-free assertions below are this module's own and
+/// are strictly stronger than the shared gate: they additionally require the
+/// backend to decline in agreement with the runtime, and to say why. Those are
+/// kept — routing through the gate adds the counting, it does not replace the
+/// contract.
 fn backend_or_assert_runtime_decline() -> Option<&'static PirlsRowBackend> {
-    match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-        Ok(Some(_)) => Some(
+    let skips_before = gam_gpu::test_gate::skipped_for_absent_device();
+    match gam_gpu::test_gate::gpu_for_test("PIRLS-row device parity") {
+        gam_gpu::test_gate::GpuTestGate::Ready(_) => Some(
             PirlsRowBackend::probe()
                 .unwrap_or_else(|error| panic!("PIRLS-row CUDA backend probe failed: {error}")),
         ),
-        Ok(None) => match PirlsRowBackend::probe() {
-            Err(GpuError::DriverLibraryUnavailable { reason }) => {
-                assert!(
-                    !reason.trim().is_empty(),
-                    "a device-free PIRLS-row backend refusal must explain why CUDA is unavailable"
-                );
-                None
+        gam_gpu::test_gate::GpuTestGate::AbsentDevice => {
+            gam_gpu::test_gate::assert_absent_device_was_counted(skips_before);
+            match PirlsRowBackend::probe() {
+                Err(GpuError::DriverLibraryUnavailable { reason }) => {
+                    assert!(
+                        !reason.trim().is_empty(),
+                        "a device-free PIRLS-row backend refusal must explain why CUDA is \
+                         unavailable"
+                    );
+                    None
+                }
+                Ok(_) => panic!(
+                    "the process-wide CUDA runtime declined, but the PIRLS-row backend admitted \
+                     a device"
+                ),
+                Err(error) => panic!(
+                    "the process-wide CUDA runtime declined cleanly, but the PIRLS-row backend \
+                     faulted: {error}"
+                ),
             }
-            Ok(_) => panic!(
-                "the process-wide CUDA runtime declined, but the PIRLS-row backend admitted a device"
-            ),
-            Err(error) => panic!(
-                "the process-wide CUDA runtime declined cleanly, but the PIRLS-row backend faulted: \
-                 {error}"
-            ),
-        },
-        Err(error) => panic!("PIRLS-row CUDA runtime resolution failed: {error}"),
+        }
     }
 }
 
