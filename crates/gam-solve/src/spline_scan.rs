@@ -900,18 +900,6 @@ fn ball_symmetrize(a: &mut BallMat, m: usize) {
 /// This intersection restores proof information supplied by the statistical
 /// model; it is not a numerical tolerance. A wholly negative or non-finite
 /// diagonal still signals an inconsistent enclosure and fails closed.
-/// Transpose of a `Ball` matrix.
-#[inline]
-fn ball_mat_t(a: &BallMat, m: usize) -> BallMat {
-    let mut out = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
-    for i in 0..m {
-        for j in 0..m {
-            out[i][j] = a[j][i];
-        }
-    }
-    out
-}
-
 /// `A = I − K e₀ᵀ`, built so its `(0,0)` entry is never a subtraction (#2614).
 ///
 /// The expanded per-entry form of the congruence `A X Aᵀ` evaluates
