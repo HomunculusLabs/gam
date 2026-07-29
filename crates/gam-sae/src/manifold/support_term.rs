@@ -4308,11 +4308,6 @@ impl SaeSupportSparseTerm {
         let mut joint_snapshot = Vec::with_capacity(self.coordinate_state_len());
         let mut joint_scaled_step = Vec::with_capacity(self.coordinate_state_len());
         let mut joint_skip_remaining = 0usize;
-        // The previous cycle's certified quantity, which is what the pace test
-        // differences against. `None` before the first cycle, at the phase
-        // boundary, and after any support move — every point where there is no
-        // comparable predecessor.
-        let mut previous_certified: Option<f64> = None;
         // PHASE. The caller's budget buys the ALTERNATION, and nothing about
         // that phase changes: no joint system is assembled, no coupled step is
         // proposed, and a fit that certifies inside `max_iter` takes exactly the
@@ -4343,7 +4338,6 @@ impl SaeSupportSparseTerm {
                 taken_step.clear();
                 taken_step.resize(self.coordinate_state_len(), 0.0);
                 last_objective = None;
-                previous_certified = None;
                 previous_candidate = false;
                 log::info!(
                     "support fixed point: alternation did not recur in {max_iter} cycles;                      arming the coupled (Schur-eliminated joint Newton) phase"
@@ -4367,46 +4361,34 @@ impl SaeSupportSparseTerm {
             let mut residual = &target - &fitted_state;
             let mut stationarity =
                 self.raw_stationarity_with_residual(&residual, lambda_smooth, ard_precisions)?;
-            // The COUPLED step, in phase two only, and there on the one further
-            // condition that makes it worth its cost: the alternation still
-            // cannot finish from here.
+            // The COUPLED step, in phase two only.
             //
-            // Both sweeps minimise their own block exactly, so the iterate's
-            // error contracts by a fixed factor per cycle (see
-            // `joint_newton_step` for why that factor is the cross-block
-            // coupling). A fixed factor is a PACE, and the budget sets the pace
-            // that is good enough:
+            // Both sweeps minimise their own block exactly, so a cycle is exact
+            // block Gauss-Seidel and the iterate's error contracts by a fixed
+            // factor — the cross-block coupling (see `joint_newton_step`). Phase
+            // one having spent the caller's whole budget without certifying IS
+            // the measurement that this factor is too close to one for the
+            // budget, so inside phase two there is nothing left to test: the
+            // coupled step fires every cycle.
             //
-            //     observed = certified_k / certified_{k-1}
-            //     needed   = (tolerance / certified_k)^(1 / cycles remaining)
+            // (An earlier revision re-tested the alternation's pace per cycle
+            // and skipped the coupled step while it looked on track. Measured on
+            // the eight-arm sweep, that halved the cost and cost an order of
+            // magnitude of accuracy on exactly the arms that need it — the
+            // stalled `s = 3` arms ended at 1.0e-2 and 4.3e-2 certified against
+            // 1.1e-3 and 6.8e-7 when the step fired every cycle. A test whose
+            // answer is already known is not worth what skipping it costs.)
             //
-            // While `observed <= needed` the cheap sweeps arrive on time and
-            // nothing is assembled. That is a comparison between two measured
-            // rates, not a threshold: no constant, and it adapts to whatever
-            // tolerance and budget the caller supplied.
-            //
-            // A point that already meets the KKT limb is never disturbed. The
-            // coupled step's job is to REACH stationarity; past it, one more
-            // strict descent only keeps the objective-recurrence limb from ever
-            // firing, which would turn a converged fit into a budget exhaustion.
+            // Two conditions still hold it back. A point already inside the KKT
+            // limb is never disturbed: one more strict descent there only keeps
+            // the objective-recurrence limb from firing, which would turn a
+            // converged fit into a budget exhaustion. And a REFUSED step doubles
+            // a skip counter, so a problem whose coupled model does not help
+            // pays a logarithmic number of assemblies rather than one per cycle.
             let certified = stationarity.scaled_max_abs();
-            let on_pace = match previous_certified {
-                Some(previous)
-                    if previous.is_finite()
-                        && previous > 0.0
-                        && certified.is_finite()
-                        && certified > 0.0
-                        && certified < previous =>
-                {
-                    let remaining = total_cycles.saturating_sub(iteration).max(1) as f64;
-                    (certified / previous) <= (tolerance / certified).powf(1.0 / remaining)
-                }
-                _ => false,
-            };
-            previous_certified = Some(certified);
             if joint_armed && joint_skip_remaining > 0 {
                 joint_skip_remaining -= 1;
-            } else if joint_armed && certified > tolerance && !on_pace {
+            } else if joint_armed && certified > tolerance {
                 let before = self.penalized_objective_with_residual(
                     &residual,
                     lambda_smooth,
@@ -4430,7 +4412,6 @@ impl SaeSupportSparseTerm {
                             lambda_smooth,
                             ard_precisions,
                         )?;
-                        previous_certified = Some(stationarity.scaled_max_abs());
                         let mut moved = Vec::with_capacity(joint_snapshot.len());
                         self.snapshot_coordinates(&mut moved);
                         let mut wrapped = Vec::with_capacity(moved.len());
@@ -4570,7 +4551,6 @@ impl SaeSupportSparseTerm {
                         taken_step.clear();
                         taken_step.resize(self.coordinate_state_len(), 0.0);
                         last_objective = None;
-                        previous_certified = None;
                         previous_candidate = false;
                         continue;
                     }
@@ -4651,7 +4631,6 @@ impl SaeSupportSparseTerm {
                                 taken_step.clear();
                                 taken_step.resize(self.coordinate_state_len(), 0.0);
                                 last_objective = None;
-                                previous_certified = None;
                                 previous_candidate = false;
                                 continue;
                             }
