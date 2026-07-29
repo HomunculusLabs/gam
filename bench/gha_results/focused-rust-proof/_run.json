@@ -1,12 +1,12 @@
 {
   "workflow": "Focused Rust Proof",
   "job_status": "failure",
-  "run_id": "30460668636",
-  "run_number": "412",
+  "run_id": "30461564746",
+  "run_number": "414",
   "run_attempt": "1",
   "event": "workflow_dispatch",
   "ref": "refs/heads/main",
-  "sha": "89b0f3686021a4a017f41c7b789744502e7ec906",
-  "completed_utc": "2026-07-29T14:34:22Z",
-  "run_url": "https://github.com/SauersML/gam/actions/runs/30460668636"
+  "sha": "8c49f3874b86234f4779a724940e5bb5e38e6c2e",
+  "completed_utc": "2026-07-29T14:38:25Z",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/30461564746"
 }
