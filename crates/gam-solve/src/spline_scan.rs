@@ -993,6 +993,25 @@ fn intersect_innovation_above_observation_variance(
     }
 }
 
+/// Intersect an enclosure with an independently derived enclosure of the same
+/// quantity.
+///
+/// Both bound the same real number, so their intersection does too, and it is
+/// no wider than either. A bound is never moved past the nearest-rounded
+/// `value`, which keeps `lo <= value <= hi` an invariant of the type rather
+/// than something each caller has to re-establish.
+#[inline]
+fn intersect_with_independent_enclosure(entry: &mut Ball, evidence: Ball) {
+    let floor = evidence.lo.min(entry.value);
+    if floor.is_finite() && entry.lo < floor {
+        entry.lo = floor;
+    }
+    let ceiling = evidence.hi.max(entry.value);
+    if ceiling.is_finite() && entry.hi > ceiling {
+        entry.hi = ceiling;
+    }
+}
+
 /// Intersect the observed coordinate of the UPDATED covariance with the exact
 /// range of its own defining map.
 ///
@@ -1817,6 +1836,20 @@ fn run_filter_ball_traced(
             // `A`, `K` and the middle factor all carry the same `P₀₀`.
             for i in 0..order {
                 for j in 0..order {
+                    if i == j {
+                        // On the DIAGONAL the subtracted term is `M[i]²/F`, a
+                        // SQUARE. The general corner form ranges `P[i][0]` and
+                        // `P[0][j]` independently, so when that entry straddles
+                        // zero it not only doubles the width but admits a
+                        // NEGATIVE product — an upper bound larger than
+                        // `P[i][i]` itself — and its monotonicity argument then
+                        // bails out entirely. `Ball::square` returns `[0, max²]`
+                        // for a straddling interval, which is the exact range.
+                        intersect_with_independent_enclosure(
+                            &mut p_new[i][i],
+                            p_star[i][i].sub(m_star[i].square().div_positive(f_star)),
+                        );
+                    }
                     intersect_updated_covariance_exact_range(
                         &mut p_new[i][j],
                         p_star[i][j],
@@ -1825,6 +1858,29 @@ fn run_filter_ball_traced(
                         m_star[0],
                         r,
                     );
+                }
+            }
+            // The first column of the UPDATED covariance is EXACTLY `R·K`, and
+            // the file already relies on that identity for every derivative
+            // gain: `M⁺ = P⁺e₀ = M − M·P₀₀/F = M·(F − P₀₀)/F = M·R/F = R·K`.
+            // The VALUE covariance was not using it. `P⁺[0][j] = P[0][j]·R/F`
+            // is a PRODUCT — no subtraction, and no shared variable appearing
+            // twice, which is what the corner form above cannot exploit: it
+            // ranges `P[0][j]` as both `a` and `c` independently even though
+            // they are one entry, and so cannot see the factorization at all.
+            //
+            // Measured at order 2, ρ = −13.8411 (the log-lambda the #2300
+            // search refuses at), node 31: `P⁺₀₁` carries value `41.56` with
+            // width `1.06e3`, and `P⁺₁₁` value `1.14e4` with width `3.55e8`,
+            // while `P⁺₀₀` — the one entry that already had its exact range —
+            // is `0.92 ± 0.99`. The unobserved entries are the runaway, and the
+            // transition feeds them straight back into the observed one as
+            // `P₀₀ + 2δP₀₁ + δ²P₁₁`.
+            for i in 0..order {
+                let exact = gain[i].mul(r);
+                intersect_with_independent_enclosure(&mut p_new[i][0], exact);
+                if i != 0 {
+                    intersect_with_independent_enclosure(&mut p_new[0][i], exact);
                 }
             }
             intersect_observed_covariance_exact_range(&mut p_new[0][0], m_star[0], r);
@@ -1968,6 +2024,12 @@ fn run_filter_ball_traced(
                     ("d3_term_a1_d1_a1t", d3_both[0][0]),
                 ] {
                     sink.push((t, record.0, record.1));
+                }
+                if order > 1 {
+                    sink.push((t, "p_upd_01", p_new[0][1]));
+                    sink.push((t, "d1_upd_01", p_new_d1[0][1]));
+                    sink.push((t, "d2_upd_01", p_new_d2[0][1]));
+                    sink.push((t, "d3_upd_01", p_new_d3[0][1]));
                 }
                 for i in 0..order {
                     sink.push((t, P_DIAGONAL_NAMES[i], p_new[i][i]));
@@ -3659,7 +3721,18 @@ mod tests {
         // `q = 1.641e7` is the value the refusal reported when this was first
         // measured (#2614); the neighbours bracket it so the scan reports where
         // the finite range ends rather than only whether one point fails.
-        let visited = [-24.0_f64, -20.0, -18.0, -16.6135, -14.0, -10.0, -6.0, 0.0, 6.0];
+        let visited = [
+            -24.0_f64,
+            -20.0,
+            -18.0,
+            -16.6135,
+            // The log-lambda the #2300 certified search refuses at, order 2.
+            -13.841116916640328,
+            -10.0,
+            -6.0,
+            0.0,
+            6.0,
+        ];
         let mut report = String::new();
         let mut first_failure: Option<(usize, f64)> = None;
         for order in 1..=MAX_ORDER {
@@ -3702,7 +3775,11 @@ mod tests {
             let last_node = trace.last().map(|&(node, _, _)| node).unwrap_or(0);
             let columns = [
                 "p_upd_00",
+                "p_upd_01",
                 "p_upd_11",
+                "d1_upd_01",
+                "d2_upd_01",
+                "d3_upd_01",
                 "p_next_00",
                 "d1_upd_00",
                 "d2_upd_00",
