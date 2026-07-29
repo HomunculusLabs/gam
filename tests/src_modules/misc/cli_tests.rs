@@ -1663,7 +1663,17 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
         firth: true,
         family: FamilyArg::Auto,
         negative_binomial_theta: None,
-        survival_likelihood: Some("transformation".to_string()),
+        // #2301: `survival_likelihood` is `Option<String>` defaulting to `None`,
+        // and the single canonical default ("transformation") is resolved at the
+        // `Surv(...)` seam rather than stored. `None` means unset; ANY `Some(mode)`
+        // is an explicit request, and on a non-survival response the materializer
+        // that reads it is never reached, so the knob would be silently dropped and
+        // the requested model would degrade to an ordinary GAM (#1767). That is why
+        // `reject_survival_likelihood_for_nonsurvival` refuses it.
+        //
+        // This fixture is a NON-survival fit, so `Some("transformation")` here was
+        // asking to be rejected. The guard is correct; the fixture predates it.
+        survival_likelihood: None,
         survival_time_anchor: None,
         baseline_target: "linear".to_string(),
         baseline_scale: None,
@@ -2096,7 +2106,17 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         firth: false,
         family: FamilyArg::Auto,
         negative_binomial_theta: None,
-        survival_likelihood: Some("transformation".to_string()),
+        // #2301: `survival_likelihood` is `Option<String>` defaulting to `None`,
+        // and the single canonical default ("transformation") is resolved at the
+        // `Surv(...)` seam rather than stored. `None` means unset; ANY `Some(mode)`
+        // is an explicit request, and on a non-survival response the materializer
+        // that reads it is never reached, so the knob would be silently dropped and
+        // the requested model would degrade to an ordinary GAM (#1767). That is why
+        // `reject_survival_likelihood_for_nonsurvival` refuses it.
+        //
+        // This fixture is a NON-survival fit, so `Some("transformation")` here was
+        // asking to be rejected. The guard is correct; the fixture predates it.
+        survival_likelihood: None,
         survival_time_anchor: None,
         baseline_target: "linear".to_string(),
         baseline_scale: None,
@@ -2188,7 +2208,17 @@ fn binomial_link_fit_args(data: PathBuf, out: PathBuf, formula: &str) -> FitArgs
         firth: false,
         family: FamilyArg::Auto,
         negative_binomial_theta: None,
-        survival_likelihood: Some("transformation".to_string()),
+        // #2301: `survival_likelihood` is `Option<String>` defaulting to `None`,
+        // and the single canonical default ("transformation") is resolved at the
+        // `Surv(...)` seam rather than stored. `None` means unset; ANY `Some(mode)`
+        // is an explicit request, and on a non-survival response the materializer
+        // that reads it is never reached, so the knob would be silently dropped and
+        // the requested model would degrade to an ordinary GAM (#1767). That is why
+        // `reject_survival_likelihood_for_nonsurvival` refuses it.
+        //
+        // This fixture is a NON-survival fit, so `Some("transformation")` here was
+        // asking to be rejected. The guard is correct; the fixture predates it.
+        survival_likelihood: None,
         survival_time_anchor: None,
         baseline_target: "linear".to_string(),
         baseline_scale: None,
