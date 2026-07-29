@@ -4394,6 +4394,7 @@ impl FittedModel {
         let normalized = self.clone().with_synchronized_stateful_link_metadata();
         normalized.validate_for_persistence()?;
         normalized.validate_numeric_finiteness()?;
+        normalized.validate_persisted_form_parses_back()?;
         // Write to a sibling temp file, fsync, then rename into place so a
         // crash mid-write never corrupts the user's existing saved fit.
         // Concurrent writers to the same path each have a distinct temp
@@ -5402,6 +5403,58 @@ impl FittedModel {
         Ok(())
     }
 
+    /// Refuse to persist a model that cannot be read back.
+    ///
+    /// [`Self::validate_numeric_finiteness`] below is a hand-maintained
+    /// enumeration of roughly forty named fields. It is incomplete by
+    /// construction: every field added after it was written is unguarded, and
+    /// the omission is invisible until a LOAD fails somewhere else entirely.
+    /// That is how a non-finite `f64` reaches disk. `serde_json` renders
+    /// `f64::NAN` and `±inf` as JSON `null`, so the value serialises silently
+    /// and then fails deserialisation as `invalid type: null, expected f64`
+    /// (#2601) — in a different session, with no field name and no way back to
+    /// the fit that produced it.
+    ///
+    /// This states the same demand against the SERIALISATION instead of against
+    /// a list of names, so it covers every field that exists or will exist.
+    /// [`Self::load_from_path`] is `serde_json::from_str::<Self>`, so a model
+    /// that fails this check is already unloadable — refusing to write it
+    /// cannot lose anything that could have been recovered, and it moves the
+    /// error to the fit that caused it.
+    ///
+    /// The null-valued paths are reported alongside serde's own message
+    /// because serde names a line and column in a document nobody kept.
+    pub fn validate_persisted_form_parses_back(&self) -> Result<(), FittedModelError> {
+        let value =
+            serde_json::to_value(self).map_err(|error| FittedModelError::PayloadCorrupt {
+                reason: format!("failed to serialize model: {error}"),
+            })?;
+        let Err(parse_error) = serde_json::from_value::<Self>(value.clone()) else {
+            return Ok(());
+        };
+        let mut nulls = Vec::new();
+        collect_json_null_paths(&value, "$", &mut nulls);
+        // A model carries many legitimately-absent `Option` fields, so the list
+        // is a lead rather than a verdict, and it is capped: the point is to
+        // name the candidates, not to reproduce the document.
+        const REPORTED_NULL_PATHS: usize = 24;
+        let truncated = nulls.len().saturating_sub(REPORTED_NULL_PATHS);
+        nulls.truncate(REPORTED_NULL_PATHS);
+        Err(FittedModelError::PayloadCorrupt {
+            reason: format!(
+                "refusing to persist a model that cannot be parsed back: {parse_error}. \
+                 A non-finite f64 serialises as JSON null, so these null-valued paths are \
+                 the candidates: [{}]{}",
+                nulls.join(", "),
+                if truncated > 0 {
+                    format!(" (+{truncated} more)")
+                } else {
+                    String::new()
+                },
+            ),
+        })
+    }
+
     pub fn validate_numeric_finiteness(&self) -> Result<(), FittedModelError> {
         let corrupt = |reason: String| FittedModelError::PayloadCorrupt { reason };
         if let Some(fit) = self.fit_result.as_ref() {
@@ -5620,6 +5673,30 @@ pub fn load_survival_time_basis_config_from_model(
         other => Err(FittedModelError::IncompatibleConfig {
             reason: format!("unsupported saved survival_time_basis '{other}'"),
         }),
+    }
+}
+
+/// Every JSON path under `value` holding `null`, in `$.a.b[3].c` form.
+///
+/// A non-finite `f64` is indistinguishable from `Option::None` once serialised
+/// — both are `null` — so this cannot decide which is which on its own. It is
+/// used only alongside a failed round-trip, where serde has already established
+/// that at least one of them is not an `Option`, and it supplies the field names
+/// serde's line-and-column message cannot.
+fn collect_json_null_paths(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Null => out.push(path.to_string()),
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_json_null_paths(item, &format!("{path}[{index}]"), out);
+            }
+        }
+        serde_json::Value::Object(entries) => {
+            for (key, item) in entries {
+                collect_json_null_paths(item, &format!("{path}.{key}"), out);
+            }
+        }
+        _ => {}
     }
 }
 
