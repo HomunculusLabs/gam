@@ -386,13 +386,24 @@ fn main() -> Result<(), String> {
     // Every knob is matched anywhere in the argument list, so an unknown
     // trailing token can only be a typo -- and a typo that is ignored
     // disarms a mechanism while the arm still reports a number. Reject it.
-    const KNOB_TOKENS: [&str; 9] =
-        ["unroll", "pool", "joint", "price", "usage", "vark", "fista", "exact", "none"];
+    const KNOB_TOKENS: [&str; 11] =
+        ["unroll", "pool", "joint", "price", "usage", "vark", "fista", "exact",
+         "refine3", "refine9", "none"];
     for arg in args.iter().skip(15) {
         if !KNOB_TOKENS.contains(&arg.as_str()) {
             return Err(format!(
                 "unrecognised trailing token {arg:?}; known knobs: {KNOB_TOKENS:?}"
             ));
+        }
+    }
+    // "refineN" multiplies the routing grid's per-atom width. Measured with the
+    // coordinate solve removed, tripling it is worth up to +0.0131 on a
+    // euclidean dictionary; the point of the knob is to find out what it is
+    // worth with the solve in place.
+    for (token, factor) in [("refine3", 3usize), ("refine9", 9usize)] {
+        if args.iter().any(|arg| arg == token) {
+            term_seed.term.set_grid_refinement(factor);
+            println!("routing grid refinement: {factor}x");
         }
     }
     // "exact" ranks affine atoms at their closed-form optimal coordinate during

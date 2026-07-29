@@ -433,6 +433,11 @@ pub struct SaeSupportSparseTerm {
     /// selection instead of at the best grid point (#2502). Measured worth
     /// 0.0103 held-out on a linear dictionary; opt-in until an A/B confirms.
     exact_affine_ranking: bool,
+    /// Multiplier on the routing grid's per-atom width (#2502). The grid gives
+    /// each atom `basis_size().max(2)` candidate coordinates; this scales that
+    /// count without changing the per-topology relationship it encodes. `1`
+    /// reproduces the historical behaviour exactly.
+    grid_refinement: usize,
     admission_usage_amortized: bool,
     /// `Some(sigma2)` arms DoF-priced admission (#2502): every support
     /// ranking expression subtracts the amortized description length of the
@@ -626,6 +631,7 @@ impl SaeSupportSparseTerm {
             decoder_fista_passes: None,
             admission_dof_sigma2: None,
             exact_affine_ranking: false,
+            grid_refinement: 1,
             admission_usage_amortized: false,
             variable_priced_support: false,
             atom_axis_periods,
@@ -1129,7 +1135,7 @@ impl SaeSupportSparseTerm {
             let mut slots = 0usize;
             for (atom_index, atom) in self.atoms.iter().enumerate() {
                 grid_offset.push(slots);
-                let width = atom.basis_size().max(2);
+                let width = atom.basis_size().max(2) * self.grid_refinement.max(1);
                 slot_atom.extend(std::iter::repeat(atom_index).take(width));
                 slots += width;
             }
@@ -1457,6 +1463,8 @@ impl SaeSupportSparseTerm {
             routed.variable_priced_support = self.variable_priced_support;
             routed.admission_usage_amortized = self.admission_usage_amortized;
             routed.exact_affine_ranking = self.exact_affine_ranking;
+        routed.grid_refinement = self.grid_refinement;
+            routed.grid_refinement = self.grid_refinement;
             return Ok(routed);
         }
         type RowRoute = (Vec<u32>, Vec<f64>, Vec<f64>);
@@ -3306,6 +3314,11 @@ impl SaeSupportSparseTerm {
     /// See [`Self::exact_affine_ranking`].
     pub fn set_exact_affine_ranking(&mut self, enabled: bool) {
         self.exact_affine_ranking = enabled;
+    }
+
+    /// See [`Self::grid_refinement`]. A value of zero is treated as one.
+    pub fn set_grid_refinement(&mut self, refinement: usize) {
+        self.grid_refinement = refinement.max(1);
     }
 
     /// See [`Self::admission_usage_amortized`]. No effect unless pricing is
