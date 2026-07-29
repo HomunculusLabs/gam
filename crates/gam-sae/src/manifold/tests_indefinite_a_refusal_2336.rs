@@ -221,17 +221,45 @@ fn priced_ard_direct_gradient_matches_fixed_state_value_2434() {
     );
 }
 
+/// The saddle specimen both halves of the gate must use: `(residual_scale,
+/// log λ_sparse)` for `obb_patchd_fixture`. Named once because the gate
+/// builds the fixture twice -- refusal, then outer-eval pricing -- and two
+/// literals silently drifted apart, leaving the pricing half asserting
+/// against a state that was no longer indefinite.
+const GENUINE_SADDLE_SPECIMEN: (f64, f64) = (1.0, -6.0);
+
 /// #2336 refusal companion — a GENUINE saddle (indefiniteness NOT attributable to
 /// the bounded ARD concave-clamp: `λ+e_v < −floor`) must STILL return the typed
 /// `IndefiniteObservedInformation` refusal, and the outer eval must price it as
-/// `+inf` infeasible (not a fatal abort). The specimen is `obb_patchd_fixture`
-/// at a window-scan saddle scale — verified genuine (E-non-attributable) by the
-/// #2336 spectral scan (scale 0.02: `n_neg=1, attributable=0`). Guards the
+/// `+inf` infeasible (not a fatal abort). Guards the
 /// "refuse ⟺ genuinely-indefinite" half of the value-side contract; the price
 /// half is `e_attributable_ard_saddle_prices_finite_2336`.
+///
+/// SPECIMEN, AND WHY THIS ONE. The scale is a MEASURED property of the fixture,
+/// not a free parameter, and the previous one stopped holding: at
+/// `(scale 0.02, log λ_sparse −6.0)` the criterion now returns `Ok(38.509663)`,
+/// so the gate was asserting a refusal against a state that is no longer a
+/// saddle. Re-scanning `obb_patchd_fixture` over
+/// `scale ∈ {0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0}` ×
+/// `log λ_sparse ∈ {−8, −6, −4, −2, 0}` — 50 cells — exactly four still refuse:
+///
+///     (0.01, −6)   (0.2, −2)   (1.0, −6)   (1.0, −4)
+///
+/// They are isolated points, not a region, so the choice matters: `scale = 1.0`
+/// is the ONLY place two adjacent lifts both refuse, which is why the specimen
+/// moved there rather than to the nearer `(0.01, −6)`. A neighbour gives the
+/// gate margin against the next drift instead of parking it on a knife edge.
+///
+/// The refusal itself is what certifies genuineness — the raising site adds the
+/// clamp curvature back (`basin = λ + e_v`) and only refuses when `basin <
+/// −floor`, so an `IndefiniteObservedInformation` IS the E-non-attributable
+/// case by construction.
 #[test]
 fn genuine_saddle_is_infeasible_probe_not_fatal_2336() {
-    let (mut term, target, rho) = super::tests_logdet_adjoint_780::obb_patchd_fixture(0.02, -6.0);
+    let (mut term, target, rho) = super::tests_logdet_adjoint_780::obb_patchd_fixture(
+        GENUINE_SADDLE_SPECIMEN.0,
+        GENUINE_SADDLE_SPECIMEN.1,
+    );
     let refusal = term.penalized_quasi_laplace_criterion_with_cache(
         target.view(),
         &rho,
@@ -250,7 +278,10 @@ fn genuine_saddle_is_infeasible_probe_not_fatal_2336() {
         refusal.map(|(value, _, _)| value)
     );
 
-    let (term, target, rho) = super::tests_logdet_adjoint_780::obb_patchd_fixture(0.02, -6.0);
+    let (term, target, rho) = super::tests_logdet_adjoint_780::obb_patchd_fixture(
+        GENUINE_SADDLE_SPECIMEN.0,
+        GENUINE_SADDLE_SPECIMEN.1,
+    );
     let rho_flat = rho.to_flat();
     let mut objective =
         SaeManifoldOuterObjective::new(term, target, None, rho, 40, 0.4, 1.0e-6, 1.0e-6);
