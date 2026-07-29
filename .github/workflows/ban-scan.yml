@@ -1,0 +1,63 @@
+name: Ban scan
+
+# The root `build.rs` ban scanner, run on its own, in under a minute.
+#
+# WHY THIS EXISTS. The scanner lives in the ROOT crate's build script, so it
+# only runs when something builds that crate — in practice, at `maturin build`
+# time. A per-crate `cargo check -p <crate>` never runs it, and that is the
+# ordinary edit loop. The result is a gate that is invisible until the wheel
+# fails, and a wheel that can stay broken for weeks: on 2026-07-28 the entire
+# Python surface (wheel, PyPI publish, python-contracts, and therefore every
+# Python-side test verdict) was blocked by exactly ONE violation, and after that
+# was fixed the same gate broke twice more the same day — once by a commit that
+# restored the identical empty error arm, once by a `std::process::exit` in an
+# example.
+#
+# Each of those was a single line, and each cost a full wheel build to discover.
+# `build.rs` has no dependencies beyond `std`, so it compiles standalone in a
+# few seconds and scans the tree in well under a minute. Running it here turns a
+# multi-hour discovery into a fast, named failure on the commit that caused it.
+#
+# This job deliberately does NOT build any crate: if it ever needs cargo, it has
+# stopped being the fast gate it exists to be.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ban-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: Root build-script ban scanner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compile the scanner (std only, no cargo)
+        run: rustc --edition 2024 -o "${RUNNER_TEMP}/ban-scan" build.rs
+
+      - name: Scan the tree
+        run: |
+          mkdir -p "${RUNNER_TEMP}/ban-out"
+          # The scanner writes its ledgers into the tree it scans; this is a
+          # throwaway checkout, so that is harmless here. It exits nonzero with
+          # a per-rule, per-file report on stderr.
+          CARGO_MANIFEST_DIR="${GITHUB_WORKSPACE}" OUT_DIR="${RUNNER_TEMP}/ban-out" \
+            "${RUNNER_TEMP}/ban-scan"
+
+      - name: Explain a failure
+        if: failure()
+        run: |
+          echo "::error::The root build script's ban scanner rejected this tree."
+          echo "Every violation above blocks 'maturin build', and therefore the"
+          echo "wheel, the PyPI publish, and every Python-side test verdict."
+          echo "Reproduce locally without building any crate:"
+          echo "  rustc --edition 2024 -o /tmp/ban-scan build.rs"
+          echo "  CARGO_MANIFEST_DIR=\$PWD OUT_DIR=/tmp/ban-out /tmp/ban-scan"

@@ -417,9 +417,10 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("curl_census_foreign: {e}");
-        std::process::exit(1);
-    }
+fn main() -> Result<(), String> {
+    // `std::process::exit` is banned by the root build script (it skips
+    // destructors and makes the exit path untestable), and one hit there blocks
+    // every wheel build in the repository. Returning the error is the sanctioned
+    // idiom and keeps the same nonzero exit status.
+    run().map_err(|error| format!("curl_census_foreign: {error}"))
 }
