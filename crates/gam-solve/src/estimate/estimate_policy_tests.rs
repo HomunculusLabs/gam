@@ -671,7 +671,15 @@ fn decode_invariant_test_parts() -> UnifiedFitResultParts {
             edf: 1.5,
             lambdas: lambdas.clone(),
         }],
-        training_sample_size: 16,
+        // One working row per training row. `WorkingGeometry` carries the
+        // P-IRLS working weights and response, which are per-observation, so
+        // `training_sample_size` is not free to disagree with their length —
+        // `UnifiedFitResult::try_from_parts` refuses when it does. This fixture
+        // declared 16 against a 3-row working geometry and predated that check,
+        // which is why all eight tests sharing it died in the constructor with
+        // `working row count 3 must match training_sample_size 16` before
+        // reaching the invariant each was written to measure.
+        training_sample_size: 3,
         log_lambdas,
         lambdas,
         likelihood_family: Some(LikelihoodSpec::new(
