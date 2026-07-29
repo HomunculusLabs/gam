@@ -4308,9 +4308,47 @@ impl SaeSupportSparseTerm {
         let mut joint_snapshot = Vec::with_capacity(self.coordinate_state_len());
         let mut joint_scaled_step = Vec::with_capacity(self.coordinate_state_len());
         let mut joint_skip_remaining = 0usize;
+        // The previous cycle's certified quantity, which is what the pace test
+        // differences against. `None` before the first cycle, at the phase
+        // boundary, and after any support move — every point where there is no
+        // comparable predecessor.
+        let mut previous_certified: Option<f64> = None;
+        // PHASE. The caller's budget buys the ALTERNATION, and nothing about
+        // that phase changes: no joint system is assembled, no coupled step is
+        // proposed, and a fit that certifies inside `max_iter` takes exactly the
+        // trajectory it has always taken. Only a fit that would otherwise return
+        // the non-recurrence refusal enters phase two, where the coupled step is
+        // armed and the same budget is spent again.
+        //
+        // That ordering is the whole safety argument. A coupled step is a strict
+        // descent on the same objective, but it is still a DIFFERENT trajectory,
+        // and a different trajectory can arrive at a different (better) optimum
+        // that the caller's budget is no longer enough to certify at. Charging
+        // that risk only to fits that were about to fail costs nothing they had,
+        // and refusing is the outcome SPEC's "a fit object must only ever come
+        // from a converged optimization" makes most expensive.
+        let mut joint_armed = false;
         let mut joint_skip_width = 1usize;
         let mut joint_accepted = 0usize;
-        for iteration in 1..=max_iter {
+        let total_cycles = max_iter.saturating_mul(2);
+        for iteration in 1..=total_cycles {
+            if iteration > max_iter && !joint_armed {
+                // Phase boundary. The alternation has spent the caller's budget
+                // without certifying, so its rate has already answered the only
+                // question the pace test asks. Arm the coupled step and start
+                // the two-cycle recurrence over: the certificate must be earned
+                // on the new trajectory, never inherited across the boundary.
+                joint_armed = true;
+                accelerator.reset();
+                taken_step.clear();
+                taken_step.resize(self.coordinate_state_len(), 0.0);
+                last_objective = None;
+                previous_certified = None;
+                previous_candidate = false;
+                log::info!(
+                    "support fixed point: alternation did not recur in {max_iter} cycles;                      arming the coupled (Schur-eliminated joint Newton) phase"
+                );
+            }
             self.snapshot_coordinates(&mut cycle_start);
             let decoder_change = match self.decoder_fista_passes {
                 Some(passes) => {
@@ -4327,18 +4365,53 @@ impl SaeSupportSparseTerm {
             )?;
             let mut max_change = decoder_change.max(coordinate_change);
             let mut residual = &target - &fitted_state;
-            // The COUPLED step. The two sweeps above have each minimised their
-            // own block exactly; what neither can travel is the direction that
-            // needs both to move together, and that direction is the whole of
-            // the alternation's linear rate (see `joint_newton_step`). Attempt
-            // it here, on the post-sweep iterate, so the certificate below reads
-            // the better of the two points and the returned state is always the
-            // one whose objective is lowest.
-            if joint_skip_remaining > 0 {
+            let mut stationarity =
+                self.raw_stationarity_with_residual(&residual, lambda_smooth, ard_precisions)?;
+            // The COUPLED step, in phase two only, and there on the one further
+            // condition that makes it worth its cost: the alternation still
+            // cannot finish from here.
+            //
+            // Both sweeps minimise their own block exactly, so the iterate's
+            // error contracts by a fixed factor per cycle (see
+            // `joint_newton_step` for why that factor is the cross-block
+            // coupling). A fixed factor is a PACE, and the budget sets the pace
+            // that is good enough:
+            //
+            //     observed = certified_k / certified_{k-1}
+            //     needed   = (tolerance / certified_k)^(1 / cycles remaining)
+            //
+            // While `observed <= needed` the cheap sweeps arrive on time and
+            // nothing is assembled. That is a comparison between two measured
+            // rates, not a threshold: no constant, and it adapts to whatever
+            // tolerance and budget the caller supplied.
+            //
+            // A point that already meets the KKT limb is never disturbed. The
+            // coupled step's job is to REACH stationarity; past it, one more
+            // strict descent only keeps the objective-recurrence limb from ever
+            // firing, which would turn a converged fit into a budget exhaustion.
+            let certified = stationarity.scaled_max_abs();
+            let on_pace = match previous_certified {
+                Some(previous)
+                    if previous.is_finite()
+                        && previous > 0.0
+                        && certified.is_finite()
+                        && certified > 0.0
+                        && certified < previous =>
+                {
+                    let remaining = total_cycles.saturating_sub(iteration).max(1) as f64;
+                    (certified / previous) <= (tolerance / certified).powf(1.0 / remaining)
+                }
+                _ => false,
+            };
+            previous_certified = Some(certified);
+            if joint_armed && joint_skip_remaining > 0 {
                 joint_skip_remaining -= 1;
-            } else {
-                let before =
-                    self.penalized_objective_with_residual(&residual, lambda_smooth, ard_precisions)?;
+            } else if joint_armed && certified > tolerance && !on_pace {
+                let before = self.penalized_objective_with_residual(
+                    &residual,
+                    lambda_smooth,
+                    ard_precisions,
+                )?;
                 match self.joint_newton_step(
                     target,
                     lambda_smooth,
@@ -4352,6 +4425,12 @@ impl SaeSupportSparseTerm {
                         joint_accepted += 1;
                         joint_skip_width = 1;
                         residual = &target - &fitted_state;
+                        stationarity = self.raw_stationarity_with_residual(
+                            &residual,
+                            lambda_smooth,
+                            ard_precisions,
+                        )?;
+                        previous_certified = Some(stationarity.scaled_max_abs());
                         let mut moved = Vec::with_capacity(joint_snapshot.len());
                         self.snapshot_coordinates(&mut moved);
                         let mut wrapped = Vec::with_capacity(moved.len());
@@ -4367,8 +4446,6 @@ impl SaeSupportSparseTerm {
                 }
             }
             last_max_change = max_change;
-            let mut stationarity =
-                self.raw_stationarity_with_residual(&residual, lambda_smooth, ard_precisions)?;
             // The raw KKT is EXTENSIVE: each decoder entry sums per-row data
             // gradients over every row on the atom's support, so its natural
             // scale grows with rows-per-atom x residual scale. Certify the
@@ -4493,6 +4570,7 @@ impl SaeSupportSparseTerm {
                         taken_step.clear();
                         taken_step.resize(self.coordinate_state_len(), 0.0);
                         last_objective = None;
+                        previous_certified = None;
                         previous_candidate = false;
                         continue;
                     }
@@ -4573,6 +4651,7 @@ impl SaeSupportSparseTerm {
                                 taken_step.clear();
                                 taken_step.resize(self.coordinate_state_len(), 0.0);
                                 last_objective = None;
+                                previous_certified = None;
                                 previous_candidate = false;
                                 continue;
                             }
@@ -4663,7 +4742,8 @@ impl SaeSupportSparseTerm {
         // distinguishes "a sweep is not solving its block" from "the blocks
         // disagree at the joint point".
         Err(format!(
-            "SaeSupportSparseTerm::solve_fixed_point did not recur within {max_iter} cycles \
+            "SaeSupportSparseTerm::solve_fixed_point did not recur within {max_iter} \
+             alternating cycles nor in the {max_iter} coupled cycles that follow \
              (raw KKT max={:.6e}, relative to objective {:.6e}: {:.6e}; \
              per block: decoder max={:.6e} l2={:.6e}, coordinate max={:.6e} l2={:.6e}; \
              CERTIFIED QUANTITY (parameter-space Newton step) max={:.6e} vs tolerance {tolerance:.6e} \
