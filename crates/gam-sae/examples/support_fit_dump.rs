@@ -332,7 +332,12 @@ fn main() -> Result<(), String> {
                 })
                 .or_else(|first| {
                     let mut last = first;
-                    for tolerance in [1.0e-1_f64, 1.0, 1.0e1, 1.0e2, 1.0e3, 1.0e4] {
+                    // The last rung certifies nothing and says so. Without it a
+                    // converged fit whose certificate limb is 1e20 -- #2517 on a
+                    // flat coordinate direction -- is discarded entirely, while
+                    // the held-out path in this same file scores the identical
+                    // situation and labels it.
+                    for tolerance in [1.0e-1_f64, 1.0, 1.0e1, 1.0e2, 1.0e3, 1.0e4, f64::MAX] {
                         match term_seed.term.solve_fixed_point(
                             centered.view(),
                             &lambda,
@@ -342,9 +347,16 @@ fn main() -> Result<(), String> {
                             1.0,
                         ) {
                             Ok(report) => {
-                                eprintln!(
-                                    "[fit] certified only at tolerance {tolerance:.0e}"
-                                );
+                                if tolerance == f64::MAX {
+                                    eprintln!(
+                                        "[fit] ACCEPTED UNCERTIFIED: no rung certified; \
+                                         downstream numbers carry this caveat"
+                                    );
+                                } else {
+                                    eprintln!(
+                                        "[fit] certified only at tolerance {tolerance:.0e}"
+                                    );
+                                }
                                 certified_tolerance.set(tolerance);
                                 escalation_cycles.set(
                                     escalation_cycles.get() + report.iterations,
