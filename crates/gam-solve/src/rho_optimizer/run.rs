@@ -6050,25 +6050,38 @@ pub(crate) fn run_outer(
     // budget. Missing or failed evidence is typed non-convergence; there is no
     // max-iteration or logging-level bypass.
     //
-    // #2273 STALE-TOLERANCE DESYNC RETRY. The solver's in-loop convergence
-    // threshold is resolved ONCE from the SEED's cost scale
-    // (`rel_cost·(1+|seed_cost|)`), while this certificate re-derives the
-    // same formula at the terminal point's own (often far smaller) cost — on
-    // a perfectly-separated binomial the score plunges between the
-    // oversmoothed heuristic seed and the first accepted step, so the solver
-    // can declare victory against a bound orders of magnitude looser than
-    // the one that then refuses it here (measured: |g|=8.1e-1 accepted
-    // in-loop vs bound 8.3e-3 at certification, 'NOT STATIONARY after 1
-    // outer iteration'; the pass/fail pattern was non-monotone in n because
-    // it tracked the seed-to-terminus cost ratio, not identifiability). The
-    // desync exists precisely because the tolerance anchor differs from the
-    // terminus, so ONE re-run seeded AT the refused checkpoint removes it by
-    // construction: the retry's seed cost IS the certificate's cost, its
-    // in-loop bound equals the certificate bound, and the solver either
-    // genuinely closes the remaining gradient gap or exhausts its budget and
-    // takes the same typed refusal as before. Bounded to a single retry;
-    // only fires when the solver CLAIMED convergence (a budget-exhausted
-    // result is not a desync — its refusal is genuine).
+    // #2273 STALE-TOLERANCE DESYNC RETRY.
+    //
+    // HISTORY, because the mechanism this was written for no longer exists.
+    // The solver's in-loop threshold used to be resolved ONCE from the SEED's
+    // cost scale (`rel_cost·(1+|seed_cost|)`) while this certificate re-derived
+    // the same formula at the terminal point's own, often far smaller, cost. On
+    // a perfectly-separated binomial the score plunges between the oversmoothed
+    // heuristic seed and the first accepted step, so the solver declared
+    // victory against a bound orders of magnitude looser than the one that then
+    // refused it here (measured: |g|=8.1e-1 accepted in-loop vs bound 8.3e-3 at
+    // certification, "NOT STATIONARY after 1 outer iteration"; the pass/fail
+    // pattern was non-monotone in n because it tracked the seed-to-terminus
+    // cost ratio, not identifiability). The retry removed that by construction:
+    // re-seeded AT the refused checkpoint, the retry's seed cost IS the
+    // certificate's cost.
+    //
+    // #2613 removed the anchor desync itself. The solver's band
+    // (`outer_gradient_tolerance`) is now a function of the declared problem
+    // and of nothing else, and this certificate's band
+    // (`outer_stationarity_band_at`) is floored at it, so
+    // `certificate_bound >= solver_bound` holds identically — a point the
+    // solver legitimately converged at CANNOT be refused here for being above
+    // its band. `certificate_band_never_undercuts_the_solver_band_2613` gates
+    // that invariant directly.
+    //
+    // What the retry still covers is a different desync with the same shape: a
+    // FIDELITY one. Search-time evaluations may run under the inner-PIRLS cap,
+    // so the gradient the solver stopped on and the gradient re-measured here
+    // at full inner fidelity are not the same number. Re-seeding at the refused
+    // checkpoint still collapses that difference, for the same reason. Bounded
+    // to a single retry; only fires when the solver CLAIMED convergence (a
+    // budget-exhausted result is not a desync — its refusal is genuine).
     // CERTIFICATION-LAST FIT OWNERSHIP. The uncertainty diagnostic evaluates
     // proposal points after theta-hat and the terminal reinstallation
     // re-evaluates at `result.rho`, so any certificate measured BEFORE them
