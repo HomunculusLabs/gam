@@ -2640,33 +2640,6 @@ mod smoothing_correction_outcome_tests {
             s[[j, j]] = 1.0;
         }
 
-        // An INTERIOR rho at which rho is identified.
-        //
-        // This was `RHO_BOUND - 1.0`, forced so `near_boundary` would fire the
-        // cubature gate. Measured: that made the gate's own precondition fail.
-        // The near-boundary window is `rho in (RHO_BOUND - 2, RHO_BOUND]`, i.e.
-        // `lambda >~ e^28`, where a ridge on 3 of 4 columns over n = 24 has
-        // collapsed to its null space and the REML score is flat in rho. So
-        // `active_rank = 0`, and `compute_smoothing_correction_auto` correctly
-        // declines with `first-order V_rho rank-deficient: cubature would
-        // impute spurious variance` -- there is no rho-uncertainty to
-        // propagate, and cubature would invent some. Every rho in that window
-        // fails the precondition on this design, so no choice inside it works.
-        //
-        // The gate has a third arm the fixture was not using. Its own comment
-        // says so: "A fit can be perfectly interior and converged while the
-        // REML surface is still broad in rho ... continue to the rho-Hessian
-        // inversion below so `max_rhovar` can trigger cubature for those
-        // broad-but-well-converged posteriors." An interior rho keeps rho
-        // identified (so the rank check passes) and reaches cubature through
-        // `max_rho_var` or the high-gradient certificate instead.
-        //
-        // lambda = 1: a ridge that regularises without saturating, so the
-        // penalised directions retain support and the rho-Hessian is
-        // invertible -- which is what this fixture's own comment already
-        // claimed it needed.
-        let final_rho = Array1::from_vec(vec![0.0]);
-
         // Run the full cubature path at one response scale; return the returned
         // correction matrix plus the cubature-counter delta observed for THIS
         // call (proves the cubature branch — not the first-order fallback — ran).
@@ -2703,13 +2676,83 @@ mod smoothing_correction_outcome_tests {
             )
             .expect("build RemlState");
 
-            // Converged inner fit at the forced near-boundary ρ — this is the
+            // ρ̂ by root-finding the outer stationarity condition, NOT a forced value.
+            //
+            // This fixture used to hand `compute_smoothing_correction_auto` a
+            // ρ of its own choosing — first `RHO_BOUND - 1`, then an interior
+            // `0.0` — and both produced the identical refusal
+            // `first-order V_rho rank-deficient`. The reason the two agreed is
+            // that neither is a stationary point, and the rank rule is not a
+            // statement about ρ's value at all. Measured at `ρ = 0` (#2614):
+            //
+            //     grad = [4.341019]   |g| = 4.341019e0
+            //     rho-Hessian eigenvalue = -2.125902     class = BelowGradientFloor
+            //     active=0/1  structural_zero=0  below_gradient_floor=1
+            //     eigensolver backward error = 3.021089e-14
+            //
+            // The curvature is NEGATIVE. This ρ is not a minimum, and the only
+            // thing that stopped `invert_identified_rho_hessian` from calling
+            // that the contradiction it is, is its own resolution floor
+            // `floor = Σ_k |g_k|·v_k² = 4.34` (#2428), which is larger than
+            // `|σ| = 2.13` and so classifies the direction as unresolvable
+            // instead. That floor exists because the production caller
+            // (`estimate/optimizer.rs:2628`) passes
+            // `outer_result.final_gradient` — the RESIDUAL gradient the outer
+            // certificate accepted ρ̂ with, which is tiny by construction. Feed
+            // it a full non-stationary gradient and it masks everything,
+            // uniformly in ρ. That is exactly the ρ-independence measured.
+            //
+            // So the fixture has to satisfy the precondition the whole
+            // correction path is written for, rather than pick a ρ and hope.
+            // `n_rho == 1`, so stationarity is a scalar root and bisection
+            // brackets it with no derivative and no tuning; the bracket is the
+            // ρ domain itself. What makes this a fixture rather than a
+            // reimplemented optimizer is that the result is CERTIFIED below:
+            // the gradient at the returned ρ̂ is asserted small, so a
+            // mis-converged root fails loudly instead of silently reproducing
+            // the defect this comment describes.
+            //
+            // The root is scale-invariant, which is what lets the equivariance
+            // comparison stay exact across the two runs: for profiled Gaussian
+            // REML, `y -> c·y` sends `rss -> c²·rss` and the score picks up
+            // `dof·ln(c²)`, an additive constant in ρ. The ρ-gradient is
+            // therefore identical at both scales and both runs bisect to the
+            // same ρ̂.
+            let outer_gradient_at = |candidate: f64| -> f64 {
+                let probe = Array1::from_vec(vec![candidate]);
+                state
+                    .compute_gradient(&probe)
+                    .unwrap_or_else(|err| {
+                        panic!("outer gradient at rho={candidate}: {err}")
+                    })[0]
+            };
+            let mut lo_rho = 1.0 - RHO_BOUND;
+            let mut hi_rho = RHO_BOUND - 1.0;
+            let g_lo = outer_gradient_at(lo_rho);
+            let g_hi = outer_gradient_at(hi_rho);
+            assert!(
+                g_lo < 0.0 && g_hi > 0.0,
+                "the REML profile has no interior stationary ρ on this design at                  scale {scale}: g({lo_rho}) = {g_lo:.6e}, g({hi_rho}) = {g_hi:.6e}.                  A monotone profile means the optimum is a rail, where the outer                  gradient does not vanish and the correction's identification rule                  has no converged ρ̂ to be applied at — the fixture's data would                  need to favour some smoothing, not the ρ search."
+            );
+            let mut bisections = 0usize;
+            while hi_rho - lo_rho > 1e-13 * (1.0 + hi_rho.abs()) && bisections < 200 {
+                let mid = 0.5 * (lo_rho + hi_rho);
+                if outer_gradient_at(mid) > 0.0 {
+                    hi_rho = mid;
+                } else {
+                    lo_rho = mid;
+                }
+                bisections += 1;
+            }
+            let final_rho = Array1::from_vec(vec![0.5 * (lo_rho + hi_rho)]);
+
+            // Converged inner fit at the certified stationary ρ — this is the
             // `final_fit` the cubature path differentiates around, and its
             // Qs-mapped H⁻¹ is the dispersion-free base covariance the
             // correction upgrades.
             let final_fit = state
                 .execute_pirls_stateless_for_cubature(&final_rho, None)
-                .expect("inner PIRLS at near-boundary rho");
+                .expect("inner PIRLS at the converged rho");
             let h_orig = map_hessian_to_original_basis(final_fit.as_ref())
                 .expect("map Hessian to original basis");
             let base_cov = gam_linalg::utils::certified_spd_inverse(&h_orig, "test base cov")
@@ -2720,8 +2763,9 @@ mod smoothing_correction_outcome_tests {
             // scales as c², the denominator is scale-invariant, so φ̂ scales as c².
             let dispersion_phi = final_fit.deviance / ((n as f64) - (p as f64)).max(1.0);
 
-            // Real outer-gradient norm at the forced ρ (finite, for the gate's
-            // highgrad arm); near_boundary already guarantees cubature entry.
+            // The residual gradient at ρ̂, which is what the production caller
+            // passes and what the identification floor is calibrated for.
+            //
             // Do NOT swallow a failed outer gradient into a zero-LENGTH array.
             //
             // This previously fell back to `Array1::zeros(0)` behind a
@@ -2748,6 +2792,16 @@ mod smoothing_correction_outcome_tests {
                      nothing to do with this test's subject."
                 ));
             let finalgrad_norm = finalgrad.dot(&finalgrad).sqrt();
+
+            // Certify the bracket actually converged. Without this the fixture
+            // could hand a mis-converged ρ straight back into the defect above,
+            // and the failure would again present as an inscrutable
+            // rank-deficiency rather than as "the root search did not finish".
+            let stationarity_tol = 1e-6 * (1.0 + final_fit.deviance.abs());
+            assert!(
+                finalgrad_norm <= stationarity_tol,
+                "the ρ bracket did not reach stationarity in {bisections} bisections:                  ρ̂ = {final_rho:?}, |g| = {finalgrad_norm:.6e} exceeds                  {stationarity_tol:.6e}"
+            );
 
             // Kept for the failure path below; `Ok`/`Err` is itself a finding.
             let self_hessian_for_diagnosis = state.compute_lamlhessian_consistent(&final_rho).ok();
