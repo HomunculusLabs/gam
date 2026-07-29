@@ -2036,8 +2036,46 @@ pub fn parse_linkwiggle_formulaspec(
         }
         .into());
     }
-    let penalty_orders =
+    // A DEFAULTED ladder adapts to the degree; an EXPLICIT one never does.
+    //
+    // `parse_linkwiggle_penalty_orders` falls back to
+    // `WigglePenaltyConfig::cubic_triple_operator_default()` -- orders [1, 2, 3],
+    // chosen for a CUBIC basis. A user writing `linkwiggle(degree=2, ...)`
+    // overrides the degree and not the ladder, so the default asks for an
+    // order-3 roughness penalty on a degree-2 basis. That penalty is the zero
+    // matrix (the 3rd derivative of a degree-2 piecewise polynomial vanishes),
+    // `bspline_unit_energy_factor` rightly refuses to build it, and the whole
+    // fit dies with "Spline degree 2 is too low for derivative order 3".
+    //
+    // The user never asked for order 3 here, so dropping it is resolving a
+    // default rather than overriding a request. When the ladder IS explicit the
+    // orders stay exactly as written and the downstream refusal stands --
+    // `wiggle::tests::unsupported_derivative_order_is_rejected_not_clamped`
+    // pins that, and it is the reason this clip lives here at the
+    // default-resolution seam instead of inside
+    // `canonical_wiggle_function_penalties`, where it would have silently
+    // clamped explicit requests too.
+    let penalty_order_requested = options
+        .get("penalty_order")
+        .is_some_and(|raw| !raw.trim().is_empty());
+    let mut penalty_orders =
         parse_linkwiggle_penalty_orders(options.get("penalty_order").map(String::as_str))?;
+    if !penalty_order_requested {
+        let supported: Vec<usize> = penalty_orders
+            .iter()
+            .copied()
+            .filter(|&order| order <= degree)
+            .collect();
+        if supported.is_empty() {
+            return Err(FormulaDslError::InvalidArgument {
+                reason: format!(
+                    "{term_name}(degree={degree}) supports no default penalty order: the default                      ladder {penalty_orders:?} contains no derivative order a degree-{degree}                      basis can penalize"
+                ),
+            }
+            .into());
+        }
+        penalty_orders = supported;
+    }
     let double_penalty =
         option_bool_strict(options, "double_penalty")?.unwrap_or(defaults.double_penalty);
     Ok(LinkWiggleFormulaSpec {
