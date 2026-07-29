@@ -279,6 +279,14 @@ fn main() -> Result<(), String> {
     // compares directly.
     let certified_tolerance = std::cell::Cell::new(1.0e-4_f64);
     let escalation_cycles = std::cell::Cell::new(0_usize);
+    // "exact_train" arms the exact affine ranking BEFORE the initial solve, so
+    // the training-time support updates inside `solve_fixed_point` use it too.
+    // "exact" (armed later, beside pricing) affects held-out scoring only, and
+    // the two are separate tokens so the effects stay separable.
+    if args.iter().any(|arg| arg == "exact_train") {
+        term_seed.term.set_exact_affine_ranking(true);
+        println!("exact affine ranking: armed BEFORE the initial solve");
+    }
     let t0 = Instant::now();
     // Per-atom REML by Fellner-Schall, alternated with the inner fit. The inner
     // certificate is a statement at fixed smoothing, so lambda moves only out
@@ -386,9 +394,9 @@ fn main() -> Result<(), String> {
     // Every knob is matched anywhere in the argument list, so an unknown
     // trailing token can only be a typo -- and a typo that is ignored
     // disarms a mechanism while the arm still reports a number. Reject it.
-    const KNOB_TOKENS: [&str; 11] =
+    const KNOB_TOKENS: [&str; 12] =
         ["unroll", "pool", "joint", "price", "usage", "vark", "fista", "exact",
-         "refine3", "refine9", "none"];
+         "refine3", "refine9", "exact_train", "none"];
     for arg in args.iter().skip(15) {
         if !KNOB_TOKENS.contains(&arg.as_str()) {
             return Err(format!(
