@@ -3674,18 +3674,30 @@ pub(crate) fn stop_reason_from(reason: TerminationReason) -> OperatorTrustRegion
             OperatorTrustRegionStopReason::RejectFloor
         }
         TerminationReason::IterationBudget { .. } => OperatorTrustRegionStopReason::IterationBudget,
-        // Every remaining variant is either a stop the solver stands
-        // behind or a hard failure the caller sees through the `Err` arm;
-        // neither is a trust-region event.
+        // A stop the solver stands behind: it applied a test and the test
+        // passed. Not a trust-region event, so it reports as converged.
         TerminationReason::GradientTolerance { .. }
         | TerminationReason::SmallStepFlatObjective { .. }
         | TerminationReason::RelativeStationarityWindow { .. }
         | TerminationReason::ModelNoiseFloor { .. }
         | TerminationReason::StepNormTolerance { .. }
-        | TerminationReason::FixedPointRequestedStop { .. }
-        | TerminationReason::LineSearchFailed { .. }
+        | TerminationReason::FixedPointRequestedStop { .. } => {
+            OperatorTrustRegionStopReason::Converged
+        }
+        // A failure. These used to join the arm above, on the premise that
+        // they are "a hard failure the caller sees through the `Err` arm" --
+        // which is false for `LineSearchFailed` on the path it actually
+        // takes: `run_plan` returns `Ok(non-converged)` whenever the last
+        // iterate is finite, because that iterate is a usable checkpoint. So
+        // the caller sees no `Err`, and the coarse reason it does see said
+        // `Converged`. A binomial/logit REML fit that never accepted a single
+        // step reported `stop_reason=Converged after 1 outer iteration(s)`
+        // (#2614). The comment immediately below already argues that
+        // defaulting an unknown stop to `Converged` would be wrong; three
+        // KNOWN failures were doing exactly that.
+        TerminationReason::LineSearchFailed { .. }
         | TerminationReason::ObjectiveFailed
-        | TerminationReason::NumericalFailure => OperatorTrustRegionStopReason::Converged,
+        | TerminationReason::NumericalFailure => OperatorTrustRegionStopReason::SolverFailure,
         // `TerminationReason` is `#[non_exhaustive]`: a variant added
         // upstream lands here rather than breaking the build. Treating an
         // unknown stop as `Converged` would be the wrong default, so it
@@ -3849,5 +3861,48 @@ mod termination_provenance_tests {
         assert_eq!(s.scaling, opt::StationarityScaling::Absolute);
         assert_eq!(w.scaling, opt::StationarityScaling::RelativeToIterate);
         assert!(w.threshold > s.threshold);
+    }
+
+    /// A stop that FAILED must not project onto the same coarse reason as a
+    /// stop that passed a test.
+    ///
+    /// `LineSearchFailed` reached this projection reporting `Converged`, and
+    /// the path that produces it is not hypothetical: `run_plan` returns
+    /// `Ok(non-converged)` whenever the failed search's last iterate is
+    /// finite, so the caller sees no `Err` and reads only this label. A
+    /// binomial/logit REML fit that accepted no step at all reported
+    /// `stop_reason=Converged after 1 outer iteration(s)` (#2614). The three
+    /// failure variants are asserted together because they entered the
+    /// defect together, in one `|` chain.
+    #[test]
+    fn a_failed_stop_does_not_project_onto_converged() {
+        let passed = TerminationReason::GradientTolerance {
+            grad_norm: 1.0e-9,
+            threshold: 1.0e-8,
+        };
+        assert_eq!(
+            stop_reason_from(passed),
+            OperatorTrustRegionStopReason::Converged,
+            "a satisfied gradient test is still a convergence"
+        );
+        for failed in [
+            TerminationReason::LineSearchFailed {
+                grad_norm: 1.484_825,
+            },
+            TerminationReason::ObjectiveFailed,
+            TerminationReason::NumericalFailure,
+        ] {
+            let projected = stop_reason_from(failed);
+            assert_eq!(
+                projected,
+                OperatorTrustRegionStopReason::SolverFailure,
+                "{failed:?} is a failure, not a convergence; it projected to {projected:?}"
+            );
+            assert!(
+                failed.stationarity_evidence().is_none(),
+                "{failed:?} compared nothing to anything, so it has no stationarity evidence to \
+                 report -- if it grows one, this projection needs revisiting"
+            );
+        }
     }
 }

@@ -5842,6 +5842,25 @@ pub enum OperatorTrustRegionStopReason {
     /// caller should consider re-fitting under a different solver class
     /// (e.g. BFGS gradient-only) instead of trusting the partial result.
     RoutingMismatch,
+    /// The solver stopped because something failed, not because a test it
+    /// stands behind was satisfied: the line search gave up, an objective
+    /// evaluation failed, or the arithmetic went non-finite.
+    ///
+    /// These used to map to [`Self::Converged`], on the stated premise that
+    /// they are "a hard failure the caller sees through the `Err` arm". That
+    /// premise is false for the line-search case on the path it actually
+    /// takes: `run_plan` turns a `BfgsError::LineSearchFailed` whose last
+    /// iterate is finite into `Ok(non-converged)`, because that iterate is a
+    /// usable checkpoint. The caller therefore sees no `Err`, and the coarse
+    /// reason it does see said `Converged` — which is how a binomial/logit
+    /// REML fit that never accepted a single step came to report
+    /// `stop_reason=Converged after 1 outer iteration(s)` (#2614).
+    ///
+    /// Reporting-only today: no consumer branches on `Converged`, so this
+    /// splits a label without moving a decision. Kept separate from
+    /// [`Self::IterationBudget`] because "ran out of budget" and "could not
+    /// take a step" call for different repairs.
+    SolverFailure,
 }
 
 /// Run the outer smoothing-parameter optimization.
