@@ -1319,7 +1319,7 @@
         }
 
         let workspace = family
-            .exact_newton_joint_hessian_workspace(&states, &[])
+            .exact_newton_joint_hessian_workspace(&states, &specs)
             .expect("latent binary hessian workspace")
             .expect("workspace should exist");
         let direction = array![0.4, -0.2, 0.3, 0.1];
