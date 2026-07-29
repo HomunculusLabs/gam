@@ -320,12 +320,12 @@ fn run() -> Result<(), String> {
         census.accepted(),
         census.fdr_alpha,
         census.ebh_threshold,
-        null_replicates + 1
+        census.replicates_drawn + 1
     );
     eprintln!(
         "[census] {} pairs beat every surrogate; making those discoveries needs \
          {:.0} replicates (this run drew {})",
-        census.n_max_e, census.replicates_required, null_replicates
+        census.n_max_e, census.replicates_required, census.replicates_drawn
     );
 
     let rows: Vec<serde_json::Value> = census
@@ -413,7 +413,7 @@ fn run() -> Result<(), String> {
         "ebh_threshold": census.ebh_threshold,
         "n_max_e": census.n_max_e,
         "replicates_required": census.replicates_required,
-        "null_replicates": null_replicates,
+        "null_replicates": census.replicates_drawn,
         "permute_seed": permute_seed,
         "coalesce_cos_threshold": coalesce_cos,
         "pairs": rows,

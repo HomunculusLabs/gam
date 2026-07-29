@@ -124,15 +124,29 @@ pub struct CurlCensusConfig {
     /// Cap on the rows the plane parse is formed on. Co-firing rows above this
     /// count are strided down; the κ SE is already saturated well below it.
     pub subsample_rows: usize,
-    /// Permutation surrogates drawn per candidate plane for the exact κ e-value.
+    /// Permutation surrogates per candidate plane, or `0` to DERIVE the only
+    /// defensible value (which is what every caller should do; the override exists
+    /// so two statistics can be compared at a fixed budget).
     ///
-    /// The indicator e-value tops out at `replicates + 1`, and an e-BH ledger over
-    /// `m` screened pairs needs `e ≥ m/(α·rank)` to reject at rank `rank`. So this
-    /// is not a precision knob to be set as large as patience allows — it is the
-    /// resolution the multiplicity of the search demands, and a census over `m`
-    /// pairs that wants to be able to reject `k` of them at level `α` needs at
-    /// least `m/(α·k) − 1` draws. Under-resourcing it does not inflate the false
-    /// discovery rate; it silently makes every rejection impossible.
+    /// The budget is not a precision knob to be set as large as patience allows.
+    /// It is two-sided, and both sides are sharp:
+    ///
+    ///   * **Too small and no rejection is possible.** The indicator e-value tops
+    ///     out at `B + 1`, and e-BH rejects at rank `k` only when the `k`-th
+    ///     largest e-value clears `m/(α·k)`. Below `B + 1 = m/α` even rank 1 is out
+    ///     of reach, and the census prints the same zero it would print for an
+    ///     absence of structure.
+    ///   * **Too large and real signal is destroyed.** The indicator pays `B + 1`
+    ///     only when NO surrogate reaches the observation, and a plane whose true
+    ///     p-value is `p` holds that with probability `≈ (1 − p)^B`. Pushing `B`
+    ///     from `2·10⁵` to `10⁶` takes a `p = 10⁻⁵` plane from a 13% chance of
+    ///     scoring at all to a 0.005% chance. More draws is not more evidence; past
+    ///     a point it is less.
+    ///
+    /// `B + 1 = m/α` is exactly where those meet: the smallest budget at which
+    /// EVERY rank is reachable (`B + 1 = m/α ≥ m/(α·k)` for all `k ≥ 1`), and
+    /// therefore the largest one that buys anything. No knob, no taste — the size
+    /// of the search fixes it.
     pub null_replicates: usize,
     /// Target false discovery rate for the e-BH ledger over all screened pairs.
     pub fdr_alpha: f64,
@@ -208,6 +222,8 @@ pub struct CurlCensus {
     /// Pairs that beat EVERY surrogate, i.e. that attained the maximum e-value the
     /// replicate budget allows.
     pub n_max_e: usize,
+    /// Surrogates actually drawn per candidate plane.
+    pub replicates_drawn: usize,
     /// Replicates that would have been needed for those `n_max_e` pairs to be
     /// discoveries: `m/(α·n_max_e) − 1`.
     ///
@@ -272,6 +288,7 @@ pub fn census_shattered_circles(
             fdr_alpha: cfg.fdr_alpha,
             ebh_threshold: f64::INFINITY,
             n_max_e: 0,
+            replicates_drawn: 0,
             replicates_required: f64::NAN,
         });
     }
@@ -297,6 +314,7 @@ pub fn census_shattered_circles(
             fdr_alpha: cfg.fdr_alpha,
             ebh_threshold: f64::INFINITY,
             n_max_e: 0,
+            replicates_drawn: 0,
             replicates_required: f64::NAN,
         });
     }
@@ -305,6 +323,15 @@ pub fn census_shattered_circles(
         ids.iter().enumerate().map(|(i, a)| (*a, i)).collect();
     let signed_active: Vec<Vec<bool>> = signed.iter().map(|s| s.active.clone()).collect();
     let candidate_pairs = cooccurrence_pairs_sparse(&signed_active, cfg.min_cooccurrence);
+    // The derived budget: B + 1 = m/α, the smallest at which every e-BH rank is
+    // reachable and the largest that buys anything. See `null_replicates`.
+    let replicates = if cfg.null_replicates > 0 {
+        cfg.null_replicates
+    } else {
+        ((candidate_pairs.len() as f64 / cfg.fdr_alpha).ceil() as usize)
+            .saturating_sub(1)
+            .max(2)
+    };
 
     let out: Vec<CensusPair> = candidate_pairs
         .par_iter()
@@ -381,7 +408,7 @@ pub fn census_shattered_circles(
                 kappa_permutation_evidence(
                     alpha.view(),
                     beta.view(),
-                    cfg.null_replicates,
+                    replicates,
                     seed | 1,
                 )
                 .unwrap_or((1.0, 0.0, f64::NAN, f64::NAN))
@@ -447,6 +474,7 @@ pub fn census_shattered_circles(
         fdr_alpha: cfg.fdr_alpha,
         ebh_threshold,
         n_max_e,
+        replicates_drawn: replicates,
         replicates_required,
     })
 }
