@@ -557,12 +557,25 @@ pub(crate) fn corrected_isometry_penalty_retargets_mixed_dimension_atoms() {
         vec![coords_d1, coords_d3],
         vec![
             LatentManifold::Circle { period: 1.0 },
-            LatentManifold::Product(vec![
-                LatentManifold::Interval { lo: -1.0, hi: 1.0 },
-                LatentManifold::Circle {
-                    period: std::f64::consts::TAU,
-                },
-            ]),
+            // `coords_d3` is S^2 in AMBIENT R^3: the evaluator is
+            // `AmbientSphereHarmonicEvaluator::new(2)`, and every row is a unit
+            // vector ([0,0,1], [0.6,-0.8,0], [0.36,0.48,0.8] -> 0.1296+0.2304+
+            // 0.64 = 1.0, [-0.48,0.6,-0.64]). So the latent manifold is a
+            // 3-wide sphere.
+            //
+            // It used to declare `Product([Interval, Circle])`, which is TWO
+            // coordinates: `ambient_dim` sums its parts (Interval -> 1,
+            // Circle -> 1), so the spec claimed width 2 for a 3-column block.
+            // `project_all_rows_to_manifold` asserts
+            // `manifold.ambient_dim(latent_dim) == latent_dim` before it strides
+            // the flat buffer, and it fired exactly as it should:
+            // `left: 2, right: 3`. Striding a 3-wide block as if it were 2-wide
+            // would have walked rows out of alignment, so the assert was the
+            // only thing standing between this fixture and silent corruption.
+            //
+            // `Sphere { dim }` carries the AMBIENT width (`ambient_dim` returns
+            // `dim` directly, not `dim + 1`), so S^2 in R^3 is `dim: 3`.
+            LatentManifold::Sphere { dim: 3 },
         ],
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, true),
     )
@@ -574,7 +587,9 @@ pub(crate) fn corrected_isometry_penalty_retargets_mixed_dimension_atoms() {
     // atoms. Per-atom correction must keep it live, not disable it.
     let mut registry = AnalyticPenaltyRegistry::new();
     registry.push(AnalyticPenaltyKind::Isometry(Arc::new(
-        IsometryPenalty::new_euclidean(PsiSlice::full(term.n_obs() * 2, Some(2)), p_out),
+        // Sized from the heterogeneous spec's MAXIMUM latent dimension, which is
+        // atom 1's 3 (was 2, from the old Product spec).
+        IsometryPenalty::new_euclidean(PsiSlice::full(term.n_obs() * 3, Some(3)), p_out),
     )));
     let registry_iso = match &registry.penalties[0] {
         AnalyticPenaltyKind::Isometry(penalty) => penalty,
@@ -591,7 +606,10 @@ pub(crate) fn corrected_isometry_penalty_retargets_mixed_dimension_atoms() {
     registry_iso.refresh_caches(Some(stale_registry_jacobian.clone()), None);
     let rho = array![0.0_f64];
 
-    for (atom_idx, expected_dim) in [(0usize, 1usize), (1usize, 2usize)] {
+    // Atom 1 is S^2 in ambient R^3, so its latent width is 3 -- see the
+    // `Sphere { dim: 3 }` note above. This loop said 2, matching the old
+    // 2-coordinate Product spec rather than the atom's actual coordinates.
+    for (atom_idx, expected_dim) in [(0usize, 1usize), (1usize, 3usize)] {
         let coord = &term.assignment.coords[atom_idx];
         let corrected = term
             .corrected_isometry_penalty(registry_iso, atom_idx, coord)
