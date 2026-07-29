@@ -198,12 +198,31 @@ jobs:
       # PyO3 NOT to link libpython, so a standalone test binary fails to LINK.
       # gam-pyffi is archived separately below with --no-default-features.
       #
-      # `--config profile.dev.debug=0` drops dev DWARF (the largest non-executable
+      # `--config profile.test.debug=0` drops DWARF (the largest non-executable
       # payload) to keep the archive small and the links practical on a standard
-      # runner. The step exits 0 even on compile failure so the archive (if any)
-      # and the build log still upload and the run-shards/aggregate jobs proceed;
-      # the compile errors captured in archive-build.log become the aggregate
-      # job's verdict.
+      # runner.
+      #
+      # IT MUST NAME THE `test` PROFILE, NOT `dev`. `cargo nextest archive`
+      # builds the `test` profile, and Cargo.toml pins `[profile.test] debug =
+      # "line-tables-only"`, which overrides the file-level default this flag
+      # used to target. Spelled `profile.dev.debug=0` the flag was INERT: the
+      # build reported `Finished `test` profile [optimized + debuginfo]` and
+      # all 231 archived binaries still carried their debuginfo. That is what
+      # exhausted the runner's 145 GB volume mid-archive with `No space left
+      # on device`, and it is why the 2026-07-29 nightly ledger recorded the
+      # ENTIRE Rust runtime surface as NOT MEASURED. Established as a paired
+      # A/B on one box, not inferred: `profile.dev.debug=0` ->
+      # `[optimized + debuginfo]`, `profile.test.debug=0` -> `[optimized]`.
+      #
+      # The step still exits 0 so the archive (if any), the build log, and the
+      # gam-pyffi archive below all upload and the downstream jobs proceed.
+      # A COMPILE failure is a result about the code, and the aggregate job
+      # reports it. An ARCHIVER failure -- every crate built, but the archive
+      # could not be written -- is not a result at all: it measures nothing,
+      # and calling it "compile errors" sends the next reader hunting a broken
+      # crate that does not exist. It is recorded here and fails the job at the
+      # end (see "Gate: the archive step measured something"), which is after
+      # every upload, so nothing that COULD be measured is lost.
       - name: Build nextest archive (whole workspace, all features)
         id: archive
         shell: bash
@@ -212,7 +231,7 @@ jobs:
           status=0
           cargo nextest archive \
             --workspace --all-features --exclude gam-pyffi \
-            --config 'profile.dev.debug=0' \
+            --config 'profile.test.debug=0' \
             --archive-file nx.tar.zst 2>&1 | tee archive-build.log || status="${PIPESTATUS[0]}"
           echo "nextest archive exit status: ${status}"
           if [ -f nx.tar.zst ]; then
@@ -220,7 +239,17 @@ jobs:
             echo "Archive built: $(du -h nx.tar.zst | cut -f1)"
           else
             echo "archived=false" >> "$GITHUB_OUTPUT"
-            echo "::error::Workspace test build FAILED to produce an archive (compile errors). See the MASTER_FAILURES.md artifact / aggregate job for every compile failure."
+            # Name WHICH failure this was. `Finished ... profile` is cargo's
+            # own statement that every crate compiled, so if it is present and
+            # the archive is still missing, the compiler is not what failed.
+            df -h . || true
+            if grep -qE '^ *Finished .*(test|dev) profile' archive-build.log; then
+              echo "archiver_failed=true" >> "$GITHUB_OUTPUT"
+              echo "::error::The workspace COMPILED but the archive could not be written, so this run measured NOTHING of the Rust runtime surface. This is an archiver/disk failure, not a compile failure. Archiver error and free space follow."
+              grep -B2 -A6 -iE '^error' archive-build.log | tail -30 || true
+            else
+              echo "::error::Workspace test build FAILED to produce an archive (compile errors). See the MASTER_FAILURES.md artifact / aggregate job for every compile failure."
+            fi
           fi
 
       # gam-pyffi unit tests need extension-module OFF so the harness links
@@ -233,7 +262,7 @@ jobs:
           set -uo pipefail
           cargo nextest archive \
             -p gam-pyffi --no-default-features \
-            --config 'profile.dev.debug=0' \
+            --config 'profile.test.debug=0' \
             --archive-file nx-pyffi.tar.zst 2>&1 | tee -a archive-build.log || true
           if [ -f nx-pyffi.tar.zst ]; then echo "gam-pyffi archive built."; fi
           exit 0
@@ -319,6 +348,22 @@ jobs:
             nextest-list.log
           retention-days: 7
           if-no-files-found: warn
+
+      # A job that compiled everything, wrote no archive, and reported `success`
+      # is the worst of the three outcomes: `rust-test` then runs ten shards
+      # against a missing archive, every one reports ARCHIVE_MISSING, and the
+      # ledger's runtime counters read 0 -- indistinguishable at a glance from
+      # a clean run. That is exactly what happened on 2026-07-29 (run
+      # 30427042552: build `success`, archive step `No space left on device`,
+      # all ten shard logs empty). This gate runs LAST and with `always()`, so
+      # every artifact above is already uploaded and the gam-pyffi surface --
+      # which does not depend on nx.tar.zst -- still runs and still reports.
+      - name: Gate — the archive step measured something
+        if: ${{ always() && steps.archive.outputs.archiver_failed == 'true' }}
+        shell: bash
+        run: |
+          echo "::error::Failing this job on purpose: the workspace compiled but produced no test archive, so no shard could measure anything. A green build job here would report 'no test failures' for a surface that was never run."
+          exit 1
 
   # ---------------------------------------------------------------------------
   # RUN MANY. N parallel shards, each running 1/N of the test surface from the
