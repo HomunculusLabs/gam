@@ -4326,25 +4326,57 @@ mod refinement_decision_tests {
             .expect("the dense route must expose an affine view");
         let (lo, hi) = profile.log_lambda_domain().expect("domain");
         let rank = (design.core.m - design.core.nullity()) as f64;
+        let dof = (design.core.y.len() - design.core.nullity()) as f64;
+        let CascadeResidualForm::Spectral(spectrum) = &profile.residual else {
+            panic!("the dense route must carry the spectral residual form");
+        };
         let bound = rank * f64::EPSILON;
 
+        let mut worst = 0.0_f64;
         for step in 0..=8 {
             let log_lambda = lo + (hi - lo) * step as f64 / 8.0;
             let cascade = profile.evaluate(log_lambda).expect("cascade jet").jet;
             let spectral = affine.evaluate(log_lambda).expect("affine jet");
+            let lambda = log_lambda.exp();
+            let certified =
+                gam_math::score_opt::certified_exp_representative(log_lambda).expect("exp");
+            let (rss, s2, s3, _) = spectrum.moments(lambda);
+            let anchor = spectrum.anchor_energy[0];
+            let mut t_sum = 0.0_f64;
+            let mut logistic_curvature = 0.0_f64;
+            let mut logdet_magnitude = 0.0_f64;
+            for &theta in &spectrum.eigenvalue {
+                let t = theta / (theta + lambda);
+                t_sum += t;
+                logistic_curvature += t * (1.0 - t);
+                logdet_magnitude += (1.0 + theta / lambda).ln().abs();
+            }
+            let rss_d1 = lambda * s2;
+            let rss_d2 = rss_d1 - 2.0 * lambda * lambda * s3;
+            println!(
+                "DIAG rho={log_lambda} lambda={lambda} lambda_gap={:e} rank={rank} dof={dof} \
+                 anchor={anchor} rss={rss} cancellation={:e} rss_d1={rss_d1} rss_d2={rss_d2} \
+                 s2={s2} s3={s3} t_sum={t_sum} logistic_curvature={logistic_curvature} \
+                 logdet_magnitude={logdet_magnitude} log_d1={:e} log_d2={:e}",
+                (certified - lambda).abs() / lambda,
+                anchor / rss,
+                rss_d1 / rss,
+                rss_d2 / rss - (rss_d1 / rss) * (rss_d1 / rss),
+            );
             for (name, a, b) in [
                 ("value", cascade.value, spectral.value),
                 ("derivative", cascade.derivative, spectral.derivative),
                 ("curvature", cascade.curvature, spectral.curvature),
             ] {
                 let gap = (a - b).abs() / (1.0 + b.abs());
-                assert!(
-                    gap <= bound,
-                    "{name} disagrees at log lambda {log_lambda}: cascade {a}, affine {b} \
-                     (relative {gap:e} exceeds the shared mode-sum roundoff {bound:e})"
-                );
+                worst = worst.max(gap / bound);
+                println!("DIAG {name} rho={log_lambda} cascade={a} affine={b} gap={gap:e}");
             }
         }
+        assert!(
+            worst <= 1.0,
+            "worst gap is {worst} times the mode-sum roundoff {bound:e}"
+        );
     }
 
     #[test]
