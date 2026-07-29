@@ -1137,6 +1137,61 @@ fn intersect_updated_covariance_exact_range(
     }
 }
 
+/// Intersect a covariance enclosure with the exact 2×2 minors of the PSD
+/// constraint it satisfies.
+///
+/// [`intersect_proper_covariance_psd`] uses the 1×1 minors — `P[i][i] ≥ 0` —
+/// and stops there. The 2×2 minors are equally exact and two-sided:
+///
+///     P[i][i]·P[j][j] − P[i][j]² ≥ 0   ⇒   |P[i][j]| ≤ √(P[i][i]·P[j][j]),
+///
+/// which bounds every off-diagonal by the diagonals rather than letting it
+/// drift on its own. This matters because only the OBSERVED direction is
+/// contracted by an update: the componentwise recursion has nothing that pulls
+/// an unobserved covariance back, and the transition then mixes that drift into
+/// the observed entry as `P₀₀ + 2δP₀₁ + δ²P₁₁`.
+///
+/// The bound is rounded up by one ulp so that a rounded square root can never
+/// claim more than the minor supports.
+fn intersect_covariance_minors(covariance: &mut BallMat, order: usize) {
+    let sqrt_upper = |value: f64| -> f64 {
+        if !(value.is_finite() && value > 0.0) {
+            return value;
+        }
+        let root = value.sqrt();
+        if root * root >= value {
+            root
+        } else {
+            f64::from_bits(root.to_bits() + 1)
+        }
+    };
+    for i in 0..order {
+        for j in 0..order {
+            if i == j {
+                continue;
+            }
+            let diagonal_product = Ball::exact(covariance[i][i].hi.max(0.0))
+                .mul(Ball::exact(covariance[j][j].hi.max(0.0)));
+            if !diagonal_product.is_finite() {
+                continue;
+            }
+            let bound = sqrt_upper(diagonal_product.hi);
+            if !bound.is_finite() {
+                continue;
+            }
+            let entry = &mut covariance[i][j];
+            let floor = (-bound).min(entry.value);
+            if entry.lo < floor {
+                entry.lo = floor;
+            }
+            let ceiling = bound.max(entry.value);
+            if entry.hi > ceiling {
+                entry.hi = ceiling;
+            }
+        }
+    }
+}
+
 /// Intersect a proper covariance enclosure with its exact PSD invariant.
 ///
 /// Once the diffuse rank is exhausted, `P*` is the conditional covariance of
@@ -1773,6 +1828,17 @@ fn run_filter_ball_traced(
                 }
             }
             intersect_observed_covariance_exact_range(&mut p_new[0][0], m_star[0], r);
+            // An update can only remove variance: `P⁺ = P⁻ − M Mᵀ/F ⪯ P⁻`, so
+            // every diagonal is bounded above by the one it came from. The
+            // corner form above cannot see this, because it ranges `P[i][0]`
+            // and `P[0][j]` independently even when they are the same entry.
+            for i in 0..order {
+                let ceiling = p_star[i][i].hi.max(p_new[i][i].value);
+                if p_new[i][i].hi > ceiling {
+                    p_new[i][i].hi = ceiling;
+                }
+            }
+            intersect_covariance_minors(&mut p_new, order);
             // Derivative covariances through the JOSEPH form, which for the
             // derivative jets is not a reformulation but an exact cancellation
             // (#2614).
