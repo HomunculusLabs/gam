@@ -16,9 +16,13 @@ ROWS=${ROWS:-100000}
 ATOMS=${ATOMS:-15040}
 MINCO=${MINCO:-300}
 PARSE=${PARSE:-2000}
-# e-BH over ~2e4 screened pairs needs e >= m/(alpha*rank); with alpha = 0.05 this
-# resolution lets the ledger reject down to rank ~2.
-DRAWS=${DRAWS:-200000}
+# e-BH over ~2e4 screened pairs needs e >= m/(alpha*rank), and the indicator
+# e-value tops out at DRAWS+1, so DRAWS is set by the size of the search: at
+# m = 2.2e4 and alpha = 0.05 a SINGLE discovery needs 4.4e5 draws. 200000 was not
+# enough and the census said so -- two pairs beat all 200000 surrogates and e-BH
+# still rejected nothing, needing 217640. Each surrogate is one shuffle and one
+# linear pass, so the budget is cheap; being short of it is not.
+DRAWS=${DRAWS:-1000000}
 ALPHA=${ALPHA:-0.05}
 OUT=$HOME/census_out
 mkdir -p "$OUT"

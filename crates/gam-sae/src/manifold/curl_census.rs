@@ -205,6 +205,17 @@ pub struct CurlCensus {
     /// Smallest e-value that would have been rejected — the ledger's own report of
     /// whether [`CurlCensusConfig::null_replicates`] was resolute enough to matter.
     pub ebh_threshold: f64,
+    /// Pairs that beat EVERY surrogate, i.e. that attained the maximum e-value the
+    /// replicate budget allows.
+    pub n_max_e: usize,
+    /// Replicates that would have been needed for those `n_max_e` pairs to be
+    /// discoveries: `m/(α·n_max_e) − 1`.
+    ///
+    /// Without this a budget shortfall is indistinguishable from an absence of
+    /// structure — both print zero discoveries. Compare it against
+    /// [`CurlCensusConfig::null_replicates`]: if it is larger, the census did not
+    /// measure anything about the data, it measured the budget.
+    pub replicates_required: f64,
 }
 
 impl CurlCensus {
@@ -260,6 +271,8 @@ pub fn census_shattered_circles(
             pairs: Vec::new(),
             fdr_alpha: cfg.fdr_alpha,
             ebh_threshold: f64::INFINITY,
+            n_max_e: 0,
+            replicates_required: f64::NAN,
         });
     }
 
@@ -283,6 +296,8 @@ pub fn census_shattered_circles(
             pairs: Vec::new(),
             fdr_alpha: cfg.fdr_alpha,
             ebh_threshold: f64::INFINITY,
+            n_max_e: 0,
+            replicates_required: f64::NAN,
         });
     }
 
@@ -416,6 +431,12 @@ pub fn census_shattered_circles(
     for i in rejected {
         out[i].fdr_discovery = true;
     }
+    let n_max_e = out.iter().filter(|p| p.e_value > 0.0).count();
+    let replicates_required = if n_max_e == 0 {
+        f64::INFINITY
+    } else {
+        m / (cfg.fdr_alpha * n_max_e as f64) - 1.0
+    };
 
     Ok(CurlCensus {
         sigma,
@@ -425,6 +446,8 @@ pub fn census_shattered_circles(
         pairs: out,
         fdr_alpha: cfg.fdr_alpha,
         ebh_threshold,
+        n_max_e,
+        replicates_required,
     })
 }
 
