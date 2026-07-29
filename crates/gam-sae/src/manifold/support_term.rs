@@ -2138,8 +2138,12 @@ impl SaeSupportSparseTerm {
         let max_sweeps = (1.0 / relative_tolerance).ceil() as usize;
         let mut sweeps = 0usize;
         let mut history: (Option<Vec<f64>>, Option<Vec<f64>>) = (None, None);
+        // The fit does not move inside this loop, so its residual does not
+        // either: compute it once.
+        let frozen_residual = self.raw_residual(target)?;
         for _ in 0..max_sweeps.max(2) {
-            let mut next_lambda = self.fellner_schall_smoothing(target, &lambda)?;
+            let mut next_lambda =
+                self.fellner_schall_smoothing_with_residual(&lambda, &frozen_residual)?;
             let next_ard = self.mackay_ard_precisions(&ard)?;
             // Convergence is measured in effective degrees of freedom, which
             // is BOUNDED by the basis size -- not in log lambda, which is not.
@@ -2221,8 +2225,21 @@ impl SaeSupportSparseTerm {
         target: ArrayView2<'_, f64>,
         lambda_smooth: &[f64],
     ) -> Result<Vec<f64>, String> {
-        self.validate_smoothing(lambda_smooth)?;
         let residual = self.raw_residual(target)?;
+        self.fellner_schall_smoothing_with_residual(lambda_smooth, &residual)
+    }
+
+    /// [`Self::fellner_schall_smoothing`] against a residual the caller already
+    /// holds. The residual is a function of the FIT, not of `lambda`, so a
+    /// loop that holds the fit still (the joint hyperparameter solve) can
+    /// compute it once instead of once per sweep -- fifty full
+    /// reconstructions per round at 250k x 8096, all of them identical.
+    pub fn fellner_schall_smoothing_with_residual(
+        &self,
+        lambda_smooth: &[f64],
+        residual: &Array2<f64>,
+    ) -> Result<Vec<f64>, String> {
+        self.validate_smoothing(lambda_smooth)?;
         let sse: f64 = residual.iter().map(|value| value * value).sum();
 
         // Per-atom effective df, and the roughness the fit actually spent.
