@@ -74,7 +74,25 @@ fn duchon_spec(k: usize, order: DuchonNullspaceOrder) -> DuchonBasisSpec {
         // the raw design so constant / linear targets are exactly representable.
         identifiability: SpatialIdentifiability::None,
         aniso_log_scales: None,
-        operator_penalties: DuchonOperatorPenaltySpec::default(),
+        // ISOLATE THE STRUCTURAL BLOCKS. This file is about the two
+        // STRUCTURAL seminorms — the exact RKHS `Primary` roughness Gram and
+        // the analytic null-space ridge. The operator dials are a separate,
+        // additive Hilbert-scale layer on top of them.
+        //
+        // `DuchonOperatorPenaltySpec::default()` is documented "ALL ON": mass
+        // and tension are Active, so the default emits `OperatorMass` and
+        // `OperatorTension` blocks alongside the two structural ones. This
+        // helper used to request that default and then panic on the very
+        // `OperatorMass` it had asked for, which is why every test in the file
+        // died with `unexpected Duchon penalty source OperatorMass`.
+        //
+        // Disabling them here does not change what is under test: `Primary`
+        // and the ridge come from `duchon_native_penalty_candidates`, and the
+        // operator candidates are only EXTENDED onto that list. The default's
+        // own contract is pinned separately by
+        // `default_operator_spec_emits_the_mass_and_tension_blocks` below, so
+        // turning them off here loses no coverage.
+        operator_penalties: DuchonOperatorPenaltySpec::all_disabled(),
         boundary: OneDimensionalBoundary::default(),
     }
 }
@@ -112,10 +130,15 @@ fn build(data: &Array2<f64>, spec: &DuchonBasisSpec) -> BuiltDuchon {
         match &penalty.info.source {
             PenaltySource::Primary => primary = Some(penalty.matrix.clone()),
             PenaltySource::DoublePenaltyNullspace => ridge = Some(penalty.matrix.clone()),
-            // A Duchon basis emits only the analytic roughness Gram and its
-            // null-space ridge; the operator/tensor sources belong to other
-            // basis kinds and must not appear here.
-            other => panic!("unexpected Duchon penalty source {other:?}"),
+            // With the operator dials disabled by `duchon_spec`, the only
+            // blocks a Duchon basis emits are the analytic roughness Gram and
+            // its null-space ridge. An operator source reaching here would mean
+            // `all_disabled()` did not take effect, which is worth failing on.
+            other => panic!(
+                "unexpected Duchon penalty source {other:?} — this spec disables \
+                 the operator dials, so only Primary and DoublePenaltyNullspace \
+                 may appear"
+            ),
         }
     }
 
@@ -124,6 +147,42 @@ fn build(data: &Array2<f64>, spec: &DuchonBasisSpec) -> BuiltDuchon {
         primary,
         ridge,
     }
+}
+
+/// The default operator spec is "ALL ON" (mass + tension active, stiffness
+/// off), and a Duchon basis built with it must actually emit those blocks.
+///
+/// The structural tests above disable the dials to isolate their subject, so
+/// without this the file would no longer notice if the default silently
+/// stopped emitting them — which is exactly the direction SPEC cares about
+/// ("the default should allow a configuration which recovers the null", i.e.
+/// the lower-order dials must be PRESENT for REML to deselect).
+#[test]
+fn default_operator_spec_emits_the_mass_and_tension_blocks() {
+    let data = synthetic_data(180, 2, 11);
+    let mut spec = duchon_spec(16, DuchonNullspaceOrder::Linear);
+    spec.operator_penalties = DuchonOperatorPenaltySpec::default();
+    let result = build_duchon_basis(data.view(), &spec).expect("build_duchon_basis succeeded");
+
+    let sources: Vec<PenaltySource> = result
+        .active_penalties
+        .iter()
+        .map(|penalty| penalty.info.source.clone())
+        .collect();
+
+    assert!(
+        sources.contains(&PenaltySource::Primary),
+        "the exact RKHS roughness Gram must always be present: {sources:?}"
+    );
+    assert!(
+        sources.contains(&PenaltySource::OperatorMass),
+        "the default spec marks mass Active, so its block must be emitted: {sources:?}"
+    );
+    assert!(
+        !sources.contains(&PenaltySource::OperatorStiffness),
+        "the default spec marks stiffness Disabled — Primary is the exact \
+         curvature and D2 must not be added on top of it: {sources:?}"
+    );
 }
 
 /// Coefficients `c` minimizing `‖X c − g‖²` via the normal equations with a
