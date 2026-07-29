@@ -138,7 +138,12 @@ fn run_arm(arm: &Arm, budget: usize, tolerance: f64) -> Result<String, String> {
                 .and_then(|tail| tail.split(',').next())
                 .unwrap_or("n/a")
                 .to_string();
-            format!("stalled at {budget} (joint accepted {accepted})")
+            // The refusal's own words, truncated. A stalled arm whose certified
+            // quantity is INSIDE the tolerance is refusing for a different
+            // reason than one that is outside it, and reading the number without
+            // the reason is how a limb gets blamed for another limb's refusal.
+            let reason: String = error.chars().take(96).collect();
+            format!("stalled (joint {accepted}) [{reason}]")
         }
     };
     Ok(format!(
