@@ -682,6 +682,23 @@ pub(crate) fn run_outer_with_plan(
 
     let seed_budget =
         effective_seed_budget_for_config(&config.seed_config, the_plan.solver).min(seeds.len());
+    // Who owns the one budgeted slot: the caller, or the heuristics?
+    //
+    // `config.initial_rho` with `screen_initial_rho == false` is the caller
+    // saying "start HERE and do not re-rank it". Two independent things
+    // downstream can displace that seed — the screening ranker below, and the
+    // neutral-baseline promotion after it — so both consult this one predicate.
+    // They disagreed before: the ranker honoured the caller and the promotion
+    // then moved the always-injected `[0.0]` baseline in front of it, which at
+    // `seed_budget == 1` does not reorder the cascade, it REPLACES the seed.
+    //
+    // The seed it replaced is not always a heuristic guess. A cache resume
+    // installs its checkpoint ρ through exactly this field (see the
+    // `CacheSeedDecision::{Seed, ExactFinal}` arms in `OuterProblem::run`,
+    // which set `initial_rho` and clear `screen_initial_rho`), so the promotion
+    // was discarding resumed work and re-starting the fit from λ=1 —
+    // `all_saturated_cached_rho_is_honored_as_seed` measured it doing that with
+    // a checkpoint at ρ=[10,−10] and every evaluation landing at [0,0].
     let explicit_initial_rho_owns_single_seed_budget = config.initial_rho.is_some()
         && seed_budget == 1
         && seeds.len() > 1
@@ -724,12 +741,14 @@ pub(crate) fn run_outer_with_plan(
             }
         };
     }
-    prioritize_neutral_bfgs_glm_seed(
-        &mut seeds,
-        &config.seed_config,
-        the_plan.solver,
-        seed_budget,
-    );
+    if !explicit_initial_rho_owns_single_seed_budget {
+        prioritize_neutral_bfgs_glm_seed(
+            &mut seeds,
+            &config.seed_config,
+            the_plan.solver,
+            seed_budget,
+        );
+    }
     log::debug!(
         "[OUTER] {context}: trying generated seeds directly (generated={}, budget={})",
         seeds.len(),

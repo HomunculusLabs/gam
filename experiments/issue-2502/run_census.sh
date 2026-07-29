@@ -32,7 +32,11 @@ fi
 if [ ! -d "$HOME/venv" ]; then
   python3 -m venv "$HOME/venv"
   "$HOME/venv/bin/pip" install -q --upgrade pip
-  "$HOME/venv/bin/pip" install -q torch transformers accelerate datasets safetensors matplotlib numpy
+  # cu126 explicitly: the default wheel is built against a newer CUDA than these
+  # driver stacks carry, and the failure is a runtime error deep inside the first
+  # forward rather than an install-time one.
+  "$HOME/venv/bin/pip" install -q torch --index-url https://download.pytorch.org/whl/cu126
+  "$HOME/venv/bin/pip" install -q transformers accelerate datasets safetensors matplotlib numpy
 fi
 PY=$HOME/venv/bin/python
 
