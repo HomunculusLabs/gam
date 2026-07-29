@@ -339,6 +339,13 @@ pub enum SplineScoreProofError {
         /// the contribution is not, the cancellation in the chain rule is.
         f_star_d3_lo: f64,
         f_star_d3_hi: f64,
+        /// The same entry AFTER this node's measurement update. `F'''` above is
+        /// the PREDICTED value, so the pair localises the growth to one of the
+        /// filter's two steps: an updated entry much narrower than the
+        /// predicted one means the update contracts and the PREDICTION is
+        /// growing it, and the reverse means the update is.
+        updated_d3_lo: f64,
+        updated_d3_hi: f64,
     },
     InvalidInput(String),
     MissingEndpointCertificate {
@@ -401,14 +408,17 @@ impl std::fmt::Display for SplineScoreProofError {
                 contribution_hi,
                 f_star_d3_lo,
                 f_star_d3_hi,
+                updated_d3_lo,
+                updated_d3_hi,
             } => {
                 write!(
                     f,
                     "spline scan: certified accumulator `{accumulator}` left the finite range at \
                      node {node} (proper innovations so far {n_proper}, q = {q_value:.6e}): \
                      value {value:.9e} in [{lo:.9e}, {hi:.9e}]; this node's contribution was \
-                     [{contribution_lo:.9e}, {contribution_hi:.9e}] and F''' was \
-                     [{f_star_d3_lo:.9e}, {f_star_d3_hi:.9e}]"
+                     [{contribution_lo:.9e}, {contribution_hi:.9e}], predicted F''' was \
+                     [{f_star_d3_lo:.9e}, {f_star_d3_hi:.9e}] and updated F''' was \
+                     [{updated_d3_lo:.9e}, {updated_d3_hi:.9e}]"
                 )
             }
             Self::InvalidInput(reason) => f.write_str(reason),
@@ -1748,6 +1758,8 @@ fn run_filter_ball(
                     contribution_hi: contribution.hi,
                     f_star_d3_lo: f_star_d3.lo,
                     f_star_d3_hi: f_star_d3.hi,
+                    updated_d3_lo: p_star_d3[0][0].lo,
+                    updated_d3_hi: p_star_d3[0][0].hi,
                 });
             }
         }
