@@ -194,7 +194,8 @@ def fig_power(d, out):
 
     rc, dc = curve("power_comb_")
     rk, dk = curve("power_konly_")
-    if not rc and not rk:
+    rr, dr = curve("power_rank_")
+    if not rc and not rk and not rr:
         return
     fig, ax = plt.subplots(figsize=(6.8, 3.9))
     if rc:
@@ -203,6 +204,9 @@ def fig_power(d, out):
     if rk:
         ax.plot(rk, dk, "-s", color=NULL, linewidth=2, markersize=6,
                 label="kappa alone")
+    if rr:
+        ax.plot(rr, dr, "-^", color="#1baf7a", linewidth=2, markersize=7,
+                label="rank complementarity")
     ax.axvline(1.8138, color=INK, linewidth=1.2, linestyle=":")
     ax.annotate("derived rate-distortion\ncrossover  R = 1.814 sigma",
                 (1.8138, ax.get_ylim()[1] * 0.72), xytext=(4, 0),
