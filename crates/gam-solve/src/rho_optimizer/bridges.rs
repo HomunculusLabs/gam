@@ -588,7 +588,7 @@ impl EscapeIncumbent {
 /// Best iterate captured by a cost-stall convergence, handed from the bridge
 /// (which is moved into `opt::Bfgs`) back to the seed-loop runner via the
 /// guard's shared cell.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct CostStallExit {
     pub(crate) rho: Array1<f64>,
     pub(crate) value: f64,
@@ -2863,14 +2863,14 @@ pub(crate) struct AcceptedStepLedger {
 }
 
 impl AcceptedStepLedger {
-    fn push(&self, step: AcceptedOuterStep) {
+    pub(crate) fn push(&self, step: AcceptedOuterStep) {
         if let Ok(mut steps) = self.steps.lock() {
             steps.push(step);
         }
     }
 
     /// Take everything queued so far, oldest first.
-    fn drain(&self) -> Vec<AcceptedOuterStep> {
+    pub(crate) fn drain(&self) -> Vec<AcceptedOuterStep> {
         match self.steps.lock() {
             Ok(mut steps) => std::mem::take(&mut *steps),
             Err(_) => Vec::new(),

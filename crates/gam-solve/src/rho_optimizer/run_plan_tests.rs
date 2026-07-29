@@ -8993,3 +8993,282 @@ fn zz_measure_2613_gradient_only_stiff_ridge_trajectory() {
         Err(err) => eprintln!("[zz_measure #2613] ERR {err}"),
     }
 }
+
+// ─── #2613 the cost-stall guard counts ACCEPTED steps, not evaluations ────────
+
+/// `‖Pg‖` at every point in the #2613 window tests: below the guard's `1e-3`
+/// stationarity threshold, so a filled window certifies as `Converged` rather
+/// than routing through the `StuckKeepDescending` escape budget. The escape
+/// ladder is a different mechanism with its own tests; keeping it out of these
+/// makes the halt index a clean function of the window alone.
+const STATIONARY_GRAD_2613: f64 = 5.0e-4;
+
+/// The plateau every #2613 window test sits on: a Strong-Wolfe zoom's trials
+/// converging geometrically to one point, so consecutive costs differ by ~1e-9
+/// against a `1e-7 · (1 + 4996.7) ≈ 5e-4` improvement floor while the ITERATE
+/// has not moved once.
+fn zoom_plateau_schedule_2613(len: usize) -> Vec<(f64, f64, f64)> {
+    (0..len)
+        .map(|i| {
+            let shrink = 0.5_f64.powi(i as i32);
+            (
+                -4996.7 + 1.0e-9 * shrink,
+                12.02577 + 1.0e-6 * shrink,
+                STATIONARY_GRAD_2613,
+            )
+        })
+        .collect()
+}
+
+/// Drive a first-order bridge over a `(cost, ρ, ‖g‖)` schedule, one entry per
+/// `eval_grad`, against a guard seeded at `(seed_rho, seed_cost, seed_grad)`.
+///
+/// `ledger` is the accepted-step channel `OuterAcceptObserver` writes to in
+/// production; a test drives it through `accept_after` so an "accepted step" is
+/// exactly what `opt` would have reported and nothing more. Returns each
+/// evaluation's outcome (stopping at the first error) and whatever the guard
+/// published into its shared exit cell.
+fn drive_first_order_bridge_2613(
+    schedule: Vec<(f64, f64, f64)>,
+    seed: (Array1<f64>, f64, f64),
+    ledger: Option<Arc<AcceptedStepLedger>>,
+    mut accept_after: impl FnMut(usize, f64),
+) -> (Vec<Result<f64, String>>, Option<CostStallExit>) {
+    let (seed_rho, seed_cost, seed_grad) = seed;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let table = Arc::new(schedule.clone());
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable);
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), _: &Array1<f64>| Ok(0.0),
+        {
+            let calls = Arc::clone(&calls);
+            let table = Arc::clone(&table);
+            move |_: &mut (), _: &Array1<f64>| {
+                let idx = calls.fetch_add(1, Ordering::Relaxed);
+                let (cost, _, grad) = table[idx.min(table.len() - 1)];
+                Ok(OuterEval {
+                    cost,
+                    gradient: array![grad],
+                    hessian: HessianValue::Unavailable,
+                    inner_beta_hint: None,
+                })
+            }
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
+    let mut guard = CostStallGuard::new(1.0e-7, COST_STALL_WINDOW, 1.0e-3, exit.clone());
+    guard.observe_seed(&seed_rho, seed_cost, seed_grad);
+    let mut bridge = OuterFirstOrderBridge {
+        obj: &mut obj,
+        layout: OuterThetaLayout::new(1, 0),
+        outer_inner_cap: None,
+        iter_count: 0,
+        g_norm_initial: None,
+        last_g_norm: None,
+        last_value_grad_rho: None,
+        value_probe_cache: Vec::new(),
+        cost_stall: Some(guard),
+        cost_stall_bounds: Some((array![-30.0], array![30.0])),
+        consecutive_probe_refusals: 0,
+        accepted_steps: ledger,
+        pending_first_order: Vec::new(),
+        incumbent: Some((seed_rho, seed_cost)),
+    };
+    let mut outcomes = Vec::new();
+    for (idx, (cost, rho, _)) in schedule.iter().enumerate() {
+        match FirstOrderObjective::eval_grad(&mut bridge, &array![*rho]) {
+            Ok(sample) => outcomes.push(Ok(sample.value)),
+            Err(err) => {
+                outcomes.push(Err(err.into_message()));
+                break;
+            }
+        }
+        accept_after(idx, *cost);
+    }
+    let published = exit.lock().expect("exit cell").take();
+    (outcomes, published)
+}
+
+/// #2613 — a Strong-Wolfe zoom bisecting toward a point emits a run of gradient
+/// evaluations whose costs differ by less than the stall floor. None of them is
+/// an accepted outer step, so none may advance the cost-stall window.
+///
+/// This is the defect from the opposite side of the one
+/// `wrong_rail_pullback_recovers_gradient_only_objective_2392` exercises:
+/// there, the spurious halt stopped a solve that was about to succeed; here the
+/// bridge is driven directly with the evaluation pattern a zoom emits and must
+/// stay silent no matter how long the zoom runs. Pairs with
+/// [`accepted_steps_still_trip_the_cost_stall_window_2613`], which feeds the
+/// IDENTICAL schedule with accept signals attached — the two differ in nothing
+/// else, which is the whole content of the fix.
+#[test]
+fn line_search_probes_never_advance_the_cost_stall_window_2613() {
+    let schedule = zoom_plateau_schedule_2613(COST_STALL_WINDOW * 4);
+    let (outcomes, published) = drive_first_order_bridge_2613(
+        schedule.clone(),
+        (array![12.02577], -4996.7, STATIONARY_GRAD_2613),
+        Some(Arc::default()),
+        // No accepted steps: `opt` is still inside iteration 0.
+        |_, _| {},
+    );
+    assert_eq!(
+        outcomes.len(),
+        schedule.len(),
+        "the guard halted a line search mid-zoom after {} of {} probes",
+        outcomes.len(),
+        schedule.len(),
+    );
+    assert!(
+        outcomes.iter().all(Result::is_ok),
+        "no line-search probe may produce the cost-stall sentinel: {outcomes:?}",
+    );
+    // `observe_seed` publishes the seed up front so the budget-exhaustion path
+    // always has a feasible fallback (#1371), so the cell is never empty. What
+    // must not happen is the probes DISPLACING that seed or counting as steps.
+    let published = published.expect("the seed is published up front");
+    assert_eq!(
+        published.iterations, 1,
+        "{} probes advanced the accepted-iterate count: {published:?}",
+        schedule.len(),
+    );
+    assert_eq!(
+        published.rho,
+        array![12.02577],
+        "a probe displaced the seed incumbent: {published:?}",
+    );
+
+    // And the same schedule down the pre-#2613 path — `accepted_steps: None`,
+    // i.e. fold every gradient evaluation — DOES halt, which is what this test
+    // is defending against. Without this the assertions above would pass on a
+    // guard that had simply been disabled.
+    let (legacy, _) = drive_first_order_bridge_2613(
+        schedule.clone(),
+        (array![12.02577], -4996.7, STATIONARY_GRAD_2613),
+        None,
+        |_, _| {},
+    );
+    // `COST_STALL_WINDOW − 1`, not `COST_STALL_WINDOW`: the inline fold has no
+    // accept latency, so the sixth observation lands on the sixth evaluation
+    // rather than the seventh.
+    assert_eq!(
+        legacy.iter().position(Result::is_err),
+        Some(COST_STALL_WINDOW - 1),
+        "folding every gradient eval must reach the sentinel — else this test proves nothing \
+         about the accept gating: {legacy:?}",
+    );
+}
+
+/// #2613 — the guard's own job is untouched: a genuine run of accepted outer
+/// steps with no improvement still halts, on exactly the
+/// `COST_STALL_WINDOW`-th accepted step, and still certifies a stationary
+/// plateau as converged.
+#[test]
+fn accepted_steps_still_trip_the_cost_stall_window_2613() {
+    let schedule = zoom_plateau_schedule_2613(COST_STALL_WINDOW * 4);
+    let ledger: Arc<AcceptedStepLedger> = Arc::default();
+    let incumbent = Arc::new(Mutex::new(-4996.7_f64));
+    let (outcomes, published) = {
+        let ledger = Arc::clone(&ledger);
+        let incumbent = Arc::clone(&incumbent);
+        drive_first_order_bridge_2613(
+            schedule.clone(),
+            (array![12.02577], -4996.7, STATIONARY_GRAD_2613),
+            Some(Arc::clone(&ledger)),
+            move |idx, cost| {
+                let mut prev = incumbent.lock().expect("incumbent");
+                ledger.push(AcceptedOuterStep {
+                    iter: idx,
+                    step_norm: 1.0e-6,
+                    actual_decrease: *prev - cost,
+                });
+                *prev = cost;
+            },
+        )
+    };
+    let halted = outcomes
+        .iter()
+        .position(Result::is_err)
+        .expect("a stalled run of accepted steps must halt");
+    assert_eq!(
+        outcomes[halted].as_ref().unwrap_err(),
+        COST_STALL_CONVERGED_SENTINEL,
+        "the halt must use the shared cost-stall sentinel",
+    );
+    // The accept for evaluation `i` is published after it and drained at the
+    // top of evaluation `i+1`, so the window closes on evaluation
+    // `COST_STALL_WINDOW`. One evaluation of latency is inherent:
+    // `on_step_accepted` fires after the line search that produced the step.
+    assert_eq!(
+        halted, COST_STALL_WINDOW,
+        "the window must close on the {COST_STALL_WINDOW}th accepted step: {outcomes:?}",
+    );
+    let published = published.expect("a stalled run must publish its best iterate");
+    assert!(
+        published.converged,
+        "a plateau whose |Pg| = {STATIONARY_GRAD_2613:.1e} clears the 1e-3 band is a stationary \
+         optimum, not a floor: {published:?}",
+    );
+}
+
+/// #2613 — `opt::StepInfo` carries no point, so the bridge reconstructs the
+/// accepted cost from `actual_decrease` and matches it against the evaluations
+/// it made. The match must be by COST, not "the most recent evaluation":
+/// `opt`'s coordinate rescue evaluates further points AFTER the line search
+/// returns and before `on_step_accepted` fires, and folding one of those would
+/// put a rejected probe into the guard's window under the accepted step's name.
+#[test]
+fn accepted_step_resolves_by_cost_not_by_recency_2613() {
+    // Evaluation 0 is the accepted trial; 1 and 2 are rescue pokes that lose.
+    // Then a plateau at the accepted cost, long enough to close the window.
+    let mut schedule = vec![
+        (-100.0, 11.0, STATIONARY_GRAD_2613),
+        (-99.0, 11.5, STATIONARY_GRAD_2613),
+        (-98.5, 10.5, STATIONARY_GRAD_2613),
+    ];
+    schedule.extend(
+        (0..(COST_STALL_WINDOW + 3)).map(|_| (-100.0, 11.0, STATIONARY_GRAD_2613)),
+    );
+    let ledger: Arc<AcceptedStepLedger> = Arc::default();
+    let (outcomes, published) = {
+        let ledger = Arc::clone(&ledger);
+        drive_first_order_bridge_2613(
+            schedule.clone(),
+            (array![16.9], -10.0, STATIONARY_GRAD_2613),
+            Some(Arc::clone(&ledger)),
+            move |idx, cost| {
+                if idx < 2 {
+                    // Inside one line search plus its rescue: nothing accepted yet.
+                    return;
+                }
+                ledger.push(AcceptedOuterStep {
+                    iter: idx,
+                    step_norm: 5.9,
+                    // `f_k − f_next` for the point evaluated FIRST. On the first
+                    // accept the incumbent is the seed; afterwards the plateau
+                    // repeats the accepted cost, so every later step decreases
+                    // by nothing.
+                    actual_decrease: if idx == 2 { 90.0 } else { -100.0 - cost },
+                });
+            },
+        )
+    };
+    assert!(
+        outcomes.iter().position(Result::is_err).is_some(),
+        "the plateau must eventually close the window: {outcomes:?}",
+    );
+    let published = published.expect("the closed window must publish an incumbent");
+    assert_eq!(
+        published.value, -100.0,
+        "the incumbent must be the ACCEPTED trial, not the last rescue poke: {published:?}",
+    );
+    assert_eq!(
+        published.rho,
+        array![11.0],
+        "and its ρ must travel with it: {published:?}",
+    );
+}
