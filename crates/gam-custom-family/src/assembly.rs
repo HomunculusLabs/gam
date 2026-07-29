@@ -2514,6 +2514,75 @@ impl TerminalLikelihoodScore {
     }
 }
 
+/// The complete smoothing state an inner Laplace mode is a function of.
+///
+/// `β̂(ρ)`, `log|H(ρ)|` and `log|S(ρ)|` are determined by the TOTAL penalty
+///
+/// ```text
+///     S_λ = Σ_b Σ_k e^{ρ_{bk}} S_{bk}   +   Σ_j e^{ρ_j} S_j
+///            ╰──── per-block ────╯          ╰─── joint ───╯
+/// ```
+///
+/// so a cached mode is reusable exactly when BOTH halves are unchanged. This
+/// records them at the ρ the mode was actually solved at, and the cache lookup
+/// compares against that record — the mode carries its own provenance instead
+/// of the consumer reconstructing a key from whatever coordinates it happens to
+/// hold.
+///
+/// Reconstructing the key is what failed (#2615). `physical_warm_start_for_labeled`
+/// rewrites a warm start's `rho` to the PHYSICAL per-block coordinates before the
+/// inner solve sees it, and a family whose smoothing lives entirely in the joint
+/// bundle has none: since #1587 emptied the multinomial's `spec.penalties` into a
+/// centered `M ⊗ S_t` bundle, `physical_count() == 0`. The old guard therefore
+/// compared an empty vector against an empty vector, answered `true` at every ρ,
+/// and returned the mode solved at the FIRST ρ for every subsequent one — freezing
+/// `log|H|` at a constant while `½log|S_λ|` kept growing, which leaves the profiled
+/// criterion monotone in ρ and rails every coordinate at its upper bound.
+/// Equality is the reuse test, and it is BITWISE on purpose: a cached mode is
+/// reusable only when the penalized objective it minimises is the identical
+/// function. A tolerance here would reintroduce exactly the failure this type
+/// exists to remove — a criterion evaluated at one ρ and reported at another.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct InnerPenaltyState {
+    /// Per-block `log λ`, in block order.
+    block: Vec<Array1<f64>>,
+    /// Joint-bundle `log λ`, parallel to the bundle's specs; empty when the
+    /// family declares no joint penalties.
+    joint: Vec<f64>,
+}
+
+impl InnerPenaltyState {
+    pub(crate) fn new(
+        block_log_lambdas: &[Array1<f64>],
+        joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
+    ) -> Self {
+        Self {
+            block: block_log_lambdas.to_vec(),
+            joint: joint_bundle
+                .map(|bundle| bundle.log_lambdas().to_vec())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Round-trip form for the on-disk warm-start record. A persisted mode is
+    /// only reusable if the state it was solved at travels with it, so both
+    /// halves are serialized rather than re-derived from the record's ρ (which
+    /// carries no block/joint split).
+    pub(crate) fn to_parts(&self) -> (Vec<Vec<f64>>, Vec<f64>) {
+        (
+            self.block.iter().map(|b| b.to_vec()).collect(),
+            self.joint.clone(),
+        )
+    }
+
+    pub(crate) fn from_parts(block: Vec<Vec<f64>>, joint: Vec<f64>) -> Self {
+        Self {
+            block: block.into_iter().map(Array1::from_vec).collect(),
+            joint,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct BlockwiseInnerResult {
     pub block_states: Vec<ParameterBlockState>,
@@ -2555,6 +2624,9 @@ pub struct BlockwiseInnerResult {
     /// constraint-aware kernel `K_T = K_S − K_S Aᵀ (A K_S Aᵀ)⁻¹ A K_S`
     /// for per-coordinate mode responses `v_k = ∂β/∂ρ_k`.
     pub active_constraints: Option<Arc<ActiveLinearConstraintBlock>>,
+    /// The smoothing state this mode was solved at — the cache key a reuse
+    /// decision must be taken against (#2615).
+    pub(crate) penalty_state: InnerPenaltyState,
 }
 
 impl std::fmt::Debug for BlockwiseInnerResult {
@@ -2602,4 +2674,8 @@ pub(crate) struct CachedInnerMode {
     pub(crate) active_constraints: Option<Arc<ActiveLinearConstraintBlock>>,
     pub(crate) terminal_working_sets: Option<Vec<BlockWorkingSet>>,
     pub(crate) terminal_likelihood_score: Option<TerminalLikelihoodScore>,
+    /// The smoothing state this cached mode was solved at (#2615). A lookup
+    /// compares against this, not against a key rebuilt from the caller's
+    /// coordinates.
+    pub(crate) penalty_state: InnerPenaltyState,
 }

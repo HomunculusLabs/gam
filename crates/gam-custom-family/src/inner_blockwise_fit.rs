@@ -2478,20 +2478,16 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         }
         assert_eq!(bundle.specs().len(), bundle.log_lambdas().len());
     }
+    let penalty_state = crate::assembly::InnerPenaltyState::new(block_log_lambdas, joint_bundle);
     let mut cached_active_sets: Vec<Option<Vec<usize>>> = vec![None; specs.len()];
     if let Some(seed) = warm_start
         && seed.block_beta.len() == states.len()
         && seed.active_sets.len() == states.len()
     {
-        log::debug!(
-            "[WARM-KEY] seed.rho.len={} block_coords={} block_match={} joint_lambdas={:?}",
-            seed.rho.len(),
-            block_log_lambdas.iter().map(|v| v.len()).sum::<usize>(),
-            warm_start_matches_block_log_lambdas(seed, block_log_lambdas),
-            joint_bundle.map(|b| b.log_lambdas().to_vec()),
-        );
-        if warm_start_matches_block_log_lambdas(seed, block_log_lambdas)
-            && let Some(cached) = seed.cached_inner.as_ref()
+        // The cached mode is reusable only when it was solved at THIS smoothing
+        // state — both the per-block penalties and the joint bundle (#2615).
+        if let Some(cached) = seed.cached_inner.as_ref()
+            && cached.penalty_state == penalty_state
             && cached.converged
             && cached.block_logdet_h.is_some_and(f64::is_finite)
             && cached.block_logdet_s.is_some_and(f64::is_finite)
@@ -2599,6 +2595,8 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     joint_workspace: certified_workspace,
                     kkt_residual: cached.kkt_residual.clone(),
                     active_constraints: cached.active_constraints.clone(),
+                    // Equal to `cached.penalty_state` by the guard above.
+                    penalty_state,
                 });
             }
         }
@@ -8211,6 +8209,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 joint_workspace: cached_joint_workspace.clone(),
                 kkt_residual: Some(kkt_residual),
                 active_constraints,
+                penalty_state,
             });
         }
         if cycles_done >= inner_max_cycles {
@@ -8428,6 +8427,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 joint_workspace: cached_joint_workspace.clone(),
                 kkt_residual: None,
                 active_constraints,
+                penalty_state,
             });
         }
         {
@@ -8506,6 +8506,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 joint_workspace: cached_joint_workspace.clone(),
                 kkt_residual: None,
                 active_constraints,
+                penalty_state,
             });
         }
     }
@@ -9559,6 +9560,7 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
         joint_workspace: certified_workspace,
         kkt_residual,
         active_constraints,
+        penalty_state: crate::assembly::InnerPenaltyState::new(block_log_lambdas, joint_bundle),
     })
 }
 

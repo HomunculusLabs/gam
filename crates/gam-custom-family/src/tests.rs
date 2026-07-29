@@ -594,6 +594,7 @@ pub(crate) fn joint_outer_gradient_uses_projected_trace_for_rank_deficient_penal
         joint_workspace: None,
         kkt_residual: None,
         active_constraints: None,
+        penalty_state: crate::assembly::InnerPenaltyState::new(&[rho.clone()], None),
     };
     let per_block = vec![rho.clone()];
     let options = BlockwiseFitOptions {
@@ -772,6 +773,7 @@ pub(crate) fn joint_outer_gradient_projected_trace_drops_joint_null() {
         joint_workspace: None,
         kkt_residual: None,
         active_constraints: None,
+        penalty_state: crate::assembly::InnerPenaltyState::new(&[rho.clone()], None),
     };
     let per_block = vec![rho.clone()];
     let options = BlockwiseFitOptions {
@@ -912,6 +914,7 @@ pub(crate) fn large_scale_rho_scan_joint_outer_evaluate_is_projection_invariant(
             joint_workspace: None,
             kkt_residual: None,
             active_constraints: None,
+            penalty_state: crate::assembly::InnerPenaltyState::new(&[rho.clone()], None),
         };
         let per_block = vec![rho.clone()];
         let options = BlockwiseFitOptions {
@@ -1290,6 +1293,7 @@ pub(crate) fn large_scale_multiblock_outer_gradient_with_realistic_drift_is_boun
         joint_workspace: None,
         kkt_residual: None,
         active_constraints: None,
+        penalty_state: crate::assembly::InnerPenaltyState::new(&per_block, None),
     };
 
     let options = BlockwiseFitOptions {

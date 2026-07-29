@@ -471,6 +471,13 @@ pub(crate) fn load_persistent_custom_family_warm_start<F: CustomFamily + ?Sized>
         active_constraints: None,
         terminal_working_sets: None,
         terminal_likelihood_score: None,
+        // #2615: the smoothing state the persisted mode was solved at, so the
+        // inner solve can decide reuse against the state itself rather than
+        // against the record's optimizer-coordinate `rho`.
+        penalty_state: crate::assembly::InnerPenaltyState::from_parts(
+            inner.block_log_lambdas,
+            inner.joint_log_lambdas,
+        ),
     });
     let inner_status = cached_inner.as_ref().map_or("missing", |inner| {
         if inner.converged {
@@ -506,6 +513,7 @@ pub(crate) fn persistent_block_inner_summary(
         if !cached.log_likelihood.is_finite() || !cached.penalty_value.is_finite() {
             return None;
         }
+        let (block_log_lambdas, joint_log_lambdas) = cached.penalty_state.to_parts();
         Some(PersistentBlockInnerSummary {
             log_likelihood: cached.log_likelihood,
             penalty_value: cached.penalty_value,
@@ -513,6 +521,8 @@ pub(crate) fn persistent_block_inner_summary(
             converged: cached.converged,
             block_logdet_h,
             block_logdet_s,
+            block_log_lambdas,
+            joint_log_lambdas,
         })
     })
 }

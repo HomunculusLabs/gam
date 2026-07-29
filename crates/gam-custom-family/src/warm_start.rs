@@ -12,28 +12,6 @@ pub(crate) fn screened_outer_warm_start<'a>(
     warm_start.filter(|seed| seed.rho.len() == rho.len())
 }
 
-pub(crate) fn warm_start_matches_block_log_lambdas(
-    seed: &ConstrainedWarmStart,
-    block_log_lambdas: &[Array1<f64>],
-) -> bool {
-    let expected = block_log_lambdas
-        .iter()
-        .map(|values| values.len())
-        .sum::<usize>();
-    if seed.rho.len() != expected {
-        return false;
-    }
-    let mut offset = 0usize;
-    for block in block_log_lambdas {
-        let end = offset + block.len();
-        if seed.rho.slice(s![offset..end]) != block.view() {
-            return false;
-        }
-        offset = end;
-    }
-    true
-}
-
 pub(crate) fn cached_inner_mode_from_result(result: &BlockwiseInnerResult) -> CachedInnerMode {
     CachedInnerMode {
         log_likelihood: result.log_likelihood,
@@ -47,6 +25,7 @@ pub(crate) fn cached_inner_mode_from_result(result: &BlockwiseInnerResult) -> Ca
         active_constraints: result.active_constraints.clone(),
         terminal_working_sets: result.terminal_working_sets.clone(),
         terminal_likelihood_score: result.terminal_likelihood_score.clone(),
+        penalty_state: result.penalty_state.clone(),
     }
 }
 

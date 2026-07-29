@@ -4,7 +4,9 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CACHE_VERSION: u32 = 1;
+// v2 (#2615): `PersistentBlockInnerSummary` carries the smoothing state its
+// cached inner mode was solved at, so a restored mode can be keyed correctly.
+const CACHE_VERSION: u32 = 2;
 const MAX_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 const CACHE_TTL_SECS: u64 = 60 * 60 * 24 * 365 * 10;
@@ -69,6 +71,17 @@ pub struct PersistentBlockInnerSummary {
     pub converged: bool,
     pub block_logdet_h: f64,
     pub block_logdet_s: f64,
+    /// Per-block `log λ` this mode was solved at, in block order (#2615).
+    ///
+    /// The record's own `rho` is the OPTIMIZER's coordinate vector, which for a
+    /// labeled / joint-penalty family is neither the per-block strengths nor
+    /// split into them — so it cannot serve as the reuse key. A cached Laplace
+    /// mode replayed at a different smoothing state is a criterion evaluated at
+    /// one ρ and reported at another; the state therefore travels with the mode.
+    pub block_log_lambdas: Vec<Vec<f64>>,
+    /// Joint-bundle `log λ` this mode was solved at; empty for a family that
+    /// declares no joint penalties (#2615).
+    pub joint_log_lambdas: Vec<f64>,
 }
 
 impl PersistentBlockInnerSummary {
@@ -77,6 +90,11 @@ impl PersistentBlockInnerSummary {
             && self.penalty_value.is_finite()
             && self.block_logdet_h.is_finite()
             && self.block_logdet_s.is_finite()
+            && self
+                .block_log_lambdas
+                .iter()
+                .all(|block| block.iter().all(|v| v.is_finite()))
+            && self.joint_log_lambdas.iter().all(|v| v.is_finite())
     }
 }
 
