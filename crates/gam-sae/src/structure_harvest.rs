@@ -6427,12 +6427,17 @@ fn linear_atom_frames(term: &SaeManifoldTerm) -> Vec<(usize, Array1<f64>, Vec<bo
 }
 
 /// Mine flat-pair → circle promotion candidates from the fitted dictionary
-/// (INTEGRATION_PLAN Phase 4 items 1–4). Coalesces rectified antipodal halves,
-/// generates co-firing candidate planes over a row subsample, projects the joint
-/// amplitude law, runs the geodict verdict, and returns the RECOMMENDED
-/// candidates ranked by net evidence, deduplicated so no two circles claim the
-/// same donor atom. Deterministic in `(term, residuals, cfg)` so the harvest and
-/// the seed-build agree on candidate order/indices.
+/// (INTEGRATION_PLAN Phase 4 items 1–4).
+///
+/// The screen itself — antipodal coalescing, co-firing candidate generation, the
+/// joint-amplitude projection and [`crate::manifold::curl_verdict`]'s derived
+/// acceptance — lives in [`crate::manifold::census_shattered_circles`], because
+/// the identical question has to be asked of dictionaries this engine did not fit
+/// (see that module's note on why a transcribed screen loses its calibration).
+/// What stays here is what is genuinely local to a fitted term: turning atoms into
+/// frames, and turning an accepted plane into a race-ready [`BirthSeed`].
+/// Deterministic in `(term, residuals, cfg)` so the harvest and the seed-build
+/// agree on candidate order/indices.
 fn curl_candidates(
     term: &SaeManifoldTerm,
     residuals: ArrayView2<'_, f64>,
@@ -6471,115 +6476,37 @@ fn curl_candidates(
         1e-9
     };
 
-    // Antipodal coalescing over the linear atoms' directions + gates.
-    let dirs: Vec<ArrayView1<f64>> = frames.iter().map(|(_, d, _, _)| d.view()).collect();
-    let actives: Vec<Vec<bool>> = frames.iter().map(|(_, _, m, _)| m.clone()).collect();
-    let ids: Vec<usize> = frames.iter().map(|(a, _, _, _)| *a).collect();
-    let signed = crate::manifold::coalesce_antipodal(
-        &dirs,
-        &actives,
-        &ids,
-        cfg.coalesce_cos_threshold,
-        cfg.coalesce_max_overlap,
-    );
-    if signed.len() < 2 {
-        return Ok(Vec::new());
-    }
-
-    // A per-atom → frame index map so a signed direction can gather its members'
-    // ambient images for the plane projection.
-    let frame_of: std::collections::HashMap<usize, usize> =
-        ids.iter().enumerate().map(|(i, a)| (*a, i)).collect();
-    let signed_active: Vec<Vec<bool>> = signed.iter().map(|s| s.active.clone()).collect();
-    // Row subsample for co-occurrence counting (never O(K²)·O(n)).
-    let rows: Vec<usize> = if n <= cfg.subsample_rows {
-        (0..n).collect()
-    } else {
-        let stride = n / cfg.subsample_rows;
-        (0..n).step_by(stride.max(1)).collect()
+    let census_frames: Vec<crate::manifold::AtomFrame<'_>> = frames
+        .iter()
+        .map(|(a, dir, mask, img)| crate::manifold::AtomFrame {
+            id: *a,
+            dir: dir.clone(),
+            active: mask.clone(),
+            image: crate::manifold::AtomImage::Dense(img.view()),
+        })
+        .collect();
+    let census_cfg = crate::manifold::CurlCensusConfig {
+        harmonics: cfg.harmonics,
+        coalesce_cos_threshold: cfg.coalesce_cos_threshold,
+        coalesce_max_overlap: cfg.coalesce_max_overlap,
+        min_cooccurrence: cfg.min_cooccurrence,
+        subsample_rows: cfg.subsample_rows,
     };
-    let pairs = crate::manifold::cooccurrence_pairs(&signed_active, &rows, cfg.min_cooccurrence);
+    let census = crate::manifold::census_shattered_circles(&census_frames, n, p, sigma, &census_cfg)?;
 
     let mut cands: Vec<CurlCandidate> = Vec::new();
-    for (si, sj, _count) in pairs {
-        let di = &signed[si];
-        let dj = &signed[sj];
-        // Co-firing rows (both signed axes active), capped at the subsample.
-        let mut co_fire: Vec<usize> = (0..n)
-            .filter(|&r| {
-                di.active.get(r).copied().unwrap_or(false)
-                    && dj.active.get(r).copied().unwrap_or(false)
-            })
-            .collect();
-        if co_fire.len() < cfg.min_cooccurrence.max(2) {
+    for pair in &census.pairs {
+        let Some(plane) = pair.accepted_geometry.as_ref() else {
             continue;
-        }
-        if co_fire.len() > cfg.subsample_rows {
-            let stride = (co_fire.len() / cfg.subsample_rows).max(1);
-            co_fire = co_fire.iter().copied().step_by(stride).collect();
-        }
-        // The plane image is the SUM of the two signed axes' member atom images —
-        // isolating the two directions' joint parse from the rest of the fit.
-        let members: Vec<usize> = di
-            .members
-            .iter()
-            .chain(dj.members.iter())
-            .copied()
-            .collect();
-        let mut x = Array2::<f64>::zeros((co_fire.len(), p));
-        for (row_out, &r) in co_fire.iter().enumerate() {
-            for &atom in &members {
-                if let Some(&fi) = frame_of.get(&atom) {
-                    let img = &frames[fi].3;
-                    for j in 0..p {
-                        x[[row_out, j]] += img[[r, j]];
-                    }
-                }
-            }
-        }
-        let mut center = Array1::<f64>::zeros(p);
-        for row_out in 0..co_fire.len() {
-            for j in 0..p {
-                center[j] += x[[row_out, j]];
-            }
-        }
-        center.mapv_inplace(|v| v / co_fire.len() as f64);
-
-        let (alpha, beta, e1, e2) = match crate::manifold::orthonormal_pair_coords(
-            x.view(),
-            di.dir.view(),
-            dj.dir.view(),
-            center.view(),
-        ) {
-            Ok(t) => t,
-            Err(_) => continue,
         };
-        let n_eff = co_fire.len() as f64;
-        // A mild MDL charge (circle basis rows vs the two linear directions); the
-        // ranking is dominated by the gain, and the REML gate is the real judge.
-        let m_circle = (2 * cfg.harmonics + 1) as f64;
-        let delta_charge = 0.5 * m_circle * n_eff.max(2.0).ln();
-        let verdict = match crate::manifold::curl_verdict(
-            alpha.view(),
-            beta.view(),
-            sigma,
-            n_eff,
-            delta_charge,
-        ) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if !verdict.recommend_curl {
-            continue;
-        }
-        // Build the race-ready seed from the orthonormal frame + parse.
+        // Build the race-ready seed from the accepted orthonormal frame + parse.
         let seed_circle = match crate::manifold::curl_seed(
-            e1.view(),
-            e2.view(),
-            alpha.view(),
-            beta.view(),
+            plane.e1.view(),
+            plane.e2.view(),
+            plane.alpha.view(),
+            plane.beta.view(),
             cfg.harmonics,
-            center.view(),
+            plane.center.view(),
         ) {
             Ok(s) => s,
             Err(_) => continue,
@@ -6592,11 +6519,17 @@ fn curl_candidates(
         // the race to adjudicate. The gain carries the circle shape constant
         // −ln(π/√3) ≈ −0.595 nats/row, so the floor binds for R̂ ≲ 3.3σ (the
         // radius where the gain reaches 0.5).
-        let own = verdict.gain_nats_per_row.max(0.5);
-        for (idx, &r) in co_fire.iter().enumerate() {
+        let own = pair.verdict.gain_nats_per_row.max(0.5);
+        for (idx, &r) in plane.rows.iter().enumerate() {
             phase_coords[[r, 0]] = seed_circle.theta_turns[idx];
             gate[r] = own;
         }
+        let members: Vec<usize> = pair
+            .members_a
+            .iter()
+            .chain(pair.members_b.iter())
+            .copied()
+            .collect();
         cands.push(CurlCandidate {
             members,
             seed: BirthSeed::Circle {
@@ -6605,7 +6538,7 @@ fn curl_candidates(
                 phase_coords,
                 gate,
             },
-            net_evidence: verdict.net_evidence_nats,
+            net_evidence: pair.verdict.net_evidence_nats,
         });
     }
 

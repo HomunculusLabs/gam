@@ -35,9 +35,9 @@
 //!      centered circle into up to FOUR rectified half-atoms (`±u, ±v`); curl
 //!      candidates must form over the coalesced signed directions or the move is
 //!      a no-op on every such dictionary (launch blocker).
-//!   2. [`cooccurrence_pairs`] — candidate planes come from co-firing counts on
-//!      a ROW SUBSAMPLE over the coalesced directions, never an `O(K²)`
-//!      enumeration.
+//!   2. [`cooccurrence_pairs_sparse`] — candidate planes come from co-firing
+//!      counts over the coalesced directions, read off the transposed firing
+//!      lists so EVERY row is counted without an `O(K²)` enumeration.
 //!   3. [`CurlCooldownLedger`] — an atom-set-keyed cooldown so
 //!      `curl → flatten → curl` cannot oscillate across rounds.
 //!
@@ -49,6 +49,7 @@
 use std::f64::consts::TAU;
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use rayon::prelude::*;
 
 /// The rate–distortion crossover radius factor `π/√3`: below `R̂ = σ·π/√3` a
 /// centered circle cannot pay its charge, so the screen refuses it regardless
@@ -515,16 +516,24 @@ pub fn coalesce_antipodal(
     assert_eq!(active.len(), k, "coalesce: dirs/active length mismatch");
     assert_eq!(atom_ids.len(), k, "coalesce: dirs/atom_ids length mismatch");
 
-    // Enumerate antipodal + disjoint candidate merges, most-antipodal first.
-    let mut merges: Vec<(f64, usize, usize)> = Vec::new();
-    for i in 0..k {
-        for j in (i + 1)..k {
-            let c = cosine(dirs[i], dirs[j]);
-            if c <= cos_threshold && mask_overlap(&active[i], &active[j]) <= max_overlap {
-                merges.push((c, i, j));
+    // Enumerate antipodal + disjoint candidate merges, most-antipodal first. The
+    // enumeration is `O(K²·p)` in the cosine and `O(K²·n)` in the overlap, which
+    // at dictionary scale (`K` in the thousands) is the whole cost of the census;
+    // the outer index is therefore fanned out, and the result re-sorted so the
+    // greedy binding below stays bit-deterministic in `(dirs, active)`.
+    let mut merges: Vec<(f64, usize, usize)> = (0..k)
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            let mut local: Vec<(f64, usize, usize)> = Vec::new();
+            for j in (i + 1)..k {
+                let c = cosine(dirs[i], dirs[j]);
+                if c <= cos_threshold && mask_overlap(&active[i], &active[j]) <= max_overlap {
+                    local.push((c, i, j));
+                }
             }
-        }
-    }
+            local
+        })
+        .collect();
     // Most antipodal (smallest cosine) binds first; deterministic tiebreak.
     merges.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
@@ -578,33 +587,58 @@ pub fn coalesce_antipodal(
     out
 }
 
-/// Co-occurring signed-direction pairs, counted over a ROW SUBSAMPLE
-/// (INTEGRATION_PLAN Phase 4.2). A curl candidate plane is a pair of signed
-/// directions that co-fire (both active) on enough rows to estimate the joint
-/// amplitude law — never an `O(K²)` enumeration of the raw dictionary. Returns
-/// `(i, j, count)` with `count ≥ min_cooccur`, sorted by count descending.
-pub fn cooccurrence_pairs(
+/// Co-occurring signed-direction pairs counted over EVERY row, from the SPARSE
+/// firing pattern rather than by scanning dense masks.
+///
+/// The obvious spelling is `O(K²·|rows|)`: ask, for each of the `K(K−1)/2` pairs,
+/// how often both masks are set. That cost forces the caller to pass a row
+/// SUBSAMPLE — and a subsample imposes a detection floor. A direction
+/// that fires on a `f` fraction of rows co-fires with a partner on at most `f`
+/// of a `|rows|`-row subsample, so at `f = 5·10⁻⁴` and `|rows| = 4000` the
+/// expected count is `2`. Every pair carrying a rare concept is below the floor
+/// before any statistic is computed. Which is to say: the screen for circles was
+/// blind to exactly the population circles are found in — weekday, month,
+/// small-integer and other low-frequency features.
+///
+/// Counting from the transposed (per-row) firing lists costs `O(Σ_r L_r²)`, where
+/// `L_r` is the number of directions active on row `r` — for a sparse dictionary a
+/// few hundred operations per row, independent of `K`. So the subsample can be
+/// dropped entirely and the floor becomes what it should have been all along: the
+/// number of co-firings the κ standard error needs.
+///
+/// Returns `(i, j, count)` with `count ≥ min_cooccur`, sorted by count descending.
+pub fn cooccurrence_pairs_sparse(
     active: &[Vec<bool>],
-    rows: &[usize],
     min_cooccur: usize,
 ) -> Vec<(usize, usize, usize)> {
     let k = active.len();
-    let mut out: Vec<(usize, usize, usize)> = Vec::new();
-    for i in 0..k {
-        for j in (i + 1)..k {
-            let mut count = 0usize;
-            for &r in rows {
-                if active[i].get(r).copied().unwrap_or(false)
-                    && active[j].get(r).copied().unwrap_or(false)
-                {
-                    count += 1;
-                }
-            }
-            if count >= min_cooccur {
-                out.push((i, j, count));
+    if k < 2 {
+        return Vec::new();
+    }
+    let n = active.iter().map(|m| m.len()).max().unwrap_or(0);
+    // Transpose to per-row active lists.
+    let mut per_row: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (i, mask) in active.iter().enumerate() {
+        for (r, &on) in mask.iter().enumerate() {
+            if on {
+                per_row[r].push(i as u32);
             }
         }
     }
+    let mut counts: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
+    for row in &per_row {
+        for a in 0..row.len() {
+            for b in (a + 1)..row.len() {
+                let key = (row[a] as u64) << 32 | row[b] as u64;
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut out: Vec<(usize, usize, usize)> = counts
+        .into_iter()
+        .filter(|&(_, c)| c as usize >= min_cooccur)
+        .map(|(key, c)| ((key >> 32) as usize, (key & 0xffff_ffff) as usize, c as usize))
+        .collect();
     out.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
     out
 }
@@ -894,8 +928,7 @@ mod tests {
             (0..10).map(|r| r < 6).collect::<Vec<_>>(),
             (0..10).map(|r| r >= 6).collect::<Vec<_>>(),
         ];
-        let rows: Vec<usize> = (0..10).collect();
-        let pairs = cooccurrence_pairs(&active, &rows, 3);
+        let pairs = cooccurrence_pairs_sparse(&active, 3);
         assert_eq!(pairs.first().map(|p| (p.0, p.1, p.2)), Some((0, 1, 6)));
         // (0,2) and (1,2) never co-fire → excluded by min_cooccur.
         assert_eq!(pairs.len(), 1);
