@@ -7991,7 +7991,21 @@ impl<'a> RemlState<'a> {
                                 .qs
                                 .dot(pirls_result.beta_transformed.as_ref()),
                         };
-                        if matches!(prediction_source, Some(WarmStartPredictionSource::Ift))
+                        // Which predictor produced the β P-IRLS actually
+                        // consumed decides which quality marker carries
+                        // this residual. `WarmStartPredictionSource`'s own
+                        // contract says both accepting branches are
+                        // narrated so the bench runner attributes residual
+                        // percentiles per predictor; only the `Ift` arm was
+                        // wired, so every tangent-line accept was silently
+                        // unmeasured and `[TANGENT-QUALITY]` had no
+                        // producer at all (gam#2617).
+                        let quality_source = match prediction_source {
+                            Some(WarmStartPredictionSource::Ift)
+                            | Some(WarmStartPredictionSource::TangentLine) => prediction_source,
+                            Some(WarmStartPredictionSource::Flat) | None => None,
+                        };
+                        if quality_source.is_some()
                             && predicted.0.len() == converged_original.len()
                         {
                             let mut diff_sq = 0.0_f64;
@@ -8006,28 +8020,51 @@ impl<'a> RemlState<'a> {
                             let pred_residual = diff_sq.sqrt();
                             let quality = pred_residual / (1.0 + conv_norm);
                             if quality.is_finite() && quality >= 0.0 {
-                                let last_residual_bits =
-                                    self.last_ift_prediction_residual.load(Ordering::Relaxed);
-                                let r = f64::from_bits(last_residual_bits);
-                                let last_residual = if r.is_finite() && r >= 0.0 {
-                                    Some(r)
+                                // The adaptive |Δρ| cap is the IFT
+                                // predictor's own feedback loop, so only an
+                                // IFT accept reads and rewrites it. A
+                                // tangent-line accept is narrated but does
+                                // not touch the cap state: routing it here
+                                // would move solver trajectories, which is
+                                // a separate decision from restoring the
+                                // measurement. Its line therefore carries
+                                // no cap fields rather than reporting a cap
+                                // that does not govern that branch.
+                                if matches!(
+                                    quality_source,
+                                    Some(WarmStartPredictionSource::Ift)
+                                ) {
+                                    let last_residual_bits =
+                                        self.last_ift_prediction_residual.load(Ordering::Relaxed);
+                                    let r = f64::from_bits(last_residual_bits);
+                                    let last_residual = if r.is_finite() && r >= 0.0 {
+                                        Some(r)
+                                    } else {
+                                        None
+                                    };
+                                    let current_cap = self
+                                        .ift_quality_step_cap(adaptive_ift_max_drho(last_residual));
+                                    let cap_predicted = self
+                                        .record_ift_prediction_quality(quality, current_cap)
+                                        .unwrap_or(current_cap);
+                                    log::info!(
+                                        "[IFT-QUALITY] quality={:.3e} ift={:.3e} pred_residual={:.3e} cap_predicted={:.3e} iters={}",
+                                        quality,
+                                        current_cap,
+                                        pred_residual,
+                                        cap_predicted,
+                                        pirls_result.iteration,
+                                    );
+                                    self.last_ift_prediction_residual
+                                        .store(quality.to_bits(), Ordering::Relaxed);
                                 } else {
-                                    None
-                                };
-                                let current_cap =
-                                    self.ift_quality_step_cap(adaptive_ift_max_drho(last_residual));
-                                let cap_predicted = self
-                                    .record_ift_prediction_quality(quality, current_cap)
-                                    .unwrap_or(current_cap);
-                                log::info!(
-                                    "[IFT-QUALITY] quality={:.3e} ift={:.3e} pred_residual={:.3e} cap_predicted={:.3e}",
-                                    quality,
-                                    current_cap,
-                                    pred_residual,
-                                    cap_predicted,
-                                );
-                                self.last_ift_prediction_residual
-                                    .store(quality.to_bits(), Ordering::Relaxed);
+                                    log::info!(
+                                        "[TANGENT-QUALITY] quality={:.3e} pred_residual={:.3e} iters={}",
+                                        quality,
+                                        pred_residual,
+                                        pirls_result.iteration,
+                                    );
+                                }
                             }
                         }
                     }

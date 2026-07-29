@@ -20,7 +20,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -1252,11 +1252,23 @@ def run_cmd_stream(cmd: list[str], cwd: Path | None = None) -> tuple[int, str, s
     )
     out_buf: list[str] = []
     err_buf: list[str] = []
-    # Dedicated buffer for [PHASE] / [OUTER summary] markers so they
+    # Dedicated buffer for the solver's instrumentation markers so they
     # survive stderr-buffer rollover when a long-running cmd produces
     # >MAX_CAPTURE_CHARS of HEARTBEAT noise. Lets `_emit_phase_summary`
     # still find the markers even after a 40-min run.
+    #
+    # Membership is decided by `_is_instrumentation_line`, which is
+    # derived from `_INSTRUMENTATION_MARKERS` — the same tuple every
+    # aggregator in `_emit_phase_summary` is checked against. A marker
+    # family the summary parses but this filter drops would leave that
+    # aggregator parsing an empty string on every real run while still
+    # passing unit tests that hand it a synthetic line, which is how
+    # ten of these aggregations were silently inert before gam#2617.
     phase_buf: list[str] = []
+    # Single-element lists so the pump thread can mutate the running
+    # byte total and the rollover count without a nonlocal binding.
+    phase_total = [0]
+    phase_dropped = [0]
     stop_event = threading.Event()
     preview = " ".join(cmd[:5]) + (" ..." if len(cmd) > 5 else "")
 
@@ -1277,23 +1289,12 @@ def run_cmd_stream(cmd: list[str], cwd: Path | None = None) -> tuple[int, str, s
                     total = sum(len(x) for x in capture)
                 if phase_capture is not None:
                     for line in text.splitlines(keepends=True):
-                        if (
-                            "[PHASE]" in line
-                            or "[OUTER summary]" in line
-                            or "[OUTER guard]" in line
-                            or "[OUTER non-finite]" in line
-                            or "[PIRLS iter-end]" in line
-                            or "[PIRLS solve-end]" in line
-                            or "[KAPPA-PHASE" in line
-                            or "[IFT-QUALITY]" in line
-                            or "[IFT-REJECTED]" in line
-                            or "[IFT-NOOP]" in line
-                            or "[TANGENT-PREDICT]" in line
-                            or "[TANGENT-REJECTED]" in line
-                            or "[TANGENT-QUALITY]" in line
-                            or "[TANGENT-NOOP]" in line
-                        ):
+                        if _is_instrumentation_line(line):
                             phase_capture.append(line)
+                            phase_total[0] += len(line)
+                            while phase_total[0] > MAX_PHASE_CAPTURE_CHARS:
+                                phase_total[0] -= len(phase_capture.pop(0))
+                                phase_dropped[0] += 1
         finally:
             tail = sanitizer.flush()
             if tail:
@@ -1334,19 +1335,59 @@ def run_cmd_stream(cmd: list[str], cwd: Path | None = None) -> tuple[int, str, s
         _print_stderr(msg)
         # Emit the phase summary EVEN ON TIMEOUT — the most useful place
         # to see WHICH phase was running when the budget ran out.
-        _emit_phase_summary("".join(phase_buf), preview, timed_out=True, rc=124)
+        _emit_phase_summary(
+            "".join(phase_buf),
+            preview,
+            timed_out=True,
+            rc=124,
+            dropped_marker_lines=phase_dropped[0],
+        )
         raise TimeoutError(msg)
     captured_stderr = "".join(err_buf)
     if (routing_path := _routing_log_path()) is not None:
         _append_routing_lines(routing_path, captured_stderr)
     # Emit a per-phase wall-clock summary parsed from the gam binary's
-    # `[PHASE]` markers so CI logs end with a quick-glance breakdown of
-    # CTN / margslope / standard-GAM / location-scale phase timings. We
-    # parse the dedicated `phase_buf` (which retains all [PHASE] markers
-    # even after stderr buffer rollover) rather than `captured_stderr`.
-    _emit_phase_summary("".join(phase_buf), preview, timed_out=False, rc=rc)
+    # instrumentation markers so CI logs end with a quick-glance
+    # breakdown of CTN / margslope / standard-GAM / location-scale phase
+    # timings plus the inner-solver health verdicts. We parse the
+    # dedicated `phase_buf` (which retains marker lines even after
+    # stderr buffer rollover) rather than `captured_stderr`.
+    _emit_phase_summary(
+        "".join(phase_buf),
+        preview,
+        timed_out=False,
+        rc=rc,
+        dropped_marker_lines=phase_dropped[0],
+    )
     return rc, "".join(out_buf), captured_stderr
 
+
+# ----------------------------------------------------------------------
+# Solver instrumentation parsers.
+#
+# The engine narrates its inner state on stderr with bracketed markers.
+# This block is the reading half of that contract: one regex per marker
+# family, aggregated by `_emit_phase_summary` into the per-run verdict
+# lines a CI reviewer reads. Every pattern here is derived from a
+# CURRENT emission site in `crates/`, not from an older revision of the
+# log format — `tests/bench_large_scale_runner_test.py` holds each one
+# against a sample built from the live format string and fails when the
+# producer moves or disappears (gam#2617).
+#
+# Three families the previous version of this block parsed are NOT here,
+# because the engine no longer emits them:
+#   * `[OUTER guard] convergence-guard re-eval` — no emission site.
+#   * `[OUTER hessian-route] reason=subspace_forced_dense` — the routing
+#     reason set is now below_crossover / callback_row_pair_work /
+#     dense_memory_budget / kernel_absent / large_k / large_linear_work /
+#     large_n_moderate_p / large_p / family_op, with no forced-dense label.
+#   * the biobank-family `declining analytic outer Hessian` tags — that
+#     line is now emitted under a single `[standard-GAM]` tag.
+# Two `[IFT-QUALITY]` fields the previous version aggregated
+# (`drho_norm`, `h_pen_logdet`) are likewise absent from the current
+# marker, so the Δρ-magnitude and log|H_pen| distributions are not
+# reconstructed here.
+# ----------------------------------------------------------------------
 
 _PHASE_END_PATTERN = re.compile(
     r"\[PHASE\]\s+([\w\-]+(?:\([\w\-/]+\))?)\s+(?:fit\s+)?(?:end|done)\s+elapsed=([\d.]+)s"
@@ -1356,6 +1397,426 @@ _BFGS_SUMMARY_PATTERN = re.compile(
     r"\[OUTER summary\]\s+BFGS\s+(converged|hit max_iter|line-search failed|failed)(?:\s+in\s+(\d+)\s+iters)?\s+elapsed=([\d.]+)s"
 )
 
+# Inner-PIRLS cap transitions from the first-order bridge. The bare
+# transition count says the adaptive cap moved; the quality variant
+# additionally captures the feedback snapshot that drove the margin, so
+# the summary can report which policy branch fired (poor LM fidelity,
+# poor IFT prediction, or geometric backoff after a cap hit).
+_SCHEDULE_TRANSITION_PATTERN = re.compile(
+    r"\[OUTER schedule\]\s+inner-PIRLS cap transition.*?prev=(\d+)\s+new=(\d+)"
+)
+_SCHEDULE_QUALITY_PATTERN = re.compile(
+    r"\[OUTER schedule\]\s+inner-PIRLS cap transition.*?"
+    r"last_iters=(\d+)\s+converged=(true|false)\s+"
+    r"ift_residual=(\S+)\s+accept_rho=(\S+)\s+"
+    r"prev=(\d+)\s+new=(\d+)"
+)
+
+# Per-iter inner-Newton wall-clock, and its split across the four
+# sub-phases that drive the cost: curvature assembly, the (H+λI)δ=-g
+# solve, the predicted-reduction quadratic form, and the candidate
+# gain-ratio evaluation. Summed over a fit, the dominant sub-phase says
+# which optimization to ship next.
+_PIRLS_ITER_END_PATTERN = re.compile(
+    r"\[PIRLS iter-end\]\s+iter=\s*(\d+)\s+elapsed=([\d.]+)s"
+)
+_PIRLS_ITER_BREAKDOWN_PATTERN = re.compile(
+    r"\[PIRLS iter-breakdown\]\s+iter=\s*(\d+)\s+attempts=(\d+)"
+    r"\s+curvature=([\d.]+)s\s+solve=([\d.]+)s\s+predred=([\d.]+)s"
+    r"\s+candidate=([\d.]+)s\s+other=([\d.]+)s"
+)
+
+# Per-iter curvature kind: the Debug rendering of `HessianCurvatureKind`
+# (`Observed` or `Fisher`). The Observed path converges faster but is
+# not guaranteed PD; a high Fisher fraction is a direct signal of
+# observed-Hessian PD failures at scale. The trailing `source=` field
+# distinguishes a rebuilt assembly from a reused one and is deliberately
+# not captured — the fraction is over kinds, not over rebuilds.
+_PIRLS_CURVATURE_KIND_PATTERN = re.compile(
+    r"\[STAGE\] PIRLS update_with_curvature iter=\d+\s+curvature=(\w+)"
+)
+
+# Fisher fallbacks that fire mid-LM-loop (the iter-start assembly
+# succeeded but the candidate evaluation forced a retry), and the
+# `force_fisher_for_rest` lock-in that fires at most once per solve
+# when consecutive fallbacks cross the threshold. Together they
+# separate transient fallbacks from a sustained Fisher-only state.
+_PIRLS_MID_ITER_FISHER_PATTERN = re.compile(
+    r"\[PIRLS\] mid-iter Fisher fallback iter=(\d+)\s+reason=(\w+)"
+)
+_PIRLS_FORCE_FISHER_PATTERN = re.compile(
+    r"\[PIRLS\] force_fisher_for_rest engaged at iter=(\d+)\s+"
+    r"\(consecutive_fisher_fallbacks=(\d+)\)\s+reason=(\w+)"
+)
+
+# Per-iter LM trajectory. `log10_ratio` is log10(final λ / start λ):
+# negative means the trust region is expanding toward Newton, positive
+# means rejections are shrinking it. `accept_rho` near 1 means the
+# quadratic model is faithful. Both render as `NaN` when undefined.
+_PIRLS_LM_TRAJECTORY_PATTERN = re.compile(
+    r"\[PIRLS lm-trajectory\]\s+iter=\s*(\d+)\s+"
+    r"start_lambda=([\d.eE+\-]+)\s+final_lambda=([\d.eE+\-]+)\s+"
+    r"log10_ratio=([\d.eE+\-nNaA]+)\s+accept_rho=([\d.eE+\-nNaA]+)\s+"
+    r"attempts=(\d+)"
+)
+
+# One line per completed PIRLS solve, carrying the geometric
+# convergence rate (g_final/g_initial)^(1/iters) and the terminal
+# `PirlsStatus`. Healthy inner Newton sits below 0.5; 0.7 and up means
+# the solve is grinding.
+_PIRLS_SOLVE_END_PATTERN = re.compile(
+    r"\[PIRLS solve-end\]\s+iters=(\d+)\s+elapsed=([\d.]+)s\s+"
+    r"g_norm_initial=\S+\s+g_norm_final=\S+\s+"
+    r"convergence_rate=([\deE.+\-nNaA]+)\s+status=(\w+)"
+)
+
+# Outer-Hessian routing decision and the wall-clock of the path it
+# chose. The route line always carries the crossover inputs; the
+# `family_op` early return reports `scale_prefers_operator=irrelevant`
+# because that branch never consults the (n,p,k) crossover.
+_OUTER_HESSIAN_ROUTE_PATTERN = re.compile(
+    r"\[OUTER hessian-route\]\s+choice=(\w+)\s+reason=(\w+)\s+"
+    r"n=(\d+)\s+p=(\d+)\s+k=(\d+)\s+"
+    r"callback_kernel=(true|false)\s+subspace_trace=(true|false)\s+"
+    r"scale_prefers_operator=(true|false|irrelevant)"
+)
+_OUTER_HESSIAN_ELAPSED_PATTERN = re.compile(
+    r"\[OUTER hessian-elapsed\]\s+choice=(\w+)\s+reason=(\w+)\s+"
+    r"n=(\d+)\s+p=(\d+)\s+k=(\d+)\s+elapsed=([\d.]+)s"
+)
+
+# Outer-eval wall-clock per evaluation order. The gap between the outer
+# eval total and (pirls_total + outer_h_total) is the remaining work —
+# score computation, gradient assembly, warm-start prediction.
+_OUTER_EVAL_END_PATTERN = re.compile(
+    r"\[STAGE\] outer eval end order=(\w+) elapsed=([\d.]+)s"
+)
+
+# Seed-screening cascade summary: one per outer fit. `stages_used=1`
+# means the heuristic seeds passed at the tightest cap tier; higher
+# means the cascade had to escalate, which is startup cost at scale.
+_SEED_CASCADE_PATTERN = re.compile(
+    r"\[OUTER\][^\n]*seed screening cascade complete\s+"
+    r"elapsed=([\d.]+)s\s+stages_used=(\d+)\s+"
+    r"final_cap=(\w+)\s+ranked=(\d+)/(\d+)"
+)
+
+# κ-optimization driver instrumentation: one `[KAPPA-PHASE]` per closure
+# invocation plus a `[KAPPA-PHASE-SUMMARY]` at exit. Two summary
+# variants are emitted (the exact-joint driver prefixes `n_rows=` and
+# appends the no-free-lunch miss counters), so the fields are captured
+# by NAME rather than by position — a positional read would silently
+# shift by one against the longer variant.
+_KAPPA_PHASE_PATTERN = re.compile(
+    r"\[KAPPA-PHASE\]\s+phase=(\w+)\s+call=(\d+)(?:\s+order=\S+)?"
+    r"(?:\s+design_revision=\S+)?"
+    r"\s+theta_norm=\S+\s+log_kappa_norm=\S+\s+elapsed_s=([\d.]+)"
+)
+_KAPPA_PHASE_SUMMARY_PATTERN = re.compile(
+    r"\[KAPPA-PHASE-SUMMARY\]\s+(?:n_rows=(?P<n_rows>\d+)\s+)?"
+    r"log_kappa_dim=(?P<log_kappa_dim>\d+)\s+"
+    r"n_cost=(?P<n_cost>\d+)\s+cost_total_s=(?P<cost_total_s>[\d.]+)\s+"
+    r"n_eval=(?P<n_eval>\d+)\s+eval_total_s=(?P<eval_total_s>[\d.]+)\s+"
+    r"n_efs=(?P<n_efs>\d+)\s+efs_total_s=(?P<efs_total_s>[\d.]+)"
+    r".*?optim_total_s=(?P<optim_total_s>[\d.]+)"
+)
+
+# Warm-start predictor quality probes, emitted after a non-screening
+# PIRLS solve that consumed a predicted β. `quality` is
+# ‖β_converged − β_predicted‖ / (1 + ‖β_converged‖) — near 0 when the
+# linearization was faithful, order 1 when the prediction was no better
+# than flat. `iters` is the inner-Newton count the solve then needed.
+#
+# The two markers are separate because they measure DIFFERENT
+# predictors: `[IFT-QUALITY]` is the implicit-function-theorem
+# predictor (and carries the adaptive |Δρ| cap it feeds), while
+# `[TANGENT-QUALITY]` is the tangent-line fallback that only fires when
+# IFT declines. Folding them into one distribution would attribute the
+# fallback's faithfulness to the primary path.
+_IFT_QUALITY_PATTERN = re.compile(
+    r"\[IFT-QUALITY\]\s+quality=([\deE.+\-nNaA]+)\s+ift=([\deE.+\-nNaA]+)\s+"
+    r"pred_residual=([\deE.+\-nNaA]+)\s+cap_predicted=([\deE.+\-nNaA]+)\s+iters=(\d+)"
+)
+_TANGENT_QUALITY_PATTERN = re.compile(
+    r"\[TANGENT-QUALITY\]\s+quality=([\deE.+\-nNaA]+)\s+"
+    r"pred_residual=([\deE.+\-nNaA]+)\s+iters=(\d+)"
+)
+
+# Predictor rejection and no-op counters. A reject is a fall-through
+# (cap exceeded, factorization failed, non-finite output, dim
+# mismatch); a no-op is an effectively-zero ρ-step where the predictor
+# returned the cached β unchanged. Keeping them apart is what makes the
+# accept rate readable: no-ops measure outer-optimizer behaviour, not
+# predictor quality.
+_IFT_REJECTED_PATTERN = re.compile(r"\[IFT-REJECTED\]\s+reason=(\w+)")
+_IFT_NOOP_PATTERN = re.compile(r"\[IFT-NOOP\]\s+reason=(\w+)")
+_TANGENT_PREDICT_PATTERN = re.compile(
+    r"\[TANGENT-PREDICT\]\s+alpha=([\deE.+\-]+)\s+cap=([\deE.+\-]+)\s+"
+    r"drho_step_norm_sq=([\deE.+\-]+)\s+drho_prev_norm_sq=([\deE.+\-]+)"
+)
+_TANGENT_REJECTED_PATTERN = re.compile(r"\[TANGENT-REJECTED\]\s+reason=(\w+)")
+_TANGENT_NOOP_PATTERN = re.compile(r"\[TANGENT-NOOP\]\s+reason=(\w+)")
+
+# IFT factor-cache hit/miss. The penalized-Hessian Cholesky is O(p³)/3
+# — seconds at large p — so the hit rate sizes what the cache saves and
+# the miss elapsed sizes what it still pays.
+_IFT_CACHE_HIT_PATTERN = re.compile(
+    r"\[IFT-CACHE\]\s+outcome=hit\s+drho_dim=(\d+)(?:\s+p=(\d+))?"
+)
+_IFT_CACHE_MISS_PATTERN = re.compile(
+    r"\[IFT-CACHE\]\s+outcome=miss\s+drho_dim=(\d+)(?:\s+p=(\d+))?\s+elapsed=([\d.]+)s"
+)
+
+# NaN / Inf in an intermediate of the outer-Hessian, leverage, or
+# adjoint computation. Zero in a healthy fit; any count is a bug signal,
+# and the captured field name says which intermediate broke.
+_OUTER_NONFINITE_PATTERN = re.compile(r"\[OUTER non-finite\]\s+(\S+)")
+
+# Substrings that identify a line as solver instrumentation worth
+# keeping in the dedicated marker buffer. Each entry must be a
+# substring of a marker family SOME aggregator in
+# `_emit_phase_summary` reads; conversely every family the summary
+# reads must be matched by some entry here, or that aggregator sees an
+# empty string on every real run. The test suite asserts both
+# directions, because "parser exists, capture drops its input" is a
+# failure that unit tests feeding synthetic lines cannot see.
+_INSTRUMENTATION_MARKERS: tuple[str, ...] = (
+    "[PHASE]",
+    "[OUTER summary]",
+    "[OUTER non-finite]",
+    "[OUTER schedule] inner-PIRLS cap transition",
+    "[OUTER hessian-route]",
+    "[OUTER hessian-elapsed]",
+    "seed screening cascade complete",
+    "[STAGE] outer eval end",
+    "[STAGE] PIRLS update_with_curvature",
+    "[PIRLS iter-end]",
+    "[PIRLS iter-breakdown]",
+    "[PIRLS lm-trajectory]",
+    "[PIRLS solve-end]",
+    "[PIRLS] mid-iter Fisher fallback",
+    "[PIRLS] force_fisher_for_rest",
+    "[KAPPA-PHASE",
+    "[IFT-QUALITY]",
+    "[IFT-REJECTED]",
+    "[IFT-NOOP]",
+    "[IFT-CACHE]",
+    "[TANGENT-PREDICT]",
+    "[TANGENT-REJECTED]",
+    "[TANGENT-QUALITY]",
+    "[TANGENT-NOOP]",
+)
+
+# The marker buffer keeps per-iter lines, so a multi-hour fit can emit
+# far more of them than the run needs held in memory at once. Bound it
+# and count what rolls off: a truncated buffer makes the distributions
+# partial, and `marker_lines_dropped=` in the summary is what tells a
+# reviewer the percentiles are computed on a suffix rather than
+# quietly reporting them as if they covered the whole run.
+MAX_PHASE_CAPTURE_CHARS = 8 * 1024 * 1024
+
+
+def _is_instrumentation_line(line: str) -> bool:
+    return any(marker in line for marker in _INSTRUMENTATION_MARKERS)
+
+
+def _percentiles(values: list[float]) -> tuple[float, float, float]:
+    """Return (p50, p95, max) of a non-empty list, by the same
+    nearest-rank convention every aggregator below uses: sort, then
+    index at `n // 2` and `int(0.95 * n)` clamped to the last element.
+    """
+    ordered = sorted(values)
+    n = len(ordered)
+    return (
+        ordered[n // 2],
+        ordered[min(n - 1, int(0.95 * n))],
+        ordered[-1],
+    )
+
+
+def _finite(values: Iterable[str]) -> list[float]:
+    """Parse decimal strings, dropping anything non-numeric or NaN.
+
+    The markers render undefined quantities as `NaN`, which must not
+    enter a percentile — a single NaN would poison the sort order
+    rather than being visibly absent.
+    """
+    out: list[float] = []
+    for text in values:
+        if not text:
+            continue
+        try:
+            value = float(text)
+        except (TypeError, ValueError):
+            continue
+        if value == value:
+            out.append(value)
+    return out
+
+
+def _combine_fit_verdicts(
+    warm_start: str | None,
+    pirls: str | None,
+    curvature: str | None = None,
+) -> str:
+    """Combine the per-axis health verdicts into one fit verdict on the
+    worst-wins total ordering DEGRADED > MARGINAL > HEALTHY > NO-DATA.
+
+    A `None` axis (its markers never fired) ranks as NO-DATA. Worst-wins
+    rather than averaging: a fit that is HEALTHY on two axes and
+    DEGRADED on the third is DEGRADED, and the per-axis fields on the
+    `[FIT health]` line say which one tripped it.
+    """
+    rank = {"DEGRADED": 3, "MARGINAL": 2, "HEALTHY": 1, "NO-DATA": 0}
+    inv_rank = {value: key for key, value in rank.items()}
+    worst = max(
+        rank.get(warm_start or "NO-DATA", 0),
+        rank.get(pirls or "NO-DATA", 0),
+        rank.get(curvature or "NO-DATA", 0),
+    )
+    return inv_rank[worst]
+
+
+def _dominant_axis_for_verdict(
+    combined: str,
+    *,
+    warm_start: str | None,
+    pirls: str | None,
+    curvature: str | None,
+) -> str:
+    """Name the axis that drove `combined`, so a CI scraper can alert on
+    the failing axis without re-deriving worst-of-three.
+
+    Ties are broken toward `pirls` first (the central inner-Newton
+    diagnostic), then `warm_start`, then `curvature`. An all-missing
+    combination reports `none`.
+    """
+    if combined == "NO-DATA":
+        return "none"
+    rank = {"DEGRADED": 3, "MARGINAL": 2, "HEALTHY": 1, "NO-DATA": 0}
+    target = rank[combined]
+    for name, verdict in (
+        ("pirls", pirls),
+        ("warm_start", warm_start),
+        ("curvature", curvature),
+    ):
+        if rank.get(verdict or "NO-DATA", 0) == target:
+            return name
+    return "none"
+
+
+def _curvature_health_verdict(
+    *,
+    fisher_frac: float | None,
+    force_fisher_n: int,
+) -> tuple[str, str]:
+    """Classify observed-Hessian reliability from the Fisher-fallback
+    counters. Returns (verdict, detail).
+
+    HEALTHY   fisher_frac < 0.05 and no lock-in
+    MARGINAL  fisher_frac < 0.20 and no lock-in — occasional transient
+              fallbacks, Observed still mostly usable
+    DEGRADED  fisher_frac >= 0.20, or any `force_fisher_for_rest`
+              lock-in: at least one solve abandoned Observed entirely
+    NO-DATA   the curvature-kind markers never fired
+    """
+    if fisher_frac is None:
+        return ("NO-DATA", "fisher_frac=n/a force_fisher_n=0")
+    detail = f"fisher_frac={fisher_frac:.2f} force_fisher_n={force_fisher_n}"
+    if force_fisher_n > 0 or fisher_frac >= 0.20:
+        return ("DEGRADED", detail)
+    if fisher_frac >= 0.05:
+        return ("MARGINAL", detail)
+    return ("HEALTHY", detail)
+
+
+def _pirls_health_verdict(*, rates: list[float]) -> tuple[str, str]:
+    """Classify the inner Newton's per-solve geometric convergence rates.
+    Returns (verdict, detail).
+
+    HEALTHY   p95(rate) < 0.5 — 95% of solves strongly converging. The
+              threshold is on p95 rather than max so one slow solve in a
+              hundred clean ones does not flip the verdict; the outlier
+              is still visible in the `max=` field.
+    MARGINAL  p50(rate) < 0.5 and max(rate) < 0.85 — median solve fast,
+              nothing in the saturation regime.
+    DEGRADED  otherwise.
+    NO-DATA   no finite rates captured.
+    """
+    if not rates:
+        return ("NO-DATA", "n_solves=0")
+    p50, p95, rmax = _percentiles(rates)
+    detail = f"n_solves={len(rates)} p50={p50:.3f} p95={p95:.3f} max={rmax:.3f}"
+    if p95 < 0.5:
+        return ("HEALTHY", detail)
+    if p50 < 0.5 and rmax < 0.85:
+        return ("MARGINAL", detail)
+    return ("DEGRADED", detail)
+
+
+def _warm_start_health_verdict(
+    *,
+    n_accepts: int,
+    n_rejects: int,
+    n_noops: int,
+    residuals: list[float],
+    n_outer_nonfinite: int = 0,
+    n_tangent_accepts: int = 0,
+    tangent_p50: float | None = None,
+) -> tuple[str, str]:
+    """Classify the warm-start machinery on two axes. Returns
+    (verdict, detail).
+
+      coverage  = accepts / (accepts + rejects + noops)
+      residual  = the accepted calls' prediction quality
+
+    HEALTHY   coverage >= 0.70, p50 < 0.05, p95 < 0.20, no
+              outer-non-finite. The p95 clause is a saturation guard:
+              a clean median over a tail of poor predictions still
+              means ~5% of solves started from a bad warm start.
+    MARGINAL  coverage >= 0.30 or p50 < 0.30, no outer-non-finite.
+    DEGRADED  any outer-non-finite (broken geometry invalidates the
+              faithfulness measurement outright); or the predictor was
+              tried and never delivered a prediction; or the residuals
+              meet neither tier.
+    NO-DATA   the predictor was never tried at all.
+
+    Tangent-line statistics ride along in the detail string so both
+    predictors are visible at a glance, but the tier stays IFT-driven:
+    tangent-line is the fallback, not the primary path.
+    """
+    denom = max(n_accepts + n_rejects + n_noops, 1)
+    coverage = n_accepts / denom
+    if residuals:
+        p50_resid, p95_resid, _ = _percentiles(residuals)
+    else:
+        p50_resid = float("nan")
+        p95_resid = float("nan")
+    detail = (
+        f"coverage={coverage:.2f} p50_resid={p50_resid:.2e} "
+        f"p95_resid={p95_resid:.2e} "
+        f"n_accepts={n_accepts} n_rejects={n_rejects} n_noops={n_noops} "
+        f"n_outer_nonfinite={n_outer_nonfinite}"
+    )
+    if n_tangent_accepts > 0:
+        if tangent_p50 is not None and tangent_p50 == tangent_p50:
+            detail += (
+                f" n_tangent_accepts={n_tangent_accepts} tangent_p50={tangent_p50:.2e}"
+            )
+        else:
+            detail += f" n_tangent_accepts={n_tangent_accepts}"
+    if n_outer_nonfinite > 0:
+        return ("DEGRADED", detail)
+    if not residuals:
+        if n_accepts + n_rejects + n_noops == 0:
+            return ("NO-DATA", detail)
+        return ("DEGRADED", detail)
+    if coverage >= 0.70 and p50_resid < 0.05 and p95_resid < 0.20:
+        return ("HEALTHY", detail)
+    if coverage >= 0.30 or p50_resid < 0.30:
+        return ("MARGINAL", detail)
+    return ("DEGRADED", detail)
+
 
 def _emit_phase_summary(
     captured_stderr: str,
@@ -1363,7 +1824,16 @@ def _emit_phase_summary(
     *,
     timed_out: bool = False,
     rc: int = 0,
+    dropped_marker_lines: int = 0,
 ) -> None:
+    """Aggregate the run's instrumentation markers into the closing CI
+    lines: one `[PHASE summary]`, then the per-axis health verdicts and
+    the combined `[FIT health]`.
+
+    Each aggregator is guarded on its own markers being present, so a
+    fit that never exercises a code path contributes no field for it
+    rather than a zero that reads like a measurement.
+    """
     by_phase: dict[str, float] = {}
     for name, secs in _PHASE_END_PATTERN.findall(captured_stderr):
         by_phase[name] = by_phase.get(name, 0.0) + float(secs)
@@ -1387,6 +1857,398 @@ def _emit_phase_summary(
         )
         iter_part = f" bfgs_iters_max={max(iters)}" if iters else ""
         parts.append(f"bfgs_runs={len(bfgs)} bfgs_total={total:.1f}s {status}{iter_part}")
+
+    # --- outer optimizer ------------------------------------------------
+    schedule_transitions = _SCHEDULE_TRANSITION_PATTERN.findall(captured_stderr)
+    if schedule_transitions:
+        parts.append(f"sched_transitions={len(schedule_transitions)}")
+    sched_quality = _SCHEDULE_QUALITY_PATTERN.findall(captured_stderr)
+    if sched_quality:
+        n_unconverged = sum(1 for row in sched_quality if row[1] == "false")
+        n_poor_ift = len(
+            [value for value in _finite(row[2] for row in sched_quality) if value >= 0.10]
+        )
+        n_poor_rho = 0
+        for _last_iters, converged, _ift, rho_text, _prev, _new in sched_quality:
+            rho = _finite([rho_text])
+            if rho and rho[0] < 0.5:
+                n_poor_rho += 1
+        parts.append(
+            f"sched_quality_n={len(sched_quality)} "
+            f"sched_unconv={n_unconverged} "
+            f"sched_poor_ift={n_poor_ift} "
+            f"sched_poor_accept_rho={n_poor_rho}"
+        )
+
+    outer_h_route = _OUTER_HESSIAN_ROUTE_PATTERN.findall(captured_stderr)
+    outer_h_elapsed = _OUTER_HESSIAN_ELAPSED_PATTERN.findall(captured_stderr)
+    if outer_h_elapsed:
+        choice_counts: dict[str, int] = {}
+        reason_secs: dict[str, float] = {}
+        for choice, reason, _n, _p, _k, secs in outer_h_elapsed:
+            choice_counts[choice] = choice_counts.get(choice, 0) + 1
+            reason_secs[reason] = reason_secs.get(reason, 0.0) + float(secs)
+        dominant = max(reason_secs, key=lambda key: reason_secs[key])
+        choice_pieces = " ".join(
+            f"outer_h_{choice}={count}" for choice, count in sorted(choice_counts.items())
+        )
+        # A route line with no matching elapsed line means the assembly
+        # errored or the process died mid-build; that gap is signal, not
+        # noise, so it gets its own field instead of being smoothed over.
+        parts.append(
+            f"outer_h_calls={len(outer_h_elapsed)} "
+            f"outer_h_total={sum(reason_secs.values()):.1f}s "
+            f"{choice_pieces} "
+            f"outer_h_dom_reason={dominant}@{reason_secs[dominant]:.1f}s "
+            f"outer_h_route_no_elapsed={max(0, len(outer_h_route) - len(outer_h_elapsed))}"
+        )
+    elif outer_h_route:
+        reason_counts: dict[str, int] = {}
+        for _choice, reason, *_rest in outer_h_route:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        dominant = max(reason_counts, key=lambda key: reason_counts[key])
+        parts.append(
+            f"outer_h_INCOMPLETE outer_h_routes={len(outer_h_route)} "
+            f"outer_h_dom_reason={dominant}"
+        )
+
+    seed_cascades = _SEED_CASCADE_PATTERN.findall(captured_stderr)
+    if seed_cascades:
+        seeds_total = sum(int(row[4]) for row in seed_cascades)
+        parts.append(
+            f"seed_cascade_n={len(seed_cascades)} "
+            f"seed_cascade_elapsed={sum(float(row[0]) for row in seed_cascades):.1f}s "
+            f"seed_cascade_escalated={sum(1 for row in seed_cascades if int(row[1]) >= 2)} "
+            f"seed_cascade_stages_total={sum(int(row[1]) for row in seed_cascades)} "
+            f"seed_cascade_rank_rate="
+            f"{sum(int(row[3]) for row in seed_cascades) / max(seeds_total, 1):.2f}"
+        )
+
+    outer_eval_ends = _OUTER_EVAL_END_PATTERN.findall(captured_stderr)
+    if outer_eval_ends:
+        order_counts: dict[str, int] = {}
+        order_secs: dict[str, float] = {}
+        for order, secs in outer_eval_ends:
+            order_counts[order] = order_counts.get(order, 0) + 1
+            order_secs[order] = order_secs.get(order, 0.0) + float(secs)
+        order_pieces = " ".join(
+            f"outer_eval_{order}={order_counts[order]}@{order_secs[order]:.1f}s"
+            for order in sorted(order_counts)
+        )
+        parts.append(
+            f"outer_eval_n={len(outer_eval_ends)} "
+            f"outer_eval_total={sum(order_secs.values()):.1f}s {order_pieces}"
+        )
+
+    # --- inner Newton ---------------------------------------------------
+    pirls_iter_secs = _finite(
+        secs for _iter, secs in _PIRLS_ITER_END_PATTERN.findall(captured_stderr)
+    )
+    if pirls_iter_secs:
+        p50, p95, pmax = _percentiles(pirls_iter_secs)
+        parts.append(
+            f"pirls_iters={len(pirls_iter_secs)} "
+            f"pirls_total={sum(pirls_iter_secs):.1f}s "
+            f"pirls_p50={p50:.3f}s pirls_p95={p95:.3f}s pirls_max={pmax:.3f}s"
+        )
+
+    curvature_kinds = _PIRLS_CURVATURE_KIND_PATTERN.findall(captured_stderr)
+    fisher_frac: float | None = None
+    if curvature_kinds:
+        kind_counts: dict[str, int] = {}
+        for kind in curvature_kinds:
+            kind_counts[kind] = kind_counts.get(kind, 0) + 1
+        fisher_frac = kind_counts.get("Fisher", 0) / len(curvature_kinds)
+        kind_pieces = " ".join(
+            f"pirls_curv_{kind}={count}" for kind, count in sorted(kind_counts.items())
+        )
+        parts.append(
+            f"pirls_curv_n={len(curvature_kinds)} {kind_pieces} "
+            f"pirls_fisher_frac={fisher_frac:.2f}"
+        )
+
+    mid_iter_fisher = _PIRLS_MID_ITER_FISHER_PATTERN.findall(captured_stderr)
+    if mid_iter_fisher:
+        parts.append(
+            f"pirls_mid_iter_fisher_n={len(mid_iter_fisher)} "
+            f"pirls_mid_iter_gain_rejection="
+            f"{sum(1 for row in mid_iter_fisher if row[1] == 'gain_rejection')} "
+            f"pirls_mid_iter_candidate_err="
+            f"{sum(1 for row in mid_iter_fisher if row[1] == 'candidate_err')}"
+        )
+
+    force_fisher = _PIRLS_FORCE_FISHER_PATTERN.findall(captured_stderr)
+    if force_fisher:
+        force_reasons: dict[str, int] = {}
+        for _iter, _count, reason in force_fisher:
+            force_reasons[reason] = force_reasons.get(reason, 0) + 1
+        reason_pieces = " ".join(
+            f"pirls_force_fisher_{reason}={count}"
+            for reason, count in sorted(force_reasons.items())
+        )
+        parts.append(f"pirls_force_fisher_n={len(force_fisher)} {reason_pieces}")
+
+    breakdown = _PIRLS_ITER_BREAKDOWN_PATTERN.findall(captured_stderr)
+    if breakdown:
+        sub_totals = {
+            "curv": sum(float(row[2]) for row in breakdown),
+            "solve": sum(float(row[3]) for row in breakdown),
+            "predred": sum(float(row[4]) for row in breakdown),
+            "cand": sum(float(row[5]) for row in breakdown),
+        }
+        other_total = sum(float(row[6]) for row in breakdown)
+        timed_sum = sum(sub_totals.values())
+        if timed_sum > 0.0:
+            dominant = max(sub_totals, key=lambda key: sub_totals[key])
+            parts.append(
+                f"pirls_attempts={sum(int(row[1]) for row in breakdown)} "
+                f"pirls_dom={dominant}@{sub_totals[dominant] / timed_sum * 100:.0f}% "
+                f"pirls_curv={sub_totals['curv']:.1f}s "
+                f"pirls_solve={sub_totals['solve']:.1f}s "
+                f"pirls_predred={sub_totals['predred']:.1f}s "
+                f"pirls_cand={sub_totals['cand']:.1f}s "
+                f"pirls_other={other_total:.1f}s"
+            )
+
+    lm_traj = _PIRLS_LM_TRAJECTORY_PATTERN.findall(captured_stderr)
+    if lm_traj:
+        ratios = _finite(row[3] for row in lm_traj)
+        rhos = _finite(row[4] for row in lm_traj)
+        attempts = [int(row[5]) for row in lm_traj]
+        pieces: list[str] = []
+        if ratios:
+            r_p50, r_p95, _ = _percentiles(ratios)
+            pieces.append(f"lm_log10_ratio_p50={r_p50:.2f}")
+            pieces.append(f"lm_log10_ratio_p95={r_p95:.2f}")
+        if rhos:
+            rho_p50 = _percentiles(rhos)[0]
+            ordered_rhos = sorted(rhos)
+            pieces.append(f"lm_accept_rho_p50={rho_p50:.2f}")
+            pieces.append(
+                f"lm_accept_rho_p05={ordered_rhos[max(0, int(0.05 * len(ordered_rhos)))]:.2f}"
+            )
+        if attempts:
+            a_p50, a_p95, a_max = _percentiles([float(value) for value in attempts])
+            pieces.append(f"lm_attempts_p50={int(a_p50)}")
+            pieces.append(f"lm_attempts_p95={int(a_p95)}")
+            pieces.append(f"lm_attempts_max={int(a_max)}")
+        if pieces:
+            parts.append(f"lm_iters={len(lm_traj)} " + " ".join(pieces))
+
+    pirls_solves = _PIRLS_SOLVE_END_PATTERN.findall(captured_stderr)
+    pirls_rates = _finite(row[2] for row in pirls_solves)
+    if pirls_solves and pirls_rates:
+        status_counts = {}
+        for row in pirls_solves:
+            status_counts[row[3]] = status_counts.get(row[3], 0) + 1
+        solve_iters = [float(row[0]) for row in pirls_solves]
+        rate_p50, rate_p95, rate_max = _percentiles(pirls_rates)
+        iter_p50, iter_p95, iter_max = _percentiles(solve_iters)
+        status_pieces = " ".join(
+            f"pirls_status_{status}={count}"
+            for status, count in sorted(status_counts.items())
+        )
+        parts.append(
+            f"pirls_solves={len(pirls_rates)} pirls_conv_p50={rate_p50:.3f} "
+            f"pirls_conv_p95={rate_p95:.3f} pirls_conv_max={rate_max:.3f} "
+            f"{status_pieces} "
+            f"pirls_solve_iters_p50={int(iter_p50)} "
+            f"pirls_solve_iters_p95={int(iter_p95)} "
+            f"pirls_solve_iters_max={int(iter_max)}"
+        )
+
+    # --- kappa optimization ---------------------------------------------
+    kappa_calls = _KAPPA_PHASE_PATTERN.findall(captured_stderr)
+    kappa_summaries = [
+        match.groupdict()
+        for match in _KAPPA_PHASE_SUMMARY_PATTERN.finditer(captured_stderr)
+    ]
+    kappa_phase_secs: dict[str, list[float]] = {}
+    for phase_name, _call, secs in kappa_calls:
+        kappa_phase_secs.setdefault(phase_name, []).append(float(secs))
+    if kappa_summaries:
+        parts.append(
+            f"kappa_optims={len(kappa_summaries)} "
+            f"kappa_optim_total="
+            f"{sum(float(row['optim_total_s']) for row in kappa_summaries):.1f}s "
+            f"kappa_cost_calls={sum(int(row['n_cost']) for row in kappa_summaries)} "
+            f"kappa_cost_total="
+            f"{sum(float(row['cost_total_s']) for row in kappa_summaries):.1f}s "
+            f"kappa_eval_calls={sum(int(row['n_eval']) for row in kappa_summaries)} "
+            f"kappa_eval_total="
+            f"{sum(float(row['eval_total_s']) for row in kappa_summaries):.1f}s "
+            f"kappa_efs_calls={sum(int(row['n_efs']) for row in kappa_summaries)} "
+            f"kappa_efs_total="
+            f"{sum(float(row['efs_total_s']) for row in kappa_summaries):.1f}s"
+        )
+        # The summary totals are authoritative; the per-call percentiles
+        # come from marker lines that survived capture, so they can
+        # under-report a distribution but never over-report it. They are
+        # what separates one slow call from a uniformly slow workload.
+        dist_pieces = []
+        for phase_name in sorted(kappa_phase_secs):
+            _, phase_p95, phase_max = _percentiles(kappa_phase_secs[phase_name])
+            dist_pieces.append(
+                f"kappa_{phase_name}_p95={phase_p95:.2f}s "
+                f"kappa_{phase_name}_max={phase_max:.2f}s"
+            )
+        if dist_pieces:
+            parts.append(" ".join(dist_pieces))
+    elif kappa_calls:
+        # Per-call markers with no summary: the κ optimization did not
+        # finish. Report per-phase totals AND the distribution, since
+        # "one eval_outer ate the budget" and "many fast eval_outer
+        # calls accumulated" are different findings that the totals
+        # alone collapse together.
+        phase_pieces = []
+        for phase_name in sorted(kappa_phase_secs):
+            secs_list = kappa_phase_secs[phase_name]
+            _, phase_p95, phase_max = _percentiles(secs_list)
+            phase_pieces.append(
+                f"kappa_{phase_name}_calls={len(secs_list)} "
+                f"kappa_{phase_name}_total={sum(secs_list):.1f}s "
+                f"kappa_{phase_name}_p95={phase_p95:.2f}s "
+                f"kappa_{phase_name}_max={phase_max:.2f}s"
+            )
+        parts.append(f"kappa_optim_INCOMPLETE {' '.join(phase_pieces)}")
+
+    # --- warm-start predictors ------------------------------------------
+    ift_quality = _IFT_QUALITY_PATTERN.findall(captured_stderr)
+    ift_rejected = _IFT_REJECTED_PATTERN.findall(captured_stderr)
+    ift_noops = _IFT_NOOP_PATTERN.findall(captured_stderr)
+    tangent_quality = _TANGENT_QUALITY_PATTERN.findall(captured_stderr)
+    tangent_predicts = _TANGENT_PREDICT_PATTERN.findall(captured_stderr)
+    tangent_rejected = _TANGENT_REJECTED_PATTERN.findall(captured_stderr)
+    tangent_noops = _TANGENT_NOOP_PATTERN.findall(captured_stderr)
+    # A no-op suppresses the quality marker, so every quality line is a
+    # real predict call and the accept count needs no subtraction.
+    n_accepts = len(ift_quality)
+    n_rejects = len(ift_rejected)
+    n_noops = len(ift_noops)
+
+    cache_hits = _IFT_CACHE_HIT_PATTERN.findall(captured_stderr)
+    cache_misses = _IFT_CACHE_MISS_PATTERN.findall(captured_stderr)
+    if cache_hits or cache_misses:
+        n_cache = len(cache_hits) + len(cache_misses)
+        miss_secs = [float(row[2]) for row in cache_misses]
+        miss_p50 = _percentiles(miss_secs)[0] if miss_secs else 0.0
+        miss_max = max(miss_secs) if miss_secs else 0.0
+        miss_ps = [int(row[1]) for row in cache_misses if row[1]]
+        size_piece = f" ift_cache_miss_max_p={max(miss_ps)}" if miss_ps else ""
+        parts.append(
+            f"ift_cache_n={n_cache} "
+            f"ift_cache_hit_rate={len(cache_hits) / n_cache:.2f} "
+            f"ift_cache_miss_secs={sum(miss_secs):.2f} "
+            f"ift_cache_miss_p50={miss_p50:.2f}s "
+            f"ift_cache_miss_max={miss_max:.2f}s "
+            f"ift_cache_paid_rejects={max(0, n_cache - n_accepts)}{size_piece}"
+        )
+
+    tangent_residuals = _finite(row[0] for row in tangent_quality)
+    if tangent_residuals:
+        t_p50, t_p95, t_max = _percentiles(tangent_residuals)
+        parts.append(
+            f"tangent_quality_predicts={len(tangent_residuals)} "
+            f"tangent_p50={t_p50:.2e} tangent_p95={t_p95:.2e} tangent_max={t_max:.2e}"
+        )
+    tangent_iters = [float(row[2]) for row in tangent_quality if row[2]]
+    if tangent_iters:
+        i_p50, i_p95, i_max = _percentiles(tangent_iters)
+        parts.append(
+            f"tangent_iters_p50={int(i_p50)} tangent_iters_p95={int(i_p95)} "
+            f"tangent_iters_max={int(i_max)}"
+        )
+
+    ift_residuals = _finite(row[0] for row in ift_quality)
+    if ift_residuals:
+        i_p50, i_p95, i_max = _percentiles(ift_residuals)
+        parts.append(
+            f"ift_predicts={len(ift_residuals)} ift_p50={i_p50:.2e} "
+            f"ift_p95={i_p95:.2e} ift_max={i_max:.2e}"
+        )
+    ift_iters = [float(row[4]) for row in ift_quality if row[4]]
+    if ift_iters:
+        i_p50, i_p95, i_max = _percentiles(ift_iters)
+        parts.append(
+            f"ift_iters_p50={int(i_p50)} ift_iters_p95={int(i_p95)} "
+            f"ift_iters_max={int(i_max)}"
+        )
+
+    outer_nonfinite = _OUTER_NONFINITE_PATTERN.findall(captured_stderr)
+    if outer_nonfinite:
+        intermediate_counts: dict[str, int] = {}
+        for name in outer_nonfinite:
+            intermediate_counts[name] = intermediate_counts.get(name, 0) + 1
+        parts.append(
+            f"outer_nonfinite={len(outer_nonfinite)} outer_nonfinite_at=["
+            + ",".join(f"{name}={count}" for name, count in sorted(intermediate_counts.items()))
+            + "]"
+        )
+
+    if tangent_predicts or tangent_rejected or tangent_noops:
+        alphas = _finite(row[0] for row in tangent_predicts)
+        alpha_piece = ""
+        if alphas:
+            a_p50, _, a_max = _percentiles(alphas)
+            alpha_piece = f" tangent_alpha_p50={a_p50:.2f} tangent_alpha_max={a_max:.2f}"
+        if tangent_rejected:
+            t_reason_counts: dict[str, int] = {}
+            for reason in tangent_rejected:
+                t_reason_counts[reason] = t_reason_counts.get(reason, 0) + 1
+            parts.append(
+                f"tangent_predicts={len(tangent_predicts)} "
+                f"tangent_rejects={len(tangent_rejected)} "
+                "tangent_reasons=["
+                + ",".join(
+                    f"{reason}={count}" for reason, count in sorted(t_reason_counts.items())
+                )
+                + f"]{alpha_piece}"
+            )
+        else:
+            parts.append(f"tangent_predicts={len(tangent_predicts)}{alpha_piece}")
+        if tangent_noops:
+            parts.append(f"tangent_noops={len(tangent_noops)}")
+        denom_total = max(len(tangent_predicts) + len(tangent_rejected) + len(tangent_noops), 1)
+        denom_active = max(len(tangent_predicts) + len(tangent_rejected), 1)
+        parts.append(
+            f"tangent_accept_rate={len(tangent_predicts) / denom_total:.2f} "
+            f"tangent_accept_rate_active={len(tangent_predicts) / denom_active:.2f}"
+        )
+
+    # Every accepted tangent-line prediction should produce exactly one
+    # downstream quality marker. Divergence beyond one (the run can be
+    # cut off between the two) means instrumentation is dropping
+    # markers, which is the failure this whole layer exists to catch.
+    if tangent_predicts and abs(len(tangent_predicts) - len(tangent_quality)) > 1:
+        parts.append(
+            f"tangent_marker_drift=predict={len(tangent_predicts)}"
+            f"_vs_quality={len(tangent_quality)}"
+        )
+
+    if n_rejects > 0 or n_noops > 0:
+        ift_reason_counts: dict[str, int] = {}
+        for reason in ift_rejected:
+            ift_reason_counts[reason] = ift_reason_counts.get(reason, 0) + 1
+        # Two denominators, because they answer different questions.
+        # `ift_accept_rate` includes no-ops and so mixes predictor
+        # quality with how often the outer takes zero-length steps;
+        # `ift_accept_rate_active` excludes them and is the
+        # predictor-only signal.
+        denom_total = max(n_accepts + n_rejects + n_noops, 1)
+        denom_active = max(n_accepts + n_rejects, 1)
+        parts.append(
+            f"ift_rejects={n_rejects} ift_noops={n_noops} "
+            f"ift_accept_rate={n_accepts / denom_total:.2f} "
+            f"ift_accept_rate_active={n_accepts / denom_active:.2f} "
+            "ift_reasons=["
+            + ",".join(
+                f"{reason}={count}" for reason, count in sorted(ift_reason_counts.items())
+            )
+            + "]"
+        )
+
+    if dropped_marker_lines:
+        parts.append(f"marker_lines_dropped={dropped_marker_lines}")
     if pending:
         parts.append("pending=" + ",".join(pending[-5:]))
     if timed_out:
@@ -1399,6 +2261,73 @@ def _emit_phase_summary(
             file=sys.stderr,
             flush=True,
         )
+
+    # --- health verdicts -------------------------------------------------
+    warm_start_verdict: str | None = None
+    if ift_quality or outer_nonfinite or tangent_quality:
+        tangent_p50 = _percentiles(tangent_residuals)[0] if tangent_residuals else None
+        warm_start_verdict, detail = _warm_start_health_verdict(
+            n_accepts=n_accepts,
+            n_rejects=n_rejects,
+            n_noops=n_noops,
+            residuals=ift_residuals,
+            n_outer_nonfinite=len(outer_nonfinite),
+            n_tangent_accepts=len(tangent_residuals),
+            tangent_p50=tangent_p50,
+        )
+        print(
+            f"[WARM-START health] cmd='{cmd_preview}' "
+            f"verdict={warm_start_verdict} {detail}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    pirls_verdict: str | None = None
+    if pirls_rates:
+        pirls_verdict, detail = _pirls_health_verdict(rates=pirls_rates)
+        print(
+            f"[PIRLS health] cmd='{cmd_preview}' verdict={pirls_verdict} {detail}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    curvature_verdict: str | None = None
+    if fisher_frac is not None:
+        curvature_verdict, detail = _curvature_health_verdict(
+            fisher_frac=fisher_frac,
+            force_fisher_n=len(force_fisher),
+        )
+        print(
+            f"[CURVATURE health] cmd='{cmd_preview}' "
+            f"verdict={curvature_verdict} {detail}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    if (
+        warm_start_verdict is not None
+        or pirls_verdict is not None
+        or curvature_verdict is not None
+    ):
+        combined = _combine_fit_verdicts(
+            warm_start_verdict, pirls_verdict, curvature_verdict
+        )
+        dominant_axis = _dominant_axis_for_verdict(
+            combined,
+            warm_start=warm_start_verdict,
+            pirls=pirls_verdict,
+            curvature=curvature_verdict,
+        )
+        print(
+            f"[FIT health] cmd='{cmd_preview}' verdict={combined} "
+            f"dominant_axis={dominant_axis} "
+            f"warm_start={warm_start_verdict or 'ABSENT'} "
+            f"pirls={pirls_verdict or 'ABSENT'} "
+            f"curvature={curvature_verdict or 'ABSENT'}",
+            file=sys.stderr,
+            flush=True,
+        )
+
 
 def tool_exists(name: str) -> bool:
     return shutil.which(name) is not None
