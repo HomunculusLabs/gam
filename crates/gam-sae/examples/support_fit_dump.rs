@@ -41,6 +41,28 @@ fn chart_digest(bytes: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
+/// FNV digest of this executable's own bytes.
+///
+/// An arm's result line already carries the chart it read, because two charts
+/// of identical size and different content once produced an EV that looked
+/// like a finding. The same hazard exists one level up: two arms of an A/B can
+/// share every argument and still differ, because one was built before a fix
+/// and the other after. That happened on this lane -- a routing fix changed
+/// what `exact` does during training, and a seed-0/seed-1 pair straddled it.
+///
+/// Reading `current_exe` costs a few milliseconds once per run and makes the
+/// binary as checkable as the data. On failure the arm still runs and reports
+/// `build=unknown`: a missing provenance field must not cost a measurement.
+fn build_digest() -> String {
+    let Ok(path) = std::env::current_exe() else {
+        return "unknown".to_string();
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => chart_digest(&bytes),
+        Err(_) => "unknown".to_string(),
+    }
+}
+
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
@@ -813,9 +835,11 @@ fn main() -> Result<(), String> {
                     let ss: f64 = centered_test.iter().map(|x| x * x).sum();
                     println!(
                         "HELDOUT rows={te_rows} recurred={} EV={:.4} chart={te_digest} \
-                         cycles={max_cycles} certified_at={:.0e} escalation_cycles={}",
+                         build={} cycles={max_cycles} certified_at={:.0e} \
+                         escalation_cycles={}",
                         rep.recurred,
                         1.0 - sse / ss,
+                        build_digest(),
                         certified_tolerance.get(),
                         escalation_cycles.get()
                     );
