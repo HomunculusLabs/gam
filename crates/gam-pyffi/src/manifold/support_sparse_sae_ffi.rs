@@ -196,6 +196,8 @@ fn fixed_point_json(report: &SaeSupportFixedPointReport) -> serde_json::Value {
         decoder_max_abs,
         coordinate_l2,
         coordinate_max_abs,
+        decoder_scaled_max_abs,
+        coordinate_scaled_max_abs,
     } = report.stationarity;
     serde_json::json!({
         "iterations": report.iterations,
@@ -204,6 +206,12 @@ fn fixed_point_json(report: &SaeSupportFixedPointReport) -> serde_json::Value {
         "decoder_max_abs": decoder_max_abs,
         "coordinate_l2": coordinate_l2,
         "coordinate_max_abs": coordinate_max_abs,
+        // #2517: the gradient-space numbers above scale with rows-per-atom, so
+        // they cannot be read as a distance to the fixed point. The scaled pair
+        // is the parameter-space certificate, and a Python caller inspecting
+        // this report needs it for the same reason the Rust side does.
+        "decoder_scaled_max_abs": decoder_scaled_max_abs,
+        "coordinate_scaled_max_abs": coordinate_scaled_max_abs,
         "max_recurrence_change": report.max_recurrence_change,
         "recurred": report.recurred,
     })
