@@ -221,7 +221,29 @@ pub(crate) fn core_saved_fit_result(
             .expect("core_saved_fit_result called with non-finite beta_covariance_corrected");
     }
     {
+        // rho IS the canonical coordinate; lambda is derived from it, not the
+        // other way round.
+        //
+        // `UnifiedFitResult` validates `lambda == exp(rho)` BIT-FOR-BIT
+        // (`log_lambdas_match_lambdas` compares `to_bits()`), which encodes the
+        // REML convention: the outer optimizer moves rho and lambda follows.
+        // Deriving `rho = ln(lambda)` and then handing back the ORIGINAL lambda
+        // violates that for almost every value, because `exp(ln(x)) != x` in
+        // floating point -- `ln(1e-3)` round-trips to `0.0009999999999999998`,
+        // one ulp off. Every saved fit built through here therefore failed with
+        //
+        //   UnifiedFitResult log_lambdas must equal ln(lambdas) elementwise
+        //
+        // Canonicalising through rho makes the invariant hold by construction
+        // instead of by luck. The cost is at most one ulp on a lambda that was
+        // itself read back from a serialized decimal, and the alternative --
+        // loosening the validator to a tolerance -- would drop the exactness
+        // the rest of the pipeline relies on to round-trip rho.
         let log_lambdas = lambdas.mapv(|v| v.max(1e-300).ln());
+        // `checked_exp_log_strength` is a domain check followed by plain
+        // `rho.exp()`, so this is bit-identical to what the validator computes
+        // -- and `gam-problem` is not a dependency of this crate.
+        let lambdas = log_lambdas.mapv(f64::exp);
         // Do not export a synthetic/placeholder Hessian here. Saved fits built
         // from externally supplied summary/covariance data may provide covariance
         // for prediction, but HMC/NUTS whitening requires an explicit upstream
