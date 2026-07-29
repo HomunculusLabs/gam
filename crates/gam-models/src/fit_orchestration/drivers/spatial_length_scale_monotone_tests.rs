@@ -704,4 +704,110 @@ mod spatial_length_scale_monotone_tests {
         let norm = grad_an.dot(&grad_an).sqrt();
         eprintln!("[zz-grad-2454] |g|_analytic_at_checkpoint={norm:.6e}");
     }
+
+    /// #2454 MEASUREMENT (reports, never fails): how much outer budget the joint
+    /// ψ descent actually needs, now that ψ is free to move.
+    ///
+    /// The monotone fixtures pin `max_outer_iter: 16`, a number calibrated (per
+    /// the comment on that field) against runs in which ψ was frozen at its box
+    /// edge for the whole search — so the budget only ever had to cover the ρ
+    /// block. With the active-set fix ψ moves, and the refusal changed to
+    /// `IterationBudget after 16 outer iteration(s); |g|=6.105992e-1 never
+    /// reached 6.941073e-4`.
+    ///
+    /// This sweeps the cap and reports, per cap, whether the fit succeeded and
+    /// what score it reached — so "the budget was calibrated against a search
+    /// that was not searching" is a measurement rather than an assertion, and so
+    /// a future slowdown in the ψ direction shows up as a number here.
+    #[test]
+    fn zz_measure_joint_outer_budget_needed_for_psi_descent_2454() {
+        let n = 60usize;
+        let d = 2usize;
+        let mut data = Array2::<f64>::zeros((n, d));
+        let mut y = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let x0 = i as f64 / (n as f64 - 1.0);
+            let x1 = (i as f64 * 0.17).sin();
+            data[[i, 0]] = x0;
+            data[[i, 1]] = x1;
+            y[i] = (3.0 * x0).cos() + 0.35 * x1;
+        }
+        let weights = Array1::ones(n);
+        let offset = Array1::zeros(n);
+        let spec = TermCollectionSpec {
+            linear_terms: vec![],
+            random_effect_terms: vec![],
+            smooth_terms: vec![SmoothTermSpec {
+                name: "matern".to_string(),
+                basis: SmoothBasisSpec::Matern {
+                    feature_cols: vec![0, 1],
+                    spec: MaternBasisSpec {
+                        periodic: None,
+                        center_strategy: CenterStrategy::FarthestPoint { num_centers: 12 },
+                        length_scale: gam_terms::basis::MaternLengthScale::fixed(12.0),
+                        nu: MaternNu::FiveHalves,
+                        include_intercept: false,
+                        double_penalty: true,
+                        identifiability: MaternIdentifiability::CenterSumToZero,
+                        aniso_log_scales: None,
+                    },
+                    input_scale: None,
+                },
+                shape: ShapeConstraint::None,
+                joint_null_rotation: None,
+            }],
+        };
+        let fit_opts = FitOptions {
+            max_iter: 40,
+            penalty_shrinkage_floor: None,
+            ..FitOptions::default()
+        };
+        let baseline = fit_term_collection_forspec(
+            data.view(),
+            y.view(),
+            weights.view(),
+            offset.view(),
+            &spec,
+            LikelihoodSpec::gaussian_identity(),
+            &fit_opts,
+        )
+        .unwrap_or_else(|e| panic!("baseline fit failed: {e:?}"));
+        let baseline_score = fit_score(&baseline.fit);
+        eprintln!("[zz-budget-2454] baseline score={baseline_score:+.10e}");
+
+        for cap in [16usize, 32, 64, 128, 256] {
+            let outcome = fit_term_collectionwith_spatial_length_scale_optimization(
+                data.view(),
+                y.clone(),
+                weights.clone(),
+                offset.clone(),
+                &spec,
+                LikelihoodSpec::gaussian_identity(),
+                &fit_opts,
+                &SpatialLengthScaleOptimizationOptions {
+                    max_outer_iter: cap,
+                    rel_tol: 1e-5,
+                    pilot_subsample_threshold: 0,
+                    ..SpatialLengthScaleOptimizationOptions::default()
+                },
+            );
+            match outcome {
+                Ok(fitted) => {
+                    let ls = match &fitted.resolvedspec.smooth_terms[0].basis {
+                        SmoothBasisSpec::Matern { spec, .. } => spec.length_scale.resolved(),
+                        _ => None,
+                    };
+                    eprintln!(
+                        "[zz-budget-2454] cap={cap:3} OK score={:+.10e} (baseline {baseline_score:+.10e}, \
+                         improvement {:+.6e}) length_scale={ls:?}",
+                        fit_score(&fitted.fit),
+                        baseline_score - fit_score(&fitted.fit),
+                    );
+                }
+                Err(error) => {
+                    eprintln!("[zz-budget-2454] cap={cap:3} REFUSED {error}");
+                }
+            }
+        }
+    }
 }

@@ -615,6 +615,103 @@ fn active_set_reduction_freezes_a_railed_coordinate_when_the_interior_is_unpolis
     );
 }
 
+/// #2454: the active set is the PROJECTOR's verdict, not a distance to a bound.
+///
+/// `certificate_railed_coordinates` is a proximity test — "within
+/// `CERTIFICATE_RAIL_MARGIN` of a bound". Proximity is not activity: at an upper
+/// bound the KKT projector keeps only the non-negative (feasible-descent) half,
+/// so a coordinate sitting on the bound with a POSITIVE gradient still has a
+/// feasible inward step and its projected component survives. Freezing it pins
+/// exactly the descent the reduction was invoked to resolve, and the reduced
+/// solve then converges everything else around a coordinate that was never on an
+/// active constraint.
+///
+/// Three coordinates, all three cases at once:
+///   0 — upper rail with a genuine `−a·e^{−ρ}` tail: projected component 0, so
+///       KKT-active, so frozen (the #2392 contract, unchanged);
+///   1 — upper rail with `+4`: projected component +4, feasible descent remains,
+///       so INTERIOR and left free;
+///   2 — strictly interior and unpolished, which is what makes the reduction
+///       fire at all.
+#[test]
+fn active_set_reduction_leaves_an_inward_railed_coordinate_free_2454() {
+    let bounded = OuterConfig {
+        model_domain_bounds: Some((array![-30.0, -30.0, -30.0], array![30.0, 30.0, 30.0])),
+        ..OuterConfig::default()
+    };
+    // V(ρ) = a·e^{−ρ₀} + ½(ρ₁ − 26)² + ½ρ₂², evaluated at ρ = [30, 30, 5].
+    //   g₀ = −a·e^{−30} < 0 at an UPPER bound → the projector drops it → active.
+    //   g₁ = +4        > 0 at an UPPER bound → the projector keeps it → interior.
+    //   g₂ = 5                                → interior, unpolished.
+    let a = 1.0_f64;
+    let cost = move |rho: &Array1<f64>| {
+        a * (-rho[0]).exp() + 0.5 * (rho[1] - 26.0).powi(2) + 0.5 * rho[2] * rho[2]
+    };
+    let mut obj = OuterProblem::new(3)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .build_objective(
+            (),
+            move |_: &mut (), rho: &Array1<f64>| Ok(cost(rho)),
+            move |_: &mut (), rho: &Array1<f64>| {
+                let e0 = (-rho[0]).exp();
+                Ok(OuterEval {
+                    cost: cost(rho),
+                    gradient: array![-a * e0, rho[1] - 26.0, rho[2]],
+                    hessian: HessianValue::Dense(array![
+                        [a * e0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ]),
+                    inner_beta_hint: Some(array![e0, 0.0, 0.0]),
+                })
+            },
+            None::<fn(&mut ())>,
+            None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+        );
+    let mut result = OuterResult::new(
+        array![30.0, 30.0, 5.0],
+        0.0,
+        1,
+        true,
+        OuterPlan {
+            solver: Solver::Bfgs,
+            hessian_source: HessianSource::BfgsApprox,
+        },
+    );
+    let outcome = certify_outer_optimality(&mut obj, &bounded, "active-set-2454", &mut result);
+    assert!(
+        outcome.is_err(),
+        "an unpolished interior beside a rail must refuse certification"
+    );
+    let reseed = result
+        .active_set_reseed
+        .as_ref()
+        .expect("the genuinely active rail must still mint an active-set reseed");
+    assert_eq!(
+        (reseed.bounds.0[0], reseed.bounds.1[0]),
+        (30.0, 30.0),
+        "coordinate 0 is KKT-active (its outward pull is projected away) and must \
+         still be frozen at its rail"
+    );
+    assert_eq!(
+        (reseed.bounds.0[1], reseed.bounds.1[1]),
+        (-30.0, 30.0),
+        "coordinate 1 sits ON its bound but its projected gradient is +4, i.e. \
+         feasible descent remains — it is INTERIOR and its box must be untouched. \
+         Freezing it pins the descent the reduction exists to resolve (#2454)."
+    );
+    assert_eq!(
+        reseed.rho[1], 30.0,
+        "an unfrozen coordinate keeps its current value as the reseed point"
+    );
+    assert_eq!(
+        (reseed.bounds.0[2], reseed.bounds.1[2]),
+        (-30.0, 30.0),
+        "the strictly interior coordinate's box must be untouched"
+    );
+}
+
 /// #2392 end-to-end recovery contract for the first-order path.
 ///
 /// `V(ρ) = A(-q + q²/2)`, `q = exp(ρ★ − ρ)`, has its unique minimum at
