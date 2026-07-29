@@ -993,7 +993,156 @@ fn intersect_innovation_above_observation_variance(
     }
 }
 
-/// Intersect an enclosure with an independently derived enclosure of the same
+/// Directed square root of a nonnegative enclosure.
+#[inline]
+fn ball_sqrt(value: Ball) -> Option<Ball> {
+    if !(value.lo >= 0.0 && value.hi.is_finite() && value.lo <= value.hi) {
+        return None;
+    }
+    Some(Ball {
+        value: value.value.max(0.0).sqrt(),
+        lo: next_down_ball(value.lo.sqrt()).max(0.0),
+        hi: next_up_ball(value.hi.sqrt()),
+    })
+}
+
+/// Lower-triangular Cholesky factor `L` with `P = L Lᵀ`, in directed arithmetic.
+///
+/// `None` when a pivot enclosure fails to be strictly positive, which is a
+/// statement about the enclosure and not about the matrix — the caller treats a
+/// missing factor as an absence of evidence, never as a refusal.
+fn ball_cholesky(covariance: &BallMat, order: usize) -> Option<BallMat> {
+    let mut factor = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..order {
+        for j in 0..=i {
+            let mut accumulator = covariance[i][j];
+            for k in 0..j {
+                accumulator = accumulator.sub(factor[i][k].mul(factor[j][k]));
+            }
+            if i == j {
+                factor[i][j] = ball_sqrt(accumulator)?;
+                if !(factor[i][j].lo > 0.0) {
+                    return None;
+                }
+            } else {
+                if !(factor[j][j].lo > 0.0) {
+                    return None;
+                }
+                factor[i][j] = accumulator.div_positive(factor[j][j]);
+            }
+        }
+    }
+    Some(factor)
+}
+
+/// Number of columns in the prediction prearray `[F·L, L_Q]`.
+const PREARRAY_COLUMNS: usize = 2 * MAX_ORDER;
+
+/// The measurement update, performed on a CARRIED FACTOR of the covariance
+/// instead of on the covariance.
+///
+/// With `P⁻ = L Lᵀ` and `L` lower triangular, `Lᵀe₀` has a single nonzero, so
+/// the whole Kalman update is one column scaling:
+///
+///     L⁺ = L · diag(β, 1, …, 1),      β = √(R/F),
+///
+/// and `P⁺ = L⁺L⁺ᵀ` is EXACTLY `P⁻ − M Mᵀ/F`. The check: `P[i][0] = L[i][0]L₀₀`
+/// because `L[0][k] = 0` for `k ≥ 1`, so
+///
+///     (L⁺L⁺ᵀ)[i][j] = P[i][j] − (1 − β²)L[i][0]L[j][0]
+///                   = P[i][j] − (P₀₀/F)·M[i]M[j]/P₀₀
+///                   = P[i][j] − M[i]M[j]/F.
+///
+/// CARRIED is the load-bearing word. Recomputing the factorization per node
+/// from the componentwise covariance was measured and is INERT — bit-identical
+/// divergence nodes `44/44/44/45/50/88/164` at order 2 — because the Cholesky's
+/// own Schur complement `L₁₁² = P₁₁ − P₀₁²/P₀₀` IS the cancelling subtraction it
+/// was meant to avoid, so factoring and immediately reconstructing recomputes
+/// exactly the quantity whose width is the problem. Carried across nodes, that
+/// difference is never re-formed: `L₁₁` is scaled and rotated, never subtracted,
+/// so its enclosure tracks the size of the RESULT instead of the size of the
+/// operands it would have been differenced out of.
+fn ball_factor_update(factor: &BallMat, beta: Ball, order: usize) -> BallMat {
+    let mut updated = *factor;
+    for row in updated.iter_mut().take(order) {
+        row[0] = row[0].mul(beta);
+    }
+    updated
+}
+
+/// `L Lᵀ` for a lower-triangular factor.
+fn ball_factor_gram(factor: &BallMat, order: usize) -> BallMat {
+    let mut gram = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..order {
+        for j in 0..order {
+            let mut accumulator = Ball::ZERO;
+            for k in 0..=i.min(j) {
+                accumulator = accumulator.add(factor[i][k].mul(factor[j][k]));
+            }
+            gram[i][j] = accumulator;
+        }
+    }
+    gram
+}
+
+/// Re-triangularize the prediction prearray `A = [F·L⁺, L_Q]` so that the
+/// carried factor stays `order`-wide, WITHOUT assuming exact orthogonality.
+///
+/// Givens rotations are applied to pairs of COLUMNS with `c` and `s` taken as
+/// floating-point points, never intervals. That is what makes the result sound:
+/// a 2×2 `Θ = [[c, −s], [s, c]]` built from points satisfies `ΘΘᵀ = (c²+s²)I`
+/// EXACTLY, so applying it to every row rescales the Gram by the scalar
+/// `c²+s²` and introduces no other error — a computed rotation that is not
+/// quite orthogonal is a similarity scaling, not a general perturbation. The
+/// product of those scalars is returned so the caller can divide it back out.
+/// Had `c` and `s` been intervals, the enclosure would have ranged over
+/// non-orthogonal `Θ`s and `L Lᵀ` would no longer have enclosed `A Aᵀ`.
+///
+/// The trailing columns are not exactly zeroed either, so their outer product
+/// `D = Σ_{k ≥ order} A[:,k]A[:,k]ᵀ` is returned as `trace(D)`, which bounds
+/// every entry of `D` because `|D[i][j]| ≤ √(D_ii·D_jj) ≤ trace(D)`.
+fn ball_retriangularize(
+    prearray: &mut [[Ball; PREARRAY_COLUMNS]; MAX_ORDER],
+    order: usize,
+    columns: usize,
+) -> (BallMat, f64, f64) {
+    let mut gram_scale = 1.0_f64;
+    for i in 0..order {
+        for k in (i + 1)..columns {
+            let a = prearray[i][i].value;
+            let b = prearray[i][k].value;
+            let radius = (a * a + b * b).sqrt();
+            if !(radius.is_finite() && radius > 0.0) {
+                continue;
+            }
+            let cosine = a / radius;
+            let sine = b / radius;
+            gram_scale = next_up_ball(gram_scale * (cosine * cosine + sine * sine));
+            for row in prearray.iter_mut().take(order) {
+                let x = row[i];
+                let y = row[k];
+                row[i] = x.scale(cosine).add(y.scale(sine));
+                row[k] = y.scale(cosine).sub(x.scale(sine));
+            }
+        }
+    }
+    let mut factor = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..order {
+        for j in 0..=i {
+            factor[i][j] = prearray[i][j];
+        }
+    }
+    let mut trailing = 0.0_f64;
+    for row in prearray.iter().take(order) {
+        for entry in row.iter().take(columns).skip(order) {
+            let magnitude = entry.lo.abs().max(entry.hi.abs());
+            trailing = next_up_ball(trailing + next_up_ball(magnitude * magnitude));
+        }
+    }
+    (factor, trailing, gram_scale)
+}
+
+/// Intersect an enclosure with an independently derived enclosure of the same/// Intersect an enclosure with an independently derived enclosure of the same
 /// quantity.
 ///
 /// Both bound the same real number, so their intersection does too, and it is
@@ -1667,6 +1816,12 @@ fn run_filter_ball_traced(
         p_inf[i][i] = Ball::ONE;
     }
     let mut diffuse_rank = order;
+    // A CARRIED Cholesky factor of the proper covariance, once the diffuse rank
+    // is consumed and there is a proper covariance to factor. The componentwise
+    // recursion still runs; this is a second, independent enclosure of the same
+    // matrix whose update and prediction contain no cancelling subtraction, and
+    // the two are intersected. `None` means no evidence, never a refusal.
+    let mut carried_factor: Option<BallMat> = None;
     let mut sum_log_f = Ball::ZERO;
     let mut sum_log_f_d1 = Ball::ZERO;
     let mut sum_log_f_d2 = Ball::ZERO;
@@ -1780,6 +1935,7 @@ fn run_filter_ball_traced(
                 if diffuse_rank == 0 {
                     p_inf = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
                     intersect_proper_covariance_psd(&mut p_star, order)?;
+                    carried_factor = ball_cholesky(&p_star, order);
                 }
             }
         }
@@ -1895,6 +2051,23 @@ fn run_filter_ball_traced(
                 }
             }
             intersect_covariance_minors(&mut p_new, order);
+            // The same update through the CARRIED factor, where it is one
+            // column scaling and contains no subtraction at all.
+            if carried_factor.is_none() {
+                carried_factor = ball_cholesky(&p_star, order);
+            }
+            if let (Some(factor), Some(beta)) = (carried_factor, ball_sqrt(r.mul(inv_f))) {
+                let updated_factor = ball_factor_update(&factor, beta, order);
+                let gram = ball_factor_gram(&updated_factor, order);
+                for i in 0..order {
+                    for j in 0..order {
+                        intersect_with_independent_enclosure(&mut p_new[i][j], gram[i][j]);
+                    }
+                }
+                carried_factor = Some(updated_factor);
+            } else {
+                carried_factor = None;
+            }
             // Derivative covariances through the JOSEPH form, which for the
             // derivative jets is not a reformulation but an exact cancellation
             // (#2614).
@@ -2211,6 +2384,42 @@ fn run_filter_ball_traced(
             } else {
                 intersect_proper_covariance_psd(&mut p_star, order)?;
             }
+            // Carry the factor across the transition: `P⁻ = (F L)(F L)ᵀ + Q`,
+            // so the prearray is `[F·L, L_Q]` and re-triangularizing it keeps
+            // the factor `order`-wide. Nothing here subtracts.
+            carried_factor = carried_factor.and_then(|factor| {
+                let transported = ball_mat_mul(&f_t, &factor, order);
+                let noise_factor = ball_cholesky(&q_noise, order)?;
+                let mut prearray = [[Ball::ZERO; PREARRAY_COLUMNS]; MAX_ORDER];
+                for i in 0..order {
+                    for j in 0..order {
+                        prearray[i][j] = transported[i][j];
+                        prearray[i][order + j] = noise_factor[i][j];
+                    }
+                }
+                let (next_factor, trailing, gram_scale) =
+                    ball_retriangularize(&mut prearray, order, 2 * order);
+                let gram = ball_factor_gram(&next_factor, order);
+                // `P⁻ = (L Lᵀ + D)/gram_scale` with `0 ⪯ D` and every entry of
+                // `D` bounded by `trace(D)`; `gram_scale` is `1 + O(eps)`.
+                let slack = Ball {
+                    value: 0.0,
+                    lo: -trailing,
+                    hi: trailing,
+                };
+                let scale = Ball {
+                    value: 1.0,
+                    lo: next_down_ball(1.0 / gram_scale),
+                    hi: next_up_ball(gram_scale),
+                };
+                for i in 0..order {
+                    for j in 0..order {
+                        let evidence = gram[i][j].add(slack).mul(scale);
+                        intersect_with_independent_enclosure(&mut p_star[i][j], evidence);
+                    }
+                }
+                Some(next_factor)
+            });
         }
     }
 
