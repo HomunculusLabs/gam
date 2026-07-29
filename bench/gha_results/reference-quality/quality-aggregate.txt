@@ -1,29 +1,29 @@
 execution record: /tmp/quality-report/quality_results.tsv
 === #1561 whole-suite quality meta-gate ===
 category        n scored GAMwin REFwin   medlogR  p(1-sided)      p_BH
-factors         3      3      1      2    0.0166      0.9093    0.9754
-families       54     52     25     27    0.0000      0.5954    0.8930
+factors         3      3      1      2    0.0166      0.9093    0.9709
+families       52     50     24     26    0.0000      0.6645    0.9709
 manifolds      15     14     11      2   -0.1642      0.0105    0.0633
-misc           36     36     10     24    0.0022      0.9754    0.9754
-smooths        35     35     18     17   -0.0002      0.1731    0.3463
+misc           35     35     10     23    0.0005      0.9709    0.9709
+smooths        34     34     17     17    0.0002      0.2470    0.4941
 survival       14     14     10      4   -0.0176      0.0513    0.1540
 ------------------------------------------------------------------------
-OVERALL       157    154     75     76    0.0000      0.2066 
+OVERALL       153    150     73     74    0.0000      0.2645 
 
-CLOSURE (one-sided p<0.05 AND GAM better on median): FAIL (p=0.2066, median log(gam/ref)=0.0000, wins 75 / losses 76)
+CLOSURE (one-sided p<0.05 AND GAM better on median): FAIL (p=0.2645, median log(gam/ref)=0.0000, wins 73 / losses 74)
 NOTE: 3 pair(s) dropped (nonfinite/nonpositive).
 
 --- execution vs emission (silent-attrition guard) ---
 category     executed  failed  emitting
 calibration         9       0         0
 factors             2       0         1
-families           96      37        34
+families           96      38        32
 manifolds          11       1         8
-misc              261      22        18
-smooths            50      14        23
+misc              261      25        18
+smooths            50      15        23
 survival           27       6         7
 
-SILENT ATTRITION: 41 test(s) failed BEFORE emitting a pair (excluded from the significance set):
+SILENT ATTRITION: 45 test(s) failed BEFORE emitting a pair (excluded from the significance set):
   METRIC_OFF/quality_metric families::quality_vs_brute_force_loo_poisson_log::alo_loo_recovers_truth_and_matches_exact_brute_force_poisson_log
   GAM_ERROR/gam_fit_failed families::quality_vs_interpret_ml_pygam_binomial_logit_comparative::gam_binomial_logit_holdout_predictive_quality
   GAM_ERROR/gam_fit_failed families::quality_vs_interpret_ml_pygam_binomial_logit_comparative::gam_binomial_logit_holdout_predictive_quality_on_real_data
@@ -32,17 +32,21 @@ SILENT ATTRITION: 41 test(s) failed BEFORE emitting a pair (excluded from the si
   GAM_ERROR/gam_fit_failed families::quality_vs_mgcv_tensor_te_2d_binomial::gam_tensor_te_2d_binomial_logit_matches_mgcv
   GAM_ERROR/gam_fit_failed families::quality_vs_mgcv_tensor_te_2d_poisson::gam_tensor_te_2d_poisson_matches_mgcv
   GAM_ERROR/gam_fit_failed families::quality_vs_mgcv_tensor_te_2d_poisson::gam_tensor_te_2d_poisson_matches_mgcv_on_real_data
+  GAM_ERROR/gam_fit_failed families::quality_vs_mgcv_tensor_te_3d_gaussian::gam_te_3d_recovers_nonadditive_surface
   GAM_ERROR/gam_fit_failed families::quality_vs_numpyro_nuts_poisson_loglink::gam_nuts_poisson_loglink_predicts_heldout_counts
   GAM_ERROR/gam_fit_failed families::quality_vs_pygam_poisson_2d_shape::gam_poisson_2d_recovers_true_log_mean_surface
   GAM_ERROR/gam_fit_failed families::quality_vs_pygam_poisson_2d_shape::gam_poisson_2d_recovers_true_log_mean_surface_on_real_data
   GAM_ERROR/gam_fit_failed families::quality_vs_sklearn_binomial_logit::gam_binomial_logit_generalizes_on_heldout_prostate
   GAM_ERROR/gam_fit_failed families::quality_vs_sklearn_binomial_logit::gam_binomial_logit_generalizes_on_heldout_prostate_on_real_data
+  GAM_ERROR/gam_fit_failed families::quality_vs_statsmodels_tweedie::gam_tweedie_matches_statsmodels_power_variance
   REF_ERROR/reference_tool families::quality_vs_synthetic_multinomial_deviance_identity::multinomial_recovers_decision_boundary_on_held_out_split
   GAM_ERROR/gam_fit_failed families::quality_vs_vgam_beta_logistic_link_parameterization::gam_beta_logistic_link_matches_vgam_beta_parameterization
   GAM_ERROR/gam_fit_failed families::quality_vs_vgam_multinomial_smooth_by_factor::gam_multinomial_smooth_by_factor_recovers_truth
   METRIC_OFF/quality_metric misc::quality_llm_weekday_circle::weekday_is_bound_to_month_when_planted_jointly_and_fissions_when_additive
   METRIC_OFF/quality_metric misc::quality_mixture_rung_vs_reference::cluster_regime_gam_selects_mixture_and_recovers_k_match_or_beat_sklearn
   GAM_ERROR/gam_fit_failed misc::quality_vs_lifelines_interval_censored_truth_recovery::gam_recovers_interval_censored_latent_truth_match_or_beat_lifelines
+  METRIC_OFF/quality_metric misc::quality_vs_nnet_multinom_penguins_species::gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet
+  METRIC_OFF/quality_metric misc::quality_vs_nnet_multinom_penguins_species::gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet_on_real_data
   METRIC_OFF/quality_metric misc::quality_vs_r_gpgp_likelihood::gam_gp_smooth_recovers_truth_and_predicts
   GAM_ERROR/gam_fit_failed misc::quality_vs_r_mlt_conditional_transformation_binary_covariate::gam_conditional_transformation_pit_is_calibrated_on_bone
   GAM_ERROR/gam_fit_failed misc::quality_vs_scipy_pit_transformation_normal::transformation_normal_held_out_pit_is_uniform
@@ -67,7 +71,7 @@ SILENT ATTRITION: 41 test(s) failed BEFORE emitting a pair (excluded from the si
   GAM_ERROR/gam_fit_failed survival::quality_vs_survival_coxph_frailty_hazard_multiplier::gam_hazard_multiplier_frailty_matches_coxph_frailty_on_real_data
 
 --- #2395 paired-panel power ---
-20 of 157 pairs carry a paired fold panel: 3 resolved BETTER, 4 resolved WORSE, 13 unresolved.
+20 of 153 pairs carry a paired fold panel: 3 resolved BETTER, 4 resolved WORSE, 13 unresolved.
 Pairing gain (unpaired SEM / paired SEM) over these panels: min 1.08x, median 12.70x, max 369.09x. Values above 1 are the common fold-draw swing that comparing two separately-averaged arms would have paid for.
 
 pair                                                         K   effect%    sem%  |e|/sem     d_z   wins  verdict
@@ -114,9 +118,10 @@ DILUTION: 13 paired pair(s) remain unresolved — their sign is not established 
   smooths/quality_vs_mgcv_matern_smooth::test: -1.254% +- 0.461% (2.74 SEM over 10 folds)
 
 Top tests GAM loses (largest log(gam/ref) > 0):
-  +1.2632  families/quality_vs_vgam_multinomial_softmax::heterogeneous_mgcv [simplex_rmse_to_truth] gam=0.18802 vs mgcv=0.053162
+  +1.2930  families/quality_vs_vgam_multinomial_softmax::heterogeneous_mgcv [simplex_rmse_to_truth] gam=0.19371 vs mgcv=0.053162
   +0.7905  survival/quality_vs_lifelines_weibull_aft_by::linear_acceleration::truth_surface [survival_rmse_to_truth] gam=0.094051 vs lifelines=0.042663
   +0.7703  misc/quality_vs_gamlss_negbin_dispersion_location_scale_1060::mu [rmse_log_mu] gam=0.088912 vs gamlss=0.041154
+  +0.7176  families/quality_vs_vgam_multinomial_softmax::main [simplex_rmse_to_truth] gam=0.11936 vs mgcv=0.058236
   +0.6430  misc/quality_vs_scam_monotone_baseline [rmse_truth] gam=0.25469 vs scam=0.1339
   +0.5600  misc/quality_vs_mass_ordinal_polr::cum [cum_rmse] gam=0.019019 vs vgam=0.010864
   +0.5497  misc/quality_vs_gamlss_negbin_dispersion_location_scale_1060::log_theta [rmse_log_theta] gam=0.41088 vs gamlss=0.23714
@@ -128,4 +133,3 @@ Top tests GAM loses (largest log(gam/ref) > 0):
   +0.4014  smooths/quality_vs_mgcv_duchon_default_rank::2d_n1500 [truth_rmse] gam=0.021396 vs mgcv=0.014322
   +0.3935  families/quality_vs_inla_binomial_smooth_probability [prob_rmse_to_truth] gam=0.028749 vs inla=0.019396
   +0.3691  survival/quality_vs_lifelines_weibull_aft_by::curved_acceleration::truth_surface [survival_rmse_to_truth] gam=0.090455 vs lifelines=0.062538
-  +0.3661  families/quality_vs_gamlss_gaussian_location_scale_by_group::log_sigma_b [log_sigma_rmse_to_truth] gam=0.13825 vs gamlss=0.095863
