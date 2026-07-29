@@ -1345,10 +1345,20 @@ where
             use crate::rho_optimizer::OuterProblem;
             use gam_problem::{DeclaredHessianForm, Derivative, HessianValue, OuterEval};
             let initial_link_kind = cfg.link_kind.clone();
+            // Same criterion, same declaration as the profiled-REML arm above
+            // (#1082): this is the location-scale / SAS-mixture LAML score, a
+            // sum over the same n rows, so its d/d-theta inherits the same O(n)
+            // scale. Declaring it is what keeps the outer stationarity band a
+            // property of the data since #2613 -- an undeclared route falls
+            // back to the bare absolute tolerance, which at large n is orders
+            // below the residual a converged fit floors at.
+            let n_obs = y_o.len();
             let problem = OuterProblem::new(theta_dim)
                 .with_gradient(Derivative::Analytic)
                 .with_hessian(DeclaredHessianForm::Either)
                 .with_prefer_gradient_only(true)
+                .with_objective_scale(Some(n_obs as f64))
+                .with_problem_size(n_obs, x_o.ncols())
                 .with_psi_dim(mixture_dim + sas_dim)
                 .with_barrier(
                     crate::estimate::reml::reml_outer_engine::BarrierConfig::from_constraints(
