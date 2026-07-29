@@ -176,13 +176,18 @@ fn run_stride(rows: &[Penguin], stride: usize, nnet_logloss: f64, nnet_acc: f64)
         .map(|&i| levels.iter().position(|c| *c == rows[i].species).expect("level"))
         .collect();
 
-    let mat = predict_multinomial_formula(&model, &test_ds).expect("predict");
-    let mut flat = Vec::with_capacity(labels.len() * K);
-    for i in 0..labels.len() {
-        for c in 0..K {
-            flat.push(mat[[i, c]]);
+    // The posterior-mean predictor can refuse (the logistic-normal quadrature
+    // has to integrate whatever posterior width the fit selected); report that
+    // as a result rather than aborting the probe, and fall back to the plug-in
+    // columns so the rest of the line still measures the FIT.
+    let mut posterior_mean_error: Option<String> = None;
+    let mat = match predict_multinomial_formula(&model, &test_ds) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            posterior_mean_error = Some(format!("{e}").chars().take(220).collect());
+            None
         }
-    }
+    };
     let plug = predict_multinomial_formula_plugin(&model, &test_ds).expect("plugin");
     let mut flat_plug = Vec::with_capacity(labels.len() * K);
     for i in 0..labels.len() {
@@ -190,13 +195,27 @@ fn run_stride(rows: &[Penguin], stride: usize, nnet_logloss: f64, nnet_acc: f64)
             flat_plug.push(plug[[i, c]]);
         }
     }
+    let mut flat = Vec::with_capacity(labels.len() * K);
+    match mat.as_ref() {
+        Some(m) => {
+            for i in 0..labels.len() {
+                for c in 0..K {
+                    flat.push(m[[i, c]]);
+                }
+            }
+        }
+        None => flat.extend_from_slice(&flat_plug),
+    }
 
+    if let Some(err) = posterior_mean_error.as_ref() {
+        println!("  POSTERIOR-MEAN PREDICT REFUSED: {err}");
+    }
     // In-sample replay: discriminates a dead FIT from a dead PREDICT path.
     let train_labels: Vec<usize> = train_idx
         .iter()
         .map(|&i| levels.iter().position(|c| *c == rows[i].species).expect("level"))
         .collect();
-    let tr_mat = predict_multinomial_formula(&model, &train_ds).expect("predict train");
+    let tr_mat = predict_multinomial_formula_plugin(&model, &train_ds).expect("predict train");
     let mut tr_flat = Vec::with_capacity(train_labels.len() * K);
     for i in 0..train_labels.len() {
         for c in 0..K {

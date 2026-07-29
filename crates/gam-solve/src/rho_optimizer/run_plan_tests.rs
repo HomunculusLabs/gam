@@ -9032,7 +9032,11 @@ fn drive_first_order_bridge_2613(
     schedule: Vec<(f64, f64, f64)>,
     seed: (Array1<f64>, f64, f64),
     ledger: Option<Arc<AcceptedStepLedger>>,
-    mut accept_after: impl FnMut(usize, f64),
+    // `None` is the "nothing was accepted" arm: the schedule is driven end to
+    // end with the ledger never signalled. It is the absence of a hook, not a
+    // hook that does nothing, so the two arms are distinguishable at the call
+    // site instead of hiding behind an empty body.
+    mut accept_after: Option<impl FnMut(usize, f64)>,
 ) -> (Vec<Result<f64, String>>, Option<CostStallExit>) {
     let (seed_rho, seed_cost, seed_grad) = seed;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -9088,7 +9092,9 @@ fn drive_first_order_bridge_2613(
                 break;
             }
         }
-        accept_after(idx, *cost);
+        if let Some(hook) = accept_after.as_mut() {
+            hook(idx, *cost);
+        }
     }
     let published = exit.lock().expect("exit cell").take();
     (outcomes, published)
@@ -9114,7 +9120,7 @@ fn line_search_probes_never_advance_the_cost_stall_window_2613() {
         (array![12.02577], -4996.7, STATIONARY_GRAD_2613),
         Some(Arc::default()),
         // No accepted steps: `opt` is still inside iteration 0.
-        |_, _| (),
+        None::<fn(usize, f64)>,
     );
     assert_eq!(
         outcomes.len(),
@@ -9150,7 +9156,7 @@ fn line_search_probes_never_advance_the_cost_stall_window_2613() {
         schedule.clone(),
         (array![12.02577], -4996.7, STATIONARY_GRAD_2613),
         None,
-        |_, _| (),
+        None::<fn(usize, f64)>,
     );
     // `COST_STALL_WINDOW − 1`, not `COST_STALL_WINDOW`: the inline fold has no
     // accept latency, so the sixth observation lands on the sixth evaluation
@@ -9179,7 +9185,7 @@ fn accepted_steps_still_trip_the_cost_stall_window_2613() {
             schedule.clone(),
             (array![12.02577], -4996.7, STATIONARY_GRAD_2613),
             Some(Arc::clone(&ledger)),
-            move |idx, cost| {
+            Some(move |idx, cost| {
                 let mut prev = incumbent.lock().expect("incumbent");
                 ledger.push(AcceptedOuterStep {
                     iter: idx,
@@ -9187,7 +9193,7 @@ fn accepted_steps_still_trip_the_cost_stall_window_2613() {
                     actual_decrease: *prev - cost,
                 });
                 *prev = cost;
-            },
+            }),
         )
     };
     let halted = outcomes
@@ -9240,7 +9246,7 @@ fn accepted_step_resolves_by_cost_not_by_recency_2613() {
             schedule.clone(),
             (array![16.9], -10.0, STATIONARY_GRAD_2613),
             Some(Arc::clone(&ledger)),
-            move |idx, cost| {
+            Some(move |idx, cost| {
                 if idx < 2 {
                     // Inside one line search plus its rescue: nothing accepted yet.
                     return;
@@ -9254,7 +9260,7 @@ fn accepted_step_resolves_by_cost_not_by_recency_2613() {
                     // by nothing.
                     actual_decrease: if idx == 2 { 90.0 } else { -100.0 - cost },
                 });
-            },
+            }),
         )
     };
     assert!(

@@ -599,10 +599,13 @@ pub fn reml_laml_evaluate(
         let mut rhs_stack = Array2::<f64>::zeros((dim, total_cols));
         let mut col_idx = 0;
         if need_rho_mode_responses {
-            for (idx, a_k_beta) in rho_curvature_a_k_betas.iter().enumerate() {
-                if !upper_active_rho[idx] {
-                    rhs_stack.column_mut(col_idx).assign(a_k_beta);
-                }
+            // Every rho coordinate gets its mode response, including one sitting
+            // on a box bound. `v_k = dbeta/drho_k` is a property of the inner map
+            // `beta(rho)`, not of the outer feasible set: zeroing it there made
+            // the criterion's own derivative depend on which box the caller
+            // happened to pass (#2615).
+            for a_k_beta in rho_curvature_a_k_betas.iter() {
+                rhs_stack.column_mut(col_idx).assign(a_k_beta);
                 col_idx += 1;
             }
         }
@@ -1069,11 +1072,9 @@ pub fn reml_laml_evaluate(
                 // the reconstructed weight sum reproduces `det1[k]` — the runtime
                 // gate below trusts the fused value only when it does.
                 let any_fractional = (0..k).any(|idx| {
-                    !upper_active_rho[idx] && {
-                        let rank = solution.penalty_coords[idx].rank();
-                        (solution.penalty_logdet.first[idx] - rank as f64).abs()
-                            > 1e-9 * (1.0 + rank as f64)
-                    }
+                    let rank = solution.penalty_coords[idx].rank();
+                    (solution.penalty_logdet.first[idx] - rank as f64).abs()
+                        > 1e-9 * (1.0 + rank as f64)
                 });
                 let joint_whitening: Option<Array2<f64>> = if any_fractional {
                     let p = ds.dim();
@@ -1094,9 +1095,6 @@ pub fn reml_laml_evaluate(
                 };
                 (0..k)
                     .map(|idx| {
-                        if upper_active_rho[idx] {
-                            return None;
-                        }
                         let coord = &solution.penalty_coords[idx];
                         let rank = coord.rank();
                         let (s_block, start, end) = coord.scaled_block_local(1.0);
@@ -1231,28 +1229,11 @@ pub fn reml_laml_evaluate(
     let rho_grad_entries: Vec<RhoGradEntry> = (0..k)
         .into_par_iter()
         .map(|idx| {
-            // Active upper-bound projection (Option A in #197):
-            //
-            // When ρ_k has been pinned at its upper bound by the outer
-            // bound-constrained solver, the IFT mode response `v_k` is
-            // already zeroed above and the IFT residual correction in
-            // `compute_kkt_residual_theta_corrections` is masked to 0 for
-            // this coord. The envelope main block must use the SAME
-            // gradient-projection convention — otherwise the trace term
-            // `½·tr(K·λ_k S_k)` and the penalty quadratic `½·λ_k β'S_kβ`
-            // produce a phantom non-zero gradient component along a
-            // frozen axis, mixing constrained (v_k = 0) and unconstrained
-            // (λ_k held active) terms in the same scalar — which matches
-            // the analytic derivative of neither cost. Returning exactly
-            // 0 here aligns the envelope, the IFT correction, and the
-            // box-constrained optimizer's gradient projection (#197).
-            if upper_active_rho[idx] {
-                log::trace!(
-                    "[RHO-GRAD] idx={} value=0.0 (upper-bound projection, see #197)",
-                    idx
-                );
-                return (idx, 0.0, lambdas[idx], 0.0, 0.0, 0.0, 0.0);
-            }
+            // Every coordinate's entry is the TRUE partial derivative of the
+            // criterion, including one sitting on a box bound. The KKT
+            // projection is applied ONCE, to the assembled gradient, below
+            // (#2615) — see the note there for why it cannot be a distance
+            // test taken here.
 
             // Cost derivative for the shifted penalty:
             // a_i = ½ λₖ (β̂ - μₖ)' Sₖ (β̂ - μₖ).
@@ -1501,9 +1482,12 @@ pub fn reml_laml_evaluate(
                 ext_frozen_drifts[idx - k].apply(v)
             }
         };
-        // Only ρ coordinates carry an upper box bound; ψ/ext never freeze here.
-        let mut active = upper_active_rho.clone();
-        active.extend(std::iter::repeat_n(false, ext_dim));
+        // No coordinate is frozen while the correction is FORMED. Which
+        // components the feasible set removes is decided once, on the assembled
+        // gradient, by the KKT projection below (#2615); masking them here made
+        // the correction and the envelope block disagree about what was being
+        // differentiated.
+        let active = vec![false; k + ext_dim];
         // The KKT-correction self-derivative term `δ_ij·C_i` is non-zero only
         // for coordinates whose r_i and A_i scale multiplicatively with their
         // own coordinate. ρ coordinates do (`λ_i = exp(ρ_i)` ⇒ `∂_ρᵢrᵢ = rᵢ`,
@@ -1711,6 +1695,38 @@ pub fn reml_laml_evaluate(
         {
             let mut sl = grad.slice_mut(ndarray::s![..k]);
             sl += pg;
+        }
+    }
+
+    // KKT projection onto the model's canonical upper face (#197, corrected by
+    // #2615).
+    //
+    // `active_upper_rho_mask` answers a DISTANCE question — "is this coordinate
+    // within 1e-8 of its upper bound?" — and #197 used that answer alone to
+    // return exactly 0 for the entry. Proximity is not activity. At an upper
+    // bound the feasible directions are DECREASING rho, so an entry with
+    // `dV/drho_k > 0` is feasible descent the search must be allowed to take;
+    // only a NEGATIVE entry (whose descent step `-g` leaves the box) is the
+    // infeasible bound multiplier. Dropping both made the box a one-way trap:
+    // any coordinate that ever touched its upper bound reported zero derivative
+    // forever, so no optimizer could leave it, and a seed projected onto the box
+    // certified as stationary at iteration 0 with `|g| = 0`. Measured on the
+    // penguins multinomial, whose effective-df-floor walls sit ABOVE the seed:
+    // all 24 coordinates pinned, `raw_g = 0.0` at each, "→ stationary", and the
+    // shipped smoothing parameters equal the walls to the last bit — i.e. the
+    // floor constant, not REML, was selecting lambda (#2615).
+    //
+    // This is the same rule `project_gradient_vector` applies in the optimizer,
+    // stated here so the criterion's own reported gradient and the optimizer's
+    // active-set verdict cannot disagree.
+    for idx in 0..k {
+        if upper_active_rho[idx] && grad[idx] < 0.0 {
+            log::trace!(
+                "[RHO-GRAD] idx={idx} entry {:+.6e} is the infeasible upper-bound multiplier; \
+                 projected to 0",
+                grad[idx],
+            );
+            grad[idx] = 0.0;
         }
     }
 
