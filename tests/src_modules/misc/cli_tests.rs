@@ -2151,8 +2151,8 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
     );
 
     let predict_args = PredictArgs {
-        model: model_path,
-        new_data: train_path,
+        model: model_path.clone(),
+        new_data: train_path.clone(),
         out: pred_path.clone(),
         offset_column: None,
         noise_offset_column: None,
@@ -2170,13 +2170,53 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         )
     });
 
+    // The DEFAULT predict (`uncertainty: false`) is point-only, and that is the
+    // documented contract rather than an omission: `resolve_prediction_request`
+    // routes a curved link through `PosteriorMeanOptions::point_only()` and says
+    // so in as many words -- "passing a confidence level is the switch that
+    // populates SE/bounds" (#2136). The default therefore emits `eta,mean`, and
+    // demanding `std_error` from it (as this test used to) asserts against the
+    // design; it failed with `missing std_error column: eta,mean`.
     let pred_text = fs::read_to_string(&pred_path)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "read prediction csv", e));
     let header = pred_text.lines().next().unwrap_or("");
+    assert!(
+        header.contains("mean"),
+        "default posterior-mean prediction must emit the point column: {header}"
+    );
+
+    // What saving the covariance actually BUYS is the other half of this test's
+    // name: the bands become computable on request. Asking for them is what
+    // proves the persisted covariance is real and reachable -- a point-only
+    // predict would pass identically with no covariance saved at all, so the
+    // column check belongs behind `uncertainty: true`.
+    let band_path = pred_path.with_extension("band.csv");
+    let band_args = PredictArgs {
+        model: model_path,
+        new_data: train_path,
+        out: band_path.clone(),
+        offset_column: None,
+        noise_offset_column: None,
+        id_column: None,
+        uncertainty: true,
+        level: 0.95,
+        covariance_mode: CovarianceModeArg::Corrected,
+        mode: PredictModeArg::PosteriorMean,
+        no_bias_correction: false,
+    };
+    run_predict(band_args).unwrap_or_else(|e| {
+        panic!(
+            "{} failed: {:?}",
+            "posterior-mean predict with uncertainty on a saved covariance", e
+        )
+    });
+    let band_text = fs::read_to_string(&band_path)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "read band csv", e));
+    let band_header = band_text.lines().next().unwrap_or("");
     for required in ["mean", "std_error", "mean_lower", "mean_upper"] {
         assert!(
-            header.contains(required),
-            "posterior-mean prediction output missing {required} column: {header}"
+            band_header.contains(required),
+            "posterior-mean prediction with uncertainty is missing {required}: {band_header}"
         );
     }
 }
@@ -2371,7 +2411,12 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         firth: true,
         family: FamilyArg::Auto,
         negative_binomial_theta: None,
-        survival_likelihood: Some("transformation".to_string()),
+        // #2301, same as the three sibling fixtures: this is a NON-survival
+        // binomial Firth fit, so an explicit survival_likelihood is a knob the
+        // materializer that reads it never sees. It would be dropped silently and
+        // degrade the requested model to an ordinary GAM (#1767), which is why
+        // reject_survival_likelihood_for_nonsurvival refuses it.
+        survival_likelihood: None,
         survival_time_anchor: None,
         baseline_target: "linear".to_string(),
         baseline_scale: None,
@@ -2406,8 +2451,8 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
     );
 
     let predict_args = PredictArgs {
-        model: model_path,
-        new_data: train_path,
+        model: model_path.clone(),
+        new_data: train_path.clone(),
         out: pred_path.clone(),
         offset_column: None,
         noise_offset_column: None,
@@ -2425,13 +2470,53 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         )
     });
 
+    // The DEFAULT predict (`uncertainty: false`) is point-only, and that is the
+    // documented contract rather than an omission: `resolve_prediction_request`
+    // routes a curved link through `PosteriorMeanOptions::point_only()` and says
+    // so in as many words -- "passing a confidence level is the switch that
+    // populates SE/bounds" (#2136). The default therefore emits `eta,mean`, and
+    // demanding `std_error` from it (as this test used to) asserts against the
+    // design; it failed with `missing std_error column: eta,mean`.
     let pred_text = fs::read_to_string(&pred_path)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "read prediction csv", e));
     let header = pred_text.lines().next().unwrap_or("");
+    assert!(
+        header.contains("mean"),
+        "default posterior-mean prediction must emit the point column: {header}"
+    );
+
+    // What saving the covariance actually BUYS is the other half of this test's
+    // name: the bands become computable on request. Asking for them is what
+    // proves the persisted covariance is real and reachable -- a point-only
+    // predict would pass identically with no covariance saved at all, so the
+    // column check belongs behind `uncertainty: true`.
+    let band_path = pred_path.with_extension("band.csv");
+    let band_args = PredictArgs {
+        model: model_path,
+        new_data: train_path,
+        out: band_path.clone(),
+        offset_column: None,
+        noise_offset_column: None,
+        id_column: None,
+        uncertainty: true,
+        level: 0.95,
+        covariance_mode: CovarianceModeArg::Corrected,
+        mode: PredictModeArg::PosteriorMean,
+        no_bias_correction: false,
+    };
+    run_predict(band_args).unwrap_or_else(|e| {
+        panic!(
+            "{} failed: {:?}",
+            "posterior-mean predict with uncertainty on a saved covariance", e
+        )
+    });
+    let band_text = fs::read_to_string(&band_path)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "read band csv", e));
+    let band_header = band_text.lines().next().unwrap_or("");
     for required in ["mean", "std_error", "mean_lower", "mean_upper"] {
         assert!(
-            header.contains(required),
-            "posterior-mean prediction output missing {required} column: {header}"
+            band_header.contains(required),
+            "posterior-mean prediction with uncertainty is missing {required}: {band_header}"
         );
     }
 }
