@@ -1369,6 +1369,15 @@ mod tests {
         let mean = Array1::from_elem(nobs, 0.5_f64);
 
         // (spec, dispersion/gaussian_scale, expected noise variant).
+        //
+        // Every family whose dispersion is estimated jointly with the mean hands
+        // that dispersion in through `gaussian_scale`; the value embedded in the
+        // response spec is only the optimizer's seed. The NB and Beta arms below
+        // passed `None` and expected the spec value to be read back — which is
+        // precisely the #1124 / #770 defect (`generate` drew Var = μ + μ² at
+        // θ = 1 regardless of the fitted overdispersion). Both arms now supply
+        // the authoritative post-fit dispersion, as the Gamma and Tweedie arms
+        // already do.
         let cases: [(LikelihoodSpec, Option<f64>, NoiseModel); 7] = [
             (
                 LikelihoodSpec::gaussian_identity(),
@@ -1393,14 +1402,14 @@ mod tests {
             ),
             (
                 LikelihoodSpec::negative_binomial_log(2.5),
-                None,
+                Some(2.5),
                 NoiseModel::NegativeBinomial {
                     theta: Array1::from_elem(nobs, 2.5),
                 },
             ),
             (
                 LikelihoodSpec::beta_logit(3.0),
-                None,
+                Some(3.0),
                 NoiseModel::Beta {
                     phi: Array1::from_elem(nobs, 3.0),
                 },

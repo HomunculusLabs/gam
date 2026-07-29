@@ -5785,10 +5785,20 @@ mod tests {
         let constraints = model
             .monotonicity_linear_constraints()
             .expect("structural derivative constraints");
-        assert_eq!(constraints.a.nrows(), 2);
+        // The structural certificate constrains the ENTIRE time block, one row
+        // per time column, including column 0 whose derivative basis is
+        // identically zero at every training row. Restricting the rows to
+        // columns active at some training row is the tail blind spot
+        // `2cf771160` closed: an I-spline column whose M-spline support sits
+        // outside the training exit times is ~0 on every row, so a row-activity
+        // filter leaves it free to go negative and monotonicity then breaks at
+        // prediction times inside its support. Every time column is asserted
+        // here so the domain-wide contract is what this fixture pins.
+        assert_eq!(constraints.a.nrows(), 3);
         assert_eq!(constraints.a.ncols(), 4);
-        assert_eq!(constraints.a.row(0).to_vec(), vec![0.0, 1.0, 0.0, 0.0]);
-        assert_eq!(constraints.a.row(1).to_vec(), vec![0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(constraints.a.row(0).to_vec(), vec![1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(constraints.a.row(1).to_vec(), vec![0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(constraints.a.row(2).to_vec(), vec![0.0, 0.0, 1.0, 0.0]);
         assert!(constraints.b.iter().all(|&v| v.abs() <= 1e-12));
 
         let beta = array![0.2, 0.2, 0.1, 0.2];
@@ -6132,14 +6142,25 @@ mod tests {
             .monotonicity_linear_constraints()
             .expect("structural derivative constraints");
 
-        assert_eq!(constraints.a.nrows(), 1);
+        // Column 0's derivative basis is identically zero at the single
+        // training row, so a row-activity filter would drop its constraint —
+        // and that is precisely the tail blind spot `2cf771160` closed. The
+        // structural certificate is domain-wide: it keeps a row for the
+        // inactive time column too, because the coefficient is what has to stay
+        // non-negative for monotonicity to hold at evaluation times outside the
+        // training support, where that column's M-spline is NOT zero.
+        assert_eq!(constraints.a.nrows(), 2);
         assert!(
-            constraints.a[[0, 0]].abs() <= 1e-12,
-            "inactive time column should remain unconstrained"
+            (constraints.a[[0, 0]] - 1.0).abs() <= 1e-12,
+            "inactive time column must still be constrained (domain-wide certificate)"
         );
         assert!(
-            (constraints.a[[0, 1]] - 1.0).abs() <= 1e-12,
+            (constraints.a[[1, 1]] - 1.0).abs() <= 1e-12,
             "active time column should remain constrained"
+        );
+        assert!(
+            constraints.a[[0, 1]].abs() <= 1e-12 && constraints.a[[1, 0]].abs() <= 1e-12,
+            "each row must constrain exactly its own time coefficient"
         );
     }
 

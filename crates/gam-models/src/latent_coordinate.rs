@@ -1068,12 +1068,19 @@ mod tests {
             target: array![0.0],
         };
         let error = optimize_latent_coordinates(request, &mut objective).unwrap_err();
+        // Name the variant that arrived. "expected typed non-convergence" alone
+        // cannot distinguish the two ways this fails — a run that certified when
+        // it should not have, versus a non-convergence reported under a variant
+        // carrying neither evidence nor a checkpoint — and those have opposite
+        // fixes. Rendered before the destructuring move so the else arm can
+        // report it.
+        let reported = format!("{error:?}");
         let LatentCoordinateOptimizationError::NonConverged {
             evidence,
             checkpoint,
         } = error
         else {
-            panic!("expected typed non-convergence");
+            panic!("expected typed non-convergence, got {reported}");
         };
         assert!(!evidence.certifies_stationarity());
         assert_eq!(evidence.stationarity_reference, 5.0);

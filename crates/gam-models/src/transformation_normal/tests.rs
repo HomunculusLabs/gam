@@ -814,7 +814,17 @@ pub(crate) fn ctn_row_quantity_cache_matches_direct_formulas() {
         );
         let hp = direct_h_prime[i];
         let log_z = log_normal_cdf_diff(h_upper[i], h_lower[i]).expect("endpoint mass");
-        expected_ll += weights[i] * (-0.5 * direct_h[i] * direct_h[i] + hp.ln() - log_z);
+        // The full truncated-normal row density is log φ(h) + log h' − log Z,
+        // and log φ carries the −½ln(2π) normalizer. `build_transformation_row_derived`
+        // includes it deliberately so the reported absolute log-likelihood (and
+        // AIC) is comparable to mlt/tram; it is coefficient-independent, so
+        // omitting it here did not change any score or Hessian, it just made
+        // this reference formula a different quantity from the cached one — by
+        // exactly `n · ½ln(2π)`.
+        expected_ll += weights[i]
+            * (-0.5 * direct_h[i] * direct_h[i] - 0.5 * (2.0 * std::f64::consts::PI).ln()
+                + hp.ln()
+                - log_z);
     }
 
     assert!(

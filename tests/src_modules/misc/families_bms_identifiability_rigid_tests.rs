@@ -36,6 +36,28 @@ fn rigid_test_design_hyper_layout(
     .expect("rigid BMS test design-hyper layout")
 }
 
+/// A layout that also declares the sigma auxiliary FAMILY axis.
+///
+/// `CustomFamilyHyperLayout` orders its coordinates design-axes-first, and
+/// `is_sigma_aux` recognizes the sigma channel by `family_axis(idx) == Some(0)`.
+/// A layout built with no family axes therefore has no sigma coordinate at all:
+/// every global index resolves to `DesignPenalty`, `is_sigma_aux` is false
+/// everywhere, and a workspace asked for the sigma terms silently routes to a
+/// design-psi axis instead. Tests that exercise the sigma path need this layout,
+/// and its sigma coordinate is the global index returned alongside it.
+fn rigid_test_sigma_aux_hyper_layout(
+    derivative_blocks: &[Vec<CustomFamilyBlockPsiDerivative>],
+) -> (crate::custom_family::CustomFamilyHyperLayout, usize) {
+    let design_axis_count: usize = derivative_blocks.iter().map(Vec::len).sum();
+    let layout = crate::custom_family::CustomFamilyHyperLayout::new(
+        derivative_blocks.to_vec(),
+        vec![0],
+        Array1::zeros(design_axis_count + 1),
+    )
+    .expect("rigid BMS test sigma-aux hyper layout");
+    (layout, design_axis_count)
+}
+
 /// Standard normal PDF's own derivative stack (as opposed to
 /// [`unary_derivatives_normal_cdf`]'s CDF stack). No production row path
 /// differentiates the bare PDF; this oracle test does.
@@ -2102,7 +2124,10 @@ fn bernoulli_psi_workspace_with_options_threads_subsample_to_first_order() {
             None,
         )],
     ];
-    let hyper_layout = rigid_test_design_hyper_layout(&derivative_blocks);
+    // This fixture compares the workspace's SIGMA first-order terms against the
+    // family-level sigma path, so the layout must actually declare the sigma
+    // family axis; `sigma_psi` is that axis's global index.
+    let (hyper_layout, sigma_psi) = rigid_test_sigma_aux_hyper_layout(&derivative_blocks);
 
     // Build a half-mask of even rows (factor = 2.0).
     let even_mask: Vec<usize> = (0..n).filter(|i| i % 2 == 0).collect();
@@ -2130,8 +2155,6 @@ fn bernoulli_psi_workspace_with_options_threads_subsample_to_first_order() {
         )
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "workspace with options", e))
         .expect("workspace some");
-    let psi_total: usize = derivative_blocks.iter().map(Vec::len).sum();
-    let sigma_psi = psi_total - 1;
     let via_ws = ws
         .first_order_terms(sigma_psi)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "ws first_order_terms", e))
@@ -2693,7 +2716,7 @@ fn score_warp_block_exposes_structural_derivative_lower_bounds() {
 }
 
 #[test]
-fn post_update_block_beta_rejects_infeasible_score_warp_step() {
+fn post_update_block_beta_clamps_infeasible_score_warp_step_to_the_feasible_segment() {
     let seed = array![-1.5, -0.5, 0.0, 0.5, 1.5];
     let prepared = build_score_warp_deviation_block_from_seed(
         &seed,
@@ -2726,13 +2749,39 @@ fn post_update_block_beta_rejects_infeasible_score_warp_step() {
         dummy_block_state(current.clone(), seed.len()),
     ];
     let spec = dummy_blockspec(score_dim, seed.len());
-    let err = family
+    // `post_update_block_beta` does not refuse an infeasible proposal, and it
+    // does not "repair" it either: it clamps the accepted update to the last
+    // feasible point of the SEGMENT from the certified `current` state toward
+    // `proposed` (`project_monotone_feasible_beta`), then re-validates that
+    // point against the structural monotonicity rows before returning it. That
+    // is a globalization guard on the constrained Newton step, and it is exact
+    // at any violation magnitude — there is no principled size threshold above
+    // which the same segment clamp would stop being valid, and inventing one
+    // would be an arbitrary knob. So the checkable contract is the one asserted
+    // here: the returned point is feasible, lies on `current + alpha*(proposed -
+    // current)` for a single `alpha` in [0, 1), and is therefore strictly short
+    // of the infeasible proposal rather than an unconstrained alteration of it.
+    let accepted = family
         .post_update_block_beta(&block_states, 2, &spec, proposed.clone())
-        .expect_err("post-update must not repair infeasible constrained beta");
+        .unwrap_or_else(|e| panic!("feasible-segment clamp should succeed: {e:?}"));
+    prepared
+        .runtime
+        .monotonicity_feasible(&accepted, "post-update accepted beta")
+        .expect("the accepted point must satisfy the structural monotone rows");
+    let direction = &proposed - &current;
+    let alpha = (accepted[0] - current[0]) / direction[0];
     assert!(
-        err.contains("structural monotonicity") || err.contains("exact monotonicity"),
-        "unexpected error: {err}"
+        (0.0..1.0).contains(&alpha),
+        "clamp must stop strictly short of the infeasible proposal, got alpha={alpha}"
     );
+    for j in 0..accepted.len() {
+        let on_segment = current[j] + alpha * direction[j];
+        assert!(
+            (accepted[j] - on_segment).abs() <= 1e-12 * on_segment.abs().max(1.0),
+            "coefficient {j} left the segment: accepted={}, current+alpha*d={on_segment}",
+            accepted[j]
+        );
+    }
 }
 
 #[test]
@@ -3398,18 +3447,28 @@ fn local_cubic_global_transform_reconstructs_same_function() {
 }
 
 #[test]
-fn denested_branch_selection_uses_normalized_cell_coefficients() {
+fn denested_branch_selection_classifies_exact_polynomial_classes() {
+    // `branch_cell` selects the EXACT polynomial class of the cell: it tests
+    // `c2 == 0.0` and `c3 == 0.0` against zero, not against a relative band.
+    // These are polynomial classes, not approximation bands — a cell with
+    // `c3 = 1e-13` genuinely is a cubic, and its conditioning is handled inside
+    // the evaluator rather than by erasing the term at classification time. This
+    // fixture previously offered `c2 = 1e-13, c3 = -1e-13` as "affine" and
+    // `c3 = 1e-13` as "quartic", i.e. it asserted a tolerance-band classifier;
+    // under the exact contract both of those cells are Sextic, which is what the
+    // affine arm reported. The negligible coefficients are now exact zeros, so
+    // each arm names the class its own coefficients actually have.
     let affine = ExactDenestedCubicCell {
         left: -1.0,
         right: 1.0,
         c0: 0.2,
         c1: -0.4,
-        c2: 1e-13,
-        c3: -1e-13,
+        c2: 0.0,
+        c3: 0.0,
     };
     let quartic = ExactDenestedCubicCell {
         c2: 2e-4,
-        c3: 1e-13,
+        c3: 0.0,
         ..affine
     };
     let sextic = ExactDenestedCubicCell {

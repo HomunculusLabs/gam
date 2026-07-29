@@ -449,7 +449,19 @@ fn survival_fit_parts_with_outer_evidence(
         beta_link_wiggle: None,
         link_wiggle_knots: None,
         link_wiggle_degree: None,
-        lambdas_time: Array1::zeros(0),
+        // The time block carries one real smoothing parameter. Both gates these
+        // fixtures exist to exercise — "outer iterations ran without an analytic
+        // stationarity certificate" and the preservation of a carried
+        // certificate — live behind `!log_lambdas.is_empty()` in
+        // `FitConvergenceEvidence::try_from_parts`, because a zero-dimensional
+        // outer certificate (|g|=|Pg|=bound=0) proves no equation and
+        // dimensionality, not the driver's iteration counter, is the semantic
+        // authority there. With all three lambda blocks empty these parts took
+        // the `Fixed` branch instead: `outer_iterations` was canonicalized to 0
+        // and `criterion_certificate` erased, so neither gate was reachable and
+        // both fixtures measured the lambda-free normalization rather than the
+        // outer-evidence contract they name.
+        lambdas_time: array![1.0],
         lambdas_threshold: Array1::zeros(0),
         lambdas_log_sigma: Array1::zeros(0),
         lambdas_linkwiggle: None,
