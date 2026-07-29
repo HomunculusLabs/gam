@@ -586,123 +586,144 @@ mod spatial_length_scale_monotone_tests {
             penalty_shrinkage_floor: None,
             ..FitOptions::default()
         };
-        // Verbatim from the refusal string, θ = [ρ₀, ρ₁, ρ₂, ψ].
-        let checkpoint = Array1::from(vec![
-            -6.285_681_405_991_277_f64,
-            -4.950_629_609_698_647,
-            -2.273_293_245_252_893,
-            -2.484_906_649_788_000_4,
-        ]);
+        // Verbatim from the refusal strings, θ = [ρ₀, ρ₁, ρ₂, ψ].
+        //
+        // `frozen-psi` is the point the route stopped at when the active-set
+        // reduction pinned ψ at its bound. `stall` is where it stops NOW, with
+        // ψ free and the outer cap raised past 32 — identical for caps 32, 64,
+        // 128 and 256, so it is not a budget. Both are probed, because the pair
+        // is the before/after of the active-set fix on one instrument.
+        for (label, checkpoint) in [
+            (
+                "frozen-psi",
+                Array1::from(vec![
+                    -6.285_681_405_991_277_f64,
+                    -4.950_629_609_698_647,
+                    -2.273_293_245_252_893,
+                    -2.484_906_649_788_000_4,
+                ]),
+            ),
+            (
+                "stall",
+                Array1::from(vec![
+                    8.886_802_573_715_045_f64,
+                    2.067_724_148_446_362,
+                    9.597_640_999_700_111,
+                    -1.270_837_894_462_055_3,
+                ]),
+            ),
+        ] {
 
-        let design = build_term_collection_design(data.view(), &spec)
-            .unwrap_or_else(|e| panic!("design failed: {e:?}"));
-        let resolved = freeze_term_collection_from_design(&spec, &design)
-            .unwrap_or_else(|e| panic!("freeze failed: {e:?}"));
-        let frozen_design = build_term_collection_design(data.view(), &resolved)
-            .unwrap_or_else(|e| panic!("frozen design failed: {e:?}"));
-        let spatial_terms = spatial_length_scale_term_indices(&resolved);
-        let dims_per_term = spatial_dims_per_term(&resolved, &spatial_terms);
-        let rho_dim = frozen_design.penalties.len();
-        let psi_dim: usize = dims_per_term.iter().sum();
-        let theta_dim = rho_dim + psi_dim;
-        eprintln!("[zz-grad-2454] rho_dim={rho_dim} psi_dim={psi_dim} theta_dim={theta_dim}");
-        if theta_dim != checkpoint.len() {
-            eprintln!(
-                "[zz-grad-2454] SKIP: reproduced theta_dim={theta_dim} but the recorded \
-                 checkpoint has {} entries",
-                checkpoint.len()
-            );
-            return;
-        }
-
-        let family = LikelihoodSpec::gaussian_identity();
-        let external_opts = external_opts_for_design(&family, &frozen_design, &fit_opts);
-        let mut cache = SingleBlockExactJointDesignCache::new(
-            data.view(),
-            resolved.clone(),
-            frozen_design.clone(),
-            spatial_terms.clone(),
-            rho_dim,
-            dims_per_term.clone(),
-        )
-        .unwrap_or_else(|e| panic!("cache failed: {e:?}"));
-        let mut evaluator = gam_solve::estimate::ExternalJointHyperEvaluator::new(
-            y.view(),
-            weights.view(),
-            &frozen_design.design,
-            offset.view(),
-            &frozen_design.penalties,
-            &external_opts,
-            "#2454 joint terminal gradient",
-        )
-        .unwrap_or_else(|e| panic!("evaluator failed: {e:?}"));
-
-        let cost_at = |theta: &Array1<f64>,
-                       cache: &mut SingleBlockExactJointDesignCache<'_>,
-                       evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
-         -> f64 {
-            cache
-                .ensure_theta(theta)
-                .unwrap_or_else(|e| panic!("ensure_theta: {e:?}"));
-            let design = cache.design();
-            evaluator
-                .evaluate_cost_only(
-                    &design.design,
-                    &design.penalties,
-                    &design.nullspace_dims,
-                    design.linear_constraints.clone(),
-                    theta,
-                    rho_dim,
-                    None,
-                    "#2454 joint terminal cost-only",
-                    None,
-                )
-                .unwrap_or_else(|e| panic!("cost-only: {e:?}"))
-        };
-
-        cache
-            .ensure_theta(&checkpoint)
-            .unwrap_or_else(|e| panic!("ensure_theta: {e:?}"));
-        let hyper_dirs = try_build_spatial_log_kappa_hyper_dirs(
-            data.view(),
-            cache.spec(),
-            cache.design(),
-            &cache.spatial_terms,
-        )
-        .unwrap_or_else(|e| panic!("hyper dirs: {e:?}"))
-        .expect("hyper dirs present");
-        let (cost_an, grad_an, _hess) = evaluate_joint_reml_outer_eval_at_theta(
-            &mut evaluator,
-            cache.design(),
-            &checkpoint,
-            rho_dim,
-            hyper_dirs,
-            None,
-            gam_solve::rho_optimizer::OuterEvalOrder::ValueAndGradient,
-            None,
-        )
-        .unwrap_or_else(|e| panic!("outer eval: {e:?}"));
-
-        for h in [1e-3_f64, 1e-4, 1e-5] {
-            for j in 0..theta_dim {
-                let mut plus = checkpoint.clone();
-                plus[j] += h;
-                let mut minus = checkpoint.clone();
-                minus[j] -= h;
-                let cp = cost_at(&plus, &mut cache, &mut evaluator);
-                let cm = cost_at(&minus, &mut cache, &mut evaluator);
-                let fd = (cp - cm) / (2.0 * h);
-                let kind = if j >= rho_dim { "psi" } else { "rho" };
+            let design = build_term_collection_design(data.view(), &spec)
+                .unwrap_or_else(|e| panic!("design failed: {e:?}"));
+            let resolved = freeze_term_collection_from_design(&spec, &design)
+                .unwrap_or_else(|e| panic!("freeze failed: {e:?}"));
+            let frozen_design = build_term_collection_design(data.view(), &resolved)
+                .unwrap_or_else(|e| panic!("frozen design failed: {e:?}"));
+            let spatial_terms = spatial_length_scale_term_indices(&resolved);
+            let dims_per_term = spatial_dims_per_term(&resolved, &spatial_terms);
+            let rho_dim = frozen_design.penalties.len();
+            let psi_dim: usize = dims_per_term.iter().sum();
+            let theta_dim = rho_dim + psi_dim;
+            eprintln!("[zz-grad-2454] rho_dim={rho_dim} psi_dim={psi_dim} theta_dim={theta_dim}");
+            if theta_dim != checkpoint.len() {
                 eprintln!(
-                    "[zz-grad-2454] V={cost_an:+.10e} h={h:.0e} {kind} j={j} \
-                     analytic={:+.8e} fd={fd:+.8e} |an-fd|={:.3e}",
-                    grad_an[j],
-                    (grad_an[j] - fd).abs()
+                    "[zz-grad-2454] SKIP: reproduced theta_dim={theta_dim} but the recorded \
+                     checkpoint has {} entries",
+                    checkpoint.len()
                 );
+                return;
             }
+
+            let family = LikelihoodSpec::gaussian_identity();
+            let external_opts = external_opts_for_design(&family, &frozen_design, &fit_opts);
+            let mut cache = SingleBlockExactJointDesignCache::new(
+                data.view(),
+                resolved.clone(),
+                frozen_design.clone(),
+                spatial_terms.clone(),
+                rho_dim,
+                dims_per_term.clone(),
+            )
+            .unwrap_or_else(|e| panic!("cache failed: {e:?}"));
+            let mut evaluator = gam_solve::estimate::ExternalJointHyperEvaluator::new(
+                y.view(),
+                weights.view(),
+                &frozen_design.design,
+                offset.view(),
+                &frozen_design.penalties,
+                &external_opts,
+                "#2454 joint terminal gradient",
+            )
+            .unwrap_or_else(|e| panic!("evaluator failed: {e:?}"));
+
+            let cost_at = |theta: &Array1<f64>,
+                           cache: &mut SingleBlockExactJointDesignCache<'_>,
+                           evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
+             -> f64 {
+                cache
+                    .ensure_theta(theta)
+                    .unwrap_or_else(|e| panic!("ensure_theta: {e:?}"));
+                let design = cache.design();
+                evaluator
+                    .evaluate_cost_only(
+                        &design.design,
+                        &design.penalties,
+                        &design.nullspace_dims,
+                        design.linear_constraints.clone(),
+                        theta,
+                        rho_dim,
+                        None,
+                        "#2454 joint terminal cost-only",
+                        None,
+                    )
+                    .unwrap_or_else(|e| panic!("cost-only: {e:?}"))
+            };
+
+            cache
+                .ensure_theta(&checkpoint)
+                .unwrap_or_else(|e| panic!("ensure_theta: {e:?}"));
+            let hyper_dirs = try_build_spatial_log_kappa_hyper_dirs(
+                data.view(),
+                cache.spec(),
+                cache.design(),
+                &cache.spatial_terms,
+            )
+            .unwrap_or_else(|e| panic!("hyper dirs: {e:?}"))
+            .expect("hyper dirs present");
+            let (cost_an, grad_an, _hess) = evaluate_joint_reml_outer_eval_at_theta(
+                &mut evaluator,
+                cache.design(),
+                &checkpoint,
+                rho_dim,
+                hyper_dirs,
+                None,
+                gam_solve::rho_optimizer::OuterEvalOrder::ValueAndGradient,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("outer eval: {e:?}"));
+
+            for h in [1e-3_f64, 1e-4, 1e-5] {
+                for j in 0..theta_dim {
+                    let mut plus = checkpoint.clone();
+                    plus[j] += h;
+                    let mut minus = checkpoint.clone();
+                    minus[j] -= h;
+                    let cp = cost_at(&plus, &mut cache, &mut evaluator);
+                    let cm = cost_at(&minus, &mut cache, &mut evaluator);
+                    let fd = (cp - cm) / (2.0 * h);
+                    let kind = if j >= rho_dim { "psi" } else { "rho" };
+                    eprintln!(
+                        "[zz-grad-2454] {label} V={cost_an:+.10e} h={h:.0e} {kind} j={j} \
+                         analytic={:+.8e} fd={fd:+.8e} |an-fd|={:.3e}",
+                        grad_an[j],
+                        (grad_an[j] - fd).abs()
+                    );
+                }
+            }
+            let norm = grad_an.dot(&grad_an).sqrt();
+            eprintln!("[zz-grad-2454] {label}: |g|_analytic_at_checkpoint={norm:.6e}");
         }
-        let norm = grad_an.dot(&grad_an).sqrt();
-        eprintln!("[zz-grad-2454] |g|_analytic_at_checkpoint={norm:.6e}");
     }
 
     /// #2454 MEASUREMENT (reports, never fails): how much outer budget the joint
