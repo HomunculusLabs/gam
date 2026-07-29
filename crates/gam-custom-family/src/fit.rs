@@ -491,6 +491,51 @@ pub(crate) const EFFECTIVE_DF_FLOOR: f64 = 1.0;
 /// Posterior width therefore accounts for `0.011` nats — about an eighth of the
 /// gap that remained there. The rest was the mode, which is why moving this
 /// constant is the right instrument and not a coincidence.
+/// WHAT THIS CONSTANT IS, in closed form (#2615).
+///
+/// For a rank-1 penalty the structural edf is `edf(ρ) = γ/(γ + e^ρ)` and
+/// `edf_max = unit_weight_term_edf_at_physical_strength(gammas, 0.0) = 1`
+/// EXACTLY — at `λ = 0` every positive `γ_j` contributes `1/(1 + 0) = 1`, so
+/// `edf_max` is the penalty rank and carries no design dependence at all. The
+/// relative target is therefore just `f`, and the bisected bound has an exact
+/// solution:
+///
+/// ```text
+///   γ/(γ + e^{ρ*}) = f    ⟺    ρ* = ln γ + ln((1 − f)/f)
+/// ```
+///
+/// which is why `f = 0.90` records `ρ* = ln γ − 2.20`: `ln(1/9) = −2.1972`.
+/// The bisection is not discovering a shape; it is recovering a logit.
+///
+/// AND WHAT `f` MEANS. `edf = γ/(γ + λ)` is the DATA's share of the posterior
+/// precision along that direction — `γ` is the design information, `λ` the
+/// prior precision. So the floor
+///
+/// ```text
+///   edf ≥ f    ⟺    λ/γ ≤ (1 − f)/f
+/// ```
+///
+/// is a ceiling on the PRIOR-TO-DATA PRECISION ODDS for the linear direction of
+/// a smooth. That is the derivation this constant was missing: it is not a
+/// fraction of an arbitrary quantity, it is an odds ratio, and it should be
+/// argued as one.
+///
+///   f = 0.50  ⟺  odds 1:1 — the data merely outvotes the prior. This is the
+///                identifiability threshold, and it is where #2608 started.
+///   f = 0.90  ⟺  odds 1:9 — the prior may carry at most a tenth of the
+///                precision. A much stronger demand than identifiability.
+///
+/// The odds reading also explains the `f → 1 ⟹ ρ* → −∞` behaviour noted below
+/// without appeal to the fit: odds → 0 means no prior mass at all is admissible,
+/// which is `λ = 0`.
+///
+/// HONEST STATUS. The FORM above is derived. The VALUE is not: `0.90` was
+/// selected as the largest value a raised Smolyak ceiling would admit while
+/// beating a log-loss bar on penguins, which is a different claim from "1:9 is
+/// the right odds for a linear trend". Recorded here rather than left implied,
+/// because those two statements have very different standing and the code used
+/// to read as the second. Deriving the value is #2615; the measurements below
+/// are what is actually known.
 pub(crate) const EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION: f64 = 0.90;
 
 /// Uniform ρ = log λ over-smoothing ceiling for the custom-family outer box, on

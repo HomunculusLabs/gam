@@ -283,3 +283,94 @@ fn zz_measure_2608_relative_floor_wall_movement() {
          tightening improves the FIT is a penguins question, not this one."
     );
 }
+
+/// A rank-1 term whose single generalized eigenvalue is `γ = c²`.
+///
+/// `X = [[c]]`, `S = [[1]]`, so `G = XᵀX = c²` and the pencil `(G, S)` on
+/// `range(S)` has the one eigenvalue `c²`.
+fn one_dir_term(gamma: f64) -> (Vec<ParameterBlockSpec>, PenaltyLabelLayout) {
+    let c = gamma.sqrt();
+    let design =
+        DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[c]]));
+    let spec = ParameterBlockSpec {
+        name: "linear".to_string(),
+        design,
+        offset: array![0.0],
+        penalties: vec![PenaltyMatrix::Dense(array![[1.0]])],
+        nullspace_dims: vec![0],
+        initial_log_lambdas: array![0.0],
+        initial_beta: Some(array![0.0]),
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    };
+    let layout = PenaltyLabelLayout {
+        penalty_counts: vec![1],
+        physical_to_outer: vec![Some(0)],
+        fixed_log_lambdas: vec![None],
+        initial_rho: array![0.0],
+        joint_specs: Vec::new(),
+        joint_to_outer: Vec::new(),
+    };
+    (vec![spec], layout)
+}
+
+/// The rank-1 relative floor is a LOGIT, and the bisection recovers it (#2615).
+///
+/// `EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION` reached its third value in one day,
+/// each read off a held-out log-loss curve, and the code gave no way to say what
+/// the number means. It has an exact closed form. For a rank-1 penalty,
+/// `edf(ρ) = γ/(γ + e^ρ)`, and `edf_max` is evaluated at `λ = 0`, where every
+/// positive `γ_j` contributes exactly `1` — so `edf_max = 1` with NO design
+/// dependence, the relative target is just `f`, and
+///
+/// ```text
+///   γ/(γ + e^{ρ*}) = f    ⟺    ρ* = ln γ + ln((1 − f)/f).
+/// ```
+///
+/// `f = 0.90` gives `ln(1/9) = −2.1972`, which is the `ρ* = ln γ − 2.20` the
+/// constant's own doc records — that agreement is the evidence the form is
+/// right, and this test makes it executable against the PRODUCTION bisection
+/// rather than against a comment.
+///
+/// The reason to pin it: `edf = γ/(γ + λ)` is the data's share of the posterior
+/// precision, so `edf ≥ f` is exactly `λ/γ ≤ (1 − f)/f` — a ceiling on the
+/// prior-to-data precision odds. Anyone changing `f` is changing those odds
+/// (0.90 is 1:9; 0.50 is 1:1), and this test is where that reading is anchored.
+#[test]
+fn the_rank_one_relative_floor_is_a_logit_of_the_prior_to_data_odds_2615() {
+    let lower = production_lower();
+    let ceiling = EFFECTIVE_DF_CEILING;
+    let f = EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION;
+    let odds = (1.0 - f) / f;
+
+    for gamma in [1.0e-2_f64, 1.0, 1.0e2] {
+        let expected = gamma.ln() + odds.ln();
+        assert!(
+            lower < expected && expected < ceiling,
+            "fixture must place ρ* strictly inside the box: γ={gamma:e}, ρ*={expected}, \
+             box=({lower}, {ceiling})"
+        );
+        let (specs, layout) = one_dir_term(gamma);
+        let upper = upper_bounds_for(&specs, &layout, ceiling, lower)
+            .expect("bounds derivation must succeed");
+        // Bisection on a smooth monotone scalar, so agreement is limited by the
+        // bisection's own halting width, not by the model.
+        assert!(
+            (upper[0] - expected).abs() <= 1e-9,
+            "the bisected rank-1 bound must equal ln γ + ln((1−f)/f): γ={gamma:e}, \
+             f={f}, odds={odds:e}, expected={expected}, got={}",
+            upper[0],
+        );
+        // The retained edf at the bound IS f, by construction. Asserted
+        // separately because it is the statement a reader cares about: the
+        // data keeps fraction f of the posterior precision there.
+        let retained = gamma / (gamma + upper[0].exp());
+        assert!(
+            (retained - f).abs() <= 1e-9,
+            "at ρ* the data's share of posterior precision must be exactly f: \
+             γ={gamma:e}, retained={retained}, f={f}"
+        );
+    }
+}
