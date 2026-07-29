@@ -39,17 +39,47 @@ plt.rcParams.update(
 )
 
 
+FLAGSHIP = os.environ.get("FLAGSHIP", "17")
+
+
 def load(d):
-    real, nulls = None, []
-    for f in sorted(glob.glob(os.path.join(d, "cen_*.json"))):
+    real = json.load(open(os.path.join(d, f"cen_L{FLAGSHIP}.json")))
+    nulls = [
+        json.load(open(f))
+        for f in sorted(glob.glob(os.path.join(d, "cen_null*.json")))
+        if not f.endswith(".planes.json")
+    ]
+    layers = {}
+    for f in sorted(glob.glob(os.path.join(d, "cen_L*.json"))):
         if f.endswith(".planes.json"):
             continue
-        j = json.load(open(f))
-        if j["permute_seed"] == 0:
-            real = j
-        else:
-            nulls.append(j)
-    return real, nulls
+        layers[int(os.path.basename(f)[5:].split(".")[0])] = json.load(open(f))
+    return real, nulls, layers
+
+
+def fig_layers(layers, out):
+    ls = sorted(layers)
+    fig, ax = plt.subplots(figsize=(6.6, 3.6))
+    disc = [layers[l]["n_accepted"] for l in ls]
+    scr = [layers[l]["n_pairs"] for l in ls]
+    ax.bar([str(l) for l in ls], disc, color=REAL, width=0.55)
+    for i, (dd, ss) in enumerate(zip(disc, scr)):
+        ax.annotate(
+            f"{dd}
+of {ss:,}", (i, dd), ha="center", va="bottom", fontsize=8.5, color=INK
+        )
+    ax.set_xlabel("Gemma 3 4B residual-stream layer (SAE hook point)")
+    ax.set_ylabel("e-BH discoveries")
+    ax.set_ylim(0, max(disc) * 1.35 + 1)
+    ax.set_title(
+        "Shattered circles by depth, one Gemma Scope 2 SAE per layer",
+        loc="left",
+        fontsize=12,
+        color=INK,
+    )
+    fig.tight_layout()
+    fig.savefig(out, bbox_inches="tight")
+    print("wrote", out)
 
 
 def fig_kappa(real, nulls, out):
@@ -156,7 +186,7 @@ def fig_planes(planes, out, toks=None, ncol=4, nrow=2):
 def main():
     d, outdir = sys.argv[1], sys.argv[2]
     os.makedirs(outdir, exist_ok=True)
-    real, nulls = load(d)
+    real, nulls, layers = load(d)
     print(
         "real:",
         {k: v for k, v in real.items() if k != "pairs"},
@@ -164,7 +194,9 @@ def main():
     for n in nulls:
         print("null:", n["permute_seed"], n["n_pairs"], n["n_accepted"])
     fig_kappa(real, nulls, os.path.join(outdir, "census_kappa.png"))
-    planes = json.load(open(os.path.join(d, "cen_0.planes.json")))["planes"]
+    if len(layers) > 1:
+        fig_layers(layers, os.path.join(outdir, "census_layers.png"))
+    planes = json.load(open(os.path.join(d, f"cen_L{FLAGSHIP}.planes.json")))["planes"]
     toks = None
     if len(sys.argv) > 3:
         td = sys.argv[3]

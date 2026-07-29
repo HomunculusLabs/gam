@@ -5939,6 +5939,13 @@ pub struct CurlConfig {
     /// Rounds an atom-set is silenced after a curl or flatten fires on it, so
     /// `curl → flatten → curl` cannot oscillate (risk #5 hysteresis guard).
     pub cooldown_rounds: usize,
+    /// Permutation surrogates per candidate plane for the exact κ e-value. The
+    /// e-BH ledger over the round's `m` screened pairs can only reject at rank
+    /// `k` when `replicates + 1 ≥ m/(α·k)`, so this is set by the size of the
+    /// search, not by taste.
+    pub null_replicates: usize,
+    /// Target false discovery rate for that ledger.
+    pub fdr_alpha: f64,
 }
 
 impl Default for CurlConfig {
@@ -5952,6 +5959,8 @@ impl Default for CurlConfig {
             max_curls: 4,
             flatten: true,
             cooldown_rounds: 2,
+            null_replicates: 4096,
+            fdr_alpha: 0.05,
         }
     }
 }
@@ -6491,11 +6500,19 @@ fn curl_candidates(
         coalesce_max_overlap: cfg.coalesce_max_overlap,
         min_cooccurrence: cfg.min_cooccurrence,
         subsample_rows: cfg.subsample_rows,
+        null_replicates: cfg.null_replicates,
+        fdr_alpha: cfg.fdr_alpha,
     };
     let census = crate::manifold::census_shattered_circles(&census_frames, n, p, sigma, &census_cfg)?;
 
     let mut cands: Vec<CurlCandidate> = Vec::new();
     for pair in &census.pairs {
+        // Only e-BH discoveries are raced. A plane that cannot beat its own
+        // permutation null at the round's multiplicity has no business spending a
+        // birth slot, however well it scored on the per-pair screen.
+        if !pair.fdr_discovery {
+            continue;
+        }
         let Some(plane) = pair.accepted_geometry.as_ref() else {
             continue;
         };

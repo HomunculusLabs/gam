@@ -587,6 +587,106 @@ pub fn coalesce_antipodal(
     out
 }
 
+/// Exact permutation evidence for the ring reading of one candidate plane.
+///
+/// The κ screen is a 2σ gate on a single pair. A census asks it of tens of
+/// thousands of pairs, so "κ resolvably below 2" stops being a claim anyone can
+/// act on without a multiplicity account, and the influence-function SE — a
+/// first-order delta-method quantity on a fourth moment — is exactly the kind of
+/// asymptotic approximation whose tail is least trustworthy. Both problems have
+/// the same fix: calibrate κ against the permutation null, per pair, exactly.
+///
+/// The null is "these two in-plane coordinates are independent given their own
+/// marginals", realised by permuting `beta` against `alpha`. It is the null a ring
+/// is a claim against: `κ = 1` says the pair is jointly confined to a shell, which
+/// no product of marginals produces. It also controls, for free, the confound a
+/// gated dictionary creates — a JumpReLU threshold carves the low-amplitude corner
+/// out of every co-firing cloud, hollowing it near the origin; the surrogates
+/// carry the identical hole because each marginal is preserved exactly.
+///
+/// The statistic collapses in closed form. With `a = α²`, `b = β²`,
+///
+/// ```text
+///   m₂ = mean(a) + mean(b)                       (permutation-INVARIANT)
+///   m₄ = mean(a²) + mean(b²) + 2·S/n ,  S = Σᵢ aᵢ·b_{π(i)}
+/// ```
+///
+/// so `κ = m₄/m₂²` is a strictly increasing affine function of the permutation
+/// cross-sum `S`, and the lower tail of κ IS the lower tail of `S`. Each surrogate
+/// therefore costs one shuffle and one dot product, with no moment recomputation
+/// and no cancellation in the fourth moment.
+///
+/// Returns `(p_value, e_value, null_kappa_mean, null_kappa_sd)`. The p-value is the
+/// exact lower-tail Monte-Carlo value `(1 + #{S_null ≤ S_obs})/(B + 1)`; the e-value
+/// is the indicator `(B+1)·1{no surrogate reaches S_obs}`, whose null mean is 1
+/// under exchangeability with NO dependence assumption, and which is what an e-BH
+/// ledger over the whole census consumes.
+pub fn kappa_permutation_evidence(
+    alpha: ArrayView1<f64>,
+    beta: ArrayView1<f64>,
+    replicates: usize,
+    seed: u64,
+) -> Result<(f64, f64, f64, f64), String> {
+    let n = alpha.len();
+    if beta.len() != n {
+        return Err(format!(
+            "kappa_permutation_evidence: α len {n} != β len {}",
+            beta.len()
+        ));
+    }
+    if n < 2 {
+        return Err("kappa_permutation_evidence: need at least 2 rows".to_string());
+    }
+    if replicates == 0 {
+        return Err("kappa_permutation_evidence: need at least 1 replicate".to_string());
+    }
+    let a: Vec<f64> = alpha.iter().map(|&v| v * v).collect();
+    let b: Vec<f64> = beta.iter().map(|&v| v * v).collect();
+    let inv = 1.0 / n as f64;
+    let mean_a: f64 = a.iter().sum::<f64>() * inv;
+    let mean_b: f64 = b.iter().sum::<f64>() * inv;
+    let m2 = mean_a + mean_b;
+    if !(m2 > 0.0) {
+        return Err("kappa_permutation_evidence: zero in-plane energy".to_string());
+    }
+    let mean_a2: f64 = a.iter().map(|&v| v * v).sum::<f64>() * inv;
+    let mean_b2: f64 = b.iter().map(|&v| v * v).sum::<f64>() * inv;
+    let kappa_of_s = |s: f64| (mean_a2 + mean_b2 + 2.0 * s * inv) / (m2 * m2);
+    let s_obs: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum();
+
+    let mut state = seed;
+    let mut next = move || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    let mut perm: Vec<f64> = b.clone();
+    let mut exceed = 0usize;
+    let mut sum_k = 0.0_f64;
+    let mut sum_k2 = 0.0_f64;
+    for _draw in 0..replicates {
+        for i in (1..n).rev() {
+            let j = (next() % (i as u64 + 1)) as usize;
+            perm.swap(i, j);
+        }
+        let s: f64 = a.iter().zip(perm.iter()).map(|(&x, &y)| x * y).sum();
+        if s <= s_obs {
+            exceed += 1;
+        }
+        let k = kappa_of_s(s);
+        sum_k += k;
+        sum_k2 += k * k;
+    }
+    let bf = replicates as f64;
+    let null_mean = sum_k / bf;
+    let null_var = (sum_k2 / bf - null_mean * null_mean).max(0.0);
+    let p_value = (1.0 + exceed as f64) / (bf + 1.0);
+    let e_value = if exceed == 0 { bf + 1.0 } else { 0.0 };
+    Ok((p_value, e_value, null_mean, null_var.sqrt()))
+}
+
 /// Co-occurring signed-direction pairs counted over EVERY row, from the SPARSE
 /// firing pattern rather than by scanning dense masks.
 ///

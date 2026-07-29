@@ -1204,14 +1204,19 @@ fn effective_df_floor_bound(
 ///
 /// `θ̂(ρ)` is defined as the endpoint of the continuation that starts at the
 /// anchor `ρ_A` and follows the segment `ρ(t) = ρ_A + t·(ρ − ρ_A)`, `t: 0 → 1`.
-/// The anchor is [`effective_df_floor_rho_upper_bounds`] — the per-coordinate ρ
-/// at which each penalized term's structural unit-weight effective df reaches
-/// one. Three properties make it the canonical anchor rather than a chosen
-/// constant: it is bisected out of the design/penalty generalized eigenvalues so
-/// it is data-determined and carries no knob; at it each term sits on its
-/// penalty nullspace, where the surviving low-dimensional problem is the
-/// parametric fit and the mode is unique; and it is already the optimizer's own
-/// upper bound, so the whole path lies inside the admissible ρ-box.
+/// The anchor is the MAXIMAL-smoothing ρ, the [`RhoBox`] ceiling: it is the most
+/// smoothed admissible point, so every penalized term is collapsed onto its
+/// penalty nullspace there, the surviving low-dimensional problem is the
+/// parametric fit, and its mode is unique — which is the one property the
+/// selection rule needs, since a unique mode is what the caller's coefficients
+/// cannot influence.
+///
+/// It is deliberately NOT the per-term
+/// [`effective_df_floor_rho_upper_bounds`], even though the two coincide for
+/// every term the absolute df floor exempts. That bound answers a different
+/// question — how much df a term must RETAIN — and #2608 made it a partial
+/// collapse for rank-deficient terms. A partially collapsed term is still
+/// nonconvex, so anchoring there would return branch selection to the seed.
 ///
 /// The mathematical object is the limit of the exact continuation path, so the
 /// discretization is refined — 1, 2, 4, … uniform steps — until the endpoint
@@ -1893,6 +1898,25 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // parametric mode — the anchor of the #2366 continuation below.
     let rho_upper_bounds =
         effective_df_floor_rho_upper_bounds(specs, &label_layout, n_rho, rho_box)?;
+    // The #2366 continuation anchor is the MAXIMAL-smoothing ρ — the uniform
+    // ceiling — and not the per-term upper bound above.
+    //
+    // The two coincided while the effective-df floor was absolute: a term that
+    // could not reach df = 1 was exempt, so its bound WAS the ceiling. #2608
+    // made the floor relative for exactly those terms, holding a rank-deficient
+    // term at a fraction of the df it can reach. That is a deliberately
+    // PARTIAL collapse, which is the opposite of what the anchor needs: the
+    // anchor's whole justification is that every penalized term sits on its
+    // penalty nullspace there, leaving a unique parametric mode that the
+    // caller's coefficients cannot select. Retaining half of a rank-1 term's
+    // attainable df leaves it at ρ = ln γ, where a nonconvex inner problem
+    // still has all of its modes — anchoring there hands branch selection back
+    // to the seed, which is the property #2366 exists to remove.
+    //
+    // The anchor is therefore derived from the ρ-box's own ceiling. It is not a
+    // fresh constant, and it can only ever sit at or above the per-term bound,
+    // so the continuation still starts at the most-smoothed admissible point.
+    let continuation_anchor = Array1::<f64>::from_elem(n_rho, rho_box.ceiling());
 
     // #2366: for a family whose joint likelihood Hessian depends on β the inner
     // problem is nonconvex, so `argmin_θ ℓ_p(θ, ρ)` is a set and the outer
@@ -1909,7 +1933,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             &outer_options,
             &label_layout,
             &rho_prior,
-            &rho_upper_bounds,
+            &continuation_anchor,
             &rho0,
         )
         .or_else(|| persistent_warm_start.clone())

@@ -50,8 +50,9 @@ use rayon::prelude::*;
 
 use super::curl::{
     CurlVerdict, coalesce_antipodal, cooccurrence_pairs_sparse, curl_verdict,
-    orthonormal_pair_coords,
+    kappa_permutation_evidence, orthonormal_pair_coords,
 };
+use super::pair_phase::ebh_reject;
 
 /// One atom's per-row ambient image, supplied lazily.
 ///
@@ -123,6 +124,18 @@ pub struct CurlCensusConfig {
     /// Cap on the rows the plane parse is formed on. Co-firing rows above this
     /// count are strided down; the κ SE is already saturated well below it.
     pub subsample_rows: usize,
+    /// Permutation surrogates drawn per candidate plane for the exact κ e-value.
+    ///
+    /// The indicator e-value tops out at `replicates + 1`, and an e-BH ledger over
+    /// `m` screened pairs needs `e ≥ m/(α·rank)` to reject at rank `rank`. So this
+    /// is not a precision knob to be set as large as patience allows — it is the
+    /// resolution the multiplicity of the search demands, and a census over `m`
+    /// pairs that wants to be able to reject `k` of them at level `α` needs at
+    /// least `m/(α·k) − 1` draws. Under-resourcing it does not inflate the false
+    /// discovery rate; it silently makes every rejection impossible.
+    pub null_replicates: usize,
+    /// Target false discovery rate for the e-BH ledger over all screened pairs.
+    pub fdr_alpha: f64,
 }
 
 /// The plane geometry retained for an ACCEPTED pair, so a caller can build the
@@ -152,6 +165,23 @@ pub struct CensusPair {
     pub n_co_fire: usize,
     /// The derived witness verdict.
     pub verdict: CurlVerdict,
+    /// Exact lower-tail Monte-Carlo p-value of κ against the per-pair permutation
+    /// null; `1.0` for pairs the deterministic screens already refused (no
+    /// surrogates are drawn for those, and an e-value of `0` is what they carry
+    /// into the ledger).
+    pub p_value: f64,
+    /// Indicator permutation e-value, `null_replicates + 1` when no surrogate
+    /// reached the observed κ and `0` otherwise. Null mean `≤ 1` with no
+    /// dependence assumption, which is what makes the e-BH ledger valid here.
+    pub e_value: f64,
+    /// Mean and sd of κ under that pair's own permutation null.
+    pub null_kappa_mean: f64,
+    /// Standard deviation of κ under that pair's own permutation null.
+    pub null_kappa_sd: f64,
+    /// True ⇒ this pair is an e-BH discovery at [`CurlCensusConfig::fdr_alpha`]
+    /// over the WHOLE screened family. This, not the per-pair screen, is what a
+    /// census is entitled to call a finding.
+    pub fdr_discovery: bool,
     /// Plane geometry, retained only when `verdict.recommend_curl`.
     pub accepted_geometry: Option<AcceptedPlane>,
 }
@@ -170,12 +200,22 @@ pub struct CurlCensus {
     pub n_coalesced: usize,
     /// Every screened pair, in candidate-generation order (co-firing count desc).
     pub pairs: Vec<CensusPair>,
+    /// The e-BH level the ledger ran at.
+    pub fdr_alpha: f64,
+    /// Smallest e-value that would have been rejected — the ledger's own report of
+    /// whether [`CurlCensusConfig::null_replicates`] was resolute enough to matter.
+    pub ebh_threshold: f64,
 }
 
 impl CurlCensus {
-    /// Pairs the derived screen accepted as shattered circles.
-    pub fn accepted(&self) -> usize {
+    /// Pairs the derived screen accepted as shattered circles, BEFORE multiplicity.
+    pub fn screen_accepted(&self) -> usize {
         self.pairs.iter().filter(|p| p.verdict.recommend_curl).count()
+    }
+
+    /// e-BH discoveries: the pairs the census reports as shattered circles.
+    pub fn accepted(&self) -> usize {
+        self.pairs.iter().filter(|p| p.fdr_discovery).count()
     }
 }
 
@@ -218,6 +258,8 @@ pub fn census_shattered_circles(
             n_signed: 0,
             n_coalesced: 0,
             pairs: Vec::new(),
+            fdr_alpha: cfg.fdr_alpha,
+            ebh_threshold: f64::INFINITY,
         });
     }
 
@@ -239,6 +281,8 @@ pub fn census_shattered_circles(
             n_signed: signed.len(),
             n_coalesced,
             pairs: Vec::new(),
+            fdr_alpha: cfg.fdr_alpha,
+            ebh_threshold: f64::INFINITY,
         });
     }
 
@@ -308,6 +352,27 @@ pub fn census_shattered_circles(
                 circle_delta_charge_nats(cfg.harmonics, n_eff),
             )
             .ok()?;
+            // Surrogates are drawn only for planes the deterministic screens
+            // already accept. A refused plane carries `e = 0` into the ledger,
+            // which is a valid e-value and keeps the multiplicity burden of the
+            // WHOLE search on the books rather than quietly shrinking the family
+            // to the candidates that happened to look good.
+            let (p_value, e_value, null_kappa_mean, null_kappa_sd) = if verdict.recommend_curl {
+                // Seed from the atom identities so the null is reproducible and
+                // independent of how the pairs happened to be ordered.
+                let seed = (di.members[0] as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    ^ (dj.members[0] as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+                kappa_permutation_evidence(
+                    alpha.view(),
+                    beta.view(),
+                    cfg.null_replicates,
+                    seed | 1,
+                )
+                .unwrap_or((1.0, 0.0, f64::NAN, f64::NAN))
+            } else {
+                (1.0, 0.0, f64::NAN, f64::NAN)
+            };
             let accepted_geometry = if verdict.recommend_curl {
                 Some(AcceptedPlane {
                     rows: co_fire,
@@ -325,10 +390,32 @@ pub fn census_shattered_circles(
                 members_b: dj.members.clone(),
                 n_co_fire: n_eff as usize,
                 verdict,
+                p_value,
+                e_value,
+                null_kappa_mean,
+                null_kappa_sd,
+                fdr_discovery: false,
                 accepted_geometry,
             })
         })
         .collect();
+
+    // One e-BH ledger over the whole screened family. e-BH is valid under
+    // ARBITRARY dependence between the pairs' e-values, which is the property this
+    // census needs: candidate planes share atoms, share rows, and are anything but
+    // independent.
+    let mut out = out;
+    let e_values: Vec<f64> = out.iter().map(|p| p.e_value).collect();
+    let rejected = ebh_reject(&e_values, cfg.fdr_alpha);
+    let m = e_values.len() as f64;
+    let ebh_threshold = if rejected.is_empty() {
+        f64::INFINITY
+    } else {
+        m / (cfg.fdr_alpha * rejected.len() as f64)
+    };
+    for i in rejected {
+        out[i].fdr_discovery = true;
+    }
 
     Ok(CurlCensus {
         sigma,
@@ -336,6 +423,8 @@ pub fn census_shattered_circles(
         n_signed: signed.len(),
         n_coalesced,
         pairs: out,
+        fdr_alpha: cfg.fdr_alpha,
+        ebh_threshold,
     })
 }
 
@@ -402,6 +491,10 @@ mod tests {
             coalesce_max_overlap: 0.1,
             min_cooccurrence: 40,
             subsample_rows: 4000,
+            // Two planted-ring pairs against a family of a handful: e-BH needs
+            // `e >= m/(alpha*rank)`, so a few hundred draws is already resolute.
+            null_replicates: 2000,
+            fdr_alpha: 0.05,
         }
     }
 

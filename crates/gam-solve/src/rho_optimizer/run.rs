@@ -2850,11 +2850,36 @@ fn certify_outer_optimality_at_terminal_fidelity(
         ));
     }
 
-    // Evaluate the derivative-bearing lane FIRST so it installs the terminal
-    // owned state AND populates the outer-eval cache; the scalar authority is
-    // then sampled from that cache below. This is one same-rho audit, not a
+    // Sample the scalar authority FIRST and leave the derivative-bearing
+    // evaluator as the terminal state owner. This is one same-rho audit, not a
     // finite-difference derivative: it catches a split value/gradient
     // implementation without violating the production no-FD contract.
+    //
+    // The order is load-bearing in two independent ways, and #2583 briefly
+    // inverted it:
+    //
+    //   * Every real outer objective's derivative lane is a warm-started inner
+    //     SOLVE, so evaluating it ADVANCES the inner state. A value sample
+    //     taken afterwards reads the state that solve left behind, not the
+    //     state it priced. The value lane, by contrast, reads the installed
+    //     state without advancing it, so value-then-derivative is the only
+    //     order in which both samples price ONE inner state.
+    //   * The mint's derivative-bearing evaluation must be the LAST evaluation
+    //     of the certification, because it is the terminal coefficient-mode
+    //     owner every downstream consumer reads (#2359). A trailing value-only
+    //     request re-installs a value-only pass as that owner.
+    //
+    // Inverting it also made the audit VACUOUS on the one route it was aimed
+    // at: the REML objective's outer-eval cache serves any `Value` request from
+    // whatever entry the derivative call just wrote, so the audit compared a
+    // number with itself and could not fire. Agreement by cache lookup is not
+    // agreement between two assemblies of the criterion.
+    //
+    // The genuine #2583 hazard — two INNER SOLVES at one ρ, disagreeing at
+    // inner-tolerance scale rather than at the √ε scale this bound is
+    // calibrated for — is addressed where it lives: the value lane's bundle is
+    // stored under the shared ρ key, so the derivative lane that follows reuses
+    // that inner solution instead of re-solving from it.
     //
     // BOTH fidelities pay this, deliberately. It is tempting to reserve it for
     // the mint the way order four is reserved (#2359), but the two are not
@@ -2866,14 +2891,34 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // nothing has validated, and mint then refuses the whole fit instead of a
     // runner-up carrying it. Pinned by
     // `analytic_hessian_candidate_screening_requires_only_first_order_evidence_2414`,
-    // which asserts screening asks for exactly the first-order pair
-    // {ValueAndGradient, Value} — the SET, not a sequence: the derivative
-    // request now leads so the value request can be served from its cache.
+    // which asserts screening's orders are exactly [Value, ValueAndGradient].
     //
     // The EFS/fixed-point route is different and IS gated on fidelity — see
     // `certify_fixed_point_optimality`. It returns above this block, and there
     // screening and mint are otherwise identical work (no order-four ladder to
     // reserve), so running the audit twice buys nothing at all.
+    let value_only = obj
+        .eval_with_order(&result.rho, OuterEvalOrder::Value)
+        .map_err(|err| {
+            outer_nonconvergence_error(
+                context,
+                &format!("terminal value-only certificate evaluation failed: {err}"),
+                result,
+                result.final_grad_norm,
+                StationarityStandard::NoComparison,
+            )
+        })?
+        .cost;
+    if !value_only.is_finite() {
+        return Err(outer_nonconvergence_error(
+            context,
+            "terminal value-only certificate evaluation returned a non-finite objective value",
+            result,
+            result.final_grad_norm,
+            StationarityStandard::NoComparison,
+        ));
+    }
+
     // Order four is reserved for the mint audit (#2359). A screening pass takes
     // the same first-order evidence the no-analytic-Hessian path already
     // certifies on, so the multi-start keeps its filter without building the
@@ -2910,48 +2955,6 @@ fn certify_outer_optimality_at_terminal_fidelity(
             StationarityStandard::NoComparison,
         )
     })?;
-
-    // The value-only lane is sampled AFTER the derivative lane, so it is served
-    // from the warm outer-eval cache the derivative evaluation just populated
-    // (`store_outer_eval`), rather than triggering a second inner solve.
-    //
-    // Order matters here and used to be the other way round. The value-only
-    // request deliberately does NOT write that cache (a gradient-free entry
-    // would force re-evaluation the moment a real gradient is wanted), so
-    // running it FIRST meant the derivative call could not hit the cache and
-    // re-solved the inner problem — warm-started from the value pass's own
-    // beta-hat. Two inner solves, two beta-hats, two costs. The audit below
-    // then compared them and refused the fit at differences of 4.2e-8 to
-    // 1.9e-6 RELATIVE — inner-tolerance scale, not the machine-epsilon scale
-    // its sqrt(eps) bound is calibrated for (#2583).
-    //
-    // Both orders assemble the cost through the same arithmetic (the
-    // `EvalMode::ValueOnly` early return in reml_outer_engine sits AFTER the
-    // cost, logdet and IFT terms are folded in), so there was never a second
-    // formula to reconcile — only a second inner solve. Sampling the cache
-    // makes the two lanes report one evaluation of one mode, which is what the
-    // audit was always trying to assert.
-    let value_only = obj
-        .eval_with_order(&result.rho, OuterEvalOrder::Value)
-        .map_err(|err| {
-            outer_nonconvergence_error(
-                context,
-                &format!("terminal value-only certificate evaluation failed: {err}"),
-                result,
-                result.final_grad_norm,
-                StationarityStandard::NoComparison,
-            )
-        })?
-        .cost;
-    if !value_only.is_finite() {
-        return Err(outer_nonconvergence_error(
-            context,
-            "terminal value-only certificate evaluation returned a non-finite objective value",
-            result,
-            result.final_grad_norm,
-            StationarityStandard::NoComparison,
-        ));
-    }
 
     if !inner_solve_converged(config.outer_inner_cap.as_ref()) {
         return Err(outer_nonconvergence_error(

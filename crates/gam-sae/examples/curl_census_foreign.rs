@@ -24,7 +24,7 @@
 //!
 //! Usage:
 //! `curl_census_foreign <dir> <max_atoms> <min_cooccur> <subsample_rows> <permute_seed>
-//!                      <coalesce_cos> <out.json>`
+//!                      <coalesce_cos> <null_replicates> <fdr_alpha> <out.json>`
 //!
 //! `coalesce_cos` is the decoder cosine at or below which two rectified halves
 //! merge into one signed direction (`-0.85` is the engine's own default). Passing
@@ -121,10 +121,10 @@ fn meta_usize(meta: &serde_json::Value, key: &str) -> Result<usize, String> {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 8 {
+    if args.len() != 10 {
         return Err(format!(
             "usage: {} <dir> <max_atoms> <min_cooccur> <subsample_rows> <permute_seed> \
-             <coalesce_cos> <out.json>",
+             <coalesce_cos> <null_replicates> <fdr_alpha> <out.json>",
             args.first().map(String::as_str).unwrap_or("curl_census_foreign")
         ));
     }
@@ -141,10 +141,16 @@ fn run() -> Result<(), String> {
     let permute_seed: u64 = args[5]
         .parse()
         .map_err(|e| format!("permute_seed must be a non-negative integer: {e}"))?;
+    let null_replicates: usize = args[7]
+        .parse()
+        .map_err(|e| format!("null_replicates must be a positive integer: {e}"))?;
+    let fdr_alpha: f64 = args[8]
+        .parse()
+        .map_err(|e| format!("fdr_alpha must be a float in (0, 1): {e}"))?;
     let coalesce_cos: f64 = args[6]
         .parse()
         .map_err(|e| format!("coalesce_cos must be a float: {e}"))?;
-    let out_path = Path::new(&args[7]);
+    let out_path = Path::new(&args[9]);
 
     let meta_text = fs::read_to_string(dir.join("meta.json"))
         .map_err(|e| format!("read meta.json: {e}"))?;
@@ -298,16 +304,23 @@ fn run() -> Result<(), String> {
         coalesce_max_overlap: 0.25,
         min_cooccurrence: min_cooccur,
         subsample_rows,
+        null_replicates,
+        fdr_alpha,
     };
     eprintln!("[census] running the screen …");
     let census = census_shattered_circles(&frames, n, p, sigma, &cfg)?;
     eprintln!(
         "[census] {} signed directions ({} of them antipodal merges) → {} screened pairs, \
-         {} accepted",
+         {} pass the per-pair screen, {} are e-BH discoveries at FDR {} \
+         (ledger threshold e ≥ {:.0}, max attainable e = {})",
         census.n_signed,
         census.n_coalesced,
         census.pairs.len(),
-        census.accepted()
+        census.screen_accepted(),
+        census.accepted(),
+        census.fdr_alpha,
+        census.ebh_threshold,
+        null_replicates + 1
     );
 
     let rows: Vec<serde_json::Value> = census
@@ -327,7 +340,12 @@ fn run() -> Result<(), String> {
                 "radius_over_sigma": pair.verdict.radius / census.sigma,
                 "gain_nats_per_row": pair.verdict.gain_nats_per_row,
                 "net_evidence_nats": pair.verdict.net_evidence_nats,
-                "accepted": pair.verdict.recommend_curl,
+                "screen_accepted": pair.verdict.recommend_curl,
+                "p_value": pair.p_value,
+                "e_value": pair.e_value,
+                "null_kappa_mean": pair.null_kappa_mean,
+                "null_kappa_sd": pair.null_kappa_sd,
+                "accepted": pair.fdr_discovery,
             })
         })
         .collect();
@@ -335,6 +353,9 @@ fn run() -> Result<(), String> {
         .pairs
         .iter()
         .filter_map(|pair| {
+            if !pair.fdr_discovery {
+                return None;
+            }
             let plane = pair.accepted_geometry.as_ref()?;
             Some(serde_json::json!({
                 "members_a": pair.members_a,
@@ -343,6 +364,9 @@ fn run() -> Result<(), String> {
                 "z_below_gaussian": pair.verdict.z_below_gaussian,
                 "radius_over_sigma": pair.verdict.radius / census.sigma,
                 "net_evidence_nats": pair.verdict.net_evidence_nats,
+                "p_value": pair.p_value,
+                "e_value": pair.e_value,
+                "null_kappa_mean": pair.null_kappa_mean,
                 "rows": plane.rows,
                 "alpha": plane.alpha.to_vec(),
                 "beta": plane.beta.to_vec(),
@@ -372,7 +396,11 @@ fn run() -> Result<(), String> {
         "n_signed": census.n_signed,
         "n_coalesced": census.n_coalesced,
         "n_pairs": census.pairs.len(),
+        "n_screen_accepted": census.screen_accepted(),
         "n_accepted": census.accepted(),
+        "fdr_alpha": census.fdr_alpha,
+        "ebh_threshold": census.ebh_threshold,
+        "null_replicates": null_replicates,
         "permute_seed": permute_seed,
         "coalesce_cos_threshold": coalesce_cos,
         "pairs": rows,
