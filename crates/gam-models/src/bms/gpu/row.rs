@@ -3655,14 +3655,6 @@ mod row_kernel_tests {
 
         #[test]
         fn generated_cuda_row_kernel_r33_matches_canonical_cpu_lowering_932() {
-            gam_gpu::configure_global_policy(gam_gpu::GpuPolicy::Required);
-            assert_eq!(
-                gam_gpu::global_policy(),
-                gam_gpu::GpuPolicy::Required,
-                "fresh-process r=33 parity must claim Required before runtime discovery"
-            );
-            gam_gpu::device_runtime::GpuRuntime::require()
-                .expect("#932 mandatory r=33 CUDA runtime");
             // Cubic deviation runtimes expose `num_internal_knots + 1` live
             // controls since the #2319 knot-selection orbit canonicalization
             // (one control fewer per block than the pre-orbit layout this
@@ -3681,7 +3673,10 @@ mod tests {
     use crate::bms::exact_eval_cache::RowPrimaryEvalCache;
     use crate::bms::row_kernel::BernoulliMarginalSlopeExactNewtonJointHessianWorkspace;
     use crate::custom_family::{BlockwiseFitOptions, ExactNewtonJointHessianWorkspace};
-    use gam_gpu::{GpuPolicy, configure_global_policy};
+    // Deliberately NOT importing `configure_global_policy`: the process-wide
+    // policy is a first-writer-wins `OnceLock`, so a test that writes it decides
+    // the backend every other test in this binary selects.
+    use gam_gpu::GpuPolicy;
     use ndarray::{Array1, Array2};
     use std::hint::black_box;
     use std::sync::atomic::AtomicUsize;
@@ -3768,9 +3763,13 @@ mod tests {
     /// of the caller's contract, so a caller that early-returns on `None` still
     /// proves something real instead of reporting `passed` with zero assertions
     /// executed (#2422). Curing it here rather than at each call site is
-    /// deliberate: all eight CUDA-gated tests in this module route through this
-    /// one function, and a fix applied per-site is a fix with a 1-in-8 success
-    /// rate the moment a ninth is written.
+    /// deliberate: every CUDA-gated test in this module routes through this one
+    /// function, and a fix applied per-site is a fix that misses the next site
+    /// the moment one is written.
+    ///
+    /// It probes with an EXPLICIT `GpuPolicy::Auto` and never writes the
+    /// process-wide policy, because that policy is a first-writer-wins
+    /// `OnceLock` shared with every other test in this binary.
     fn cuda_runtime_for_test(
         test_name: &str,
     ) -> Option<&'static gam_gpu::device_runtime::GpuRuntime> {
@@ -3799,19 +3798,29 @@ mod tests {
         }
     }
 
-    /// Mandatory A100 acceptance hook. Run this exact test in a fresh process:
-    /// configuring `Required` is deliberately the first GPU action, and every
-    /// missing-runtime, probe, upload, launch, synchronization, status, or
-    /// download failure aborts the test instead of turning into a skip.
+    /// Mandatory A100 acceptance hook: once a device is present, every probe,
+    /// upload, launch, synchronization, status, or download failure aborts the
+    /// test instead of turning into a skip. The device arm is entered through
+    /// [`cuda_runtime_for_test`], which asserts the device-free seam contract
+    /// before it hands back `None`, so the host arm still proves something.
+    ///
+    /// It does NOT claim `gam_gpu::GpuPolicy::Required`. That policy lives in a
+    /// process-wide `OnceLock` with first-writer-wins semantics, so a test that
+    /// sets it changes the backend selection every OTHER test in the same binary
+    /// makes: `resolve(Required)` on a device-free host is `Err`, and the ~90
+    /// unrelated tests that reach `resolve(global_policy())` then fail on the
+    /// device-absence error. Whether they do depends on whether this test or a
+    /// production `configure_global_policy(Auto)` claimed the slot first, which
+    /// is scheduling-dependent. Required also buys nothing here: the cache-
+    /// residency decision is `resolve(policy)?.is_some()`, identical under Auto
+    /// on a host that actually has a device.
     #[test]
     fn mandatory_required_gpu_workspace_consumes_device_cache_end_to_end_932() {
-        configure_global_policy(GpuPolicy::Required);
-        assert_eq!(
-            gam_gpu::global_policy(),
-            GpuPolicy::Required,
-            "fresh-process acceptance test must claim Required before any competing policy"
-        );
-        gam_gpu::device_runtime::GpuRuntime::require().expect("#932 mandatory CUDA runtime");
+        if cuda_runtime_for_test("mandatory_required_gpu_workspace_consumes_device_cache_end_to_end_932")
+            .is_none()
+        {
+            return;
+        }
 
         let (family, states) = row_kernel_tests::parity_415::make_flex_parity_family(256, 8, 6);
         let mut workspace = BernoulliMarginalSlopeExactNewtonJointHessianWorkspace::new(
@@ -3819,14 +3828,15 @@ mod tests {
             states,
             BlockwiseFitOptions::default(),
         )
-        .expect("#932 Required workspace must build its device row cache");
+        .expect("#932 device workspace must build its device row cache");
 
         assert!(
             matches!(
                 &workspace.cache.row_primary_hessians,
                 RowPrimaryEvalCache::Device(_)
             ),
-            "Required full-FLEX workspace must retain RowPrimaryEvalCache::Device"
+            "a full-FLEX workspace built on a device-present host must retain \
+             RowPrimaryEvalCache::Device"
         );
         {
             let device = workspace
@@ -3978,10 +3988,11 @@ mod tests {
         const WARMUPS: usize = 3;
         const SAMPLES: usize = 21;
 
-        configure_global_policy(GpuPolicy::Required);
-        assert_eq!(gam_gpu::global_policy(), GpuPolicy::Required);
-        gam_gpu::device_runtime::GpuRuntime::require()
-            .expect("#932 full-row release measurement requires CUDA");
+        if cuda_runtime_for_test("release_measure_generated_bms_full_row_vs_strongest_cpu_932")
+            .is_none()
+        {
+            return;
+        }
 
         // Cubic deviation runtimes expose `num_internal_knots + 1` live
         // controls since the #2319 knot-selection orbit canonicalization, so
@@ -4998,14 +5009,11 @@ mod tests {
     /// CPU oracle consumes, then dispatching the device kernels.
     #[test]
     pub(crate) fn bms_flex_row_r33_consumers_match_cpu_oracles_when_cuda_available() {
-        configure_global_policy(GpuPolicy::Required);
-        assert_eq!(
-            gam_gpu::global_policy(),
-            GpuPolicy::Required,
-            "fresh-process r=33 consumer parity must claim Required before runtime discovery"
-        );
-        gam_gpu::device_runtime::GpuRuntime::require()
-            .expect("#932 mandatory r=33 consumer CUDA runtime");
+        if cuda_runtime_for_test("bms_flex_row_r33_consumers_match_cpu_oracles_when_cuda_available")
+            .is_none()
+        {
+            return;
+        }
         let n = 3_usize;
         let p_h_dim = 16_usize;
         let p_w_dim = 15_usize;
