@@ -2803,8 +2803,13 @@ mod smoothing_correction_outcome_tests {
                 "the ρ bracket did not reach stationarity in {bisections} bisections:                  ρ̂ = {final_rho:?}, |g| = {finalgrad_norm:.6e} exceeds                  {stationarity_tol:.6e}"
             );
 
-            // Kept for the failure path below; `Ok`/`Err` is itself a finding.
-            let self_hessian_for_diagnosis = state.compute_lamlhessian_consistent(&final_rho).ok();
+            // Kept for the failure path below; `Ok`/`Err` is itself a finding,
+            // so the `Err` is CARRIED rather than flattened away. `.ok()` here
+            // would have thrown out the one string that distinguishes "the
+            // Hessian says the direction is unresolvable" from "the Hessian
+            // could not be computed at all" -- the same discard this whole
+            // diagnostic exists to undo.
+            let self_hessian_for_diagnosis = state.compute_lamlhessian_consistent(&final_rho);
 
             let before = SMOOTHING_CORRECTION_CUBATURE_COUNT.load(Ordering::SeqCst);
             let final_lambdas = Array1::from_vec(
@@ -2855,9 +2860,8 @@ mod smoothing_correction_outcome_tests {
                 // looks identical under all of them. `invert_identified_rho_hessian`
                 // already computes the discriminating numbers; the failure path
                 // just never asked for them.
-                let spectrum = self_hessian_for_diagnosis
-                    .as_ref()
-                    .map(|h| {
+                let spectrum = match self_hessian_for_diagnosis.as_ref() {
+                    Ok(h) => {
                         match crate::estimate::smoothing_correction::invert_identified_rho_hessian(
                             h, 0, &finalgrad,
                         ) {
@@ -2874,8 +2878,9 @@ mod smoothing_correction_outcome_tests {
                             ),
                             Err(err) => format!("inverter refused: {err}"),
                         }
-                    })
-                    .unwrap_or_else(|| "rho Hessian unavailable at this rho".to_string());
+                    }
+                    Err(err) => format!("rho Hessian unavailable at this rho: {err}"),
+                };
                 panic!(
                     "cubature/first-order outcome carries a correction matrix; \
                      got: {outcome_description}; rho={final_rho:?} \
