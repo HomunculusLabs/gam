@@ -5547,19 +5547,27 @@ fn run_nonconverged_arc_returns_typed_checkpoint_after_budget_retry_ladder() {
     // returns typed non-convergence carrying the last rho checkpoint rather
     // than an `OuterResult` that could reach fitted-model assembly.
     //
-    // We use `cost = x^4`, `grad = 4 x^3`, `hess = 12 x^2` from
-    // `initial_rho = [5.0]` with `max_iter = 1`. Newton-style ARC
-    // steps on x^4 contract the gradient by ~3× per attempt, so
-    // the halving gate passes and both retries proceed; ARC still
-    // cannot reach the optimum in three single-iter attempts.
+    // We use a quartic `cost = SCALE·(x − OFFSET)^4` from `initial_rho = [5.0]`
+    // with `max_iter = 1`. Newton-style ARC steps on a quartic contract the
+    // distance to the optimum by ~⅓ per attempt, so the halving gate passes and
+    // both retries proceed; ARC still cannot reach the optimum in three
+    // single-iter attempts.
     //
-    // Arc + Gaussian has `effective_seed_budget == 1`, so `initial_rho = [5.0]`
-    // is the sole authoritative start: no second budgeted seed lets the always-
-    // injected neutral baseline `[0.0]` (the EXACT global minimum of x⁴, cost 0)
-    // screen in and win — which would make ARC start already-optimal, report
-    // converged in 0 iters, and never exercise the retry ladder this test drives.
-    // (Any effective-budget-1 profile works; Arc Gaussian and GLM are both floored
-    // to 1 now — see `effective_seed_budget`.)
+    // OFFSET is what makes the subject reachable, and it is not cosmetic. The
+    // seed budget bounds how many seeds are STARTED SPECULATIVELY, not how many
+    // may be tried: `should_start_next_seed` keeps going while no candidate has
+    // certified, because a fit whose budgeted seeds all fail should try the rest
+    // rather than refuse. So with a plain `x^4` the cascade walks past the
+    // exhausted `[5.0]` ladder to the always-injected neutral baseline `[0.0]`,
+    // which is the EXACT global minimum of `x^4` — it certifies at iteration 0,
+    // the run returns `Ok`, and the retry ladder this test exists to drive is
+    // never measured. Putting the optimum at ½ leaves it stationary at NO
+    // generated candidate (they are integers), so every seed exhausts its ladder
+    // and the runner must produce the typed checkpoint. SCALE keeps the residual
+    // gradient far above the stationarity band after the cascade, so the verdict
+    // cannot turn on how close a seed happened to land.
+    const OFFSET: f64 = 0.5;
+    const SCALE: f64 = 1.0e6;
     let mut seed_config = gam_problem::SeedConfig::default();
     seed_config.seed_budget = 1;
     seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;
@@ -5573,13 +5581,13 @@ fn run_nonconverged_arc_returns_typed_checkpoint_after_budget_retry_ladder() {
         .with_cache_session(Arc::clone(&session));
     let mut obj = problem.build_objective(
         (),
-        |_: &mut (), theta: &Array1<f64>| Ok(theta[0].powi(4)),
+        |_: &mut (), theta: &Array1<f64>| Ok(SCALE * (theta[0] - OFFSET).powi(4)),
         |_: &mut (), theta: &Array1<f64>| {
-            let x = theta[0];
+            let d = theta[0] - OFFSET;
             Ok(OuterEval {
-                cost: x.powi(4),
-                gradient: array![4.0 * x.powi(3)],
-                hessian: HessianValue::Dense(array![[12.0 * x.powi(2)]]),
+                cost: SCALE * d.powi(4),
+                gradient: array![SCALE * 4.0 * d.powi(3)],
+                hessian: HessianValue::Dense(array![[SCALE * 12.0 * d.powi(2)]]),
                 inner_beta_hint: None,
             })
         },
@@ -5592,14 +5600,14 @@ fn run_nonconverged_arc_returns_typed_checkpoint_after_budget_retry_ladder() {
     let EstimationError::RemlDidNotConverge { rho_checkpoint, .. } = error else {
         panic!("expected typed REML non-convergence, got {error}");
     };
-    // The ladder must have genuinely stepped away from neither the optimum
-    // (rho=0, where x⁴ is stationary) nor stalled at the seed: ARC contracts
-    // toward 0 but cannot reach it in the single-iter budget, so the reported
-    // ρ is strictly between the optimum and the [5.0] start.
+    // The ladder must have neither reached the optimum (ρ = OFFSET, where the
+    // quartic is stationary) nor stalled at a seed: ARC contracts toward OFFSET
+    // but cannot arrive within the single-iter budget, so the reported ρ is
+    // strictly inside the box and off the optimum.
     assert!(
-        rho_checkpoint[0].abs() > 1.0e-6 && rho_checkpoint[0] < 5.0,
-        "the budget ladder must have made partial progress from the [5.0] seed \
-         toward the x⁴ optimum without reaching it; got rho={:?}",
+        (rho_checkpoint[0] - OFFSET).abs() > 1.0e-6 && rho_checkpoint[0].abs() < 5.0,
+        "the budget ladder must have made partial progress toward the quartic \
+         optimum at {OFFSET} without reaching it; got rho={:?}",
         rho_checkpoint
     );
 }
