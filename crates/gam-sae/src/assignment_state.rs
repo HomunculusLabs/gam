@@ -284,8 +284,8 @@ impl SaeAssignmentState {
             }
 
             let mut coord_cursor = 0usize;
-            let mut slots = Vec::with_capacity(support_k);
-            for slot in 0..support_k {
+            let mut slots = Vec::with_capacity(indices[i].len());
+            for slot in 0..indices[i].len() {
                 let atom = indices[i][slot] as usize;
                 if atom >= k_atoms {
                     return Err(format!(

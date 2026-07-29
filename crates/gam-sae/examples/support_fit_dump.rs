@@ -93,6 +93,18 @@ fn main() -> Result<(), String> {
     let mut atom_basis = vec![topology_arg.clone(); k_atoms];
     if topology_arg == "auto" {
         resolve_support_auto_atoms(&mut atom_basis);
+    } else if topology_arg == "earned" {
+        // No atom is curved because of its index. Every atom starts on the
+        // simplest chart that can carry a coordinate; the occupancy census
+        // and the image-degeneracy test (both derived, no constants) remove
+        // closure that the data does not support, and the remaining curved
+        // capacity has to be earned by the fit rather than granted by a
+        // modulus. This is the control the whole portfolio question needs:
+        // if forced curvature beats earned curvature, the forcing was
+        // carrying information; if not, it was noise with a shape.
+        for basis in atom_basis.iter_mut() {
+            *basis = "euclidean".to_string();
+        }
     } else if topology_arg == "rich" {
         // Every topology the lane can fit, weighted by what today's censuses
         // and steering tables earned: linear stays the routing base, the
@@ -346,7 +358,6 @@ fn main() -> Result<(), String> {
         println!("decoder strategy: FISTA (6 passes/cycle)");
     }
     let mut ard = ard;
-    let mut unrolled_once = false;
     while reml_arg {
         let updated = term_seed
             .term
@@ -430,8 +441,7 @@ fn main() -> Result<(), String> {
         // tokens occupy at most half the circle, then let the next inner
         // solve refit the freed capacity on the arc the data owns. The edf
         // baseline is reset because converted atoms lawfully jump.
-        if unroll_arg && !unrolled_once {
-            unrolled_once = true;
+        if unroll_arg {
             let unrolled = term_seed.term.convert_underoccupied_loops(2502)?;
             if !unrolled.is_empty() {
                 println!(

@@ -660,6 +660,95 @@ impl SaeSupportSparseTerm {
                 let t = self.assignment.coords_for_slot(row, slot)[0];
                 fracs.push((t / period).rem_euclid(1.0));
             }
+            // Degeneracy test, independent of occupancy: sample the decoded
+            // image around the whole period and compare its two principal
+            // second moments. A circle spends equal power on both; an
+            // ellipse collapsed to a diameter spends it all on one, and is
+            // a line traversed out and back no matter how well occupied.
+            // The threshold is the sampling resolution itself: an image
+            // whose minor axis is below the chord length between adjacent
+            // samples is not resolvable as anything but a segment.
+            let probes = self.atoms[atom_index].basis_size().max(8) * 4;
+            let mut image = Array2::<f64>::zeros((probes, self.output_dim));
+            if let Some(evaluator) = self.atoms[atom_index].basis_evaluator.clone() {
+                for probe in 0..probes {
+                    let t = period * probe as f64 / probes as f64;
+                    let coordinate = Array2::from_shape_vec((1, 1), vec![t])
+                        .map_err(|error| format!("degeneracy probe: {error}"))?;
+                    let (phi, _) = evaluator.evaluate(coordinate.view())?;
+                    let decoded = phi
+                        .row(0)
+                        .dot(self.atoms[atom_index].decoder_coefficients());
+                    for channel in 0..self.output_dim {
+                        image[[probe, channel]] = decoded[channel];
+                    }
+                }
+                let mut centre = vec![0.0_f64; self.output_dim];
+                for probe in 0..probes {
+                    for channel in 0..self.output_dim {
+                        centre[channel] += image[[probe, channel]] / probes as f64;
+                    }
+                }
+                let mut total = 0.0_f64;
+                let mut along = 0.0_f64;
+                // Power along the dominant direction vs total: one power
+                // iteration on the centred image's Gram is enough to
+                // separate a segment from a genuine ellipse.
+                let mut direction = vec![0.0_f64; self.output_dim];
+                for channel in 0..self.output_dim {
+                    direction[channel] = image[[0, channel]] - centre[channel];
+                }
+                let mut norm = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
+                for _ in 0..8 {
+                    if !(norm > 0.0) {
+                        break;
+                    }
+                    for value in direction.iter_mut() {
+                        *value /= norm;
+                    }
+                    let mut next = vec![0.0_f64; self.output_dim];
+                    for probe in 0..probes {
+                        let mut dot = 0.0_f64;
+                        for channel in 0..self.output_dim {
+                            dot += (image[[probe, channel]] - centre[channel])
+                                * direction[channel];
+                        }
+                        for channel in 0..self.output_dim {
+                            next[channel] +=
+                                dot * (image[[probe, channel]] - centre[channel]);
+                        }
+                    }
+                    direction = next;
+                    norm = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
+                }
+                if norm > 0.0 {
+                    for value in direction.iter_mut() {
+                        *value /= norm;
+                    }
+                    for probe in 0..probes {
+                        let mut dot = 0.0_f64;
+                        let mut sq = 0.0_f64;
+                        for channel in 0..self.output_dim {
+                            let centred = image[[probe, channel]] - centre[channel];
+                            dot += centred * direction[channel];
+                            sq += centred * centred;
+                        }
+                        total += sq;
+                        along += dot * dot;
+                    }
+                }
+                let across = (total - along).max(0.0);
+                let resolution = total / probes as f64 / (probes as f64).powi(2);
+                if total > 0.0 && across <= resolution * probes as f64 {
+                    log::debug!(
+                        "atom {atom_index}: periodic image is degenerate to a segment \
+                         (across/total = {:.3e}); unrolling",
+                        across / total
+                    );
+                    fracs.clear();
+                    fracs.extend((0..pairs.len()).map(|slot| slot as f64 / pairs.len() as f64));
+                }
+            }
             // Exact largest-gap test, no binning. Under the null that a
             // closed loop's usage is uniform on the circle, the largest of
             // the n circular spacings G satisfies the exact bound
@@ -856,13 +945,27 @@ impl SaeSupportSparseTerm {
             None => vec![0.0_f64; self.k_atoms()],
             Some(sigma2) => {
                 let l_param = 0.5 * (target.nrows().max(2) as f64).log2();
+                // Amortize over the PORTFOLIO's mean firing count, not each
+                // atom's own: dividing by the atom's own firings prices
+                // rarity, not parameters, and a homogeneous portfolio then
+                // pays a charge that varies only through usage -- measured,
+                // that cost 0.167 EV. With the shared denominator the charge
+                // varies only through basis size, and a homogeneous
+                // portfolio receives a constant that cannot reorder anything.
+                let mean_firings = (self
+                    .atom_rows
+                    .iter()
+                    .map(|rows| rows.len())
+                    .sum::<usize>()
+                    .max(1) as f64)
+                    / self.k_atoms().max(1) as f64;
                 (0..self.k_atoms())
                     .map(|atom| {
                         let bits = self.atoms[atom].basis_size() as f64
                             * self.output_dim as f64
                             * l_param;
-                        let firings = self.atom_rows[atom].len().max(1) as f64;
-                        2.0 * sigma2 * std::f64::consts::LN_2 * bits / firings
+                        2.0 * sigma2 * std::f64::consts::LN_2 * bits
+                            / mean_firings.max(1.0)
                     })
                     .collect()
             }
@@ -2297,7 +2400,16 @@ impl SaeSupportSparseTerm {
             .collect();
         let mut momentum_t = 1.0_f64;
         let mut max_change = 0.0_f64;
-        for _pass in 0..passes {
+        // `passes` is the FLOOR, not the count (#2502): six majorized passes
+        // were measured sufficient at K=808 and insufficient at K=8096
+        // (EM+FISTA 0.6490 vs EM+colour 0.7345) -- a fixed count
+        // under-converges large decoders and the evidence updates then read
+        // corrupted curvature. Passing continues while each pass still
+        // improves, by the same no-longer-decreasing stall rule the outer
+        // criteria use.
+        let mut pass_index = 0usize;
+        let mut previous_pass_change = f64::INFINITY;
+        loop {
             // grad_k = -Phi_k^T R|rows(k) + lambda_k S_k B_k ; step against the
             // majorizer via the penalized solver:
             //   (s G_k + lambda_k S_k) D_k = Phi_k^T R|rows(k) - lambda_k S_k B_k
@@ -2338,9 +2450,11 @@ impl SaeSupportSparseTerm {
             let beta = (momentum_t - 1.0) / next_t;
             momentum_t = next_t;
             let mut installed: Vec<Array2<f64>> = Vec::with_capacity(k_atoms);
+            let mut pass_change = 0.0_f64;
             for (atom_idx, (new, delta)) in updates.into_iter().enumerate() {
                 for value in delta.iter() {
                     max_change = max_change.max(value.abs());
+                    pass_change = pass_change.max(value.abs());
                 }
                 let extrapolated = &new + &((&new - &previous[atom_idx]) * beta);
                 previous[atom_idx] = new;
@@ -2375,6 +2489,13 @@ impl SaeSupportSparseTerm {
                         }
                     }
                 });
+            pass_index += 1;
+            if pass_index >= passes
+                && (!(pass_change > 0.0) || pass_change >= previous_pass_change)
+            {
+                break;
+            }
+            previous_pass_change = pass_change;
         }
         Ok(max_change)
     }
