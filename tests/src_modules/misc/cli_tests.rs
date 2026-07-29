@@ -1904,7 +1904,18 @@ fn saved_bernoulli_marginal_slope_replays_main_and_logslope_deviation_runtimes()
                 ResponseFamily::Binomial,
                 InverseLink::Standard(StandardLink::Probit),
             )),
-            likelihood_scale: LikelihoodScaleMetadata::Unspecified,
+            // Binomial has NO free dispersion: phi is identically 1, so the resolved
+            // scale is Unit. `Unspecified` is not "the family decides" -- it means the
+            // caller never said, and `LikelihoodSpec::resolved_scale` refuses it for
+            // binomial/Poisson because the saved-model contract requires "the
+            // response-scale summary paired with explicit likelihood-scale metadata for
+            // non-Gaussian models" (core_saved_fit_result). Leaving it Unspecified made
+            // these fixtures build a saved model the loader is right to reject:
+            //   invalid resolved likelihood scale: family binomial requires exact
+            //   FixedDispersion { phi: 1.0 } metadata, got Unspecified
+            // The validator is not loosened -- an Unspecified reaching it still means a
+            // real caller dropped the metadata, which is exactly what it should catch.
+            likelihood_scale: LikelihoodScaleMetadata::FixedDispersion { phi: 1.0 },
             log_likelihood_normalization: LogLikelihoodNormalization::UserProvided,
             ..saved_fit_summary_fixture()
         },
@@ -1981,7 +1992,7 @@ fn nonlinear_saved_model_with_hessian_only_remains_persistable_and_predictable()
             ResponseFamily::Binomial,
             InverseLink::Standard(StandardLink::Logit),
         )),
-        likelihood_scale: LikelihoodScaleMetadata::Unspecified,
+        likelihood_scale: LikelihoodScaleMetadata::FixedDispersion { phi: 1.0 },
         log_likelihood_normalization: LogLikelihoodNormalization::UserProvided,
         log_likelihood: -1.0,
         deviance: 2.0,
@@ -2990,7 +3001,7 @@ fn compact_fit_result_for_batch_preserves_unified_geometry_invariant() {
             ResponseFamily::Binomial,
             InverseLink::Standard(StandardLink::Logit),
         )),
-        likelihood_scale: LikelihoodScaleMetadata::Unspecified,
+        likelihood_scale: LikelihoodScaleMetadata::FixedDispersion { phi: 1.0 },
         log_likelihood_normalization: LogLikelihoodNormalization::UserProvided,
         log_likelihood: -2.0,
         deviance: 4.0,
@@ -4095,7 +4106,7 @@ fn saved_bernoulli_marginal_slope_prediction_replays_latent_z_normalization() {
                 ResponseFamily::Binomial,
                 InverseLink::Standard(StandardLink::Probit),
             )),
-            likelihood_scale: LikelihoodScaleMetadata::Unspecified,
+            likelihood_scale: LikelihoodScaleMetadata::FixedDispersion { phi: 1.0 },
             log_likelihood_normalization: LogLikelihoodNormalization::UserProvided,
             ..saved_fit_summary_fixture()
         },
