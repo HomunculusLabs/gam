@@ -79,6 +79,13 @@ pub fn gpu_for_test(label: &str) -> GpuTestGate {
         Ok(Some(runtime)) => GpuTestGate::Ready(runtime),
         Ok(None) => {
             if matches!(policy, GpuPolicy::Required) {
+                // SAFETY: aborting is the contract. Under `GpuPolicy::Required`
+                // the caller has declared that a device MUST be present, so the
+                // only alternatives are to abort or to return a gate the test
+                // reads as "skip" -- and a skip here prints `ok` for a test that
+                // verified nothing, which is the #2422 defect this gate exists
+                // to remove. Reachable only from a `#[test]` under an explicit
+                // Required policy.
                 panic!(
                     "[gpu-test] {label} REQUIRES a device: the process policy is \
                      GpuPolicy::Required and no CUDA runtime resolved. Skipping here \
@@ -92,6 +99,12 @@ pub fn gpu_for_test(label: &str) -> GpuTestGate {
             );
             GpuTestGate::AbsentDevice
         }
+        // SAFETY: aborting is the contract. A FAULTED device is not an absent
+        // one: resolution reached the runtime and it errored, so continuing
+        // would run the test against a broken device or silently skip it. The
+        // twenty-one `let Some(..) = resolve(..) else { return }` sites this
+        // replaced swallowed exactly this case (#2422). Reachable only from a
+        // `#[test]`.
         Err(error) => panic!(
             "[gpu-test] {label}: CUDA resolution FAULTED: {error}. A faulted device is \
              not an absent one, and must never be skipped (#2422) -- twenty-one sites \
