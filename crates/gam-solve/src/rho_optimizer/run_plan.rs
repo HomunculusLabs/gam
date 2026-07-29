@@ -1708,6 +1708,7 @@ pub(crate) fn run_outer_with_plan(
                                     // certificate honors the same flat band the
                                     // guard certified in the loop.
                                     result.flat_noise_grad_bound = exit.noise_grad_bound;
+                                    result.cost_stall_probe_scale = exit.probe_scale;
                                     // Preserve HOW ARC stopped so the mandatory
                                     // final analytic certificate can report the
                                     // checkpoint provenance without confusing it
@@ -2256,6 +2257,7 @@ pub(crate) fn run_outer_with_plan(
                                     // certificate honors the same flat band the
                                     // guard certified in the loop.
                                     result.flat_noise_grad_bound = exit.noise_grad_bound;
+                                    result.cost_stall_probe_scale = exit.probe_scale;
                                     // Preserve HOW BFGS stopped even when the
                                     // guard already certified the stalled score
                                     // surface (mirrors the ARC branch above).

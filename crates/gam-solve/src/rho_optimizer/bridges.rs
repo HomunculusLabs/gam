@@ -332,6 +332,34 @@ pub(crate) enum ProbeNoiseVerdict {
 }
 
 impl ProbeNoiseVerdict {
+    /// The two quantities the ratio was formed from, whether or not the ratio
+    /// licensed a bound: `(noise_floor σ̂, probe_radius Δ)`.
+    ///
+    /// `certified_bound` deliberately answers only "may this rung certify",
+    /// which is `None` for both `Unmeasured` and `Unresolvable` — so a stall
+    /// that measured σ̂ and Δ and found them unresolving is indistinguishable,
+    /// downstream, from a stall that measured nothing. Those are different
+    /// facts about a halt, and on the #1575 fixture they are the deciding ones:
+    /// σ̂ is the per-step objective change the no-improvement window judged, and
+    /// Δ is the radius the accepted steps actually moved. A window that filled
+    /// because the search took microscopic steps and one that filled because
+    /// the surface is genuinely flat differ in Δ, not in the verdict label.
+    pub(crate) fn measured_scale(self) -> Option<(f64, f64)> {
+        match self {
+            Self::Unmeasured => None,
+            Self::Resolved {
+                noise_floor,
+                probe_radius,
+                ..
+            }
+            | Self::Unresolvable {
+                noise_floor,
+                probe_radius,
+                ..
+            } => Some((noise_floor, probe_radius)),
+        }
+    }
+
     /// The gradient bound this measurement licenses, if any.
     pub(crate) fn certified_bound(self) -> Option<f64> {
         match self {
@@ -553,6 +581,10 @@ pub(crate) struct CostStallExit {
     /// the certificate never adopts a `ProbeNoiseFloor` rung the guard did not
     /// actually measure.
     pub(crate) noise_grad_bound: Option<f64>,
+    /// `(noise_floor σ̂, probe_radius Δ)` as measured at the stall, independent
+    /// of whether their ratio licensed a bound. See
+    /// [`ProbeNoiseVerdict::measured_scale`].
+    pub(crate) probe_scale: Option<(f64, f64)>,
 }
 
 /// Tracks the monotone best accepted-iterate REML objective and a
@@ -1145,6 +1177,7 @@ impl CostStallGuard {
             self.probe_noise_verdict(),
         );
         let noise_grad_bound = certified.probe_noise.certified_bound();
+        let probe_scale = certified.probe_noise.measured_scale();
         let converged = best_grad_norm.is_finite() && best_grad_norm <= certified.value;
         if !converged
             && let ProbeNoiseVerdict::Unresolvable { .. } = certified.probe_noise
@@ -1163,6 +1196,7 @@ impl CostStallGuard {
                     iterations: self.accepted_iters,
                     converged,
                     noise_grad_bound,
+                    probe_scale,
                 });
             }
             return CostStallVerdict::Converged;
@@ -1269,6 +1303,7 @@ impl CostStallGuard {
                 iterations: self.accepted_iters,
                 converged,
                 noise_grad_bound,
+                probe_scale,
             });
         }
         CostStallVerdict::FlatValleyStall {
@@ -1323,6 +1358,7 @@ impl CostStallGuard {
                 // Not a halted stall: no noise-floor measurement is claimed
                 // for a running best-so-far snapshot (#2241).
                 noise_grad_bound: None,
+                probe_scale: None,
             });
         }
     }

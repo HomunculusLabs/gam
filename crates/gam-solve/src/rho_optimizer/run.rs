@@ -1323,6 +1323,14 @@ pub struct OuterResult {
     /// gradient unfreezes it — no silent clamping of a coordinate that stops
     /// wanting the rail).
     pub active_set_reseed: Option<ActiveSetReseed>,
+    /// `(noise_floor σ̂, probe_radius Δ)` the cost-stall guard measured over its
+    /// stall window, when a stall produced this result. Present whether or not
+    /// their ratio licensed a `flat_noise_grad_bound`: σ̂ is the per-step
+    /// objective change the no-improvement window judged and Δ is the radius the
+    /// accepted steps moved, and a window that filled because the search took
+    /// microscopic steps is told from one that filled because the surface is
+    /// flat by Δ, not by the verdict.
+    pub cost_stall_probe_scale: Option<(f64, f64)>,
     /// Which lane produced this result. See [`OuterResultOrigin`].
     pub origin: OuterResultOrigin,
 }
@@ -1368,6 +1376,7 @@ impl OuterResult {
             saddle_escape_reseed: None,
             wrong_rail_reseed: None,
             active_set_reseed: None,
+            cost_stall_probe_scale: None,
             origin: OuterResultOrigin::Solver,
         }
     }
@@ -2496,6 +2505,14 @@ fn outer_nonconvergence_error(
     // A stall halted against a noise bound and a stall halted against the
     // score-relative flat band are different verdicts, and only the first
     // carries this.
+    let reason = match result.cost_stall_probe_scale {
+        Some((noise_floor, probe_radius)) => format!(
+            "{reason}, cost_stall_window=[noise_floor={noise_floor:.6e}, \
+             probe_radius={probe_radius:.6e}, ratio={:.6e}]",
+            noise_floor / probe_radius
+        ),
+        None => reason,
+    };
     let reason = match result.flat_noise_grad_bound {
         Some(bound) => format!("{reason}, flat_noise_grad_bound={bound:.6e}"),
         None => reason,
