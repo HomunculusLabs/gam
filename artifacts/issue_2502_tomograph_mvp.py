@@ -83,6 +83,17 @@ def main():
             h = h + blk.down(torch.relu(pre))
         return model.norm(h)[:, -1, :], pres
 
+    CHUNK = 128   # keep peak activation memory (B x ctx x 4d, f64) modest
+
+    def forward_chunked(x_last, base, pos_ids, want_pres=True):
+        outs, press = [], None
+        for s0 in range(0, x_last.shape[0], CHUNK):
+            o, p = forward_batch(x_last[s0:s0 + CHUNK], base, pos_ids, want_pres)
+            outs.append(o)
+            if want_pres:
+                press = [torch.cat([a, b]) for a, b in zip(press, p)] if press else list(p)
+        return torch.cat(outs), press
+
     for ray_i in range(n_rays):
         start = int(rng.integers(0, len(ids_all) - ctx - 2))
         seq = torch.tensor(ids_all[start:start + ctx], device=dev)
@@ -94,7 +105,7 @@ def main():
         ts = torch.linspace(0.0, 1.0, 257, device=dev, dtype=torch.float64)
         with torch.no_grad():
             xs = (1 - ts).unsqueeze(1) * e0 + ts.unsqueeze(1) * e1
-            _, pres = forward_batch(xs, base, pos_ids)
+            _, pres = forward_chunked(xs, base, pos_ids)
             signs = torch.cat([p.sign() for p in pres], dim=1)   # (257, total)
         flips = (signs[1:] * signs[:-1] < 0).nonzero()
         if flips.numel() == 0:
@@ -117,7 +128,7 @@ def main():
             for _ in range(50):
                 mid = 0.5 * (lo + hi)
                 xs = (1 - mid).unsqueeze(1) * e0 + mid.unsqueeze(1) * e1
-                _, pres_m = forward_batch(xs, base, pos_ids)
+                _, pres_m = forward_chunked(xs, base, pos_ids)
                 pre_all = torch.cat(pres_m, dim=1)
                 val = pre_all[torch.arange(len(mid), device=dev), unit]
                 go_hi = (val.sign() == hi_sign) | (val == 0)
@@ -129,7 +140,7 @@ def main():
         # crossings in one backward (rows of the batch are independent).
         xs = ((1 - tstar).unsqueeze(1) * e0 + tstar.unsqueeze(1) * e1)
         xs = xs.detach().requires_grad_(True)
-        _, pres_g = forward_batch(xs, base, pos_ids)
+        _, pres_g = forward_chunked(xs, base, pos_ids)
         pre_all = torch.cat(pres_g, dim=1)
         sel = pre_all[torch.arange(len(tstar), device=dev), unit].sum()
         sel.backward()
@@ -143,9 +154,9 @@ def main():
         eps = float(np.cbrt(np.finfo(np.float64).eps)) * float(emb.norm(dim=1).median())
         with torch.no_grad():
             x0 = ((1 - tstar).unsqueeze(1) * e0 + tstar.unsqueeze(1) * e1)
-            out0, _ = forward_batch(x0, base, pos_ids, want_pres=False)
-            outp, _ = forward_batch(x0 + eps * n_unit, base, pos_ids, want_pres=False)
-            outm, _ = forward_batch(x0 - eps * n_unit, base, pos_ids, want_pres=False)
+            out0, _ = forward_chunked(x0, base, pos_ids, want_pres=False)
+            outp, _ = forward_chunked(x0 + eps * n_unit, base, pos_ids, want_pres=False)
+            outm, _ = forward_chunked(x0 - eps * n_unit, base, pos_ids, want_pres=False)
             u_vecs = (outp + outm - 2 * out0) / eps
             u_norms = u_vecs.norm(dim=1)
         good = torch.isfinite(u_norms) & (u_norms > 1e-9)
