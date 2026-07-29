@@ -1214,6 +1214,23 @@ pub struct OuterResult {
     /// [`certify_outer_optimality`] folds it into the stationarity bound so the
     /// final re-measured gradient is judged against the same flat certificate
     /// the guard granted.
+    /// Why the solver's line search gave up, when it did (#2465).
+    ///
+    /// `opt` reports `LineSearchFailureReason` plus the attempt count on
+    /// `BfgsError::LineSearchFailed`, and the two variants have opposite
+    /// causes: `StepSizeTooSmall` means the direction WAS a descent direction
+    /// and no usable step decreased the objective — an objective/gradient
+    /// inconsistency or evaluation noise — while `MaxAttempts` means the
+    /// bracketing never closed, a pathological landscape. The bridge used to
+    /// drop both on the floor: a line-search failure whose last iterate is
+    /// finite is returned as `Ok(non-converged)`, so the caller never sees the
+    /// `Err` that carries them, and the certificate could say only
+    /// `termination=line_search_failed(|g|=…)` — the verdict without the
+    /// quantity it was decided against.
+    ///
+    /// `None` means no line search failed (or no `opt` solver produced this
+    /// result at all).
+    pub line_search_failure: Option<(LineSearchFailureReason, usize)>,
     pub flat_noise_grad_bound: Option<f64>,
     /// Post-fit PSIS diagnostic for whether sampled smoothing-parameter weights
     /// show evidence that plug-in REML/LAML intervals are unreliable. Populated
@@ -1303,6 +1320,7 @@ impl OuterResult {
             operator_stop_reason: None,
             solver_termination: None,
             criterion_certificate: None,
+            line_search_failure: None,
             flat_noise_grad_bound: None,
             rho_uncertainty_diagnostic: None,
             tail_snap_reseed: None,
@@ -2423,6 +2441,17 @@ fn outer_nonconvergence_error(
             .map(|via| format!(", converged_via={via:?}"))
             .unwrap_or_default(),
     );
+    // #2465: the line search's own verdict, when one failed. `StepSizeTooSmall`
+    // and `MaxAttempts` are different defects with different repairs, and
+    // "line_search_failed" alone distinguishes neither.
+    let reason = match result.line_search_failure {
+        Some((failure_reason, max_attempts)) => format!(
+            "{reason}, line_search={failure_reason:?} after {max_attempts} attempt(s) \
+             [StepSizeTooSmall = the direction descended but no step improved the \
+             objective; MaxAttempts = the bracket never closed]"
+        ),
+        None => reason,
+    };
     EstimationError::RemlDidNotConverge {
         context: context.to_string(),
         reason,

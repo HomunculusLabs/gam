@@ -2187,7 +2187,24 @@ pub(crate) fn run_outer_with_plan(
                                     .as_ref()
                                     .is_none_or(|g| g.iter().all(|v| v.is_finite()))
                             {
-                                Ok(solution_into_outer_result(*last_solution, false, *the_plan))
+                                // Carry the line search's own verdict (#2465).
+                                //
+                                // This arm turns a line-search failure with a
+                                // finite last iterate into `Ok(non-converged)`,
+                                // which is right -- the iterate is usable as a
+                                // checkpoint -- but it means the caller NEVER
+                                // sees the `Err` that holds `failure_reason` and
+                                // `max_attempts`. Downstream the certificate
+                                // could say only `termination=line_search_failed`,
+                                // and `StepSizeTooSmall` (the direction descended
+                                // but nothing improved the objective) and
+                                // `MaxAttempts` (the bracket never closed) are
+                                // different defects with different repairs.
+                                let mut outer_result =
+                                    solution_into_outer_result(*last_solution, false, *the_plan);
+                                outer_result.line_search_failure =
+                                    Some((failure_reason, max_attempts));
+                                Ok(outer_result)
                             } else {
                                 Err(EstimationError::RemlOptimizationFailed(
                                     bfgs_line_search_failure_message(
