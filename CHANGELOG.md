@@ -1,5 +1,30 @@
 ## Unreleased
 
+- **A flat-valley verdict now requires a flat valley (#2613).** The outer
+  cost-stall guard — the mgcv-style stop that halts a smoothing-parameter search
+  once the criterion stops improving over six consecutive **accepted** steps —
+  was being fed every gradient evaluation, on the premise that the optimizer
+  only asks for a gradient at points it has accepted. It does not: a
+  strong-Wolfe line search evaluates the gradient at every trial that clears
+  Armijo, because the curvature condition needs it. A search bisecting toward a
+  point therefore reported six "steps" whose criterion values differed
+  negligibly — of course they did, they were converging to a point — and the
+  guard halted the fit *inside* one iteration, shipping a non-stationary
+  checkpoint labelled "weakly-identified valley floor" and a refusal that
+  counted line-search probes as outer iterations. The guard now consumes the
+  optimizer's own accepted-step signal.
+- **Outer stationarity no longer depends on where the search started (#2613).**
+  The threshold a fit is judged converged against carried a component resolved
+  once, at the seed, against the criterion's value *there*. Across the seeds of
+  a single fit that spread the threshold over eighteen orders of magnitude, and
+  a seed that happened to land somewhere absurd produced a threshold no gradient
+  can fail — so the search claimed convergence against the wrong smoothing rail.
+  The solver's threshold is now a function of the declared problem alone, the
+  certificate keeps the per-point form it always meant, and the certificate can
+  never be *stricter* than the threshold the solver was told to reach — which
+  closes the "solver claimed convergence, certificate refused" family by
+  construction rather than by retry.
+
 - **A fit that has no criterion says so, everywhere (#2595).** `Summary.reml_score`
   and `raw_reml_score` were `0.0` on every exactly-interpolating Gaussian fit,
   because `UnifiedFitResult` had no way to express "no criterion exists here" and
