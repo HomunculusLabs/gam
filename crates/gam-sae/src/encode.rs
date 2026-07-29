@@ -5193,6 +5193,124 @@ mod encode_fix_tests {
     /// data-placed centers, risking an under-estimate of `L` (false certificate).
     /// The refusal routes every Duchon row to the exact multi-start encode. A
     /// non-Duchon control atom is NOT auto-zeroed by this guard.
+    /// #2518 — the `d = 1` periodic fiber enumerator must minimise the encode's
+    /// OWN objective, over the whole period.
+    ///
+    /// This gates the one assumption that could make the wiring a silent no-op
+    /// rather than a visible break: `PeriodicCurveExtrema` assumes the harmonic
+    /// ordering `[1, sin τt, cos τt, sin 2τt, cos 2τt, …]`, and
+    /// `build_periodic_fiber` hands it `G = D Dᵀ` in whatever order
+    /// `PeriodicHarmonicEvaluator` emits. If those disagree the enumerated point
+    /// is a stationary point of a DIFFERENT curve, it never wins the encode's
+    /// reconstruction-error comparison, and the union quietly reverts to top-K
+    /// routing with nothing red anywhere.
+    ///
+    /// The decoder is deliberately FOLDED — a second harmonic large enough that
+    /// the decoded curve crosses near itself — so the objective genuinely has
+    /// competing basins and agreeing with a dense scan is a real claim rather
+    /// than a unimodal tautology. The scan is the test's oracle only; the
+    /// enumeration itself uses no lattice.
+    #[test]
+    fn the_d1_periodic_fiber_enumerator_minimises_the_encode_objective_2518() {
+        let m = 5usize;
+        let decoder = ndarray::array![
+            [0.00_f64, 0.00],
+            [1.00, 0.00],
+            [0.00, 1.00],
+            [0.00, 0.90],
+            [0.90, 0.00],
+        ];
+        let atom = SaeManifoldAtom::new_with_provided_function_gram(
+            "folded",
+            SaeAtomBasisKind::Periodic,
+            1,
+            Array2::<f64>::eye(m),
+            Array3::<f64>::zeros((m, m, 1)),
+            decoder.clone(),
+            Array2::<f64>::eye(m),
+        )
+        .expect("folded periodic atom builds");
+        let fiber = build_periodic_fiber(&atom)
+            .expect("a d = 1 periodic atom of odd harmonic width carries the enumerator");
+        let evaluator = PeriodicHarmonicEvaluator::new(m).expect("evaluator");
+
+        let scan = 40_000usize;
+        let mut folded_targets = 0usize;
+        for probe in 0..23usize {
+            // Targets swept around and across the folded image, so some sit in
+            // the ambiguous region where two branches compete.
+            let angle = std::f64::consts::TAU * probe as f64 / 23.0;
+            let radius = 0.35 + 0.75 * ((probe % 5) as f64 / 4.0);
+            let x = Array1::from(vec![radius * angle.cos(), radius * angle.sin()]);
+
+            let projected = decoder.dot(&x);
+            let linear: Vec<f64> = projected.iter().copied().collect();
+            let extremum = fiber
+                .minimize_squared_distance(&linear)
+                .expect("the fiber enumerates");
+
+            let recon_error = |t: f64| -> f64 {
+                let coords =
+                    Array2::from_shape_vec((1, 1), vec![t]).expect("coordinate shape");
+                let (phi, _) = evaluator.evaluate(coords.view()).expect("basis evaluates");
+                let recon = phi.row(0).dot(&decoder);
+                (&recon - &x).dot(&(&recon - &x))
+            };
+
+            let mut best_scan = (f64::INFINITY, 0.0_f64);
+            let mut second_basin = f64::INFINITY;
+            for step in 0..scan {
+                let t = step as f64 / scan as f64;
+                let err = recon_error(t);
+                if err < best_scan.0 {
+                    best_scan = (err, t);
+                }
+            }
+            // The competing basin: the best point at least a fifth of a period
+            // away from the winner, which is what "folded" means here.
+            for step in 0..scan {
+                let t = step as f64 / scan as f64;
+                let gap = (t - best_scan.1).abs();
+                if gap.min(1.0 - gap) < 0.2 {
+                    continue;
+                }
+                second_basin = second_basin.min(recon_error(t));
+            }
+            if second_basin < best_scan.0 * 4.0 {
+                folded_targets += 1;
+            }
+
+            let enumerated = recon_error(extremum.coordinate);
+            assert!(
+                enumerated <= best_scan.0 + 1.0e-8 * (1.0 + best_scan.0),
+                "probe {probe}: the enumerated coordinate {:.9} reconstructs at {:.12e}, \
+                 worse than the scan's best {:.12e} at t = {:.9} — the enumerator and the \
+                 evaluator disagree about the harmonic ordering",
+                extremum.coordinate,
+                enumerated,
+                best_scan.0,
+                best_scan.1
+            );
+        }
+        assert!(
+            folded_targets >= 5,
+            "the fixture must actually fold: only {folded_targets} of 23 targets had a \
+             competing basin within 4x of the winner, so agreeing with the scan proves \
+             nothing about multi-basin routing"
+        );
+
+        // The guard is a capability declaration, not a default: a family whose
+        // fiber is NOT one Laurent polynomial gets no enumerator.
+        assert!(
+            build_periodic_fiber(&tiny_atom(SaeAtomBasisKind::Linear, 1)).is_none(),
+            "a linear atom must not claim the period-one harmonic enumerator"
+        );
+        assert!(
+            build_periodic_fiber(&tiny_atom(SaeAtomBasisKind::Torus, 2)).is_none(),
+            "a d = 2 atom must not claim the one-dimensional enumerator"
+        );
+    }
+
     #[test]
     fn f3_duchon_atoms_are_uncertifiable() {
         let atom = tiny_atom(SaeAtomBasisKind::Duchon, 1);
