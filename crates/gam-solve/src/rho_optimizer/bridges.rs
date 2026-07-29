@@ -491,6 +491,40 @@ impl std::fmt::Display for FlatValleyGradBound {
 /// still terminates (reported non-converged) rather than grinding to `max_iter`.
 pub(crate) const STUCK_STALL_MAX_ESCAPES: usize = 8;
 
+/// The incumbent state a stall escape was granted from, compared by raw bits.
+///
+/// Bit identity is the only comparison that supports the claim the escape cut
+/// makes. The cut asserts that reopening the no-improvement window CANNOT
+/// produce a different outcome, and that follows only from the search being in
+/// the state it was in last time: a deterministic procedure replayed from an
+/// identical state returns an identical result. Any tolerance weaker than
+/// identity turns that proof into a guess about how much movement counts as
+/// progress, and #2392 measured what such a guess costs — a run halted at
+/// escape 1 of 8 with a residual gradient 165x its own keep-descending
+/// threshold, because one window improved the best by less than roundoff while
+/// the search was still moving.
+///
+/// Raw bits also keep the comparison total where a float comparison is not:
+/// two non-finite incumbents match only when their payloads match, and `-0.0`
+/// is not `0.0` — both errors, when made, are made on the safe side (grant the
+/// escape, do not cut the budget).
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct EscapeIncumbent {
+    rho: Vec<u64>,
+    value: u64,
+    grad_norm: u64,
+}
+
+impl EscapeIncumbent {
+    fn new(rho: &Array1<f64>, value: f64, grad_norm: f64) -> Self {
+        Self {
+            rho: rho.iter().map(|value| value.to_bits()).collect(),
+            value: value.to_bits(),
+            grad_norm: grad_norm.to_bits(),
+        }
+    }
+}
+
 /// Best iterate captured by a cost-stall convergence, handed from the bridge
 /// (which is moved into `opt::Bfgs`) back to the seed-loop runner via the
 /// guard's shared cell.
@@ -1192,7 +1226,7 @@ impl CostStallGuard {
         // incumbent did not improve, and #2392 is what keying this on the
         // value alone cost: a still-descending run halted at escape 1 of 8
         // carrying |g| = 2.479e2 against a keep-descending threshold of 1.5.
-        let escape_incumbent = EscapeIncumbent::new(best_rho.as_ref(), best_value, best_grad_norm);
+        let escape_incumbent = EscapeIncumbent::new(&best_rho, best_value, best_grad_norm);
         let previous_escape_replayed = self
             .incumbent_at_last_escape
             .as_ref()
