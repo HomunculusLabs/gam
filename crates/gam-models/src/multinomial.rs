@@ -4638,6 +4638,93 @@ mod reference_class_invariance_tests {
         );
     }
 
+    /// #2615 diagnostic (zz_measure): does the outer REML criterion SEE the
+    /// rank-1 null-space smoothing coordinate at all?
+    ///
+    /// The production penguins fit selects EVERY joint λ exactly on its
+    /// effective-df-floor wall, and the raw outer gradient prints `+0.0000` at
+    /// every rank-1 (null-space) coordinate while the rank-8 (wiggliness)
+    /// coordinates carry |g| ≈ 1.9. If that near-zero is the true derivative,
+    /// the criterion is genuinely flat in the linear direction's λ and the
+    /// df floor is making a modelling choice REML declines to make. If central
+    /// FD disagrees, the analytic outer gradient is desynced from its own
+    /// criterion on exactly the coordinate #2608/#2612 had to pin by hand.
+    ///
+    /// `sample_classes` draws a PURELY LINEAR softmax, so the whole signal
+    /// lives in the null space of the wiggliness penalty — the same geometry
+    /// as penguins, at a fixture cost. Prints only; never asserts a bound.
+    #[test]
+    fn zz_measure_2615_nullspace_outer_gradient_fd() {
+        let td = tempdir().expect("tempdir");
+        let dir = td.path();
+        let (x, cls) = sample_classes(0, 300);
+        let labels: Vec<String> = cls
+            .iter()
+            .map(|&c| ["A", "B", "C"][c].to_string())
+            .collect();
+        let train = dataset_xy(dir, "fd2615", &x, &labels);
+        let config = FitConfig::default();
+        let request = MultinomialFitRequest {
+            init_lambda: 1.0,
+            max_iter: 60,
+            tol: 1e-6,
+            ..MultinomialFitRequest::new(&train, "y ~ s(x)", &config)
+        };
+        let parts = penalized_multinomial_formula_parts(&request)
+            .expect("production formula parts must build");
+        let mut probe_options = parts.options.clone();
+        probe_options.compute_covariance = false;
+
+        // Coordinate layout: joint specs are emitted term-major, K per-class
+        // specs per term, so with one smooth (wiggliness + null space) and
+        // K = 3 this is [w,w,w, n,n,n].
+        let eval_at = |rho_vec: &[f64]| -> (f64, ndarray::Array1<f64>, bool) {
+            let fam = parts
+                .family
+                .clone()
+                .with_joint_initial_log_lambdas(rho_vec.to_vec());
+            let diagnostics = crate::custom_family::evaluate_labeled_outer_criterion_for_diagnostics(
+                &fam,
+                &parts.blocks,
+                &probe_options,
+                &ndarray::Array1::from(rho_vec.to_vec()),
+                gam_problem::EvalMode::ValueAndGradient,
+            )
+            .expect("labeled outer evaluation");
+            (
+                diagnostics.objective,
+                diagnostics.gradient,
+                diagnostics.inner_converged,
+            )
+        };
+
+        // The wiggliness coordinate is held where the production fit puts it
+        // (hard against its own wall); only the null-space coordinate moves.
+        const RHO_WIGGLE: f64 = 8.0;
+        let h = 1.0e-3;
+        eprintln!(
+            "#2615 null-space profile (rho_wiggle={RHO_WIGGLE}, one smooth, K=3, n=300)"
+        );
+        for step in 0..11 {
+            let rho_n = -8.0 + 2.0 * step as f64;
+            let rho: Vec<f64> = vec![RHO_WIGGLE, RHO_WIGGLE, RHO_WIGGLE, rho_n, rho_n, rho_n];
+            let (v, g, conv) = eval_at(&rho);
+            let mut plus = rho.clone();
+            let mut minus = rho.clone();
+            plus[3] += h;
+            minus[3] -= h;
+            let (vp, _, _) = eval_at(&plus);
+            let (vm, _, _) = eval_at(&minus);
+            let fd = (vp - vm) / (2.0 * h);
+            eprintln!(
+                "#2615   rho_null={rho_n:+.1}  V={v:.9e}  g[3]analytic={:+.6e}                   g[3]fd={fd:+.6e}  ratio={:+.3e}  g[0]analytic={:+.6e}  inner_conv={conv}",
+                g[3],
+                if fd.abs() > 0.0 { g[3] / fd } else { f64::NAN },
+                g[0],
+            );
+        }
+    }
+
     /// #2349 diagnostic (zz_measure): finite-difference the OUTER REML
     /// criterion of the EXACT production multinomial objective at the refusal
     /// checkpoint from MSI job 13390650. The certificate there claimed
