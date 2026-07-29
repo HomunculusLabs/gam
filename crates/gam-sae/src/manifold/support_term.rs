@@ -1137,7 +1137,33 @@ impl SaeSupportSparseTerm {
                 })?;
                 let width = grid_offset[atom_index + 1] - grid_offset[atom_index];
                 for g in 0..width {
-                    let raw = -1.0 + 2.0 * (g as f64 / width as f64);
+                    // Sample the CHART coordinate, not the pre-squash
+                    // variable. `chart_coordinate` squashes periodic kinds
+                    // through `0.5 + atan(raw)/PI`, so a `raw` grid on
+                    // [-1, 1] reaches only `t` in [0.25, 0.75] -- half the
+                    // period -- and the greedy would rank such an atom
+                    // without ever evaluating the other half. Cell centres
+                    // are used there because a periodic cell's endpoints are
+                    // the same point and `tan` diverges at them.
+                    //
+                    // Every other kind passes `raw` through unchanged, and for
+                    // those the closed interval is right: the previous
+                    // `g / width` excluded the upper endpoint, so a width-2
+                    // atom was ranked at {-1, 0} and never at its positive
+                    // extreme. `width` is `basis_size().max(2)`, so
+                    // `width - 1 >= 1`.
+                    let periodic_chart = matches!(
+                        atom.basis_kind(),
+                        SaeAtomBasisKind::Periodic
+                            | SaeAtomBasisKind::Torus
+                            | SaeAtomBasisKind::KleinBottle
+                    );
+                    let raw = if periodic_chart {
+                        let u = (g as f64 + 0.5) / width as f64;
+                        (std::f64::consts::PI * (u - 0.5)).tan()
+                    } else {
+                        -1.0 + 2.0 * (g as f64 / (width - 1) as f64)
+                    };
                     let t = super::support_seed::chart_coordinate(atom.basis_kind(), 0, raw);
                     let coordinate = Array2::from_shape_vec((1, 1), vec![t])
                         .map_err(|error| format!("reroute grid: {error}"))?;
