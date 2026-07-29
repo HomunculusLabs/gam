@@ -1388,6 +1388,30 @@ fn run_filter_ball(
     q: Ball,
     order: usize,
 ) -> Result<BallFilterPass, SplineScoreProofError> {
+    run_filter_ball_traced(nodes, q, order, None)
+}
+
+/// One `(node, quantity, ball)` record of the `d3` recursion, for the caller
+/// that asked to see it.
+///
+/// A refusal names the accumulator that left the finite range; it cannot show
+/// how the width GOT there, and that is the difference between "the recursion
+/// grows" and "the interval evaluation cannot see a cancellation the exact
+/// arithmetic has". Only a caller that passes a sink pays for this.
+type BallTraceRecord = (usize, &'static str, Ball);
+
+/// Diagonal names for the traced covariance jets, indexed by state coordinate.
+const D3_DIAGONAL_NAMES: [&str; MAX_ORDER] = ["d3_upd_00", "d3_upd_11", "d3_upd_22"];
+const D2_DIAGONAL_NAMES: [&str; MAX_ORDER] = ["d2_upd_00", "d2_upd_11", "d2_upd_22"];
+const D1_DIAGONAL_NAMES: [&str; MAX_ORDER] = ["d1_upd_00", "d1_upd_11", "d1_upd_22"];
+const P_DIAGONAL_NAMES: [&str; MAX_ORDER] = ["p_upd_00", "p_upd_11", "p_upd_22"];
+
+fn run_filter_ball_traced(
+    nodes: &[PooledNode],
+    q: Ball,
+    order: usize,
+    mut trace: Option<&mut Vec<BallTraceRecord>>,
+) -> Result<BallFilterPass, SplineScoreProofError> {
     let mut a: BallVec = [Ball::ZERO; MAX_ORDER];
     let mut a_d1: BallVec = [Ball::ZERO; MAX_ORDER];
     let mut a_d2: BallVec = [Ball::ZERO; MAX_ORDER];
@@ -1624,7 +1648,8 @@ fn run_filter_ball(
             let a_d2_operator = ball_update_operator_derivative(&gain_d2, order);
 
             // d³P⁺ = A D₃ Aᵀ + A″D₁Aᵀ + A D₁A″ᵀ + 2A′D₂Aᵀ + 2A D₂A′ᵀ + 2A′D₁A′ᵀ
-            let mut p_new_d3 = ball_congruence(&a_operator, &d3_pred, &a_operator, order);
+            let d3_congruence = ball_congruence(&a_operator, &d3_pred, &a_operator, order);
+            let mut p_new_d3 = d3_congruence;
             let d3_second = ball_congruence(&a_d2_operator, &d1_pred, &a_operator, order);
             let d3_first = ball_congruence(&a_d1_operator, &d2_pred, &a_operator, order);
             let d3_both = ball_congruence(&a_d1_operator, &d1_pred, &a_d1_operator, order);
@@ -1641,6 +1666,31 @@ fn run_filter_ball(
             let mut gain_d3 = [Ball::ZERO; MAX_ORDER];
             for i in 0..order {
                 gain_d3[i] = p_new_d3[i][0].div_positive(r);
+            }
+
+            if let Some(sink) = trace.as_mut() {
+                for record in [
+                    ("f_star", f_star),
+                    ("inv_f", inv_f),
+                    ("a_operator_00", a_operator[0][0]),
+                    ("gain_0", gain[0]),
+                    ("gain_d1_0", gain_d1[0]),
+                    ("gain_d2_0", gain_d2[0]),
+                    ("gain_d3_0", gain_d3[0]),
+                    ("d3_pred_00", d3_pred[0][0]),
+                    ("d3_congruence_00", d3_congruence[0][0]),
+                    ("d3_term_a2_d1_at", d3_second[0][0]),
+                    ("d3_term_a1_d2_at", d3_first[0][0]),
+                    ("d3_term_a1_d1_a1t", d3_both[0][0]),
+                ] {
+                    sink.push((t, record.0, record.1));
+                }
+                for i in 0..order {
+                    sink.push((t, P_DIAGONAL_NAMES[i], p_new[i][i]));
+                    sink.push((t, D1_DIAGONAL_NAMES[i], p_new_d1[i][i]));
+                    sink.push((t, D2_DIAGONAL_NAMES[i], p_new_d2[i][i]));
+                    sink.push((t, D3_DIAGONAL_NAMES[i], p_new_d3[i][i]));
+                }
             }
 
             // Mean update through the SAME operator, for the same reason.
@@ -1801,6 +1851,12 @@ fn run_filter_ball(
             p_star_d1 = p_next_d1;
             p_star_d2 = p_next_d2;
             p_star_d3 = p_next_d3;
+            if let Some(sink) = trace.as_mut() {
+                sink.push((t, "p_next_00", p_star[0][0]));
+                sink.push((t, "d1_next_00", p_star_d1[0][0]));
+                sink.push((t, "d2_next_00", p_star_d2[0][0]));
+                sink.push((t, "d3_next_00", p_star_d3[0][0]));
+            }
             if diffuse_rank > 0 {
                 let mut pi_next =
                     ball_mat_mul(&ball_mat_mul(&f_t, &p_inf, order), &f_t_t, order);
@@ -3177,28 +3233,9 @@ mod tests {
     #[test]
     fn weighted_scan_dgp_2300_search_terminates_in_bounded_evaluations() {
         // Deterministic stand-in for the acceptance DGP (xorshift Box-Muller;
-        // the hang class is structural, not noise-realization-specific).
-        let n = 180usize;
-        let mut state: u64 = 0x2300_2300_2300_2300;
-        let mut next_unit = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            (state >> 11) as f64 / (1u64 << 53) as f64
-        };
-        let mut x = Vec::with_capacity(n);
-        let mut y = Vec::with_capacity(n);
-        let mut w = Vec::with_capacity(n);
-        for i in 0..n {
-            let xi = -2.0 + 4.0 * (i as f64) / ((n - 1) as f64);
-            let wi: f64 = if xi < 0.0 { 1.0 } else { 9.0 };
-            let u1 = next_unit().max(1e-12);
-            let u2 = next_unit();
-            let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-            x.push(xi);
-            w.push(wi);
-            y.push(0.4 + (1.3 * xi).sin() + (0.45 / wi.sqrt()) * z);
-        }
+        // the hang class is structural, not noise-realization-specific). Shared
+        // with the `d3` enclosure diagnostic so the two cannot drift apart.
+        let (x, y, w) = dgp_2300();
         // Every smoothing order, not just the cubic: the order-3 (quintic)
         // search has a deeper λ→∞ tail walk (scale shift (2m−1)·log L) and a
         // larger residual-d.f. Lipschitz constant, and was the remaining
@@ -3275,6 +3312,155 @@ mod tests {
             }
         }
     }
+    /// The #2300 weighted-scan DGP, as its own function so the certified-search
+    /// test and the `d3` enclosure diagnostics below read the SAME data rather
+    /// than two copies that can drift apart.
+    fn dgp_2300() -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let n = 180usize;
+        let mut state: u64 = 0x2300_2300_2300_2300;
+        let mut next_unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut x = Vec::with_capacity(n);
+        let mut y = Vec::with_capacity(n);
+        let mut w = Vec::with_capacity(n);
+        for i in 0..n {
+            let xi = -2.0 + 4.0 * (i as f64) / ((n - 1) as f64);
+            let wi: f64 = if xi < 0.0 { 1.0 } else { 9.0 };
+            let u1 = next_unit().max(1e-12);
+            let u2 = next_unit();
+            let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+            x.push(xi);
+            w.push(wi);
+            y.push(0.4 + (1.3 * xi).sin() + (0.45 / wi.sqrt()) * z);
+        }
+        (x, y, w)
+    }
+
+    /// The certified `q` the search actually evaluates at, built exactly as
+    /// [`certified_concentrated_criterion_jet`] builds it.
+    fn certified_q(log_lambda: f64) -> Ball {
+        let q_value =
+            gam_problem::checked_exp_log_strength(-log_lambda).expect("inverse log strength");
+        let enclosure =
+            gam_math::score_opt::certified_exp(-log_lambda).expect("certified exponential");
+        Ball::certified(q_value, enclosure)
+    }
+
+    /// A `d3` covariance enclosure must survive a pass at every `ρ` the
+    /// certified search visits.
+    ///
+    /// This is the #2614 cluster-A non-termination, isolated to ONE ball pass so
+    /// it fails in milliseconds instead of blowing the lane's run budget through
+    /// the branch-and-bound search that consumes it. The search cannot bracket
+    /// an optimum whose endpoint jets refuse, and a refusal here is the reason
+    /// `weighted_scan_dgp_2300_search_terminates_in_bounded_evaluations` and
+    /// `order_one_scan_matches_dense_random_walk_posterior` do not terminate.
+    ///
+    /// The failure message is the measurement: per node it reports the VALUE and
+    /// the enclosure WIDTH of each summand of
+    ///
+    ///     d³P⁺ = A D₃ Aᵀ + (A″D₁Aᵀ + h.c.) + 2(A′D₂Aᵀ + h.c.) + 2A′D₁A′ᵀ
+    ///
+    /// separately, plus the predicted jet either side of the transition. A term
+    /// whose WIDTH grows while its VALUE does not is a cancellation the ball
+    /// arithmetic cannot see, and is repaired by rewriting that term; if the
+    /// VALUES grow too, the recursion itself is unbounded and no rewrite helps.
+    #[test]
+    fn d3_covariance_enclosure_survives_every_visited_rho_on_the_2300_scan() {
+        let (x, y, w) = dgp_2300();
+        // `q = 1.641e7` is the value the refusal reported when this was first
+        // measured (#2614); the neighbours bracket it so the scan reports where
+        // the finite range ends rather than only whether one point fails.
+        let visited = [-24.0_f64, -20.0, -18.0, -16.6135, -14.0, -10.0, -6.0, 0.0, 6.0];
+        let mut report = String::new();
+        let mut first_failure: Option<(usize, f64)> = None;
+        for order in 1..=MAX_ORDER {
+            let (nodes, _, _) = pool_nodes(&x, &y, &w, order).expect("pool");
+            for &log_lambda in &visited {
+                let q = certified_q(log_lambda);
+                match run_filter_ball(&nodes, q, order) {
+                    Ok(pass) => report.push_str(&format!(
+                        "order {order} rho {log_lambda}: ok, sum_v2_over_f_d3 width {:e}, \
+                         sum_log_f_d3 width {:e}\n",
+                        pass.sum_v2_over_f_d3.hi - pass.sum_v2_over_f_d3.lo,
+                        pass.sum_log_f_d3.hi - pass.sum_log_f_d3.lo,
+                    )),
+                    Err(error) => {
+                        report.push_str(&format!(
+                            "order {order} rho {log_lambda}: REFUSED {error:?}\n"
+                        ));
+                        if first_failure.is_none() {
+                            first_failure = Some((order, log_lambda));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((order, log_lambda)) = first_failure {
+            let (nodes, _, _) = pool_nodes(&x, &y, &w, order).expect("pool");
+            let mut trace: Vec<BallTraceRecord> = Vec::new();
+            let error = run_filter_ball_traced(
+                &nodes,
+                certified_q(log_lambda),
+                order,
+                Some(&mut trace),
+            )
+            .err();
+            let recorded: HashMap<(usize, &str), Ball> = trace
+                .iter()
+                .map(|&(node, name, ball)| ((node, name), ball))
+                .collect();
+            let last_node = trace.last().map(|&(node, _, _)| node).unwrap_or(0);
+            let columns = [
+                "p_upd_00",
+                "d1_upd_00",
+                "d2_upd_00",
+                "d3_upd_00",
+                "d3_pred_00",
+                "d3_congruence_00",
+                "d3_term_a2_d1_at",
+                "d3_term_a1_d2_at",
+                "d3_term_a1_d1_a1t",
+                "d3_next_00",
+                "gain_d1_0",
+                "gain_d2_0",
+                "gain_d3_0",
+                "a_operator_00",
+                "inv_f",
+            ];
+            report.push_str(&format!(
+                "\nTRACE order {order} rho {log_lambda} (last traced node {last_node}), \
+                 refusal {error:?}\nnode quantity value width\n"
+            ));
+            for node in 0..=last_node {
+                // A stride keeps the growth curve readable while every node near
+                // the divergence is printed in full.
+                if node % 8 != 0 && node + 10 < last_node {
+                    continue;
+                }
+                for name in columns {
+                    if let Some(ball) = recorded.get(&(node, name)) {
+                        report.push_str(&format!(
+                            "{node} {name} {:e} {:e}\n",
+                            ball.value,
+                            ball.hi - ball.lo
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            first_failure.is_none(),
+            "the certified d3 jet does not survive every visited rho:\n{report}"
+        );
+    }
+
     /// Value-only diagnostic surface retained for the derivative oracle tests.
     fn concentrated_criterion(
         nodes: &[PooledNode],
