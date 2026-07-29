@@ -1720,6 +1720,39 @@ where
     }
     let h_eps = assemble(FIXED_STABILIZATION_RIDGE)?;
     if let Ok(factor) = factorize_sparse_spd(&h_eps) {
+        // Say WHY the ridge-free assembly failed (#2614).
+        //
+        // This arm is the only escalation in the ladder that reported nothing.
+        // Step 2 computes a Gershgorin bound and warns; step 1 just silently
+        // returned a nonzero ridge, so "the fit took a 1e-8 ridge" arrived
+        // downstream with no way to ask whether that was round-off (which the
+        // comment above asserts is the only possible cause) or genuine
+        // indefiniteness that happens to be small.
+        //
+        // The distinction is load-bearing, not cosmetic.
+        // `sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19` fails with
+        // `left: 1e-8, right: 0.0` on a DELIBERATELY well-conditioned n = 20
+        // fixture, and its message reads as "a ridge was applied without need".
+        // It is not: this ladder reaches 1e-8 only after `assemble(0.0)` has
+        // already failed to factorize. So the defect being reported is an
+        // assembly that is not factorizable on a well-conditioned problem, and
+        // nothing in the run record said so. The bound below is what
+        // distinguishes those two readings, and it costs one O(nnz) pass on an
+        // escalation path that is documented as the uncommon case.
+        let (gershgorin_min, diag_scale) = gershgorin_min_eig_lower_bound(&h0);
+        log::warn!(
+            "penalized Hessian did not factorize at ridge 0 and required the fixed \
+             stabilization ridge {:.3e}: Gershgorin lambda_min >= {:.3e}, diag scale \
+             {:.3e}, ratio {:.3e}. The assembly comment holds that an exact-arithmetic \
+             PSD Hessian can only fail Cholesky through round-off, so a bound that is \
+             negative by much more than the scale's round-off is evidence AGAINST that \
+             premise and should be investigated at the assembly, not absorbed by the \
+             ridge.",
+            FIXED_STABILIZATION_RIDGE,
+            gershgorin_min,
+            diag_scale,
+            gershgorin_min / diag_scale.max(f64::MIN_POSITIVE),
+        );
         return Ok((h_eps, factor, FIXED_STABILIZATION_RIDGE));
     }
 
