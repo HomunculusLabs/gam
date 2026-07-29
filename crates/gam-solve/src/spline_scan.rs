@@ -2904,6 +2904,25 @@ fn certified_concentrated_criterion_jet(
         third,
         third_derivative_global_bound(proper_modes, residual_dof),
     );
+    // Announce a weakened anchor where a reader meets it.
+    //
+    // `curvature_source` / `third_source` exist so a certificate that fell back
+    // to a closed-form global constant names itself rather than quietly getting
+    // wider. That is only true if something READS them: written-and-never-read
+    // is exactly the silent degradation the fields were added to prevent, and
+    // it also fails `-D dead-code` in a non-test lib build, where the only
+    // reader was a test.
+    if !matches!(
+        (curvature_source, third_source),
+        (BoundSource::EndpointJet, BoundSource::EndpointJet)
+    ) {
+        log::debug!(
+            "spline scan certified jet at log_lambda {log_lambda}: curvature anchored by \
+             {curvature_source:?}, third order by {third_source:?}. A global-bound anchor \
+             keeps the search CERTIFIED and widens its tail cells -- half rate in place of \
+             cube rate -- so this costs cells, never soundness."
+        );
+    }
     Ok(CertifiedCriterionJet {
         jet: ScoreJet {
             value: value.value,
