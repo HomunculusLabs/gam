@@ -680,3 +680,177 @@ fn binomial_logit_outer_objective_is_a_function_of_rho_1575() {
          cannot descend on a criterion that moves under it.\n{summary}"
     );
 }
+
+/// #2519/#2614: is the trial point hard, or is the carried inner state wrong?
+///
+/// Run 30454491190 measured the branch jumps of the sibling probe down to their
+/// source: at rho0 the inner P-IRLS converges in 5 iterations to an inner
+/// gradient of 3.3e-14, and one displacement of 1e-7 away — warm-started from
+/// that very solution — it stops after ONE iteration at 6.3e-4 and the outer
+/// eval returns the infeasible `+inf`:
+///
+/// ```text
+///   rho0        cost=5.091491188561e2  dev=9.912547084e2 edf=19.672597 iters=5 |g_inner|=3.344e-14
+///   alpha=1e-7  cost=inf   "did not converge within 1 iterations. Last gradient norm was 6.314893e-4."
+///   alpha=1e-9  cost=inf   "did not converge within 300 iterations. Last gradient norm was 4.117748e-4."
+///   alpha=1e-12 cost=inf   "did not converge within 1 iterations. Last gradient norm was 6.321214e-4."
+/// ```
+///
+/// (The count in that message is `pirls_result.iteration`, not the budget —
+/// `PirlsDidNotConverge` is constructed with `max_iterations: iteration`. So
+/// "within 1 iterations" is a solve that quit after one step, not a solve given
+/// one step.)
+///
+/// A rho displacement of 1e-7 from a converged mode is not a hard inner
+/// problem. What differs between the two calls is everything the inner solve
+/// carries across calls: the warm-start beta, the recorded warm-start rho and
+/// its IFT extrapolation, and the Levenberg-Marquardt damping hint seeded from
+/// the previous solve's `final_lm_lambda`. This probe runs the SAME trial rho
+/// twice — once through the ordinary stateful path, once through
+/// `execute_pirls_stateless_for_cubature`, which by construction threads none
+/// of that state — and prints both. If the stateless solve converges where the
+/// stateful one refuses, the trial point is fine and the carried state is the
+/// defect.
+#[test]
+fn binomial_logit_inner_solve_refusal_is_carried_state_1575() {
+    let (x, y, s_list) = build_fixture();
+    let weights = Array1::<f64>::ones(N);
+    let offset = Array1::<f64>::zeros(N);
+    let p = x.ncols();
+
+    let specs: Vec<PenaltySpec> = s_list.iter().map(PenaltySpec::from_blockwise_ref).collect();
+    let ext = ExternalOptimOptions {
+        family: LikelihoodSpec::new(
+            ResponseFamily::Binomial,
+            InverseLink::Standard(StandardLink::Logit),
+        ),
+        latent_cloglog: None,
+        mixture_link: None,
+        optimize_mixture: false,
+        sas_link: None,
+        optimize_sas: false,
+        compute_inference: true,
+        skip_rho_posterior_inference: false,
+        max_iter: 300,
+        tol: 1e-7,
+        nullspace_dims: vec![2; N_SMOOTH],
+        linear_constraints: None,
+        firth_bias_reduction: Some(false),
+        penalty_shrinkage_floor: None,
+        rho_prior: Default::default(),
+        kronecker_penalty_system: None,
+        kronecker_factored: None,
+        persist_warm_start_disk: false,
+    };
+    let cfg = super::external_options::resolved_external_config(&ext)
+        .expect("the binomial/logit external config resolves")
+        .0;
+    let x_dm: DesignMatrix = x.clone().into();
+    let (canonical, active_nullspace_dims) = gam_terms::construction::canonicalize_penalty_specs(
+        &specs,
+        &ext.nullspace_dims,
+        p,
+        "binomial_logit_inner_solve_refusal_is_carried_state_1575",
+    )
+    .expect("the three P-spline penalties canonicalize");
+    let conditioning = ParametricColumnConditioning::infer_from_penalty_specs(&x_dm, &specs);
+    let x_fit = conditioning.apply_to_design(&x_dm);
+    let mut state = RemlState::newwith_offset(
+        y.view(),
+        x_fit,
+        weights.view(),
+        offset.view(),
+        canonical,
+        p,
+        &cfg,
+        Some(active_nullspace_dims),
+        None,
+        None,
+    )
+    .expect("the outer REML state builds on the #1575 fixture");
+    state.set_penalty_shrinkage_floor(ext.penalty_shrinkage_floor);
+    state.set_rho_prior(ext.rho_prior.clone());
+    state.set_link_states(
+        cfg.link_kind.mixture_state().cloned(),
+        cfg.link_kind.sas_state().copied(),
+    );
+
+    let rho0 = Array1::from(vec![
+        -0.7060116450326054,
+        -0.11090597501554852,
+        0.6994622375684085,
+    ]);
+    let seed = state
+        .compute_outer_eval_with_order(&rho0, crate::rho_optimizer::OuterEvalOrder::ValueAndGradient)
+        .expect("the seed evaluates");
+    let f0 = seed.cost;
+    let g = seed.gradient.clone();
+    let gnorm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let d = g.mapv(|v| -v / gnorm);
+
+    let describe = |result: Result<std::sync::Arc<crate::pirls::PirlsResult>, EstimationError>| {
+        match result {
+            Ok(pr) => format!(
+                "OK iters={} |g_inner|={:.3e} lm_lambda={:.3e} dev={:.9e} edf={:.6} status={:?}",
+                pr.iteration,
+                pr.lastgradient_norm,
+                pr.final_lm_lambda,
+                pr.deviance,
+                pr.edf,
+                pr.status,
+            ),
+            Err(err) => format!("REFUSED {err}"),
+        }
+    };
+
+    let mut table = String::new();
+    let mut stateful_refusals = 0usize;
+    let mut stateless_refusals = 0usize;
+    for alpha in [1.0e-1_f64, 1.0e-4, 1.0e-7, 1.0e-9, 1.0e-12] {
+        let trial = &rho0 + &d.mapv(|v| v * alpha);
+        // Stateless FIRST, so the stateful arm sees exactly the carried state
+        // the previous stateful call left behind (the stateless call writes
+        // none of it) rather than a state this probe perturbed.
+        let stateless = describe(state.execute_pirls_stateless_for_cubature(&trial, None));
+        if stateless.starts_with("REFUSED") {
+            stateless_refusals += 1;
+        }
+        let stateful_cost = match state
+            .compute_outer_eval_with_order(&trial, crate::rho_optimizer::OuterEvalOrder::Value)
+        {
+            Ok(eval) => format!("{:.12e}", eval.cost),
+            Err(err) => format!("ERR {err}"),
+        };
+        let stateful_inner = describe(state.obtain_eval_bundle(&trial).map(|b| b.pirls_result));
+        if stateful_inner.starts_with("REFUSED") {
+            stateful_refusals += 1;
+        }
+        table.push_str(&format!(
+            "\n  alpha={alpha:.0e}\n    stateful  cost={stateful_cost}  {stateful_inner}\n    stateless {stateless}"
+        ));
+    }
+
+    let summary = format!(
+        "#1575/#2519 same trial rho, stateful vs stateless inner solve\n\
+         f(rho0) = {f0:.12e}   |g| = {gnorm:.9e}\n\
+         inner refusals: stateful {stateful_refusals}/5, stateless {stateless_refusals}/5{table}"
+    );
+    eprintln!("{summary}");
+
+    // The claim under test: a trial rho within 1e-1 of a point whose inner mode
+    // is certified to 3.3e-14 is a solvable inner problem. `execute_pirls_stateless_for_cubature`
+    // is documented as bit-identical math to the ordinary non-screening branch
+    // with every cross-call carry removed, so a refusal there WOULD mean the
+    // point is genuinely hard and this probe would be the wrong lead.
+    assert_eq!(
+        stateless_refusals, 0,
+        "the stateless inner solve also refuses, so these trial points are \
+         genuinely hard and the carried warm-start/LM state is not the lead.\n{summary}"
+    );
+    assert_eq!(
+        stateful_refusals, 0,
+        "the same trial rho that the stateless inner solve fits is refused by \
+         the stateful path, so the outer objective's +inf is produced by the \
+         state the inner solve carries between calls, not by the point.\n{summary}"
+    );
+}
