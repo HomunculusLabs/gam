@@ -845,6 +845,49 @@ fn ball_symmetrize(a: &mut BallMat, m: usize) {
 /// This intersection restores proof information supplied by the statistical
 /// model; it is not a numerical tolerance. A wholly negative or non-finite
 /// diagonal still signals an inconsistent enclosure and fails closed.
+/// Intersect the proper innovation variance with its exact lower bound `R_t`.
+///
+/// `F̃_t = H P*_t Hᵀ + R_t`, and `P*` is a covariance, so `H P* Hᵀ ≥ 0` exactly
+/// and therefore `F̃_t ≥ R_t > 0`. The componentwise interval evaluation of `P*`
+/// forgets that: after enough rank-one updates its diagonal enclosure widens,
+/// and once `P*[0][0].lo` drops below zero the enclosure of `F̃` reaches down
+/// toward zero even though the true value cannot. `inv_f = 1/F̃` then has an
+/// enclosure reaching `+∞` — and EVERY gain, every `log F̃`, and every one of
+/// the three derivative recursions multiplies by it.
+///
+/// That is the observed failure, on three surfaces: `gam-solve`'s own
+/// `spline_scan` tests refuse with `InvalidArithmetic{"diffuse filter
+/// accumulator"}` carrying `[-inf, +inf]` derivative enclosures around exact
+/// centre values; `gam-models`' `spline_scan_payload_round_trips_and_validates`
+/// dies on its first line; and the Python surface reports `IntegrationError:
+/// spline scan: non-finite interval arithmetic in proper covariance PSD
+/// intersection` (#2614, #2616).
+///
+/// Restoring this bound is the same move [`intersect_proper_covariance_psd`]
+/// already makes for the covariance diagonal, and its own comment states the
+/// principle: "This intersection restores proof information supplied by the
+/// statistical model; it is not a numerical tolerance." Here the information is
+/// stronger, because `R_t = 1/w_t` is an exact input rather than a computed
+/// quantity — the observation variance is data, not arithmetic.
+///
+/// The floor is capped at the ball's own `value` and `hi` so the result stays a
+/// well-formed enclosure (`lo ≤ value ≤ hi`) even if the centre has itself gone
+/// non-positive; an inconsistent enclosure is left inconsistent for the finite
+/// checks downstream to reject, rather than being papered into consistency here.
+#[inline]
+fn intersect_innovation_above_observation_variance(
+    innovation: &mut Ball,
+    observation_variance: Ball,
+) {
+    let floor = observation_variance
+        .lo
+        .min(innovation.value)
+        .min(innovation.hi);
+    if floor.is_finite() && innovation.lo < floor {
+        innovation.lo = floor;
+    }
+}
+
 #[inline]
 fn intersect_proper_covariance_psd(
     covariance: &mut BallMat,
@@ -1267,7 +1310,8 @@ fn run_filter_ball(
             m_star_d2[i] = p_star_d2[i][0];
             m_star_d3[i] = p_star_d3[i][0];
         }
-        let f_star = m_star[0].add(r);
+        let mut f_star = m_star[0].add(r);
+        intersect_innovation_above_observation_variance(&mut f_star, r);
         let f_star_d1 = m_star_d1[0];
         let f_star_d2 = m_star_d2[0];
         let f_star_d3 = m_star_d3[0];
