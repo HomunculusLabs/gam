@@ -4059,6 +4059,186 @@ impl SaeSupportSparseTerm {
     /// Alternate exact decoder blocks and direct active-row coordinate Newton
     /// steps until the raw KKT residual AND a full-cycle recurrence agree. A
     /// budget-exhausted iterate is an error; only converged fits are returned.
+    /// One JOINT Gauss-Newton step over `(T, B)`, Schur-eliminating the per-row
+    /// coordinate blocks -- the cure for the alternating map's linear rate
+    /// (#2575), safeguarded on the same penalized objective the certificate
+    /// uses (#2517).
+    ///
+    /// WHY THE ALTERNATION CANNOT GET THERE ON ITS OWN. Write the joint
+    /// Gauss-Newton Hessian in the two blocks the two sweeps own,
+    ///
+    /// ```text
+    ///     H = [ A   C  ]        A = blockdiag_i H_tt^(i)   (rows, given B)
+    ///         [ C'  B  ]        B = blockdiag_k H_bb^(k)   (atoms, given T)
+    /// ```
+    ///
+    /// Each sweep is the EXACT minimiser of its own block: `decoder_sweep`
+    /// solves `(G_k + lambda S_k) B_k = rhs_k` outright, and near the fixed
+    /// point `row_coordinate_solve` takes the unconstrained block-Newton step.
+    /// A cycle is therefore exact block Gauss-Seidel, whose error propagates by
+    /// `M = A^-1 C B^-1 C'`, i.e.
+    ///
+    /// ```text
+    ///     rho(M) = 1 - lambda_min(A^-1 S),   S = A - C B^-1 C'
+    /// ```
+    ///
+    /// the Schur complement of the block the alternation eliminates. So the
+    /// measured rate is not a tuning artefact and no extrapolator can remove
+    /// it: it IS the cross-block coupling, and it approaches 1 exactly as the
+    /// joint problem approaches a direction that only a SIMULTANEOUS,
+    /// compensating change in both blocks can travel. This term has such
+    /// directions by construction -- reparameterising an atom's coordinates and
+    /// counter-transforming its decoder leaves `f` unchanged, so the objective's
+    /// curvature along that orbit comes only from the (weak) ARD and smoothing
+    /// priors, which is `lambda_min(A^-1 S) << 1`. Anderson cannot rescue it
+    /// either: there is one such near-flat orbit PER ATOM, so the slow subspace
+    /// has dimension `O(K)` while a depth-`d` multisecant model spans `d`.
+    ///
+    /// Solving the joint system removes `M` from the iteration entirely -- the
+    /// step is the Newton step of the coupled quadratic model, so the coupling
+    /// is not damped or extrapolated but eliminated.
+    ///
+    /// The arithmetic is the standard bundle-adjustment reduction, and this
+    /// term's [`Self::assemble_arrow_schur`] already builds exactly that system
+    /// with `H_bb` and every `H_tb` installed as operators; nothing in the solve
+    /// path had ever consumed it. `InexactPCG` is the mode this system admits:
+    /// it is matrix-free by construction (the only resident row matrices are the
+    /// `q_i x q_i` blocks), and the dense modes would have to materialise a
+    /// `beta_dim x beta_dim` shared block that the overcomplete lane cannot hold.
+    ///
+    /// Returns `Some(objective)` when a step was accepted -- state and `fitted`
+    /// are updated to that point -- and `None` when the model refused or no
+    /// backtracked step decreased the objective, leaving the state EXACTLY as it
+    /// was found. A refused joint step is never an error: the alternating cycle
+    /// is monotone on its own, so the caller simply continues.
+    fn joint_newton_step(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        lambda_smooth: &[f64],
+        ard_precisions: &[Vec<f64>],
+        fitted: &mut Array2<f64>,
+        objective: f64,
+        coordinate_snapshot: &mut Vec<f64>,
+        scaled_step: &mut Vec<f64>,
+    ) -> Result<Option<f64>, String> {
+        let mut system = self.assemble_arrow_schur(target, lambda_smooth, ard_precisions)?;
+        if system.k == 0 || self.n_obs() == 0 {
+            return Ok(None);
+        }
+        // Opt the per-row factorisation into spectral discovery. A row whose
+        // coordinate block is flat along one axis (a periodic atom sitting at a
+        // stationary phase, an atom the router left with a single row) has a
+        // singular `H_tt^(i)`, and refusing to factor it would discard the whole
+        // joint step over one row. Deflating that direction to unit stiffness is
+        // what the dense manifold lane already does for the same reason.
+        SaeManifoldTerm::ensure_row_gauge_deflation_for_quasi_laplace(&mut system);
+        let options = ArrowSolveOptions::inexact_pcg();
+        // Levenberg ladder seeded from the system's OWN curvature scale, so the
+        // first trial is a true Newton step and any damping that follows is
+        // measured in the units the block diagonal is already in -- never an
+        // absolute number. `sqrt(EPSILON)` is the smallest relative shift that
+        // survives the f64 assembly of that diagonal.
+        let curvature_scale = system
+            .hbb_diag
+            .as_ref()
+            .map(|diag| diag.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs())))
+            .unwrap_or(0.0)
+            .max(
+                system
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        (0..row.htt.nrows())
+                            .map(|i| row.htt[[i, i]].abs())
+                            .fold(0.0_f64, f64::max)
+                    })
+                    .fold(0.0_f64, f64::max),
+            );
+        let seed_ridge = f64::EPSILON.sqrt() * curvature_scale;
+        let mut step_pair = None;
+        let mut ridge = 0.0_f64;
+        for attempt in 0..4 {
+            match gam_solve::arrow_schur::solve_arrow_newton_step_with_options(
+                &system, ridge, ridge, &options,
+            ) {
+                Ok((delta_t, delta_beta, ..)) => {
+                    step_pair = Some((delta_t, delta_beta));
+                    break;
+                }
+                Err(error) => {
+                    log::debug!(
+                        "support joint Newton refused at ridge {ridge:.3e} (attempt {attempt}): {error}"
+                    );
+                    if !(seed_ridge > 0.0) {
+                        break;
+                    }
+                    ridge = if ridge > 0.0 { ridge * 16.0 } else { seed_ridge };
+                }
+            }
+        }
+        let (delta_t, delta_beta) = match step_pair {
+            Some(pair) => pair,
+            None => return Ok(None),
+        };
+        if delta_t.len() != self.coordinate_state_len() {
+            return Err(format!(
+                "SaeSupportSparseTerm::joint_newton_step: arrow step width {} != compact \
+                 coordinate width {}",
+                delta_t.len(),
+                self.coordinate_state_len()
+            ));
+        }
+        if !delta_t.iter().chain(delta_beta.iter()).all(|v| v.is_finite()) {
+            return Ok(None);
+        }
+        let (beta_offsets, beta_dim) = self.beta_layout()?;
+        if delta_beta.len() != beta_dim {
+            return Err(format!(
+                "SaeSupportSparseTerm::joint_newton_step: arrow border width {} != decoder \
+                 width {beta_dim}",
+                delta_beta.len()
+            ));
+        }
+        self.snapshot_coordinates(coordinate_snapshot);
+        let restore: Vec<Array2<f64>> = self
+            .atoms
+            .iter()
+            .map(|atom| atom.decoder_coefficients().clone())
+            .collect();
+        let output_dim = self.output_dim;
+        // Backtracking on the SAME objective the certificate reads, from the
+        // full Newton length. The floor is the coordinate sweep's own halving
+        // budget, so neither block can be walked further than the other.
+        for halving in 0..=24 {
+            let scale = 2.0_f64.powi(-(halving as i32));
+            self.install_coordinates(coordinate_snapshot)?;
+            scaled_step.clear();
+            scaled_step.extend(delta_t.iter().map(|value| scale * value));
+            self.retract_coordinates(scaled_step)?;
+            for (atom, base) in restore.iter().enumerate() {
+                let mut decoder = base.clone();
+                let offset = beta_offsets[atom];
+                for basis in 0..decoder.nrows() {
+                    for channel in 0..output_dim {
+                        decoder[[basis, channel]] +=
+                            scale * delta_beta[offset + basis * output_dim + channel];
+                    }
+                }
+                self.atoms[atom].set_decoder_coefficients(decoder)?;
+            }
+            let trial = self.penalized_objective(target, lambda_smooth, ard_precisions)?;
+            if trial.is_finite() && trial < objective {
+                self.reconstruct_into(fitted)?;
+                return Ok(Some(trial));
+            }
+        }
+        self.install_coordinates(coordinate_snapshot)?;
+        for (atom, decoder) in restore.into_iter().enumerate() {
+            self.atoms[atom].set_decoder_coefficients(decoder)?;
+        }
+        Ok(None)
+    }
+
     pub fn solve_fixed_point(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -4119,6 +4299,17 @@ impl SaeSupportSparseTerm {
         // strict decrease -- so monotonicity survives by construction.
         let mut last_reroute_cycle = 0usize;
         let mut objective_at_last_reroute = f64::INFINITY;
+        // #2575 joint-step bookkeeping. The joint step is attempted on every
+        // cycle it is not skipping; a refusal doubles the skip so a lane where
+        // the coupled model does not help pays a logarithmic number of extra
+        // assemblies rather than one per cycle, and an acceptance clears it so
+        // the terminal phase runs the coupled step every cycle. The doubling is
+        // the schedule itself, not a tuned rate.
+        let mut joint_snapshot = Vec::with_capacity(self.coordinate_state_len());
+        let mut joint_scaled_step = Vec::with_capacity(self.coordinate_state_len());
+        let mut joint_skip_remaining = 0usize;
+        let mut joint_skip_width = 1usize;
+        let mut joint_accepted = 0usize;
         for iteration in 1..=max_iter {
             self.snapshot_coordinates(&mut cycle_start);
             let decoder_change = match self.decoder_fista_passes {
@@ -4134,9 +4325,48 @@ impl SaeSupportSparseTerm {
                 tolerance,
                 Some(&mut fitted_state),
             )?;
-            let max_change = decoder_change.max(coordinate_change);
-            last_max_change = max_change;
+            let mut max_change = decoder_change.max(coordinate_change);
             let mut residual = &target - &fitted_state;
+            // The COUPLED step. The two sweeps above have each minimised their
+            // own block exactly; what neither can travel is the direction that
+            // needs both to move together, and that direction is the whole of
+            // the alternation's linear rate (see `joint_newton_step`). Attempt
+            // it here, on the post-sweep iterate, so the certificate below reads
+            // the better of the two points and the returned state is always the
+            // one whose objective is lowest.
+            if joint_skip_remaining > 0 {
+                joint_skip_remaining -= 1;
+            } else {
+                let before =
+                    self.penalized_objective_with_residual(&residual, lambda_smooth, ard_precisions)?;
+                match self.joint_newton_step(
+                    target,
+                    lambda_smooth,
+                    ard_precisions,
+                    &mut fitted_state,
+                    before,
+                    &mut joint_snapshot,
+                    &mut joint_scaled_step,
+                )? {
+                    Some(_) => {
+                        joint_accepted += 1;
+                        joint_skip_width = 1;
+                        residual = &target - &fitted_state;
+                        let mut moved = Vec::with_capacity(joint_snapshot.len());
+                        self.snapshot_coordinates(&mut moved);
+                        let mut wrapped = Vec::with_capacity(moved.len());
+                        self.wrapped_coordinate_residual(&joint_snapshot, &moved, &mut wrapped);
+                        for value in &wrapped {
+                            max_change = max_change.max(value.abs());
+                        }
+                    }
+                    None => {
+                        joint_skip_remaining = joint_skip_width;
+                        joint_skip_width = joint_skip_width.saturating_mul(2);
+                    }
+                }
+            }
+            last_max_change = max_change;
             let mut stationarity =
                 self.raw_stationarity_with_residual(&residual, lambda_smooth, ard_precisions)?;
             // The raw KKT is EXTENSIVE: each decoder entry sums per-row data
@@ -4273,7 +4503,7 @@ impl SaeSupportSparseTerm {
                 }
                 log::info!(
                     "support fixed-point cycle {iteration}: raw KKT max={:.3e} rel={:.3e} \
-                     max_change={:.3e} objective={:.6e} anderson_accepted={accepted_extrapolations}",
+                     max_change={:.3e} objective={:.6e}                      anderson_accepted={accepted_extrapolations} joint_accepted={joint_accepted}",
                     stationarity.max_abs(),
                     stationarity.max_abs() / kkt_scale,
                     max_change,
@@ -4407,14 +4637,15 @@ impl SaeSupportSparseTerm {
             }
             log::info!(
                 "support fixed-point cycle {iteration}: raw KKT max={:.3e} rel={:.3e} \
-                 max_change={:.3e} objective={:.6e} anderson={}/{} order={}",
+                 max_change={:.3e} objective={:.6e} anderson={}/{} order={} joint={}",
                 stationarity.max_abs(),
                 stationarity.max_abs() / kkt_scale,
                 max_change,
                 objective,
                 accepted_extrapolations,
                 iteration,
-                accelerator.history_len()
+                accelerator.history_len(),
+                joint_accepted
             );
         }
         let stationarity = self.raw_stationarity(target, lambda_smooth, ard_precisions)?;
@@ -4437,7 +4668,8 @@ impl SaeSupportSparseTerm {
              per block: decoder max={:.6e} l2={:.6e}, coordinate max={:.6e} l2={:.6e}; \
              CERTIFIED QUANTITY (parameter-space Newton step) max={:.6e} vs tolerance {tolerance:.6e} \
              (decoder {:.6e}, coordinate {:.6e}); \
-             last parameter max_change={last_max_change:.6e}, gauge-invariant limbs required)",
+             last parameter max_change={last_max_change:.6e}, \
+             joint Newton steps accepted={joint_accepted}, gauge-invariant limbs required)",
             stationarity.max_abs(),
             objective,
             stationarity.max_abs() / objective.abs().max(1.0),
