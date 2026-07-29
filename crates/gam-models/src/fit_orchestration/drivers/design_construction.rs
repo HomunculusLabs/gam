@@ -8657,7 +8657,7 @@ mod glm_eta_observation_fd_tests {
     }
 
     #[test]
-    fn invalid_weights_and_nonfinite_inputs_are_refused_in_row_order() {
+    fn invalid_weights_are_refused_in_row_order_and_zero_weight_rows_are_excluded() {
         let family = LikelihoodSpec::gaussian_identity();
         let y = array![1.0, 2.0];
         let eta = array![0.0, 0.0];
@@ -8675,7 +8675,29 @@ mod glm_eta_observation_fd_tests {
             assert!(err.to_string().contains("row 0"), "{err}");
         }
 
+        // #2618: a non-finite response is refused exactly when the row carries
+        // likelihood mass. A prior weight of exactly zero is this project's
+        // "excluded row" convention — such a row must be equivalent to omitting
+        // it entirely (`gam_solve::gaussian_reml::effective_observation_count`
+        // states the convention; `validate_dispersion_family_data` exempts
+        // zero-weight rows from the response-support check and its refusal tells
+        // callers to "set the row's prior weight to 0 to exclude it"; the PIRLS
+        // family state substitutes `z = eta` instead of reading `y` there). This
+        // assertion used to demand the opposite of the dormant-row test above
+        // for the same call, which no implementation could satisfy.
         let err = evaluate_standard_familyobservations(
+            family.clone(),
+            None,
+            None,
+            None,
+            &array![f64::NAN],
+            &array![1.0],
+            &array![0.0],
+        )
+        .expect_err("a non-finite response on a weight-bearing row must be refused");
+        assert!(err.to_string().contains("row 0"), "{err}");
+
+        let excluded = evaluate_standard_familyobservations(
             family,
             None,
             None,
@@ -8684,8 +8706,11 @@ mod glm_eta_observation_fd_tests {
             &array![0.0],
             &array![0.0],
         )
-        .expect_err("a non-finite response may not hide behind zero weight");
-        assert!(err.to_string().contains("row 0"), "{err}");
+        .expect("a zero-weight row is excluded, so its response is never inspected");
+        assert_eq!(excluded.score[0], 0.0);
+        assert_eq!(excluded.fisherweight[0], 0.0);
+        assert_eq!(excluded.neghessian_eta[0], 0.0);
+        assert_eq!(excluded.log_likelihood, 0.0);
     }
 
     #[test]
