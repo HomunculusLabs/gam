@@ -5025,17 +5025,26 @@ pub(crate) fn gaussian_location_scale_family_exposes_joint_psi_hook_surface() {
     // minted fit: build each block's state from its penalty-geometry seed so the
     // family exposes its psi score / Hessian / mixed-drift hooks without asking
     // the outer optimizer to certify a (deliberately tiny) fixture.
-    let mut block_states = Vec::<ParameterBlockState>::with_capacity(blocks.len());
-    for spec in blocks.iter() {
-        let beta = spec
-            .initial_beta
-            .clone()
-            .unwrap_or_else(|| Array1::zeros(spec.design.ncols()));
+    // `block_geometry` answers "what geometry do THESE states see", so it is
+    // asked once the whole state vector exists. Seeding the betas first and
+    // filling the etas in a second pass keeps every call to it addressed to a
+    // complete partition, instead of to a vector that is empty on block 0.
+    let mut block_states: Vec<ParameterBlockState> = blocks
+        .iter()
+        .map(|spec| ParameterBlockState {
+            beta: spec
+                .initial_beta
+                .clone()
+                .unwrap_or_else(|| Array1::zeros(spec.design.ncols())),
+            eta: Array1::zeros(spec.design.nrows()),
+        })
+        .collect();
+    for (index, spec) in blocks.iter().enumerate() {
         let (design, offset) = family
             .block_geometry(&block_states, spec)
             .expect("hook fixture block geometry");
-        let eta = design.matrixvectormultiply(&beta) + &offset;
-        block_states.push(ParameterBlockState { beta, eta });
+        let eta = design.matrixvectormultiply(&block_states[index].beta) + &offset;
+        block_states[index].eta = eta;
     }
     family
         .evaluate(&block_states)

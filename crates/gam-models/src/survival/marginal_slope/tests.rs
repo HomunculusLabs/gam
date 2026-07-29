@@ -671,7 +671,22 @@ fn validate_spec_accepts_learned_gaussian_shift_sigma() {
                 makeham: None,
             },
         },
-        time_block: base_time_block(),
+        // `base_time_block()` is a ONE-row block; this spec carries two data
+        // rows, and `validate_spec` requires the time-block designs to have one
+        // row per observation. Widen it so the frailty-scale claim under test is
+        // what the validation actually reaches.
+        time_block: TimeBlockInput {
+            design_entry: DesignMatrix::from(Array2::zeros((2, 1))),
+            design_exit: DesignMatrix::from(Array2::zeros((2, 1))),
+            design_derivative_exit: DesignMatrix::from(Array2::ones((2, 1))),
+            offset_entry: Array1::zeros(2),
+            offset_exit: Array1::zeros(2),
+            derivative_offset_exit: Array1::from_elem(
+                2,
+                DEFAULT_SURVIVAL_MARGINAL_SLOPE_DERIVATIVE_GUARD,
+            ),
+            ..base_time_block()
+        },
         timewiggle_block: None,
         logslopespec: empty_termspec(),
         logslopespecs: None,
@@ -4466,8 +4481,14 @@ fn time_constraints_use_exact_derivative_guard_rows() {
         stacked_design: None,
         stacked_offset: None,
     };
+    // `block_linear_constraints` expresses its rows in the coefficient basis of
+    // block `block_idx`, so it needs that block's state to check the width.
+    let states = [ParameterBlockState {
+        beta: Array1::zeros(2),
+        eta: Array1::zeros(2),
+    }];
     let constraints = match family
-        .block_linear_constraints(&[], 0, &spec)
+        .block_linear_constraints(&states, 0, &spec)
         .expect("constraint lookup")
         .expect("time constraints")
     {
@@ -4547,8 +4568,13 @@ fn time_block_constraints_synthesize_qd1_rows_when_stored_constraints_missing() 
         stacked_offset: None,
     };
 
+    // Same parallel-array precondition as above: block 0 must carry state.
+    let states = [ParameterBlockState {
+        beta: Array1::zeros(2),
+        eta: Array1::zeros(1),
+    }];
     let constraints = match family
-        .block_linear_constraints(&[], 0, &spec)
+        .block_linear_constraints(&states, 0, &spec)
         .expect("synthesized constraints")
         .expect("qd1 row")
     {

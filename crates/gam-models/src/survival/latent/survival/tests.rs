@@ -1084,7 +1084,11 @@
                 .expect_err("binary requires a fixed latent scale");
         assert_eq!(
             bin_learnable.to_string(),
-            "latent-binary currently requires a fixed hazard-multiplier sigma"
+            // `LatentBinaryModel::frailty_policy` routes through
+            // `fixed_latent_hazard_frailty_typed(frailty, "latent-binary")`,
+            // whose reason is `"{context} requires a fixed hazard-multiplier
+            // sigma"`. The stale "currently" predates that shared driver.
+            "latent-binary requires a fixed hazard-multiplier sigma"
         );
 
         // 7. The time-block shape check is owned by the shared driver: a
@@ -1271,6 +1275,10 @@
         let family = fixed_sigma_binary_test_family();
         let beta = array![0.15, 0.25, 0.1, -0.15];
         let states = latent_binary_states_from_joint_beta(&family, &beta);
+        // `exact_newton_joint_gradient_evaluation` takes states and specs as
+        // parallel per-block arrays; an empty spec slice is an inconsistent
+        // parameter partition, not "no opinion".
+        let specs = latent_test_specs(family.event_target.len(), &[("time", 2), ("mean", 2)]);
         let h = 1e-6;
 
         let analytic_hessian = family
@@ -1284,7 +1292,7 @@
             let gradient_plus = family
                 .exact_newton_joint_gradient_evaluation(
                     &latent_binary_states_from_joint_beta(&family, &beta_plus),
-                    &[],
+                    &specs,
                 )
                 .expect("joint gradient plus")
                 .expect("joint gradient should exist")
@@ -1295,7 +1303,7 @@
             let gradient_minus = family
                 .exact_newton_joint_gradient_evaluation(
                     &latent_binary_states_from_joint_beta(&family, &beta_minus),
-                    &[],
+                    &specs,
                 )
                 .expect("joint gradient minus")
                 .expect("joint gradient should exist")
@@ -1393,6 +1401,11 @@
         let family = learnable_sigma_test_family();
         let beta = learnable_sigma_test_joint_beta();
         let states = latent_survival_states_from_joint_beta(&family, &beta);
+        // States and specs are parallel per-block arrays for this hook.
+        let specs = latent_test_specs(
+            family.event_target.len(),
+            &[("time", 2), ("mean", 2), ("log_sigma", 1)],
+        );
         let slices = family.joint_slices();
         let sigma_idx = slices
             .log_sigma
@@ -1405,7 +1418,7 @@
             .evaluate(&states)
             .expect("learnable latent survival evaluation");
         let joint_gradient = family
-            .exact_newton_joint_gradient_evaluation(&states, &[])
+            .exact_newton_joint_gradient_evaluation(&states, &specs)
             .expect("joint gradient evaluation")
             .expect("joint gradient should exist")
             .gradient;
@@ -1474,6 +1487,11 @@
         let family = learnable_sigma_test_family();
         let beta = learnable_sigma_test_joint_beta();
         let states = latent_survival_states_from_joint_beta(&family, &beta);
+        // States and specs are parallel per-block arrays for this hook.
+        let specs = latent_test_specs(
+            family.event_target.len(),
+            &[("time", 2), ("mean", 2), ("log_sigma", 1)],
+        );
         let h = 1e-6;
 
         let analytic_hessian = family
@@ -1487,7 +1505,7 @@
             let gradient_plus = family
                 .exact_newton_joint_gradient_evaluation(
                     &latent_survival_states_from_joint_beta(&family, &beta_plus),
-                    &[],
+                    &specs,
                 )
                 .expect("joint gradient plus")
                 .expect("joint gradient should exist")
@@ -1498,7 +1516,7 @@
             let gradient_minus = family
                 .exact_newton_joint_gradient_evaluation(
                     &latent_survival_states_from_joint_beta(&family, &beta_minus),
-                    &[],
+                    &specs,
                 )
                 .expect("joint gradient minus")
                 .expect("joint gradient should exist")

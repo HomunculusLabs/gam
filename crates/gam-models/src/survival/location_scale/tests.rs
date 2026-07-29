@@ -8058,7 +8058,20 @@ fn survival_ls_heteroscedastic_two_col_location_family()
 #[test]
 fn survival_ls_scale_aware_location_block_trust_metric_floor_caps_starvation_1569() {
     let (family, states) = survival_ls_heteroscedastic_two_col_location_family();
-    let specs: Vec<ParameterBlockSpec> = Vec::new();
+    // `joint_trust_metric_block_floor` validates specs against
+    // `joint_block_dims()` — one spec per block, each as wide as its design.
+    // An empty vector is an inconsistent partition, not "no specs needed".
+    let specs = vec![
+        spec_from_dense_for_test(
+            "time",
+            DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+                family.x_time_entry.as_ref().clone(),
+            )),
+            200,
+        ),
+        spec_from_dense_for_test("threshold", family.x_threshold.clone(), 150),
+        spec_from_dense_for_test("log_sigma", family.x_log_sigma.clone(), 120),
+    ];
 
     let offsets = family.joint_block_offsets();
     let (loc_start, loc_end) = (

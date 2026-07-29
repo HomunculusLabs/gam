@@ -607,51 +607,47 @@ pub fn coalesce_antipodal(
 /// corner out of every co-firing cloud, hollowing it near the origin, and the
 /// surrogates carry the identical hole.
 ///
-/// # Why κ alone is not the statistic
+/// # An angular channel was tried, measured, and removed
 ///
-/// κ has a small DYNAMIC RANGE against exactly this null. For a true ring
-/// `α = R cos θ`, `β = R sin θ` with `θ` uniform, `κ = 1`; permuting the same
-/// marginals against each other gives `E[α²β²] = E[α²]E[β²] = R⁴/4` and hence
-/// `κ = 1.25`. A whole, clean ring is worth 0.25 — which at a few thousand rows
-/// is still many null sd, so a κ-only test does detect a clean planted circle
-/// (`structure_harvest::tests::curl_killer_demo_planted_circle_wins_race`).
+/// κ has a small dynamic range against this null. A true ring `α = R cos θ`,
+/// `β = R sin θ` sits at `κ = 1`; permuting that same ring's own marginals gives
+/// `E[α²β²] = E[α²]E[β²] = R⁴/4` and hence `κ = 1.25`. A whole clean circle is
+/// worth 0.25, because the arcsine marginals the null preserves are already
+/// hollow — most of the ring signature is handed to the null before the statistic
+/// is read.
 ///
-/// What it loses is the PARTIAL case, which is the only case a real dictionary
-/// offers. A plane that is somewhat shell-like moves κ by a fraction of that
-/// 0.25, and the arcsine marginals the null preserves are already hollow, so most
-/// of the ring signature has been handed to the null before the statistic is
-/// read.
+/// That argues for adding the fourth circular harmonic `R₄ = |E[e^{4iθ}]|`, which
+/// vanishes for a uniform angle and sits near `0.5` for the corner-clumped product
+/// of two ring marginals: twice κ's whole range, on a quantity the null cannot
+/// fake. So the statistic was briefly the standardised sum of both channels.
 ///
-/// The channel with room to move is angular. A ring's `θ` is uniform, so every
-/// circular harmonic vanishes; the product of two ring marginals piles mass at the
-/// four corners `(±R, ±R)`, a 4-fold pattern with a fourth harmonic near `0.5`.
-/// That is twice κ's entire range, on a quantity the null cannot fake, and it is
-/// where power on partial structure comes from.
+/// The spike-in power arm refuted it. At a matched replicate budget on the same
+/// Gemma Scope 2 layer-17 dump, κ alone returned 2 e-BH discoveries and κ + R₄
+/// returned 0 — at planted radii of 1σ, 2σ and 4σ alike. The reason is that a
+/// NONNEGATIVE GATE cannot carry a centred ring: every co-firing circle a real
+/// dictionary holds is offset into the positive quadrant, and after the plane
+/// parse re-centres it, what is left keeps 4-fold corner structure. `R₄` for those
+/// planes therefore sits ABOVE its null mean, the second standardised term goes
+/// negative, and a genuine circle is vetoed by the channel that was supposed to
+/// find it.
 ///
-/// The statistic is therefore the standardised sum of both channels,
-///
-/// ```text
-///   T = (κ̄_null − κ)/sd_null(κ) + (R̄₄_null − R₄)/sd_null(R₄) ,
-/// ```
-///
-/// large when the plane is both more shell-like AND more rotationally uniform than
-/// its own permuted marginals. Any function of the data is a legitimate permutation
-/// statistic provided it is computed identically for the observation and every
-/// surrogate, which is why the null moments are estimated in a first pass and then
-/// held fixed across the second.
+/// So the statistic is κ, and the harmonic channel is a documented negative
+/// result rather than a knob. It is the power arm that settled this; a statistic
+/// argued for on paper and never measured is how a screen acquires a veto nobody
+/// notices.
 ///
 /// # Cost
 ///
 /// `m₂` is permutation-invariant and `m₄` moves only through `S = Σᵢ aᵢ·b_{π(i)}`
-/// (`a = α²`, `b = β²`), so κ needs no moment recomputation. The harmonics need no
-/// trigonometry either: with `c₂ = (α² − β²)/r²` and `s₂ = 2αβ/r²`,
-/// `cos 4θ = c₂² − s₂²` and `sin 4θ = 2c₂s₂`. Each surrogate is one shuffle and one
-/// linear pass.
+/// (`a = α²`, `b = β²`), so κ is a strictly increasing affine function of `S` and
+/// its lower tail IS `S`'s lower tail: each surrogate is one shuffle and one dot
+/// product, with no fourth-moment recomputation and no cancellation.
 ///
 /// Returns `(p_value, e_value, null_kappa_mean, null_kappa_sd)`. The p-value is the
-/// exact upper-tail Monte-Carlo value on `T`; the e-value is the indicator
-/// `(B+1)·1{no surrogate reaches T}`, whose null mean is 1 under exchangeability
-/// with NO dependence assumption, and which is what an e-BH ledger consumes.
+/// exact lower-tail Monte-Carlo value `(1 + #{S_null ≤ S_obs})/(B + 1)`; the
+/// e-value is the indicator `(B+1)·1{no surrogate reaches the observation}`, whose
+/// null mean is 1 under exchangeability with NO dependence assumption, and which is
+/// what an e-BH ledger consumes.
 pub fn kappa_permutation_evidence(
     alpha: ArrayView1<f64>,
     beta: ArrayView1<f64>,
@@ -671,41 +667,19 @@ pub fn kappa_permutation_evidence(
     if replicates < 2 {
         return Err("kappa_permutation_evidence: need at least 2 replicates".to_string());
     }
-    let al: Vec<f64> = alpha.to_vec();
-    let be: Vec<f64> = beta.to_vec();
-    let a: Vec<f64> = al.iter().map(|&v| v * v).collect();
-    let b: Vec<f64> = be.iter().map(|&v| v * v).collect();
+    let a: Vec<f64> = alpha.iter().map(|&v| v * v).collect();
+    let b: Vec<f64> = beta.iter().map(|&v| v * v).collect();
     let inv = 1.0 / n as f64;
-    let m2 = (a.iter().sum::<f64>() + b.iter().sum::<f64>()) * inv;
+    let mean_a: f64 = a.iter().sum::<f64>() * inv;
+    let mean_b: f64 = b.iter().sum::<f64>() * inv;
+    let m2 = mean_a + mean_b;
     if !(m2 > 0.0) {
         return Err("kappa_permutation_evidence: zero in-plane energy".to_string());
     }
     let mean_a2: f64 = a.iter().map(|&v| v * v).sum::<f64>() * inv;
     let mean_b2: f64 = b.iter().map(|&v| v * v).sum::<f64>() * inv;
-
-    // (κ, R₄) for a given pairing `beta[perm[i]]` against `alpha[i]`.
-    let channels = |perm: &[u32]| -> (f64, f64) {
-        let (mut s, mut c4, mut s4) = (0.0_f64, 0.0_f64, 0.0_f64);
-        for i in 0..n {
-            let j = perm[i] as usize;
-            let (ai, bj) = (a[i], b[j]);
-            s += ai * bj;
-            let r2 = ai + bj;
-            if r2 <= 0.0 {
-                continue;
-            }
-            let c2 = (ai - bj) / r2;
-            let s2 = 2.0 * al[i] * be[j] / r2;
-            c4 += c2 * c2 - s2 * s2;
-            s4 += 2.0 * c2 * s2;
-        }
-        let kappa = (mean_a2 + mean_b2 + 2.0 * s * inv) / (m2 * m2);
-        let r4 = ((c4 * inv).powi(2) + (s4 * inv).powi(2)).sqrt();
-        (kappa, r4)
-    };
-
-    let identity: Vec<u32> = (0..n as u32).collect();
-    let (kappa_obs, r4_obs) = channels(&identity);
+    let kappa_of_s = |s: f64| (mean_a2 + mean_b2 + 2.0 * s * inv) / (m2 * m2);
+    let s_obs: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum();
 
     let mut state = seed;
     let mut next = move || {
@@ -715,39 +689,25 @@ pub fn kappa_permutation_evidence(
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     };
-    let mut perm: Vec<u32> = identity.clone();
-    let mut draws: Vec<(f64, f64)> = Vec::with_capacity(replicates);
+    let mut perm: Vec<f64> = b.clone();
+    let mut exceed = 0usize;
+    let (mut sum_k, mut sum_k2) = (0.0_f64, 0.0_f64);
     for _draw in 0..replicates {
         for i in (1..n).rev() {
             let j = (next() % (i as u64 + 1)) as usize;
             perm.swap(i, j);
         }
-        draws.push(channels(&perm));
+        let s_null: f64 = a.iter().zip(perm.iter()).map(|(&x, &y)| x * y).sum();
+        if s_null <= s_obs {
+            exceed += 1;
+        }
+        let k = kappa_of_s(s_null);
+        sum_k += k;
+        sum_k2 += k * k;
     }
-
     let bf = replicates as f64;
-    let (mut mk, mut mr) = (0.0_f64, 0.0_f64);
-    for &(k, r) in &draws {
-        mk += k;
-        mr += r;
-    }
-    mk /= bf;
-    mr /= bf;
-    let (mut vk, mut vr) = (0.0_f64, 0.0_f64);
-    for &(k, r) in &draws {
-        vk += (k - mk) * (k - mk);
-        vr += (r - mr) * (r - mr);
-    }
-    // The null spread of each channel, floored off zero so a degenerate channel
-    // simply contributes nothing rather than a division by zero.
-    let sk = (vk / bf).sqrt().max(f64::MIN_POSITIVE);
-    let sr = (vr / bf).sqrt().max(f64::MIN_POSITIVE);
-    let statistic = |k: f64, r: f64| (mk - k) / sk + (mr - r) / sr;
-    let t_obs = statistic(kappa_obs, r4_obs);
-    let exceed = draws
-        .iter()
-        .filter(|&&(k, r)| statistic(k, r) >= t_obs)
-        .count();
+    let mk = sum_k / bf;
+    let sk = (sum_k2 / bf - mk * mk).max(0.0).sqrt();
 
     let p_value = (1.0 + exceed as f64) / (bf + 1.0);
     let e_value = if exceed == 0 { bf + 1.0 } else { 0.0 };
@@ -1087,12 +1047,11 @@ mod tests {
         assert_eq!(signed.len(), 2, "overlapping gates must not coalesce");
     }
 
-    /// The claim that made the angular channel necessary, made executable: κ's
-    /// ENTIRE range against this null is under 0.3 nats of shape — a whole clean
-    /// ring against its own permuted marginals — so on partial structure there is
-    /// nothing left to read, while the fourth harmonic moves twice as far. The
-    /// power curve on planted circles is what measures the difference; this pins
-    /// the arithmetic the curve is expected to show.
+    /// The permutation test's two ends: a clean ring beats every surrogate, and a
+    /// product of two ring marginals — same marginals, corner-clumped rather than
+    /// a shell — does not. The middle assertion pins κ's whole range against this
+    /// null at under 0.3, which is the arithmetic that motivated trying an angular
+    /// channel and that the spike-in power arm then measured against.
     #[test]
     fn permutation_test_resolves_a_ring_its_marginals_cannot_fake() {
         let n = 600;
