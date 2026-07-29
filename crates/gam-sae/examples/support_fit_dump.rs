@@ -464,6 +464,13 @@ fn main() -> Result<(), String> {
             Err(error) => {
                 eprintln!("[reml] round solve NOT CONVERGED at 1e-4: {error}");
                 let mut accepted = None;
+                // Each rung's refusal is carried, not dropped: if the whole
+                // ladder fails, the reason the LOOSEST rung refused is the only
+                // evidence about why this round is unrecoverable, and a silent
+                // arm here would print "unrecoverable" with nothing behind it.
+                // (Also: an empty error arm fails the root build script's ban
+                // scanner, which blocks every wheel build in the repository.)
+                let mut last_refusal = error;
                 for tolerance in [1.0e-2_f64, 1.0e-1, 1.0, 1.0e1, 1.0e2, 1.0e3, 1.0e4] {
                     match term_seed.term.solve_fixed_point(
                         centered.view(),
@@ -478,13 +485,19 @@ fn main() -> Result<(), String> {
                             accepted = Some(report);
                             break;
                         }
-                        Err(_) => {}
+                        Err(rung_refusal) => {
+                            eprintln!("[reml] rung {tolerance:.0e} refused: {rung_refusal}");
+                            last_refusal = rung_refusal;
+                        }
                     }
                 }
                 match accepted {
                     Some(report) => report,
                     None => {
-                        eprintln!("[reml] round unrecoverable; keeping the previous round's report and stopping the ladder");
+                        eprintln!(
+                            "[reml] round unrecoverable (loosest rung 1e4 refused: {last_refusal}); \
+                             keeping the previous round's report and stopping the ladder"
+                        );
                         break;
                     }
                 }
