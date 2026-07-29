@@ -900,77 +900,68 @@ fn ball_symmetrize(a: &mut BallMat, m: usize) {
 /// This intersection restores proof information supplied by the statistical
 /// model; it is not a numerical tolerance. A wholly negative or non-finite
 /// diagonal still signals an inconsistent enclosure and fails closed.
-/// `(I − u e₀ᵀ) · X · (I − w e₀ᵀ)ᵀ`, componentwise.
-///
-/// The congruence the Joseph-form derivative identity `dP⁺ = A dP Aᵀ` needs
-/// (#2614). Expanding with `A = I − u e₀ᵀ`:
-///
-/// ```text
-///   (A X Aᵀ)[i][j] = X[i][j] − u_i X[0][j] − w_j X[i][0] + u_i w_j X[0][0]
-/// ```
+/// Transpose of a `Ball` matrix.
 #[inline]
-fn congruence_identity_minus_rank_one(
-    x: &BallMat,
-    u: &BallVec,
-    w: &BallVec,
-    order: usize,
-) -> BallMat {
+fn ball_mat_t(a: &BallMat, m: usize) -> BallMat {
     let mut out = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
-    for i in 0..order {
-        for j in 0..order {
-            out[i][j] = x[i][j]
-                .sub(u[i].mul(x[0][j]))
-                .sub(w[j].mul(x[i][0]))
-                .add(u[i].mul(w[j]).mul(x[0][0]));
+    for i in 0..m {
+        for j in 0..m {
+            out[i][j] = a[j][i];
         }
     }
     out
 }
 
-/// `(−u e₀ᵀ) X (I − w e₀ᵀ)ᵀ  +  (I − w e₀ᵀ) X (−u e₀ᵀ)ᵀ`.
+/// `A = I − K e₀ᵀ`, built so its `(0,0)` entry is never a subtraction (#2614).
 ///
-/// The two always appear as this symmetric pair in the higher jets, where the
-/// differentiated factor `A′ = −K′ e₀ᵀ` sits on one side and `A` on the other.
-/// Expanding the left term:
+/// The expanded per-entry form of the congruence `A X Aᵀ` evaluates
+/// `X[0][0]·(1 − 2K₀ + K₀²)` — that is `X[0][0]·(1 − K₀)²` written as three
+/// terms. In the saturated regime `K₀ = P₀₀/F → 1`, so it is `1 − 1` twice
+/// over: the value collapses and the interval width does not. Measured
+/// consequence: the third covariance-derivative entry reached an enclosure of
+/// `+/-4.1e247` by node 62, growing about `10^4` per node, while `d1` and `d2`
+/// — which carry fewer such terms — stayed clean.
+///
+/// The identity that removes it is exact and involves no subtraction:
 ///
 /// ```text
-///   ((−u e₀ᵀ) X Aᵀ)[i][j] = −u_i X[0][j] + u_i w_j X[0][0]
+///   A[0][0] = 1 − K₀ = 1 − P₀₀/F = (F − P₀₀)/F = R/F
 /// ```
 ///
-/// and the right term is its transpose.
+/// since `F = P₀₀ + R` by construction. So that entry is `r·inv_f` directly.
+/// Away from the first column `A` is the identity; below the diagonal in the
+/// first column it is `−K_i`. Neither cancels, so building `A` and multiplying
+/// is ordinary arithmetic on well-conditioned entries.
 #[inline]
-fn congruence_rank_one_left_symmetrized(
-    x: &BallMat,
-    u: &BallVec,
-    w: &BallVec,
-    order: usize,
-) -> BallMat {
-    let mut out = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
-    for i in 0..order {
-        for j in 0..order {
-            let left = u[i].mul(w[j]).mul(x[0][0]).sub(u[i].mul(x[0][j]));
-            let right = u[j].mul(w[i]).mul(x[0][0]).sub(u[j].mul(x[i][0]));
-            out[i][j] = left.add(right);
-        }
+fn ball_update_operator(gain: &BallVec, a_diag_zero: Ball, order: usize) -> BallMat {
+    let mut a = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for (i, row) in a.iter_mut().enumerate().take(order) {
+        row[i] = Ball::ONE;
     }
-    out
+    a[0][0] = a_diag_zero;
+    for i in 1..order {
+        a[i][0] = gain[i].neg();
+    }
+    a
 }
 
-/// `(−u e₀ᵀ) X (−w e₀ᵀ)ᵀ`, which collapses to the outer product `u wᵀ X[0][0]`.
+/// `A⁽ᵏ⁾ = −K⁽ᵏ⁾ e₀ᵀ`, the ρ-derivative of [`ball_update_operator`].
+///
+/// The identity part differentiates away and only the first column survives, so
+/// there is no cancelling entry here at all.
 #[inline]
-fn congruence_rank_one_both(
-    x: &BallMat,
-    u: &BallVec,
-    w: &BallVec,
-    order: usize,
-) -> BallMat {
-    let mut out = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+fn ball_update_operator_derivative(gain_jet: &BallVec, order: usize) -> BallMat {
+    let mut a = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
     for i in 0..order {
-        for j in 0..order {
-            out[i][j] = u[i].mul(w[j]).mul(x[0][0]);
-        }
+        a[i][0] = gain_jet[i].neg();
     }
-    out
+    a
+}
+
+/// `L · X · Rᵀ` for `Ball` matrices.
+#[inline]
+fn ball_congruence(l: &BallMat, x: &BallMat, r_side: &BallMat, order: usize) -> BallMat {
+    ball_mat_mul(&ball_mat_mul(l, x, order), &ball_mat_t(r_side, order), order)
 }
 
 /// Intersect the proper innovation variance with its exact lower bound `R_t`.
@@ -1605,36 +1596,48 @@ fn run_filter_ball(
             // `gain_d1` is then `p_new_d1`'s first column; `d2` needs `gain_d1`;
             // and so on. Each jet exists exactly when the next one needs it,
             // which is also why the mean update now follows this block.
-            let p_new_d1 = congruence_identity_minus_rank_one(&d1_pred, &gain, &gain, order);
+            // `A[0][0] = 1 − K₀ = R/F` EXACTLY — never `1 − K₀` as a
+            // subtraction. See `ball_update_operator`: that single entry is
+            // where the `d3` jet was losing everything, and the measurement
+            // that found it is on #2614 (`F'''` at `+/-4.1e247` by node 62,
+            // ~`10^4` per node, with `d1`/`d2` clean).
+            let a_operator = ball_update_operator(&gain, r.mul(inv_f), order);
+
+            // dP⁺ = A · dP · Aᵀ  (the `dK` terms cancel exactly, since M⁺ = R·K)
+            let p_new_d1 = ball_congruence(&a_operator, &d1_pred, &a_operator, order);
             let mut gain_d1 = [Ball::ZERO; MAX_ORDER];
             for i in 0..order {
                 gain_d1[i] = p_new_d1[i][0].div_positive(r);
             }
+            let a_d1_operator = ball_update_operator_derivative(&gain_d1, order);
 
-            let mut p_new_d2 = congruence_identity_minus_rank_one(&d2_pred, &gain, &gain, order);
-            let d2_cross = congruence_rank_one_left_symmetrized(&d1_pred, &gain_d1, &gain, order);
+            // d²P⁺ = A D₂ Aᵀ + A′D₁Aᵀ + A D₁A′ᵀ
+            let mut p_new_d2 = ball_congruence(&a_operator, &d2_pred, &a_operator, order);
+            let d2_cross = ball_congruence(&a_d1_operator, &d1_pred, &a_operator, order);
             for i in 0..order {
                 for j in 0..order {
-                    p_new_d2[i][j] = p_new_d2[i][j].add(d2_cross[i][j]);
+                    p_new_d2[i][j] = p_new_d2[i][j].add(d2_cross[i][j]).add(d2_cross[j][i]);
                 }
             }
             let mut gain_d2 = [Ball::ZERO; MAX_ORDER];
             for i in 0..order {
                 gain_d2[i] = p_new_d2[i][0].div_positive(r);
             }
+            let a_d2_operator = ball_update_operator_derivative(&gain_d2, order);
 
-            let mut p_new_d3 = congruence_identity_minus_rank_one(&d3_pred, &gain, &gain, order);
-            let d3_cross_second =
-                congruence_rank_one_left_symmetrized(&d2_pred, &gain_d1, &gain, order);
-            let d3_cross_first =
-                congruence_rank_one_left_symmetrized(&d1_pred, &gain_d2, &gain, order);
-            let d3_both = congruence_rank_one_both(&d1_pred, &gain_d1, &gain_d1, order);
+            // d³P⁺ = A D₃ Aᵀ + A″D₁Aᵀ + A D₁A″ᵀ + 2A′D₂Aᵀ + 2A D₂A′ᵀ + 2A′D₁A′ᵀ
+            let mut p_new_d3 = ball_congruence(&a_operator, &d3_pred, &a_operator, order);
+            let d3_second = ball_congruence(&a_d2_operator, &d1_pred, &a_operator, order);
+            let d3_first = ball_congruence(&a_d1_operator, &d2_pred, &a_operator, order);
+            let d3_both = ball_congruence(&a_d1_operator, &d1_pred, &a_d1_operator, order);
             for i in 0..order {
                 for j in 0..order {
                     p_new_d3[i][j] = p_new_d3[i][j]
-                        .add(d3_cross_second[i][j].scale(2.0))
-                        .add(d3_both[i][j].scale(2.0))
-                        .add(d3_cross_first[i][j]);
+                        .add(d3_second[i][j])
+                        .add(d3_second[j][i])
+                        .add(d3_first[i][j].scale(2.0))
+                        .add(d3_first[j][i].scale(2.0))
+                        .add(d3_both[i][j].scale(2.0));
                 }
             }
             let mut gain_d3 = [Ball::ZERO; MAX_ORDER];
