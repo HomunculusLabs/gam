@@ -65,8 +65,7 @@ def fig_layers(layers, out):
     ax.bar([str(l) for l in ls], disc, color=REAL, width=0.55)
     for i, (dd, ss) in enumerate(zip(disc, scr)):
         ax.annotate(
-            f"{dd}
-of {ss:,}", (i, dd), ha="center", va="bottom", fontsize=8.5, color=INK
+            f"{dd}\nof {ss:,}", (i, dd), ha="center", va="bottom", fontsize=8.5, color=INK
         )
     ax.set_xlabel("Gemma 3 4B residual-stream layer (SAE hook point)")
     ax.set_ylabel("e-BH discoveries")
@@ -183,6 +182,44 @@ def fig_planes(planes, out, toks=None, ncol=4, nrow=2):
     print("wrote", out)
 
 
+def fig_power(d, out):
+    files = sorted(
+        (f for f in glob.glob(os.path.join(d, "spike_*.json")) if not f.endswith(".planes.json")),
+        key=lambda f: float(os.path.basename(f)[6:-5]),
+    )
+    if not files:
+        return
+    rs, disc = [], []
+    for f in files:
+        j = json.load(open(f))
+        rs.append(float(os.path.basename(f)[6:-5]))
+        disc.append(j["n_accepted"])
+    base = json.load(open(os.path.join(d, f"cen_L{FLAGSHIP}.json")))["n_accepted"]
+    fig, ax = plt.subplots(figsize=(6.4, 3.8))
+    ax.plot(rs, disc, "-o", color=REAL, linewidth=2, markersize=7, label="planted + native")
+    ax.axhline(base, color=MUTED, linewidth=1.5, linestyle="--")
+    ax.annotate(
+        f"native discoveries ({base})",
+        (rs[0], base),
+        xytext=(0, 6),
+        textcoords="offset points",
+        fontsize=9,
+        color=MUTED,
+    )
+    ax.set_xlabel("planted circle radius  (units of the activations' centred per-coordinate sd)")
+    ax.set_ylabel("e-BH discoveries")
+    ax.set_title(
+        "Power: a circle planted in the SAE's own decoder plane, re-encoded by its own encoder",
+        loc="left",
+        fontsize=11.5,
+        color=INK,
+    )
+    ax.legend(frameon=False, fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out, bbox_inches="tight")
+    print("wrote", out)
+
+
 def main():
     d, outdir = sys.argv[1], sys.argv[2]
     os.makedirs(outdir, exist_ok=True)
@@ -194,6 +231,7 @@ def main():
     for n in nulls:
         print("null:", n["permute_seed"], n["n_pairs"], n["n_accepted"])
     fig_kappa(real, nulls, os.path.join(outdir, "census_kappa.png"))
+    fig_power(d, os.path.join(outdir, "census_power.png"))
     if len(layers) > 1:
         fig_layers(layers, os.path.join(outdir, "census_layers.png"))
     planes = json.load(open(os.path.join(d, f"cen_L{FLAGSHIP}.planes.json")))["planes"]
