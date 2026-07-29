@@ -120,6 +120,8 @@ pub use summary::{
 #[cfg(test)]
 mod binomial_reml_outer_cost_1575_tests;
 #[cfg(test)]
+mod ridge_continuity_tests;
+#[cfg(test)]
 mod continuous_order_tests;
 #[cfg(test)]
 mod estimate_policy_tests;
