@@ -2749,6 +2749,9 @@ mod smoothing_correction_outcome_tests {
                 ));
             let finalgrad_norm = finalgrad.dot(&finalgrad).sqrt();
 
+            // Kept for the failure path below; `Ok`/`Err` is itself a finding.
+            let self_hessian_for_diagnosis = state.compute_lamlhessian_consistent(&final_rho).ok();
+
             let before = SMOOTHING_CORRECTION_CUBATURE_COUNT.load(Ordering::SeqCst);
             let final_lambdas = Array1::from_vec(
                 gam_problem::checked_exp_log_strengths(final_rho.iter().copied())
@@ -2780,9 +2783,51 @@ mod smoothing_correction_outcome_tests {
             // this costs one formatted string on the failure path only.
             let outcome_description = format!("{outcome:?}");
             let correction = outcome.into_correction_with_method().0.unwrap_or_else(|| {
+                // Name the SPECTRUM, not just the verdict.
+                //
+                // Two hypotheses for `active_rank = 0` have now been refuted by
+                // measurement: the near-boundary ρ (moving to an interior 0.0
+                // changed nothing) and a swallowed outer gradient (the panic
+                // above never fired, so `compute_gradient` succeeded). What is
+                // left is the classification rule itself, and it splits the one
+                // direction three ways —
+                //
+                //   Active             σ > floor
+                //   StructuralZero     |σ| <= eigensolver backward error
+                //   BelowGradientFloor otherwise
+                //
+                // with `floor = Σ_k |g_k|·v_k²` (#2428). Those three have
+                // different causes and different fixes, and `V_ρ = [[0.0]]`
+                // looks identical under all of them. `invert_identified_rho_hessian`
+                // already computes the discriminating numbers; the failure path
+                // just never asked for them.
+                let spectrum = self_hessian_for_diagnosis
+                    .as_ref()
+                    .map(|h| {
+                        match crate::estimate::smoothing_correction::invert_identified_rho_hessian(
+                            h, 0, &finalgrad,
+                        ) {
+                            Ok(inv) => format!(
+                                "active={}/{} structural_zero={} below_gradient_floor={} \
+                                 eigenvalues={:?} classes={:?} backward_error={:.6e}",
+                                inv.active_rank,
+                                h.nrows(),
+                                inv.structural_zero,
+                                inv.below_gradient_floor,
+                                inv.eigenvalues,
+                                inv.classifications,
+                                inv.eigenvalue_backward_error_bound,
+                            ),
+                            Err(err) => format!("inverter refused: {err}"),
+                        }
+                    })
+                    .unwrap_or_else(|| "rho Hessian unavailable at this rho".to_string());
                 panic!(
                     "cubature/first-order outcome carries a correction matrix; \
-                     got: {outcome_description}"
+                     got: {outcome_description}; rho={final_rho:?} \
+                     grad={finalgrad:?} |g|={finalgrad_norm:.6e} \
+                     deviance={:.6e} rho-Hessian spectrum: {spectrum}",
+                    final_fit.deviance,
                 )
             });
             (correction, after.saturating_sub(before))
