@@ -171,13 +171,15 @@ def fig_planes(planes, out, toks=None, ncol=4, nrow=2):
     for ax in np.ravel(axes)[len(planes) :]:
         ax.axis("off")
     fig.suptitle(
-        "Circles Google's SAE split into straight atoms — the plane parse of e-BH discoveries",
-        fontsize=12,
+        "Curves Google's SAE split into straight atoms — the plane parse of e-BH discoveries.\n"
+        "These read as ordered ARCS through the positive quadrant, not closed rings: a nonnegative\n"
+        "gate cannot carry a centred circle, and an arc's cone is still its plane.",
+        fontsize=11.5,
         color=INK,
         x=0.02,
         ha="left",
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
     fig.savefig(out, bbox_inches="tight")
     print("wrote", out)
 
