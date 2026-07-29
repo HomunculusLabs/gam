@@ -5696,7 +5696,12 @@ fn collect_json_null_paths(value: &serde_json::Value, path: &str, out: &mut Vec<
                 collect_json_null_paths(item, &format!("{path}.{key}"), out);
             }
         }
-        _ => {}
+        // A bool, number or string holds no nested value: there is nothing to
+        // descend into and nothing to record. Returning states that, where an
+        // empty block would only have looked like an unfinished case — and an
+        // empty arm here fails the root build script's ban scanner, which
+        // blocks every wheel build in the repository.
+        _ => return,
     }
 }
 
