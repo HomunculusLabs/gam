@@ -515,4 +515,192 @@ mod spatial_length_scale_monotone_tests {
             psi_seed < psi_lower || psi_seed > psi_upper,
         );
     }
+
+    /// #2454 MEASUREMENT (reports, never fails): the joint route's terminal
+    /// point carries TWO gradients that disagree by four orders.
+    ///
+    /// With the search box fixed to contain its own seed, the monotone Matérn
+    /// arm now improves on its baseline (−69.585 against −68.411) and refuses at
+    /// the stationarity certificate instead:
+    ///
+    /// ```text
+    ///   |g|=4.316e0 |Pg|=4.316e0 bound=7.059e-4
+    ///   railed (theta-wide): [3]   #3 theta=-2.484907e0 box=[-2.484907e0, 5.719033e0]
+    ///   solver provenance: claimed_converged=true,
+    ///     termination=gradient_tolerance(|g|=1.029235e-4 < 5.487011e-4)
+    ///   rho_checkpoint = [-6.285681, -4.950630, -2.273293, -2.484907]
+    /// ```
+    ///
+    /// `|Pg| = |g|` says the projector did NOT drop coordinate 3, i.e. its
+    /// gradient is feasible-descent (points INTO the box) — which is not a state
+    /// a descent method should be able to terminate in. Meanwhile the solver's
+    /// own terminating `|g|` at what should be the same point is 1.03e-4.
+    ///
+    /// Both cannot be the gradient of one criterion at one θ. This probe
+    /// evaluates the production joint objective at the reported checkpoint and
+    /// prints, per coordinate, the analytic gradient beside a central difference
+    /// of the same criterion — so the disagreement is attributed to a coordinate
+    /// and to a side (analytic wrong, or the two evaluations are not at the same
+    /// point) rather than being read off a refusal string.
+    #[test]
+    fn zz_measure_joint_terminal_gradient_at_the_checkpoint_2454() {
+        let n = 60usize;
+        let d = 2usize;
+        let mut data = Array2::<f64>::zeros((n, d));
+        let mut y = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let x0 = i as f64 / (n as f64 - 1.0);
+            let x1 = (i as f64 * 0.17).sin();
+            data[[i, 0]] = x0;
+            data[[i, 1]] = x1;
+            y[i] = (3.0 * x0).cos() + 0.35 * x1;
+        }
+        let weights = Array1::ones(n);
+        let offset = Array1::zeros(n);
+        let spec = TermCollectionSpec {
+            linear_terms: vec![],
+            random_effect_terms: vec![],
+            smooth_terms: vec![SmoothTermSpec {
+                name: "matern".to_string(),
+                basis: SmoothBasisSpec::Matern {
+                    feature_cols: vec![0, 1],
+                    spec: MaternBasisSpec {
+                        periodic: None,
+                        center_strategy: CenterStrategy::FarthestPoint { num_centers: 12 },
+                        length_scale: gam_terms::basis::MaternLengthScale::fixed(12.0),
+                        nu: MaternNu::FiveHalves,
+                        include_intercept: false,
+                        double_penalty: true,
+                        identifiability: MaternIdentifiability::CenterSumToZero,
+                        aniso_log_scales: None,
+                    },
+                    input_scale: None,
+                },
+                shape: ShapeConstraint::None,
+                joint_null_rotation: None,
+            }],
+        };
+        let fit_opts = FitOptions {
+            max_iter: 40,
+            penalty_shrinkage_floor: None,
+            ..FitOptions::default()
+        };
+        // Verbatim from the refusal string, θ = [ρ₀, ρ₁, ρ₂, ψ].
+        let checkpoint = Array1::from(vec![
+            -6.285_681_405_991_277_f64,
+            -4.950_629_609_698_647,
+            -2.273_293_245_252_893,
+            -2.484_906_649_788_000_4,
+        ]);
+
+        let design = build_term_collection_design(data.view(), &spec)
+            .unwrap_or_else(|e| panic!("design failed: {e:?}"));
+        let resolved = freeze_term_collection_from_design(&spec, &design)
+            .unwrap_or_else(|e| panic!("freeze failed: {e:?}"));
+        let frozen_design = build_term_collection_design(data.view(), &resolved)
+            .unwrap_or_else(|e| panic!("frozen design failed: {e:?}"));
+        let spatial_terms = spatial_length_scale_term_indices(&resolved);
+        let dims_per_term = spatial_dims_per_term(&resolved, &spatial_terms);
+        let rho_dim = frozen_design.penalties.len();
+        let psi_dim: usize = dims_per_term.iter().sum();
+        let theta_dim = rho_dim + psi_dim;
+        eprintln!("[zz-grad-2454] rho_dim={rho_dim} psi_dim={psi_dim} theta_dim={theta_dim}");
+        if theta_dim != checkpoint.len() {
+            eprintln!(
+                "[zz-grad-2454] SKIP: reproduced theta_dim={theta_dim} but the recorded \
+                 checkpoint has {} entries",
+                checkpoint.len()
+            );
+            return;
+        }
+
+        let family = LikelihoodSpec::gaussian_identity();
+        let external_opts = external_opts_for_design(&family, &frozen_design, &fit_opts);
+        let mut cache = SingleBlockExactJointDesignCache::new(
+            data.view(),
+            resolved.clone(),
+            frozen_design.clone(),
+            spatial_terms.clone(),
+            rho_dim,
+            dims_per_term.clone(),
+        )
+        .unwrap_or_else(|e| panic!("cache failed: {e:?}"));
+        let mut evaluator = gam_solve::estimate::ExternalJointHyperEvaluator::new(
+            y.view(),
+            weights.view(),
+            &frozen_design.design,
+            offset.view(),
+            &frozen_design.penalties,
+            &external_opts,
+            "#2454 joint terminal gradient",
+        )
+        .unwrap_or_else(|e| panic!("evaluator failed: {e:?}"));
+
+        let cost_at = |theta: &Array1<f64>,
+                       cache: &mut SingleBlockExactJointDesignCache<'_>,
+                       evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
+         -> f64 {
+            cache
+                .ensure_theta(theta)
+                .unwrap_or_else(|e| panic!("ensure_theta: {e:?}"));
+            let design = cache.design();
+            evaluator
+                .evaluate_cost_only(
+                    &design.design,
+                    &design.penalties,
+                    &design.nullspace_dims,
+                    design.linear_constraints.clone(),
+                    theta,
+                    rho_dim,
+                    None,
+                    "#2454 joint terminal cost-only",
+                    None,
+                )
+                .unwrap_or_else(|e| panic!("cost-only: {e:?}"))
+        };
+
+        cache
+            .ensure_theta(&checkpoint)
+            .unwrap_or_else(|e| panic!("ensure_theta: {e:?}"));
+        let hyper_dirs = try_build_spatial_log_kappa_hyper_dirs(
+            data.view(),
+            cache.spec(),
+            cache.design(),
+            &cache.spatial_terms,
+        )
+        .unwrap_or_else(|e| panic!("hyper dirs: {e:?}"))
+        .expect("hyper dirs present");
+        let (cost_an, grad_an, _hess) = evaluate_joint_reml_outer_eval_at_theta(
+            &mut evaluator,
+            cache.design(),
+            &checkpoint,
+            rho_dim,
+            hyper_dirs,
+            None,
+            gam_solve::rho_optimizer::OuterEvalOrder::ValueAndGradient,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("outer eval: {e:?}"));
+
+        for h in [1e-3_f64, 1e-4, 1e-5] {
+            for j in 0..theta_dim {
+                let mut plus = checkpoint.clone();
+                plus[j] += h;
+                let mut minus = checkpoint.clone();
+                minus[j] -= h;
+                let cp = cost_at(&plus, &mut cache, &mut evaluator);
+                let cm = cost_at(&minus, &mut cache, &mut evaluator);
+                let fd = (cp - cm) / (2.0 * h);
+                let kind = if j >= rho_dim { "psi" } else { "rho" };
+                eprintln!(
+                    "[zz-grad-2454] V={cost_an:+.10e} h={h:.0e} {kind} j={j} \
+                     analytic={:+.8e} fd={fd:+.8e} |an-fd|={:.3e}",
+                    grad_an[j],
+                    (grad_an[j] - fd).abs()
+                );
+            }
+        }
+        let norm = grad_an.dot(&grad_an).sqrt();
+        eprintln!("[zz-grad-2454] |g|_analytic_at_checkpoint={norm:.6e}");
+    }
 }
