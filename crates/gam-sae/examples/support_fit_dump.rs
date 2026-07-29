@@ -28,7 +28,7 @@ fn write_f64s(path: &str, values: &[f64]) -> Result<(), String> {
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19) {
+    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21) {
         return Err("usage: support_fit_dump <f64-le.bin> <rows> <cols> <k> <top_k> <max_cycles> <out_dir> [test.bin test_rows] [reserved] [seed]".into());
     }
     // Seed for BOTH the support cold start and the term seed. A single fit
@@ -363,18 +363,46 @@ fn main() -> Result<(), String> {
         term_seed.term.set_decoder_fista_passes(Some(6));
         println!("decoder strategy: FISTA (6 passes/cycle)");
     }
+    let pool_arg = args.iter().any(|arg| arg == "pool");
+    if pool_arg {
+        println!("pooled smoothing: armed");
+    }
+    let joint_arg = args.iter().any(|arg| arg == "joint");
+    if joint_arg {
+        println!("joint (lambda, alpha) fixed point: armed");
+    }
     let mut ard = ard;
     while reml_arg {
-        let updated = term_seed
-            .term
-            .fellner_schall_smoothing(centered.view(), &lambda)?;
+        // "joint" solves (lambda, alpha) to mutual self-consistency at a
+        // frozen fit instead of taking one step of each per refit; the
+        // alternation's feedback is what carried alpha to 134 at 1M rows.
+        let (updated, joint_ard) = if joint_arg {
+            let (lam, ard_next, sweeps) = term_seed.term.joint_hyperparameter_fixed_point(
+                centered.view(),
+                &lambda,
+                &ard,
+                1.0e-3,
+            )?;
+            println!("joint hyperparameter fixed point: {sweeps} sweeps");
+            (lam, Some(ard_next))
+        } else {
+            (
+                term_seed
+                    .term
+                    .fellner_schall_smoothing(centered.view(), &lambda)?,
+                None,
+            )
+        };
         // The alpha update is LIVE again: the runaway that disabled it was the
         // crude fixed point's constant numerator (`n / (sum t^2 + tr H^-1)`
         // drives alpha -> infinity whenever the tangent is weak, measured
         // median 1 -> 38 -> 78). The update now iterates MacKay's gamma form,
         // whose numerator is the well-determined count and erases itself as
         // alpha grows, so the coupled alternation has a finite attractor.
-        let updated_ard = term_seed.term.mackay_ard_precisions(&ard)?;
+        let updated_ard = match joint_ard {
+            Some(joint) => joint,
+            None => term_seed.term.mackay_ard_precisions(&ard)?,
+        };
         let ard_move = updated_ard
             .iter()
             .zip(ard.iter())
@@ -395,6 +423,15 @@ fn main() -> Result<(), String> {
         // stalls at 0.25 while lambda_max climbs 12 -> 94 without converging.
         // `tau_k - M0_k` saturates at that limit, so it is the quantity that
         // actually says whether the fit has stopped changing.
+        // "pool" replaces K independent smoothing estimates with a shared
+        // scale plus the deviation each atom's own effective df supports --
+        // the repair the overcompleteness result calls for.
+        let updated = if pool_arg {
+            let edf_for_pool = term_seed.term.effective_curvature_df(&updated)?;
+            term_seed.term.pooled_smoothing(&updated, &edf_for_pool)?
+        } else {
+            updated
+        };
         let edf_now = term_seed.term.effective_curvature_df(&updated)?;
         let edf_move = edf_now
             .iter()
