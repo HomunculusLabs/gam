@@ -2145,6 +2145,7 @@ fn estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363() {
         // cache invariance at all and no amount of work on the cache would
         // close it. Measured here rather than assumed, because this test's
         // whole claim is an attribution.
+        let failures_before_case = failures.len();
         let cold_again = cache_invariance_arm(family, y, &w, &x, false);
         if let Some(gap) = first_bitwise_gap(
             cold.beta.as_slice().expect("contiguous cold β"),
@@ -2221,6 +2222,31 @@ fn estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363() {
         ) {
             failures.push(format!(
                 "[{name}] the certified log-λ depends on cache state: {gap}"
+            ));
+        }
+        // PROVENANCE for whatever differed above: did the warm arm SEARCH from
+        // the seeded optimum, or re-certify it in place?
+        //
+        // The cache hit logs `action=resume-and-recertify` and installs the
+        // prior fit's ρ as `initial_rho` with `screen_initial_rho = false`
+        // (`rho_optimizer/run.rs`, the `CacheSeedDecision::ExactFinal` arm),
+        // plus the prior β as an inner seed. If that point is already
+        // certified, the outer search has nothing to do and must return it
+        // unchanged -- so a warm arm reporting ANY outer iterations is
+        // re-deriving a point it was handed, and the ~1e-9 drift in the
+        // certified log-λ follows from that rather than from the cache
+        // carrying wrong state.
+        //
+        // Two readings, opposite fixes, and the iteration count separates them:
+        // warm iterations == 0 means the seed was returned and the difference
+        // is elsewhere; warm iterations > 0 means it searched. Reported only
+        // when this case actually failed, so a green run stays quiet.
+        if failures.len() > failures_before_case {
+            failures.push(format!(
+                "[{name}] PROVENANCE: cold iters={} |g|={:.6e} | warm iters={} |g|={:.6e} \
+                 (a warm arm that re-certifies a seeded optimum in place must report 0 \
+                 outer iterations; anything else re-derived a point it was given)",
+                cold.iterations, cold.finalgrad_norm, warm.iterations, warm.finalgrad_norm,
             ));
         }
     }
