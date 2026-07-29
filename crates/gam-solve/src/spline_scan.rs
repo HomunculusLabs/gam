@@ -888,18 +888,6 @@ fn ball_symmetrize(a: &mut BallMat, m: usize) {
     }
 }
 
-/// Intersect a proper covariance enclosure with its exact PSD invariant.
-///
-/// Once the diffuse rank is exhausted, `P*` is the conditional covariance of
-/// the state. Its diagonal is therefore nonnegative at every measurement
-/// update and prediction. A componentwise interval evaluation of
-/// `P - PH'(HPH' + R)⁻¹HP` forgets that dependency and can widen a diagonal
-/// through zero after repeated rank-one subtractions, even though the exact
-/// innovation is bounded below by the positive observation variance `R`.
-///
-/// This intersection restores proof information supplied by the statistical
-/// model; it is not a numerical tolerance. A wholly negative or non-finite
-/// diagonal still signals an inconsistent enclosure and fails closed.
 /// `A = I − K e₀ᵀ`, built so its `(0,0)` entry is never a subtraction (#2614).
 ///
 /// The expanded per-entry form of the congruence `A X Aᵀ` evaluates
@@ -995,6 +983,18 @@ fn intersect_innovation_above_observation_variance(
     }
 }
 
+/// Intersect a proper covariance enclosure with its exact PSD invariant.
+///
+/// Once the diffuse rank is exhausted, `P*` is the conditional covariance of
+/// the state. Its diagonal is therefore nonnegative at every measurement
+/// update and prediction. A componentwise interval evaluation of
+/// `P - PH'(HPH' + R)⁻¹HP` forgets that dependency and can widen a diagonal
+/// through zero after repeated rank-one subtractions, even though the exact
+/// innovation is bounded below by the positive observation variance `R`.
+///
+/// This intersection restores proof information supplied by the statistical
+/// model; it is not a numerical tolerance. A wholly negative or non-finite
+/// diagonal still signals an inconsistent enclosure and fails closed.
 #[inline]
 fn intersect_proper_covariance_psd(
     covariance: &mut BallMat,
