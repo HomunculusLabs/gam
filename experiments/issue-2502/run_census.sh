@@ -74,6 +74,18 @@ for R in ${SPIKES:-0.15 0.3 0.6 1.2}; do
   echo "SPIKE $R DONE"
 done
 
+# Replication across INDEPENDENTLY TRAINED dictionaries: the same activations
+# re-encoded by the wider SAE at the same layer. A plane that is a circle in the
+# 16k dictionary and a circle in the 65k dictionary, spanning the same ambient
+# 2-plane, is a fact about the model rather than about one training run.
+for W in ${WIDTHS:-65k}; do
+  D=$HOME/gs2W$W
+  [ -f "$D/meta.json" ] || $PY "$DUMP" "$D" --layer "$FLAGSHIP" --width "$W" \
+    --from "$HOME/gs2L$FLAGSHIP"
+  $BIN "$D" "$ATOMS" "$MINCO" "$PARSE" 0 -0.85 "$DRAWS" "$ALPHA" "$OUT/cen_W$W.json"
+  echo "WIDTH $W DONE"
+done
+
 cp "$HOME/gs2L$FLAGSHIP/vocab.json" "$OUT/vocab.json"
 cp "$HOME/gs2L$FLAGSHIP/tokens.i32" "$OUT/tokens.i32"
 $PY "$HOME/gam/experiments/issue-2502/census_figs.py" "$OUT" "$OUT" "$OUT" || true

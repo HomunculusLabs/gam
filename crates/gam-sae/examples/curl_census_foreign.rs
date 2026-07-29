@@ -370,6 +370,12 @@ fn run() -> Result<(), String> {
                 "rows": plane.rows,
                 "alpha": plane.alpha.to_vec(),
                 "beta": plane.beta.to_vec(),
+                // The plane's orthonormal ambient frame, so a plane found in one
+                // dictionary can be matched to a plane found in an independently
+                // trained one by principal angles — replication across artifacts,
+                // not merely across seeds of the same artifact.
+                "e1": plane.e1.to_vec(),
+                "e2": plane.e2.to_vec(),
             }))
         })
         .collect();
