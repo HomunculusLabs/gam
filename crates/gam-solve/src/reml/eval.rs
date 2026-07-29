@@ -2716,10 +2716,24 @@ mod smoothing_correction_outcome_tests {
                 .expect("smoothing correction evaluation");
             let after = SMOOTHING_CORRECTION_CUBATURE_COUNT.load(Ordering::SeqCst);
 
-            let correction = outcome
-                .into_correction_with_method()
-                .0
-                .expect("cubature/first-order outcome carries a correction matrix");
+            // Name the outcome that failed to carry a correction.
+            //
+            // `SmoothingCorrectionOutcome` records WHY it has no matrix -- the
+            // `FirstOrder` variant carries a `reason` explaining why the
+            // cubature upgrade was not taken, and `Unavailable` carries a typed
+            // `SmoothingCorrectionUnavailable`. `.0.expect(..)` threw all of it
+            // away and reported only that a matrix was absent, which is the
+            // same defect (#2465) that made #2614's spline-scan refusal cost
+            // two exact-but-misdirected repairs: a verdict has to carry the
+            // quantity it was decided against. The type derives `Debug`, so
+            // this costs one formatted string on the failure path only.
+            let outcome_description = format!("{outcome:?}");
+            let correction = outcome.into_correction_with_method().0.unwrap_or_else(|| {
+                panic!(
+                    "cubature/first-order outcome carries a correction matrix; \
+                     got: {outcome_description}"
+                )
+            });
             (correction, after.saturating_sub(before))
         };
 
