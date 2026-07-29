@@ -273,6 +273,12 @@ fn main() -> Result<(), String> {
     let lambda: Vec<f64> = vec![lambda_arg; k_ret];
     println!("seeded: retained {k_ret} of {k_atoms}");
 
+    // Which tolerance the initial fit actually certified at, and how many
+    // cycles it consumed getting there. `max_cycles` is the request; these are
+    // the dose, and they differ by up to 120 cycles across arms this issue
+    // compares directly.
+    let certified_tolerance = std::cell::Cell::new(1.0e-4_f64);
+    let escalation_cycles = std::cell::Cell::new(0_usize);
     let t0 = Instant::now();
     // Per-atom REML by Fellner-Schall, alternated with the inner fit. The inner
     // certificate is a statement at fixed smoothing, so lambda moves only out
@@ -320,6 +326,10 @@ fn main() -> Result<(), String> {
                 // a 2.3e4 threshold at 1e-2. Report which tolerance certified, so
                 // the caveat travels with the numbers.
                 .solve_fixed_point(centered.view(), &lambda, &ard, 20, 1.0e-2, 1.0)
+                .inspect(|report| {
+                    certified_tolerance.set(1.0e-2);
+                    escalation_cycles.set(escalation_cycles.get() + report.iterations);
+                })
                 .or_else(|first| {
                     let mut last = first;
                     for tolerance in [1.0e-1_f64, 1.0, 1.0e1, 1.0e2, 1.0e3, 1.0e4] {
@@ -334,6 +344,10 @@ fn main() -> Result<(), String> {
                             Ok(report) => {
                                 eprintln!(
                                     "[fit] certified only at tolerance {tolerance:.0e}"
+                                );
+                                certified_tolerance.set(tolerance);
+                                escalation_cycles.set(
+                                    escalation_cycles.get() + report.iterations,
                                 );
                                 return Ok(report);
                             }
@@ -738,9 +752,12 @@ fn main() -> Result<(), String> {
                     let sse: f64 = centered_test.iter().zip(recon.iter()).map(|(x, r)| (x - r).powi(2)).sum();
                     let ss: f64 = centered_test.iter().map(|x| x * x).sum();
                     println!(
-                        "HELDOUT rows={te_rows} recurred={} EV={:.4} chart={te_digest}",
+                        "HELDOUT rows={te_rows} recurred={} EV={:.4} chart={te_digest} \
+                         cycles={max_cycles} certified_at={:.0e} escalation_cycles={}",
                         rep.recurred,
-                        1.0 - sse / ss
+                        1.0 - sse / ss,
+                        certified_tolerance.get(),
+                        escalation_cycles.get()
                     );
                     // The held-out reconstruction itself. Chart EV alone cannot
                     // say whether the reconstructed directions are the ones the

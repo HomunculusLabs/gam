@@ -438,6 +438,108 @@ pub struct SaeSupportSparseTerm {
     admission_dof_sigma2: Option<f64>,
 }
 
+/// `(tr((G + lambda*S)^-1 G), dim null(S))` for one atom's blocks.
+///
+/// Both the curvature census and the Fellner-Schall update need exactly this
+/// pair, and both carried their own copy until #2502 -- which is how a single
+/// tolerance defect came to be present, and to need fixing, in two places.
+///
+/// Two invariants hold by construction and are what the consumers rely on.
+/// Because `lambda*S` is positive semidefinite, every eigenvector `v` of
+/// `G + lambda*S` satisfies `v'Gv <= v'(G + lambda*S)v`, so each mode
+/// contributes at most one and the trace is at most `m`. The modes spanning
+/// `S`'s null space see `G` alone and contribute exactly one each, so the
+/// trace is at least `dim null(S)` -- which is what makes
+/// `trace - null_dim >= 0` an effective degrees of freedom rather than an
+/// arbitrary difference.
+///
+/// The mode tolerance is scaled by `trace(G)`, which bounds the largest
+/// eigenvalue of a positive semidefinite `G` and therefore bounds the
+/// numerator being divided. Scaling it by `max|eigenvalue(G + lambda*S)|`
+/// instead -- the pre-#2502 form -- lets a large `lambda` swallow the
+/// well-conditioned modes spanning `S`'s null space, collapsing the trace to
+/// zero and returning `-null_dim`. Measured at `lambda = 6.339e15`.
+pub(crate) fn penalized_trace_and_null_dim(
+    gram: &Array2<f64>,
+    penalty: &Array2<f64>,
+    lambda: f64,
+    context: &str,
+) -> Result<(f64, f64), String> {
+    let m = gram.nrows();
+    let symmetric_penalty = (penalty + &penalty.t()) * 0.5;
+    let (penalty_eigenvalues, penalty_vectors) = symmetric_penalty
+        .eigh(Side::Lower)
+        .map_err(|error| format!("{context}: penalty eigh: {error}"))?;
+    let penalty_scale = penalty_eigenvalues
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    // The same machine-precision relative floor `solve_psd_minimum_norm` uses
+    // to decide rank, so the two agree about what "zero" means.
+    let penalty_tolerance = f64::EPSILON * penalty_scale * m.max(1) as f64;
+    let null_dim = penalty_eigenvalues
+        .iter()
+        .filter(|value| **value <= penalty_tolerance)
+        .count() as f64;
+
+    // Jacobi scaling in `S`'s eigenbasis, the identity
+    // `solve_penalized_normal_equations` uses for the same reason: it removes
+    // lambda from the conditioning rather than tolerating it. With
+    // `d_i = 1/sqrt(1 + lambda*s_i)` and `G~ = D U' G U D`,
+    //     tr((G + lambda*S)^-1 G) = tr((G~ + P~)^-1 G~),
+    // where `P~ = diag(lambda*s/(1 + lambda*s))` has every entry in [0, 1) for
+    // every lambda. No matrix whose condition number is lambda is ever formed,
+    // so there is no precision cliff: assembling `G + lambda*S` loses `G`
+    // entirely once `lambda*max|S|` passes `max|G|/eps`, which is near 1e15
+    // here and is where the production collapse to `edf = -null_dim` occurred.
+    let rotated = penalty_vectors.t().dot(gram).dot(&penalty_vectors);
+    let mut scaled = Array2::<f64>::zeros((m, m));
+    let mut penalty_fraction = vec![0.0_f64; m];
+    for row in 0..m {
+        // A symmetric PSD penalty has no negative eigenvalues; rounding can
+        // still deliver one a hair below zero, and it carries no penalty.
+        let s_row = penalty_eigenvalues[row].max(0.0);
+        let d_row = 1.0 / (1.0 + lambda * s_row).sqrt();
+        penalty_fraction[row] = if s_row > 0.0 && lambda > 0.0 {
+            let product = lambda * s_row;
+            // The limit of `x / (1 + x)` is 1, but the expression itself is
+            // `inf / inf` = NaN once the product overflows. Take the limit.
+            if product.is_finite() {
+                product / (1.0 + product)
+            } else {
+                1.0
+            }
+        } else {
+            0.0
+        };
+        for column in 0..m {
+            let s_column = penalty_eigenvalues[column].max(0.0);
+            let d_column = 1.0 / (1.0 + lambda * s_column).sqrt();
+            scaled[[row, column]] = d_row * rotated[[row, column]] * d_column;
+        }
+    }
+    let mut shifted = scaled.clone();
+    for row in 0..m {
+        shifted[[row, row]] += penalty_fraction[row];
+    }
+    let symmetric = (&shifted + &shifted.t()) * 0.5;
+    let (eigenvalues, eigenvectors) = symmetric
+        .eigh(Side::Lower)
+        .map_err(|error| format!("{context}: eigh: {error}"))?;
+    // Both operands are now scaled to G's own magnitude, so the floor for a
+    // meaningless ratio is set by that magnitude.
+    let scaled_trace = (0..m).map(|mode| scaled[[mode, mode]]).sum::<f64>();
+    let tolerance = f64::EPSILON * scaled_trace.max(1.0) * m.max(1) as f64;
+    let projected = eigenvectors.t().dot(&scaled).dot(&eigenvectors);
+    let mut trace = 0.0_f64;
+    for mode in 0..m {
+        if eigenvalues[mode] > tolerance {
+            trace += projected[[mode, mode]] / eigenvalues[mode];
+        }
+    }
+    Ok((trace, null_dim))
+}
+
 impl SaeSupportSparseTerm {
     #[must_use = "term construction error must be handled"]
     pub fn new(
@@ -2292,6 +2394,9 @@ impl SaeSupportSparseTerm {
         let mut tau = vec![0.0_f64; self.k_atoms()];
         let mut null_dim = vec![0.0_f64; self.k_atoms()];
         let mut roughness = vec![0.0_f64; self.k_atoms()];
+        // The level at which `b'Sb` stops being distinguishable from zero,
+        // per atom, from the magnitudes that produced it.
+        let mut roughness_floor = vec![0.0_f64; self.k_atoms()];
         for atom_idx in 0..self.k_atoms() {
             let m = self.atoms[atom_idx].basis_size();
             let penalty = self.atoms[atom_idx].smooth_penalty().clone();
@@ -2309,46 +2414,13 @@ impl SaeSupportSparseTerm {
                 }
             }
 
-            // `M0` is the dimension of the penalty null space, taken at the SAME
-            // machine-precision relative floor `solve_psd_minimum_norm` uses to
-            // decide rank, so the two agree about what "zero" means.
-            let symmetric_penalty = (&penalty + &penalty.t()) * 0.5;
-            let (penalty_eigenvalues, _) = symmetric_penalty
-                .eigh(Side::Lower)
-                .map_err(|error| format!("fellner_schall_smoothing: penalty eigh: {error}"))?;
-            let penalty_scale = penalty_eigenvalues
-                .iter()
-                .map(|value| value.abs())
-                .fold(0.0_f64, f64::max);
-            let penalty_tolerance = f64::EPSILON * penalty_scale * m.max(1) as f64;
-            null_dim[atom_idx] = penalty_eigenvalues
-                .iter()
-                .filter(|value| **value <= penalty_tolerance)
-                .count() as f64;
-
-            // `tau = tr((G + lambda S)^-1 G)`, evaluated through the same
-            // symmetric eigendecomposition rather than an explicit inverse.
-            let mut shifted = gram.clone();
-            shifted.scaled_add(lambda_smooth[atom_idx], &penalty);
-            let symmetric = (&shifted + &shifted.t()) * 0.5;
-            let (eigenvalues, eigenvectors) = symmetric
-                .eigh(Side::Lower)
-                .map_err(|error| format!("fellner_schall_smoothing: eigh: {error}"))?;
-            // The tolerance is set by the scale of what is DIVIDED, not by
-            // the scale of what it is divided by. `projected` is bounded by
-            // G's largest eigenvalue, which `trace(G)` bounds for PSD G; a
-            // tolerance taken from `max|eigenvalue(G + lambda*S)|` instead is
-            // dominated by lambda and discards the well-conditioned modes
-            // spanning S's null space, where the sum is simply G.
-            let gram_scale = (0..m).map(|mode| gram[[mode, mode]]).sum::<f64>();
-            let tolerance = f64::EPSILON * gram_scale * m.max(1) as f64;
-            let projected = eigenvectors.t().dot(&gram).dot(&eigenvectors);
-            let mut trace = 0.0_f64;
-            for mode in 0..m {
-                if eigenvalues[mode] > tolerance {
-                    trace += projected[[mode, mode]] / eigenvalues[mode];
-                }
-            }
+            let (trace, atom_null_dim) = penalized_trace_and_null_dim(
+                &gram,
+                &penalty,
+                lambda_smooth[atom_idx],
+                "fellner_schall_smoothing",
+            )?;
+            null_dim[atom_idx] = atom_null_dim;
             tau[atom_idx] = trace;
 
             let decoder = self.atoms[atom_idx].decoder_coefficients();
@@ -2358,6 +2430,16 @@ impl SaeSupportSparseTerm {
                 .zip(penalized.iter())
                 .map(|(left, right)| left * right)
                 .sum::<f64>();
+            // Rounding error in that quadratic form is of order
+            // `eps * max|S| * |b|^2 * m`. A roughness beneath it is noise, and
+            // dividing by it is how lambda reached 1.571e227.
+            let penalty_scale = penalty
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            let decoder_sq = decoder.iter().map(|value| value * value).sum::<f64>();
+            roughness_floor[atom_idx] =
+                f64::EPSILON * penalty_scale * decoder_sq * m.max(1) as f64;
         }
 
         // Profiled scale: residual sum of squares over the residual degrees of
@@ -2379,7 +2461,7 @@ impl SaeSupportSparseTerm {
             // No rows, no roughness, or no df beyond the null space: nothing in
             // the likelihood distinguishes one lambda from another here.
             if self.atom_rows[atom_idx].is_empty()
-                || !(roughness[atom_idx] > 0.0)
+                || !(roughness[atom_idx] > roughness_floor[atom_idx])
                 || !(signal > 0.0)
             {
                 continue;
@@ -2426,40 +2508,12 @@ impl SaeSupportSparseTerm {
                     }
                 }
             }
-            let symmetric_penalty = (&penalty + &penalty.t()) * 0.5;
-            let (penalty_eigenvalues, _) = symmetric_penalty
-                .eigh(Side::Lower)
-                .map_err(|error| format!("effective_curvature_df: penalty eigh: {error}"))?;
-            let penalty_scale = penalty_eigenvalues
-                .iter()
-                .map(|value| value.abs())
-                .fold(0.0_f64, f64::max);
-            let penalty_tolerance = f64::EPSILON * penalty_scale * m.max(1) as f64;
-            let null_dim = penalty_eigenvalues
-                .iter()
-                .filter(|value| **value <= penalty_tolerance)
-                .count() as f64;
-            let mut shifted = gram.clone();
-            shifted.scaled_add(lambda_smooth[atom_idx], &penalty);
-            let symmetric = (&shifted + &shifted.t()) * 0.5;
-            let (eigenvalues, eigenvectors) = symmetric
-                .eigh(Side::Lower)
-                .map_err(|error| format!("effective_curvature_df: eigh: {error}"))?;
-            // The tolerance is set by the scale of what is DIVIDED, not by
-            // the scale of what it is divided by. `projected` is bounded by
-            // G's largest eigenvalue, which `trace(G)` bounds for PSD G; a
-            // tolerance taken from `max|eigenvalue(G + lambda*S)|` instead is
-            // dominated by lambda and discards the well-conditioned modes
-            // spanning S's null space, where the sum is simply G.
-            let gram_scale = (0..m).map(|mode| gram[[mode, mode]]).sum::<f64>();
-            let tolerance = f64::EPSILON * gram_scale * m.max(1) as f64;
-            let projected = eigenvectors.t().dot(&gram).dot(&eigenvectors);
-            let mut trace = 0.0_f64;
-            for mode in 0..m {
-                if eigenvalues[mode] > tolerance {
-                    trace += projected[[mode, mode]] / eigenvalues[mode];
-                }
-            }
+            let (trace, null_dim) = penalized_trace_and_null_dim(
+                &gram,
+                &penalty,
+                lambda_smooth[atom_idx],
+                "effective_curvature_df",
+            )?;
             out[atom_idx] = trace - null_dim;
         }
         Ok(out)
