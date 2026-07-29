@@ -8872,3 +8872,103 @@ fn screening_at_a_clean_optimum_spends_no_order_four_2596() {
         "a candidate that clears its first-order band must pay nothing extra: {orders:?}"
     );
 }
+
+// ─── #2613 diagnostic (zz_measure): the gradient-only stiff-ridge trajectory ──
+
+/// Replay the #2392 recovery objective with every outer evaluation logged, so
+/// the line-search path between the pull-back seed and the 12.0258 stall is
+/// visible instead of inferred. Signal test: it asserts nothing about the
+/// optimum, only that the run terminates; the `eprintln` stream is the output.
+#[test]
+#[ignore = "zz_measure diagnostic: prints the trajectory, asserts nothing"]
+fn zz_measure_2613_gradient_only_stiff_ridge_trajectory() {
+    const AMPLITUDE: f64 = 1.0e4;
+    const RHO_STAR: f64 = 12.0;
+
+    let _ = env_logger::builder()
+        .filter_level(log::LevelFilter::Trace)
+        .is_test(false)
+        .try_init();
+
+    let calls = Arc::new(Mutex::new(Vec::<(char, f64, f64, f64)>::new()));
+    let cost_log = Arc::clone(&calls);
+    let eval_log = Arc::clone(&calls);
+
+    let cost = move |rho: &Array1<f64>| {
+        let q = (RHO_STAR - rho[0]).exp();
+        let v = AMPLITUDE * (-q + 0.5 * q * q);
+        cost_log
+            .lock()
+            .expect("log")
+            .push(('c', rho[0], v, f64::NAN));
+        v
+    };
+    let eval = move |rho: &Array1<f64>| {
+        let q = (RHO_STAR - rho[0]).exp();
+        let v = AMPLITUDE * (-q + 0.5 * q * q);
+        let g = AMPLITUDE * (q - q * q);
+        eval_log.lock().expect("log").push(('g', rho[0], v, g));
+        OuterEval {
+            cost: v,
+            gradient: array![g],
+            hessian: HessianValue::Unavailable,
+            inner_beta_hint: Some(array![q]),
+        }
+    };
+
+    let audit_problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable);
+    let audit_cost = cost.clone();
+    let audit_eval = eval.clone();
+    let mut audit_obj = audit_problem.build_objective(
+        (),
+        move |_: &mut (), rho: &Array1<f64>| Ok(audit_cost(rho)),
+        move |_: &mut (), rho: &Array1<f64>| Ok(audit_eval(rho)),
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let refusal = audit_stationary_point(
+        &mut audit_obj,
+        array![29.9],
+        "gradient-only wrong-rail audit #2613",
+    )
+    .expect_err("the inward-descent upper rail must not certify");
+    let reseed = refusal
+        .result
+        .wrong_rail_reseed
+        .expect("first-order clean-tail evidence must publish an inward pull-back");
+    eprintln!("[zz_measure #2613] pull-back reseed = {reseed:?}");
+    calls.lock().expect("log").clear();
+
+    let recovery_problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_initial_rho(reseed)
+        .with_screen_initial_rho(false)
+        .with_seed_config(gam_problem::SeedConfig {
+            max_seeds: 1,
+            seed_budget: 1,
+            ..Default::default()
+        });
+    let mut recovery_obj = recovery_problem.build_objective(
+        (),
+        move |_: &mut (), rho: &Array1<f64>| Ok(cost(rho)),
+        move |_: &mut (), rho: &Array1<f64>| Ok(eval(rho)),
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let outcome = recovery_problem.run(&mut recovery_obj, "zz_measure #2613 recovery");
+    for (idx, (kind, rho, value, grad)) in calls.lock().expect("log").iter().enumerate() {
+        eprintln!(
+            "[zz_measure #2613] {idx:>4} {kind} rho={rho:+.12e} V={value:+.12e} g={grad:+.6e}"
+        );
+    }
+    match outcome {
+        Ok(result) => eprintln!(
+            "[zz_measure #2613] OK rho={:?} iters={}",
+            result.rho, result.iterations
+        ),
+        Err(err) => eprintln!("[zz_measure #2613] ERR {err}"),
+    }
+}
