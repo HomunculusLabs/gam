@@ -1463,7 +1463,6 @@ impl SaeSupportSparseTerm {
             routed.variable_priced_support = self.variable_priced_support;
             routed.admission_usage_amortized = self.admission_usage_amortized;
             routed.exact_affine_ranking = self.exact_affine_ranking;
-        routed.grid_refinement = self.grid_refinement;
             routed.grid_refinement = self.grid_refinement;
             return Ok(routed);
         }
@@ -1667,6 +1666,13 @@ impl SaeSupportSparseTerm {
         routed.admission_dof_sigma2 = self.admission_dof_sigma2;
         routed.variable_priced_support = self.variable_priced_support;
         routed.admission_usage_amortized = self.admission_usage_amortized;
+        // Both routing settings must survive the rebuild too. The early-return
+        // path above carries them; omitting them here disarmed the ranking
+        // after the first reroute, so a fit asked for exact ranking got it for
+        // one cycle and grid ranking thereafter -- and a refined grid never
+        // took effect at all, which made an A/B over it train bit-identically.
+        routed.exact_affine_ranking = self.exact_affine_ranking;
+        routed.grid_refinement = self.grid_refinement;
         Ok(routed)
     }
 
