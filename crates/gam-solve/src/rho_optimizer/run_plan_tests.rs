@@ -3643,10 +3643,13 @@ fn cost_stall_far_above_tolerance_keeps_descending_not_flat_valley() {
     // (The exit cell still tracks the running best via `publish_best_so_far`,
     // but the verdict did not request a halt.)
 
-    // The escape budget is finite: after STUCK_STALL_MAX_ESCAPES escapes the
-    // guard falls back to a FlatValleyStall halt so the loop still terminates.
+    // The escapes are finite: an infeasible probe leaves the incumbent
+    // BIT-IDENTICAL, so the second escape would replay the first and is cut,
+    // falling back to a FlatValleyStall halt so the loop still terminates.
+    // This loop deliberately allows more rounds than that: the assertion is
+    // that a halt arrives, not when.
     let mut last = verdict;
-    for _ in 0..(STUCK_STALL_MAX_ESCAPES + 3) {
+    for _ in 0..8 {
         // Re-fill the window each round (each escape reset it).
         guard.observe_infeasible(&probe);
         guard.observe_infeasible(&probe);
@@ -3657,8 +3660,13 @@ fn cost_stall_far_above_tolerance_keeps_descending_not_flat_valley() {
     }
     assert!(
         matches!(last, CostStallVerdict::FlatValleyStall { .. }),
-        "after exhausting the bounded escape budget the guard must eventually \
+        "once an escape would replay a bit-identical incumbent the guard must \
          halt (reported non-converged) so the loop terminates"
+    );
+    assert_eq!(
+        guard.stuck_escapes, 1,
+        "infeasible probes leave the incumbent bit-identical, so exactly ONE \
+         escape is informative and the rest are provable replays"
     );
     let published = exit
         .lock()
@@ -3672,11 +3680,13 @@ fn cost_stall_far_above_tolerance_keeps_descending_not_flat_valley() {
     );
 }
 
-/// #2253 regression: the stuck-stall cap bounds CONSECUTIVE fruitless escapes,
-/// not the lifetime number of productive shelf crossings. The Qwen K=1 circle
-/// replay consumed its historical budget even though a late escape restored a
-/// large objective decrease; retaining the lifetime count killed the seed at
-/// the next shelf even though the trajectory was descending.
+/// #2253 regression: a multi-shelf descent is granted an escape per shelf, and
+/// a genuine super-floor improvement ends the fruitless streak. The Qwen K=1
+/// circle replay consumed a fitted lifetime budget of 8 even though a late
+/// escape restored a large objective decrease, which killed the seed at the
+/// next shelf while the trajectory was still descending. There is no longer a
+/// count to exhaust -- each shelf moves the incumbent, so no escape is a
+/// replay -- and this test now walks MORE shelves than that budget had.
 #[test]
 fn cost_stall_productive_descent_replenishes_escape_budget_2253() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
@@ -3685,11 +3695,11 @@ fn cost_stall_productive_descent_replenishes_escape_budget_2253() {
     let stuck_grad = 10.9;
     guard.observe_seed(&seed, 10.0, stuck_grad);
 
-    // Consume the entire escape budget on a MULTI-SHELF descent: each window
-    // improves the incumbent, but by less than the relative no-improvement
-    // floor, so the window still fills and each shelf is granted exactly one
-    // escape. That is the trajectory #2253 is about — the Qwen K=1 circle
-    // replay whose 7th escape bought a 36-point drop.
+    // Walk a MULTI-SHELF descent past the fitted budget of 8 that used to cap
+    // it: each window improves the incumbent, but by less than the relative
+    // no-improvement floor, so the window still fills and each shelf is granted
+    // exactly one escape. That is the trajectory #2253 is about — the Qwen K=1
+    // circle replay whose 7th escape bought a 36-point drop.
     //
     // The improvement per trial must sit strictly between two thresholds the
     // guard already owns, and the whole budget mechanism lives in that gap:
@@ -3706,7 +3716,8 @@ fn cost_stall_productive_descent_replenishes_escape_budget_2253() {
     let infeasible_probe = array![-10.0, -10.0];
     let mut shelf_value = 10.0_f64;
     const SUBFLOOR_STEP: f64 = 1.0e-9;
-    for escape_idx in 0..STUCK_STALL_MAX_ESCAPES {
+    const SHELVES: usize = 12;
+    for escape_idx in 0..SHELVES {
         let floor = 1.0e-6 * (1.0 + shelf_value.abs());
         let roundoff = f64::EPSILON * (1.0 + shelf_value.abs());
         assert!(
@@ -3724,7 +3735,7 @@ fn cost_stall_productive_descent_replenishes_escape_budget_2253() {
             matches!(verdict, CostStallVerdict::StuckKeepDescending { .. }),
             "escape {} of {} must still keep descending",
             escape_idx + 1,
-            STUCK_STALL_MAX_ESCAPES,
+            SHELVES,
         );
     }
 

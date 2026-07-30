@@ -549,16 +549,6 @@ impl std::fmt::Display for FlatValleyGradBound {
     }
 }
 
-/// Maximum number of consecutive [`CostStallVerdict::StuckKeepDescending`]
-/// escapes the guard grants before it falls back to a [`CostStallVerdict::
-/// FlatValleyStall`] halt (#1426). Each escape resets the no-improvement window
-/// and lets the optimizer take more steps (with the inner solve running to
-/// tighter tolerance), giving it room to climb out of a stuck stall toward the
-/// well-penalized optimum. If the surface is genuinely pathological and the
-/// escapes do not restore descent, the guard eventually halts so the outer loop
-/// still terminates (reported non-converged) rather than grinding to `max_iter`.
-pub(crate) const STUCK_STALL_MAX_ESCAPES: usize = 8;
-
 /// The incumbent state a stall escape was granted from, compared by raw bits.
 ///
 /// Bit identity is the only comparison that supports the claim the escape cut
@@ -668,11 +658,23 @@ pub(crate) struct CostStallGuard {
     /// iterate (#1082/#1237).
     infeasible_streak: usize,
     accepted_iters: usize,
-    /// Number of [`CostStallVerdict::StuckKeepDescending`] escapes already
-    /// granted on this seed (#1426). Capped at [`STUCK_STALL_MAX_ESCAPES`];
-    /// once exhausted the guard halts a far-above-tolerance stall as an ordinary
-    /// flat-valley floor so the loop still terminates.
-    stuck_escapes: usize,
+    /// Number of consecutive fruitless [`CostStallVerdict::StuckKeepDescending`]
+    /// escapes granted on this seed (#1426), reset by any genuine super-floor
+    /// improvement.
+    ///
+    /// This is a DIAGNOSTIC, reported in the escape log lines, and it gates
+    /// nothing. It used to be compared against a fitted ceiling of 8 escapes,
+    /// which was raised to whichever fixture was widest at the time. What
+    /// actually bounds the escapes is [`Self::incumbent_at_last_escape`] (an
+    /// escape from a bit-identical incumbent provably replays the previous one)
+    /// together with the CONFIGURED outer iteration budget: each escape costs a
+    /// full `window` of accepted or infeasible trials, so a run admits at most
+    /// `max_iter / window` of them however this counter moves.
+    ///
+    /// `pub(crate)` so the escape tests can assert HOW MANY escapes a
+    /// trajectory was granted. Both of them previously asserted only that a
+    /// halt eventually arrived, which is satisfied by any ceiling >= 2.
+    pub(crate) stuck_escapes: usize,
     /// The WHOLE incumbent at the moment the previous escape was granted --
     /// `(ρ, value, ‖g‖)` in raw bits -- so the NEXT stall can ask whether that
     /// escape produced any new state at all.
@@ -732,6 +734,54 @@ impl CostStallGuard {
             recent: std::collections::VecDeque::new(),
             exit,
         }
+    }
+
+    /// The iterate a stall is judged at: the recorded best, falling back to the
+    /// current point for each field that is (pathologically) unset.
+    fn best_iterate_or(
+        &self,
+        rho: &Array1<f64>,
+        value: f64,
+        grad_norm: f64,
+    ) -> (Array1<f64>, f64, f64) {
+        (
+            self.best_rho.clone().unwrap_or_else(|| rho.clone()),
+            if self.best_value.is_finite() {
+                self.best_value
+            } else {
+                value
+            },
+            if self.best_grad_norm.is_finite() {
+                self.best_grad_norm
+            } else {
+                grad_norm
+            },
+        )
+    }
+
+    /// Grant one stall escape unless it would replay the previous one.
+    ///
+    /// This is the whole termination argument for the escape mechanism, and it
+    /// is a derivation rather than a budget. An escape reopens the
+    /// no-improvement window and lets the search take another `window` steps
+    /// from the incumbent. Reopening it from a BIT-IDENTICAL incumbent replays a
+    /// deterministic procedure from an identical state, so it must return an
+    /// identical result — that escape provably cannot differ and is refused.
+    /// An escape whose window visited new points gathered new information even
+    /// when the incumbent did not improve, so it is granted; the total number of
+    /// such escapes is bounded by the CONFIGURED outer budget, because each one
+    /// costs a full `window` of accepted or infeasible trials out of `max_iter`.
+    ///
+    /// Returns `true` when the escape was granted (and then reopens the
+    /// no-improvement window as part of granting it).
+    fn grant_escape_unless_replay(&mut self, incumbent: EscapeIncumbent) -> bool {
+        if self.incumbent_at_last_escape.as_ref() == Some(&incumbent) {
+            return false;
+        }
+        self.stuck_escapes = self.stuck_escapes.saturating_add(1);
+        self.incumbent_at_last_escape = Some(incumbent);
+        self.no_improve_streak = 0;
+        true
     }
 
     /// Record one trusted accepted iterate into the #2241 noise-evidence
@@ -993,16 +1043,13 @@ impl CostStallGuard {
         } else {
             self.no_improve_streak = 0;
             // A genuine super-floor improvement means the last stuck-stall
-            // escape (if any) restored real descent, so replenish the escape
-            // budget: [`STUCK_STALL_MAX_ESCAPES`] then bounds CONSECUTIVE
-            // fruitless escapes — the documented pathological-surface case —
-            // rather than the total number of productive basin hops a
-            // multi-shelf descent needs (measured on the #2253 repro: the
-            // 7th escape bought a 36-point objective drop and the lifetime
-            // cap still killed the seed). Termination is preserved because
-            // each replenishment requires an improvement strictly above the
-            // relative floor and the criterion is bounded below, so only
-            // finitely many resets can occur.
+            // escape (if any) restored real descent, so the escape streak is
+            // over: clear both the diagnostic count and the recorded incumbent
+            // so the next stall is judged as a fresh streak rather than as a
+            // replay of a window that predates real descent. Clearing the
+            // incumbent is redundant with the bit-identity test (an improved
+            // best cannot compare equal) and is kept because it makes the
+            // state machine say what the streak means.
             self.stuck_escapes = 0;
             self.incumbent_at_last_escape = None;
         }
@@ -1023,19 +1070,31 @@ impl CostStallGuard {
         // already does; the escape budget bounds consecutive fruitless
         // refusals so a surface that genuinely floors at a saddle still halts
         // (converged=false) after the budget instead of looping.
-        if self.best_hessian_psd == Some(false) && self.stuck_escapes < STUCK_STALL_MAX_ESCAPES {
-            self.stuck_escapes = self.stuck_escapes.saturating_add(1);
-            self.no_improve_streak = 0;
-            log::warn!(
-                "[OUTER] ARC cost-stall window filled at a strict-saddle incumbent \
-                 (hessian_psd=NO at best-so-far, value={:.6e}): refusing to certify the \
-                 saddle and returning control to cubic regularization to exploit the \
-                 negative curvature (escape {}/{}).",
-                self.best_value,
+        if self.best_hessian_psd == Some(false) {
+            let (best_rho, best_value, best_grad_norm) =
+                self.best_iterate_or(rho, value, grad_norm);
+            let incumbent = EscapeIncumbent::new(&best_rho, best_value, best_grad_norm);
+            if self.grant_escape_unless_replay(incumbent) {
+                log::warn!(
+                    "[OUTER] ARC cost-stall window filled at a strict-saddle incumbent \
+                     (hessian_psd=NO at best-so-far, value={:.6e}): refusing to certify the \
+                     saddle and returning control to cubic regularization to exploit the \
+                     negative curvature (escape {}).",
+                    self.best_value,
+                    self.stuck_escapes,
+                );
+                return CostStallVerdict::Continue;
+            }
+            log::info!(
+                "[OUTER] ARC strict-saddle stall refusal cut at escape {}: the previous \
+                 refusal reopened a full {}-step window and left the incumbent \
+                 bit-identical (best={:.9e}, |g|={:.3e}), so refusing again replays the \
+                 same window from the same state; halting.",
                 self.stuck_escapes,
-                STUCK_STALL_MAX_ESCAPES,
+                self.window,
+                best_value,
+                best_grad_norm,
             );
-            return CostStallVerdict::Continue;
         }
         self.publish_stall(rho, value, grad_norm)
     }
@@ -1170,17 +1229,7 @@ impl CostStallGuard {
     fn publish_stall(&mut self, rho: &Array1<f64>, value: f64, grad_norm: f64) -> CostStallVerdict {
         // Publish the best iterate. Prefer the recorded best; fall back to the
         // current point if (pathologically) none was stored.
-        let best_rho = self.best_rho.clone().unwrap_or_else(|| rho.clone());
-        let best_value = if self.best_value.is_finite() {
-            self.best_value
-        } else {
-            value
-        };
-        let best_grad_norm = if self.best_grad_norm.is_finite() {
-            self.best_grad_norm
-        } else {
-            grad_norm
-        };
+        let (best_rho, best_value, best_grad_norm) = self.best_iterate_or(rho, value, grad_norm);
         // Convergence is STATIONARITY, measured RELATIVE TO THE SCORE SCALE.
         // A cost stall counts as a converged optimum when the projected gradient
         // at the best iterate clears EITHER (a) the absolute outer gradient
@@ -1302,34 +1351,25 @@ impl CostStallGuard {
         // value alone cost: a still-descending run halted at escape 1 of 8
         // carrying |g| = 2.479e2 against a keep-descending threshold of 1.5.
         let escape_incumbent = EscapeIncumbent::new(&best_rho, best_value, best_grad_norm);
-        let previous_escape_replayed = self
-            .incumbent_at_last_escape
-            .as_ref()
-            .is_some_and(|before| *before == escape_incumbent);
-        if non_stationary_stall
-            && self.stuck_escapes < STUCK_STALL_MAX_ESCAPES
-            && !previous_escape_replayed
-        {
-            self.stuck_escapes = self.stuck_escapes.saturating_add(1);
-            self.incumbent_at_last_escape = Some(escape_incumbent);
-            // Reset BOTH no-progress streaks: the optimizer should be allowed a
-            // fresh window of accepted/infeasible steps to climb out of the
-            // stuck state. Do NOT publish a halt — leave the shared exit cell
-            // tracking the running best (`publish_best_so_far` already keeps it
-            // current) so an eventual budget-exhaustion still recovers a sane
-            // iterate.
-            self.no_improve_streak = 0;
+        if non_stationary_stall && self.grant_escape_unless_replay(escape_incumbent.clone()) {
+            // The grant already reopened the no-improvement window. Reset the
+            // infeasible streak too: the optimizer should be allowed a fresh
+            // window of accepted AND infeasible steps to climb out of the stuck
+            // state. Do NOT publish a halt — leave the shared exit cell tracking
+            // the running best (`publish_best_so_far` already keeps it current)
+            // so an eventual replay cut still recovers a sane iterate.
             self.infeasible_streak = 0;
             return CostStallVerdict::StuckKeepDescending {
                 residual_grad_norm: best_grad_norm,
                 escape_threshold: keep_descending_threshold,
             };
         }
+        let previous_escape_replayed =
+            self.incumbent_at_last_escape.as_ref() == Some(&escape_incumbent);
         if non_stationary_stall && previous_escape_replayed {
             log::info!(
-                "[OUTER] cost-stall escape budget cut at {}/{}: escape {} reopened a full                  {}-step window and left the incumbent bit-identical (best={:.9e}, |g|={:.3e}),                  so reopening it again replays the same window from the same state; halting.",
+                "[OUTER] cost-stall escape streak cut at {}: escape {} reopened a full                  {}-step window and left the incumbent bit-identical (best={:.9e}, |g|={:.3e}),                  so reopening it again replays the same window from the same state; halting.",
                 self.stuck_escapes,
-                STUCK_STALL_MAX_ESCAPES,
                 self.stuck_escapes,
                 self.window,
                 best_value,
@@ -1669,11 +1709,10 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                                 "[OUTER] cost-stall STUCK (infeasible BFGS probes, NOT a flat \
                                  valley): residual |g|={:.3e} far above the certified-stationary \
                                  band (escape threshold {:.3e}); refusing \
-                                 to halt-and-ship and continuing (escape {}/{}, value={:.6e}).",
+                                 to halt-and-ship and continuing (escape {}, value={:.6e}).",
                                 residual_grad_norm,
                                 escape_threshold,
                                 guard.stuck_escapes,
-                                STUCK_STALL_MAX_ESCAPES,
                                 guard.best_value,
                             );
                         }
@@ -2066,13 +2105,12 @@ impl OuterFirstOrderBridge<'_> {
                          < {:.3e} (relative) over {} accepted outer steps but the projected \
                          gradient is FAR above the certified-stationary band \
                          (|g|={:.3e} > escape threshold {:.3e}); refusing \
-                         to halt-and-ship and continuing the descent (escape {}/{}, value={:.6e}).",
+                         to halt-and-ship and continuing the descent (escape {}, value={:.6e}).",
                         guard.rel_tol,
                         guard.window,
                         residual_grad_norm,
                         escape_threshold,
                         guard.stuck_escapes,
-                        STUCK_STALL_MAX_ESCAPES,
                         guard.best_value,
                     );
                 }
@@ -2564,13 +2602,12 @@ impl OuterSecondOrderBridge<'_> {
                      < {:.3e} (relative) over {} outer steps but the projected gradient is FAR \
                      above the certified-stationary band (|g|={:.3e} > escape threshold \
                      {:.3e}); refusing to halt-and-ship \
-                     and continuing the descent (escape {}/{}, value={:.6e}).",
+                     and continuing the descent (escape {}, value={:.6e}).",
                     guard.rel_tol,
                     guard.window,
                     residual_grad_norm,
                     escape_threshold,
                     guard.stuck_escapes,
-                    STUCK_STALL_MAX_ESCAPES,
                     guard.best_value,
                 );
             }
@@ -2627,11 +2664,10 @@ impl OuterSecondOrderBridge<'_> {
                     "[OUTER] ARC cost-stall STUCK (infeasible run, NOT a flat valley): best \
                      feasible residual |g|={:.3e} far above the certified-stationary band \
                      (escape threshold {:.3e}); refusing to \
-                     halt-and-ship and continuing (escape {}/{}, value={:.6e}).",
+                     halt-and-ship and continuing (escape {}, value={:.6e}).",
                     residual_grad_norm,
                     escape_threshold,
                     guard.stuck_escapes,
-                    STUCK_STALL_MAX_ESCAPES,
                     guard.best_value,
                 );
                 None
