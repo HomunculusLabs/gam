@@ -1527,60 +1527,6 @@ pub fn launch_row_reweight_on_stream(
     Ok(())
 }
 
-/// Stage 6: device-side row reweight launcher for JIT-compiled
-/// custom-family kernels. Same kernel ABI as the built-in path
-/// ([`launch_row_reweight_on_stream`]) — the only differences are
-/// (a) the kernel symbol is `spec.kernel_name()` and (b) the module
-/// resolution goes through [`PirlsRowBackend::module_for_jit`].
-#[cfg(target_os = "linux")]
-pub fn launch_row_reweight_jit_on_stream(
-    backend: &PirlsRowBackend,
-    spec: &JitFamilySpec,
-    curvature: CurvatureMode,
-    stream: &Arc<cudarc::driver::CudaStream>,
-    n: usize,
-    eta_dev: &cudarc::driver::CudaSlice<f64>,
-    y_dev: &cudarc::driver::CudaSlice<f64>,
-    prior_w_dev: &cudarc::driver::CudaSlice<f64>,
-    out: &mut RowOutputDevBuffers,
-) -> Result<(), GpuError> {
-    use cudarc::driver::{LaunchConfig, PushKernelArg};
-    if out.n != n {
-        gam_gpu::gpu_bail!("JIT row reweight buffers shape {} mismatches n={n}", out.n);
-    }
-    let module = backend.module_for_jit(spec, curvature)?;
-    let kernel_name = spec.kernel_name();
-    let func = module
-        .load_function(&kernel_name)
-        .gpu_ctx_with(|err| format!("JIT row reweight load_function({kernel_name}): {err}"))?;
-    const THREADS_PER_BLOCK: u32 = 256;
-    let n_u32 = u32::try_from(n)
-        .map_err(|_| gam_gpu::gpu_err!("n={n} exceeds u32 for JIT row reweight grid sizing"))?;
-    let grid_x = n_u32.div_ceil(THREADS_PER_BLOCK).max(1);
-    let n_i32 = i32::try_from(n)
-        .map_err(|_| gam_gpu::gpu_err!("n={n} exceeds i32 for JIT row reweight kernel argument"))?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_x, 1, 1),
-        block_dim: (THREADS_PER_BLOCK, 1, 1),
-        shared_mem_bytes: 0,
-    };
-    let mut builder = stream.launch_builder(&func);
-    builder.arg(&n_i32);
-    builder.arg(eta_dev);
-    builder.arg(y_dev);
-    builder.arg(prior_w_dev);
-    builder.arg(&mut out.mu);
-    builder.arg(&mut out.grad_eta);
-    builder.arg(&mut out.w_hessian);
-    builder.arg(&mut out.w_solver);
-    builder.arg(&mut out.deviance);
-    builder.arg(&mut out.status);
-    // SAFETY: JIT spec's `cuda_source` builder emits the same kernel
-    // signature as `cuda_source_for`; arg order/types match one-for-one.
-    unsafe { builder.launch(cfg) }
-        .gpu_ctx_with(|err| format!("JIT row reweight launch({kernel_name}): {err}"))?;
-    Ok(())
-}
 
 /// **solve-row** mode launcher.
 ///

@@ -4,7 +4,6 @@
 // consumer) still names `gam::inference::data`. Keep that path valid by
 // aliasing the relocated crate so the extraction does not silently drop a
 // public module path it inherited.
-pub mod util;
 pub use gam_data as data;
 
 // `alo` descended into gam-solve (#1521): genuine REML-evidence numerics whose

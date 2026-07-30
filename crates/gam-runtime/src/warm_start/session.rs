@@ -134,16 +134,6 @@ impl Session {
             })
     }
 
-    /// Read the currently available warm-start entry without consuming a
-    /// preloaded near-match seed.
-    ///
-    /// This is intentionally separate from [`Self::try_load`]: callers that
-    /// only need to make a scheduling decision (for example, whether to run an
-    /// expensive cold-start pilot) must not drain the preloaded seed that the
-    /// outer optimizer is about to consume.
-    pub fn peek_load(&self) -> Option<WarmStartEntry> {
-        self.peek_load_with_source().map(|loaded| loaded.entry)
-    }
 
     /// Read the currently available warm-start entry with source metadata,
     /// without consuming a preloaded near-match seed.

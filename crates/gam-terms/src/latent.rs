@@ -807,21 +807,6 @@ impl LatentManifold {
 }
 
 impl LatentIdMode {
-    /// Fixes the audit finding that ARD/DimSelection alone is rotation
-    /// symmetric and therefore not a standalone identifiability mode.
-    pub fn is_identifiable(&self) -> bool {
-        match self {
-            Self::AuxPrior { .. } | Self::AuxPriorDimSelection { .. } => true,
-            // A fixed-reference anchor pins the full gauge on its own.
-            Self::IsometryToReference { .. } => true,
-            // The behavioral head anchors the gauge through the label channel
-            // and always composes with ARD axis-selection; it is a standalone
-            // identifiable mode provided the head actually carries labels (an
-            // empty head pins nothing, rejected by `validate`).
-            Self::AuxOutcome { head, .. } => head.effective_labeled_count() > 0.0,
-            Self::DimSelection { .. } | Self::None => false,
-        }
-    }
 
     /// Validate the mode's identifiability composition (issue #912 step 2).
     ///
@@ -1323,26 +1308,6 @@ impl LatentCoordValues {
     }
 }
 
-/// Minimum total active assignment mass a per-row atom code must retain after a
-/// Whether the active assignment mass of a per-row code is degenerate
-/// (non-finite), i.e. a NaN/Inf assignment.
-///
-/// #1074: the magic `LATENT_ACTIVE_MASS_FLOOR = 1e-6` collapse-detect-and-reseed
-/// floor was DELETED. It masked the real defect — rows being driven dark by the
-/// assignment optimizer — with a detect-then-reseed bandaid rather than
-/// preventing the collapse. Only the genuine NaN/Inf guard remains. The proper
-/// fix (prevent the active-set collapse in the assignment step) is tracked
-/// separately.
-///
-/// `active_weights` is the slice of per-atom assignment weights on the row's
-/// active support. Returns `true` only when the summed magnitude is non-finite.
-pub fn active_mass_breached(active_weights: &[f64]) -> bool {
-    let mut mass = 0.0_f64;
-    for &w in active_weights {
-        mass += w.abs();
-    }
-    !mass.is_finite()
-}
 
 fn wrap_to_period(x: f64, period: f64) -> f64 {
     assert!(

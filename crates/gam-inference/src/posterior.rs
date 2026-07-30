@@ -1,4 +1,4 @@
-use crate::util::quantile::quantile_from_sorted;
+use gam_math::quantile::quantile_from_sorted;
 use std::cmp::Ordering;
 
 pub fn credible_interval(

@@ -153,9 +153,6 @@ impl BranchCertificate {
         self
     }
 
-    pub fn record_kink_branch(&mut self, record: DualKinkBranchRecord) {
-        self.kink_branches.push(record);
-    }
 
     /// Route derivatives through individual eigenpairs only when the spectral
     /// separation is resolved above eigensolver round-off. At degeneracy this

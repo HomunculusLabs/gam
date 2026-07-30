@@ -265,10 +265,6 @@ impl StratumDesign {
         }
     }
 
-    /// Expected number of sampled rows across all strata, `Σ_h N_h π_h`.
-    pub fn expected_sample_size(&self) -> f64 {
-        self.strata.iter().map(|s| s.n_rows as f64 * s.pi).sum()
-    }
 }
 
 /// Sturges' rule stratum cap `K_max = ⌊log₂ N⌋ + 1` — the standard derived bin

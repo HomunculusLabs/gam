@@ -421,9 +421,6 @@ impl LearnedGraphAtom {
         graph_edge_rank_charge(self.n_eff, self.fiber_rank())
     }
 
-    pub fn summed_edge_charge(&self) -> f64 {
-        self.one_edge_charge() * self.topology_readout().surviving_edges as f64
-    }
 
     pub fn occupancy(&self) -> OccupancyLaw {
         self.occupancy
@@ -462,11 +459,6 @@ impl LearnedGraphAtom {
         self.weighted_laplacian_from_mask(&self.surviving_edges)
     }
 
-    /// Weighted graph Laplacian `L_W` before edge retirement.
-    pub fn full_laplacian(&self) -> Array2<f64> {
-        let all_edges = vec![true; self.candidate_edges.len()];
-        self.weighted_laplacian_from_mask(&all_edges)
-    }
 
     /// Smoothness value `beta^T (L_W kron I_r) beta =
     /// sum_e w_e ||beta_i-beta_j||^2` over the surviving edge set.

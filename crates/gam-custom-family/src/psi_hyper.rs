@@ -2778,28 +2778,6 @@ pub fn evaluate_custom_family_joint_hyper_owned<F: CustomFamily + Clone + Send +
     Ok(outer_eval_result_into_joint_hyper_owned_result(eval_result))
 }
 
-pub fn evaluate_custom_family_joint_hyper_shared<
-    F: CustomFamily + Clone + Send + Sync + 'static,
->(
-    family: &F,
-    specs: &[ParameterBlockSpec],
-    options: &BlockwiseFitOptions,
-    rho_current: &Array1<f64>,
-    hyper_layout: SharedCustomFamilyHyperLayout,
-    warm_start: Option<&CustomFamilyWarmStart>,
-    eval_mode: EvalMode,
-) -> Result<CustomFamilyJointHyperResult, CustomFamilyError> {
-    Ok(evaluate_custom_family_joint_hyper_owned_shared(
-        family,
-        specs,
-        options,
-        rho_current,
-        hyper_layout,
-        warm_start,
-        eval_mode,
-    )?
-    .result)
-}
 
 /// Shared-layout variant of
 /// [`evaluate_custom_family_joint_hyper_owned`].
@@ -3608,26 +3586,6 @@ pub fn evaluate_custom_family_joint_hyper_efs_owned<
     )
 }
 
-pub fn evaluate_custom_family_joint_hyper_efs_shared<
-    F: CustomFamily + Clone + Send + Sync + 'static,
->(
-    family: &F,
-    specs: &[ParameterBlockSpec],
-    options: &BlockwiseFitOptions,
-    rho_current: &Array1<f64>,
-    hyper_layout: SharedCustomFamilyHyperLayout,
-    warm_start: Option<&CustomFamilyWarmStart>,
-) -> Result<CustomFamilyJointHyperEfsResult, CustomFamilyError> {
-    Ok(evaluate_custom_family_joint_hyper_efs_owned_shared(
-        family,
-        specs,
-        options,
-        rho_current,
-        hyper_layout,
-        warm_start,
-    )?
-    .result)
-}
 
 /// Shared-layout variant of
 /// [`evaluate_custom_family_joint_hyper_efs_owned`].

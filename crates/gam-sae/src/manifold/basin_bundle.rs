@@ -204,10 +204,6 @@ impl<S> BasinBundle<S> {
         Ok((idx, self.members[idx].last_value))
     }
 
-    /// The argmin member's state (the state the outer eval should return).
-    pub fn argmin_state(&self) -> Option<&S> {
-        self.argmin().map(|m| &m.state)
-    }
 }
 
 #[cfg(test)]

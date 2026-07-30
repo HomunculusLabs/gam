@@ -173,29 +173,7 @@ pub struct AtomGeometryReport {
 }
 
 impl AtomGeometryReport {
-    /// Indices of atoms whose curve has collapsed below its topology
-    /// ([`AtomGeometryEntry::is_collapsed`]). This is the deployment-scale,
-    /// linear-in-`K` complement to the pairwise structural-coherence guard.
-    pub fn collapsed_atoms(&self) -> Vec<usize> {
-        self.atoms
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.is_collapsed())
-            .map(|(i, _)| i)
-            .collect()
-    }
 
-    /// Mean effective output dimension over atoms that have one (unavailable atoms
-    /// are skipped, not counted as zero). `None` when no atom has a defined
-    /// spectrum.
-    pub fn mean_effective_output_dim(&self) -> Option<f64> {
-        let (sum, count) = self
-            .atoms
-            .iter()
-            .filter_map(|e| e.effective_output_dim)
-            .fold((0.0_f64, 0usize), |(s, c), v| (s + v, c + 1));
-        (count > 0).then(|| sum / count as f64)
-    }
 }
 
 /// Build the geometry lens over a fitted [`SaeManifoldTerm`].

@@ -3785,15 +3785,6 @@ pub fn spatial_identifiability_policy(
 /// selection coordinate when the fit is well-determined.
 pub const NULLSPACE_WELLDET_DEGENERACY_RHO_SD: f64 = 15.0;
 
-/// True iff `prior` is the well-determined double-penalty null-space
-/// degeneracy prior placed on a `DoublePenaltyNullspace` selection coordinate.
-pub fn is_nullspace_degeneracy_prior(prior: &gam_spec::RhoPrior) -> bool {
-    matches!(
-        prior,
-        gam_spec::RhoPrior::Normal { mean, sd }
-            if *mean == 0.0 && *sd == NULLSPACE_WELLDET_DEGENERACY_RHO_SD
-    )
-}
 
 /// Per-term data-derived ψ = log κ bounds.
 ///

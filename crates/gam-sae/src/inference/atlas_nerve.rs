@@ -161,18 +161,6 @@ impl AtlasTransferGate {
         }
     }
 
-    pub fn from_fitted_transport(edge: AtlasHolonomyEdgeId, transport: &FittedTransport) -> Self {
-        let valid = transport.topology_preserved
-            && transport.isometry_defect.is_finite()
-            && transport.isometry_defect_se.is_finite()
-            && transport.isometry_defect <= transport.isometry_defect_se;
-        Self {
-            edge,
-            valid,
-            transport_defect: transport.isometry_defect,
-            equivariance_defect: transport.residual_rms,
-        }
-    }
 
     #[must_use]
     pub fn edge(&self) -> AtlasHolonomyEdgeId {

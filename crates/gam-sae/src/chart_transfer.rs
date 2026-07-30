@@ -28,15 +28,6 @@ pub struct TransferCertificate {
     pub equivariance_defect: f64,
 }
 
-/// One coordinate-valued graph edge `(atom_j, layer_l) -> (atom_k, layer_l+1)`.
-#[derive(Clone, Debug)]
-pub struct CoordinateAttributionEdge {
-    pub component: String,
-    pub input_atom: usize,
-    pub output_atom: usize,
-    pub operator: Array2<f64>,
-    pub variance: Array2<f64>,
-}
 
 /// Compute one pulled-back operator from an output chart jet and ambient JVPs.
 pub fn pulled_back_operator(

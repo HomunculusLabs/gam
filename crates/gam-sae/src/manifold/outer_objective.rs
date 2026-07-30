@@ -1535,52 +1535,6 @@ impl SaeManifoldOuterObjective {
         self.probe_telemetry
     }
 
-    /// #1033 — opt into AMORTIZED (frozen) routing for the ρ-search: freeze the
-    /// term's assignment gates to a ρ-invariant routing distilled from the CURRENT
-    /// (construction-time / seed) dictionary, so the outer ρ-search reuses one
-    /// routing instead of re-solving the per-row gates at every eval (the
-    /// n-independent-outer-loop lever). `None` ⇒ off (free-logit search, the
-    /// default). `Some(predictor)` selects the fixed-form distill:
-    ///   * [`RoutingPredictor::Snapshot`] — freeze the current logits as-is
-    ///     (cheapest; the MVP/baseline; goes stale if the dictionary moves);
-    ///   * [`RoutingPredictor::ChartGeometry`] — distill the routing from the
-    ///     encode-chart reconstruction alignment of the current dictionary
-    ///     ([`SaeManifoldTerm::chart_geometry_routing_logits`]), which tracks the
-    ///     dictionary geometry.
-    /// Freezing here (from the seed/anchor dictionary) makes the routing
-    /// ρ-invariant across the search; the inner solve then optimizes only the
-    /// coordinates and decoder. The baseline (multi-start restore) term is frozen
-    /// to match. Rejected for Softmax (separable-mode contract). The accuracy gate
-    /// decides which predictor (and whether a per-outer-iterate refresh) is needed.
-    #[must_use = "build error must be handled"]
-    pub fn with_amortized_routing(
-        mut self,
-        predictor: Option<RoutingPredictor>,
-    ) -> Result<Self, String> {
-        let Some(form) = predictor else {
-            return Ok(self);
-        };
-        match form {
-            RoutingPredictor::Snapshot => {
-                self.term.assignment.freeze_routing_in_place()?;
-                self.baseline_term.assignment.freeze_routing_in_place()?;
-            }
-            RoutingPredictor::ChartGeometry => {
-                let predicted = self.term.chart_geometry_routing_logits(
-                    self.target.view(),
-                    AMORTIZED_GATE_LOGIT_SCALE,
-                )?;
-                self.term
-                    .assignment
-                    .set_frozen_routing_in_place(predicted.clone())?;
-                self.baseline_term
-                    .assignment
-                    .set_frozen_routing_in_place(predicted)?;
-            }
-        }
-        self.routing_frozen = true;
-        Ok(self)
-    }
 
     /// #1033 — whether the ρ-search runs on frozen (amortized) routing.
     pub fn routing_is_frozen(&self) -> bool {

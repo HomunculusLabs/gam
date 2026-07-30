@@ -246,17 +246,6 @@ impl fmt::Display for EffectError {
 
 impl Error for EffectError {}
 
-/// Construct an effect report directly from a unified fit and an explicit
-/// covariance-selection policy.
-pub fn effect_report_from_fit(
-    fit: &UnifiedFitResult,
-    source: CovarianceSource,
-    contrast_design: ArrayView2<'_, f64>,
-    options: BandOptions,
-) -> Result<EffectReport, EffectError> {
-    let selected = select_covariance(fit, source)?;
-    effect_report(fit.beta.view(), selected.matrix, contrast_design, options)
-}
 
 /// Compute centers, standard errors, bounds, and the common critical value for
 /// a linear effect curve.

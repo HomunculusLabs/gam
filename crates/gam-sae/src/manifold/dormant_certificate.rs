@@ -126,10 +126,6 @@ impl AtomOccupancy {
         self.dormant.len()
     }
 
-    /// Whether slot `k` is dormant (unidentified by the reconstruction objective).
-    pub fn is_dormant(&self, slot: usize) -> bool {
-        self.dormant.binary_search(&slot).is_ok()
-    }
 }
 
 /// Effective occupancy `N_eff,k` of every capacity slot from a sparse block

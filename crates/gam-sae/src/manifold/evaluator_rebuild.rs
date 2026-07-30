@@ -13,8 +13,6 @@ use super::{SaeAtomBasisKind, SaeAtomGeometryPlan, SaeBasisSecondJet};
 /// reliably resolves a non-trivial signal on `T^2` without exploding the
 /// design.
 pub const SAE_DEFAULT_TORUS_HARMONICS: usize = 3;
-/// Sphere chart basis size (lat/lon ⇒ `[1, x, y, z, xy, yz, xz]`).
-pub const SAE_SPHERE_BASIS_SIZE: usize = 7;
 
 /// Duchon nullspace knob `m` for a SAE-manifold atom of latent dimension
 /// `dim`, sized so the native reproducing-norm Gram (`PenaltySource::Primary`)

@@ -302,14 +302,6 @@ pub fn effect_weighted_retention(
     Ok(out)
 }
 
-/// Convenience wrapper for a full Rung-3 shard plus existing variance evidence.
-pub fn fisher_effect_weighted_retention_from_interventions(
-    variance: &[Option<VarianceChargeEvidence>],
-    shard: &InterventionShard,
-) -> Result<Vec<AtomRetentionEvidence>, String> {
-    let effect = fisher_effect_from_interventions(variance.len(), shard)?;
-    effect_weighted_retention(variance, &effect)
-}
 
 /// Primary fit-quality report. Interchange accuracy is deliberately the headline
 /// because coordinates are useful only if interventions in those coordinates

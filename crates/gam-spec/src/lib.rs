@@ -2284,12 +2284,6 @@ impl ResolvedLikelihoodScale {
         }
     }
 
-    pub fn negative_binomial_log_theta(self) -> Result<f64, InvalidLikelihoodScale> {
-        match self {
-            Self::NegativeBinomial { theta, .. } => Ok(theta.log_value()),
-            other => Err(other.wrong_family("a negative-binomial theta")),
-        }
-    }
 
     pub fn negative_binomial_theta(self) -> Result<f64, InvalidLikelihoodScale> {
         match self {
@@ -2591,20 +2585,12 @@ impl GlmLikelihoodSpec {
         self.resolved_scale()?.beta_precision()
     }
 
-    #[inline]
-    pub fn resolved_beta_log_precision(&self) -> Result<f64, InvalidLikelihoodScale> {
-        self.resolved_scale()?.beta_log_precision()
-    }
 
     #[inline]
     pub fn resolved_gaussian_log_phi(&self) -> Result<f64, InvalidLikelihoodScale> {
         self.resolved_scale()?.gaussian_log_phi()
     }
 
-    #[inline]
-    pub fn resolved_gaussian_phi(&self) -> Result<f64, InvalidLikelihoodScale> {
-        self.resolved_scale()?.gaussian_phi()
-    }
 
     #[inline]
     pub fn link_function(&self) -> LinkFunction {

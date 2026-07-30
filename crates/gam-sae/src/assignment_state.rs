@@ -94,18 +94,6 @@ impl SaeAssignmentAtomSpec {
         }
     }
 
-    /// Capture the exact geometry of an existing coordinate block without
-    /// copying any of its `N×d` values.
-    #[must_use]
-    pub fn from_coord_template(template: &LatentCoordValues) -> Self {
-        Self {
-            latent_dim: template.latent_dim(),
-            id_mode: template.id_mode().clone(),
-            manifold: template.manifold().clone(),
-            retraction: template.retraction_registry().clone(),
-            latent_id: template.latent_id(),
-        }
-    }
 }
 
 /// Support-sparse per-row assignment state (see module docs). Internal type: the

@@ -159,36 +159,6 @@ pub fn diff_dictionaries(
     }
 }
 
-/// Merge two certified-compatible artifacts by taking all left atoms and only
-/// non-equivalent right atoms.  The result is re-hashed from canonical bytes.
-pub fn merge_dictionaries(
-    left: &CanonicalDictionaryArtifact,
-    right: &CanonicalDictionaryArtifact,
-    tol: f64,
-) -> CanonicalDictionaryArtifact {
-    let diff = diff_dictionaries(left, right, tol);
-    let mut atoms = left.atoms.clone();
-    for (ri, atom) in right.atoms.iter().enumerate() {
-        let matched = diff
-            .atom_diffs
-            .iter()
-            .any(|d| d.right_atom == ri && d.certified_equivalent);
-        if !matched {
-            atoms.push(atom.clone());
-        }
-    }
-    atoms.sort_by(|a, b| atom_sort_key(a).cmp(&atom_sort_key(b)));
-    let gauge_certificate = format!(
-        "merge({}, {})",
-        left.gauge_certificate, right.gauge_certificate
-    );
-    let content_hash = hash_atoms(&atoms, &gauge_certificate);
-    CanonicalDictionaryArtifact {
-        atoms,
-        gauge_certificate,
-        content_hash,
-    }
-}
 
 fn canonical_decoder_block(frame: ArrayView2<'_, f64>) -> (Array2<f64>, f64) {
     let norm = frame.iter().map(|v| v * v).sum::<f64>().sqrt();

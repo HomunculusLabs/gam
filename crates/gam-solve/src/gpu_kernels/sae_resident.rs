@@ -1675,23 +1675,7 @@ pub struct ResidencyReport {
 }
 
 impl ResidencyReport {
-    /// Fraction of operator applies that executed on the device. `0.0` when the
-    /// loop performed none (a fit that converged before its first step).
-    #[must_use]
-    pub fn operator_device_fraction(&self) -> f64 {
-        if self.operator_applies == 0 {
-            return 0.0;
-        }
-        self.operator_device_applies as f64 / self.operator_applies as f64
-    }
 
-    /// Total per-iterate bus traffic. Compare against
-    /// [`DeviceResidentArrowWorkspace::resident_device_bytes`]: residency is the
-    /// claim that this stays `O(n·d + p)` per apply while that stays put.
-    #[must_use]
-    pub fn transfer_bytes(&self) -> usize {
-        self.operator_host_to_device_bytes + self.operator_device_to_host_bytes
-    }
 }
 
 /// Options for the device-resident inner Newton loop. Defaults mirror the

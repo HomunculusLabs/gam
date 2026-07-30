@@ -582,15 +582,6 @@ impl RailFaceLimitOutcome {
         }
     }
 
-    /// A human-readable account of a decline, for the certificate's log.
-    pub fn decline_reason(&self) -> Option<&str> {
-        match self {
-            Self::Available(_) => None,
-            Self::OutsideClosedForm { reason } | Self::FaceUnavailable { reason } => {
-                Some(reason.as_str())
-            }
-        }
-    }
 }
 
 /// The per-face penalty geometry shared by every closed form: the face's
