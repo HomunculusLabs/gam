@@ -4669,6 +4669,7 @@ mod refinement_decision_tests {
         // `zz_measure_cascade_width_by_level_count_2546` at `levels = 6`:
         //
         //   side=45  n=2025  m=2038   13 short
+        //   side=47  n=2209  m=2159   IDENTIFIED, 50 to spare
         //   side=50  n=2500  m=2508    8 short
         //   side=60  n=3600  m=3628   28 short
         //   side=70  n=4900  m=1922   IDENTIFIED
@@ -4678,11 +4679,17 @@ mod refinement_decision_tests {
         // `m` climbs to 3628 at side=60 and then FALLS to 1922 at side=70: once
         // the sample is finer than the level-6 net's own spacing the net stops
         // adding centres for it, so width and sample decouple and the data
-        // overtake the spectrum. Every side from 46 to 64 sits BELOW that
-        // discontinuity, where `m` tracks `n` about 28 columns above it, so a
-        // search bounded at 64 cannot succeed however finely it steps -- and
-        // "64x64 gives 4117 columns (past the budget)" is the trend argument that
-        // the discontinuity invalidates.
+        // overtake the spectrum. That discontinuity is why "64x64 gives 4117
+        // columns, so the band ends below 64" was a trend argument and not a
+        // measurement.
+        //
+        // But `m` does not track `n` at a fixed offset below the discontinuity
+        // either, and the margin is not monotone in `side` there: side=47 is
+        // identified by 50 columns while its neighbours 45 and 50 are short by 13
+        // and 8. So a fine search below 64 CAN succeed -- side=47 is measured
+        // doing it -- and the reason to prefer the candidate list below is cost,
+        // not reachability: side=70 hits on the first design build where stepping
+        // from 46 pays for one or two dozen.
         //
         // So the candidates are the measured ones, in cost order, with the band's
         // edges kept after them: the search still self-heals if DENSE_GRAM_MAX or
