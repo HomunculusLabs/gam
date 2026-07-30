@@ -127,6 +127,18 @@ fn sae_observe_atlas_topology<'py>(
                     out.set_item("open_triangles", *open_triangles)?;
                     out.set_item("total", *total)?;
                 }
+                TopologyRefusal::OrientationSubcomplexIncomplete {
+                    signed_b0,
+                    signed_b1,
+                    nerve_b0,
+                    nerve_b1,
+                } => {
+                    out.set_item("kind", "orientation_subcomplex_incomplete")?;
+                    out.set_item("signed_b0", *signed_b0)?;
+                    out.set_item("signed_b1", *signed_b1)?;
+                    out.set_item("nerve_b0", *nerve_b0)?;
+                    out.set_item("nerve_b1", *nerve_b1)?;
+                }
                 TopologyRefusal::NoTwoCells => {
                     out.set_item("kind", "no_two_cells")?;
                 }
@@ -172,6 +184,15 @@ fn sae_observe_atlas_topology<'py>(
         "open_orientation_triangles",
         invariants.open_orientation_triangles,
     )?;
+    out.set_item(
+        "unsigned_orientation_triangles",
+        invariants.unsigned_orientation_triangles,
+    )?;
+    let signed_betti = PyDict::new(py);
+    signed_betti.set_item("b0", invariants.signed_subcomplex_betti.b0)?;
+    signed_betti.set_item("b1", invariants.signed_subcomplex_betti.b1)?;
+    signed_betti.set_item("b2", invariants.signed_subcomplex_betti.b2)?;
+    out.set_item("signed_subcomplex_betti", signed_betti)?;
     out.set_item("incoherent_overlap_pairs", invariants.incoherent_overlap_pairs)?;
     out.set_item("max_cover_multiplicity", invariants.max_cover_multiplicity)?;
     out.set_item("mean_cover_multiplicity", invariants.mean_cover_multiplicity)?;
