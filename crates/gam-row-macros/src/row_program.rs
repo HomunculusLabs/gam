@@ -1364,12 +1364,10 @@ fn directional_expression(
     stack_index: &mut usize,
     preludes: &mut Vec<String>,
 ) -> Result<DirectionalJet> {
-    let DirectionalExpressionEnvironment {
-        leaves,
-        constants,
-        dimension,
-        fourth,
-    } = *environment;
+    let leaves = environment.leaves;
+    let constants = environment.constants;
+    let dimension = environment.dimension;
+    let fourth = environment.fourth;
     let mut child = |expression: &ProgramExpr| {
         directional_expression(
             expression,
