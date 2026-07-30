@@ -42,7 +42,21 @@ impl_reason_error_boilerplate! {
     }
 }
 
-const COLUMN_TOL: f64 = 1e-12;
+// Floor on a centred weighted sum of squares below which the noise-replay
+// rescale factor `sqrt(orig_css / resid_css)` is not formed and the column is
+// left at unit scale.
+//
+// This is a DECLARED, UNMEASURED policy and not a derived bound, stated here
+// rather than left implicit. Unlike the intercept-detection test in
+// `infer_non_intercept_start_impl` (which compares a cancelling difference and
+// so has a roundoff band to compare against), both operands here are
+// already-centred sums of non-negative terms: they cancel nothing, so their
+// roundoff band is a fixed fraction of themselves and a band-based test
+// degenerates to `> 0.0`. What this floor actually guards is the AMPLIFICATION
+// of the ratio as `resid_css` shrinks, and the amplification a replay solve can
+// absorb has not been measured. Retuning it without that measurement would move
+// published column scales, so the value is left where it was found.
+const RESCALE_CENTERED_SS_FLOOR: f64 = 1e-12;
 const SCALE_DESIGN_TARGET_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 // Numerical conditioning floor for the SVD truncation tolerance: we drop any
 // singular direction below `RCOND_FLOOR * sigma_max`, which is the standard
@@ -435,6 +449,11 @@ struct WeightedColumnStats {
     weighted_sum: Array1<f64>,
     weighted_sum_sq: Array1<f64>,
     total_weight: f64,
+    /// Rows that actually contributed, i.e. those with a nonzero weight. This
+    /// is the accumulation depth of `weighted_sum` and `weighted_sum_sq` — the
+    /// zero-weight rows are `continue`d and round nothing — and so it is what
+    /// the roundoff band of a quantity built from them is a function of.
+    contributing_rows: usize,
 }
 
 fn validate_scale_weights(weights: &Array1<f64>) -> Result<f64, ScaleDesignError> {
@@ -481,6 +500,7 @@ fn weighted_column_stats(
     let mut weighted_sum = Array1::<f64>::zeros(p);
     let mut weighted_sum_sq = Array1::<f64>::zeros(p);
     let chunk_rows = scale_design_row_chunk_size(design.nrows(), p);
+    let mut contributing_rows = 0usize;
     for start in (0..design.nrows()).step_by(chunk_rows) {
         let end = (start + chunk_rows).min(design.nrows());
         let chunk = design.row_chunk(start..end)?;
@@ -489,6 +509,7 @@ fn weighted_column_stats(
             if w == 0.0 {
                 continue;
             }
+            contributing_rows += 1;
             for j in 0..p {
                 let x = chunk[[local, j]];
                 weighted_sum[j] += w * x;
@@ -500,6 +521,7 @@ fn weighted_column_stats(
         weighted_sum,
         weighted_sum_sq,
         total_weight,
+        contributing_rows,
     })
 }
 
@@ -511,9 +533,33 @@ fn infer_non_intercept_start_impl(
     let stats = weighted_column_stats(design, weights, row_mismatch_error)?;
     let mut end = 0;
     for j in 0..stats.weighted_sum.len() {
-        let centered_ss = stats.weighted_sum_sq[j]
-            - stats.weighted_sum[j] * stats.weighted_sum[j] / stats.total_weight;
-        if centered_ss <= COLUMN_TOL {
+        // Textbook one-pass centered sum of squares, and therefore a
+        // DIFFERENCE OF TWO LARGE NON-NEGATIVE QUANTITIES. For the constant
+        // column this test exists to find, the two are equal in exact
+        // arithmetic and the computed difference is nothing but the roundoff of
+        // the accumulations that produced them — so the threshold it is
+        // compared against has to be that roundoff, and nothing else.
+        //
+        // Both operands are sums of non-negative terms (weights are validated
+        // non-negative above), so `Σ|terms| = raw_ss + mean_ss` exactly, and
+        // Wilkinson's band applies with no cancellation inside either operand.
+        // Depth: each contributing row commits two multiplies and one add into
+        // `weighted_sum_sq` and one multiply and one add into `weighted_sum`,
+        // then the correction costs a square, a divide and the subtraction.
+        let raw_ss = stats.weighted_sum_sq[j];
+        let mean_ss = stats.weighted_sum[j] * stats.weighted_sum[j] / stats.total_weight;
+        let centered_ss = raw_ss - mean_ss;
+        let roundoff_floor = gam_linalg::roundoff::accumulation_band(
+            5 * stats.contributing_rows + 3,
+            raw_ss + mean_ss,
+        );
+        // The value replaced here was an ABSOLUTE `1e-12`, which cannot be
+        // right for a quantity in the units of `Σ w x²`: a constant column of
+        // magnitude `1e6` over `1e6` unit-weight rows leaves a cancellation
+        // residue near `1e8`, so the column it was written to find was not
+        // found, while a genuinely varying column whose values are `~1e-7`
+        // scores `~1e-14` and was misread as constant.
+        if centered_ss <= roundoff_floor {
             end = j + 1;
         } else {
             break;
@@ -774,9 +820,9 @@ fn build_scale_deviation_transform_impl(
         for jj in 0..active_cols {
             let j = first_active + jj;
             let scale = if resid_css[jj].is_finite()
-                && resid_css[jj] > COLUMN_TOL
+                && resid_css[jj] > RESCALE_CENTERED_SS_FLOOR
                 && orig_css[jj].is_finite()
-                && orig_css[jj] > COLUMN_TOL
+                && orig_css[jj] > RESCALE_CENTERED_SS_FLOOR
             {
                 (orig_css[jj] / resid_css[jj]).sqrt()
             } else {
