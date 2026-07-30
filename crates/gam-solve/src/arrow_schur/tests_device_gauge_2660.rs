@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use super::*;
 use ndarray::{Array1, Array2};
 
@@ -119,6 +121,7 @@ fn device_direct_applies_beta_gauge_quotient_at_composed_cofit_shape_2660() {
         eprintln!("[#2660] no CUDA runtime; skipping device quotient parity");
         return;
     }
+    gam_gpu::configure_global_policy(gam_gpu::GpuPolicy::Required);
 
     let (sys, gauge_direction) = production_shaped_gauge_system();
     let ridge_t = 1.0e-7;
