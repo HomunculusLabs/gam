@@ -2324,7 +2324,7 @@ impl<'a> ConstraintSetOps<'a> {
         }
         Ok(ops)
     }
- 
+
     fn nrows(&self) -> usize {
         self.norms.len()
     }
