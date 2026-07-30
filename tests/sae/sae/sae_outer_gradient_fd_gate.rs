@@ -335,9 +335,16 @@ fn sae_outer_rho_gradient_components_match_centered_fd_ordered_beta_bernoulli() 
 /// `ρ̂ ± h` along one outer coordinate. [`SaeManifoldTerm::loss`] borrows `&self`
 /// and never re-solves the inner (t, β) problem, so the inner state stays pinned
 /// at the converged `θ̂` and this difference isolates the DIRECT ρ-derivative of
-/// the data-fit + priors — exactly the analytic `explicit` channel — with no
-/// envelope / IFT term. FD-OK: audit instrument only (SPEC), never a production
-/// path; the analytic channel is authoritative.
+/// the data-fit + priors, with no envelope / IFT term.
+///
+/// #2087 — this is the analytic `explicit` channel MINUS
+/// `rank_charge_direct_rho`, NOT `explicit` itself. The assembler folds the
+/// realised-rank charge's direct ρ-differential into `explicit`, and that charge
+/// lives in the quasi-Laplace complexity, so `loss.total()` cannot see it. The
+/// caller nets it out before comparing; comparing against raw `explicit` reports
+/// the charge as a data-fit/prior desync, which is what this gate used to do.
+/// FD-OK: audit instrument only (SPEC), never a production path; the analytic
+/// channel is authoritative.
 fn frozen_explicit_fd(
     term: &SaeManifoldTerm,
     target: &Array2<f64>,
@@ -395,35 +402,58 @@ fn assert_channel_decomposition(label: &str, f: &Fixture) {
         let logdet_a = components.logdet_trace[coord];
         let occam_a = components.occam[coord];
         let third_a = components.third_order_correction[coord];
+        // #2087 LIKE-FOR-LIKE. `components.explicit` is not the ρ-derivative of
+        // `loss.total() + extra_penalty_energy` alone: the assembler folds the
+        // realised-rank charge's direct ρ-differential into it. That charge lives in
+        // the quasi-Laplace COMPLEXITY, so `SaeManifoldTerm::loss` cannot see it and
+        // `frozen_explicit_fd` cannot either. Net it out on the analytic side, and
+        // out of the block FD, which inherits it through `total_fd - explicit_fd`.
+        // Before this, the two assertions below were off by exactly ∓rank_charge —
+        // equal and opposite — and each blamed a channel that was not at fault.
+        let rank_charge_a = components.rank_charge_direct_rho[coord];
+        let loss_explicit_a = explicit_a - rank_charge_a;
 
-        // Direct (frozen-θ) FD of loss.total() ≡ the analytic `explicit` channel.
+        // Direct (frozen-θ) FD of loss.total() ≡ `explicit` MINUS the folded charge.
         let explicit_fd = frozen_explicit_fd(&converged, &f.target, &f.rho, coord);
         // Envelope FD of the RE-SOLVED criterion ≡ the FULL analytic gradient.
         let total_fd = centered_fd(&converged, &f.target, &f.rho, coord, 8);
-        // The log|H|-block is the envelope FD minus the frozen-θ explicit FD.
-        let block_fd = total_fd - explicit_fd;
+        // The log|H|-block is the envelope FD minus BOTH loss-visible legs: the
+        // frozen-θ explicit FD and the rank charge the criterion prices directly.
+        let block_fd = total_fd - explicit_fd - rank_charge_a;
         let block_a = logdet_a + occam_a + third_a;
 
         eprintln!(
-            "[{label}] coord {coord}: EXPLICIT fd={explicit_fd:.6e} an={explicit_a:.6e} | \
+            "[{label}] coord {coord}: EXPLICIT fd={explicit_fd:.6e} an={loss_explicit_a:.6e} \
+             (= explicit {explicit_a:.6e} − rank_charge {rank_charge_a:.6e}) | \
              logH-BLOCK fd={block_fd:.6e} an={block_a:.6e} \
              (= logdet_trace {logdet_a:.6e} + occam {occam_a:.6e} + third_order {third_a:.6e})"
         );
 
-        let expl_tol = 2.5e-3 * (1.0 + explicit_fd.abs().max(explicit_a.abs()));
+        let expl_tol = 2.5e-3 * (1.0 + explicit_fd.abs().max(loss_explicit_a.abs()));
         assert!(
-            (explicit_fd - explicit_a).abs() <= expl_tol,
+            (explicit_fd - loss_explicit_a).abs() <= expl_tol,
             "[{label}] EXPLICIT channel coord {coord} desync: frozen-θ loss FD {explicit_fd:.8e} \
-             vs analytic explicit {explicit_a:.8e} — the direct data-fit/prior ρ-derivative is wrong"
+             vs analytic explicit-minus-rank-charge {loss_explicit_a:.8e} (= explicit \
+             {explicit_a:.8e} − rank_charge_direct_rho {rank_charge_a:.8e}). The rank charge is \
+             netted out, so this names the DIRECT ρ-derivative of `loss.total() + \
+             extra_penalty_energy`: the per-atom decoder-smoothness energy, the ARD \
+             log-precision prior, or the assignment log-strength prior. It does NOT implicate \
+             the log-det block."
         );
         let block_tol = 2.5e-3 * (1.0 + block_fd.abs().max(block_a.abs()));
         assert!(
             (block_fd - block_a).abs() <= block_tol,
-            "[{label}] log|H|-BLOCK coord {coord} desync: envelope-minus-explicit FD {block_fd:.8e} \
-             vs analytic (logdet_trace {logdet_a:.8e} + occam {occam_a:.8e} + third_order {third_a:.8e}) \
-             = {block_a:.8e}. The direct prior/data-fit channel is clean (asserted above), so the \
-             defect is in the Hessian log-det derivative: the direct trace ½tr(H⁻¹∂H/∂ρ) and/or the \
-             θ-adjoint Γ feeding the #1006 third-order ordered Beta--Bernoulli shared-M channel."
+            "[{label}] log|H|-BLOCK coord {coord} desync: envelope-minus-explicit-minus-rank-charge \
+             FD {block_fd:.8e} vs analytic (logdet_trace {logdet_a:.8e} + occam {occam_a:.8e} + \
+             third_order {third_a:.8e}) = {block_a:.8e}. The direct prior/data-fit channel is clean \
+             (asserted above) and the rank charge is netted out of BOTH sides, so the candidates \
+             are, in order: (1) `third_order` = −½⟨A⁺Γ, g_ρ⟩ amplified through a near-singular A⁺ \
+             (`SAE_EXACT_A_PD_FLOOR_REL = 1e-9` inverts an eigenvalue just above the floor at 1/λ); \
+             (2) a value↔gradient log-determinant ROUTE split (`direct_logdet_admitted` vs \
+             `exact_a_logdet_route`); (3) the direct trace ½tr(H⁻¹∂H/∂ρ). Read the h-sweep printed \
+             by `zz_2087_third_order_envelope_discriminator_softmax` to separate (1) from (3): if \
+             the block FD stays glued to `logdet_trace` as h grows, the analytic `third_order` is \
+             the defect."
         );
     }
 }

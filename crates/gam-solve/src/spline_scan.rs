@@ -3014,6 +3014,31 @@ fn third_derivative_global_bound(proper_modes: f64, residual_dof: f64) -> f64 {
     0.5 * (0.25 * proper_modes + 6.0 * residual_dof)
 }
 
+/// `|V′| ≤ ½(r/4 + ν)`, the k=1 member of the same closed-form family.
+///
+/// Derived exactly as its siblings, in the same place. The normalized
+/// determinant contribution's first derivative in `ρ` is `u(1-u)`, whose
+/// magnitude is at most `1/4` on `u ∈ [0,1]` — the same `r/4` term every order
+/// carries. For the residual part `(log R)′ = R′/R` is a convex average of the
+/// kernel ratios `t′/t`, each bounded by `1`, so Faa di Bruno's coefficient sum
+/// at k=1 is `1`, against `1+1 = 2` at k=2, `1+3+2 = 6` at k=3 and
+/// `1+4+3+12+6 = 26` at k=4.
+///
+/// UNLIKE its siblings this is deliberately NOT applied in
+/// [`certified_concentrated_criterion_jet`], and there is no `BoundSource` for
+/// it. The first derivative is the quantity the certified search is SOLVING
+/// FOR: its isolation gate asks whether the cell's derivative enclosure
+/// excludes zero, and a constant bound on `|V′|` says nothing about where
+/// `V′ = 0` is. Substituting it there would leave every bracket unresolved
+/// while looking like a tightening.
+///
+/// Its one legitimate consumer is the score-VALUE enclosure in
+/// [`concentrated_criterion_enclosure`], which integrates `V′` across the cell
+/// and therefore needs it only as a magnitude. See the comment at that use.
+fn first_derivative_global_bound(proper_modes: f64, residual_dof: f64) -> f64 {
+    0.5 * (0.25 * proper_modes + residual_dof)
+}
+
 /// Intersect a derivative enclosure with its closed-form global bound.
 ///
 /// ONE rule at every order, not a branch taken only on failure: the minimum of
@@ -3174,16 +3199,18 @@ fn certified_concentrated_criterion_jet(
 /// `u in [0,1]`; every normalized profiled-residual derivative is a convex
 /// average of the same kernels. Consequently
 ///
-/// `|L''| <= 1/2 (r/4 + 2 nu)`, `|L'''| <= 1/2 (r/4 + 6 nu)`, and
-/// `|L''''| <= 1/2 (r/4 + 26 nu)`,
+/// `|L'| <= 1/2 (r/4 + nu)`, `|L''| <= 1/2 (r/4 + 2 nu)`,
+/// `|L'''| <= 1/2 (r/4 + 6 nu)`, and `|L''''| <= 1/2 (r/4 + 26 nu)`,
 ///
 /// where `r` is the number of proper innovation modes and `nu=n-order` is the
 /// residual d.f. For one normalized determinant contribution, the fourth
 /// derivative is `u(1-u)(1-6u+6u^2)`, whose magnitude is at most `1/4` on
-/// `u in [0,1]`. For each residual kernel `t = z^2 (1-u)`, every ratio
-/// `|t^{(k)}/t| <= 1` for `k <= 4`, so Faa di Bruno on `log R` gives
-/// `1+4+3+12+6 = 26`. Within-tie residual energy is lambda-independent and
-/// only tightens these bounds.
+/// `u in [0,1]`; so is the FIRST derivative `u(1-u)`, which is why every order
+/// carries the same `r/4` term. For each residual kernel `t = z^2 (1-u)`,
+/// every ratio `|t^{(k)}/t| <= 1` for `k <= 4`, so Faa di Bruno on `log R`
+/// gives `1 = 1` at first order, `1+1 = 2` at second, `1+3+2 = 6` at third and
+/// `1+4+3+12+6 = 26` at fourth. Within-tie residual energy is
+/// lambda-independent and only tightens these bounds.
 /// Endpoint jets plus these analytic Lipschitz bounds therefore enclose the
 /// entire interval without a sampling lattice.
 ///
@@ -3308,7 +3335,58 @@ fn concentrated_criterion_enclosure(
             .max(right_certificate.curvature.hi),
     )
     .add(ClosedInterval::new(-curvature_radius, curvature_radius));
-    let derivative_ball = Ball::certified(0.0, derivative);
+    // VALUE CHANNEL ONLY: intersect the slope with its closed-form global
+    // bound before it is integrated across the cell.
+    //
+    // `from_left`/`from_right` below are the mean-value form
+    // `V(u) = V(e) + V′(ξ)(u - e)`, so they need only an ENCLOSURE of `V′` over
+    // this cell; `V′` enters as a magnitude multiplied by the width. Both
+    // `derivative` (the endpoint hull plus the Taylor pad) and `[-B, B]` with
+    // `B = 1/2 (r/4 + nu)` are valid outer enclosures of `V′` here, so their
+    // intersection is one as well. That is the same "minimum of two valid
+    // upper bounds on one quantity is a valid upper bound" rule
+    // `intersect_with_global_bound` already applies at the second and third
+    // orders — nothing is loosened and no bound is weakened.
+    //
+    // DO NOT "simplify" this by clamping `derivative` itself. The enclosure
+    // returned at the end of this function feeds the certified search's
+    // ISOLATION gate (`gam_math::score_opt`, `!enclosure.derivative
+    // .contains_zero()`), which is looking for where `V′ = 0`. A constant
+    // bound on `|V′|` cannot locate that root, which is precisely why the
+    // first derivative has no global-bound substitute at the jet level while
+    // the second and third do. The two channels consume `V′` for different
+    // purposes and must keep different enclosures of it.
+    //
+    // WHAT THIS FIXES AND WHAT IT DOES NOT — a PARTIAL repair, on purpose.
+    // Unclamped, a near-divergent `sum_v2_over_f_d1` ball made this product
+    // astronomical: score-value enclosures of order `[-1.9e59, 1.9e59]` on an
+    // 8.4e-9-wide cell, so `resolution_flat_region` could never accept and the
+    // search refused with `Unresolved` at the abscissa-resolution floor.
+    // Clamped, that gap is at most `B * w`, of order `1e-6` at `n = 600`.
+    // But the flatness test compares it against `2 * evaluation_error`, and
+    // `evaluation_error` has itself been observed at `14399` on the same
+    // fixtures — a SEPARATE degeneracy, in the value ball's forward error,
+    // that this change does not touch. Do not read a green cell here as
+    // evidence that the value channel is healthy until both sides of that
+    // comparison have been re-measured.
+    let first_derivative_bound =
+        first_derivative_global_bound((n_nodes - order) as f64, (n_obs - order) as f64);
+    let value_channel_derivative = ClosedInterval::new(
+        derivative.lo.max(-first_derivative_bound),
+        derivative.hi.min(first_derivative_bound),
+    );
+    // An empty intersection means two independently valid outer bounds on the
+    // same `V′` are disjoint. That is a contradiction, not a tolerance: refuse
+    // instead of picking one, in the same shape as the score-value
+    // intersection check below. A valid endpoint certificate contains
+    // `V′(lo)`, whose magnitude the global bound covers, so this is
+    // unreachable unless something upstream is already wrong.
+    if !(value_channel_derivative.lo <= value_channel_derivative.hi) {
+        return Err(SplineScoreProofError::InvalidArithmetic {
+            context: "first-derivative global-bound intersection",
+        });
+    }
+    let derivative_ball = Ball::certified(0.0, value_channel_derivative);
     let from_left = left_certificate.value.add(derivative_ball.mul(Ball::certified(
         0.0,
         ClosedInterval::new(0.0, width.hi),

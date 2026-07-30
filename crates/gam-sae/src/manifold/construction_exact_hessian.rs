@@ -2678,6 +2678,55 @@ impl SaeManifoldTerm {
             && matrix_free_system.is_none()
             && self.dense_exact_a_theta_adjoint_is_modelled();
 
+        // #2087/#2330 ROUTE-COHERENCE GUARD. The VALUE's log-determinant route and
+        // THIS gradient's are selected by two unrelated predicates:
+        //
+        //   value    `streaming_plan().admitted_or_error(..).direct_logdet_admitted()`
+        //            — a working-set/memory admission (construction_quasi_laplace.rs).
+        //            Admitted ⇒ ranks the exact `½log|A|`; not admitted ⇒ delegates to
+        //            the streaming implementation, which ranks the majorizer `½log|B|`.
+        //   gradient `exact_a_logdet_route` above — the bundle / matrix-free /
+        //            assignment-family triple. Nothing consults the value's admission.
+        //
+        // Nothing tied them, so a fit whose value was priced by the streaming
+        // `½log|B|` could still be handed an exact-A derivative here. The desync is
+        // `½·d/dρ log|I + B⁻¹ΔC|` — unbounded on a near-singular `A`, and invisible
+        // to `criterion_as_atoms`'s 64-ulp identity check, which re-derives the
+        // VALUE predicate and so cannot observe that the gradient took the other
+        // route. Refuse rather than return the derivative of an operator the value
+        // never ranked.
+        //
+        // SCOPE — this refuses ONLY the undocumented cell (value = B, gradient = A).
+        // The mirror cell (value = A, gradient = B, i.e. `ThresholdGate`) is the
+        // DELIBERATE staging documented on `dense_exact_a_theta_adjoint_is_modelled`
+        // and held by the matrix-free and bundle routes too; refusing it would break
+        // every ThresholdGate fit, so it is named there rather than rejected here.
+        //
+        // LIMIT — this guard reads the PLAN, so it catches a predicate mismatch, not
+        // a caller that hand-picks `penalized_quasi_laplace_criterion_streaming_exact_with_cache`
+        // on a shape the plan would have admitted (see
+        // `tests_streaming_outer_gradient_2026`, which does exactly that on purpose).
+        if exact_a_logdet_route {
+            let value_route_is_exact_a = self
+                .streaming_plan()
+                .map_err(OuterGradientError::internal)?
+                .admitted_or_error(self.n_obs(), self.output_dim(), self.k_atoms())
+                .map_err(OuterGradientError::internal)?
+                .direct_logdet_admitted();
+            if !value_route_is_exact_a {
+                return Err(OuterGradientError::internal(format!(
+                    "analytic_outer_rho_gradient_components: log-determinant route \
+                     incoherence — this gradient would differentiate the exact ½log|A|, \
+                     but at shape n={}, p={}, K={} the criterion VALUE is priced by the \
+                     streaming ½log|B| implementation (direct_logdet_admitted = false). \
+                     Returning it would desync value and gradient by ½·d/dρ log|I + B⁻¹ΔC|.",
+                    self.n_obs(),
+                    self.output_dim(),
+                    self.k_atoms()
+                )));
+            }
+        }
+
         if let Some(sparse_index) = rho.sparse_flat_index() {
             explicit[sparse_index] =
                 crate::assignment::assignment_prior_log_strength_derivative_weighted(
@@ -2828,6 +2877,15 @@ impl SaeManifoldTerm {
         // The scalar criterion replaces `½ log|H_tt|` with the realised-rank
         // charge. Its direct rho differential belongs alongside the explicit
         // penalty channels and is present on every layout (dense or probes).
+        //
+        // #2087 ATTRIBUTION — folding it in means `explicit` is no longer the
+        // ρ-derivative of `loss.total() + extra_penalty_energy`, which is what its
+        // docstring used to claim. Keep the folded summand ADDRESSABLE so an audit
+        // that finite-differences `loss.total()` (the only loss entry that pins θ̂)
+        // can net it out. Without this, such an audit's two halves are off by
+        // exactly ∓this vector — equal, opposite, and each blaming a channel that
+        // is not at fault.
+        let rank_charge_direct_rho = rank_charge.direct_rho.clone();
         explicit += &rank_charge.direct_rho;
 
         // #2080: the envelope Γ off the SAME shared low-rank logdet derivative
@@ -2978,6 +3036,7 @@ impl SaeManifoldTerm {
 
         Ok(SaeOuterRhoGradientComponents {
             explicit,
+            rank_charge_direct_rho,
             logdet_trace,
             occam,
             third_order_correction,
