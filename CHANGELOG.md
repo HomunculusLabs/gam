@@ -1,5 +1,53 @@
 ## Unreleased
 
+- **The CLI and the engine no longer disagree about where a survival fit is
+  anchored (#2631).** The survival time-basis centering anchor was decided in two
+  places. `materialize_survival` — the engine path behind `fit_from_formula` and
+  the Python FFI — promoted the robust median-exit anchor whenever ANY entry age
+  exceeded the origin threshold, and hardcoded the caller override to `None`.
+  `gam-cli`'s `run_survival` promoted it only for marginal-slope, and owned the
+  `--survival-time-anchor` override. Each was internally consistent, so nothing
+  was mis-persisted; the same formula, data and config simply produced a
+  different fit depending on which front end ran it. Measured on a 500-row
+  delayed-entry cohort (`Surv(entry, exit, event) ~ s(x)`, location-scale) from
+  byte-identical inputs: the CLI persisted `survival_time_anchor = 4.0579` (the
+  earliest entry) where `gamfit` persisted `12.0317` (the median exit).
+  Re-centering is an exact affine reparameterization of the design, so this is
+  not cosmetic metadata — it is the conditioning the smoothing selection sees,
+  which is the whole point of the `#751`/`#1790` robust anchor.
+
+  Three further consequences fell out of the same duplication. Because the
+  override lived only in the CLI's copy, and the CLI's own default
+  (transformation / Weibull) route delegates to the engine copy,
+  `--survival-time-anchor` was **silently ignored on the default route** — parsed,
+  validated, then dropped, while the code comment claimed it was "honored by all
+  paths". `FitRequestConfigDocument` had no field for the anchor at all, even
+  though `--survival-time-anchor` declares a conflict with `--request` on the
+  premise that the document carries the complete scientific model configuration.
+  And the CLI's third branch was unreachable dead code carrying a *second,
+  different* definition of left truncation — `min(entry) > threshold` against the
+  materializer's `any(entry > threshold)` — which under-triggers on staggered
+  entry, the ordinary shape of a real registry cohort.
+
+  The rule is now one function, `resolve_survival_time_anchor_for_mode`, composed
+  of three orthogonal primitives (validate-override, earliest-entry,
+  robust-interior) and one left-truncation predicate. The three per-mode
+  resolvers collapse into it and the transformation-specific one is deleted.
+  `SURVIVAL_DELAYED_ENTRY_THRESHOLD` goes too: it was a second constant kept in
+  lockstep with `ENTRY_AT_ORIGIN_THRESHOLD` by comment, the same failure mode one
+  level down. The override became model configuration —
+  `FitConfig::survival_time_anchor`, a `survival_time_anchor` key in the fit-request
+  document, and a `gamfit.fit(survival_time_anchor=...)` kwarg — validated once in
+  `FitConfig::resolve()` and refused on a non-survival response exactly as
+  `survival_likelihood` already was. Engine behaviour is bit-identical when no
+  explicit anchor is set; left-truncated CLI location-scale and latent fits now
+  agree with the engine, which is the intended change.
+
+  The mechanism itself is now measured rather than asserted. On a staggered-entry
+  cohort, one I-spline basis centered at each candidate anchor: the earliest-entry
+  anchor leaves the trend coordinate at `max|trend| = 5.000` with **every** row
+  one-signed; the median-exit anchor leaves `1.140` with an exact 6/6 sign split.
+
 - **A separated binomial fit is no longer refused for being right (#2273).** On
   exactly-separated data — a genuine gap between the classes — `y ~ smooth(x)`
   could not be fitted at any `n`. The in-loop separation guard turned a
