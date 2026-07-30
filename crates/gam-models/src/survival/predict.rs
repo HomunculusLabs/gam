@@ -13,9 +13,11 @@ use ndarray::{Array1, Array2, ArrayView2, s};
 
 use crate::fit_orchestration::prepare_survival_time_stack;
 use crate::inference::model::{
-    FittedFamily, FittedModel as SavedModel, SavedBaselineTimeWiggleRuntime,
-    load_survival_time_basis_config_from_model, survival_baseline_config_from_model,
+    FittedFamily, FittedModel as SavedModel, FittedModelPayload,
+    SavedBaselineTimeWiggleRuntime, load_survival_time_basis_config_from_model,
+    survival_baseline_config_from_model,
 };
+use gam_data::EncodedDataset;
 use crate::inference::predict_io::{BernoulliMarginalSlopePredictor, PredictInput};
 use crate::model_types::{BlockRole, FittedBlock, FittedLinkState, UnifiedFitResult};
 use crate::probability::signed_probit_logcdf_and_mills_ratio;
@@ -5772,4 +5774,190 @@ mod tests {
         }
     }
 
+}
+
+/// Multiplier applied to the Weibull baseline scale when no time-basis knots are
+/// available, so the default surface grid reaches into the right tail of the
+/// fitted distribution rather than stopping at the characteristic time.
+const SURVIVAL_DEFAULT_GRID_SCALE_MARGIN: f64 = 5.0;
+
+/// Training-time upper bound for the default survival surface grid, read from
+/// the saved model rather than the prediction frame.
+///
+/// The default surface grid must be a property of the FITTED model, not of the
+/// `exit` placeholder a caller happens to put in the prediction frame. A small
+/// placeholder `exit` previously shrank the grid to `[entry, exit]` and silently
+/// truncated the surface (#896); a large one stretched the fixed grid past the
+/// fitted range and coarsened every in-range cell (#1717).
+///
+/// Returns `None` when the model carries neither a time-basis knot vector nor a
+/// usable training range / baseline scale (the caller then falls back to the
+/// prediction-frame range alone, preserving the prior behavior).
+pub fn survival_training_time_upper_bound(payload: &FittedModelPayload) -> Option<f64> {
+    if let Some(knots) = payload.survival_time_knots.as_ref() {
+        let max_log_knot = knots
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .fold(f64::NEG_INFINITY, f64::max);
+        if max_log_knot.is_finite() {
+            let hi = max_log_knot.exp();
+            if hi.is_finite() && hi > 0.0 {
+                return Some(hi);
+            }
+        }
+    }
+
+    // No time-basis knots (the linear Weibull baseline). Two candidate anchors:
+    //
+    //   * the model's recorded TRAINING time support — the upper end of the
+    //     survival exit column's training range — which is the true observed
+    //     upper bound of the fitted distribution; and
+    //   * a margin over the parametric Weibull `survival_baseline_scale`, to
+    //     reach into the right tail.
+    //
+    // Take the LARGER so the surface grid always covers the observed time range.
+    // The scale field alone is unreliable here: on the covariate-driven Weibull
+    // parameterization the baseline scale is absorbed into the linear predictor
+    // and `survival_baseline_scale` is left as a degenerate floor sentinel
+    // (≈ SURVIVAL_TIME_FLOOR ≈ 1e-9). Anchoring on it alone collapsed the grid
+    // to ~0 and truncated every `survival_at` query past the prediction frame's
+    // `exit` placeholder, even for times well inside the fitted range (#896).
+    let mut upper = f64::NEG_INFINITY;
+    if let Some(training_hi) = survival_training_exit_upper_bound(payload) {
+        upper = upper.max(training_hi);
+    }
+    if let Some(scale) = payload.survival_baseline_scale
+        && scale.is_finite()
+        && scale > 0.0
+    {
+        upper = upper.max(scale * SURVIVAL_DEFAULT_GRID_SCALE_MARGIN);
+    }
+    (upper.is_finite() && upper > 0.0).then_some(upper)
+}
+
+/// Upper end of the survival exit column's recorded training range.
+///
+/// Used to anchor the default survival-surface grid to the fitted model's
+/// observed time support when the parametric baseline carries no usable time
+/// signal (the linear Weibull basis: no knots, and a degenerate
+/// `survival_baseline_scale` sentinel — #896). Returns `None` when the model
+/// carries no training-range metadata or the exit column cannot be located.
+fn survival_training_exit_upper_bound(payload: &FittedModelPayload) -> Option<f64> {
+    let exit_name = payload.survival_exit.as_deref()?;
+    let headers = payload.training_headers.as_ref()?;
+    let ranges = payload.training_feature_ranges.as_ref()?;
+    let idx = headers.iter().position(|h| h == exit_name)?;
+    let (_, hi) = *ranges.get(idx)?;
+    (hi.is_finite() && hi > 0.0).then_some(hi)
+}
+
+/// The default survival-surface time grid: 64 uniform points spanning the
+/// prediction frame's `[min entry, max exit]`, with the upper edge anchored to
+/// the fitted model's training time support when one is supplied.
+///
+/// This is the SINGLE owner of the default-grid policy for every frontend
+/// (#2470); it used to live only in the Python bindings, so `gam predict` and
+/// `model.predict()` produced different survival surfaces by default.
+///
+/// The `entry_name == None` case is the right-censored shorthand
+/// `Surv(time, event)`: every subject enters at time zero, so the grid lower
+/// bound is zero and there is no entry column to read per row. The anchor CAPS
+/// (and floors) the frame's `hi` — the frame's `exit` placeholder is a
+/// semantically meaningless response value that `survival_at` ignores, so it
+/// must neither truncate the surface below the fitted range (#896) nor stretch
+/// the fixed 64-point grid past it (#1717); query times legitimately beyond
+/// the support are handled by `survival_at`'s extrapolation (#1595).
+pub fn default_survival_time_grid(
+    formula: &str,
+    dataset: &EncodedDataset,
+    training_time_upper: Option<f64>,
+) -> Result<Option<Vec<f64>>, String> {
+    let parsed = gam_terms::inference::formula_dsl::parse_formula(formula)
+        .map_err(|err| format!("failed to parse survival formula: {err}"))?;
+    let Some((entry_name, exit_name, _event_name)) =
+        gam_terms::inference::formula_dsl::parse_surv_response(&parsed.response)
+            .map_err(|err| format!("failed to parse Surv(...) response: {err}"))?
+    else {
+        return Ok(None);
+    };
+
+    let header_to_index: HashMap<&str, usize> = dataset
+        .headers
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect();
+    let entry_idx = match entry_name.as_deref() {
+        Some(name) => match header_to_index.get(name).copied() {
+            Some(idx) => Some(idx),
+            None => {
+                return Err(format!(
+                    "survival prediction data is missing required time column(s): {name}"
+                ));
+            }
+        },
+        None => None,
+    };
+    let exit_idx = match header_to_index.get(exit_name.as_str()).copied() {
+        Some(idx) => idx,
+        None => {
+            return Err(format!(
+                "survival prediction data is missing required time column(s): {exit_name}"
+            ));
+        }
+    };
+
+    if let Some(index) = entry_idx
+        && matches!(
+            dataset.schema.columns[index].kind,
+            gam_data::ColumnKindTag::Categorical
+        )
+    {
+        return Err(format!(
+            "survival entry column '{}' is categorical, expected numeric times",
+            entry_name.as_deref().unwrap_or_default()
+        ));
+    }
+    if matches!(
+        dataset.schema.columns[exit_idx].kind,
+        gam_data::ColumnKindTag::Categorical
+    ) {
+        return Err(format!(
+            "survival exit column '{exit_name}' is categorical, expected numeric times"
+        ));
+    }
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for row_index in 0..dataset.values.nrows() {
+        let entry_value = match entry_idx {
+            None => 0.0,
+            Some(index) => dataset.values[[row_index, index]],
+        };
+        let exit_value = dataset.values[[row_index, exit_idx]];
+        if !entry_value.is_finite() || !exit_value.is_finite() {
+            return Err("survival time columns must contain only finite values".to_string());
+        }
+        lo = lo.min(entry_value);
+        hi = hi.max(exit_value);
+    }
+    if dataset.values.nrows() == 0 {
+        return Ok(None);
+    }
+    if let Some(training_hi) = training_time_upper
+        && training_hi.is_finite()
+    {
+        hi = training_hi;
+    }
+    if hi <= lo {
+        return Err(format!(
+            "survival exit times must extend beyond entry times; got min entry {lo:?} and max exit {hi:?}"
+        ));
+    }
+    let span = hi - lo;
+    let hi_padded = hi + (span * 1.0e-6).max(1.0e-9);
+    let step = (hi_padded - lo) / 63.0;
+    Ok(Some(
+        (0..64).map(|index| lo + step * (index as f64)).collect(),
+    ))
 }

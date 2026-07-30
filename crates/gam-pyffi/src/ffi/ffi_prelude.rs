@@ -62,7 +62,6 @@ pub(crate) use gam::data::{
     encode_recordswith_schema, infer_and_encode_column_major,
 };
 
-pub(crate) use gam::inference::formula_dsl::{parse_formula, parse_surv_response};
 
 pub(crate) use gam::inference::model::{
     FittedFamily, FittedModel, FittedModelPayload, GroupMetadata, PredictModelClass,

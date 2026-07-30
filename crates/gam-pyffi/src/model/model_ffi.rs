@@ -8,7 +8,7 @@ use manifold_pyclasses::{
     SphereManifold, StiefelManifold, TorusManifold,
 };
 
-use python_literal::{python_float_display, python_string_repr};
+
 
 use sklearn_metadata::sklearn_fit_metadata;
 
@@ -1535,114 +1535,6 @@ fn extract_row_ids(
     Ok(Some(row_ids))
 }
 
-/// Training-time upper bound for the default survival surface grid, read from
-/// the saved model rather than the prediction frame.
-///
-/// The default surface grid must be a property of the FITTED model, not of the
-/// `exit` placeholder a caller happens to put in the prediction frame. A small
-/// placeholder `exit` previously shrank the grid to `[entry, exit]` and silently
-/// truncated the surface, so `survival_at(t)` for an ordinary in-fitted-range
-/// `t` past that placeholder fell through to the `t -> inf` asymptote (`S = 0`)
-/// — issue #896. Anchoring the grid's upper edge to the training time support
-/// keeps every in-range query time inside the surface regardless of the
-/// placeholder.
-///
-/// Sources, in order:
-///   * `survival_time_knots` (bspline / ispline bases) live on the `log(t)`
-///     axis spanning the training entry/exit range, so `exp(max knot)` is the
-///     largest training time the basis was fit over.
-///   * `survival_baseline_scale` (the linear Weibull basis stores no knots) is
-///     the Weibull characteristic time; a few multiples of it comfortably cover
-///     the fitted range, which is all a grid UPPER bound needs.
-///
-/// Returns `None` when the model carries neither (the caller then falls back to
-/// the prediction-frame range alone, preserving the prior behavior).
-fn saved_survival_training_time_upper_bound(model_bytes: &[u8]) -> Option<f64> {
-    let saved: serde_json::Value = serde_json::from_slice(model_bytes).ok()?;
-    let payload = saved
-        .get("payload")
-        .and_then(serde_json::Value::as_object)?;
-
-    if let Some(knots) = payload
-        .get("survival_time_knots")
-        .and_then(serde_json::Value::as_array)
-    {
-        let max_log_knot = knots
-            .iter()
-            .filter_map(serde_json::Value::as_f64)
-            .filter(|value| value.is_finite())
-            .fold(f64::NEG_INFINITY, f64::max);
-        if max_log_knot.is_finite() {
-            let hi = max_log_knot.exp();
-            if hi.is_finite() && hi > 0.0 {
-                return Some(hi);
-            }
-        }
-    }
-
-    // No time-basis knots (the linear Weibull baseline). Two candidate anchors:
-    //
-    //   * the model's recorded TRAINING time support — the upper end of the
-    //     survival exit column's training range — which is the true observed
-    //     upper bound of the fitted distribution; and
-    //   * a margin over the parametric Weibull `survival_baseline_scale`, to
-    //     reach into the right tail.
-    //
-    // Take the LARGER so the surface grid always covers the observed time range.
-    // The scale field alone is unreliable here: on the covariate-driven Weibull
-    // parameterization the baseline scale is absorbed into the linear predictor
-    // and `survival_baseline_scale` is left as a degenerate floor sentinel
-    // (≈ SURVIVAL_TIME_FLOOR ≈ 1e-9). Anchoring on it alone collapsed the grid
-    // to ~0 and truncated every `survival_at` query past the prediction frame's
-    // `exit` placeholder, even for times well inside the fitted range (#896).
-    let mut upper = f64::NEG_INFINITY;
-    if let Some(training_hi) = saved_survival_training_exit_upper_bound(payload) {
-        upper = upper.max(training_hi);
-    }
-    if let Some(scale) = payload
-        .get("survival_baseline_scale")
-        .and_then(serde_json::Value::as_f64)
-        && scale.is_finite()
-        && scale > 0.0
-    {
-        upper = upper.max(scale * SURVIVAL_DEFAULT_GRID_SCALE_MARGIN);
-    }
-    (upper.is_finite() && upper > 0.0).then_some(upper)
-}
-
-/// Upper end of the survival exit column's recorded training range.
-///
-/// Used to anchor the default survival-surface grid to the fitted model's
-/// observed time support when the parametric baseline carries no usable time
-/// signal (the linear Weibull basis: no knots, and a degenerate
-/// `survival_baseline_scale` sentinel — #896). Returns `None` when the model
-/// carries no training-range metadata or the exit column cannot be located.
-fn saved_survival_training_exit_upper_bound(
-    payload: &serde_json::Map<String, serde_json::Value>,
-) -> Option<f64> {
-    let exit_name = payload
-        .get("survival_exit")
-        .and_then(serde_json::Value::as_str)?;
-    let headers = payload
-        .get("training_headers")
-        .and_then(serde_json::Value::as_array)?;
-    let ranges = payload
-        .get("training_feature_ranges")
-        .and_then(serde_json::Value::as_array)?;
-    let idx = headers.iter().position(|h| h.as_str() == Some(exit_name))?;
-    let hi = ranges
-        .get(idx)
-        .and_then(serde_json::Value::as_array)
-        .and_then(|range| range.get(1))
-        .and_then(serde_json::Value::as_f64)?;
-    (hi.is_finite() && hi > 0.0).then_some(hi)
-}
-
-/// Multiplier applied to the Weibull baseline scale when no time-basis knots are
-/// available, so the default surface grid reaches into the right tail of the
-/// fitted distribution rather than stopping at the characteristic time.
-const SURVIVAL_DEFAULT_GRID_SCALE_MARGIN: f64 = 5.0;
-
 #[pyfunction(signature = (model_class, formula, headers, rows, model_bytes = None))]
 fn default_survival_time_grid(
     model_class: &str,
@@ -1668,125 +1560,17 @@ fn default_survival_time_grid_impl(
         | "survival location-scale" => {}
         _ => return Ok(None),
     }
-
-    // Parse the survival response with the canonical formula parser rather
-    // than a bespoke regex. The previous regex only matched the three-argument
-    // `Surv(entry, exit, event)` form, so models fit with the right-censored
-    // shorthand `Surv(time, event)` (entry synthesized as zero per row) fell
-    // through to `None`. That collapsed `model.predict` to a degenerate
-    // single-column per-row surface, which `cumulative_hazard_at(grid)` then
-    // re-evaluated as a flat constant for every requested time (the time basis
-    // never got re-evaluated because there was no real grid). Routing through
-    // `parse_surv_response` returns `entry_name: None` for the shorthand, and
-    // we span the grid from a synthesized zero entry.
-    let parsed = parse_formula(formula)
-        .map_err(|err| py_value_error(format!("failed to parse survival formula: {err}")))?;
-    let Some((entry_name, exit_name, _event_name)) = parse_surv_response(&parsed.response)
-        .map_err(|err| py_value_error(format!("failed to parse Surv(...) response: {err}")))?
-    else {
-        return Ok(None);
-    };
-
-    let header_to_index: HashMap<&str, usize> = dataset
-        .headers
-        .iter()
-        .enumerate()
-        .map(|(index, name)| (name.as_str(), index))
-        .collect();
-    // `entry_name == None` is the two-argument shorthand `Surv(time, event)`:
-    // every subject enters at time zero, so the grid lower bound is zero and
-    // there is no entry column to read per row.
-    let entry_idx = match entry_name.as_deref() {
-        Some(name) => match header_to_index.get(name).copied() {
-            Some(idx) => Some(idx),
-            None => {
-                return Err(py_value_error(format!(
-                    "survival prediction data is missing required time column(s): {name}"
-                )));
-            }
-        },
-        None => None,
-    };
-    let exit_idx = match header_to_index.get(exit_name.as_str()).copied() {
-        Some(idx) => idx,
-        None => {
-            return Err(py_value_error(format!(
-                "survival prediction data is missing required time column(s): {exit_name}"
-            )));
-        }
-    };
-
-    if let Some(index) = entry_idx
-        && matches!(
-            dataset.schema.columns[index].kind,
-            ColumnKindTag::Categorical
-        )
-    {
-        return Err(py_value_error(format!(
-            "survival entry column {} is categorical, expected numeric times",
-            python_string_repr(entry_name.as_deref().unwrap_or_default())
-        )));
-    }
-    if matches!(
-        dataset.schema.columns[exit_idx].kind,
-        ColumnKindTag::Categorical
-    ) {
-        return Err(py_value_error(format!(
-            "survival exit column {} is categorical, expected numeric times",
-            python_string_repr(&exit_name)
-        )));
-    }
-    let mut lo = f64::INFINITY;
-    let mut hi = f64::NEG_INFINITY;
-    for row_index in 0..dataset.values.nrows() {
-        let entry_value = match entry_idx {
-            None => 0.0,
-            Some(index) => dataset.values[[row_index, index]],
-        };
-        let exit_value = dataset.values[[row_index, exit_idx]];
-        if !entry_value.is_finite() || !exit_value.is_finite() {
-            return Err(py_value_error(
-                "survival time columns must contain only finite values".to_string(),
-            ));
-        }
-        lo = lo.min(entry_value);
-        hi = hi.max(exit_value);
-    }
-    if dataset.values.nrows() == 0 {
-        return Ok(None);
-    }
-    // Anchor the grid's upper edge to the fitted model's training time support,
-    // independent of the prediction-frame `exit` placeholder. The placeholder is
-    // a semantically meaningless response value that `survival_at` ignores (it
-    // supplies its own query times), so it must neither truncate the surface
-    // below the fitted range (a SMALL placeholder — issue #896) nor stretch the
-    // fixed 64-point uniform grid past the fitted range (a LARGE placeholder,
-    // which coarsens every in-range cell and drifts interpolated `survival_at`
-    // values — issue #1717). When the training time support is known, it CAPS
-    // (and floors) `hi` to that bound regardless of the placeholder; query times
-    // legitimately beyond the support are handled by `survival_at`'s
-    // extrapolation (#1595), not by the grid. When the model carries no
-    // training-time signal (e.g. legacy models) the prediction-frame range is
-    // used alone, exactly as before.
-    if let Some(bytes) = model_bytes
-        && let Some(training_hi) = saved_survival_training_time_upper_bound(bytes)
-        && training_hi.is_finite()
-    {
-        hi = training_hi;
-    }
-    if hi <= lo {
-        let lo_display = python_float_display(lo);
-        let hi_display = python_float_display(hi);
-        return Err(py_value_error(format!(
-            "survival exit times must extend beyond entry times; got min entry {lo_display} and max exit {hi_display}"
-        )));
-    }
-    let span = hi - lo;
-    let hi_padded = hi + (span * 1.0e-6).max(1.0e-9);
-    let step = (hi_padded - lo) / 63.0;
-    Ok(Some(
-        (0..64).map(|index| lo + step * (index as f64)).collect(),
-    ))
+    // Training-time anchor from the saved payload, read through the TYPED
+    // model rather than ad-hoc JSON field sniffing (#2470). A byte payload
+    // that fails to parse contributes no anchor, preserving the historical
+    // prediction-frame-only fallback for legacy models.
+    let training_hi = model_bytes
+        .and_then(|bytes| serde_json::from_slice::<FittedModel>(bytes).ok())
+        .and_then(|model| {
+            gam::families::survival::predict::survival_training_time_upper_bound(model.payload())
+        });
+    gam::families::survival::predict::default_survival_time_grid(formula, dataset, training_hi)
+        .map_err(py_value_error)
 }
 
 #[pyfunction(signature = (headers, rows, formula, config_json = None, fisher_rao_w = None))]

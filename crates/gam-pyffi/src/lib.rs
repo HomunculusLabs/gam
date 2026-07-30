@@ -56,7 +56,7 @@ pub(crate) use ffi::ffi_prelude::*;
 // `ffi_errors`' contents are already glob-re-exported above (line 42); the
 // include!-fragment entrypoints reach them by item name, not via a
 // `crate::ffi_errors::…` module path, so the module itself needs no flat alias.
-pub(crate) use ffi::{ffi_prelude, finite_safe_json, python_literal};
+pub(crate) use ffi::{ffi_prelude, finite_safe_json};
 pub(crate) use inference::inference_instruments;
 pub(crate) use io::{competing_risks_decode, summary_render, survival_surface_io};
 pub(crate) use manifold::manifold_pyclasses;
