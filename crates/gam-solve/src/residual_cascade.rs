@@ -4621,12 +4621,20 @@ mod refinement_decision_tests {
     /// capability.
     #[test]
     fn auto_reml_certifies_past_the_dense_gram_cache() {
-        // A 45x45 grid: 2025 rows against ~1.7k columns, so the data identify
+        // A 50x50 grid: 2500 rows against ~2.0k columns, so the data identify
         // the whole Schur spectrum. That matters — a design with FEWER rows than
         // columns is a separate, pre-existing problem for the certified search
         // (see `the_spectral_residual_carries_no_null_modes`) and would test that
         // instead of this.
-        let (x1, x2, y) = dense_fixture(45);
+        //
+        // 45 was the first attempt and it MISSED: a 45-grid refines to 2038
+        // columns against 2025 rows, so this fixture's own premise assertion
+        // refused it by 13 modes. The width at a fixed level count is set by the
+        // net geometry and is nearly independent of the sample — the companion
+        // measurement prints `n=1200 m=2054` and `n=2500 m=2002` at `levels=6` —
+        // so buying identifiability here means buying ROWS, not narrowing the
+        // design. The margin at 50 is ~500 modes.
+        let (x1, x2, y) = dense_fixture(50);
         let weights = vec![1.0; y.len()];
         let axes: [&[f64]; 2] = [&x1, &x2];
         let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 6)
