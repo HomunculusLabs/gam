@@ -184,6 +184,21 @@ def _sigma_float_list(values: typing.Any) -> list[float]:
     return arr.reshape(-1).tolist()
 
 
+def _prediction_mean_array(prediction: typing.Any) -> np.ndarray:
+    """Extract the response mean from any public gamfit prediction container."""
+
+    if isinstance(prediction, dict):
+        if "mean" not in prediction:
+            raise RuntimeError("gamfit prediction mapping has no 'mean' column")
+        return np.asarray(prediction["mean"], dtype=float).reshape(-1)
+    columns = getattr(prediction, "columns", None)
+    if columns is not None:
+        if "mean" not in columns:
+            raise RuntimeError("gamfit prediction table has no 'mean' column")
+        return np.asarray(prediction["mean"], dtype=float).reshape(-1)
+    return np.asarray(prediction, dtype=float).reshape(-1)
+
+
 class _TerminalOutputSanitizer:
     def __init__(self) -> None:
         self._state = "normal"
@@ -1055,7 +1070,7 @@ def run_rust_scenario_cv(
     eval_ood: bool = False,
     collect_continuous_order: bool = False,
     collect_adaptive_diagnostics: bool = False,
-    rust_fit_extra_args: list[str] | None = None,
+    adaptive_regularization: bool = False,
     formula_link: str | None = None,
 ) -> typing.Any:
     scenario_name = scenario["name"]
@@ -1070,13 +1085,13 @@ def run_rust_scenario_cv(
         folds = folds_for_dataset(ds)
 
     try:
-        rust_bin = _ensure_rust_binary()
-    except _EXPECTED_EXTERNAL_FAILURES as e:
+        gamfit_module = importlib.import_module("gamfit")
+    except ImportError as e:
         return {
             "contender": contender_name,
             "scenario_name": scenario_name,
             "status": "failed",
-            "error": str(e),
+            "error": f"failed to import gamfit benchmark API: {e}",
         }
 
     base_df = pd.DataFrame(ds["rows"])
@@ -1096,7 +1111,6 @@ def run_rust_scenario_cv(
             train_df = base_df.iloc[fold.train_idx].copy()
             test_df = base_df.iloc[fold.test_idx].copy()
             model_path = td_path / f"model_{fold_id}.json"
-            pred_path = td_path / f"pred_{fold_id}.csv"
             shared_artifact = (
                 shared_fold_artifacts[fold_id]
                 if shared_fold_artifacts is not None and fold_id < len(shared_fold_artifacts)
@@ -1106,12 +1120,10 @@ def run_rust_scenario_cv(
             if shared_artifact is not None:
                 train_path = shared_artifact.train_scaled_csv
                 test_path = shared_artifact.test_scaled_csv
+                train_df = pd.read_csv(train_path)
+                test_df = pd.read_csv(test_path)
             else:
-                train_path = td_path / f"train_{fold_id}.csv"
-                test_path = td_path / f"test_{fold_id}.csv"
                 train_df, test_df = zscore_train_test(train_df, test_df, ds["features"])
-                train_df.to_csv(train_path, index=False)
-                test_df.to_csv(test_path, index=False)
             _family, formula = _rust_formula_for_scenario(
                 scenario_name,
                 ds,
@@ -1123,27 +1135,27 @@ def run_rust_scenario_cv(
                 else formula
             )
             formula = _append_formula_link_term(formula, formula_link)
-            fit_cmd = [
-                str(rust_bin),
-                "fit",
-                "--out",
-                str(model_path),
-            ]
-
-            if rust_fit_extra_args:
-                fit_cmd.extend([str(x) for x in rust_fit_extra_args])
-            fit_cmd.extend([str(train_path), formula])
 
             t0 = perf_counter()
-            code, out, err = run_cmd(fit_cmd, cwd=ROOT)
-            fit_sec = perf_counter() - t0
-            if code != 0:
+            try:
+                model = gamfit_module.fit(
+                    train_df,
+                    formula,
+                    family=_family,
+                    adaptive_regularization=adaptive_regularization,
+                )
+                fit_sec = perf_counter() - t0
+            except Exception as e:
                 return {
                     "contender": contender_name,
                     "scenario_name": scenario_name,
                     "status": "failed",
-                    "error": (err.strip() or out.strip() or "rust fit failed"),
+                    "error": f"gamfit fit failed: {e}",
                 }
+            # Persistence and JSON inspection are deliberately outside
+            # `fit_sec`, matching mgcv's timer around `gam()` rather than
+            # charging only gam for benchmark artifact serialization.
+            model.save(model_path)
             model_payload = None
             try:
                 model_payload = json.loads(model_path.read_text())
@@ -1172,33 +1184,27 @@ def run_rust_scenario_cv(
                     adaptive_row["n_test"] = int(len(fold.test_idx))
                     adaptive_rows.append(adaptive_row)
 
-            pred_cmd = [
-                str(rust_bin),
-                "predict",
-                str(model_path),
-                str(test_path),
-                "--out",
-                str(pred_path),
-            ]
             t1 = perf_counter()
-            code, out, err = run_cmd(pred_cmd, cwd=ROOT)
-            pred_sec = perf_counter() - t1
-            if code != 0:
+            try:
+                pred = _prediction_mean_array(model.predict(test_df, return_type="dict"))
+                pred_sec = perf_counter() - t1
+            except Exception as e:
                 return {
                     "contender": contender_name,
                     "scenario_name": scenario_name,
                     "status": "failed",
-                    "error": (err.strip() or out.strip() or "rust predict failed"),
+                    "error": f"gamfit predict failed: {e}",
                 }
-            pred_df = pd.read_csv(pred_path)
-            if "mean" not in pred_df.columns:
+            if pred.shape[0] != len(test_df):
                 return {
                     "contender": contender_name,
                     "scenario_name": scenario_name,
                     "status": "failed",
-                    "error": "rust prediction output missing 'mean' column",
+                    "error": (
+                        "gamfit prediction length mismatch: "
+                        f"got {pred.shape[0]}, expected {len(test_df)}"
+                    ),
                 }
-            pred = pred_df["mean"].to_numpy(dtype=float)
 
             if ds["family"] == "binomial":
                 y_test = test_df[ds["target"]].to_numpy(dtype=float)
@@ -1214,7 +1220,7 @@ def run_rust_scenario_cv(
                         "logloss": log_loss_score(y_test, pred),
                         "nagelkerke_r2": nagelkerke_r2_score(y_test, pred, null_mean=float(np.mean(y_train))),
                         "n_test": int(len(fold.test_idx)),
-                        "model_spec": f"{fitted_formula} via release binary {eval_suffix}",
+                        "model_spec": f"{fitted_formula} via release extension {eval_suffix}",
                         "fit_quality": fit_quality_row,
                     }
                 )
@@ -1227,31 +1233,20 @@ def run_rust_scenario_cv(
                         n_points=max(32, int(len(fold.test_idx))),
                     )
                     if not ood_df.empty:
-                        ood_path = td_path / f"ood_{fold_id}.csv"
-                        ood_pred_path = td_path / f"ood_pred_{fold_id}.csv"
-                        ood_df.to_csv(ood_path, index=False)
-                        ood_pred_cmd = [
-                            str(rust_bin),
-                            "predict",
-                            str(model_path),
-                            str(ood_path),
-                            "--out",
-                            str(ood_pred_path),
-                        ]
-                        code, out, err = run_cmd(ood_pred_cmd, cwd=ROOT)
-                        if code == 0 and ood_pred_path.is_file():
-                            ood_pred_df = pd.read_csv(ood_pred_path)
-                            if "mean" in ood_pred_df.columns:
-                                p_ood = np.clip(ood_pred_df["mean"].to_numpy(dtype=float), 1e-9, 1 - 1e-9)
-                                baseline = float(np.clip(np.mean(y_test), 1e-9, 1 - 1e-9))
-                                ood_rows.append(
-                                    {
-                                        "n_test": int(len(fold.test_idx)),
-                                        "ood_abs_dev_from_baseline": float(np.mean(np.abs(p_ood - baseline))),
-                                        "ood_max_abs_dev_from_baseline": float(np.max(np.abs(p_ood - baseline))),
-                                        "ood_mean_abs_logit": float(np.mean(np.abs(np.log(p_ood / (1.0 - p_ood))))),
-                                    }
-                                )
+                        p_ood = np.clip(
+                            _prediction_mean_array(model.predict(ood_df, return_type="dict")),
+                            1e-9,
+                            1 - 1e-9,
+                        )
+                        baseline = float(np.clip(np.mean(y_test), 1e-9, 1 - 1e-9))
+                        ood_rows.append(
+                            {
+                                "n_test": int(len(fold.test_idx)),
+                                "ood_abs_dev_from_baseline": float(np.mean(np.abs(p_ood - baseline))),
+                                "ood_max_abs_dev_from_baseline": float(np.max(np.abs(p_ood - baseline))),
+                                "ood_mean_abs_logit": float(np.mean(np.abs(np.log(p_ood / (1.0 - p_ood))))),
+                            }
+                        )
             elif ds["family"] == "gaussian":
                 y_test = test_df[ds["target"]].to_numpy(dtype=float)
                 _append_supervised_plot_fold(plot_payload, test_df, pred, ds["target"])
@@ -1299,7 +1294,7 @@ def run_rust_scenario_cv(
                         "predict_sec": float(pred_sec),
                         **gaussian_prediction_scores(y_test, pred, sigma_hat),
                         "n_test": int(len(fold.test_idx)),
-                        "model_spec": f"{fitted_formula} via release binary {eval_suffix}",
+                        "model_spec": f"{fitted_formula} via release extension {eval_suffix}",
                         "fit_quality": fit_quality_row,
                     }
                 )
@@ -1492,13 +1487,13 @@ def _run_rust_gamlss_scenario_cv_variant(
         folds = folds_for_dataset(ds)
 
     try:
-        rust_bin = _ensure_rust_binary()
-    except _EXPECTED_EXTERNAL_FAILURES as e:
+        gamfit_module = importlib.import_module("gamfit")
+    except ImportError as e:
         return {
             "contender": contender_name,
             "scenario_name": scenario_name,
             "status": "failed",
-            "error": str(e),
+            "error": f"failed to import gamfit benchmark API: {e}",
         }
 
     _, mean_formula = _rust_formula_for_scenario(scenario_name, ds)
@@ -1524,32 +1519,25 @@ def _run_rust_gamlss_scenario_cv_variant(
             if shared_artifact is not None:
                 train_path = shared_artifact.train_scaled_csv
                 test_path = shared_artifact.test_scaled_csv
+                train_df = pd.read_csv(train_path)
+                test_df = pd.read_csv(test_path)
             else:
                 # Z-score features (matches the main rust_gam contender).
                 train_df, test_df = zscore_train_test(train_df, test_df, ds["features"])
-                train_path = td_path / f"train_{fold_id}.csv"
-                test_path = td_path / f"test_{fold_id}.csv"
-                train_df.to_csv(train_path, index=False)
-                test_df.to_csv(test_path, index=False)
             noise_formula = _formula_rhs_from_terms(
                 _sigma_feature_terms(ds, scenario_name=scenario_name, backend="rust")
             )
             model_path = td_path / f"model_{fold_id}.json"
-            pred_path = td_path / f"pred_{fold_id}.csv"
-
-            fit_cmd = [
-                str(rust_bin),
-                "fit",
-                "--predict-noise",
-                noise_formula,
-                "--out",
-                str(model_path),
-            ]
-            fit_cmd.extend([str(train_path), mean_formula])
             t0 = perf_counter()
-            code, out, err = run_cmd(fit_cmd, cwd=ROOT)
-            fit_sec = perf_counter() - t0
-            if code != 0:
+            try:
+                model = gamfit_module.fit(
+                    train_df,
+                    mean_formula,
+                    family=family,
+                    noise_formula=noise_formula,
+                )
+                fit_sec = perf_counter() - t0
+            except Exception as e:
                 return {
                     "contender": contender_name,
                     "scenario_name": scenario_name,
@@ -1558,21 +1546,16 @@ def _run_rust_gamlss_scenario_cv_variant(
                     "n_train": int(len(fold.train_idx)),
                     "n_test": int(len(fold.test_idx)),
                     "n_folds": int(len(folds)),
-                    "error": (err.strip() or out.strip() or "rust gamlss fit failed"),
+                    "error": f"gamfit location-scale fit failed: {e}",
                 }
+            model.save(model_path)
 
-            pred_cmd = [
-                str(rust_bin),
-                "predict",
-                str(model_path),
-                str(test_path),
-                "--out",
-                str(pred_path),
-            ]
             t1 = perf_counter()
-            code, out, err = run_cmd(pred_cmd, cwd=ROOT)
-            pred_sec = perf_counter() - t1
-            if code != 0:
+            try:
+                prediction = model.predict(test_df, return_type="dict")
+                pred = _prediction_mean_array(prediction)
+                pred_sec = perf_counter() - t1
+            except Exception as e:
                 return {
                     "contender": contender_name,
                     "scenario_name": scenario_name,
@@ -1581,10 +1564,9 @@ def _run_rust_gamlss_scenario_cv_variant(
                     "n_train": int(len(fold.train_idx)),
                     "n_test": int(len(fold.test_idx)),
                     "n_folds": int(len(folds)),
-                    "error": (err.strip() or out.strip() or "rust gamlss predict failed"),
+                    "error": f"gamfit location-scale predict failed: {e}",
                 }
-            pred_df = pd.read_csv(pred_path)
-            if "mean" not in pred_df.columns:
+            if pred.shape[0] != len(test_df):
                 return {
                     "contender": contender_name,
                     "scenario_name": scenario_name,
@@ -1593,9 +1575,11 @@ def _run_rust_gamlss_scenario_cv_variant(
                     "n_train": int(len(fold.train_idx)),
                     "n_test": int(len(fold.test_idx)),
                     "n_folds": int(len(folds)),
-                    "error": "rust gamlss prediction output missing 'mean' column",
+                    "error": (
+                        "gamfit location-scale prediction length mismatch: "
+                        f"got {pred.shape[0]}, expected {len(test_df)}"
+                    ),
                 }
-            pred = pred_df["mean"].to_numpy(dtype=float)
             y_test = test_df[ds["target"]].to_numpy(dtype=float)
             _append_supervised_plot_fold(plot_payload, test_df, pred, ds["target"])
 
@@ -1615,11 +1599,11 @@ def _run_rust_gamlss_scenario_cv_variant(
                         "logloss": log_loss_score(y_test, pred),
                         "nagelkerke_r2": nagelkerke_r2_score(y_test, pred, null_mean=float(np.mean(y_train))),
                         "n_test": int(len(fold.test_idx)),
-                        "model_spec": f"mu: {mean_formula}; sigma: {noise_formula} via release binary {eval_suffix}",
+                        "model_spec": f"mu: {mean_formula}; sigma: {noise_formula} via release extension {eval_suffix}",
                     }
                 )
             else:
-                if "sigma" not in pred_df.columns:
+                if not isinstance(prediction, dict) or "sigma" not in prediction:
                     return {
                         "contender": contender_name,
                         "scenario_name": scenario_name,
@@ -1628,9 +1612,9 @@ def _run_rust_gamlss_scenario_cv_variant(
                         "n_train": int(len(fold.train_idx)),
                         "n_test": int(len(fold.test_idx)),
                         "n_folds": int(len(folds)),
-                        "error": "rust gamlss gaussian prediction output missing 'sigma' column",
+                        "error": "gamfit location-scale prediction output missing 'sigma' column",
                     }
-                sigma_hat = pred_df["sigma"].to_numpy(dtype=float)
+                sigma_hat = np.asarray(prediction["sigma"], dtype=float).reshape(-1)
                 if sigma_hat.shape[0] != pred.shape[0]:
                     return {
                         "contender": contender_name,
@@ -1666,7 +1650,7 @@ def _run_rust_gamlss_scenario_cv_variant(
                         "predict_sec": float(pred_sec),
                         **gaussian_prediction_scores(y_test, pred, sigma_hat),
                         "n_test": int(len(fold.test_idx)),
-                        "model_spec": f"mu: {mean_formula}; sigma: {noise_formula} via release binary {eval_suffix}",
+                        "model_spec": f"mu: {mean_formula}; sigma: {noise_formula} via release extension {eval_suffix}",
                     }
                 )
 
@@ -2549,10 +2533,7 @@ def main() -> None:
                         shared_fold_artifacts=shared_fold_artifacts,
                         rust_cfg_override={"double_penalty": True},
                         collect_adaptive_diagnostics=True,
-                        rust_fit_extra_args=[
-                            "--adaptive-regularization",
-                            "true",
-                        ],
+                        adaptive_regularization=True,
                     ),
                 )
                 if ds["family"] == "binomial":
@@ -2568,10 +2549,7 @@ def main() -> None:
                             shared_fold_artifacts=shared_fold_artifacts,
                             rust_cfg_override={"double_penalty": True},
                             collect_adaptive_diagnostics=True,
-                            rust_fit_extra_args=[
-                                "--adaptive-regularization",
-                                "true",
-                            ],
+                            adaptive_regularization=True,
                             formula_link=_flexible_link_name(
                                 _default_rust_formula_link_for_family(ds["family"])
                             ),

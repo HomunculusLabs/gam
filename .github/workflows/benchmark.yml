@@ -2,6 +2,11 @@ name: Benchmark Suite
 
 on:
   workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "Comma-separated scenario names to benchmark"
+        required: true
+        type: string
   schedule:
     - cron: "0 4 * * *"
 
@@ -77,7 +82,8 @@ jobs:
         id: matrix
         shell: bash
         run: |
-          python3 .github/scripts/workflow_tasks.py build_matrix
+          python3 .github/scripts/workflow_tasks.py build_matrix \
+            --scenarios '${{ inputs.scenarios }}'
 
   bootstrap-runtime:
     name: Bootstrap benchmark runtime
@@ -603,6 +609,7 @@ jobs:
           name: benchmark
           files: |
             bench/results.nightly.json
+            bench/benchmark-verdict.json
       - name: Generate merged figures
         # `success() &&` is load-bearing: a step-level `if:` REPLACES the
         # implicit success() guard, so without it a failed merge step would

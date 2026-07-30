@@ -3,7 +3,6 @@ import glob
 import json
 import os
 import pathlib
-import re
 import shutil
 import subprocess
 import sys
@@ -41,18 +40,11 @@ def validate_geo_subpop():
         mod.validate_scenario_schema(s)
     print(f"validated geo_subpop16 simulation for {len(geo_subpop)} scenarios")
 
-def build_matrix():
+def build_matrix(requested_scenarios=None):
     SERIAL_SCENARIOS = {
         "icu_survival_death",
         "cirrhosis_survival",
     }
-
-    def choose_single_knot(variants):
-        by_k = {v["k"]: v for v in variants}
-        if 12 in by_k:
-            return by_k[12]["scenario"]
-        ordered = sorted(variants, key=lambda v: v["k"])
-        return ordered[len(ordered) // 2]["scenario"]
 
     cfg = json.loads(pathlib.Path("bench/scenarios.json").read_text())
     scenarios = cfg.get("scenarios", [])
@@ -64,38 +56,24 @@ def build_matrix():
     is_nightly = event_name == "schedule"
 
     if is_nightly:
+        if requested_scenarios:
+            raise SystemExit("Scheduled benchmark runs cannot select a scenario subset")
         selected = names
     else:
-        pattern = re.compile(r"^(.*?)_n(\d+)_k(\d+)$")
-        parsed = []
-        for name in names:
-            m = pattern.match(name)
-            if not m:
-                # Unparsed names are re-added below via `from_unparsed`; do not
-                # touch `selected` here (it is not defined yet — appending would
-                # raise NameError on every workflow_dispatch run).
-                continue
-            family = m.group(1)
-            n_val = int(m.group(2))
-            k_val = int(m.group(3))
-            parsed.append({
-                "scenario": name,
-                "family": family,
-                "n": n_val,
-                "k": k_val,
-            })
-        by_family_n = {}
-        for p in parsed:
-            key = (p["family"], p["n"])
-            by_family_n.setdefault(key, []).append(p)
-        
-        selected = []
-        for key, variants in by_family_n.items():
-            selected.append(choose_single_knot(variants))
-        
-        from_unparsed = [n for n in names if not pattern.match(n)]
-        selected.extend(from_unparsed)
-        selected = sorted(list(set(selected)))
+        if not requested_scenarios:
+            raise SystemExit(
+                "workflow_dispatch requires --scenarios with one or more comma-separated names"
+            )
+        selected = list(
+            dict.fromkeys(
+                name.strip()
+                for name in requested_scenarios.split(",")
+                if name.strip()
+            )
+        )
+        unknown = sorted(set(selected) - set(names))
+        if unknown:
+            raise SystemExit(f"Unknown benchmark scenario(s): {', '.join(unknown)}")
 
     # benchmark.yml fans the selected scenarios across two jobs:
     #   `bench-shard`        (max-parallel 8, gated on `parallel_count != '0'`)
@@ -265,6 +243,169 @@ def fit_sec_ratio_rows(rows):
     return pairs
 
 
+MATCHED_BENCHMARK_CONTENDERS = {
+    "rust_gam": "r_mgcv",
+    "rust_gamlss": "r_mgcv_gaulss",
+}
+PERFORMANCE_MEASURES = ("fit_sec", "predict_sec")
+ACCURACY_DIRECTIONS = {
+    "auc": "higher",
+    "c_index": "higher",
+    "nagelkerke_r2": "higher",
+    "r2": "higher",
+    "brier": "lower",
+    "logloss": "lower",
+    "mse": "lower",
+    "rmse": "lower",
+    "mae": "lower",
+}
+
+
+def _finite_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and number not in (float("inf"), float("-inf")) else None
+
+
+def matched_benchmark_verdict(rows, *, maximum_slowdown=1.2):
+    """Strict #2623 performance/accuracy verdict for genuinely matched arms."""
+
+    by_scenario_contender = {}
+    observed_scenarios = set()
+    for row in rows:
+        scenario = str(row.get("scenario_name", ""))
+        contender = str(row.get("contender", ""))
+        if scenario:
+            observed_scenarios.add(scenario)
+        by_scenario_contender[(scenario, contender)] = row
+
+    configured = json.loads(pathlib.Path("bench/scenarios.json").read_text()).get("scenarios", [])
+    expected_scenarios = {str(s["name"]) for s in configured if s.get("name")}
+    missing_scenarios = sorted(expected_scenarios - observed_scenarios)
+    comparisons = []
+
+    for scenario in sorted(observed_scenarios):
+        for gam_contender, reference_contender in MATCHED_BENCHMARK_CONTENDERS.items():
+            gam_row = by_scenario_contender.get((scenario, gam_contender))
+            reference_row = by_scenario_contender.get((scenario, reference_contender))
+            if gam_row is None and reference_row is None:
+                continue
+            comparison = {
+                "scenario_name": scenario,
+                "gam_contender": gam_contender,
+                "reference_contender": reference_contender,
+                "gam_status": None if gam_row is None else gam_row.get("status"),
+                "reference_status": None if reference_row is None else reference_row.get("status"),
+                "performance": [],
+                "accuracy": [],
+                "passed": False,
+            }
+            if (
+                gam_row is None
+                or reference_row is None
+                or gam_row.get("status") != "ok"
+                or reference_row.get("status") != "ok"
+            ):
+                comparison["failure"] = "missing or failed matched contender"
+                comparisons.append(comparison)
+                continue
+
+            for measure in PERFORMANCE_MEASURES:
+                gam_value = _finite_number(gam_row.get(measure))
+                reference_value = _finite_number(reference_row.get(measure))
+                if gam_value is None or reference_value is None or reference_value <= 0.0:
+                    comparison["performance"].append(
+                        {"measure": measure, "passed": False, "failure": "missing/non-positive value"}
+                    )
+                    continue
+                ratio = gam_value / reference_value
+                comparison["performance"].append(
+                    {
+                        "measure": measure,
+                        "gam": gam_value,
+                        "reference": reference_value,
+                        "gam_over_reference": ratio,
+                        "passed": ratio <= maximum_slowdown,
+                    }
+                )
+
+            for measure, direction in ACCURACY_DIRECTIONS.items():
+                gam_value = _finite_number(gam_row.get(measure))
+                reference_value = _finite_number(reference_row.get(measure))
+                if gam_value is None and reference_value is None:
+                    continue
+                if gam_value is None or reference_value is None:
+                    comparison["accuracy"].append(
+                        {
+                            "measure": measure,
+                            "direction": direction,
+                            "passed": False,
+                            "failure": "measure missing from one matched arm",
+                        }
+                    )
+                    continue
+                tolerance = 1e-12 * max(1.0, abs(gam_value), abs(reference_value))
+                passed = (
+                    gam_value + tolerance >= reference_value
+                    if direction == "higher"
+                    else gam_value <= reference_value + tolerance
+                )
+                comparison["accuracy"].append(
+                    {
+                        "measure": measure,
+                        "direction": direction,
+                        "gam": gam_value,
+                        "reference": reference_value,
+                        "gam_minus_reference": gam_value - reference_value,
+                        "passed": passed,
+                    }
+                )
+
+            measures = comparison["performance"] + comparison["accuracy"]
+            comparison["passed"] = (
+                len(comparison["performance"]) == len(PERFORMANCE_MEASURES)
+                and bool(comparison["accuracy"])
+                and all(measure["passed"] for measure in measures)
+            )
+            comparisons.append(comparison)
+
+    performance_rows = [
+        {
+            **measure,
+            "scenario_name": comparison["scenario_name"],
+            "gam_contender": comparison["gam_contender"],
+            "reference_contender": comparison["reference_contender"],
+        }
+        for comparison in comparisons
+        for measure in comparison["performance"]
+        if "gam_over_reference" in measure
+    ]
+    worst_performance = (
+        max(performance_rows, key=lambda measure: measure["gam_over_reference"])
+        if performance_rows
+        else None
+    )
+    complete = not missing_scenarios and observed_scenarios == expected_scenarios
+    certified = complete and bool(comparisons) and all(c["passed"] for c in comparisons)
+    return {
+        "contract": {
+            "maximum_slowdown": maximum_slowdown,
+            "accuracy": "no loss on every shared reported accuracy measure",
+            "missing_or_failed_pairs": "fail",
+            "full_suite_required": True,
+        },
+        "configured_scenario_count": len(expected_scenarios),
+        "observed_scenario_count": len(observed_scenarios),
+        "missing_scenarios": missing_scenarios,
+        "full_suite": complete,
+        "comparisons": comparisons,
+        "worst_performance_measure": worst_performance,
+        "certified": certified,
+    }
+
+
 def _fit_sec_ratio_summary_lines(pairs):
     if not pairs:
         return [
@@ -354,6 +495,7 @@ def format_results():
         shard_files += 1
 
     ratio_pairs = fit_sec_ratio_rows(rows)
+    benchmark_verdict = matched_benchmark_verdict(rows)
     merged = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "results": rows,
@@ -361,9 +503,12 @@ def format_results():
         # and the dashboard read) so the speed comparison is in the published
         # artifact, not only in a step summary that expires with the run.
         "fit_sec_ratios": ratio_pairs,
+        "benchmark_verdict": benchmark_verdict,
     }
     with open("bench/results.nightly.json", "w") as f:
         json.dump(merged, f, indent=2)
+    with open("bench/benchmark-verdict.json", "w") as f:
+        json.dump(benchmark_verdict, f, indent=2)
     print(
         f"merged {len(rows)} contender rows from {shard_files} shard file(s) "
         "into bench/results.nightly.json"
@@ -393,6 +538,26 @@ def format_results():
         lines.append(f"| {scen} | {contender} | {stat} | {fit_s} | {pred_s} |")
 
     lines.extend(_fit_sec_ratio_summary_lines(ratio_pairs))
+    lines.extend(
+        [
+            "",
+            "### Strict matched benchmark verdict",
+            "",
+            (
+                f"**{'CERTIFIED' if benchmark_verdict['certified'] else 'NOT CERTIFIED'}** — "
+                f"{benchmark_verdict['observed_scenario_count']}/"
+                f"{benchmark_verdict['configured_scenario_count']} scenarios observed; "
+                f"{len(benchmark_verdict['comparisons'])} matched comparison(s)."
+            ),
+        ]
+    )
+    worst_measure = benchmark_verdict["worst_performance_measure"]
+    if worst_measure is not None:
+        lines.append(
+            f"Worst measured performance ratio: {worst_measure['gam_over_reference']:.3f}x "
+            f"on `{worst_measure['scenario_name']}` / `{worst_measure['measure']}` "
+            f"({worst_measure['gam_contender']}` vs `{worst_measure['reference_contender']}`)."
+        )
 
     summary = "\n".join(lines)
     print(summary)
@@ -419,7 +584,9 @@ if __name__ == "__main__":
     elif task == "validate_geo_subpop":
         validate_geo_subpop()
     elif task == "build_matrix":
-        build_matrix()
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--scenarios")
+        build_matrix(parser.parse_args(sys.argv[2:]).scenarios)
     elif task == "extract_maturin_wheel":
         out_dir = sys.argv[2] if len(sys.argv) > 2 else "gamfit"
         extract_maturin_wheel(out_dir)

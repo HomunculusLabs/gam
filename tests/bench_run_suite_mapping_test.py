@@ -385,7 +385,7 @@ class RunSuiteMappingTests(unittest.TestCase):
         # Joint 16-PC Duchon needs power=dim//2+1=9 so phi^(2)(0) exists
         # strictly (2*(1+9)=20 > 16+2=18).
         self.assertIn("power=9", term)
-        self.assertIn("length_scale=1.0", term)
+        self.assertNotIn("length_scale=", term)
         self.assertNotIn("double_penalty", term)
 
     def test_geo_subpop16_marginal_slope_aniso_lane_is_present_and_enabled(self) -> None:
@@ -397,12 +397,12 @@ class RunSuiteMappingTests(unittest.TestCase):
             _RUN_SUITE._is_contender_enabled(scenario, "rust_gamlss_marginal_slope")
         )
 
-    def test_thread3_adaptive_reml_uses_current_boolean_cli(self) -> None:
+    def test_thread3_adaptive_reml_uses_in_process_boolean(self) -> None:
         seen = []
 
         def _fake_run_rust_scenario_cv(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
             if kwargs.get("contender_name") == "rust_thread3_adaptive_reml":
-                seen.append(list(kwargs.get("rust_fit_extra_args") or []))
+                seen.append(kwargs.get("adaptive_regularization"))
             return {
                 "status": "ok",
                 "scenario_name": "thread3_admixture_cliff",
@@ -440,7 +440,7 @@ class RunSuiteMappingTests(unittest.TestCase):
                 _RUN_SUITE.main()
 
         self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0], ["--adaptive-regularization", "true"])
+        self.assertIs(seen[0], True)
 
     def test_thread3_adaptive_flexible_passes_flexible_formula_link(self) -> None:
         seen_formula_links = []
@@ -544,21 +544,24 @@ class RunSuiteMappingTests(unittest.TestCase):
             SimpleNamespace(train_idx=[0, 1], test_idx=[2, 3]),
             SimpleNamespace(train_idx=[2, 3], test_idx=[0, 1]),
         ]
-        def _fake_run_cmd(cmd: typing.Any, cwd: typing.Any = None) -> typing.Any:
-            if len(cmd) >= 2 and cmd[1] == "fit":
-                Path(cmd[cmd.index("--out") + 1]).write_text(
+        class _FakeModel:
+            def save(self, path: Path) -> None:
+                Path(path).write_text(
                     json.dumps({"fit_result": {"standard_deviation": 1.25}})
                 )
-                return 0, "", ""
-            if len(cmd) >= 2 and cmd[1] == "predict":
-                Path(cmd[cmd.index("--out") + 1]).write_text("mean\n1.5\n1.5\n")
-                return 0, "", ""
-            return 1, "", f"unexpected command: {cmd}"
+
+            def predict(self, _data: typing.Any, **_kwargs: typing.Any) -> list[float]:
+                return [1.5, 1.5]
+
+        fake_gamfit = SimpleNamespace(fit=lambda *_args, **_kwargs: _FakeModel())
 
         with tempfile.TemporaryDirectory() as td:
             with _patched_attrs(
-                (_RUN_SUITE, "_ensure_rust_binary", lambda: Path("/tmp/fake-rust-gam")),
-                (_RUN_SUITE, "run_cmd", _fake_run_cmd),
+                (
+                    _RUN_SUITE.importlib,
+                    "import_module",
+                    lambda name: fake_gamfit,
+                ),
                 (_RUN_SUITE, "_workspace_tempdir", _tempdir_factory(Path(td))),
                 (
                     _RUN_SUITE,
@@ -568,6 +571,18 @@ class RunSuiteMappingTests(unittest.TestCase):
                         "logratio ~ s(range, type=ps, knots=24)",
                     ),
                 ),
+                (_RUN_SUITE, "zscore_train_test", lambda train, test, _features: (train, test)),
+                (
+                    _RUN_SUITE,
+                    "gaussian_prediction_scores",
+                    lambda *_args: {
+                        "logloss": 1.0,
+                        "mse": 0.25,
+                        "rmse": 0.5,
+                        "mae": 0.4,
+                        "r2": 0.2,
+                    },
+                ),
             ):
                 result = _RUN_SUITE.run_rust_scenario_cv(scenario, ds=ds, folds=folds)
 
@@ -575,6 +590,72 @@ class RunSuiteMappingTests(unittest.TestCase):
         self.assertEqual(result["evaluation"], "2-fold CV")
         self.assertEqual(result["n_folds"], 2)
         self.assertIn("[2-fold CV]", result["model_spec"])
+
+    def test_run_rust_gamlss_cv_uses_in_process_location_scale_api(self) -> None:
+        scenario = {"name": "lidar_semipar"}
+        ds = {
+            "family": "gaussian",
+            "rows": [
+                {"range": 0.0, "logratio": 0.0},
+                {"range": 1.0, "logratio": 1.0},
+                {"range": 2.0, "logratio": 2.0},
+                {"range": 3.0, "logratio": 3.0},
+            ],
+            "features": ["range"],
+            "target": "logratio",
+        }
+        folds = [SimpleNamespace(train_idx=[0, 1], test_idx=[2, 3])]
+        fit_calls = []
+
+        class _FakeModel:
+            def save(self, path: Path) -> None:
+                Path(path).write_text("{}")
+
+            def predict(self, _data: typing.Any, **_kwargs: typing.Any) -> dict[str, list[float]]:
+                return {"mean": [1.5, 1.5], "sigma": [1.25, 1.25]}
+
+        def _fit(*args: typing.Any, **kwargs: typing.Any) -> _FakeModel:
+            fit_calls.append((args, kwargs))
+            return _FakeModel()
+
+        with tempfile.TemporaryDirectory() as td:
+            with _patched_attrs(
+                (_RUN_SUITE.importlib, "import_module", lambda name: SimpleNamespace(fit=_fit)),
+                (_RUN_SUITE, "_workspace_tempdir", _tempdir_factory(Path(td))),
+                (_RUN_SUITE, "zscore_train_test", lambda train, test, _features: (train, test)),
+                (
+                    _RUN_SUITE,
+                    "_rust_formula_for_scenario",
+                    lambda *_args, **_kwargs: (
+                        "gaussian",
+                        "logratio ~ s(range, type=ps, knots=24)",
+                    ),
+                ),
+                (_RUN_SUITE, "_sigma_feature_terms", lambda *_args, **_kwargs: ["s(range)"]),
+                (
+                    _RUN_SUITE,
+                    "gaussian_prediction_scores",
+                    lambda *_args: {
+                        "logloss": 1.0,
+                        "mse": 0.25,
+                        "rmse": 0.5,
+                        "mae": 0.4,
+                        "r2": 0.2,
+                    },
+                ),
+            ):
+                result = _RUN_SUITE.run_rust_gamlss_scenario_cv(
+                    scenario,
+                    ds=ds,
+                    folds=folds,
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["evaluation"], "holdout")
+        self.assertEqual(len(fit_calls), 1)
+        self.assertEqual(fit_calls[0][1]["family"], "gaussian")
+        self.assertEqual(fit_calls[0][1]["noise_formula"], "s(range)")
+        self.assertIn("via release extension", result["model_spec"])
 
     def test_main_does_not_schedule_rust_gam_for_survival_scenarios(self) -> None:
         seen = []

@@ -1,0 +1,111 @@
+{
+  "contract": {
+    "maximum_slowdown": 1.2,
+    "accuracy": "no loss on every shared reported accuracy measure",
+    "missing_or_failed_pairs": "fail",
+    "full_suite_required": true
+  },
+  "source_run_id": "30519203869",
+  "source_sha": "c19567b5",
+  "source_is_pre_fix": true,
+  "configured_scenario_count": 110,
+  "observed_scenario_count": 13,
+  "full_suite": false,
+  "matched_comparisons": [
+    {
+      "scenario_name": "papuan_oce4_psperpc_k6",
+      "fit_sec": {"gam": 1998.077790089, "reference": 8.505, "gam_over_reference": 234.9309570945},
+      "predict_sec": {"gam": 0.577034079, "reference": 0.942, "gam_over_reference": 0.6125627166},
+      "accuracy": {
+        "auc": {"gam": 0.8298912717, "reference": 0.8275941167},
+        "brier": {"gam": 0.1071223202, "reference": 0.1070772333},
+        "logloss": {"gam": 0.3276324401, "reference": 0.3276484333},
+        "nagelkerke_r2": {"gam": 0.3673707904, "reference": 0.3672512}
+      },
+      "passed": false
+    },
+    {
+      "scenario_name": "bone_gamair",
+      "fit_sec": {"gam": 19.488468075, "reference": 0.465, "gam_over_reference": 41.9106840323},
+      "predict_sec": {"gam": 0.054290514, "reference": 0.015, "gam_over_reference": 3.6193676},
+      "accuracy": {
+        "auc": {"gam": 1.0, "reference": 0.8550652174},
+        "brier": {"gam": 0.1297771837, "reference": 0.2111043478},
+        "logloss": {"gam": 0.4367740186, "reference": 2.9149434783},
+        "nagelkerke_r2": {"gam": 0.4989198121, "reference": -868228925.9531044}
+      },
+      "passed": false
+    },
+    {
+      "scenario_name": "us48_demand_5day",
+      "fit_sec": {"gam": 4.934326947, "reference": 0.697, "gam_over_reference": 7.0793786901},
+      "predict_sec": {"gam": 0.162824944, "reference": 0.026, "gam_over_reference": 6.2624978462},
+      "accuracy": {
+        "logloss": {"gam": 9.3801392367, "reference": 9.353578125},
+        "mse": {"gam": 7839668.169051786, "reference": 7439872.025489801},
+        "rmse": {"gam": 2784.7718774926, "reference": 2714.4848041667},
+        "mae": {"gam": 2264.6431198552, "reference": 2246.2855010417},
+        "r2": {"gam": 0.9950925953, "reference": 0.99525}
+      },
+      "passed": false
+    },
+    {
+      "scenario_name": "wine_gamair",
+      "fit_sec": {"gam": 8.460124962, "reference": 1.675, "gam_over_reference": 5.050820873},
+      "predict_sec": {"gam": 0.164892064, "reference": 0.027, "gam_over_reference": 6.1071134815},
+      "accuracy": {
+        "logloss": {"gam": 1071.0418541628, "reference": 4.7583578947},
+        "mse": {"gam": 2140.2458312591, "reference": 210.0808103679},
+        "rmse": {"gam": 37.6076947317, "reference": 13.6485736842},
+        "mae": {"gam": 23.1051276071, "reference": 10.7823131579},
+        "r2": {"gam": -6.7745915516, "reference": 0.2681315789}
+      },
+      "passed": false
+    },
+    {
+      "scenario_name": "wine_price_vs_temp",
+      "fit_sec": {"gam": 1.076183846, "reference": 0.189, "gam_over_reference": 5.6930362222},
+      "predict_sec": {"gam": 0.055939345, "reference": 0.019, "gam_over_reference": 2.9441760526},
+      "accuracy": {
+        "logloss": {"gam": 181.9773883481, "reference": 4.3962631579},
+        "mse": {"gam": 362.1168996298, "reference": 299.4608196674},
+        "rmse": {"gam": 17.7538968517, "reference": 16.2920210526},
+        "mae": {"gam": 13.3873472351, "reference": 11.7078815789},
+        "r2": {"gam": -0.2303573838, "reference": -0.0713605263}
+      },
+      "passed": false
+    },
+    {
+      "scenario_name": "lidar_semipar",
+      "fit_sec": {"gam": 2.076547862, "reference": 0.329, "gam_over_reference": 6.3116956292},
+      "predict_sec": {"gam": 0.081994011, "reference": 0.016, "gam_over_reference": 5.1246256875},
+      "accuracy": {
+        "logloss": {"gam": -1.0889900028, "reference": -1.0895760181},
+        "mse": {"gam": 0.0065593259, "reference": 0.0065515367},
+        "rmse": {"gam": 0.0806922748, "reference": 0.0806447964},
+        "mae": {"gam": 0.0561726901, "reference": 0.0561402715},
+        "r2": {"gam": 0.9152604688, "reference": 0.9153760181}
+      },
+      "passed": false
+    },
+    {
+      "scenario_name": "wine_temp_vs_year",
+      "fit_sec": {"gam": 0.626039772, "reference": 0.174, "gam_over_reference": 3.5979297241},
+      "predict_sec": {"gam": 0.059825268, "reference": 0.02, "gam_over_reference": 2.9912634},
+      "accuracy": {
+        "logloss": {"gam": 1.0194055202, "reference": 1.019412766},
+        "mse": {"gam": 0.4433291916, "reference": 0.4433194413},
+        "rmse": {"gam": 0.6631824856, "reference": 0.6632},
+        "mae": {"gam": 0.5475121581, "reference": 0.5470574468},
+        "r2": {"gam": 0.4016909858, "reference": 0.4006021277}
+      },
+      "passed": false
+    }
+  ],
+  "worst_performance_measure": {
+    "scenario_name": "papuan_oce4_psperpc_k6",
+    "measure": "fit_sec",
+    "gam_over_reference": 234.9309570945
+  },
+  "certified": false
+}

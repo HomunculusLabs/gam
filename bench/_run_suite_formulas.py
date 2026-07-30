@@ -388,9 +388,14 @@ def _emit_joint_pc_term(
             # With order=0 (p_order=1), the Duchon center-collision derivative
             # phi^(2)(0) exists iff 2*(p+s) > dimension+2, i.e. s > dimension/2.
             # The smallest integer power satisfying this strictly is dim//2 + 1.
+            #
+            # `length_scale` would opt gam into a hybrid Duchon-Matérn
+            # estimator with an additional learned kappa axis.  mgcv's
+            # `bs="ds"` reference is the scale-free Duchon estimator, so a
+            # matched benchmark must leave that hybrid parameter absent.
             return (
                 f"duchon({cols}, centers={knot_count}, "
-                f"order=0, power={len(pc_cols) // 2 + 1}, length_scale=1.0)"
+                f"order=0, power={len(pc_cols) // 2 + 1})"
             )
         if pc_basis == "matern":
             return f"matern({cols}, centers={knot_count}{dp})"
@@ -438,7 +443,7 @@ def _rust_duchon_options_for_dimension(dimension: int) -> str:
     # phi^(2)(0) exists iff 2*(p+s) > dimension+2, i.e. s > dimension/2.
     # The smallest integer power satisfying this strictly is dim//2 + 1.
     power = dimension // 2 + 1
-    return f", order=0, power={power}, length_scale=1.0"
+    return f", order=0, power={power}"
 
 
 def _rust_joint_spatial_term(basis: str, smooth_cols: list[str], knot_count: int, dp_opt: str) -> str:
@@ -829,6 +834,5 @@ def _is_matern_rust_scenario(s_cfg: typing.Any) -> bool:
     if cfg is None:
         return False
     return bool(_canonical_smooth_basis(cfg.get("smooth_basis", "ps")) == "matern")
-
 
 
