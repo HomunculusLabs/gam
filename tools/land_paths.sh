@@ -150,7 +150,23 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
     exit 8
   fi
 
-  if git push -q origin "$COMMIT:main" 2>/dev/null; then
+  # Capture the push's stderr rather than discarding it. Every failure used to
+  # be reported as "main moved", because a losing race is the common case --
+  # so an authentication failure retried eight times in silence and then said
+  # main was moving too fast, while `origin/main` had not moved at all. Only a
+  # non-fast-forward is a race; anything else is a real error and must be shown
+  # and must NOT be retried.
+  PUSH_ERR=$(git push -q origin "$COMMIT:main" 2>&1)
+  PUSH_RC=$?
+  if [ "$PUSH_RC" -ne 0 ] && ! printf '%s' "$PUSH_ERR" | grep -qiE 'non-fast-forward|fetch first|rejected'; then
+    echo "PUSH FAILED, and not because of a race — not retrying:" >&2
+    printf '%s\n' "$PUSH_ERR" >&2
+    echo >&2
+    echo "If this is 'Permission ... denied', the git credential helper is serving the" >&2
+    echo "wrong account. Fix with: gh auth switch -u <owner> && gh auth setup-git" >&2
+    exit 9
+  fi
+  if [ "$PUSH_RC" -eq 0 ]; then
     git fetch -q origin main
     if [ "$(git rev-parse origin/main)" = "$COMMIT" ]; then
       echo "landed $COMMIT on main (base $BASE, attempt $attempt)"
