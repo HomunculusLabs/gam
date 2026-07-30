@@ -79,9 +79,6 @@ env:
 
 jobs:
   prove:
-    permissions:
-      contents: write
-      actions: read
     name: Focused Rust proof (issue ${{ github.event.inputs.issue }})
     runs-on: ${{ github.event.inputs.runner }}
     # Must exceed BUILD_BUDGET_SECONDS + RUN_BUDGET_SECONDS plus checkout and
@@ -404,47 +401,3 @@ jobs:
           name: focused-rust-${{ github.run_id }}
           path: focused-rust-logs
           if-no-files-found: ignore
-
-
-      # Track this run's uncompressed numbers in-tree (bench/gha_results/focused-rust-proof).
-      # always() so a failed or timed-out run still publishes what it measured -
-      # those numbers are usually the interesting ones. Publishes nothing when the
-      # run produced no results, so a bad run never blanks the last good one.
-      # Did any test actually EXECUTE? Only then is there a result to publish.
-      #
-      # This step is the gate for the one below. `focused-rust-logs` holds the
-      # per-filter output, and a `test result:` line appears there if and only
-      # if libtest ran. A build that did not compile, a build that blew its
-      # budget, and an input-validation failure all leave the directory without
-      # one -- those are infrastructure outcomes, not facts about the code, and
-      # committing them was pure churn on the default branch.
-      - name: Did any test execute
-        id: executed
-        if: '!cancelled()'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if grep -rqs 'test result:' focused-rust-logs; then
-            echo "executed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "executed=false" >> "$GITHUB_OUTPUT"
-            echo "no test executed; not publishing a result commit"
-          fi
-
-      # Publish ONLY a run that measured something.
-      #
-      # Every dispatch used to append a `results(focused-rust-proof): run <id>`
-      # commit to the default branch, including the ones that never ran a test:
-      # a mistyped package name, a comma-separated `filters` the validator
-      # rejects, a build that exceeded its budget. Those carry no information
-      # about the code under test, and on a day with many probes they are most
-      # of the commits in `git log`. A failing RUN is still published -- a test
-      # that executed and failed is a result -- so this narrows the publish to
-      # measurement, not to success.
-      - name: Publish results to bench/gha_results
-        if: '!cancelled() && steps.executed.outputs.executed == ''true'''
-        uses: ./.github/actions/publish-gha-results
-        with:
-          name: focused-rust-proof
-          files: |
-            focused-rust-logs

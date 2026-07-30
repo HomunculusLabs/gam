@@ -1,8 +1,12 @@
 {
-  "workflow": "Rust tests",
+  "workflow": "Rust CI",
   "job_status": "failure",
-  "run_id": "30209439994",
-  "run_url": "https://github.com/SauersML/gam/actions/runs/30209439994",
-  "completed_utc": "2026-07-26T19:42:00Z",
-  "seeded_by": "manual backfill from the run's artifact; subsequent updates are written by .github/actions/publish-gha-results"
+  "run_id": "30503262222",
+  "run_number": "5958",
+  "run_attempt": "1",
+  "event": "workflow_dispatch",
+  "ref": "refs/heads/main",
+  "sha": "5ae2b390ed651eb8945fa61562501623cc9e83d7",
+  "completed_utc": "2026-07-30T04:50:57Z",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/30503262222"
 }

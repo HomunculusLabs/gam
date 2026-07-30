@@ -65,9 +65,9 @@ on:
         required: false
 
 # GitHub may drop scheduled events under load (#2437), so this expensive workflow
-# is dispatch-only. A scheduled dispatcher (retired; any future one inherits the
-# contract) supplies `ledger_date` exactly once when the current UTC ledger is
-# overdue; until one exists, ledger dispatches are manual.
+# is dispatch-only. `nightly-ledger-guardian.yml` gets several cheap scheduling
+# opportunities and supplies `ledger_date` exactly once when the current UTC
+# ledger is overdue.
 #
 # Interactive dispatches keep their ref-keyed supersession policy. A ledger
 # dispatch gets a UTC-date group with cancellation disabled, so interactive work
@@ -623,6 +623,15 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
+      # The publisher below is a repository-local composite action. Aggregate
+      # previously downloaded only result artifacts, so the workspace contained
+      # MASTER_FAILURES.md but not `.github/actions/publish-gha-results/action.yml`;
+      # every completed suite then failed at the publish step and left the
+      # in-tree ledger stale. Check out the exact workflow SHA before using any
+      # local action.
+      - name: Checkout publisher
+        uses: actions/checkout@v5
+
       - name: Download build logs
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -1004,17 +1013,6 @@ jobs:
           if-no-files-found: warn
 
 
-      # Track this run's uncompressed numbers in-tree (bench/gha_results/rust-test-suite).
-      # always() so a failed or timed-out run still publishes what it measured -
-      # those numbers are usually the interesting ones. Publishes nothing when the
-      # run produced no results, so a bad run never blanks the last good one.
-      - name: Publish results to bench/gha_results
-        if: always()
-        uses: ./.github/actions/publish-gha-results
-        with:
-          name: rust-test-suite
-          files: |
-            MASTER_FAILURES.md
       - name: Fail the run if any failure was collected
         shell: bash
         run: |
@@ -1038,6 +1036,17 @@ jobs:
             exit 1
           fi
           echo "No failures collected."
+
+      # Track this run's uncompressed ledger in-tree after the gate has assigned
+      # the job's honest status. `always()` preserves publication for red suites;
+      # the publisher itself keeps the previous ledger when no report exists.
+      - name: Publish results to bench/gha_results
+        if: always()
+        uses: ./.github/actions/publish-gha-results
+        with:
+          name: rust-test-suite
+          files: |
+            MASTER_FAILURES.md
 
   # ---------------------------------------------------------------------------
   # Python API + maturin/wheel flow. PRESERVED verbatim from the old workflow,

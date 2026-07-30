@@ -352,9 +352,12 @@ jobs:
               outcome=METRIC_OFF; cause=quality_metric; reason="${panicmsg:-nonzero exit $rc}"; metricoff=$((metricoff+1))
             fi
             # Sanitize to single-line cells for the TSV / markdown table; the full
-            # untouched text always remains in the per-test log artifact.
-            metric_clean=$(printf '%s' "$metric" | tr '\t|' '  ' | tr -s ' ')
-            reason_clean=$(printf '%s' "$reason" | tr '\t\n|' '   ' | tr -s ' ' | cut -c1-400)
+            # untouched text always remains in the per-test log artifact. GitHub's
+            # TSV renderer treats a bare ASCII double quote as the start of CSV
+            # quoting, so normalize quotes too instead of producing an "Illegal
+            # quoting" error that makes the tracked table unsearchable.
+            metric_clean=$(printf '%s' "$metric" | tr '\t|"' "  '" | tr -s ' ')
+            reason_clean=$(printf '%s' "$reason" | tr '\t\n|"' "   '" | tr -s ' ' | cut -c1-400)
             printf '%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\n' \
               "$i" "$outcome" "$cause" "$t" "$rc" "$dur" "$sub_passed" "$sub_failed" "$metric_clean" "$reason_clean" >> "$RES"
             printf '{"idx":%d,"outcome":"%s","cause":"%s","test":"%s","rc":%d,"dur_s":%d,"sub_passed":%s,"sub_failed":%s}\n' \
