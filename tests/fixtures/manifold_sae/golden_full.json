@@ -586,6 +586,7 @@
     ]
   },
   "dispersion": 1.07,
+  "fisher_factor_kind": "uncertified_approximation",
   "fisher_factors": [
     [
       [
@@ -686,7 +687,6 @@
     0.003
   ],
   "fisher_provenance": "output_fisher_downstream",
-  "fisher_factor_kind": "uncertified_approximation",
   "fitted": [
     [
       0.5,
@@ -718,6 +718,57 @@
       1.7600000000000002,
       1.83
     ]
+  ],
+  "geometry_plans": [
+    {
+      "kind": "periodic",
+      "latent_dim": 1,
+      "reference_metric": {
+        "kind": "unit_circle"
+      },
+      "resolution": {
+        "kind": "periodic_harmonics",
+        "order": 2
+      }
+    },
+    {
+      "kind": "linear",
+      "latent_dim": 2,
+      "reference_metric": {
+        "kind": "euclidean_polynomial"
+      },
+      "resolution": {
+        "degree": 1,
+        "kind": "polynomial"
+      }
+    },
+    {
+      "kind": "duchon",
+      "latent_dim": 2,
+      "reference_metric": {
+        "kind": "euclidean_duchon"
+      },
+      "resolution": {
+        "centers": {
+          "data": [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            2.5,
+            3.0,
+            3.5
+          ],
+          "dim": [
+            4,
+            2
+          ],
+          "v": 1
+        },
+        "kind": "duchon_coordinates"
+      }
+    }
   ],
   "hybrid_split": {
     "atoms": [
@@ -751,7 +802,6 @@
     ],
     "mu_hat": 0.31
   },
-  "threshold_gate_threshold": 0.15,
   "learnable_alpha": true,
   "learning_rate": 0.03,
   "logits": [
@@ -783,48 +833,9 @@
   ],
   "max_iter": 42,
   "metric_provenance": "OutputFisherDownstream",
-  "geometry_plans": [
-    {
-      "kind": "periodic",
-      "latent_dim": 1,
-      "reference_metric": {
-        "kind": "unit_circle"
-      },
-      "resolution": {
-        "kind": "periodic_harmonics",
-        "order": 2
-      }
-    },
-    {
-      "kind": "linear",
-      "latent_dim": 2,
-      "reference_metric": {
-        "kind": "euclidean_polynomial"
-      },
-      "resolution": {
-        "degree": 1,
-        "kind": "polynomial"
-      }
-    },
-    {
-      "kind": "duchon",
-      "latent_dim": 2,
-      "reference_metric": {
-        "kind": "euclidean_duchon"
-      },
-      "resolution": {
-        "centers": {
-          "data": [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
-          "dim": [4, 2],
-          "v": 1
-        },
-        "kind": "duchon_coordinates"
-      }
-    }
-  ],
   "oos_projection_top1": true,
-  "penalized_quasi_laplace_criterion": 41.25,
   "penalized_loss_score": -37.5,
+  "penalized_quasi_laplace_criterion": 41.25,
   "primitive_names": [
     "circle_0",
     "line_1",
@@ -868,6 +879,14 @@
   "structure_certificate": "{\"alpha\": 0.1, \"entries\": [{\"kind\": \"NonConstant\", \"log_e\": 3.4, \"steps\": 2, \"confirmed\": true}]}",
   "structured_residual_diagnostics": [],
   "tau": 0.4,
+  "termination": null,
+  "threshold_gate_threshold": 0.15,
+  "tier0_scale": [
+    1.0,
+    1.2,
+    1.4,
+    1.6
+  ],
   "top_k": 2,
   "topology_persistence": {
     "atoms": [
@@ -881,13 +900,6 @@
       }
     ]
   },
-  "termination": null,
-  "tier0_scale": [
-    1.0,
-    1.2,
-    1.4,
-    1.6
-  ],
   "training_mean": [
     0.4,
     0.65,
