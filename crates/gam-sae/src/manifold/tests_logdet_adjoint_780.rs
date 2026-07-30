@@ -1955,9 +1955,21 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144
         );
         let analytic = gamma.t[cache.row_offsets[row] + local_pos];
         let tol = 3.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
+        // #2330: `local_pos` above is HARDCODED, i.e. this loop asserts every row is
+        // packed `[Logit0, Logit1, Coord0, Coord1]`. If the whitened layout orders its
+        // local block differently, `analytic` is a different variable's derivative and
+        // the comparison is meaningless rather than merely out of tolerance. Report the
+        // resolved block width so a failure distinguishes the two: a width of 4 is
+        // consistent with the assumed packing, whereas a width equal to the coordinate
+        // count alone says the logit probes are indexing coordinate slots.
+        let block_width = cache.row_offsets[row + 1] - cache.row_offsets[row];
         assert!(
             (fd - analytic).abs() <= tol,
-            "full-rank whitened Gamma row={row} local_pos={local_pos}: fd={fd:.8e}, analytic={analytic:.8e}"
+            "full-rank whitened Gamma row={row} local_pos={local_pos}: fd={fd:.8e}, \
+             analytic={analytic:.8e} (var={var:?}, row block width={block_width}, \
+             gamma.t len={}, row_offsets[{row}]={})",
+            gamma.t.len(),
+            cache.row_offsets[row],
         );
     }
 }
