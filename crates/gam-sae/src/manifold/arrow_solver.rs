@@ -604,6 +604,28 @@ pub(crate) fn cholesky_factor_apply(
     out
 }
 
+/// The local coordinates a row jet differentiates against.
+///
+/// #2330 — OPEN QUESTION, recorded here because the measurement is unambiguous even
+/// though the attribution is not. The ordered Beta--Bernoulli concentration `α` is a free
+/// parameter whenever `learnable_alpha` is set and no override pins it (see
+/// `SaeAssignment::effective_alpha_is_learnable`), and it has no variant here. Note
+/// that `α` varies with `ρ`, so its absence from this INNER-`θ` basis may well be
+/// deliberate — the open question is whether the θ-adjoint under a learnable `α` is
+/// then being assembled against a gate the basis cannot see vary.
+/// Every derivative assembly keyed on this enum skips `α` — the `dz` / `d2z`
+/// loops in `construction_row_jet_logdet_channels.rs` open with
+/// `let SaeLocalRowVar::Logit { .. } = *var else { continue; }`, and the border-channel
+/// match falls through to `_ => 0.0`. The result is not an inaccurate `∂/∂α`; it is an
+/// identically zero one, in a direction the outer optimizer is free to move.
+///
+/// Measured: with `learnable_alpha`, `fd = -1.428192e0` against `analytic = 5.500943e-3`,
+/// relative error FROZEN at `5.904e-1` across a 10x reduction in `h` (a missing term, not
+/// a precision limit), while the coordinate channel in the same dump converges
+/// quadratically. The same fixture WITHOUT the learnable concentration passes.
+///
+/// Adding a variant is the real repair, but this enum is indexed positionally by several
+/// assemblies (`vars.iter().enumerate()`), so widening it requires auditing each consumer.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SaeLocalRowVar {
     Logit { atom: usize },
