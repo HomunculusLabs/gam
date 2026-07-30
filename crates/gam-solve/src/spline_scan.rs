@@ -1958,6 +1958,8 @@ const D3_DIAGONAL_NAMES: [&str; MAX_ORDER] = ["d3_upd_00", "d3_upd_11", "d3_upd_
 const D2_DIAGONAL_NAMES: [&str; MAX_ORDER] = ["d2_upd_00", "d2_upd_11", "d2_upd_22"];
 const D1_DIAGONAL_NAMES: [&str; MAX_ORDER] = ["d1_upd_00", "d1_upd_11", "d1_upd_22"];
 const P_DIAGONAL_NAMES: [&str; MAX_ORDER] = ["p_upd_00", "p_upd_11", "p_upd_22"];
+/// Kalman gain coordinates, so a caller can rebuild the closed-loop map.
+const GAIN_NAMES: [&str; MAX_ORDER] = ["gain_0", "gain_1", "gain_2"];
 
 fn run_filter_ball_traced(
     nodes: &[PooledNode],
@@ -2416,7 +2418,6 @@ fn run_filter_ball_traced(
                     ("f_star", f_star),
                     ("inv_f", inv_f),
                     ("a_operator_00", a_operator[0][0]),
-                    ("gain_0", gain[0]),
                     ("gain_d1_0", gain_d1[0]),
                     ("gain_d2_0", gain_d2[0]),
                     ("gain_d3_0", gain_d3[0]),
@@ -2435,6 +2436,7 @@ fn run_filter_ball_traced(
                     sink.push((t, "d3_upd_01", p_new_d3[0][1]));
                 }
                 for i in 0..order {
+                    sink.push((t, GAIN_NAMES[i], gain[i]));
                     sink.push((t, P_DIAGONAL_NAMES[i], p_new[i][i]));
                     sink.push((t, D1_DIAGONAL_NAMES[i], p_new_d1[i][i]));
                     sink.push((t, D2_DIAGONAL_NAMES[i], p_new_d2[i][i]));
@@ -4647,6 +4649,150 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
                 );
             }
         }
+    }
+
+    /// The amplifier behind every width in this file, measured on the map
+    /// itself rather than inferred from what it produces.
+    ///
+    /// The filtered covariance sits at its Riccati fixed point on this fixture
+    /// (`P₁₁ = 1225.652` and `P₂₂ = 950572.8` at nodes 40, 60 and 80 alike), so
+    /// the recursion's true width map is the closed-loop congruence
+    /// `Ψ = A F`, `A = I − K e₀ᵀ`, and it CONTRACTS: the product of the `Ψ_t`
+    /// over the whole proper range has max-norm well below one. The
+    /// componentwise interval evaluation of that same recursion propagates
+    /// widths through `|Ψ|` instead, and the product of the `|Ψ_t|` over the
+    /// same range explodes.
+    ///
+    /// This is not dependency loss that a corner or exact-range evaluation can
+    /// reach. `Ψ` has `−K_i` below the diagonal of its first column and `+δ`
+    /// above it, so the sign of the `1↔2` cycle is NEGATIVE — and a cycle's sign
+    /// is invariant under diagonal similarity, so no rescaling of the state
+    /// makes `|Ψ| = Ψ`. The cancellation is between coordinates of one step, and
+    /// no componentwise interval arithmetic in any diagonal basis can see it.
+    /// Every enclosure this file builds by recursion over nodes — the
+    /// covariance, its jets, the mean, and equally the BACKWARD smoother
+    /// recursions that a closed-form `V′` would need, which propagate through
+    /// `Ψᵀ` and inherit the same factor — is bounded below by it. That is why
+    /// the remaining reds are not reachable by adding more exact identities to
+    /// the recursion, and it is measured here so the next reader does not have
+    /// to rediscover it.
+    ///
+    /// As measured (order 3, ρ = −16.6135, 176 closed-loop steps):
+    ///
+    /// ```text
+    ///   steps    ‖Π Ψ‖        ‖Π |Ψ|‖
+    ///      20    3.06e−1      4.34e+4
+    ///      40    8.39e−4      2.55e+6
+    ///      80    1.13e−9      8.84e+9
+    ///     120    1.83e−17     6.97e+12
+    ///     176    2.60e−29     4.48e+16
+    /// ```
+    ///
+    /// 0.688 per step against 1.2434 per step: 45 orders of magnitude between
+    /// what the filter does and what a componentwise interval evaluation of it
+    /// can prove. The two columns also give the operating point for any repair
+    /// that recomputes over a WINDOW instead of over the whole prefix — the
+    /// right column is the width such a window pays, the left is how much of
+    /// its own initial condition it has forgotten by then, and they cross at a
+    /// few tens of nodes.
+    #[test]
+    fn the_closed_loop_map_contracts_while_its_absolute_value_explodes() {
+        let (x, y, w) = dgp_2300();
+        let order = 3;
+        let log_lambda = -16.6135_f64;
+        let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
+        let q_value =
+            gam_problem::checked_exp_log_strength(-log_lambda).expect("inverse log strength");
+        let q = Ball::certified(
+            q_value,
+            gam_math::score_opt::certified_exp(-log_lambda).expect("certified exponential"),
+        );
+        let mut trace: Vec<BallTraceRecord> = Vec::new();
+        certified_concentrated_criterion_jet(&nodes, within, n_obs, log_lambda, order)
+            .expect("the certified jet must exist at the rho this map is measured at");
+        run_filter_ball_traced(&nodes, q, order, Some(&mut trace)).expect("traced pass");
+        let mut gains: HashMap<usize, [f64; MAX_ORDER]> = HashMap::new();
+        for (node, name, ball) in &trace {
+            if let Some(coordinate) = GAIN_NAMES.iter().position(|candidate| candidate == name) {
+                gains.entry(*node).or_insert([0.0; MAX_ORDER])[coordinate] = ball.value;
+            }
+        }
+        let identity = |matrix: &mut [[f64; MAX_ORDER]; MAX_ORDER]| {
+            for i in 0..order {
+                matrix[i][i] = 1.0;
+            }
+        };
+        let mut signed = [[0.0_f64; MAX_ORDER]; MAX_ORDER];
+        let mut absolute = [[0.0_f64; MAX_ORDER]; MAX_ORDER];
+        identity(&mut signed);
+        identity(&mut absolute);
+        let max_norm = |matrix: &[[f64; MAX_ORDER]; MAX_ORDER]| -> f64 {
+            let mut norm = 0.0_f64;
+            for row in matrix.iter().take(order) {
+                for entry in row.iter().take(order) {
+                    norm = norm.max(entry.abs());
+                }
+            }
+            norm
+        };
+        let mut steps = 0usize;
+        for t in order..(nodes.len() - 1) {
+            let Some(gain) = gains.get(&t) else {
+                continue;
+            };
+            let transition = ball_transition(Ball::exact(nodes[t + 1].x - nodes[t].x), order);
+            // `(A F)[i][j] = F[i][j] − K_i·F[0][j]`.
+            let mut closed = [[0.0_f64; MAX_ORDER]; MAX_ORDER];
+            for i in 0..order {
+                for j in 0..order {
+                    closed[i][j] =
+                        transition[i][j].value - gain[i] * transition[0][j].value;
+                }
+            }
+            let mut next_signed = [[0.0_f64; MAX_ORDER]; MAX_ORDER];
+            let mut next_absolute = [[0.0_f64; MAX_ORDER]; MAX_ORDER];
+            for i in 0..order {
+                for j in 0..order {
+                    let mut signed_entry = 0.0_f64;
+                    let mut absolute_entry = 0.0_f64;
+                    for k in 0..order {
+                        signed_entry += closed[i][k] * signed[k][j];
+                        absolute_entry += closed[i][k].abs() * absolute[k][j];
+                    }
+                    next_signed[i][j] = signed_entry;
+                    next_absolute[i][j] = absolute_entry;
+                }
+            }
+            signed = next_signed;
+            absolute = next_absolute;
+            steps += 1;
+            if steps % 20 == 0 {
+                eprintln!(
+                    "after {steps} closed-loop steps: |prod Psi| = {:.6e}, \
+                     |prod |Psi|| = {:.6e}",
+                    max_norm(&signed),
+                    max_norm(&absolute)
+                );
+            }
+        }
+        let contracted = max_norm(&signed);
+        let inflated = max_norm(&absolute);
+        eprintln!(
+            "closed loop over {steps} steps: signed {contracted:.6e}, absolute {inflated:.6e}, \
+             per-step absolute factor {:.4}",
+            inflated.powf(1.0 / steps as f64)
+        );
+        assert!(
+            contracted < 1.0,
+            "the closed-loop product does not contract ({contracted:e} over {steps} steps); \
+             the filter's own stability is the premise of every width argument here"
+        );
+        assert!(
+            inflated > 1.0e10,
+            "the absolute closed-loop product no longer explodes ({inflated:e} over {steps} \
+             steps). If that is a repair, the recursion-level enclosures can be tightened \
+             directly and this test is where the new factor is recorded"
+        );
     }
 
     /// The per-node WIDTH of the recursion that still widens, measured.
