@@ -5873,39 +5873,77 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 // not an infeasible trial: silently replaying the scalar family
                 // path could change the row measure and let structurally invalid
                 // Hessian/gradient evidence participate in the trust ratio.
-                let fused_first_attempt = fused_first_attempt_log_likelihood(
+                // ── one rejection path for both evaluators (gam#2600) ──────────
+                //
+                // A likelihood evaluation that fails AT A TRIAL POINT is
+                // information about that point, not about the problem: the
+                // family refuses because the proposed β is outside its domain
+                // (`MonotonicityViolated` when `h' <= 0` on the transformation
+                // arm), which is precisely what the trust region exists to back
+                // off from. Attempts 1.. already treat it that way — restore β,
+                // refresh η, shrink the radius, retry — while attempt 0 went
+                // through `?` and ABORTED THE WHOLE INNER SOLVE, because it is
+                // the only attempt that can take the fused workspace path
+                // (`trust_attempt == 0 && joint_workspace_requested`). Same
+                // condition, two verdicts, decided by which attempt index
+                // happened to hit it.
+                //
+                // Today that asymmetry is mostly latent: `TRANSFORMATION_
+                // MONOTONICITY_EPS` is added into `h'`, so `h' >= 1e-8` always
+                // and the domain refusal cannot fire. It stops being latent the
+                // moment that epsilon is removed — which is the actual gam#2600
+                // fix, since capping the monotonicity barrier at `log(1e-8)` is
+                // what makes collapsing the transformation affordable at
+                // `lambda ~ 1370` (measured: `Δobj = +9.987e5` at `ρ = 1.000`).
+                // With an uncapped barrier the solver MUST be able to propose a
+                // point at or past the cone vertex and be told no. Aborting
+                // there would turn a degenerate-but-finite optimum into a hard
+                // error on the first attempt of a cycle, so this is a
+                // prerequisite for that change rather than a tidy-up.
+                //
+                // Route both evaluators into one `Result` so there is a single
+                // rejection block. Byte-identical while no evaluator errs.
+                let trial_ll_or_refusal = match fused_first_attempt_log_likelihood(
                     family,
                     options,
                     specs,
                     &states,
                     trust_attempt,
                     joint_workspace_requested,
-                )?;
-                let trial_ll = if let Some((value, workspace)) = fused_first_attempt {
-                    accepted_joint_workspace = Some(workspace);
-                    value
-                } else {
-                    match joint_line_search_log_likelihood(family, &line_search_options, &states) {
-                        Ok((value, workspace)) => {
-                            accepted_joint_workspace = workspace;
-                            value
-                        }
-                        Err(e) => {
-                            likelihood_rejects += 1;
-                            if first_likelihood_reject.is_none() {
-                                first_likelihood_reject = Some(e);
+                ) {
+                    Ok(Some((value, workspace))) => {
+                        accepted_joint_workspace = Some(workspace);
+                        Ok(value)
+                    }
+                    Ok(None) => {
+                        match joint_line_search_log_likelihood(family, &line_search_options, &states)
+                        {
+                            Ok((value, workspace)) => {
+                                accepted_joint_workspace = workspace;
+                                Ok(value)
                             }
-                            for (b, old) in old_beta.iter().enumerate() {
-                                states[b].beta.assign(old);
-                            }
-                            refresh_all_block_etas(family, specs, &mut states)?;
-                            joint_trust_radius = shrink_active_joint_block_trust_radii(
-                                &mut joint_block_trust_radii,
-                                &block_step_norms,
-                                0.25,
-                            );
-                            continue;
+                            Err(e) => Err(e),
                         }
+                    }
+                    Err(e) => Err(e),
+                };
+                let trial_ll = match trial_ll_or_refusal {
+                    Ok(value) => value,
+                    Err(e) => {
+                        likelihood_rejects += 1;
+                        if first_likelihood_reject.is_none() {
+                            first_likelihood_reject = Some(e);
+                        }
+                        for (b, old) in old_beta.iter().enumerate() {
+                            states[b].beta.assign(old);
+                        }
+                        refresh_all_block_etas(family, specs, &mut states)?;
+                        joint_trust_radius = shrink_active_joint_block_trust_radii(
+                            &mut joint_block_trust_radii,
+                            &block_step_norms,
+                            0.25,
+                        );
+                        continue;
                     }
                 };
                 let trialobjective = -trial_ll + trial_penalty;
