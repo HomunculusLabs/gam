@@ -1684,6 +1684,21 @@ impl SaeManifoldTerm {
                     && stall_polish_escalations < STALL_POLISH_ANTI_RUNAWAY_CAP
                 {
                     terminal_newton_polish_armed = false;
+                    // The cap counts ENTRIES, not successes. Incrementing inside
+                    // the `true` arm left every polish that bails WITHOUT
+                    // committing a step invisible to it — the first step's
+                    // backtracks all rejected, or the no-contraction bail — while
+                    // that invocation still paid one assemble + one deflated
+                    // factorization + one full exact-pencil GMRES + up to eight
+                    // backtracks, each of which re-assembles AND re-factors the
+                    // whole arrow-Schur system. Re-entry is gated by
+                    // `terminal_newton_polish_armed` alone, and any materially
+                    // descending round re-arms it (#2132), so the uncounted lane
+                    // was re-enterable once per plateau for the whole refine
+                    // budget: precisely the unbounded-COST shape this counter
+                    // exists to close. Counting at entry prices the invocation,
+                    // not its verdict.
+                    stall_polish_escalations += 1;
                     if self.terminal_exact_newton_polish(
                         target,
                         rho_fixed,
@@ -1704,7 +1719,6 @@ impl SaeManifoldTerm {
                         64,
                         &mut best_seen,
                     )? {
-                        stall_polish_escalations += 1;
                         *criterion_fixed_point = false;
                         consecutive_objective_stalls = 0;
                         saw_refine_progress = true;
