@@ -613,7 +613,22 @@ fn sanctioned_fd_allowlist_membership_is_correct() {
     // The FD-audit oracle and its certificate-plumbing files ARE allowlisted: the
     // audit differences the objective only to CHECK the analytic gradient and is
     // never on the fit-math path (#1440 sanctioned diagnostic).
+    // `fd_audit.rs` NO LONGER EXISTS. a6dbd67a7 folded the Ridders probe into
+    // `run_plan.rs`, beside the seed evaluation it audits, and the certificate
+    // into a thread-local store in `outer_eval_capture.rs`. The allowlist above
+    // was updated -- it names both successors and says so in its own comment --
+    // but this membership assertion was not, so it has been asserting that a
+    // deleted path is allowlisted, which it is not. That made this test RED.
+    //
+    // Name the two files the oracle was folded INTO, and pin the retired path as
+    // NOT allowlisted so it cannot creep back in unreviewed.
     assert!(fd_ok_markers_allowed(Path::new(
+        "crates/gam-solve/src/rho_optimizer/run_plan.rs"
+    )));
+    assert!(fd_ok_markers_allowed(Path::new(
+        "crates/gam-solve/src/estimate/outer_eval_capture.rs"
+    )));
+    assert!(!fd_ok_markers_allowed(Path::new(
         "crates/gam-solve/src/rho_optimizer/fd_audit.rs"
     )));
     assert!(fd_ok_markers_allowed(Path::new(
