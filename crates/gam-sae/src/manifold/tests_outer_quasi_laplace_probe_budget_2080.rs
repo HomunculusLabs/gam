@@ -1770,3 +1770,442 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
         (value_lane - analytic).abs()
     );
 }
+
+/// PROBE (#2080 Class-B localizer). The K=2 wide-`p` acceptance fixture
+/// (`wide_p_outer_reml_terminates_within_probe_budget_2080`) times out, and its
+/// outer search never starts: every candidate seed is rejected because the
+/// domain-entry criterion refuses with `inner solve did not converge at fixed ρ`.
+/// So the timeout is decided ENTIRELY inside one criterion evaluation, on the
+/// fixture's own seed ρ, before any outer step exists.
+///
+/// This probe reads that one evaluation instead of inferring it. Two halves:
+///
+///  1. A BUDGET SWEEP of the raw inner solve. Per budget it reports the KKT
+///     residual `‖g‖`, its gauge quotient `‖Π⊥g‖`, the admission tolerance the
+///     criterion actually compares them against, the penalised objective, the
+///     per-iteration contraction `(‖g‖ₖ₊₁/‖g‖ₖ)^(1/Δbudget)`, and wall clock.
+///     The contraction column is the discriminator the issue asks for: a value
+///     bounded away from 1 with `‖g‖` still descending is a solve that needs
+///     more iterations (a rate problem); a value AT 1 with the objective still
+///     falling is a solve that is moving somewhere the residual does not see.
+///
+///  2. ONE full criterion evaluation with the solver's own per-iterate trace
+///     forwarded to stderr, so the accepted step length, the LM ridge ladder and
+///     the rejection route are READ rather than guessed.
+///
+/// Diagnostic only: it asserts that the readings exist, never a rate. The
+/// numbers are the deliverable.
+#[test]
+fn zz_measure_k2_wide_p_inner_trajectory_2080() {
+    let n = 96usize;
+    let p = 96usize;
+    let k = 2usize;
+    let harmonics = 2usize;
+    let z = two_circle_wide_target(n, p, 0.03);
+    let (base, seed_dispersion) = two_circle_periodic_term(z.view(), k, harmonics);
+    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+    let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .expect("seed dispersion is finite and strictly positive");
+    // The acceptance fixture's own inner settings, so this reads the evaluation
+    // that fixture performs and not a nearby one.
+    let (inner_max_iter, learning_rate, ridge) = (8usize, 0.04_f64, 1.0e-6_f64);
+
+    eprintln!(
+        "[2080-K2] n={} p_out={} k={} beta_dim={} coord_dim={} inner_max_iter={inner_max_iter} \
+         lr={learning_rate} ridge={ridge:.1e}",
+        base.n_obs(),
+        base.output_dim(),
+        base.k_atoms(),
+        base.beta_dim(),
+        base.n_obs() * base.assignment.row_block_dim(),
+    );
+    eprintln!(
+        "[2080-K2] budget | ‖g‖ | ‖Π⊥gauge g‖ | tol | pen_obj | contraction/iter | wall_s"
+    );
+
+    let budgets = [8usize, 16, 32, 64, 128, 256, 512];
+    let mut previous: Option<(usize, f64)> = None;
+    let mut readings = 0usize;
+    for &budget in &budgets {
+        let mut term = base.clone();
+        let mut rho_fixed = rho.clone();
+        let started = std::time::Instant::now();
+        let outcome = term.run_joint_fit_arrow_schur_for_quasi_laplace(
+            z.view(),
+            &mut rho_fixed,
+            None,
+            budget,
+            learning_rate,
+            ridge,
+            ridge,
+        );
+        let wall = started.elapsed().as_secs_f64();
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                eprintln!(
+                    "[2080-K2] {budget:>6} | inner solve HARD-ERRORED after {wall:.2}s: {err}"
+                );
+                continue;
+            }
+        };
+        let Ok(sys) = term.assemble_arrow_schur(z.view(), &rho_fixed, None) else {
+            eprintln!("[2080-K2] {budget:>6} | reassembly failed after {wall:.2}s");
+            continue;
+        };
+        let grad_norm_sq = SaeManifoldTerm::system_grad_norm_sq(&sys);
+        let grad_norm = grad_norm_sq.sqrt();
+        let quotient = term.quotient_gradient_norm_from_system(
+            &sys,
+            grad_norm_sq,
+            &rho_fixed
+                .lambda_smooth_vec()
+                .expect("the fixture rho carries one smoothing block per atom"),
+        );
+        let tolerance = SAE_MANIFOLD_INNER_GRAD_REL_TOL * term.inner_iterate_scale();
+        let objective = term
+            .penalized_objective_total(z.view(), &rho_fixed, None, 1.0)
+            .unwrap_or(f64::NAN);
+        let contraction = match previous {
+            Some((prev_budget, prev_grad)) if prev_grad > 0.0 && grad_norm > 0.0 => {
+                (grad_norm / prev_grad).powf(1.0 / ((budget - prev_budget) as f64))
+            }
+            _ => f64::NAN,
+        };
+        eprintln!(
+            "[2080-K2] {budget:>6} | {grad_norm:.6e} | {quotient:.6e} | {tolerance:.6e} | \
+             {objective:.9e} | {contraction:.6} | {wall:.2} (fixed_point={}, gap={:?})",
+            outcome.fixed_point, outcome.gap,
+        );
+        previous = Some((budget, grad_norm));
+        readings += 1;
+    }
+
+    // Half 2: the traced criterion evaluation.
+    struct ForwardingTestLogger;
+    impl log::Log for ForwardingTestLogger {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Debug
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            eprintln!("[{}] {}", record.level(), record.args());
+        }
+        fn flush(&self) {}
+    }
+    static FORWARDING_TEST_LOGGER: ForwardingTestLogger = ForwardingTestLogger;
+    if log::set_logger(&FORWARDING_TEST_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Debug);
+    }
+
+    let mut term = base.clone();
+    let started = std::time::Instant::now();
+    let evaluated = term.penalized_quasi_laplace_criterion_with_cache_refine_policy(
+        z.view(),
+        &rho,
+        None,
+        inner_max_iter,
+        learning_rate,
+        ridge,
+        ridge,
+        true,
+    );
+    let wall = started.elapsed().as_secs_f64();
+    match evaluated {
+        Ok(value) => eprintln!("[2080-K2] criterion CONVERGED cost={:.9e} in {wall:.2}s", value.0),
+        Err(err) => eprintln!("[2080-K2] criterion REFUSED in {wall:.2}s: {err}"),
+    }
+
+    assert!(
+        readings > 0,
+        "[2080-K2] the budget sweep produced no reading at all; the probe measured nothing"
+    );
+}
+
+/// PROBE (#2080 Class-B discriminator). Is the residual the inner gate measures
+/// the gradient of the objective the inner line search descends?
+///
+/// [`zz_measure_k2_wide_p_inner_trajectory_2080`] shows a trajectory where the
+/// two disagree in SIGN: over the tail of the K=2 wide-`p` solve the penalised
+/// objective falls monotonically while `‖g‖` rises monotonically, iterate after
+/// iterate. Only two readings of that are possible.
+///
+///   * The gate's `g` IS `∇(penalized_objective_total)`, and the solve is simply
+///     unable to move the stiff directions that carry it. Then a steepest-descent
+///     FINITE DIFFERENCE along `−g` must realise a decrease of `h·‖g‖²` to
+///     leading order, because that is what a gradient means.
+///   * The gate's `g` is NOT that gradient — a different objective, a different
+///     chart, or a term present on one side only. Then the finite difference
+///     along `−g` will not match `h·‖g‖²`, and no amount of iteration or budget
+///     can make the gate clear, because the solve is minimising one function and
+///     the gate is certifying the stationarity of another.
+///
+/// The measurement is direct: assemble the system at the iterate the solve
+/// actually reaches, read `g` off it (`row.gt` per row plus `sys.gb`, the exact
+/// blocks [`sae_manifold_newton_directional_decrease`] contracts), step along
+/// `−g` with [`SaeManifoldTerm::apply_newton_step`] at several `h`, and compare
+/// the realised decrease against the predicted `h·‖g‖²`. The ratio is reported
+/// per `h`; a consistent ratio near 1 as `h → 0` says gradient, anything else
+/// says desync. Diagnostic only — it asserts that the readings are finite.
+#[test]
+fn zz_measure_k2_wide_p_gradient_is_the_objectives_2080() {
+    let z = two_circle_wide_target(96, 96, 0.03);
+    let (base, seed_dispersion) = two_circle_periodic_term(z.view(), 2, 2);
+    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+    let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 2])
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .expect("seed dispersion is finite and strictly positive");
+
+    // Read the question at BOTH ends of the trajectory: the cold seed, where the
+    // solve is descending happily, and the tail plateau, where `‖g‖` and the
+    // objective move in opposite directions. A desync that is present at both is
+    // structural; one that appears only at the plateau is state-dependent.
+    for &warmup in &[0usize, 128] {
+        let mut term = base.clone();
+        let mut rho_fixed = rho.clone();
+        if warmup > 0 {
+            term.run_joint_fit_arrow_schur_for_quasi_laplace(
+                z.view(),
+                &mut rho_fixed,
+                None,
+                warmup,
+                0.04,
+                1.0e-6,
+                1.0e-6,
+            )
+            .expect("inner evidence fit must not hard-error on the K=2 wide-p rung");
+        }
+        let sys = term
+            .assemble_arrow_schur(z.view(), &rho_fixed, None)
+            .expect("reassemble at the warmed iterate");
+
+        // `d = −g`, in the variable-stride `(row_offsets, row_dims)` layout the
+        // solver's own step vectors use.
+        let total_t = sys.row_offsets[sys.rows.len()];
+        let mut dir_t = Array1::<f64>::zeros(total_t);
+        for (row_idx, row) in sys.rows.iter().enumerate() {
+            let row_base = sys.row_offsets[row_idx];
+            for axis in 0..sys.row_dims[row_idx] {
+                dir_t[row_base + axis] = -row.gt[axis];
+            }
+        }
+        let mut dir_b = Array1::<f64>::zeros(sys.k);
+        for idx in 0..sys.k {
+            dir_b[idx] = -sys.gb[idx];
+        }
+        let grad_norm_sq = SaeManifoldTerm::system_grad_norm_sq(&sys);
+        // Cross-check the direction against the solver's own contraction, so a
+        // layout mistake here cannot be read as a desync: for `d = −g` the
+        // directional decrease `−gᵀd` must be exactly `‖g‖²`.
+        let contracted =
+            sae_manifold_newton_directional_decrease(&sys, dir_t.view(), dir_b.view());
+        let base_objective = term
+            .penalized_objective_total(z.view(), &rho_fixed, None, 1.0)
+            .expect("objective at the warmed iterate");
+        eprintln!(
+            "[2080-FD] warmup={warmup} ‖g‖²={grad_norm_sq:.9e} (−gᵀd via solver contraction \
+             ={contracted:.9e}, rel_gap={:.3e}) obj={base_objective:.12e}",
+            (contracted - grad_norm_sq).abs() / grad_norm_sq.max(f64::MIN_POSITIVE)
+        );
+
+        let snapshot = term.snapshot_mutable_state();
+        let mut finite_readings = 0usize;
+        for &h in &[1.0e-4_f64, 1.0e-5, 1.0e-6, 1.0e-7, 1.0e-8] {
+            term.restore_mutable_state(&snapshot)
+                .expect("restore before each finite-difference trial");
+            let stepped = term
+                .apply_newton_step(dir_t.view(), dir_b.view(), h)
+                .and_then(|()| term.penalized_objective_total(z.view(), &rho_fixed, None, 1.0));
+            match stepped {
+                Ok(objective) => {
+                    let realised = base_objective - objective;
+                    let predicted = h * grad_norm_sq;
+                    eprintln!(
+                        "[2080-FD] warmup={warmup} h={h:.1e} | predicted_decrease={predicted:.9e} \
+                         | realised_decrease={realised:.9e} | ratio={:.6}",
+                        realised / predicted
+                    );
+                    if realised.is_finite() {
+                        finite_readings += 1;
+                    }
+                }
+                Err(err) => eprintln!("[2080-FD] warmup={warmup} h={h:.1e} | step failed: {err}"),
+            }
+        }
+        term.restore_mutable_state(&snapshot)
+            .expect("restore after the finite-difference sweep");
+        assert!(
+            finite_readings > 0,
+            "[2080-FD] warmup={warmup}: no finite finite-difference reading; the probe \
+             measured nothing"
+        );
+    }
+}
+
+/// PROBE (#2080 Class-B, PRE-REGISTERED A/B). Would a gradient-related direction
+/// clear the gate that the arrow-Schur direction cannot?
+///
+/// [`zz_measure_k2_wide_p_gradient_is_the_objectives_2080`] establishes that the
+/// gate's `g` IS `∇(penalized_objective_total)` — a steepest-descent finite
+/// difference realises `h·‖g‖²` to five digits at the plateau — so descent along
+/// `−g` is genuinely available there. [`zz_measure_k2_wide_p_inner_trajectory_2080`]
+/// establishes that the solver's own direction `Δ` is nearly ORTHOGONAL to `g`
+/// (`gᵀΔ/(‖g‖‖Δ‖) ≈ 2e-3`), which is precisely the condition under which Armijo
+/// backtracking stops guaranteeing `‖g‖ → 0`.
+///
+/// This probe runs the two arms from ONE shared state so the comparison is not
+/// across fixtures: arm A continues the production inner solve, arm B takes
+/// plain Armijo steepest-descent steps. Same iterate, same iteration count, same
+/// objective, same sufficient-decrease constant.
+///
+/// **Registered in advance:** if arm B drives `‖g‖` materially down while arm A
+/// holds it flat, the defect is the DIRECTION and a gradient-related fallback is
+/// the fix. If arm B's `‖g‖` also stalls, the diagnosis is incomplete and no
+/// angle condition should be built on it. Diagnostic only; it asserts that both
+/// arms produced readings.
+#[test]
+fn zz_measure_k2_wide_p_gradient_arm_vs_solver_arm_2080() {
+    let z = two_circle_wide_target(96, 96, 0.03);
+    let (base, seed_dispersion) = two_circle_periodic_term(z.view(), 2, 2);
+    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+    let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 2])
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .expect("seed dispersion is finite and strictly positive");
+
+    // The shared starting state: the plateau the production solve reaches and
+    // then cannot leave.
+    let warmup = 128usize;
+    let mut shared = base.clone();
+    let mut rho_fixed = rho.clone();
+    shared
+        .run_joint_fit_arrow_schur_for_quasi_laplace(
+            z.view(),
+            &mut rho_fixed,
+            None,
+            warmup,
+            0.04,
+            1.0e-6,
+            1.0e-6,
+        )
+        .expect("inner evidence fit must not hard-error on the K=2 wide-p rung");
+    let entry = shared.snapshot_mutable_state();
+
+    let report = |tag: &str, term: &mut SaeManifoldTerm, iter: usize| -> Option<(f64, f64, f64)> {
+        let sys = term.assemble_arrow_schur(z.view(), &rho_fixed, None).ok()?;
+        let grad_norm_sq = SaeManifoldTerm::system_grad_norm_sq(&sys);
+        let quotient = term.quotient_gradient_norm_from_system(
+            &sys,
+            grad_norm_sq,
+            &rho_fixed.lambda_smooth_vec().ok()?,
+        );
+        let objective = term
+            .penalized_objective_total(z.view(), &rho_fixed, None, 1.0)
+            .ok()?;
+        let tolerance = SAE_MANIFOLD_INNER_GRAD_REL_TOL * term.inner_iterate_scale();
+        eprintln!(
+            "[2080-AB] {tag} iter={iter:>4} ‖g‖={:.6e} ‖Π⊥g‖={quotient:.6e} tol={tolerance:.6e} \
+             obj={objective:.12e}",
+            grad_norm_sq.sqrt()
+        );
+        Some((grad_norm_sq.sqrt(), quotient, objective))
+    };
+
+    // ── Arm A: the production inner solve, continued from the shared state.
+    let mut arm_a = shared.clone();
+    let mut a_readings = 0usize;
+    report("A/solver ", &mut arm_a, 0);
+    for round in 1..=8usize {
+        let mut rho_a = rho_fixed.clone();
+        if arm_a
+            .run_joint_fit_arrow_schur_for_quasi_laplace(
+                z.view(),
+                &mut rho_a,
+                None,
+                25,
+                0.04,
+                1.0e-6,
+                1.0e-6,
+            )
+            .is_err()
+        {
+            eprintln!("[2080-AB] A/solver  round {round} hard-errored");
+            break;
+        }
+        if report("A/solver ", &mut arm_a, round * 25).is_some() {
+            a_readings += 1;
+        }
+    }
+
+    // ── Arm B: plain Armijo steepest descent from the same shared state.
+    let mut arm_b = shared;
+    arm_b
+        .restore_mutable_state(&entry)
+        .expect("arm B starts from the shared entry state");
+    report("B/gradient", &mut arm_b, 0);
+    let mut b_readings = 0usize;
+    let mut trial_step = 1.0_f64;
+    for iter in 1..=200usize {
+        let Ok(sys) = arm_b.assemble_arrow_schur(z.view(), &rho_fixed, None) else {
+            break;
+        };
+        let total_t = sys.row_offsets[sys.rows.len()];
+        let mut dir_t = Array1::<f64>::zeros(total_t);
+        for (row_idx, row) in sys.rows.iter().enumerate() {
+            let row_base = sys.row_offsets[row_idx];
+            for axis in 0..sys.row_dims[row_idx] {
+                dir_t[row_base + axis] = -row.gt[axis];
+            }
+        }
+        let mut dir_b = Array1::<f64>::zeros(sys.k);
+        for idx in 0..sys.k {
+            dir_b[idx] = -sys.gb[idx];
+        }
+        let grad_norm_sq = SaeManifoldTerm::system_grad_norm_sq(&sys);
+        // Normalise, so the trial length is a distance and not a gradient scale.
+        let grad_norm = grad_norm_sq.sqrt();
+        if !(grad_norm.is_finite() && grad_norm > 0.0) {
+            break;
+        }
+        dir_t.mapv_inplace(|v| v / grad_norm);
+        dir_b.mapv_inplace(|v| v / grad_norm);
+        // Directional decrease along the UNIT gradient direction is exactly ‖g‖.
+        let Ok(pre) = arm_b.penalized_objective_total(z.view(), &rho_fixed, None, 1.0) else {
+            break;
+        };
+        let snapshot = arm_b.snapshot_mutable_state();
+        let mut accepted = false;
+        let mut alpha = trial_step;
+        for _ in 0..=SAE_MANIFOLD_MAX_LINESEARCH_HALVINGS {
+            if arm_b.restore_mutable_state(&snapshot).is_err() {
+                break;
+            }
+            let post = arm_b
+                .apply_newton_step(dir_t.view(), dir_b.view(), alpha)
+                .and_then(|()| arm_b.penalized_objective_total(z.view(), &rho_fixed, None, 1.0));
+            if let Ok(post) = post
+                && post.is_finite()
+                && post <= pre - SAE_MANIFOLD_ARMIJO_C1 * alpha * grad_norm
+            {
+                accepted = true;
+                break;
+            }
+            alpha *= 0.5;
+        }
+        if !accepted {
+            let _ok = arm_b.restore_mutable_state(&snapshot).is_ok();
+            eprintln!("[2080-AB] B/gradient line search found no acceptable step at iter={iter}");
+            break;
+        }
+        // Ratchet the trial length the same way the production loop does.
+        trial_step = (alpha * 2.0).min(1.0e2);
+        if iter % 25 == 0 && report("B/gradient", &mut arm_b, iter).is_some() {
+            b_readings += 1;
+        }
+    }
+
+    assert!(
+        a_readings > 0 && b_readings > 0,
+        "[2080-AB] the A/B needs a reading from BOTH arms to be a comparison; \
+         got A={a_readings}, B={b_readings}"
+    );
+}
