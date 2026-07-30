@@ -95,7 +95,29 @@ jobs:
           RUSTFLAGS: "-D warnings"
           CARGO_INCREMENTAL: "0"
         run: |
-          cargo check --workspace --exclude gam-pyffi --all-targets
+          # `--locked` on the NATIVE arm, and this is the arm that catches
+          # lockfile drift, not a style preference.
+          #
+          # A plain `cargo check` RESOLVES and silently rewrites Cargo.lock when a
+          # manifest gains a dependency edge, so it passes. `--locked` refuses
+          # instead. Until now `--locked` appeared ONLY in `publish.yml` and
+          # `pypi-wheels.yml` -- the release paths -- so a drifted lockfile cleared
+          # every gate on every push and first failed at PUBLISH time, on a
+          # different day, to a different person, with no obvious link back to the
+          # commit that caused it.
+          #
+          # Measured: `1fa453556` added `gam-test-support` to
+          # `crates/gam-cli/Cargo.toml` without a lock entry. Its author ran
+          # `cargo check -p gam-linalg -p gam-cli -p gam-test-support
+          # --all-targets` and got a clean exit -- necessary but not sufficient,
+          # exactly because a bare check repairs the lock on the way past. It took
+          # a follow-up commit (`dad51929c`) to notice.
+          #
+          # Only the native arm carries it: the two arms share one checkout, so a
+          # single `--locked` proves the lock is complete, and putting it on both
+          # would fail the cross-compile arm for a reason that has nothing to do
+          # with the target it exists to check.
+          cargo check --locked --workspace --exclude gam-pyffi --all-targets
 
   windows-gnu-check:
     name: Non-Linux cross (x86_64-pc-windows-gnu)
