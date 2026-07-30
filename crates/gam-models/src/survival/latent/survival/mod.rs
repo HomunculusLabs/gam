@@ -4646,7 +4646,36 @@ fn logk_q_derivatives(
     let r1 = log_kernel_ratio(&bundle, k + 1, k);
     let r2 = log_kernel_ratio(&bundle, k + 2, k);
     let d1 = -mass * r1;
-    let d2 = d1 + mass * mass * (r2 - r1 * r1);
+    // #2610 -- \ is a CANCELLING difference. Past     // the two terms agree to \ of their own size, so the
+    // subtraction keeps only the bits they do not share and the result changes
+    // SIGN between adjacent 0.05 steps of \. No working precision
+    // repairs it: 513 -> 1025 quadrature nodes bought 335x at \ and
+    // nothing at \, because the cancelled quantity keeps shrinking
+    // while the roundoff floor does not (#2566).
+    //
+    // \ forms the same quantity without the subtraction:
+    // it factors the common ratio out into an \ and takes the second
+    // difference of the ANALYTIC prefix in closed form -- exactly \ for
+    // every \ and \ -- so only the slowly-varying Laplace half is
+    // differenced numerically. It was written for this defect and had NO
+    // production caller; this is that caller.
+    //
+    // It refuses rather than degrade when a rung is missing or an input is
+    // non-finite, and the difference form is then the only route left. Taking
+    // that route silently is what let this defect hide, so the fallback says so.
+    let second_cumulant = match bundle.second_cumulant_ratio(k, sigma) {
+        Some(value) => value,
+        None => {
+            log::warn!(
+                "[#2610] cancellation-free second cumulant unavailable at k={k} \
+                 (sigma={sigma:.6e}, mass={mass:.6e}); falling back to the \
+                 differencing form, whose relative error grows without bound past \
+                 log sigma ~ 5.4"
+            );
+            r2 - r1 * r1
+        }
+    };
+    let d2 = d1 + mass * mass * second_cumulant;
     Ok((d1, d2, bundle.mode))
 }
 
