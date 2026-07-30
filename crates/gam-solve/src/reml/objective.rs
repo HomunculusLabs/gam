@@ -231,11 +231,18 @@ impl<'a> RemlState<'a> {
             }
         };
         let pirls_ms = t_pirls.elapsed().as_secs_f64() * 1000.0;
+        // #2465 instance 4: the backend label never travels alone. #2449
+        // tabulated `backend DenseSpectral` from THIS line on both sides of a
+        // 12x per-trial cost change and could conclude only "it is not a
+        // backend switch" -- the label is two-valued, so it cannot say which of
+        // the six routes to it was taken, nor whether a density was measured at
+        // all.
         log::debug!(
-            "[REML] eval#{} pirls done | elapsed {:.1}ms | backend {:?}",
+            "[REML] eval#{} pirls done | elapsed {:.1}ms | backend {:?} | {}",
             cost_call_idx,
             pirls_ms,
-            bundle.backend_kind()
+            bundle.backend_kind(),
+            bundle.geometry.basis()
         );
         if bundle.backend_kind() == GeometryBackendKind::SparseExactSpd {
             let t_assemble = std::time::Instant::now();
@@ -2592,9 +2599,10 @@ impl<'a> RemlState<'a> {
         };
         let pirls_ms = t_pirls.elapsed().as_secs_f64() * 1000.0;
         log::debug!(
-            "[REML] grad-only pirls done | elapsed {:.1}ms | backend {:?}",
+            "[REML] grad-only pirls done | elapsed {:.1}ms | backend {:?} | {}",
             pirls_ms,
-            bundle.backend_kind()
+            bundle.backend_kind(),
+            bundle.geometry.basis()
         );
         let t_assemble = std::time::Instant::now();
         if bundle.backend_kind() == GeometryBackendKind::SparseExactSpd {
@@ -2775,10 +2783,11 @@ impl<'a> RemlState<'a> {
 
         let pirls_ms = t_pirls.elapsed().as_secs_f64() * 1000.0;
         log::debug!(
-            "[REML] outer-eval pirls done | elapsed {:.1}ms | backend {:?} | mode {:?}",
+            "[REML] outer-eval pirls done | elapsed {:.1}ms | backend {:?} | mode {:?} | {}",
             pirls_ms,
             bundle.backend_kind(),
-            eval_mode
+            eval_mode,
+            bundle.geometry.basis()
         );
 
         let t_assemble = std::time::Instant::now();

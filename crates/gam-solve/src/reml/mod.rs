@@ -5020,7 +5020,16 @@ pub(crate) struct EvalShared {
     pub(crate) key: Option<Vec<u64>>,
     pub(crate) pirls_result: Arc<PirlsResult>,
     pub(crate) ridge_passport: RidgePassport,
-    pub(crate) geometry: RemlGeometry,
+    /// The routing verdict this bundle was built under, carried WITH the
+    /// quantities it was decided from (#2465 instance 4). The bundle used to
+    /// hold the bare `RemlGeometry` label, so every consumer that reported
+    /// `backend {:?}` reported a two-valued enum and nothing that could
+    /// falsify it: `select_reml_geometry` measures a penalized-Hessian
+    /// density against `SPARSE_HESSIAN_MAX_DENSITY` on one of its six routes
+    /// and never measures it on the other five, and the label is identical
+    /// across all six. Storing the decision rather than its outcome makes a
+    /// bundle unrepresentable without the basis for its own label.
+    pub(crate) geometry: SparseRemlDecision,
     /// The exact H_total matrix used for LAML cost computation.
     /// For Firth: effective Hessian minus hphi (plus any barrier curvature).
     /// For non-Firth: the effective Hessian itself (plus any barrier curvature).
@@ -5242,10 +5251,35 @@ impl EvalShared {
 
 impl PenalizedGeometry for EvalShared {
     fn backend_kind(&self) -> GeometryBackendKind {
-        match self.geometry {
+        match self.geometry.geometry {
             RemlGeometry::DenseSpectral => GeometryBackendKind::DenseSpectral,
             RemlGeometry::SparseExactSpd => GeometryBackendKind::SparseExactSpd,
         }
+    }
+}
+
+impl SparseRemlDecision {
+    /// One-line rendering of the quantities this routing verdict was decided
+    /// from, for emission beside the `backend=`/`geometry=` label itself
+    /// (#2465). `nnz_h_est`/`density_h_est` read `na` on the routes that
+    /// decide before any structure is measured — that absence is itself the
+    /// basis, and it is what tells `penalized_hessian_too_dense` (a density
+    /// genuinely measured above the threshold) apart from `design_not_sparse`
+    /// and its four siblings, which never measure one.
+    pub(crate) fn basis(&self) -> String {
+        format!(
+            "reason={} p={} nnz_x={} nnz_h_est={} density_h_est={} threshold={:.4}",
+            self.reason,
+            self.p,
+            self.nnz_x,
+            self.nnz_h_upper_est
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "na".to_string()),
+            self.density_h_upper_est
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "na".to_string()),
+            RemlState::SPARSE_HESSIAN_MAX_DENSITY,
+        )
     }
 }
 

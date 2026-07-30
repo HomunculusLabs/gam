@@ -198,4 +198,52 @@ mod tests {
         );
         assert!(decision.nnz_h_upper_est.is_some());
     }
+
+    /// #2465 instance 4: the routing verdict rides on the bundle, so every
+    /// emitter of the `backend=` label can print the quantities the label was
+    /// decided from — and a route that decided BEFORE measuring any structure
+    /// must say so rather than render a zero that reads like a measurement.
+    #[test]
+    fn a_routing_verdict_renders_the_quantities_it_was_decided_from_2465() {
+        let measured = SparseRemlDecision {
+            geometry: RemlGeometry::DenseSpectral,
+            reason: "penalized_hessian_too_dense",
+            p: 111,
+            nnz_x: 35_520,
+            nnz_h_upper_est: Some(4_096),
+            density_h_upper_est: Some(0.6654),
+        };
+        let rendered = measured.basis();
+        assert!(
+            rendered.contains("reason=penalized_hessian_too_dense"),
+            "the basis must name which of the six routes decided: {rendered}"
+        );
+        assert!(
+            rendered.contains("density_h_est=0.6654") && rendered.contains("nnz_h_est=4096"),
+            "a measured density must appear as the measurement it is: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                "threshold={:.4}",
+                RemlState::SPARSE_HESSIAN_MAX_DENSITY
+            )),
+            "the measurement is only falsifiable beside the threshold it was compared with: {rendered}"
+        );
+
+        let unmeasured = SparseRemlDecision {
+            reason: "design_not_sparse",
+            nnz_h_upper_est: None,
+            density_h_upper_est: None,
+            ..measured
+        };
+        let rendered = unmeasured.basis();
+        assert!(
+            rendered.contains("nnz_h_est=na") && rendered.contains("density_h_est=na"),
+            "a route that measured no structure must report the absence, not a value: {rendered}"
+        );
+        assert!(
+            !rendered.contains("density_h_est=0"),
+            "an unmeasured density must never render as a number: {rendered}"
+        );
+    }
 }

@@ -4745,39 +4745,52 @@ impl<'a> RemlState<'a> {
         // decides the cost. Report the decision itself, with the threshold it
         // was compared against, on BOTH branches.
         log::info!(
-            "[reml-geometry] {} reason={} p={} nnz_x={} nnz_h_est={} density_h_est={} threshold={:.4}",
+            "[reml-geometry] {} {}",
             match decision.geometry {
                 RemlGeometry::SparseExactSpd => "sparse_exact_spd",
                 RemlGeometry::DenseSpectral => "dense_spectral",
             },
-            decision.reason,
-            decision.p,
-            decision.nnz_x,
-            decision
-                .nnz_h_upper_est
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "na".to_string()),
-            decision
-                .density_h_upper_est
-                .map(|v| format!("{v:.4}"))
-                .unwrap_or_else(|| "na".to_string()),
-            Self::SPARSE_HESSIAN_MAX_DENSITY,
+            decision.basis(),
         );
         match decision.geometry {
             RemlGeometry::SparseExactSpd => {
-                match self.prepare_sparse_eval_bundlewithkey(rho, key.clone(), value_only_rows) {
+                match self.prepare_sparse_eval_bundlewithkey(
+                    rho,
+                    key.clone(),
+                    value_only_rows,
+                    decision.clone(),
+                ) {
                     Ok(bundle) => Ok(bundle),
                     Err(err) => {
                         log::warn!(
                             "[reml-geometry] sparse_exact_spd failed ({}); falling back to dense spectral",
                             err
                         );
-                        self.prepare_dense_eval_bundlewithkey(rho, key, value_only_rows)
+                        // The bundle records the geometry it was BUILT with,
+                        // and here that is not the routing verdict: the
+                        // structural quantities still say sparse was the right
+                        // route, so the label must carry the reason it was not
+                        // taken (#2465). A bundle stamped `sparse_exact_spd`
+                        // while holding a dense factorization, or stamped
+                        // `penalized_hessian_too_dense` when the density is
+                        // below the threshold, would both be labels that
+                        // contradict their own basis.
+                        let fallback = SparseRemlDecision {
+                            geometry: RemlGeometry::DenseSpectral,
+                            reason: "sparse_exact_spd_assembly_failed",
+                            ..decision
+                        };
+                        self.prepare_dense_eval_bundlewithkey(
+                            rho,
+                            key,
+                            value_only_rows,
+                            fallback,
+                        )
                     }
                 }
             }
             RemlGeometry::DenseSpectral => {
-                self.prepare_dense_eval_bundlewithkey(rho, key, value_only_rows)
+                self.prepare_dense_eval_bundlewithkey(rho, key, value_only_rows, decision)
             }
         }
     }
@@ -6876,6 +6889,7 @@ impl<'a> RemlState<'a> {
         rho: &Array1<f64>,
         key: Option<Vec<u64>>,
         value_only_rows: bool,
+        decision: SparseRemlDecision,
     ) -> Result<EvalShared, EstimationError> {
         let pirls_result = if value_only_rows {
             self.execute_pirls_for_value_only(rho)?
@@ -6964,7 +6978,7 @@ impl<'a> RemlState<'a> {
             key,
             pirls_result,
             ridge_passport,
-            geometry: RemlGeometry::DenseSpectral,
+            geometry: decision,
             h_total: Arc::new(h_total),
             sparse_exact: None,
             firth_dense_operator,
@@ -6981,6 +6995,7 @@ impl<'a> RemlState<'a> {
         rho: &Array1<f64>,
         key: Option<Vec<u64>>,
         value_only_rows: bool,
+        decision: SparseRemlDecision,
     ) -> Result<EvalShared, EstimationError> {
         let pirls_result = if value_only_rows {
             self.execute_pirls_for_value_only(rho)?
@@ -7107,7 +7122,7 @@ impl<'a> RemlState<'a> {
             key,
             pirls_result,
             ridge_passport,
-            geometry: RemlGeometry::SparseExactSpd,
+            geometry: decision,
             h_total: Arc::new(Array2::zeros((0, 0))),
             sparse_exact: Some(Arc::new({
                 let factor = Arc::new(sparse_system.factor);
@@ -7630,14 +7645,32 @@ impl<'a> RemlState<'a> {
                 // large scale — the main signal for "what's the slow path"
                 // when an outer BFGS / line-search step blows past the
                 // 2400 s job budget.
+                // #2465 instance 4: this line's `elapsed=` moved 11.4x at
+                // n=320k when the frozen-row bundle began reaching the
+                // Gaussian PLS dispatch (#2544, `156e17ac9`), and it read
+                // IDENTICALLY on both sides of that change -- same
+                // `iters=1 status=Converged` -- because the row source the
+                // cost swings on was not on it. Recovering it cost two
+                // thread-local censuses and a purpose-built counter. The
+                // source is a value already in hand here, so name it, and
+                // separate the two ways a solve can carry real rows: a
+                // derivative request needs them by contract, while a
+                // value-only request that has them found no frozen bundle to
+                // synthesize from.
+                let row_source = match (value_only_rows, cost_only_gaussian_rows.is_some()) {
+                    (_, true) => "frozen",
+                    (true, false) => "full(no-frozen-bundle)",
+                    (false, false) => "full(derivative-request)",
+                };
                 log::info!(
-                    "[STAGE] inner pirls solve iters={} status={:?} max_eta={:.1} jeffreys_logdet={} elapsed={:.3}s",
+                    "[STAGE] inner pirls solve iters={} status={:?} max_eta={:.1} jeffreys_logdet={} rows={} elapsed={:.3}s",
                     wm.iterations,
                     res.status,
                     res.max_abs_eta,
                     res.jeffreys_logdet()
                         .map(|v| format!("{v:.3e}"))
                         .unwrap_or_else(|| "none".to_string()),
+                    row_source,
                     pirls_elapsed.as_secs_f64(),
                 );
             }
