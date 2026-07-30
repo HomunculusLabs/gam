@@ -777,6 +777,26 @@ impl SaeManifoldTerm {
         // +inf, so nothing is silently accepted.
         let mut polish_escalations = 0usize;
         const POLISH_ESCALATION_ANTI_RUNAWAY_CAP: usize = 2;
+        // The STALL-branch polish window had no anti-runaway bound at all. It
+        // shares `terminal_newton_polish_armed` with the window above but not
+        // that window's counter, so it neither read nor wrote
+        // `polish_escalations` — and because material descent re-arms the flag
+        // (#2132, the `else` arm at the bottom of this loop), a fit that
+        // alternates descend / stall / descend / stall can enter it once per
+        // plateau without limit. Each entry costs a refine round at an inner
+        // budget of 64, and unlike the window above it does not extend
+        // `budget_escalation_extra`, so the failure mode is unbounded COST
+        // rather than a hang.
+        //
+        // It gets its OWN counter rather than sharing the cap-2 one. Reusing
+        // that constant would silently redefine the #2132 contract: the whole
+        // point of re-arming on material descent is that a NEW plateau earns a
+        // fresh polish, and a cap of 2 would retire the mechanism after the
+        // second plateau of the fit. This bound exists only to stop a
+        // pathological alternation, so it is set well above any legitimate
+        // plateau count, matching the certificate-escalation bound below.
+        let mut stall_polish_escalations = 0usize;
+        const STALL_POLISH_ANTI_RUNAWAY_CAP: usize = 8;
         const CERTIFICATE_ESCALATION_PROGRESS: f64 = 0.7;
         const CERTIFICATE_ESCALATION_ANTI_RUNAWAY_CAP: usize = 8;
         // #1051 — objective-stagnation convergence. On an ill-conditioned
@@ -1660,7 +1680,9 @@ impl SaeManifoldTerm {
                 // and the idempotence certificate (the state moved, so
                 // `criterion_fixed_point` is cleared and one evidence re-entry
                 // must recur exactly before acceptance, same as any hook move).
-                if terminal_newton_polish_armed {
+                if terminal_newton_polish_armed
+                    && stall_polish_escalations < STALL_POLISH_ANTI_RUNAWAY_CAP
+                {
                     terminal_newton_polish_armed = false;
                     if self.terminal_exact_newton_polish(
                         target,
@@ -1682,6 +1704,7 @@ impl SaeManifoldTerm {
                         64,
                         &mut best_seen,
                     )? {
+                        stall_polish_escalations += 1;
                         *criterion_fixed_point = false;
                         consecutive_objective_stalls = 0;
                         saw_refine_progress = true;
