@@ -265,15 +265,41 @@ fn load_json_record<T: for<'de> Deserialize<'de>>(key: &str) -> Option<T> {
 
 /// Anchor the warm-start cache under the platform temp directory.
 ///
-/// Reading `XDG_CACHE_HOME` / `HOME` / `LOCALAPPDATA` (the canonical
-/// `dirs::cache_dir()` fallbacks) requires `env::var_os`, which is banned
-/// in this crate (see the build-script tripwire scan and the
-/// `feedback_no_env_vars` policy memo). `std::env::temp_dir()` resolves
-/// platform-conventional locations through OS-level primitives without
-/// going through `env::var`, so we route the persistent warm-start
-/// checkpoint root there instead. The directory is durable across
-/// processes within a single boot, and `WarmStartStore::open` falls back
-/// to `None` if the path is unwritable.
+/// **This location satisfies the no-`env::var` rule textually and violates it
+/// semantically, which is worse than an explicit read.** Both halves of the
+/// original justification are wrong, and both were measured (gam#2639):
+///
+/// * *"`dirs::cache_dir()` requires `env::var_os`, which is banned"* — the ban
+///   is a **substring scan over first-party sources** (the build script says so
+///   itself, and early-returns entirely when gam is consumed as a published
+///   dependency because "there is no first-party tree to lint"). An
+///   `env::var_os` inside the `dirs` crate is invisible to it. `dirs::cache_dir()`
+///   is therefore *exactly as compliant as* `temp_dir()`. The real objection to
+///   `dirs` is that it is not a workspace dependency — a dependency-budget
+///   question, which should be argued as one.
+/// * *"`temp_dir()` resolves through OS-level primitives without going through
+///   `env::var`"* — true of the **call**, false of the **behaviour**.
+///   `temp_dir()` honours `TMPDIR`, and this repository relies on that: two
+///   round-trip tests were made green by setting it, measurement lanes isolate
+///   themselves with it, and the section below tells readers to delete the root
+///   for a cold arm.
+///
+/// So the environment-dependence is load-bearing — it silently relocates a
+/// machine-global cache with a ten-year TTL — and invisible to every tool we
+/// have. An `env::var("TMPDIR")` would at least be greppable.
+///
+/// The repair is **not** to swap one ambient helper for another, and **not** to
+/// widen the scanner to catch `temp_dir()` (that would put a textual proxy where
+/// a property check belongs, which is the defect of gam#2651 in a new place).
+/// It is to make the root **explicit configuration with a documented default**,
+/// so isolation becomes a supported operation instead of the folklore that
+/// `TMPDIR` happens to work.
+///
+/// Until then: the directory is durable across processes within a single boot,
+/// and `WarmStartStore::open` falls back to `None` if the path cannot be
+/// created — note that it is `create_dir_all` and nothing else, so it returns
+/// `Ok` on an existing root regardless of free space, and a full filesystem is
+/// discovered only at write time (gam#2639).
 ///
 /// # A FRESH WORKING DIRECTORY IS NOT A COLD CACHE
 ///
