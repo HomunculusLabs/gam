@@ -35,3 +35,4 @@ mod sae_streaming_arrow_schur_contract;
 mod sae_structure_ladder_bottom_rungs;
 mod sae_torus_chart_canonicalization;
 mod sae_unit_speed_chart_canonicalization;
+mod shared_seed_fixtures;

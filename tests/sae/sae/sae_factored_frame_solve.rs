@@ -158,72 +158,7 @@ fn planted_plane(truth: &SmallTruth, a: usize, p: usize) -> Array2<f64> {
 // ported VERBATIM from the battery fixtures.
 // ---------------------------------------------------------------------------
 
-fn residual_seed_logits(
-    basis_values: ArrayView3<'_, f64>,
-    basis_sizes: &[usize],
-    z: ArrayView2<'_, f64>,
-    gain: f64,
-) -> Array2<f64> {
-    let k_atoms = basis_sizes.len();
-    let (n_obs, p_out) = z.dim();
-    let mut logits = Array2::<f64>::zeros((n_obs, k_atoms));
-    if n_obs == 0 || p_out == 0 || k_atoms <= 1 {
-        return logits;
-    }
-    let z_owned = z.to_owned();
-    let mut resid = Array2::<f64>::zeros((n_obs, k_atoms));
-    for atom_idx in 0..k_atoms {
-        let m_k = basis_sizes[atom_idx];
-        let mut phi = Array2::<f64>::zeros((n_obs, m_k));
-        for row in 0..n_obs {
-            for c in 0..m_k {
-                phi[[row, c]] = basis_values[[atom_idx, row, c]];
-            }
-        }
-        let mut gram = fast_ata(&phi);
-        let mut trace = 0.0_f64;
-        for i in 0..m_k {
-            trace += gram[[i, i]];
-        }
-        let jitter = (trace / m_k as f64).max(1.0).max(1.0e-12) * 1.0e-8;
-        for i in 0..m_k {
-            gram[[i, i]] += jitter;
-        }
-        let rhs = fast_atb(&phi, &z_owned);
-        let factor = gram
-            .cholesky(FaerSide::Lower)
-            .expect("residual seed Cholesky");
-        let b_k = factor.solve_mat(&rhs);
-        let fitted = phi.dot(&b_k);
-        for row in 0..n_obs {
-            let mut e = 0.0_f64;
-            for col in 0..p_out {
-                let d = z[[row, col]] - fitted[[row, col]];
-                e += d * d;
-            }
-            resid[[row, atom_idx]] = e;
-        }
-    }
-    let mut global_mean = 0.0_f64;
-    for row in 0..n_obs {
-        for k in 0..k_atoms {
-            global_mean += resid[[row, k]];
-        }
-    }
-    global_mean /= (n_obs * k_atoms) as f64;
-    let floor = (global_mean * 1.0e-6).max(1.0e-12);
-    for row in 0..n_obs {
-        let mut row_mean = 0.0_f64;
-        for k in 0..k_atoms {
-            row_mean += resid[[row, k]];
-        }
-        row_mean = (row_mean / k_atoms as f64).max(floor);
-        for k in 0..k_atoms {
-            logits[[row, k]] = -gain * (resid[[row, k]] - row_mean) / row_mean;
-        }
-    }
-    logits
-}
+use super::shared_seed_fixtures::residual_seed_logits;
 
 fn decoder_lsq_init(
     basis_values: ArrayView3<'_, f64>,
