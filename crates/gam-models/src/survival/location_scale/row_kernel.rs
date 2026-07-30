@@ -781,116 +781,6 @@ fn sls_row_vgh_generated(
     (value, gradient, hessian)
 }
 
-/// Retired strongest-hand V/G/H schedule for the location-scale row. It remains
-/// test-only as the non-abstracted performance opponent for the generated
-/// whole-row [`sls_row_program_order2`] lowering.
-#[cfg(test)]
-#[inline(always)]
-fn sls_row_vgh_fused(
-    p: &[f64; SLS_ROW_K],
-    kernel: &SurvivalExactRowKernel,
-) -> (f64, [f64; SLS_ROW_K], [[f64; SLS_ROW_K]; SLS_ROW_K]) {
-    let entry_exp = (-p[7]).exp();
-    let exit_exp = (-p[6]).exp();
-
-    let mut value = kernel.w * kernel.log_s0;
-    let u0_first = -kernel.w * kernel.r0;
-    let u0_second = -kernel.w * kernel.dr0;
-
-    let censored_weight = kernel.w * (1.0 - kernel.d);
-    let event_weight = kernel.w * kernel.d;
-    let mut u1_first = 0.0;
-    let mut u1_second = 0.0;
-    if censored_weight != 0.0 {
-        value -= censored_weight * kernel.log_s1;
-        u1_first += censored_weight * kernel.r1;
-        u1_second += censored_weight * kernel.dr1;
-    }
-
-    let mut g_first = 0.0;
-    let mut g_second = 0.0;
-    if event_weight != 0.0 {
-        value -= event_weight * (kernel.logphi1 + kernel.log_g);
-        u1_first -= event_weight * kernel.dlogphi1;
-        u1_second -= event_weight * kernel.d2logphi1;
-        g_first = -event_weight * kernel.d_log_g;
-        g_second = -event_weight * kernel.d2_log_g;
-    }
-
-    let u0_g4 = -entry_exp;
-    let u0_g7 = p[4] * entry_exp;
-    let u1_g3 = -exit_exp;
-    let u1_g6 = p[3] * exit_exp;
-    let inner = p[3] * p[8] - p[5];
-    let g3 = exit_exp * p[8];
-    let g5 = -exit_exp;
-    let g6 = -exit_exp * inner;
-    let g8 = exit_exp * p[3];
-
-    let mut gradient = [0.0; SLS_ROW_K];
-    gradient[0] = u0_first;
-    gradient[4] = u0_first * u0_g4;
-    gradient[7] = u0_first * u0_g7;
-    if censored_weight != 0.0 || event_weight != 0.0 {
-        gradient[1] += u1_first;
-        gradient[3] += u1_first * u1_g3;
-        gradient[6] += u1_first * u1_g6;
-    }
-    if event_weight != 0.0 {
-        gradient[2] += g_first;
-        gradient[3] += g_first * g3;
-        gradient[5] += g_first * g5;
-        gradient[6] += g_first * g6;
-        gradient[8] += g_first * g8;
-    }
-
-    let mut hessian = [[0.0; SLS_ROW_K]; SLS_ROW_K];
-    macro_rules! symmetric {
-        ($i:expr, $j:expr, $value:expr) => {{
-            let channel = $value;
-            hessian[$i][$j] += channel;
-            if $i != $j {
-                hessian[$j][$i] += channel;
-            }
-        }};
-    }
-
-    symmetric!(0, 0, u0_second);
-    symmetric!(0, 4, u0_second * u0_g4);
-    symmetric!(0, 7, u0_second * u0_g7);
-    symmetric!(4, 4, u0_second * u0_g4 * u0_g4);
-    symmetric!(4, 7, u0_second * u0_g4 * u0_g7 + u0_first * entry_exp);
-    symmetric!(7, 7, u0_second * u0_g7 * u0_g7 - u0_first * u0_g7);
-
-    if censored_weight != 0.0 || event_weight != 0.0 {
-        symmetric!(1, 1, u1_second);
-        symmetric!(1, 3, u1_second * u1_g3);
-        symmetric!(1, 6, u1_second * u1_g6);
-        symmetric!(3, 3, u1_second * u1_g3 * u1_g3);
-        symmetric!(3, 6, u1_second * u1_g3 * u1_g6 + u1_first * exit_exp);
-        symmetric!(6, 6, u1_second * u1_g6 * u1_g6 - u1_first * u1_g6);
-    }
-
-    if event_weight != 0.0 {
-        symmetric!(2, 2, g_second);
-        symmetric!(2, 3, g_second * g3);
-        symmetric!(2, 5, g_second * g5);
-        symmetric!(2, 6, g_second * g6);
-        symmetric!(2, 8, g_second * g8);
-        symmetric!(3, 3, g_second * g3 * g3);
-        symmetric!(3, 5, g_second * g3 * g5);
-        symmetric!(3, 6, g_second * g3 * g6 - g_first * exit_exp * p[8]);
-        symmetric!(3, 8, g_second * g3 * g8 + g_first * exit_exp);
-        symmetric!(5, 5, g_second * g5 * g5);
-        symmetric!(5, 6, g_second * g5 * g6 + g_first * exit_exp);
-        symmetric!(5, 8, g_second * g5 * g8);
-        symmetric!(6, 6, g_second * g6 * g6 + g_first * exit_exp * inner);
-        symmetric!(6, 8, g_second * g6 * g8 - g_first * exit_exp * p[3]);
-        symmetric!(8, 8, g_second * g8 * g8);
-    }
-
-    (value, gradient, hessian)
-}
 
 /// Hessian-only lowering of the same build-time symbolic atoms used by
 /// [`sls_row_vgh_compiled`]. Only the 24 structurally live upper-triangle
@@ -5273,6 +5163,119 @@ mod index_derivative_lowering_tests {
 
 #[cfg(test)]
 mod patterned_order2_perf_tests {
+    /// MOVED here from the crate body by the ban rule: `#[cfg(test)]` on a
+    /// bare `fn` under `src/` is a dead_code-lint escape hatch and aborts the ROOT
+    /// build.rs, which fails EVERY root-crate target. Its only caller is `hand_fused`
+    /// below, so it belongs inside this already-`#[cfg(test)]` module.
+    /// Retired strongest-hand V/G/H schedule for the location-scale row. It remains
+    /// test-only as the non-abstracted performance opponent for the generated
+    /// whole-row [`sls_row_program_order2`] lowering.
+    #[inline(always)]
+    fn sls_row_vgh_fused(
+        p: &[f64; SLS_ROW_K],
+        kernel: &SurvivalExactRowKernel,
+    ) -> (f64, [f64; SLS_ROW_K], [[f64; SLS_ROW_K]; SLS_ROW_K]) {
+        let entry_exp = (-p[7]).exp();
+        let exit_exp = (-p[6]).exp();
+
+        let mut value = kernel.w * kernel.log_s0;
+        let u0_first = -kernel.w * kernel.r0;
+        let u0_second = -kernel.w * kernel.dr0;
+
+        let censored_weight = kernel.w * (1.0 - kernel.d);
+        let event_weight = kernel.w * kernel.d;
+        let mut u1_first = 0.0;
+        let mut u1_second = 0.0;
+        if censored_weight != 0.0 {
+            value -= censored_weight * kernel.log_s1;
+            u1_first += censored_weight * kernel.r1;
+            u1_second += censored_weight * kernel.dr1;
+        }
+
+        let mut g_first = 0.0;
+        let mut g_second = 0.0;
+        if event_weight != 0.0 {
+            value -= event_weight * (kernel.logphi1 + kernel.log_g);
+            u1_first -= event_weight * kernel.dlogphi1;
+            u1_second -= event_weight * kernel.d2logphi1;
+            g_first = -event_weight * kernel.d_log_g;
+            g_second = -event_weight * kernel.d2_log_g;
+        }
+
+        let u0_g4 = -entry_exp;
+        let u0_g7 = p[4] * entry_exp;
+        let u1_g3 = -exit_exp;
+        let u1_g6 = p[3] * exit_exp;
+        let inner = p[3] * p[8] - p[5];
+        let g3 = exit_exp * p[8];
+        let g5 = -exit_exp;
+        let g6 = -exit_exp * inner;
+        let g8 = exit_exp * p[3];
+
+        let mut gradient = [0.0; SLS_ROW_K];
+        gradient[0] = u0_first;
+        gradient[4] = u0_first * u0_g4;
+        gradient[7] = u0_first * u0_g7;
+        if censored_weight != 0.0 || event_weight != 0.0 {
+            gradient[1] += u1_first;
+            gradient[3] += u1_first * u1_g3;
+            gradient[6] += u1_first * u1_g6;
+        }
+        if event_weight != 0.0 {
+            gradient[2] += g_first;
+            gradient[3] += g_first * g3;
+            gradient[5] += g_first * g5;
+            gradient[6] += g_first * g6;
+            gradient[8] += g_first * g8;
+        }
+
+        let mut hessian = [[0.0; SLS_ROW_K]; SLS_ROW_K];
+        macro_rules! symmetric {
+            ($i:expr, $j:expr, $value:expr) => {{
+                let channel = $value;
+                hessian[$i][$j] += channel;
+                if $i != $j {
+                    hessian[$j][$i] += channel;
+                }
+            }};
+        }
+
+        symmetric!(0, 0, u0_second);
+        symmetric!(0, 4, u0_second * u0_g4);
+        symmetric!(0, 7, u0_second * u0_g7);
+        symmetric!(4, 4, u0_second * u0_g4 * u0_g4);
+        symmetric!(4, 7, u0_second * u0_g4 * u0_g7 + u0_first * entry_exp);
+        symmetric!(7, 7, u0_second * u0_g7 * u0_g7 - u0_first * u0_g7);
+
+        if censored_weight != 0.0 || event_weight != 0.0 {
+            symmetric!(1, 1, u1_second);
+            symmetric!(1, 3, u1_second * u1_g3);
+            symmetric!(1, 6, u1_second * u1_g6);
+            symmetric!(3, 3, u1_second * u1_g3 * u1_g3);
+            symmetric!(3, 6, u1_second * u1_g3 * u1_g6 + u1_first * exit_exp);
+            symmetric!(6, 6, u1_second * u1_g6 * u1_g6 - u1_first * u1_g6);
+        }
+
+        if event_weight != 0.0 {
+            symmetric!(2, 2, g_second);
+            symmetric!(2, 3, g_second * g3);
+            symmetric!(2, 5, g_second * g5);
+            symmetric!(2, 6, g_second * g6);
+            symmetric!(2, 8, g_second * g8);
+            symmetric!(3, 3, g_second * g3 * g3);
+            symmetric!(3, 5, g_second * g3 * g5);
+            symmetric!(3, 6, g_second * g3 * g6 - g_first * exit_exp * p[8]);
+            symmetric!(3, 8, g_second * g3 * g8 + g_first * exit_exp);
+            symmetric!(5, 5, g_second * g5 * g5);
+            symmetric!(5, 6, g_second * g5 * g6 + g_first * exit_exp);
+            symmetric!(5, 8, g_second * g5 * g8);
+            symmetric!(6, 6, g_second * g6 * g6 + g_first * exit_exp * inner);
+            symmetric!(6, 8, g_second * g6 * g8 - g_first * exit_exp * p[3]);
+            symmetric!(8, 8, g_second * g8 * g8);
+        }
+
+        (value, gradient, hessian)
+    }
     use super::*;
     use gam_math::jet_scalar::MappedOrder2Accumulator;
 
