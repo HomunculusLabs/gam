@@ -102,12 +102,12 @@ jobs:
           path: |
             bench/runtime/pydeps
             bench/runtime/r-lib
-          key: ${{ runner.os }}-bench-runtime-${{ env.BENCH_RUNTIME_CACHE_VERSION }}-${{ hashFiles('.github/actions/bench-setup/action.yml', '.github/workflows/benchmark.yml') }}
+          key: ${{ runner.os }}-bench-runtime-${{ env.BENCH_RUNTIME_CACHE_VERSION }}-${{ hashFiles('.github/actions/bench-setup/action.yml', 'bench/runtime-dependencies.txt') }}
           restore-keys: |
             ${{ runner.os }}-bench-runtime-${{ env.BENCH_RUNTIME_CACHE_VERSION }}-
 
       - name: Shared benchmark setup (cached)
-        if: ${{ steps.runtime-cache.outputs.cache-hit != 'true' }}
+        if: ${{ steps.runtime-cache.outputs.cache-matched-key == '' }}
         uses: ./.github/actions/bench-setup
         with:
           install-runtime-deps: "true"
@@ -136,7 +136,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p bench/runtime
-          if [ "${{ steps.runtime-cache.outputs.cache-hit }}" != "true" ]; then
+          if [ -z "${{ steps.runtime-cache.outputs.cache-matched-key }}" ]; then
             mkdir -p bench/runtime/pydeps bench/runtime/r-lib
             if [ ! -d "${R_LIBS_USER}" ]; then
               echo "::error title=Missing R library::R_LIBS_USER=${R_LIBS_USER} does not exist after bench-setup; cannot stage R packages for shards."

@@ -1,0 +1,10 @@
+# Inputs that determine the staged benchmark runtime cache.
+#
+# Keep this manifest aligned with `.github/actions/bench-setup/action.yml` and
+# `.github/workflows/benchmark.yml`.  Orchestration-only workflow edits must not
+# invalidate an 811 MB dependency cache; dependency changes must update this
+# file and therefore produce a new exact cache key.
+python=3.11
+r=4.4.3
+python-packages=numpy,pandas,scikit-learn,lifelines,scikit-survival,xgboost,matplotlib
+r-packages=mgcv,jsonlite,survival,glmnet,gamlss,gamlss.dist,gamboostLSS,mboost,bamlss,brms
