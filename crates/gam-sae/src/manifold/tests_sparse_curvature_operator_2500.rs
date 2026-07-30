@@ -742,3 +742,185 @@ fn threshold_gate_outer_gradient_uses_the_modelled_logdet_channels_2500() {
         exact_a_trace[sparse]
     );
 }
+
+/// #2330/#2336 FALSIFICATION GATE - is `A` really `d2L/dtheta2`?
+///
+/// The `IndefiniteObservedInformation` refusal
+/// (`SaeManifoldTerm::exact_observed_information_log_dets`) reads the spectrum of
+/// the dense `A = B + dC` that `materialize_exact_hessian_dense` builds column by
+/// column from the production `apply_exact_hessian`. Every consumer of that
+/// refusal - the `+inf` probe pricing in `outer_objective`, the criterion value
+/// path, and the IFT adjoint's `A^-1` - inherits the claim that `A` IS the second
+/// derivative of the penalized objective. Nothing gated that claim DIRECTLY: the
+/// #2500 gates above finite-difference the log-det TRACE and the theta-adjoint in
+/// `rho`, i.e. they check `dA/drho` and contractions of `A^-1`, never `A` itself
+/// against `dg/dtheta`.
+///
+/// This gate closes that, and it is deliberately aimed at its own author's
+/// conclusion. "The mode converged but `A` is indefinite" admits exactly two
+/// readings, with OPPOSITE fixes:
+///
+/// * the inner solve really does stop at a saddle of `L` - a defect UPSTREAM, in
+///   a majorized solver whose PD model `B` structurally cannot see a negative
+///   direction, curable only by a negative-curvature escape;
+/// * or `A` is not the curvature of the thing whose gradient the solve drove to
+///   zero - a defect AT the refusal site, curable there and only there.
+///
+/// `g = (gt, gb)` read off `assemble_arrow_schur` is the EXACT KKT gradient: the
+/// same vector `terminal_exact_newton_polish` negates to form its Newton
+/// right-hand side, with no majorization anywhere in it. So a central difference
+/// of `g` along `v` is `dg/dtheta . v` on the nose. If it disagrees with `A.v`,
+/// the second reading is the true one and the converged-but-indefinite verdict is
+/// an artefact of the refusal site.
+///
+/// The BELOW-THRESHOLD arm is used on purpose: it is the deflation-free stratum
+/// (asserted, not assumed), so no per-row direction changes discrete class
+/// between the `+/-h` endpoints and the central difference stays a difference of
+/// ONE smooth branch - the same branch-identity discipline the `rho`-FD gates in
+/// this file already apply. `h = 1e-5` is the step those gates use.
+#[test]
+fn dense_exact_a_matches_finite_difference_of_the_kkt_gradient_2330() {
+    let (term, target, rho) = threshold_gate_tiny_fixture(false);
+    let (_loss, cache) = frozen_cache(&term, &target, &rho);
+    assert_eq!(
+        deflated_direction_count(&term, &cache),
+        0,
+        "#2330 FD gate: the below-threshold arm must be deflation-free, or the +/-h \
+         endpoints can straddle a discrete deflation change and the central \
+         difference stops being a difference of one smooth branch"
+    );
+
+    let a = term
+        .materialize_exact_hessian_dense(&rho, target.view(), &cache)
+        .expect("dense exact A at the frozen fixture mode");
+    let total_t = cache.delta_t_len();
+    let k = cache.k;
+    let dim = total_t + k;
+    assert_eq!(
+        a.nrows(),
+        dim,
+        "#2330 FD gate: dense A must be (total_t + k) square before it can be compared \
+         against the (gt, gb) gradient layout"
+    );
+
+    // The exact KKT gradient at whatever state `t` is in, concatenated in the
+    // SAME (t, beta) order the Newton right-hand side uses in
+    // `terminal_exact_newton_polish`. `&mut` because `assemble_arrow_schur`
+    // takes `&mut self` (it refreshes row-layout state); this is only ever
+    // called on the locally-owned `moved` clone below, and the analytic side is
+    // already an owned `Array2`, so no borrow of `term` is live across it.
+    let gradient = |t: &mut SaeManifoldTerm| -> Array1<f64> {
+        let sys = t
+            .assemble_arrow_schur(target.view(), &rho, None)
+            .expect("arrow-Schur assembly at the finite-difference endpoint");
+        let mut g = Array1::<f64>::zeros(dim);
+        let mut offset = 0usize;
+        for row in &sys.rows {
+            for (axis, &value) in row.gt.iter().enumerate() {
+                g[offset + axis] = value;
+            }
+            offset += row.gt.len();
+        }
+        assert_eq!(
+            offset, total_t,
+            "#2330 FD gate: concatenated per-row gt width must equal cache.delta_t_len(), \
+             or the gradient and A are not in the same coordinates"
+        );
+        assert_eq!(
+            sys.gb.len(),
+            k,
+            "#2330 FD gate: border gradient width must equal cache.k"
+        );
+        for (axis, &value) in sys.gb.iter().enumerate() {
+            g[total_t + axis] = value;
+        }
+        g
+    };
+
+    let h = 1.0e-5_f64;
+    // TWO directions, so the gate cannot pass by being blind in one block. A
+    // coordinate-axis probe would test a single column of `A` and could miss an
+    // entire mis-assembled sub-block, so both probes are dense and deterministic
+    // and each leans on a different block.
+    for (label, weight_t, weight_beta) in [
+        ("coordinate-weighted", 1.0_f64, 0.25_f64),
+        ("border-weighted", 0.25_f64, 1.0_f64),
+    ] {
+        let mut v_t = Array1::<f64>::zeros(total_t);
+        let mut v_beta = Array1::<f64>::zeros(k);
+        let mut v = Array1::<f64>::zeros(dim);
+        for idx in 0..dim {
+            let phase = 0.7 + 0.31 * (idx as f64);
+            let raw = phase.sin() + 0.5 * (2.0 * phase).cos();
+            let value = raw * if idx < total_t { weight_t } else { weight_beta };
+            v[idx] = value;
+        }
+        let norm = v.dot(&v).sqrt();
+        assert!(
+            norm.is_finite() && norm > 0.0,
+            "#2330 FD gate ({label}): probe direction must be finite and nonzero"
+        );
+        v.mapv_inplace(|value| value / norm);
+        for idx in 0..total_t {
+            v_t[idx] = v[idx];
+        }
+        for idx in 0..k {
+            v_beta[idx] = v[total_t + idx];
+        }
+
+        let analytic = a.dot(&v);
+
+        let endpoint = |sign: f64| -> Array1<f64> {
+            let mut moved = term.clone();
+            moved
+                .apply_newton_step(v_t.view(), v_beta.view(), sign * h)
+                .expect("finite-difference endpoint step");
+            gradient(&mut moved)
+        };
+        let g_plus = endpoint(1.0);
+        let g_minus = endpoint(-1.0);
+        let fd = (&g_plus - &g_minus).mapv(|delta| delta / (2.0 * h));
+
+        // A zero-vs-zero comparison passes any tolerance. The analytic side must
+        // carry real curvature along this direction before the assertion below
+        // means anything at all.
+        let analytic_norm = analytic.dot(&analytic).sqrt();
+        let fd_norm = fd.dot(&fd).sqrt();
+        assert!(
+            analytic_norm > 1.0e-6,
+            "#2330 FD gate ({label}): |A.v|={analytic_norm:.6e} is too small for this \
+             comparison to be a gate rather than a zero-vs-zero tautology"
+        );
+
+        let mut worst = 0.0_f64;
+        let mut worst_idx = 0usize;
+        for idx in 0..dim {
+            let scale = analytic[idx].abs().max(fd[idx].abs()).max(1.0e-8);
+            let relative = (analytic[idx] - fd[idx]).abs() / scale;
+            if relative > worst {
+                worst = relative;
+                worst_idx = idx;
+            }
+        }
+        // Report the directional pair as well as the worst component: a ratio of
+        // -1 is a SIGN convention and a ratio of 2 is a majorization leak, and
+        // neither is distinguishable from noise if only a magnitude is printed.
+        let directional = analytic.dot(&v);
+        let directional_fd = fd.dot(&v);
+        assert!(
+            worst <= 1.0e-4,
+            "#2330: the dense exact A is NOT the second derivative of the penalized \
+             objective whose gradient the inner solve drives to zero. Worst component \
+             relative error {worst:.6e} at index {worst_idx} (A.v={:.9e}, FD={:.9e}); \
+             |A.v|={analytic_norm:.6e} |FD|={fd_norm:.6e}; v'Av={directional:.9e} vs \
+             v'(dg/dtheta)v={directional_fd:.9e} (ratio {:.6e}). If this fires, the \
+             IndefiniteObservedInformation refusal is measuring the wrong operator, the \
+             converged-but-indefinite verdict is an artefact of the refusal site rather \
+             than a saddle upstream, and the negative-curvature escape is the WRONG fix. \
+             Probe: {label}, h={h:.3e}",
+            analytic[worst_idx],
+            fd[worst_idx],
+            directional_fd / directional,
+        );
+    }
+}

@@ -22,6 +22,15 @@
 /// objective↔gradient desync. The former outer-objective numerical safeguard
 /// has been removed: deflating these directions keeps the envelope term
 /// value-consistent at its analytic source.
+/// COUNTERPART FLOOR (#2253 x #2330). This is a `B`-RELATIVE ratio
+/// (`mu = x'Ax / x'Bx`), NOT an eigenvalue of `A`, so it is not comparable
+/// term-for-term with [`SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL`], which
+/// floors an absolute eigenvalue of `A` at `1e-9 * max(lambda_max(A), 1)`. The
+/// two nonetheless classify the SAME directions of the SAME operator, for the
+/// value path and the gradient path respectively, and they can disagree: see
+/// the overlap-region note on that constant for the exact crossing conditions
+/// and for the pencil-spectrum measurement that would let the two be replaced
+/// by one quantity. Deliberately left as two numbers until that is measured.
 fn sae_ift_min_curvature_fraction() -> f64 {
     f64::EPSILON.sqrt()
 }
@@ -3442,6 +3451,41 @@ impl SaeManifoldTerm {
     /// null of `A`, unit-pinned ⇒ `log 1 = 0`, `1/λ → 0`). #2330 ACCEPTS
     /// `min_eig > −floor`; #2336's saddle-escape TRIGGERS on `min_eig < −floor` —
     /// the same constant, so the two features cannot disagree in the band.
+    ///
+    /// TWO FLOORS, ONE OPERATOR (#2330 x #2253). This constant and
+    /// [`sae_ift_min_curvature_fraction`] both classify directions of the SAME
+    /// `A = B + dC`, and they are deliberately NOT the same number because they
+    /// are not the same quantity:
+    ///
+    /// * HERE: an absolute eigenvalue of `A`, floored relative to `lambda_max(A)`
+    ///   (`1e-9 * max(lambda_max, 1)`). It asks "is this direction's own
+    ///   curvature negative enough that `1/2 log|A|` is meaningless?"
+    /// * THERE: the generalized Rayleigh quotient `mu = x'Ax / x'Bx` of the IFT
+    ///   SOLUTION, floored at `sqrt(eps) ~ 1.49e-8`. That is a `B`-RELATIVE
+    ///   ratio, not an eigenvalue of anything. It asks "did `1/mu` amplify an
+    ///   unidentified near-null into `theta_rho`?"
+    ///
+    /// THE OVERLAP REGION IS REAL AND UNMEASURED. A direction `v` with
+    /// `lambda(v)` in `(-1e-9*lambda_max, 0)` sits inside THIS band and is
+    /// priced as the radial-gauge null (`log 1 = 0`), while its `mu` can sit far
+    /// ABOVE `sqrt(eps)` whenever `v'Bv << |lambda|/sqrt(eps)` - the value calls
+    /// the direction gauge, the gradient calls it a resolved negative-curvature
+    /// direction and keeps its `A^-1` response. The converse exists too:
+    /// `|lambda| >> floor` with `mu` below `sqrt(eps)` when `v'Bv` is large, so
+    /// the value prices a direction the gradient has projected out. Neither
+    /// crossing is detected today and neither has been measured.
+    ///
+    /// UNIFYING THEM IS A MEASUREMENT, NOT AN EDIT, which is why this commit
+    /// changes no number. The two collapse into one quantity only under a common
+    /// metric - compare `lambda` in the `B` metric (the pencil eigenvalues of
+    /// `(A, B)`) at BOTH sites, so "gauge null" and "unidentified" become the
+    /// same statement. What would settle it: on a fixture that actually refuses
+    /// with `IndefiniteObservedInformation`, dump the `(A, B)` pencil spectrum
+    /// beside the plain `A` spectrum and count the directions that change class
+    /// between the two normalizations. A nonzero count IS the defect; a zero
+    /// count says the split is harmless there and both constants may stand. The
+    /// refusal-site `log::debug!` in `exact_observed_information_log_dets` emits
+    /// the per-direction half of that dump.
     pub(crate) const SAE_EXACT_A_PD_FLOOR_REL: f64 = 1.0e-9;
 
     /// #2330 Phase-2 — the EXACT observed-information Laplace log-determinants
@@ -3506,6 +3550,38 @@ impl SaeManifoldTerm {
                         }
                         let basin = lambda + e_v;
                         if basin < -floor {
+                            // NOT a step toward a saddle escape. #2336's
+                            // terminal saddle-ESCAPE was REFUTED three ways
+                            // (closed `e972387215`; both re-convergence lanes,
+                            // undamped and descent-enforcing MM/Armijo, return
+                            // to the same mode after a provably-descending step;
+                            // `GATE_SHIFT=0`, evidence tests `6a5ca5d84`). The
+                            // shipped resolution is the E-attributability
+                            // arithmetic on the lines directly above. Comments
+                            // elsewhere in this crate still promise that escape
+                            // as pending - `construction_quasi_laplace.rs:353`,
+                            // `outer_objective.rs:2622`/`:3081`/`:4118` - and
+                            // they are stale pointers to a refuted approach.
+                            //
+                            // What this emits is the surviving open question. A
+                            // refusal here means the mode is stationary AND the
+                            // exact curvature is negative by more than the clamp
+                            // explains, and every one of those magnitudes is
+                            // computed on this line and then discarded with the
+                            // eigenvector. They are the per-direction half of
+                            // the pencil-spectrum dump named on
+                            // `SAE_EXACT_A_PD_FLOOR_REL`: the coordinate-block
+                            // mass is what says whether the two floors would
+                            // have classified this direction the same way.
+                            // Diagnostic only - no control flow, no numerics,
+                            // and the typed refusal below is unchanged.
+                            let t_mass: f64 = (0..limit).map(|j| v[j] * v[j]).sum();
+                            log::debug!(
+                                "SAE exact-A saddle refusal: block={block} idx={idx} \
+                                 lambda={lambda:.6e} clamp v'Ev={e_v:.6e} \
+                                 basin={basin:.6e} floor={floor:.6e} \
+                                 max_eig={max_eig:.6e} coordinate-block mass={t_mass:.6e}"
+                            );
                             return Err(SaeCriterionError::IndefiniteObservedInformation { block });
                         }
                         basin
