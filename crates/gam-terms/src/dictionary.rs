@@ -1733,8 +1733,10 @@ mod tests {
         let mut fitted = assignments.dot(&atoms);
         let mut lambdas = Array1::<f64>::from_elem(config.n_atoms, INACTIVE_LAMBDA);
         let mut reml_scores = Array1::<f64>::zeros(config.n_atoms);
-        let mut previous_ev = explained_variance(x.view(), fitted.view());
+        let initial_ev = explained_variance(x.view(), fitted.view());
+        let mut previous_ev = initial_ev;
         let mut prev_support: Option<Vec<Vec<bool>>> = None;
+        let mut observed_sweeps = 0usize;
         for sweep in 0..12 {
             for atom_idx in 0..config.n_atoms {
                 fit_one_atom_penalized_ls(
@@ -1768,11 +1770,55 @@ mod tests {
                 (rerouted_ev - previous_ev).abs(),
                 (rerouted_ev - sweep_ev).abs(),
             );
+            assert!(
+                sweep_ev.is_finite() && rerouted_ev.is_finite(),
+                "[zz2372:dict] sweep={sweep} produced a non-finite explained \
+                 variance: sweep_ev={sweep_ev} rerouted_ev={rerouted_ev}"
+            );
+            // `explained_variance` returns 1 - RSS/TSS with RSS a sum of
+            // squares, so EV <= 1 is an identity of the function, not a
+            // property of the fit. The 1e-12 slack covers float summation
+            // order on the two sums only.
+            assert!(
+                sweep_ev <= 1.0 + 1e-12 && rerouted_ev <= 1.0 + 1e-12,
+                "[zz2372:dict] sweep={sweep} explained variance exceeded 1: \
+                 sweep_ev={sweep_ev} rerouted_ev={rerouted_ev}"
+            );
+            observed_sweeps += 1;
             previous_ev = rerouted_ev;
             prev_support = Some(support);
             assignments = rerouted;
             fitted = rerouted_fitted;
         }
+        // Deliberately NOT a per-sweep monotone-objective gate, even though
+        // this is nominally coordinate descent. Two reasons, both structural:
+        //   * `fit_one_atom_penalized_ls` descends a RIDGE-penalized loss whose
+        //     lambda it re-estimates by REML on every call, so the objective it
+        //     descends is not fixed across the sweep and the unpenalized EV
+        //     traced here is not its Lyapunov function;
+        //   * `reroute_against_atoms` is a greedy top-k selection, not the
+        //     exact minimizer of that loss over assignments, so the reroute
+        //     step can lower EV.
+        // Whether EV actually oscillates is precisely the limit-cycle question
+        // this instrument was cut to answer; asserting monotonicity would
+        // encode the answer as the premise.
+        //
+        // What the trace can honestly claim is NET progress on a planted
+        // 4-atom fixture: twelve full sweeps of atom refits must not leave the
+        // fit worse than the initialization routing they started from. A red
+        // here is divergence, not slow convergence -- and it would refute the
+        // "slow drift" reading directly.
+        assert_eq!(
+            observed_sweeps, 12,
+            "the trace must record all twelve sweeps; a short loop would make \
+             the per-sweep gates vacuous"
+        );
+        assert!(
+            previous_ev >= initial_ev - 1e-12,
+            "[zz2372:dict] twelve coordinate-descent sweeps left the fit WORSE \
+             than initialization: initial_ev={initial_ev:.15} \
+             final_ev={previous_ev:.15}"
+        );
     }
 
     /// The same 6x12 planted two-atom overcomplete fixture
