@@ -427,9 +427,9 @@ fn main() -> Result<(), String> {
     // Every knob is matched anywhere in the argument list, so an unknown
     // trailing token can only be a typo -- and a typo that is ignored
     // disarms a mechanism while the arm still reports a number. Reject it.
-    const KNOB_TOKENS: [&str; 12] =
+    const KNOB_TOKENS: [&str; 13] =
         ["unroll", "pool", "joint", "price", "usage", "vark", "fista", "exact",
-         "refine3", "refine9", "exact_train", "none"];
+         "refine3", "refine9", "exact_train", "none", "peel"];
     for arg in args.iter().skip(15) {
         if !KNOB_TOKENS.contains(&arg.as_str()) {
             return Err(format!(
