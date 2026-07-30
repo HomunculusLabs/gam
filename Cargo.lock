@@ -6350,8 +6350,9 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "opt"
-version = "0.8.0"
-source = "git+https://github.com/SauersML/opt.git?rev=a9bd4a0c7abebba1a8419776f8301c08ccac5181#a9bd4a0c7abebba1a8419776f8301c08ccac5181"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b19897b659bc83a1e1f38f9b903b0ea7f9ca7a83ca7f4b4df905d1a8ca397008"
 dependencies = [
  "faer",
  "log",

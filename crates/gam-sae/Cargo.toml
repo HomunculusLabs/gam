@@ -8,7 +8,7 @@ repository = "https://github.com/SauersML/gam"
 rust-version = "1.97"
 
 [dependencies]
-faer = "0.24.0"
+faer = "0.24.4"
 gam-geometry = { path = "../gam-geometry", version = "=0.3.151" }
 gam-gpu = { path = "../gam-gpu", version = "=0.3.151" }
 gam-identifiability = { path = "../gam-identifiability", version = "=0.3.151" }

@@ -12,7 +12,7 @@ warnings = "deny"
 
 [dependencies]
 dyn-stack = "0.13.2"
-faer = "0.24.0"
+faer = "0.24.4"
 gam-geometry = { path = "../gam-geometry", version = "=0.3.151" }
 gam-gpu = { path = "../gam-gpu", version = "=0.3.151" }
 gam-linalg = { path = "../gam-linalg", version = "=0.3.151" }

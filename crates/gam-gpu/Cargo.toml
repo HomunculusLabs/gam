@@ -10,7 +10,7 @@ repository = "https://github.com/SauersML/gam"
 warnings = "deny"
 
 [dependencies]
-faer = "0.24.0"
+faer = "0.24.4"
 gam-linalg = { path = "../gam-linalg", version = "=0.3.151" }
 gam-runtime = { path = "../gam-runtime", version = "=0.3.151" }
 libloading = "0.9.0"

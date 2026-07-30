@@ -11,7 +11,7 @@ repository = "https://github.com/SauersML/gam"
 warnings = "deny"
 
 [dependencies]
-faer = "0.24.0"
+faer = "0.24.4"
 libm = "0.2.16"
 gam-linalg = { path = "../gam-linalg", version = "=0.3.151" }
 gam-math = { path = "../gam-math", version = "=0.3.151" }

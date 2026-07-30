@@ -17,7 +17,7 @@ gam-problem = { path = "../gam-problem", version = "=0.3.151" }
 gam-runtime = { path = "../gam-runtime", version = "=0.3.151" }
 gam-terms = { path = "../gam-terms", version = "=0.3.151" }
 csv = "1.4.0"
-faer = "0.24.0"
+faer = "0.24.4"
 ndarray = { version = "0.17.2", features = ["serde", "rayon"] }
 
 [dev-dependencies]

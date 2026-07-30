@@ -11,7 +11,7 @@ repository = "https://github.com/SauersML/gam"
 path = "src/lib.rs"
 
 [dependencies]
-faer = "0.24.0"
+faer = "0.24.4"
 gam-geometry = { path = "../gam-geometry", version = "=0.3.151" }
 gam-linalg = { path = "../gam-linalg", version = "=0.3.151" }
 gam-spec = { path = "../gam-spec", version = "=0.3.151" }
