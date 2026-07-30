@@ -5838,6 +5838,42 @@ pub enum ArrowSchurError {
     AdaptiveCorrectionFailed { reason: String },
 }
 
+impl ArrowSchurError {
+    /// Whether this refusal is an indefinite reduced Schur complement — the
+    /// caller's operator was well-formed and finite, and the factorization
+    /// declined only because the complement is not positive definite at this
+    /// iterate.
+    ///
+    /// The distinction matters to a caller that owns a trial point it can
+    /// MOVE: an indefinite complement means the point is in an indefinite
+    /// basin adjacent to a PD optimum, so the trial can be refused and the
+    /// search steered, whereas a non-finite or non-square operator is a defect
+    /// no relocation fixes. gam-sae's outer ρ-search is exactly that caller —
+    /// it reads an indefinite complement as `+∞` and steers ρ back into the PD
+    /// region (#1782).
+    ///
+    /// ⚠ #2598 — this predicate exists because that caller was recovering the
+    /// same verdict by matching TWO substrings of [`Display`]'s output
+    /// (`"Schur complement Cholesky failed"` and `"not positive definite"`) on
+    /// a `String`-typed spine. The information was already a type here and was
+    /// being rendered to prose and reconstructed, across a crate boundary:
+    /// rewording either message below would have silently reclassified every
+    /// recoverable Schur refusal as a fatal defect with nothing failing. The
+    /// conjunct is preserved exactly — the discriminant carries the first
+    /// substring and `reason` carries the second — so a `SchurFactorFailed`
+    /// whose reason is a non-finite entry, a non-square operator or an
+    /// unavailable device still reports `false` and stays fatal.
+    ///
+    /// [`Display`]: std::fmt::Display
+    pub fn is_non_pd_schur_complement(&self) -> bool {
+        matches!(
+            self,
+            ArrowSchurError::SchurFactorFailed { reason }
+                if reason.contains("not positive definite")
+        )
+    }
+}
+
 impl std::fmt::Display for ArrowSchurError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

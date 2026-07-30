@@ -7103,3 +7103,61 @@ fn evidence_cache_boundary_is_invariant_to_newton_damping_history_2308() {
         damped_step.arrow_log_det().unwrap().to_bits()
     );
 }
+
+/// #2598 — pin [`ArrowSchurError::is_non_pd_schur_complement`] to the exact
+/// conjunct gam-sae used to reconstruct from `to_string()`: the discriminant
+/// must be `SchurFactorFailed` AND its reason must name a non-PD operator.
+///
+/// The two negative arms are the load-bearing ones. A `SchurFactorFailed`
+/// raised for a non-finite or non-square operator, and a per-row refusal whose
+/// own reason happens to name a non-PD block, both rendered a string that the
+/// old two-substring match rejected; they must stay fatal here, or a genuine
+/// assembly defect gets masked as a recoverable trial-point refusal.
+#[test]
+fn non_pd_schur_predicate_preserves_the_two_substring_conjunct_2598() {
+    let non_pd = ArrowSchurError::SchurFactorFailed {
+        reason: "non-PD pivot -2.5e-09 at index 2 (matrix is not positive definite)".to_string(),
+    };
+    assert!(
+        non_pd.is_non_pd_schur_complement(),
+        "an indefinite reduced Schur complement is the recoverable trial-point refusal: {non_pd}"
+    );
+
+    let non_finite = ArrowSchurError::SchurFactorFailed {
+        reason: "cholesky_lower: non-finite entry at linear index 7".to_string(),
+    };
+    assert!(
+        !non_finite.is_non_pd_schur_complement(),
+        "a non-finite Schur operator is a defect, not a relocatable trial point: {non_finite}"
+    );
+
+    let non_square = ArrowSchurError::SchurFactorFailed {
+        reason: "cholesky_lower: non-square 3×4".to_string(),
+    };
+    assert!(
+        !non_square.is_non_pd_schur_complement(),
+        "a non-square Schur operator is a defect: {non_square}"
+    );
+
+    let per_row = ArrowSchurError::PerRowFactorFailed {
+        row: 3,
+        reason: "non-PD pivot -1e-12 at index 0 (matrix is not positive definite)".to_string(),
+    };
+    assert!(
+        !per_row.is_non_pd_schur_complement(),
+        "a per-row H_tt refusal is a different class and has its own predicate: {per_row}"
+    );
+
+    let ill_conditioned = ArrowSchurError::PerRowFactorIllConditioned {
+        row: 1,
+        kappa_estimate: 1e18,
+    };
+    assert!(!ill_conditioned.is_non_pd_schur_complement());
+    let pcg = ArrowSchurError::PcgFailed {
+        reason: "residual stalled while the operator is not positive definite".to_string(),
+    };
+    assert!(
+        !pcg.is_non_pd_schur_complement(),
+        "only the Schur-factor discriminant carries this verdict: {pcg}"
+    );
+}
