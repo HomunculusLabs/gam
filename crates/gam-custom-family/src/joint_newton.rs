@@ -2571,8 +2571,6 @@ pub(crate) struct KktRefusalReport {
     pub(crate) block_carrying_residual: Option<usize>,
 
     pub(crate) hpen_eigenvalues_sorted_desc: Vec<f64>,
-    pub(crate) hpen_min_abs_eigenvalue: f64,
-    pub(crate) hpen_max_abs_eigenvalue: f64,
     pub(crate) hpen_condition_number: f64,
     pub(crate) hpen_nullity_at_rank_tol: usize,
     pub(crate) hpen_rank_tol: f64,
@@ -4076,8 +4074,6 @@ pub(crate) fn compute_kkt_refusal_report(
         .map(|(i, _)| i);
 
     let mut hpen_eigenvalues_sorted_desc: Vec<f64> = Vec::new();
-    let mut hpen_min_abs_eigenvalue = f64::NAN;
-    let mut hpen_max_abs_eigenvalue = f64::NAN;
     let mut hpen_condition_number = f64::NAN;
     let mut hpen_nullity_at_rank_tol = 0usize;
     let mut hpen_null_gradient_inf = f64::NAN;
@@ -4123,12 +4119,6 @@ pub(crate) fn compute_kkt_refusal_report(
                     .fold(f64::INFINITY, f64::min);
                 let cutoff = KKT_REFUSAL_RANK_TOL * max_abs;
                 hpen_nullity_at_rank_tol = sorted.iter().filter(|x| x.abs() < cutoff).count();
-                hpen_max_abs_eigenvalue = max_abs;
-                hpen_min_abs_eigenvalue = if min_abs.is_finite() {
-                    min_abs
-                } else {
-                    f64::NAN
-                };
                 hpen_condition_number = if min_abs > 0.0 && min_abs.is_finite() {
                     max_abs / min_abs
                 } else {
@@ -4216,8 +4206,6 @@ pub(crate) fn compute_kkt_refusal_report(
         block_residual_inf,
         block_carrying_residual,
         hpen_eigenvalues_sorted_desc,
-        hpen_min_abs_eigenvalue,
-        hpen_max_abs_eigenvalue,
         hpen_condition_number,
         hpen_nullity_at_rank_tol,
         hpen_rank_tol: KKT_REFUSAL_RANK_TOL,
@@ -4329,8 +4317,22 @@ impl KktRefusalReport {
             self.block_grad_inf,
             self.block_penalty_grad_inf,
             self.block_residual_inf,
-            self.hpen_max_abs_eigenvalue,
-            self.hpen_min_abs_eigenvalue,
+            // ALGEBRAIC extremes, off the signed descending spectrum. These
+            // rendered `hpen_max_abs_eigenvalue`/`hpen_min_abs_eigenvalue` -- the
+            // largest and smallest MAGNITUDES -- so `{-1.691, .., +5.777e4}`
+            // printed byte-identically to `{+1.691, .., +5.777e4}`, and an
+            // indefinite H_pen read as contradicting the
+            // `resolvable_negative_curvature` flag in the same refusal (#2659).
+            // `cond` and `nullity` are magnitude questions and are unchanged;
+            // only these two labels were wrong.
+            self.hpen_eigenvalues_sorted_desc
+                .first()
+                .copied()
+                .unwrap_or(f64::NAN),
+            self.hpen_eigenvalues_sorted_desc
+                .last()
+                .copied()
+                .unwrap_or(f64::NAN),
             self.hpen_condition_number,
             self.hpen_rank_tol,
             self.hpen_nullity_at_rank_tol,
@@ -4373,8 +4375,22 @@ impl KktRefusalReport {
             self.block_grad_inf,
             self.block_penalty_grad_inf,
             self.block_residual_inf,
-            self.hpen_max_abs_eigenvalue,
-            self.hpen_min_abs_eigenvalue,
+            // ALGEBRAIC extremes, off the signed descending spectrum. These
+            // rendered `hpen_max_abs_eigenvalue`/`hpen_min_abs_eigenvalue` -- the
+            // largest and smallest MAGNITUDES -- so `{-1.691, .., +5.777e4}`
+            // printed byte-identically to `{+1.691, .., +5.777e4}`, and an
+            // indefinite H_pen read as contradicting the
+            // `resolvable_negative_curvature` flag in the same refusal (#2659).
+            // `cond` and `nullity` are magnitude questions and are unchanged;
+            // only these two labels were wrong.
+            self.hpen_eigenvalues_sorted_desc
+                .first()
+                .copied()
+                .unwrap_or(f64::NAN),
+            self.hpen_eigenvalues_sorted_desc
+                .last()
+                .copied()
+                .unwrap_or(f64::NAN),
             self.hpen_condition_number,
             self.hpen_rank_tol,
             self.hpen_nullity_at_rank_tol,
