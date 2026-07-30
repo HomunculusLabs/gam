@@ -223,6 +223,14 @@ const CERTIFIED_SPECTRUM_BYTES: usize = 512 * 1024 * 1024;
 /// if it ever exceeds this, because a count below the realized one would let
 /// [`CERTIFIED_SPECTRUM_MAX`] admit a width that overruns
 /// [`CERTIFIED_SPECTRUM_BYTES`].
+///
+/// The count is measured NEAR the cap and is not claimed constant in `m`. It is
+/// not: with the cap lifted experimentally, the same refinement ladder reached
+/// `m = 8435` at 26 GB resident (≈46 blocks) and the next level past it at
+/// 198 GB before being stopped. So the budget holds where the cap admits and the
+/// growth past it is superlinear in the block count as well as in `m²` — which is
+/// the quantitative reason the cap is not simply raised to whatever a given
+/// fixture asks for.
 const CERTIFIED_SPECTRUM_BLOCKS: usize = 8;
 
 /// Memory budget for the exact sparse-direct factor of `A = X'WX + λD`, stated
@@ -4621,37 +4629,44 @@ mod refinement_decision_tests {
     /// capability.
     #[test]
     fn auto_reml_certifies_past_the_dense_gram_cache() {
-        // A 50x50 grid: 2500 rows against ~2.0k columns, so the data identify
-        // the whole Schur spectrum. That matters — a design with FEWER rows than
-        // columns is a separate, pre-existing problem for the certified search
-        // (see `the_spectral_residual_carries_no_null_modes`) and would test that
-        // instead of this.
-        //
-        // 45 was the first attempt and it MISSED: a 45-grid refines to 2038
-        // columns against 2025 rows, so this fixture's own premise assertion
-        // refused it by 13 modes. The width at a fixed level count is set by the
-        // net geometry and is nearly independent of the sample — the companion
-        // measurement prints `n=1200 m=2054` and `n=2500 m=2002` at `levels=6` —
-        // so buying identifiability here means buying ROWS, not narrowing the
-        // design. The margin at 50 is ~500 modes.
-        let (x1, x2, y) = dense_fixture(50);
-        let weights = vec![1.0; y.len()];
+        // The grid side is SEARCHED for rather than pinned, because the two
+        // premises pull against each other and neither is a property of the code
+        // under test. The width has to land strictly between the Gram cache and
+        // the spectrum budget, and the sample has to be at least as large as the
+        // width: a design with FEWER rows than columns is a separate,
+        // pre-existing problem for the certified search (see
+        // `the_spectral_residual_carries_no_null_modes`) and would be measured
+        // here instead of the capability. Six levels of box-filling net set a
+        // floor on the width, and a finer data grid adds centres of its own, so
+        // the admissible sides are a band: 45x45 gives 2038 columns against 2025
+        // rows (13 short), 64x64 gives 4117 columns (past the budget).
+        let mut fixture = None;
+        for side in 46..=64_usize {
+            let (x1, x2, y) = dense_fixture(side);
+            let weights = vec![1.0; y.len()];
+            let m = {
+                let axes: [&[f64]; 2] = [&x1, &x2];
+                ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 6)
+                    .expect("cascade design")
+                    .core
+                    .m
+            };
+            if m > DENSE_GRAM_MAX && m <= CERTIFIED_SPECTRUM_MAX && m <= y.len() {
+                println!("#2546 certified-past-cache fixture: side={side} m={m} rows={}", y.len());
+                fixture = Some((x1, x2, y, weights, m));
+                break;
+            }
+        }
+        let (x1, x2, y, weights, m) = fixture.expect(
+            "no grid side in 46..=64 puts the width between DENSE_GRAM_MAX and              CERTIFIED_SPECTRUM_MAX with at least as many rows as columns",
+        );
         let axes: [&[f64]; 2] = [&x1, &x2];
         let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 6)
             .expect("cascade design");
-        let m = design.core.m;
+        assert_eq!(design.core.m, m);
         assert!(
-            m > DENSE_GRAM_MAX && design.core.dense_gram.is_none(),
+            design.core.dense_gram.is_none(),
             "premise: the fixture must be past the dense Gram cache, got {m} columns"
-        );
-        assert!(
-            m <= CERTIFIED_SPECTRUM_MAX,
-            "premise: the fixture must be inside the certified spectrum budget, got {m} columns"
-        );
-        assert!(
-            m - design.core.nullity() <= y.len() - design.core.nullity(),
-            "premise: the data must identify every Schur mode ({m} columns, {} rows)",
-            y.len()
         );
         let fit = design
             .fit_reml()
