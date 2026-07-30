@@ -4548,6 +4548,15 @@ fn serialize_survival_prediction_payload(
     columns.insert("survival_prob".to_string(), survival_col);
     columns.insert("failure_prob".to_string(), failure_col);
 
+    // Restricted mean survival time over the prediction horizon. The engine
+    // owns both the integral and the choice of horizon; this layer only moves
+    // them across the boundary.
+    let rmst = result.rmst_over_prediction_horizon();
+    if let Some(rmst) = rmst.as_ref() {
+        columns.insert("rmst".to_string(), rmst.values.to_vec());
+    }
+    let rmst_tau = rmst.as_ref().map(|rmst| rmst.tau);
+
     let likelihood_mode_str = match result.likelihood_mode {
         gam::families::survival::construction::SurvivalLikelihoodMode::MarginalSlope => {
             "marginal-slope"
@@ -4597,6 +4606,7 @@ fn serialize_survival_prediction_payload(
         covariance_source: result
             .covariance_source
             .map(|source| source.as_str().to_string()),
+        rmst_tau,
     };
     serde_json::to_string(&survival_payload)
         .map_err(|err| format!("failed to serialize survival prediction payload: {err}"))
@@ -4930,6 +4940,16 @@ fn serialize_competing_risks_prediction_payload(
             (0..upper.nrows()).map(|i| upper[[i, t_last]]).collect(),
         );
     }
+
+    // All-cause restricted mean survival time over the prediction horizon.
+    // Cause-specific restricted-mean-time-lost is `tau - RMST` partitioned by
+    // CIF, which the CIF surface above already carries.
+    let overall_rmst = result.overall_rmst_over_prediction_horizon();
+    if let Some(rmst) = overall_rmst.as_ref() {
+        columns.insert("rmst_overall".to_string(), rmst.values.to_vec());
+    }
+    let rmst_tau = overall_rmst.as_ref().map(|rmst| rmst.tau);
+
     let likelihood_mode_str = match result.likelihood_mode {
         gam::families::survival::construction::SurvivalLikelihoodMode::MarginalSlope => {
             "marginal-slope"
@@ -4992,6 +5012,7 @@ fn serialize_competing_risks_prediction_payload(
         "eta_se": result.eta_se.as_ref().map(|value| vectors_to_nested(value)),
         "eta_lower": eta_lower.as_ref().map(|value| vectors_to_nested(value)),
         "eta_upper": eta_upper.as_ref().map(|value| vectors_to_nested(value)),
+        "rmst_tau": rmst_tau,
         "columns": columns,
     });
     serde_json::to_string(&payload)

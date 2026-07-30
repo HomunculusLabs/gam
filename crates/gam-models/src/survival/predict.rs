@@ -1408,7 +1408,44 @@ fn restricted_mean_survival_time_from_curve(
     Some(area)
 }
 
+/// A restricted-mean-survival column together with the horizon it was
+/// integrated to.
+///
+/// RMST is meaningless without its `tau` — "8.4 months" answers a different
+/// question at a 12-month horizon than at a 24-month one — so the two travel
+/// together and every reporting surface emits both.
+#[derive(Clone, Debug)]
+pub struct RestrictedMeanSurvival {
+    /// The restriction horizon the area was accumulated to, in time units.
+    pub tau: f64,
+    /// Per-row `\int_0^{tau} S_i(t) dt`, one entry per predicted row.
+    pub values: Array1<f64>,
+}
+
+/// The horizon a prediction grid supports: its last time point.
+///
+/// `None` when the grid is empty or its last point is not a positive finite
+/// time, which are exactly the cases the RMST integral rejects.
+fn prediction_horizon(times: &[f64]) -> Option<f64> {
+    let tau = *times.last()?;
+    (tau.is_finite() && tau > 0.0).then_some(tau)
+}
+
 impl SurvivalPredictResult {
+    /// Restricted mean survival time over the prediction horizon — the area
+    /// under each row's survival curve out to the last time on the grid.
+    ///
+    /// This is the reporting default: the horizon is the grid the caller
+    /// already chose, so no separate knob decides it. Callers wanting a
+    /// different `tau` use [`Self::restricted_mean_survival_time`] directly.
+    pub fn rmst_over_prediction_horizon(&self) -> Option<RestrictedMeanSurvival> {
+        let tau = prediction_horizon(&self.times)?;
+        Some(RestrictedMeanSurvival {
+            tau,
+            values: self.restricted_mean_survival_time(tau)?,
+        })
+    }
+
     /// Per-row restricted mean survival time `\int_0^{tau} S_i(t) dt` from the
     /// predicted survival surface. `tau` is the restriction horizon (e.g. the
     /// study follow-up bound). Length-`n` vector, one RMST per predicted row.
@@ -1428,6 +1465,19 @@ impl SurvivalPredictResult {
 }
 
 impl CompetingRisksPredictResult {
+    /// All-cause restricted mean survival time over the prediction horizon.
+    ///
+    /// The competing-risks counterpart of
+    /// [`SurvivalPredictResult::rmst_over_prediction_horizon`], taken on the
+    /// overall survival `exp(-sum_k H_k(t))`.
+    pub fn overall_rmst_over_prediction_horizon(&self) -> Option<RestrictedMeanSurvival> {
+        let tau = prediction_horizon(&self.times)?;
+        Some(RestrictedMeanSurvival {
+            tau,
+            values: self.restricted_mean_overall_survival_time(tau)?,
+        })
+    }
+
     /// Per-row restricted mean survival time of the OVERALL (all-cause) survival
     /// curve, `\int_0^{tau} S_overall_i(t) dt`. For competing risks the relevant
     /// restricted-mean summary is taken on the all-cause survival
@@ -5573,4 +5623,153 @@ mod tests {
             .is_none()
         );
     }
+
+    /// `S(t) = exp(-rate*t)` sampled on `times`, one identical row per subject.
+    fn exponential_survival_result(times: Vec<f64>, rate: f64, rows: usize) -> SurvivalPredictResult {
+        let t = times.len();
+        let mut survival = Array2::<f64>::zeros((rows, t));
+        let mut hazard = Array2::<f64>::zeros((rows, t));
+        let mut cumulative_hazard = Array2::<f64>::zeros((rows, t));
+        for i in 0..rows {
+            for (j, &time) in times.iter().enumerate() {
+                survival[[i, j]] = (-rate * time).exp();
+                hazard[[i, j]] = rate;
+                cumulative_hazard[[i, j]] = rate * time;
+            }
+        }
+        SurvivalPredictResult {
+            times,
+            hazard,
+            survival,
+            cumulative_hazard,
+            linear_predictor: Array1::zeros(rows),
+            likelihood_mode: SurvivalLikelihoodMode::MarginalSlope,
+            survival_se: None,
+            eta_se: None,
+            covariance_source: None,
+        }
+    }
+
+    #[test]
+    fn rmst_over_prediction_horizon_matches_the_exponential_closed_form() {
+        // For S(t) = exp(-rate*t) the restricted mean has a closed form,
+        // RMST(tau) = (1 - exp(-rate*tau)) / rate, so the trapezoid sum is
+        // checked against an exact value rather than against itself.
+        let rate = 0.35_f64;
+        let tau = 4.0_f64;
+        let steps = 4000_usize;
+        let times: Vec<f64> = (1..=steps)
+            .map(|k| tau * (k as f64) / (steps as f64))
+            .collect();
+        let result = exponential_survival_result(times, rate, 3);
+
+        let rmst = result
+            .rmst_over_prediction_horizon()
+            .expect("a positive finite grid yields an RMST column");
+        let expected = (1.0 - (-rate * tau).exp()) / rate;
+
+        assert!((rmst.tau - tau).abs() < 1e-12, "tau = {}", rmst.tau);
+        assert_eq!(rmst.values.len(), 3);
+        for value in rmst.values.iter() {
+            // Trapezoid error on a convex curve is O(h^2); h = tau/steps here,
+            // so 1e-6 is several orders above the discretization floor and
+            // still far below any difference that would matter clinically.
+            assert!(
+                (value - expected).abs() < 1e-6,
+                "rmst {value} vs closed form {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn rmst_over_prediction_horizon_integrates_to_the_last_grid_time() {
+        let times = vec![0.5, 1.0, 2.5, 6.0];
+        let result = exponential_survival_result(times.clone(), 0.2, 2);
+
+        let horizon = result
+            .rmst_over_prediction_horizon()
+            .expect("non-empty grid");
+        let explicit = result
+            .restricted_mean_survival_time(6.0)
+            .expect("explicit tau at the same horizon");
+
+        assert_eq!(horizon.tau, 6.0, "tau is the last grid point");
+        assert_eq!(horizon.values, explicit, "no second integration policy");
+    }
+
+    #[test]
+    fn rmst_over_prediction_horizon_declines_an_empty_or_degenerate_grid() {
+        let empty = exponential_survival_result(Vec::new(), 0.2, 2);
+        assert!(empty.rmst_over_prediction_horizon().is_none(), "empty grid");
+
+        // A grid whose only point is the time origin encloses no area.
+        let origin_only = exponential_survival_result(vec![0.0], 0.2, 2);
+        assert!(
+            origin_only.rmst_over_prediction_horizon().is_none(),
+            "tau = 0 encloses no area"
+        );
+    }
+
+    #[test]
+    fn rmst_over_prediction_horizon_declines_a_non_finite_curve() {
+        let mut result = exponential_survival_result(vec![1.0, 2.0], 0.2, 2);
+        result.survival[[1, 0]] = f64::NAN;
+        assert!(
+            result.rmst_over_prediction_horizon().is_none(),
+            "a NaN anywhere on the integrated span refuses the whole column"
+        );
+    }
+
+    #[test]
+    fn overall_rmst_over_prediction_horizon_reads_the_all_cause_surface() {
+        // Two endpoints, each with constant hazard `rate`, so the all-cause
+        // survival is exp(-2*rate*t) and the closed form applies to it.
+        let rate = 0.25_f64;
+        let tau = 3.0_f64;
+        let steps = 3000_usize;
+        let times: Vec<f64> = (1..=steps)
+            .map(|k| tau * (k as f64) / (steps as f64))
+            .collect();
+        let rows = 2_usize;
+        let t = times.len();
+        let mut overall_survival = Array2::<f64>::zeros((rows, t));
+        for i in 0..rows {
+            for (j, &time) in times.iter().enumerate() {
+                overall_survival[[i, j]] = (-2.0 * rate * time).exp();
+            }
+        }
+        let per_cause = Array2::<f64>::zeros((rows, t));
+        let result = CompetingRisksPredictResult {
+            times,
+            endpoint_names: vec!["a".to_string(), "b".to_string()],
+            hazard: vec![per_cause.clone(), per_cause.clone()],
+            survival: vec![per_cause.clone(), per_cause.clone()],
+            cumulative_hazard: vec![per_cause.clone(), per_cause.clone()],
+            cif: vec![per_cause.clone(), per_cause],
+            overall_survival,
+            linear_predictor: vec![Array1::zeros(rows), Array1::zeros(rows)],
+            likelihood_mode: SurvivalLikelihoodMode::MarginalSlope,
+            covariance_source: None,
+            hazard_se: None,
+            survival_se: None,
+            cumulative_hazard_se: None,
+            cif_se: None,
+            overall_survival_se: None,
+            eta_se: None,
+        };
+
+        let rmst = result
+            .overall_rmst_over_prediction_horizon()
+            .expect("all-cause RMST over a positive grid");
+        let expected = (1.0 - (-2.0 * rate * tau).exp()) / (2.0 * rate);
+
+        assert!((rmst.tau - tau).abs() < 1e-12);
+        for value in rmst.values.iter() {
+            assert!(
+                (value - expected).abs() < 1e-6,
+                "all-cause rmst {value} vs closed form {expected}"
+            );
+        }
+    }
+
 }
