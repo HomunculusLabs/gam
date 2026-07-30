@@ -220,9 +220,11 @@ impl WarmStartStore {
 
     /// Look up the best entry for `key`, or `None` if no valid entry exists.
     ///
-    /// Selection: lowest `objective` first; ties prefer [`EntryKind::Final`]
-    /// over [`EntryKind::Checkpoint`], then latest `written_unix_secs`. If
-    /// every candidate has `objective = None`, picks the latest write.
+    /// Selection: a [`EntryKind::Final`] entry outranks every
+    /// [`EntryKind::Checkpoint`]; among terminal writes the latest one wins
+    /// (which completed fit to resume is a provenance question — see
+    /// `entry_better`); among checkpoints the lowest `objective` wins, ties and
+    /// absent objectives falling back to the latest write.
     /// Corrupt or schema-mismatched candidates are silently cleaned up and
     /// skipped.
     pub fn lookup(&self, key: &Fingerprint) -> Result<Option<WarmStartEntry>, StoreError> {
@@ -762,7 +764,8 @@ const APPROX_META_BYTES: u64 = 512;
 /// How [`WarmStartStore::lookup_with`] ranks candidate entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum LookupMode {
-    /// Lowest objective wins; ties to [`entry_better`].
+    /// Ranked by [`entry_better`]: terminal writes first (latest one), then
+    /// checkpoints by lowest objective.
     Best,
     /// Newest write wins; objectives ignored.
     Latest,
@@ -951,21 +954,46 @@ fn read_meta(path: &Path) -> Result<OnDiskMeta, StoreError> {
 }
 
 fn entry_better(candidate: &OnDiskMeta, current: &OnDiskMeta) -> bool {
-    match (candidate.objective, current.objective) {
-        (Some(c), Some(d)) => {
-            if (c - d).abs() < 1e-12 {
-                match (candidate.kind, current.kind) {
-                    (EntryKind::Final, EntryKind::Checkpoint) => true,
-                    (EntryKind::Checkpoint, EntryKind::Final) => false,
-                    _ => entry_newer(candidate, current),
+    match (candidate.kind, current.kind) {
+        // Two terminal writes under one key are two COMPLETED fits of the same
+        // problem, and choosing between them is a provenance question, not a
+        // quality one. Ranking them by recorded objective let any historical
+        // write whose criterion value happened to be lower outrank the fit that
+        // just finished — and keep outranking it on every future run, since the
+        // fresh terminus never displaces it. A resume then advertised itself as
+        // "a prior fit's terminal certificate" while carrying a point the
+        // previous fit never shipped, and (being inside this criterion's
+        // stationarity band) got accepted at zero outer iterations and shipped
+        // verbatim: the fit became a function of machine history (#2622).
+        //
+        // The recorded objectives are not on a common scale across fits anyway.
+        // Anything that moves the criterion's VALUE without moving this key —
+        // a different build, a differently anchored frozen nuisance — makes the
+        // comparison meaningless while leaving it numerically decisive.
+        // Recency is the ordering the claim needs: the newest terminal write IS
+        // the previous fit's terminus.
+        (EntryKind::Final, EntryKind::Final) => entry_newer(candidate, current),
+        // A completed fit's terminus outranks mid-flight state unconditionally.
+        // A checkpoint's objective is measured at a sub-converged iterate, so a
+        // lower number there does not make it the better resume; crash recovery
+        // is unaffected because checkpoints still rank among themselves whenever
+        // no terminal write exists for the key.
+        (EntryKind::Final, EntryKind::Checkpoint) => true,
+        (EntryKind::Checkpoint, EntryKind::Final) => false,
+        (EntryKind::Checkpoint, EntryKind::Checkpoint) => {
+            match (candidate.objective, current.objective) {
+                (Some(c), Some(d)) => {
+                    if (c - d).abs() < 1e-12 {
+                        entry_newer(candidate, current)
+                    } else {
+                        c < d
+                    }
                 }
-            } else {
-                c < d
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => entry_newer(candidate, current),
             }
         }
-        (Some(_), None) => true,
-        (None, Some(_)) => false,
-        (None, None) => entry_newer(candidate, current),
     }
 }
 
@@ -1452,6 +1480,100 @@ mod tests {
         let latest = store.lookup_latest(&key).unwrap().unwrap();
         assert_eq!(latest.payload, b"newer-higher-objective");
         assert_eq!(latest.iteration, Some(2));
+    }
+
+    #[test]
+    fn lookup_prefers_the_latest_terminal_write_over_a_lower_objective_one_2622() {
+        let (_d, store) = temp_store();
+        let key = key_for("terminal-provenance");
+        // A completed fit from earlier: its recorded criterion value is lower,
+        // but it is not this key's most recent terminus. Nothing about a lower
+        // number makes it the fit whose result a resume may claim to carry.
+        store
+            .save(
+                &key,
+                b"older-lower-objective",
+                Some(1.0),
+                Some(9),
+                EntryKind::Final,
+            )
+            .unwrap();
+        store.test_advance_time(Duration::from_millis(2));
+        store
+            .save(
+                &key,
+                b"newest-terminus",
+                Some(10.0),
+                Some(4),
+                EntryKind::Final,
+            )
+            .unwrap();
+
+        let got = store.lookup(&key).unwrap().unwrap();
+        assert_eq!(
+            got.payload, b"newest-terminus",
+            "a terminal-certificate resume must carry the LAST completed fit's terminus; ranking \
+             two Final writes by recorded objective let a historical entry outrank the fit that \
+             just finished, permanently, and the resume then shipped a point no recent fit \
+             produced (#2622)"
+        );
+        assert_eq!(got.objective, Some(10.0));
+    }
+
+    #[test]
+    fn lookup_prefers_a_terminal_write_over_a_lower_objective_checkpoint_2622() {
+        let (_d, store) = temp_store();
+        let key = key_for("terminal-vs-checkpoint");
+        store
+            .save(&key, b"final", Some(5.0), Some(3), EntryKind::Final)
+            .unwrap();
+        store.test_advance_time(Duration::from_millis(2));
+        // A mid-flight iterate measured at a sub-converged state. Its objective
+        // is not on the terminus' scale, so a lower number here is not evidence
+        // that it is the better resume.
+        store
+            .save(
+                &key,
+                b"lower-objective-checkpoint",
+                Some(0.5),
+                Some(70),
+                EntryKind::Checkpoint,
+            )
+            .unwrap();
+
+        let got = store.lookup(&key).unwrap().unwrap();
+        assert_eq!(got.payload, b"final");
+        assert_eq!(got.kind, EntryKind::Final);
+    }
+
+    #[test]
+    fn checkpoints_still_rank_by_objective_when_no_terminal_write_exists_2622() {
+        let (_d, store) = temp_store();
+        let key = key_for("checkpoint-only");
+        store
+            .save(&key, b"worse", Some(3.0), Some(1), EntryKind::Checkpoint)
+            .unwrap();
+        store.test_advance_time(Duration::from_millis(2));
+        store
+            .save(&key, b"best", Some(1.0), Some(2), EntryKind::Checkpoint)
+            .unwrap();
+        store.test_advance_time(Duration::from_millis(2));
+        store
+            .save(
+                &key,
+                b"newest-but-worse",
+                Some(2.0),
+                Some(3),
+                EntryKind::Checkpoint,
+            )
+            .unwrap();
+
+        let got = store.lookup(&key).unwrap().unwrap();
+        assert_eq!(
+            got.payload, b"best",
+            "crash recovery keeps the best iterate seen: with no terminal write for the key, \
+             checkpoints are still ordered by objective"
+        );
     }
 
     #[test]

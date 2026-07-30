@@ -28,8 +28,10 @@
 //! Per-entry SHA-256 checksums catch any residual corruption.
 //!
 //! Multiple entries can coexist for one key (concurrent fits, prior aborted
-//! runs). `lookup` picks the lowest-objective entry; ties prefer
-//! [`EntryKind::Final`] over [`EntryKind::Checkpoint`], then latest mtime.
+//! runs). `lookup` prefers a completed fit's [`EntryKind::Final`] write over
+//! any [`EntryKind::Checkpoint`], takes the LATEST of several terminal writes
+//! (which completed fit a resume carries is a provenance question, not a
+//! quality one), and orders checkpoints by lowest objective.
 //!
 //! Disk is bounded by [`StoreOptions::size_budget_bytes`] (default ~1 GiB);
 //! oldest entries are evicted to fit. Entries older than

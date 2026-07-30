@@ -1870,8 +1870,22 @@ where
 
         break;
     } // negative-binomial joint-coordinate loop
-    // Ensure we don't report 0 iterations to the caller; at least 1 is more meaningful.
-    let iters = std::cmp::max(1, outer_result.iterations);
+    // Report the outer iteration count that was MEASURED, including a genuine
+    // zero. A seed that is a prior fit's terminal certificate and is still
+    // stationary here is accepted without iterating
+    // (`certified_resume_is_already_stationary`), so zero is a reachable,
+    // meaningful outcome; flooring it to one made the reported count a claim no
+    // measurement supports, and every consumer asking "did a fit happen" then
+    // read a fabricated pass (#2622).
+    //
+    // Dropping the floor cannot let a zero-iteration fit slip past the #934
+    // certificate obligation from this entry point. The `certificate_valid`
+    // gate below refuses to ship at all unless the outer result converged AND
+    // carries a certifying analytic certificate, for every fit with a smoothing
+    // coordinate; assembly then takes its `Analytic` arm on the certificate's
+    // presence, never the iteration count, and its `outer_iterations == 0`
+    // fixed-λ arm stays unreachable from here.
+    let iters = outer_result.iterations;
 
     // Map beta back to original basis
     let beta_orig_internal = pirls_res
