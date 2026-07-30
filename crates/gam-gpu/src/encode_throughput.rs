@@ -54,7 +54,7 @@ use std::time::{Duration, Instant};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use super::linalg_dispatch::ResidentDesignGram;
-use super::policy::{GPU_THROUGHPUT_TARGET_ROWS_PER_SEC, GpuThroughputVerdict};
+use super::policy::GpuThroughputVerdict;
 
 /// A representative LLM/SAE batched-solve work cell: `n` design rows, `p` wide
 /// decoder border. (`d`, the per-atom reduced-Schur block size, is fixed by the
@@ -104,7 +104,7 @@ pub struct ResidentSolveThroughput {
     /// device path did not engage (a non-measurement).
     pub measured_rows_per_sec: f64,
     /// The verdict comparing `measured_rows_per_sec` against
-    /// [`GPU_THROUGHPUT_TARGET_ROWS_PER_SEC`].
+    /// [`super::policy::GPU_THROUGHPUT_TARGET_ROWS_PER_SEC`].
     pub verdict: GpuThroughputVerdict,
 }
 

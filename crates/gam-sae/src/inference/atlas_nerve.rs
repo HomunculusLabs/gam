@@ -14,7 +14,6 @@ use crate::chart_transfer::TransferCertificate;
 use crate::inference::atlas_holonomy::{
     AtlasEulerCharacteristic, AtlasHolonomyCertificate, AtlasHolonomyEdgeId,
 };
-use crate::inference::layer_transport::FittedTransport;
 use crate::manifold::{
     AtlasOrientability, BettiSignature, GraphCompressionKind, GraphCompressionReport,
 };

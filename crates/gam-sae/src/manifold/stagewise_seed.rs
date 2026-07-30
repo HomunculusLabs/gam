@@ -1,6 +1,5 @@
 //! Typed construction of the single-atom seed consumed by stagewise SAE.
 
-use gam_terms::analytic_penalties::AnalyticPenaltyRegistry;
 use ndarray::{ArrayView2, ArrayView3, ArrayView4};
 
 use super::*;
