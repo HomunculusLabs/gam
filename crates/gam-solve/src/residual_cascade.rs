@@ -4614,7 +4614,19 @@ mod refinement_decision_tests {
         // by `side`, and neither the level table above nor the net arithmetic
         // says where it is won. Two guesses at it were wrong by 13 and by 8
         // columns respectively, so it is measured here instead.
-        for side in [45_usize, 50, 60, 70, 80, 90] {
+        //
+        // The band is swept DENSELY (every side from 45 to 64) rather than sampled,
+        // because a coarse sample of this curve is what produced both wrong guesses
+        // and then a third wrong claim drawn from the sample itself -- that no side
+        // below 64 can be identified, inferred from 45, 50 and 60 all being short
+        // by a small margin. The MARGIN is not monotone in `side` either, so
+        // neighbouring sides disagree and only every-side settles it. Sides above
+        // the band stay coarse: past the net discontinuity `m` falls away from `n`
+        // and the outcome is no longer close.
+        let mut sides: Vec<usize> = (45..=64).collect();
+        sides.extend([70, 80, 90]);
+        let mut identified_in_band: Vec<(usize, usize, usize)> = Vec::new();
+        for side in sides {
             let (x1, x2, y) = dense_fixture(side);
             let weights = vec![1.0; y.len()];
             let axes: [&[f64]; 2] = [&x1, &x2];
@@ -4623,14 +4635,22 @@ mod refinement_decision_tests {
             let m = design.core.m;
             let n = y.len();
             let nullity = design.core.nullity();
+            let identified = m - nullity <= n - nullity;
+            let past_cache = m > DENSE_GRAM_MAX && design.core.dense_gram.is_none();
+            let certified = m <= CERTIFIED_SPECTRUM_MAX;
             println!(
-                "#2546-IDENT side={side} n={n} m={m} nullity={nullity} \
-                 identified={} past_cache={} certified={}",
-                m - nullity <= n - nullity,
-                m > DENSE_GRAM_MAX && design.core.dense_gram.is_none(),
-                m <= CERTIFIED_SPECTRUM_MAX
+                "#2546-IDENT side={side} n={n} m={m} nullity={nullity} margin={} \
+                 identified={identified} past_cache={past_cache} certified={certified}",
+                m as i64 - n as i64
             );
+            if side <= 64 && identified && past_cache && certified {
+                identified_in_band.push((side, m, n));
+            }
         }
+        println!(
+            "#2546-IDENT sides in 45..=64 that are past the cache, inside the budget \
+             and identified: {identified_in_band:?}"
+        );
     }
 
     /// The width regime this issue existed to open: PAST the dense Gram cache,
@@ -4683,13 +4703,24 @@ mod refinement_decision_tests {
         // columns, so the band ends below 64" was a trend argument and not a
         // measurement.
         //
-        // But `m` does not track `n` at a fixed offset below the discontinuity
-        // either, and the margin is not monotone in `side` there: side=47 is
-        // identified by 50 columns while its neighbours 45 and 50 are short by 13
-        // and 8. So a fine search below 64 CAN succeed -- side=47 is measured
-        // doing it -- and the reason to prefer the candidate list below is cost,
-        // not reachability: side=70 hits on the first design build where stepping
-        // from 46 pays for one or two dozen.
+        // Below the discontinuity, though, `m` does not track `n` at a fixed
+        // offset, and the MARGIN `m - n` is not monotone in `side` either. Swept
+        // exhaustively over 45..=64 by `zz_measure_cascade_width_by_level_count_2546`:
+        //
+        //   45:+13  46: +9  47:-50  48:-63  49:+27  50: +8  51:+22  52:+21
+        //   53:+24  54:+19  55:+27  56:+14  57:+20  58:+18  59:+20  60:+28
+        //   61:+20  62:+22  63:+24  64:+21
+        //
+        // Sides 47 and 48 are a two-point DIP of -50 and -63 in a band that is
+        // otherwise +8 to +28, and both satisfy all three conditions. So a fine
+        // search below 64 does succeed, and "45, 50 and 60 are all short, so no
+        // side below 64 is identified" was a third extrapolation over the same
+        // curve -- it samples straight across the only two sides that work.
+        //
+        // The reason to prefer the candidate list below is therefore COST, not
+        // reachability: side=70 is identified by 2978 columns and hits on the first
+        // design build, where stepping from 46 pays for two builds to reach 47 and
+        // a reader cannot tell a deliberate choice from a lucky one.
         //
         // So the candidates are the measured ones, in cost order, with the band's
         // edges kept after them: the search still self-heals if DENSE_GRAM_MAX or
