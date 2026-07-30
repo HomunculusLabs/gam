@@ -391,6 +391,7 @@ from .layer_transport import (
 from .manifold_crosscoder import sae_crosscoder_fit
 from .manifold_behavior import sae_behavior_fit
 from .checkpoint_dynamics import sae_checkpoint_dynamics
+from .intervention_calibration import ChartCalibration, fit_chart_calibration
 from ._sae_spectral import audit_sae
 from .geometry import (
     CircleManifold,

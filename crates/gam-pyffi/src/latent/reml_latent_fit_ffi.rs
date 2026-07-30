@@ -4958,69 +4958,33 @@ fn survival_lifted_metrics_from_predictions<'py>(
         Ok(out.clone().unbind())
     };
     let obs: Vec<bool> = events.iter().map(|value| *value > 0.5).collect();
-    let mut surv = survival_matrix.as_array().to_owned();
+    let raw_surv = survival_matrix.as_array();
     if event_times.len() != obs.len()
-        || surv.nrows() != event_times.len()
-        || surv.ncols() != grid.len()
+        || raw_surv.nrows() != event_times.len()
+        || raw_surv.ncols() != grid.len()
         || grid.len() < 2
         || grid.windows(2).any(|pair| pair[1] <= pair[0])
     {
         return none_result(&out);
     }
-    for mut row in surv.rows_mut() {
-        row[0] = 1.0;
-        let mut prev = 1.0;
-        for value in row.iter_mut() {
-            *value = value.clamp(eps, 1.0).min(prev);
-            prev = *value;
-        }
+    // Hoisted out of the scoring loop: the core scorer takes finite positive
+    // event times as a precondition, and deciding what a malformed one means
+    // for the Python surface is this layer's job.
+    if event_times
+        .iter()
+        .any(|time| !time.is_finite() || *time <= 0.0)
+    {
+        return none_result(&out);
     }
-    let dt: Vec<f64> = grid.windows(2).map(|pair| pair[1] - pair[0]).collect();
-    let cumhaz = surv.mapv(|value| -value.clamp(eps, 1.0).ln());
-    let mut haz = Array2::<f64>::zeros((surv.nrows(), surv.ncols() - 1));
-    for row in 0..surv.nrows() {
-        for col in 0..surv.ncols() - 1 {
-            haz[[row, col]] = ((cumhaz[[row, col + 1]] - cumhaz[[row, col]]) / dt[col]).max(0.0);
-        }
-    }
-    let mut haz_sq_prefix = Array2::<f64>::zeros((surv.nrows(), surv.ncols()));
-    for row in 0..surv.nrows() {
-        for col in 0..haz.ncols() {
-            haz_sq_prefix[[row, col + 1]] =
-                haz_sq_prefix[[row, col]] + haz[[row, col]] * haz[[row, col]] * dt[col];
-        }
-    }
-    let mut log_losses = vec![0.0; event_times.len()];
-    // The "hazard quadratic" per-subject score 0.5∫h² − δ·h(T): a proper score
-    // for the hazard model, but NOT the (IPCW) Brier score — see #1563.
-    let mut hazard_quadratic_losses = vec![0.0; event_times.len()];
-    for (row, &time) in event_times.iter().enumerate() {
-        if !time.is_finite() || time <= 0.0 {
-            return none_result(&out);
-        }
-        let mut j = grid.partition_point(|value| *value < time);
-        if j >= grid.len() {
-            j = grid.len() - 1;
-        }
-        let interval_idx = j.saturating_sub(1);
-        let (h_z, h2_int, hcum_z) = if (grid[j] - time).abs() <= 1.0e-12 {
-            (
-                haz[[row, interval_idx]],
-                haz_sq_prefix[[row, j]],
-                cumhaz[[row, j]],
-            )
-        } else {
-            let elapsed = time - grid[interval_idx];
-            let h = haz[[row, interval_idx]];
-            (
-                h,
-                haz_sq_prefix[[row, interval_idx]] + h * h * elapsed,
-                cumhaz[[row, interval_idx]] + h * elapsed,
-            )
-        };
-        log_losses[row] = hcum_z - if obs[row] { h_z.max(eps).ln() } else { 0.0 };
-        hazard_quadratic_losses[row] = 0.5 * h2_int - if obs[row] { h_z } else { 0.0 };
-    }
+    let (surv, scores) = gam::families::survival::predict::monotone_survival_and_hazard_scores(
+        raw_surv,
+        &event_times,
+        &obs,
+        &grid,
+        eps,
+    );
+    let log_losses = scores.log_losses;
+    let hazard_quadratic_losses = scores.hazard_quadratic_losses;
     let logloss = log_losses.iter().sum::<f64>() / log_losses.len() as f64;
     let hazard_quadratic =
         hazard_quadratic_losses.iter().sum::<f64>() / hazard_quadratic_losses.len() as f64;
@@ -5061,59 +5025,18 @@ fn survival_lifted_metrics_from_predictions<'py>(
 
     let mut nagelkerke = None;
     if let Some(null_matrix) = null_survival_matrix {
-        let mut null_surv = null_matrix.as_array().to_owned();
-        if null_surv.dim() == surv.dim() {
-            for mut row in null_surv.rows_mut() {
-                row[0] = 1.0;
-                let mut prev = 1.0;
-                for value in row.iter_mut() {
-                    *value = value.clamp(eps, 1.0).min(prev);
-                    prev = *value;
-                }
-            }
-            let null_cumhaz = null_surv.mapv(|value| -value.clamp(eps, 1.0).ln());
-            let mut null_haz = Array2::<f64>::zeros((null_surv.nrows(), null_surv.ncols() - 1));
-            for row in 0..null_surv.nrows() {
-                for col in 0..null_surv.ncols() - 1 {
-                    null_haz[[row, col]] =
-                        ((null_cumhaz[[row, col + 1]] - null_cumhaz[[row, col]]) / dt[col])
-                            .max(0.0);
-                }
-            }
-            let mut null_haz_sq_prefix =
-                Array2::<f64>::zeros((null_surv.nrows(), null_surv.ncols()));
-            for row in 0..null_surv.nrows() {
-                for col in 0..null_haz.ncols() {
-                    null_haz_sq_prefix[[row, col + 1]] = null_haz_sq_prefix[[row, col]]
-                        + null_haz[[row, col]] * null_haz[[row, col]] * dt[col];
-                }
-            }
-            let mut null_log_losses = vec![0.0; event_times.len()];
-            let mut null_hazard_quadratic_losses = vec![0.0; event_times.len()];
-            for (row, &time) in event_times.iter().enumerate() {
-                let mut j = grid.partition_point(|value| *value < time);
-                if j >= grid.len() {
-                    j = grid.len() - 1;
-                }
-                let interval_idx = j.saturating_sub(1);
-                let (h_z, hcum_z, h2_int) = if (grid[j] - time).abs() <= 1.0e-12 {
-                    (
-                        null_haz[[row, interval_idx]],
-                        null_cumhaz[[row, j]],
-                        null_haz_sq_prefix[[row, j]],
-                    )
-                } else {
-                    let elapsed = time - grid[interval_idx];
-                    let h = null_haz[[row, interval_idx]];
-                    (
-                        h,
-                        null_cumhaz[[row, interval_idx]] + h * elapsed,
-                        null_haz_sq_prefix[[row, interval_idx]] + h * h * elapsed,
-                    )
-                };
-                null_log_losses[row] = hcum_z - if obs[row] { h_z.max(eps).ln() } else { 0.0 };
-                null_hazard_quadratic_losses[row] = 0.5 * h2_int - if obs[row] { h_z } else { 0.0 };
-            }
+        let raw_null = null_matrix.as_array();
+        if raw_null.dim() == surv.dim() {
+            let (null_surv, null_scores) =
+                gam::families::survival::predict::monotone_survival_and_hazard_scores(
+                    raw_null,
+                    &event_times,
+                    &obs,
+                    &grid,
+                    eps,
+                );
+            let null_log_losses = null_scores.log_losses;
+            let null_hazard_quadratic_losses = null_scores.hazard_quadratic_losses;
             let null_logloss = null_log_losses.iter().sum::<f64>() / null_log_losses.len() as f64;
             let null_hazard_quadratic = null_hazard_quadratic_losses.iter().sum::<f64>()
                 / null_hazard_quadratic_losses.len() as f64;
