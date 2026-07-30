@@ -19,6 +19,7 @@
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
+use gam::test_support::reference::rmse;
 use gam::{
     FitConfig, FitResult, StandardFitResult, encode_recordswith_inferred_schema, fit_from_formula,
     init_parallelism,
@@ -28,11 +29,6 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal, Uniform};
 use std::time::Instant;
-
-fn rmse(a: &[f64], b: &[f64]) -> f64 {
-    assert_eq!(a.len(), b.len());
-    (a.iter().zip(b).map(|(p, q)| (p - q).powi(2)).sum::<f64>() / a.len() as f64).sqrt()
-}
 
 /// Fit `formula` on `ds`, then predict on the design rebuilt at `grid`.
 /// Returns (fit, fitted-at-grid, fit_seconds, predict_seconds).

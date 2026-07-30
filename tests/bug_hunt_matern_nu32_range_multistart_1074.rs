@@ -21,6 +21,7 @@
 
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
+use gam::test_support::reference::rmse;
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
@@ -29,10 +30,6 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal, Uniform};
 use std::f64::consts::PI;
-
-fn rmse(a: &[f64], b: &[f64]) -> f64 {
-    (a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f64>() / a.len() as f64).sqrt()
-}
 
 /// Fit `y ~ matern(x, nu=1.5, k=18)` on `f(x)=0.5+sin(3πx)exp(-x²/2)+N(0,0.08²)`
 /// (the `quality_vs_mgcv_matern_varying_nu` ν=3/2 arm) for one noise seed and

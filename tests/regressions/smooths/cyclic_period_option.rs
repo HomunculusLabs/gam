@@ -23,6 +23,7 @@
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
+use gam::test_support::reference::max_abs_diff;
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
@@ -71,13 +72,6 @@ fn fit_predict(formula: &str, probes: &[f64]) -> Vec<f64> {
     let design = build_term_collection_design(m.view(), &fit.resolvedspec)
         .unwrap_or_else(|e| panic!("rebuild design for `{formula}`: {e}"));
     design.design.apply(&fit.fit.beta).to_vec()
-}
-
-fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0_f64, f64::max)
 }
 
 /// A dense grid over the full declared period plus the wrap point, used both

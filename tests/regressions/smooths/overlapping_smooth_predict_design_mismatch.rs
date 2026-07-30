@@ -24,6 +24,7 @@ use gam::inference::data::EncodedDataset;
 use gam::inference::model::{ColumnKindTag, DataSchema, SchemaColumn};
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
+use gam::test_support::reference::pearson;
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism};
 use ndarray::Array2;
 
@@ -151,23 +152,6 @@ fn run_one(formula: &str) {
     let grid_pred = grid_design.design.apply(&fit.fit.beta).to_vec();
     assert_eq!(grid_pred.len(), m);
     assert!(grid_pred.iter().all(|v| v.is_finite()));
-}
-
-fn pearson(a: &[f64], b: &[f64]) -> f64 {
-    let n = a.len() as f64;
-    let ma = a.iter().sum::<f64>() / n;
-    let mb = b.iter().sum::<f64>() / n;
-    let mut cov = 0.0;
-    let mut va = 0.0;
-    let mut vb = 0.0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        let dx = x - ma;
-        let dy = y - mb;
-        cov += dx * dy;
-        va += dx * dx;
-        vb += dy * dy;
-    }
-    cov / (va.sqrt() * vb.sqrt()).max(1e-300)
 }
 
 #[test]

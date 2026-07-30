@@ -21,6 +21,7 @@
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
+use gam::test_support::reference::rmse;
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
@@ -49,11 +50,6 @@ fn linspace(a: f64, b: f64) -> Vec<f64> {
     (0..GRID_POINTS)
         .map(|i| a + (b - a) * (i as f64) / ((GRID_POINTS - 1) as f64))
         .collect()
-}
-
-fn rmse(a: &[f64], b: &[f64]) -> f64 {
-    let s: f64 = a.iter().zip(b.iter()).map(|(u, v)| (u - v) * (u - v)).sum();
-    (s / a.len() as f64).sqrt()
 }
 
 #[test]

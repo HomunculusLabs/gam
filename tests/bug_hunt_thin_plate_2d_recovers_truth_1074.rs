@@ -21,15 +21,12 @@
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
+use gam::test_support::reference::rmse;
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
 use ndarray::Array2;
 use std::f64::consts::PI;
-
-fn rmse(a: &[f64], b: &[f64]) -> f64 {
-    (a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f64>() / a.len() as f64).sqrt()
-}
 
 /// Deterministic standard-normal stream (splitmix64 → Box–Muller), identical to
 /// the quality test's `GaussianStream`, so the noisy `y` is bit-for-bit the same.

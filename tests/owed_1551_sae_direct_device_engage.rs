@@ -41,6 +41,7 @@ use gam::solver::arrow_schur::{
     solve_arrow_newton_step_with_options,
 };
 use gam::solver::gpu_kernels::arrow_schur::solve_arrow_newton_step_dense_reference;
+use gam::test_support::reference::max_abs_diff;
 use ndarray::Array2;
 
 fn gpu_available_or_fail() -> bool {
@@ -320,12 +321,6 @@ fn build_framed_sae_system(install_device_data: bool) -> ArrowSchurSystem {
         });
     }
     sys
-}
-
-fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
-    a.iter()
-        .zip(b.iter())
-        .fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()))
 }
 
 /// Build the production Direct options + assert the mode the #1551 device branch

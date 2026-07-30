@@ -28,6 +28,7 @@
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
+use gam::test_support::reference::rmse;
 use gam::types::{InverseLink, ResponseColumnKind, ResponseFamily, StandardLink};
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
@@ -51,11 +52,6 @@ fn truth_eta(x: f64) -> f64 {
 fn centered(v: &[f64]) -> Vec<f64> {
     let mean = v.iter().sum::<f64>() / v.len().max(1) as f64;
     v.iter().map(|x| x - mean).collect()
-}
-
-fn rmse(a: &[f64], b: &[f64]) -> f64 {
-    let n = a.len().max(1) as f64;
-    (a.iter().zip(b).map(|(p, q)| (p - q) * (p - q)).sum::<f64>() / n).sqrt()
 }
 
 /// Layer 1: the single auto-inference seam. With no family supplied,

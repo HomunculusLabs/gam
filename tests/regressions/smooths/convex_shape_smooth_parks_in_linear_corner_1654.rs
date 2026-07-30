@@ -50,6 +50,7 @@
 
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
+use gam::test_support::reference::rmse;
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
@@ -77,11 +78,6 @@ fn make_convex_data(seed: u64, n: usize, sigma: f64) -> (Vec<f64>, Vec<f64>, Vec
         t.push(fi);
     }
     (x, y, t)
-}
-
-fn rmse(a: &[f64], b: &[f64]) -> f64 {
-    let s: f64 = a.iter().zip(b).map(|(p, q)| (p - q) * (p - q)).sum();
-    (s / a.len() as f64).sqrt()
 }
 
 #[test]

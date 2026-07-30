@@ -22,6 +22,7 @@
 
 use csv::StringRecord;
 use gam::pirls::PirlsStatus;
+use gam::test_support::reference::pearson;
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
@@ -58,21 +59,6 @@ fn make_panel(
     }
     let data = encode_recordswith_inferred_schema(headers, rows).expect("encode panel");
     (data, true_group_mean)
-}
-
-fn pearson(a: &[f64], b: &[f64]) -> f64 {
-    let n = a.len() as f64;
-    let ma = a.iter().sum::<f64>() / n;
-    let mb = b.iter().sum::<f64>() / n;
-    let mut cov = 0.0;
-    let mut va = 0.0;
-    let mut vb = 0.0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        cov += (x - ma) * (y - mb);
-        va += (x - ma) * (x - ma);
-        vb += (y - mb) * (y - mb);
-    }
-    cov / (va.sqrt() * vb.sqrt())
 }
 
 #[test]

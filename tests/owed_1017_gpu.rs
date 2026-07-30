@@ -24,6 +24,7 @@ use gam::solver::gpu_kernels::arrow_schur::{
     solve_arrow_newton_step, solve_arrow_newton_step_dense_reference,
 };
 use gam::solver::gpu_kernels::sae_resident::{DeviceResidentInnerOptions, color_arm_fixture};
+use gam::test_support::reference::max_abs_diff;
 
 fn build_wide_border(n: usize, d: usize, k: usize) -> ArrowSchurSystem {
     let mut state: u64 = 0xC0FFEE ^ (k as u64);
@@ -51,12 +52,6 @@ fn build_wide_border(n: usize, d: usize, k: usize) -> ArrowSchurSystem {
         sys.gb[a] = lcg();
     }
     sys
-}
-
-fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
-    a.iter()
-        .zip(b.iter())
-        .fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()))
 }
 
 #[test]
