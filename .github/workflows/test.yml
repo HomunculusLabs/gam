@@ -74,7 +74,24 @@ on:
 # cannot destroy the ledger and duplicate ledger events cannot supersede it.
 concurrency:
   group: rust-ci-${{ inputs.ledger_date != '' && format('ledger-{0}', inputs.ledger_date) || github.ref }}
-  cancel-in-progress: ${{ inputs.ledger_date == '' }}
+  # NEVER cancel a run on `main`.
+  #
+  # The `aggregate` job is `if: always()` and ends by publishing this run's
+  # numbers to `bench/gha_results/rust-test-suite` -- deliberately, so that a
+  # failed or timed-out run still records what it measured, because those are
+  # usually the interesting numbers. But a CANCELLED workflow does not finish
+  # its `always()` jobs either, so cancellation skips the publish entirely.
+  #
+  # On a fast-moving `main` every push cancelled the run before it, and the
+  # ledger silently froze: `rust-test-suite` sat at 2026-07-26 for three days
+  # while every other lane stayed current, and multiple investigations were
+  # run against that stale snapshot before anyone noticed. The sibling lanes
+  # that stayed fresh (`reference-quality`) are exactly the ones that do not
+  # cancel.
+  #
+  # Branches and PRs keep cancelling -- there the newest push is the only one
+  # anybody wants, and no ledger is written for them.
+  cancel-in-progress: ${{ inputs.ledger_date == '' && github.ref != 'refs/heads/main' }}
 
 permissions:
   actions: read
