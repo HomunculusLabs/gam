@@ -2832,7 +2832,6 @@ mod tests {
 
         let generic = observed_weight_noncanonical(
             y - mu,
-            mu,
             jet.d1,
             jet.d2,
             jet.d3,

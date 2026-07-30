@@ -534,8 +534,8 @@ pub(crate) fn compute_observed_hessian_curvature_arrays(
 /// rather than the exact Laplace approximation.
 ///
 /// # Arguments
-/// * `y`   -- response value
-/// * `mu`  -- fitted mean h(eta)
+/// * `resid` -- `y - mu`, formed by the caller so a saturated Bernoulli row can
+///   supply the link's tail complement instead of a cancelled zero (#2273)
 /// * `h1`...`h4` -- inverse-link derivatives h'(eta) ... h''''(eta)
 /// * `vj`  -- variance-function jet (V, V', V'', V''') evaluated at mu
 /// * `phi` -- dispersion parameter (1.0 for Bernoulli/Poisson)
@@ -547,7 +547,6 @@ pub(crate) fn compute_observed_hessian_curvature_arrays(
 #[inline]
 pub fn observed_weight_noncanonical(
     resid: f64,
-    mu: f64,
     h1: f64,
     h2: f64,
     h3: f64,
@@ -556,7 +555,6 @@ pub fn observed_weight_noncanonical(
     phi: f64,
     pw: f64,
 ) -> (f64, f64, f64) {
-    let _ = mu;
     // The whole tower is `T = h₁/(φV)` and its η-derivatives: `B = T₁`,
     // `B_η = T₂`, `B_ηη = T₃`, and `W_F = h₁·T₀` with its derivatives by the
     // product rule. `weight_ratio_tower` builds `T` by Leibniz on `T·Q = h₁`,
@@ -670,7 +668,6 @@ pub fn weight_ratio_tower(
 #[inline]
 pub fn e_obs_from_jets(
     resid: f64,
-    mu: f64,
     h1: f64,
     h2: f64,
     h3: f64,
@@ -680,7 +677,6 @@ pub fn e_obs_from_jets(
     phi: f64,
     pw: f64,
 ) -> f64 {
-    let _ = mu;
     // One recurrence, shared with `observed_weight_noncanonical` (#2273): the
     // two used to expand the same `T`-tower independently, and the lower-order
     // one expanded it into `φV²/φV³/φV⁴` closed forms that underflow on a
@@ -922,7 +918,6 @@ pub fn observed_weight_dispatch(
             let resid = bernoulli_pair_residual(family, y, mu, one_minus_mu);
             observed_weight_noncanonical(
                 resid,
-                mu,
                 jet.d1,
                 jet.d2,
                 jet.d3,

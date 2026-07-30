@@ -3588,7 +3588,7 @@ mod tk_math_tests {
             v.is_finite() && v > 0.0,
             "fixture {link_label} (eta={eta0}) has degenerate V(μ)={v}; pick a non-saturated point"
         );
-        let analytic = e_obs_from_jets(y, h0, h1, h2, h3, h4, h5, vj, phi, 1.0);
+        let analytic = e_obs_from_jets(y - h0, h1, h2, h3, h4, h5, vj, phi, 1.0);
 
         let (_, _, _, d3_w) = third_derivative(
             |delta| {
@@ -3683,8 +3683,7 @@ mod tk_math_tests {
             // canonical fast-path stores in `e_array`.
             let canonical_fast_path = h4; // W = h₁ ⇒ ∂³W/∂η³ = h⁽⁴⁾.
             let general_at_y_eq_mu = e_obs_from_jets(
-                jet.mu,
-                jet.mu,
+                0.0,
                 jet.d1,
                 jet.d2,
                 jet.d3,

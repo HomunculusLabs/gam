@@ -3788,8 +3788,7 @@ impl<'a> RemlState<'a> {
                 let pw = weights[i];
                 let y_i = y_view[i];
                 let resid_i = pirls::bernoulli_pair_residual(weight_family, y_i, mu_i, one_minus_mu);
-                let e_i =
-                    pirls::e_obs_from_jets(resid_i, mu_i, h1, h2, h3, h4, h5, vj, phi, pw);
+                let e_i = pirls::e_obs_from_jets(resid_i, h1, h2, h3, h4, h5, vj, phi, pw);
                 if e_i.is_finite() {
                     Ok(e_i)
                 } else {
