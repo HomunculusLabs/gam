@@ -2574,29 +2574,6 @@ fn rho_gradient_part_ladder_2454(
     rho_values: &[f64],
     step: f64,
 ) -> Vec<RhoGradientLadderRow2454> {
-    rho_gradient_part_ladder_family_2454(rho_values, step, LikelihoodSpec::gaussian_identity())
-}
-
-/// The #2454 ladder over an arbitrary family.
-///
-/// #2623/#2644 DISCRIMINATOR. The Gaussian-identity ladder above can only grade
-/// three of the four criterion channels: a Gaussian fit is dispersion-profiled
-/// (`DispersionHandling::ProfiledGaussian`), and the inner-KKT envelope
-/// correction `−½rᵀH⁻¹r` is gated on `DispersionHandling::Fixed` — so the `kkt`
-/// column is identically zero on every Gaussian rung and its analytic-vs-FD
-/// comparison is vacuous. Every non-Gaussian family takes the `Fixed` branch,
-/// which is where the correction, and its ρ-derivative
-/// `−a_kᵀq + ½qᵀA_kq`, actually run.
-///
-/// Threading the family through the SAME ladder (one fixture, one audit, one FD
-/// stencil) is what makes the two arms comparable: a channel that is clean on
-/// the Gaussian arm and dirty on the binomial arm is the KKT channel by
-/// elimination, with no second code path to have drifted.
-fn rho_gradient_part_ladder_family_2454(
-    rho_values: &[f64],
-    step: f64,
-    family: LikelihoodSpec,
-) -> Vec<RhoGradientLadderRow2454> {
     use gam_solve::estimate::outer_eval_capture::{
         enable_rho_outer_audit, take_rho_outer_audit, PenaltyEnergyAudit, RhoOuterAudit,
     };
@@ -2610,23 +2587,7 @@ fn rho_gradient_part_ladder_family_2454(
         let x1 = (i as f64 * 0.17).sin();
         data[[i, 0]] = x0;
         data[[i, 1]] = x1;
-        let eta = (3.0 * x0).cos() + 0.35 * x1;
-        y[i] = if family.is_gaussian_identity() {
-            eta
-        } else {
-            // Smooth, non-separating Bernoulli labels (the `well_conditioned`
-            // recipe from `build_iso_kappa_fixture`): a deterministic logistic
-            // threshold against a fixed phase grid keeps fitted μ away from
-            // {0,1}, so `H` stays well conditioned and the FD oracle grades the
-            // KKT channel rather than the conditioning of the inner solve.
-            let p = 1.0 / (1.0 + (-0.6 * eta).exp());
-            let u = 0.5 * ((5.0 * (i as f64) + 0.5).sin() + 1.0);
-            if u < p {
-                1.0
-            } else {
-                0.0
-            }
-        };
+        y[i] = (3.0 * x0).cos() + 0.35 * x1;
     }
     let weights = Array1::ones(n);
     let offset = Array1::zeros(n);
@@ -2660,6 +2621,8 @@ fn rho_gradient_part_ladder_family_2454(
         penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
+    let family = LikelihoodSpec::gaussian_identity();
+
     let design = build_term_collection_design(data.view(), &spec)
         .unwrap_or_else(|e| panic!("design failed: {e:?}"));
     let frozen = freeze_term_collection_from_design(&spec, &design)
@@ -3082,104 +3045,6 @@ fn zz_measure_rho_gradient_part_decomposition_2454() {
         ] {
             eprintln!(
                 "[zz-parts-2454]    {name} an={analytic:+.10e} fd={fd:+.10e} \
-                 gap={:+.6e} gap_over_lambda={:+.6e}",
-                analytic - fd,
-                (analytic - fd) / row.lambda,
-            );
-        }
-    }
-}
-
-/// #2623/#2644 MEASUREMENT (reports, never fails): the SAME ρ-part ladder on a
-/// BINOMIAL-logit fixture, i.e. under `DispersionHandling::Fixed`, where the
-/// inner-KKT envelope correction `−½rᵀH⁻¹r` is live.
-///
-/// WHY THIS RUNG EXISTS. `crates/gam-solve/src/reml/reml_outer_engine/objective.rs`
-/// gates the whole correction — cost side AND the ρ-gradient block from
-/// `compute_kkt_residual_theta_corrections` — on
-/// `kkt_residual_correction_active = kkt_residual.is_some() && dispersion is
-/// Fixed`. A Gaussian fit is dispersion-PROFILED, so every existing #2454 rung
-/// runs with that gate CLOSED and its `kkt` column is identically zero on both
-/// the analytic and the FD side. The four-channel decomposition therefore had
-/// no evidence at all about channel (D); the #2454 gates certify (A), (B), (C)
-/// only. This arm opens the gate.
-///
-/// WHAT EACH OUTCOME MEANS (pre-registered, so the reading cannot be chosen
-/// after the numbers arrive):
-///   * `kkt an ≈ fd ≈ 0` at every rung — the residual is at the inner solve's
-///     noise floor on this fixture and the arm is UNINFORMATIVE, not a clean
-///     bill of health; it must then be re-run against a deliberately capped
-///     inner solve before channel (D) can be called clean.
-///   * `kkt an ≠ 0, fd ≈ 0` — the value and the gradient are reading DIFFERENT
-///     objectives: the analytic side differentiates `Ṽ = V − ½rᵀH⁻¹r` while the
-///     cost-only probe returns bare `V`. That is a bridge mismatch
-///     (`evaluate_unified` passes `populate_inner_kkt = false`,
-///     `build_design_moving_assembly` passes `true`), not an algebra error.
-///   * `kkt an` and `fd` both nonzero but disagreeing, with the gap growing in
-///     λ — the algebra in `outer_derivatives/kkt.rs` is wrong; the λ-SLOPE of
-///     the gap names how many stray λ factors.
-/// The `gap_over_lambda` column is printed for exactly that slope reading: a
-/// gap flat in `gap_over_lambda` is one stray λ, a gap flat in `gap` is none.
-///
-/// Deliberately a measurement and not a gate. A gate authored before the
-/// numbers exist would be a tolerance chosen to pass, which is what
-/// `outer_rho_gradient_error_does_not_scale_with_lambda_2454` avoided by
-/// asserting a SCALING law instead. The gate for channel (D) belongs in the
-/// commit that fixes it, expressed the same way.
-#[test]
-fn zz_measure_rho_gradient_part_decomposition_binomial_2623() {
-    let rows = rho_gradient_part_ladder_family_2454(
-        &[0.0, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0],
-        3e-4,
-        LikelihoodSpec::binomial_logit(),
-    );
-    for row in &rows {
-        if row.coordinate == 0 {
-            eprintln!(
-                "[zz-parts-2623] rho={:5.1} COST={:+.12e} penalized_rank={} null_dim={} \
-                 logdet_rank={} logdet_S={:+.6e} \
-                 beta_null_energy={:.4e} energy criterion={:+.12e} blocks={:+.12e} \
-                 ratio={:.10}",
-                row.rho,
-                row.cost,
-                row.penalized_rank,
-                row.declared_null_dim,
-                row.logdet_rank,
-                row.logdet_value,
-                row.beta_null_energy,
-                row.penalty_energy_criterion,
-                row.penalty_energy_blocks,
-                row.penalty_energy_criterion / row.penalty_energy_blocks,
-            );
-        }
-        eprintln!(
-            "[zz-parts-2623]  j={} lambda={:.6e} q_k={:+.10e} lambda_q={:+.10e}",
-            row.coordinate,
-            row.lambda,
-            row.block_quadratic,
-            row.lambda * row.block_quadratic,
-        );
-        for (name, analytic, fd) in [
-            ("total     ", row.analytic_total, row.finite_difference_total),
-            (
-                "fixed_beta",
-                row.analytic_fixed_beta,
-                row.finite_difference_fixed_beta,
-            ),
-            (
-                "logdet_h  ",
-                row.analytic_logdet_h,
-                row.finite_difference_logdet_h,
-            ),
-            (
-                "logdet_s  ",
-                row.analytic_logdet_s,
-                row.finite_difference_logdet_s,
-            ),
-            ("kkt       ", row.analytic_kkt, row.finite_difference_kkt),
-        ] {
-            eprintln!(
-                "[zz-parts-2623]    {name} an={analytic:+.10e} fd={fd:+.10e} \
                  gap={:+.6e} gap_over_lambda={:+.6e}",
                 analytic - fd,
                 (analytic - fd) / row.lambda,
