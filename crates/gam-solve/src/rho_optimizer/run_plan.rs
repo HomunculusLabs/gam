@@ -921,7 +921,30 @@ pub(crate) fn run_outer_with_plan(
         }
         obj.reset();
         if crate::estimate::outer_eval_capture::outer_gradient_fd_capture_enabled(cap.psi_dim) {
-            capture_outer_gradient_fd_at_seed(
+            // The audit is an OBSERVER. Its failure must not decide the fit.
+            //
+            // This call used to end in `?`. That made the claim in the comment
+            // below false in exactly the case that matters: when the audit's own
+            // `obj.eval_with_order(seed, ..)` refuses -- which is common at a
+            // cold seed on a spatial basis, where the inner solve has not
+            // converged at theta_0 -- the `?` propagated that error out of
+            // `run_plan` and ABORTED THE WHOLE RUN. With the audit disabled the
+            // identical seed would simply have been rejected, recorded in
+            // `seed_rejections`, and the cascade would have moved on to the next
+            // one, which may well succeed.
+            //
+            // So arming the audit CHANGED THE OUTCOME IT WAS MEASURING: a
+            // recoverable per-seed rejection became a hard run abort, and the
+            // capture window closed empty, so `take_outer_gradient_fd_capture()`
+            // returned `None` and the consuming test reported "no evidence"
+            // rather than the gradient disagreement it was written to detect.
+            // An instrument that perturbs its subject reports about itself.
+            //
+            // Handled exactly like the curvature-homotopy entry error directly
+            // below -- warn, reset to the pristine baseline, fall through to the
+            // ordinary seed cascade -- because it is the same situation: a
+            // non-feasibility-gating failure on an optional entry path.
+            if let Err(err) = capture_outer_gradient_fd_at_seed(
                 obj,
                 config,
                 context,
@@ -930,10 +953,18 @@ pub(crate) fn run_outer_with_plan(
                 cap.psi_dim,
                 &bounds_template.0,
                 &bounds_template.1,
-            )?;
+            ) {
+                log::warn!(
+                    "[OUTER] {context}: outer-gradient FD audit refused at seed {seed_idx} \
+                     ({err}); the audit records nothing for this seed and the seed cascade \
+                     proceeds unchanged"
+                );
+                obj.reset();
+            }
             // The audit leaves the objective pristine, so the real seed path
             // below (including any curvature homotopy) is bit-identical to a
-            // run with capture disabled.
+            // run with capture disabled -- which is now true on the refusal
+            // path as well, not only on the success path.
         }
         // Certified curvature-homotopy entry leg (#1007). When the objective
         // has a certified anchor (the SAE-manifold `η = 0` Eckart-Young
