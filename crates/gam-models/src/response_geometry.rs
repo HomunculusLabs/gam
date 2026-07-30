@@ -775,11 +775,37 @@ impl PreparedSharedTangent {
             penalty_beta.push(z);
         }
 
+
+        // REML profiles the scale out as `φ̂ = D_p/rdf` with `D_p` the PENALIZED
+        // deviance, so the criterion's data term is `rdf·ln(D_p)` and its
+        // ρ-derivative is `rdf·(β̂ᵗλⱼSⱼβ̂)/D_p` — exactly `deviance_first[j]/D_p`.
+        // That identity is the ENVELOPE theorem, and it holds for `D_p` only:
+        // `D_p` is stationary in β at β̂, the unpenalized `D` is not
+        // (`dD/dρⱼ = 2β̂ᵗS_λA⁻¹λⱼSⱼβ̂`, a different quantity).
+        //
+        // The cost below used the UNPENALIZED `profiled_deviance` while the
+        // gradient and Hessian were already the derivatives of the penalized one,
+        // so the value and its derivatives described two different criteria. That
+        // is why #2597's FD check missed by a large RATIO rather than by an
+        // FD-step artifact: analytic `3.6460865888809835` against central FD
+        // `0.6001259341301612` at `ρ = [−0.2, 0.35]`.
+        //
+        // `Σⱼ deviance_first[j] = β̂ᵗS_λβ̂` exactly, because `S_λ = Σⱼ λⱼSⱼ`, so the
+        // penalized deviance needs no additional quadratic form.
+        //
+        // NOT changed here: the `sigma2 = evaluation.profiled_deviance/residual_df`
+        // at the fit boundary is the same `D` vs `D_p` confusion in the SCALE
+        // estimate, and REML's is `D_p/rdf`. It is left alone deliberately —
+        // correcting it moves every reported standard error on this path, which
+        // wants its own measurement rather than riding on an FD fixture.
+        let penalized_deviance = profiled_deviance + deviance_first.sum();
+        validate_profiled_deviance(penalized_deviance)?;
+
         let mut gradient = Array1::<f64>::zeros(m);
         for j in 0..m {
             gradient[j] = 0.5
                 * (penalty_traces[j] - penalty_logdet_traces[j]
-                    + residual_degrees_of_freedom * deviance_first[j] / profiled_deviance);
+                    + residual_degrees_of_freedom * deviance_first[j] / penalized_deviance);
         }
         let mut hessian = Array2::<f64>::zeros((m, m));
         for j in 0..m {
@@ -800,9 +826,9 @@ impl PreparedSharedTangent {
                 let value = 0.5
                     * (logdet_second - penalty_logdet_second
                         + residual_degrees_of_freedom
-                            * (deviance_second / profiled_deviance
+                            * (deviance_second / penalized_deviance
                                 - deviance_first[j] * deviance_first[kk]
-                                    / (profiled_deviance * profiled_deviance)));
+                                    / (penalized_deviance * penalized_deviance)));
                 hessian[[j, kk]] = value;
                 hessian[[kk, j]] = value;
             }
@@ -811,7 +837,7 @@ impl PreparedSharedTangent {
             * (d as f64 * log_determinant - d as f64 * spectrum.log_pseudo_determinant
                 + residual_degrees_of_freedom
                     * (1.0
-                        + (2.0 * std::f64::consts::PI * profiled_deviance
+                        + (2.0 * std::f64::consts::PI * penalized_deviance
                             / residual_degrees_of_freedom)
                             .ln()));
         validate_evaluation(cost, &gradient, &hessian)?;
@@ -867,11 +893,37 @@ impl PreparedSharedTangent {
             penalty_beta.push(z);
         }
 
+
+        // REML profiles the scale out as `φ̂ = D_p/rdf` with `D_p` the PENALIZED
+        // deviance, so the criterion's data term is `rdf·ln(D_p)` and its
+        // ρ-derivative is `rdf·(β̂ᵗλⱼSⱼβ̂)/D_p` — exactly `deviance_first[j]/D_p`.
+        // That identity is the ENVELOPE theorem, and it holds for `D_p` only:
+        // `D_p` is stationary in β at β̂, the unpenalized `D` is not
+        // (`dD/dρⱼ = 2β̂ᵗS_λA⁻¹λⱼSⱼβ̂`, a different quantity).
+        //
+        // The cost below used the UNPENALIZED `profiled_deviance` while the
+        // gradient and Hessian were already the derivatives of the penalized one,
+        // so the value and its derivatives described two different criteria. That
+        // is why #2597's FD check missed by a large RATIO rather than by an
+        // FD-step artifact: analytic `3.6460865888809835` against central FD
+        // `0.6001259341301612` at `ρ = [−0.2, 0.35]`.
+        //
+        // `Σⱼ deviance_first[j] = β̂ᵗS_λβ̂` exactly, because `S_λ = Σⱼ λⱼSⱼ`, so the
+        // penalized deviance needs no additional quadratic form.
+        //
+        // NOT changed here: the `sigma2 = evaluation.profiled_deviance/residual_df`
+        // at the fit boundary is the same `D` vs `D_p` confusion in the SCALE
+        // estimate, and REML's is `D_p/rdf`. It is left alone deliberately —
+        // correcting it moves every reported standard error on this path, which
+        // wants its own measurement rather than riding on an FD fixture.
+        let penalized_deviance = profiled_deviance + deviance_first.sum();
+        validate_profiled_deviance(penalized_deviance)?;
+
         let mut gradient = Array1::<f64>::zeros(m);
         for j in 0..m {
             gradient[j] = 0.5
                 * (penalty_traces[j] - penalty_logdet_traces[j]
-                    + residual_degrees_of_freedom * deviance_first[j] / profiled_deviance);
+                    + residual_degrees_of_freedom * deviance_first[j] / penalized_deviance);
         }
         let mut hessian = Array2::<f64>::zeros((m, m));
         for j in 0..m {
@@ -892,9 +944,9 @@ impl PreparedSharedTangent {
                 let value = 0.5
                     * (logdet_second - penalty_logdet_second
                         + residual_degrees_of_freedom
-                            * (deviance_second / profiled_deviance
+                            * (deviance_second / penalized_deviance
                                 - deviance_first[j] * deviance_first[kk]
-                                    / (profiled_deviance * profiled_deviance)));
+                                    / (penalized_deviance * penalized_deviance)));
                 hessian[[j, kk]] = value;
                 hessian[[kk, j]] = value;
             }
@@ -903,7 +955,7 @@ impl PreparedSharedTangent {
             * (log_determinant - d as f64 * spectrum.log_pseudo_determinant
                 + residual_degrees_of_freedom
                     * (1.0
-                        + (2.0 * std::f64::consts::PI * profiled_deviance
+                        + (2.0 * std::f64::consts::PI * penalized_deviance
                             / residual_degrees_of_freedom)
                             .ln()));
         if inverse.dim() != (q, q) {
