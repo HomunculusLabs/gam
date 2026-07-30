@@ -345,6 +345,60 @@ pub(crate) fn build_model_summary(
     })
 }
 
+/// Rebuild `Vb` from a saved fit that persisted only the penalized Hessian.
+///
+/// The two CLI entry points below both need this fallback, and both used to
+/// hand-roll it as `from_factorized_hessian(H)` — which is `φ = 1` and *no*
+/// constrained correction. That is not `Vb` for either of the two reasons the
+/// library's own fallback (`gam-predict`'s `conditional_prediction_backend`)
+/// handles:
+///
+/// * the module invariant is `Vb = φ·H⁻¹`, and `φ` is the profiled residual
+///   variance `σ̂²` for the scale-free profiled Gaussian (`1.0` for every family
+///   whose IRLS weight already carries the dispersion, #679); and
+/// * a fit that accepted inequality constraints has a **truncated** Laplace
+///   posterior, whose covariance is `Σ − GΔGᵀ`, not the ambient `Σ`. Where a
+///   constraint is active the ambient covariance is simply the wrong object:
+///   it describes spread along directions the feasible set does not have
+///   (#2385).
+///
+/// The two are one fix rather than two, because the correction's `lift` and
+/// `removed_normal_variance` already live on the φ-scaled covariance metric
+/// (see `PredictionCovarianceBackend::Factorized`). Subtracting a φ-scaled
+/// `GΔGᵀ` from an unscaled `H⁻¹` would be dimensionally inconsistent, so the
+/// correction cannot be routed here without also honoring `φ`.
+///
+/// Consequence of routing both through the library's constructor: a fit with no
+/// engine-level family (custom / GAMLSS) has no scalar coefficient-covariance
+/// scale and is now refused here, exactly as the library path already refuses
+/// it, instead of silently returning an unscaled `H⁻¹` labelled `Vb`.
+fn factorized_covariance_fallback(fit: &UnifiedFitResult) -> Option<Result<PredictionCovarianceBackend<'_>, String>> {
+    let hessian = fit.penalized_hessian()?;
+    let scale = match fit.coefficient_covariance_scale() {
+        Ok(scale) => scale,
+        Err(error) => {
+            return Some(Err(format!(
+                "saved model persisted only a penalized Hessian, so the reported covariance must be \
+                 reconstructed as Vb = phi*H^-1, but this fit has no scalar coefficient-covariance \
+                 scale: {error}"
+            )));
+        }
+    };
+    let constrained_correction = fit
+        .geometry
+        .as_ref()
+        .and_then(|geometry| geometry.constrained_posterior.as_ref())
+        .and_then(|posterior| posterior.correction.as_ref());
+    Some(
+        PredictionCovarianceBackend::from_factorized_hessian_scaled_with_correction(
+            SymmetricMatrix::Dense(hessian.clone()),
+            scale,
+            constrained_correction,
+        )
+        .map_err(|e| format!("failed to factor saved penalized Hessian for prediction: {e}")),
+    )
+}
+
 pub(crate) fn covariance_from_model(
     model: &SavedModel,
     mode: InferenceCovarianceMode,
@@ -362,11 +416,8 @@ pub(crate) fn covariance_from_model(
     if let Some(cov) = fit.beta_covariance() {
         return Ok(cov.clone());
     }
-    if let Some(hessian) = fit.penalized_hessian() {
-        let backend = PredictionCovarianceBackend::from_factorized_hessian(SymmetricMatrix::Dense(
-            hessian.clone(),
-        ))
-        .map_err(|e| format!("failed to factor saved penalized Hessian for prediction: {e}"))?;
+    if let Some(backend) = factorized_covariance_fallback(fit) {
+        let backend = backend?;
         let dim = backend.nrows();
         let mut eye = Array2::<f64>::zeros((dim, dim));
         for j in 0..dim {
@@ -400,16 +451,13 @@ pub(crate) fn prediction_backend_from_model<'a>(
     if let Some(covariance) = fit.beta_covariance() {
         return Ok(PredictionCovarianceBackend::from_dense(covariance.view()));
     }
-    if let Some(hessian) = fit.penalized_hessian() {
+    if let Some(backend) = factorized_covariance_fallback(fit) {
         // Surface the factorization error directly rather than swallowing it
         // and reporting the generic "model is missing either ..." message.
         // When the saved Hessian exists but cannot be factored (indefinite,
         // numerically degenerate, etc.) the user needs to see *why*, not a
         // confused "refit" instruction that doesn't match the real fault.
-        return PredictionCovarianceBackend::from_factorized_hessian(SymmetricMatrix::Dense(
-            hessian.clone(),
-        ))
-        .map_err(|e| format!("failed to factor saved penalized Hessian for prediction: {e}"));
+        return backend;
     }
     Err(
         "nonlinear posterior-mean prediction requires either covariance or a saved penalized Hessian; refit"
