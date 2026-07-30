@@ -3,9 +3,24 @@
 //!
 //! The redesign's penalty CORE has landed — the default `duchon(...)` emits the
 //! full Hilbert scale of function penalties (`Primary` + `OperatorTension` +
-//! `OperatorMass` + `DoublePenaltyNullspace`). But these are NOT yet all-green:
-//! the REML-DESELECTION half of the contract is still honest-red. `null_recovery`
-//! currently FAILS — REML does not yet collapse the all-on Hilbert scale to
+//! `OperatorMass` + `DoublePenaltyNullspace`).
+//!
+//! CORRECTED 2026-07-30: `null_recovery` now PASSES. Measured on acn116,
+//! max|f_hat - mean(f_hat)| = 0.0004 against sigma = 1, i.e. flat to 3.4 orders
+//! below sigma. REML DOES collapse the all-on Hilbert scale when x is
+//! irrelevant. The text below is kept because it was load-bearing for #2348 and
+//! the record should show it was retired by measurement rather than deleted --
+//! but read it as HISTORY, not as the current state. A header that reports a
+//! passing test as failing is worse than no header: it invites the next reader
+//! to fix a working path, or to distrust the whole file.
+//!
+//! The one arm not green here is `deselection_recovers_truth`, and it is NOT a
+//! gam red: it aborts with REFERENCE_ENV_MISSING:Rscript, which the harness
+//! itself reports as NOT MEASURED and explicitly not a statement about gam
+//! either way. On a box without R this file is 3 passed / 1 unmeasured.
+//!
+//! HISTORICAL: the REML-DESELECTION half of the contract was honest-red.
+//! `null_recovery` then FAILED — REML does not yet collapse the all-on Hilbert scale to
 //! ~zero amplitude when `x` is irrelevant, so the smooth still chases noise.
 //! That is a real, unfixed defect, not a passing guard: do NOT read this file as
 //! green until REML shrinks the unhelpful blocks. The contract under test:
