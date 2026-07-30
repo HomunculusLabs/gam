@@ -14,7 +14,9 @@
 use crate::model_types::EstimationError;
 use crate::probability::{log1mexp_positive, signed_log_sum_exp};
 use crate::quadrature::{
-    IntegratedExpectationMode, QuadratureContext, lognormal_laplace_unit_log_term_shared,
+    IntegratedExpectationMode, QuadratureContext,
+    cloglog_log_survival_mu_derivative_gumbel_quadrature,
+    cloglog_log_survival_uses_gumbel_quadrature, lognormal_laplace_unit_log_term_shared,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -326,7 +328,40 @@ pub struct LogLognormalKernelBundle {
     /// [`Self::second_cumulant_ratio`] recover the exact part of a second
     /// difference instead of subtracting it away.
     pub log_laplace: Vec<f64>,
+    /// `σ^j · ∂_a^j K_0` in signed-log coordinates for `j = 0..=max_k`, where
+    /// `a = μ + ln m` is the SINGLE location the `k = 0` kernel depends on
+    /// (#2610), or `None` when the analytic branch does not apply.
+    ///
+    /// `K_0(m,μ,σ) = S(μ + ln m, σ)` because `m` and `μ` enter only through the
+    /// product `m·e^U`. That makes `∂_a` the one derivative the rung ladder is
+    /// built out of:
+    ///
+    /// ```text
+    /// m^k K_k = (−1)^k · ∂_a(∂_a − 1)···(∂_a − k + 1) K_0,
+    /// ```
+    ///
+    /// so a term list in the `K_k` basis and one in the `∂_a^j K_0` basis carry
+    /// the SAME information — but not the same conditioning. Reaching
+    /// `∂_a^4 K_0` through the rungs means evaluating `−mK_1 + 7m²K_2 − 6m³K_3 +
+    /// m⁴K_4`, whose summands are `O(1/σ)` while the sum is `O(1/σ^5)`; reading
+    /// it from here is one quadrature over an integrand that is already small.
+    /// The scaling by `σ^j` is what keeps every entry inside the representable
+    /// range: `∂_a^4 K_0` itself is `~1e-17` at `log σ = 7`.
+    ///
+    /// Entry `j = 0` is `log_values[0]` verbatim, so a term list that only
+    /// reaches `k = 0` evaluates bit-identically on either basis.
+    pub log_scaled_a_derivatives: Option<Vec<KernelSignedLog>>,
     pub mode: IntegratedExpectationMode,
+}
+
+/// One signed magnitude in logarithmic coordinates.
+///
+/// `sign` is exactly `-1.0`, `0.0`, or `1.0`; `log_abs` is `-∞` when and only
+/// when `sign` is zero.
+#[derive(Clone, Copy, Debug)]
+pub struct KernelSignedLog {
+    pub log_abs: f64,
+    pub sign: f64,
 }
 
 impl LogLognormalKernelBundle {
@@ -440,6 +475,9 @@ pub fn log_kernel_bundle(
         return Ok(LogLognormalKernelBundle {
             log_values,
             log_laplace,
+            // `a = μ + ln m` does not exist at `m = 0`, and it is not needed:
+            // this branch IS closed form, so no rung difference can cancel.
+            log_scaled_a_derivatives: None,
             mode: IntegratedExpectationMode::ExactClosedForm,
         });
     }
@@ -472,11 +510,58 @@ pub fn log_kernel_bundle(
         prefix += mu + (k as f64 + 0.5) * sigma2;
         shifted_mu += sigma2;
     }
+    // `log K_0` read out before the vector moves into the bundle; the loop above
+    // always pushes at least the `k = 0` rung.
+    let log_values_first = log_values[0];
     Ok(LogLognormalKernelBundle {
         log_values,
         log_laplace: log_laplace_values,
+        log_scaled_a_derivatives: log_scaled_a_derivative_tower(
+            quadctx,
+            mu + log_m,
+            sigma,
+            max_k,
+            log_values_first,
+        ),
         mode,
     })
+}
+
+/// The `σ^j ∂_a^j K_0` tower for one bundle, or `None` when it must not be used.
+///
+/// `None` is returned unless `ln S(a,σ)` is itself routed through the
+/// Gumbel-mixing quadrature. That condition is not a tuning knob: the tower is
+/// the μ-derivative of exactly that quadrature, so requesting it where the value
+/// came from a different branch would hand a consumer a derivative and a value
+/// off two different approximation surfaces. `None` also covers any entry that
+/// fails to come back as a finite signed magnitude, so a caller either gets the
+/// whole tower or falls back to the rung basis — never a partial mix.
+fn log_scaled_a_derivative_tower(
+    quadctx: &QuadratureContext,
+    a: f64,
+    sigma: f64,
+    max_k: usize,
+    log_k0: f64,
+) -> Option<Vec<KernelSignedLog>> {
+    if !cloglog_log_survival_uses_gumbel_quadrature(a, sigma) || !log_k0.is_finite() {
+        return None;
+    }
+    let mut tower = Vec::with_capacity(max_k + 1);
+    // Entry 0 is the kernel itself, taken verbatim from the value path so a
+    // `k = 0` term list evaluates identically on either basis.
+    tower.push(KernelSignedLog {
+        log_abs: log_k0,
+        sign: 1.0,
+    });
+    for order in 1..=max_k {
+        let (log_abs, sign) =
+            cloglog_log_survival_mu_derivative_gumbel_quadrature(quadctx, a, sigma, order);
+        if !(log_abs.is_finite() && (sign == 1.0 || sign == -1.0)) {
+            return None;
+        }
+        tower.push(KernelSignedLog { log_abs, sign });
+    }
+    Some(tower)
 }
 
 /// Computes the value-space derivative ratios `∂ⁿ_μ K_{k,m} / K_{k,m}`
