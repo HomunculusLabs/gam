@@ -781,14 +781,37 @@ pub(crate) fn fit_standard_model(
                     firth_fitted
                 }
                 Err(original_error) => {
+                    let retry_report = firth_failure
+                        .unwrap_or_else(|| "unknown retry failure".to_string());
                     log::warn!(
                         "[#1762/#2273] Firth-capable binomial base fit ({}) failed \
-                         ({original_report}); Firth retry also failed to certify ({}) — returning \
-                         the original typed base evidence, not either abandoned iterate.",
+                         ({original_report}); Firth retry also failed to certify \
+                         ({retry_report}) — returning the original typed base evidence, not \
+                         either abandoned iterate.",
                         request.family.pretty_name(),
-                        firth_failure.unwrap_or_else(|| "unknown retry failure".to_string()),
                     );
-                    return Err(original_error.to_string());
+                    // #2273 — the RETURNED error has to say that the rescue was
+                    // attempted and why it failed, not only the log line.
+                    //
+                    // The base evidence is preserved unchanged, because a failed
+                    // rescue may not replace it. But the base evidence for a
+                    // separated design ends with "enable Firth/Jeffreys bias
+                    // reduction or remove/reparameterize the separating column" --
+                    // advice to do the thing that was just done automatically and
+                    // failed. A caller following it gets the same refusal, and the
+                    // reason the rescue failed lives only in a `log::warn!`, which
+                    // is not present in a test panic message and is inert through
+                    // the Python extension where this pathology is reported.
+                    //
+                    // So the outcome of the rescue is appended to the returned
+                    // message. The typed original is still what was raised; what
+                    // changes is that the refusal stops recommending a remedy it
+                    // has already tried without saying so.
+                    return Err(format!(
+                        "{original_error}; the automatic Firth/Jeffreys rescue WAS attempted \
+                         and also failed to certify, so enabling Firth explicitly will not \
+                         change this outcome: {retry_report}"
+                    ));
                 }
             }
         }
