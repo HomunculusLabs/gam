@@ -662,6 +662,103 @@ impl ResidentBaseArrowFrameHandle {
                 .refactor_and_solve_with_gradient(ridge_t, ridge_beta, g_t, g_beta)
         }
     }
+
+    /// Run only the ridge-dependent FACTOR work and hand the factors back, so a
+    /// caller whose ridge does not move on the next iterate can re-solve without
+    /// re-factoring (#2539).
+    ///
+    /// [`Self::refactor_and_solve_with_gradient`] is exactly this followed by
+    /// [`Self::solve_with_factors`]. An inner Newton needs them separately: its
+    /// ridge changes only on an LM accept/reject, while its gradient changes
+    /// every iterate, so factoring per iterate would pay a POTRF/TRSM/Schur
+    /// chain for a factor that did not move — the accepted-step cost the
+    /// ridge-keyed frame used to avoid.
+    pub fn factor_at(
+        &self,
+        ridge_t: f64,
+        ridge_beta: f64,
+    ) -> Result<ResidentBaseRidgeFactorsHandle, ArrowSchurGpuFailure> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            if ridge_t.is_nan() || ridge_beta.is_nan() {
+                return Err(ArrowSchurGpuFailure::SchurFactorFailed {
+                    reason: "ridge is NaN".to_string(),
+                });
+            }
+            Err(ArrowSchurGpuFailure::Unavailable)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Ok(ResidentBaseRidgeFactorsHandle {
+                inner: self.inner.factor_at(ridge_t, ridge_beta)?,
+            })
+        }
+    }
+
+    /// Solve `(H + ridge)·δ = −gradient` against factors from
+    /// [`Self::factor_at`]. No POTRF, no `B` whitening: only the gradient
+    /// (`n·d + k` doubles) crosses to the device and only `δ` crosses back.
+    pub fn solve_with_factors(
+        &self,
+        factors: &ResidentBaseRidgeFactorsHandle,
+        g_t: &[f64],
+        g_beta: &[f64],
+    ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            if g_t.iter().chain(g_beta).any(|v| !v.is_finite()) {
+                return Err(ArrowSchurGpuFailure::SchurFactorFailed {
+                    reason: "gradient entry is not finite".to_string(),
+                });
+            }
+            match *factors {}
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.inner
+                .solve_with_gradient_checked(&factors.inner, g_t, g_beta)
+        }
+    }
+}
+
+/// Ridge-derived factors of a [`ResidentBaseArrowFrameHandle`], held on the
+/// device between solves (#2539).
+///
+/// The base frame owns the ridge-INDEPENDENT blocks; this owns everything the
+/// ridge moves. A caller keeps one of these alongside the frame and asks
+/// [`Self::matches_ridge`] before re-solving: a hit is a gradient-only solve, a
+/// miss is a [`ResidentBaseArrowFrameHandle::factor_at`] whose inputs never
+/// leave the device.
+#[cfg(target_os = "linux")]
+pub struct ResidentBaseRidgeFactorsHandle {
+    inner: cuda::BaseRidgeFactors,
+}
+
+/// The base-resident CUDA factors are unavailable, rather than emulated, on a
+/// non-CUDA host.
+#[cfg(not(target_os = "linux"))]
+pub enum ResidentBaseRidgeFactorsHandle {}
+
+impl ResidentBaseRidgeFactorsHandle {
+    /// Whether these factors were built at exactly `(ridge_t, ridge_beta)`.
+    ///
+    /// The key lives with the factors rather than beside them so a cache cannot
+    /// hold a key that has drifted from the factor state it names.
+    #[must_use]
+    pub fn matches_ridge(&self, ridge_t: f64, ridge_beta: f64) -> bool {
+        #[cfg(not(target_os = "linux"))]
+        {
+            // A NaN ridge never keys anything, on either host.
+            if ridge_t.is_nan() || ridge_beta.is_nan() {
+                return false;
+            }
+            match *self {}
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.matches_ridge(ridge_t, ridge_beta)
+        }
+    }
 }
 
 /// Build a GPU-backed Schur matvec closure for CPU-driven PCG at K ≥ 5000.
@@ -2608,6 +2705,80 @@ mod cuda {
         };
         if status != cublasStatus_t::CUBLAS_STATUS_SUCCESS {
             return Err(ArrowSchurGpuFailure::Unavailable);
+        }
+        Ok(())
+    }
+
+    /// The GRADIENT-INDEPENDENT half of [`accumulate_schur`]: `schur ← schur −
+    /// Σ_i Y_i^T Y_i`, one GEMM per block in ascending block order.
+    ///
+    /// Splitting the fused loop is a pure regrouping: the GEMM accumulates into
+    /// `schur` and the GEMV of [`accumulate_schur_rhs_only`] accumulates into a
+    /// disjoint `rhs`, both in ascending `i` on the same stream, so running the
+    /// two loops separately produces bit-identical buffers to running them
+    /// interleaved. That is what lets a ridge-derived factor be cached and
+    /// re-solved against a fresh gradient without changing any number.
+    fn accumulate_schur_reduce_only(
+        blas: &CudaBlas,
+        d: usize,
+        k: usize,
+        n: usize,
+        y_stack: &CudaSlice<f64>,
+        schur: &mut CudaSlice<f64>,
+    ) -> Result<(), ArrowSchurGpuFailure> {
+        let y_block_elems = d * k;
+        for i in 0..n {
+            let y_slice = y_stack.slice(i * y_block_elems..(i + 1) * y_block_elems);
+            let gemm_cfg = GemmConfig::<f64> {
+                transa: cublasOperation_t::CUBLAS_OP_T,
+                transb: cublasOperation_t::CUBLAS_OP_N,
+                m: to_i32(k).ok_or(ArrowSchurGpuFailure::Unavailable)?,
+                n: to_i32(k).ok_or(ArrowSchurGpuFailure::Unavailable)?,
+                k: to_i32(d).ok_or(ArrowSchurGpuFailure::Unavailable)?,
+                alpha: -1.0,
+                lda: to_i32(d).ok_or(ArrowSchurGpuFailure::Unavailable)?,
+                ldb: to_i32(d).ok_or(ArrowSchurGpuFailure::Unavailable)?,
+                beta: 1.0,
+                ldc: to_i32(k).ok_or(ArrowSchurGpuFailure::Unavailable)?,
+            };
+            // SAFETY: y_slice is d×k col-major, schur is k×k col-major; alpha/beta scalars set above.
+            unsafe { blas.gemm(gemm_cfg, &y_slice, &y_slice, schur) }
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+        }
+        Ok(())
+    }
+
+    /// The GRADIENT-DEPENDENT half of [`accumulate_schur`]: `rhs ← rhs + Σ_i
+    /// Y_i^T u_i`, one GEMV per block in ascending block order. See
+    /// [`accumulate_schur_reduce_only`] for why the split is exact.
+    fn accumulate_schur_rhs_only(
+        blas: &CudaBlas,
+        d: usize,
+        k: usize,
+        n: usize,
+        y_stack: &CudaSlice<f64>,
+        u_stack: &CudaSlice<f64>,
+        rhs: &mut CudaSlice<f64>,
+    ) -> Result<(), ArrowSchurGpuFailure> {
+        let y_block_elems = d * k;
+        let u_block_elems = d;
+        for i in 0..n {
+            let y_slice = y_stack.slice(i * y_block_elems..(i + 1) * y_block_elems);
+            let u_slice = u_stack.slice(i * u_block_elems..(i + 1) * u_block_elems);
+            let gemv_cfg = GemvConfig::<f64> {
+                trans: cublasOperation_t::CUBLAS_OP_T,
+                m: to_i32(d).ok_or(ArrowSchurGpuFailure::Unavailable)?,
+                n: to_i32(k).ok_or(ArrowSchurGpuFailure::Unavailable)?,
+                alpha: 1.0,
+                lda: to_i32(d).ok_or(ArrowSchurGpuFailure::Unavailable)?,
+                incx: 1,
+                beta: 1.0,
+                incy: 1,
+            };
+            // SAFETY: y_slice (d×k col-major) and u_slice (length d) are live
+            // device buffers; `rhs` is the length-k accumulator.
+            unsafe { blas.gemv(gemv_cfg, &y_slice, &u_slice, rhs) }
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
         }
         Ok(())
     }
@@ -4628,6 +4799,31 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             g_t: &[f64],
             g_beta: &[f64],
         ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
+            self.check_gradient_lens(g_t, g_beta)?;
+            self.refactor_and_solve_from(ridge_t, ridge_beta, Some((g_t, g_beta)))
+        }
+
+        /// #2539: solve against ALREADY-BUILT factors for a fresh gradient. The
+        /// checked entry point behind
+        /// [`super::ResidentBaseArrowFrameHandle::solve_with_factors`]; the
+        /// length contract is the same one
+        /// [`Self::refactor_and_solve_with_gradient`] enforces, so a caller that
+        /// caches factors cannot smuggle a differently shaped gradient past it.
+        pub(super) fn solve_with_gradient_checked(
+            &self,
+            factors: &BaseRidgeFactors,
+            g_t: &[f64],
+            g_beta: &[f64],
+        ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
+            self.check_gradient_lens(g_t, g_beta)?;
+            self.solve_with_factors(factors, Some((g_t, g_beta)))
+        }
+
+        fn check_gradient_lens(
+            &self,
+            g_t: &[f64],
+            g_beta: &[f64],
+        ) -> Result<(), ArrowSchurGpuFailure> {
             if g_t.len() != self.n * self.d {
                 return Err(ArrowSchurGpuFailure::SchurFactorFailed {
                     reason: format!(
@@ -4646,7 +4842,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                     ),
                 });
             }
-            self.refactor_and_solve_from(ridge_t, ridge_beta, Some((g_t, g_beta)))
+            Ok(())
         }
 
         /// The shared ridge-dependent factor+solve. `gradient` selects where the
@@ -4655,12 +4851,35 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         /// uploads a fresh one (an inner Newton iterate). Every step after the
         /// gradient sourcing is common, so the two callers are bit-identical at
         /// equal ridge and equal gradient.
+        ///
+        /// It is the composition `factor_at` ∘ `solve_with_factors` and holds no
+        /// arithmetic of its own, so a caller that keeps the factors (an inner
+        /// Newton at an unchanged ridge) gets numbers identical to a caller that
+        /// re-derives them here.
         fn refactor_and_solve_from(
             &self,
             ridge_t: f64,
             ridge_beta: f64,
             gradient: Option<(&[f64], &[f64])>,
         ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
+            let factors = self.factor_at(ridge_t, ridge_beta)?;
+            self.solve_with_factors(&factors, gradient)
+        }
+
+        /// The GRADIENT-INDEPENDENT ridge-dependent factor work: `POTRF(D +
+        /// ρ_t I)`, `Y_i = L_i^{-1} B_i`, the Schur reduction `S = (H_ββ + ρ_β I)
+        /// − Σ Y_iᵀ Y_i` and its `POTRF`, plus `log|H|`. Nothing here reads a
+        /// gradient, so the result is a complete, reusable factor state for
+        /// `(ridge_t, ridge_beta)` (#2539): an inner Newton whose ridge did not
+        /// move re-solves against it and pays no POTRF at all.
+        ///
+        /// Sources `D`/`B`/`H_ββ` from the resident base buffers, so the only
+        /// host→device traffic is the `n·d·d` re-diagonalised `D`.
+        pub(super) fn factor_at(
+            &self,
+            ridge_t: f64,
+            ridge_beta: f64,
+        ) -> Result<BaseRidgeFactors, ArrowSchurGpuFailure> {
             if ridge_t.is_nan() || ridge_beta.is_nan() {
                 return Err(ArrowSchurGpuFailure::SchurFactorFailed {
                     reason: "ridge is NaN".to_string(),
@@ -4705,27 +4924,6 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
             trsm_batched_lower_inplace(&self.blas, &self.stream, d, n, k, &l_dev, &mut y_dev)?;
 
-            // ----- u_i = L_i^{-1} g_i. The resident base g_t is a device-to-device
-            // copy; a caller-supplied gradient is the one extra H2D (`n·d`
-            // doubles, the same order as the ridged `D` above).
-            let mut u_dev = match gradient {
-                Some((g_t, _)) => self
-                    .stream
-                    .clone_htod(g_t)
-                    .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
-                None => {
-                    let mut resident = self
-                        .stream
-                        .alloc_zeros::<f64>(n * d)
-                        .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-                    self.stream
-                        .memcpy_dtod(&self.g_t_dev, &mut resident)
-                        .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-                    resident
-                }
-            };
-            trsm_batched_lower_inplace(&self.blas, &self.stream, d, n, 1, &l_dev, &mut u_dev)?;
-
             // ----- Schur S = (H_ββ + ridge_β I) − Σ Y_iᵀ Y_i.
             let mut schur_dev = self
                 .stream
@@ -4745,78 +4943,18 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                 &mut schur_dev,
                 k + 1,
             )?;
-            let rhs_init: Vec<f64> = match gradient {
-                Some((_, g_beta)) => g_beta.iter().map(|v| -v).collect(),
-                None => self.gb_host.iter().map(|v| -v).collect(),
-            };
-            let mut rhs_dev = self
-                .stream
-                .clone_htod(&rhs_init)
-                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            accumulate_schur_reduce_only(&self.blas, d, k, n, &y_dev, &mut schur_dev)?;
 
-            accumulate_schur(
-                &self.blas,
-                d,
-                k,
-                n,
-                &y_dev,
-                &u_dev,
-                &mut schur_dev,
-                &mut rhs_dev,
-            )?;
-
-            // ----- Factor S_β, solve δβ = L_S^{-T} L_S^{-1} rhs.
+            // ----- Factor S_β.
             let info = potrf_single(&self.solver, &self.stream, k, &mut schur_dev)?;
             if info != 0 {
                 return Err(ArrowSchurGpuFailure::SchurFactorFailed {
                     reason: format!("Schur Cholesky failed at pivot {info}"),
                 });
             }
-            trsm_single(
-                &self.blas,
-                &self.stream,
-                k,
-                &schur_dev,
-                &mut rhs_dev,
-                false,
-                false,
-            )?;
-            trsm_single(
-                &self.blas,
-                &self.stream,
-                k,
-                &schur_dev,
-                &mut rhs_dev,
-                false,
-                true,
-            )?;
-            let delta_beta_host = self
-                .stream
-                .clone_dtoh(&rhs_dev)
-                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-            let delta_beta = Array1::from_vec(delta_beta_host);
 
-            // ----- Back-sub δt_i = −L_i^{-T}(u_i + Y_i δβ).
-            accumulate_back_sub_rhs(&self.blas, d, k, n, &y_dev, &rhs_dev, &mut u_dev)?;
-            trsm_batched_lower_inplace_transposed(
-                &self.blas,
-                &self.stream,
-                d,
-                n,
-                1,
-                &l_dev,
-                &mut u_dev,
-            )?;
-            let x_host = self
-                .stream
-                .clone_dtoh(&u_dev)
-                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-            let mut delta_t = Array1::<f64>::zeros(n * d);
-            for (i, v) in x_host.iter().enumerate() {
-                delta_t[i] = -*v;
-            }
-
-            // ----- log|H| = 2 Σ log L_{i,jj} + 2 Σ log L_{S,aa}.
+            // log|H| = 2 Σ log L_{i,jj} + 2 Σ log L_{S,aa}: a property of the
+            // factored Hessian, so it belongs to the factors, not the solve.
             let l_local_host = self
                 .stream
                 .clone_dtoh(&l_dev)
@@ -4837,11 +4975,150 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             }
             log_det *= 2.0;
 
+            Ok(BaseRidgeFactors {
+                ridge_t,
+                ridge_beta,
+                l_dev,
+                y_dev,
+                schur_dev,
+                log_det_hessian: log_det,
+            })
+        }
+
+        /// Solve `(H + ridge)·δ = −gradient` against factors already produced by
+        /// [`Self::factor_at`]. No POTRF and no `B` whitening run here — the only
+        /// host→device traffic is the gradient (`n·d + k` doubles) and the only
+        /// readback is `δ`.
+        ///
+        /// `gradient` sources the right-hand side exactly as
+        /// [`Self::refactor_and_solve_from`] documents: `None` is the resident
+        /// gradient captured at construction, `Some` a fresh per-iterate one.
+        pub(super) fn solve_with_factors(
+            &self,
+            factors: &BaseRidgeFactors,
+            gradient: Option<(&[f64], &[f64])>,
+        ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
+            let (n, d, k) = (self.n, self.d, self.k);
+            let l_dev = &factors.l_dev;
+            let y_dev = &factors.y_dev;
+            let schur_dev = &factors.schur_dev;
+
+            // ----- u_i = L_i^{-1} g_i. The resident base g_t is a device-to-device
+            // copy; a caller-supplied gradient is the one extra H2D (`n·d`
+            // doubles, the same order as the ridged `D` the factor pass uploads).
+            let mut u_dev = match gradient {
+                Some((g_t, _)) => self
+                    .stream
+                    .clone_htod(g_t)
+                    .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
+                None => {
+                    let mut resident = self
+                        .stream
+                        .alloc_zeros::<f64>(n * d)
+                        .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+                    self.stream
+                        .memcpy_dtod(&self.g_t_dev, &mut resident)
+                        .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+                    resident
+                }
+            };
+            trsm_batched_lower_inplace(&self.blas, &self.stream, d, n, 1, l_dev, &mut u_dev)?;
+
+            // ----- Schur RHS = −g_β + Σ_i Y_iᵀ u_i.
+            let rhs_init: Vec<f64> = match gradient {
+                Some((_, g_beta)) => g_beta.iter().map(|v| -v).collect(),
+                None => self.gb_host.iter().map(|v| -v).collect(),
+            };
+            let mut rhs_dev = self
+                .stream
+                .clone_htod(&rhs_init)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            accumulate_schur_rhs_only(&self.blas, d, k, n, y_dev, &u_dev, &mut rhs_dev)?;
+
+            // ----- Solve δβ = L_S^{-T} L_S^{-1} rhs.
+            trsm_single(
+                &self.blas,
+                &self.stream,
+                k,
+                schur_dev,
+                &mut rhs_dev,
+                false,
+                false,
+            )?;
+            trsm_single(
+                &self.blas,
+                &self.stream,
+                k,
+                schur_dev,
+                &mut rhs_dev,
+                false,
+                true,
+            )?;
+            let delta_beta_host = self
+                .stream
+                .clone_dtoh(&rhs_dev)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let delta_beta = Array1::from_vec(delta_beta_host);
+
+            // ----- Back-sub δt_i = −L_i^{-T}(u_i + Y_i δβ).
+            accumulate_back_sub_rhs(&self.blas, d, k, n, y_dev, &rhs_dev, &mut u_dev)?;
+            trsm_batched_lower_inplace_transposed(
+                &self.blas,
+                &self.stream,
+                d,
+                n,
+                1,
+                l_dev,
+                &mut u_dev,
+            )?;
+            let x_host = self
+                .stream
+                .clone_dtoh(&u_dev)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let mut delta_t = Array1::<f64>::zeros(n * d);
+            for (i, v) in x_host.iter().enumerate() {
+                delta_t[i] = -*v;
+            }
+
             Ok(ArrowSchurGpuSolution {
                 delta_t,
                 delta_beta,
-                log_det_hessian: log_det,
+                log_det_hessian: factors.log_det_hessian,
             })
+        }
+    }
+
+    /// The ridge-derived factor state of a [`ResidentBaseArrowFrame`], resident
+    /// on the device and keyed by the `(ridge_t, ridge_beta)` it was built at
+    /// (#2539).
+    ///
+    /// The base frame holds the ridge-INDEPENDENT blocks; this holds everything
+    /// the ridge does move. Separating them is what lets an inner Newton keep
+    /// the accepted-step behaviour it had before the base frame was adopted: a
+    /// same-ridge iterate re-solves against these factors with no POTRF, and a
+    /// ridge change rebuilds only this — from blocks that never leave the
+    /// device.
+    pub(super) struct BaseRidgeFactors {
+        ridge_t: f64,
+        ridge_beta: f64,
+        /// Per-row lower Cholesky factors `L_i` of `H_tt + ρ_t I` (`n` tiles of
+        /// `d×d`, column-major).
+        l_dev: CudaSlice<f64>,
+        /// Whitened cross blocks `Y_i = L_i^{-1} H_tβ^(i)` (`n` tiles of `d×k`).
+        y_dev: CudaSlice<f64>,
+        /// Lower Cholesky factor `L_S` of `S_β = H_ββ + ρ_β I − Σ_i Y_iᵀ Y_i`.
+        schur_dev: CudaSlice<f64>,
+        /// `log|H|`, a property of the factored Hessian alone.
+        log_det_hessian: f64,
+    }
+
+    impl BaseRidgeFactors {
+        /// The ridge pair these factors were built at. A caller caching them
+        /// compares against this rather than tracking the key separately, so the
+        /// key can never drift from the factors it names.
+        #[inline]
+        pub(super) fn matches_ridge(&self, ridge_t: f64, ridge_beta: f64) -> bool {
+            self.ridge_t == ridge_t && self.ridge_beta == ridge_beta
         }
     }
 
