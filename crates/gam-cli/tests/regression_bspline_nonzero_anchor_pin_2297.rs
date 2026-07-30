@@ -72,7 +72,7 @@ fn fit_and_predict_mean(formula: &str) -> Vec<f64> {
         .tempfile()
         .expect("temp output path");
 
-    let fit = Command::new(gam_test_support::gam_binary!())
+    let fit = Command::new(env!("CARGO_BIN_EXE_gam"))
         .arg("fit")
         .arg(train)
         .arg(formula)
@@ -89,7 +89,7 @@ fn fit_and_predict_mean(formula: &str) -> Vec<f64> {
         stderr_tail(&fit.stderr)
     );
 
-    let predict = Command::new(gam_test_support::gam_binary!())
+    let predict = Command::new(env!("CARGO_BIN_EXE_gam"))
         .arg("predict")
         .arg(model.path())
         .arg(newdata)
