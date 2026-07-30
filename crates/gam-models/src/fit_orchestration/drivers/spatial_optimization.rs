@@ -6637,6 +6637,7 @@ where
         &[TermCollectionDesign],
         gam_solve::estimate::reml::reml_outer_engine::EvalMode,
         &gam_problem::outer_subsample::RowSet,
+        Option<Mode>,
     ) -> Result<ExactJointEvaluation<Mode>, String>,
     ExactEfsFn: FnMut(
         &Array1<f64>,
@@ -6788,6 +6789,18 @@ where
                     theta_values_match(mode_theta, theta)
                         && mode_objective.to_bits() == objective.to_bits()
                 })
+        }
+
+        fn take_terminal_mode(&mut self, theta: &Array1<f64>) -> Option<M> {
+            if self
+                .terminal_mode
+                .as_ref()
+                .is_some_and(|(mode_theta, _, _)| theta_values_match(mode_theta, theta))
+            {
+                self.terminal_mode.take().map(|(_, _, mode)| mode)
+            } else {
+                None
+            }
         }
     }
 
@@ -7059,9 +7072,20 @@ where
             } else {
                 gam_solve::estimate::reml::reml_outer_engine::EvalMode::ValueAndGradient
             };
+            let owned_value_mode = if value_only {
+                None
+            } else {
+                ctx.take_terminal_mode(theta)
+            };
             let t0 = std::time::Instant::now();
-            let result =
-                (*exact_fn_cell.borrow_mut())(theta, &specs, &designs, eval_mode, &ctx.row_set);
+            let result = (*exact_fn_cell.borrow_mut())(
+                theta,
+                &specs,
+                &designs,
+                eval_mode,
+                &ctx.row_set,
+                owned_value_mode,
+            );
             let elapsed_s = t0.elapsed().as_secs_f64();
             kphase_eval_calls.set(kphase_eval_calls.get() + 1);
             kphase_eval_total_s.set(kphase_eval_total_s.get() + elapsed_s);
@@ -7155,6 +7179,7 @@ where
                     &designs,
                     gam_solve::estimate::reml::reml_outer_engine::EvalMode::ValueOnly,
                     &ctx.row_set,
+                    None,
                 );
                 let elapsed_s = t0.elapsed().as_secs_f64();
                 kphase_cost_calls.set(kphase_cost_calls.get() + 1);

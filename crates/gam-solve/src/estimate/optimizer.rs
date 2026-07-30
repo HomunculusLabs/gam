@@ -226,42 +226,34 @@ where
 
 pub(crate) fn external_reml_seed_config(k: usize, link: LinkFunction) -> SeedConfig {
     let gaussian = matches!(link, LinkFunction::Identity);
+    if gaussian {
+        // Profiled Gaussian REML already constructs and scores two
+        // data-derived starts below: the commensurate-curvature `initial.sp`
+        // point and the certified summed-penalty diagonal profile.  Sending
+        // their winner into the generic generated-seed lattice repeats the
+        // same basin decision with arbitrary global shifts and an absolute
+        // `rho=8` probe.  Besides violating SPEC's no-grid-search contract,
+        // that screen dominates small fits: a converged zero-iteration
+        // `y ~ s(x)` fit paid 68 outer cost evaluations / 104 inner solves,
+        // while a ten-penalty saturated fold paid 415 inner solves.
+        //
+        // The analytic candidates are evaluated against the true coupled REML
+        // criterion and adopted only on strict improvement, so they retain the
+        // #1074 over-smoothing escape without a second heuristic search.  A
+        // single generated seed is still required when neither analytic point
+        // beats the invariant neutral anchor.  The ordinary optimizer and its
+        // analytic terminal certificate remain mandatory either way.
+        return SeedConfig {
+            bounds: (-12.0, 12.0),
+            max_seeds: 1,
+            seed_budget: 1,
+            risk_profile: SeedRiskProfile::Gaussian,
+            screen_max_inner_iterations: SeedConfig::default().screen_max_inner_iterations,
+            num_auxiliary_trailing: 0,
+            over_smoothing_probe_rho: None,
+        };
+    }
     if k >= REML_SEED_SCREENING_RHO_CAP {
-        if gaussian {
-            // #1074: the over-smoothing safety net (heavy probe + budget-2
-            // lowest-cost keep-best) must remain reachable for MULTI-TERM
-            // Gaussian fits, not just the single-smooth k < CAP case. A textbook
-            // geostatistical model `mag ~ s(long,lat,bs="tp") + s(depth)` carries
-            // FOUR penalty blocks (two double-penalized smooths), so it lands in
-            // this k >= CAP branch — where the old single-anchor `seed_budget = 1`
-            // path descends from the heuristic anchor straight into the flexible
-            // (low-λ) basin and over-fits the weak earthquake-magnitude signal
-            // (edf ≈ 104 vs mgcv ≈ 15, held-out R² ≈ 0.02). The single-smooth arm
-            // (`s(long,lat)` alone, k = 2) does NOT over-fit precisely because it
-            // already gets this net.
-            //
-            // Cost: the probe is ONE extra seed and the heavily-penalized basin
-            // solves cheaply (its inner P-IRLS collapses into the penalty null
-            // space — few effective dof — so it converges in a handful of
-            // iterations), so the added work is ~one cheap solve, NOT a 2× of the
-            // expensive flexible solve. The seed lattice stays minimal (anchor +
-            // 4 global shifts + the probe = 6 candidates, `max_seeds = 4` so no
-            // exploratory lattice is appended), honouring the perf-guard intent of
-            // the cap (no large seed lattice for high-rho fits) while restoring the
-            // basin coverage. Lowest-cost keep-best adopts the heavy basin only
-            // when it scores a strictly lower REML, so a genuinely flexible
-            // multi-term Gaussian surface is never worsened — only a weak-signal
-            // over-rich fit escapes the over-fit basin it currently rails into.
-            return SeedConfig {
-                bounds: (-12.0, 12.0),
-                max_seeds: 4,
-                seed_budget: 2,
-                risk_profile: SeedRiskProfile::Gaussian,
-                screen_max_inner_iterations: SeedConfig::default().screen_max_inner_iterations,
-                num_auxiliary_trailing: 0,
-                over_smoothing_probe_rho: Some(8.0),
-            };
-        }
         return SeedConfig {
             bounds: (-12.0, 12.0),
             max_seeds: 2,
@@ -274,46 +266,35 @@ pub(crate) fn external_reml_seed_config(k: usize, link: LinkFunction) -> SeedCon
     }
     SeedConfig {
         bounds: (-12.0, 12.0),
-        max_seeds: if gaussian && k <= 4 {
-            // #1074: widen the small-k Gaussian candidate pool from 2 to 4 so the
-            // flexible anchor shifts AND the absolute over-smoothing probe (set
-            // below) both survive into the screened pool instead of one being
-            // truncated. With promote-extreme seeding (now enabled for Gaussian)
-            // and seed_budget 2, the flexible basin is solved at slot 0 and the
-            // heavy basin at slot 1.
-            4
-        } else if gaussian && k <= 12 {
-            4
-        } else if gaussian {
-            6
-        } else if k <= 4 {
+        max_seeds: if k <= 4 {
             6
         } else if k <= 12 {
             8
         } else {
             10
         },
-        // #1074: Gaussian small-k fits get TWO full-budget solves (was 1) so the
-        // heavily-penalized basin is actually solved alongside the flexible one;
-        // lowest-cost keep-best then returns whichever has the lower REML, so a
-        // genuinely flexible fit (tp_2d/te_3d) is never worsened while a
-        // weak-signal over-rich spatial fit (quakes) can escape the over-fit
-        // basin it currently rails into (edf≈104 → mgcv-like).
         seed_budget: 2,
-        risk_profile: if gaussian {
-            SeedRiskProfile::Gaussian
-        } else {
-            SeedRiskProfile::GeneralizedLinear
-        },
+        risk_profile: SeedRiskProfile::GeneralizedLinear,
         screen_max_inner_iterations: SeedConfig::default().screen_max_inner_iterations,
         num_auxiliary_trailing: 0,
-        // #1074: an ABSOLUTE high-λ probe (interior, below the 11.5 over-smoothing
-        // boundary so it is promoted as the heaviest interior seed rather than
-        // parked at the tail) seeds the over-smoothed basin the Gaussian global
-        // shifts (±4) and baseline centers (±6) never reach. None for non-Gaussian
-        // (their symmetric shifts + promote-extreme already span both basins).
-        over_smoothing_probe_rho: if gaussian { Some(8.0) } else { None },
+        over_smoothing_probe_rho: None,
     }
+}
+
+pub(crate) fn standard_reml_search_prefers_gradient_only(link: LinkFunction) -> bool {
+    // The optimize-3 / certify-4 split exists to keep the generic
+    // non-Gaussian family derivative tower through order four out of the
+    // smoothing-parameter search (#2359).  A profiled Gaussian identity
+    // likelihood is quadratic in eta: its family derivatives above order two
+    // vanish, so reserving the already-available exact outer Hessian for mint
+    // buys nothing.  Worse, it routes a small exact-curvature problem through
+    // first-order BFGS: the saturated wine_gamair fold took 86 accepted
+    // iterations, then failed the first analytic stationarity audit.
+    //
+    // Let the capability planner choose analytic-Hessian ARC for that exact
+    // quadratic objective.  Every non-identity family retains the order-three
+    // search ceiling and pays order four only at mint.
+    !matches!(link, LinkFunction::Identity)
 }
 
 fn reml_inner_progress_feedback(
@@ -519,7 +500,7 @@ fn gaussian_identity_response_scale(
 /// The on-disk session must not be active while this computation runs (the inner
 /// solve would reload the cached β mid-anchor), so a direct call on an attached
 /// state is refused. The design-moving evaluator satisfies this precondition
-/// with `RemlState::without_persistent_warm_start_disk`; the standard evaluator
+/// with `RemlState::without_persistent_warm_start_store`; the standard evaluator
 /// calls before attaching persistence. The ρ-keyed eval/P-IRLS memos are kept:
 /// they cache a deterministic computation at a ρ the caller is about to evaluate
 /// again.
@@ -575,10 +556,7 @@ pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor_with_ext_count(
     if k == 0 || frozen.load(Ordering::Relaxed) != 0 {
         return Ok(());
     }
-    if reml_state
-        .persistent_warm_start_disk_enabled
-        .load(Ordering::Relaxed)
-    {
+    if reml_state.persistent_warm_start_store().is_some() {
         crate::bail_invalid_estim!(
             "the {family} λ-search freeze must be anchored before the persistent warm-start \
              layer is attached, or while it is scoped off (#2363/#2426); with the on-disk \
@@ -825,10 +803,10 @@ where
         heuristic_lambdas,
         &reml_seed_config,
     )?;
-    if opts.persist_warm_start_disk {
-        // Caller opted into cross-process resume (#1082): engage the on-disk
-        // warm-start layer. Default-false keeps replicate/CI loops disk-silent.
-        reml_state.enable_persistent_warm_start_disk();
+    if let Some(store) = opts.persistent_warm_start_store.clone() {
+        // Attach only after the canonical nuisance anchor so cache history
+        // cannot influence the criterion frame.
+        reml_state.attach_persistent_warm_start_store(store);
     }
     reml_state.setwarm_start_original_beta(warm_start_beta);
 
@@ -900,10 +878,12 @@ where
                 .and_then(|rho| rho.as_slice())
                 .or(heuristic_lambdas);
             let analytic_outer_hessian_available = reml_state.analytic_outer_hessian_enabled();
-            // #2359: search consumes the analytic outer gradient (the family
-            // derivative ladder through order three). Exact curvature remains
-            // declared because the terminal mint audit consumes it once,
-            // verifies the minimum, and persists it for inference.
+            // #2359: non-Gaussian search consumes the analytic outer gradient
+            // (the family derivative ladder through order three), reserving
+            // exact curvature for the terminal mint audit.  Profiled Gaussian
+            // identity is quadratic in eta and has no expensive order-four
+            // family tower, so it uses the declared exact outer Hessian during
+            // search instead of approximating it with first-order BFGS.
             let n_obs = y_o.len();
             let problem = OuterProblem::new(k)
                 .with_gradient(Derivative::Analytic)
@@ -912,7 +892,9 @@ where
                 } else {
                     DeclaredHessianForm::Unavailable
                 })
-                .with_prefer_gradient_only(true)
+                .with_prefer_gradient_only(standard_reml_search_prefers_gradient_only(
+                    cfg.link_function(),
+                ))
                 .with_barrier(
                     crate::estimate::reml::reml_outer_engine::BarrierConfig::from_constraints(
                         fit_linear_constraints.as_ref(),
@@ -3318,7 +3300,7 @@ mod blended_mixture_link_solve_tests {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         };
 
         // The joint mixture solve must converge (no error) on data its own pure
@@ -3429,7 +3411,7 @@ mod reported_loglikelihood_normalization_tests {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         }
     }
 
@@ -3626,7 +3608,7 @@ mod negative_binomial_joint_certificate_tests {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         };
         let error = match optimize_external_design(
             y.view(),
@@ -3695,7 +3677,7 @@ mod constrained_posterior_transport_tests {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         };
         optimize_external_design(
             y.view(),

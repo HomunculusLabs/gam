@@ -3033,6 +3033,119 @@ pub fn evaluate_custom_family_joint_hyper_best_mode_shared<
     })
 }
 
+
+/// Upgrade a value-only coefficient-mode selection at the identical hyperpoint
+/// into its requested analytic derivative payload without re-entering the
+/// nonconvex inner solver.
+///
+/// Ownership is the identity proof: the supplied selection carries the exact
+/// converged `BlockwiseInnerResult` that produced its screened scalar value.
+/// Smoothing and family-hyper coordinates must match bit-for-bit; a warm start
+/// or numerically-near point is deliberately insufficient.
+pub fn upgrade_custom_family_joint_hyper_mode_shared<
+    F: CustomFamily + Clone + Send + Sync + 'static,
+>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+    rho_current: &Array1<f64>,
+    hyper_layout: SharedCustomFamilyHyperLayout,
+    selection: CustomFamilyJointHyperModeSelection,
+    eval_mode: EvalMode,
+) -> Result<CustomFamilyJointHyperModeSelection, CustomFamilyError> {
+    if matches!(eval_mode, EvalMode::ValueOnly) {
+        return Ok(selection);
+    }
+
+    let CustomFamilyJointHyperModeSelection {
+        result: screened_result,
+        selected_candidate,
+        screened_objectives,
+        rejected_candidates,
+        mode,
+    } = selection;
+    let CustomFamilyOwnedMode {
+        objective: owned_objective,
+        rho: owned_rho,
+        hyper_values: owned_hyper_values,
+        inner: selected_inner,
+    } = mode;
+
+    let same_rho = owned_rho.len() == rho_current.len()
+        && owned_rho
+            .iter()
+            .zip(rho_current.iter())
+            .all(|(owned, current)| owned.to_bits() == current.to_bits());
+    let current_hyper_values = hyper_layout.values();
+    let same_hyper_values = owned_hyper_values.len() == current_hyper_values.len()
+        && owned_hyper_values
+            .iter()
+            .zip(current_hyper_values.iter())
+            .all(|(owned, current)| owned.to_bits() == current.to_bits());
+    if !same_rho || !same_hyper_values {
+        return Err(CustomFamilyError::InvalidInput {
+            context: "upgrade_custom_family_joint_hyper_mode_shared",
+            reason: format!(
+                "owned coefficient mode belongs to a different hyperpoint:                  rho_match={same_rho}, family_hyper_match={same_hyper_values}"
+            ),
+        });
+    }
+    if owned_objective.to_bits() != screened_result.objective.to_bits() {
+        return Err(CustomFamilyError::InvalidInput {
+            context: "upgrade_custom_family_joint_hyper_mode_shared",
+            reason: format!(
+                "owned coefficient mode objective {:.16e} does not match screened authority {:.16e}",
+                owned_objective, screened_result.objective,
+            ),
+        });
+    }
+
+    let penalty_counts = validate_blockspecs(specs)?;
+    let has_psi_derivatives = !hyper_layout.is_empty();
+    let (eval_options, _) =
+        derivative_quality_options_and_warm_start(options, None, has_psi_derivatives);
+    let mut derivative_eval = evaluate_custom_family_hyper_internal_shared(
+        family,
+        specs,
+        &eval_options,
+        &penalty_counts,
+        rho_current,
+        Arc::clone(&hyper_layout),
+        None,
+        gam_problem::RhoPrior::Flat,
+        eval_mode,
+        eval_mode,
+        Some(selected_inner),
+    )
+    .map_err(|error| CustomFamilyError::UnsupportedConfiguration {
+        reason: format!(
+            "owned coefficient mode failed requested derivative assembly: {error}"
+        ),
+    })?;
+    let derivative_objective = derivative_eval.objective;
+    derivative_eval.objective = canonicalize_screened_objective(
+        screened_result.objective,
+        derivative_objective,
+        selected_candidate,
+    )?;
+    derivative_eval.criterion_components[0] +=
+        derivative_eval.objective - derivative_objective;
+    validate_requested_best_mode_derivatives(
+        &derivative_eval,
+        eval_mode,
+        rho_current.len() + hyper_layout.len(),
+        selected_candidate,
+    )?;
+    let owned = outer_eval_result_into_joint_hyper_owned_result(derivative_eval);
+    Ok(CustomFamilyJointHyperModeSelection {
+        result: owned.result,
+        selected_candidate,
+        screened_objectives,
+        rejected_candidates,
+        mode: owned.mode,
+    })
+}
+
 #[cfg(test)]
 mod mode_selection_value_tests {
     use super::*;

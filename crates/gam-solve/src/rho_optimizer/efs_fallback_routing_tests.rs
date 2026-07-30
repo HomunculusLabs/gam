@@ -220,6 +220,158 @@ fn post_seed_custom_family_refusal_retains_typed_terminal_state_2658() {
     ));
 }
 
+/// A non-finite criterion at the literal seed is evidence about that seed, not
+/// a structural failure of the objective. The fixed-point adapter must retain
+/// the bridge's recoverable verdict so the caller can continue the seed
+/// cascade.
+#[test]
+fn non_finite_efs_seed_cost_is_a_typed_seed_rejection_2653() {
+    let problem = OuterProblem::new(3)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable);
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), theta: &Array1<f64>| Ok(0.5 * theta.dot(theta)),
+        |_: &mut (), theta: &Array1<f64>| {
+            Ok(OuterEval {
+                cost: 0.5 * theta.dot(theta),
+                gradient: theta.clone(),
+                hessian: HessianValue::Unavailable,
+                inner_beta_hint: None,
+            })
+        },
+        None::<fn(&mut ())>,
+        Some(|_: &mut (), theta: &Array1<f64>| {
+            Ok(EfsEval {
+                cost: f64::INFINITY,
+                steps: vec![0.0; theta.len()],
+                beta: None,
+                psi_gradient: None,
+                psi_indices: None,
+                inner_hessian_scale: None,
+                logdet_enclosure_gap: None,
+                consecutive_restored_incumbents: None,
+            })
+        }),
+    );
+    let capability = obj.capability();
+    let the_plan = plan(&capability);
+    assert_eq!(the_plan.solver, Solver::Efs);
+    let seed = Array1::from_elem(3, 1.0);
+
+    let error = match run_fixed_point_outer_solver(
+        &mut obj,
+        capability.theta_layout(),
+        capability.barrier_config.clone(),
+        &problem.config(),
+        "non-finite EFS seed cost",
+        &seed,
+        the_plan,
+        "EFS",
+        "EFS failed",
+    ) {
+        Err(FixedPointOuterRunError::SeedRejected(error)) => error,
+        Err(FixedPointOuterRunError::IterationRejected(_)) => {
+            panic!("the first EFS evaluation failed; no iteration started")
+        }
+        Err(FixedPointOuterRunError::ImmediateFallback(_)) => {
+            panic!("a non-finite cost is a point-local refusal, not a solver request")
+        }
+        Err(FixedPointOuterRunError::Failed(error)) => {
+            panic!("a point-local non-finite seed cost was made fatal: {error}")
+        }
+        Ok(_) => panic!("a non-finite EFS seed cost must be rejected"),
+    };
+    assert!(error.is_recoverable());
+    assert_eq!(
+        error.message(),
+        "outer EFS eval failed: objective returned a non-finite cost"
+    );
+}
+
+/// The same producer verdict after a successful seed evaluation must remain an
+/// iteration rejection. This is the boundary that used to discard the typed
+/// error and abort all remaining seeds.
+#[test]
+fn non_finite_post_seed_efs_cost_is_a_typed_iteration_rejection_2653() {
+    let efs_calls = Arc::new(AtomicUsize::new(0));
+    let problem = OuterProblem::new(3)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_max_iter(20);
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), theta: &Array1<f64>| Ok(0.5 * theta.dot(theta)),
+        |_: &mut (), theta: &Array1<f64>| {
+            Ok(OuterEval {
+                cost: 0.5 * theta.dot(theta),
+                gradient: theta.clone(),
+                hessian: HessianValue::Unavailable,
+                inner_beta_hint: None,
+            })
+        },
+        None::<fn(&mut ())>,
+        {
+            let efs_calls = Arc::clone(&efs_calls);
+            Some(move |_: &mut (), theta: &Array1<f64>| {
+                let cost = if efs_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    0.5 * theta.dot(theta)
+                } else {
+                    f64::INFINITY
+                };
+                Ok(EfsEval {
+                    cost,
+                    steps: vec![-0.25; theta.len()],
+                    beta: None,
+                    psi_gradient: None,
+                    psi_indices: None,
+                    inner_hessian_scale: None,
+                    logdet_enclosure_gap: None,
+                    consecutive_restored_incumbents: None,
+                })
+            })
+        },
+    );
+    let capability = obj.capability();
+    let the_plan = plan(&capability);
+    assert_eq!(the_plan.solver, Solver::Efs);
+    let seed = Array1::from_elem(3, 1.0);
+
+    let error = match run_fixed_point_outer_solver(
+        &mut obj,
+        capability.theta_layout(),
+        capability.barrier_config.clone(),
+        &problem.config(),
+        "non-finite post-seed EFS cost",
+        &seed,
+        the_plan,
+        "EFS",
+        "EFS failed",
+    ) {
+        Err(FixedPointOuterRunError::IterationRejected(error)) => error,
+        Err(FixedPointOuterRunError::SeedRejected(_)) => {
+            panic!("the finite seed evaluation succeeded; this is not a seed rejection")
+        }
+        Err(FixedPointOuterRunError::ImmediateFallback(_)) => {
+            panic!("a non-finite cost is a point-local refusal, not a solver request")
+        }
+        Err(FixedPointOuterRunError::Failed(error)) => {
+            panic!("a point-local non-finite iteration cost was made fatal: {error}")
+        }
+        Ok(_) => panic!("the synthetic post-seed non-finite cost must be rejected"),
+    };
+    assert!(error.is_recoverable());
+    assert_eq!(
+        error.message(),
+        "outer EFS eval failed: objective returned a non-finite cost"
+    );
+    assert_eq!(
+        efs_calls.load(Ordering::Relaxed),
+        2,
+        "one finite seed evaluation and one rejected iteration must be observed"
+    );
+}
+
 /// A post-seed objective failure that is not a typed request keeps its
 /// fatal classification: only the routing request is rerouted.
 #[test]

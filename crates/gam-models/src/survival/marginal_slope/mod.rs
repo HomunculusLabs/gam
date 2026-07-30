@@ -21,6 +21,7 @@ pub(crate) use crate::custom_family::{
     fit_custom_family, fit_custom_family_fixed_log_lambda_warm_start,
     fit_custom_family_fixed_log_lambdas_from_mode_selection,
     joint_hyper_options_for_outer_tolerance,
+    upgrade_custom_family_joint_hyper_mode_shared,
 };
 pub(crate) use gam_problem::{
     ExactNewtonJointPsiSecondOrderTerms, ExactNewtonJointPsiTerms, ExactNewtonJointPsiWorkspace,

@@ -3312,7 +3312,7 @@ pub(super) fn run_two_block_exact_joint_optimize(
                 + designs[0].penalties.len() as f64
                 + designs[1].penalties.len() as f64)
         },
-        |theta, specs, designs, eval_mode, _| {
+        |theta, specs, designs, eval_mode, _, _| {
             assert_eq!(theta.len(), theta_dim);
             assert_eq!(specs.len(), 2);
             assert!(!designs.is_empty());
@@ -3475,12 +3475,10 @@ fn staged_exact_joint_outer_reoptimizes_and_certifies_the_full_row_measure() {
             fit_entry_serial.set(Some(evaluation_serial.get()));
             Ok(theta.clone())
         },
-        |theta, specs, designs, eval_mode, row_set| {
+        |theta, specs, designs, eval_mode, row_set, owned_mode| {
             assert_eq!(theta.len(), theta_dim);
             assert_eq!(specs.len(), 2);
             assert_eq!(designs.len(), 2);
-            let serial = evaluation_serial.get() + 1;
-            evaluation_serial.set(serial);
             let (center, full_rows) = match row_set {
                 gam_problem::outer_subsample::RowSet::Subsample { .. } => {
                     pilot_evals.set(pilot_evals.get() + 1);
@@ -3503,16 +3501,44 @@ fn staged_exact_joint_outer_reoptimizes_and_certifies_the_full_row_measure() {
             } else {
                 gam_problem::HessianValue::Unavailable
             };
-            Ok(ExactJointEvaluation {
-                objective: cost,
-                gradient,
-                hessian,
-                mode: TerminalEvidence {
+            let mode = if let Some(mode) = owned_mode {
+                assert!(
+                    !matches!(
+                        eval_mode,
+                        gam_solve::estimate::reml::reml_outer_engine::EvalMode::ValueOnly
+                    ),
+                    "a value-only evaluation cannot consume its own terminal mode",
+                );
+                assert_eq!(
+                    mode.theta_bits,
+                    theta.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                    "owned mode must belong to the exact requested theta",
+                );
+                assert_eq!(
+                    mode.objective_bits,
+                    cost.to_bits(),
+                    "owned mode must carry the exact requested objective",
+                );
+                assert_eq!(
+                    mode.full_rows, full_rows,
+                    "owned mode cannot cross the pilot/full-data boundary",
+                );
+                mode
+            } else {
+                let serial = evaluation_serial.get() + 1;
+                evaluation_serial.set(serial);
+                TerminalEvidence {
                     serial,
                     theta_bits: theta.iter().map(|value| value.to_bits()).collect(),
                     objective_bits: cost.to_bits(),
                     full_rows,
-                },
+                }
+            };
+            Ok(ExactJointEvaluation {
+                objective: cost,
+                gradient,
+                hessian,
+                mode,
             })
         },
         |_, _, _, _| {
@@ -5219,7 +5245,7 @@ fn exact_joint_two_block_no_spatial_fast_path_returns_fully_frozen_specs() {
             ));
             Ok(designs[0].design.ncols() as f64 + designs[1].design.ncols() as f64)
         },
-        |theta, specs, designs, eval_mode, _| {
+        |theta, specs, designs, eval_mode, _, _| {
             assert_eq!(theta.len(), theta_dim);
             assert_eq!(specs.len(), 2);
             assert_eq!(designs.len(), 2);

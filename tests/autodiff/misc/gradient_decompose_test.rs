@@ -495,7 +495,7 @@ fn test_single_penalty_logit_gradient() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let rho = array![2.0];
     let w = Array1::ones(n);
@@ -569,7 +569,7 @@ fn test_two_overlapping_penalties_logit_gradient() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let rho = array![2.0, -1.0];
     let w = Array1::ones(n);
@@ -639,7 +639,7 @@ fn test_two_nonoverlapping_penalties_logit_gradient() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let rho = array![2.0, -1.0];
     let w = Array1::ones(n);
@@ -725,7 +725,7 @@ fn test_gaussian_gradient_vs_fd() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let rho = array![1.5, 0.8];
     let w = Array1::ones(n);
@@ -784,7 +784,7 @@ fn test_probit_single_penalty_gradient() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let rho = array![2.0];
     let w = Array1::ones(n);
@@ -843,7 +843,7 @@ fn test_probit_overlapping_penalties_gradient() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let rho = array![2.0, -1.0];
     let w = Array1::ones(n);

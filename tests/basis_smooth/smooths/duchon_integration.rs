@@ -123,7 +123,7 @@ fn assert_invalid_pure_duchon_simulated_10d(power: usize, nullspace_order: Ducho
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     ) {
         Ok(_) => panic!("invalid pure 10D Duchon configuration should be rejected"),
@@ -223,7 +223,7 @@ fn duchon_fit_term_collection_gaussian_simulated_10dwith_exact_adaptive_regulari
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     ) {
         Ok(_) => panic!("invalid adaptive pure 10D Duchon configuration should be rejected"),
@@ -351,7 +351,7 @@ fn duchon_2d_aniso_gaussian_fits_successfully() {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     )
     .expect("anisotropic hybrid Duchon Gaussian fit should succeed");
@@ -507,7 +507,7 @@ fn duchon_2d_aniso_binomial_fits_successfully() {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     )
     .expect("anisotropic hybrid Duchon binomial fit should succeed");
@@ -665,7 +665,7 @@ fn duchon_2d_scale_dimensions_does_not_abort_on_clean_data_issue_382() {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     )
     .expect(

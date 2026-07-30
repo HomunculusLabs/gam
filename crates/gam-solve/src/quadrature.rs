@@ -178,6 +178,7 @@ use crate::mixture_link::{
     beta_logistic_inverse_link_jet, component_inverse_link_jet, sas_inverse_link_jet,
 };
 use gam_math::probability::{erfcx_nonnegative, normal_logcdf};
+use gam_math::quadrature::{GaussHermiteRule, gauss_hermite_rule};
 use gam_math::special::stable_polynomial_times_exp_neg as cloglog_stable_poly_times_exp_neg;
 use gam_problem::types::{
     GlmLikelihoodSpec, InverseLink, LinkComponent, LinkFunction, MixtureLinkState, ResponseFamily,
@@ -213,10 +214,10 @@ struct Complex {
 /// Quadrature context that owns Gauss-Hermite caches.
 pub struct QuadratureContext {
     gh_cache: OnceLock<GaussHermiteRule>,
-    gh15_cache: OnceLock<GaussHermiteRuleDynamic>,
-    gh21_cache: OnceLock<GaussHermiteRuleDynamic>,
-    gh31_cache: OnceLock<GaussHermiteRuleDynamic>,
-    gh51_cache: OnceLock<GaussHermiteRuleDynamic>,
+    gh15_cache: OnceLock<GaussHermiteRule>,
+    gh21_cache: OnceLock<GaussHermiteRule>,
+    gh31_cache: OnceLock<GaussHermiteRule>,
+    gh51_cache: OnceLock<GaussHermiteRule>,
     // Clenshaw-Curtis rules are constructed on demand because the node count is
     // chosen from the certified truncation/ellipse heuristic rather than from a
     // tiny fixed family like the GHQ rules above.
@@ -480,7 +481,7 @@ impl QuadratureContext {
         self.gh_cache.get_or_init(compute_gauss_hermite)
     }
 
-    fn gauss_hermite_n(&self, n: usize) -> &GaussHermiteRuleDynamic {
+    fn gauss_hermite_n(&self, n: usize) -> &GaussHermiteRule {
         match n {
             // The fixed 7-point cache is served via `gauss_hermite()`. If a caller
             // ends up here with n=7 anyway, fall back to the 15-point rule.
@@ -509,19 +510,6 @@ impl Default for QuadratureContext {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Gauss-Hermite quadrature rule: nodes and weights.
-struct GaussHermiteRule {
-    /// Quadrature nodes (roots of Hermite polynomial)
-    nodes: [f64; N_POINTS],
-    /// Quadrature weights (for physicist's Hermite, sum to sqrt(π))
-    weights: [f64; N_POINTS],
-}
-
-pub(crate) struct GaussHermiteRuleDynamic {
-    pub(crate) nodes: Vec<f64>,
-    pub(crate) weights: Vec<f64>,
 }
 
 #[derive(Clone)]
@@ -668,213 +656,19 @@ fn cloglog_should_prefer_cc(mu: f64, sigma: f64, tol: f64) -> bool {
     }
 }
 
-/// Compute Gauss-Hermite quadrature nodes and weights using the Golub-Welsch algorithm.
-///
-/// The Golub-Welsch algorithm computes quadrature rules by finding the eigenvalues
-/// and eigenvectors of the symmetric tridiagonal Jacobi matrix associated with
-/// the orthogonal polynomial recurrence relation.
-///
-/// For physicist's Hermite polynomials Hₙ(x) with weight exp(-x²):
-/// - Recurrence: Hₙ₊₁(x) = 2x·Hₙ(x) - 2n·Hₙ₋₁(x)
-/// - Jacobi matrix has: diagonal = 0, off-diagonal[i] = sqrt(i/2) for i = 1..n
-///
-/// The nodes are the eigenvalues, and weights are derived from the first
-/// component of each eigenvector.
+/// Fixed production rule built by the shared `O(n²)`-time, `O(n)`-space
+/// Golub-Welsch implementation.
 fn compute_gauss_hermite() -> GaussHermiteRule {
-    // Build symmetric tridiagonal Jacobi matrix for physicist's Hermite polynomials
-    // For the recurrence aₙHₙ₊₁ = (x - bₙ)Hₙ - cₙHₙ₋₁ where cₙ = n/(2aₙ₋₁)
-    // The Jacobi matrix has: J[i,i] = 0, J[i,i+1] = J[i+1,i] = sqrt((i+1)/2)
-
-    let mut diag = [0.0f64; N_POINTS]; // All zeros for Hermite
-    let mut off_diag = [0.0f64; N_POINTS - 1];
-
-    for i in 0..(N_POINTS - 1) {
-        // Off-diagonal: sqrt((i+1)/2) for physicist's Hermite
-        off_diag[i] = (((i + 1) as f64) / 2.0).sqrt();
-    }
-
-    // Find eigenvalues and eigenvectors using symmetric tridiagonal QR algorithm
-    // This is the implicit symmetric QR algorithm with Wilkinson shifts
-    let (eigenvalues, eigenvectors) = symmetric_tridiagonal_eigen(&mut diag, &mut off_diag);
-
-    // Nodes are the eigenvalues (sorted)
-    let nodes = eigenvalues;
-    let mut weights = [0.0f64; N_POINTS];
-
-    // Weights: wᵢ = μ₀ * (first component of eigenvector)².
-    // `symmetric_tridiagonal_eigen` applies the QL rotations to rows of the
-    // accumulator and returns Q^T, so the first component of eigenvector i is
-    // stored at eigenvectors[i][0], not eigenvectors[0][i].
-    // For physicist's Hermite: μ₀ = ∫exp(-x²)dx = sqrt(π)
-    let mu0 = std::f64::consts::PI.sqrt();
-    for i in 0..N_POINTS {
-        let v0 = eigenvectors[i][0];
-        weights[i] = mu0 * v0 * v0;
-    }
-
-    // Sort nodes (and corresponding weights) in ascending order
-    let mut indices: [usize; N_POINTS] = [0, 1, 2, 3, 4, 5, 6];
-    indices.sort_by(|&a, &b| nodes[a].total_cmp(&nodes[b]));
-
-    let sorted_nodes: [f64; N_POINTS] = std::array::from_fn(|i| nodes[indices[i]]);
-    let sortedweights: [f64; N_POINTS] = std::array::from_fn(|i| weights[indices[i]]);
-
-    GaussHermiteRule {
-        nodes: sorted_nodes,
-        weights: sortedweights,
-    }
+    compute_gauss_hermite_n(N_POINTS)
 }
 
-pub(crate) fn compute_gauss_hermite_n(n: usize) -> GaussHermiteRuleDynamic {
-    let mut diag = vec![0.0f64; n];
-    let mut off_diag = vec![0.0f64; n.saturating_sub(1)];
-    for (i, od) in off_diag.iter_mut().enumerate() {
-        *od = (((i + 1) as f64) / 2.0).sqrt();
-    }
-    let (nodes, eigenvectors) = symmetric_tridiagonal_eigen_dynamic(&mut diag, &mut off_diag);
-    let mu0 = std::f64::consts::PI.sqrt();
-    let mut pairs = (0..n)
-        .map(|i| {
-            let v0 = eigenvectors[i][0];
-            (nodes[i], mu0 * v0 * v0)
-        })
-        .collect::<Vec<_>>();
-    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    GaussHermiteRuleDynamic {
-        nodes: pairs.iter().map(|p| p.0).collect(),
-        weights: pairs.iter().map(|p| p.1).collect(),
-    }
-}
-
-/// Symmetric tridiagonal eigenvalue decomposition using implicit QR with Wilkinson shifts.
-///
-/// Returns (eigenvalues, eigenvectors) where eigenvectors[i] is the i-th eigenvector.
-fn symmetric_tridiagonal_eigen(
-    diag: &mut [f64; N_POINTS],
-    off_diag: &mut [f64; N_POINTS - 1],
-) -> ([f64; N_POINTS], [[f64; N_POINTS]; N_POINTS]) {
-    let mut diag_vec = diag.to_vec();
-    let mut off_diag_vec = off_diag.to_vec();
-    let (eigenvalues, eigenvectors) =
-        symmetric_tridiagonal_eigen_dynamic(&mut diag_vec, &mut off_diag_vec);
-
-    let mut values = [0.0; N_POINTS];
-    let mut vectors = [[0.0; N_POINTS]; N_POINTS];
-    values.copy_from_slice(&eigenvalues);
-    for i in 0..N_POINTS {
-        vectors[i].copy_from_slice(&eigenvectors[i]);
-    }
-    diag.copy_from_slice(&values);
-    off_diag.copy_from_slice(&off_diag_vec);
-    (values, vectors)
-}
-
-fn symmetric_tridiagonal_eigen_dynamic(
-    diag: &mut [f64],
-    off_diag: &mut [f64],
-) -> (Vec<f64>, Vec<Vec<f64>>) {
-    let dim = diag.len();
-    let mut z = vec![vec![0.0_f64; dim]; dim];
-    for (i, row) in z.iter_mut().enumerate().take(dim) {
-        row[i] = 1.0;
-    }
-    // Relative off-diagonal deflation tolerance (near `f64` precision) and the
-    // per-subproblem QL/QR sweep cap, mirroring LAPACK `dsteqr`'s convergence
-    // guards. The cap is generous: QL with implicit shifts deflates an
-    // eigenvalue in a handful of sweeps, so reaching it signals a pathological
-    // matrix rather than normal operation.
-    const DEFLATION_TOL: f64 = 1e-15;
-    const MAX_QL_SWEEPS: usize = 200;
-    let eps = DEFLATION_TOL;
-    let max_iter = MAX_QL_SWEEPS;
-    // Matrix 1-norm fallback scale. The row-local criterion
-    // `eps * (|d[m-1]| + |d[m]|)` collapses to zero when the diagonal is
-    // identically zero (as for physicist's Hermite), which stalls QR because
-    // no off-diagonal can satisfy `|e| <= 0`. LAPACK dsteqr uses ||T||_inf;
-    // we take the max absolute row sum and use it as a floor on the scale.
-    let mut t_norm = 0.0_f64;
-    for i in 0..dim {
-        let left = if i > 0 { off_diag[i - 1].abs() } else { 0.0 };
-        let right = if i + 1 < dim { off_diag[i].abs() } else { 0.0 };
-        let row_sum = diag[i].abs() + left + right;
-        if row_sum > t_norm {
-            t_norm = row_sum;
-        }
-    }
-    let mut n = dim;
-    while n > 1 {
-        let mut converged = false;
-        for _ in 0..max_iter {
-            let mut m = n - 1;
-            while m > 0 {
-                let row_scale = (diag[m - 1].abs() + diag[m].abs()).max(t_norm);
-                if off_diag[m - 1].abs() <= eps * row_scale {
-                    off_diag[m - 1] = 0.0;
-                    break;
-                }
-                m -= 1;
-            }
-            if m == n - 1 {
-                n -= 1;
-                converged = true;
-                break;
-            }
-            let shift = wilkinson_shift(diag[n - 2], diag[n - 1], off_diag[n - 2]);
-            let mut x = diag[m] - shift;
-            let mut y = off_diag[m];
-            for k in m..(n - 1) {
-                let (c, s) = if y.abs() > eps {
-                    let r = x.hypot(y);
-                    if r > 0.0 && r.is_finite() {
-                        (x / r, -y / r)
-                    } else {
-                        (1.0, 0.0)
-                    }
-                } else {
-                    (1.0, 0.0)
-                };
-                if k > m {
-                    off_diag[k - 1] = x.hypot(y);
-                }
-                let d1 = diag[k];
-                let d2 = diag[k + 1];
-                let e_k = off_diag[k];
-                diag[k] = c * c * d1 + s * s * d2 - 2.0 * c * s * e_k;
-                diag[k + 1] = s * s * d1 + c * c * d2 + 2.0 * c * s * e_k;
-                off_diag[k] = c * s * (d1 - d2) + (c * c - s * s) * e_k;
-                if k < n - 2 {
-                    x = off_diag[k];
-                    y = -s * off_diag[k + 1];
-                    off_diag[k + 1] *= c;
-                }
-                for i in 0..dim {
-                    let t = z[k][i];
-                    z[k][i] = c * t - s * z[k + 1][i];
-                    z[k + 1][i] = s * t + c * z[k + 1][i];
-                }
-            }
-        }
-        if !converged {
-            off_diag[n - 2] = 0.0;
-            n -= 1;
-        }
-    }
-    (diag.to_vec(), z)
-}
-
-#[inline]
-fn wilkinson_shift(a: f64, c: f64, b: f64) -> f64 {
-    let d = (a - c) * 0.5;
-    let t = d.hypot(b);
-    let sgn = if d >= 0.0 { 1.0 } else { -1.0 }; // sign(0)=+1
-    let denom = d + sgn * t;
-
-    if denom.abs() > f64::EPSILON * t.max(1.0) {
-        c - (b * b) / denom
-    } else {
-        // Degenerate fallback: equivalent limiting shift when denominator collapses.
-        c - t
-    }
+pub(crate) fn compute_gauss_hermite_n(n: usize) -> GaussHermiteRule {
+    // SAFETY: every production caller selects n from the positive, hard-coded
+    // GHQ family {7,15,21,31,51}. A failure here means the shared deterministic
+    // eigensolver violated that construction invariant; no alternate numerical
+    // rule has been certified for the caller to recover with.
+    gauss_hermite_rule(n)
+        .unwrap_or_else(|error| panic!("shared Gauss-Hermite construction failed: {error}"))
 }
 
 /// Computes the posterior mean probability for a logistic model under
@@ -1580,9 +1374,7 @@ pub fn cloglog_log_survival_mu_derivative_gumbel_quadrature(
         if hermite == 0.0 {
             continue;
         }
-        let summand = (weight * half).ln()
-            + (eta - safe_exp(eta))
-            + log_gaussian_norm
+        let summand = (weight * half).ln() + (eta - safe_exp(eta)) + log_gaussian_norm
             - 0.5 * standardized * standardized
             + hermite.abs().ln();
         if !summand.is_finite() {
@@ -5286,15 +5078,6 @@ mod tests {
     }
 
     #[test]
-    fn testwilkinson_shift_finitewhen_d_iszero() {
-        // Trailing 2x2 with equal diagonal entries => d=0.
-        // Regression: using f64::signum() would produce denominator 0 here.
-        let shift = wilkinson_shift(0.0, 0.0, 1.25);
-        assert!(shift.is_finite());
-        assert_relative_eq!(shift, -1.25, epsilon = 1e-14);
-    }
-
-    #[test]
     fn test_matches_abramowitz_stegun_7_point_gauss_hermite_constants() {
         // Abramowitz & Stegun 25.4, 7-point Gauss-Hermite rule for the
         // physicist's weight exp(-x^2). This pins both the Jacobi matrix and
@@ -5324,48 +5107,6 @@ mod tests {
             assert_relative_eq!(gh.nodes[i], known_nodes[i], epsilon = 1e-12);
             assert_relative_eq!(gh.weights[i], knownweights[i], epsilon = 1e-12);
         }
-    }
-
-    #[test]
-    fn test_gauss_hermite_weight_assembly_uses_eigenvector_rows() {
-        let mut diag = [0.0_f64; N_POINTS];
-        let mut off_diag = [0.0_f64; N_POINTS - 1];
-        for (i, od) in off_diag.iter_mut().enumerate() {
-            *od = (((i + 1) as f64) / 2.0).sqrt();
-        }
-        let (nodes, eigenvectors) = symmetric_tridiagonal_eigen(&mut diag, &mut off_diag);
-        let mu0 = std::f64::consts::PI.sqrt();
-        let mut row_pairs: Vec<(f64, f64)> = (0..N_POINTS)
-            .map(|i| (nodes[i], mu0 * eigenvectors[i][0] * eigenvectors[i][0]))
-            .collect();
-        let mut column_pairs: Vec<(f64, f64)> = (0..N_POINTS)
-            .map(|i| (nodes[i], mu0 * eigenvectors[0][i] * eigenvectors[0][i]))
-            .collect();
-        row_pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-        column_pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-        let knownweights = [
-            0.000_971_781_245_099_519_1,
-            0.054_515_582_819_127_03,
-            0.425_607_252_610_127_8,
-            0.810_264_617_556_807_3,
-            0.425_607_252_610_127_8,
-            0.054_515_582_819_127_03,
-            0.000_971_781_245_099_519_1,
-        ];
-
-        for i in 0..N_POINTS {
-            assert_relative_eq!(row_pairs[i].1, knownweights[i], epsilon = 1e-12);
-        }
-        let column_error: f64 = column_pairs
-            .iter()
-            .zip(knownweights.iter())
-            .map(|(actual, expected)| (actual.1 - expected).abs())
-            .sum();
-        assert!(
-            column_error > 1.0,
-            "column-oriented eigenvector indexing unexpectedly matched A&S weights"
-        );
     }
 
     #[test]
@@ -6749,13 +6490,8 @@ mod tests {
         let spec =
             LikelihoodSpec::new(ResponseFamily::Binomial, InverseLink::LatentCLogLog(latent));
         let likelihood = GlmLikelihoodSpec::canonical(spec);
-        let err = integrated_family_moments_jet(
-            &ctx,
-            &likelihood,
-            0.2,
-            0.5,
-        )
-        .expect_err("latent cloglog moments should error in this dispatcher");
+        let err = integrated_family_moments_jet(&ctx, &likelihood, 0.2, 0.5)
+            .expect_err("latent cloglog moments should error in this dispatcher");
         assert!(format!("{err}").contains("LatentCLogLog"));
     }
 
@@ -6769,13 +6505,8 @@ mod tests {
         .expect("sas state should reconstruct from raw parameters");
         let spec = LikelihoodSpec::new(ResponseFamily::Binomial, InverseLink::Sas(sas));
         let likelihood = GlmLikelihoodSpec::canonical(spec);
-        let out = integrated_family_moments_jet(
-            &ctx,
-            &likelihood,
-            0.2,
-            0.5,
-        )
-        .expect("stateful SAS integrated moments should evaluate");
+        let out = integrated_family_moments_jet(&ctx, &likelihood, 0.2, 0.5)
+            .expect("stateful SAS integrated moments should evaluate");
         assert!(out.mean.is_finite());
         assert!(out.d1.is_finite());
         assert!(out.d2.is_finite());
@@ -6793,13 +6524,8 @@ mod tests {
         .expect("single-component probit mixture state");
         let spec = LikelihoodSpec::new(ResponseFamily::Binomial, InverseLink::Mixture(state));
         let likelihood = GlmLikelihoodSpec::canonical(spec);
-        let out = integrated_family_moments_jet(
-            &ctx,
-            &likelihood,
-            0.7,
-            1.3,
-        )
-        .expect("pure probit mixture integrated moments should evaluate");
+        let out = integrated_family_moments_jet(&ctx, &likelihood, 0.7, 1.3)
+            .expect("pure probit mixture integrated moments should evaluate");
         let exact = integrated_probit_jet(0.7, 1.3);
         assert_relative_eq!(out.mean, exact.mean, epsilon = 1e-12);
         assert_relative_eq!(out.d1, exact.d1, epsilon = 1e-12);
@@ -6818,13 +6544,8 @@ mod tests {
         .expect("single-component logit mixture state");
         let spec = LikelihoodSpec::new(ResponseFamily::Binomial, InverseLink::Mixture(state));
         let likelihood = GlmLikelihoodSpec::canonical(spec);
-        let out = integrated_family_moments_jet(
-            &ctx,
-            &likelihood,
-            1.1,
-            0.8,
-        )
-        .expect("pure logit mixture integrated moments should evaluate");
+        let out = integrated_family_moments_jet(&ctx, &likelihood, 1.1, 0.8)
+            .expect("pure logit mixture integrated moments should evaluate");
         let exact = integrated_inverse_link_jet(&ctx, LinkFunction::Logit, 1.1, 0.8)
             .expect("canonical integrated logit jet");
         assert_relative_eq!(out.mean, exact.mean, epsilon = 1e-12);
@@ -6850,13 +6571,8 @@ mod tests {
             InverseLink::Mixture(state.clone()),
         );
         let likelihood = GlmLikelihoodSpec::canonical(spec);
-        let out = integrated_family_moments_jet(
-            &ctx,
-            &likelihood,
-            0.2,
-            0.5,
-        )
-        .expect("stateful mixture integrated moments should evaluate");
+        let out = integrated_family_moments_jet(&ctx, &likelihood, 0.2, 0.5)
+            .expect("stateful mixture integrated moments should evaluate");
         let direct = integrated_mixture_jet(&ctx, 0.2, 0.5, &state)
             .expect("direct integrated mixture jet should evaluate");
         assert_relative_eq!(out.mean, direct.mean, epsilon = 1e-12);
@@ -6885,13 +6601,8 @@ mod tests {
             spec: tweedie.clone(),
             scale: LikelihoodScaleMetadata::EstimatedTweediePhi { phi },
         };
-        let out = integrated_family_moments_jet(
-            &ctx,
-            &tweedie_likelihood,
-            e,
-            se,
-        )
-        .expect("tweedie integrated moments should evaluate");
+        let out = integrated_family_moments_jet(&ctx, &tweedie_likelihood, e, se)
+            .expect("tweedie integrated moments should evaluate");
         let expected = phi * m.powf(p);
         assert_relative_eq!(out.variance, expected, epsilon = 1e-12);
         // Guard against the φ = 1 regression: the corrected value is φ× the old one.
@@ -6904,13 +6615,8 @@ mod tests {
             spec: gamma.clone(),
             scale: LikelihoodScaleMetadata::EstimatedGammaShape { shape },
         };
-        let out = integrated_family_moments_jet(
-            &ctx,
-            &gamma_likelihood,
-            e,
-            se,
-        )
-        .expect("gamma integrated moments should evaluate");
+        let out = integrated_family_moments_jet(&ctx, &gamma_likelihood, e, se)
+            .expect("gamma integrated moments should evaluate");
         let expected = m * m / shape;
         assert_relative_eq!(out.variance, expected, epsilon = 1e-12);
         // Guard against the k = 1 regression: the corrected value is (1/k)× the old one.
@@ -6919,26 +6625,16 @@ mod tests {
         // Poisson is φ ≡ 1, Var = m, independent of the (unit) scale label.
         let poisson = LikelihoodSpec::poisson_log();
         let poisson_likelihood = GlmLikelihoodSpec::canonical(poisson);
-        let out = integrated_family_moments_jet(
-            &ctx,
-            &poisson_likelihood,
-            e,
-            se,
-        )
-        .expect("poisson integrated moments should evaluate");
+        let out = integrated_family_moments_jet(&ctx, &poisson_likelihood, e, se)
+            .expect("poisson integrated moments should evaluate");
         assert_relative_eq!(out.variance, m, epsilon = 1e-12);
 
         // NB2 with theta = 3: Var = m + m²/θ, unchanged by this fix.
         let theta = 3.0_f64;
         let nb = LikelihoodSpec::negative_binomial_log(theta);
         let nb_likelihood = GlmLikelihoodSpec::canonical(nb);
-        let out = integrated_family_moments_jet(
-            &ctx,
-            &nb_likelihood,
-            e,
-            se,
-        )
-        .expect("negative-binomial integrated moments should evaluate");
+        let out = integrated_family_moments_jet(&ctx, &nb_likelihood, e, se)
+            .expect("negative-binomial integrated moments should evaluate");
         assert_relative_eq!(out.variance, m + m * m / theta, epsilon = 1e-12);
 
         // Missing Gamma dispersion metadata is rejected, not silently φ = 1.
@@ -6946,13 +6642,8 @@ mod tests {
             spec: gamma,
             scale: LikelihoodScaleMetadata::Unspecified,
         };
-        let err = integrated_family_moments_jet(
-            &ctx,
-            &missing_gamma,
-            e,
-            se,
-        )
-        .expect_err("gamma without a shape in the scale metadata must error");
+        let err = integrated_family_moments_jet(&ctx, &missing_gamma, e, se)
+            .expect_err("gamma without a shape in the scale metadata must error");
         assert!(
             format!("{err}").contains("GammaShape"),
             "unexpected error message: {err}"
@@ -6963,13 +6654,8 @@ mod tests {
             spec: tweedie,
             scale: LikelihoodScaleMetadata::Unspecified,
         };
-        let err = integrated_family_moments_jet(
-            &ctx,
-            &missing_tweedie,
-            e,
-            se,
-        )
-        .expect_err("tweedie without a φ in the scale metadata must error");
+        let err = integrated_family_moments_jet(&ctx, &missing_tweedie, e, se)
+            .expect_err("tweedie without a φ in the scale metadata must error");
         assert!(
             format!("{err}").contains("EstimatedTweediePhi"),
             "unexpected error message: {err}"

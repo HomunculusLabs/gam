@@ -938,6 +938,7 @@ pub(crate) fn materialize_survival<'a>(
                 initial_threshold_log_lambdas,
                 initial_log_sigma_log_lambdas,
                 cache_session: None,
+                persistent_warm_start_store: config.persistent_warm_start_store.clone(),
                 cache_mirror_sessions: Vec::new(),
             };
             // During baseline-θ BFGS probes we hold the inverse-link state
@@ -955,7 +956,6 @@ pub(crate) fn materialize_survival<'a>(
                 wiggle: effective_linkwiggle_cfg.clone(),
                 kappa_options: config.spatial_optimization.clone(),
                 optimize_inverse_link,
-                cache_session: None,
             })
         };
 
@@ -1020,6 +1020,7 @@ pub(crate) fn materialize_survival<'a>(
             },
             options: BlockwiseFitOptions {
                 compute_covariance: false,
+                persistent_warm_start_store: config.persistent_warm_start_store.clone(),
                 // Robustness (Firth/Jeffreys stabilizer) is the unconditional
                 // default for survival marginal-slope — no flag to thread.
                 ..Default::default()
@@ -1141,7 +1142,10 @@ pub(crate) fn materialize_survival<'a>(
                     mean_offset: threshold_offset.clone(),
                 },
                 frailty: config.frailty.clone(),
-                options: BlockwiseFitOptions::default(),
+                options: BlockwiseFitOptions {
+                    persistent_warm_start_store: config.persistent_warm_start_store.clone(),
+                    ..BlockwiseFitOptions::default()
+                },
             })
         };
 
@@ -1200,7 +1204,10 @@ pub(crate) fn materialize_survival<'a>(
                     mean_offset: threshold_offset.clone(),
                 },
                 frailty: config.frailty.clone(),
-                options: BlockwiseFitOptions::default(),
+                options: BlockwiseFitOptions {
+                    persistent_warm_start_store: config.persistent_warm_start_store.clone(),
+                    ..BlockwiseFitOptions::default()
+                },
             })
         };
 
@@ -1449,7 +1456,7 @@ pub(crate) fn materialize_survival<'a>(
                     ridge_lambda: config.ridge_lambda,
                     penalty_block_gamma_priors: config.penalty_block_gamma_priors.clone(),
                 },
-                cache_session: None,
+                persistent_warm_start_store: config.persistent_warm_start_store.clone(),
             })
         }
         SurvivalLikelihoodMode::LocationScale => {

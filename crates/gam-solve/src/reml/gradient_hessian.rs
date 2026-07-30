@@ -4586,7 +4586,7 @@ impl<'a> RemlState<'a> {
             analytic_penalty_registry_fingerprint: 0,
             persistent_warm_start_loaded: AtomicBool::new(false),
             persistent_warm_start_store_suppression: AtomicUsize::new(0),
-            persistent_warm_start_disk_enabled: AtomicBool::new(false),
+            persistent_warm_start_store: std::sync::OnceLock::new(),
             gaussian_weight_log_sum_half_cache: std::sync::OnceLock::new(),
             gaussian_dp_floor_scale_cache: std::sync::OnceLock::new(),
             positive_weight_observation_count_cache: std::sync::OnceLock::new(),
@@ -5700,69 +5700,36 @@ impl<'a> RemlState<'a> {
     /// same realized-fit-context key as the inner beta record. Disjoint
     /// keyspace, so inner and outer payloads don't collide.
     ///
-    /// Returns `None` if no platform cache directory is discoverable.
+    /// Returns `None` unless the caller supplied an explicit store root.
     pub(crate) fn outer_cache_session(
         &self,
     ) -> Option<std::sync::Arc<gam_runtime::warm_start::Session>> {
-        if !self.warm_start_enabled.load(Ordering::Relaxed) {
-            return None;
-        }
-        // Opt-in only: opening the cross-process outer-iterate session also
-        // opens the shared on-disk `WarmStartStore` (dir/eviction scan). Skip
-        // it unless `FitConfig::persist_warm_start_disk` enabled disk
-        // persistence (#1082/#1114).
-        if !self
-            .persistent_warm_start_disk_enabled
-            .load(Ordering::Relaxed)
+        let store = self.persistent_warm_start_store()?;
+        let key = self.persistent_warm_start_cache_key()?;
+        crate::persistent_warm_start::open_outer_session(store, &key)
+    }
+
+    pub(crate) fn attach_persistent_warm_start_store(
+        &self,
+        store: gam_runtime::warm_start::ConfiguredWarmStartStore,
+    ) {
+        self.persistent_warm_start_store
+            .set(store)
+            .expect("persistent warm-start store may be attached only once");
+    }
+
+    pub(crate) fn persistent_warm_start_store(
+        &self,
+    ) -> Option<&gam_runtime::warm_start::ConfiguredWarmStartStore> {
+        if !self.warm_start_enabled.load(Ordering::Relaxed)
+            || self
+                .persistent_warm_start_store_suppression
+                .load(Ordering::Relaxed)
+                > 0
         {
             return None;
         }
-        let key = self.persistent_warm_start_cache_key()?;
-        crate::persistent_warm_start::open_outer_session(&key)
-    }
-
-    /// Engage the cross-process ON-DISK warm-start layer. Called from the
-    /// estimate constructor when `FitConfig::persist_warm_start_disk` requests
-    /// cross-process / repeat-fit persistence. Until this is set the disk
-    /// load/store/eviction-scan path is skipped entirely and only the
-    /// in-memory warm start is used.
-    pub(crate) fn enable_persistent_warm_start_disk(&self) {
-        self.persistent_warm_start_disk_enabled
-            .store(true, Ordering::Relaxed);
-    }
-
-    /// Run one canonical computation without consulting or mutating the
-    /// cross-process warm-start store, then restore the caller's disk policy.
-    ///
-    /// A design-moving outer search uses this immediately after
-    /// `reset_surface`: the previous design's estimated nuisance is stale, but
-    /// the persistent session is already attached. Merely clearing the
-    /// in-memory predictor is insufficient because the inner solve would reload
-    /// a cached beta mid-anchor. Temporarily disengaging the per-state disk
-    /// layer suppresses both the load and store paths while leaving the ordinary
-    /// in-memory anchor result available to seed the requested evaluation.
-    pub(crate) fn without_persistent_warm_start_disk<T>(&self, f: impl FnOnce() -> T) -> T {
-        struct PersistentDiskGuard<'a> {
-            enabled: &'a AtomicBool,
-            restore_enabled: bool,
-        }
-
-        impl Drop for PersistentDiskGuard<'_> {
-            fn drop(&mut self) {
-                self.enabled.store(self.restore_enabled, Ordering::Relaxed);
-            }
-        }
-
-        let restore_enabled = self
-            .persistent_warm_start_disk_enabled
-            .swap(false, Ordering::Relaxed);
-        let guard = PersistentDiskGuard {
-            enabled: &self.persistent_warm_start_disk_enabled,
-            restore_enabled,
-        };
-        let out = f();
-        drop(guard);
-        out
+        self.persistent_warm_start_store.get()
     }
 
     pub(crate) fn persistent_warm_start_cache_key(&self) -> Option<String> {
@@ -5875,15 +5842,9 @@ impl<'a> RemlState<'a> {
         if !self.warm_start_enabled.load(Ordering::Relaxed) {
             return;
         }
-        // Cross-process disk restore is opt-in. Without it, skip the
-        // `persistent_store()` open + dir/eviction scan entirely — the
-        // in-memory warm start fully serves an in-process fit (#1082/#1114).
-        if !self
-            .persistent_warm_start_disk_enabled
-            .load(Ordering::Relaxed)
-        {
+        let Some(store) = self.persistent_warm_start_store() else {
             return;
-        }
+        };
         if self
             .persistent_warm_start_loaded
             .swap(true, Ordering::Relaxed)
@@ -5901,7 +5862,7 @@ impl<'a> RemlState<'a> {
         let Some(key) = self.persistent_warm_start_cache_key() else {
             return;
         };
-        let Some(record) = load_record(&key) else {
+        let Some(record) = load_record(store, &key) else {
             return;
         };
         if !record.is_compatible(&key, self.y.len(), self.p) {
@@ -5959,26 +5920,9 @@ impl<'a> RemlState<'a> {
         if !self.warm_start_enabled.load(Ordering::Relaxed) {
             return;
         }
-        // Cross-process disk checkpoint is opt-in (a cache session was
-        // attached). Without it, never touch the shared `WarmStartStore`:
-        // `store_record` opens the store and pays an eviction/dir scan that is
-        // O(cache entries) on a network FS, and a throwaway in-process fit
-        // (CI-coverage replicate, posterior probe) writes a record nothing will
-        // ever read — pure overhead that, accumulated across a refit loop,
-        // dominated the profile (#1082/#1114).
-        if !self
-            .persistent_warm_start_disk_enabled
-            .load(Ordering::Relaxed)
-        {
+        let Some(store) = self.persistent_warm_start_store() else {
             return;
-        }
-        if self
-            .persistent_warm_start_store_suppression
-            .load(Ordering::Relaxed)
-            > 0
-        {
-            return;
-        }
+        };
         // Disk persistence is a process-recovery checkpoint, not part of the
         // REML objective. The in-memory warm start is updated on every
         // successful PIRLS solve above; writing JSON/bin records here on every
@@ -6040,11 +5984,15 @@ impl<'a> RemlState<'a> {
             finite_nonnegative_from_bits(self.last_ift_prediction_residual.load(Ordering::Relaxed));
         record.last_pirls_accept_rho =
             finite_nonnegative_from_bits(self.last_pirls_accept_rho.load(Ordering::Relaxed));
-        if let Err(err) = store_record(&record) {
-            log::warn!("[warm-start-cache] failed to persist warm start: {err}");
-        }
+        store_record(store, &record);
     }
 
+    /// Run one canonical computation without consulting or mutating the
+    /// configured cross-process store, then restore the caller's capability.
+    ///
+    /// This scopes both reads and writes. It is used by posterior probes and by
+    /// design-moving nuisance anchors whose result must be independent of cache
+    /// history.
     pub(crate) fn without_persistent_warm_start_store<T>(&self, f: impl FnOnce() -> T) -> T {
         struct StoreSuppressionGuard<'a>(&'a AtomicUsize);
         impl Drop for StoreSuppressionGuard<'_> {

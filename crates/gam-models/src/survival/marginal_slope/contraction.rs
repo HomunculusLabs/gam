@@ -3,18 +3,62 @@
 
 use super::*;
 
-use gam_math::jet_scalar::{OneSeed, TwoSeed};
+use gam_math::jet_scalar::{JetScalar, OneSeed, TwoSeed};
 
 impl SurvivalMarginalSlopeFamily {
-    /// Build the row's third-order contracted tensor
-    /// `T[a][b] = d_ea d_eb d_dir NLL_i` from the single-source rigid row NLL
-    /// at the packed `OneSeed<4>` directional scalar (no dense `t3`).
+    /// Evaluate the single-source rigid row program once through order three.
+    ///
+    /// Three of the four rigid primaries are affine, so static sparsity retains
+    /// only the ten potentially nonzero third-order channels. The resulting
+    /// tower is independent of the directions later contracted into it.
+    pub(crate) fn build_row_primary_third_tower(
+        &self,
+        row: usize,
+        block_states: &[ParameterBlockState],
+    ) -> Result<SparseTower3<RIGID_LINEAR_MASK>, String> {
+        let inputs = rigid_row_inputs(
+            self,
+            block_states,
+            row,
+            "survival marginal-slope rigid row helper third",
+        )?;
+        let p = rigid_row_kernel_primaries(self, block_states, row)?;
+        let vars: [SparseTower3<RIGID_LINEAR_MASK>; N_PRIMARY] =
+            std::array::from_fn(|a| SparseTower3::variable(p[a], a));
+        rigid_row_nll(&vars, &inputs)
+    }
+
+    /// Contract a previously evaluated sparse row tower with one direction,
+    /// preserving the dense tower's exact accumulation order.
+    pub(crate) fn contract_row_primary_third_tower(
+        tower: &SparseTower3<RIGID_LINEAR_MASK>,
+        dir: &Array1<f64>,
+    ) -> Result<[[f64; N_PRIMARY]; N_PRIMARY], String> {
+        if dir.len() != N_PRIMARY {
+            return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
+                reason: format!(
+                    "survival rigid third contracted: dir length {} != primary dimension {N_PRIMARY}",
+                    dir.len()
+                ),
+            }
+            .into());
+        }
+        let mut dir_arr = [0.0_f64; N_PRIMARY];
+        dir_arr.copy_from_slice(dir.as_slice().ok_or_else(|| {
+            "survival rigid third contracted: non-contiguous direction".to_string()
+        })?);
+        Ok(tower3_third_contracted(&tower.t3, &dir_arr))
+    }
+
+    /// Build one rigid row's third-order directional contraction without
+    /// materializing the full third tensor. Single-axis callers retain this
+    /// cheaper directional scalar; only multi-axis callers build a shared tower.
     pub(crate) fn row_primary_third_contracted_tower(
         &self,
         row: usize,
         block_states: &[ParameterBlockState],
         dir: ArrayView1<'_, f64>,
-    ) -> Result<[[f64; 4]; 4], String> {
+    ) -> Result<[[f64; N_PRIMARY]; N_PRIMARY], String> {
         if dir.len() != N_PRIMARY {
             return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
                 reason: format!(
@@ -35,7 +79,7 @@ impl SurvivalMarginalSlopeFamily {
             "survival marginal-slope rigid row helper third",
         )?;
         let p = rigid_row_kernel_primaries(self, block_states, row)?;
-        let vars: [OneSeed<4>; 4] =
+        let vars: [OneSeed<N_PRIMARY>; N_PRIMARY] =
             std::array::from_fn(|a| OneSeed::seed_direction(p[a], a, dir_arr[a]));
         Ok(rigid_row_nll(&vars, &inputs)?.contracted_third())
     }

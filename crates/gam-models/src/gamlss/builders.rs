@@ -2201,7 +2201,8 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                  specs: &[TermCollectionSpec],
                  designs: &[TermCollectionDesign],
                  eval_mode,
-                 row_set: &crate::row_kernel::RowSet| {
+                 row_set: &crate::row_kernel::RowSet,
+                 _| {
                     use gam_problem::EvalMode;
                     if !analytic_joint_derivatives_available {
                         return Err(

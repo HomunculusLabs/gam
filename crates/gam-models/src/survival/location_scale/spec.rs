@@ -181,6 +181,7 @@ pub(crate) struct SurvivalLocationScaleSpec {
     /// Explicit persistent warm-start cache session. See
     /// [`BlockwiseFitOptions::cache_session`].
     pub cache_session: Option<std::sync::Arc<gam_runtime::warm_start::Session>>,
+    pub persistent_warm_start_store: Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
     /// Persistent warm-start mirror sessions; see
     /// [`BlockwiseFitOptions::cache_mirror_sessions`].
     pub cache_mirror_sessions: Vec<std::sync::Arc<gam_runtime::warm_start::Session>>,
@@ -240,6 +241,7 @@ pub struct SurvivalLocationScaleTermSpec {
     /// Explicit persistent warm-start cache session. See
     /// [`crate::custom_family::BlockwiseFitOptions::cache_session`].
     pub cache_session: Option<std::sync::Arc<gam_runtime::warm_start::Session>>,
+    pub persistent_warm_start_store: Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
     /// Explicit persistent warm-start mirror sessions. See
     /// [`crate::custom_family::BlockwiseFitOptions::cache_mirror_sessions`].
     pub cache_mirror_sessions: Vec<std::sync::Arc<gam_runtime::warm_start::Session>>,

@@ -195,6 +195,7 @@ pub(crate) struct FitArgs {
             "adaptive_regularization",
             "scale_dimensions",
             "precompute_conformal",
+            "persistent_warm_start_root",
             "pilot_subsample_threshold",
             "ctn_stage1",
             "precision_hyperpriors",
@@ -384,6 +385,10 @@ pub(crate) struct FitArgs {
     /// its training data, fits in batch, or never asks for conformal intervals.
     #[arg(long = "precompute-conformal", action = ArgAction::Set, default_value_t = true)]
     pub(crate) precompute_conformal: bool,
+    /// Opt in to cross-process warm starts at this exact root. Omit to keep the
+    /// fit disk-silent; no ambient temp/cache path is used.
+    #[arg(long = "persistent-warm-start-root", value_name = "DIR")]
+    pub(crate) persistent_warm_start_root: Option<PathBuf>,
     /// Subsample threshold for automatic pilot-fit spatial length-scale optimization.
     /// When n exceeds 2x this value, κ/anisotropy optimization runs on a
     /// spatially stratified subsample to initialize the geometry, then the
@@ -490,6 +495,8 @@ pub(crate) struct SurvivalArgs {
     pub(crate) frailty_kind: Option<FrailtyKindArg>,
     pub(crate) frailty_sd: Option<f64>,
     pub(crate) hazard_loading: Option<HazardLoadingArg>,
+    pub(crate) persistent_warm_start_store:
+        Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
 }
 
 #[derive(Args, Debug)]

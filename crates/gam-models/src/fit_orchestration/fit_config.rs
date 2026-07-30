@@ -81,6 +81,18 @@ pub fn validate_survival_baseline_config(
 }
 
 impl FitConfig {
+    /// Opt in to cross-process warm starts at the exact supplied root.
+    ///
+    /// The path is neither canonicalized nor relocated through temp/cache
+    /// discovery. Opening remains lazy until a real fit performs its first
+    /// persistence operation.
+    pub fn with_persistent_warm_start_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.persistent_warm_start_store = Some(
+            gam_solve::persistent_warm_start::configured_store(root.into()),
+        );
+        self
+    }
+
     /// Normalize and validate the canonical configuration contract.
     ///
     /// CLI and JSON layers translate syntax only. Model-family legality and
@@ -104,6 +116,13 @@ impl FitConfig {
             normalize_optional_column(self.noise_offset_column, "noise_offset_column")?;
         self.weight_column = normalize_optional_column(self.weight_column, "weight_column")?;
         self.z_column = normalize_optional_column(self.z_column, "z_column")?;
+        if self
+            .persistent_warm_start_store
+            .as_ref()
+            .is_some_and(|store| store.root().as_os_str().is_empty())
+        {
+            return Err("persistent_warm_start_root must not be empty".to_string());
+        }
 
         if !self.ridge_lambda.is_finite() || self.ridge_lambda < 0.0 {
             return Err("ridge_lambda must be finite and >= 0".to_string());

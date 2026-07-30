@@ -35,6 +35,8 @@ struct EmissionSurfaces {
     generic: bool,
     runtime: bool,
     order2: bool,
+    third: bool,
+    fourth: bool,
     witnesses: bool,
     cuda: bool,
 }
@@ -45,12 +47,14 @@ impl EmissionSurfaces {
             "generic" => &mut self.generic,
             "runtime" => &mut self.runtime,
             "order2" => &mut self.order2,
+            "third" => &mut self.third,
+            "fourth" => &mut self.fourth,
             "witnesses" => &mut self.witnesses,
             "cuda" => &mut self.cuda,
             _ => {
                 return Err(syn::Error::new_spanned(
                     surface,
-                    "row_program emission surface must be one of `generic`, `runtime`, `order2`, `witnesses`, or `cuda`",
+                    "row_program emission surface must be one of `generic`, `runtime`, `order2`, `third`, `fourth`, `witnesses`, or `cuda`",
                 ));
             }
         };
@@ -65,7 +69,13 @@ impl EmissionSurfaces {
     }
 
     fn is_empty(&self) -> bool {
-        !(self.generic || self.runtime || self.order2 || self.witnesses || self.cuda)
+        !(self.generic
+            || self.runtime
+            || self.order2
+            || self.third
+            || self.fourth
+            || self.witnesses
+            || self.cuda)
     }
 }
 
@@ -862,6 +872,12 @@ impl SymbolicJet {
         out
     }
 
+    fn constant(value: String, dimension: usize) -> Self {
+        let mut out = Self::zero(dimension);
+        out.value = value;
+        out
+    }
+
     fn support(&self) -> SymbolicSupport {
         let mut support = SymbolicSupport::empty(self.gradient.len());
         support.include(self);
@@ -1008,6 +1024,62 @@ fn symbolic_multiply_jets(left: SymbolicJet, right: SymbolicJet) -> SymbolicJet 
     }
 }
 
+fn symbolic_negate_jet(value: SymbolicJet) -> SymbolicJet {
+    SymbolicJet {
+        value: symbolic_negate(&value.value),
+        gradient: value
+            .gradient
+            .iter()
+            .map(|component| component.as_ref().map(|value| symbolic_negate(value)))
+            .collect(),
+        hessian: value
+            .hessian
+            .iter()
+            .map(|component| component.as_ref().map(|value| symbolic_negate(value)))
+            .collect(),
+    }
+}
+
+fn symbolic_scale_jet(value: SymbolicJet, scalar: &str) -> SymbolicJet {
+    SymbolicJet {
+        value: symbolic_multiply(&value.value, scalar),
+        gradient: value
+            .gradient
+            .iter()
+            .map(|component| symbolic_scale_component(component, scalar))
+            .collect(),
+        hessian: value
+            .hessian
+            .iter()
+            .map(|component| symbolic_scale_component(component, scalar))
+            .collect(),
+    }
+}
+
+fn symbolic_compose_jet(input: SymbolicJet, stack: &str, offset: usize) -> SymbolicJet {
+    let first = format!("{stack}[{}]", offset + 1);
+    let second = format!("{stack}[{}]", offset + 2);
+    let dimension = input.gradient.len();
+    let mut gradient = vec![None; dimension];
+    let mut hessian = vec![None; dimension * dimension];
+    for axis in 0..dimension {
+        gradient[axis] = symbolic_scale_component(&input.gradient[axis], &first);
+        for other in axis..dimension {
+            let index = axis * dimension + other;
+            let inherited = symbolic_scale_component(&input.hessian[index], &first);
+            let curvature =
+                symbolic_multiply_component(&input.gradient[axis], &input.gradient[other])
+                    .map(|component| symbolic_multiply(&second, &component));
+            hessian[index] = symbolic_add_component(&inherited, &curvature);
+        }
+    }
+    SymbolicJet {
+        value: format!("{stack}[{offset}]"),
+        gradient,
+        hessian,
+    }
+}
+
 fn symbolic_expression(
     expression: &ProgramExpr,
     owner: &str,
@@ -1131,6 +1203,299 @@ fn symbolic_expression(
                 gradient,
                 hessian,
             })
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DirectionalJet {
+    base: SymbolicJet,
+    u: SymbolicJet,
+    v: SymbolicJet,
+    uv: SymbolicJet,
+}
+
+#[derive(Clone)]
+struct DirectionalSupport {
+    base: SymbolicSupport,
+    u: SymbolicSupport,
+    v: SymbolicSupport,
+    uv: SymbolicSupport,
+}
+
+impl DirectionalSupport {
+    fn empty(dimension: usize) -> Self {
+        Self {
+            base: SymbolicSupport::empty(dimension),
+            u: SymbolicSupport::empty(dimension),
+            v: SymbolicSupport::empty(dimension),
+            uv: SymbolicSupport::empty(dimension),
+        }
+    }
+
+    fn include(&mut self, jet: &DirectionalJet) {
+        self.base.include(&jet.base);
+        self.u.include(&jet.u);
+        self.v.include(&jet.v);
+        self.uv.include(&jet.uv);
+    }
+}
+
+impl DirectionalJet {
+    fn zero(dimension: usize) -> Self {
+        Self {
+            base: SymbolicJet::zero(dimension),
+            u: SymbolicJet::zero(dimension),
+            v: SymbolicJet::zero(dimension),
+            uv: SymbolicJet::zero(dimension),
+        }
+    }
+
+    fn primary(name: &str, axis: usize, dimension: usize, fourth: bool) -> Self {
+        Self {
+            base: SymbolicJet::primary(name, axis, dimension),
+            u: SymbolicJet::constant(format!("direction_u[{axis}]"), dimension),
+            v: if fourth {
+                SymbolicJet::constant(format!("direction_v[{axis}]"), dimension)
+            } else {
+                SymbolicJet::zero(dimension)
+            },
+            uv: SymbolicJet::zero(dimension),
+        }
+    }
+
+    fn support(&self) -> DirectionalSupport {
+        let mut support = DirectionalSupport::empty(self.base.gradient.len());
+        support.include(self);
+        support
+    }
+}
+
+fn directional_add(left: DirectionalJet, right: DirectionalJet) -> DirectionalJet {
+    DirectionalJet {
+        base: symbolic_add_jets(left.base, right.base),
+        u: symbolic_add_jets(left.u, right.u),
+        v: symbolic_add_jets(left.v, right.v),
+        uv: symbolic_add_jets(left.uv, right.uv),
+    }
+}
+
+fn directional_negate(value: DirectionalJet) -> DirectionalJet {
+    DirectionalJet {
+        base: symbolic_negate_jet(value.base),
+        u: symbolic_negate_jet(value.u),
+        v: symbolic_negate_jet(value.v),
+        uv: symbolic_negate_jet(value.uv),
+    }
+}
+
+fn directional_scale(value: DirectionalJet, scalar: &str) -> DirectionalJet {
+    DirectionalJet {
+        base: symbolic_scale_jet(value.base, scalar),
+        u: symbolic_scale_jet(value.u, scalar),
+        v: symbolic_scale_jet(value.v, scalar),
+        uv: symbolic_scale_jet(value.uv, scalar),
+    }
+}
+
+fn directional_multiply(
+    left: DirectionalJet,
+    right: DirectionalJet,
+    fourth: bool,
+) -> DirectionalJet {
+    let base = symbolic_multiply_jets(left.base.clone(), right.base.clone());
+    let u = symbolic_add_jets(
+        symbolic_multiply_jets(left.u.clone(), right.base.clone()),
+        symbolic_multiply_jets(left.base.clone(), right.u.clone()),
+    );
+    if !fourth {
+        return DirectionalJet {
+            base,
+            u,
+            v: SymbolicJet::zero(left.base.gradient.len()),
+            uv: SymbolicJet::zero(left.base.gradient.len()),
+        };
+    }
+    let v = symbolic_add_jets(
+        symbolic_multiply_jets(left.v.clone(), right.base.clone()),
+        symbolic_multiply_jets(left.base.clone(), right.v.clone()),
+    );
+    let uv = symbolic_add_jets(
+        symbolic_add_jets(
+            symbolic_multiply_jets(left.uv, right.base.clone()),
+            symbolic_multiply_jets(left.u, right.v),
+        ),
+        symbolic_add_jets(
+            symbolic_multiply_jets(left.v, right.u),
+            symbolic_multiply_jets(left.base, right.uv),
+        ),
+    );
+    DirectionalJet { base, u, v, uv }
+}
+
+fn materialize_directional(
+    value: DirectionalJet,
+    owner: &str,
+    fourth: bool,
+    temporary_index: &mut usize,
+    preludes: &mut Vec<String>,
+) -> DirectionalJet {
+    let name = format!("{owner}_directional_tmp{}", *temporary_index);
+    *temporary_index += 1;
+    let support = value.support();
+    let mut source = String::new();
+    push_directional_declaration(&mut source, "", &name, "", &value, &support, fourth);
+    preludes.push(source);
+    directional_reference(&name, &support, value.base.gradient.len(), fourth)
+}
+
+struct DirectionalExpressionEnvironment<'a> {
+    leaves: &'a [Leaf],
+    constants: &'a HashSet<String>,
+    dimension: usize,
+    fourth: bool,
+}
+
+fn directional_expression(
+    expression: &ProgramExpr,
+    owner: &str,
+    environment: &DirectionalExpressionEnvironment<'_>,
+    bindings: &HashMap<String, DirectionalJet>,
+    stack_index: &mut usize,
+    preludes: &mut Vec<String>,
+) -> Result<DirectionalJet> {
+    let leaves = environment.leaves;
+    let constants = environment.constants;
+    let dimension = environment.dimension;
+    let fourth = environment.fourth;
+    let mut child = |expression: &ProgramExpr| {
+        directional_expression(
+            expression,
+            owner,
+            environment,
+            bindings,
+            stack_index,
+            preludes,
+        )
+    };
+    match expression {
+        ProgramExpr::Path(ident) => bindings.get(&ident.to_string()).cloned().ok_or_else(|| {
+            syn::Error::new_spanned(ident, "directional row_program binding is not defined")
+        }),
+        ProgramExpr::Zero => Ok(DirectionalJet::zero(dimension)),
+        ProgramExpr::Neg(value) => {
+            let value = directional_negate(child(value)?);
+            Ok(materialize_directional(
+                value,
+                owner,
+                fourth,
+                stack_index,
+                preludes,
+            ))
+        }
+        ProgramExpr::Scale(value, scalar) => {
+            let value = child(value)?;
+            let scalar = symbolic_scalar(scalar, constants, SymbolicTarget::Rust)?;
+            let value = directional_scale(value, &scalar);
+            Ok(materialize_directional(
+                value,
+                owner,
+                fourth,
+                stack_index,
+                preludes,
+            ))
+        }
+        ProgramExpr::AddConstant(value, scalar) => {
+            let mut value = child(value)?;
+            value.base.value = symbolic_add(
+                &value.base.value,
+                &symbolic_scalar(scalar, constants, SymbolicTarget::Rust)?,
+            );
+            Ok(materialize_directional(
+                value,
+                owner,
+                fourth,
+                stack_index,
+                preludes,
+            ))
+        }
+        ProgramExpr::Add(left, right) => {
+            let left = child(left)?;
+            let right = child(right)?;
+            let value = directional_add(left, right);
+            Ok(materialize_directional(
+                value,
+                owner,
+                fourth,
+                stack_index,
+                preludes,
+            ))
+        }
+        ProgramExpr::Mul(left, right) => {
+            let left = child(left)?;
+            let right = child(right)?;
+            let value = directional_multiply(left, right, fourth);
+            Ok(materialize_directional(
+                value,
+                owner,
+                fourth,
+                stack_index,
+                preludes,
+            ))
+        }
+        ProgramExpr::Compose {
+            leaf,
+            value,
+            arguments,
+        } => {
+            let input = bindings.get(&value.to_string()).cloned().ok_or_else(|| {
+                syn::Error::new_spanned(value, "directional compose input is not defined")
+            })?;
+            let suffix = *stack_index;
+            *stack_index += 1;
+            let stack = format!("{owner}_directional_stack{suffix}");
+            let mut leaf_arguments = vec![input.base.value.clone()];
+            for argument in arguments {
+                leaf_arguments.push(symbolic_scalar(argument, constants, SymbolicTarget::Rust)?);
+            }
+            let rust_leaf = &leaves[*leaf].rust;
+            let rust_leaf = quote!(#rust_leaf).to_string();
+            preludes.push(format!(
+                "let {stack} = {rust_leaf}({});",
+                leaf_arguments.join(", ")
+            ));
+
+            let base = symbolic_compose_jet(input.base.clone(), &stack, 0);
+            let first = symbolic_compose_jet(input.base.clone(), &stack, 1);
+            let u = symbolic_multiply_jets(first.clone(), input.u.clone());
+            if !fourth {
+                let value = DirectionalJet {
+                    base,
+                    u,
+                    v: SymbolicJet::zero(dimension),
+                    uv: SymbolicJet::zero(dimension),
+                };
+                return Ok(materialize_directional(
+                    value,
+                    owner,
+                    fourth,
+                    stack_index,
+                    preludes,
+                ));
+            }
+            let v = symbolic_multiply_jets(first.clone(), input.v.clone());
+            let second = symbolic_compose_jet(input.base, &stack, 2);
+            let uv = symbolic_add_jets(
+                symbolic_multiply_jets(symbolic_multiply_jets(second, input.u), input.v),
+                symbolic_multiply_jets(first, input.uv),
+            );
+            Ok(materialize_directional(
+                DirectionalJet { base, u, v, uv },
+                owner,
+                fourth,
+                stack_index,
+                preludes,
+            ))
         }
     }
 }
@@ -1306,6 +1671,416 @@ fn symbolic_schedule(
         mutable_support,
         assigned,
         witness_values,
+    })
+}
+
+struct DirectionalLocal {
+    name: String,
+    mutable: bool,
+    value: DirectionalJet,
+    preludes: Vec<String>,
+}
+
+struct DirectionalAssignment {
+    target: String,
+    value: DirectionalJet,
+    preludes: Vec<String>,
+}
+
+enum DirectionalStatement {
+    Local(DirectionalLocal),
+    If {
+        condition: String,
+        assignments: Vec<DirectionalAssignment>,
+    },
+}
+
+struct DirectionalSchedule {
+    statements: Vec<DirectionalStatement>,
+    result: DirectionalJet,
+    result_preludes: Vec<String>,
+    mutable_support: HashMap<String, DirectionalSupport>,
+    assigned: HashSet<String>,
+}
+
+fn directional_prefix(name: &str, component: &str) -> String {
+    format!("__row_program_{name}_{component}")
+}
+
+fn directional_reference(
+    name: &str,
+    support: &DirectionalSupport,
+    dimension: usize,
+    fourth: bool,
+) -> DirectionalJet {
+    DirectionalJet {
+        base: SymbolicJet::reference(&directional_prefix(name, "base"), &support.base, dimension),
+        u: SymbolicJet::reference(&directional_prefix(name, "u"), &support.u, dimension),
+        v: if fourth {
+            SymbolicJet::reference(&directional_prefix(name, "vdir"), &support.v, dimension)
+        } else {
+            SymbolicJet::zero(dimension)
+        },
+        uv: if fourth {
+            SymbolicJet::reference(&directional_prefix(name, "uv"), &support.uv, dimension)
+        } else {
+            SymbolicJet::zero(dimension)
+        },
+    }
+}
+
+fn directional_schedule(
+    primaries: &[Ident],
+    constants: &HashSet<String>,
+    leaves: &[Leaf],
+    statements: &[Statement],
+    result: &ProgramExpr,
+    fourth: bool,
+) -> Result<DirectionalSchedule> {
+    let dimension = primaries.len();
+    let expression_environment = DirectionalExpressionEnvironment {
+        leaves,
+        constants,
+        dimension,
+        fourth,
+    };
+    let mut bindings = HashMap::<String, DirectionalJet>::new();
+    for (axis, primary) in primaries.iter().enumerate() {
+        bindings.insert(
+            primary.to_string(),
+            DirectionalJet::primary(&primary.to_string(), axis, dimension, fourth),
+        );
+    }
+    let mut mutable_support = HashMap::<String, DirectionalSupport>::new();
+    let mut assigned = HashSet::new();
+    let mut directional_statements = Vec::new();
+    let mut stack_index = 0;
+    for statement in statements {
+        match statement {
+            Statement::Local {
+                name,
+                mutable,
+                value,
+            } => {
+                let mut preludes = Vec::new();
+                let value = directional_expression(
+                    value,
+                    &name.to_string(),
+                    &expression_environment,
+                    &bindings,
+                    &mut stack_index,
+                    &mut preludes,
+                )?;
+                let support = value.support();
+                if *mutable {
+                    mutable_support.insert(name.to_string(), support.clone());
+                }
+                bindings.insert(
+                    name.to_string(),
+                    directional_reference(&name.to_string(), &support, dimension, fourth),
+                );
+                directional_statements.push(DirectionalStatement::Local(DirectionalLocal {
+                    name: name.to_string(),
+                    mutable: *mutable,
+                    value,
+                    preludes,
+                }));
+            }
+            Statement::If {
+                condition,
+                assignments,
+            } => {
+                let mut directional_assignments = Vec::new();
+                for (target_name, value) in assignments {
+                    assigned.insert(target_name.to_string());
+                    let mut preludes = Vec::new();
+                    let value = directional_expression(
+                        value,
+                        &target_name.to_string(),
+                        &expression_environment,
+                        &bindings,
+                        &mut stack_index,
+                        &mut preludes,
+                    )?;
+                    let support = mutable_support
+                        .get_mut(&target_name.to_string())
+                        .expect("validated mutable directional target");
+                    support.include(&value);
+                    bindings.insert(
+                        target_name.to_string(),
+                        directional_reference(&target_name.to_string(), support, dimension, fourth),
+                    );
+                    directional_assignments.push(DirectionalAssignment {
+                        target: target_name.to_string(),
+                        value,
+                        preludes,
+                    });
+                }
+                directional_statements.push(DirectionalStatement::If {
+                    condition: symbolic_scalar(condition, constants, SymbolicTarget::Rust)?,
+                    assignments: directional_assignments,
+                });
+            }
+        }
+    }
+    let mut result_preludes = Vec::new();
+    let result = directional_expression(
+        result,
+        "result",
+        &expression_environment,
+        &bindings,
+        &mut stack_index,
+        &mut result_preludes,
+    )?;
+    Ok(DirectionalSchedule {
+        statements: directional_statements,
+        result,
+        result_preludes,
+        mutable_support,
+        assigned,
+    })
+}
+
+fn push_symbolic_declaration(
+    source: &mut String,
+    indentation: &str,
+    prefix: &str,
+    mutable: &str,
+    value: &SymbolicJet,
+    support: &SymbolicSupport,
+) {
+    let dimension = value.gradient.len();
+    source.push_str(&format!(
+        "{indentation}let {mutable}{prefix}_v: f64 = {};\n",
+        value.value
+    ));
+    for axis in 0..dimension {
+        if support.gradient[axis] {
+            source.push_str(&format!(
+                "{indentation}let {mutable}{prefix}_g{axis}: f64 = {};\n",
+                symbolic_component(&value.gradient[axis]),
+            ));
+        }
+        for other in axis..dimension {
+            let index = axis * dimension + other;
+            if support.hessian[index] {
+                source.push_str(&format!(
+                    "{indentation}let {mutable}{prefix}_h{axis}_{other}: f64 = {};\n",
+                    symbolic_component(&value.hessian[index]),
+                ));
+            }
+        }
+    }
+}
+
+fn push_symbolic_assignment(
+    source: &mut String,
+    indentation: &str,
+    prefix: &str,
+    value: &SymbolicJet,
+    support: &SymbolicSupport,
+) {
+    let dimension = value.gradient.len();
+    source.push_str(&format!("{indentation}{prefix}_v = {};\n", value.value));
+    for axis in 0..dimension {
+        if support.gradient[axis] {
+            source.push_str(&format!(
+                "{indentation}{prefix}_g{axis} = {};\n",
+                symbolic_component(&value.gradient[axis]),
+            ));
+        }
+        for other in axis..dimension {
+            let index = axis * dimension + other;
+            if support.hessian[index] {
+                source.push_str(&format!(
+                    "{indentation}{prefix}_h{axis}_{other} = {};\n",
+                    symbolic_component(&value.hessian[index]),
+                ));
+            }
+        }
+    }
+}
+
+fn push_directional_declaration(
+    source: &mut String,
+    indentation: &str,
+    name: &str,
+    mutable: &str,
+    value: &DirectionalJet,
+    support: &DirectionalSupport,
+    fourth: bool,
+) {
+    push_symbolic_declaration(
+        source,
+        indentation,
+        &directional_prefix(name, "base"),
+        mutable,
+        &value.base,
+        &support.base,
+    );
+    push_symbolic_declaration(
+        source,
+        indentation,
+        &directional_prefix(name, "u"),
+        mutable,
+        &value.u,
+        &support.u,
+    );
+    if fourth {
+        push_symbolic_declaration(
+            source,
+            indentation,
+            &directional_prefix(name, "vdir"),
+            mutable,
+            &value.v,
+            &support.v,
+        );
+        push_symbolic_declaration(
+            source,
+            indentation,
+            &directional_prefix(name, "uv"),
+            mutable,
+            &value.uv,
+            &support.uv,
+        );
+    }
+}
+
+fn push_directional_assignment(
+    source: &mut String,
+    indentation: &str,
+    name: &str,
+    value: &DirectionalJet,
+    support: &DirectionalSupport,
+    fourth: bool,
+) {
+    push_symbolic_assignment(
+        source,
+        indentation,
+        &directional_prefix(name, "base"),
+        &value.base,
+        &support.base,
+    );
+    push_symbolic_assignment(
+        source,
+        indentation,
+        &directional_prefix(name, "u"),
+        &value.u,
+        &support.u,
+    );
+    if fourth {
+        push_symbolic_assignment(
+            source,
+            indentation,
+            &directional_prefix(name, "vdir"),
+            &value.v,
+            &support.v,
+        );
+        push_symbolic_assignment(
+            source,
+            indentation,
+            &directional_prefix(name, "uv"),
+            &value.uv,
+            &support.uv,
+        );
+    }
+}
+
+fn rust_directional_body(
+    primaries: &[Ident],
+    constants: &HashSet<String>,
+    leaves: &[Leaf],
+    statements: &[Statement],
+    result: &ProgramExpr,
+    fourth: bool,
+) -> Result<syn::Block> {
+    let dimension = primaries.len();
+    let schedule = directional_schedule(primaries, constants, leaves, statements, result, fourth)?;
+    let mut source = "{\n".to_string();
+    for statement in &schedule.statements {
+        match statement {
+            DirectionalStatement::Local(local) => {
+                push_preludes(&mut source, &local.preludes, "    ");
+                let mutable = if schedule.assigned.contains(&local.name) {
+                    "mut "
+                } else {
+                    ""
+                };
+                let support = if local.mutable {
+                    schedule
+                        .mutable_support
+                        .get(&local.name)
+                        .expect("mutable directional support exists")
+                        .clone()
+                } else {
+                    local.value.support()
+                };
+                push_directional_declaration(
+                    &mut source,
+                    "    ",
+                    &local.name,
+                    mutable,
+                    &local.value,
+                    &support,
+                    fourth,
+                );
+            }
+            DirectionalStatement::If {
+                condition,
+                assignments,
+            } => {
+                source.push_str(&format!("    if {condition} {{\n"));
+                for assignment in assignments {
+                    push_preludes(&mut source, &assignment.preludes, "        ");
+                    let support = schedule
+                        .mutable_support
+                        .get(&assignment.target)
+                        .expect("mutable directional assignment support exists");
+                    push_directional_assignment(
+                        &mut source,
+                        "        ",
+                        &assignment.target,
+                        &assignment.value,
+                        support,
+                        fourth,
+                    );
+                }
+                source.push_str("    }\n");
+            }
+        }
+    }
+    push_preludes(&mut source, &schedule.result_preludes, "    ");
+    let contracted = if fourth {
+        &schedule.result.uv
+    } else {
+        &schedule.result.u
+    };
+    source.push_str("    [\n");
+    for axis in 0..dimension {
+        source.push_str("        [");
+        for other in 0..dimension {
+            if other != 0 {
+                source.push_str(", ");
+            }
+            let (row, column) = if axis <= other {
+                (axis, other)
+            } else {
+                (other, axis)
+            };
+            let index = row * dimension + column;
+            source.push_str(symbolic_component(&contracted.hessian[index]));
+        }
+        source.push_str("],\n");
+    }
+    source.push_str("    ]\n}\n");
+    let order = if fourth { "fourth" } else { "third" };
+    syn::parse_str(&source).map_err(|error| {
+        syn::Error::new(
+            error.span(),
+            format!(
+                "failed to parse generated Rust {order}-order contracted row program: {error}\n{source}"
+            ),
+        )
     })
 }
 
@@ -1827,6 +2602,51 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         quote!()
     };
 
+    let third_function = if emissions.third {
+        let third_name = format_ident!("{}_third_contracted", name);
+        let third_body = rust_directional_body(
+            &primaries,
+            &constant_names,
+            &leaves,
+            &statements,
+            &result,
+            false,
+        )?;
+        quote! {
+            #[inline(never)]
+            #visibility fn #third_name(
+                #(#primaries: f64,)*
+                #(#constants: f64,)*
+                direction_u: &[f64; #dimension],
+            ) -> [[f64; #dimension]; #dimension] #third_body
+        }
+    } else {
+        quote!()
+    };
+
+    let fourth_function = if emissions.fourth {
+        let fourth_name = format_ident!("{}_fourth_contracted", name);
+        let fourth_body = rust_directional_body(
+            &primaries,
+            &constant_names,
+            &leaves,
+            &statements,
+            &result,
+            true,
+        )?;
+        quote! {
+            #[inline(never)]
+            #visibility fn #fourth_name(
+                #(#primaries: f64,)*
+                #(#constants: f64,)*
+                direction_u: &[f64; #dimension],
+                direction_v: &[f64; #dimension],
+            ) -> [[f64; #dimension]; #dimension] #fourth_body
+        }
+    } else {
+        quote!()
+    };
+
     let scalar_witness_function = if emissions.witnesses {
         let scalar_witness_dependencies = witness_dependencies(&statements, &witnesses);
         let scalar_witness_scalar_dependencies =
@@ -1902,6 +2722,8 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         #generic_function
         #runtime_function
         #order2_function
+        #third_function
+        #fourth_function
         #scalar_witness_function
         #cuda_constant
     })
@@ -1973,7 +2795,7 @@ mod tests {
     fn emits_generic_and_shared_symbolic_rust_cuda_schedules() {
         let input = syn::parse2::<Input>(quote! {
             pub(crate) fn sample(q, g; weight, event, scale)
-            emit [generic, runtime, order2, witnesses, cuda];
+            emit [generic, runtime, order2, third, fourth, witnesses, cuda];
             leaves {
                 sqrt => sqrt_stack => d_sqrt,
                 log => log_stack => d_log,
@@ -1997,6 +2819,10 @@ mod tests {
         assert!(expanded.contains("RuntimeJetScalar"));
         assert!(expanded.contains("fn sample_runtime"));
         assert!(expanded.contains("fn sample_order2"));
+        assert!(expanded.contains("fn sample_third_contracted"));
+        assert!(expanded.contains("fn sample_fourth_contracted"));
+        assert!(expanded.contains("direction_u"));
+        assert!(expanded.contains("direction_v"));
         assert!(expanded.contains("sqrt_stack"));
         assert!(expanded.contains("log_stack"));
         assert!(expanded.contains("SAMPLE_CUDA_VGH"));
@@ -2011,7 +2837,7 @@ mod tests {
     fn emits_exactly_the_mandatory_per_program_surfaces() {
         let names = emitted_item_names(quote! {
             fn selective(x; shift)
-            emit [runtime, order2];
+            emit [runtime, order2, third, fourth];
             leaves { curve => curve_stack => d_curve }
             witnesses [curved];
             {
@@ -2026,6 +2852,8 @@ mod tests {
             vec![
                 "selective_runtime".to_owned(),
                 "selective_order2".to_owned(),
+                "selective_third_contracted".to_owned(),
+                "selective_fourth_contracted".to_owned(),
             ]
         );
     }
@@ -2057,8 +2885,9 @@ mod tests {
             { return x; }
         });
         assert!(
-            unknown
-                .contains("must be one of `generic`, `runtime`, `order2`, `witnesses`, or `cuda`")
+            unknown.contains(
+                "must be one of `generic`, `runtime`, `order2`, `third`, `fourth`, `witnesses`, or `cuda`"
+            )
         );
 
         let duplicate = parse_error(quote! {
@@ -2111,7 +2940,7 @@ mod tests {
             "letx=(*x).clone();",
             "lety=(*y).clone();",
             "value.add_constant(shift)",
-            "S::constant(0.0,__row_program_dimension,__row_program_workspace,)",
+            "S::constant(0.0,__row_program_dimension,__row_program_workspace)",
             "letvalue=shifted.clone();",
             "[curved.value()]",
         ] {
@@ -2170,6 +2999,56 @@ mod tests {
         assert!(!rust.contains("SparseOrder2"));
         assert!(!rust.contains("*0.0"));
         assert!(!rust.contains("0.0*"));
+    }
+
+    #[test]
+    fn contracted_formulas_are_direct_sparse_scalar_schedules() {
+        let input = quote! {
+            fn directional(x, y; take)
+            emit [third, fourth];
+            leaves { curve => curve_stack => d_curve }
+            witnesses [];
+            {
+                let product = mul(x, y);
+                let curved = compose(curve, product);
+                let mut out = x;
+                if (take > 0.0) { out = add(curved, y); }
+                return out;
+            }
+        };
+        let third =
+            emitted_function(input.clone(), "directional_third_contracted").replace(' ', "");
+        let fourth = emitted_function(input, "directional_fourth_contracted").replace(' ', "");
+
+        for formula in [
+            "fndirectional_third_contracted(x:f64,y:f64,take:f64,direction_u:&[f64;2usize],)",
+            "let__row_program_product_directional_tmp0_u_v:f64=((direction_u[0]*y)+(x*direction_u[1]));",
+            "letcurved_directional_stack1=curve_stack(__row_program_product_base_v);",
+            "curved_directional_stack1[3]",
+            "if(take>0.0){",
+        ] {
+            assert!(
+                third.contains(formula),
+                "missing generated third-order formula: {formula}\n{third}"
+            );
+        }
+        for formula in [
+            "fndirectional_fourth_contracted(x:f64,y:f64,take:f64,direction_u:&[f64;2usize],direction_v:&[f64;2usize],)",
+            "curved_directional_stack1[4]",
+            "__row_program_product_directional_tmp0_uv_v",
+            "[",
+        ] {
+            assert!(
+                fourth.contains(formula),
+                "missing generated fourth-order formula: {formula}\n{fourth}"
+            );
+        }
+        for rust in [&third, &fourth] {
+            assert!(!rust.contains("JetScalar"));
+            assert!(!rust.contains("SparseOrder2"));
+            assert!(!rust.contains("*0.0"));
+            assert!(!rust.contains("0.0*"));
+        }
     }
 
     #[test]

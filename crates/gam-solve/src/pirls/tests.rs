@@ -1741,7 +1741,7 @@ mod tests {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         };
 
         let sparse_res = optimize_external_design(
@@ -3097,7 +3097,7 @@ mod tests {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         };
 
         let result = optimize_external_design(

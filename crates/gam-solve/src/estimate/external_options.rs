@@ -93,13 +93,9 @@ pub struct ExternalOptimOptions {
     pub kronecker_penalty_system: Option<gam_terms::smooth::KroneckerPenaltySystem>,
     /// Full Kronecker factored basis for P-IRLS factored reparameterization.
     pub kronecker_factored: Option<gam_terms::basis::KroneckerFactoredBasis>,
-    /// Engage the cross-process ON-DISK persistent warm-start layer for this
-    /// fit. Default `false`: only the in-memory warm start runs, so throwaway /
-    /// replicate / CI-coverage loops pay no disk I/O (#1082). A caller that
-    /// wants cross-process resume threads `true` down from
-    /// `FitConfig::persist_warm_start_disk`; the standard `RemlState`
-    /// constructor then calls `enable_persistent_warm_start_disk()`.
-    pub persist_warm_start_disk: bool,
+    /// Explicit cross-process warm-start capability for this fit. `None` is
+    /// disk-silent; clones share one caller-configured store handle.
+    pub persistent_warm_start_store: Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
 }
 
 pub(crate) fn resolve_external_family(

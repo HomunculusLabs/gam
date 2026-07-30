@@ -1400,7 +1400,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
          specs: &[TermCollectionSpec],
          designs: &[TermCollectionDesign],
          eval_mode,
-         row_set: &crate::row_kernel::RowSet| {
+         row_set: &crate::row_kernel::RowSet,
+         owned_value_mode| {
             use gam_problem::EvalMode;
             let row_set_rows = match row_set {
                 crate::row_kernel::RowSet::All => outer_row_indices(options, n).len(),
@@ -1466,23 +1467,44 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 eval_id,
                 scope: crate::custom_family::EvalScope::OuterDerivative,
             });
-            let (froze, candidates) = exact_mode_branch
-                .borrow_mut()
-                .candidates(effective_mode, &rho);
-            if froze {
+            let selection = if let Some(value_selection) = owned_value_mode {
+                let froze = exact_mode_branch.borrow_mut().prepare(effective_mode);
+                if froze {
+                    log::info!(
+                        "[SMS] froze deterministic exact coefficient-mode branch at the first derivative-bearing outer evaluation"
+                    );
+                }
                 log::info!(
-                    "[SMS] froze deterministic exact coefficient-mode branch at the first derivative-bearing outer evaluation"
+                    "[SMS] upgrading the exact owned ValueOnly coefficient mode at identical theta; skipping coefficient re-solve"
                 );
-            }
-            let selection = evaluate_custom_family_joint_hyper_best_mode_shared(
-                &family,
-                &blocks,
-                &outer_options,
-                &rho,
-                hyper_layout,
-                &candidates,
-                effective_mode,
-            )?;
+                upgrade_custom_family_joint_hyper_mode_shared(
+                    &family,
+                    &blocks,
+                    &outer_options,
+                    &rho,
+                    hyper_layout,
+                    value_selection,
+                    effective_mode,
+                )?
+            } else {
+                let (froze, candidates) = exact_mode_branch
+                    .borrow_mut()
+                    .candidates(effective_mode, &rho);
+                if froze {
+                    log::info!(
+                        "[SMS] froze deterministic exact coefficient-mode branch at the first derivative-bearing outer evaluation"
+                    );
+                }
+                evaluate_custom_family_joint_hyper_best_mode_shared(
+                    &family,
+                    &blocks,
+                    &outer_options,
+                    &rho,
+                    hyper_layout,
+                    &candidates,
+                    effective_mode,
+                )?
+            };
             exact_mode_branch
                 .borrow_mut()
                 .record_value(eval_mode, selection.result.warm_start.clone());

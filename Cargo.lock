@@ -3876,6 +3876,7 @@ dependencies = [
 name = "gam-row-macros"
 version = "0.3.151"
 dependencies = [
+ "gam-math",
  "proc-macro2",
  "quote",
  "syn 3.0.3",

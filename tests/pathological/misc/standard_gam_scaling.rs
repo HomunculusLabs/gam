@@ -160,7 +160,7 @@ fn run_fit_with_k(n: usize, k: usize) -> (f64, usize, usize, bool) {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     )
     .expect("standard-GAM scaling probe must succeed");

@@ -82,6 +82,7 @@ pub(crate) fn survival_blockwise_fit_options(
         outer_tol: BLOCKWISE_OUTER_TOL,
         compute_covariance: true,
         cache_session: spec.cache_session.clone(),
+        persistent_warm_start_store: spec.persistent_warm_start_store.clone(),
         cache_mirror_sessions: spec.cache_mirror_sessions.clone(),
         // Constant-scale (parametric-AFT) fits pin the time-warp ρ seed at the
         // identified affine-baseline limit; re-screening that already-correct

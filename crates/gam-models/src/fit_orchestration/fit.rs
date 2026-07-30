@@ -417,6 +417,20 @@ fn firth_can_rescue(error: &gam_solve::estimate::EstimationError) -> bool {
         )
 }
 
+/// Whether an automatic Firth retry can use the same outer-coordinate model as
+/// the failed base fit.
+///
+/// Optimized SAS and mixture links append link-parameter coordinates to the
+/// REML problem. The Firth outer derivative does not define those coordinates,
+/// so the solver rejects that combination before evaluating its seed. Decline
+/// the rescue here, where the configuration is already known, instead of
+/// launching a retry that is statically incapable of producing a fit (#2654).
+fn firth_rescue_has_compatible_outer_coordinates(
+    options: &gam_solve::estimate::FitOptions,
+) -> bool {
+    !options.optimize_mixture && !options.optimize_sas
+}
+
 fn certified_retry_or_original<T, E>(original: E, retry: Result<T, E>) -> Result<T, E> {
     match retry {
         Ok(value) => Ok(value),
@@ -473,12 +487,13 @@ fn rescale_influence_coordinates(matrix: &mut Array2<f64>, factors: &[f64]) {
 #[cfg(test)]
 mod standard_convergence_gate_tests {
     use super::{
-        certified_retry_or_original, firth_can_rescue, rescale_covariance_coordinates,
+        certified_retry_or_original, firth_can_rescue,
+        firth_rescue_has_compatible_outer_coordinates, rescale_covariance_coordinates,
         rescale_precision_coordinates, survival_baseline_parameter_checkpoint,
         survival_pirls_status_is_certified,
     };
     use crate::survival::construction::{SurvivalBaselineConfig, SurvivalBaselineTarget};
-    use gam_solve::estimate::EstimationError;
+    use gam_solve::estimate::{EstimationError, FitOptions};
     use gam_solve::pirls::PirlsStatus;
     use ndarray::array;
 
@@ -554,6 +569,24 @@ mod standard_convergence_gate_tests {
         assert!(!firth_can_rescue(&EstimationError::InvalidInput(
             "structural mismatch".to_string()
         )));
+    }
+
+    #[test]
+    fn firth_retry_declines_every_link_parameter_outer_problem() {
+        let ordinary = FitOptions::default();
+        assert!(firth_rescue_has_compatible_outer_coordinates(&ordinary));
+
+        let sas = FitOptions {
+            optimize_sas: true,
+            ..ordinary.clone()
+        };
+        assert!(!firth_rescue_has_compatible_outer_coordinates(&sas));
+
+        let mixture = FitOptions {
+            optimize_mixture: true,
+            ..ordinary
+        };
+        assert!(!firth_rescue_has_compatible_outer_coordinates(&mixture));
     }
 }
 
@@ -794,10 +827,9 @@ pub(crate) fn fit_standard_model(
     // the retry itself carries both inner and outer convergence certificates. If
     // the retry fails, return the ORIGINAL base error unchanged; a failed rescue
     // can never replace its evidence or mint the abandoned base iterate.
-    // Structural errors are not Firth-retryable, and links without a Fisher-weight
-    // jet fall straight through to the original error (arming Firth on them would
-    // itself be rejected, then reduced back to the original error by
-    // `certified_retry_or_original`).
+    // Structural errors and link-parameter outer problems are not
+    // Firth-retryable. The latter are declined before solving because the Firth
+    // outer derivative does not define their appended link coordinates (#2654).
     let is_firth_capable_binomial = request.family.supports_firth();
     let base = fit_standard_base(&request, &request.family, &request.options);
     let fitted = match base {
@@ -805,6 +837,7 @@ pub(crate) fn fit_standard_model(
         Err(original_error)
             if is_firth_capable_binomial
                 && !request.options.firth_bias_reduction
+                && firth_rescue_has_compatible_outer_coordinates(&request.options)
                 && firth_can_rescue(&original_error) =>
         {
             let original_report = original_error.to_string();
@@ -2583,6 +2616,7 @@ fn fit_cause_specific_survival_transformation_custom(
     beta0_flat: Array1<f64>,
     derivative_floor: f64,
     penalty_block_gamma_priors: &[(String, f64, f64)],
+    persistent_warm_start_store: Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
 ) -> Result<SurvivalTransformationFitResult, String> {
     let cause_count = crate::survival::cause_count_from_event_codes(spec.event_target.view())
         .into_workflow_result()?;
@@ -2758,6 +2792,7 @@ fn fit_cause_specific_survival_transformation_custom(
         // per-cause approximations at prediction time would discard the
         // cross-cause blocks and misstate CIF uncertainty (#2298).
         compute_covariance: true,
+        persistent_warm_start_store,
         ..Default::default()
     };
     let rho_prior = cause_specific_survival_rho_prior(
@@ -3050,12 +3085,13 @@ fn persistent_survival_transformation_key(
 }
 
 fn load_survival_transformation_persistent_warm_start(
+    store: &gam_runtime::warm_start::ConfiguredWarmStartStore,
     key: &str,
     spec: &SurvivalTransformationTermSpec,
     n_cols: usize,
     rho: &[f64],
 ) -> Option<(Array1<f64>, Option<f64>)> {
-    let record = gam_solve::persistent_warm_start::load_record(key)?;
+    let record = gam_solve::persistent_warm_start::load_record(store, key)?;
     if !record.is_compatible(key, spec.age_entry.len(), n_cols)
         || record.rho.len() != rho.len()
         || !record
@@ -3074,6 +3110,7 @@ fn load_survival_transformation_persistent_warm_start(
 }
 
 fn store_survival_transformation_persistent_warm_start(
+    store: &gam_runtime::warm_start::ConfiguredWarmStartStore,
     key: &str,
     spec: &SurvivalTransformationTermSpec,
     n_cols: usize,
@@ -3102,22 +3139,13 @@ fn store_survival_transformation_persistent_warm_start(
     record.last_pirls_accept_rho = summary
         .final_accept_rho
         .filter(|value| value.is_finite() && *value >= 0.0);
-    match gam_solve::persistent_warm_start::store_record(&record) {
-        Ok(()) => {
-            gam_solve::persistent_warm_start::load_record(&record.key).is_some_and(|stored| {
-                stored.rho == record.rho
-                    && stored.beta == record.beta
-                    && stored.last_inner_iters == record.last_inner_iters
-                    && stored.last_inner_converged == record.last_inner_converged
-            })
-        }
-        Err(err) => {
-            log::warn!(
-                "[warm-start-cache] failed to persist survival transformation warm start: {err}"
-            );
-            false
-        }
-    }
+    gam_solve::persistent_warm_start::store_record(store, &record);
+    gam_solve::persistent_warm_start::load_record(store, &record.key).is_some_and(|stored| {
+        stored.rho == record.rho
+            && stored.beta == record.beta
+            && stored.last_inner_iters == record.last_inner_iters
+            && stored.last_inner_converged == record.last_inner_converged
+    })
 }
 
 pub(crate) fn fit_survival_transformation_model(
@@ -3128,7 +3156,7 @@ pub(crate) fn fit_survival_transformation_model(
     let SurvivalTransformationFitRequest {
         data,
         spec,
-        cache_session: _cache_session,
+        persistent_warm_start_store,
     } = request;
     let mut baseline_cfg = spec.baseline_cfg.clone();
     let covariate_design =
@@ -3450,6 +3478,7 @@ pub(crate) fn fit_survival_transformation_model(
             beta0_flat,
             exact_derivative_guard,
             &spec.penalty_block_gamma_priors,
+            persistent_warm_start_store.clone(),
         );
     }
     // REML/LAML-select the time-smoothing λ (issue #563). With λ pinned at its
@@ -3519,12 +3548,15 @@ pub(crate) fn fit_survival_transformation_model(
         expected_beta_len,
     );
     let mut opts = opts;
-    let beta_start = match load_survival_transformation_persistent_warm_start(
-        &persistent_warm_start_key,
-        &spec,
-        expected_beta_len,
-        &rho_for_cache,
-    ) {
+    let beta_start = match persistent_warm_start_store.as_ref().and_then(|store| {
+        load_survival_transformation_persistent_warm_start(
+            store,
+            &persistent_warm_start_key,
+            &spec,
+            expected_beta_len,
+            &rho_for_cache,
+        )
+    }) {
         Some((beta, lm_lambda)) => {
             opts.initial_lm_lambda = lm_lambda;
             beta
@@ -3559,14 +3591,17 @@ pub(crate) fn fit_survival_transformation_model(
     // Persist every finite accepted iterate before enforcing the certificate:
     // an exhausted solve is resumable work, but it is never a fit. The record's
     // `last_inner_converged` bit distinguishes a final mode from a checkpoint.
-    let checkpoint_persisted = store_survival_transformation_persistent_warm_start(
-        &persistent_warm_start_key,
-        &spec,
-        expected_beta_len,
-        rho_for_cache.clone(),
-        &beta,
-        &summary,
-    );
+    let checkpoint_persisted = persistent_warm_start_store.as_ref().is_some_and(|store| {
+        store_survival_transformation_persistent_warm_start(
+            store,
+            &persistent_warm_start_key,
+            &spec,
+            expected_beta_len,
+            rho_for_cache.clone(),
+            &beta,
+            &summary,
+        )
+    });
     require_certified_survival_pirls(
         &summary,
         "survival transformation final fixed-lambda PIRLS",

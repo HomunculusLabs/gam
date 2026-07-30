@@ -578,6 +578,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                 initial_threshold_log_lambdas: None,
                 initial_log_sigma_log_lambdas: None,
                 cache_session: None,
+                persistent_warm_start_store: args.persistent_warm_start_store.clone(),
                 cache_mirror_sessions: Vec::new(),
             }
         };
@@ -621,7 +622,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                             }),
                             kappa_options: kappa_options.clone(),
                             optimize_inverse_link,
-                            cache_session: None,
                         },
                     )) {
                         Ok(FitResult::SurvivalLocationScale(result)) => result,
@@ -708,7 +708,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                 }),
                 kappa_options: kappa_options.clone(),
                 optimize_inverse_link,
-                cache_session: None,
             },
         )) {
             Ok(FitResult::SurvivalLocationScale(result)) => {
@@ -1151,6 +1150,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
         let latent_derivative_guard = survival_derivative_guard_for_likelihood(likelihood_mode);
         let options = gam::families::custom_family::BlockwiseFitOptions {
             compute_covariance: false,
+            persistent_warm_start_store: args.persistent_warm_start_store.clone(),
             ..Default::default()
         };
         let build_time_block = |prepared: &PreparedSurvivalTimeStack| {

@@ -729,6 +729,7 @@ pub(crate) fn fit_survival_location_scale_terms(
             timewiggle_block: spec.timewiggle_block.clone(),
             linkwiggle_block,
             cache_session: spec.cache_session.clone(),
+            persistent_warm_start_store: spec.persistent_warm_start_store.clone(),
             cache_mirror_sessions: spec.cache_mirror_sessions.clone(),
         })
     };
@@ -819,7 +820,8 @@ pub(crate) fn fit_survival_location_scale_terms(
          specs: &[TermCollectionSpec],
          designs: &[TermCollectionDesign],
          eval_mode,
-         row_set: &crate::row_kernel::RowSet| {
+         row_set: &crate::row_kernel::RowSet,
+         _| {
             use gam_problem::EvalMode;
             if !analytic_joint_gradient_available {
                 return Err(SurvivalLocationScaleError::InvalidConfiguration { reason: "analytic spatial psi derivatives are unavailable for survival exact two-block path"

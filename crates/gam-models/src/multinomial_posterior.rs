@@ -18,6 +18,7 @@
 
 use crate::model_types::EstimationError;
 use gam_linalg::faer_ndarray::FaerEigh;
+use gam_math::quadrature::gauss_hermite_rule as physicists_gauss_hermite_rule;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use std::collections::BTreeMap;
 
@@ -223,6 +224,10 @@ pub fn integrate_multinomial_design_moments(
     let mut class_standard_deviation = Array2::<f64>::zeros((n, k));
     let mut active_mean = Array1::<f64>::zeros(m);
     let mut active_covariance = Array2::<f64>::zeros((m, m));
+    // Every row follows the same deterministic order-doubling ladder.  A rule
+    // depends only on its order, not on the row's mean or covariance, so build
+    // each order once for this prediction call and reuse it across rows.
+    let mut conditioned_three_class_rules = ConditionedThreeClassRuleLadder::default();
     for row in 0..n {
         let x = design.row(row);
         for a in 0..m {
@@ -247,10 +252,11 @@ pub fn integrate_multinomial_design_moments(
                 active_covariance[[a, b]] = value;
             }
         }
-        let moments = integrate_logistic_normal_softmax_moments(
+        let moments = integrate_logistic_normal_softmax_moments_with_rule_ladder(
             active_mean.view(),
             active_covariance.view(),
             control,
+            &mut conditioned_three_class_rules,
         )?;
         class_mean.row_mut(row).assign(&moments.class_mean);
         class_standard_deviation
@@ -317,6 +323,10 @@ pub enum MultinomialPosteriorRule {
     /// Exact reduction: the binary logistic-normal evaluator, or a covariance
     /// that is a point mass.
     Exact,
+    /// Exact Gaussian conditioning reduces a three-class, rank-two posterior
+    /// to one Gauss-Hermite direction plus the controlled scalar
+    /// logistic-normal evaluator. Carries the outer rule's node count.
+    ConditionedThreeClass(usize),
     /// Tensor-product Gauss-Hermite whose one-dimensional node count is chosen
     /// per retained posterior direction.  Carries those node counts.
     AnisotropicTensor(Vec<usize>),
@@ -364,6 +374,21 @@ pub fn integrate_logistic_normal_softmax_moments(
     active_covariance: ArrayView2<'_, f64>,
     control: &MultinomialPosteriorIntegrationControl,
 ) -> Result<MultinomialPosteriorMoments, EstimationError> {
+    let mut conditioned_three_class_rules = ConditionedThreeClassRuleLadder::default();
+    integrate_logistic_normal_softmax_moments_with_rule_ladder(
+        active_mean,
+        active_covariance,
+        control,
+        &mut conditioned_three_class_rules,
+    )
+}
+
+fn integrate_logistic_normal_softmax_moments_with_rule_ladder(
+    active_mean: ArrayView1<'_, f64>,
+    active_covariance: ArrayView2<'_, f64>,
+    control: &MultinomialPosteriorIntegrationControl,
+    conditioned_three_class_rules: &mut ConditionedThreeClassRuleLadder,
+) -> Result<MultinomialPosteriorMoments, EstimationError> {
     control.validate()?;
     validate_inputs(active_mean, active_covariance)?;
     // Integrate the nearest symmetric matrix. (C + Cᵀ)/2 is exact in floating
@@ -396,6 +421,14 @@ pub fn integrate_logistic_normal_softmax_moments(
         let mut out = point_mass_moments(&mean)?;
         out.covariance_range_projection_bound = projected.projection_bound;
         return Ok(out);
+    }
+    if m == 2 && projected.factor.ncols() == 2 {
+        return integrate_three_class_conditionally(
+            &mean,
+            &projected,
+            control,
+            conditioned_three_class_rules,
+        );
     }
 
     integrate_general(&mean, &projected, control)
@@ -533,6 +566,333 @@ fn integrate_binary(
         max_raw_moment_level_difference: 0.0,
         covariance_range_projection_bound: 0.0,
     })
+}
+
+/// Three softmax classes admit an exact one-dimensional Rao-Blackwellization.
+///
+/// Condition active logit `X` on the other active logit `Y`.  With
+///
+/// ```text
+/// L = sigmoid(X - softplus(Y)), q = sigmoid(Y),
+/// ```
+///
+/// the class probabilities are `p_x=L`, `p_y=q(1-L)`, and
+/// `p_ref=(1-q)(1-L)`.  The controlled scalar logistic-normal evaluator gives
+/// `a=E[L|Y]` and `d=E[L(1-L)|Y]`, so all conditional first and second moments
+/// are algebra:
+///
+/// ```text
+/// E[L²|Y]       = a-d,
+/// E[(1-L)²|Y]   = 1-a-d,
+/// E[L(1-L)|Y]   = d.
+/// ```
+///
+/// Only the Gaussian expectation over `Y` remains.  This changes the work for
+/// the wide rank-two posterior in #2612 from the Cartesian pair
+/// `1023² + 2047²` to two one-dimensional rules while preserving every raw
+/// moment and the same caller-tolerance convergence check.
+fn integrate_three_class_conditionally(
+    active_mean: &[f64],
+    projected: &ProjectedGaussian,
+    control: &MultinomialPosteriorIntegrationControl,
+    rules: &mut ConditionedThreeClassRuleLadder,
+) -> Result<MultinomialPosteriorMoments, EstimationError> {
+    let integrand = ThreeClassConditionalIntegrand::new(active_mean, projected)?;
+    let mut previous: Option<Vec<f64>> = None;
+    let mut total_evaluations = 0usize;
+    let mut rule_index = 1usize;
+    let mut refinement_depth = 0usize;
+    let mut last_difference = f64::INFINITY;
+    let mut last_deciding: Option<DecidingMoment> = None;
+
+    loop {
+        let node_count = rule_index
+            .checked_mul(2)
+            .and_then(|value| value.checked_sub(1))
+            .ok_or_else(|| {
+                EstimationError::InvalidInput(
+                    "three-class conditional Gauss-Hermite order overflowed usize".to_string(),
+                )
+            })?;
+        let remaining = control
+            .maximum_function_evaluations
+            .saturating_sub(total_evaluations);
+        if node_count > remaining {
+            let deciding_report = match last_deciding {
+                Some(moment) => format!(
+                    "worst raw moment {} (normalized error {:.6e} = (difference {:.6e} + projection bound {:.6e}) / tolerance {:.6e})",
+                    moment.index,
+                    moment.normalized_error,
+                    moment.difference,
+                    projected.projection_bound,
+                    moment.tolerance,
+                ),
+                None => "no two conditional rules fit, so no raw moment was compared".to_string(),
+            };
+            return Err(EstimationError::InvalidInput(format!(
+                "multinomial logistic-normal quadrature did not converge: the next one-dimensional conditioned three-class rule needs {node_count} evaluations, against {remaining} remaining; final max raw-moment difference {last_difference:.6e}, evaluations {total_evaluations}/{}; {deciding_report}",
+                control.maximum_function_evaluations
+            )));
+        }
+
+        let rule = rules.rule(refinement_depth, rule_index)?;
+        let current = integrand.raw_moments(
+            rule,
+            &mut total_evaluations,
+            control.maximum_function_evaluations,
+            control.absolute_tolerance,
+        )?;
+        if let Some(previous_moments) = previous.as_ref() {
+            let mut certified = true;
+            let mut maximum_difference = 0.0_f64;
+            let mut deciding: Option<DecidingMoment> = None;
+            for (index, (&new_value, &old_value)) in
+                current.iter().zip(previous_moments.iter()).enumerate()
+            {
+                let difference = (new_value - old_value).abs();
+                maximum_difference = maximum_difference.max(difference);
+                let tolerance = control.absolute_tolerance
+                    + control.relative_tolerance * new_value.abs().max(old_value.abs());
+                let controlled_error = difference + projected.projection_bound;
+                if controlled_error > tolerance {
+                    certified = false;
+                }
+                let normalized_error = if tolerance > 0.0 {
+                    controlled_error / tolerance
+                } else if controlled_error > 0.0 {
+                    f64::INFINITY
+                } else {
+                    0.0
+                };
+                if deciding
+                    .as_ref()
+                    .map(|current| normalized_error > current.normalized_error)
+                    .unwrap_or(true)
+                {
+                    deciding = Some(DecidingMoment {
+                        index,
+                        normalized_error,
+                        difference,
+                        tolerance,
+                    });
+                }
+            }
+            last_difference = maximum_difference;
+            last_deciding = deciding;
+            if certified {
+                return moments_from_raw(
+                    current,
+                    3,
+                    2,
+                    MultinomialPosteriorRule::ConditionedThreeClass(node_count),
+                    total_evaluations,
+                    maximum_difference,
+                    projected.projection_bound,
+                );
+            }
+        }
+        previous = Some(current);
+        rule_index = rule_index.checked_mul(2).ok_or_else(|| {
+            EstimationError::InvalidInput(
+                "three-class conditional Gauss-Hermite refinement overflowed usize".to_string(),
+            )
+        })?;
+        refinement_depth = refinement_depth.checked_add(1).ok_or_else(|| {
+            EstimationError::InvalidInput(
+                "three-class conditional Gauss-Hermite refinement depth overflowed usize"
+                    .to_string(),
+            )
+        })?;
+    }
+}
+
+/// Prediction-call-owned cache for the order-doubling rule ladder used by the
+/// exact three-class conditional reduction.
+///
+/// Depth `d` always means rule index `2^d` and therefore `2^(d+1)-1` nodes.
+/// Storing the ladder densely by depth gives direct indexing without either a
+/// global, unbounded cache or a map lookup for an order already fixed by the
+/// refinement schedule.
+#[derive(Default)]
+struct ConditionedThreeClassRuleLadder {
+    rules: Vec<GaussHermiteRule>,
+}
+
+impl ConditionedThreeClassRuleLadder {
+    fn rule(
+        &mut self,
+        refinement_depth: usize,
+        rule_index: usize,
+    ) -> Result<&GaussHermiteRule, EstimationError> {
+        if self.rules.len() == refinement_depth {
+            self.rules.push(gauss_hermite_rule(rule_index)?);
+        }
+        self.rules.get(refinement_depth).ok_or_else(|| {
+            EstimationError::InvalidInput(format!(
+                "conditioned three-class rule ladder is missing refinement depth {refinement_depth}"
+            ))
+        })
+    }
+}
+
+/// Parameters of `X | Y` and the class mapping for the exact three-class
+/// reduction above.
+struct ThreeClassConditionalIntegrand<'a> {
+    active_mean: &'a [f64],
+    conditioned_class: usize,
+    outer_class: usize,
+    outer_standard_deviation: f64,
+    conditional_regression: f64,
+    conditional_standard_deviation: f64,
+    upper_offsets: Vec<usize>,
+}
+
+impl<'a> ThreeClassConditionalIntegrand<'a> {
+    fn new(active_mean: &'a [f64], projected: &ProjectedGaussian) -> Result<Self, EstimationError> {
+        if active_mean.len() != 2 || projected.factor.dim() != (2, 2) {
+            return Err(EstimationError::InvalidInput(format!(
+                "conditioned three-class integration requires two active logits and a 2x2 retained factor, got {} logits and factor {:?}",
+                active_mean.len(),
+                projected.factor.dim()
+            )));
+        }
+        let row_variance = |row: usize| {
+            projected
+                .factor
+                .row(row)
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+        };
+        let variances = [row_variance(0), row_variance(1)];
+        // One-dimensional Gauss-Hermite resolution grows with the marginal
+        // standard deviation of the remaining outer coordinate.  Conditioning
+        // the other coordinate therefore minimizes the outer rule's derived
+        // work requirement without a tuned routing threshold.
+        let outer_class = if variances[0] <= variances[1] { 0 } else { 1 };
+        let conditioned_class = 1 - outer_class;
+        let outer_variance = variances[outer_class];
+        if !(outer_variance.is_finite() && outer_variance > 0.0) {
+            return Err(EstimationError::InvalidInput(format!(
+                "conditioned three-class outer variance must be finite and positive, got {outer_variance}"
+            )));
+        }
+        let covariance = projected
+            .factor
+            .row(conditioned_class)
+            .iter()
+            .zip(projected.factor.row(outer_class).iter())
+            .map(|(left, right)| left * right)
+            .sum::<f64>();
+        let conditional_regression = covariance / outer_variance;
+        // Form the conditional residual in factor space.  Its squared norm is
+        // Var(X|Y), evaluated without the catastrophic cancellation in
+        // Var(X)-Cov(X,Y)^2/Var(Y) near a rank-one covariance.
+        let conditional_variance = projected
+            .factor
+            .row(conditioned_class)
+            .iter()
+            .zip(projected.factor.row(outer_class).iter())
+            .map(|(conditioned, outer)| {
+                let residual = conditioned - conditional_regression * outer;
+                residual * residual
+            })
+            .sum::<f64>();
+        if !(conditional_variance.is_finite() && conditional_variance >= 0.0) {
+            return Err(EstimationError::InvalidInput(format!(
+                "conditioned three-class residual variance is invalid: {conditional_variance}"
+            )));
+        }
+        Ok(Self {
+            active_mean,
+            conditioned_class,
+            outer_class,
+            outer_standard_deviation: outer_variance.sqrt(),
+            conditional_regression,
+            conditional_standard_deviation: conditional_variance.sqrt(),
+            upper_offsets: upper_triangle_offsets(3)?,
+        })
+    }
+
+    fn raw_moments(
+        &self,
+        rule: &GaussHermiteRule,
+        total_evaluations: &mut usize,
+        maximum_function_evaluations: usize,
+        absolute_tolerance: f64,
+    ) -> Result<Vec<f64>, EstimationError> {
+        let mut accumulator = QuadratureAccumulator::new(packed_moment_count(3)?)?;
+        for (&standard_normal, &weight) in rule.nodes.iter().zip(rule.weights.iter()) {
+            if *total_evaluations >= maximum_function_evaluations {
+                return Err(EstimationError::InvalidInput(format!(
+                    "multinomial conditioned three-class quadrature exhausted its function-evaluation budget ({maximum_function_evaluations}) before convergence"
+                )));
+            }
+            *total_evaluations += 1;
+
+            let outer_mean = self.active_mean[self.outer_class];
+            let outer_eta = outer_mean + self.outer_standard_deviation * standard_normal;
+            let conditioned_mean = self.active_mean[self.conditioned_class]
+                + self.conditional_regression * (outer_eta - outer_mean);
+            let scalar_location = conditioned_mean - gam_linalg::utils::stable_softplus(outer_eta);
+            let (selected_mean, selected_slope) =
+                gam_solve::quadrature::logit_posterior_meanwith_deriv(
+                    scalar_location,
+                    self.conditional_standard_deviation,
+                )
+                .map_err(|error| {
+                    EstimationError::InvalidInput(format!(
+                        "conditioned three-class scalar logistic-normal evaluation failed: {error}"
+                    ))
+                })?;
+            let outer_share = (-gam_linalg::utils::stable_softplus(-outer_eta)).exp();
+            let reference_share = 1.0 - outer_share;
+            let selected_second = selected_mean - selected_slope;
+            let remainder_second = 1.0 - selected_mean - selected_slope;
+
+            let mut means = [0.0_f64; 3];
+            means[self.conditioned_class] = selected_mean;
+            means[self.outer_class] = outer_share * (1.0 - selected_mean);
+            means[2] = reference_share * (1.0 - selected_mean);
+
+            let mut seconds = [[0.0_f64; 3]; 3];
+            seconds[self.conditioned_class][self.conditioned_class] = selected_second;
+            seconds[self.conditioned_class][self.outer_class] = outer_share * selected_slope;
+            seconds[self.outer_class][self.conditioned_class] =
+                seconds[self.conditioned_class][self.outer_class];
+            seconds[self.conditioned_class][2] = reference_share * selected_slope;
+            seconds[2][self.conditioned_class] = seconds[self.conditioned_class][2];
+            seconds[self.outer_class][self.outer_class] =
+                outer_share * outer_share * remainder_second;
+            seconds[self.outer_class][2] = outer_share * reference_share * remainder_second;
+            seconds[2][self.outer_class] = seconds[self.outer_class][2];
+            seconds[2][2] = reference_share * reference_share * remainder_second;
+
+            accumulator.add_weight(weight);
+            for (class, mean) in means.into_iter().enumerate() {
+                accumulator.add_moment(class, weight * mean);
+            }
+            let second_offset = 3;
+            for row in 0..3 {
+                for column in row..3 {
+                    let packed = second_offset + self.upper_offsets[row] + column - row;
+                    accumulator.add_moment(packed, weight * seconds[row][column]);
+                }
+            }
+        }
+        let (mut raw_moments, mass, absolute_weight_sum) = accumulator.finish();
+        normalize_by_mass(
+            &mut raw_moments,
+            mass,
+            absolute_weight_sum,
+            absolute_tolerance,
+            &format!(
+                "conditioned three-class rule with {} nodes",
+                rule.nodes.len()
+            ),
+        )?;
+        Ok(raw_moments)
+    }
 }
 
 fn point_mass_moments(active_mean: &[f64]) -> Result<MultinomialPosteriorMoments, EstimationError> {
@@ -678,10 +1038,7 @@ impl<'a> RowIntegrand<'a> {
                 rules.insert(order, gauss_hermite_rule(order)?);
             }
         }
-        let axes: Vec<&GaussHermiteRule> = orders
-            .iter()
-            .map(|order| &rules[order])
-            .collect();
+        let axes: Vec<&GaussHermiteRule> = orders.iter().map(|order| &rules[order]).collect();
         let mut workspace = QuadratureWorkspace::new(
             self.active_mean,
             self.projected,
@@ -866,10 +1223,7 @@ fn integrate_general(
         )?;
     }
 
-    let refined: Vec<usize> = orders
-        .iter()
-        .map(|order| order.saturating_mul(2))
-        .collect();
+    let refined: Vec<usize> = orders.iter().map(|order| order.saturating_mul(2)).collect();
     let certifying_pair_cost =
         tensor_node_count(&orders)?.saturating_add(tensor_node_count(&refined)?);
     let remaining = control
@@ -967,7 +1321,11 @@ fn integrate_anisotropic_tensor(
         coarse = fine;
         let next: Vec<usize> = orders.iter().map(|order| order * 2).collect();
         let next_cost = tensor_node_count(&next)?;
-        if next_cost > control.maximum_function_evaluations.saturating_sub(total_evaluations) {
+        if next_cost
+            > control
+                .maximum_function_evaluations
+                .saturating_sub(total_evaluations)
+        {
             let standard_deviations: Vec<String> = integrand
                 .projected
                 .standard_deviations
@@ -1138,8 +1496,7 @@ fn integrate_isotropic_sparse(
     };
     Err(EstimationError::InvalidInput(format!(
         "multinomial logistic-normal quadrature did not converge: reached Smolyak level {last_level_attempted} and exhausted the evaluation budget; final max raw-moment level difference {last_max_difference:.6e}, max normalized error {last_max_normalized_error:.6e}, projection bound {:.6e}, evaluations {total_evaluations}/{}; {deciding_report}",
-        projected.projection_bound,
-        control.maximum_function_evaluations
+        projected.projection_bound, control.maximum_function_evaluations
     )))
 }
 
@@ -1341,7 +1698,7 @@ struct QuadratureWorkspace<'a, 'b> {
 }
 
 impl<'a, 'b> QuadratureWorkspace<'a, 'b> {
-        fn new(
+    fn new(
         active_mean: &'a [f64],
         projected: &'a ProjectedGaussian,
         rules: &'a [GaussHermiteRule],
@@ -1487,34 +1844,17 @@ fn gauss_hermite_rule(index: usize) -> Result<GaussHermiteRule, EstimationError>
                 "multinomial posterior Gauss-Hermite order overflowed usize".to_string(),
             )
         })?;
-    let mut jacobi = Array2::<f64>::zeros((node_count, node_count));
-    for diagonal in 0..node_count.saturating_sub(1) {
-        // Physicists' Hermite weight exp(-x^2): Jacobi off-diagonal sqrt(i/2).
-        let value = (((diagonal + 1) as f64) * 0.5).sqrt();
-        jacobi[[diagonal, diagonal + 1]] = value;
-        jacobi[[diagonal + 1, diagonal]] = value;
-    }
-    let (eigenvalues, eigenvectors) = jacobi.eigh(faer::Side::Lower).map_err(|error| {
+    let physicists = physicists_gauss_hermite_rule(node_count).map_err(|error| {
         EstimationError::InvalidInput(format!(
-            "multinomial posterior Gauss-Hermite rule {node_count} eigendecomposition failed: {error}"
+            "multinomial posterior Gauss-Hermite rule {node_count} construction failed: {error}"
         ))
     })?;
-    let mut nodes = Vec::new();
-    let mut weights = Vec::new();
-    nodes.try_reserve_exact(node_count).map_err(|error| {
-        EstimationError::InvalidInput(format!(
-            "multinomial posterior could not allocate Gauss-Hermite nodes: {error}"
-        ))
-    })?;
-    weights.try_reserve_exact(node_count).map_err(|error| {
-        EstimationError::InvalidInput(format!(
-            "multinomial posterior could not allocate Gauss-Hermite weights: {error}"
-        ))
-    })?;
-    for column in 0..node_count {
-        nodes.push(std::f64::consts::SQRT_2 * eigenvalues[column]);
-        weights.push(eigenvectors[[0, column]] * eigenvectors[[0, column]]);
-    }
+    let nodes = physicists
+        .nodes
+        .into_iter()
+        .map(|node| std::f64::consts::SQRT_2 * node)
+        .collect::<Vec<_>>();
+    let mut weights = physicists.weights;
     let weight_sum: f64 = weights.iter().sum();
     if !(weight_sum.is_finite() && weight_sum > 0.0) {
         return Err(EstimationError::InvalidInput(format!(
@@ -1747,11 +2087,9 @@ mod tests {
     #[test]
     fn a_refusal_names_the_moment_that_decided_it_2612() {
         let active_mean = Array1::from_vec(vec![0.7, -1.3, 2.1]);
-        let active_covariance = Array2::from_shape_vec(
-            (3, 3),
-            vec![2.5, 0.4, -0.3, 0.4, 3.1, 0.6, -0.3, 0.6, 2.2],
-        )
-        .expect("covariance shape");
+        let active_covariance =
+            Array2::from_shape_vec((3, 3), vec![2.5, 0.4, -0.3, 0.4, 3.1, 0.6, -0.3, 0.6, 2.2])
+                .expect("covariance shape");
         // Two levels and a tolerance no sparse rule can reach, so the loop
         // exhausts its levels and falls through to the refusal cheaply.
         let control = MultinomialPosteriorIntegrationControl {
@@ -2032,9 +2370,9 @@ mod tests {
         })
     }
 
-    /// A WIDE two-direction posterior: the rule that certifies it must be the
-    /// tensor product, because the sparse grid cannot reach the order it needs
-    /// (#2612).
+    /// A WIDE two-direction posterior: exact conditioning removes one Gaussian
+    /// direction before quadrature, because the sparse grid cannot reach the
+    /// simultaneous order the unreduced integrand needs (#2612).
     ///
     /// Measured at `origin/main` on this exact covariance, the isotropic sparse
     /// ladder's error against a converged tensor oracle falls only algebraically
@@ -2057,10 +2395,10 @@ mod tests {
     ///
     /// The test asserts both halves, so it cannot pass by accident:
     ///   * the isotropic sparse rule REFUSES this row at its level ceiling, and
-    ///   * the shipped entry point certifies it and lands on an independent
-    ///     high-order tensor Gauss-Hermite oracle.
+    ///   * the conditioned entry point certifies every raw moment against an
+    ///     independent high-order tensor Gauss-Hermite oracle.
     #[test]
-    fn a_wide_two_direction_posterior_needs_the_tensor_rule_the_sparse_grid_cannot_reach_2612() {
+    fn a_wide_two_direction_posterior_is_reduced_before_quadrature_2612() {
         let active_mean = Array1::from_vec(vec![2.0, -1.0]);
         let active_covariance = wide_two_direction_covariance();
         let control = MultinomialPosteriorIntegrationControl::default();
@@ -2082,19 +2420,18 @@ mod tests {
             "unexpected sparse-rule error: {sparse_error}"
         );
 
-        // Half two: the shipped entry point certifies it, with the tensor rule.
+        // Half two: the shipped entry point certifies it after exact
+        // Rao-Blackwellization to one dimension.
         let result = integrate_logistic_normal_softmax_moments(
             active_mean.view(),
             active_covariance.view(),
             &control,
         )
         .expect("the wide posterior must be integrable");
-        match &result.rule {
-            MultinomialPosteriorRule::AnisotropicTensor(node_counts) => {
-                assert_eq!(node_counts.len(), 2, "one node count per retained direction");
-            }
-            other => panic!("expected the tensor rule to certify this row, got {other:?}"),
-        }
+        assert!(matches!(
+            result.rule,
+            MultinomialPosteriorRule::ConditionedThreeClass(_)
+        ));
 
         // And the certified answer is the right one: an independent tensor
         // Gauss-Hermite evaluation at an order nothing above chose.
@@ -2103,6 +2440,7 @@ mod tests {
         // what is being asserted.
         let oracle_rule = gauss_hermite_rule(151).expect("oracle rule");
         let mut oracle_mean = vec![0.0_f64; 3];
+        let mut oracle_second = [[0.0_f64; 3]; 3];
         let mut mass = 0.0_f64;
         for (&first_node, &first_weight) in oracle_rule.nodes.iter().zip(oracle_rule.weights.iter())
         {
@@ -2122,11 +2460,20 @@ mod tests {
                 let probability = softmax_with_reference(&eta).expect("oracle softmax");
                 for class in 0..3 {
                     oracle_mean[class] += weight * probability[class];
+                    for other in 0..3 {
+                        oracle_second[class][other] +=
+                            weight * probability[class] * probability[other];
+                    }
                 }
             }
         }
         for value in &mut oracle_mean {
             *value /= mass;
+        }
+        for row in &mut oracle_second {
+            for value in row {
+                *value /= mass;
+            }
         }
         for class in 0..3 {
             assert_close(
@@ -2134,6 +2481,218 @@ mod tests {
                 oracle_mean[class],
                 1.0e-7,
                 "wide posterior class mean",
+            );
+            for other in 0..3 {
+                let oracle_covariance =
+                    oracle_second[class][other] - oracle_mean[class] * oracle_mean[other];
+                assert_close(
+                    result.class_covariance[[class, other]],
+                    oracle_covariance,
+                    3.0e-7,
+                    "wide posterior class covariance",
+                );
+            }
+        }
+    }
+
+    /// The Gauss-Hermite ladder is a property of the requested orders, not of
+    /// a prediction row.  Reusing it across rows must avoid every repeated
+    /// Golub-Welsch construction without changing a posterior bit.
+    #[test]
+    fn conditioned_three_class_rule_ladder_is_reused_across_rows_2612() {
+        let active_mean = Array1::from_vec(vec![1.1, -0.6]);
+        let active_covariance =
+            Array2::from_shape_vec((2, 2), vec![3.0, 0.7, 0.7, 1.8]).expect("covariance");
+        let control = control(2.0e-9);
+        let symmetric = symmetrized_covariance(active_covariance.view());
+        let projected = project_active_covariance(symmetric.view(), control.absolute_tolerance)
+            .expect("project covariance");
+        let mut rules = ConditionedThreeClassRuleLadder::default();
+
+        let first = integrate_three_class_conditionally(
+            active_mean.as_slice().expect("contiguous mean"),
+            &projected,
+            &control,
+            &mut rules,
+        )
+        .expect("first prediction row");
+        let constructions_after_first_row = rules.rules.len();
+        assert!(
+            constructions_after_first_row >= 2,
+            "certification must compare at least two rules"
+        );
+
+        let second = integrate_three_class_conditionally(
+            active_mean.as_slice().expect("contiguous mean"),
+            &projected,
+            &control,
+            &mut rules,
+        )
+        .expect("identical second prediction row");
+        assert_eq!(
+            rules.rules.len(),
+            constructions_after_first_row,
+            "an identical row must reuse every constructed rule"
+        );
+        assert_eq!(first.rule, second.rule);
+        assert_eq!(first.function_evaluations, second.function_evaluations);
+        assert_eq!(
+            first.max_raw_moment_level_difference.to_bits(),
+            second.max_raw_moment_level_difference.to_bits()
+        );
+        for (&left, &right) in first.class_mean.iter().zip(second.class_mean.iter()) {
+            assert_eq!(left.to_bits(), right.to_bits());
+        }
+        for (&left, &right) in first
+            .class_covariance
+            .iter()
+            .zip(second.class_covariance.iter())
+        {
+            assert_eq!(left.to_bits(), right.to_bits());
+        }
+    }
+
+    /// Re-reference and permute all three classes, including exchanging an
+    /// active class with the reference class.  A structural conditional
+    /// reduction must commute with this change of coordinates: choosing which
+    /// logit to condition is a work decision, not a statistical one.
+    #[test]
+    fn conditioned_three_class_moments_are_invariant_to_class_permutation_2612() {
+        let active_mean = Array1::from_vec(vec![1.4, -0.9]);
+        let active_covariance =
+            Array2::from_shape_vec((2, 2), vec![7.0, -1.3, -1.3, 2.5]).expect("covariance");
+        let control = control(2.0e-9);
+        let original = integrate_logistic_normal_softmax_moments(
+            active_mean.view(),
+            active_covariance.view(),
+            &control,
+        )
+        .expect("original conditioned moments");
+        assert!(matches!(
+            &original.rule,
+            MultinomialPosteriorRule::ConditionedThreeClass(_)
+        ));
+
+        // New class j is old class permutation[j].  The new reference is old
+        // active class zero, so this covers the reference-coding boundary
+        // rather than merely swapping the two stored active columns.
+        let permutation = [2usize, 1usize, 0usize];
+        let old_full_mean = [active_mean[0], active_mean[1], 0.0];
+        let new_active_mean = Array1::from_vec(vec![
+            old_full_mean[permutation[0]] - old_full_mean[permutation[2]],
+            old_full_mean[permutation[1]] - old_full_mean[permutation[2]],
+        ]);
+        let old_active_coefficient = |class: usize| match class {
+            0 => [1.0, 0.0],
+            1 => [0.0, 1.0],
+            2 => [0.0, 0.0],
+            _ => unreachable!("three classes"),
+        };
+        let reference_coefficient = old_active_coefficient(permutation[2]);
+        let transformation = [
+            {
+                let class = old_active_coefficient(permutation[0]);
+                [
+                    class[0] - reference_coefficient[0],
+                    class[1] - reference_coefficient[1],
+                ]
+            },
+            {
+                let class = old_active_coefficient(permutation[1]);
+                [
+                    class[0] - reference_coefficient[0],
+                    class[1] - reference_coefficient[1],
+                ]
+            },
+        ];
+        let new_active_covariance = Array2::from_shape_fn((2, 2), |(row, column)| {
+            let mut value = 0.0;
+            for left in 0..2 {
+                for right in 0..2 {
+                    value += transformation[row][left]
+                        * active_covariance[[left, right]]
+                        * transformation[column][right];
+                }
+            }
+            value
+        });
+        let permuted = integrate_logistic_normal_softmax_moments(
+            new_active_mean.view(),
+            new_active_covariance.view(),
+            &control,
+        )
+        .expect("permuted conditioned moments");
+
+        for new_class in 0..3 {
+            let old_class = permutation[new_class];
+            assert_close(
+                permuted.class_mean[new_class],
+                original.class_mean[old_class],
+                2.0e-8,
+                "permuted class mean",
+            );
+            for new_other in 0..3 {
+                let old_other = permutation[new_other];
+                assert_close(
+                    permuted.class_covariance[[new_class, new_other]],
+                    original.class_covariance[[old_class, old_other]],
+                    5.0e-8,
+                    "permuted class covariance",
+                );
+            }
+        }
+        for row in 0..3 {
+            assert_close(
+                permuted.class_covariance.row(row).sum(),
+                0.0,
+                3.0e-14,
+                "conditioned simplex covariance row sum",
+            );
+        }
+    }
+
+    /// The work gap is structural, not a larger allowance.  Learn the outer
+    /// resolution this posterior needs, then rerun with one fewer evaluation
+    /// than a square grid at that same per-direction resolution.  The exact
+    /// conditioned rule still fits because its work is linear in the node
+    /// count; an unreduced Cartesian rule cannot.
+    #[test]
+    fn conditioned_three_class_rule_fits_below_the_corresponding_tensor_cost_2612() {
+        let active_mean = Array1::from_vec(vec![2.0, -1.0]);
+        let active_covariance = wide_two_direction_covariance();
+        let baseline = integrate_logistic_normal_softmax_moments(
+            active_mean.view(),
+            active_covariance.view(),
+            &MultinomialPosteriorIntegrationControl::default(),
+        )
+        .expect("baseline conditioned moments");
+        let nodes = match baseline.rule {
+            MultinomialPosteriorRule::ConditionedThreeClass(nodes) => nodes,
+            other => panic!("expected conditioned rule, got {other:?}"),
+        };
+        assert!(nodes > 1, "wide posterior must require a refinement");
+        let square_cost = nodes.checked_mul(nodes).expect("tensor cost");
+        let tight_control = MultinomialPosteriorIntegrationControl {
+            maximum_function_evaluations: square_cost - 1,
+            ..MultinomialPosteriorIntegrationControl::default()
+        };
+        let conditioned = integrate_logistic_normal_softmax_moments(
+            active_mean.view(),
+            active_covariance.view(),
+            &tight_control,
+        )
+        .expect("conditioned rule must fit below corresponding tensor cost");
+        assert!(
+            conditioned.function_evaluations < square_cost,
+            "conditioned work {} must be below {nodes}²={square_cost}",
+            conditioned.function_evaluations
+        );
+        for class in 0..3 {
+            assert_close(
+                conditioned.class_mean[class],
+                baseline.class_mean[class],
+                3.0e-8,
+                "tight-budget conditioned mean",
             );
         }
     }

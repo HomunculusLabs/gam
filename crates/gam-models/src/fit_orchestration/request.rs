@@ -131,19 +131,12 @@ pub struct SurvivalLocationScaleFitRequest<'a> {
     pub wiggle: Option<LinkWiggleConfig>,
     pub kappa_options: SpatialLengthScaleOptimizationOptions,
     pub optimize_inverse_link: bool,
-    /// See [`gam_custom_family::BlockwiseFitOptions::cache_session`].
-    /// Threaded into the internally constructed `BlockwiseFitOptions` by
-    /// `fit_survival_location_scale_model`.
-    pub cache_session: Option<std::sync::Arc<gam_runtime::warm_start::Session>>,
 }
 
 pub struct SurvivalTransformationFitRequest<'a> {
     pub data: ArrayView2<'a, f64>,
     pub spec: SurvivalTransformationTermSpec,
-    /// See [`gam_custom_family::BlockwiseFitOptions::cache_session`].
-    /// Threaded into the internally constructed `BlockwiseFitOptions` by
-    /// `fit_survival_transformation_model`.
-    pub cache_session: Option<std::sync::Arc<gam_runtime::warm_start::Session>>,
+    pub persistent_warm_start_store: Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
 }
 
 #[derive(Clone)]
@@ -685,15 +678,15 @@ pub struct FitConfig {
     /// explicit array-valued `centers=` differs, routing through
     /// `CenterStrategy::UserProvided` instead of `FarthestPoint`/`EqualMass`.
     pub smooth_overrides: Option<JsonValue>,
-    /// Engage the cross-process ON-DISK persistent checkpoint layer (#1082).
+    /// Explicit cross-process warm-start capability.
     ///
-    /// Default `true`: formula fits survive process and wall interruptions.
-    /// The flag threads
-    /// `FitConfig → FitOptions → ExternalOptimOptions` down to the standard
-    /// `RemlState`, which then calls `enable_persistent_warm_start_disk()`.
-    /// Low-level embedding code may disable it explicitly when it owns a
-    /// stronger external checkpoint transaction.
-    pub persist_warm_start_disk: bool,
+    /// Default `None`: ordinary fits never consult or write an ambient
+    /// machine-global cache. Call
+    /// [`FitConfig::with_persistent_warm_start_root`] to opt in with a
+    /// caller-owned root. The configured capability is lazy and clone-shared,
+    /// so validation creates no directories and every standard, survival, and
+    /// custom-family owner uses one opened store handle.
+    pub persistent_warm_start_store: Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
     /// Per-smooth spatial center requests maintained by the adaptive
     /// fit→expand→refit loop. Outer `None` means no loop owns this request, so
     /// raw materialization keeps the ordinary full basis. `Some` activates the
@@ -774,7 +767,7 @@ impl Default for FitConfig {
             latents: None,
             analytic_penalties: None,
             smooth_overrides: None,
-            persist_warm_start_disk: true,
+            persistent_warm_start_store: None,
             spatial_center_counts: None,
         }
     }
@@ -824,11 +817,11 @@ mod default_workflow_policy_tests {
     use super::*;
 
     #[test]
-    fn formula_fits_checkpoint_durably_by_default() {
+    fn formula_fits_are_disk_silent_by_default() {
         let config = FitConfig::default();
-        assert!(config.persist_warm_start_disk);
+        assert!(config.persistent_warm_start_store.is_none());
         let options = canonical_standard_fit_options(&config, StandardFitOptionsInputs::default());
-        assert!(options.persist_warm_start_disk);
+        assert!(options.persistent_warm_start_store.is_none());
     }
 
     #[test]
@@ -840,12 +833,22 @@ mod default_workflow_policy_tests {
     }
 
     #[test]
-    fn explicit_external_checkpoint_owner_can_disable_disk_layer() {
-        let config = FitConfig {
-            persist_warm_start_disk: false,
-            ..FitConfig::default()
-        };
+    fn explicit_root_threads_one_lazy_store_capability() {
+        let directory = tempfile::tempdir().expect("create explicit store parent");
+        let root = directory.path().join("chosen-root");
+        let config = FitConfig::default().with_persistent_warm_start_root(root.clone());
+        let configured = config
+            .persistent_warm_start_store
+            .as_ref()
+            .expect("explicit root must configure persistence");
+        assert_eq!(configured.root(), root);
+        assert!(!root.exists(), "configuration must remain lazy");
+
         let options = canonical_standard_fit_options(&config, StandardFitOptionsInputs::default());
-        assert!(!options.persist_warm_start_disk);
+        let threaded = options
+            .persistent_warm_start_store
+            .as_ref()
+            .expect("canonical options must retain the configured store");
+        assert_eq!(threaded.root(), root);
     }
 }

@@ -61,7 +61,7 @@ fn default_logit_opts() -> ExternalOptimOptions {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     }
 }
 
@@ -319,7 +319,7 @@ fn conditioned_helpercost_matches_fittedobjective() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
 
     let result = optimize_external_design(

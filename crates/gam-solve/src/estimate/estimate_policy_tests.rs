@@ -12,6 +12,7 @@ use super::evaluation::{
 use super::external_options::resolve_external_family;
 use super::optimizer::{
     external_reml_seed_config, freeze_lambda_search_nuisance_at_canonical_anchor,
+    standard_reml_search_prefers_gradient_only,
 };
 use super::penalty::REML_SEED_SCREENING_RHO_CAP;
 use super::prefit::{
@@ -34,55 +35,26 @@ use rand::{RngExt, SeedableRng};
 use std::sync::atomic::Ordering;
 
 #[test]
-fn gaussian_external_reml_seeds_over_smoothing_safety_net() {
-    // #1074: low-dimensional Gaussian REML ranks several deterministic candidate
-    // basins (`max_seeds > seed_budget`) AND fully solves TWO of them — the
-    // flexible anchor (slot 0) and the over-smoothing probe (slot 1) — so
-    // lowest-cost keep-best can escape the flexible over-fit basin a weak-signal
-    // over-rich fit otherwise rails into. The probe is an absolute high-λ start.
+fn gaussian_external_reml_uses_one_analytic_seed() {
+    // The profiled-Gaussian path scores its data-derived `initial.sp` and
+    // summed-penalty diagonal candidates before constructing the outer
+    // problem.  The generic lattice must not repeat that basin decision.
     let cfg = external_reml_seed_config(2, LinkFunction::Identity);
     assert_eq!(cfg.risk_profile, SeedRiskProfile::Gaussian);
-    assert!(
-        cfg.max_seeds > cfg.seed_budget,
-        "Gaussian REML should rank deterministic candidate basins before startup"
-    );
-    assert_eq!(
-        cfg.seed_budget, 2,
-        "Gaussian REML must fully solve both the flexible anchor and the over-smoothing \
-         probe so keep-best can reject an over-fit basin"
-    );
-    assert_eq!(
-        cfg.over_smoothing_probe_rho,
-        Some(8.0),
-        "Gaussian REML must seed an absolute high-λ over-smoothing probe (#1074)"
-    );
+    assert_eq!(cfg.max_seeds, 1);
+    assert_eq!(cfg.seed_budget, 1);
+    assert_eq!(cfg.over_smoothing_probe_rho, None);
 }
 
 #[test]
-fn high_dimensional_gaussian_external_reml_keeps_over_smoothing_safety_net() {
-    // #1074: a MULTI-TERM Gaussian model (e.g. `s(long,lat,bs="tp") + s(depth)`,
-    // four penalty blocks) lands at/above the screening cap. It must STILL get
-    // the over-smoothing safety net — a budget-2 multi-start with the high-λ
-    // probe — or it descends into the flexible basin and over-fits the weak
-    // signal (the #1074 quakes edf≈104 vs mgcv≈15 failure). The lattice stays
-    // minimal (anchor + global shifts + probe, no exploratory seeds) to honour
-    // the cap's perf intent, but the budget-2 keep-best coverage is preserved.
+fn high_dimensional_gaussian_external_reml_does_not_restore_a_lattice() {
+    // Coordinate count must not silently re-enable heuristic global shifts:
+    // the coupled analytic candidates own the same decision at every k.
     let cfg = external_reml_seed_config(REML_SEED_SCREENING_RHO_CAP, LinkFunction::Identity);
     assert_eq!(cfg.risk_profile, SeedRiskProfile::Gaussian);
-    assert!(
-        cfg.max_seeds > cfg.seed_budget,
-        "high-dimensional Gaussian REML must still rank the flexible and over-smoothing basins"
-    );
-    assert_eq!(
-        cfg.seed_budget, 2,
-        "high-dimensional Gaussian REML must fully solve both basins so keep-best can \
-         reject the multi-term over-fit (#1074)"
-    );
-    assert_eq!(
-        cfg.over_smoothing_probe_rho,
-        Some(8.0),
-        "the over-smoothing probe must survive past the screening cap for Gaussian (#1074)"
-    );
+    assert_eq!(cfg.max_seeds, 1);
+    assert_eq!(cfg.seed_budget, 1);
+    assert_eq!(cfg.over_smoothing_probe_rho, None);
 }
 
 #[test]
@@ -108,6 +80,28 @@ fn generalized_external_reml_keeps_multistart_policy() {
         cfg.seed_budget, 2,
         "GLM REML must request the alternate ARC startup basin"
     );
+}
+
+#[test]
+fn profiled_gaussian_search_consumes_exact_outer_curvature() {
+    assert!(
+        !standard_reml_search_prefers_gradient_only(LinkFunction::Identity),
+        "quadratic Gaussian identity REML must route its available exact Hessian into search"
+    );
+}
+
+#[test]
+fn non_gaussian_search_reserves_order_four_for_mint() {
+    for link in [
+        LinkFunction::Logit,
+        LinkFunction::Probit,
+        LinkFunction::Log,
+    ] {
+        assert!(
+            standard_reml_search_prefers_gradient_only(link),
+            "{link:?} must retain the optimize-3 / certify-4 derivative ceiling"
+        );
+    }
 }
 
 #[test]
@@ -1155,7 +1149,7 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
 
     let theta = array![0.10, 0.12, -0.18];
@@ -1438,7 +1432,7 @@ fn sas_true_score_beta_jacobian_matchesfd_at_seed19() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
 
     let theta = array![0.10, 0.12, -0.18];
@@ -1616,7 +1610,7 @@ fn sas_pirlshessian_matches_true_score_jacobian_at_seed19() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
 
     let theta = array![0.10, 0.12, -0.18];
@@ -1931,7 +1925,10 @@ fn lambda_search_nuisance_freeze_is_a_function_of_data_and_spec_alone_2363() {
     // that point the inner solve reloads the cached β, so an anchor taken there
     // would be cache-dependent again.
     let attached = beta_precision_anchor_state(&y, &w, &x, &cfg);
-    attached.enable_persistent_warm_start_disk();
+    let directory = tempfile::tempdir().expect("create explicit warm-start root");
+    attached.attach_persistent_warm_start_store(
+        crate::persistent_warm_start::configured_store(directory.path().join("warm")),
+    );
     let refusal = freeze_lambda_search_nuisance_at_canonical_anchor(
         &attached,
         &resolved,
@@ -1959,25 +1956,9 @@ fn cache_invariance_arm(
     y: &Array1<f64>,
     w: &Array1<f64>,
     x: &Array2<f64>,
-    key_nonce: f64,
-    persist_warm_start_disk: bool,
+    persistent_warm_start_store: Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
 ) -> ExternalOptimResult {
-    // `key_nonce` is a CONSTANT offset shared by every arm of one run, and it
-    // exists to move this fixture into a private region of the persistent
-    // warm-start keyspace. `persistent_warm_start_cache_key` hashes the offset
-    // array (`reml/gradient_hessian.rs`, `hash_array_view(&mut hasher,
-    // self.offset.view())`), so a distinct nonce is a distinct store key.
-    //
-    // It is a constant, and the intercept is column 0 of the design and is
-    // UNPENALIZED (`one_penalty_non_intercept` zeroes row/col 0, and
-    // `nullspace_dims = vec![1]`). For the log and logit links used here,
-    // eta = X*beta + c is exactly reparameterized by beta_0 -> beta_0 - c, so
-    // in exact arithmetic the criterion, the certified log-lambda and
-    // beta_1..3 are unchanged and only the intercept absorbs it. The nonce
-    // therefore relabels the cache key WITHOUT redefining the problem, and no
-    // assertion in this test compares against a c = 0 baseline: every
-    // comparison is between arms that share one nonce.
-    let offset = Array1::<f64>::from_elem(y.len(), key_nonce);
+    let offset = Array1::<f64>::zeros(y.len());
     let s_list: Vec<PenaltySpec> = one_penalty_non_intercept(x.ncols())
         .into_iter()
         .map(PenaltySpec::Dense)
@@ -2000,7 +1981,7 @@ fn cache_invariance_arm(
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk,
+        persistent_warm_start_store: persistent_warm_start_store.clone(),
     };
     optimize_external_designwith_heuristic_lambdas_andwarm_start(
         y.view(),
@@ -2014,8 +1995,9 @@ fn cache_invariance_arm(
     )
     .unwrap_or_else(|error| {
         panic!(
-            "a fit must succeed regardless of cache state (persist={persist_warm_start_disk}): \
-             {error:?}"
+            "a fit must succeed regardless of cache state (persist={}): \
+             {error:?}",
+            persistent_warm_start_store.is_some()
         )
     })
 }
@@ -2088,46 +2070,10 @@ fn estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363() {
     // made cold and warm machines minimize different criteria; this asserts
     // they now minimize the same one and report the same fit.
     //
-    // Each family runs three arms in one process: a cold arm whose persistent
-    // reads are STRUCTURALLY disabled (`persist_warm_start_disk = false`), a
-    // priming arm that completes the same fit with persistence engaged, and a
-    // warm arm that therefore starts from a populated cache. Disabling the reads
-    // is what makes the cold arm cold — the store root is resolved once per
-    // process and memoized, so repointing it cannot prove coldness from inside a
-    // running test binary.
-    //
-    // WHAT MAKES THE PRIMING ARM THE THING THAT PRIMED IT (#2614 triage).
-    //
-    // The "therefore" above is only earned if the priming arm found the store
-    // EMPTY for this fixture's key. It does not: the root is
-    // `temp_dir()/gam/warm/v1` — machine-global, shared by every gam build on
-    // the box, with a ten-year TTL (`persistent_warm_start.rs` says so in bold,
-    // and prescribes deleting the root between arms). This fixture's data is
-    // fixed, so its key was fixed too, and the priming arm read whatever any
-    // earlier process had left under it. A foreign entry is refused as a
-    // terminal certificate since gam#2625 but is still accepted as a SEED, and
-    // a seed moves the trajectory; the priming arm then wrote ITS answer, which
-    // the warm arm returned in place at `iters = 0`. The reported divergence
-    // was thus inherited from machine history, not produced by the cache.
-    //
-    // Measured, three arms at one SHA on one box:
-    //   shared `/tmp` root (35 MiB of entries, oldest Jul 27) ... FAILS, on
-    //     gamma/tweedie/beta: certified log-λ |Δ| = 2.683e-9, 4.107e-9,
-    //     9.869e-9, every warm arm at `iters = 0`
-    //   private EMPTY root ....................................... PASSES
-    //   private root repopulated by that same passing run ........ PASSES
-    // The third arm is the control that matters: a populated store is not what
-    // breaks it, a store carrying a FOREIGN producer's entry is. So the subject
-    // is real and the fixture's attribution premise was the defect.
-    //
-    // Deleting the root is not available from here (the store is memoized
-    // process-wide, other tests in this binary share it, and concurrent lanes
-    // share the machine). Instead each run claims a private region of the
-    // keyspace: `key_nonce` below is a per-run constant offset, and the cache
-    // key hashes the offset array. This is the same disjoint-keyspace device
-    // `persistent_warm_start.rs`'s own artifact tests use (`format!(
-    // "test-roundtrip-{}", unix_secs_now())`). The bitwise contract below is
-    // UNCHANGED — nothing here is a tolerance.
+    // Each family runs against one test-owned empty root: cold arms carry no
+    // capability, the priming arm writes through the explicit capability, and
+    // the warm arm reuses the same clone-shared store. No machine history or
+    // concurrent lane can enter the attribution.
     //
     // The comparison is BITWISE on the criterion, on β and on the certified
     // log-λ. Approximate agreement is the wrong contract here: the defect this
@@ -2137,21 +2083,6 @@ fn estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363() {
     let n = 160usize;
     let (x, grid) = nuisance_invariance_design(n);
     let w = Array1::<f64>::ones(n);
-
-    // Per-run cache-key nonce; see the keyspace note above.
-    //
-    // Nanoseconds since the epoch, mixed with the pid so two processes that
-    // start within one clock tick still separate. Reduced to 53 bits and
-    // scaled by 2^-73, which is EXACT (a power of two) and therefore injective
-    // on those 53 bits: distinct nonces are distinct f64 bit patterns, hence
-    // distinct cache keys. The magnitude is below 2^-20 (< 1e-6), small enough
-    // that the intercept absorbs it without moving the fit off its basin.
-    let nonce_bits = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since_epoch| since_epoch.as_nanos())
-        .unwrap_or(0)
-        ^ (u128::from(std::process::id()).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    let key_nonce = ((nonce_bits & ((1u128 << 53) - 1)) as f64) * 2f64.powi(-73);
 
     let gamma_y = Array1::from_iter(grid.iter().enumerate().map(|(i, t)| {
         let mu = (0.3 + 0.9 * (2.0 * std::f64::consts::PI * t).sin()).exp();
@@ -2200,7 +2131,11 @@ fn estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363() {
 
     let mut failures: Vec<String> = Vec::new();
     for (name, family, y) in &cases {
-        let cold = cache_invariance_arm(family, y, &w, &x, key_nonce, false);
+        let cache_directory = tempfile::tempdir().expect("create private cache root");
+        let cache = crate::persistent_warm_start::configured_store(
+            cache_directory.path().join("warm"),
+        );
+        let cold = cache_invariance_arm(family, y, &w, &x, None);
         // CONTROL, before the cache is involved at all: a second cold arm.
         //
         // Every difference below is attributed to the cache, and that
@@ -2210,7 +2145,7 @@ fn estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363() {
         // close it. Measured here rather than assumed, because this test's
         // whole claim is an attribution.
         let failures_before_case = failures.len();
-        let cold_again = cache_invariance_arm(family, y, &w, &x, key_nonce, false);
+        let cold_again = cache_invariance_arm(family, y, &w, &x, None);
         if let Some(gap) = first_bitwise_gap(
             cold.beta.as_slice().expect("contiguous cold β"),
             cold_again.beta.as_slice().expect("contiguous second cold β"),
@@ -2231,8 +2166,20 @@ fn estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363() {
                 "[{name}] CONTROL FAILED — two COLD fits' log-λ differ: {gap}"
             ));
         }
-        drop(cache_invariance_arm(family, y, &w, &x, key_nonce, true));
-        let warm = cache_invariance_arm(family, y, &w, &x, key_nonce, true);
+        drop(cache_invariance_arm(
+            family,
+            y,
+            &w,
+            &x,
+            Some(cache.clone()),
+        ));
+        let warm = cache_invariance_arm(
+            family,
+            y,
+            &w,
+            &x,
+            Some(cache.clone()),
+        );
 
         if cold.outer_converged != warm.outer_converged {
             failures.push(format!(

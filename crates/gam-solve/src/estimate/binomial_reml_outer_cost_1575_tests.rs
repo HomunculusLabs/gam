@@ -371,7 +371,7 @@ fn binomial_logit_first_outer_line_search_ladder_1575() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let cfg = super::external_options::resolved_external_config(&ext)
         .expect("the binomial/logit external config resolves")
@@ -559,7 +559,7 @@ fn binomial_logit_outer_objective_is_a_function_of_rho_1575() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let cfg = super::external_options::resolved_external_config(&ext)
         .expect("the binomial/logit external config resolves")
@@ -740,7 +740,7 @@ fn binomial_logit_inner_solve_refusal_is_carried_state_1575() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let cfg = super::external_options::resolved_external_config(&ext)
         .expect("the binomial/logit external config resolves")
@@ -968,7 +968,7 @@ fn binomial_logit_inner_refusal_names_its_carried_datum_1575() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let cfg = super::external_options::resolved_external_config(&ext)
         .expect("the binomial/logit external config resolves")

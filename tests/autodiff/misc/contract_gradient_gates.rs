@@ -493,7 +493,7 @@ fn glm_reml_outer_row() -> Vec<GradientChannel> {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let rho = array![0.15, 0.1501];
     let analytic = evaluate_externalgradient(
@@ -612,7 +612,7 @@ fn glm_reml_binomial_noncanonical_outer_row() -> Vec<GradientChannel> {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     // Moderate-smoothing ρ: keeps the fit away from both the λ→0 (interpolating,
     // ill-conditioned) and λ→∞ (degenerate null-space) corners.

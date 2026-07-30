@@ -670,6 +670,14 @@ pub struct BlockwiseFitOptions {
     /// explicitly; ordinary workflow fits leave this empty so refit-heavy
     /// loops do not touch the shared on-disk store.
     pub cache_session: Option<Arc<gam_runtime::warm_start::Session>>,
+    /// Explicit fit-owned cross-process store. Unlike `cache_session`, which is
+    /// one caller-keyed outer-iterate stream, this capability owns the shared
+    /// response-keyed record and descriptor-keyed artifact namespaces too.
+    ///
+    /// `None` is disk-silent. The high-level configuration constructs this
+    /// lazily from an explicit root; no custom-family fit discovers ambient
+    /// temp/cache state.
+    pub persistent_warm_start_store: Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
     /// Optional mirror sessions that receive a copy of the final-result
     /// finalize() write. Callers can use this to broadcast a converged ρ to
     /// additional keyspace(s) so future fits with related structure can
@@ -794,6 +802,7 @@ impl Default for BlockwiseFitOptions {
             auto_outer_subsample: true,
             outer_eval_context: None,
             cache_session: None,
+            persistent_warm_start_store: None,
             cache_mirror_sessions: Vec::new(),
             joint_penalties: None,
             independent_prior_factor_labels: Vec::new(),

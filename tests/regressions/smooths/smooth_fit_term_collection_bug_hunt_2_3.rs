@@ -30,7 +30,7 @@ fn opts() -> FitOptions {
         rho_prior: RhoPrior::Flat,
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     }
 }
 

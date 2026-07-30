@@ -1,7 +1,8 @@
 """First-class ``fit()`` model-spec kwargs must match the ``config={...}`` escape hatch.
 
 These fields (``noise_formula``, ``noise_offset``, ``flexible_link``,
-``survival_time_anchor``) are genuine model-spec parameters fully wired through the
+``survival_time_anchor``, ``persistent_warm_start_root``) are genuine
+model-spec parameters fully wired through the
 FFI/core; promoting them to dedicated ``fit()`` kwargs is pure CLI<->Python parity.
 ``survival_time_anchor`` joined them in #2631, where the anchor rule was collapsed to
 one function and the override had to become model configuration rather than a CLI flag. This test pins two properties:
@@ -33,6 +34,7 @@ _BASE: dict[str, typing.Any] = {
     "family": "auto",
     "offset": None,
     "weights": None,
+    "persistent_warm_start_root": None,
     "transformation_normal": None,
     "transformation_normal_stage1": None,
     "survival_likelihood": None,
@@ -75,6 +77,11 @@ def _payload(**overrides: typing.Any) -> dict[str, typing.Any]:
         ("noise_offset", "logvar", "noise_offset"),
         ("flexible_link", True, "flexible_link"),
         ("survival_time_anchor", 25.0, "survival_time_anchor"),
+        (
+            "persistent_warm_start_root",
+            "warm-start-fixture",
+            "persistent_warm_start_root",
+        ),
     ],
 )
 def test_model_spec_kwarg_matches_config_escape_hatch(
@@ -106,6 +113,17 @@ def test_dedicated_kwarg_wins_over_conflicting_config_key() -> None:
     assert payload["noise_formula"] == "s(x)"
 
 
+def test_persistent_warm_start_path_is_serialized_exactly() -> None:
+    from pathlib import Path
+
+    root = Path("caller-owned") / ".." / "warm-root"
+    via_kwarg = _payload(persistent_warm_start_root=root)
+    via_config = _payload(config={"persistent_warm_start_root": root})
+
+    assert via_kwarg == via_config
+    assert via_kwarg["persistent_warm_start_root"] == str(root)
+
+
 def test_unset_model_spec_kwargs_emit_no_config_keys() -> None:
     # No spurious keys when the user touches none of the three (no behavior change
     # for callers that never used these fields).
@@ -115,6 +133,7 @@ def test_unset_model_spec_kwargs_emit_no_config_keys() -> None:
         "noise_offset",
         "flexible_link",
         "survival_time_anchor",
+        "persistent_warm_start_root",
     ):
         assert key not in payload
 

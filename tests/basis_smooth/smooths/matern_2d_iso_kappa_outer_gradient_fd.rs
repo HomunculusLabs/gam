@@ -238,7 +238,7 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
         kappa_options: SpatialLengthScaleOptimizationOptions {
             enabled: true,

@@ -15,5 +15,8 @@ proc-macro2 = "1.0.106"
 quote = "1.0.45"
 syn = { version = "3.0.3", features = ["full"] }
 
+[dev-dependencies]
+gam-math = { path = "../gam-math" }
+
 [lints.rust]
 warnings = "deny"

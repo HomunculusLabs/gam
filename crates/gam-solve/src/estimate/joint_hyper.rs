@@ -263,11 +263,8 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         if let Some(kf) = opts.kronecker_factored.clone() {
             reml_state.set_kronecker_factored(kf);
         }
-        if opts.persist_warm_start_disk {
-            // Caller opted into cross-process resume (#1082): engage the
-            // on-disk warm-start layer. Default-false keeps replicate/CI loops
-            // disk-silent.
-            reml_state.enable_persistent_warm_start_disk();
+        if let Some(store) = opts.persistent_warm_start_store.clone() {
+            reml_state.attach_persistent_warm_start_store(store);
         }
 
         Ok(Self {
@@ -339,7 +336,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             self.reml_state.config.link_function(),
         );
 
-        self.reml_state.without_persistent_warm_start_disk(|| {
+        self.reml_state.without_persistent_warm_start_store(|| {
             super::optimizer::freeze_lambda_search_nuisance_at_canonical_anchor_with_ext_count(
                 &self.reml_state,
                 &resolved_likelihood_scale,
@@ -566,8 +563,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             .as_ref()
             .is_some_and(|t| t.contains(psi))
     }
-
-
     /// True when the design-realization SKIP to `psi` is β̂-SOUND given the
     /// reference surface pinned at the last slow-path reset (#1264). Restored
     /// after the "stale-penalty-not-stale-basis" theory was empirically refuted:
@@ -626,8 +621,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
     ) -> Option<std::sync::Arc<crate::psi_gram_tensor::PsiGramTensor>> {
         self.psi_gram_tensor.clone()
     }
-
-
     /// Lowest ψ at/above which the installed tensor's conditioned Gram holds its
     /// maximal numerical rank — the floor below which the design-revision skip's
     /// `reduced_basis_equal` witness must (soundly) refuse because the reduced

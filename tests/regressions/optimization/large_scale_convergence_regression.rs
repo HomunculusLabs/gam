@@ -186,7 +186,7 @@ fn large_scale_convergence_regression() {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     )
     .expect("large-scale dense Bernoulli-logit fit must succeed");

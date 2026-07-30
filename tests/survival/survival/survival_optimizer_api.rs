@@ -28,7 +28,7 @@ fn fit_gam_rejects_royston_parmar_and_points_to_survival_api() {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
 
     let err: gam::estimate::EstimationError = match fit_gam(

@@ -318,6 +318,7 @@ pub(crate) fn materialize_standard<'a>(
                 // part of fit assembly: an improper or unfactorizable posterior
                 // refuses the fit instead of minting a mode-only artifact.
                 compute_covariance: true,
+                persistent_warm_start_store: config.persistent_warm_start_store.clone(),
                 ..BlockwiseFitOptions::default()
             },
         })

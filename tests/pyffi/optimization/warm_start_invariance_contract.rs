@@ -15,12 +15,10 @@
 //!
 //! ## Mechanics
 //!
-//! The cold arm sets `persist_warm_start_disk = false`, which structurally
-//! prevents any persistent read regardless of process history. A priming arm
-//! then enables persistence and completes the same fit, and the warm arm repeats
-//! it with persistence enabled. This remains correct even though the persistent
-//! store is process-global and memoized; mutating `TMPDIR` cannot reset that
-//! `OnceLock` and therefore cannot prove coldness.
+//! Every case owns an empty explicit store root. The cold arm carries no store;
+//! a priming arm writes through the configured capability, and the warm arm
+//! repeats with a clone of that same handle. No process history or ambient temp
+//! setting can enter the comparison.
 //!
 //! ## The contract, and why it is not bitwise
 //!
@@ -332,7 +330,7 @@ fn fit_once(
     x: &[f64],
     y: &[f64],
     arm: &str,
-    persist_warm_start_disk: bool,
+    persistent_warm_start_store: Option<gam::warm_start::ConfiguredWarmStartStore>,
 ) -> ArmOutcome {
     let mut csv = String::from("x,y\n");
     for i in 0..x.len() {
@@ -359,7 +357,7 @@ fn fit_once(
 
     let cfg = FitConfig {
         family: Some(case.family.to_string()),
-        persist_warm_start_disk,
+        persistent_warm_start_store,
         ..FitConfig::default()
     };
     let result = fit_from_formula(case.formula, &ds, &cfg).unwrap_or_else(|e| {
@@ -451,12 +449,17 @@ fn fits_are_invariant_to_warm_start_cache_state_across_families() {
     let mut failures: Vec<String> = Vec::new();
     for case in &cases {
         let (x, y) = (case.data)();
-        let cold = fit_once(case, &x, &y, "cold", false);
+        let cache_directory = tempfile::tempdir().expect("create private warm-start root");
+        let cache = FitConfig::default()
+            .with_persistent_warm_start_root(cache_directory.path().join("warm"))
+            .persistent_warm_start_store
+            .expect("explicit root must configure a store");
+        let cold = fit_once(case, &x, &y, "cold", None);
         // Prime both the exact-key and seed-prefix checkpoints. This arm need
         // not itself be cold; after it completes the next arm is guaranteed to
         // have a valid persistent entry.
-        drop(fit_once(case, &x, &y, "prime", true));
-        let warm = fit_once(case, &x, &y, "warm", true);
+        drop(fit_once(case, &x, &y, "prime", Some(cache.clone())));
+        let warm = fit_once(case, &x, &y, "warm", Some(cache));
 
         if let Some(gap) = first_ulp_gap(
             std::slice::from_ref(&cold.criterion),

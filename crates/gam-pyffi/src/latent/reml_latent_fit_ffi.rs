@@ -643,7 +643,7 @@ fn glm_reml_fit_latent_impl(
         firth_bias_reduction: Some(false),
         penalty_shrinkage_floor: None,
         rho_prior: RhoPrior::Flat,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
         kronecker_penalty_system: None,
         kronecker_factored: None,
     };

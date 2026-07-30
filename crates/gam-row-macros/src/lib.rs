@@ -6,11 +6,17 @@
 //! Symbolic zeros are removed before Rust/LLVM see the generated schedule, so
 //! it carries neither runtime dependency masks nor the `0*x` work that ordinary
 //! forward jets must preserve for IEEE-754 semantics.
+//!
+//! Local-coordinate programs can request `order2_at_zero`, `third_at_zero`,
+//! and `fourth_at_zero`. Those surfaces differentiate the same expression,
+//! substitute zero for every primary, canonicalize the remaining parameter
+//! polynomial, and rebuild it as a multivariate Horner schedule. Their emitted
+//! functions consequently accept only the runtime constants and directions.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Literal, Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::{
@@ -26,6 +32,9 @@ enum Lowering {
     Order2,
     Third,
     Fourth,
+    Order2AtZero,
+    ThirdAtZero,
+    FourthAtZero,
 }
 
 struct RowAtomInput {
@@ -51,10 +60,14 @@ impl Parse for RowAtomInput {
                 "order2" => Lowering::Order2,
                 "third" => Lowering::Third,
                 "fourth" => Lowering::Fourth,
+                "order2_at_zero" => Lowering::Order2AtZero,
+                "third_at_zero" => Lowering::ThirdAtZero,
+                "fourth_at_zero" => Lowering::FourthAtZero,
                 _ => {
                     return Err(syn::Error::new_spanned(
                         lowering,
-                        "row_atom lowerings are generic, order2, third, and fourth",
+                        "row_atom lowerings are generic, order2, third, fourth, \
+                         order2_at_zero, third_at_zero, and fourth_at_zero",
                     ));
                 }
             };
@@ -141,6 +154,8 @@ struct Graph {
     derivatives: HashMap<(usize, usize), usize>,
 }
 
+type Polynomial = BTreeMap<Vec<usize>, f64>;
+
 impl Graph {
     fn new() -> Self {
         Self {
@@ -188,6 +203,16 @@ impl Graph {
         }
         if let (Some(left), Some(right)) = (self.constant_value(left), self.constant_value(right)) {
             return self.constant(left + right);
+        }
+        if let Node::Sub(value, removed) = self.nodes[left]
+            && removed == right
+        {
+            return value;
+        }
+        if let Node::Sub(value, removed) = self.nodes[right]
+            && removed == left
+        {
+            return value;
         }
         self.intern(Node::Add(left, right))
     }
@@ -245,6 +270,204 @@ impl Graph {
             return inner;
         }
         self.intern(Node::Neg(value))
+    }
+
+    fn exp(&mut self, value: usize) -> usize {
+        if let Some(value) = self.constant_value(value) {
+            return self.constant(value.exp());
+        }
+        self.intern(Node::Exp(value))
+    }
+
+    fn ln(&mut self, value: usize) -> usize {
+        if let Some(value) = self.constant_value(value) {
+            return self.constant(value.ln());
+        }
+        self.intern(Node::Ln(value))
+    }
+
+    fn sqrt(&mut self, value: usize) -> usize {
+        if let Some(value) = self.constant_value(value) {
+            return self.constant(value.sqrt());
+        }
+        self.intern(Node::Sqrt(value))
+    }
+
+    fn substitute_zero_primaries(&mut self, id: usize, memo: &mut HashMap<usize, usize>) -> usize {
+        if let Some(&specialized) = memo.get(&id) {
+            return specialized;
+        }
+        let node = self.nodes[id].clone();
+        let specialized = match node {
+            Node::Constant(_) | Node::Parameter(_) => id,
+            Node::Variable(_) => self.constant(0.0),
+            Node::Add(left, right) => {
+                let left = self.substitute_zero_primaries(left, memo);
+                let right = self.substitute_zero_primaries(right, memo);
+                self.add(left, right)
+            }
+            Node::Sub(left, right) => {
+                let left = self.substitute_zero_primaries(left, memo);
+                let right = self.substitute_zero_primaries(right, memo);
+                self.sub(left, right)
+            }
+            Node::Mul(left, right) => {
+                let left = self.substitute_zero_primaries(left, memo);
+                let right = self.substitute_zero_primaries(right, memo);
+                self.mul(left, right)
+            }
+            Node::Div(left, right) => {
+                let left = self.substitute_zero_primaries(left, memo);
+                let right = self.substitute_zero_primaries(right, memo);
+                self.div(left, right)
+            }
+            Node::Neg(value) => {
+                let value = self.substitute_zero_primaries(value, memo);
+                self.neg(value)
+            }
+            Node::Exp(value) => {
+                let value = self.substitute_zero_primaries(value, memo);
+                self.exp(value)
+            }
+            Node::Ln(value) => {
+                let value = self.substitute_zero_primaries(value, memo);
+                self.ln(value)
+            }
+            Node::Sqrt(value) => {
+                let value = self.substitute_zero_primaries(value, memo);
+                self.sqrt(value)
+            }
+        };
+        memo.insert(id, specialized);
+        specialized
+    }
+
+    fn polynomial(
+        &self,
+        id: usize,
+        parameter_count: usize,
+        memo: &mut HashMap<usize, Option<Polynomial>>,
+    ) -> Option<Polynomial> {
+        if let Some(polynomial) = memo.get(&id) {
+            return polynomial.clone();
+        }
+        let zero_exponents = || vec![0; parameter_count];
+        let polynomial = match self.nodes[id].clone() {
+            Node::Constant(bits) => {
+                let value = f64::from_bits(bits);
+                let mut polynomial = Polynomial::new();
+                if value != 0.0 {
+                    polynomial.insert(zero_exponents(), value);
+                }
+                Some(polynomial)
+            }
+            Node::Parameter(parameter) => {
+                let mut exponents = zero_exponents();
+                exponents[parameter] = 1;
+                Some([(exponents, 1.0)].into_iter().collect())
+            }
+            Node::Variable(_) | Node::Exp(_) | Node::Ln(_) | Node::Sqrt(_) => None,
+            Node::Neg(value) => self
+                .polynomial(value, parameter_count, memo)
+                .map(|mut value| {
+                    for coefficient in value.values_mut() {
+                        *coefficient = -*coefficient;
+                    }
+                    value
+                }),
+            Node::Add(left, right) | Node::Sub(left, right) => {
+                let mut left = self.polynomial(left, parameter_count, memo)?;
+                let right = self.polynomial(right, parameter_count, memo)?;
+                let sign = if matches!(self.nodes[id], Node::Add(_, _)) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                for (exponents, coefficient) in right {
+                    let total = left.entry(exponents).or_default();
+                    *total += sign * coefficient;
+                }
+                left.retain(|_, coefficient| *coefficient != 0.0);
+                Some(left)
+            }
+            Node::Mul(left, right) => {
+                let left = self.polynomial(left, parameter_count, memo)?;
+                let right = self.polynomial(right, parameter_count, memo)?;
+                let mut product = Polynomial::new();
+                for (left_exponents, left_coefficient) in &left {
+                    for (right_exponents, right_coefficient) in &right {
+                        let exponents = left_exponents
+                            .iter()
+                            .zip(right_exponents)
+                            .map(|(left, right)| left + right)
+                            .collect::<Vec<_>>();
+                        *product.entry(exponents).or_default() +=
+                            left_coefficient * right_coefficient;
+                    }
+                }
+                product.retain(|_, coefficient| *coefficient != 0.0);
+                Some(product)
+            }
+            Node::Div(numerator, denominator) => {
+                let mut numerator = self.polynomial(numerator, parameter_count, memo)?;
+                let denominator = self.polynomial(denominator, parameter_count, memo)?;
+                let coefficient = denominator.get(&zero_exponents()).copied()?;
+                if denominator.len() != 1 || coefficient == 0.0 {
+                    None
+                } else {
+                    for value in numerator.values_mut() {
+                        *value /= coefficient;
+                    }
+                    Some(numerator)
+                }
+            }
+        };
+        memo.insert(id, polynomial.clone());
+        polynomial
+    }
+
+    fn polynomial_horner(&mut self, polynomial: &Polynomial, variables: &[usize]) -> usize {
+        if polynomial.is_empty() {
+            return self.constant(0.0);
+        }
+        if variables.is_empty() {
+            return self.constant(*polynomial.values().next().expect("nonempty polynomial"));
+        }
+        let variable = variables[0];
+        let parameter = self.intern(Node::Parameter(variable));
+        let mut coefficients = BTreeMap::<usize, Polynomial>::new();
+        for (exponents, coefficient) in polynomial {
+            let exponent = exponents[variable];
+            let mut coefficient_exponents = exponents.clone();
+            coefficient_exponents[variable] = 0;
+            coefficients
+                .entry(exponent)
+                .or_default()
+                .insert(coefficient_exponents, *coefficient);
+        }
+        let mut descending = coefficients.iter().rev();
+        let (&highest, leading) = descending.next().expect("nonempty coefficients");
+        let mut result = self.polynomial_horner(leading, &variables[1..]);
+        let mut previous = highest;
+        for (&exponent, coefficient) in descending {
+            for _ in exponent..previous {
+                result = self.mul(result, parameter);
+            }
+            let coefficient = self.polynomial_horner(coefficient, &variables[1..]);
+            result = self.add(result, coefficient);
+            previous = exponent;
+        }
+        for _ in 0..previous {
+            result = self.mul(result, parameter);
+        }
+        result
+    }
+
+    fn normalize_polynomial(&mut self, id: usize, parameter_count: usize) -> usize {
+        let Some(polynomial) = self.polynomial(id, parameter_count, &mut HashMap::new()) else {
+            return id;
+        };
+        self.polynomial_horner(&polynomial, &(0..parameter_count).collect::<Vec<_>>())
     }
 
     fn derivative(&mut self, id: usize, variable: usize) -> usize {
@@ -374,7 +597,7 @@ fn graph_expression(
             ..
         }) => {
             let value = graph_expression(expr, primaries, constants, graph)?;
-            Ok(graph.intern(Node::Neg(value)))
+            Ok(graph.neg(value))
         }
         Expr::Binary(ExprBinary {
             left, op, right, ..
@@ -382,10 +605,10 @@ fn graph_expression(
             let left = graph_expression(left, primaries, constants, graph)?;
             let right = graph_expression(right, primaries, constants, graph)?;
             let node = match op {
-                BinOp::Add(_) => Node::Add(left, right),
-                BinOp::Sub(_) => Node::Sub(left, right),
-                BinOp::Mul(_) => Node::Mul(left, right),
-                BinOp::Div(_) => Node::Div(left, right),
+                BinOp::Add(_) => graph.add(left, right),
+                BinOp::Sub(_) => graph.sub(left, right),
+                BinOp::Mul(_) => graph.mul(left, right),
+                BinOp::Div(_) => graph.div(left, right),
                 _ => {
                     return Err(syn::Error::new_spanned(
                         op,
@@ -393,7 +616,7 @@ fn graph_expression(
                     ));
                 }
             };
-            Ok(graph.intern(node))
+            Ok(node)
         }
         Expr::Call(call) => {
             if call.args.len() != 1 {
@@ -404,12 +627,12 @@ fn graph_expression(
             }
             let argument = graph_expression(&call.args[0], primaries, constants, graph)?;
             let node = match call_name(call)?.to_string().as_str() {
-                "exp" => Node::Exp(argument),
-                "ln" => Node::Ln(argument),
-                "sqrt" => Node::Sqrt(argument),
+                "exp" => graph.exp(argument),
+                "ln" => graph.ln(argument),
+                "sqrt" => graph.sqrt(argument),
                 "recip" => {
                     let one = graph.constant(1.0);
-                    Node::Div(one, argument)
+                    graph.div(one, argument)
                 }
                 name => {
                     return Err(syn::Error::new_spanned(
@@ -418,7 +641,7 @@ fn graph_expression(
                     ));
                 }
             };
-            Ok(graph.intern(node))
+            Ok(node)
         }
         _ => Err(syn::Error::new_spanned(
             expression,
@@ -664,8 +887,40 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         });
     }
 
-    if lowerings.contains(&Lowering::Order2) {
-        let order2_name = format_ident!("{name}_order2");
+    for (lowering, suffix, at_zero) in [
+        (Lowering::Order2, "order2", false),
+        (Lowering::Order2AtZero, "order2_at_zero", true),
+    ] {
+        if !lowerings.contains(&lowering) {
+            continue;
+        }
+        let order2_name = format_ident!("{name}_{suffix}");
+        let (value, gradient, hessian) = if at_zero {
+            let mut memo = HashMap::new();
+            let value = graph.substitute_zero_primaries(value, &mut memo);
+            let value = graph.normalize_polynomial(value, constants.len());
+            let gradient = gradient
+                .iter()
+                .map(|&id| {
+                    let id = graph.substitute_zero_primaries(id, &mut memo);
+                    graph.normalize_polynomial(id, constants.len())
+                })
+                .collect::<Vec<_>>();
+            let hessian = hessian
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|&id| {
+                            let id = graph.substitute_zero_primaries(id, &mut memo);
+                            graph.normalize_polynomial(id, constants.len())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            (value, gradient, hessian)
+        } else {
+            (value, gradient.clone(), hessian.clone())
+        };
         let mut packed_hessian = Vec::with_capacity(dimension * (dimension + 1) / 2);
         for (row, channels) in hessian.iter().enumerate() {
             packed_hessian.extend_from_slice(&channels[row..]);
@@ -700,10 +955,15 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
             });
         let gradient_bits = Literal::u128_unsuffixed(gradient_bits);
         let hessian_bits = Literal::u128_unsuffixed(hessian_bits);
+        let primary_parameters = if at_zero {
+            quote!()
+        } else {
+            quote!(#(#primaries: f64,)*)
+        };
         output.push(quote! {
             #[inline(always)]
             #visibility fn #order2_name(
-                #(#primaries: f64,)*
+                #primary_parameters
                 #(#constants: f64),*
             ) -> ::gam_math::jet_scalar::StaticOrder2Atom<
                 #dimension,
@@ -721,15 +981,28 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         });
     }
 
-    if lowerings.contains(&Lowering::Third) {
-        let third_name = format_ident!("{name}_third_contracted");
+    for (lowering, suffix, at_zero) in [
+        (Lowering::Third, "third_contracted", false),
+        (Lowering::ThirdAtZero, "third_contracted_at_zero", true),
+    ] {
+        if !lowerings.contains(&lowering) {
+            continue;
+        }
+        let third_name = format_ident!("{name}_{suffix}");
         let mut roots = Vec::new();
         let mut assignments = Vec::new();
+        let mut memo = HashMap::new();
         for row in 0..dimension {
             for column in row..dimension {
-                let derivatives = (0..dimension)
+                let mut derivatives = (0..dimension)
                     .map(|axis| graph.derivative(hessian[row][column], axis))
                     .collect::<Vec<_>>();
+                if at_zero {
+                    for derivative in &mut derivatives {
+                        *derivative = graph.substitute_zero_primaries(*derivative, &mut memo);
+                        *derivative = graph.normalize_polynomial(*derivative, constants.len());
+                    }
+                }
                 roots.extend(derivatives.iter().copied());
                 let terms = derivatives
                     .iter()
@@ -740,18 +1013,30 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                         quote!(#derivative * direction[#axis])
                     });
                 let temporary = format_ident!("__row_atom_third_{row}_{column}");
-                assignments.push(quote! {
-                    let #temporary = 0.0 #(+ #terms)*;
-                    out[#row][#column] = #temporary;
-                    out[#column][#row] = #temporary;
+                assignments.push(if row == column {
+                    quote! {
+                        let #temporary = 0.0 #(+ #terms)*;
+                        out[#row][#column] = #temporary;
+                    }
+                } else {
+                    quote! {
+                        let #temporary = 0.0 #(+ #terms)*;
+                        out[#row][#column] = #temporary;
+                        out[#column][#row] = #temporary;
+                    }
                 });
             }
         }
         let definitions = schedule_definitions(roots, &graph, &primaries, &constants)?;
+        let primary_parameters = if at_zero {
+            quote!()
+        } else {
+            quote!(#(#primaries: f64,)*)
+        };
         output.push(quote! {
             #[inline(always)]
             #visibility fn #third_name(
-                #(#primaries: f64,)*
+                #primary_parameters
                 #(#constants: f64,)*
                 direction: &[f64; #dimension],
             ) -> [[f64; #dimension]; #dimension] {
@@ -763,16 +1048,23 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         });
     }
 
-    if lowerings.contains(&Lowering::Fourth) {
-        let fourth_name = format_ident!("{name}_fourth_contracted");
+    for (lowering, suffix, at_zero) in [
+        (Lowering::Fourth, "fourth_contracted", false),
+        (Lowering::FourthAtZero, "fourth_contracted_at_zero", true),
+    ] {
+        if !lowerings.contains(&lowering) {
+            continue;
+        }
+        let fourth_name = format_ident!("{name}_{suffix}");
         let mut roots = Vec::new();
         let mut assignments = Vec::new();
+        let mut memo = HashMap::new();
         for row in 0..dimension {
             for column in row..dimension {
                 let third = (0..dimension)
                     .map(|axis| graph.derivative(hessian[row][column], axis))
                     .collect::<Vec<_>>();
-                let fourth = third
+                let mut fourth = third
                     .iter()
                     .map(|&id| {
                         (0..dimension)
@@ -780,6 +1072,12 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                             .collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>();
+                if at_zero {
+                    for derivative in fourth.iter_mut().flatten() {
+                        *derivative = graph.substitute_zero_primaries(*derivative, &mut memo);
+                        *derivative = graph.normalize_polynomial(*derivative, constants.len());
+                    }
+                }
                 roots.extend(fourth.iter().flatten().copied());
                 let terms = fourth.iter().enumerate().flat_map(|(axis_u, derivatives)| {
                     derivatives
@@ -793,18 +1091,30 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                         .collect::<Vec<_>>()
                 });
                 let temporary = format_ident!("__row_atom_fourth_{row}_{column}");
-                assignments.push(quote! {
-                    let #temporary = 0.0 #(+ #terms)*;
-                    out[#row][#column] = #temporary;
-                    out[#column][#row] = #temporary;
+                assignments.push(if row == column {
+                    quote! {
+                        let #temporary = 0.0 #(+ #terms)*;
+                        out[#row][#column] = #temporary;
+                    }
+                } else {
+                    quote! {
+                        let #temporary = 0.0 #(+ #terms)*;
+                        out[#row][#column] = #temporary;
+                        out[#column][#row] = #temporary;
+                    }
                 });
             }
         }
         let definitions = schedule_definitions(roots, &graph, &primaries, &constants)?;
+        let primary_parameters = if at_zero {
+            quote!()
+        } else {
+            quote!(#(#primaries: f64,)*)
+        };
         output.push(quote! {
             #[inline(always)]
             #visibility fn #fourth_name(
-                #(#primaries: f64,)*
+                #primary_parameters
                 #(#constants: f64,)*
                 direction_u: &[f64; #dimension],
                 direction_v: &[f64; #dimension],
@@ -832,6 +1142,10 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
 ///     }
 /// }
 /// ```
+///
+/// A normalized local-coordinate atom whose production expansion point is
+/// identically zero can instead request the `_at_zero` lowerings. This is
+/// exact partial evaluation, not a separate derivative expression.
 #[proc_macro]
 pub fn row_atom(input: TokenStream) -> TokenStream {
     match expand(parse_macro_input!(input as RowAtomInput)) {

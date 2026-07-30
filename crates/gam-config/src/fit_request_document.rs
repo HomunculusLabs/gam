@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 /// Stable identity of the serialized fit-request document.
 pub const FIT_REQUEST_SCHEMA: &str = "gam.fit-request";
@@ -152,6 +153,11 @@ pub struct FitRequestConfigDocument {
     /// produce a conformal interval at all. Turn it off when the caller retains
     /// its training data, fits in batch, or never asks for conformal intervals.
     pub precompute_conformal: Option<bool>,
+    /// Explicit root for cross-process warm starts. Omit to disable on-disk
+    /// persistence. The path is used exactly as supplied; no temp/cache
+    /// discovery or environment fallback is performed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persistent_warm_start_root: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ridge_lambda: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -368,6 +374,7 @@ mod tests {
                         rate: 0.5,
                     },
                 )])),
+                persistent_warm_start_root: Some(PathBuf::from("warm-start-fixture")),
                 smooth_descriptors: Some(
                     serde_json::from_value(json!({
                         "x": {"centers": 8, "kind": "duchon", "vars": ["x"]}

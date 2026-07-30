@@ -470,10 +470,10 @@ impl SurvivalLsRowKernel<'_> {
 /// [`JetScalar::compose_unary`]. There is exactly one source for value and every
 /// derivative order (the #736/#932 single-source contract).
 #[derive(Clone, Copy)]
-struct SlsOuterPlan {
-    u0: [f64; 5],
-    u1: Option<[f64; 5]>,
-    g: Option<[f64; 5]>,
+struct SlsOuterPlan<const ORDER: usize> {
+    u0: [f64; ORDER],
+    u1: Option<[f64; ORDER]>,
+    g: Option<[f64; ORDER]>,
 }
 
 /// Exactly the eight diagonal index-space NLL channels consumed by the
@@ -499,7 +499,7 @@ fn project_index_diagonal<const CHANNELS: usize, const ORDER: usize>(
     std::array::from_fn(|index| stacks[index][ORDER])
 }
 
-impl SlsOuterPlan {
+impl SlsOuterPlan<5> {
     /// Mechanically lower the canonical `(u0, u1, g)` outer derivative stacks
     /// to the sparse diagonal channels read by the inner-Newton consumer.
     /// Inactive event/censoring branches are structural zero stacks, while the
@@ -521,8 +521,12 @@ impl SlsOuterPlan {
 }
 
 #[inline(always)]
-fn add_scaled_stack(target: &mut [f64; 5], stack: [f64; 5], scale: f64) {
-    for i in 0..5 {
+fn add_scaled_stack<const ORDER: usize>(
+    target: &mut [f64; ORDER],
+    stack: [f64; 5],
+    scale: f64,
+) {
+    for i in 0..ORDER {
         target[i] += scale * stack[i];
     }
 }
@@ -531,8 +535,11 @@ fn add_scaled_stack(target: &mut [f64; 5], stack: [f64; 5], scale: f64) {
 /// event transforms of `u1` share the same inner index, so linearity lets the
 /// compiler combine their derivative stacks before one Faà di Bruno pass.
 #[inline(always)]
-fn sls_outer_plan(kernel: &SurvivalExactRowKernel) -> SlsOuterPlan {
-    let mut u0 = [0.0; 5];
+fn sls_outer_plan<const ORDER: usize>(
+    kernel: &SurvivalExactRowKernel,
+) -> SlsOuterPlan<ORDER> {
+    assert!(ORDER <= 5);
+    let mut u0 = [0.0; ORDER];
     add_scaled_stack(
         &mut u0,
         [
@@ -547,7 +554,7 @@ fn sls_outer_plan(kernel: &SurvivalExactRowKernel) -> SlsOuterPlan {
 
     let censored_weight = kernel.w * (1.0 - kernel.d);
     let event_weight = kernel.w * kernel.d;
-    let mut u1 = [0.0; 5];
+    let mut u1 = [0.0; ORDER];
     if censored_weight != 0.0 {
         add_scaled_stack(
             &mut u1,
@@ -575,7 +582,7 @@ fn sls_outer_plan(kernel: &SurvivalExactRowKernel) -> SlsOuterPlan {
         );
     }
     let g = (event_weight != 0.0).then(|| {
-        let mut stack = [0.0; 5];
+        let mut stack = [0.0; ORDER];
         add_scaled_stack(
             &mut stack,
             [
@@ -623,7 +630,7 @@ row_atom! {
 /// them — manufacturing `0·∞ = NaN` out of an exactly-zero term (#2342
 /// far-tail dH NaN, localized by `zz_measure_2342_far_tail_dh_nan_localization`).
 #[inline(always)]
-fn stack_is_exactly_zero(stack: &[f64; 5]) -> bool {
+fn stack_is_exactly_zero<const ORDER: usize>(stack: &[f64; ORDER]) -> bool {
     stack.iter().all(|v| *v == 0.0)
 }
 
@@ -679,7 +686,7 @@ row_program! {
         g_third,
         g_fourth
     )
-    emit [generic, order2];
+    emit [generic, order2, third, fourth];
     leaves {
         exponential => sls_program_exp_stack => sls_program_exp_stack_cuda,
         outer => sls_program_outer_stack => sls_program_outer_stack_cuda,
@@ -741,15 +748,17 @@ row_program! {
 }
 
 #[inline(always)]
-fn sls_program_activity_and_stacks(plan: &SlsOuterPlan) -> (f64, [f64; 5], f64, [f64; 5], f64) {
+fn sls_program_activity_and_stacks<const ORDER: usize>(
+    plan: &SlsOuterPlan<ORDER>,
+) -> (f64, [f64; ORDER], f64, [f64; ORDER], f64) {
     let u0_active = if stack_is_exactly_zero(&plan.u0) {
         0.0
     } else {
         1.0
     };
-    let u1 = plan.u1.unwrap_or([0.0; 5]);
+    let u1 = plan.u1.unwrap_or([0.0; ORDER]);
     let u1_active = if stack_is_exactly_zero(&u1) { 0.0 } else { 1.0 };
-    let g = plan.g.unwrap_or([0.0; 5]);
+    let g = plan.g.unwrap_or([0.0; ORDER]);
     let g_active = if stack_is_exactly_zero(&g) { 0.0 } else { 1.0 };
     (u0_active, u1, u1_active, g, g_active)
 }
@@ -759,7 +768,7 @@ pub(crate) fn sls_row_nll<S: JetScalar<SLS_ROW_K>>(
     vars: &[S; SLS_ROW_K],
     kernel: &SurvivalExactRowKernel,
 ) -> Result<S, String> {
-    let plan = sls_outer_plan(kernel);
+    let plan = sls_outer_plan::<5>(kernel);
     let (u0_active, u1, u1_active, g, g_active) = sls_program_activity_and_stacks(&plan);
     let (nll, []) = sls_row_program(
         &vars[0], &vars[1], &vars[2], &vars[3], &vars[4], &vars[5], &vars[6], &vars[7], &vars[8],
@@ -774,15 +783,72 @@ fn sls_row_vgh_generated(
     primary: &[f64; SLS_ROW_K],
     kernel: &SurvivalExactRowKernel,
 ) -> (f64, [f64; SLS_ROW_K], [[f64; SLS_ROW_K]; SLS_ROW_K]) {
-    let plan = sls_outer_plan(kernel);
+    let plan = sls_outer_plan::<3>(kernel);
     let (u0_active, u1, u1_active, g, g_active) = sls_program_activity_and_stacks(&plan);
     let (value, gradient, hessian, []) = sls_row_program_order2(
         primary[0], primary[1], primary[2], primary[3], primary[4], primary[5], primary[6],
-        primary[7], primary[8], u0_active, plan.u0[0], plan.u0[1], plan.u0[2], plan.u0[3],
-        plan.u0[4], u1_active, u1[0], u1[1], u1[2], u1[3], u1[4], g_active, g[0], g[1], g[2], g[3],
-        g[4],
+        primary[7], primary[8], u0_active, plan.u0[0], plan.u0[1], plan.u0[2], 0.0, 0.0,
+        u1_active, u1[0], u1[1], u1[2], 0.0, 0.0, g_active, g[0], g[1], g[2], 0.0, 0.0,
     );
     (value, gradient, hessian)
+}
+
+#[inline(always)]
+fn sls_row_third_generated(
+    primary: &[f64; SLS_ROW_K],
+    kernel: &SurvivalExactRowKernel,
+    direction: &[f64; SLS_ROW_K],
+) -> [[f64; SLS_ROW_K]; SLS_ROW_K] {
+    let plan = sls_outer_plan::<5>(kernel);
+    let (u0_active, u1, u1_active, g, g_active) = sls_program_activity_and_stacks(&plan);
+    sls_row_program_third_contracted(
+        primary[0], primary[1], primary[2], primary[3], primary[4], primary[5], primary[6],
+        primary[7], primary[8], u0_active, plan.u0[0], plan.u0[1], plan.u0[2], plan.u0[3],
+        plan.u0[4], u1_active, u1[0], u1[1], u1[2], u1[3], u1[4], g_active, g[0], g[1], g[2], g[3],
+        g[4], direction,
+    )
+}
+
+#[inline(always)]
+fn sls_row_fourth_generated(
+    primary: &[f64; SLS_ROW_K],
+    kernel: &SurvivalExactRowKernel,
+    direction_u: &[f64; SLS_ROW_K],
+    direction_v: &[f64; SLS_ROW_K],
+) -> [[f64; SLS_ROW_K]; SLS_ROW_K] {
+    let plan = sls_outer_plan::<5>(kernel);
+    let (u0_active, u1, u1_active, g, g_active) = sls_program_activity_and_stacks(&plan);
+    sls_row_program_fourth_contracted(
+        primary[0],
+        primary[1],
+        primary[2],
+        primary[3],
+        primary[4],
+        primary[5],
+        primary[6],
+        primary[7],
+        primary[8],
+        u0_active,
+        plan.u0[0],
+        plan.u0[1],
+        plan.u0[2],
+        plan.u0[3],
+        plan.u0[4],
+        u1_active,
+        u1[0],
+        u1[1],
+        u1[2],
+        u1[3],
+        u1[4],
+        g_active,
+        g[0],
+        g[1],
+        g[2],
+        g[3],
+        g[4],
+        direction_u,
+        direction_v,
+    )
 }
 
 
@@ -853,7 +919,7 @@ fn sls_row_hessian_pairs_compiled(
         primary[SLS_G_AXES[3]],
         primary[SLS_G_AXES[4]],
     );
-    let plan = sls_outer_plan(kernel);
+    let plan = sls_outer_plan::<5>(kernel);
     let mut output = [0.0; SLS_HESSIAN_PAIRS.len()];
     add_composed_hessian_pairs(
         &mut output,
@@ -2205,8 +2271,9 @@ fn sls_row_nll_onesseed_batch(
     // homogeneous gating signature guarantees all four lanes agree on which
     // terms are active, so the per-lane plans share the same `Some`/`None`
     // structure and pack lane-for-lane into the batched coefficient stacks.
-    let plans: [SlsOuterPlan; 4] = std::array::from_fn(|lane| sls_outer_plan(k[lane]));
-    let pack = |get: fn(&SlsOuterPlan) -> [f64; 5]| -> [f64x4; 5] {
+    let plans: [SlsOuterPlan<5>; 4] =
+        std::array::from_fn(|lane| sls_outer_plan::<5>(k[lane]));
+    let pack = |get: fn(&SlsOuterPlan<5>) -> [f64; 5]| -> [f64x4; 5] {
         let per_lane: [[f64; 5]; 4] = std::array::from_fn(|lane| get(&plans[lane]));
         std::array::from_fn(|order| f64x4::new(std::array::from_fn(|lane| per_lane[lane][order])))
     };
@@ -2352,6 +2419,34 @@ impl crate::row_kernel::RowKernel<SLS_ROW_K> for SurvivalLsRowKernel<'_> {
         match self.row_nll_inputs_opt(row)? {
             Some((p, kernel)) => Ok(sls_row_vgh_generated(&p, &kernel)),
             None => Ok((0.0, [0.0; SLS_ROW_K], [[0.0; SLS_ROW_K]; SLS_ROW_K])),
+        }
+    }
+
+    fn row_third_contracted(
+        &self,
+        row: usize,
+        direction: &[f64; SLS_ROW_K],
+    ) -> Result<[[f64; SLS_ROW_K]; SLS_ROW_K], String> {
+        match self.row_nll_inputs_opt(row)? {
+            Some((primary, kernel)) => Ok(sls_row_third_generated(&primary, &kernel, direction)),
+            None => Ok([[0.0; SLS_ROW_K]; SLS_ROW_K]),
+        }
+    }
+
+    fn row_fourth_contracted(
+        &self,
+        row: usize,
+        direction_u: &[f64; SLS_ROW_K],
+        direction_v: &[f64; SLS_ROW_K],
+    ) -> Result<[[f64; SLS_ROW_K]; SLS_ROW_K], String> {
+        match self.row_nll_inputs_opt(row)? {
+            Some((primary, kernel)) => Ok(sls_row_fourth_generated(
+                &primary,
+                &kernel,
+                direction_u,
+                direction_v,
+            )),
+            None => Ok([[0.0; SLS_ROW_K]; SLS_ROW_K]),
         }
     }
 
@@ -4939,7 +5034,7 @@ impl SurvivalLocationScaleFamily {
         let Some(kernel) = self.exact_row_kernel_rescaled(row, state, deriv_log_scale)? else {
             return Ok(None);
         };
-        let channels = sls_outer_plan(&kernel).lower_index_derivative_channels();
+        let channels = sls_outer_plan::<5>(&kernel).lower_index_derivative_channels();
         let [nll_d1_q0, nll_d1_q1, nll_d1_qdot1] = channels.gradient;
         let [nll_d2_q0, nll_d2_q1, nll_d2_qdot1] = channels.hessian_diagonal;
         let [nll_d3_q0, nll_d3_q1] = channels.third_diagonal;
@@ -5069,7 +5164,7 @@ mod index_derivative_lowering_tests {
     fn sls_index_sparse_lowering_matches_generic_jet_all_branches_932() {
         for d in [0.0, 1.0, 0.37] {
             let kernel = analytic_kernel(d);
-            let sparse = flatten(sls_outer_plan(&kernel).lower_index_derivative_channels());
+            let sparse = flatten(sls_outer_plan::<5>(&kernel).lower_index_derivative_channels());
             let generic = flatten(generic_index_channels(&kernel));
             for channel in 0..sparse.len() {
                 assert_eq!(
@@ -5135,7 +5230,8 @@ mod index_derivative_lowering_tests {
     fn sls_index_sparse_lowering_matches_independent_fd_all_branches_932() {
         let point = [U0, U1, G];
         for d in [0.0, 1.0, 0.37] {
-            let channels = sls_outer_plan(&analytic_kernel(d)).lower_index_derivative_channels();
+            let channels =
+                sls_outer_plan::<5>(&analytic_kernel(d)).lower_index_derivative_channels();
             for axis in 0..3 {
                 assert_fd_close(
                     d,
@@ -5319,7 +5415,7 @@ mod patterned_order2_perf_tests {
             primary[SLS_G_AXES[3]],
             primary[SLS_G_AXES[4]],
         );
-        let plan = sls_outer_plan(kernel);
+        let plan = sls_outer_plan::<5>(kernel);
         let truncate = |stack: [f64; 5]| [stack[0], stack[1], stack[2]];
         let mut output = MappedOrder2Accumulator::zero();
         output.add_composed(
@@ -5830,40 +5926,32 @@ mod patterned_order2_perf_tests {
         );
     }
 
-    /// #932 release speed gate for the SLS contracted third/fourth towers: the
-    /// specialized directional seedings production consumes (`OneSeed<9>` for
-    /// `contracted_third`, `TwoSeed<9>` for `contracted_fourth`, both through
-    /// the single-source [`sls_row_nll`]) must beat the generic dense tower
-    /// instantiations of the SAME expression (`Tower3<9>` / `Tower4<9>` plus
-    /// dense contraction — the former generic-jet oracle path production never
-    /// materializes). No hand-derived third/fourth tower ever existed for this
-    /// family, so — as in the multinomial / cause-specific / rigid-contracted
-    /// release cells — the honest fail-closed baseline is the generic AD
-    /// tower, and the emitted `hand_over_production` token carries
-    /// `generic_tower_ns / production_ns` for the MSI release harness to fail
-    /// closed on any cell `<= 1`.
+    /// #932 parity gate for the compiler-emitted contracted third/fourth
+    /// schedules. The canonical specialized and dense jets remain independent
+    /// correctness oracles; the focused `gam-row-macros` release racer carries
+    /// the honest performance gate against the family-specific handwritten
+    /// analytic schedule and these specialized jets.
     #[test]
-    fn release_measure_sls_contracted_towers_vs_generic_tower_932() {
+    fn sls_generated_contracted_orders_match_specialized_and_dense_jets_932() {
         use gam_math::jet_scalar::{OneSeed, TwoSeed};
         use gam_math::jet_tower::{Tower3, Tower4};
-        use std::time::Instant;
 
         let (p, kernel) = fixture();
         let dir_u: [f64; SLS_ROW_K] = [0.7, -1.3, 0.4, 0.6, -0.5, 0.9, -0.2, 0.3, -0.8];
         let dir_v: [f64; SLS_ROW_K] = [-0.4, 0.6, 1.1, -0.2, 0.8, -0.7, 0.5, -0.9, 0.1];
 
-        // Parity pins on the exact benchmarked inputs: the specialized
-        // contractions must equal the dense towers' contractions.
         let one_vars: [OneSeed<SLS_ROW_K>; SLS_ROW_K] =
             std::array::from_fn(|a| OneSeed::seed_direction(p[a], a, dir_u[a]));
-        let third = sls_row_nll(&one_vars, &kernel)
+        let specialized_third = sls_row_nll(&one_vars, &kernel)
             .expect("specialized third")
             .contracted_third();
         let two_vars: [TwoSeed<SLS_ROW_K>; SLS_ROW_K] =
             std::array::from_fn(|a| TwoSeed::seed(p[a], a, dir_u[a], dir_v[a]));
-        let fourth = sls_row_nll(&two_vars, &kernel)
+        let specialized_fourth = sls_row_nll(&two_vars, &kernel)
             .expect("specialized fourth")
             .contracted_fourth();
+        let generated_third = sls_row_third_generated(&p, &kernel, &dir_u);
+        let generated_fourth = sls_row_fourth_generated(&p, &kernel, &dir_u, &dir_v);
         let t3_vars: [Tower3<SLS_ROW_K>; SLS_ROW_K] =
             std::array::from_fn(|a| Tower3::variable(p[a], a));
         let dense3 = sls_row_nll(&t3_vars, &kernel).expect("dense Tower3");
@@ -5877,17 +5965,31 @@ mod patterned_order2_perf_tests {
                 for c in 0..SLS_ROW_K {
                     dense_third_ab += dense3.t3[a][b][c] * dir_u[c];
                 }
-                let band = 1e-11 * third[a][b].abs().max(dense_third_ab.abs()).max(1.0);
+                let third_band = 1e-11
+                    * specialized_third[a][b]
+                        .abs()
+                        .max(generated_third[a][b].abs())
+                        .max(dense_third_ab.abs())
+                        .max(1.0);
                 assert!(
-                    (third[a][b] - dense_third_ab).abs() <= band,
-                    "third[{a}][{b}]: specialized {:+.15e} vs dense {dense_third_ab:+.15e}",
-                    third[a][b],
+                    (specialized_third[a][b] - dense_third_ab).abs() <= third_band
+                        && (generated_third[a][b] - dense_third_ab).abs() <= third_band,
+                    "third[{a}][{b}]: specialized {:+.15e}, generated {:+.15e}, dense {dense_third_ab:+.15e}",
+                    specialized_third[a][b],
+                    generated_third[a][b],
                 );
-                let band = 1e-11 * fourth[a][b].abs().max(dense_fourth[a][b].abs()).max(1.0);
+                let fourth_band = 1e-11
+                    * specialized_fourth[a][b]
+                        .abs()
+                        .max(generated_fourth[a][b].abs())
+                        .max(dense_fourth[a][b].abs())
+                        .max(1.0);
                 assert!(
-                    (fourth[a][b] - dense_fourth[a][b]).abs() <= band,
-                    "fourth[{a}][{b}]: specialized {:+.15e} vs dense {:+.15e}",
-                    fourth[a][b],
+                    (specialized_fourth[a][b] - dense_fourth[a][b]).abs() <= fourth_band
+                        && (generated_fourth[a][b] - dense_fourth[a][b]).abs() <= fourth_band,
+                    "fourth[{a}][{b}]: specialized {:+.15e}, generated {:+.15e}, dense {:+.15e}",
+                    specialized_fourth[a][b],
+                    generated_fourth[a][b],
                     dense_fourth[a][b],
                 );
             }
