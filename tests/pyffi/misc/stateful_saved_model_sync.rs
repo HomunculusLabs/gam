@@ -23,14 +23,26 @@ use tempfile::tempdir;
 
 const EXPECTED_MODEL_PAYLOAD_VERSION: u64 = 15;
 const EXPECTED_SAVED_MODEL_ROOT_FIELD_COUNT: usize = 2;
-// FittedModelPayload has 96 serialized fields in schema version 15. These pin
+// FittedModelPayload has 98 serialized fields in schema version 15. These pin
 // fixtures leave `group_metadata=None` and `deployment_extensions=[]`; those are
 // the only two fields guarded by `skip_serializing_if`, so their JSON payloads
-// contain exactly 94 keys. Version 12 adds the required fitted-estimator tag so
+// contain exactly 96 keys. Version 12 adds the required fitted-estimator tag so
 // an expectile target cannot be decoded as a Gaussian observation law.
 // Any payload-field or skip-rule change requires a fresh enumeration before
 // changing this pin.
-const EXPECTED_MODEL_PAYLOAD_FIELD_COUNT: usize = 94;
+//
+// Re-enumerated at the tip that carries this line: `FittedModelPayload`
+// declares 98 `pub` fields, exactly two of which carry `skip_serializing_if`
+// (`group_metadata`, `deployment_extensions` -- the same two named above), and
+// the struct has no `#[serde(skip)]` and no `#[serde(flatten)]`, so the
+// declared-field count IS the serialized-key count. 98 - 2 = 96.
+//
+// The previous pin of 94 was correct when the struct had 96 fields; two were
+// added since (both `#[serde(default)]` only, so both always serialize) and the
+// pin was not re-derived. Noting the arithmetic here because the count is
+// stated in three places in this comment and all three must move together --
+// which is how it drifted the first time.
+const EXPECTED_MODEL_PAYLOAD_FIELD_COUNT: usize = 96;
 const EXPECTED_STANDARD_FAMILY_FIELD_COUNT: usize = 6;
 
 fn read_saved_model_json(path: &Path) -> Value {
