@@ -79,9 +79,22 @@ fn beta_generative_draw_variance_tracks_forwarded_phi_not_seed() {
     let var_fitted = empirical_draw_variance(&seed_spec, Some(forwarded_phi), mu);
     let phi_fitted = implied_phi(mu, var_fitted);
 
-    // (b) Same spec, but no fitted dispersion supplied → falls back to the seed.
-    let var_seed = empirical_draw_variance(&seed_spec, None, mu);
+    // (b) Same spec at the LOW precision the seed carries. This used to pass
+    // `None` and lean on a silent fallback to the embedded construction-time
+    // `phi`, which is precisely the leak #770 reports: `NoiseModel::from_likelihood`
+    // now REFUSES a missing dispersion rather than sampling the seed. Forwarding
+    // `phi = 1` explicitly keeps the identical low-precision comparison arm while
+    // sourcing the value from `gaussian_scale`, and the refusal itself is pinned
+    // below.
+    let seed_phi = 1.0_f64;
+    let var_seed = empirical_draw_variance(&seed_spec, Some(seed_phi), mu);
     let phi_seed = implied_phi(mu, var_seed);
+
+    // The seed value must not be reachable as a silent fallback at all.
+    assert!(
+        NoiseModel::from_likelihood(&seed_spec, 4_000, None).is_err(),
+        "omitting the fitted dispersion must refuse, not fall back to the embedded seed phi          (that fallback IS issue #770)"
+    );
 
     // The forwarded precision must drive the draws: implied φ ≈ 40, not ≈ 1.
     // 100k samples give a tiny sampling error on the variance, so a wide
@@ -93,11 +106,11 @@ fn beta_generative_draw_variance_tracks_forwarded_phi_not_seed() {
          (φ=1) is leaking through — this is issue #770."
     );
 
-    // The seed fallback must reproduce the low-precision (φ ≈ 1) draws, proving
-    // the value is genuinely sourced from `gaussian_scale` and not a constant.
+    // The low-precision arm must reproduce the φ ≈ 1 draws, proving the value is
+    // genuinely sourced from `gaussian_scale` and not a constant.
     assert!(
         (0.7..=1.4).contains(&phi_seed),
-        "seed-fallback Beta draws did not reflect the embedded φ=1: implied φ={phi_seed:.3} \
+        "low-precision Beta draws did not reflect the forwarded φ=1: implied φ={phi_seed:.3} \
          (empirical var={var_seed:.6})"
     );
 

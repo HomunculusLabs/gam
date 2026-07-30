@@ -43,6 +43,12 @@ fn fit_single_atom(
     max_outer: usize,
 ) -> Array2<f64> {
     let n = z.nrows();
+    // The ARD block is per-AXIS: `validated_ard_precisions` accepts 0 axes
+    // (ARD disabled) or exactly the coordinate's latent dimension, nothing in
+    // between. Pinning 1 here refused every atom whose chart is not
+    // one-dimensional (the torus chart is 2-D), so read the width off the
+    // coordinates the caller actually supplied.
+    let ard_axes = true_coords.ncols();
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((n, 1)),
         vec![true_coords],
@@ -51,7 +57,7 @@ fn fit_single_atom(
     )
     .expect("assignment construction");
     let mut term = SaeManifoldTerm::new(vec![atom], assignment).expect("term construction");
-    let mut rho = SaeManifoldRho::new(0.0, -4.0, vec![Array1::<f64>::zeros(1)]);
+    let mut rho = SaeManifoldRho::new(0.0, -4.0, vec![Array1::<f64>::zeros(ard_axes)]);
     let ridge = 1.0e-6;
     for _ in 0..max_outer {
         let loss = term
