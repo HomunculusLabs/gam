@@ -1926,6 +1926,7 @@ mod exact_deviance_state_cache_tests {
             inverse_link: InverseLink::Standard(StandardLink::Log),
             phi: 1.0,
             penalty_scores: Arc::new(Vec::new()),
+            penalties: &[],
             lambdas: Vec::new(),
             base_scaled_half_deviance: 0.0,
             base_neg_score_at_mode: array![0.0, 0.0],
