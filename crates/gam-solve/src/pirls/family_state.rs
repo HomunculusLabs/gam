@@ -431,9 +431,51 @@ pub(crate) fn valid_negbin_theta(theta: f64) -> bool {
     theta.is_finite() && theta > 0.0
 }
 
+/// The row-level count-response contract: finite, non-negative, and an exact
+/// integer.
+///
+/// The integrality test is EXACT (`y == y.round()`), and that is a derivation
+/// rather than a strictness preference. Every count `k` with `|k| < 2^53` is
+/// exactly representable in `f64`, so a genuine count read from data satisfies
+/// `y == y.round()` with no slack to allocate -- there is no rounding step
+/// between "the datum is an integer" and "the bits say so". A tolerance band
+/// would therefore admit only values that are NOT counts, and the Poisson /
+/// negative-binomial log-likelihood is defined (through `ln_gamma`) at
+/// non-integer `y`, so such a value does not fail loudly downstream: it
+/// silently evaluates a different likelihood.
+///
+/// This is `pub` on purpose. `gam-inference` needs the same contract for the
+/// HMC entry points, and while it was unreachable that crate carried a private
+/// copy whose predicate was `(y - y.round()).abs() <= 1e-9` under a
+/// byte-identical error message -- so `3.0 + 5e-10` was a valid count for joint
+/// HMC and an invalid one for P-IRLS on the same data and family.
 #[inline]
-pub(crate) fn valid_count_response(y: f64) -> bool {
+pub fn valid_count_response(y: f64) -> bool {
     y.is_finite() && y >= 0.0 && y == y.round()
+}
+
+/// Certify a whole count response against [`valid_count_response`], reporting
+/// the first offending positive-weight row.
+///
+/// Owns the predicate, the row scan and the message text once, and returns the
+/// message rather than a typed error so that callers in other crates can wrap
+/// it in their own error type without re-deriving any of the three. Rows with
+/// non-positive weight are excluded: a zero weight is this workspace's
+/// excluded-row convention, and an excluded row's response never enters the
+/// likelihood.
+pub fn certify_count_responses(
+    y: &ArrayView1<'_, f64>,
+    weights: &ArrayView1<'_, f64>,
+    family: &str,
+) -> Result<(), String> {
+    for (i, (&yi, &wi)) in y.iter().zip(weights.iter()).enumerate() {
+        if wi > 0.0 && !valid_count_response(yi) {
+            return Err(format!(
+                "{family} response must be a finite non-negative integer at positive-weight row {i}; got {yi}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_count_responses(
@@ -441,12 +483,8 @@ pub(crate) fn validate_count_responses(
     priorweights: &ArrayView1<'_, f64>,
     family: &str,
 ) -> Result<(), EstimationError> {
-    for (i, (&yi, &wi)) in y.iter().zip(priorweights.iter()).enumerate() {
-        if wi > 0.0 && !valid_count_response(yi) {
-            crate::bail_invalid_estim!(
-                "{family} response must be a finite non-negative integer at positive-weight row {i}; got {yi}"
-            );
-        }
+    if let Err(message) = certify_count_responses(y, priorweights, family) {
+        crate::bail_invalid_estim!("{message}");
     }
     Ok(())
 }

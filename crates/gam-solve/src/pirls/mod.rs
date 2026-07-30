@@ -43,6 +43,10 @@ pub use curvature::*;
 pub use deviance::*;
 pub(crate) use dispersion::*;
 pub(crate) use family_state::*;
+// The count-response contract is needed by `gam-inference`'s HMC entry
+// points, which the `pub(crate)` glob above cannot reach; naming the two
+// items explicitly is what keeps that crate from carrying its own copy.
+pub use family_state::{certify_count_responses, valid_count_response};
 pub(crate) use gam_working_model::*;
 pub use glm_update::*;
 pub use low_rank::*;

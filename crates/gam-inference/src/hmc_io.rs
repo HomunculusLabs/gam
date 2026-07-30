@@ -951,26 +951,21 @@ fn validate_firth_likelihood_support(
     Ok::<(), _>(())
 }
 
-#[inline]
-fn valid_count_response(y: f64) -> bool {
-    y.is_finite() && y >= 0.0 && (y - y.round()).abs() <= 1e-9
-}
-
+/// Wrap the workspace count-response contract in this crate's error type.
+///
+/// The predicate, the row scan and the message all belong to
+/// [`gam_solve::pirls::certify_count_responses`]. This crate previously carried
+/// its own copy of all three, and the copy's integrality test was a `1e-9`
+/// tolerance against the canonical exact `y == y.round()` -- so a response of
+/// `3.0 + 5e-10` was admitted for joint HMC and refused by P-IRLS on the same
+/// data and family, while both reported the identical message text.
 fn validate_count_responses(
     family: &str,
     y: &ArrayView1<'_, f64>,
     weights: &ArrayView1<'_, f64>,
 ) -> Result<(), HmcError> {
-    for (i, (&yi, &wi)) in y.iter().zip(weights.iter()).enumerate() {
-        if wi > 0.0 && !valid_count_response(yi) {
-            return Err(HmcError::InvalidConfig {
-                reason: format!(
-                    "{family} response must be a finite non-negative integer at positive-weight row {i}; got {yi}"
-                ),
-            });
-        }
-    }
-    Ok(())
+    gam_solve::pirls::certify_count_responses(y, weights, family)
+        .map_err(|reason| HmcError::InvalidConfig { reason })
 }
 
 fn validate_binary_responses(
