@@ -1505,6 +1505,27 @@ impl InferenceCovarianceMode {
     }
 }
 
+impl std::str::FromStr for InferenceCovarianceMode {
+    type Err = String;
+
+    /// The one public vocabulary for the covariance-mode knob across every
+    /// surface (`gam predict --covariance-mode`, Python `covariance_mode`).
+    /// The CLI historically said "corrected" and the Python bindings said
+    /// "smoothing" for the SAME mode; both spellings (plus the enum's own
+    /// canonical "smoothing-corrected") are accepted here so the vocabulary
+    /// cannot drift per frontend again. Unknown strings are a hard error so a
+    /// typo never silently degrades to a default covariance.
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "conditional" => Ok(Self::Conditional),
+            "corrected" | "smoothing" | "smoothing-corrected" => Ok(Self::SmoothingCorrected),
+            other => Err(format!(
+                "covariance mode must be one of \"conditional\", \"corrected\", or \"smoothing\"; got \"{other}\""
+            )),
+        }
+    }
+}
+
 /// Per-axis training support range used by boundary and OOD corrections.
 /// For each predictor axis we record the empirical [min, max] from training.
 /// Boundary correction inflates variance for x_i within a small fraction of

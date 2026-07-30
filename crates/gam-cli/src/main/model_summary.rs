@@ -347,13 +347,13 @@ pub(crate) fn build_model_summary(
 
 pub(crate) fn covariance_from_model(
     model: &SavedModel,
-    mode: CovarianceModeArg,
+    mode: InferenceCovarianceMode,
 ) -> Result<Array2<f64>, String> {
     let fit = model
         .fit_result
         .as_ref()
         .ok_or_else(|| "model is missing canonical fit_result payload; refit".to_string())?;
-    if mode == CovarianceModeArg::Corrected {
+    if mode == InferenceCovarianceMode::SmoothingCorrected {
         return fit.beta_covariance_corrected().cloned().ok_or_else(|| {
             "saved model does not contain smoothing-corrected covariance; refit before requesting --covariance-mode corrected"
                 .to_string()
@@ -384,13 +384,13 @@ pub(crate) fn covariance_from_model(
 
 pub(crate) fn prediction_backend_from_model<'a>(
     model: &'a SavedModel,
-    mode: CovarianceModeArg,
+    mode: InferenceCovarianceMode,
 ) -> Result<PredictionCovarianceBackend<'a>, String> {
     let fit = model
         .fit_result
         .as_ref()
         .ok_or_else(|| "model is missing canonical fit_result payload; refit".to_string())?;
-    if mode == CovarianceModeArg::Corrected {
+    if mode == InferenceCovarianceMode::SmoothingCorrected {
         let covariance = fit.beta_covariance_corrected().ok_or_else(|| {
             "saved model does not contain smoothing-corrected covariance; refit before requesting --covariance-mode corrected"
                 .to_string()
@@ -417,12 +417,6 @@ pub(crate) fn prediction_backend_from_model<'a>(
     )
 }
 
-pub(crate) fn infer_covariance_mode(mode: CovarianceModeArg) -> InferenceCovarianceMode {
-    match mode {
-        CovarianceModeArg::Conditional => InferenceCovarianceMode::Conditional,
-        CovarianceModeArg::Corrected => InferenceCovarianceMode::SmoothingCorrected,
-    }
-}
 
 /// Render the covariance-provenance suffix for `gam predict` from
 /// RESULT-OWNED sources (#2296): what the evaluator actually consumed for the

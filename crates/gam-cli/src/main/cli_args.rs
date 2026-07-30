@@ -393,8 +393,8 @@ pub(crate) struct PredictArgs {
     pub(crate) uncertainty: bool,
     #[arg(long = "level", default_value_t = 0.95, value_parser = parse_probability_open_cli)]
     pub(crate) level: f64,
-    #[arg(long = "covariance-mode", value_enum, default_value_t = CovarianceModeArg::Corrected)]
-    pub(crate) covariance_mode: CovarianceModeArg,
+    #[arg(long = "covariance-mode", default_value = "corrected", value_parser = parse_covariance_mode_arg)]
+    pub(crate) covariance_mode: InferenceCovarianceMode,
     #[arg(long = "mode", value_enum, default_value_t = PredictModeArg::PosteriorMean)]
     pub(crate) mode: PredictModeArg,
     /// Disable the O(n⁻¹) frequentist bias correction in the survival
@@ -607,10 +607,13 @@ pub(crate) enum HazardLoadingArg {
     LoadedVsUnloaded,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum, Eq, PartialEq)]
-pub(crate) enum CovarianceModeArg {
-    Conditional,
-    Corrected,
+/// Thin clap shim over the engine's one covariance-mode vocabulary
+/// (`InferenceCovarianceMode::from_str`), shared verbatim with the Python
+/// bindings' `covariance_mode`. The CLI used to carry its own two-variant
+/// enum with a "corrected"-only spelling while Python accepted "smoothing"
+/// only — one knob, two vocabularies.
+pub(crate) fn parse_covariance_mode_arg(raw: &str) -> Result<InferenceCovarianceMode, String> {
+    raw.parse()
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, Eq, PartialEq)]

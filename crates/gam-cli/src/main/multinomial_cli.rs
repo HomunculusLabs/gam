@@ -227,7 +227,7 @@ pub(crate) fn run_predict_multinomial(args: &PredictArgs) -> Result<(), String> 
         // coefficient covariance. A smoothing-corrected request (the global
         // default) must refuse rather than silently deliver the narrower
         // conditional band under a corrected label.
-        if args.covariance_mode == CovarianceModeArg::Corrected {
+        if args.covariance_mode == InferenceCovarianceMode::SmoothingCorrected {
             return Err(
                 "multinomial uncertainty carries only the conditional-on-\u{3bb}\u{302} \
                  joint-Laplace covariance; a smoothing-corrected (Vp) band is not \

@@ -116,24 +116,14 @@ struct PyPredictOptions {
 }
 
 /// Parse the public `covariance_mode` string into the engine enum. `None`
-/// keeps the engine default (required smoothing-corrected); unknown strings are a hard
-/// error so a typo never silently degrades to the default covariance.
+/// keeps the engine default (required smoothing-corrected). The vocabulary is
+/// owned by `InferenceCovarianceMode::from_str` — the same parser the CLI's
+/// `--covariance-mode` uses — so the accepted spellings cannot drift per
+/// frontend.
 fn parse_covariance_mode(
     raw: Option<&str>,
 ) -> Result<Option<gam_predict::InferenceCovarianceMode>, String> {
-    let Some(text) = raw else {
-        return Ok(None);
-    };
-    match text.trim().to_ascii_lowercase().as_str() {
-        "conditional" => Ok(Some(gam_predict::InferenceCovarianceMode::Conditional)),
-        "smoothing" => Ok(Some(
-            gam_predict::InferenceCovarianceMode::SmoothingCorrected,
-        )),
-        other => Err(format!(
-            "covariance_mode must be one of \"conditional\" or \"smoothing\"; \
-             got \"{other}\""
-        )),
-    }
+    raw.map(str::parse).transpose()
 }
 
 #[derive(Serialize)]
@@ -491,12 +481,6 @@ struct SurvivalPredictionPayload {
     /// uncertainty was computed.
     #[serde(skip_serializing_if = "Option::is_none")]
     covariance_source: Option<String>,
-    /// Restriction horizon of the `rmst` column, in time units. Travels with
-    /// the column because an RMST without its horizon is not interpretable —
-    /// the same curve gives a different number at every `tau`. `None` exactly
-    /// when the grid supports no horizon and `rmst` is therefore absent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rmst_tau: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -7495,7 +7479,6 @@ mod prediction_payload_tests {
             survival_se: Some(vec![vec![0.01, f64::NAN], vec![0.02, f64::NAN]]),
             eta_se: Some(vec![0.1, f64::INFINITY]),
             covariance_source: Some("smoothing-corrected".to_string()),
-            rmst_tau: Some(2.0),
         };
 
         let json = serde_json::to_string(&payload).expect("serialize must succeed");
