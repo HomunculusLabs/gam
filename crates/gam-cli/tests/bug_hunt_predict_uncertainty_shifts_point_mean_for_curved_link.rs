@@ -74,7 +74,7 @@ fn predict_uncertainty_does_not_shift_point_mean_for_curved_link() {
         .expect("temp uncertainty output path");
 
     // Fit a binomial/logit model (curved inverse link => posterior-mean default).
-    let fit = Command::new(gam_test_support::gam_binary!())
+    let fit = Command::new(env!("CARGO_BIN_EXE_gam"))
         .arg("fit")
         .arg(train)
         .arg("y ~ s(x)")
@@ -97,7 +97,7 @@ fn predict_uncertainty_does_not_shift_point_mean_for_curved_link() {
     );
 
     // Predict WITHOUT --uncertainty (the documented default point: posterior mean).
-    let plain = Command::new(gam_test_support::gam_binary!())
+    let plain = Command::new(env!("CARGO_BIN_EXE_gam"))
         .arg("predict")
         .arg(model.path())
         .arg(newdata)
@@ -119,7 +119,7 @@ fn predict_uncertainty_does_not_shift_point_mean_for_curved_link() {
 
     // Predict WITH --uncertainty. This must ADD std_error/bounds only, never
     // shift the point `mean`.
-    let uncertain = Command::new(gam_test_support::gam_binary!())
+    let uncertain = Command::new(env!("CARGO_BIN_EXE_gam"))
         .arg("predict")
         .arg(model.path())
         .arg(newdata)
