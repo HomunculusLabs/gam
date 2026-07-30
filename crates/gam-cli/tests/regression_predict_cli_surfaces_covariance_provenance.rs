@@ -30,7 +30,7 @@ fn run_predict(
     out: &std::path::Path,
     extra_args: &[&str],
 ) -> std::process::Output {
-    let mut cmd = Command::new(gam_test_support::gam_binary!());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_gam"));
     cmd.arg("predict")
         .arg(model)
         .arg(newdata)
@@ -70,7 +70,7 @@ fn predict_uncertainty_surfaces_resolved_covariance_source() {
         .tempfile()
         .expect("temp conditional output path");
 
-    let fit = Command::new(gam_test_support::gam_binary!())
+    let fit = Command::new(env!("CARGO_BIN_EXE_gam"))
         .arg("fit")
         .arg(train)
         .arg("y ~ s(x)")
