@@ -120,6 +120,24 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
     if [ "$(git rev-parse origin/main)" = "$COMMIT" ]; then
       echo "landed $COMMIT on main (base $BASE, attempt $attempt)"
       git diff --numstat "$BASE" "$COMMIT"
+      # This script commits by plumbing and never touches the working tree or
+      # the index, so `git status` still shows every landed path as ` M`. That
+      # is expected and it has already cost real time: a landed change set was
+      # read as an abandoned mid-edit, and two lanes went looking for a
+      # non-existent author. So say so, and prove it per path by comparing the
+      # working-tree blob against what main now holds -- content, not status.
+      echo
+      echo "working tree still reads ' M' for these paths -- that is expected."
+      echo "verified against origin/main by content:"
+      for p in "$@"; do
+        if [ "$DELETE" = 1 ]; then
+          echo "  deleted   $p"
+        elif [ "$(git hash-object -- "$p")" = "$(git rev-parse "origin/main:$p")" ]; then
+          echo "  identical $p"
+        else
+          echo "  DIFFERS   $p  <- edited since the blob was hashed; re-land it" >&2
+        fi
+      done
       exit 0
     fi
   fi
