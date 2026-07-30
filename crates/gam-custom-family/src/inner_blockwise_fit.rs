@@ -3133,18 +3133,25 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         // ALSO above tol is this a genuine non-convergence the outer optimizer
         // should reject — exit non-converged so it rejects this ρ cleanly
         // instead of waiting for the cycle cap.
-        const FULLY_REJECTED_STALL_MAX_CYCLES: usize = 8;
-        let mut prev_rejected_trust_radius: Option<f64> = None;
-        let mut consecutive_held_rejected_cycles: usize = 0;
-        // Byte-identical fixed-point detector for the fully-rejected stall.
-        // Tracks the first-attempt trial objective of the previous fully-
-        // rejected cycle; when the current fully-rejected cycle reproduces it
-        // bit-for-bit the iterate is provably stationary at the f64 floor (the
-        // n≈3e5 marginal/logslope coupling case where the line search rejects
-        // every step on a 1-ULP cross-path round-off gap and β reverts
-        // identically each cycle). One repeat is conclusive, so the guard fires
-        // after two such cycles regardless of the `radius_held` heuristic.
-        let mut prev_rejected_first_attempt_objective: Option<f64> = None;
+        // A rejected-cycle fixed point must describe the state that actually
+        // determines the next trust-region search. The former detector compared
+        // only the first trial objective; that scalar omits the joint and
+        // per-block trust radii, so shrinking-radius globalization could produce
+        // the same rounded objective while still making essential progress.
+        // Keep exact f64 bit patterns for the pre-cycle iterate and every radius,
+        // plus the realized first proposal and rejection partition. Equality is
+        // therefore an equality of solver state and observed transition, not a
+        // coincidental equality of one rounded output.
+        #[derive(PartialEq, Eq)]
+        struct FullyRejectedCycleSignature {
+            beta_bits: Vec<u64>,
+            joint_trust_radius_bits: u64,
+            block_trust_radius_bits: Vec<u64>,
+            first_trial_delta_bits: Option<Vec<u64>>,
+            first_trial_objective_bits: Option<u64>,
+            rejection_counts: [usize; 4],
+        }
+        let mut prev_fully_rejected_cycle_signature: Option<FullyRejectedCycleSignature> = None;
         let mut consecutive_identical_rejected_cycles: usize = 0;
         const IDENTICAL_REJECTED_STALL_MAX_CYCLES: usize = 2;
         // Collapsed-trust-region all-reject-at-floor guard (gam#979 survival
@@ -3343,9 +3350,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                         tr_clamped_during_stall = false;
                         residual_rate_history.clear();
                         merit_window.clear();
-                        prev_rejected_trust_radius = None;
-                        consecutive_held_rejected_cycles = 0;
-                        prev_rejected_first_attempt_objective = None;
+                        prev_fully_rejected_cycle_signature = None;
                         consecutive_identical_rejected_cycles = 0;
                         consecutive_all_reject_at_floor_cycles = 0;
                         last_joint_math = None;
@@ -4900,10 +4905,8 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     tr_clamped_during_stall = false;
                     residual_rate_history.clear();
                     merit_window.clear();
-                    prev_rejected_trust_radius = None;
-                    consecutive_held_rejected_cycles = 0;
-                    prev_rejected_first_attempt_objective = None;
-                    consecutive_identical_rejected_cycles = 0;
+                    prev_fully_rejected_cycle_signature = None;
+                        consecutive_identical_rejected_cycles = 0;
                     consecutive_all_reject_at_floor_cycles = 0;
                     last_joint_math = None;
                     last_kkt_refusal_report = None;
@@ -5061,24 +5064,18 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // arm), so every converging fit is byte-identical.
             let mut feasibility_rejects = 0usize;
             let mut first_likelihood_reject: Option<String> = None;
-            // Fixed-point signature for the fully-rejected stall guard. The
-            // FIRST trust attempt of a cycle evaluates the proposal at the
-            // pre-cycle β (the attempt that has not yet shrunk the radius), so
-            // its trial objective is a deterministic function of (β, S, λ)
-            // alone. On a fully-rejected cycle β is reverted to that same
-            // pre-cycle value, so if two consecutive fully-rejected cycles
-            // report a *byte-identical* first-attempt trial objective the next
-            // cycle's entire Newton system, trust-region search, and reject
-            // outcome are provably byte-identical — the iterate is at an exact
-            // fixed point and every further cycle is a pure no-op. This is
-            // strictly stronger evidence than the `radius_held` heuristic (which
-            // can keep resetting while the boundary block's radius oscillates),
-            // so it lets the guard fire in two cycles instead of grinding to the
-            // 8-cycle held-radius count or the hard ceiling. Captured only on
-            // the first attempt; a successful first-attempt likelihood-reject
-            // leaves it `None` (and the early-exit reject path captures it
-            // explicitly below) so a non-finite trial cannot masquerade as a
-            // fixed point.
+            // Snapshot every mutable input to the trust-region attempt loop
+            // before it can shrink a radius. A later fully-rejected cycle is an
+            // exact fixed point only if this state and the realized first trial
+            // both reproduce bit-for-bit.
+            let cycle_start_beta_bits =
+                beta_joint.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+            let cycle_start_joint_trust_radius_bits = joint_trust_radius.to_bits();
+            let cycle_start_block_trust_radius_bits = joint_block_trust_radii
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>();
+            let mut first_attempt_trial_delta_bits: Option<Vec<u64>> = None;
             let mut first_attempt_trial_objective: Option<f64> = None;
             // Frozen-step line-search short-circuit (n≈3e5 marginal-slope floor
             // stall). Once the joint trust radius is pinned (the shrink rule
@@ -5604,6 +5601,11 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                             trial_delta = chord;
                         }
                     }
+                }
+                if trust_attempt == 0 {
+                    first_attempt_trial_delta_bits = Some(
+                        trial_delta.iter().map(|value| value.to_bits()).collect(),
+                    );
                 }
                 block_step_norms = joint_trust_region_block_metric_norms(
                     &trial_delta,
@@ -6400,46 +6402,31 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 let all_attempts_rejected = frozen_floor_full_reject
                     || model_rejects + likelihood_rejects + objective_rejects + feasibility_rejects
                         == JOINT_TRUST_MAX_ATTEMPTS;
-                let radius_held_since_last_reject = match prev_rejected_trust_radius {
-                    Some(prev) => {
-                        joint_trust_radius.is_finite()
-                            && prev.is_finite()
-                            && joint_trust_radius >= prev * (1.0 - 1e-12)
-                    }
-                    None => false,
-                };
-                if all_attempts_rejected && radius_held_since_last_reject {
-                    consecutive_held_rejected_cycles =
-                        consecutive_held_rejected_cycles.saturating_add(1);
-                } else {
-                    consecutive_held_rejected_cycles = 0;
-                }
-                prev_rejected_trust_radius = Some(joint_trust_radius);
-                // Byte-identical fixed-point detector. A fully-rejected cycle
-                // whose first-attempt trial objective reproduces the previous
-                // fully-rejected cycle's value bit-for-bit proves β reverted to
-                // the same iterate and the Newton system is identical, so every
-                // further cycle is a provable no-op. This is stronger than the
-                // held-radius count and fires in two cycles, fixing the n≈3e5
-                // marginal/logslope grind where the held-radius path's off-by-one
-                // let the inner solve spin past the wall-clock budget (gam#979).
-                match (
-                    all_attempts_rejected,
-                    first_attempt_trial_objective,
-                    prev_rejected_first_attempt_objective,
-                ) {
-                    (true, Some(current), Some(prev)) if current.to_bits() == prev.to_bits() => {
-                        consecutive_identical_rejected_cycles =
-                            consecutive_identical_rejected_cycles.saturating_add(1);
-                    }
-                    _ => {
-                        consecutive_identical_rejected_cycles = 0;
-                    }
-                }
                 if all_attempts_rejected {
-                    prev_rejected_first_attempt_objective = first_attempt_trial_objective;
+                    let signature = FullyRejectedCycleSignature {
+                        beta_bits: cycle_start_beta_bits,
+                        joint_trust_radius_bits: cycle_start_joint_trust_radius_bits,
+                        block_trust_radius_bits: cycle_start_block_trust_radius_bits,
+                        first_trial_delta_bits: first_attempt_trial_delta_bits,
+                        first_trial_objective_bits: first_attempt_trial_objective
+                            .map(|value| value.to_bits()),
+                        rejection_counts: [
+                            model_rejects,
+                            likelihood_rejects,
+                            objective_rejects,
+                            feasibility_rejects,
+                        ],
+                    };
+                    consecutive_identical_rejected_cycles =
+                        if prev_fully_rejected_cycle_signature.as_ref() == Some(&signature) {
+                            consecutive_identical_rejected_cycles.saturating_add(1)
+                        } else {
+                            1
+                        };
+                    prev_fully_rejected_cycle_signature = Some(signature);
                 } else {
-                    prev_rejected_first_attempt_objective = None;
+                    prev_fully_rejected_cycle_signature = None;
+                    consecutive_identical_rejected_cycles = 0;
                 }
                 // Collapsed-trust-region all-reject-at-floor detector (gam#979).
                 // Increment only when EVERY attempt this cycle was rejected AND
@@ -6461,8 +6448,8 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     consecutive_all_reject_at_floor_cycles,
                     all_attempts_rejected_at_floor_this_cycle,
                 );
-                if consecutive_held_rejected_cycles >= FULLY_REJECTED_STALL_MAX_CYCLES
-                    || consecutive_identical_rejected_cycles >= IDENTICAL_REJECTED_STALL_MAX_CYCLES
+                if consecutive_identical_rejected_cycles
+                    >= IDENTICAL_REJECTED_STALL_MAX_CYCLES
                     || collapsed_floor_exit
                 {
                     // #2485. "Every trust-region attempt was rejected" and "no
@@ -6560,23 +6547,17 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                         >= IDENTICAL_REJECTED_STALL_MAX_CYCLES
                     {
                         format!(
-                            "byte-identical first-attempt trial objective for {} consecutive \
-                             fully-rejected cycles (exact fixed point)",
+                            "{} consecutive fully-rejected cycles reproduced the complete \
+                             pre-cycle iterate/radius state, first proposal, trial objective, \
+                             and rejection partition bit-for-bit (exact fixed point)",
                             consecutive_identical_rejected_cycles
                         )
-                    } else if consecutive_all_reject_at_floor_cycles
-                        >= JOINT_COLLAPSED_FLOOR_ALL_REJECT_MAX_CYCLES
-                    {
+                    } else {
                         format!(
                             "{} consecutive fully-rejected cycles with the joint trust radius \
                              collapsed to its absolute 1e-12 floor (no smaller step \
                              representable, step makes no progress)",
                             consecutive_all_reject_at_floor_cycles
-                        )
-                    } else {
-                        format!(
-                            "{} consecutive fully-rejected cycles with joint trust radius held",
-                            consecutive_held_rejected_cycles
                         )
                     };
                     log::warn!(
@@ -6643,12 +6624,10 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // cycle moved β and may have grown the trust radius, so the next
             // rejected-cycle comparison must start fresh rather than carry
             // forward a stale radius snapshot from the previous reject streak.
-            prev_rejected_trust_radius = None;
-            consecutive_held_rejected_cycles = 0;
+            prev_fully_rejected_cycle_signature = None;
             // An accepted step moved β, so the fixed-point signature is stale;
             // reset it so a later reject streak compares only consecutive
             // fully-rejected cycles at the SAME iterate.
-            prev_rejected_first_attempt_objective = None;
             consecutive_identical_rejected_cycles = 0;
             // An accepted step moved β and (via the trust-region grow rules)
             // lifts the radius off its floor, so the collapsed-floor all-reject
