@@ -69,6 +69,7 @@ use crate::custom_family::{
 use crate::vector_response::{
     MultinomialLogitLikelihood, VectorLikelihood, validate_multinomial_simplex,
 };
+use gam_linalg::faer_ndarray::{fast_ab, fast_atb};
 use gam_linalg::matrix::{DenseDesignMatrix, DesignMatrix, SymmetricMatrix};
 use gam_math::jet_scalar::{JetScalar, OneSeed, Order2, TwoSeed};
 use gam_math::nested_dual::JetField;
@@ -2700,6 +2701,64 @@ struct MultinomialDirectionalHyperOperator {
     p: usize,
 }
 
+impl MultinomialDirectionalHyperOperator {
+    /// Compute `G_a = X F_a` for every active-class block `F_a` and stack the
+    /// results class-major as an `(M*N) × rank` matrix.
+    ///
+    /// Every projection surface uses this same contraction.  Keeping it in a
+    /// dense matrix multiply avoids repeating `N*M*rank` scalar dot products
+    /// through bounds-checked ndarray indexing in debug/quality builds.
+    fn projected_design_by_class(&self, factor: &Array2<f64>) -> Array2<f64> {
+        let dim = self.m * self.p;
+        assert_eq!(factor.nrows(), dim);
+        let n = self.design.nrows();
+        let rank = factor.ncols();
+        let mut projected = Array2::<f64>::zeros((self.m * n, rank));
+        for class in 0..self.m {
+            let factor_block = factor.slice(ndarray::s![class * self.p..(class + 1) * self.p, ..]);
+            let class_projection = fast_ab(self.design.as_ref(), &factor_block);
+            projected
+                .slice_mut(ndarray::s![class * n..(class + 1) * n, ..])
+                .assign(&class_projection);
+        }
+        projected
+    }
+
+    /// Apply each row's `M × M` Fisher jet to the class axis of stacked
+    /// projected designs.
+    fn apply_jet_to_projected_design(&self, projected: &Array2<f64>) -> Array2<f64> {
+        let n = self.design.nrows();
+        let rank = projected.ncols();
+        assert_eq!(projected.nrows(), self.m * n);
+        let projected_values = projected
+            .as_slice()
+            .expect("class-projected design is standard-layout");
+        let jet_values = self
+            .jet
+            .as_slice()
+            .expect("directional Fisher jet is standard-layout");
+        let mut weighted = Array2::<f64>::zeros(projected.raw_dim());
+        let weighted_values = weighted
+            .as_slice_mut()
+            .expect("weighted class-projected design is standard-layout");
+
+        for class in 0..self.m {
+            for row in 0..n {
+                let target = (class * n + row) * rank;
+                for source_class in 0..self.m {
+                    let weight = jet_values[(row * self.m + class) * self.m + source_class];
+                    let source = (source_class * n + row) * rank;
+                    for column in 0..rank {
+                        weighted_values[target + column] +=
+                            weight * projected_values[source + column];
+                    }
+                }
+            }
+        }
+        weighted
+    }
+}
+
 impl HyperOperator for MultinomialDirectionalHyperOperator {
     fn dim(&self) -> usize {
         self.m * self.p
@@ -2758,51 +2817,53 @@ impl HyperOperator for MultinomialDirectionalHyperOperator {
     fn projected_matrix(&self, factor: &Array2<f64>) -> Array2<f64> {
         let dim = self.m * self.p;
         assert_eq!(factor.nrows(), dim);
-        let rank = factor.ncols();
-        let design = self.design.view();
-        let n = design.nrows();
-        let (m, p) = (self.m, self.p);
-        let mut out = Array2::<f64>::zeros((rank, rank));
-        // g[a,k]  = X[row] · F_block_a[:,k]
-        // jg[a,l] = Σ_b Ĵ[row,a,b] · g[b,l]
-        let mut g = Array2::<f64>::zeros((m, rank));
-        let mut jg = Array2::<f64>::zeros((m, rank));
-        for row in 0..n {
-            for a in 0..m {
-                let base = a * p;
-                for k in 0..rank {
-                    let mut acc = 0.0_f64;
-                    for i in 0..p {
-                        acc += design[[row, i]] * factor[[base + i, k]];
-                    }
-                    g[[a, k]] = acc;
-                }
-            }
-            for a in 0..m {
-                for l in 0..rank {
-                    let mut acc = 0.0_f64;
-                    for b in 0..m {
-                        acc += self.jet[[row, a, b]] * g[[b, l]];
-                    }
-                    jg[[a, l]] = acc;
-                }
-            }
-            for k in 0..rank {
-                for l in 0..rank {
-                    let mut acc = 0.0_f64;
-                    for a in 0..m {
-                        acc += g[[a, k]] * jg[[a, l]];
-                    }
-                    out[[k, l]] += acc;
-                }
-            }
-        }
-        out
+        // With class-major row stacking this is exactly
+        //
+        //   Σ_a G_aᵀ (Σ_b diag(J_ab) G_b) = Fᵀ B_d F.
+        //
+        // The former scalar loop recomputed every X·F block one row and one
+        // rank coordinate at a time, then accumulated the rank² result through
+        // bounds-checked indexing.  These two matrix products implement the
+        // algebra stated in the operator's contract directly.
+        let projected = self.projected_design_by_class(factor);
+        let weighted = self.apply_jet_to_projected_design(&projected);
+        fast_atb(&projected, &weighted)
     }
 
     fn trace_projected_factor(&self, factor: &Array2<f64>) -> f64 {
-        // tr(Fᵀ B_d F) — exact, matching the dense `dense_trace_projected_factor`.
-        self.projected_matrix(factor).diag().sum()
+        // tr(Fᵀ B_d F) = Σ_row Σ_a,b J[row,a,b] <G[row,a],G[row,b]>.
+        //
+        // A trace has only `rank` diagonal terms.  Materializing the complete
+        // `rank × rank` projection here made this nominally matrix-free
+        // operation O(N*M*rank²), dominating the penguins quality fit.  The
+        // direct contraction is exact and costs O(N*M²*rank).
+        let dim = self.m * self.p;
+        assert_eq!(factor.nrows(), dim);
+        let projected = self.projected_design_by_class(factor);
+        let projected_values = projected
+            .as_slice()
+            .expect("class-projected design is standard-layout");
+        let jet_values = self
+            .jet
+            .as_slice()
+            .expect("directional Fisher jet is standard-layout");
+        let n = self.design.nrows();
+        let rank = factor.ncols();
+        let mut trace = 0.0_f64;
+        for row in 0..n {
+            for class in 0..self.m {
+                let left = (class * n + row) * rank;
+                for source_class in 0..self.m {
+                    let right = (source_class * n + row) * rank;
+                    let mut dot = 0.0_f64;
+                    for column in 0..rank {
+                        dot += projected_values[left + column] * projected_values[right + column];
+                    }
+                    trace += jet_values[(row * self.m + class) * self.m + source_class] * dot;
+                }
+            }
+        }
+        trace
     }
 
     fn to_dense(&self) -> Array2<f64> {
@@ -4315,8 +4376,17 @@ mod tests {
     #[test]
     fn matrix_free_directional_operator_matches_dense_oracle() {
         // A few representative small fits (the operator path fires for small
-        // `total_rho_dim`): vary N, P, K and the projection rank.
-        for &(n, p, k, rank) in &[(11, 4, 3, 2), (9, 5, 4, 3), (13, 3, 5, 4), (7, 6, 3, 1)] {
+        // `total_rho_dim`): vary N, P, K and the projection rank.  The final
+        // two cases exercise the K=3 full-rank and one-gauge-removed factors
+        // used by the penguins outer solve, not only skinny test projections.
+        for &(n, p, k, rank) in &[
+            (11, 4, 3, 2),
+            (9, 5, 4, 3),
+            (13, 3, 5, 4),
+            (7, 6, 3, 1),
+            (17, 10, 3, 20),
+            (17, 10, 3, 19),
+        ] {
             let family = toy_family(n, p, k);
             let m = family.active_classes();
             let dim = m * p;
@@ -4434,6 +4504,11 @@ mod tests {
         assert!(
             (td - tm).abs() <= 1e-10 * (1.0 + td.abs()),
             "{ctx}: trace dense {td} != matrix-free {tm}"
+        );
+        let tm_from_projection = pm.diag().sum();
+        assert!(
+            (tm - tm_from_projection).abs() <= 1e-10 * (1.0 + tm.abs()),
+            "{ctx}: direct trace {tm} != projected-matrix trace {tm_from_projection}"
         );
 
         // Matvec B·v.
