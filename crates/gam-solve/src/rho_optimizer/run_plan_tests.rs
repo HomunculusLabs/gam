@@ -4743,9 +4743,26 @@ fn run_malformed_gradient_seed_surfaces_as_error() {
     let err = problem
         .run(&mut obj, "test gradient mismatch")
         .expect_err("malformed analytic gradient must surface as error");
+    // Assert the CONTRACT, not a variant. What this test exists to prevent is a
+    // silent numerical-gradient fallback that masks the bug by spinning a
+    // cost-only BFGS; what matters is therefore that the failure surfaces AND
+    // that it names the malformation, so a reader is sent to the real cause.
+    //
+    // It previously matched `EstimationError::RemlOptimizationFailed(_)`. The
+    // refusal is now wrapped by the fatal outer-evaluation path and arrives as a
+    // different variant carrying the SAME diagnosis, so the old assertion failed
+    // while the behaviour it guards was intact -- an equality assertion on an enum
+    // variant survives every refactor of the wrapping and none of the meaning.
+    let rendered = err.to_string();
     assert!(
-        matches!(err, EstimationError::RemlOptimizationFailed(_)),
-        "unexpected error variant: {err:?}",
+        rendered.contains("gradient length mismatch"),
+        "the error must NAME the malformed gradient rather than mask it behind a \
+         fallback; got: {rendered}"
+    );
+    assert!(
+        rendered.contains("got 1") && rendered.contains("expected 2"),
+        "the error must carry the observed and expected lengths so the reader does \
+         not have to re-derive them; got: {rendered}"
     );
 }
 
