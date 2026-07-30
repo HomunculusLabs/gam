@@ -374,31 +374,54 @@ impl ConstrainedPosteriorGeometry {
 /// where `cᵀt` is an independent scalar Gaussian and `u` is the retained
 /// orthant-truncated Gaussian.  The interval therefore comes from the quantiles
 /// of that convolution, not from `posterior_mean ± z·posterior_sd`.
-pub fn constrained_projection_equal_tailed_interval(
+/// The decomposition every scalar-projection consumer in this module needs, in
+/// one place.
+///
+/// Two consumers read it — the equal-tailed interval and
+/// [`constrained_projection_law`] — and it is exactly the kind of derivation
+/// that is individually reasonable and quietly different when written twice.
+/// That is the failure genus this sweep is about (#2385), so it is written once.
+struct TruncatedProjection {
+    /// `E_π[cᵀβ]`.
+    posterior_mean: f64,
+    /// Retained constraint-normal coordinates `u`: centre, covariance, walls.
+    normal_center: Array1<f64>,
+    normal_covariance: Array2<f64>,
+    upper_limits: Vec<f64>,
+    /// `Gᵀc`: how a displacement of `u` moves the projection.
+    projection_lift: Array1<f64>,
+    /// `Var(cᵀt)`, the tangent component that stays Gaussian and independent of
+    /// `u`. Exactly zero when `c` is carried entirely by the retained
+    /// constraint normals, which is the case a product cone on one block gives.
+    residual_variance: f64,
+}
+
+struct ProjectionDecomposition {
+    ambient_mean: f64,
+    ambient_variance: f64,
+    /// `None` exactly when the geometry carries no correction: the truncation
+    /// is invisible at f64 resolution and the projection is the ambient normal.
+    truncated: Option<TruncatedProjection>,
+}
+
+fn decompose_projection(
     ambient_covariance: &Array2<f64>,
     geometry: &ConstrainedPosteriorGeometry,
     contrast: &Array1<f64>,
-    level: f64,
-) -> Result<(f64, f64), String> {
+) -> Result<ProjectionDecomposition, String> {
     let p = contrast.len();
     geometry.validate_for_dimension(p)?;
     if ambient_covariance.dim() != (p, p) {
         return Err(format!(
-            "constrained projection interval needs a {p}x{p} ambient covariance, got {:?}",
+            "constrained projection needs a {p}x{p} ambient covariance, got {:?}",
             ambient_covariance.dim()
-        ));
-    }
-    if !(level.is_finite() && level > 0.0 && level < 1.0) {
-        return Err(format!(
-            "constrained projection interval level must lie in (0, 1), got {level}"
         ));
     }
     if ambient_covariance.iter().any(|value| !value.is_finite())
         || contrast.iter().any(|value| !value.is_finite())
     {
         return Err(
-            "constrained projection interval received a non-finite covariance or contrast"
-                .to_string(),
+            "constrained projection received a non-finite covariance or contrast".to_string(),
         );
     }
 
@@ -411,24 +434,20 @@ pub fn constrained_projection_equal_tailed_interval(
         .map(|value| value.abs())
         .fold(f64::MIN_POSITIVE, f64::max);
     let contrast_scale = contrast.dot(contrast).max(f64::MIN_POSITIVE);
-    let variance_floor =
-        (p.max(1) as f64) * f64::EPSILON * covariance_scale * contrast_scale;
+    let variance_floor = (p.max(1) as f64) * f64::EPSILON * covariance_scale * contrast_scale;
     if ambient_variance < -variance_floor || !ambient_variance.is_finite() {
         return Err(format!(
-            "constrained projection interval has invalid ambient variance {ambient_variance:.6e}"
+            "constrained projection has invalid ambient variance {ambient_variance:.6e}"
         ));
     }
     let ambient_variance = ambient_variance.max(0.0);
-    let alpha = 0.5 * (1.0 - level);
 
     let Some(correction) = geometry.correction.as_ref() else {
-        let sd = ambient_variance.sqrt();
-        if sd == 0.0 {
-            return Ok((ambient_mean, ambient_mean));
-        }
-        let z = standard_normal_quantile(1.0 - alpha)
-            .map_err(|error| format!("constrained projection normal quantile: {error}"))?;
-        return Ok((ambient_mean - z * sd, ambient_mean + z * sd));
+        return Ok(ProjectionDecomposition {
+            ambient_mean,
+            ambient_variance,
+            truncated: None,
+        });
     };
 
     let q = correction.rows.len();
@@ -437,8 +456,8 @@ pub fn constrained_projection_equal_tailed_interval(
     let mut sigma_a = Array2::<f64>::zeros((p, q));
     for (position, &row) in correction.rows.iter().enumerate() {
         let a = geometry.constraints.a.row(row);
-        normal_center[position] = a.dot(&geometry.unconstrained_center)
-            - geometry.constraints.b[row];
+        normal_center[position] =
+            a.dot(&geometry.unconstrained_center) - geometry.constraints.b[row];
         sigma_a
             .column_mut(position)
             .assign(&ambient_covariance.dot(&a));
@@ -453,12 +472,13 @@ pub fn constrained_projection_equal_tailed_interval(
     }
 
     let projection_lift = correction.lift.t().dot(contrast);
-    let normal_component_variance =
-        projection_lift.dot(&normal_covariance.dot(&projection_lift));
+    let normal_component_variance = projection_lift.dot(&normal_covariance.dot(&projection_lift));
     let residual_variance = ambient_variance - normal_component_variance;
     let residual_floor = (p.max(q).max(1) as f64)
         * f64::EPSILON
-        * ambient_variance.max(normal_component_variance).max(f64::MIN_POSITIVE);
+        * ambient_variance
+            .max(normal_component_variance)
+            .max(f64::MIN_POSITIVE);
     if residual_variance < -residual_floor || !residual_variance.is_finite() {
         return Err(format!(
             "constrained projection decomposition produced residual variance \
@@ -466,15 +486,163 @@ pub fn constrained_projection_equal_tailed_interval(
         ));
     }
     let residual_variance = residual_variance.max(0.0);
-    let posterior_mean =
-        ambient_mean + projection_lift.dot(&correction.normal_mean_shift);
+    let posterior_mean = ambient_mean + projection_lift.dot(&correction.normal_mean_shift);
     let upper_limits = correction.upper_limits();
     if upper_limits.len() != q {
         return Err(format!(
-            "constrained projection interval: {q} retained rows carry {} upper limits",
+            "constrained projection: {q} retained rows carry {} upper limits",
             upper_limits.len()
         ));
     }
+    Ok(ProjectionDecomposition {
+        ambient_mean,
+        ambient_variance,
+        truncated: Some(TruncatedProjection {
+            posterior_mean,
+            normal_center,
+            normal_covariance,
+            upper_limits,
+            projection_lift,
+            residual_variance,
+        }),
+    })
+}
+
+/// The LAW of one scalar projection `cᵀβ` of an inequality-truncated Gaussian
+/// posterior — not two of its quantiles, and not a normal fitted to its first
+/// two moments.
+///
+/// This is what the module's own decomposition produces:
+///
+/// ```text
+/// cᵀβ = cᵀβ_unc + (Gᵀc)ᵀ(u - E_untrunc[u]) + cᵀt,
+/// ```
+///
+/// a discrete mixture over the retained orthant's cubature nodes convolved with
+/// one independent Gaussian. Two properties a normal cannot have, and both are
+/// why this exists (#2446):
+///
+/// * **Every node is feasible.** The nodes are points of the retained orthant,
+///   so the law puts no mass on coefficient vectors the fit excluded. The
+///   normal with the same first two moments does — measurably, a few percent of
+///   its mass — because the pushforward of a cone-truncated joint through `cᵀ`
+///   is not a normal for `q > 1`.
+/// * **Its error is a RATE, not a floor.** Matching two moments is exact for a
+///   normal and wrong by a fixed amount for this law, so no extra work reduces
+///   it. The node sum converges with the cubature.
+///
+/// A consumer that integrates a SMOOTH functional barely notices the first
+/// property. One that integrates an indicator — any quantile, any exceedance
+/// probability — reads the location of mass at first order, and for it the
+/// moment-matched normal is not admissible at all.
+pub struct ConstrainedProjectionLaw {
+    /// `(location, weight)` per cubature node, weights summing to one. A
+    /// geometry with no correction is one node of weight one at the ambient
+    /// mean.
+    pub nodes: Vec<(f64, f64)>,
+    /// Variance of the independent Gaussian each node is convolved with. Zero
+    /// when the contrast is carried entirely by the retained constraint
+    /// normals, and then the mixture IS the whole law.
+    pub residual_variance: f64,
+}
+
+impl ConstrainedProjectionLaw {
+    /// `E[cᵀβ]` under this law.
+    pub fn mean(&self) -> f64 {
+        self.nodes
+            .iter()
+            .map(|(location, weight)| location * weight)
+            .sum()
+    }
+
+    /// `Var(cᵀβ)` under this law: the mixture's own spread plus the tangent.
+    pub fn variance(&self) -> f64 {
+        let mean = self.mean();
+        let spread = self
+            .nodes
+            .iter()
+            .map(|(location, weight)| weight * (location - mean) * (location - mean))
+            .sum::<f64>();
+        spread + self.residual_variance
+    }
+}
+
+/// Build [`ConstrainedProjectionLaw`] for `cᵀβ` from the persisted geometry and
+/// the ambient covariance, using the SAME cubature the module's moments and
+/// intervals use.
+pub fn constrained_projection_law(
+    ambient_covariance: &Array2<f64>,
+    geometry: &ConstrainedPosteriorGeometry,
+    contrast: &Array1<f64>,
+) -> Result<ConstrainedProjectionLaw, String> {
+    let decomposition = decompose_projection(ambient_covariance, geometry, contrast)?;
+    let Some(truncated) = decomposition.truncated else {
+        return Ok(ConstrainedProjectionLaw {
+            nodes: vec![(decomposition.ambient_mean, 1.0)],
+            residual_variance: decomposition.ambient_variance,
+        });
+    };
+    let nodes = converged_projection_nodes(
+        &truncated.normal_center,
+        &truncated.normal_covariance,
+        &truncated.upper_limits,
+        &truncated.projection_lift,
+        decomposition.ambient_mean,
+    )?;
+    Ok(ConstrainedProjectionLaw {
+        nodes: nodes
+            .into_iter()
+            .map(|node| (node.conditional_mean, node.weight))
+            .collect(),
+        residual_variance: truncated.residual_variance,
+    })
+}
+
+/// Equal-tailed interval for one linear projection of an inequality-truncated
+/// Gaussian posterior.
+///
+/// `ambient_covariance` is the pre-truncation covariance `Σ` in the active
+/// coefficient frame and `contrast` defines the scalar `cᵀβ`.  The affine
+/// shift of a saved coefficient gauge is deliberately not accepted here:
+/// callers add that deterministic shift to both returned endpoints.
+///
+/// The interval comes from the quantiles of the convolution
+/// [`decompose_projection`] produces, not from `posterior_mean ± z·posterior_sd`.
+pub fn constrained_projection_equal_tailed_interval(
+    ambient_covariance: &Array2<f64>,
+    geometry: &ConstrainedPosteriorGeometry,
+    contrast: &Array1<f64>,
+    level: f64,
+) -> Result<(f64, f64), String> {
+    if !(level.is_finite() && level > 0.0 && level < 1.0) {
+        return Err(format!(
+            "constrained projection interval level must lie in (0, 1), got {level}"
+        ));
+    }
+    let decomposition = decompose_projection(ambient_covariance, geometry, contrast)?;
+    let ambient_mean = decomposition.ambient_mean;
+    let ambient_variance = decomposition.ambient_variance;
+    let alpha = 0.5 * (1.0 - level);
+
+    let Some(truncated) = decomposition.truncated else {
+        let sd = ambient_variance.sqrt();
+        if sd == 0.0 {
+            return Ok((ambient_mean, ambient_mean));
+        }
+        let z = standard_normal_quantile(1.0 - alpha)
+            .map_err(|error| format!("constrained projection normal quantile: {error}"))?;
+        return Ok((ambient_mean - z * sd, ambient_mean + z * sd));
+    };
+
+    let TruncatedProjection {
+        posterior_mean,
+        normal_center,
+        normal_covariance,
+        upper_limits,
+        projection_lift,
+        residual_variance,
+    } = truncated;
+    let q = normal_center.len();
     if q == 1 && residual_variance == 0.0 && projection_lift[0] != 0.0 {
         let scalar_quantile = |probability: f64| -> Result<f64, String> {
             let normal_probability = if projection_lift[0] > 0.0 {
@@ -4290,6 +4458,238 @@ mod affine_ceiling_tests {
         assert_eq!(
             early.pivot, 0,
             "a normal on coordinate 0 cannot reach a later coordinate through a lower-triangular factor"
+        );
+    }
+}
+
+
+#[cfg(test)]
+mod projection_law_2446_tests {
+    use super::*;
+    use ndarray::array;
+
+    /// The integrand a locscale response-moment consumer actually evaluates:
+    /// a survival probability read off an inverse link at `eta0 + w`. Smooth,
+    /// bounded, and monotone, so nothing about the comparison below depends on
+    /// picking an integrand that flatters the mixture.
+    fn integrand(w: f64) -> f64 {
+        1.0 / (1.0 + (-0.5 + w).exp())
+    }
+
+    /// Composite Simpson on `[0, upper]`, odd `points`.
+    fn simpson<F: Fn(f64) -> f64>(lower: f64, upper: f64, points: usize, f: F) -> f64 {
+        assert!(points % 2 == 1, "Simpson needs an odd point count");
+        let h = (upper - lower) / ((points - 1) as f64);
+        let mut total = 0.0;
+        for index in 0..points {
+            let weight = if index == 0 || index == points - 1 {
+                1.0
+            } else if index % 2 == 1 {
+                4.0
+            } else {
+                2.0
+            };
+            total += weight * f(lower + h * (index as f64));
+        }
+        total * h / 3.0
+    }
+
+    /// `E[f(cᵀβ)]` under `N(center, covariance)` restricted to `β ≥ 0`, for a
+    /// two-dimensional fixture, by tensor Simpson on the exact density. This is
+    /// the reference: it never calls the cubature under test, and its own error
+    /// is `O(h⁴)` at `h ≈ 3e-3`.
+    fn exact_orthant_expectation(
+        center: &Array1<f64>,
+        covariance: &Array2<f64>,
+        contrast: &Array1<f64>,
+    ) -> f64 {
+        let det = covariance[[0, 0]] * covariance[[1, 1]] - covariance[[0, 1]] * covariance[[1, 0]];
+        let inverse = array![
+            [covariance[[1, 1]] / det, -covariance[[0, 1]] / det],
+            [-covariance[[1, 0]] / det, covariance[[0, 0]] / det]
+        ];
+        let density = |b0: f64, b1: f64| -> f64 {
+            let d0 = b0 - center[0];
+            let d1 = b1 - center[1];
+            let quadratic = inverse[[0, 0]] * d0 * d0
+                + 2.0 * inverse[[0, 1]] * d0 * d1
+                + inverse[[1, 1]] * d1 * d1;
+            (-0.5 * quadratic).exp()
+        };
+        // 12 sd past the wall in each coordinate leaves `exp(-72)` of the mass
+        // outside the box, which is below the reference's own quadrature error
+        // by more than twenty orders.
+        let upper0 = center[0].max(0.0) + 12.0 * covariance[[0, 0]].sqrt();
+        let upper1 = center[1].max(0.0) + 12.0 * covariance[[1, 1]].sqrt();
+        let points = 2001;
+        let mass = simpson(0.0, upper0, points, |b0| {
+            simpson(0.0, upper1, points, |b1| density(b0, b1))
+        });
+        let weighted = simpson(0.0, upper0, points, |b0| {
+            simpson(0.0, upper1, points, |b1| {
+                density(b0, b1) * integrand(contrast[0] * b0 + contrast[1] * b1)
+            })
+        });
+        weighted / mass
+    }
+
+    /// `E[f(w)]` under `N(mean, variance)` on the WHOLE line — the law the
+    /// locscale warp integral ships today: the normal carrying the constrained
+    /// posterior's first two moments.
+    fn normal_expectation(mean: f64, variance: f64) -> f64 {
+        let sd = variance.sqrt();
+        let points = 4001;
+        simpson(mean - 12.0 * sd, mean + 12.0 * sd, points, |w| {
+            let z = (w - mean) / sd;
+            (-0.5 * z * z).exp() * integrand(w)
+        }) / (sd * (2.0 * std::f64::consts::PI).sqrt())
+    }
+
+    /// Mass a moment-matched normal puts on `w < 0` — warps a non-negative
+    /// basis over a non-negative coefficient block cannot produce.
+    fn normal_infeasible_mass(mean: f64, variance: f64) -> f64 {
+        let sd = variance.sqrt();
+        let lower = mean - 12.0 * sd;
+        if lower >= 0.0 {
+            return 0.0;
+        }
+        simpson(lower, 0.0, 4001, |w| {
+            let z = (w - mean) / sd;
+            (-0.5 * z * z).exp()
+        }) / (sd * (2.0 * std::f64::consts::PI).sqrt())
+    }
+
+    /// #2446: the pushforward of a cone-truncated joint through a contrast is
+    /// NOT a normal, so reporting it as the normal with the right first two
+    /// moments has an error FLOOR. The mixture this module's own cubature
+    /// produces has an error RATE instead — and, unlike the normal, it puts no
+    /// mass on infeasible warps.
+    ///
+    /// The fixture is the `q = 2` near-wall case: both coefficients are
+    /// constrained non-negative (`A = I`), correlated, with the ambient centre
+    /// straddling the wall. The contrast is non-negative, as an I-spline basis
+    /// row is, so `w = bᵀβ ≥ 0` is exactly the feasible image.
+    ///
+    /// Measured here, against a reference that is a tensor Simpson rule on the
+    /// exact truncated density and calls none of the code under test.
+    #[test]
+    fn projection_law_beats_the_moment_matched_normal_on_a_two_row_cone_2446() {
+        let ambient = array![[0.40, 0.24], [0.24, 0.36]];
+        let center = array![0.05, -0.10];
+        let contrast = array![0.70, 0.30];
+        let constraints =
+            LinearInequalityConstraints::new(array![[1.0, 0.0], [0.0, 1.0]], array![0.0, 0.0])
+                .expect("build the two-row non-negativity cone");
+        let correction =
+            constrained_posterior_correction_from_covariance(&ambient, &center, &constraints)
+                .expect("the correction is computable on this face")
+                .expect("a centre straddling both walls must retain the face");
+        // The retention walk orders rows by slack, so compare the SET.
+        let mut retained = correction.rows.clone();
+        retained.sort_unstable();
+        assert_eq!(
+            retained,
+            vec![0, 1],
+            "the fixture must retain BOTH rows; a one-row face is the closed-form case and \
+             would measure nothing about the pushforward"
+        );
+        let geometry = ConstrainedPosteriorGeometry {
+            constraints,
+            mode: array![0.0, 0.0],
+            unconstrained_center: center.clone(),
+            correction: Some(correction.clone()),
+        };
+
+        // (e) the node mixture, from the SHIPPED cubature.
+        let law = constrained_projection_law(&ambient, &geometry, &contrast)
+            .expect("projection law on a retained face");
+        assert!(
+            law.residual_variance <= 1e-12 * ambient[[0, 0]],
+            "with `A = I` the contrast is carried entirely by the constraint normals, so the \
+             tangent component must vanish and the mixture must BE the whole law; got residual \
+             variance {:.3e}",
+            law.residual_variance
+        );
+        let weight_sum = law.nodes.iter().map(|(_, weight)| weight).sum::<f64>();
+        assert!(
+            (weight_sum - 1.0).abs() < 1e-9,
+            "node weights must be normalized, got {weight_sum:.12e}"
+        );
+        let infeasible_nodes = law
+            .nodes
+            .iter()
+            .filter(|(location, _)| *location < 0.0)
+            .count();
+        assert_eq!(
+            infeasible_nodes, 0,
+            "every cubature node is a point of the retained orthant, so no node may carry a \
+             negative warp"
+        );
+        let node_sum = law
+            .nodes
+            .iter()
+            .map(|(location, weight)| weight * integrand(*location))
+            .sum::<f64>();
+
+        // (c) the moment-matched normal: exactly what the locscale warp
+        // integral evaluates today.
+        let posterior_mean = contrast.dot(&correction.posterior_mean(&center));
+        let corrected = correction.apply_to_covariance(&ambient);
+        let posterior_variance = contrast.dot(&corrected.dot(&contrast));
+        let normal_value = normal_expectation(posterior_mean, posterior_variance);
+        let infeasible_mass = normal_infeasible_mass(posterior_mean, posterior_variance);
+
+        let reference = exact_orthant_expectation(&center, &ambient, &contrast);
+        let node_error = (node_sum - reference).abs();
+        let normal_error = (normal_value - reference).abs();
+        eprintln!(
+            "[2446] nodes={} reference={reference:.12e} node_sum={node_sum:.12e} \
+             (err {node_error:.3e}) normal={normal_value:.12e} (err {normal_error:.3e}) \
+             normal_infeasible_mass={infeasible_mass:.4e} \
+             posterior_mean={posterior_mean:.9e} law_mean={:.9e} \
+             posterior_variance={posterior_variance:.9e} law_variance={:.9e}",
+            law.nodes.len(),
+            law.mean(),
+            law.variance()
+        );
+
+        // The mixture must be the SAME object the module's moments describe,
+        // not a second estimand that happens to be nearby. Both moments are
+        // formed from the same cubature, so they agree to its own certified
+        // tolerance and no better -- asserting tighter would be asserting
+        // against `ORTHANT_MOMENT_RELATIVE_TOLERANCE` rather than against the
+        // law.
+        let moment_tolerance = 4.0 * ORTHANT_MOMENT_RELATIVE_TOLERANCE;
+        assert!(
+            (law.mean() - posterior_mean).abs()
+                <= moment_tolerance * posterior_variance.sqrt(),
+            "the node mixture's mean must be the reported posterior mean: law {:.9e} vs \
+             reported {posterior_mean:.9e}",
+            law.mean()
+        );
+        assert!(
+            (law.variance() - posterior_variance).abs()
+                <= moment_tolerance * posterior_variance,
+            "the node mixture's variance must be the reported posterior variance: law {:.9e} \
+             vs reported {posterior_variance:.9e}",
+            law.variance()
+        );
+
+        // The fixture must actually exercise the defect this issue is about.
+        assert!(
+            infeasible_mass > 1.0e-2,
+            "the moment-matched normal must put a non-trivial share of its mass on warps the \
+             cone excludes, or this fixture measures nothing; got {infeasible_mass:.3e}"
+        );
+        // The mixture agrees with the exact pushforward, which is the claim the
+        // moment-matched normal cannot make no matter how well its moments are
+        // computed: its error is a floor set by asserting normality, not a rate.
+        assert!(
+            node_error < 1.0e-4,
+            "the node mixture must agree with the exact pushforward: reference \
+             {reference:.12e}, node sum {node_sum:.12e} (error {node_error:.3e}); the \
+             moment-matched normal is at {normal_value:.12e} (error {normal_error:.3e}) with \
+             {infeasible_mass:.3e} of its mass on w < 0"
         );
     }
 }
