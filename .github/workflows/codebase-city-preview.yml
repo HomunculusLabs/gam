@@ -1,0 +1,49 @@
+name: Refresh codebase city preview
+
+on:
+  schedule:
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codebase-city-preview
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .github/codebase-city-preview/package-lock.json
+
+      - name: Install the pinned capture browser
+        run: npm ci --prefix .github/codebase-city-preview
+
+      - name: Install Chromium
+        run: npx --prefix .github/codebase-city-preview playwright install --with-deps chromium
+
+      - name: Capture the live city
+        run: node .github/codebase-city-preview/capture.cjs docs/images/codebase-city-latest.png
+
+      - name: Publish the changed preview
+        run: |
+          if git diff --quiet -- docs/images/codebase-city-latest.png; then
+            echo "The city pixels are already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/images/codebase-city-latest.png
+          git commit -m "chore: refresh codebase city preview [skip ci]"
+          git push origin HEAD:main

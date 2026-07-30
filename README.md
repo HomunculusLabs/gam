@@ -14,6 +14,14 @@ Docs: <https://gamfit.readthedocs.io/>. PyPI: <https://pypi.org/project/gamfit/>
 
 Contributions of every kind are welcome.
 
+## Live codebase city
+
+[![Latest GAM Codebase City: files become buildings, failures become fires, and repository relationships become roads](docs/images/codebase-city-latest.png)](https://gam-codebase-city.sauerslabs.chatgpt.site)
+
+The city is rebuilt from the repository's files, crates, issues, commits,
+tests, failures, Actions runs, and measurement history. The preview is checked
+and refreshed every two hours. [Explore the live 3D city.](https://gam-codebase-city.sauerslabs.chatgpt.site)
+
 ![3D Matérn fit on a noisy 2-D landscape](docs/images/surface_3d_wireframe.png)
 
 ## Scope

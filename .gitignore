@@ -237,3 +237,6 @@ experiments/spectrometer/*.npy
 artifacts/*
 artifacts/**
 artifacts/**/*
+
+# README city capture dependencies are installed only on demand.
+/.github/codebase-city-preview/node_modules/

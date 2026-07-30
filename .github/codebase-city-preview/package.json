@@ -1,0 +1,10 @@
+{
+  "name": "gam-codebase-city-preview",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Deterministic README capture for the GAM Codebase City",
+  "type": "commonjs",
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}
