@@ -41,40 +41,6 @@ struct PySampleOptions {
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PyExtendGroupRequest {
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    term: Option<String>,
-    #[serde(default)]
-    column: Option<String>,
-    #[serde(default)]
-    level: Option<serde_json::Value>,
-    #[serde(default)]
-    levels: Option<Vec<serde_json::Value>>,
-    #[serde(default)]
-    metadata: Option<serde_json::Value>,
-    #[serde(default)]
-    prior: Option<serde_json::Value>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PyExtensionPrior {
-    #[serde(default)]
-    mean: Option<f64>,
-    #[serde(default)]
-    mu: Option<f64>,
-    #[serde(default)]
-    variance: Option<f64>,
-    #[serde(default)]
-    precision: Option<f64>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct PyPredictOptions {
     /// Single uncertainty knob (issue #342): `Some(level)` requests the
     /// full-uncertainty predictor with that pointwise coverage level

@@ -68,6 +68,8 @@ pub(crate) use gam::inference::model::{
     SavedDeploymentExtension, append_deployment_extension_columns,
 };
 
+pub(crate) use gam::inference::model_extension::ExtendGroupRequest;
+
 pub(crate) use gam_predict::posterior_bands::{self, PosteriorPredictBandsPayload};
 
 pub(crate) use gam_predict::FittedModelPredictExt;

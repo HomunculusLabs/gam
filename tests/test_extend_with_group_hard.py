@@ -145,7 +145,8 @@ def test_extend_with_unknown_term_rejects_with_name_in_message() -> None:
 
 def test_extend_with_vector_mean_rejected() -> None:
     """``prior['mean']`` is a scalar in the Rust contract
-    (``crates/gam-pyffi/src/lib.rs:155`` ``PyExtensionPrior.mean: Option<f64>``).
+    (``crates/gam-models/src/inference/model_extension.rs``
+    ``ExtensionPrior.mean: Option<f64>``).
     Passing a list/array must raise rather than silently coerce."""
     model = _fit_simple()
     with pytest.raises(Exception):
