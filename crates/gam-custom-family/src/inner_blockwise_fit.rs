@@ -404,8 +404,7 @@ fn compare_quadratic_candidate_to_reference(
     let metric_delta_ref = metric.dot(&delta_ref);
     let metric_norm_squared = delta_ref.dot(&metric_delta_ref);
     let model_decrease = directional_descent - 0.5 * metric_norm_squared;
-    let tolerance =
-        1.0e-8 * (1.0 + directional_descent.abs().max(metric_norm_squared.abs()));
+    let tolerance = 1.0e-8 * (1.0 + directional_descent.abs().max(metric_norm_squared.abs()));
     Ok(QuadraticCandidateComparison {
         directional_descent,
         metric_norm_squared,
@@ -556,8 +555,8 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
         (clipped_violation, clipped_worst_row) = constraints
             .max_scaled_violation(clipped.view())
             .map_err(|error| {
-                format!("feasible-chord final endpoint classification failed: {error}")
-            })?;
+            format!("feasible-chord final endpoint classification failed: {error}")
+        })?;
     }
     if !clipped_violation.is_finite() || clipped_violation > 0.0 {
         return Err(format!(
@@ -816,9 +815,7 @@ fn certified_reduced_face_candidate(
              (candidate_scaled_violation={solver_candidate_violation:.6e}@{solver_candidate_worst_row:?})"
         ));
     }
-    if solver_candidate_violation
-        > gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL
-    {
+    if solver_candidate_violation > gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
         return Err(format!(
             "reduced-face QP endpoint violates the active-set feasibility contract \
              (candidate_scaled_violation={solver_candidate_violation:.6e}@{solver_candidate_worst_row:?}, \
@@ -1051,22 +1048,20 @@ mod exact_face_newton_tests {
         // its 9.005e-9 violation is below the solver's numerical feasibility
         // tolerance. The reduced-face theorem must explicitly strengthen that
         // contract rather than silently inheriting it.
-        let (raw_solver_candidate, _) =
-            gam_solve::active_set::solve_quadratic_with_constraint_set(
-                &face_metric,
-                &objective_rhs,
-                &feasible_base,
-                &constraints,
-                Some(&[0]),
-            )
-            .expect("generic tolerance-feasible QP endpoint");
+        let (raw_solver_candidate, _) = gam_solve::active_set::solve_quadratic_with_constraint_set(
+            &face_metric,
+            &objective_rhs,
+            &feasible_base,
+            &constraints,
+            Some(&[0]),
+        )
+        .expect("generic tolerance-feasible QP endpoint");
         let (raw_solver_violation, raw_solver_worst_row) = constraints
             .max_scaled_violation(raw_solver_candidate.view())
             .expect("raw solver endpoint violation");
         assert!(
             raw_solver_violation > 0.0
-                && raw_solver_violation
-                    <= gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL,
+                && raw_solver_violation <= gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL,
             "fixture must discriminate the generic tolerance contract from exact feasibility"
         );
         assert_eq!(raw_solver_worst_row, Some(0));
@@ -1098,8 +1093,7 @@ mod exact_face_newton_tests {
         )
         .expect("old comparison algebra");
         assert!(
-            infeasible_base_comparison.model_decrease
-                < -infeasible_base_comparison.tolerance
+            infeasible_base_comparison.model_decrease < -infeasible_base_comparison.tolerance
                 && !infeasible_base_comparison.certifies_no_inferiority(),
             "the infeasible-base theorem must reproduce the live false refusal"
         );
@@ -5916,8 +5910,11 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                         Ok(value)
                     }
                     Ok(None) => {
-                        match joint_line_search_log_likelihood(family, &line_search_options, &states)
-                        {
+                        match joint_line_search_log_likelihood(
+                            family,
+                            &line_search_options,
+                            &states,
+                        ) {
                             Ok((value, workspace)) => {
                                 accepted_joint_workspace = workspace;
                                 Ok(value)
@@ -8412,12 +8409,13 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // vector held here belongs to the states being returned. Bind
             // the operating point with it so the consumer checks that
             // rather than trusting the loop ordering (gam#2474).
-            let retained_likelihood_score = cached_joint_gradient.as_ref().map(|score| {
-                TerminalLikelihoodScore {
-                    beta: TerminalLikelihoodScore::joint_beta(&states),
-                    score: score.clone(),
-                }
-            });
+            let retained_likelihood_score =
+                cached_joint_gradient
+                    .as_ref()
+                    .map(|score| TerminalLikelihoodScore {
+                        beta: TerminalLikelihoodScore::joint_beta(&states),
+                        score: score.clone(),
+                    });
             return Ok(BlockwiseInnerResult {
                 block_states: states,
                 terminal_working_sets: cached_eval
@@ -8631,12 +8629,13 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // vector held here belongs to the states being returned. Bind
             // the operating point with it so the consumer checks that
             // rather than trusting the loop ordering (gam#2474).
-            let retained_likelihood_score = cached_joint_gradient.as_ref().map(|score| {
-                TerminalLikelihoodScore {
-                    beta: TerminalLikelihoodScore::joint_beta(&states),
-                    score: score.clone(),
-                }
-            });
+            let retained_likelihood_score =
+                cached_joint_gradient
+                    .as_ref()
+                    .map(|score| TerminalLikelihoodScore {
+                        beta: TerminalLikelihoodScore::joint_beta(&states),
+                        score: score.clone(),
+                    });
             return Ok(BlockwiseInnerResult {
                 block_states: states,
                 terminal_working_sets: cached_eval
@@ -8711,12 +8710,13 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // vector held here belongs to the states being returned. Bind
             // the operating point with it so the consumer checks that
             // rather than trusting the loop ordering (gam#2474).
-            let retained_likelihood_score = cached_joint_gradient.as_ref().map(|score| {
-                TerminalLikelihoodScore {
-                    beta: TerminalLikelihoodScore::joint_beta(&states),
-                    score: score.clone(),
-                }
-            });
+            let retained_likelihood_score =
+                cached_joint_gradient
+                    .as_ref()
+                    .map(|score| TerminalLikelihoodScore {
+                        beta: TerminalLikelihoodScore::joint_beta(&states),
+                        score: score.clone(),
+                    });
             return Ok(BlockwiseInnerResult {
                 block_states: states,
                 terminal_working_sets: cached_eval

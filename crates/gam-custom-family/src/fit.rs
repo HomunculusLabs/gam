@@ -1083,9 +1083,7 @@ pub(crate) fn effective_df_floor_rho_upper_bounds(
             };
             for (joint_idx, joint) in layout.joint_specs.iter().enumerate() {
                 let Some(group) = joint.group else { continue };
-                let Some(&(_, rho_star)) =
-                    group_bounds.iter().find(|(g, _)| *g == group)
-                else {
+                let Some(&(_, rho_star)) = group_bounds.iter().find(|(g, _)| *g == group) else {
                     continue;
                 };
                 let Some(&outer) = layout.joint_to_outer.get(joint_idx) else {
@@ -1101,7 +1099,10 @@ pub(crate) fn effective_df_floor_rho_upper_bounds(
     log::debug!(
         "[EDF-FLOOR] emitted rho upper bounds (ceiling={:.3}): {:?}",
         rho_box.ceiling(),
-        upper.iter().map(|b| (b * 1e6).round() / 1e6).collect::<Vec<_>>(),
+        upper
+            .iter()
+            .map(|b| (b * 1e6).round() / 1e6)
+            .collect::<Vec<_>>(),
     );
     Ok(upper)
 }
@@ -1221,19 +1222,19 @@ fn effective_df_floor_bound(
     if unit_weight_term_edf(gammas, ceiling)? >= target {
         return Ok(None);
     }
-            // If the existing lower side of the box has already smoothed this
-            // term below the structural floor, the floor is not enforceable
-            // inside the optimizer's admissible domain. Do not manufacture an
-            // upper bound numerically indistinguishable from (or below, after
-            // the optimizer's strict bound-validation tolerance is applied)
-            // the lower bound: that turns a legitimate model into an invalid
-            // rho-box before the data likelihood is even evaluated. This case
-            // occurs for very weakly scaled range-space directions, including
-            // dispersion location-scale smooths whose unit-weight generalized
-            // eigenvalues can put the edf=1 crossing just outside the `lower`
-            // wall of the rho box. Evaluating at `lower` (the real floor) rather
-            // than `-ceiling` guarantees the crossing bracketed below is strictly
-            // inside `(lower, ceiling)`, so the emitted upper stays above `lower`.
+    // If the existing lower side of the box has already smoothed this
+    // term below the structural floor, the floor is not enforceable
+    // inside the optimizer's admissible domain. Do not manufacture an
+    // upper bound numerically indistinguishable from (or below, after
+    // the optimizer's strict bound-validation tolerance is applied)
+    // the lower bound: that turns a legitimate model into an invalid
+    // rho-box before the data likelihood is even evaluated. This case
+    // occurs for very weakly scaled range-space directions, including
+    // dispersion location-scale smooths whose unit-weight generalized
+    // eigenvalues can put the edf=1 crossing just outside the `lower`
+    // wall of the rho box. Evaluating at `lower` (the real floor) rather
+    // than `-ceiling` guarantees the crossing bracketed below is strictly
+    // inside `(lower, ceiling)`, so the emitted upper stays above `lower`.
     if unit_weight_term_edf(gammas, lower)? <= target {
         return Ok(None);
     }

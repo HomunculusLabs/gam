@@ -604,9 +604,8 @@ pub(crate) fn joint_outer_gradient_uses_projected_trace_for_rank_deficient_penal
         ..BlockwiseFitOptions::default()
     };
     let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
-    let no_d2h = |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
-        Ok(None)
-    };
+    let no_d2h =
+        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
 
     let projected = joint_outer_evaluate(
         &inner,
@@ -784,9 +783,8 @@ pub(crate) fn joint_outer_gradient_projected_trace_drops_joint_null() {
         ..BlockwiseFitOptions::default()
     };
     let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
-    let no_d2h = |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
-        Ok(None)
-    };
+    let no_d2h =
+        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
 
     let projected = joint_outer_evaluate(
         &inner,
@@ -870,9 +868,8 @@ pub(crate) fn large_scale_rho_scan_joint_outer_evaluate_is_projection_invariant(
         array![[4.0, 0.2, 7.0], [0.2, 9.0, -3.0], [7.0, -3.0, 30.0]].mapv(|v| v * n_scale);
 
     let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
-    let no_d2h = |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
-        Ok(None)
-    };
+    let no_d2h =
+        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
 
     let mut g_un_at_10 = 0.0_f64;
     let mut g_pr_at_10 = 0.0_f64;
@@ -1195,9 +1192,8 @@ pub(crate) fn large_scale_multiblock_outer_gradient_with_realistic_drift_is_boun
     // large scale + Duchon-shape S.
     let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
     let compute_dh = no_dh;
-    let no_d2h = |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
-        Ok(None)
-    };
+    let no_d2h =
+        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
 
     // ── ParameterBlockSpec for each block.
     let mk_spec = |name: &str,
@@ -2717,9 +2713,9 @@ pub(crate) fn jeffreys_psi_mixed_geometry_preserves_workspace_authority() {
             assert_eq!(psi_index, 0);
             assert_eq!(direction.len(), 1);
             self.mixed_calls.fetch_add(1, Ordering::Relaxed);
-            Ok(Some(DriftDerivResult::Dense(array![[
-                0.125 * direction[0]
-            ]])))
+            Ok(Some(DriftDerivResult::Dense(array![
+                [0.125 * direction[0]]
+            ])))
         }
     }
 
@@ -6013,7 +6009,11 @@ fn the_drift_audits_pilot_beta_is_the_warm_start_not_zeros_2360() {
     let (pilot, current) = drift_audit_beta_pair(&specs, &states);
 
     assert_eq!(pilot.len(), 5, "the pilot is flattened over blocks, 2 + 3");
-    assert_eq!(current.len(), 5, "the current side is flattened the same way");
+    assert_eq!(
+        current.len(),
+        5,
+        "the current side is flattened the same way"
+    );
     assert_eq!(
         &pilot[..2],
         warm_a.as_slice().expect("contiguous"),

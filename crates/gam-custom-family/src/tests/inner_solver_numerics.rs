@@ -603,7 +603,10 @@ pub(crate) fn joint_trust_region_takes_a_measured_decrease_the_model_cannot_reso
     // the ordinary gain-ratio path keeps its labels and its arithmetic.
     let resolvable =
         update_joint_trust_region_radius(OLD_RADIUS, STEP_NORM, 1.0e-3, 1.0e-3, OBJECTIVE_SCALE);
-    assert!(resolvable.accepted, "a well-resolved unit gain ratio must accept");
+    assert!(
+        resolvable.accepted,
+        "a well-resolved unit gain ratio must accept"
+    );
     assert!(
         (resolvable.rho - 1.0).abs() <= 1e-12,
         "the gain ratio must still be actual/predicted, got {:.6e}",
@@ -672,8 +675,7 @@ pub(crate) fn objective_includes_solverridge_quadratic_term() {
     let beta = result.block_states[0].beta[0];
     let expected_penalty = 0.5 * ridge * beta * beta;
     assert!(
-        (result.penalized_objective().expect("objective present") - expected_penalty).abs()
-            < 1e-12,
+        (result.penalized_objective().expect("objective present") - expected_penalty).abs() < 1e-12,
         "penalized objective should equal ridge quadratic term when ll=0 and S=0; got {:?}, expected {}",
         result.penalized_objective(),
         expected_penalty

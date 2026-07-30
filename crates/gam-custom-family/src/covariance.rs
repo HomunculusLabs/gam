@@ -2866,13 +2866,9 @@ mod required_covariance_tests {
             gradient: array![-1.0],
             hessian: SymmetricMatrix::Dense(array![[1.0]]),
         }];
-        let from_working_sets = lower_bounded_posterior(
-            spec.clone(),
-            &states,
-            Some(working_sets.as_slice()),
-            None,
-        )
-        .expect("working-set route");
+        let from_working_sets =
+            lower_bounded_posterior(spec.clone(), &states, Some(working_sets.as_slice()), None)
+                .expect("working-set route");
 
         let retained = TerminalLikelihoodScore {
             beta: array![0.0],
