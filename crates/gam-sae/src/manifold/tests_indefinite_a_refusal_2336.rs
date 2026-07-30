@@ -356,6 +356,24 @@ fn zz_measure_best_seen_classification_2228() {
                 "2228-MEASURE: Ok(value={value:.9e}) certified; min_eig={min_eig:.6e} \
                  max_eig={max_eig:.6e} floor={floor:.6e}"
             );
+            // A CERTIFIED best-seen mode is only meaningful if the numbers it is
+            // certified on are well-posed: a finite criterion value, a finite
+            // ordered spectrum, and a strictly positive PD floor to compare against.
+            assert!(
+                value.is_finite(),
+                "2228-MEASURE: a certified best-seen mode must carry a finite criterion value, \
+                 got {value}"
+            );
+            assert!(
+                min_eig.is_finite() && max_eig.is_finite() && min_eig <= max_eig,
+                "2228-MEASURE: the exact-A spectrum must be finite and ordered \
+                 (min_eig={min_eig}, max_eig={max_eig})"
+            );
+            assert!(
+                floor > 0.0 && floor.is_finite(),
+                "2228-MEASURE: the relative PD floor the gate decides on must be a positive \
+                 finite number, got {floor}"
+            );
             // Every direction the gate examined, with the quantity it decided on.
             for (idx, &lambda) in eigs.iter().enumerate() {
                 if lambda >= -floor {
@@ -365,6 +383,15 @@ fn zz_measure_best_seen_classification_2228() {
                 let limit = total_t.min(v.len());
                 let e_v: f64 = (0..limit).map(|j| e_diag[j] * v[j] * v[j]).sum();
                 let basin = lambda + e_v;
+                // `basin` is the quantity the refuse/price decision is read off, so
+                // both of its addends must be real numbers; `e_v = vᵀEv` with E the
+                // ARD concave-clamp remainder is a diagonal quadratic form on a unit
+                // eigenvector and cannot be infinite.
+                assert!(
+                    e_v.is_finite() && basin.is_finite(),
+                    "2228-MEASURE: dir {idx}: the priced basin curvature must be finite \
+                     (lambda={lambda}, vEv={e_v})"
+                );
                 eprintln!(
                     "2228-MEASURE:   dir {idx}: lambda={lambda:.6e} vEv={e_v:.6e} \
                      basin={basin:.6e} vs -floor={:.6e} => {}",
@@ -560,6 +587,25 @@ fn zz_measure_saddle_escape_linesearch_reconverge_2336() {
         "2336-FINAL: obj={obj_final:.9e} min_eig={min_eig:.6e} max_eig={max_eig:.6e} n_neg={n_neg} now_pd_accepted={}",
         reclass.is_ok()
     );
+    // The escape verdict is read off this final line, so its three numbers must be
+    // mutually consistent and well-posed: a finite ordered spectrum, a finite
+    // objective, and a negative-eigenvalue count that agrees with the reported
+    // minimum (they are two readouts of the same spectrum and cannot disagree).
+    assert!(
+        min_eig.is_finite() && max_eig.is_finite() && min_eig <= max_eig,
+        "2336-FINAL: the exact-A spectrum must be finite and ordered \
+         (min_eig={min_eig}, max_eig={max_eig})"
+    );
+    assert!(
+        obj_final.is_finite(),
+        "2336-FINAL: the penalized objective at the final mode must be finite, got {obj_final}"
+    );
+    assert_eq!(
+        n_neg > 0,
+        min_eig < 0.0,
+        "2336-FINAL: the negative-eigenvalue count and the reported minimum are two readouts of \
+         one spectrum and must agree (n_neg={n_neg}, min_eig={min_eig})"
+    );
 }
 
 /// #2336 ROOT-CAUSE (zz_measure) — is the +1.25e-4 re-convergence CLIMB (v2) a
@@ -723,6 +769,28 @@ fn zz_measure_saddle_gate_desync_2336() {
             obj_stepped_frozen - obj_saddle,
             obj_stepped_refreshed - obj_stepped_frozen
         );
+        // GATE_SHIFT is a difference of two objectives, so both must be finite for
+        // the shift to mean anything, and the line search must return a step from
+        // inside its own bracket that never increases the objective it minimises
+        // (its accumulator is seeded at `obj_saddle` and only replaced on strict
+        // decrease — a violation means the search is reporting a different state
+        // than the one it priced).
+        assert!(
+            min_eig.is_finite()
+                && obj_saddle.is_finite()
+                && obj_min.is_finite()
+                && obj_stepped_frozen.is_finite()
+                && obj_stepped_refreshed.is_finite(),
+            "2336-GATESHIFT: every reported curvature and objective must be finite \
+             (min_eig={min_eig}, obj_saddle={obj_saddle}, obj_min={obj_min}, \
+              obj_stepped_frozen={obj_stepped_frozen}, \
+              obj_stepped_refreshed={obj_stepped_refreshed})"
+        );
+        assert!(
+            (0.0..=0.6).contains(&s_min) && obj_min <= obj_saddle,
+            "2336-GATESHIFT: the line search must return a bracketed step that does not raise \
+             the objective (s_min={s_min}, obj_min={obj_min}, obj_saddle={obj_saddle})"
+        );
     }
 
     // ---- Experiment B: re-converge with gates held frozen-consistent. ----
@@ -785,6 +853,26 @@ fn zz_measure_saddle_gate_desync_2336() {
              (v2 unfrozen was +1.25e-4 CLIMB). climb_removed={}",
             obj_reconv - obj_stepped,
             (obj_reconv - obj_stepped) < 1.0e-4
+        );
+        // The FROZENVERDICT is `obj_reconv - obj_stepped`; a non-finite endpoint
+        // would make the printed climb (and the `climb_removed` boolean derived
+        // from it) arbitrary. The re-converged spectrum's two readouts must also
+        // agree with each other.
+        assert!(
+            min_eig.is_finite()
+                && obj_saddle.is_finite()
+                && obj_stepped.is_finite()
+                && obj_reconv.is_finite()
+                && min_eig2.is_finite(),
+            "2336-FROZENRECONV: every reported curvature and objective must be finite \
+             (min_eig={min_eig}, obj_saddle={obj_saddle}, obj_stepped={obj_stepped}, \
+              obj_reconv={obj_reconv}, min_eig_reconv={min_eig2})"
+        );
+        assert_eq!(
+            n_neg2 > 0,
+            min_eig2 < 0.0,
+            "2336-FROZENRECONV: the re-converged negative-eigenvalue count must agree with the \
+             reported minimum (n_neg={n_neg2}, min_eig={min_eig2})"
         );
     }
 }
@@ -898,6 +986,21 @@ fn zz_measure_e_attributability_2336() {
         // coord-localised (hence ARD-relevant) the direction is.
         let t_frac = (0..total_t).map(|j| v[j] * v[j]).sum::<f64>();
         let priced = lambda + e_v;
+        // `attributable` is the theory verdict; it is only a verdict if its inputs
+        // are well-posed. `v` is a unit eigenvector, so the t-block's share of its
+        // squared norm is a fraction in [0,1]: if `t_frac` ever left that range the
+        // "coord-localised" cross-check printed next to it would be meaningless.
+        assert!(
+            e_v.is_finite() && priced.is_finite() && vt_dc.is_finite(),
+            "2336-EATTR: neg#{n_neg}: the attributability inputs must be finite \
+             (lambda={lambda}, e_v={e_v}, full(B-A)v.v={})",
+            -vt_dc
+        );
+        assert!(
+            (-1.0e-9..=1.0 + 1.0e-9).contains(&t_frac),
+            "2336-EATTR: neg#{n_neg}: v is a unit eigenvector, so its t-block share must lie in \
+             [0,1], got t_frac={t_frac}"
+        );
         let attributable = priced >= -floor;
         if !attributable {
             all_attributable = false;

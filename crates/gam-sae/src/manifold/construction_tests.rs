@@ -1311,7 +1311,28 @@ mod amortized_encoder_tests {
                 "DEFL row={row} q={q} defl_dirs={dirs} spectrum_some={spec} \
                  dHtt_ard0_max={ht0:.3e} dHtt_ard1_max={ht1:.3e}"
             );
+            // The whole reading of this probe is "is `∂H_tt/∂ρ_ard` zero or not",
+            // so the reported block maxima must be well-posed magnitudes: a |·|-max
+            // is finite and non-negative by construction, and a NaN would print as
+            // a plausible-looking number while destroying the zero/non-zero verdict.
+            assert!(
+                ht0.is_finite() && ht0 >= 0.0 && ht1.is_finite() && ht1 >= 0.0,
+                "row {row}: the ARD ∂H_tt/∂ρ block maxima are absolute-value maxima and must be \
+                 finite and non-negative, got dHtt_ard0_max={ht0}, dHtt_ard1_max={ht1}"
+            );
+            // The row must actually have coordinates for a block max to mean
+            // anything; a zero-width block would make every printed max a vacuous 0.
+            assert!(
+                q > 0 && base + q <= m_ops[&ard0].nrows(),
+                "row {row}: the cache row block [{base}, {base}+{q}) must be a nonempty slice of \
+                 the {}-dimensional ARD operator",
+                m_ops[&ard0].nrows()
+            );
         }
+        assert!(
+            term.n_obs() > 0,
+            "the deflation probe must inspect at least one row, otherwise it reports nothing"
+        );
     }
 
     /// #2330 — attribute the g3 cross non-conservation to the trace vs frozen-DK
@@ -1349,11 +1370,27 @@ mod amortized_encoder_tests {
             .ch5_twist_leg_cross(&rho, target.view(), &cache, smooth0, ard0)
             .expect("twist leg cross");
         let names = ["part_a_tr", "part_a_dk", "part_b_tr", "part_b_dk"];
+        // The attribution only works if every named leg is present: a shortened
+        // return silently drops the suspect leg (`part_a_dk`) from the report while
+        // `zip` still prints a tidy-looking table of the survivors.
+        assert_eq!(
+            legs.len(),
+            names.len(),
+            "the twist split must return one cross pair per named leg {names:?}, got {}",
+            legs.len()
+        );
         for (name, (ij, ji)) in names.iter().zip(legs.iter()) {
             eprintln!(
                 "LEG {name}: <leg_smooth,b_ard>={ij:.6e} <leg_ard,b_smooth>={ji:.6e} \
                  asym={:.3e}",
                 (ij - ji).abs()
+            );
+            // The asymmetry printed per leg is the measurement; it is only readable
+            // if both inner products are finite numbers.
+            assert!(
+                ij.is_finite() && ji.is_finite(),
+                "leg {name}: both cross pairings must be finite, got \
+                 <leg_smooth,b_ard>={ij}, <leg_ard,b_smooth>={ji}"
             );
         }
     }

@@ -2421,12 +2421,43 @@ fn sae_exact_a_pd_window_scan_2330_patchd() {
         match built {
             Ok((_value, _loss, cache)) => {
                 match term.exact_a_spectrum_summary(&rho, target.view(), &cache) {
-                    Ok((min_eig, max_eig, n_neg, dc_frob, a_frob)) => eprintln!(
-                        "PATCHD_WINDOW scale={scale:.4} PD_OK min_eig={min_eig:.6e} \
-                         max_eig={max_eig:.6e} n_neg={n_neg} dc_frob={dc_frob:.6e} \
-                         a_frob={a_frob:.6e} dc_rel={:.6e}",
-                        dc_frob / a_frob.max(1.0e-300)
-                    ),
+                    Ok((min_eig, max_eig, n_neg, dc_frob, a_frob)) => {
+                        eprintln!(
+                            "PATCHD_WINDOW scale={scale:.4} PD_OK min_eig={min_eig:.6e} \
+                             max_eig={max_eig:.6e} n_neg={n_neg} dc_frob={dc_frob:.6e} \
+                             a_frob={a_frob:.6e} dc_rel={:.6e}",
+                            dc_frob / a_frob.max(1.0e-300)
+                        );
+                        // This window scan decides where the Patch-D arbiter may be
+                        // anchored, so each summary row must be a real spectrum
+                        // summary: ordered finite extremes, Frobenius norms that are
+                        // finite non-negative magnitudes, and a negative count that
+                        // agrees with the reported minimum. A silently-NaN row would
+                        // otherwise read as "PD_OK".
+                        assert!(
+                            min_eig.is_finite() && max_eig.is_finite() && min_eig <= max_eig,
+                            "scale={scale}: the exact-A spectrum must be finite and ordered \
+                             (min_eig={min_eig}, max_eig={max_eig})"
+                        );
+                        assert!(
+                            dc_frob.is_finite()
+                                && dc_frob >= 0.0
+                                && a_frob.is_finite()
+                                && a_frob >= 0.0,
+                            "scale={scale}: Frobenius norms must be finite non-negative \
+                             magnitudes (dc_frob={dc_frob}, a_frob={a_frob})"
+                        );
+                        // `n_neg` counts eigenvalues below the relative PD floor, so
+                        // it may be 0 while `min_eig` is a hair negative — but it
+                        // can never be positive unless the minimum is genuinely
+                        // negative. That one-way implication is exact.
+                        assert!(
+                            n_neg == 0 || min_eig < 0.0,
+                            "scale={scale}: {n_neg} eigenvalue(s) below the PD floor but the \
+                             reported minimum is min_eig={min_eig} ≥ 0 — the count and the \
+                             minimum are two readouts of one spectrum"
+                        );
+                    }
                     Err(e) => eprintln!("PATCHD_WINDOW scale={scale:.4} SPECTRUM_ERR {e}"),
                 }
             }

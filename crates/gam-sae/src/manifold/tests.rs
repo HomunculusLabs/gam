@@ -4109,6 +4109,31 @@ fn zz_measure_smoothness_dof_bundle_vs_deflated_2499() {
          plain_selected_inverse_available={}",
         solver.plain_selected_inverse_available()
     );
+    // The three routes are only comparable if each returned a per-atom EDF vector
+    // of the same shape, made of finite non-negative degrees of freedom; a route
+    // that silently returns an empty/short vector or a NaN would print as a
+    // difference and be attributed to deflation.
+    assert!(
+        max_abs.is_finite() && max_abs >= 0.0,
+        "[#2499] the plain-vs-deflated selected-inverse gap is a max |·| and must be a finite \
+         non-negative magnitude, got {max_abs}"
+    );
+    assert!(
+        !from_probes.is_empty()
+            && from_probes.len() == dense_deflated.len()
+            && from_probes.len() == with_solver.len(),
+        "[#2499] the three smoothness-EDF routes must return the same nonempty per-atom shape: \
+         from_probes={from_probes:?} dense_deflated={dense_deflated:?} with_solver={with_solver:?}"
+    );
+    assert!(
+        from_probes
+            .iter()
+            .chain(dense_deflated.iter())
+            .chain(with_solver.iter())
+            .all(|v| v.is_finite() && *v >= 0.0),
+        "[#2499] a smoothness effective dof is a finite non-negative trace: \
+         from_probes={from_probes:?} dense_deflated={dense_deflated:?} with_solver={with_solver:?}"
+    );
 
     // The three routes agree bitwise here, so the parity desync is NOT the
     // deflated-vs-plain selected inverse. Reproduce the gate's exact call
@@ -4141,6 +4166,25 @@ fn zz_measure_smoothness_dof_bundle_vs_deflated_2499() {
         bundled_components.logdet_trace[smooth_index],
         0.5 * after_loss[0],
         0.5 * from_probes[0],
+    );
+    // The desync this probe attributes is `dense - bundled` on one coordinate, so
+    // that coordinate must exist in both component vectors and be finite in both.
+    assert!(
+        smooth_index < dense_components.logdet_trace.len()
+            && smooth_index < bundled_components.logdet_trace.len(),
+        "[#2499] the smooth coordinate {smooth_index} must be present in both logdet-trace \
+         vectors (dense len={}, bundled len={})",
+        dense_components.logdet_trace.len(),
+        bundled_components.logdet_trace.len()
+    );
+    assert!(
+        dense_components.logdet_trace[smooth_index].is_finite()
+            && bundled_components.logdet_trace[smooth_index].is_finite()
+            && after_loss.iter().all(|v| v.is_finite()),
+        "[#2499] both logdet-trace routes must report a finite smooth coordinate \
+         (dense={}, bundled={}, after_loss={after_loss:?})",
+        dense_components.logdet_trace[smooth_index],
+        bundled_components.logdet_trace[smooth_index]
     );
 }
 

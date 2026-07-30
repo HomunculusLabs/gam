@@ -209,6 +209,14 @@ fn zz_measure_inner_step_acceptance_trace_2267() {
     }
 
     let (mut term, z, rho) = p16_circle_rung();
+    // The trace is only readable if it describes the rung this probe claims to
+    // read: a finite p=16 target the solver can actually be run against.
+    assert!(
+        z.ncols() == 16 && z.nrows() > 0 && z.iter().all(|v| v.is_finite()),
+        "[2267-TRACE] the p=16 rung must be a finite n-by-16 target, got {}x{}",
+        z.nrows(),
+        z.ncols()
+    );
     let started = std::time::Instant::now();
     let evaluated = term.penalized_quasi_laplace_criterion_with_cache_refine_policy(
         z.view(),
@@ -222,10 +230,20 @@ fn zz_measure_inner_step_acceptance_trace_2267() {
     );
     let wall = started.elapsed().as_secs_f64();
     match evaluated {
-        Ok(value) => eprintln!(
-            "[2267-TRACE] criterion CONVERGED cost={:.6e} in {wall:.2}s",
-            value.0
-        ),
+        Ok(value) => {
+            eprintln!(
+                "[2267-TRACE] criterion CONVERGED cost={:.6e} in {wall:.2}s",
+                value.0
+            );
+            // A criterion that reports CONVERGED must have a real cost behind it:
+            // a `+inf`/NaN returned as `Ok` is exactly the refusal-laundering this
+            // trace is meant to expose, and would print as a plausible line.
+            assert!(
+                value.0.is_finite(),
+                "[2267-TRACE] a CONVERGED criterion must carry a finite cost, got {}",
+                value.0
+            );
+        }
         Err(err) => eprintln!("[2267-TRACE] criterion REFUSED in {wall:.2}s: {err}"),
     }
 }

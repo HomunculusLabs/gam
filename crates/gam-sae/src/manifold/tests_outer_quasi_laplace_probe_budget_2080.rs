@@ -1319,6 +1319,27 @@ fn zz_measure_wide_p_criterion_cost_localizer_2080() {
              materialize_M={dt_m:8.3}s | eigh_E-M={dt_eigh:8.3}s | full={dt_full:8.3}s",
             a_dense.nrows(),
         );
+        // The cost attribution above is only about the right work if each phase
+        // actually produced its object: a square exact A covering at least the
+        // t-block, and finite log-dets. A refusal laundered into a non-finite
+        // `log_dets` would otherwise be timed and reported as a successful phase.
+        assert!(
+            a_dense.nrows() == a_dense.ncols() && a_dense.nrows() >= total_t,
+            "p={p}: the materialized exact A must be a square operator covering the {total_t} \
+             t-coordinates, got {}x{}",
+            a_dense.nrows(),
+            a_dense.ncols()
+        );
+        assert!(
+            log_dets.0.is_finite() && log_dets.1.is_finite(),
+            "p={p}: the exact observed-information log-dets this phase is timed on must be \
+             finite, got {log_dets:?}"
+        );
+        assert!(
+            dim > 0 && beta_dim > 0,
+            "p={p}: the localizer must be run on a nonempty system (dim={dim}, \
+             beta_dim={beta_dim})"
+        );
     }
 }
 
@@ -1369,6 +1390,21 @@ fn zz_measure_2439_value_vs_gradient_inner_mode() {
         eprintln!(
             "[#2439 {tag}] value={:.16e} grad_lane={:.16e} diff={diff:.6e} bound={bound:.6e}",
             a.cost, b.cost
+        );
+        // Both lanes ACCEPTED (the `.expect(...)`s above), so both must price a
+        // finite cost — `diff` and the certification `bound` it is compared against
+        // are otherwise undefined and the two candidate causes cannot be separated.
+        assert!(
+            a.cost.is_finite() && b.cost.is_finite(),
+            "[#2439 {tag}] both accepted lanes must price a finite cost \
+             (value={}, grad_lane={})",
+            a.cost,
+            b.cost
+        );
+        assert!(
+            diff.is_finite() && bound > 0.0,
+            "[#2439 {tag}] the lane gap and its certification bound must be well-defined \
+             (diff={diff}, bound={bound})"
         );
         match (&a.inner_beta_hint, &b.inner_beta_hint) {
             (Some(bv), Some(bg)) if bv.len() == bg.len() => {
@@ -1453,6 +1489,14 @@ fn zz_measure_2228_value_lane_budget_sweep() {
     let z = one_circle_wide_target(n, p, 0.05);
     let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let (lr, re, rb) = (0.04_f64, 1.0e-6_f64, 1.0e-6_f64);
+    // The sweep's binary CONVERGED/REFUSED outcome only answers the rate-vs-floor
+    // question if every budget is run against the same well-posed wide-p target.
+    assert!(
+        z.nrows() == n && z.ncols() == p && z.iter().all(|v| v.is_finite()),
+        "[#2228 sweep] the wide-p target must be a finite {n}x{p} matrix, got {}x{}",
+        z.nrows(),
+        z.ncols()
+    );
 
     for imi in [8usize, 16, 32, 64, 128] {
         // Rebuild the term and rho per budget: the criterion mutates inner state,
@@ -1497,6 +1541,24 @@ fn zz_measure_2228_value_lane_budget_sweep() {
         };
         eprintln!("[#2228 sweep] imi={imi:>4} full={full_report}");
         eprintln!("[#2228 sweep] imi={imi:>4} coarse={coarse_report}");
+        // "CONVERGED" is the answer this sweep records, so an `Ok` carrying a
+        // non-finite value would flip the rate-vs-floor verdict while printing as
+        // a converged budget.
+        if let Ok((value, _, _)) = &full {
+            assert!(
+                value.is_finite(),
+                "[#2228 sweep] imi={imi}: a CONVERGED full-budget criterion must carry a finite \
+                 value, got {value}"
+            );
+        }
+        if let Ok(evaluated) = &coarse {
+            assert!(
+                evaluated.0.is_finite(),
+                "[#2228 sweep] imi={imi}: a CONVERGED coarse-budget criterion must carry a \
+                 finite value, got {}",
+                evaluated.0
+            );
+        }
     }
 }
 

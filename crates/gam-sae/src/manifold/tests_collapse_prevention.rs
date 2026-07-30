@@ -2303,6 +2303,16 @@ fn zz_measure_separation_force_vs_c2_2253() {
         let (v, g) = term.separation_barrier_value_and_grad_for_test(1.0);
         let fnorm = g.iter().map(|x| x * x).sum::<f64>().sqrt();
         eprintln!("SEPFORCE c2={c2:.6} value={v:.6e} force_gradnorm={fnorm:.6e}");
+        // Well-posedness of the two quantities this probe reports: the barrier is
+        // finite strictly inside the collapse boundary (c2 < 1 here) and a gradient
+        // norm is a finite non-negative magnitude. A NaN/inf from the barrier — the
+        // failure mode a near-collapse sweep actually risks — reds here instead of
+        // being printed and ignored.
+        assert!(
+            v.is_finite() && fnorm.is_finite() && fnorm >= 0.0,
+            "c²={c2}: the separation-barrier value and restoring-force norm must be finite \
+             (value={v}, force_gradnorm={fnorm})"
+        );
     }
 }
 
@@ -2322,6 +2332,19 @@ fn zz_measure_real_fixture_barrier_q_2253() {
             eprintln!(
                 "REALQ {tag} pair=({j},{k}) q={q:.6e} o_c2={o:.6e} lam_min=1-q*o={:.6e}",
                 1.0 - q * o
+            );
+            // The three printed quantities are a probability-like co-firing weight,
+            // a squared cosine, and the collapsing eigenvalue they imply. Each has
+            // a definitional range; a gate that starts reporting an out-of-range or
+            // non-finite q/o makes every printed lam_min meaningless.
+            assert!(
+                q.is_finite() && (0.0..=1.0).contains(q),
+                "{tag} pair=({j},{k}): the co-firing weight must be a weight in [0,1], got q={q}"
+            );
+            assert!(
+                o.is_finite() && (-1.0e-12..=1.0 + 1.0e-12).contains(&o),
+                "{tag} pair=({j},{k}): the decoder coherence is a squared cosine and must lie \
+                 in [0,1], got o={o}"
             );
         }
         if pairs.is_empty() {
@@ -2366,6 +2389,21 @@ fn zz_measure_tiny_fixture_target_rank_2253() {
         let s1 = s.first().copied().unwrap_or(0.0);
         let s2 = s.get(1).copied().unwrap_or(0.0);
         let ratio = if s1 > 0.0 { s2 / s1 } else { 0.0 };
+        // The rank verdict is read off `ratio`, so the spectrum it comes from must
+        // be a real singular spectrum: finite, non-negative, descending. A reversed
+        // or non-finite spectrum would invert the "fixture under-power" reading.
+        assert!(
+            s.iter().all(|x| x.is_finite() && *x >= 0.0),
+            "{tag}: singular values must be finite and non-negative, got {s:?}"
+        );
+        assert!(
+            s.windows(2).all(|w| w[0] >= w[1]),
+            "{tag}: singular values must be returned in descending order, got {s:?}"
+        );
+        assert!(
+            (0.0..=1.0).contains(&ratio),
+            "{tag}: sigma2/sigma1 must lie in [0,1], got {ratio} from sigma1={s1}, sigma2={s2}"
+        );
         let sfmt: Vec<String> = s.iter().map(|x| format!("{x:.4e}")).collect();
         eprintln!(
             "TARGETRANK {tag} dim={:?} sigmas={:?} sigma2_over_sigma1={ratio:.6e}",
