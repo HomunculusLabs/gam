@@ -6305,6 +6305,14 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         if k == 0 || data.beta_dim != k || sys.k != k {
             return Err(ArrowSchurGpuFailure::Unavailable);
         }
+        // #2502 GUARD: a residency-only payload (a_phi/local_jac staged for the
+        // CPU resident reduced-Schur, no H_bb blocks) carries NO data-fit Gram
+        // and NO smooth penalty; the legacy kernel would solve against a
+        // ridge-only H_bb. Decline so the host falls back to the CPU operator,
+        // which composes H_bb through the system closures.
+        if data.sparse_g_blocks.is_empty() && data.smooth_blocks.is_empty() && data.frame.is_none() {
+            return Err(ArrowSchurGpuFailure::Unavailable);
+        }
         // #1017/#1026 GUARD: the legacy `⊗ I_p` kernel must NEVER receive framed
         // data (factored `G ⊗ W_{ij}` + dense per-row cross blocks); decline so a
         // mis-route falls back to the CPU rather than returning a wrong step.
