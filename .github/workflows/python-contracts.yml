@@ -280,6 +280,35 @@ jobs:
         # an unattended 12-hourly job must not be one version bump away from
         # aborting the suite partway and publishing a truncated inventory. 200 is
         # far above any plausible count while still bounding a true crash loop.
+        #
+        # faulthandler_timeout=240 is what makes those worker deaths DIAGNOSABLE,
+        # and without it every one of them is reason-free. pytest-timeout's thread
+        # method does produce a diagnosis -- `timeout_timer` calls
+        # `dump_stacks(terminal)` naming the exact hung frame -- and then calls
+        # `os._exit(1)` on the very next line. Under xdist that terminal is a
+        # buffered execnet channel, and `os._exit` skips every flush, so the dump
+        # is written and discarded microseconds later. That is the whole reason a
+        # timed-out test reports only `worker 'gwN' crashed while running ...`
+        # with no stack: the stack existed and was thrown away.
+        #
+        # pytest's own faulthandler plugin re-arms `dump_traceback_later` per test
+        # item and writes from C straight to fd 2, which is neither buffered by
+        # execnet nor dependent on a Python flush, so its dump survives the
+        # `os._exit` that eats pytest-timeout's. 240 < 300 is load-bearing: the
+        # dump must fire BEFORE pytest-timeout kills the worker, and 60s of margin
+        # covers a badly contended runner. `faulthandler_exit_on_timeout` stays at
+        # its default false so pytest-timeout still owns the kill and the 300s
+        # verdict is unchanged -- this adds evidence, it does not change any
+        # pass/fail outcome or any count in the JUnit artifact.
+        #
+        # MEASURED, not assumed: verified on a `time.sleep` fixture under
+        # `-n 2 --timeout=20 --timeout-method=thread`. Without it, the run emits
+        # `[gw1] node down: Not properly terminated` + `worker 'gw1' crashed while
+        # running ...` and no stack. With it, the controller log names the hung
+        # test function and its callers. Caveat worth knowing when reading the
+        # log: concurrent workers write their dumps to the same fd 2 with no
+        # locking, so simultaneous dumps interleave character-wise and need
+        # picking apart by hand. Interleaved evidence still beats none.
         working-directory: ${{ runner.temp }}
         run: |
           python -m pytest "$GITHUB_WORKSPACE/tests/" \
@@ -287,6 +316,7 @@ jobs:
             -p no:cacheprovider \
             -n auto --timeout=300 --timeout-method=thread \
             --max-worker-restart=200 \
+            -o faulthandler_timeout=240 \
             -o addopts="--import-mode=importlib" \
             --junitxml="$RUNNER_TEMP/py1512_junit.xml" \
             -q --tb=line
