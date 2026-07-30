@@ -2792,3 +2792,92 @@ mod observed_single_source_oracle_tests {
         }
     }
 }
+
+/// The three `CustomFamily` joint-ψ hooks, generated once for every
+/// location-scale family already on the normalised `_for_specs` signature.
+///
+/// These three hooks are a family's exact likelihood-side contribution to the
+/// unified full `[rho, psi]` outer Hessian:
+///
+///   `exact_newton_joint_psi_terms(..)`                          -> `D_a`, `D_{beta a}`, `D_{beta beta a}`
+///   `exact_newton_joint_psisecond_order_terms(..)`              -> `D_ab`, `D_{beta ab}`, `D_{beta beta ab}`
+///   `exact_newton_joint_psihessian_directional_derivative(..)`  -> `T_a[u]`
+///
+/// Generic exact-joint code in `custom_family.rs` adds all realized penalty
+/// motion `S_a` / `S_ab` and combines these likelihood-only objects with the
+/// joint mode solves `beta_i`, `beta_ij` and the total Hessian drifts
+/// `dot H_i`, `ddot H_ij`. Keeping this contract explicit is what makes a
+/// wiggle family's full `[rho, psi]` Hessian real rather than a gradient-only
+/// or block-local surrogate.
+///
+/// (That contract was written out on exactly one of the four copies, in
+/// `binomial/wiggle_custom_family.rs`. Collapsing the copies would have
+/// deleted the only statement of it in the tree, so it moved here — #2470.)
+///
+/// Each body is a family-axis guard plus a forward into the family's
+/// `_for_specs` entry. The guard is the one that survives: the `_for_specs`
+/// methods themselves no longer re-check `family_axis_count()`, because these
+/// hooks are their only callers.
+macro_rules! impl_location_scale_joint_psi_custom_family_hooks {
+    ($label:literal) => {
+        fn exact_newton_joint_psi_terms(
+            &self,
+            block_states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+            hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
+            psi_index: usize,
+        ) -> Result<Option<gam_problem::ExactNewtonJointPsiTerms>, String> {
+            if hyper_layout.family_axis_count() != 0 {
+                return Err(concat!($label, " does not declare family-owned hyper axes").to_string());
+            }
+            self.exact_newton_joint_psi_terms_for_specs(
+                block_states,
+                specs,
+                hyper_layout.design_derivative_blocks(),
+                psi_index,
+            )
+        }
+
+        fn exact_newton_joint_psisecond_order_terms(
+            &self,
+            block_states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+            hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
+            psi_i: usize,
+            psi_j: usize,
+        ) -> Result<Option<gam_problem::ExactNewtonJointPsiSecondOrderTerms>, String> {
+            if hyper_layout.family_axis_count() != 0 {
+                return Err(concat!($label, " does not declare family-owned hyper axes").to_string());
+            }
+            self.exact_newton_joint_psisecond_order_terms_for_specs(
+                block_states,
+                specs,
+                hyper_layout.design_derivative_blocks(),
+                psi_i,
+                psi_j,
+            )
+        }
+
+        fn exact_newton_joint_psihessian_directional_derivative(
+            &self,
+            block_states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+            hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
+            psi_index: usize,
+            d_beta_flat: &Array1<f64>,
+        ) -> Result<Option<Array2<f64>>, String> {
+            if hyper_layout.family_axis_count() != 0 {
+                return Err(concat!($label, " does not declare family-owned hyper axes").to_string());
+            }
+            self.exact_newton_joint_psihessian_directional_derivative_for_specs(
+                block_states,
+                specs,
+                hyper_layout.design_derivative_blocks(),
+                psi_index,
+                d_beta_flat,
+            )
+        }
+    };
+}
+
+pub(crate) use impl_location_scale_joint_psi_custom_family_hooks;

@@ -2420,66 +2420,7 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
         )
     }
 
-    fn exact_newton_joint_psi_terms(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
-        psi_index: usize,
-    ) -> Result<Option<gam_problem::ExactNewtonJointPsiTerms>, String> {
-        if hyper_layout.family_axis_count() != 0 {
-            return Err("GaussianLocationScaleWiggleFamily does not declare family-owned hyper axes"
-                .to_string());
-        }
-        self.exact_newton_joint_psi_terms_for_specs(
-            block_states,
-            specs,
-            hyper_layout.design_derivative_blocks(),
-            psi_index,
-        )
-    }
-
-    fn exact_newton_joint_psisecond_order_terms(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
-        psi_i: usize,
-        psi_j: usize,
-    ) -> Result<Option<gam_problem::ExactNewtonJointPsiSecondOrderTerms>, String> {
-        if hyper_layout.family_axis_count() != 0 {
-            return Err("GaussianLocationScaleWiggleFamily does not declare family-owned hyper axes"
-                .to_string());
-        }
-        self.exact_newton_joint_psisecond_order_terms_for_specs(
-            block_states,
-            specs,
-            hyper_layout.design_derivative_blocks(),
-            psi_i,
-            psi_j,
-        )
-    }
-
-    fn exact_newton_joint_psihessian_directional_derivative(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
-        psi_index: usize,
-        d_beta_flat: &Array1<f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        if hyper_layout.family_axis_count() != 0 {
-            return Err("GaussianLocationScaleWiggleFamily does not declare family-owned hyper axes"
-                .to_string());
-        }
-        self.exact_newton_joint_psihessian_directional_derivative_for_specs(
-            block_states,
-            specs,
-            hyper_layout.design_derivative_blocks(),
-            psi_index,
-            d_beta_flat,
-        )
-    }
+    impl_location_scale_joint_psi_custom_family_hooks!("GaussianLocationScaleWiggleFamily");
 
     fn exact_newton_joint_psi_workspace(
         &self,
