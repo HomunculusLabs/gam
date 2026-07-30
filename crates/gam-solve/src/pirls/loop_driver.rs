@@ -1461,13 +1461,37 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         gradient += &s_beta;
         let mut penalty_term = penalty_active.shifted_quadratic(beta_transformed.as_ref());
         let ridge_used = baseridge;
-        let stabilizedhessian = if ridge_used > 0.0 {
-            penalized_hessian
-                .addridge(ridge_used)
-                .map_err(|e| EstimationError::InvalidInput(format!("ridge addition failed: {e}")))?
-        } else {
-            penalized_hessian.clone()
-        };
+        // ONE OWNER FOR δ, AND IT IS THE ASSEMBLER.
+        //
+        // `solve_penalized_least_squares_implicit` folds `ridge_used` into the
+        // diagonal of the matrix it returns, on BOTH of its branches: the dense
+        // branch adds it in place before factorizing, and the sparse branch
+        // asks `assemble_sparse_penalized_hessian` for `H = XᵀWX + S_λ + δI`.
+        // So `penalized_hessian` ALREADY carries δ and this seam must not add
+        // it a second time.
+        //
+        // This used to be `penalized_hessian.addridge(ridge_used)`. It was
+        // masked, not correct: the sparse branch reported `ridge_used = 0.0`
+        // while handing back a matrix that carried δ = 1e-8 (its assembler
+        // closure rewrote a requested 0 into `FIXED_STABILIZATION_RIDGE`), so
+        // the `> 0.0` guard skipped the second addition. Making the reported
+        // ridge equal the applied ridge — the point of the #2519 repair —
+        // unmasks it, and every sparse fit would silently get `H + 2δ` in
+        // `0.5·log|H|` while `penalty_term` and the gradient carried only one δ.
+        //
+        // The finalization seam of the ITERATED path already states this
+        // contract for the same reason ("P-IRLS already folded any
+        // stabilization ridge directly into the Hessian. Keep that exact matrix
+        // so outer LAML derivatives stay consistent"), and
+        // `gam_working_model::update` is the assembler that folds it there. The
+        // zero-iteration synthesis now matches: `penalized_hessian ==
+        // stabilizedhessian == XᵀWX + S_λ + δI`.
+        //
+        // The objective bookkeeping below is NOT double counting: `δ‖β‖²` in
+        // `penalty_term` and `δβ` in the gradient are the scalar/vector
+        // companions of the δI already in the matrix, exactly as
+        // `gam_working_model::update` adds them alongside its in-place ridge.
+        let stabilizedhessian = penalized_hessian.clone();
         let mut ridge_grad_norm = 0.0;
         if ridge_used > 0.0 {
             let ridge_penalty =

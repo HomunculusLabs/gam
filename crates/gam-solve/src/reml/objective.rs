@@ -1598,16 +1598,28 @@ impl<'a> RemlState<'a> {
         //   1. `estimate_sparse_native_decision` gates on H density, which
         //      implies large p and typically n ≫ p (large-scale) — i.e.
         //      `X'WX` is rank-full, so `X'WX + S` is rank-full, so
-        //      `ridge_used = 0` and no leak term exists.
+        //      `p − rank(X'WX + S) = 0` and no leak term exists.
         //   2. The small-n/high-dim regime that motivated e33c06be (n=120,
         //      k=6 Duchon) is dense territory; it never chooses
         //      `SparseNative` because the sparse density heuristic rejects
         //      near-dense systems.
         //
+        // Note that the conjunct doing the work is the RANK one, not "δ = 0".
+        // This paragraph used to close case 1 with "so `ridge_used = 0`", which
+        // is no longer true of any path: `ensure_sparse_positive_definitewithridge`
+        // applies `FIXED_STABILIZATION_RIDGE` on its FIRST rung and reports it,
+        // because a δ chosen by a Cholesky-success predicate is a function of ρ
+        // and breaks the envelope identity (#1575/#2519). The leak term is
+        // `(p − rank(X'WX + S)) · log δ`, so it vanishes whenever the rank is
+        // full, whatever δ is — which is exactly the argument above. δ > 0
+        // everywhere does not widen the exposure; only a rank-deficient
+        // sparse-native system would.
+        //
         // No projection correction is emitted here; pass 0.0 through to
         // `finish_assembly`.  If a future test exercise ever finds a
-        // sparse-native fit with `ridge_used > 0` AND genuine null
-        // directions of `X'WX + S`, extend the combined penalty pseudo-logdet
+        // sparse-native fit with genuine null directions of `X'WX + S`
+        // (δ > 0 is now universal and is not by itself the trigger),
+        // extend the combined penalty pseudo-logdet
         // to include the ridge-matched null contributions (keeping both
         // sides of the LAML ratio on the same p-dim space) rather than
         // reintroducing the range(S_+) projection; Cholesky can't cheaply

@@ -265,12 +265,20 @@ pub(super) fn solve_penalized_least_squares_implicit(
         // 1. Sparse penalized Hessian: H = X'diag(w)X + S_λ + ridge·I.
         //    The Cholesky factor is reused from the SPD check so we avoid
         //    factorizing the same matrix twice.
+        //
+        //    The closure assembles EXACTLY the ridge it is handed. It used to
+        //    rewrite a requested `0.0` into `FIXED_STABILIZATION_RIDGE`, which
+        //    desynchronized the passport from the matrix: the ladder's first
+        //    rung asked for `0.0`, got a matrix carrying δ = 1e-8, and reported
+        //    `ridge_used = 0.0`. β̂ was then the stationary point of the RIDGED
+        //    system while the criterion was assembled as if unridged — the
+        //    Tikhonov RHS term `δ·μ` below was skipped, `penalty_term +=
+        //    δ‖β‖²` in `loop_driver` was skipped, and every consumer of
+        //    `ridge_passport.delta()` was told 0. The rewrite is redundant now
+        //    that `ensure_sparse_positive_definitewithridge` applies δ on its
+        //    first rung, and it was the mechanism that made the report differ
+        //    from the application.
         let (h_sparse, factor, ridge_used) = ensure_sparse_positive_definitewithridge(|ridge| {
-            let ridge = if ridge == 0.0 {
-                FIXED_STABILIZATION_RIDGE
-            } else {
-                ridge
-            };
             workspace.assemble_sparse_penalized_hessian(
                 x_sparse,
                 &weights_owned,
@@ -468,73 +476,60 @@ pub(super) fn solve_penalized_least_squares_implicit(
         );
     }
 
-    // 4. Ridge stabilization — CONDITIONAL, matching the sparse path
-    // (`ensure_sparse_positive_definitewithridge`) and the dense Newton path
-    // (`ensure_positive_definitewithridge`). A penalized Hessian assembled from
-    // `XᵀWX + S_λ` is mathematically PSD; a fixed tiny nugget is only needed to
-    // cure round-off when the bare matrix narrowly fails Cholesky. Applying the
-    // nugget UNCONDITIONALLY (the previous behaviour) made β̂ the stationary
-    // point of the RIDGED objective `½βᵀ(H+δI)β`, so the inner residual was
-    // `Xᵀu − S_λβ̂ = δβ̂` rather than 0. The outer REML ψ-gradient differentiates
-    // the BARE objective via the envelope theorem (it assumes exact
-    // stationarity), so the gratuitous δ broke the envelope identity: the
-    // analytic datafit derivative `a` was short by `½·δ·βᵀ(dβ̂/dψ)` and the
-    // β-independent `log|H|` term was differentiated on the un-ridged surface
-    // while the criterion VALUE used `log|H+δI|`. For the Matérn iso-κ joint
-    // REML at θ₀ (`TransformedQs` frame, δ_eff ≈ 1.75e-6 in the original basis)
-    // this is exactly the residual outer-gradient↔FD DESYNC of #1122 (gap
-    // 2.565e-2, with `cos(Xᵀu−S_λβ̂, β̂) = 1.0000` pinning the residual to the
-    // ridge gradient). Try the bare matrix first so the well-conditioned common
-    // case carries NO ridge (`ridge_used = 0`) and the envelope identity holds
-    // exactly; fall back to the Tikhonov nugget only when the bare factorization
-    // actually fails. The augmented RHS `r + δμ` keeps the fallback a Tikhonov
-    // regularization centered at the prior-mean target.
-    let bare_factor = match StableSolver::new().factorize(&penalized_hessian) {
-        Ok(factor) => Some(factor),
-        Err(err) => {
-            // WARN, not DEBUG, and say what it means (#2614).
-            //
-            // The penalized Hessian `X'WX + S_λ` is mathematically PSD, so a
-            // bare factorization failure is a statement about the ASSEMBLY or
-            // the conditioning, not a routine event — and this is the only
-            // place that knows why the fit ends up carrying a ridge at all.
-            // Swallowing it at `debug` made "why is `ridge_passport.delta()`
-            // nonzero" unanswerable downstream: the passport records the
-            // magnitude and no reason, and no test target in this crate
-            // installs a logger, so in practice the message reached nobody.
-            //
-            // `sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19` is that
-            // gap in the field. It asserts `delta() == 0.0` on a deliberately
-            // well-conditioned n = 20 fixture whose comment records that the
-            // fit "takes NO stabilization ridge", and it now fails with
-            // `left: 1e-8`. Since the nugget is reached ONLY after this
-            // factorization has already failed, the defect being reported is a
-            // well-conditioned penalized Hessian that will not factorize — and
-            // the error text below is the only evidence of why.
-            log::warn!(
-                "PLS: bare penalized-Hessian factorization FAILED, falling back to the \
-                 Tikhonov nugget {FIXED_STABILIZATION_RIDGE:.3e}; the fit will report a \
-                 nonzero ridge from here. X'WX + S_lambda is mathematically PSD, so this \
-                 is the assembly or the conditioning, not routine: {err}"
-            );
-            None
-        }
-    };
-    let (factor, ridge_used) = if let Some(factor) = bare_factor {
-        (factor, 0.0)
-    } else {
-        let nugget = FIXED_STABILIZATION_RIDGE;
-        let mut regularizedhessian = penalized_hessian.clone();
-        if nugget > 0.0 {
-            for i in 0..p_dim {
-                regularizedhessian[[i, i]] += nugget;
-            }
-        }
-        let factor = StableSolver::new()
-            .factorize(&regularizedhessian)
-            .map_err(EstimationError::LinearSystemSolveFailed)?;
-        (factor, nugget)
-    };
+    // 4. Ridge stabilization — UNCONDITIONAL, matching the dense Newton path
+    // (`ensure_positive_definitewithridge`, made unconditional in `fc2b286a2`)
+    // and the sparse ladder (`ensure_sparse_positive_definitewithridge`).
+    //
+    // δ MUST NOT BE CHOSEN BY A BRANCH. `FIXED_STABILIZATION_RIDGE`'s own doc
+    // (`gam_working_model.rs`) states the invariant this file has to honour:
+    //
+    //   V(ρ) includes log|H(ρ)| with H(ρ) = XᵀWX + S_λ(ρ) + δI. If δ = δ(ρ) is
+    //   adaptive, V(ρ) is only piecewise-smooth and ∂V/∂ρ ignores ∂δ/∂ρ.
+    //
+    // This site used to factor the BARE matrix first and report `ridge_used =
+    // 0` when that succeeded, adding δ only on failure. A Cholesky-success
+    // predicate on a near-singular matrix is a function of ρ, so δ became a
+    // function of ρ — and δ is carried as `RidgePolicy::exact_full_objective()`
+    // straight into the outer criterion through `0.5·log|H|`. Measured on the
+    // #1575 binomial/logit fixture (dense Newton twin of this selector): the
+    // outer cost jumped by exactly `0.5·ln(1e8) = 9.2103400803` between
+    // neighbouring ρ at identical deviance, edf and penalty term, the whole
+    // difference being δ = 1e-8 at one point and 0 at its neighbours. That
+    // discontinuity is #2519: no line search and no certificate is well posed
+    // on a criterion that jumps by 9.21 between neighbouring ρ.
+    //
+    // The bare-first shape was introduced for the opposite failure (#1122): an
+    // ADAPTIVE nonzero δ broke the envelope identity, because β̂ is the
+    // stationary point of `½βᵀ(H+δI)β` (inner residual `Xᵀu − S_λβ̂ = δβ̂`, with
+    // `cos(Xᵀu−S_λβ̂, β̂) = 1.0000` pinning the residual to the ridge gradient)
+    // while the outer ψ-gradient differentiated the un-ridged surface. A
+    // CONSTANT δ does not have that defect: the ridge is part of the objective
+    // at every ρ, `penalty_term` carries `δ‖β‖²` and the gradient carries `δβ`
+    // (see `loop_driver`'s zero-iteration synthesis and
+    // `gam_working_model::update`), so the criterion and its derivative expand
+    // the SAME operator `XᵀWX + S_λ + δI`. The augmented RHS `r + δμ` below
+    // keeps the system a Tikhonov regularization centered at the prior-mean
+    // target rather than at zero.
+    //
+    // On a well-conditioned Hessian this is numerically inert in the direction
+    // that matters: the criterion shifts by `½·Σ ln(1 + δ/λ_i) ≤ ½·δ·tr(H⁻¹)`,
+    // far below the convergence tolerances when `λ_i ≫ δ = 1e-8`. What it
+    // removes is the 9.21 jump, not the scale.
+    //
+    // OWNERSHIP: δ is folded into `penalized_hessian` HERE, so the matrix this
+    // function returns already carries it — the same contract
+    // `gam_working_model::update` follows (its dense arm mutates the Hessian in
+    // place through `ensure_positive_definitewithridge`) and the same contract
+    // `loop_driver`'s finalization reads ("P-IRLS already folded any
+    // stabilization ridge directly into the Hessian"). The zero-iteration
+    // synthesis in `loop_driver` must therefore NOT add `ridge_used` again.
+    let ridge_used = FIXED_STABILIZATION_RIDGE;
+    for i in 0..penalized_hessian.nrows() {
+        penalized_hessian[[i, i]] += ridge_used;
+    }
+    let factor = StableSolver::new()
+        .factorize(&penalized_hessian)
+        .map_err(EstimationError::LinearSystemSolveFailed)?;
 
     // 5. Solve
     if workspace.rhs_full.len() != p_dim {

@@ -1717,50 +1717,48 @@ pub(super) fn ensure_sparse_positive_definitewithridge<F>(
 where
     F: FnMut(f64) -> Result<SparseColMat<usize, f64>, EstimationError>,
 {
-    // Step 1 — genuine round-off stabilization. A symmetric Hessian assembled
-    // from `XᵀWX + S_λ` is mathematically PSD; the only reason an exact-arithmetic
-    // PSD matrix fails a Cholesky is floating-point round-off in the assembly,
-    // which a fixed tiny nugget on the diagonal cures. This is the principled,
-    // scale-free first attempt and the common case.
-    let h0 = assemble(0.0)?;
-    if let Ok(factor) = factorize_sparse_spd(&h0) {
-        return Ok((h0, factor, 0.0));
-    }
+    // Step 1 — the fixed stabilization ridge, applied UNCONDITIONALLY.
+    //
+    // A symmetric Hessian assembled from `XᵀWX + S_λ` is mathematically PSD;
+    // the only reason an exact-arithmetic PSD matrix fails a Cholesky is
+    // floating-point round-off in the assembly, which a fixed tiny nugget on
+    // the diagonal cures. This is the principled, scale-free first attempt and
+    // the common case.
+    //
+    // δ IS NOT CHOSEN BY A BRANCH. This ladder used to try `assemble(0.0)`
+    // first and return `ridge = 0.0` when that factorized. Two things were
+    // wrong with that:
+    //
+    //  1. A Cholesky-success predicate on a near-singular matrix is a function
+    //     of ρ, so δ became a function of ρ — and δ enters the outer criterion
+    //     through `0.5·log|H|`. `FIXED_STABILIZATION_RIDGE`'s own doc in
+    //     `gam_working_model.rs` states the invariant: δ must be constant
+    //     w.r.t. ρ or the envelope-theorem gradient `dV/dρ_k` is invalid. The
+    //     dense twin (`ensure_positive_definitewithridge`) was measured jumping
+    //     by exactly `0.5·ln(1e8) = 9.21` between neighbouring ρ for this
+    //     reason (#1575/#2519), which is what kills the outer line search.
+    //
+    //  2. It reported the REQUESTED ridge, not the APPLIED one. `pls_solver`'s
+    //     sparse branch passed a closure that rewrote a requested `0.0` into
+    //     `FIXED_STABILIZATION_RIDGE`, so the first rung returned a matrix
+    //     carrying δ = 1e-8 together with `ridge_used = 0.0`. β̂ was then the
+    //     stationary point of the RIDGED system while the criterion was
+    //     assembled as if unridged: the Tikhonov RHS term `δ·μ` was skipped,
+    //     `penalty_term += δ‖β‖²` was skipped, and `ridge_passport.delta()`
+    //     reported 0 to every consumer. Asking for δ up front makes the
+    //     reported ridge equal the applied ridge by construction.
+    //
+    // A secondary consequence of the old order: when the first factorization
+    // failed, `assemble(FIXED_STABILIZATION_RIDGE)` produced a BIT-IDENTICAL
+    // matrix under that clamping closure, so it failed again and control fell
+    // through to the Gershgorin escalation below, which sets a DATA-DEPENDENT
+    // τ(ρ) — an unbounded ρ-dependent jump in `log|H|`, strictly worse than the
+    // 9.21 one.
+    //
+    // The Gershgorin ladder below is retained, but only as the escalation for
+    // genuine indefiniteness that it was written to be.
     let h_eps = assemble(FIXED_STABILIZATION_RIDGE)?;
     if let Ok(factor) = factorize_sparse_spd(&h_eps) {
-        // Say WHY the ridge-free assembly failed (#2614).
-        //
-        // This arm is the only escalation in the ladder that reported nothing.
-        // Step 2 computes a Gershgorin bound and warns; step 1 just silently
-        // returned a nonzero ridge, so "the fit took a 1e-8 ridge" arrived
-        // downstream with no way to ask whether that was round-off (which the
-        // comment above asserts is the only possible cause) or genuine
-        // indefiniteness that happens to be small.
-        //
-        // The distinction is load-bearing, not cosmetic.
-        // `sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19` fails with
-        // `left: 1e-8, right: 0.0` on a DELIBERATELY well-conditioned n = 20
-        // fixture, and its message reads as "a ridge was applied without need".
-        // It is not: this ladder reaches 1e-8 only after `assemble(0.0)` has
-        // already failed to factorize. So the defect being reported is an
-        // assembly that is not factorizable on a well-conditioned problem, and
-        // nothing in the run record said so. The bound below is what
-        // distinguishes those two readings, and it costs one O(nnz) pass on an
-        // escalation path that is documented as the uncommon case.
-        let (gershgorin_min, diag_scale) = gershgorin_min_eig_lower_bound(&h0);
-        log::warn!(
-            "penalized Hessian did not factorize at ridge 0 and required the fixed \
-             stabilization ridge {:.3e}: Gershgorin lambda_min >= {:.3e}, diag scale \
-             {:.3e}, ratio {:.3e}. The assembly comment holds that an exact-arithmetic \
-             PSD Hessian can only fail Cholesky through round-off, so a bound that is \
-             negative by much more than the scale's round-off is evidence AGAINST that \
-             premise and should be investigated at the assembly, not absorbed by the \
-             ridge.",
-            FIXED_STABILIZATION_RIDGE,
-            gershgorin_min,
-            diag_scale,
-            gershgorin_min / diag_scale.max(f64::MIN_POSITIVE),
-        );
         return Ok((h_eps, factor, FIXED_STABILIZATION_RIDGE));
     }
 
