@@ -38,16 +38,10 @@ use crate::basis::{PeriodicHarmonicEvaluator, SaeBasisSecondJet};
 use ndarray::{Array2, ArrayView2, array, s};
 use std::sync::Arc;
 
-/// Deterministic `splitmix64` bit-mixer — a structureless uniform PRNG (no
-/// periodic / low-rank pattern a circle chart could latch onto), so the fixture is
-/// a faithful, byte-reproducible stand-in for `rng.normal(size=(120, 32))`.
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
+// Deterministic `splitmix64` bit-mixer — a structureless uniform PRNG (no
+// periodic / low-rank pattern a circle chart could latch onto), so the fixture is
+// a faithful, byte-reproducible stand-in for `rng.normal(size=(120, 32))`.
+use gam_linalg::utils::splitmix64;
 
 fn uniform01(state: &mut u64) -> f64 {
     (splitmix64(state) >> 11) as f64 / (1u64 << 53) as f64

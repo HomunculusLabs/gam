@@ -14,14 +14,7 @@ use std::time::Instant;
 const N_PCS: usize = 3;
 
 // Inline splitmix64 + Box-Muller (matches the stall test's DGP).
-#[inline]
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
+use gam::utils::splitmix64;
 #[inline]
 fn next_unit(state: &mut u64) -> f64 {
     let bits = splitmix64(state) >> 11;
