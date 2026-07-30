@@ -1042,15 +1042,34 @@ fn lift_tier0_rows(recon: &mut Array2<f64>, mu: &Array1<f64>, sigma: Option<&Arr
 /// - `loss` reporting stays caller-owned: the fit entry reports the last
 ///   outer pass's converged loss (`carried_loss: Some(..)`), the certify
 ///   entry recomputes at the final installed state (`carried_loss: None`).
-#[allow(clippy::too_many_arguments)]
-fn finalize_sae_fit_report(
-    mut term: SaeManifoldTerm,
-    mut rho: SaeManifoldRho,
-    mut shape_uncertainty: SaeShapeUncertainty,
-    z: &Array2<f64>,
-    registry: &AnalyticPenaltyRegistry,
+/// Everything [`finalize_sae_fit_report`] needs beyond the three values it takes
+/// ownership of and mutates.
+///
+/// The postlude carried nineteen positional parameters, eleven of them bare
+/// `bool`/`f64`/`usize`, and was held together by a clippy too-many-arguments
+/// silencer. Lint-silencing attributes are banned repo-wide — the ban scanner's
+/// own wording is "fix the underlying code instead of silencing the lint", and
+/// note the scanner matches on TEXT, so naming the attribute literally even in a
+/// comment re-trips it. The lint was right on the merits: with `alpha`, `learning_rate`,
+/// `ridge_ext_coord` and `ridge_beta` adjacent and all `f64`, and
+/// `run_structure_search` / `shape_uncertainty_invalidated` / `isometry_pin_active`
+/// adjacent and all `bool`, transposing a pair at either of the two call sites
+/// would compile silently and change the fit.
+///
+/// Naming them at the call site removes that class of error outright. The fields
+/// are grouped by what they configure, and the function body is unchanged: it
+/// destructures this into exactly the bindings it used before.
+struct SaeFinalizeRequest<'a> {
+    /// Row block the fit was computed on.
+    z: &'a Array2<f64>,
+    registry: &'a AnalyticPenaltyRegistry,
+    /// Run the #977/#997 evidence-gated structure search around the converged
+    /// state.
     run_structure_search: bool,
+    /// The search changed the model, so any carried shape uncertainty is stale.
     shape_uncertainty_invalidated: bool,
+    /// `Some` on the fit entry (report the last outer pass's converged loss),
+    /// `None` on the certify entry (recompute at the final installed state).
     carried_loss: Option<SaeManifoldLoss>,
     structured_residual_diagnostics: Vec<StructuredResidualPassDiagnostic>,
     outer_termination: SaeOuterTermination,
@@ -1062,8 +1081,36 @@ fn finalize_sae_fit_report(
     learning_rate: f64,
     ridge_ext_coord: f64,
     ridge_beta: f64,
-    entry_label: &str,
+    /// Names the entry in diagnostics: "SAE fit" or "SAE certify entry".
+    entry_label: &'a str,
+}
+
+fn finalize_sae_fit_report(
+    mut term: SaeManifoldTerm,
+    mut rho: SaeManifoldRho,
+    mut shape_uncertainty: SaeShapeUncertainty,
+    request: SaeFinalizeRequest<'_>,
 ) -> Result<SaeFitReport, SaeFitError> {
+    // Destructured into the same bindings the body already used, so this change
+    // is confined to the signature and the two call sites.
+    let SaeFinalizeRequest {
+        z,
+        registry,
+        run_structure_search,
+        shape_uncertainty_invalidated,
+        carried_loss,
+        structured_residual_diagnostics,
+        outer_termination,
+        penalized_quasi_laplace_criterion,
+        metric_provenance,
+        alpha,
+        isometry_pin_active,
+        max_iter,
+        learning_rate,
+        ridge_ext_coord,
+        ridge_beta,
+        entry_label,
+    } = request;
     let (n_obs, p_out) = z.dim();
     term.record_fit_data_collapse_if_needed(z.view(), &rho, max_iter)?;
 
@@ -1649,22 +1696,24 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
         term,
         rho,
         shape_uncertainty,
-        &z,
-        &registry,
-        run_structure_search,
-        finalization_invalidated_shape_uncertainty,
-        Some(loss),
-        structured_residual_diagnostics,
-        outer_termination,
-        penalized_quasi_laplace_criterion,
-        metric_provenance,
-        alpha,
-        isometry_pin_active,
-        max_iter,
-        learning_rate,
-        ridge_ext_coord,
-        ridge_beta,
-        "SAE fit",
+        SaeFinalizeRequest {
+            z: &z,
+            registry: &registry,
+            run_structure_search,
+            shape_uncertainty_invalidated: finalization_invalidated_shape_uncertainty,
+            carried_loss: Some(loss),
+            structured_residual_diagnostics,
+            outer_termination,
+            penalized_quasi_laplace_criterion,
+            metric_provenance,
+            alpha,
+            isometry_pin_active,
+            max_iter,
+            learning_rate,
+            ridge_ext_coord,
+            ridge_beta,
+            entry_label: "SAE fit",
+        },
     )?;
     Ok(SaeFitOutcome::Manifold(report))
 }
@@ -1799,22 +1848,24 @@ pub fn run_sae_manifold_certify(
         term,
         rho,
         shape_uncertainty,
-        &z,
-        &registry,
-        run_structure_search,
-        false,
-        None,
-        Vec::new(),
-        outer_termination,
-        penalized_quasi_laplace_criterion,
-        metric_provenance,
-        alpha,
-        isometry_pin_active,
-        max_iter,
-        learning_rate,
-        ridge_ext_coord,
-        ridge_beta,
-        "SAE certify entry",
+        SaeFinalizeRequest {
+            z: &z,
+            registry: &registry,
+            run_structure_search,
+            shape_uncertainty_invalidated: false,
+            carried_loss: None,
+            structured_residual_diagnostics: Vec::new(),
+            outer_termination,
+            penalized_quasi_laplace_criterion,
+            metric_provenance,
+            alpha,
+            isometry_pin_active,
+            max_iter,
+            learning_rate,
+            ridge_ext_coord,
+            ridge_beta,
+            entry_label: "SAE certify entry",
+        },
     )?;
     Ok(SaeExternalCertificationOutcome::Certified(report))
 }
