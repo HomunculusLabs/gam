@@ -29,7 +29,6 @@ use gam::basis::{
 };
 use gam::smooth::auto_initial_length_scale;
 use gam::smooth::input_standardization::estimate_isotropic_scale;
-use gam::terms::OriginalUnits;
 use ndarray::Array2;
 
 /// Deterministic n×2 cloud on `[0, 5]²` (xorshift64*, no RNG crate dependency),
@@ -63,9 +62,7 @@ fn matern_basis_cols(data: &Array2<f64>, k: usize) -> usize {
     let input_scale =
         estimate_isotropic_scale(x.view()).expect("2-D cloud with n>=2 has a spatial scale");
     input_scale.standardize(&mut x);
-    let length_scale = input_scale
-        .to_standardized_units(OriginalUnits::new(raw_length_scale))
-        .standardized_value();
+    let length_scale = input_scale.to_standardized_units(raw_length_scale);
 
     let spec = MaternBasisSpec {
         center_strategy: CenterStrategy::FarthestPoint { num_centers: k },
