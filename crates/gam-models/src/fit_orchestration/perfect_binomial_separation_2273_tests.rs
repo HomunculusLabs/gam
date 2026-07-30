@@ -12,8 +12,11 @@
 //! itself the tell that this was a fragile-outer-search bug, not a genuine
 //! capacity/identifiability boundary (see the issue's root-cause comments).
 //!
-//! Two independent fixes landed:
-//!   1. `FitConvergenceEvidence::try_from_parts` now mints a
+//! ## What makes each arm pass
+//!
+//! Two fixes landed first and are what the `y ~ x` logit sweep and the explicit
+//! `--firth` arm rest on:
+//!   1. `FitConvergenceEvidence::try_from_parts` mints a
 //!      `StalledAtValidMinimum` fit when the analytic outer criterion
 //!      certificate certifies (measurement over status-enum taxonomy) — this
 //!      is what lets the automatic Firth retry actually rescue a fit instead
@@ -23,6 +26,36 @@
 //!      re-seeded at the refused checkpoint, so the retry's tolerance anchor
 //!      matches the certificate's bound by construction — this is what fixes
 //!      the *non*-Firth path's premature 1-outer-iteration give-up.
+//!
+//! They were not enough, and the issue was reopened. The `smooth(x)` and
+//! non-logit arms needed four more, each a separate defect:
+//!   3. `detect_logit_instability` turned a converged, finite, well-penalized
+//!      logit fit into `PirlsStatus::Unstable` whenever its fitted η separated
+//!      the classes — which on separable data is what the CORRECT fit does. The
+//!      criterion was `+∞` over the whole region containing its own optimum, so
+//!      `y ~ smooth(x)` could not be fitted at any `n`. Under a penalty that
+//!      covers the separating direction the penalized objective is coercive, so
+//!      `β̂(λ)` is finite and unique even under exact separation; the saturation
+//!      heuristics are gone from the penalized branch and the genuinely unbounded
+//!      λ are refused by measurement instead.
+//!   4. The Jeffreys coefficient Hessian `HΦ`, which `WorkingState.hessian`
+//!      deliberately omits, reached only ONE of the four places that invert that
+//!      Hessian. The augmented-square-root direction solve folded it in by
+//!      congruence, but that route is gated on Fisher curvature — true only for
+//!      the canonical logit link — so every non-canonical binomial link solved a
+//!      system with the Jeffreys score in the gradient and no Jeffreys curvature
+//!      in the matrix, and contracted linearly (0.4937/iteration, measured)
+//!      instead of converging. The dense direction solves, the undamped Newton
+//!      polish and the exact-decrement certificate now all use the objective's
+//!      own curvature.
+//!   5. The Bernoulli variance was rebuilt from `μ` alone, so once `μ` rounds to
+//!      exactly `1.0` (cloglog at η ≈ 3.62, probit at η ≈ 8.29) `V = μ(1−μ)`
+//!      collapsed to zero and every observed-information quantity divided by it.
+//!      The link's cancellation-free tail complement now reaches the variance and
+//!      the working residual.
+//!   6. The observed weight's closed forms divided by `φV²`, `φV³` and `φV⁴`,
+//!      and `V⁴` underflows at `V = 2.9e-84`. They are now the Leibniz recurrence
+//!      the third derivative already used, which divides by `φV` once per order.
 //!
 //! This file is the CLI n-sweep verification the issue explicitly calls out
 //! as owed: every n across the reported failure/pass boundary must now

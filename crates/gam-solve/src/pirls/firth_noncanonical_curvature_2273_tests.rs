@@ -22,10 +22,30 @@
 //! `StalledAtValidMinimum` — which the fit-assembly gate refuses. The refused β̂
 //! was the RIGHT one, which is why the failure was so hard to read.
 //!
-//! These tests assert the invariant that makes the two consumers one fact: the
-//! inner Firth solve converges to the same machine-precision stationarity on a
-//! non-canonical link as on the canonical one, and lands on the answer an
-//! independent reference computes.
+//! Four places invert that Hessian, not two: the dense unconstrained solve, the
+//! constrained/bounded active-set solves, the post-loop undamped Newton polish,
+//! and the exact-decrement certificate. All four now fold `HΦ` in through one
+//! helper that owns the sign convention.
+//!
+//! The file then covers what the corrected solve reaches, which is a saturated
+//! row — and two further defects that only a converging solve gets far enough to
+//! hit. The Bernoulli variance was rebuilt from `μ` alone, so `V = μ(1−μ)`
+//! collapsed to a hard zero past the point where `μ` rounds to `1.0`; and the
+//! observed weight's closed forms divided by `φV²`, `φV³` and `φV⁴`, which
+//! underflow at `V = 2.9e-84`.
+//!
+//! What the tests assert, in order:
+//!
+//!   * the cross-link invariant — a Firth solve certifies on EVERY binomial link,
+//!     not only the canonical one;
+//!   * the probit Firth mode against scipy on the same objective;
+//!   * the fold-in's sign convention, where it is defined;
+//!   * the noncanonical observed tower on a saturated row, against the exact
+//!     identity `−ℓ = e^η` for a cloglog `y = 0` row and against mpmath at 220
+//!     decimal digits for `y = 1`;
+//!   * the variance's positivity past the `μ`-rounding point;
+//!   * the composite bounded links' tail complements, against the absolute
+//!     resolution of the naive subtraction they replace.
 
 #![cfg(test)]
 
