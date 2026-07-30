@@ -480,7 +480,18 @@ fn duchon_2d_aniso_binomial_fits_successfully() {
             optimize_sas: false,
             compute_inference: false,
             skip_rho_posterior_inference: false,
-            max_iter: 8,
+            // #2547: this is the OUTER smoothing-parameter budget as well as the
+            // inner cycle cap (`options.max_iter` feeds both `outer_max_iter` and
+            // `inner_max_cycles`), so capping it at 8 asked the outer search to
+            // certify stationarity in 8 iterations and then asserted the fit
+            // converged. Measured same-base A/B on this fixture: at 8 the search
+            // stops with `termination=iteration_budget(8 iterations; |g|=6.983876e-2
+            // never reached 4.900000e-3)` and the fit is correctly refused; at the
+            // library default it converges and the test passes (and finishes
+            // sooner, because the refusal path pays for tail-snap and
+            // asymptote-rail probing first). Use the default rather than a tuned
+            // number.
+            max_iter: 100,
             tol: 1e-4,
             nullspace_dims: vec![],
             linear_constraints: None,
