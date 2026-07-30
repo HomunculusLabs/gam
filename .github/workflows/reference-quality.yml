@@ -274,7 +274,25 @@ jobs:
             # hiding a non-convergence. The three variants are matched with their
             # trailing `{` so a test's prose about its own reference computation
             # ("... Newton refit did not converge") cannot be swept in.
-            gamfit_re='IntegrationFailed|InvalidConfig|IdentifiabilityFailure|LayoutError|identifiability audit|Invalid input|could not broadcast|Newton step|transformation fit failed|workflow survival baseline failed|RemlOptimizationFailed|REML smoothing optimization|Optimization \{ context:|OrderFailures \{|NonConvergence \{'
+            # A sixth missing variant, from the SAME family as the two above and
+            # measured on run 30460836905 (headSha 7b4d762d8):
+            #
+            #   fit_tensor_surface: finite REML optimum is value-resolved but not
+            #   an isolated stationary point (LowerBoundary)
+            #     misc::quality_llm_weekday_circle
+            #
+            # That is gam REFUSING to certify an outer-REML optimum -- a fit
+            # failure -- yet it landed in METRIC_OFF, i.e. it was reported as
+            # "gam fitted and a quality metric missed its bound". The existing
+            # `RemlOptimizationFailed|REML smoothing optimization` alternatives
+            # do not cover it: this refusal is raised by the term/solve layer
+            # (`gam-terms/src/structure/anova_atom.rs`, `grid_spline_2d.rs`,
+            # `gam-solve/src/spline_scan.rs`, `residual_cascade.rs`,
+            # `gam-sae/src/identifiability.rs`) with its own wording. All five
+            # sites share the literal phrase `REML optimum is value-resolved`,
+            # which is gam's own prose and cannot be produced by a test
+            # describing its reference tool, so that phrase is the key.
+            gamfit_re='IntegrationFailed|InvalidConfig|IdentifiabilityFailure|LayoutError|identifiability audit|Invalid input|could not broadcast|Newton step|transformation fit failed|workflow survival baseline failed|RemlOptimizationFailed|REML smoothing optimization|Optimization \{ context:|OrderFailures \{|NonConvergence \{|REML optimum is value-resolved'
             if [ "$outcome" = TEST_ERROR ]; then
               testerr=$((testerr+1))
             elif [ "$outcome" = BUILDFAIL ]; then
