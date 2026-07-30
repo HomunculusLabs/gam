@@ -1196,6 +1196,133 @@ fn intersect_with_independent_enclosure(entry: &mut Ball, evidence: Ball) {
     }
 }
 
+/// Intersect the FIRST-derivative covariance with the two-sided range the
+/// covariance itself gives it: `0 ⪯ −dP/dρ ⪯ P`.
+///
+/// The file already uses the left half — "`P` is operator monotone increasing in
+/// the process-noise scale `q = e^{−ρ}`, so `dP/dρ ⪯ 0`" — to carry a Cholesky
+/// factor of `−dP/dρ`. The right half comes from the same map being operator
+/// CONCAVE in `q`, which is what actually bounds the derivative:
+///
+/// * the measurement update `P ↦ P − PHᵀ(HPHᵀ+R)⁻¹HP = (P⁻¹ + HᵀR⁻¹H)⁻¹` is the
+///   parallel sum, which is operator concave and operator monotone;
+/// * the prediction `P ↦ FPFᵀ + qQ` is affine and jointly monotone in `(P, q)`;
+/// * the seed is affine in `q`.
+///
+/// A composition of operator-concave monotone maps with affine inner maps is
+/// operator concave, so `q ↦ P_t(q)` is. Concavity at `q` against `0` gives
+/// `P_t(0) ⪰ P_t(q) − q·dP_t/dq`, i.e.
+///
+/// ```text
+///   0 ⪯ −dP/dρ = q·dP/dq ⪯ P(q) − P(0) ⪯ P(q),
+/// ```
+///
+/// the last step because `P_t(0) ⪰ 0` is a covariance. Only the DIAGONAL of a
+/// semidefinite ordering transfers entrywise, so that is what is intersected
+/// here; [`intersect_covariance_minors`] then carries it to the off-diagonals
+/// through `|X_ij| ≤ √(X_ii X_jj)`, applied to `−dP/dρ`, which is the PSD
+/// matrix of the pair.
+///
+/// Measured need (#2614, order 3, ρ = −16.6135, dgp_2300): at node 40 the value
+/// covariance `P⁺₀₀` holds width `8.4e−3` while `dP⁺₀₀/dρ` — a quantity this
+/// bound pins into `[−0.74, 0]` — carries width `4.97e5`, and by node 80 it is
+/// `2.5e149`. Every gain jet is a column of that matrix divided by `R`, so the
+/// mean jet, `v′`, and `Σ v²/F̃`'s derivative inherit it directly.
+fn intersect_derivative_covariance_below_its_own_covariance(
+    derivative: &mut BallMat,
+    covariance: &BallMat,
+    order: usize,
+) {
+    for i in 0..order {
+        intersect_with_exact_range(&mut derivative[i][i], -covariance[i][i].hi, 0.0);
+    }
+    let mut negated = ball_mat_neg(derivative, order);
+    intersect_covariance_minors(&mut negated, order);
+    for i in 0..order {
+        for j in 0..order {
+            intersect_with_independent_enclosure(&mut derivative[i][j], negated[i][j].neg());
+        }
+    }
+}
+
+/// Intersect an enclosure with an exact two-sided range of the same quantity.
+///
+/// Same rule as [`intersect_with_independent_enclosure`], for evidence that is a
+/// pair of bounds rather than a computed ball: bounds move only inward and never
+/// past the nearest-rounded `value`, so `lo <= value <= hi` stays an invariant of
+/// the type.
+#[inline]
+fn intersect_with_exact_range(entry: &mut Ball, lo: f64, hi: f64) {
+    let floor = lo.min(entry.value);
+    if floor.is_finite() && entry.lo < floor {
+        entry.lo = floor;
+    }
+    let ceiling = hi.max(entry.value);
+    if ceiling.is_finite() && entry.hi > ceiling {
+        entry.hi = ceiling;
+    }
+}
+
+/// Intersect the two ORDER-ONE accumulators with the exact ranges the Gaussian
+/// model gives them, at every node.
+///
+/// Once the diffuse rank is consumed, the accumulated pair over the data prefix
+/// `y` seen so far IS the restricted Gaussian pair for that prefix: with
+/// `V = R + qG` (`R = diag(1/w)`, `G ⪰ 0` the process-noise Gram, `q = e^{−ρ}`),
+/// `X` the diffuse polynomial design and
+/// `P = V⁻¹ − V⁻¹X(XᵀV⁻¹X)⁻¹XᵀV⁻¹` its restricted inverse,
+///
+/// ```text
+///   Σ v²/F̃ = yᵀPy,     Σ log F̃ = log|V| + log|XᵀV⁻¹X|.
+/// ```
+///
+/// `dV/dρ = −qG = −(V − R)` and `dP/dρ = −P(dV/dρ)P = P − PRP`, so
+///
+/// ```text
+///   d/dρ Σ v²/F̃  = yᵀPy − yᵀPRPy,
+///   d/dρ Σ log F̃ = tr(P dV/dρ) = −(tr(PV) − tr(PR)).
+/// ```
+///
+/// Every piece of that is signed by a semidefinite fact and nothing else:
+/// `R ⪰ 0` gives `yᵀPRPy ≥ 0`; `V − R = qG ⪰ 0` with `PVP = P` gives
+/// `yᵀPRPy ≤ yᵀPVPy = yᵀPy` and `tr(PR) ≤ tr(PV)`; and `tr(PV) = n_proper`
+/// exactly. Hence, EXACTLY,
+///
+/// ```text
+///   0 ≤ Σ v²/F̃ ≤ yᵀR⁻¹y = Σ w y²,     0 ≤ d/dρ Σ v²/F̃ ≤ Σ v²/F̃,
+///   −n_proper ≤ d/dρ Σ log F̃ ≤ 0,
+/// ```
+///
+/// the first ceiling because `P ⪯ V⁻¹ ⪯ R⁻¹`.
+///
+/// Why this is the intersection that matters (#2614, measured): at smoothing
+/// order 2 on the #2300 nodes the search refuses at `ρ = −18` with a certified
+/// criterion DERIVATIVE ball of `±1.95e91` and a cell value enclosure of
+/// `±1.58e83` — both finite, so no accumulator check fires, and both useless:
+/// `strict_sign` cannot sign a `±1e91` interval, so the search can neither
+/// bracket a stationary point nor exclude one, and reports `Unresolved`. The
+/// true derivative is bounded by `½(n_proper + ν)`, i.e. by `178` on that
+/// fixture. The entire `1e89` excess is dependency loss in the jet recursions,
+/// and it is the running SUM that carries it forward, so the bound is applied
+/// per node rather than once at the end: a partial sum is the same quantity for
+/// its own prefix, which is what makes that legitimate.
+///
+/// This restores proof information supplied by the statistical model; it is not
+/// a numerical tolerance, and it cannot make a false statement true, because
+/// each bound is a property of the exact real number the enclosure encloses.
+#[inline]
+fn intersect_first_order_accumulator_exact_ranges(
+    quadratic: &mut Ball,
+    quadratic_d1: &mut Ball,
+    log_determinant_d1: &mut Ball,
+    weighted_energy: Ball,
+    n_proper: usize,
+) {
+    intersect_with_exact_range(quadratic, 0.0, weighted_energy.hi);
+    intersect_with_exact_range(quadratic_d1, 0.0, quadratic.hi);
+    intersect_with_exact_range(log_determinant_d1, -(n_proper as f64), 0.0);
+}
+
 /// Intersect the observed coordinate of the UPDATED covariance with the exact
 /// range of its own defining map.
 ///
@@ -1875,9 +2002,18 @@ fn run_filter_ball_traced(
     let mut sum_v2_over_f_d2 = Ball::ZERO;
     let mut sum_v2_over_f_d3 = Ball::ZERO;
     let mut n_proper = 0usize;
+    // `Σ w y²` over the prefix — the exact ceiling on the accumulated
+    // innovations quadratic (see
+    // [`intersect_first_order_accumulator_exact_ranges`]). Accumulated at EVERY
+    // node, including the ones that consume diffuse rank, because the quadratic
+    // it bounds is the restricted form for the whole prefix and not only for the
+    // nodes that contributed a proper innovation.
+    let mut weighted_energy = Ball::ZERO;
 
     for t in 0..nodes.len() {
         let r = Ball::ONE.div_positive(Ball::exact(nodes[t].w));
+        weighted_energy = weighted_energy
+            .add(Ball::exact(nodes[t].y).square().mul(Ball::exact(nodes[t].w)));
         let v = Ball::exact(nodes[t].y).sub(a[0]);
         let v_d1 = a_d1[0].neg();
         let v_d2 = a_d2[0].neg();
@@ -2224,6 +2360,16 @@ fn run_filter_ball_traced(
                 }
                 updated
             });
+            // Only once the diffuse rank is consumed: until then `P*` is the
+            // proper PART of a two-matrix decomposition and not the filtered
+            // covariance the concavity argument is about.
+            if diffuse_rank == 0 {
+                intersect_derivative_covariance_below_its_own_covariance(
+                    &mut p_new_d1,
+                    &p_new,
+                    order,
+                );
+            }
             let mut gain_d1 = [Ball::ZERO; MAX_ORDER];
             for i in 0..order {
                 gain_d1[i] = p_new_d1[i][0].div_positive(r);
@@ -2404,6 +2550,37 @@ fn run_filter_ball_traced(
             sum_v2_over_f_d2 = sum_v2_over_f_d2.add(t2);
             sum_v2_over_f_d3 = sum_v2_over_f_d3.add(t3);
             n_proper += 1;
+            if diffuse_rank == 0 {
+                intersect_first_order_accumulator_exact_ranges(
+                    &mut sum_v2_over_f,
+                    &mut sum_v2_over_f_d1,
+                    &mut sum_log_f_d1,
+                    weighted_energy,
+                    n_proper,
+                );
+            }
+            if let Some(sink) = trace.as_mut() {
+                for record in [
+                    ("a_00", a[0]),
+                    ("a_d1_00", a_d1[0]),
+                    ("v", v),
+                    ("v_d1", v_d1),
+                    ("t0", t0),
+                    ("t1", t1),
+                    (
+                        "carried_factor",
+                        Ball::exact(f64::from(u8::from(carried_factor.is_some()))),
+                    ),
+                    (
+                        "carried_d1_factor",
+                        Ball::exact(f64::from(u8::from(carried_d1_factor.is_some()))),
+                    ),
+                    ("sum_v2_over_f", sum_v2_over_f),
+                    ("sum_v2_over_f_d1", sum_v2_over_f_d1),
+                ] {
+                    sink.push((t, record.0, record.1));
+                }
+            }
             // Refuse AT the node that diverged, not at the end of the pass.
             //
             // The end-of-pass check below reports that some accumulator is
@@ -2481,6 +2658,16 @@ fn run_filter_ball_traced(
             ball_symmetrize(&mut p_next_d1, order);
             ball_symmetrize(&mut p_next_d2, order);
             ball_symmetrize(&mut p_next_d3, order);
+            // `0 ⪯ −dP/dρ ⪯ P` holds at the PREDICTED covariance for the same
+            // reason it holds at the updated one: the prediction is one more
+            // affine, jointly monotone step of the same concave composition.
+            if diffuse_rank == 0 {
+                intersect_derivative_covariance_below_its_own_covariance(
+                    &mut p_next_d1,
+                    &p_next,
+                    order,
+                );
+            }
             p_star = p_next;
             p_star_d1 = p_next_d1;
             p_star_d2 = p_next_d2;
@@ -2906,7 +3093,16 @@ fn certified_concentrated_criterion_jet(
     let rss_d1 = pass.sum_v2_over_f_d1;
     let rss_d2 = pass.sum_v2_over_f_d2;
     let rss_d3 = pass.sum_v2_over_f_d3;
-    let rss_log_d1 = rss_d1.div_positive(rss);
+    let mut rss_log_d1 = rss_d1.div_positive(rss);
+    // `0 ≤ (Σ v²/F̃)′ ≤ Σ v²/F̃ ≤ rss` bounds this RATIO by one, and the division
+    // above cannot see that: it ranges numerator and denominator independently,
+    // so the same dependency loss the accumulator ranges just removed reappears
+    // one line later. Measured at order 3, ρ = −16.6135: the accumulator pair is
+    // `(21.2 ± 34.8, 0.494 ± 38.6)` — both inside their ranges — and the
+    // quotient still reaches `2.8e2`, carrying the certified derivative to
+    // `[−2.51e4, 88.5]` when the model fixes it at `[−ν/2, r/2]`. The upper end
+    // is already exactly `r/2 = 88.5`; only the quotient's lower end was loose.
+    intersect_with_exact_range(&mut rss_log_d1, 0.0, 1.0);
     let rss_log_d2 = rss_d2
         .div_positive(rss)
         .sub(rss_log_d1.square());
@@ -4194,13 +4390,13 @@ mod tests {
 
     /// Where the certified derivative ladder stops, measured rather than assumed.
     ///
-    /// This began as "the `d3` covariance enclosure survives every visited `ρ`".
-    /// That subject is now known to be FALSE at a known place for a known
-    /// reason, so asserting it asserted a hope. What follows asserts the
-    /// measurement instead: for every smoothing order and every `ρ` the
-    /// certified search visits, either a certificate exists — and then which
-    /// bound anchored its curvature and third order — or the pass refuses, and
-    /// then which accumulator left the finite range and at which node.
+    /// This began as "the `d3` covariance enclosure survives every visited `ρ`",
+    /// which asserted a hope. What follows asserts the measurement instead: for
+    /// every smoothing order and every `ρ` the certified search visits, either a
+    /// certificate exists — and then which bound anchored its curvature and
+    /// third order — or the pass refuses, and then which accumulator left the
+    /// finite range and at which node. On the fixture as it stands nothing
+    /// refuses; the table records which anchor each cell got.
     ///
     /// This is not XFAIL. XFAIL asserts nothing and hides a defect; this pins
     /// the exact frontier, in both directions. A cell that improves fails this
@@ -4219,7 +4415,7 @@ mod tests {
     /// parameter is differentiated); and global-bound substitution, which is
     /// what the two `BoundSource` columns below record.
     #[test]
-    fn the_certified_ladder_stops_at_a_measured_boundary() {
+    fn the_certified_ladder_frontier_is_the_measured_one() {
         let (x, y, w) = dgp_2300();
         let visited = [
             -24.0_f64,
@@ -4260,23 +4456,30 @@ mod tests {
     }
 
     /// The frontier as measured on this fixture, read out of the run and not
-    /// predicted. Two features of it are worth naming because both contradict
-    /// the shapes that were guessed before it was taken.
+    /// predicted. What it records now is a LADDER THAT NO LONGER STOPS: at every
+    /// smoothing order and every visited `rho` a certificate exists, and the only
+    /// thing that varies is which bound anchored its curvature and third order.
     ///
-    /// It is a BAND, not a tail. Smoothing order 3 refuses across
-    /// `-20 <= rho <= -10` and SUCCEEDS at `rho = -24` on either side of it, so
-    /// "diverges for all rho below some threshold" — which is what every
-    /// intuition here suggested — is false. The node at which it goes moves
-    /// smoothly with `rho` (72, 75, 81, 99, 137), which is why the band has
-    /// edges: below `-20` and above `-10` that node runs past the end of the
-    /// data.
+    /// It replaces a table in which smoothing order 3 refused across
+    /// `-20 <= rho <= -10` with `sum_v2_over_f_d1 diverged at node 72/75/81/99/137`.
+    /// Nothing about the recursion changed to remove those: the accumulator that
+    /// left the finite range is now intersected with the exact range the Gaussian
+    /// model gives it at every node (see
+    /// [`intersect_first_order_accumulator_exact_ranges`]), so it cannot leave a
+    /// range it was always inside. The same measurement moved four order-2 cells
+    /// from `third AnalyticGlobalBound` to `third EndpointJet`, and order 3 at
+    /// `rho = -6` from a global anchor to the exact jets, because the
+    /// derivative covariance is now pinned by `0 <= -dP/drho <= P` (see
+    /// [`intersect_derivative_covariance_below_its_own_covariance`]) instead of
+    /// widening without bound.
     ///
-    /// And what refuses is `sum_v2_over_f_d1`, the FIRST derivative. Every
-    /// higher level has a valid closed-form substitute and now takes it; this
-    /// one does not, because the search is looking for `V\u{2032} = 0` and a
-    /// constant bound on `|V\u{2032}|` says nothing about where that is. So the
-    /// ladder does not stop at an optimisation — it stops at the quantity the
-    /// search IS.
+    /// What is left is the order-3 low-`rho` block, where the curvature and third
+    /// order still fall back to their closed-form global bounds. That costs cells
+    /// and never soundness, and its cause is measured and named: the VALUE
+    /// covariance's unobserved diagonals still widen about `1.7x` per node,
+    /// because the closed-loop map `Psi = A F` has `rho(Psi) < 1` while
+    /// `rho(|Psi|) > 1` -- the cancellation is between coordinates of one step,
+    /// which no componentwise interval evaluation in any diagonal basis can see.
     const MEASURED_LADDER_BOUNDARY: &str = "\
 order 1 rho -24: curvature EndpointJet, third EndpointJet\n\
 order 1 rho -20: curvature EndpointJet, third EndpointJet\n\
@@ -4287,24 +4490,183 @@ order 1 rho -10: curvature EndpointJet, third EndpointJet\n\
 order 1 rho -6: curvature EndpointJet, third EndpointJet\n\
 order 1 rho 0: curvature EndpointJet, third EndpointJet\n\
 order 1 rho 6: curvature EndpointJet, third EndpointJet\n\
-order 2 rho -24: curvature EndpointJet, third AnalyticGlobalBound\n\
-order 2 rho -20: curvature EndpointJet, third AnalyticGlobalBound\n\
-order 2 rho -18: curvature EndpointJet, third AnalyticGlobalBound\n\
-order 2 rho -16.6135: curvature EndpointJet, third AnalyticGlobalBound\n\
+order 2 rho -24: curvature EndpointJet, third EndpointJet\n\
+order 2 rho -20: curvature EndpointJet, third EndpointJet\n\
+order 2 rho -18: curvature EndpointJet, third EndpointJet\n\
+order 2 rho -16.6135: curvature EndpointJet, third EndpointJet\n\
 order 2 rho -13.841116916640328: curvature EndpointJet, third EndpointJet\n\
 order 2 rho -10: curvature EndpointJet, third EndpointJet\n\
 order 2 rho -6: curvature EndpointJet, third EndpointJet\n\
 order 2 rho 0: curvature EndpointJet, third EndpointJet\n\
 order 2 rho 6: curvature EndpointJet, third EndpointJet\n\
 order 3 rho -24: curvature AnalyticGlobalBound, third AnalyticGlobalBound\n\
-order 3 rho -20: sum_v2_over_f_d1 diverged at node 72\n\
-order 3 rho -18: sum_v2_over_f_d1 diverged at node 75\n\
-order 3 rho -16.6135: sum_v2_over_f_d1 diverged at node 81\n\
-order 3 rho -13.841116916640328: sum_v2_over_f_d1 diverged at node 99\n\
-order 3 rho -10: sum_v2_over_f_d1 diverged at node 137\n\
-order 3 rho -6: curvature AnalyticGlobalBound, third AnalyticGlobalBound\n\
+order 3 rho -20: curvature AnalyticGlobalBound, third AnalyticGlobalBound\n\
+order 3 rho -18: curvature AnalyticGlobalBound, third AnalyticGlobalBound\n\
+order 3 rho -16.6135: curvature AnalyticGlobalBound, third AnalyticGlobalBound\n\
+order 3 rho -13.841116916640328: curvature AnalyticGlobalBound, third AnalyticGlobalBound\n\
+order 3 rho -10: curvature AnalyticGlobalBound, third AnalyticGlobalBound\n\
+order 3 rho -6: curvature EndpointJet, third EndpointJet\n\
 order 3 rho 0: curvature EndpointJet, third EndpointJet\n\
 order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
+
+    /// The certified criterion jet stays inside the range the Gaussian model
+    /// gives it, on the fixture where it did not (#2614).
+    ///
+    /// `V′ = −½(Σ log F̃)′ − ½·ν·(Σ v²/F̃)′/rss`, and the exact accumulator ranges
+    /// (see [`intersect_first_order_accumulator_exact_ranges`]) are
+    /// `−r ≤ (Σ log F̃)′ ≤ 0` and `0 ≤ (Σ v²/F̃)′ ≤ Σ v²/F̃ ≤ rss`, so
+    /// `−ν/2 ≤ V′ ≤ r/2` — a width of at most `(r + ν)/2`. Measured before those
+    /// ranges were applied: `±1.95e91` at order 2, `ρ = −18`, i.e. 89 orders of
+    /// magnitude outside a range the model fixes at `178`. That is what made the
+    /// search report `Unresolved` rather than bracket a stationary point.
+    ///
+    /// Containment is asserted FIRST and against an independent recurrence: the
+    /// ball jet must enclose the scalar `f64` jet, which shares no arithmetic
+    /// with it. A narrower enclosure that stops containing the value it encloses
+    /// is a worse defect than the width this test exists to bound.
+    #[test]
+    fn the_certified_jet_contains_the_scalar_jet_and_stays_in_its_closed_form_range() {
+        let (x, y, w) = dgp_2300();
+        for order in 1..=MAX_ORDER {
+            let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
+            let proper_modes = (nodes.len() - order) as f64;
+            let residual_dof = (n_obs - order) as f64;
+            for &rho in &[
+                -18.0_f64,
+                -16.6135,
+                -13.841116916640328,
+                -10.0,
+                -6.0,
+                0.0,
+                6.0,
+            ] {
+                let Ok(certificate) =
+                    certified_concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
+                else {
+                    continue;
+                };
+                let scalar = concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
+                    .expect("independent scalar recurrence");
+                assert!(
+                    certificate.value.interval().contains(scalar.0),
+                    "order={order} rho={rho}: scalar value {} escaped {:?}",
+                    scalar.0,
+                    certificate.value
+                );
+                assert!(
+                    certificate.derivative.interval().contains(scalar.1),
+                    "order={order} rho={rho}: scalar derivative {} escaped {:?}",
+                    scalar.1,
+                    certificate.derivative
+                );
+                let width = certificate.derivative.hi - certificate.derivative.lo;
+                assert!(
+                    width < proper_modes + residual_dof,
+                    "order={order} rho={rho}: the certified derivative ball is {width:e} \
+                     wide, outside the closed-form range the accumulators are bounded to \
+                     ({:e}); the search cannot sign an interval that wide",
+                    0.5 * (proper_modes + residual_dof)
+                );
+            }
+        }
+    }
+
+    /// The per-node WIDTH of the recursion that still widens, measured.
+    ///
+    /// [`MEASURED_LADDER_BOUNDARY`] records which anchor each cell got; it cannot
+    /// say whether the quantity behind a weakened anchor is diverging in VALUE —
+    /// in which case there is nothing to enclose — or only in enclosure WIDTH,
+    /// which is dependency loss and has a fix. This walks the traced filter at
+    /// the middle of the order-3 block and prints both per node. Measured there:
+    /// the filtered mean `a₀` holds values in `[−1.2, +1.3]` across every node
+    /// while its enclosure width runs `3.6e−7` at node 8, `9.1e+1` at node 40,
+    /// `5.1e+74` at node 80 and `2.3e+254` at node 120.
+    #[test]
+    fn the_mean_enclosure_width_diverges_while_its_value_stays_bounded() {
+        let (x, y, w) = dgp_2300();
+        let order = 3;
+        let log_lambda = -16.6135_f64;
+        let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
+        let q_value =
+            gam_problem::checked_exp_log_strength(-log_lambda).expect("inverse log strength");
+        let q = Ball::certified(
+            q_value,
+            gam_math::score_opt::certified_exp(-log_lambda).expect("certified exponential"),
+        );
+        let mut trace: Vec<BallTraceRecord> = Vec::new();
+        let outcome = run_filter_ball_traced(&nodes, q, order, Some(&mut trace));
+        for (node, name, ball) in &trace {
+            if matches!(
+                *name,
+                "a_00"
+                    | "a_d1_00"
+                    | "v_d1"
+                    | "t0"
+                    | "t1"
+                    | "sum_v2_over_f"
+                    | "sum_v2_over_f_d1"
+                    | "p_upd_00"
+                    | "p_upd_11"
+                    | "p_upd_22"
+                    | "d1_upd_00"
+                    | "f_star"
+                    | "inv_f"
+                    | "a_operator_00"
+                    | "gain_0"
+                    | "gain_d1_0"
+            ) {
+                eprintln!(
+                    "node {node} {name}: value {:+.6e} width {:.6e}",
+                    ball.value,
+                    ball.hi - ball.lo
+                );
+            }
+        }
+        // The subject, asserted in BOTH directions like
+        // [`MEASURED_LADDER_BOUNDARY`]: the VALUE of the filtered mean stays
+        // O(1) over every node the pass reaches, and its WIDTH does not. A
+        // repair that contracts the width fails this test as loudly as a
+        // regression that widens it, and either way the table above is the
+        // measurement the next reader inherits.
+        let mean: Vec<(usize, f64, f64)> = trace
+            .iter()
+            .filter(|(_, name, _)| *name == "a_00")
+            .map(|(node, _, ball)| (*node, ball.value, ball.hi - ball.lo))
+            .collect();
+        let (last_node, _, last_width) = *mean.last().expect("the pass reaches a proper node");
+        let widest_value = mean
+            .iter()
+            .fold(0.0_f64, |widest, (_, value, _)| widest.max(value.abs()));
+        assert!(
+            widest_value < 1.0e2,
+            "the filtered mean's VALUE left O(1) at order {order}, rho {log_lambda}: \
+             {widest_value:e}. The subject of this test is width divergence on a stable \
+             value; a diverging value is a different defect"
+        );
+        assert!(
+            last_width > 1.0e10,
+            "the filtered mean's enclosure width at node {last_node} contracted to \
+             {last_width:e} on a value of order one. If that is a repair, this test is \
+             the place to record the new width; the pass through
+             `certified_concentrated_criterion_jet` below is the surface that consumes it"
+        );
+        // Whatever the pass does, the certified jet must agree with it: either
+        // both produce a criterion or both refuse.
+        let certified =
+            certified_concentrated_criterion_jet(&nodes, within, n_obs, log_lambda, order);
+        assert_eq!(
+            outcome.is_err(),
+            certified.is_err(),
+            "the certified jet and the filter pass disagree about refusing"
+        );
+        if let Ok(certificate) = certified {
+            eprintln!(
+                "certified derivative {:?} width {:e}",
+                certificate.derivative,
+                certificate.derivative.hi - certificate.derivative.lo
+            );
+        }
+    }
 
 
     /// Value-only diagnostic surface retained for the derivative oracle tests.
