@@ -3728,7 +3728,7 @@ mod tests {
     use crate::estimate::EstimationError;
     use approx::assert_relative_eq;
     use gam_problem::KhatriRaoConeConstraints;
-    use ndarray::{Array1, Array2, array, s};
+    use ndarray::{Array1, Array2, array};
 
     fn gather_linear_constraint_rows(
         constraints: &LinearInequalityConstraints,
