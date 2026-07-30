@@ -3845,7 +3845,13 @@ mod tests {
             log_lambdas: Array1::zeros(0),
             lambdas: Array1::zeros(0),
             likelihood_family: Some(gam_spec::LikelihoodSpec::royston_parmar()),
-            likelihood_scale: gam_spec::LikelihoodScaleMetadata::FixedDispersion { phi: 1.0 },
+            // Royston-Parmar carries no scalar GLM dispersion, so a `phi` is not
+            // a value this family owns. `LikelihoodSpec::default_scale_metadata`
+            // maps RoystonParmar -> Unspecified, and `resolved_scale` rejects any
+            // other pairing atomically inside `try_from_parts` -- so the fixture
+            // never built a fit at all and died at `.expect("survival fit")`,
+            // long before reaching the posterior-mean assertion it exists to make.
+            likelihood_scale: gam_spec::LikelihoodScaleMetadata::Unspecified,
             log_likelihood_normalization: gam_spec::LogLikelihoodNormalization::Full,
             log_likelihood: 0.0,
             deviance: 0.0,

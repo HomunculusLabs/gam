@@ -769,8 +769,12 @@ mod tests {
                 0.4 + (1.3 * value).sin() + (i as f64 * 0.71).sin() / weights[i].sqrt()
             })
             .collect();
+        // Diagnostic only: these two weighted-scan tests can ONLY go red via a
+        // panic (one round-trips a payload against itself, the other compares
+        // against exactly the quantities production computes), so the refusal
+        // text is the entire signal and `expect` was discarding it.
         let fit = gam_solve::spline_scan::fit_spline_scan(&x, &y, &weights, 2)
-            .expect("weighted scan fit");
+            .unwrap_or_else(|error| panic!("weighted scan fit refused: {error:?}"));
         let mut payload = assemble_spline_scan_payload(
             "y ~ s(x)".to_string(),
             "x".to_string(),

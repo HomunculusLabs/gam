@@ -2327,7 +2327,33 @@ fn run_filter_ball_traced(
             let a_d3_contracted = ball_mat_vec(&a_operator, &a_d3, order);
             let y_node = Ball::exact(nodes[t].y);
             for i in 0..order {
-                a[i] = a_contracted[i].add(gain[i].mul(y_node));
+                // Row 0 keeps the factored form. There `A[0][0] = R/F` is a
+                // genuine contraction, so `A a + K y` cancels, while the
+                // innovation form would cost `(1 + |K_0|) w(a_0) ~ 2 w(a_0)`.
+                //
+                // Rows i >= 1 are the opposite case and were swept along with
+                // row 0 by 64778c4e0, whose justification only ever covered row
+                // 0. There `A[i][i] = 1` EXACTLY -- nothing cancels -- and since
+                // `(A a)_i = a_i - K_i a_0`, the two forms are algebraically
+                // identical while the factored one is strictly wider:
+                //
+                //   factored    a_i - K_i a_0 + K_i y   width += (|a_0| + |y|) w(K_i)
+                //   innovation  a_i + K_i v             width += |v| w(K_i)
+                //
+                // The difference is about `2 |y| w(K_i)` of pure enclosure
+                // inflation per node, applied to `w(K_1)` -- the quantity this
+                // filter already measures as blown out. The mean recursion is
+                // intersected against NO independent enclosure (the covariance
+                // gets seven per node), so nothing downstream reins this in and
+                // the width compounds geometrically.
+                //
+                // Values are unchanged; only the enclosure tightens.
+                let a_prev = a[i];
+                a[i] = if i == 0 {
+                    a_contracted[i].add(gain[i].mul(y_node))
+                } else {
+                    a_prev.add(gain[i].mul(v))
+                };
                 a_d1[i] = a_d1_contracted[i].add(gain_d1[i].mul(v));
                 a_d2[i] = a_d2_contracted[i]
                     .add(gain_d1[i].mul(v_d1).scale(2.0))

@@ -29,7 +29,9 @@ def test_description_length_scores_one_dimensional_residual_covariance() -> None
     fitted = _featurizer(dimensions=1)
     test_x = fitted.recon + np.linspace(-0.5, 0.5, fitted.recon.shape[0])[:, None]
 
-    result = description_length(fitted, test_x, r2_targets=(0.9,))
+    result = description_length(
+        fitted, test_x, amortization_horizon=1000, r2_targets=(0.9,)
+    )
 
     assert set(result) == {
         "support_bits",
@@ -45,7 +47,11 @@ def test_description_length_rejects_shape_mismatch() -> None:
     fitted = _featurizer()
 
     with pytest.raises(ValueError, match="same shape"):
-        description_length(fitted, np.ones((fitted.recon.shape[0] + 1, 2)))
+        description_length(
+            fitted,
+            np.ones((fitted.recon.shape[0] + 1, 2)),
+            amortization_horizon=1000,
+        )
 
 
 def test_fitted_featurizer_requires_one_code_dimension_per_atom() -> None:
@@ -59,4 +65,4 @@ def test_fitted_featurizer_requires_one_code_dimension_per_atom() -> None:
         fit_seconds=0.0,
     )
     with pytest.raises(ValueError, match="one entry per atom"):
-        description_length(fitted, np.ones((4, 1)))
+        description_length(fitted, np.ones((4, 1)), amortization_horizon=1000)

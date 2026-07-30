@@ -2842,11 +2842,33 @@ impl WorkingModelSurvival {
 
         // Hessian operator on the transformed H′. Orthogonal similarity
         // preserves strict positive definiteness and the exact spectrum.
+        // An indefinite inner Hessian here is a property of THIS rho, not of the
+        // problem: `H_pen = H + S(lambda)` and the active penalty set includes a
+        // full-span stabilization ridge block, so a neighbouring lambda adds PSD
+        // curvature on the offending direction and the same design evaluates
+        // fine. `InvalidInput` is classified FATAL by `is_trial_point_infeasible`,
+        // so raising it aborted the entire fit at the first indefinite trial
+        // instead of letting the outer lambda-search mark the point infeasible
+        // and step away -- on a 6-row delayed-entry design that is the whole
+        // difference between a fit and
+        //
+        //   positive-definite Hessian required for Laplace evaluation:
+        //   eigenvalue 0 is -1.034960e-2
+        //
+        // The sibling refusal 130 lines above already draws this distinction for
+        // exactly the same reason (#2531); this call site was left behind. The
+        // positive-definiteness REQUIREMENT is unchanged -- a saddle is still not
+        // a Laplace mode and is still refused. Only the blast radius of the
+        // refusal is corrected.
         let hop = DenseSpectralOperator::from_symmetric_with_mode(
             &reparam_inner.hessian_transformed,
             hessian_logdet_mode,
         )
-        .map_err(EstimationError::InvalidInput)?;
+        .map_err(|reason| EstimationError::TrialPointRefused {
+            reason: format!(
+                "survival LAML requires a positive-definite inner Hessian at this rho: {reason}"
+            ),
+        })?;
 
         // Penalty coordinates: the per-block TRANSFORMED roots (Q_s frame), the
         // single source of truth for penalty roots there. One coordinate per ρ

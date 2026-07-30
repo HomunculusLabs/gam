@@ -94,10 +94,24 @@ pub(crate) fn classify_inner_error(message: String) -> InnerFailure {
             message,
         };
     }
+    // `BudgetExhausted` claims something specific -- "ran out of cycle budget"
+    // -- so only sentinels that actually say so may route here.
+    //
+    // `"did not converge after"` does NOT say so. It is the opening phrase of
+    // EVERY `InnerSolveNotConverged` Display ("custom-family inner solve did not
+    // converge after {cycles} cycle(s)"), so it matched at any cycle count,
+    // including zero. A divergence-guard exit at cycle 0 was reported as budget
+    // exhaustion, and `rejected_by_budget` could never be false -- it counted
+    // non-convergences, not budgets, while reading like a measurement. A
+    // rejection breakdown of `rejected_by_budget=6` then pointed every reader at
+    // a budget that was never consumed.
+    //
+    // Unclassifiable non-convergences now fall through to `Other`, whose
+    // contract is exactly that: still rejected, the cascade just cannot say why.
+    // An honest "unclassified" beats a confident wrong label.
     if message.contains("inner_max_cycles")
         || message.contains("budget exhausted")
         || message.contains("exhausted the joint Newton budget")
-        || message.contains("did not converge after")
     {
         return InnerFailure::BudgetExhausted { message };
     }

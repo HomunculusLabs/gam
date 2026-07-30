@@ -3163,13 +3163,40 @@ pub(crate) fn derivative_quality_options_and_warm_start(
         true,
     )
     .map(|inner| CustomFamilyWarmStart { inner });
+    // A BUDGET IS NOT A TOLERANCE, and gating one on the other is why this
+    // floor never fired.
+    //
+    // `tighten` asks whether the OUTER tolerance is stricter than the inner one.
+    // Every model-level constructor sets `inner_tol` and `outer_tol` from the
+    // same user scalar, so `derivative_inner_tol == inner_tol`, `tighten` is
+    // false, and the cycle floor below was unreachable on exactly the paths that
+    // need it. Those same constructors also source `inner_max_cycles` from the
+    // user's OUTER `max_iter` -- typically 40, against this crate's own
+    // `DEFAULT_CUSTOM_FAMILY_INNER_MAX_CYCLES = 1200`. A joint Newton solving a
+    // coupled multi-block Hessian for an analytic outer gradient was therefore
+    // cut off at a few percent of its intended budget and reported
+    //
+    //   custom-family inner solve did not converge after 40 cycle(s)
+    //
+    // which the outer search then had to refuse. The refusal is correct; the
+    // starvation upstream of it is the defect.
+    //
+    // The two knobs are now separated. The cycle floor applies whenever this
+    // evaluation carries psi derivatives, because that is what makes the solve
+    // expensive. The TOLERANCE change keeps its original one-way rule: a
+    // stricter outer target may demand a tighter inner solve, but a looser one
+    // grants no authority to relax the inner stationarity equation (#2460).
+    // `inner_max_cycles > 1` is preserved so a deliberate single-cycle probe is
+    // still honoured.
+    if eval_options.inner_max_cycles > 1 {
+        eval_options.inner_max_cycles = eval_options
+            .inner_max_cycles
+            .max(DIRECT_JOINT_HYPER_MIN_CYCLES);
+    }
     if !tighten {
         return (eval_options, psi_safe_warm_start);
     }
     eval_options.inner_tol = derivative_inner_tol;
-    eval_options.inner_max_cycles = eval_options
-        .inner_max_cycles
-        .max(DIRECT_JOINT_HYPER_MIN_CYCLES);
     (eval_options, psi_safe_warm_start)
 }
 

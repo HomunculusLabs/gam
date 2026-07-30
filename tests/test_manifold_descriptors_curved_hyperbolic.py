@@ -190,9 +190,9 @@ def test_poincare_batch_exp_log_roundtrip():
 
 def test_poincare_batch_core_enforces_descriptor_dimension_and_chart_domain():
     m = manifolds.Poincare(dim=2, curvature=-1.0)
-    with pytest.raises(ValueError, match="expected 2"):
+    with pytest.raises(ValueError, match="expected length 2"):
         m.exp(np.zeros((2, 3)), np.zeros((2, 3)))
-    with pytest.raises(ValueError, match="expected 2"):
+    with pytest.raises(ValueError, match="expected length 2"):
         m.distance(np.zeros((2, 2)), np.zeros((2, 3)))
     with pytest.raises(ValueError, match="outside the open ball"):
         m.metric(np.array([1.0, 0.0]))

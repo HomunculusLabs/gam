@@ -14,7 +14,9 @@ def _random_inputs() -> np.ndarray:
 
 @pytest.mark.parametrize("assignment", ["softmax", "ordered_beta_bernoulli", "threshold_gate"])
 def test_smooth_assignments_reject_top_k(assignment: str) -> None:
-    with pytest.raises(ValueError, match="valid only with assignment='topk'"):
+    with pytest.raises(
+        ValueError, match=r"valid only with assignment_kind 'topk'"
+    ):
         gamfit.sae_manifold_fit(
             X=_random_inputs(),
             K=3,

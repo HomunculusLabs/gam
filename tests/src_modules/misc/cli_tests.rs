@@ -2794,6 +2794,18 @@ fn intercept_only_binomial_mean_wiggle_model(
         family_name,
     );
     payload.fit_result = Some(fit_result);
+    // `saved_link_wiggle` gates a Standard link-wiggle payload on TWO
+    // independent fields, and the helper set neither. Supplying only the
+    // coefficients clears the bit-identity gate and then dies on the next one,
+    // which is why fixing just `beta_link_wiggle` moved nothing at all.
+    //
+    // The failure surfaces as a bare "predictor failed" because
+    // `FittedModel::predictor()` does `saved_prediction_runtime().ok()?`,
+    // discarding a fully-populated error.
+    payload.beta_link_wiggle = Some(beta_link_wiggle.clone());
+    // One entry per MEAN coefficient; zero means the warp index is the base
+    // predictor, which is this fixture's intent.
+    payload.link_wiggle_index_shift = Some(vec![0.0]);
     payload.link = Some(InverseLink::Standard(
         StandardLink::try_from(link).unwrap_or_else(|e| {
             panic!(

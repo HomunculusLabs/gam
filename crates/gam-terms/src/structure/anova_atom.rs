@@ -543,24 +543,72 @@ pub fn fit_tensor_surface(
                 search.value_certificate.comparison_resolution
             ));
         }
-        let ScoreOptimumLocation::Stationary(index) = search.location else {
-            return Err(format!(
-                "fit_tensor_surface: finite REML optimum is value-resolved but not an \
-                 isolated stationary point ({:?})",
-                search.location
-            ));
+        // A boundary optimum is an ANSWER, not a failure. The search window is
+        // placed (see the domain comment above) so its lower end already IS the
+        // lambda->0 limit of every positive Gram mode, so a response the tensor
+        // basis interpolates -- the carve re-fit is one by construction -- puts
+        // the profiled maximum exactly there. Refusing it refuses the fit.
+        //
+        // `ScoreOptimumLocation` is initialised to a boundary and only upgraded
+        // to `Stationary` when a stationary point strictly beats it, so
+        // demanding `Stationary` demands that an interior point win. The sibling
+        // REML routine in this crate (`GridSpline2dDesign::fit_reml`) handles all
+        // four arms -- "Both boundaries compete directly with all isolated
+        // optima" -- and so does every other consumer in the workspace. This
+        // call site was the only one refusing them: an incomplete port, not a
+        // designed constraint.
+        //
+        // Every certificate is kept. A boundary is proved with the one-sided KKT
+        // condition, an interior point with the two-sided one, and a
+        // resolution-flat window is still refused outright.
+        enum KktKind {
+            LowerBoundary,
+            UpperBoundary,
+            Stationary,
+        }
+        let (bracket, kkt_kind) = match search.location {
+            ScoreOptimumLocation::LowerBoundary => (
+                ClosedInterval::point(search.lower_boundary.x),
+                KktKind::LowerBoundary,
+            ),
+            ScoreOptimumLocation::UpperBoundary => (
+                ClosedInterval::point(search.upper_boundary.x),
+                KktKind::UpperBoundary,
+            ),
+            ScoreOptimumLocation::Stationary(index) => (
+                search
+                    .stationary_points
+                    .get(index)
+                    .ok_or_else(|| {
+                        "fit_tensor_surface: optimizer returned an invalid stationary index"
+                            .to_string()
+                    })?
+                    .bracket,
+                KktKind::Stationary,
+            ),
+            ScoreOptimumLocation::ResolutionFlat(index) => {
+                let flat = search.resolution_flat_regions.get(index).ok_or_else(|| {
+                    "fit_tensor_surface: optimizer returned an invalid resolution-flat index"
+                        .to_string()
+                })?;
+                return Err(format!(
+                    "fit_tensor_surface: finite REML optimum is value-resolved but not \
+                     stationary on {:?} (gap {}, resolution {})",
+                    flat.bracket, flat.max_score_gap, flat.score_resolution
+                ));
+            }
         };
-        let stationary = search.stationary_points.get(index).ok_or_else(|| {
-            "fit_tensor_surface: optimizer returned an invalid stationary index".to_string()
-        })?;
         let kkt = profile
-            .enclose(stationary.bracket.lo, stationary.bracket.hi)
+            .enclose(bracket.lo, bracket.hi)
             .map_err(|error| format!("fit_tensor_surface: {error}"))?;
-        if !(kkt.derivative.contains_zero() && kkt.curvature.hi < 0.0) {
+        let kkt_holds = match kkt_kind {
+            KktKind::LowerBoundary => kkt.derivative.hi <= 0.0,
+            KktKind::UpperBoundary => kkt.derivative.lo >= 0.0,
+            KktKind::Stationary => kkt.derivative.contains_zero() && kkt.curvature.hi < 0.0,
+        };
+        if !kkt_holds {
             return Err(format!(
-                "fit_tensor_surface: exact-real interior REML KKT certificate failed on \
-                 {:?}: {kkt:?}",
-                stationary.bracket
+                "fit_tensor_surface: exact-real REML KKT certificate failed on {bracket:?}: {kkt:?}"
             ));
         }
         let relative_lambda = certified_exp_representative(search.optimum.x).ok_or_else(|| {
