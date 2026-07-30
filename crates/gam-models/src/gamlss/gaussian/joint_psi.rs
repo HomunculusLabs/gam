@@ -14,7 +14,7 @@ use gam_row_macros::row_atom;
 // expression retains the production extreme-value semantics while build-time
 // differentiation emits exact observed H, contracted t3, and contracted t4.
 row_atom! {
-    fn gaussian_normalized_row [generic, order2, third, fourth](
+    fn gaussian_normalized_row [generic, order2_at_zero, third_at_zero, fourth_at_zero](
         delta_mu,
         delta_eta;
         obs_weight,
@@ -699,9 +699,7 @@ impl<'a> GaussianJointRowProgram<'a> {
         &self,
         row: usize,
     ) -> gam_math::jet_scalar::StaticOrder2Atom<2, 3, 3, 7> {
-        gaussian_normalized_row_order2(
-            0.0,
-            0.0,
+        gaussian_normalized_row_order2_at_zero(
             self.rows.obs_weight[row],
             self.rows.standardized_residual[row],
             self.rows.inv_sigma[row],
@@ -712,9 +710,7 @@ impl<'a> GaussianJointRowProgram<'a> {
     /// Symbolically lowered Hessian derivative in one predictor direction.
     #[inline(always)]
     pub(crate) fn row_third_contracted(&self, row: usize, direction: &[f64; 2]) -> [[f64; 2]; 2] {
-        gaussian_normalized_row_third_contracted(
-            0.0,
-            0.0,
+        gaussian_normalized_row_third_contracted_at_zero(
             self.rows.obs_weight[row],
             self.rows.standardized_residual[row],
             self.rows.inv_sigma[row],
@@ -731,9 +727,7 @@ impl<'a> GaussianJointRowProgram<'a> {
         direction_u: &[f64; 2],
         direction_v: &[f64; 2],
     ) -> [[f64; 2]; 2] {
-        gaussian_normalized_row_fourth_contracted(
-            0.0,
-            0.0,
+        gaussian_normalized_row_fourth_contracted_at_zero(
             self.rows.obs_weight[row],
             self.rows.standardized_residual[row],
             self.rows.inv_sigma[row],
