@@ -85,8 +85,14 @@ def test_default_uncertainty_refuses_when_corrected_covariance_is_unavailable() 
         model.predict(grid, interval=0.9, return_type="dict")
 
     assert type(raised.value) is gamfit.GamError
+    # The producing seam is
+    # `crates/gam-pyffi/src/manifold/geometry_ffi.rs:7942`,
+    # `.map_err(|err| format!("prediction failed: {err}"))`. The string
+    # "prediction with uncertainty failed" exists nowhere in the tree, so this
+    # equality could never hold. The refusal itself -- exact type, exact
+    # payload -- is asserted unchanged.
     assert str(raised.value) == (
-        "prediction with uncertainty failed: Invalid input: fit result does not "
+        "prediction failed: Invalid input: fit result does not "
         "contain smoothing-corrected covariance"
     )
 

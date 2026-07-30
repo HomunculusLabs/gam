@@ -310,9 +310,18 @@ def _build_fit_payload(
         "noise_offset": noise_offset,
         "flexible_link": flexible_link,
         "precision_hyperpriors": precision_hyperpriors,
-        "latents": normalized_latents,
-        "penalties": _normalize_penalties(penalties, normalized_latents),
-        "smooths": _normalize_smooths(smooths),
+        # `FitRequestConfigDocument` is `deny_unknown_fields` and names these
+        # three `latent_coordinates` / `analytic_penalties` /
+        # `smooth_descriptors` (crates/gam-config/src/fit_request_document.rs
+        # L116, L132, L146), consuming them under those names in
+        # crates/gam-config/src/lib.rs:143-163. The spellings below appear in
+        # no Rust file, so every `smooths=` / `penalties=` / `latents=` call
+        # died as `unknown field ...` before reaching the fitter. The value
+        # shapes already match the documents (BTreeMap<String, JsonValue> and
+        # Vec<JsonValue>); only the key names were wrong.
+        "latent_coordinates": normalized_latents,
+        "analytic_penalties": _normalize_penalties(penalties, normalized_latents),
+        "smooth_descriptors": _normalize_smooths(smooths),
     }
     for key, value in kwarg_items.items():
         if value is not None:

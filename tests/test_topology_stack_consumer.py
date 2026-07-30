@@ -118,13 +118,27 @@ def test_holdout_log_density_table_matches_gaussian(monkeypatch):
 
     # The table the binding received is the per-point Gaussian held-out
     # log-density of the true y under each candidate's recovered (mean, sd).
+    # `stack_topologies` (gamfit/_select_topology.py:481) calls
+    # `stack_topologies_gaussian`, NOT `stacking_weights_from_log_density`, so
+    # `captured_rows` stays None and every read of it raised TypeError before
+    # reaching an assertion. The Gaussian log-density table itself moved into
+    # `gam::solver::topology_stack_gaussian`; what Python still owns -- and
+    # what this test exists to pin -- is that the marshalled per-candidate
+    # (mean, band) recovers each candidate's exact predictive moments, so the
+    # table the kernel forms from them IS the held-out Gaussian log-density.
     assert rust.captured_names == ["flat", "linear"]
     y = holdout["y"]
+    assert rust.captured_y == [float(v) for v in y]
+    z = NormalDist().inv_cdf(0.5 + 0.5 * rust.captured_interval_level)
     for i, yi in enumerate(y):
         expected_flat = _gaussian_logpdf(yi, 0.0, 1.0)
         expected_linear = _gaussian_logpdf(yi, float(i), 0.5)
-        assert math.isclose(rust.captured_rows[i][0], expected_flat, rel_tol=1e-9)
-        assert math.isclose(rust.captured_rows[i][1], expected_linear, rel_tol=1e-9)
+        sd_flat = (rust.captured_uppers[0][i] - rust.captured_lowers[0][i]) / (2.0 * z)
+        sd_linear = (rust.captured_uppers[1][i] - rust.captured_lowers[1][i]) / (2.0 * z)
+        got_flat = _gaussian_logpdf(yi, rust.captured_means[0][i], sd_flat)
+        got_linear = _gaussian_logpdf(yi, rust.captured_means[1][i], sd_linear)
+        assert math.isclose(got_flat, expected_flat, rel_tol=1e-9)
+        assert math.isclose(got_linear, expected_linear, rel_tol=1e-9)
 
     assert stack.weights == {"flat": 0.3, "linear": 0.7}
     assert stack.mean_log_score == -1.234
@@ -192,9 +206,17 @@ def test_non_positive_sd_rows_are_dropped_from_a_candidate(monkeypatch):
     monkeypatch.setattr(st, "_topology_rust", lambda: rust)
 
     st.stack_topologies(fits, holdout, "y")
-    # First row's degenerate column is -inf; the good column stays finite.
-    assert rust.captured_rows[0][1] == float("-inf")
-    assert math.isfinite(rust.captured_rows[0][0])
+    # `captured_rows` belongs to the binding the consumer no longer calls (see
+    # the sibling test); the -inf substitution and the row drop now live in
+    # `gam::solver::topology_stack_gaussian`. The Python seam's obligation is
+    # to marshal the collapsed band THROUGH rather than crash on it or repair
+    # it, which is exactly what "dropped from a candidate" depends on.
+    degen = rust.captured_names.index("degen")
+    good = rust.captured_names.index("good")
+    assert rust.captured_uppers[degen][0] == rust.captured_lowers[degen][0]
+    assert rust.captured_uppers[good][0] > rust.captured_lowers[good][0]
+    assert math.isfinite(rust.captured_means[degen][0])
+    assert math.isfinite(rust.captured_means[good][0])
 
 
 def test_missing_response_column_is_rejected():

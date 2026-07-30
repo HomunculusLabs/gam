@@ -97,13 +97,28 @@ def _model() -> ManifoldSAE:
 def test_coordinate_fidelity_report_and_gated_angle_reader() -> None:
     model = _model()
 
-    rows = model.coordinate_fidelity_report()
+    # `coordinate_fidelity_report()` and `atom_angle_coordinate()` exist
+    # nowhere under crates/ or gamfit/ -- these calls were the only two
+    # occurrences of either name, so they could never resolve. The live
+    # readers are the `coordinate_fidelity` report getter
+    # (crates/gam-pyffi/src/manifold/manifold_and_posterior_ffi.rs:6606) and
+    # the per-atom `coords_u_arc` getter (same file:5404). The contract under
+    # test is unchanged: one row per atom, the certified verdict, the honest
+    # arc-length coordinate on the recoverable atom, and NO coordinate at all
+    # on the degenerate one -- the gate the removed reader used to enforce by
+    # raising. Both read paths are checked, so the report and the atom surface
+    # cannot silently disagree.
+    rows = model.coordinate_fidelity["atoms"]
     assert len(rows) == 2
     assert rows[0]["verdict"] == "recoverable_via_arclength"
-    np.testing.assert_allclose(model.atom_angle_coordinate(0), [0.0, 0.25, 0.5, 0.75])
+    assert rows[0]["certified"] is True
+    np.testing.assert_allclose(rows[0]["coords_u_arc"], [0.0, 0.25, 0.5, 0.75])
+    np.testing.assert_allclose(model.atoms[0].coords_u_arc, [0.0, 0.25, 0.5, 0.75])
 
-    with pytest.raises(ValueError, match="degenerate"):
-        model.atom_angle_coordinate(1)
+    assert rows[1]["verdict"] == "degenerate"
+    assert rows[1]["certified"] is False
+    assert rows[1]["coords_u_arc"] is None
+    assert model.atoms[1].coords_u_arc is None
 
 
 def test_coordinate_fidelity_round_trips_through_dict() -> None:
@@ -114,4 +129,10 @@ def test_coordinate_fidelity_round_trips_through_dict() -> None:
     assert restored.certificates["claims"]["coordinate-fidelity"]["verdict"] == "insufficient"
     assert restored.atoms[0].coords_u_arc is not None
     np.testing.assert_allclose(restored.atoms[0].coords_u_arc, [0.0, 0.25, 0.5, 0.75])
-    np.testing.assert_allclose(restored.atom_angle_coordinate(0), [0.0, 0.25, 0.5, 0.75])
+    # `atom_angle_coordinate` does not exist (see the sibling test). The report
+    # block is the second persisted copy of the same coordinate, so assert the
+    # round trip carried BOTH and that they still agree.
+    np.testing.assert_allclose(
+        restored.coordinate_fidelity["atoms"][0]["coords_u_arc"],
+        [0.0, 0.25, 0.5, 0.75],
+    )
