@@ -218,6 +218,15 @@ def main() -> int:
         "chart_ev_omp_ls": float(ev(Xte, rec_chart)),
         "ambient_ev": float(ev(amb, rec_amb)),
     }
+    wout = os.environ.get("WEIGHTS_OUT", "")
+    if wout:
+        _w = {"U": U.detach().cpu().numpy(), "W_enc": W_enc.detach().cpu().numpy(),
+              "b_enc": b_enc.detach().cpu().numpy(), "b_pre": b_pre.detach().cpu().numpy()}
+        for _n in ("V", "gamma"):
+            if _n in dir() and locals().get(_n) is not None:
+                _w[_n] = locals()[_n].detach().cpu().numpy()
+        np.savez(wout, **_w)
+
     print(json.dumps(out, indent=1), flush=True)
     tag = "flatval" if flat_validation else "curved"
     np.savez(f"{V2}/{tag}_k{K}_s{seed}_l{k_act}.npz",

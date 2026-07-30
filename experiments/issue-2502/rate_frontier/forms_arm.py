@@ -67,7 +67,8 @@ def main() -> int:
         r = int(os.environ.get("FIELD_RANK", "16"))
         MA = torch.nn.Parameter(0.1 * torch.randn(P, r, generator=g, device=dev))
         MB = torch.nn.Parameter(0.1 * torch.randn(P, r, generator=g, device=dev))
-        g2 = torch.nn.Parameter(0.05 * torch.ones(K, device=dev))
+        gamma_init = float(os.environ.get("GAMMA_INIT", "0.05"))
+        g2 = torch.nn.Parameter(gamma_init * torch.ones(K, device=dev))
         params += [MA, MB, g2]
     if form in ("ray", "cubic"):
         V2p = torch.randn(K, P, generator=g, device=dev)
@@ -108,10 +109,12 @@ def main() -> int:
         else 0.5 * (1.0 + np.cos(np.pi * (s - warm) / max(1, total - warm))),
     )
     last_fired = torch.zeros(K, dtype=torch.long, device=dev)
+    curv_warm_epochs = int(os.environ.get("CURV_WARM_EPOCHS", "0"))
+    curv_active = [curv_warm_epochs <= 0]
 
     def decode(z):
         rec = z @ U
-        if form == "field":
+        if form == "field" and curv_active[0]:
             V_eff = U @ MA @ MB.t()
             rec = rec + ((z * z) * g2) @ V_eff
         if form in ("ray", "cubic"):
@@ -123,6 +126,8 @@ def main() -> int:
         return rec
 
     for _ep in range(epochs):
+        if not curv_active[0] and _ep >= curv_warm_epochs:
+            curv_active[0] = True
         perm = torch.randperm(n, generator=g, device=dev)
         for s in range(0, n, bs):
             xb = t_data[perm[s:s + bs]]
@@ -320,9 +325,22 @@ def main() -> int:
         "K": K, "seed": seed, "L0_equals_scalars": k_act, "epochs": epochs, "field_rank": int(os.environ.get("FIELD_RANK", "16")) if form == "field" else None, "curv_decay": curv_decay,
         "decoder_params": int(K * ppa),
         "alive_on_test_routing": alive, "dead_frac": (K - alive) / K,
+        "gamma_init": float(os.environ.get("GAMMA_INIT", "0.05")) if form == "field" else None,
+        "curv_warm_epochs": int(os.environ.get("CURV_WARM_EPOCHS", "0")) if form == "field" else None,
+        "curved_share_1em3": float((g2.abs() > 1e-3).float().mean().item()) if g2 is not None else None,
+        "gamma_abs_median": float(g2.abs().median().item()) if g2 is not None else None,
+        "gamma_abs_p90": float(g2.abs().quantile(0.9).item()) if g2 is not None else None,
         "chart_ev": float(ev(Xte, rec_chart)),
         "ambient_ev": float(ev(amb, rec_amb)),
     }
+    wout = os.environ.get("WEIGHTS_OUT", "")
+    if wout:
+        _w = {"U": U.detach().cpu().numpy(), "W_enc": W_enc.detach().cpu().numpy(),
+              "b_enc": b_enc.detach().cpu().numpy(), "b_pre": b_pre.detach().cpu().numpy()}
+        for _n, _t in (("MA", MA), ("MB", MB), ("g2", g2), ("g3", g3), ("V2p", V2p), ("V3p", V3p), ("B", B)):
+            if _t is not None: _w[_n] = _t.detach().cpu().numpy()
+        np.savez(wout, **_w)
+
     print(json.dumps(out, indent=1), flush=True)
     save = {"U": Ud.cpu().numpy(), "b_pre": bp.cpu().numpy(),
             "W_enc": W_enc.detach().cpu().numpy(), "b_enc": b_enc.detach().cpu().numpy(),
