@@ -6198,6 +6198,43 @@ mod tests {
         );
     }
 
+    /// The strict-interior repair is an identity-metric projection, so a
+    /// carrier with many repeated observation rows must cost one finite dual
+    /// face in coefficient space. Row cardinality may increase operator-scan
+    /// work; it must never restore the retired row-count pivot budget that made
+    /// the 320k-row CTN repair grind until the command timeout.
+    #[test]
+    fn operator_strict_interior_projection_is_coefficient_bounded_on_repeated_rows_979() {
+        let rows = 24_000;
+        let p = 24;
+        let psi = Array2::from_shape_fn((rows, p), |(row, column)| {
+            if column == row % p { 1.0 } else { 0.0 }
+        });
+        let cone =
+            KhatriRaoConeConstraints::new(std::sync::Arc::new(psi), vec![0], 1)
+                .expect("many-row coordinate cone");
+        let set = ConstraintSet::KhatriRaoCone(cone);
+        let point = Array1::<f64>::from_elem(p, -1.0);
+
+        let projected = project_point_strictly_into_feasible_constraint_set(&point, &set)
+            .expect("finite dual strict-interior projection");
+        let values = set.values(projected.view()).expect("projected values");
+        for row in 0..set.nrows() {
+            let norm = set.row_norm(row).expect("row norm");
+            let scaled_slack = values[row] / norm;
+            assert!(
+                scaled_slack >= 0.5 * ACTIVE_SET_INTERIOR_SEED_MARGIN - 1e-9,
+                "row {row} missed the certified interior: {scaled_slack:.3e}"
+            );
+        }
+        for (column, value) in projected.iter().enumerate() {
+            assert!(
+                *value < ACTIVE_SET_INTERIOR_SEED_MARGIN + 1e-8,
+                "identity projection moved coordinate {column} past its nearest interior face: {value:.3e}"
+            );
+        }
+    }
+
     #[test]
     fn operator_scan_separates_primal_feasibility_from_active_equality_979() {
         let psi = array![[1.0_f64, 0.0], [0.0, 1.0]];
