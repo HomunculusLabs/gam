@@ -1607,6 +1607,31 @@ where
                 },
             ),
         );
+            // #2629: this objective is built on the SAME `&mut RemlState` as the
+            // standard-REML arm above and evaluates through
+            // `evaluate_unified_with_link_ext` → `assemble_and_evaluate` →
+            // `build_prior`, so it carries the IDENTICAL `log cosh` barrier —
+            // measured on the SAS ladder, the barrier is 99.998% of the outer
+            // ρ-gradient at ρ=30 (`1.332439e-7` of `1.332418e-7`) with a clean
+            // `−22.82·e^{−ρ}` face tail underneath it, and the total is positive,
+            // which is exactly the sign `project_gradient_vector` retains at an
+            // upper bound. Publishing nothing left a standing `|Pg| ≥ w·a` on
+            // every railed coordinate of every flexible-link fit.
+            //
+            // The closure is BYTE-IDENTICAL to the standard arm's, which is the
+            // point of #2629's seam change: this objective's outer coordinate is
+            // `θ = [ρ (k entries), mixture/SAS link coordinates]`, and the
+            // θ-embedding (barrier in the leading `k`, exact zeros in the link
+            // slots) is applied once by `ClosureObjective` from the declared
+            // `psi_dim` rather than hand-written here. A hand-written version is
+            // the failure this issue exists to prevent: every coordinate's
+            // barrier is the same order of magnitude, so a misalignment is
+            // invisible in the norm.
+            let obj = obj.with_soft_rho_guard_gradient(
+                |state: &mut &mut crate::estimate::reml::RemlState<'_>, rho: &Array1<f64>| {
+                    state.soft_rho_guard_gradient(rho)
+                },
+            );
             // Same exact-seed cache publish/consume symmetry as the standard
             // REML arm above (issue #236).
             let mut obj = obj.with_seed_inner_state(with_reml_beta_seed_hook());

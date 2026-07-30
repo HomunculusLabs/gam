@@ -221,6 +221,13 @@ pub trait OuterObjective {
     /// closed form written against raw ρ agrees with the criterion only on
     /// unweighted fits and disagrees on every weighted one.
     ///
+    /// "Same length as [`Self::eval`]'s gradient" means the full θ, including
+    /// any trailing ψ/link block. The barrier acts on ρ only, so those entries
+    /// are EXACTLY zero — never omitted, and never filled with the ρ block
+    /// shifted along. [`ClosureObjective`] does that embedding from the
+    /// declared [`OuterThetaLayout`] so no implementor writes the arithmetic
+    /// (#2629).
+    ///
     /// # What this is for, and the line it must not cross
     ///
     /// A `log cosh` barrier's gradient SATURATES at `w·a` instead of decaying,
@@ -1149,14 +1156,56 @@ where
         }
     }
 
-    fn soft_rho_guard_gradient(&mut self, rho: &Array1<f64>) -> Option<Array1<f64>> {
-        let guard = self.soft_rho_guard_gradient_fn.as_mut()?(&mut self.state, rho);
+    fn soft_rho_guard_gradient(&mut self, theta: &Array1<f64>) -> Option<Array1<f64>> {
+        // The hook speaks ρ; the seam speaks θ. The barrier acts on ρ only —
+        // `RemlState::build_prior` adds it to `grad[..k]` and to nothing else —
+        // so on an objective whose outer coordinate is
+        // `θ = [ρ (rho_dim), ψ/link (psi_dim)]` the publication must be
+        // θ-length with EXACT zeros in the trailing block. Doing that
+        // arithmetic here, from the DECLARED layout, rather than at each
+        // construction site is what makes the two REML arms install a
+        // byte-identical hook: standard REML (`psi_dim = 0`) sees the embedding
+        // collapse to the identity, and the mixture/SAS arm gets the zeros it
+        // needs without writing a single index (#2629).
+        //
+        // Why the layout and not `theta.len()`: a misalignment here is silent.
+        // Every coordinate's barrier is the same order of magnitude, so
+        // subtracting one coordinate's from another's is invisible in the norm
+        // and surfaces only as a coordinate that never certifies.
+        let layout = self.cap.theta_layout();
+        if theta.len() != layout.n_params {
+            log::trace!(
+                "[#2545/#2629] barrier publication declined: theta length {} is not the \
+                 declared n_params {} (rho_dim={}, psi_dim={})",
+                theta.len(),
+                layout.n_params,
+                layout.rho_dim(),
+                layout.psi_dim
+            );
+            return None;
+        }
+        let rho_dim = layout.rho_dim();
+        let rho = theta.slice(ndarray::s![..rho_dim]).to_owned();
+        let guard = self.soft_rho_guard_gradient_fn.as_mut()?(&mut self.state, &rho);
         // A hook that answers in the wrong shape is reported as an ABSENCE, not
         // spliced in at whatever length it returned: the consumers index this
-        // array by ρ-coordinate, and a length mismatch would subtract one
+        // array by outer coordinate, and a length mismatch would subtract one
         // coordinate's barrier from another's gradient. Reporting `None` costs
         // only the pre-#2545 behavior (the barrier stays in the residual).
-        (guard.len() == rho.len() && guard.iter().all(|v| v.is_finite())).then_some(guard)
+        if guard.len() != rho_dim || !guard.iter().all(|v| v.is_finite()) {
+            log::trace!(
+                "[#2545/#2629] barrier publication declined: the hook returned {} entries \
+                 for a rho block of {rho_dim}, or a non-finite one",
+                guard.len()
+            );
+            return None;
+        }
+        if layout.psi_dim == 0 {
+            return Some(guard);
+        }
+        let mut published = Array1::<f64>::zeros(layout.n_params);
+        published.slice_mut(ndarray::s![..rho_dim]).assign(&guard);
+        Some(published)
     }
 
     fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
@@ -1245,6 +1294,20 @@ impl<S, Fc, Fe, Fr, Fefs, Feo, Fsp, Fseed> ClosureObjective<S, Fc, Fe, Fr, Fefs,
     /// from the policy constants — the barrier is evaluated at the
     /// weight-anchored coordinate, so a raw-ρ closed form is a different
     /// function on any weighted fit.
+    ///
+    /// The closure speaks **ρ**, not θ: it receives the leading `rho_dim`
+    /// entries of the outer point and returns one entry per ρ-coordinate.
+    /// [`OuterObjective::soft_rho_guard_gradient`] embeds that into the full θ
+    /// with exact zeros in the ψ/link block, so an objective with auxiliary
+    /// outer coordinates installs the SAME closure as one without — the layout
+    /// arithmetic that the mixture/SAS arm would otherwise have had to
+    /// hand-write (and that #2629 records as invisible when wrong) lives in one
+    /// place, driven by the declared [`OuterThetaLayout`].
+    ///
+    /// A closure whose criterion is NOT built on `RemlState` must not install
+    /// this hook at all: `None` is the correct answer for an objective that
+    /// carries no barrier, and publishing a zero array would be indistinguishable
+    /// from publishing a real one at the consumers.
     pub fn with_soft_rho_guard_gradient<Fguard>(mut self, guard: Fguard) -> Self
     where
         Fguard: FnMut(&mut S, &Array1<f64>) -> Array1<f64> + 'static,

@@ -8812,6 +8812,94 @@ mod rail_barrier_removal_tests {
         );
     }
 
+    /// #2629 — on an objective whose outer coordinate is
+    /// `θ = [ρ (rho_dim), ψ/link (psi_dim)]`, the publication is θ-length with
+    /// the barrier in the leading ρ block and EXACT zeros in the trailing one.
+    ///
+    /// This is the gate the issue asks for, and it is on the seam rather than
+    /// on a call site because that is where the layout is now applied. The
+    /// mixture/SAS objective installs the same closure standard REML does — a
+    /// closure that speaks ρ — and `ClosureObjective` embeds it from the
+    /// declared `psi_dim`. The failure this refuses is specifically invisible:
+    /// every coordinate's barrier is the same order of magnitude, so a
+    /// publication shifted by one slot has the same norm as a correct one and
+    /// shows up only as a coordinate that never certifies.
+    #[test]
+    fn a_psi_bearing_objective_publishes_the_barrier_in_the_rho_block_and_zeros_elsewhere_2629() {
+        use super::{Derivative, HessianValue, OuterEval, OuterProblem};
+        // 2 ρ coordinates + 2 link coordinates, the shape a one-smooth SAS fit
+        // presents (`θ_dim = k + sas_dim`).
+        let problem = OuterProblem::new(4)
+            .with_gradient(Derivative::Analytic)
+            .with_psi_dim(2);
+        // The hook is handed the ρ BLOCK and answers over it. Distinct values so
+        // a slot shift cannot be mistaken for a correct answer.
+        let mut obj = problem
+            .build_objective(
+                (),
+                |_: &mut (), theta: &Array1<f64>| Ok(0.5 * theta.dot(theta)),
+                |_: &mut (), theta: &Array1<f64>| {
+                    Ok(OuterEval {
+                        cost: 0.5 * theta.dot(theta),
+                        gradient: theta.clone(),
+                        hessian: HessianValue::Unavailable,
+                        inner_beta_hint: None,
+                    })
+                },
+                None::<fn(&mut ())>,
+                None::<fn(&mut (), &Array1<f64>) -> Result<super::EfsEval, super::EstimationError>>,
+            )
+            .with_soft_rho_guard_gradient(|_: &mut (), rho: &Array1<f64>| {
+                assert_eq!(
+                    rho.len(),
+                    2,
+                    "the hook must receive the RHO block, not the full theta"
+                );
+                Array1::from_vec(vec![BARRIER_AT_RHO_30, 0.5 * BARRIER_AT_RHO_30])
+            });
+
+        let theta = Array1::from_vec(vec![30.0, 30.0, 0.25, -0.25]);
+        let published = super::OuterObjective::soft_rho_guard_gradient(&mut obj, &theta)
+            .expect("an objective that installed the hook must publish");
+        assert_eq!(
+            published.len(),
+            theta.len(),
+            "the publication is indexed by OUTER coordinate at every consumer, so it \
+             must be theta-length"
+        );
+        assert_eq!(published[0], BARRIER_AT_RHO_30);
+        assert_eq!(published[1], 0.5 * BARRIER_AT_RHO_30);
+        // Exact zeros, not "small": the barrier acts on ρ only, and a consumer
+        // subtracts this from a railed coordinate's gradient verbatim.
+        assert_eq!(
+            published[2], 0.0,
+            "the link slots carry no barrier and must publish EXACTLY zero"
+        );
+        assert_eq!(published[3], 0.0);
+
+        // ...and composed with the removal, a railed LINK coordinate keeps its
+        // gradient bit for bit while the railed ρ coordinates lose theirs. This
+        // is the property a hand-written θ publication would have broken.
+        let bounds = box_30(4);
+        let at_bounds = Array1::from_vec(vec![30.0, 30.0, 30.0, -30.0]);
+        let gradient = Array1::from_vec(vec![
+            BARRIER_AT_RHO_30,
+            0.5 * BARRIER_AT_RHO_30,
+            7.5e-3,
+            -2.5e-3,
+        ]);
+        let view =
+            gradient_with_rail_barrier_removed(&at_bounds, &gradient, &bounds, Some(&published));
+        assert_eq!(view[0], 0.0, "railed rho coordinate 0 loses its barrier");
+        assert_eq!(view[1], 0.0, "railed rho coordinate 1 loses its barrier");
+        assert_eq!(
+            view[2], gradient[2],
+            "a railed LINK coordinate carries no barrier and must be untouched — \
+             its box is a real constraint, not a proxy for a limit"
+        );
+        assert_eq!(view[3], gradient[3]);
+    }
+
     /// A missing or mis-shaped publication is an ABSENCE, never a partial
     /// subtraction: the pre-#2545 behavior, not a coordinate-shifted one.
     #[test]

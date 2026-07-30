@@ -248,3 +248,177 @@ fn the_mixture_sas_criterion_carries_the_soft_rho_guard_barrier_at_its_upper_rai
         unpublished[0]
     );
 }
+
+/// The fix, end to end on the real objective: build the `mixture/SAS flexible
+/// link` objective the way `optimizer.rs` builds it — same `RemlState`, same
+/// `evaluate_unified_with_link_ext` evaluator, same `psi_dim` declaration, same
+/// barrier hook — and drive it through the certificate's own two steps
+/// (`gradient_with_rail_barrier_removed` then `project_gradient_vector`).
+///
+/// The acceptance number is the one #2545 set for standard REML, restated for
+/// this objective: the certificate-visible residual at the railed ρ coordinate
+/// must fall from the barrier-bearing `1.33e-7` to **exactly 0.0**, because
+/// what is left under the barrier points INWARD and `gi.max(0.0)` discards a
+/// feasible-descent pull at an upper bound.
+///
+/// Three things are asserted that the unit-level seam gate cannot reach:
+///
+/// * the publication comes off the REAL state, so it carries the weight anchor
+///   and is bit-identical to the emission `build_prior` added (#2545's arm 2);
+/// * it is θ-length with exact zeros in the SAS `(ε, log δ)` slots, produced by
+///   the seam from the DECLARED `psi_dim` and not by arithmetic at this site;
+/// * the ψ slots' own gradient survives the removal untouched — their box is a
+///   real constraint on a shape parameter, not a proxy for `λ = ∞`, and nothing
+///   about the ρ barrier may leak into it.
+#[test]
+fn the_mixture_sas_objectives_railed_rho_certifies_once_it_publishes_its_barrier() {
+    use crate::rho_optimizer::{
+        Derivative, HessianValue, OuterEval, OuterObjective, OuterProblem,
+        gradient_with_rail_barrier_removed, project_gradient_vector,
+    };
+
+    let n = 60usize;
+    let x = tiny_design(n);
+    let y = binomial_response(n);
+    let w = Array1::<f64>::ones(n);
+    let offset = Array1::<f64>::zeros(n);
+    let cfg = sas_binomial_config();
+    let mut state = sas_binomial_state(&y, &w, &offset, &x, &cfg);
+
+    // θ = [ρ (k=1), ε, log δ]: exactly the layout `optimizer.rs` declares at the
+    // `mixture/SAS flexible link` site (`OuterProblem::new(k + sas_dim)` with
+    // `.with_psi_dim(sas_dim)`).
+    const K: usize = 1;
+    const SAS_DIM: usize = 2;
+    let problem = OuterProblem::new(K + SAS_DIM)
+        .with_gradient(Derivative::Analytic)
+        .with_psi_dim(SAS_DIM)
+        .with_rho_bound(crate::estimate::RHO_BOUND);
+    let mut obj = problem
+        .build_objective(
+            &mut state,
+            |state: &mut &mut crate::estimate::reml::RemlState<'_>, theta: &Array1<f64>| {
+                let rho = theta.slice(ndarray::s![..K]).to_owned();
+                Ok(state
+                    .evaluate_unified_with_link_ext(
+                        &rho,
+                        crate::estimate::reml::reml_outer_engine::EvalMode::ValueOnly,
+                    )?
+                    .cost)
+            },
+            |state: &mut &mut crate::estimate::reml::RemlState<'_>, theta: &Array1<f64>| {
+                let rho = theta.slice(ndarray::s![..K]).to_owned();
+                let evaluation = state.evaluate_unified_with_link_ext(
+                    &rho,
+                    crate::estimate::reml::reml_outer_engine::EvalMode::ValueAndGradient,
+                )?;
+                let gradient = evaluation.gradient.ok_or_else(|| {
+                    crate::estimate::EstimationError::InvalidInput(
+                        "ValueAndGradient returned no gradient".to_string(),
+                    )
+                })?;
+                Ok(OuterEval {
+                    cost: evaluation.cost,
+                    gradient,
+                    hessian: HessianValue::Unavailable,
+                    inner_beta_hint: None,
+                })
+            },
+            None::<fn(&mut &mut crate::estimate::reml::RemlState<'_>)>,
+            None::<
+                fn(
+                    &mut &mut crate::estimate::reml::RemlState<'_>,
+                    &Array1<f64>,
+                )
+                    -> Result<gam_problem::EfsEval, crate::estimate::EstimationError>,
+            >,
+        )
+        // Byte-identical to the standard-REML arm's hook. That is the whole
+        // point: no layout arithmetic here.
+        .with_soft_rho_guard_gradient(
+            |state: &mut &mut crate::estimate::reml::RemlState<'_>, rho: &Array1<f64>| {
+                state.soft_rho_guard_gradient(rho)
+            },
+        );
+
+    // The railed point: ρ at the box bound, the link shape at its zero seed.
+    let theta = Array1::from_vec(vec![crate::estimate::RHO_BOUND, 0.0, 0.0]);
+    let evaluation = obj
+        .eval(&theta)
+        .expect("the SAS link-ext objective must evaluate at the rail");
+    let gradient = evaluation.gradient;
+    assert_eq!(gradient.len(), K + SAS_DIM);
+
+    let published = obj
+        .soft_rho_guard_gradient(&theta)
+        .expect("the mixture/SAS objective must publish its barrier gradient (#2629)");
+    assert_eq!(
+        published.len(),
+        K + SAS_DIM,
+        "the publication must be theta-length; the consumers index it by OUTER \
+         coordinate alongside `gradient` and `bounds`"
+    );
+    // Bit-identical to the criterion's own emission — the subtraction cannot
+    // drift from the addition by construction, not by tolerance.
+    assert_eq!(
+        published[0],
+        state_emission_at(&y, &w, &offset, &x, &cfg, crate::estimate::RHO_BOUND),
+        "the published rho entry must be the SAME atom emission `build_prior` adds"
+    );
+    for slot in K..K + SAS_DIM {
+        assert_eq!(
+            published[slot], 0.0,
+            "SAS link slot {slot} must publish EXACTLY zero: the barrier acts on \
+             rho only, and a nonzero entry here would be subtracted from a shape \
+             parameter's gradient"
+        );
+    }
+
+    // Before: the rail carries the saturated barrier as its whole KKT residual.
+    let bounds = (
+        Array1::from_elem(K + SAS_DIM, -crate::estimate::RHO_BOUND),
+        Array1::from_elem(K + SAS_DIM, crate::estimate::RHO_BOUND),
+    );
+    let saturation = crate::estimate::RHO_SOFT_PRIOR_WEIGHT
+        * (crate::estimate::RHO_SOFT_PRIOR_SHARPNESS / crate::estimate::RHO_BOUND);
+    let unpublished = project_gradient_vector(&theta, &gradient, Some(&bounds));
+    assert!(
+        unpublished[0] >= 0.999 * saturation,
+        "without the publication the railed rho coordinate must carry the \
+         saturated barrier w*a = {saturation:.6e} as a standing residual, got {:.6e}",
+        unpublished[0]
+    );
+
+    // After: exactly zero. Not "smaller" — the removal is exact and what is left
+    // is an inward pull the projector discards outright.
+    let view = gradient_with_rail_barrier_removed(&theta, &gradient, &bounds, Some(&published));
+    let projected = project_gradient_vector(&theta, &view, Some(&bounds));
+    assert_eq!(
+        projected[0], 0.0,
+        "with the barrier out of the certificate's view, this objective's \
+         lambda=infinity face must project to exactly 0 (#2629). The removed \
+         quantity was {:.6e} of a {:.6e} gradient",
+        published[0], gradient[0]
+    );
+    // And the link coordinates are untouched by any of it.
+    for slot in K..K + SAS_DIM {
+        assert_eq!(
+            view[slot], gradient[slot],
+            "SAS link slot {slot} must keep the criterion gradient verbatim"
+        );
+    }
+}
+
+/// The barrier emission a fresh state produces at `rho`, used to assert the
+/// published entry is the criterion's own atom rather than a parallel formula.
+fn state_emission_at(
+    y: &Array1<f64>,
+    w: &Array1<f64>,
+    offset: &Array1<f64>,
+    x: &Array2<f64>,
+    cfg: &RemlConfig,
+    rho: f64,
+) -> f64 {
+    let state = sas_binomial_state(y, w, offset, x, cfg);
+    state.soft_rho_guard_prior_atom(&Array1::from_elem(1, rho)).gradient()[0]
+}
