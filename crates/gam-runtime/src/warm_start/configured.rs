@@ -150,6 +150,11 @@ mod tests {
         let opened = configured.store().expect("explicit root must open");
         assert_eq!(opened.root(), root);
         assert!(root.is_dir());
+        let cloned = configured.clone();
+        assert!(
+            std::ptr::eq(opened, cloned.store().expect("clone shares opened store")),
+            "every clone must reuse one opened store handle"
+        );
     }
 
     #[test]
