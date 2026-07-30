@@ -520,8 +520,19 @@ pub(crate) fn try_device_arrow_direct(
     }
     match crate::gpu_kernels::arrow_schur::solve_arrow_newton_step(sys, ridge_t, ridge_beta) {
         Ok(solution) => {
+            let final_relative_residual = match arrow_quotient_backward_error_certificate(
+                sys,
+                ridge_t,
+                ridge_beta,
+                solution.delta_t.view(),
+                solution.delta_beta.view(),
+            ) {
+                Ok(residual) => residual,
+                Err(error) => return Some(Err(error)),
+            };
             let diagnostics = ArrowPcgDiagnostics {
                 used_device_arrow: true,
+                final_relative_residual,
                 ..ArrowPcgDiagnostics::default()
             };
             Some(Ok((solution.delta_t, solution.delta_beta, diagnostics)))
@@ -2101,6 +2112,79 @@ pub(crate) fn arrow_residual(
         res_beta[i] -= ax_beta[i];
     }
     (res_t, res_beta)
+}
+
+/// Quotient-aware normwise backward error for a Device Direct step.
+///
+/// The device solves the full row equations and the Faddeev--Popov reduced
+/// beta equation. Consequently the raw beta residual may retain only a
+/// declared gauge-orbit component; the identifiable residual is `P r_beta`.
+/// Project that component away, then use the same
+/// [`arrow_backward_error_certificate`] normalization as the host-side
+/// refinement certificate. This value is surfaced through
+/// [`ArrowPcgDiagnostics::final_relative_residual`] even though Direct executes
+/// no CG iterations.
+pub(crate) fn arrow_quotient_backward_error_certificate(
+    sys: &ArrowSchurSystem,
+    ridge_t: f64,
+    ridge_beta: f64,
+    delta_t: ArrayView1<'_, f64>,
+    delta_beta: ArrayView1<'_, f64>,
+) -> Result<f64, ArrowSchurError> {
+    if delta_t.iter().chain(delta_beta.iter()).any(|value| !value.is_finite()) {
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: "device Direct solve returned a non-finite step".to_string(),
+        });
+    }
+    let n = sys.rows.len();
+    let mut rhs_t = Array1::<f64>::zeros(sys.row_offsets[n]);
+    for (row_idx, row) in sys.rows.iter().enumerate() {
+        let row_offset = sys.row_offsets[row_idx];
+        for axis in 0..sys.row_dims[row_idx] {
+            rhs_t[row_offset + axis] = -row.gt[axis];
+        }
+    }
+    let rhs_beta = sys.gb.mapv(|value| -value);
+    let (residual_t, residual_beta_raw) = arrow_residual(
+        sys,
+        ridge_t,
+        ridge_beta,
+        delta_t,
+        delta_beta,
+        rhs_t.view(),
+        rhs_beta.view(),
+    );
+    let residual_beta = match sys.beta_gauge_quotient.as_ref() {
+        Some(quotient) => quotient.project_complement(residual_beta_raw.view()),
+        None => residual_beta_raw,
+    };
+    if residual_t
+        .iter()
+        .chain(residual_beta.iter())
+        .any(|value| !value.is_finite())
+    {
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: "device Direct solve produced a non-finite quotient residual".to_string(),
+        });
+    }
+    let backward_error = arrow_backward_error_certificate(
+        sys,
+        ridge_t,
+        ridge_beta,
+        delta_t,
+        delta_beta,
+        rhs_t.view(),
+        rhs_beta.view(),
+        residual_t.view(),
+        residual_beta.view(),
+    )?;
+    if !backward_error.is_finite() {
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: "device Direct solve produced a non-finite backward-error certificate"
+                .to_string(),
+        });
+    }
+    Ok(backward_error)
 }
 
 pub(crate) fn arrow_operator_apply(
