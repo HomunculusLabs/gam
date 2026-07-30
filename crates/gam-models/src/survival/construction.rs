@@ -1160,13 +1160,22 @@ pub fn build_survival_time_basis(
         cap.max(1)
     }
 
-    fn infer_survival_time_knots(
+    /// Infer a survival time knot vector, reporting the PUBLIC basis degree
+    /// the returned vector can actually carry.
+    ///
+    /// `build_bspline_basis_1d` may auto-shrink the requested degree when the
+    /// data cannot support it (issue #340) -- with 4 rows a degree-4 clamped
+    /// vector is not constructible, so it silently returns a degree-3 one and
+    /// records that in `BasisMetadata::BSpline1D::degree`. Callers must be told,
+    /// or they will hand a shrunk vector to a consumer sized for the degree they
+    /// asked for.
+    fn infer_survival_time_knots_with_degree(
         combined: &Array1<f64>,
         knot_degree: usize,
         validation_degree: usize,
         num_internal_knots: usize,
         basis_options: BasisOptions,
-    ) -> Result<Array1<f64>, String> {
+    ) -> Result<(Array1<f64>, usize), String> {
         // Identifiability/termination guard: never request more baseline
         // internal knots than the observed time resolution supports. See
         // `data_capped_internal_knots` for the full rationale (a flat smoothing
@@ -1233,7 +1242,8 @@ pub fn build_survival_time_basis(
         }
 
         let inferwith =
-            |placement: gam_terms::basis::BSplineKnotPlacement| -> Result<Array1<f64>, String> {
+            |placement: gam_terms::basis::BSplineKnotPlacement|
+             -> Result<(Array1<f64>, usize), String> {
                 let built = build_bspline_basis_1d(
                     combined.view(),
                     &BSplineBasisSpec {
@@ -1250,8 +1260,10 @@ pub fn build_survival_time_basis(
                     },
                 )
                 .map_err(|e| format!("failed to infer survival time knots: {e}"))?;
-                let knots = match built.metadata {
-                    BasisMetadata::BSpline1D { knots, .. } => knots,
+                let (knots, built_degree) = match built.metadata {
+                    BasisMetadata::BSpline1D { knots, degree, .. } => {
+                        (knots, degree.unwrap_or(knot_degree))
+                    }
                     _ => {
                         return Err(
                             "internal error: expected BSpline1D metadata for survival time basis"
@@ -1267,14 +1279,21 @@ pub fn build_survival_time_basis(
                 // B-spline antiderivative degree. Validating with
                 // `knot_degree` here would raise a second time and reject the
                 // coherent knot vector we just inferred.
+                // The caller's two degrees differ by a fixed raise: `i_spline()`
+                // lifts the public degree to its working B-spline antiderivative
+                // degree, so `knot_degree == validation_degree + raise`. When the
+                // builder shrinks the vector, the public degree has to come down
+                // by the same raise or the two stop describing one geometry.
+                let raise = knot_degree.saturating_sub(validation_degree);
+                let effective_validation_degree = built_degree.saturating_sub(raise);
                 create_basis::<Dense>(
                     combined.view(),
                     KnotSource::Provided(knots.view()),
-                    validation_degree,
+                    effective_validation_degree,
                     basis_options,
                 )
                 .map_err(|e| e.to_string())?;
-                Ok(knots)
+                Ok((knots, effective_validation_degree))
             };
 
         if quantile_knot_inference_needs_uniform_fallback(combined, num_internal_knots) {
@@ -1282,6 +1301,25 @@ pub fn build_survival_time_basis(
         } else {
             inferwith(gam_terms::basis::BSplineKnotPlacement::Quantile)
         }
+    }
+
+    /// Knot vector only, for the callers whose consumer degree is the one they
+    /// passed in (no i-spline raise, so a shrink cannot desynchronise anything).
+    fn infer_survival_time_knots(
+        combined: &Array1<f64>,
+        knot_degree: usize,
+        validation_degree: usize,
+        num_internal_knots: usize,
+        basis_options: BasisOptions,
+    ) -> Result<Array1<f64>, String> {
+        infer_survival_time_knots_with_degree(
+            combined,
+            knot_degree,
+            validation_degree,
+            num_internal_knots,
+            basis_options,
+        )
+        .map(|(knots, _)| knots)
     }
 
     match cfg {
@@ -1447,23 +1485,39 @@ pub fn build_survival_time_basis(
             keep_cols,
             smooth_lambda,
         } => {
-            let bspline_degree = degree
+            let requested_bspline_degree = degree
                 .checked_add(1)
                 .ok_or_else(|| "ispline degree overflow while building knot basis".to_string())?;
-            let knotvec = if knots.is_empty() {
+            // Every consumer below -- the derivative basis at `bspline_degree`
+            // and both i-spline bases at `degree` -- is sized from these two
+            // numbers, so they must describe the vector we HAVE rather than the
+            // one we asked for. Inference can shrink the degree on data too
+            // sparse to carry it (4 rows cannot support degree 4), and the
+            // shrunk vector was previously handed to a degree-4 consumer:
+            //
+            //   Insufficient knots for degree 4 spline: need at least 10 knots
+            //   but only 9 were provided.
+            //
+            // An explicit knot vector is the user's own geometry and is never
+            // re-derived, so it keeps the requested degrees.
+            let (knotvec, degree, bspline_degree) = if knots.is_empty() {
                 let (num_internal_knots, _) = infer_knots_if_needed.ok_or_else(|| {
                     "internal error: ispline time basis requested without knot source".to_string()
                 })?;
                 let combined = survival_time_knot_input(&log_entry, &log_exit);
-                infer_survival_time_knots(
+                let (knotvec, effective_degree) = infer_survival_time_knots_with_degree(
                     &combined,
-                    bspline_degree,
+                    requested_bspline_degree,
                     degree,
                     num_internal_knots,
                     BasisOptions::i_spline(),
-                )?
+                )?;
+                let effective_bspline_degree = effective_degree.checked_add(1).ok_or_else(|| {
+                    "ispline degree overflow while building knot basis".to_string()
+                })?;
+                (knotvec, effective_degree, effective_bspline_degree)
             } else {
-                knots
+                (knots, degree, requested_bspline_degree)
             };
 
             let (db_exit_arc, _) = create_basis::<Dense>(
