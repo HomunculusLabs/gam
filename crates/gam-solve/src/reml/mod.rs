@@ -5236,8 +5236,18 @@ pub(crate) struct EvalShared {
     /// coordinates (`n_ext == 0`) the correction engages; with ψ present the
     /// seam declines (returns the cheap zero), and n_ext is fixed for a fit, so
     /// a single cell suffices.
-    pub(crate) block_local_correction:
-        std::sync::OnceLock<(usize, Arc<outer_eval::TkCorrectionTerms>)>,
+    /// The third slot carries the #2623 ρ-block audit record for the SAME
+    /// computation, so a later assemble call at this ρ that reads the cache can
+    /// re-publish it. Without that, the audit window — which is cleared at the
+    /// start of every assemble call — would report the second and third calls at
+    /// an engaged ρ as DECLINED, and an FD row asserting engagement would fail
+    /// on a fit where the splice ran. `None` when the splice declined or when
+    /// the audit was disarmed (the production case, which allocates nothing).
+    pub(crate) block_local_correction: std::sync::OnceLock<(
+        usize,
+        Arc<outer_eval::TkCorrectionTerms>,
+        Option<crate::estimate::outer_eval_capture::SampledMarginalAudit>,
+    )>,
 }
 
 /// The penalty components the criterion APPLIES, `S̃_k = Π S_k Π`, for an inner

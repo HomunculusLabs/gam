@@ -2524,19 +2524,27 @@ impl<'a> RemlState<'a> {
         bundle: &EvalShared,
         n_ext: usize,
     ) -> Result<TkCorrectionTerms, EstimationError> {
-        if let Some((cached_ext, terms)) = bundle.block_local_correction.get()
+        if let Some((cached_ext, terms, audit)) = bundle.block_local_correction.get()
             && *cached_ext == n_ext
         {
+            // Re-publish the audit record the computing call wrote: the window
+            // was cleared at the start of THIS assemble call, so without this a
+            // ρ whose splice engaged reads back as declined on every assemble
+            // after the first (#2623).
+            if let Some(record) = audit.as_ref() {
+                crate::estimate::outer_eval_capture::record_sampled_marginal(record.clone());
+            }
             return Ok((**terms).clone());
         }
         let terms = self.block_local_sampled_correction_compute(rho, bundle, n_ext)?;
+        let audit = crate::estimate::outer_eval_capture::last_sampled_marginal_record();
         // First writer wins; a racing writer built from identical inputs, so
         // either stored object is correct. A `set` that loses the race (cell
         // already filled) is fine — both terms are equal — so the `Err` is
         // discarded by returning the freshly computed `terms` either way.
         match bundle
             .block_local_correction
-            .set((n_ext, std::sync::Arc::new(terms.clone())))
+            .set((n_ext, std::sync::Arc::new(terms.clone()), audit))
         {
             Ok(()) => Ok(terms),
             Err(_) => Ok(terms),
@@ -3024,11 +3032,19 @@ impl<'a> RemlState<'a> {
         let rowq = (&xq * x).sum_axis(ndarray::Axis(1)); // n
 
         // Per-coordinate contraction.
+        //
         // The splice ran, so channels (b), (c) and (d) below are real on this
-        // evaluation. Recorded so an FD row can ASSERT engagement before
-        // comparing them; without that assertion the comparison is vacuous
-        // whenever the splice declines (#2623).
-        crate::estimate::outer_eval_capture::record_sampled_marginal_engaged();
+        // evaluation. Each channel is retained per coordinate and published into
+        // the ρ-block audit after the loop, so an FD row can ASSERT engagement
+        // and then compare the channels SEPARATELY; without the assertion the
+        // comparison is vacuous whenever the splice declines, and without the
+        // split it can only compare the total, which on a near-cancelling fit
+        // cannot say which channel is wrong (#2623).
+        let audit_armed = crate::estimate::outer_eval_capture::rho_outer_audit_enabled();
+        let mut audit_a: Vec<f64> = Vec::new();
+        let mut audit_trace: Vec<f64> = Vec::new();
+        let mut audit_mode: Vec<f64> = Vec::new();
+        let mut audit_spliced: Vec<f64> = Vec::new();
 
         // WARNING (#2623) -- READ THIS BEFORE CHANGING THE SIGN IN THIS LOOP.
         //
@@ -3069,6 +3085,25 @@ impl<'a> RemlState<'a> {
         // channel against finite differences separately. The existing FD guard
         // cannot see it: both of its rows are deliberately well-behaved, so the
         // splice declines and trace_j and mode_j are never exercised at all.
+        //
+        // MEASURED (#2623), and the answer is NEITHER SIGN. The channel record
+        // published below drives examples/probe_2623_sampled_marginal_channel_fd,
+        // which finite-differences Delta_b itself on fixtures where the splice
+        // engages. On two well-conditioned cells whose importance sampler is
+        // essentially exact (ESS 507.9/512 and 500.1/512) the FD reference is
+        // stable to six digits over h from 3e-4 to 3e-3, and the envelope
+        // channels agree with it to 1e-7 relative -- so the stencil is sound.
+        // Against that reference the three channels below match at no sign
+        // assignment. The four measured ratios of the shipped line to the truth
+        // are 0.84, -1.40, -1.43 and -17.4; for the proposed flip they are -12.1,
+        // 4.36, 8.88 and 27.8. Decisively, WHICH sign is closer changes between
+        // the two rho coordinates of a SINGLE evaluation, and no global sign
+        // convention can do that. So this is a wrong contraction, not a wrong
+        // sign, and flipping it exchanges one wrong gradient for another -- which
+        // is also what the flip measured end-to-end. The residual total gradient
+        // error is 1e-4 to 1.3e-1 relative in these mild regimes and INVERTS the
+        // search on the #2623 fold, where the true slope is a three-way
+        // near-cancellation.
         let mut gradient = Array1::<f64>::zeros(n_rho + n_ext);
         for j in 0..n_rho.min(sampled.rho_gradient.len()) {
             let lam_j = target.lambdas[j];
@@ -3094,6 +3129,29 @@ impl<'a> RemlState<'a> {
             let trace_j = lam_j * tr_sq - tr_cq;
             let mode_j = -v_j.dot(&g_d);
             gradient[j] = -sampled.rho_gradient[j] + trace_j + mode_j;
+            if audit_armed {
+                audit_a.push(sampled.rho_gradient[j]);
+                audit_trace.push(trace_j);
+                audit_mode.push(mode_j);
+                audit_spliced.push(gradient[j]);
+            }
+        }
+        if audit_armed {
+            crate::estimate::outer_eval_capture::record_sampled_marginal(
+                crate::estimate::outer_eval_capture::SampledMarginalAudit {
+                    delta_b: sampled.value,
+                    standard_error: sampled.standard_error,
+                    importance_ess: sampled.importance_ess,
+                    n_draws: sampled.n_draws,
+                    max_abs_skewness: verdict.max_abs_skewness,
+                    skewness_threshold: verdict.threshold,
+                    block_cols: block_cols.clone(),
+                    explicit_a: audit_a,
+                    trace_bc: audit_trace,
+                    mode_d: audit_mode,
+                    spliced: audit_spliced,
+                },
+            );
         }
         Ok(TkCorrectionTerms {
             value: -sampled.value,
@@ -5161,7 +5219,7 @@ impl<'a> RemlState<'a> {
                 })
                 .unwrap_or_default();
             return Err(EstimationError::ParameterConstraintViolation(format!(
-                "KKT residuals exceed tolerance: primal={:.3e}, dual={:.3e}, comp={:.3e}, stat={:.3e} (stat_rel={:.3e} vs tol={:.3e}{}; ‖grad‖∞={:.3e}); active={}/{}{}{}{}",
+                "KKT residuals exceed tolerance: primal={:.3e}, dual={:.3e}, comp={:.3e}, stat={:.3e} (stat_rel={:.3e} vs tol={:.3e}{}; ‖grad‖∞={:.3e}); active={}/{}{}{}",
                 kkt.primal_feasibility,
                 kkt.dual_feasibility,
                 kkt.complementarity,
@@ -5177,10 +5235,7 @@ impl<'a> RemlState<'a> {
                 kkt.n_active,
                 kkt.n_constraints,
                 worstrow_msg,
-                reachability_msg,
-                // A refusal is not a measurement: without this the reader cannot
-                // tell `stat` from an unprojected gradient (#2601).
-                kkt.cone_projection_note()
+                reachability_msg
             )));
         }
         Ok(())
