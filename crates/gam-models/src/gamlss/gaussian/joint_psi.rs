@@ -56,17 +56,16 @@ pub(crate) struct LocationScaleJointPsiSecondDrifts {
 /// The four families are structurally identical at the workspace level: each
 /// owns two dense block designs (location + log-scale), produces a per-ψ
 /// direction, and assembles second-order ψ terms and a ψ-Hessian directional
-/// derivative from those parts. They differ only in (1) the concrete
-/// [`Direction`](Self::Direction) struct produced (Gaussian vs Binomial field
-/// names), (2) the family-name fragment in the dense-designs error message, and
-/// (3) whether an optional Horvitz–Thompson outer-row subsample is threaded
-/// into the per-row weight arrays (Gaussian does; Binomial ignores it and runs
-/// the full-data exact path). This single trait gives the generic
+/// derivative from those parts. They differ only in (1) the family-name
+/// fragment in the dense-designs error message, and (2) whether an optional
+/// Horvitz–Thompson outer-row subsample is threaded into the per-row weight
+/// arrays (Gaussian does; Binomial ignores it and runs the full-data exact
+/// path). All four produce the same concrete
+/// [`LocationScaleJointPsiDirection`], so the direction is a plain type here,
+/// not an associated one. This single trait gives the generic
 /// [`LocationScaleJointPsiWorkspace`] one dispatch surface; each family's impl
 /// is a thin delegation to inherent methods it already owns.
 pub(crate) trait LocationScaleJointPsiFamily: Clone + Send + Sync + 'static {
-    /// Per-ψ joint direction produced by this family.
-    type Direction: Send + Sync + 'static;
 
     /// Family-name fragment used in the workspace's dense-designs error
     /// message so the originating family stays visible after unification.
@@ -87,14 +86,14 @@ pub(crate) trait LocationScaleJointPsiFamily: Clone + Send + Sync + 'static {
         design_loc: &Array2<f64>,
         design_scale: &Array2<f64>,
         policy: &gam_runtime::resource::ResourcePolicy,
-    ) -> Result<Option<Self::Direction>, String>;
+    ) -> Result<Option<LocationScaleJointPsiDirection>, String>;
 
     fn ws_psi_second_order_terms_from_parts(
         &self,
         block_states: &[ParameterBlockState],
         derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
-        psi_a: &Self::Direction,
-        psi_b: &Self::Direction,
+        psi_a: &LocationScaleJointPsiDirection,
+        psi_b: &LocationScaleJointPsiDirection,
         design_loc: &Array2<f64>,
         design_scale: &Array2<f64>,
         subsample: Option<&[crate::outer_subsample::WeightedOuterRow]>,
@@ -103,17 +102,194 @@ pub(crate) trait LocationScaleJointPsiFamily: Clone + Send + Sync + 'static {
     fn ws_psi_hessian_directional_from_parts(
         &self,
         block_states: &[ParameterBlockState],
-        psi_dir: &Self::Direction,
+        psi_dir: &LocationScaleJointPsiDirection,
         d_beta_flat: &Array1<f64>,
         design_loc: &Array2<f64>,
         design_scale: &Array2<f64>,
         subsample: Option<&[crate::outer_subsample::WeightedOuterRow]>,
     ) -> Result<Array2<f64>, String>;
+
+    /// Wire label for this family's primary (first) parameter block: `"mu"` for
+    /// the Gaussian families, `"threshold"` for the Binomial ones. The shared
+    /// direction/drift helpers name it in their diagnostics, so it is the one
+    /// token that distinguished four otherwise byte-identical copies.
+    const PRIMARY_LABEL: &'static str;
+
+    /// Index of the primary parameter block (each family's `BLOCK_MU` /
+    /// `BLOCK_T`). Zero for every family that exists today; carried as a named
+    /// const rather than a literal so a family that reorders its blocks cannot
+    /// silently disagree with the helpers it delegates to.
+    const PRIMARY_BLOCK: usize;
+
+    /// Index of the log-scale block. One for all four families; defaulted so a
+    /// family only restates it if that ever stops being true.
+    const LOG_SIGMA_BLOCK: usize = 1;
+
+    /// Parameter-block count: two for the location-scale families, three for
+    /// the wiggle variants, which append the wiggle block.
+    const N_BLOCKS: usize;
+
+    /// Fitted response row count, used to size the per-row ψ parts.
+    fn ws_n_obs(&self) -> usize;
+
+    /// Per-ψ joint direction from the already-realised block designs.
+    ///
+    /// Shared default (#2470): the four families' copies of this body were
+    /// identical up to `PRIMARY_BLOCK`, `N_BLOCKS`, `LABEL`, `PRIMARY_LABEL`,
+    /// the local name of the primary design, and the order of two fields in
+    /// the returned struct literal. Nothing else differed, so there is one
+    /// body now and the consts above carry the difference.
+    fn exact_newton_joint_psi_direction(
+        &self,
+        block_states: &[ParameterBlockState],
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_index: usize,
+        x_primary: &Array2<f64>,
+        x_ls: &Array2<f64>,
+        policy: &gam_runtime::resource::ResourcePolicy,
+    ) -> Result<Option<LocationScaleJointPsiDirection>, String> {
+        let Some(parts) = locscale_joint_psi_direction_parts(
+            block_states,
+            derivative_blocks,
+            psi_index,
+            self.ws_n_obs(),
+            x_primary.ncols(),
+            x_ls.ncols(),
+            Self::PRIMARY_BLOCK,
+            Self::LOG_SIGMA_BLOCK,
+            Self::N_BLOCKS,
+            Self::LABEL,
+            Self::PRIMARY_LABEL,
+            policy,
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(LocationScaleJointPsiDirection {
+            block_idx: parts.block_idx,
+            local_idx: parts.local_idx,
+            z_primary_psi: parts.primary_z,
+            z_ls_psi: parts.log_sigma_z,
+            x_primary_psi: parts.primary_psi,
+            x_ls_psi: parts.log_sigma_psi,
+        }))
+    }
+
+    /// Second-order ψ design drifts from the already-realised block designs.
+    ///
+    /// Shared default (#2470): the four copies differed only in `LABEL`,
+    /// `PRIMARY_BLOCK`, `PRIMARY_LABEL` and the local name of the primary
+    /// design — a byte-identical body otherwise.
+    fn exact_newton_joint_psisecond_design_drifts(
+        &self,
+        block_states: &[ParameterBlockState],
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_a: &LocationScaleJointPsiDirection,
+        psi_b: &LocationScaleJointPsiDirection,
+        x_primary: &Array2<f64>,
+        x_ls: &Array2<f64>,
+    ) -> Result<LocationScaleJointPsiSecondDrifts, String> {
+        locscale_joint_psisecond_design_drifts(
+            block_states,
+            derivative_blocks,
+            psi_a,
+            psi_b,
+            LocScalePsiDriftConfig {
+                n: self.ws_n_obs(),
+                p_primary: x_primary.ncols(),
+                p_log_sigma: x_ls.ncols(),
+                primary_block_idx: Self::PRIMARY_BLOCK,
+                log_sigma_block_idx: Self::LOG_SIGMA_BLOCK,
+                family_name: Self::LABEL,
+                primary_label: Self::PRIMARY_LABEL,
+                policy: self.ws_policy(),
+            },
+        )
+    }
+
+    /// ψ-Hessian directional derivative from already-realised block designs.
+    ///
+    /// Shared default (#2470). The four copies differed only in the local name
+    /// of the primary design and in a trailing `None`: the Gaussian
+    /// location-scale family's inherent `_from_parts` takes an
+    /// outer-subsample argument and the other three do not, so only that copy
+    /// passed one. Routing through [`Self::ws_psi_hessian_directional_from_parts`]
+    /// — which every family already implements and which normalises that
+    /// argument — makes the arity uniform without adding a subsample parameter
+    /// to the three inherent bodies that deliberately lack one (see the
+    /// full-data rationale on the wiggle impls below).
+    fn exact_newton_joint_psihessian_directional_derivative_from_designs(
+        &self,
+        block_states: &[ParameterBlockState],
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_index: usize,
+        d_beta_flat: &Array1<f64>,
+        x_primary: &Array2<f64>,
+        x_ls: &Array2<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        let Some(dir_a) = self.exact_newton_joint_psi_direction(
+            block_states,
+            derivative_blocks,
+            psi_index,
+            x_primary,
+            x_ls,
+            self.ws_policy(),
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.ws_psi_hessian_directional_from_parts(
+            block_states,
+            &dir_a,
+            d_beta_flat,
+            x_primary,
+            x_ls,
+            None,
+        )?))
+    }
+
+    /// ψ-Hessian directional derivative for a realised spec list.
+    ///
+    /// Shared default (#2470). Three of the four families already took
+    /// `derivative_blocks` directly; `GaussianLocationScaleFamily` alone still
+    /// took a `CustomFamilyHyperLayout` and re-checked `family_axis_count()`
+    /// before forwarding `design_derivative_blocks()`. That inner check was
+    /// unreachable-when-true: this method's only caller, on every family, is
+    /// that family's own `CustomFamily` entry point, which performs the
+    /// byte-identical check immediately before forwarding. The surviving guard
+    /// is the outer one; the signature here is the three-family majority.
+    fn exact_newton_joint_psihessian_directional_derivative_for_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_index: usize,
+        d_beta_flat: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        let Some((x_primary, x_ls)) = self.ws_exact_joint_dense_block_designs(Some(specs))? else {
+            return Ok(None);
+        };
+        self.exact_newton_joint_psihessian_directional_derivative_from_designs(
+            block_states,
+            derivative_blocks,
+            psi_index,
+            d_beta_flat,
+            &x_primary,
+            &x_ls,
+        )
+    }
 }
 
 impl LocationScaleJointPsiFamily for GaussianLocationScaleFamily {
-    type Direction = LocationScaleJointPsiDirection;
     const LABEL: &'static str = "GaussianLocationScaleFamily";
+
+    const PRIMARY_LABEL: &'static str = "mu";
+    const PRIMARY_BLOCK: usize = Self::BLOCK_MU;
+    const N_BLOCKS: usize = 2;
+
+    fn ws_n_obs(&self) -> usize {
+        self.y.len()
+    }
 
     fn ws_policy(&self) -> &gam_runtime::resource::ResourcePolicy {
         &self.policy
@@ -187,8 +363,15 @@ impl LocationScaleJointPsiFamily for GaussianLocationScaleFamily {
 }
 
 impl LocationScaleJointPsiFamily for GaussianLocationScaleWiggleFamily {
-    type Direction = LocationScaleJointPsiDirection;
     const LABEL: &'static str = "GaussianLocationScaleWiggleFamily";
+
+    const PRIMARY_LABEL: &'static str = "mu";
+    const PRIMARY_BLOCK: usize = Self::BLOCK_MU;
+    const N_BLOCKS: usize = 3;
+
+    fn ws_n_obs(&self) -> usize {
+        self.y.len()
+    }
 
     fn ws_policy(&self) -> &gam_runtime::resource::ResourcePolicy {
         &self.policy
@@ -327,7 +510,7 @@ pub(crate) struct LocationScaleJointPsiWorkspace<F: LocationScaleJointPsiFamily>
     pub(crate) derivative_blocks: Vec<Vec<CustomFamilyBlockPsiDerivative>>,
     pub(crate) design_loc: Arc<Array2<f64>>,
     pub(crate) design_scale: Arc<Array2<f64>>,
-    pub(crate) psi_directions: ExactNewtonJointPsiDirectCache<F::Direction>,
+    pub(crate) psi_directions: ExactNewtonJointPsiDirectCache<LocationScaleJointPsiDirection>,
     pub(crate) outer_score_subsample: Option<Arc<crate::outer_subsample::OuterScoreSubsample>>,
 }
 
@@ -376,7 +559,7 @@ impl<F: LocationScaleJointPsiFamily> LocationScaleJointPsiWorkspace<F> {
     pub(crate) fn psi_direction(
         &self,
         psi_index: usize,
-    ) -> Result<Option<Arc<F::Direction>>, String> {
+    ) -> Result<Option<Arc<LocationScaleJointPsiDirection>>, String> {
         self.psi_directions.get_or_try_init(psi_index, || {
             self.family.ws_psi_direction(
                 &self.block_states,

@@ -906,90 +906,6 @@ impl BinomialLocationScaleWiggleFamily {
         )
     }
 
-    pub(crate) fn exact_newton_joint_psihessian_directional_derivative_for_specs(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
-        psi_index: usize,
-        d_beta_flat: &Array1<f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        let Some((x_t, x_ls)) = self.exact_joint_dense_block_designs(Some(specs))? else {
-            return Ok(None);
-        };
-        self.exact_newton_joint_psihessian_directional_derivative_from_designs(
-            block_states,
-            derivative_blocks,
-            psi_index,
-            d_beta_flat,
-            &x_t,
-            &x_ls,
-        )
-    }
-
-    pub(crate) fn exact_newton_joint_psi_direction(
-        &self,
-        block_states: &[ParameterBlockState],
-        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
-        psi_index: usize,
-        x_t: &Array2<f64>,
-        x_ls: &Array2<f64>,
-        policy: &gam_runtime::resource::ResourcePolicy,
-    ) -> Result<Option<LocationScaleJointPsiDirection>, String> {
-        let Some(parts) = locscale_joint_psi_direction_parts(
-            block_states,
-            derivative_blocks,
-            psi_index,
-            self.y.len(),
-            x_t.ncols(),
-            x_ls.ncols(),
-            Self::BLOCK_T,
-            Self::BLOCK_LOG_SIGMA,
-            3,
-            "BinomialLocationScaleWiggleFamily",
-            "threshold",
-            policy,
-        )?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(LocationScaleJointPsiDirection {
-            block_idx: parts.block_idx,
-            local_idx: parts.local_idx,
-            z_primary_psi: parts.primary_z,
-            z_ls_psi: parts.log_sigma_z,
-            x_primary_psi: parts.primary_psi,
-            x_ls_psi: parts.log_sigma_psi,
-        }))
-    }
-
-    pub(crate) fn exact_newton_joint_psisecond_design_drifts(
-        &self,
-        block_states: &[ParameterBlockState],
-        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
-        psi_a: &LocationScaleJointPsiDirection,
-        psi_b: &LocationScaleJointPsiDirection,
-        x_t: &Array2<f64>,
-        x_ls: &Array2<f64>,
-    ) -> Result<LocationScaleJointPsiSecondDrifts, String> {
-        locscale_joint_psisecond_design_drifts(
-            block_states,
-            derivative_blocks,
-            psi_a,
-            psi_b,
-            LocScalePsiDriftConfig {
-                n: self.y.len(),
-                p_primary: x_t.ncols(),
-                p_log_sigma: x_ls.ncols(),
-                primary_block_idx: Self::BLOCK_T,
-                log_sigma_block_idx: Self::BLOCK_LOG_SIGMA,
-                family_name: "BinomialLocationScaleWiggleFamily",
-                primary_label: "threshold",
-                policy: &self.policy,
-            },
-        )
-    }
-
     pub(crate) fn exact_newton_joint_psi_terms_from_designs(
         &self,
         block_states: &[ParameterBlockState],
@@ -2240,37 +2156,6 @@ impl BinomialLocationScaleWiggleFamily {
             hessian_psi_psi,
             hessian_psi_psi_operator: None,
         })
-    }
-
-    pub(crate) fn exact_newton_joint_psihessian_directional_derivative_from_designs(
-        &self,
-        block_states: &[ParameterBlockState],
-        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
-        psi_index: usize,
-        d_beta_flat: &Array1<f64>,
-        x_t: &Array2<f64>,
-        x_ls: &Array2<f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        let Some(dir_a) = self.exact_newton_joint_psi_direction(
-            block_states,
-            derivative_blocks,
-            psi_index,
-            x_t,
-            x_ls,
-            &self.policy,
-        )?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(
-            self.exact_newton_joint_psihessian_directional_derivative_from_parts(
-                block_states,
-                &dir_a,
-                d_beta_flat,
-                x_t,
-                x_ls,
-            )?,
-        ))
     }
 
     pub(crate) fn exact_newton_joint_psihessian_directional_derivative_from_parts(

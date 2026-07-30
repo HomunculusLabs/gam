@@ -25,10 +25,16 @@ pub struct BinomialLocationScaleFamily {
 /// not thread the outer-row subsample (they run the full-data exact ψ path), so
 /// the trait's `subsample` argument is accepted and ignored here.
 macro_rules! impl_binomial_location_scale_joint_psi_family {
-    ($family:ty, $label:literal) => {
+    ($family:ty, $label:literal, $n_blocks:literal) => {
         impl LocationScaleJointPsiFamily for $family {
-            type Direction = LocationScaleJointPsiDirection;
             const LABEL: &'static str = $label;
+            const PRIMARY_LABEL: &'static str = "threshold";
+            const PRIMARY_BLOCK: usize = Self::BLOCK_T;
+            const N_BLOCKS: usize = $n_blocks;
+
+            fn ws_n_obs(&self) -> usize {
+                self.y.len()
+            }
 
             fn ws_policy(&self) -> &gam_runtime::resource::ResourcePolicy {
                 &self.policy
@@ -105,12 +111,14 @@ macro_rules! impl_binomial_location_scale_joint_psi_family {
 
 impl_binomial_location_scale_joint_psi_family!(
     BinomialLocationScaleFamily,
-    "BinomialLocationScaleFamily"
+    "BinomialLocationScaleFamily",
+    2
 );
 
 impl_binomial_location_scale_joint_psi_family!(
     BinomialLocationScaleWiggleFamily,
-    "BinomialLocationScaleWiggleFamily"
+    "BinomialLocationScaleWiggleFamily",
+    3
 );
 
 pub(crate) type BinomialLocationScaleExactNewtonJointPsiWorkspace =
