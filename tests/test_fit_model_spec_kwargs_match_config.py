@@ -140,13 +140,13 @@ def test_rust_location_scale_fit_kwarg_matches_config() -> None:
     via_kwarg = gamfit.fit(
         data,
         "y ~ s(x)",
-        family="gaussian-location-scale",
+        family="gaussian",
         noise_formula="s(x)",
     )
     via_config = gamfit.fit(
         data,
         "y ~ s(x)",
-        family="gaussian-location-scale",
+        family="gaussian",
         config={"noise_formula": "s(x)"},
     )
 

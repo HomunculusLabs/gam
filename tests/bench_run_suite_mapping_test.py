@@ -33,6 +33,29 @@ _REQUIRED_BENCHMARK_DATASETS = {
 }
 
 
+class _DefiningNamespace:
+    """Attribute view over the module globals a re-exported function resolves in.
+
+    `bench/run_suite.py` pulls the external-contender helpers in with
+    `_import_run_suite_exports`, which copies `vars(module)` into run_suite's
+    globals while the submodule receives a one-time snapshot of run_suite's
+    globals through `configure()`. Neither direction is a live binding, so a
+    patch installed on the `bench_run_suite` module object is invisible to
+    `bench/_run_suite_external.py`. A re-exported function still carries its
+    defining module dict as `__globals__`, which is the namespace its own
+    free variables (`run_cmd`, `_workspace_tempdir`, ...) are looked up in.
+    """
+
+    def __init__(self, fn: typing.Any) -> None:
+        self.__dict__["_ns"] = fn.__globals__
+
+    def __getattr__(self, name: str) -> typing.Any:
+        return self.__dict__["_ns"][name]
+
+    def __setattr__(self, name: str, value: typing.Any) -> None:
+        self.__dict__["_ns"][name] = value
+
+
 @contextlib.contextmanager
 def _patched_attrs(*patches: tuple[typing.Any, str, typing.Any]) -> typing.Iterator[None]:
     originals = [(obj, name, getattr(obj, name)) for obj, name, _value in patches]
@@ -238,10 +261,13 @@ class RunSuiteMappingTests(unittest.TestCase):
                 return 0, "", ""
             return 1, "", f"unexpected command: {cmd}"
 
+        external = _DefiningNamespace(_RUN_SUITE.run_external_r_gamlss_cv)
         with tempfile.TemporaryDirectory() as td:
             with _patched_attrs(
                 (_RUN_SUITE, "run_cmd", _fake_run_cmd),
                 (_RUN_SUITE, "_workspace_tempdir", _tempdir_factory(Path(td))),
+                (external, "run_cmd", _fake_run_cmd),
+                (external, "_workspace_tempdir", _tempdir_factory(Path(td))),
             ):
                 result = _RUN_SUITE.run_external_r_gamlss_cv(scenario, ds=ds, folds=folds)
 
