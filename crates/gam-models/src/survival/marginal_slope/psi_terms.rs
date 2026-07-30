@@ -562,6 +562,12 @@ impl SurvivalMarginalSlopeFamily {
                     (g, h)
                 };
 
+                // The rigid third-order row tower depends on the fitted mode and
+                // row, but not on which ψ axis is contracted into it. Build it
+                // exactly once and preserve the existing per-axis contraction
+                // and reduction order below.
+                let third_tower = self.build_row_primary_third_tower(row, block_states)?;
+
                 for (axis_idx, axis) in axes.iter().enumerate() {
                     let psi_row = axis
                         .psi_map
@@ -569,8 +575,12 @@ impl SurvivalMarginalSlopeFamily {
                         .map_err(|e| format!("survival rowwise psi map (batched): {e}"))?;
                     let dir =
                         primary_direction_from_psi_row(axis.block_idx, &psi_row, axis.beta_psi);
-                    let mut third =
-                        self.row_primary_third_contracted_general(row, block_states, &dir)?;
+                    let third_stack =
+                        Self::contract_row_primary_third_tower(&third_tower, dir.view())?;
+                    let mut third = Array2::from_shape_fn(
+                        (N_PRIMARY, N_PRIMARY),
+                        |(a, b)| third_stack[a][b],
+                    );
                     if w != 1.0 {
                         third.mapv_inplace(|v| v * w);
                     }
