@@ -514,7 +514,7 @@ fn rust_runtime_expression(expression: &ProgramExpr, leaves: &[Leaf]) -> TokenSt
         ProgramExpr::Zero => quote!(S::constant(
             0.0,
             __row_program_dimension,
-            __row_program_workspace,
+            __row_program_workspace
         )),
         ProgramExpr::Neg(value) => {
             let value = rust_runtime_expression(value, leaves);
