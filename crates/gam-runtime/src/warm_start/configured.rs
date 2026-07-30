@@ -42,10 +42,6 @@ impl ConfiguredWarmStartStore {
         &self.root
     }
 
-    pub fn options(&self) -> &StoreOptions {
-        &self.options
-    }
-
     /// Return the shared opened store, or `None` when persistence is
     /// unavailable.
     ///
