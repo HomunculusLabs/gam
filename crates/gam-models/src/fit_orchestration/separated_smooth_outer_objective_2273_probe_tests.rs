@@ -610,10 +610,8 @@ fn penalized_blocks_are_coercive_for_every_smooth_2273() {
         // S(1) = Σ_k S_k, embedded into the full coefficient space.
         let mut s_total = Array2::<f64>::zeros((p, p));
         for penalty in &design.penalties {
-            let start = penalty.col_range.start;
             for (local_row, global_row) in penalty.col_range.clone().enumerate() {
                 for (local_col, global_col) in penalty.col_range.clone().enumerate() {
-                    debug_assert!(global_row >= start && global_col >= start);
                     s_total[[global_row, global_col]] += penalty.local[[local_row, local_col]];
                 }
             }
