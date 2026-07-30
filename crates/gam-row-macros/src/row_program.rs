@@ -1554,12 +1554,6 @@ fn symbolic_schedule(
     target: SymbolicTarget,
 ) -> Result<SymbolicSchedule> {
     let dimension = primaries.len();
-    let expression_environment = DirectionalExpressionEnvironment {
-        leaves,
-        constants,
-        dimension,
-        fourth,
-    };
     let mut bindings = HashMap::<String, SymbolicJet>::new();
     for (axis, primary) in primaries.iter().enumerate() {
         bindings.insert(
@@ -1744,6 +1738,12 @@ fn directional_schedule(
     fourth: bool,
 ) -> Result<DirectionalSchedule> {
     let dimension = primaries.len();
+    let expression_environment = DirectionalExpressionEnvironment {
+        leaves,
+        constants,
+        dimension,
+        fourth,
+    };
     let mut bindings = HashMap::<String, DirectionalJet>::new();
     for (axis, primary) in primaries.iter().enumerate() {
         bindings.insert(
