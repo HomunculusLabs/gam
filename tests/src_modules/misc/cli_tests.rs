@@ -662,6 +662,7 @@ fn location_scale_fit_args(
         sigma_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
+        precompute_conformal: true,
         pilot_subsample_threshold: 0,
         out: Some(out),
     }
@@ -1355,6 +1356,7 @@ fn issue_2116_cli_standard_fit_gates_duchon_operator_penalties_for_poisson() {
         sigma_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
+        precompute_conformal: true,
         pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
@@ -1451,6 +1453,7 @@ fn cli_surv_predict_noise_routes_to_survival_location_scale() {
         sigma_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
+        precompute_conformal: true,
         pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
@@ -1754,6 +1757,7 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
         sigma_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
+        precompute_conformal: true,
         pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
@@ -1866,6 +1870,7 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_main_formula() {
         sigma_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
+        precompute_conformal: true,
         pilot_subsample_threshold: 0,
         out: None,
     })
@@ -1922,6 +1927,7 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_logslope_formula() {
         sigma_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
+        precompute_conformal: true,
         pilot_subsample_threshold: 0,
         out: None,
     })
@@ -2222,6 +2228,7 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         sigma_time_degree: 3,
         adaptive_regularization: true,
         scale_dimensions: false,
+        precompute_conformal: true,
         pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     };
@@ -2364,6 +2371,7 @@ fn binomial_link_fit_args(data: PathBuf, out: PathBuf, formula: &str) -> FitArgs
         sigma_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
+        precompute_conformal: true,
         pilot_subsample_threshold: 0,
         out: Some(out),
     }
@@ -2522,6 +2530,7 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         sigma_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
+        precompute_conformal: true,
         pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     };

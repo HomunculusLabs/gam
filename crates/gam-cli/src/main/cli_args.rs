@@ -194,6 +194,7 @@ pub(crate) struct FitArgs {
             "sigma_time_degree",
             "adaptive_regularization",
             "scale_dimensions",
+            "precompute_conformal",
             "pilot_subsample_threshold",
             "ctn_stage1",
             "precision_hyperpriors",
@@ -362,6 +363,24 @@ pub(crate) struct FitArgs {
     /// `scale_dims=true` / `scale_dims=false`, which overrides this global flag.
     #[arg(long = "scale-dimensions", default_value_t = false)]
     pub(crate) scale_dimensions: bool,
+    /// Whether to precompute the distribution-free conformal substrates (#942
+    /// jackknife+, #1098 exact full-conformal) at fit time and persist them on
+    /// the saved model. Omit to keep the default of precomputing whenever the
+    /// fit is eligible; `false` skips both.
+    ///
+    /// Measured on `y ~ s(x1,k=6) + s(x2,k=6)` (#2633): the two substrates are
+    /// 94% of a saved Gaussian model at n=20,000 (10.2 MB of 10.85 MB) and grow
+    /// linearly with the training rows. Rebuilding both costs ~5.6 ms, 0.3% of
+    /// the fit, and stays under half a second out to p=253. So turning this off
+    /// yields a ~16x smaller model (10.85 MB -> ~0.65 MB at n=20,000).
+    ///
+    /// It is opt-OUT because rebuilding needs the training design AND response
+    /// back, which a saved model deliberately does not carry: a model shipped to
+    /// a host that never sees the training data must keep them or it cannot
+    /// produce a conformal interval at all. Turn it off when the caller retains
+    /// its training data, fits in batch, or never asks for conformal intervals.
+    #[arg(long = "precompute-conformal", action = ArgAction::Set, default_value_t = true)]
+    pub(crate) precompute_conformal: bool,
     /// Subsample threshold for automatic pilot-fit spatial length-scale optimization.
     /// When n exceeds 2x this value, κ/anisotropy optimization runs on a
     /// spatially stratified subsample to initialize the geometry, then the

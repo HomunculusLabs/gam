@@ -115,6 +115,7 @@ fn fit_request_document_from_fit_args(
         analytic_penalties,
         pilot_subsample_threshold: Some(args.pilot_subsample_threshold),
         precision_hyperpriors,
+        precompute_conformal: Some(args.precompute_conformal),
         ridge_lambda: Some(args.ridge_lambda),
         scale_dimensions: args.scale_dimensions.then_some(true),
         sigma_time_degree: Some(args.sigma_time_degree),
