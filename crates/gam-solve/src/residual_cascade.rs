@@ -4662,10 +4662,34 @@ mod refinement_decision_tests {
         // `the_spectral_residual_carries_no_null_modes`) and would be measured
         // here instead of the capability. Six levels of box-filling net set a
         // floor on the width, and a finer data grid adds centres of its own, so
-        // the admissible sides are a band: 45x45 gives 2038 columns against 2025
-        // rows (13 short), 64x64 gives 4117 columns (past the budget).
+        // the admissible sides are a band.
+        //
+        // The band is NOT where counting upward from 45 suggests, because `m` is
+        // not monotone in `side`. Measured by
+        // `zz_measure_cascade_width_by_level_count_2546` at `levels = 6`:
+        //
+        //   side=45  n=2025  m=2038   13 short
+        //   side=50  n=2500  m=2508    8 short
+        //   side=60  n=3600  m=3628   28 short
+        //   side=70  n=4900  m=1922   IDENTIFIED
+        //   side=80  n=6400  m=2667   identified
+        //   side=90  n=8100  m=3637   identified, past the spectrum budget
+        //
+        // `m` climbs to 3628 at side=60 and then FALLS to 1922 at side=70: once
+        // the sample is finer than the level-6 net's own spacing the net stops
+        // adding centres for it, so width and sample decouple and the data
+        // overtake the spectrum. Every side from 46 to 64 sits BELOW that
+        // discontinuity, where `m` tracks `n` about 28 columns above it, so a
+        // search bounded at 64 cannot succeed however finely it steps -- and
+        // "64x64 gives 4117 columns (past the budget)" is the trend argument that
+        // the discontinuity invalidates.
+        //
+        // So the candidates are the measured ones, in cost order, with the band's
+        // edges kept after them: the search still self-heals if DENSE_GRAM_MAX or
+        // the spectrum budget moves, but it does not pay for two dozen design
+        // builds to rediscover a curve that has already been sampled.
         let mut fixture = None;
-        for side in 46..=64_usize {
+        for side in [70_usize, 80, 75, 85, 90, 100, 60, 50] {
             let (x1, x2, y) = dense_fixture(side);
             let weights = vec![1.0; y.len()];
             let m = {
@@ -4682,7 +4706,7 @@ mod refinement_decision_tests {
             }
         }
         let (x1, x2, y, weights, m) = fixture.expect(
-            "no grid side in 46..=64 puts the width between DENSE_GRAM_MAX and              CERTIFIED_SPECTRUM_MAX with at least as many rows as columns",
+            "no candidate grid side puts the width between DENSE_GRAM_MAX and              CERTIFIED_SPECTRUM_MAX with at least as many rows as columns -- if the caps              moved, re-run zz_measure_cascade_width_by_level_count_2546 and take the              candidates from its sweep rather than extrapolating a trend, because m is              not monotone in side",
         );
         let axes: [&[f64]; 2] = [&x1, &x2];
         let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 6)
