@@ -445,8 +445,21 @@ pub(crate) fn threshold_gate_assignment_prior_hessian_diag_is_exact_over_logit_s
     let inv_tau2 = inv_tau * inv_tau;
     let sparsity_strength = rho.lambda_sparse().unwrap();
 
+    // #2520 (`2956f601c`) split this channel in two: `assignment_prior_grad_hdiag`
+    // now returns the PSD MAJORIZER `B`, and the concave half travels
+    // `threshold_gate_negative_hessian_remainder_weighted` into `ΔC`. The exact
+    // signed second derivative is still pinned here — it is just `B + ΔC` rather
+    // than `B` — and the split itself is now pinned too, which the single
+    // assertion this replaced could not do.
+    let remainder = crate::assignment::threshold_gate_negative_hessian_remainder_weighted(
+        &assignment,
+        &rho,
+        None,
+    )
+    .expect("ThresholdGate concave-half remainder");
     assert_eq!(grad.len(), n * k);
     assert_eq!(diag.len(), n * k);
+    assert_eq!(remainder.len(), n * k);
     let mut saw_negative = false;
     for (idx, &entry) in diag.iter().enumerate() {
         let logit = logits[[idx / k, idx % k]];
@@ -459,12 +472,25 @@ pub(crate) fn threshold_gate_assignment_prior_hessian_diag_is_exact_over_logit_s
             entry.is_finite(),
             "threshold-gate hessian_diag must be finite at index {idx}"
         );
-        saw_negative |= entry < 0.0;
-        assert_abs_diff_eq!(entry, expected, epsilon = 1e-12);
+        // `B` is the majorizer, so it is non-negative at EVERY logit; the sign
+        // information lives in the remainder.
+        assert!(
+            entry >= 0.0,
+            "#2520: the installed threshold-gate curvature `B` is the PSD majorizer, \
+             so it cannot be negative at index {idx}; got {entry}"
+        );
+        assert!(
+            remainder[idx] <= 0.0,
+            "#2520: the `ΔC` remainder `exact − majorizer` is non-positive because \
+             softplus_τ₀(c) ≥ max(c, 0) ≥ c; got {} at index {idx}",
+            remainder[idx]
+        );
+        saw_negative |= entry + remainder[idx] < 0.0;
+        assert_abs_diff_eq!(entry + remainder[idx], expected, epsilon = 1e-12);
     }
     assert!(
         saw_negative,
-        "exact threshold-gate hessian_diag must go negative above the threshold"
+        "exact threshold-gate curvature `B + ΔC` must go negative above the threshold"
     );
 }
 

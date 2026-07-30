@@ -212,14 +212,37 @@ fn threshold_gate_sparse_curvature_operator_is_modelled_2500() {
          max|entry| = {mass}"
     );
 
-    // The RAW prior curvature is signed: the fixture straddles the gate, so both
-    // signs must be present in the quantity the operator is built from. A
+    // The EXACT prior curvature is signed: the fixture straddles the gate, so
+    // both signs must be present in the quantity the operator is built from. A
     // one-sided fixture would leave the whole deflation half of this defect
     // unexercised.
-    let raw =
+    //
+    // `assignment_prior_log_strength_hdiag` is NOT that quantity. Since #2520 its
+    // ThresholdGate arm returns `ThresholdGateLogitCurvature::psd_majorizer_hess`,
+    // i.e. `smooth_psd_clamp(magnitude, signed)` = `magnitude · (max(signed, 0) +
+    // τ₀·ln(1 + exp(−|signed|/τ₀)))` with `magnitude = w·λ·a(1−a)/τ² ≥ 0`. That is
+    // NON-NEGATIVE by construction (above the threshold, where `signed < 0` and
+    // `|signed| ≫ τ₀ ≈ 1.44e-8`, it is exactly `0`), so a `< −1e-8` probe on it is
+    // unreachable for ANY fixture — the check could never have discriminated a
+    // straddling fixture from a one-sided one. The exact signed curvature is
+    // recovered from the two crate channels that are defined to sum to it
+    // bit-for-bit: `psd_majorizer_hess + negative_hessian_remainder == exact`.
+    let majorized =
         crate::assignment::assignment_prior_log_strength_hdiag(&term.assignment, &rho).unwrap();
-    let saw_positive = raw.iter().any(|v| *v > 1.0e-8);
-    let saw_negative = raw.iter().any(|v| *v < -1.0e-8);
+    let remainder = crate::assignment::threshold_gate_negative_hessian_remainder_weighted(
+        &term.assignment,
+        &rho,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        majorized.len(),
+        remainder.len(),
+        "#2500: the majorizer and remainder channels share one flat logit layout"
+    );
+    let exact = &majorized + &remainder;
+    let saw_positive = exact.iter().any(|v| *v > 1.0e-8);
+    let saw_negative = exact.iter().any(|v| *v < -1.0e-8);
     assert!(
         saw_positive && saw_negative,
         "#2500: the ThresholdGate prior curvature is SIGNED (λ·s·(1−2a)/τ²); the fixture \
@@ -870,10 +893,20 @@ fn dense_exact_a_matches_finite_difference_of_the_kkt_gradient_2330() {
 
         let analytic = a.dot(&v);
 
+        // `apply_newton_step` REFUSES a non-positive `step_size`
+        // (`apply_newton_step_impl_with_parallelism`: "step_size must be finite
+        // and positive"). It applies `step_size · delta`, so the `-h` endpoint
+        // has to negate the DIRECTION and keep the step positive. Passing
+        // `sign * h` made the minus endpoint an `Err` that the `expect` turned
+        // into a panic BEFORE any finite difference was formed — this gate has
+        // never reached its own comparison. Measured on `bc5d6bdde`: it dies at
+        // this line with `got -0.00001`.
         let endpoint = |sign: f64| -> Array1<f64> {
             let mut moved = term.clone();
+            let signed_t = v_t.mapv(|value| sign * value);
+            let signed_beta = v_beta.mapv(|value| sign * value);
             moved
-                .apply_newton_step(v_t.view(), v_beta.view(), sign * h)
+                .apply_newton_step(signed_t.view(), signed_beta.view(), h)
                 .expect("finite-difference endpoint step");
             gradient(&mut moved)
         };
