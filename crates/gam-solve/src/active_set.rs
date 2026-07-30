@@ -9,7 +9,7 @@ use gam_linalg::utils::{KahanSum, StableSolver, array_is_finite};
 use gam_problem::{
     ConstraintRowId, ConstraintSet, KhatriRaoConeConstraints, LinearInequalityConstraints,
 };
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, s};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::HashSet;
