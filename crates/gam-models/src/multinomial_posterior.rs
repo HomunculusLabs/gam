@@ -99,7 +99,22 @@ impl Default for MultinomialPosteriorIntegrationControl {
             // Three raises, one argument, and each time the level bound really
             // was what bound. That reasoning is still right about the DEFECT.
             //
-            // It was wrong about the REPAIR, and the measurement is unambiguous.
+            // I THEN REVERTED IT ON A BAD COMPARISON, and this paragraph is the
+            // correction. The revert cited "941 s and still running, against a
+            // refusal in seconds before". The 941 s is real; the "refusal in
+            // seconds" was a DIFFERENT TEST -- a residual-cascade fixture on
+            // #2546 -- not this path. Re-measured AT the revert on an unloaded
+            // node, the same penguins arm ran 931 s: indistinguishable from the
+            // 941 s I had blamed on removing the ceiling. So the ceiling was not
+            // the cause of the cost, and the evidence did not support the
+            // conclusion I drew from it.
+            //
+            // What is actually known, so the next reader does not inherit my
+            // error: this arm costs ~930 s in BOTH states, and no COMPLETED run
+            // was obtained in either -- so whether removing the ceiling changes
+            // the outcome, or the cost, is UNMEASURED.
+            //
+            // The original concern survives as a concern, not a measurement.
             // With the ceiling removed, the penguins real-data arm ran **941 s
             // and was still going**, against a refusal in seconds before. The
             // reason is the other half of the same observation: because the
