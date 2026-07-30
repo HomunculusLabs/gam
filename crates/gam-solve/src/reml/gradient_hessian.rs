@@ -2892,7 +2892,7 @@ impl<'a> RemlState<'a> {
         // negative sign.
         //
         // ── Exact gradient channels (b)–(d) ─────────────────────────────
-        // The explicit channel `−sampled.rho_gradient` (channel (a)) is NOT
+        // The explicit channel `sampled.rho_gradient` is NOT
         // the total ρ-derivative of the realized estimator: with fixed-seed
         // draws `t_s = z_s/√λ_r(ρ)`, the value also moves through the block
         // eigenvalues (draw rescale, (b)), the block eigenvectors (frame
