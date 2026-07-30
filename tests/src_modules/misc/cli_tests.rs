@@ -826,7 +826,16 @@ fn cli_sample_bounded_model_reaches_sampler_config_validation() {
                 response: array![0.0, 1.0, 1.0],
             }),
         }),
-        saved_fit_summary_fixture(),
+        {
+            // The shared fixture declares `training_sample_size: 1`, but the
+            // working geometry above carries three rows. The sampler checks the
+            // two agree, so the fixture has to state the size it actually has;
+            // the shared default is left alone because its other dependents
+            // carry different row counts.
+            let mut summary = saved_fit_summary_fixture();
+            summary.training_sample_size = 3;
+            summary
+        },
     );
     payload.fit_result = Some(fit_result);
     payload.data_schema = Some(bounded_cli_schema());
@@ -1313,7 +1322,12 @@ fn issue_2116_cli_standard_fit_gates_duchon_operator_penalties_for_poisson() {
         firth: false,
         family: FamilyArg::PoissonLog,
         negative_binomial_theta: None,
-        survival_likelihood: Some("transformation".to_string()),
+        // `survival_likelihood` is read exclusively by the survival fit path.
+        // On a Poisson response nothing consumes it, so the requested survival
+        // model would silently degrade to an ordinary GAM -- the fit now refuses
+        // it rather than ignoring it. This test gates Duchon operator penalties
+        // and never needed the option.
+        survival_likelihood: None,
         survival_time_anchor: None,
         baseline_target: "linear".to_string(),
         baseline_scale: None,
@@ -5055,12 +5069,24 @@ fn gaussian_location_scale_prediction_csv_includes_std_error_before_bounds_when_
 
 #[test]
 fn gaussian_location_scale_generate_restores_sigma_to_response_units() {
-    // logb noise link σ_scaled = LOGB_SIGMA_FLOOR + exp(η_ls). For
-    // η_ls = log(0.25) the scaled σ is 0.01 + 0.25 = 0.26, then scaled to
-    // response units gives 0.26 * 8 = 2.08. Pick the input so the expected
-    // response σ exits as 2.0 exactly: η_ls = log(2.0/8 − LOGB_SIGMA_FLOOR)
-    // = log(0.24).
-    let model = intercept_only_gaussian_location_scale_model(-3.0, (0.24f64).ln(), 8.0);
+    // The persisted log-σ coefficient is already in RAW response units:
+    // `rescale_gaussian_location_scale_to_raw` shifts that intercept by
+    // `+ln(response_scale)` at fit time, so `exp(η_ls)` carries one factor of
+    // the scale on its own. The soft floor sits OUTSIDE the exp and cannot ride
+    // that shift, so it is the only piece still standardized and the only piece
+    // multiplied here:
+    //
+    //   σ_raw = response_scale·LOGB_SIGMA_FLOOR + exp(η_ls)
+    //         = response_scale·(LOGB_SIGMA_FLOOR + exp(η_internal))
+    //
+    // Scaling the whole `(floor + exp(η_ls))` instead would apply
+    // `response_scale` twice on the exp term and break σ's response-scale
+    // equivariance -- the defect behind #1874/#1928, and precisely what this
+    // fixture used to assert. See `GaussianLocationScalePredictor::compute_sigma`.
+    //
+    // Pick the input so σ exits at 2.0 exactly under the real convention:
+    // exp(η_ls) = 2.0 − 8·0.01 = 1.92.
+    let model = intercept_only_gaussian_location_scale_model(-3.0, (1.92f64).ln(), 8.0);
     let data = ndarray::Array2::<f64>::zeros((2, 0));
     let headers = vec![];
     let col_map = HashMap::new();
