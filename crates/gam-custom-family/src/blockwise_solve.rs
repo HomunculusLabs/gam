@@ -1039,10 +1039,79 @@ pub(crate) fn extract_simple_lower_bounds(
     constraints: &ConstraintSet,
     p: usize,
 ) -> Result<Option<SimpleLowerBounds>, String> {
-    let ConstraintSet::Dense(constraints) = constraints else {
-        // A factored cone couples whole covariate rows; it is never a
-        // per-coordinate lower-bound system.
-        return Ok(None);
+    let constraints = match constraints {
+        ConstraintSet::Dense(dense) => dense,
+        // A factored cone USUALLY couples whole covariate rows, and then it is
+        // not a per-coordinate lower-bound system. But that is a statement about
+        // the geometry the carrier expresses, not about the carrier type, and
+        // keying on the type made the box-KKT repair below UNREACHABLE for a
+        // whole model class (gam#2600).
+        //
+        // A Khatri-Rao cone row is psi_i dot A[k,:] >= 0. When the covariate
+        // factor has ONE column, psi_i is a scalar, so the row reduces to the
+        // per-coordinate bound A[k] >= 0 whenever psi_i > 0 -- and on an
+        // intercept-only fit every psi_i is exactly 1, so all n rows of a slot
+        // are the SAME halfspace. Measured on the CTN fixture: a coefficient
+        // pinned at bit-exact zero on every cycle of four independent inner
+        // solves, carrying the largest raw residual in the problem, with the
+        // certificate scoring that valid multiplier as a stationarity defect
+        // because this function refused to see the box.
+        //
+        // The test below is the GEOMETRIC one, deliberately not a p_cov check:
+        // every row must touch exactly one column with a positive coefficient.
+        // That is the same predicate the dense arm applies, so a cone whose rows
+        // are not axis-aligned-positive -- every multi-column cone, and any
+        // single-column cone whose factor changes sign, where the slot is really
+        // the EQUALITY A[k] = 0 -- still returns None and behaves exactly as
+        // before. The row values and bounds come from the cone itself rather
+        // than being re-derived from the factor, so the unit-normalization
+        // convention cannot drift away from the rest of the solver.
+        ConstraintSet::KhatriRaoCone(cone) => {
+            if cone.factor().ncols() != 1 {
+                return Ok(None);
+            }
+            if cone.ncols() != p {
+                return Err(CustomFamilyError::ConstraintViolation {
+                    reason: "linear constraints: factored cone width does not match the coefficient block".to_string(),
+                }
+                .into());
+            }
+            let mut lower_bounds = Array1::from_elem(p, f64::NEG_INFINITY);
+            let mut coeff_to_row = vec![None; p];
+            let mut row_to_coeff = Vec::with_capacity(cone.nrows());
+            for row in 0..cone.nrows() {
+                let support = cone.row_column_support(row).map_err(|error| {
+                    CustomFamilyError::ConstraintViolation {
+                        reason: format!("factored cone row support: {error}"),
+                    }
+                })?;
+                if support.len() != 1 {
+                    return Ok(None);
+                }
+                let col = support[0];
+                let gathered = cone.gather_rows(&[row]).map_err(|error| {
+                    CustomFamilyError::ConstraintViolation {
+                        reason: format!("factored cone row gather: {error}"),
+                    }
+                })?;
+                let coeff_value = gathered.a[[0, col]];
+                if !(coeff_value > 0.0) {
+                    return Ok(None);
+                }
+                let bound = gathered.b[0] / coeff_value;
+                if bound > lower_bounds[col] {
+                    lower_bounds[col] = bound;
+                    coeff_to_row[col] = Some(row);
+                }
+                row_to_coeff.push(col);
+            }
+            return Ok(Some(SimpleLowerBounds {
+                lower_bounds,
+                row_to_coeff,
+                coeff_to_row,
+            }));
+        }
+        _ => return Ok(None),
     };
     if constraints.a.ncols() != p || constraints.a.nrows() != constraints.b.len() {
         return Err(CustomFamilyError::ConstraintViolation {
