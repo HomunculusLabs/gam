@@ -1314,11 +1314,18 @@ pub(crate) fn inverse_link_complement_for_inverse_link(
     let raw = match link {
         InverseLink::Standard(link_fn) => standard_link_complement(*link_fn, eta, mu),
         InverseLink::Sas(state) => sas_link_complement(eta, state.epsilon, state.log_delta, mu),
-        // No cancellation-free closed form wired for these yet; the naive
-        // complement leaves their saturation behaviour exactly as it was.
-        InverseLink::LatentCLogLog(_) | InverseLink::BetaLogistic(_) | InverseLink::Mixture(_) => {
-            1.0 - mu
+        InverseLink::BetaLogistic(state) => {
+            beta_logistic_link_complement(eta, state.log_delta, state.epsilon, mu)
         }
+        InverseLink::Mixture(state) => mixture_link_complement(state, eta, mu),
+        // The latent-cloglog mean is a lognormal-Laplace quadrature
+        // (`latent_cloglog_jet5`), whose kernel reports `mean` and its
+        // derivatives but not the complementary `E[exp(-Z e^eta)]` the exact
+        // complement would need. Until that kernel exposes the survival output,
+        // the naive complement leaves this link's saturation behaviour exactly as
+        // it was, so it retains the `V = mu(1-mu) -> 0` limitation the sibling
+        // links no longer have.
+        InverseLink::LatentCLogLog(_) => 1.0 - mu,
     };
     if raw.is_nan() {
         raw
@@ -1381,6 +1388,69 @@ fn standard_link_complement(link: StandardLink, eta: f64, mu: f64) -> f64 {
         // exact enough for these here.
         StandardLink::Logit | StandardLink::Identity | StandardLink::Log => 1.0 - mu,
     }
+}
+
+/// Cancellation-free `1 - mu(eta)` for the beta-logistic inverse link.
+///
+/// `mu = I_x(a, b)` with `x = logistic(eta)`, so the exact complement is the
+/// regularized incomplete beta's own reflection identity
+/// `1 - I_x(a, b) = I_{1-x}(b, a)`, and `1 - x = logistic(-eta)` is already
+/// carried alongside `x` by [`logistic_uwith_derivatives`]. On the saturated side
+/// (`use_upper_tail`) the forward map computes `mu` AS `1 - beta_reg(b, a, 1-x)`,
+/// so the complement is that `beta_reg` call with no subtraction at all — the
+/// tail mass the forward `1 - ...` throws away. On the other side `mu` is small
+/// and `1.0 - mu` loses nothing.
+#[inline]
+fn beta_logistic_link_complement(eta: f64, log_delta: f64, epsilon: f64, mu: f64) -> f64 {
+    let logistic = logistic_uwith_derivatives(eta);
+    if logistic.ln_u.is_nan() || logistic.ln_one_minus_u.is_nan() {
+        return f64::NAN;
+    }
+    if logistic.ln_u == f64::NEG_INFINITY {
+        return 1.0;
+    }
+    if logistic.ln_one_minus_u == f64::NEG_INFINITY {
+        return 0.0;
+    }
+    let a = (log_delta - epsilon).exp();
+    let b = (log_delta + epsilon).exp();
+    if logistic.use_upper_tail {
+        beta_reg(b, a, logistic.one_minus_u)
+    } else {
+        1.0 - mu
+    }
+}
+
+/// Cancellation-free `1 - mu(eta)` for the mixture inverse link.
+///
+/// `mu = sum_i pi_i mu_i`, so
+/// `1 - mu = (1 - sum_i pi_i) + sum_i pi_i (1 - mu_i)` — exact for any weight
+/// vector, and each component is one of the standard bounded links whose own
+/// complement is already cancellation-free. Summing the component TAILS keeps a
+/// mixture whose components all saturate from returning a hard zero: every
+/// `mu_i` rounds to `1.0` while every `1 - mu_i` is still representable.
+#[inline]
+fn mixture_link_complement(state: &MixtureLinkState, eta: f64, mu: f64) -> f64 {
+    let k = state.components.len().min(state.pi.len());
+    let mut weight_total = 0.0_f64;
+    let mut complement = 0.0_f64;
+    for i in 0..k {
+        let (mu_i, _) = component_inverse_link_mu_d1(state.components[i], eta);
+        if mu_i.is_nan() {
+            return f64::NAN;
+        }
+        let component_complement =
+            standard_link_complement(state.components[i].as_standard_link(), eta, mu_i);
+        if component_complement.is_nan() {
+            return f64::NAN;
+        }
+        weight_total += state.pi[i];
+        complement += state.pi[i] * component_complement;
+    }
+    if k == 0 {
+        return 1.0 - mu;
+    }
+    (1.0 - weight_total) + complement
 }
 
 /// Cancellation-free `1 - mu` for the SAS inverse link. `mu = Phi(z)` with

@@ -248,6 +248,24 @@ impl LinkComponent {
             Self::Cauchit => "cauchit",
         }
     }
+
+    /// The standalone link this mixture component IS.
+    ///
+    /// Every component of a blended link is one of the standard bounded links, so
+    /// anything defined per standard link — a cancellation-free tail complement,
+    /// for instance — applies to a component unchanged. Making the correspondence
+    /// a method rather than a match at each use site is what keeps a new
+    /// component from silently acquiring a default.
+    #[inline]
+    pub const fn as_standard_link(self) -> StandardLink {
+        match self {
+            Self::Probit => StandardLink::Probit,
+            Self::Logit => StandardLink::Logit,
+            Self::CLogLog => StandardLink::CLogLog,
+            Self::LogLog => StandardLink::LogLog,
+            Self::Cauchit => StandardLink::Cauchit,
+        }
+    }
 }
 
 /// User-facing configuration for a blended inverse link.

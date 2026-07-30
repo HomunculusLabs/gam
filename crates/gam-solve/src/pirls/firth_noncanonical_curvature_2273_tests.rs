@@ -389,3 +389,85 @@ fn saturated_binomial_variance_is_positive_past_the_mu_rounding_point_2273() {
         }
     }
 }
+
+/// #2273: the tail complement now covers the COMPOSITE bounded links too.
+///
+/// `inverse_link_complement_for_inverse_link` wired the standard links and SAS
+/// and left the beta-logistic and mixture links on the naive `1.0 - mu`, so
+/// those two kept the `V = μ(1−μ) → 0` refusal the standard links no longer
+/// have. Both have exact identities:
+///
+/// * beta-logistic — `μ = I_x(a,b)` with `x = logistic(η)`, so
+///   `1 − μ = I_{1−x}(b,a)` by the regularized incomplete beta's reflection, and
+///   `1 − x = logistic(−η)` is already carried beside `x`;
+/// * mixture — `μ = Σ πᵢ μᵢ`, so `1 − μ = (1 − Σ πᵢ) + Σ πᵢ (1 − μᵢ)`, and each
+///   component is a standard link whose complement is already exact.
+///
+/// The invariant asserted is the one that makes them identities rather than
+/// approximations: `1.0 - mu` is a subtraction of two numbers of size 1, so its
+/// ABSOLUTE error is `~ε/2` no matter how small the true complement is, and an
+/// exact complement must therefore agree with it to that absolute band — for
+/// every `η`, saturated or not. That is a two-sided check with teeth: at
+/// `η = 12` the beta-logistic naive complement is `5.195844e-14` and the identity
+/// says `5.190486e-14`, agreeing to `5.4e-17` while DISAGREEING in the fourth
+/// significant digit, because by then the naive value has only three digits left.
+/// Past the rounding point the naive value is exactly zero and the identity is
+/// still there, which is the whole point.
+#[test]
+fn composite_bounded_links_carry_an_exact_tail_complement_2273() {
+    use gam_problem::{InverseLink, LinkComponent, MixtureLinkState, SasLinkState};
+    use ndarray::array;
+
+    let beta_logistic = InverseLink::BetaLogistic(SasLinkState {
+        epsilon: 0.35,
+        log_delta: 0.6,
+        delta: 0.6_f64.exp(),
+    });
+    let mixture = InverseLink::Mixture(MixtureLinkState {
+        components: vec![LinkComponent::CLogLog, LinkComponent::Probit],
+        rho: array![0.4],
+        pi: array![0.6, 0.4],
+    });
+
+    // `1.0 - mu` carries an absolute error of about half an ulp of 1; four of
+    // them is the band an exact complement has to sit inside.
+    let band = 4.0 * f64::EPSILON;
+    for (label, link) in [("beta-logistic", beta_logistic), ("mixture", mixture)] {
+        let mut recovered = 0usize;
+        for eta in [-1.5_f64, -0.25, 0.0, 0.8, 2.0, 8.0, 12.0, 20.0, 40.0] {
+            let Ok(jet) = crate::mixture_link::inverse_link_jet_for_inverse_link(&link, eta) else {
+                continue;
+            };
+            let complement = crate::mixture_link::inverse_link_complement_for_inverse_link(
+                &link, eta, jet.mu,
+            );
+            let naive = 1.0 - jet.mu;
+            eprintln!(
+                "#2273 composite complement {label} eta={eta}: mu={:.17e} \
+                 complement={complement:.6e} naive={naive:.6e} diff={:.3e}",
+                jet.mu,
+                complement - naive,
+            );
+            assert!(
+                complement >= 0.0 && complement.is_finite(),
+                "#2273: {label} complement at eta={eta} is {complement:.6e}"
+            );
+            assert!(
+                (complement - naive).abs() <= band,
+                "#2273: {label} complement at eta={eta} is {complement:.17e} against a naive \
+                 {naive:.17e}: they differ by {:.3e}, more than the naive subtraction's own \
+                 {band:.3e} absolute resolution, so the identity is wrong rather than better \
+                 conditioned",
+                (complement - naive).abs(),
+            );
+            if naive == 0.0 && complement > 0.0 {
+                recovered += 1;
+            }
+        }
+        assert!(
+            recovered > 0,
+            "#2273: {label} never reached a saturated eta where the naive complement is a hard \
+             zero, so this test is not exercising the repair"
+        );
+    }
+}
