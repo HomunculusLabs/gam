@@ -215,6 +215,43 @@ pub(crate) struct OuterConfig {
     /// reach the same λ̂ and the same fitted surface. `None` (or an identity
     /// permutation) leaves the legacy native-order path byte-for-byte unchanged.
     pub(crate) rho_canonical_keys: Option<Vec<u64>>,
+    /// A CALLER'S absolute requirement on the projected outer gradient norm,
+    /// honoured by the search and not merely checked at the end (#2568).
+    ///
+    /// The engine's own stationarity bound is a function of the FIT, not a
+    /// constant of the engine: it is a widening ladder anchored on the
+    /// criterion's magnitude and the optimizer's terminal state. That is right
+    /// for minting a model, and it means two fits on the same data in the same
+    /// call can be certified against bounds four orders apart -- measured on
+    /// #2568 at `2.0708e-4` for one and **exactly `1.000e0`** for its
+    /// companion, the latter being the saturated
+    /// [`StationarityBoundSource::FlatValleyScoreCeiling`] value. A consumer
+    /// whose accuracy requirement is stricter than whatever the ladder happens
+    /// to compute had no supported way to impose it.
+    ///
+    /// Reading `|Pg|` off the summary and thresholding it afterwards is not the
+    /// same thing, and is the shape SPEC-20 exists to prevent: it mints a
+    /// replayable, diagnostics-clean fit the consumer must then reject. Nothing
+    /// made the optimizer *work harder* to reach the stricter standard.
+    ///
+    /// So this number enters in BOTH places that decide the outcome:
+    ///
+    /// * [`outer_gradient_tolerance`] floors the solver's convergence band at
+    ///   it, so the outer loop keeps going instead of stopping at a looser
+    ///   sealed bound -- the load-bearing half;
+    /// * the certificate's bound ladder is CAPPED by it, so a point the engine
+    ///   would have certified against a wider rung is refused, reporting
+    ///   [`StationarityBoundSource::CallerRequirement`] and naming the engine's
+    ///   own bound alongside it.
+    ///
+    /// The cap is applied to the ladder's TOP, after every widening rung, which
+    /// is why it cannot be defeated by a rung that fires later. It never
+    /// loosens: a requirement weaker than the engine's own bound leaves the
+    /// engine's in force, because a caller asking for less accuracy than the
+    /// engine already guarantees is not asking for anything.
+    ///
+    /// `None` reproduces today's behaviour byte-for-byte on every path.
+    pub(crate) required_projected_gradient_norm: Option<f64>,
 }
 
 impl Default for OuterConfig {
@@ -222,6 +259,7 @@ impl Default for OuterConfig {
         Self {
             tolerance: 1e-5,
             rel_cost_tolerance: None,
+            required_projected_gradient_norm: None,
             max_iter: 200,
             model_domain_bounds: None,
             search_bounds_override: None,
@@ -271,6 +309,8 @@ pub struct OuterProblem {
     barrier_config: Option<BarrierConfig>,
     tolerance: f64,
     rel_cost_tolerance: Option<f64>,
+    /// See [`OuterConfig::required_projected_gradient_norm`] (#2568).
+    required_projected_gradient_norm: Option<f64>,
     max_iter: usize,
     bounds: Option<(Array1<f64>, Array1<f64>)>,
     rho_bound: f64,
@@ -308,6 +348,7 @@ impl OuterProblem {
             barrier_config: None,
             tolerance: 1e-5,
             rel_cost_tolerance: None,
+            required_projected_gradient_norm: None,
             max_iter: 200,
             bounds: None,
             rho_bound: 30.0,
@@ -541,6 +582,39 @@ impl OuterProblem {
         self
     }
 
+    /// Require the returned fit's projected outer gradient norm to satisfy
+    /// `|Pg| <= requirement`, and make the SEARCH pursue it (#2568).
+    ///
+    /// This is the caller-side floor the engine's own stationarity bound could
+    /// not previously express. Without it the engine's data-scaled ladder is the
+    /// only standard applied, and because that ladder is a function of the fit,
+    /// a fit can be certified at `|Pg| = 5.564e-1` against a bound that
+    /// saturated to exactly `1.000e0` while its companion on the same data in
+    /// the same call was held to `2.0708e-4`.
+    ///
+    /// Two consequences, and the first is the point:
+    ///
+    /// 1. the outer loop's convergence band is floored at `requirement`, so it
+    ///    keeps optimizing rather than stopping at a looser sealed bound;
+    /// 2. the certificate cannot mint above `requirement` -- the bound ladder is
+    ///    capped at it, so an unmet requirement is a typed refusal naming both
+    ///    `requirement` and the engine's own bound.
+    ///
+    /// A refusal is the CORRECT outcome when the requirement is unreachable on
+    /// the design: `|Pg| = 5.564e-1` may be a genuine floor of the criterion
+    /// there, and saying so beats certifying against `1.0`. Callers who want the
+    /// engine's judgement unmodified pass `None`, which is the default and is
+    /// byte-for-byte today's behaviour.
+    ///
+    /// Non-finite and non-positive values are rejected rather than silently
+    /// clamped: a requirement of `0.0` or `NaN` is not a stricter standard, it
+    /// is an unsatisfiable one, and honouring it would grind the outer loop to
+    /// `max_iter` and then refuse every fit.
+    pub fn with_required_projected_gradient_norm(mut self, requirement: Option<f64>) -> Self {
+        self.required_projected_gradient_norm = requirement.filter(|v| v.is_finite() && *v > 0.0);
+        self
+    }
+
     /// Cap the infinity-norm displacement of BFGS cost-only line-search probes
     /// on the **rho axes** (the first `n_params - psi_dim` outer parameters,
     /// = log-λ). Also scales the initial inverse metric so the first trial
@@ -618,6 +692,7 @@ impl OuterProblem {
         OuterConfig {
             tolerance: self.tolerance,
             rel_cost_tolerance: self.rel_cost_tolerance,
+            required_projected_gradient_norm: self.required_projected_gradient_norm,
             max_iter: self.max_iter,
             model_domain_bounds: self.bounds.clone(),
             search_bounds_override: None,
@@ -2492,6 +2567,15 @@ pub(crate) enum StationarityBoundSource {
     /// Only the ONE refusal on that route which has actually formed the
     /// residual carries this. Its eight early exits formed none, and now say so.
     FixedPointResidual,
+    /// The CALLER's `|Pg|` requirement (#2568), capping every rung above.
+    ///
+    /// The only member of this enum that is not the engine's own judgement, and
+    /// the only one that ever TIGHTENS the bound. Reported when the caller's
+    /// requirement is stricter than the ladder the engine would have applied, so
+    /// a reader can tell "the engine refused this" from "the engine would have
+    /// certified this and the caller would not" -- a distinction that matters
+    /// because the second is not a defect in the fit.
+    CallerRequirement,
 }
 
 impl StationarityBoundSource {
@@ -2505,6 +2589,7 @@ impl StationarityBoundSource {
             Self::CurvatureResolvabilityFiniteDifference => "curvature-resolvability(fd-gradient)",
             Self::GradientReproducibility => "gradient-reproducibility",
             Self::FixedPointResidual => "fixed-point-residual",
+            Self::CallerRequirement => "caller-requirement",
         }
     }
 
@@ -3352,6 +3437,33 @@ fn certify_outer_optimality_at_terminal_fidelity(
             bound_source = StationarityBoundSource::ProbeNoiseFloor;
             stationarity_bound = noise_bound;
         }
+    }
+    // #2568 -- the caller's requirement caps the ladder's TOP. Every rung above
+    // widens, so capping here is the only placement that cannot be defeated by a
+    // rung that fires later; in particular the score-relative widening is what
+    // produced the saturated `bound = 1.000e0` this issue was filed against.
+    //
+    // No new refusal path is needed and none is added: the acceptance test below
+    // already compares `projected_grad_norm` against `stationarity_bound`, so
+    // tightening the bound refuses the fit through the machinery that was always
+    // there, with the rung naming who decided.
+    //
+    // Both numbers are reported. The engine's own bound is what the fit would
+    // have been held to and is the quantity a reader needs to judge whether the
+    // requirement was reasonable; the requirement is what actually decided. A
+    // refusal that named only one of them would be unauditable in exactly the
+    // way #2465 is about.
+    if let Some(required) = config.required_projected_gradient_norm
+        && required < stationarity_bound
+    {
+        log::info!(
+            "[2568-REQUIREMENT] {context}: caller requires |Pg| <= {required:.6e}; \
+             engine bound was {stationarity_bound:.6e} (rung {}); measured |Pg| = \
+             {projected_grad_norm:.6e}",
+            bound_source.label(),
+        );
+        bound_source = StationarityBoundSource::CallerRequirement;
+        stationarity_bound = required;
     }
     audit_outer_value_agreement(
         context,
@@ -7336,6 +7448,21 @@ pub(crate) fn outer_gradient_tolerance(config: &OuterConfig) -> GradientToleranc
     if let Some(scale) = config.objective_scale {
         abs = abs.max(outer_cost_relative_tolerance(config) * (1.0 + scale));
     }
+    // #2568 -- a caller's requirement is the one input to this band that may
+    // TIGHTEN it. Everything above widens: the arithmetic floor and the
+    // scale-relative rung both exist to stop the optimizer chasing digits the
+    // criterion cannot resolve. A caller asking for `|Pg| <= 1e-3` on a fit
+    // whose sealed band is `1.0` is asking the search to keep working, so the
+    // requirement enters HERE and not only at the certificate -- surfacing the
+    // number without letting it drive the search moves the disappointment later
+    // without changing the answer.
+    //
+    // `min`, never `max`: a requirement looser than the engine's own band is not
+    // a request for anything, and honouring it would let a caller *weaken* a
+    // standard the engine derived from the criterion's resolution.
+    if let Some(required) = config.required_projected_gradient_norm {
+        abs = abs.min(required);
+    }
     GradientTolerance {
         abs,
         rel_initial_grad: None,
@@ -7364,7 +7491,20 @@ pub(crate) fn outer_stationarity_band_at(config: &OuterConfig, cost_at_point: f6
     if !cost_at_point.is_finite() {
         return solver_band;
     }
-    solver_band.max(outer_cost_relative_tolerance(config) * (1.0 + cost_at_point.abs()))
+    let widened =
+        solver_band.max(outer_cost_relative_tolerance(config) * (1.0 + cost_at_point.abs()));
+    // #2568 -- the score-relative widening above is what produced the saturated
+    // `bound = 1.000e0`, so a caller requirement that did not survive it would
+    // be defeated by exactly the case it was introduced for. Cap after widening.
+    //
+    // This does NOT manufacture the "solver claimed convergence, certificate
+    // refused" family warned about above: `outer_gradient_tolerance` was floored
+    // at the same requirement, so the solver was told to reach the number the
+    // certificate now applies. The two spellings agree by construction.
+    match config.required_projected_gradient_norm {
+        Some(required) => widened.min(required),
+        None => widened,
+    }
 }
 
 pub(crate) fn outer_max_iterations(value: usize) -> Result<MaxIterations, EstimationError> {
