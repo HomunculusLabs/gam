@@ -44,10 +44,11 @@ use crate::structure_harvest;
 use crate::tiered::Tier0Mean;
 
 use super::{
-    AmortizedEncoderConsistency, AssignmentMode, CoordinateFidelityCertificate,
-    SaeManifoldFitDiagnostics, SaeManifoldLoss, SaeManifoldOuterObjective, SaeManifoldRho,
-    SaeManifoldTerm, SaeOuterTermination, SaeShapeUncertainty, SaeTrustDiagnostics,
-    TopologyPersistenceCertificate, VanishedAtoms,
+    AmortizedEncoderConsistency, AssignmentMode, CoordinateFidelityCertificate, CrossFitConfig,
+    CrossFitReport, SaeManifoldFitDiagnostics, SaeManifoldLoss, SaeManifoldOuterObjective,
+    SaeManifoldRho, SaeManifoldTerm, SaeOuterTermination, SaeShapeUncertainty,
+    SaeTrustDiagnostics, TopologyPersistenceCertificate, VanishedAtoms,
+    cross_fit_reconstruction_ev,
 };
 
 /// Hard cap on evidence-certified #2021 whitened-residual refit passes.
@@ -213,6 +214,22 @@ pub struct SaeFitReport {
     pub fitted: Array2<f64>,
     pub active_mask: Vec<bool>,
     pub reconstruction_r2: f64,
+    /// Post-selection optimism REFERENCE for [`Self::reconstruction_r2`], when
+    /// the caller asked for it (`SaeFitRequest::reconstruction_optimism_folds`).
+    ///
+    /// `reconstruction_r2` is held-in: the dictionary is discovered and scored
+    /// on the same rows, so it is inflated by however much freedom that
+    /// discovery had. This is the K-fold cross-fit of a MATCHED-DIMENSION
+    /// LINEAR subspace on the same data — `naive`, `cross_fit`, and their
+    /// difference `optimism`.
+    ///
+    /// It is deliberately NOT the SAE's own optimism, and must not be reported
+    /// as such. It is the optimism a plain linear reconstruction of the same
+    /// dimension carries here, which is a LOWER reference: the SAE selects
+    /// atoms, gates, and curvature on top of choosing a subspace, so its own
+    /// optimism is at least this large. Cross-fitting the SAE itself means
+    /// refitting it per fold and is a separate, far more expensive change.
+    pub reconstruction_optimism_reference: Option<CrossFitReport>,
     pub outer_termination: SaeOuterTermination,
     pub shape_uncertainty: SaeShapeUncertainty,
     pub metric_provenance: &'static str,
@@ -722,6 +739,13 @@ fn fit_outer_stage_to_boundary(
 /// per-fit state to the engine.  The request owns every orchestration choice so
 /// bindings do not need a parallel fit driver or process-global configuration.
 pub struct SaeFitRequest {
+    /// Fold count for the reconstruction optimism reference, or `None` to skip
+    /// it (the default). Computing it costs `k` extra linear subspace fits, and
+    /// it is a reporting diagnostic rather than part of the objective, so no
+    /// fit pays for it unless the caller asks. See
+    /// [`SaeFitReport::reconstruction_optimism_reference`] for what it measures
+    /// -- in particular, what it does NOT measure.
+    pub reconstruction_optimism_folds: Option<usize>,
     pub base_term: SaeManifoldTerm,
     pub target: Array2<f64>,
     pub registry: AnalyticPenaltyRegistry,
@@ -1085,6 +1109,8 @@ struct SaeFinalizeRequest<'a> {
     ridge_beta: f64,
     /// Names the entry in diagnostics: "SAE fit" or "SAE certify entry".
     entry_label: &'a str,
+    /// Fold count for the optimism reference, or `None` to skip it.
+    reconstruction_optimism_folds: Option<usize>,
 }
 
 fn finalize_sae_fit_report(
@@ -1112,6 +1138,7 @@ fn finalize_sae_fit_report(
         ridge_ext_coord,
         ridge_beta,
         entry_label,
+        reconstruction_optimism_folds,
     } = request;
     let (n_obs, p_out) = z.dim();
     term.record_fit_data_collapse_if_needed(z.view(), &rho, max_iter)?;
@@ -1361,6 +1388,27 @@ fn finalize_sae_fit_report(
         0.0
     };
 
+    // Optimism reference for the held-in `reconstruction_r2` above. The
+    // dimension is matched to what the fitted dictionary actually spans, so the
+    // linear comparator has the same amount of subspace freedom the SAE had --
+    // an unmatched dimension would make the two numbers incomparable. Capped
+    // below the ambient width because a full-rank subspace reconstructs
+    // everything and its optimism is degenerate.
+    let reconstruction_optimism_reference = reconstruction_optimism_folds.and_then(|k_folds| {
+        let q = term
+            .atoms
+            .iter()
+            .map(|atom| atom.latent_dim())
+            .sum::<usize>()
+            .min(p_out.saturating_sub(1));
+        if q == 0 || k_folds < 2 {
+            return None;
+        }
+        // A failed reference is a missing diagnostic, never a failed fit: the
+        // caller asked for extra information, not for a second gate.
+        cross_fit_reconstruction_ev(z.view(), CrossFitConfig { k_folds, seed: 0 }, q).ok()
+    });
+
     let reported_log_alpha = match term.assignment.mode {
         AssignmentMode::OrderedBetaBernoulli { alpha, .. } => alpha.ln(),
         _ => alpha.ln(),
@@ -1394,6 +1442,7 @@ fn finalize_sae_fit_report(
         fitted,
         active_mask,
         reconstruction_r2,
+        reconstruction_optimism_reference,
         outer_termination,
         shape_uncertainty,
         metric_provenance,
@@ -1430,6 +1479,7 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
         run_outer_rho_search,
         structured_residual_passes,
         cancel,
+        reconstruction_optimism_folds,
     } = request;
     let (n_obs, p_out) = z.dim();
     let mut metric_provenance: &'static str = metric_provenance_initial;
@@ -1725,6 +1775,7 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
             learning_rate,
             ridge_ext_coord,
             ridge_beta,
+            reconstruction_optimism_folds,
             entry_label: "SAE fit",
         },
     )?;
@@ -1877,6 +1928,9 @@ pub fn run_sae_manifold_certify(
             learning_rate,
             ridge_ext_coord,
             ridge_beta,
+            // The certify entry re-reads an installed state rather than
+            // discovering one, so there is no selection to price here.
+            reconstruction_optimism_folds: None,
             entry_label: "SAE certify entry",
         },
     )?;

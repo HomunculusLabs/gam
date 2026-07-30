@@ -88,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } = seed;
 
     let report = run_sae_manifold_fit(SaeFitRequest {
+            reconstruction_optimism_folds: None,
         base_term,
         target,
         registry,

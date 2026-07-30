@@ -168,6 +168,7 @@ mod tests {
         } = seed;
 
         run_sae_manifold_fit(SaeFitRequest {
+            reconstruction_optimism_folds: None,
             base_term,
             target,
             registry,
@@ -350,6 +351,7 @@ mod tests {
         } = seed;
 
         run_sae_manifold_fit(SaeFitRequest {
+            reconstruction_optimism_folds: None,
             base_term,
             target,
             registry,

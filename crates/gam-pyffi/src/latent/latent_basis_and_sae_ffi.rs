@@ -1988,6 +1988,7 @@ fn sae_manifold_fit_inner<'py>(
     // single typed orchestration entry (#2236).
     let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let request = gam::terms::sae::manifold::SaeFitRequest {
+            reconstruction_optimism_folds: None,
         base_term,
         target: z_view.to_owned(),
         registry,
@@ -2075,6 +2076,7 @@ fn sae_fit_report_into_dict<'py>(
         fitted,
         active_mask,
         reconstruction_r2,
+        reconstruction_optimism_reference,
         outer_termination,
         shape_uncertainty,
         metric_provenance,
@@ -2234,6 +2236,22 @@ fn sae_fit_report_into_dict<'py>(
     out.set_item("atom_active_mask", active_mask)?;
     out.set_item("fitted", fitted.into_pyarray(py))?;
     out.set_item("reconstruction_r2", reconstruction_r2)?;
+    // The optimism reference travels as its own dict so the three numbers stay
+    // together: a `cross_fit` without the `naive` it is compared against, or an
+    // `optimism` without the fold count behind it, is not interpretable.
+    // Absent (not null-filled) when the caller did not ask for it.
+    if let Some(reference) = reconstruction_optimism_reference {
+        let block = PyDict::new(py);
+        block.set_item("naive", reference.naive)?;
+        block.set_item("cross_fit", reference.cross_fit)?;
+        block.set_item("optimism", reference.optimism)?;
+        block.set_item("per_fold", reference.per_fold)?;
+        // Names what was cross-fitted. This is the matched-dimension LINEAR
+        // comparator, not the SAE itself, and a consumer that reports it as the
+        // SAE's own optimism is reading it wrong.
+        block.set_item("comparator", "matched_dimension_linear_subspace")?;
+        out.set_item("reconstruction_optimism_reference", block)?;
+    }
     // #2023 Increment 5 — the Tier-0 shared mean the ONE fit entry peeled off the
     // raw target, now carried on the fitted artifact (`p`-vector μ) so a Python
     // consumer reconstructing from the per-atom `decoder_B` (which fit the DE-MEANED

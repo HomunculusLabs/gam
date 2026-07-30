@@ -1337,6 +1337,7 @@ fn production_circle_coords_at_seed(
         metric_provenance,
     } = seed;
     let report = run_sae_manifold_fit(SaeFitRequest {
+            reconstruction_optimism_folds: None,
         base_term,
         target: target.clone(),
         registry,

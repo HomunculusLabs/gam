@@ -710,4 +710,82 @@ mod tests {
             report.optimism
         );
     }
+
+    /// `n x p` rows lying on a genuine `q`-dimensional linear subspace plus
+    /// isotropic noise of the given scale.
+    fn planted_subspace(n: usize, p: usize, q: usize, noise: f64, seed: u64) -> Array2<f64> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let basis: Array2<f64> = Array2::from_shape_fn((q, p), |(k, j)| {
+            ((k * 31 + j * 17) as f64 * 0.7).sin()
+        });
+        Array2::from_shape_fn((n, p), |(i, j)| {
+            let mut v = 0.0;
+            for k in 0..q {
+                let score = ((i * 13 + k * 7) as f64 * 0.31).cos();
+                v += score * basis[[k, j]];
+            }
+            v + noise * (rng.random::<f64>() - 0.5)
+        })
+    }
+
+    #[test]
+    fn optimism_collapses_when_the_structure_is_real() {
+        // THE DISCRIMINATING CASE. A cross-fit that always reports a gap would
+        // pass every "optimism >= 0" check while measuring nothing. Here the
+        // subspace is genuinely present and the sample is large relative to the
+        // dimension, so the held-out EV must nearly match the in-sample EV.
+        let data = planted_subspace(400, 12, 3, 0.02, 11);
+        let report = cross_fit_reconstruction_ev(data.view(), CrossFitConfig::five_fold(7), 3)
+            .expect("well-posed cross-fit");
+        assert!(
+            report.naive > 0.99,
+            "planted subspace should be reconstructed in-sample, got {}",
+            report.naive
+        );
+        assert!(
+            report.optimism.abs() < 0.01,
+            "real structure generalizes: optimism {} should be ~0",
+            report.optimism
+        );
+    }
+
+    #[test]
+    fn optimism_is_visible_when_the_subspace_is_mostly_selection() {
+        // The opposite pole: pure noise, and a subspace nearly as wide as the
+        // sample can support. In-sample EV is then largely fitted noise and the
+        // held-out score must fall well short of it.
+        let data = planted_subspace(40, 16, 0, 1.0, 23);
+        let report = cross_fit_reconstruction_ev(data.view(), CrossFitConfig::five_fold(5), 10)
+            .expect("well-posed cross-fit");
+        assert!(
+            report.optimism > 0.05,
+            "fitting 10 directions to 40 noise rows must show optimism, got {} \
+             (naive {}, cross_fit {})",
+            report.optimism,
+            report.naive,
+            report.cross_fit
+        );
+        assert!(
+            report.cross_fit < report.naive,
+            "held-out cannot beat in-sample here"
+        );
+    }
+
+    #[test]
+    fn cross_fit_report_carries_every_fold_it_scored() {
+        let data = planted_subspace(120, 8, 2, 0.1, 3);
+        let report = cross_fit_reconstruction_ev(data.view(), CrossFitConfig::five_fold(2), 2)
+            .expect("well-posed cross-fit");
+        assert_eq!(report.per_fold.len(), 5, "one held-out score per fold");
+        let mean = report.per_fold.iter().sum::<f64>() / report.per_fold.len() as f64;
+        assert!(
+            (mean - report.cross_fit).abs() < 1e-12,
+            "cross_fit must be the mean of the folds it reports, not a separate number"
+        );
+        assert!(
+            (report.optimism - (report.naive - report.cross_fit)).abs() < 1e-12,
+            "optimism must be naive - cross_fit"
+        );
+    }
+
 }
