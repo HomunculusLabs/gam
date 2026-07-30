@@ -562,30 +562,21 @@ impl SurvivalMarginalSlopeFamily {
                     (g, h)
                 };
 
-                // Resolve every row-local ψ direction before entering the
-                // axis accumulation. The exact directional row algebra then packs
-                // up to four axes into one SIMD pass; lane extraction is bitwise
-                // identical to the former scalar `OneSeed` evaluation.
-                let mut psi_rows = Vec::with_capacity(k);
-                let mut directions = Vec::with_capacity(k);
-                for axis in &axes {
+                // The row program is direction-independent through order three.
+                // Evaluate its exact statically sparse tower once, then contract
+                // each ψ axis without repeating any transcendental algebra.
+                let third_tower = self.build_row_primary_third_tower(row, block_states)?;
+
+                for axis_idx in 0..k {
+                    let axis = &axes[axis_idx];
                     let psi_row = axis
                         .psi_map
                         .row_vector(row)
                         .map_err(|e| format!("survival rowwise psi map (batched): {e}"))?;
                     let dir =
                         primary_direction_from_psi_row(axis.block_idx, &psi_row, axis.beta_psi);
-                    psi_rows.push(psi_row);
-                    directions.push(dir);
-                }
-                let third_stacks =
-                    self.row_primary_third_contracted_batch(row, block_states, &directions)?;
-
-                for axis_idx in 0..k {
-                    let axis = &axes[axis_idx];
-                    let psi_row = &psi_rows[axis_idx];
-                    let dir = &directions[axis_idx];
-                    let third_stack = &third_stacks[axis_idx];
+                    let third_stack =
+                        Self::contract_row_primary_third_tower(&third_tower, &dir)?;
                     let mut third = Array2::from_shape_fn(
                         (N_PRIMARY, N_PRIMARY),
                         |(a, b)| third_stack[a][b],
@@ -597,17 +588,17 @@ impl SurvivalMarginalSlopeFamily {
                     let acc = &mut accs[axis_idx];
 
                     // objective_psi += w * (f_pi · dir)
-                    acc.objective_psi += w * f_pi.dot(dir);
+                    acc.objective_psi += w * f_pi.dot(&dir);
 
                     // score_psi += w * (f_pi · loading) * psi_row, routed to
                     // the marginal or logslope block depending on axis.
                     let s1 = w * f_pi.dot(&axis.loading);
                     match axis.block_idx {
-                        1 => acc.score_m.scaled_add(s1, psi_row),
-                        _ => acc.score_g.scaled_add(s1, psi_row),
+                        1 => acc.score_m.scaled_add(s1, &psi_row),
+                        _ => acc.score_g.scaled_add(s1, &psi_row),
                     }
 
-                    let mut pb = f_pipi.dot(dir);
+                    let mut pb = f_pipi.dot(&dir);
                     if w != 1.0 {
                         pb.mapv_inplace(|v| v * w);
                     }
@@ -633,7 +624,7 @@ impl SurvivalMarginalSlopeFamily {
                         self,
                         row,
                         axis.block_idx,
-                        psi_row,
+                        &psi_row,
                         &right_primary,
                     )?;
                     acc.hessian.add_pullback(self, row, &third)?;
