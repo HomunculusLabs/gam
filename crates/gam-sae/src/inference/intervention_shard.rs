@@ -232,8 +232,9 @@ fn group_is_eval_forever(g: i64, seed_mix: u64) -> bool {
 /// is an eval-forever group under `seed` (guard G2). A pure per-group function
 /// of `(group id, seed)` — record order, shard composition, and refit history
 /// cannot move a record across the fence. This is the single source of truth
-/// the Python `intervention_calibration._eval_forever_mask` binding wraps, so
-/// the SplitMix64 split stays bit-identical across the language boundary.
+/// for the split; it is Rust-only today (no `gam-pyffi` export wraps it), so
+/// any future Python or CLI surface must call through here rather than
+/// reimplement the SplitMix64 split.
 pub fn eval_forever_mask(group: &[i64], seed: u64) -> Vec<bool> {
     let seed_mix = splitmix64(seed);
     group

@@ -52,7 +52,10 @@ class AdditiveRemlOutput:
     * ``edf``: length-``F`` per-smooth EDFs.
 
     Multi-output block fits use the shared-scale block-orthogonal estimator
-    and still report one ``λ`` / EDF per smooth.
+    and still report one ``λ`` / EDF per smooth. That estimator is
+    **forward-only** — the Rust core exposes no backward for it, so its fields
+    are detached tensors and a fit with grad-tracked inputs raises rather than
+    returning a silently broken graph.
     """
 
     coefficients: list[torch.Tensor]
@@ -70,6 +73,24 @@ def _gaussian_reml_fit_blocks_orthogonal(
     weights: torch.Tensor | None = None,
     init_log_lambdas: torch.Tensor | None = None,
 ) -> AdditiveRemlOutput:
+    # Rust exports `gaussian_reml_fit_blocks_orthogonal_forward` with no
+    # matching `_backward`, so this path cannot be an autograd.Function and
+    # every output below is detached by `from_numpy_like`. Refuse a fit whose
+    # gradient the caller would then silently never receive.
+    if torch.is_grad_enabled():
+        tracked = [*design_blocks, *penalty_blocks, y]
+        if weights is not None:
+            tracked.append(weights)
+        if init_log_lambdas is not None:
+            tracked.append(init_log_lambdas)
+        if any(t.requires_grad for t in tracked):
+            raise NotImplementedError(
+                "the multi-output (D > 1) block-orthogonal Gaussian REML path is "
+                "forward-only: the Rust core exposes no backward for it, so the "
+                "returned tensors carry no autograd graph. Fit a single-column "
+                "response to get gradients, or wrap this call in torch.no_grad()."
+            )
+
     designs_np = [to_numpy_f64(d) for d in design_blocks]
     penalties_np = [to_numpy_f64(p) for p in penalty_blocks]
     y_np = to_numpy_f64(y.unsqueeze(1) if y.dim() == 1 else y)
@@ -851,7 +872,9 @@ def gaussian_reml_fit_additive(
     block-orthogonal estimator, preserving one λ per smooth instead of
     falling back to one scalar λ for the whole block-diagonal penalty.
 
-    Both paths return fully differentiable tensors.
+    Only the single-column path is differentiable. The multi-output estimator
+    has no Rust backward, so it is forward-only and raises
+    :class:`NotImplementedError` if any input requires grad.
 
     Parameters
     ----------

@@ -452,7 +452,8 @@ def _build_design_penalty(
             design = (design.unsqueeze(2) * b_j.unsqueeze(1)).reshape(n, -1)
         # Penalty: single-λ Kronecker-sum  S = Σ_a I ⊗ S_a ⊗ I  (mgcv te()-style
         # isotropic tensor penalty), matching the Rust TensorBSpline penalty
-        # `S = Σ_i I ⊗ … ⊗ S_i ⊗ … ⊗ I` (src/terms/smooth/part_001.rs:486).
+        # `S = Σ_i I ⊗ … ⊗ S_i ⊗ … ⊗ I` (the MarginalKroneckerSum branch of
+        # `gam_terms::smooth::term_specs::build_tensor_bspline_basis`).
         total = 1
         for k in sizes:
             total *= k
