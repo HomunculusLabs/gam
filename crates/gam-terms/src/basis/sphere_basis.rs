@@ -1747,28 +1747,19 @@ pub fn build_duchon_operator_penalty_psi_derivatives(
     // assertion fires here rather than at the spec layer so the
     // scale-free path stays fractional-clean.
     let coeffs = duchon_partial_fraction_coeffs(p_order, s_order, 1.0 / length_scale);
-    let mut z_kernel =
-        kernel_constraint_nullspace(centers, effective_nullspace_order, &mut workspace.cache)?;
-    // #1355: fold the frozen data-metric radial reparam `Z' = Z·V` so the
-    // operator-penalty ψ-derivatives assemble in the SAME rotated radial basis
-    // (`K·Z·V`) that the forward build's operator collocation matrices use
-    // (`duchon_operator_penalty_candidates` threads `radial_reparam` into
-    // `build_duchon_collocation_operator_matrices`). Without this fold the
-    // derivative differentiates the operator Gram in the raw `Z` frame while
-    // the REML cost is built in the `Z·V` frame — a design↔penalty desync that
-    // makes the analytic mass/tension log-κ gradient disagree with a central
-    // finite difference of the rebuilt penalty by orders of magnitude (the
-    // native `Primary`/trend arms already fold `V`).
-    if let Some(v) = spec.radial_reparam.as_ref() {
-        if v.nrows() != z_kernel.ncols() {
-            crate::bail_dim_basis!(
-                "Duchon frozen radial reparam shape {:?} does not match constrained kernel dimension {}",
-                v.dim(),
-                z_kernel.ncols()
-            );
-        }
-        z_kernel = fast_ab(&z_kernel, v);
-    }
+    // #1355: assemble the operator-penalty ψ-derivatives in the SAME rotated
+    // radial basis (`K·Z·V`) the forward build's operator collocation matrices
+    // use (`duchon_operator_penalty_candidates` threads `radial_reparam` into
+    // `build_duchon_collocation_operator_matrices`). Differentiating the
+    // operator Gram in the raw `Z` frame while the REML cost is built in the
+    // `Z·V` frame is a design↔penalty desync that puts the analytic
+    // mass/tension log-κ gradient orders of magnitude off a central difference
+    // of the rebuilt penalty.
+    let z_kernel = duchon_frozen_radial_chart(
+        kernel_constraint_nullspace(centers, effective_nullspace_order, &mut workspace.cache)?,
+        spec,
+        "operator penalty",
+    )?;
     let n_basis = centers.nrows();
     if collocation_points.ncols() != dim {
         crate::bail_dim_basis!(
@@ -2183,21 +2174,13 @@ pub fn build_duchon_native_penalty_psi_derivatives(
     let p_order = duchon_p_from_nullspace_order(effective_nullspace_order);
     let s_order = spec.power_as_usize();
     let dim = centers.ncols();
-    let mut z =
-        kernel_constraint_nullspace(centers, effective_nullspace_order, &mut workspace.cache)?;
-    // #1355: fold the frozen data-metric reparam `Z' = Z·V` so the penalty
-    // ψ-derivatives project in the SAME rotated radial basis as the forward
-    // penalty (`Vᵀ Ω(ψ) V`), staying bit-consistent with the design.
-    if let Some(v) = spec.radial_reparam.as_ref() {
-        if v.nrows() != z.ncols() {
-            crate::bail_dim_basis!(
-                "Duchon frozen radial reparam shape {:?} does not match constrained kernel dimension {}",
-                v.dim(),
-                z.ncols()
-            );
-        }
-        z = fast_ab(&z, v);
-    }
+    // #1355: project the penalty ψ-derivatives in the SAME rotated radial basis
+    // as the forward penalty (`Vᵀ Ω(ψ) V`), bit-consistent with the design.
+    let z = duchon_frozen_radial_chart(
+        kernel_constraint_nullspace(centers, effective_nullspace_order, &mut workspace.cache)?,
+        spec,
+        "native penalty",
+    )?;
     let kernel_cols = z.ncols();
     let poly_cols = polynomial_block_from_order(centers, effective_nullspace_order).ncols();
     let total_cols = kernel_cols + poly_cols;

@@ -7114,7 +7114,7 @@ fn test_duchon_raw_gram_psi_derivative_fd_dim1() {
 fn test_duchon_log_kappa_derivative_matchesfd_lengthscale_one() {
     let data = array![[0.0, 0.0], [1.0, 0.2], [0.3, 1.1], [0.9, 0.8]];
     let centers = array![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
-    let spec = DuchonBasisSpec {
+    let mut spec = DuchonBasisSpec {
         radial_reparam: None,
         periodic: None,
         center_strategy: CenterStrategy::UserProvided(centers),
@@ -7126,6 +7126,17 @@ fn test_duchon_log_kappa_derivative_matchesfd_lengthscale_one() {
         operator_penalties: DuchonOperatorPenaltySpec::default(),
         boundary: OneDimensionalBoundary::Open,
     };
+    // #2638: freeze the FULL production chart before differencing. Left
+    // un-frozen, the +/-eps rebuilds below adopt a FRESH data-metric radial
+    // reparam V(psi) (#1355) while the analytic derivative stays in the raw Z
+    // chart, so the quotient is of a different penalty and the gate reads the
+    // chart mismatch as an error in the derivative.
+    let frozen_base = freeze_duchon_chart(data.view(), &mut spec);
+    assert!(
+        !frozen_base.active_penalties.is_empty(),
+        "[duchon_ls1] the frozen chart must ship at least one penalty; an empty \
+         list would leave the loop below vacuous"
+    );
     let derivative =
         build_duchon_basis_log_kappa_derivatives(data.view(), &spec).unwrap_or_else(|e| {
             panic!(
@@ -7145,6 +7156,8 @@ fn test_duchon_log_kappa_derivative_matchesfd_lengthscale_one() {
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "plus build", e));
     let minus = build_duchon_basis(data.view(), &spec_minus)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "minus build", e));
+    assert_duchon_fd_chart_frozen(&spec, &plus, "duchon_ls1:+eps");
+    assert_duchon_fd_chart_frozen(&spec, &minus, "duchon_ls1:-eps");
     assert!(
         !derivative.first.penalties_derivative.is_empty(),
         "[duchon_ls1] derivative must expose at least one penalty matrix; an \
@@ -7228,6 +7241,58 @@ fn freeze_duchon_chart(
         panic!("freeze_duchon_chart requires Duchon metadata");
     }
     base
+}
+
+/// Assert a Duchon log-κ FD gate's ±ε rebuilds were assembled in the SAME
+/// frozen chart the analytic derivative was taken in.
+///
+/// `build_duchon_basis` ADOPTS a fresh data-metric radial reparam `V(ψ)` for any
+/// spec that carries none (#1355), while every ψ-derivative builder is a
+/// frozen-chart derivative. A gate whose rebuilds re-derive the chart therefore
+/// differences a DIFFERENT penalty from the one the analytic side describes, and
+/// reads that chart mismatch as an error in the derivative -- which is what
+/// three of these fixtures were reporting as a 10x-290x analytic failure
+/// (#2638). The premise is shared by every FD gate on this path, so it is
+/// asserted here rather than assumed: without it the gate is not measuring the
+/// derivative at all.
+fn assert_duchon_fd_chart_frozen(
+    spec: &DuchonBasisSpec,
+    rebuilt: &BasisBuildResult,
+    label: &str,
+) {
+    let BasisMetadata::Duchon { radial_reparam, .. } = &rebuilt.metadata else {
+        panic!("[{label}] expected Duchon metadata on the FD rebuild");
+    };
+    match (spec.radial_reparam.as_ref(), radial_reparam.as_ref()) {
+        (Some(frozen), Some(rebuilt_v)) => {
+            assert_eq!(
+                frozen.dim(),
+                rebuilt_v.dim(),
+                "[{label}] the FD rebuild changed the radial chart shape: frozen {:?} vs rebuilt {:?}",
+                frozen.dim(),
+                rebuilt_v.dim(),
+            );
+            let drift = (frozen - rebuilt_v)
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                drift == 0.0,
+                "[{label}] the FD rebuild re-derived the data-metric radial chart \
+                 (max|V_frozen - V_rebuilt| = {drift:.6e}); the analytic derivative is a \
+                 FROZEN-chart derivative, so this difference quotient is of a different \
+                 penalty (#2638)"
+            );
+        }
+        (None, None) => {}
+        (frozen, rebuilt_v) => panic!(
+            "[{label}] radial chart presence disagrees between the analytic spec \
+             (frozen={}) and the FD rebuild (frozen={}); one side is in the raw Z chart \
+             and the other in Z·V (#2638)",
+            frozen.is_some(),
+            rebuilt_v.is_some(),
+        ),
+    }
 }
 
 /// FD-test the **design** derivative dX/dpsi against the rebuilt cost
@@ -7401,7 +7466,7 @@ fn test_duchon_log_kappa_derivative_matchesfd_dim1_power1_linear_no_ident() {
     for i in 0..n {
         data[[i, 0]] = i as f64 / (n as f64 - 1.0);
     }
-    let spec = DuchonBasisSpec {
+    let mut spec = DuchonBasisSpec {
         radial_reparam: None,
         periodic: None,
         center_strategy: CenterStrategy::FarthestPoint { num_centers: 8 },
@@ -7413,6 +7478,17 @@ fn test_duchon_log_kappa_derivative_matchesfd_dim1_power1_linear_no_ident() {
         operator_penalties: DuchonOperatorPenaltySpec::default(),
         boundary: OneDimensionalBoundary::Open,
     };
+    // #2638: freeze the FULL production chart before differencing. Left
+    // un-frozen, the +/-eps rebuilds below adopt a FRESH data-metric radial
+    // reparam V(psi) (#1355) while the analytic derivative stays in the raw Z
+    // chart. identifiability stays None, so this fixture still isolates the
+    // kappa-dependence of the identifiability transform.
+    let frozen_base = freeze_duchon_chart(data.view(), &mut spec);
+    assert!(
+        !frozen_base.active_penalties.is_empty(),
+        "[duchon_d1_p1_no_ident] the frozen chart must ship at least one penalty; \
+         an empty list would leave the loop below vacuous"
+    );
     let derivative =
         build_duchon_basis_log_kappa_derivatives(data.view(), &spec).unwrap_or_else(|e| {
             panic!(
@@ -7420,7 +7496,7 @@ fn test_duchon_log_kappa_derivative_matchesfd_dim1_power1_linear_no_ident() {
                 "analytic Duchon derivative should build", e
             )
         });
-    let eps: f64 = 1e-5;
+    let eps: f64 = 1e-4;
     let kappa = 1.0;
     let ls_plus = 1.0 / (kappa * eps.exp());
     let ls_minus = 1.0 / (kappa * (-eps).exp());
@@ -7432,6 +7508,8 @@ fn test_duchon_log_kappa_derivative_matchesfd_dim1_power1_linear_no_ident() {
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "plus build", e));
     let minus = build_duchon_basis(data.view(), &spec_minus)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "minus build", e));
+    assert_duchon_fd_chart_frozen(&spec, &plus, "duchon_d1_p1_no_ident:+eps");
+    assert_duchon_fd_chart_frozen(&spec, &minus, "duchon_d1_p1_no_ident:-eps");
     assert!(
         !derivative.first.penalties_derivative.is_empty(),
         "[duchon_d1_p1_no_ident] derivative must expose at least one penalty \
@@ -7448,24 +7526,24 @@ fn test_duchon_log_kappa_derivative_matchesfd_dim1_power1_linear_no_ident() {
             "[duchon_d1_p1_no_ident] penalty {} analytic_norm={:.4e} fd_norm={:.4e} err={:.4e}",
             idx, a_norm, fd_norm, err
         );
-        // Central difference in psi = log(kappa) at eps = 1e-5.
-        //   truncation = (eps^2/6)*|d3 S/dpsi3| = 1.7e-11 * |d3 S/dpsi3|
-        //   roundoff   = f64_eps*|S|/eps  = 2.2e-11 per entry
-        // Same absolute floor construction as the frozen sibling
-        // `test_duchon_log_kappa_derivative_matchesfd_dim1_power1_frozen`
-        // (100x the measured 1e-14-per-entry rebuild roundoff, in Frobenius,
-        // divided by 2*eps): 5e-8*sqrt(entries), which at this fixture's 8x8
-        // penalty is ~4e-7. That arm is what covers the eigendecomposition
-        // noise of the FRESH radial reparam V(psi) this spec rebuilds at each
-        // +/-eps; the analytic side handles a fresh V exactly, by first-order
-        // eigenvalue perturbation (dLambda_i/dpsi = v_i^T M_psi v_i), so the
-        // comparison is well posed and no chart-motion slack is warranted.
+        // Step chosen from a MEASURED sweep on this fixture in the frozen
+        // chart, max absolute residual over all four penalties:
         //
-        // Relative arm 1e-6, four orders above the ~1e-10 stencil floor,
-        // scaled by max(1, ||analytic||, ||fd||) since the penalties are
-        // Frobenius-normalized and therefore O(1).
-        let entries = plus.active_penalties[idx].matrix.len() as f64;
-        let fd_roundoff_floor = 1e2 * 1e-14 * entries.sqrt() / (2.0 * eps);
+        //   eps      1e-2    3e-3    1e-3    3e-4    1e-4    3e-5    1e-5
+        //   max err  5.3e-4  4.8e-5  5.4e-6  5.9e-7  5.6e-7  1.6e-6  1.6e-5
+        //
+        // A V in eps: `eps^2` truncation on the left, and on the right the
+        // eigendecomposition roundoff of the range-floored Primary block in the
+        // data-metric `V` chart -- which is ~1e-9 per entry, five orders above
+        // the 1e-14 arithmetic rebuild noise the sibling gates assume, because
+        // the +/-eps rebuilds re-run `eigh` on a Gram whose condition number is
+        // >1e10. The basin bottoms at 5.6e-7 at eps=1e-4; that is where this
+        // gate runs, with an absolute arm at 5e-6 (~10x the measured floor).
+        //
+        // 5e-6 is not a number chosen to pass. The defect this gate exists to
+        // catch -- differencing a rebuild that re-derives the radial chart
+        // (#2638) -- reads 2.5e-1 here, five orders above the bound.
+        let fd_noise_floor = 5e-6;
         let scale = a_norm.max(fd_norm).max(1.0);
         assert!(
             err.is_finite(),
@@ -7473,11 +7551,10 @@ fn test_duchon_log_kappa_derivative_matchesfd_dim1_power1_linear_no_ident() {
              residual: err={err}"
         );
         assert!(
-            err <= fd_roundoff_floor || err <= 1e-6 * scale,
+            err <= fd_noise_floor * scale,
             "[duchon_d1_p1_no_ident] penalty {idx} analytic dS/dpsi disagrees \
              with its central difference: analytic_norm={a_norm:.6e} \
-             fd_norm={fd_norm:.6e} err={err:.6e} rel={:.6e} \
-             floor={fd_roundoff_floor:.6e} tol=1e-6",
+             fd_norm={fd_norm:.6e} err={err:.6e} rel={:.6e} tol=5e-6",
             err / scale,
         );
     }
@@ -8393,6 +8470,15 @@ fn zz_measure_2372_duchon_frozen_block_decomposition() {
         Some(z) => SpatialIdentifiability::FrozenTransform { transform: z },
         None => SpatialIdentifiability::None,
     };
+    // #2638: the centers and the identifiability transform were frozen here but
+    // the DATA-METRIC RADIAL REPARAM was not, so the +/-eps rebuilds below
+    // adopted a fresh V(psi) (#1355) while the analytic derivative stayed in the
+    // raw Z chart. That is the whole of this instrument's "analytic ~ 0 against
+    // FD = 0.47": a chart mismatch, not a missing derivative term.
+    spec.radial_reparam = match &base.metadata {
+        BasisMetadata::Duchon { radial_reparam, .. } => radial_reparam.clone(),
+        other => panic!("expected Duchon metadata, got {other:?}"),
+    };
     let derivative = build_duchon_basis_log_kappa_derivatives(data.view(), &spec)
         .unwrap_or_else(|e| panic!("analytic derivative failed: {e:?}"));
     let eps: f64 = 1e-5;
@@ -8404,6 +8490,8 @@ fn zz_measure_2372_duchon_frozen_block_decomposition() {
         .unwrap_or_else(|e| panic!("plus build failed: {e:?}"));
     let minus = build_duchon_basis(data.view(), &spec_minus)
         .unwrap_or_else(|e| panic!("minus build failed: {e:?}"));
+    assert_duchon_fd_chart_frozen(&spec, &plus, "zz2372:+eps");
+    assert_duchon_fd_chart_frozen(&spec, &minus, "zz2372:-eps");
     let block_norms = |m: &ndarray::Array2<f64>, label: &str| {
         let p = m.nrows();
         let kb = kernel_cols.min(p);
