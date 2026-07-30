@@ -20,7 +20,7 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::time::Instant;
 
-fn matern_smooth(name: &str, centers: usize) -> SmoothTermSpec {
+fn matern_smooth(name: &str, centers: usize, kappa_auto: bool) -> SmoothTermSpec {
     SmoothTermSpec {
         name: name.to_string(),
         basis: SmoothBasisSpec::Matern {
@@ -30,7 +30,11 @@ fn matern_smooth(name: &str, centers: usize) -> SmoothTermSpec {
                     num_centers: centers,
                 },
                 periodic: None,
-                length_scale: gam::terms::basis::MaternLengthScale::fixed(1.0),
+                length_scale: if kappa_auto {
+                    gam::terms::basis::MaternLengthScale::auto()
+                } else {
+                    gam::terms::basis::MaternLengthScale::fixed(1.0)
+                },
                 nu: MaternNu::ThreeHalves,
                 include_intercept: false,
                 double_penalty: false,
@@ -58,7 +62,7 @@ fn erf_approx(x: f64) -> f64 {
     sign * y
 }
 
-fn build(n: usize, centers: usize) -> (Array2<f64>, BernoulliMarginalSlopeTermSpec) {
+fn build(n: usize, centers: usize, kappa_auto: bool) -> (Array2<f64>, BernoulliMarginalSlopeTermSpec) {
     let mut rng = StdRng::seed_from_u64(0x9797_0001);
     let mut data = Array2::<f64>::zeros((n, 2));
     for i in 0..n {
@@ -93,12 +97,12 @@ fn build(n: usize, centers: usize) -> (Array2<f64>, BernoulliMarginalSlopeTermSp
     let marginalspec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
-        smooth_terms: vec![matern_smooth("f_pc", centers)],
+        smooth_terms: vec![matern_smooth("f_pc", centers, kappa_auto)],
     };
     let logslopespec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
-        smooth_terms: vec![matern_smooth("ls_pc", centers)],
+        smooth_terms: vec![matern_smooth("ls_pc", centers, kappa_auto)],
     };
     let spec = BernoulliMarginalSlopeTermSpec {
         y,
@@ -150,7 +154,8 @@ fn main() {
     }
     let n: usize = arg_usize(1, 1500);
     let centers: usize = arg_usize(2, 4);
-    let (data, spec) = build(n, centers);
+    let kappa_auto: bool = arg_usize(3, 1) != 0;
+    let (data, spec) = build(n, centers, kappa_auto);
     let request = FitRequest::BernoulliMarginalSlope(BernoulliMarginalSlopeFitRequest {
         data: data.view(),
         spec,
@@ -164,11 +169,11 @@ fn main() {
     match result {
         Ok(FitResult::BernoulliMarginalSlope(out)) => {
             eprintln!(
-                "[979-REPRO] n={n} centers={centers} total_s={elapsed:.2} outer_iters={} inner_cycles={} converged=certified",
+                "[979-REPRO] n={n} centers={centers} kappa_auto={kappa_auto} total_s={elapsed:.2} outer_iters={} inner_cycles={} converged=certified",
                 out.fit.outer_iterations, out.fit.inner_cycles
             );
         }
         Ok(_) => eprintln!("[979-REPRO] wrong FitResult variant"),
-        Err(e) => eprintln!("[979-REPRO] fit failed after {elapsed:.2}s: {e}"),
+        Err(e) => eprintln!("[979-REPRO] kappa_auto={kappa_auto} fit failed after {elapsed:.2}s: {e}"),
     }
 }
