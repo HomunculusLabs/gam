@@ -1730,6 +1730,78 @@ fn cli_weibull_route_anchors_left_truncated_data_and_honors_the_override_2631() 
     }
 }
 
+/// #2631: a `--request` document's `survival_time_anchor` must reach the fit on
+/// EVERY survival route, including the ones the CLI still materializes itself.
+///
+/// `--survival-time-anchor` declares `conflicts_with = --request` precisely
+/// because the document is supposed to carry the complete scientific model
+/// configuration. Under `--request` the flag is therefore always `None`, so a
+/// survival route that read the anchor from `FitArgs` rather than from the
+/// resolved `FitConfig` would drop a document-supplied anchor without a word.
+/// This exercises the location-scale route, which `run_survival` materializes
+/// itself rather than delegating to the engine.
+#[test]
+fn cli_request_document_survival_time_anchor_reaches_the_fit_2631() {
+    const EXPLICIT_ANCHOR: f64 = 25.0;
+    let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let train_path = td.path().join("request_anchor.csv");
+    let request_path = td.path().join("request_anchor.request.json");
+    let model_path = td.path().join("request_anchor.model.json");
+    fs::write(
+        &train_path,
+        "entry,exit,event,x\n\
+         10,15,1,-0.8\n\
+         20,35,0,0.4\n\
+         40,60,1,-0.2\n\
+         80,100,0,0.7\n\
+         120,150,1,0.1\n\
+         160,220,1,-0.5\n",
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write survival csv", e));
+    fs::write(
+        &request_path,
+        format!(
+            r#"{{"schema":"gam.fit-request","schema_version":1,
+                 "formula":"Surv(entry, exit, event) ~ x",
+                 "config":{{"survival_likelihood":"location-scale",
+                            "survival_time_anchor":{EXPLICIT_ANCHOR}}}}}"#
+        ),
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write fit-request document", e));
+
+    let mut args = location_scale_fit_args(
+        train_path.clone(),
+        model_path.clone(),
+        "unused ~ when --request is supplied",
+        "1",
+    );
+    // `--request` carries the formula and the whole model configuration; the CLI
+    // rejects the conflicting flags, so they must be cleared here too.
+    args.request = Some(request_path);
+    args.formula_positional = None;
+    args.predict_noise = None;
+    args.survival_likelihood = None;
+    args.family = FamilyArg::Auto;
+    run_fit(args).unwrap_or_else(|e| {
+        panic!(
+            "{} failed: {:?}",
+            "fit from a --request document with an explicit anchor should succeed", e
+        )
+    });
+
+    let saved = SavedModel::load_from_path(&model_path)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "load fitted model", e));
+    let anchor = saved
+        .survival_time_anchor
+        .expect("a saved survival model must carry its time anchor");
+    assert!(
+        (anchor - EXPLICIT_ANCHOR).abs() <= 1e-12,
+        "a --request document's survival_time_anchor must reach the fit; \
+         requested {EXPLICIT_ANCHOR}, saved {anchor}"
+    );
+    remove_temp_file(&model_path);
+}
+
 #[test]
 fn cli_surv_predict_noise_routes_to_survival_location_scale() {
     let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
