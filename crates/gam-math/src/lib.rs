@@ -5,6 +5,7 @@ pub mod jet_tower;
 pub mod nested_dual;
 pub mod order2_graph;
 pub mod probability;
+pub mod quadrature;
 pub mod score_opt;
 pub mod special;
 

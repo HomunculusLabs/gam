@@ -1,29 +1,49 @@
-//! #2110 defense-in-depth: no assertion-less `#[test]` may live in the gam-sae
-//! manifold test tree — checked at HARNESS time, so it fires even when a cached
-//! `target/` lets the workspace-root `build.rs` skip its own scan.
+//! #2110: no assertion-less `#[test]` may live in the gam-sae manifold test
+//! tree — checked at HARNESS time.
 //!
 //! #2110 (assertion-less #2101 birth-locus probes aborting the whole build) is
-//! the latest in a recurring pattern: a Claude-authored SAE commit lands a
-//! print-only diagnostic `#[test]` under `crates/gam-sae/src/manifold/`, which
-//! trips `build.rs::scan_for_useless_tests` and breaks `cargo build`/`--release`
-//! and the `gamfit` wheel. The build.rs ban is the primary gate, but it only
-//! re-runs when its build-script fingerprint is invalidated — a stale
-//! incremental `target/` skips it, which is *exactly* how the #2110 probes rode
-//! onto `main` (see the issue's "A cached `target/` hides this" note). This test
-//! runs every `cargo test` regardless of build-script caching, over the whole
-//! `crates/gam-sae/src/manifold` directory rather than a single file, so the
-//! *next* print-only probe in this subsystem is caught here even if the build.rs
-//! fingerprint is warm.
+//! the latest in a recurring pattern: a commit lands a print-only diagnostic
+//! `#[test]` under `crates/gam-sae/src/manifold/`, breaking
+//! `cargo build`/`--release` and the `gamfit` wheel.
 //!
-//! The assertion detector mirrors `build.rs::line_is_assertion_shaped` /
-//! `body_reaches_assertion`: a `#[test]` is fine if its body — or, following one
+//! THIS SCAN IS NOT DEFENCE IN DEPTH. IT IS THE ONLY ASSERTION-LESS-TEST GATE
+//! IN THE REPOSITORY, AND IT COVERS ONE DIRECTORY.
+//!
+//! The paragraph that stood here until now described a workspace-root
+//! `build.rs` scan as "the primary gate" and concluded that "because the
+//! workspace only builds when build.rs's own stricter scan finds zero offenders
+//! tree-wide, a green build guarantees this scoped scan finds zero too". That
+//! was true when this file landed (`c9aff5898`, 2026-07-03). It stopped being
+//! true on 2026-07-15, when `f3ffc54e5` ("Restore build.rs to build work and
+//! pattern gates only") removed the tree-wide scan. Every helper this module
+//! claimed to mirror — `scan_for_useless_tests`, `line_is_assertion_shaped`,
+//! `body_reaches_assertion`, `line_contains_propagating_question`,
+//! `line_contains_assertion_helper_*` — now occurs ZERO times in `build.rs`.
+//! `scan_for_ignored_tests` (the `#[ignore]` ban) survived that commit; the
+//! assertion-less scan did not.
+//!
+//! The consequence is not cosmetic. A stale doc comment asserting that a
+//! stricter tree-wide gate already exists is precisely the reason nobody
+//! widened this one: the justification for keeping it narrow was a fact about
+//! `build.rs` that has been false for two weeks. Everything outside
+//! `crates/gam-sae/src/manifold` — the rest of `crates/`, and all 205 targets
+//! under `tests/` — is ungated. Widening this scan tree-wide is tracked
+//! separately, because it must be MEASURED (offender count on a real build)
+//! before it lands, not widened blind.
+//!
+//! Note also what a static scan can and cannot do, since the two are easy to
+//! conflate: it reads the SOURCE. A `#[test]` whose body contains an assertion
+//! it never reaches at runtime — an early `return` on a missing device, say —
+//! is invisible to any scanner of this kind, by construction. That class needs
+//! a counted-skip mechanism, not a wider regex.
+//!
+//! The assertion detector: a `#[test]` is fine if its body — or, following one
 //! hop of local helper delegation — reaches an `assert*!`/`panic!`/
 //! `unreachable!`/`todo!`/`unimplemented!` macro or a propagating `?`, or if it
-//! is guarded by `#[should_panic]`. `.expect(...)`/`.unwrap()` do NOT count, by
-//! design (matching build.rs). Because the workspace only builds when build.rs's
-//! own stricter scan finds zero offenders tree-wide, a green build guarantees
-//! this scoped scan finds zero too; it exists to catch the *regression window*
-//! between "print-only test committed" and "someone runs a fresh build".
+//! is guarded by `#[should_panic]`. `.expect(...)`/`.unwrap()` do NOT count:
+//! they encode an author's expectation, not a checked property, and a test
+//! whose only "assertion" is an unwrap passes for reasons unrelated to what it
+//! claims to test.
 
 use std::collections::HashMap;
 use std::fs;

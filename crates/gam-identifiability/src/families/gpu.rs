@@ -793,17 +793,22 @@ mod tests {
         }
         #[cfg(target_os = "linux")]
         {
-            let runtime =
-                match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-                    Ok(Some(runtime)) => runtime,
-                    Ok(None) => {
-                        eprintln!(
-                            "[identifiability_compile] no CUDA device — skipping parity check"
-                        );
-                        return;
-                    }
-                    Err(error) => panic!("[identifiability_compile] CUDA probe failed: {error}"),
-                };
+            // #2422: the bare `resolve` announced an absent device with a wording
+            // unique to this file and then returned before the first assertion,
+            // so on every CPU-only runner this test printed `ok` having verified
+            // nothing and left no trace a ledger could scrape. The shared gate
+            // panics on a driver FAULT, panics under `GpuPolicy::Required`,
+            // counts the genuine absence and prints the one greppable marker;
+            // `assert_absent_device_was_counted` makes that count the assertion
+            // this skip path executes.
+            let skips_before = gam_gpu::test_gate::skipped_for_absent_device();
+            let runtime = match gam_gpu::test_gate::gpu_for_test("identifiability Gram parity") {
+                gam_gpu::test_gate::GpuTestGate::Ready(runtime) => runtime,
+                gam_gpu::test_gate::GpuTestGate::AbsentDevice => {
+                    gam_gpu::test_gate::assert_absent_device_was_counted(skips_before);
+                    return;
+                }
+            };
             let bundle =
                 primary_state_gram_cuda_with_runtime(runtime, &channel_blocks, &h_packed, &ranges)
                     .expect("CUDA primary-state Gram dispatch must succeed after Auto admission");

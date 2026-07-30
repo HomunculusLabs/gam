@@ -179,10 +179,9 @@ pub(crate) fn fit_config_from_survival_args(args: &SurvivalArgs) -> Result<FitCo
         // `SurvivalArgs` already carries a resolved concrete mode; this is a
         // survival fit, so the explicit `Some` is correct.
         survival_likelihood: Some(args.survival_likelihood.clone()),
-        // The baseline time-basis anchor is model configuration, not CLI
-        // transport: carrying it here is what makes `--survival-time-anchor`
-        // reach the canonical transformation/Weibull route, which delegates to
-        // `fit_from_formula` and used to drop the flag on the floor (#2631).
+        // The baseline time-basis anchor is model configuration, not front-end
+        // transport (#2631) — `run_survival` reads it from here, so this is the
+        // seam that carries it into the CLI's own materialization.
         survival_time_anchor: args.survival_time_anchor,
         survival_distribution: args.survival_distribution.clone(),
         threshold_time_k: args.threshold_time_k,
@@ -308,7 +307,12 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
             mixture_rho: effective_mixture_rho.clone(),
             sas_init: effective_sas_init.clone(),
             beta_logistic_init: effective_beta_logistic_init.clone(),
-            survival_time_anchor: args.survival_time_anchor,
+            // From the RESOLVED config, like every other survival knob in this
+            // literal — not from `args`. `resolve_fit_invocation` produces it
+            // either from the `--request` document or from the flags, and the
+            // flag conflicts with `--request`, so reading `args` here would
+            // silently drop a document-supplied anchor (#2631).
+            survival_time_anchor: fit_config.survival_time_anchor,
             baseline_target: fit_config.baseline_target.clone(),
             baseline_scale: fit_config.baseline_scale,
             baseline_shape: fit_config.baseline_shape,
@@ -691,8 +695,7 @@ fn run_canonical_standard_fit(
                     fit_config,
                     result,
                 })?;
-                payload.group_metadata = fit_config.group_metadata.clone();
-                payload.inference_notes = outcome.inference_notes;
+                apply_request_metadata(&mut payload, fit_config, outcome.inference_notes);
                 write_payload_json(out, payload)?;
             }
             emit_smooth_structure_warnings("fit-end", &spatial_warnings);
@@ -723,8 +726,7 @@ fn run_canonical_standard_fit(
                     dataset.feature_ranges(),
                 );
                 payload.weight_column = fit_config.weight_column.clone();
-                payload.group_metadata = fit_config.group_metadata.clone();
-                payload.inference_notes = outcome.inference_notes;
+                apply_request_metadata(&mut payload, fit_config, outcome.inference_notes);
                 write_payload_json(out, payload)?;
             }
             Ok(())
@@ -756,8 +758,7 @@ fn run_canonical_standard_fit(
                     dataset.headers.clone(),
                     dataset.feature_ranges(),
                 )?;
-                payload.group_metadata = fit_config.group_metadata.clone();
-                payload.inference_notes = outcome.inference_notes;
+                apply_request_metadata(&mut payload, fit_config, outcome.inference_notes);
                 write_payload_json(out, payload)?;
             }
             Ok(())

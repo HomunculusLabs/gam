@@ -52,10 +52,15 @@ def build_payload() -> dict[str, Any]:
     Shapes: N=5 rows, p=4 channels, K=3 atoms.
       atom 0: periodic, M0=5 (H=2 -> 2H+1), d0=1  (carries coords_u_arc + band)
       atom 1: linear,    M1=3, d1=2
-      atom 2: duchon,    M2=4, d2=2               (carries duchon centers)
+      atom 2: duchon,    M2=5, d2=2               (carries duchon centers)
+
+    M2 is 5, not 4: the four duchon centers are collinear (y = x + 0.5), so the
+    polynomial constraint block drops rank and the plan basis size is
+    (4 centers - 2 dropped) kernel + 3 poly = 5. Rust checks the decoder block
+    against exactly that (crates/gam-pyffi/src/manifold/manifold_sae_payload.rs:360).
     """
     N, p = 5, 4
-    m = [5, 3, 4]
+    m = [5, 3, 5]
     d = [1, 2, 2]
 
     decoder_blocks = [_arange(m[k], p, start=1.0 + k) for k in range(3)]

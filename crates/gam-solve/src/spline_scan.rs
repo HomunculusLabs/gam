@@ -1035,16 +1035,6 @@ fn ball_cholesky(covariance: &BallMat, order: usize) -> Option<BallMat> {
     Some(factor)
 }
 
-/// `-M`, entrywise.
-fn ball_mat_neg(matrix: &BallMat, order: usize) -> BallMat {
-    let mut negated = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
-    for i in 0..order {
-        for j in 0..order {
-            negated[i][j] = matrix[i][j].neg();
-        }
-    }
-    negated
-}
 
 /// How many accumulators the per-node divergence check scans.
 ///
@@ -1090,20 +1080,6 @@ fn ball_factor_update(factor: &BallMat, beta: Ball, order: usize) -> BallMat {
     updated
 }
 
-/// `L Lᵀ` for a factor that need not be triangular.
-fn ball_factor_gram_full(factor: &BallMat, order: usize) -> BallMat {
-    let mut gram = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
-    for i in 0..order {
-        for j in 0..order {
-            let mut accumulator = Ball::ZERO;
-            for k in 0..order {
-                accumulator = accumulator.add(factor[i][k].mul(factor[j][k]));
-            }
-            gram[i][j] = accumulator;
-        }
-    }
-    gram
-}
 
 /// `L Lᵀ` for a lower-triangular factor.
 fn ball_factor_gram(factor: &BallMat, order: usize) -> BallMat {
@@ -1194,6 +1170,138 @@ fn intersect_with_independent_enclosure(entry: &mut Ball, evidence: Ball) {
     if ceiling.is_finite() && entry.hi > ceiling {
         entry.hi = ceiling;
     }
+}
+
+/// Intersect the FIRST-derivative covariance with the two-sided range the
+/// covariance itself gives it: `0 ⪯ −dP/dρ ⪯ P`.
+///
+/// The file already uses the left half — "`P` is operator monotone increasing in
+/// the process-noise scale `q = e^{−ρ}`, so `dP/dρ ⪯ 0`" — to carry a Cholesky
+/// factor of `−dP/dρ`. The right half comes from the same map being operator
+/// CONCAVE in `q`, which is what actually bounds the derivative:
+///
+/// * the measurement update `P ↦ P − PHᵀ(HPHᵀ+R)⁻¹HP = (P⁻¹ + HᵀR⁻¹H)⁻¹` is the
+///   parallel sum, which is operator concave and operator monotone;
+/// * the prediction `P ↦ FPFᵀ + qQ` is affine and jointly monotone in `(P, q)`;
+/// * the seed is affine in `q`.
+///
+/// A composition of operator-concave monotone maps with affine inner maps is
+/// operator concave, so `q ↦ P_t(q)` is. Concavity at `q` against `0` gives
+/// `P_t(0) ⪰ P_t(q) − q·dP_t/dq`, i.e.
+///
+/// ```text
+///   0 ⪯ −dP/dρ = q·dP/dq ⪯ P(q) − P(0) ⪯ P(q),
+/// ```
+///
+/// the last step because `P_t(0) ⪰ 0` is a covariance. Only the DIAGONAL of a
+/// semidefinite ordering transfers entrywise, so that is what is intersected
+/// here; [`intersect_covariance_minors`] then carries it to the off-diagonals
+/// through `|X_ij| ≤ √(X_ii X_jj)`, applied to `−dP/dρ`, which is the PSD
+/// matrix of the pair.
+///
+/// Measured need (#2614, order 3, ρ = −16.6135, dgp_2300): at node 40 the value
+/// covariance `P⁺₀₀` holds width `8.4e−3` while `dP⁺₀₀/dρ` — a quantity this
+/// bound pins into `[−0.74, 0]` — carries width `4.97e5`, and by node 80 it is
+/// `2.5e149`. Every gain jet is a column of that matrix divided by `R`, so the
+/// mean jet, `v′`, and `Σ v²/F̃`'s derivative inherit it directly.
+fn intersect_derivative_covariance_below_its_own_covariance(
+    derivative: &mut BallMat,
+    covariance: &BallMat,
+    order: usize,
+) {
+    for i in 0..order {
+        intersect_with_exact_range(&mut derivative[i][i], -covariance[i][i].hi, 0.0);
+    }
+    let mut negated = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..order {
+        for j in 0..order {
+            negated[i][j] = derivative[i][j].neg();
+        }
+    }
+    intersect_covariance_minors(&mut negated, order);
+    for i in 0..order {
+        for j in 0..order {
+            intersect_with_independent_enclosure(&mut derivative[i][j], negated[i][j].neg());
+        }
+    }
+}
+
+/// Intersect an enclosure with an exact two-sided range of the same quantity.
+///
+/// Same rule as [`intersect_with_independent_enclosure`], for evidence that is a
+/// pair of bounds rather than a computed ball: bounds move only inward and never
+/// past the nearest-rounded `value`, so `lo <= value <= hi` stays an invariant of
+/// the type.
+#[inline]
+fn intersect_with_exact_range(entry: &mut Ball, lo: f64, hi: f64) {
+    let floor = lo.min(entry.value);
+    if floor.is_finite() && entry.lo < floor {
+        entry.lo = floor;
+    }
+    let ceiling = hi.max(entry.value);
+    if ceiling.is_finite() && entry.hi > ceiling {
+        entry.hi = ceiling;
+    }
+}
+
+/// Intersect the two ORDER-ONE accumulators with the exact ranges the Gaussian
+/// model gives them, at every node.
+///
+/// Once the diffuse rank is consumed, the accumulated pair over the data prefix
+/// `y` seen so far IS the restricted Gaussian pair for that prefix: with
+/// `V = R + qG` (`R = diag(1/w)`, `G ⪰ 0` the process-noise Gram, `q = e^{−ρ}`),
+/// `X` the diffuse polynomial design and
+/// `P = V⁻¹ − V⁻¹X(XᵀV⁻¹X)⁻¹XᵀV⁻¹` its restricted inverse,
+///
+/// ```text
+///   Σ v²/F̃ = yᵀPy,     Σ log F̃ = log|V| + log|XᵀV⁻¹X|.
+/// ```
+///
+/// `dV/dρ = −qG = −(V − R)` and `dP/dρ = −P(dV/dρ)P = P − PRP`, so
+///
+/// ```text
+///   d/dρ Σ v²/F̃  = yᵀPy − yᵀPRPy,
+///   d/dρ Σ log F̃ = tr(P dV/dρ) = −(tr(PV) − tr(PR)).
+/// ```
+///
+/// Every piece of that is signed by a semidefinite fact and nothing else:
+/// `R ⪰ 0` gives `yᵀPRPy ≥ 0`; `V − R = qG ⪰ 0` with `PVP = P` gives
+/// `yᵀPRPy ≤ yᵀPVPy = yᵀPy` and `tr(PR) ≤ tr(PV)`; and `tr(PV) = n_proper`
+/// exactly. Hence, EXACTLY,
+///
+/// ```text
+///   0 ≤ Σ v²/F̃ ≤ yᵀR⁻¹y = Σ w y²,     0 ≤ d/dρ Σ v²/F̃ ≤ Σ v²/F̃,
+///   −n_proper ≤ d/dρ Σ log F̃ ≤ 0,
+/// ```
+///
+/// the first ceiling because `P ⪯ V⁻¹ ⪯ R⁻¹`.
+///
+/// Why this is the intersection that matters (#2614, measured): at smoothing
+/// order 2 on the #2300 nodes the search refuses at `ρ = −18` with a certified
+/// criterion DERIVATIVE ball of `±1.95e91` and a cell value enclosure of
+/// `±1.58e83` — both finite, so no accumulator check fires, and both useless:
+/// `strict_sign` cannot sign a `±1e91` interval, so the search can neither
+/// bracket a stationary point nor exclude one, and reports `Unresolved`. The
+/// true derivative is bounded by `½(n_proper + ν)`, i.e. by `178` on that
+/// fixture. The entire `1e89` excess is dependency loss in the jet recursions,
+/// and it is the running SUM that carries it forward, so the bound is applied
+/// per node rather than once at the end: a partial sum is the same quantity for
+/// its own prefix, which is what makes that legitimate.
+///
+/// This restores proof information supplied by the statistical model; it is not
+/// a numerical tolerance, and it cannot make a false statement true, because
+/// each bound is a property of the exact real number the enclosure encloses.
+#[inline]
+fn intersect_first_order_accumulator_exact_ranges(
+    quadratic: &mut Ball,
+    quadratic_d1: &mut Ball,
+    log_determinant_d1: &mut Ball,
+    weighted_energy: Ball,
+    n_proper: usize,
+) {
+    intersect_with_exact_range(quadratic, 0.0, weighted_energy.hi);
+    intersect_with_exact_range(quadratic_d1, 0.0, quadratic.hi);
+    intersect_with_exact_range(log_determinant_d1, -(n_proper as f64), 0.0);
 }
 
 /// Intersect the observed coordinate of the UPDATED covariance with the exact
@@ -1826,11 +1934,304 @@ fn run_filter_ball(
 /// arithmetic has". Only a caller that passes a sink pays for this.
 type BallTraceRecord = (usize, &'static str, Ball);
 
+/// Stacked mean blocks carried as ONE zonotope: `(a, a′)`.
+const MEAN_BLOCKS: usize = 2;
+/// Capacity of that stacked state; the ACTIVE dimension is `2·order`.
+const MEAN_DIM: usize = MEAN_BLOCKS * MAX_ORDER;
+/// Capacity of the `vec(dP/dρ)` state; the ACTIVE dimension is `order²`.
+const COVARIANCE_D1_DIM: usize = MAX_ORDER * MAX_ORDER;
+/// Generators retained before the OLDEST are folded into an axis-aligned set.
+///
+/// Folding is exact — a box IS the zonotope of its own axis generators, so the
+/// folded part keeps being transformed by the true map rather than by its
+/// absolute value, which is the whole point of carrying generators at all. The
+/// cap only bounds the work: `dim²·CAP` per node, `O(n)` overall. It is well
+/// above the ~35 nodes a generator needs to decay past `ε` at the measured
+/// contraction, so folding reaches nothing that is still carrying information.
+const ZONOTOPE_GENERATOR_CAP: usize = 240;
+/// `γ_{dim+2}` with room to spare: `2·(d+2)·u` with `u = ε/2` is `11ε` at
+/// `d = 9`, and this charges `32ε` for every floating-point dot product a
+/// zonotope forms.
+const ZONOTOPE_ROUNDOFF: f64 = 32.0 * f64::EPSILON;
+
+/// Radius of a ball ABOUT ITS REPRESENTATIVE, which is what a zonotope centred
+/// on that representative must absorb. Not `(hi−lo)/2`: the representative is
+/// not required to be the midpoint.
+#[inline]
+fn ball_radius_about_value(ball: Ball) -> f64 {
+    let above = ball.hi - ball.value;
+    let below = ball.value - ball.lo;
+    next_up_ball(above.max(below).max(0.0))
+}
+
+/// A linear recursion's state as a ZONOTOPE — a centre plus a list of error
+/// GENERATORS — rather than as componentwise intervals.
+///
+/// This is not a tightening heuristic. Two of this filter's recursions cannot
+/// be carried in a box AT ANY WIDTH, and the reason is arithmetic rather than
+/// numerical. Per node the mean does update-then-predict, `a ← T(A a + K y)`
+/// with `A = I − K e₀ᵀ`, so the fused per-node map at order 2 is
+///
+/// ```text
+///   B = T A = [[R/F − δ·K₁ ,  δ ],
+///              [   −K₁     ,  1 ]]
+/// ```
+///
+/// Measured on the #2300 nodes at the ρ the certified search refused at
+/// (`−13.841116908`): `R/F = 0.0754`, `K₁ ≈ 41.5`, `δ = 4/179`, so `δ·K₁ = 0.930`
+/// and
+///
+/// ```text
+///   true B : trace 0.145 , det 0.0754  ⇒ |eigenvalues| = √0.0754 = 0.2746
+///   |B|    : trace 1.855 , det −0.0754 ⇒ ρ(|B|)        = 1.894
+/// ```
+///
+/// **The map contracts at 0.27 per node and its entrywise absolute value
+/// expands at 1.894.** A componentwise interval carries widths through `|B|`,
+/// because `a₀` reaches the next `a₀` by two paths — the row-0 update, and row 1
+/// followed by the transition — whose widths ADD as `0.0754 + 0.930` where the
+/// exact map SUBTRACTS to `−0.855`. Over 180 nodes that is `1.894¹⁸⁰ ≈ 10⁵⁰`,
+/// and the traced widths reproduced it exactly: `w(a₀)` ran `1e−11 → 1e20` from
+/// node 10 to node 113 at a clean factor of 2.0 per node, while every
+/// covariance quantity in the same pass stayed flat (`w(P₀₀) = 5.6e−13`,
+/// `w(F) = 1e−10`, `w(Σ log F) = 7.4e−10`).
+///
+/// The covariance's FIRST DERIVATIVE has the same defect one tensor rank up.
+/// `dP⁺ = A·dP·Aᵀ` and `dP⁻ = F·dP·Fᵀ − Q` make `vec(dP)` a linear recursion
+/// with map `B ⊗ B`, whose true spectral radius is `0.27² = 0.075` and whose
+/// componentwise companion `|B| ⊗ |B|` is `1.894² = 3.59`. Measured at
+/// `ρ = −12.5466`, order 2: `w(dP₁₁)` runs `1.4e−2 → 7.5e2` over nodes 40..80
+/// while `w(P₀₀)` holds at `7e−12`.
+///
+/// Two rearrangements do NOT help and are recorded so they are not retried:
+/// fusing `T` and `A` first leaves `ρ(|TA|)` at the same 1.894 — the
+/// cancellation is between entries of the product, not between the factors —
+/// and rescaling the state cannot help either, since `ρ(|D⁻¹BD|) ≥ ρ(|B|)` for
+/// every diagonal `D` and the natural step scaling `D = diag(1, δ)` attains it
+/// exactly.
+///
+/// A zonotope keeps the cancellation because it transforms each GENERATOR by
+/// the true map, so generator norms follow `0.27` per node and a generator is
+/// below `ε` relative after ~35 nodes. The value covariance escaped the same
+/// problem by being carried as a Cholesky factor; neither the mean nor `dP`
+/// has PSD structure enough to exploit that way, but both are exactly LINEAR
+/// with coefficients this filter already encloses tightly, which is the
+/// hypothesis a zonotope needs and the Riccati update itself does not satisfy.
+///
+/// `N` is the capacity; `dim` is how much of it the current smoothing order
+/// uses, and every loop stops there, so an order-1 scan pays `1`-dimensional
+/// work out of a `9`-wide array.
+#[derive(Clone, Debug)]
+struct Zonotope<const N: usize> {
+    center: [f64; N],
+    generators: Vec<[f64; N]>,
+    dim: usize,
+}
+
+impl<const N: usize> Zonotope<N> {
+    fn zeroed(dim: usize) -> Self {
+        // `N` is the array capacity and `dim` indexes into it, so a `dim > N`
+        // is an out-of-bounds every loop in this file would then commit. A
+        // `debug_assert!` compiles to nothing in the release profile the
+        // scan actually ships in, which is precisely where the bound stops
+        // being checked by anything else -- hence the workspace ban.
+        assert!(
+            dim <= N,
+            "zonotope dim {dim} exceeds its capacity {N}"
+        );
+        Self {
+            center: [0.0; N],
+            generators: Vec::new(),
+            dim,
+        }
+    }
+
+    /// One coordinate as an ordinary ball, for the consumers that need a scalar.
+    fn coordinate(&self, index: usize) -> Ball {
+        let mut radius = 0.0f64;
+        for generator in &self.generators {
+            radius += generator[index].abs();
+        }
+        let radius = next_up_ball(radius * (1.0 + 64.0 * f64::EPSILON));
+        let value = self.center[index];
+        Ball {
+            value,
+            lo: next_down_ball(value - radius),
+            hi: next_up_ball(value + radius),
+        }
+    }
+
+    /// `x ← M x + b`, exactly on the generators, with every floating-point and
+    /// interval radius charged into FRESH axis-aligned generators.
+    ///
+    /// The fresh radii are appended as `radius·eᵢ` rather than held in a
+    /// separate box field, because a box propagated as `|M|·box` would grow at
+    /// `ρ(|M|)` per node — reintroducing the exact defect this type exists to
+    /// remove, on a quantity too small to notice until it is `1e11`.
+    fn apply(&mut self, map: &[[Ball; N]; N], constant: &[Ball; N]) -> bool {
+        let dim = self.dim;
+        let mut generator_column_sum = [0.0f64; N];
+        for generator in &self.generators {
+            for j in 0..dim {
+                generator_column_sum[j] += generator[j].abs();
+            }
+        }
+
+        let mut next_center = [0.0f64; N];
+        let mut fresh_radius = [0.0f64; N];
+        for i in 0..dim {
+            let mut center = constant[i].value;
+            // Everything the roundoff of the dot products — the centre's and
+            // every generator's — is charged against, summed once.
+            let mut magnitude = constant[i].value.abs();
+            let mut radius = ball_radius_about_value(constant[i]);
+            for j in 0..dim {
+                let coefficient = map[i][j].value;
+                center += coefficient * self.center[j];
+                magnitude += (coefficient * self.center[j]).abs()
+                    + coefficient.abs() * generator_column_sum[j];
+                radius += ball_radius_about_value(map[i][j])
+                    * (self.center[j].abs() + generator_column_sum[j]);
+            }
+            next_center[i] = center;
+            fresh_radius[i] = next_up_ball(
+                (radius + ZONOTOPE_ROUNDOFF * magnitude) * (1.0 + 64.0 * f64::EPSILON),
+            );
+        }
+
+        for generator in self.generators.iter_mut() {
+            let previous = *generator;
+            for i in 0..dim {
+                let mut coordinate = 0.0f64;
+                for j in 0..dim {
+                    coordinate += map[i][j].value * previous[j];
+                }
+                generator[i] = coordinate;
+            }
+        }
+
+        self.center = next_center;
+        for i in 0..dim {
+            if fresh_radius[i] > 0.0 {
+                let mut axis = [0.0f64; N];
+                axis[i] = fresh_radius[i];
+                self.generators.push(axis);
+            }
+        }
+        self.compact();
+        self.center[..dim].iter().all(|value| value.is_finite())
+            && self
+                .generators
+                .iter()
+                .all(|generator| generator[..dim].iter().all(|value| value.is_finite()))
+    }
+
+    /// Fold the OLDEST generators into one axis-aligned set once the list is
+    /// over the cap. Sound because a box is a zonotope over its own axes, and
+    /// the folded generators are the ones that have contracted for the longest.
+    fn compact(&mut self) {
+        if self.generators.len() <= ZONOTOPE_GENERATOR_CAP {
+            return;
+        }
+        let dim = self.dim;
+        let fold = self.generators.len() - ZONOTOPE_GENERATOR_CAP / 2;
+        let retained = self.generators.split_off(fold);
+        let mut folded = [0.0f64; N];
+        for generator in &self.generators {
+            for i in 0..dim {
+                folded[i] += generator[i].abs();
+            }
+        }
+        let mut next = Vec::with_capacity(retained.len() + dim);
+        for i in 0..dim {
+            if folded[i] > 0.0 {
+                let mut axis = [0.0f64; N];
+                axis[i] = next_up_ball(folded[i] * (1.0 + 64.0 * f64::EPSILON));
+                next.push(axis);
+            }
+        }
+        next.extend(retained);
+        self.generators = next;
+    }
+}
+
+/// The identity map over the first `dim` coordinates.
+fn zonotope_identity_map<const N: usize>(dim: usize) -> [[Ball; N]; N] {
+    let mut map = [[Ball::ZERO; N]; N];
+    for (i, row) in map.iter_mut().enumerate().take(dim) {
+        row[i] = Ball::ONE;
+    }
+    map
+}
+
+/// Write an `order × order` block of the stacked MEAN map at block row/column
+/// `(block_row, block_column)`. The mean layout is `block·order + i`.
+fn mean_set_block(
+    map: &mut [[Ball; MEAN_DIM]; MEAN_DIM],
+    block_row: usize,
+    block_column: usize,
+    block: &BallMat,
+    order: usize,
+) {
+    for i in 0..order {
+        for j in 0..order {
+            map[block_row * order + i][block_column * order + j] = block[i][j];
+        }
+    }
+}
+
+/// The congruence `X ↦ L·X·Rᵀ` as a linear map on `vec(X)`, i.e. `L ⊗ R`.
+///
+/// This is what makes `dP` carryable: the derivative's update and prediction
+/// are congruences by matrices built from the VALUE covariance, which this
+/// filter already encloses to `1e−12`, so the map's own entries are tight and
+/// only the state needs the generators. The `vec` layout is `i·order + j`.
+fn zonotope_congruence_map(
+    left: &BallMat,
+    right: &BallMat,
+    order: usize,
+) -> [[Ball; COVARIANCE_D1_DIM]; COVARIANCE_D1_DIM] {
+    let mut map = [[Ball::ZERO; COVARIANCE_D1_DIM]; COVARIANCE_D1_DIM];
+    for i in 0..order {
+        for j in 0..order {
+            for k in 0..order {
+                for l in 0..order {
+                    map[i * order + j][k * order + l] = left[i][k].mul(right[j][l]);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Read `vec(X)` back out as a matrix.
+fn zonotope_to_matrix(
+    state: &Zonotope<COVARIANCE_D1_DIM>,
+    order: usize,
+) -> BallMat {
+    let mut out = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..order {
+        for j in 0..order {
+            out[i][j] = state.coordinate(i * order + j);
+        }
+    }
+    out
+}
+
 /// Diagonal names for the traced covariance jets, indexed by state coordinate.
 const D3_DIAGONAL_NAMES: [&str; MAX_ORDER] = ["d3_upd_00", "d3_upd_11", "d3_upd_22"];
 const D2_DIAGONAL_NAMES: [&str; MAX_ORDER] = ["d2_upd_00", "d2_upd_11", "d2_upd_22"];
 const D1_DIAGONAL_NAMES: [&str; MAX_ORDER] = ["d1_upd_00", "d1_upd_11", "d1_upd_22"];
 const P_DIAGONAL_NAMES: [&str; MAX_ORDER] = ["p_upd_00", "p_upd_11", "p_upd_22"];
+/// Kalman gain coordinates, so a caller can rebuild the closed-loop map.
+const GAIN_NAMES: [&str; MAX_ORDER] = ["gain_0", "gain_1", "gain_2"];
+/// Full PREDICTED covariance, so a caller can weigh that map by the matrix the
+/// Riccati recursion makes a Lyapunov matrix for it.
+const P_NEXT_ENTRY_NAMES: [[&str; MAX_ORDER]; MAX_ORDER] = [
+    ["p_next_00", "p_next_01", "p_next_02"],
+    ["p_next_10", "p_next_11", "p_next_12"],
+    ["p_next_20", "p_next_21", "p_next_22"],
+];
 
 fn run_filter_ball_traced(
     nodes: &[PooledNode],
@@ -1838,12 +2239,13 @@ fn run_filter_ball_traced(
     order: usize,
     mut trace: Option<&mut Vec<BallTraceRecord>>,
 ) -> Result<BallFilterPass, SplineScoreProofError> {
-    let mut a: BallVec = [Ball::ZERO; MAX_ORDER];
-    let mut a_d1: BallVec = [Ball::ZERO; MAX_ORDER];
+    // `(a, a′)` together, and `vec(dP/dρ)`, each as a zonotope; see `Zonotope`
+    // for why a componentwise enclosure of either is impossible at any width.
+    let mut mean = Zonotope::<MEAN_DIM>::zeroed(MEAN_BLOCKS * order);
+    let mut covariance_d1 = Zonotope::<COVARIANCE_D1_DIM>::zeroed(order * order);
     let mut a_d2: BallVec = [Ball::ZERO; MAX_ORDER];
     let mut a_d3: BallVec = [Ball::ZERO; MAX_ORDER];
     let mut p_star: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
-    let mut p_star_d1: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
     let mut p_star_d2: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
     let mut p_star_d3: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
     let mut p_inf: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
@@ -1857,15 +2259,6 @@ fn run_filter_ball_traced(
     // matrix whose update and prediction contain no cancelling subtraction, and
     // the two are intersected. `None` means no evidence, never a refusal.
     let mut carried_factor: Option<BallMat> = None;
-    // ... and one for `−dP/dρ`, which obeys the SAME recursion.
-    //
-    // `P` is operator monotone increasing in the process-noise scale `q`, and
-    // `q = e^{−ρ}`, so `dP/dρ ⪯ 0` and `−dP/dρ` is PSD — at seeding it is `0`,
-    // the update carries it through the congruence `A(−D₁)Aᵀ` which preserves
-    // PSD, and the prediction is `F(−D₁)Fᵀ + Q` because `dQ/dρ = −Q`. Term for
-    // term the same recursion as the covariance, so the same carried factor
-    // applies, and `D₁`'s entries inherit the same freedom from cancellation.
-    let mut carried_d1_factor: Option<BallMat> = None;
     let mut sum_log_f = Ball::ZERO;
     let mut sum_log_f_d1 = Ball::ZERO;
     let mut sum_log_f_d2 = Ball::ZERO;
@@ -1875,13 +2268,24 @@ fn run_filter_ball_traced(
     let mut sum_v2_over_f_d2 = Ball::ZERO;
     let mut sum_v2_over_f_d3 = Ball::ZERO;
     let mut n_proper = 0usize;
+    // `Σ w y²` over the prefix — the exact ceiling on the accumulated
+    // innovations quadratic (see
+    // [`intersect_first_order_accumulator_exact_ranges`]). Accumulated at EVERY
+    // node, including the ones that consume diffuse rank, because the quadratic
+    // it bounds is the restricted form for the whole prefix and not only for the
+    // nodes that contributed a proper innovation.
+    let mut weighted_energy = Ball::ZERO;
 
     for t in 0..nodes.len() {
         let r = Ball::ONE.div_positive(Ball::exact(nodes[t].w));
-        let v = Ball::exact(nodes[t].y).sub(a[0]);
-        let v_d1 = a_d1[0].neg();
+        weighted_energy = weighted_energy
+            .add(Ball::exact(nodes[t].y).square().mul(Ball::exact(nodes[t].w)));
+        let v = Ball::exact(nodes[t].y).sub(mean.coordinate(0));
+        let v_d1 = mean.coordinate(order).neg();
         let v_d2 = a_d2[0].neg();
         let v_d3 = a_d3[0].neg();
+        // `dP/dρ` materialized from its zonotope for this node's consumers.
+        let p_star_d1 = zonotope_to_matrix(&covariance_d1, order);
         let mut m_star: BallVec = [Ball::ZERO; MAX_ORDER];
         let mut m_star_d1: BallVec = [Ball::ZERO; MAX_ORDER];
         let mut m_star_d2: BallVec = [Ball::ZERO; MAX_ORDER];
@@ -1916,15 +2320,34 @@ fn run_filter_ball_traced(
             if !proper_update {
                 let inv_f_inf = Ball::ONE.div_positive(f_inf);
                 let inv_f_inf_sq = inv_f_inf.square();
+                let mut gain_inf: BallVec = [Ball::ZERO; MAX_ORDER];
                 for i in 0..order {
-                    let k_inf = m_inf[i].mul(inv_f_inf);
-                    a[i] = a[i].add(k_inf.mul(v));
-                    a_d1[i] = a_d1[i].add(k_inf.mul(v_d1));
-                    a_d2[i] = a_d2[i].add(k_inf.mul(v_d2));
-                    a_d3[i] = a_d3[i].add(k_inf.mul(v_d3));
+                    gain_inf[i] = m_inf[i].mul(inv_f_inf);
+                    a_d2[i] = a_d2[i].add(gain_inf[i].mul(v_d2));
+                    a_d3[i] = a_d3[i].add(gain_inf[i].mul(v_d3));
+                }
+                // `a⁺ = A_inf·a + K_inf·y` and `a′⁺ = A_inf·a′`, with
+                // `A_inf = I − K_inf e₀ᵀ`: the diffuse update is the same
+                // operator on both blocks and the jet block carries no `y`,
+                // because `v′ = −a′₀` has no data term to pick up.
+                // `K_inf[0] = M_inf[0]/F_inf = 1` identically, since `F_inf` IS
+                // `M_inf[0]`, so the operator's own diagonal entry is an exact
+                // zero rather than a `1 − K₀` subtraction.
+                let a_inf = ball_update_operator(&gain_inf, Ball::ZERO, order);
+                let mut diffuse_map = zonotope_identity_map::<MEAN_DIM>(MEAN_BLOCKS * order);
+                mean_set_block(&mut diffuse_map, 0, 0, &a_inf, order);
+                mean_set_block(&mut diffuse_map, 1, 1, &a_inf, order);
+                let mut diffuse_constant = [Ball::ZERO; MEAN_DIM];
+                let y_node = Ball::exact(nodes[t].y);
+                for i in 0..order {
+                    diffuse_constant[i] = gain_inf[i].mul(y_node);
+                }
+                if !mean.apply(&diffuse_map, &diffuse_constant) {
+                    return Err(SplineScoreProofError::InvalidArithmetic {
+                        context: "diffuse mean zonotope",
+                    });
                 }
                 let mut p_new = p_star;
-                let mut p_new_d1 = p_star_d1;
                 let mut p_new_d2 = p_star_d2;
                 let mut p_new_d3 = p_star_d3;
                 for i in 0..order {
@@ -1937,13 +2360,6 @@ fn run_filter_ball_traced(
                             .sub(subtract_left)
                             .sub(subtract_right)
                             .add(add_star);
-
-                        let subtract_left_d1 = m_inf[i].mul(m_star_d1[j]).mul(inv_f_inf);
-                        let subtract_right_d1 = m_star_d1[i].mul(m_inf[j]).mul(inv_f_inf);
-                        p_new_d1[i][j] = p_new_d1[i][j]
-                            .sub(subtract_left_d1)
-                            .sub(subtract_right_d1)
-                            .add(inf_product.mul(f_star_d1).mul(inv_f_inf_sq));
 
                         let subtract_left_d2 = m_inf[i].mul(m_star_d2[j]).mul(inv_f_inf);
                         let subtract_right_d2 = m_star_d2[i].mul(m_inf[j]).mul(inv_f_inf);
@@ -1960,12 +2376,23 @@ fn run_filter_ball_traced(
                             .add(inf_product.mul(f_star_d3).mul(inv_f_inf_sq));
                     }
                 }
+                // `D1+ = A_inf*D1*A_inf'` EXACTLY: expanding that congruence
+                // gives `D1[i][j] - c_j D1[i][0] - c_i D1[0][j] + c_i c_j D1[0][0]`
+                // with `c = M_inf/F_inf`, which is the diffuse update term for
+                // term. The other jets keep the expanded form because they are
+                // not carried as zonotopes.
+                if !covariance_d1.apply(
+                    &zonotope_congruence_map(&a_inf, &a_inf, order),
+                    &[Ball::ZERO; COVARIANCE_D1_DIM],
+                ) {
+                    return Err(SplineScoreProofError::InvalidArithmetic {
+                        context: "diffuse covariance-derivative zonotope",
+                    });
+                }
                 p_star = p_new;
-                p_star_d1 = p_new_d1;
                 p_star_d2 = p_new_d2;
                 p_star_d3 = p_new_d3;
                 ball_symmetrize(&mut p_star, order);
-                ball_symmetrize(&mut p_star_d1, order);
                 ball_symmetrize(&mut p_star_d2, order);
                 ball_symmetrize(&mut p_star_d3, order);
                 for i in 0..order {
@@ -1980,7 +2407,6 @@ fn run_filter_ball_traced(
                     p_inf = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
                     intersect_proper_covariance_psd(&mut p_star, order)?;
                     carried_factor = ball_cholesky(&p_star, order);
-                    carried_d1_factor = ball_cholesky(&ball_mat_neg(&p_star_d1, order), order);
                 }
             }
         }
@@ -2204,26 +2630,41 @@ fn run_filter_ball_traced(
             // followed is the carried factor below, not anything in this block.
 
             // dP⁺ = A · dP · Aᵀ  (the `dK` terms cancel exactly, since M⁺ = R·K)
-            let mut p_new_d1 = ball_congruence(&a_operator, &d1_pred, &a_operator, order);
-            // `dP⁺ = A·dP·Aᵀ`, so on the factor of `−dP` the update is simply
-            // `L ↦ A·L`: no subtraction, and no triangularity required until
-            // the prediction re-triangularizes it.
-            if carried_d1_factor.is_none() {
-                carried_d1_factor = ball_cholesky(&ball_mat_neg(&p_star_d1, order), order);
+            //
+            // Applied to the ZONOTOPE, not to a matrix of intervals. This is
+            // the same recursion the carried `−dP` Cholesky factor used to
+            // guard, and the factor is gone with it: a factor can only be
+            // re-seeded from an enclosure that still PROVES `−dP ⪰ 0`, so once
+            // the componentwise widths grew past that it could not come back,
+            // which is exactly the window the trace shows (`w(dP₁₁)` 1.4e−2 at
+            // node 40, 7.5e2 at node 80, back to 4e−9 at node 160 when a
+            // re-seed finally succeeded). A zonotope needs no re-seeding
+            // because it never loses the structure in the first place.
+            if !covariance_d1.apply(
+                &zonotope_congruence_map(&a_operator, &a_operator, order),
+                &[Ball::ZERO; COVARIANCE_D1_DIM],
+            ) {
+                return Err(SplineScoreProofError::InvalidArithmetic {
+                    context: "covariance-derivative zonotope update",
+                });
             }
-            carried_d1_factor = carried_d1_factor.map(|factor| {
-                let updated = ball_mat_mul(&a_operator, &factor, order);
-                let gram = ball_factor_gram_full(&updated, order);
-                for i in 0..order {
-                    for j in 0..order {
-                        intersect_with_independent_enclosure(
-                            &mut p_new_d1[i][j],
-                            gram[i][j].neg(),
-                        );
-                    }
-                }
-                updated
-            });
+            let mut p_new_d1 = zonotope_to_matrix(&covariance_d1, order);
+            // `0 ⪯ −dP/dρ ⪯ P`, applied to the MATERIALIZED view the consumers
+            // below read rather than to the zonotope that carries it: the bound
+            // is a fact about the matrix, the zonotope is a representation of
+            // it, and every consumer here — `gain_d1`, and through it every
+            // higher jet — reads this matrix.
+            //
+            // Only once the diffuse rank is consumed: until then `P*` is the
+            // proper PART of a two-matrix decomposition and not the filtered
+            // covariance the concavity argument is about.
+            if diffuse_rank == 0 {
+                intersect_derivative_covariance_below_its_own_covariance(
+                    &mut p_new_d1,
+                    &p_new,
+                    order,
+                );
+            }
             let mut gain_d1 = [Ball::ZERO; MAX_ORDER];
             for i in 0..order {
                 gain_d1[i] = p_new_d1[i][0].div_positive(r);
@@ -2270,7 +2711,6 @@ fn run_filter_ball_traced(
                     ("f_star", f_star),
                     ("inv_f", inv_f),
                     ("a_operator_00", a_operator[0][0]),
-                    ("gain_0", gain[0]),
                     ("gain_d1_0", gain_d1[0]),
                     ("gain_d2_0", gain_d2[0]),
                     ("gain_d3_0", gain_d3[0]),
@@ -2289,6 +2729,7 @@ fn run_filter_ball_traced(
                     sink.push((t, "d3_upd_01", p_new_d3[0][1]));
                 }
                 for i in 0..order {
+                    sink.push((t, GAIN_NAMES[i], gain[i]));
                     sink.push((t, P_DIAGONAL_NAMES[i], p_new[i][i]));
                     sink.push((t, D1_DIAGONAL_NAMES[i], p_new_d1[i][i]));
                     sink.push((t, D2_DIAGONAL_NAMES[i], p_new_d2[i][i]));
@@ -2296,65 +2737,46 @@ fn run_filter_ball_traced(
                 }
             }
 
-            // Mean update through the SAME operator, for the same reason.
-            //
-            // `a⁺ = a + K·v` with `v = y − a₀` expands at the first coordinate to
-            // `a₀ + K₀·y − K₀·a₀`, and in the saturated regime `K₀ = P₀₀/F → 1`
-            // that is `a₀ − a₀ + y`: the value is right and the interval width is
-            // not. Factored, it is the same operator the covariance jets use:
-            //
-            //     a⁺ = (I − K e₀ᵀ)·a + K·y = A·a + K·y
-            //
-            // and `A[0][0] = R/F` is exact (see `ball_update_operator`), so no
-            // subtraction of near-equal quantities occurs.
-            //
-            // Measured: after `A[0][0]` fixed the covariance jets, the divergence
-            // moved to `sum_v2_over_f` -- ORDER ZERO -- at node 129, whose
-            // contribution `t0 = v²·inv_f` had `hi = inf` while `inv_f ≤ w` is
-            // bounded by the `F̃ ≥ R` intersection. The unbounded factor was `v`,
-            // hence `a`. This is that same defect in the one recursion the
-            // operator rewrite had not reached.
+            // Mean update as ONE linear map on the stacked `(a, a′)`.
             //
             // The jets follow from `a⁺⁽ᵏ⁾ = Σ_j C(k,j)·A⁽ʲ⁾a⁽ᵏ⁻ʲ⁾ + K⁽ᵏ⁾y` with
             // `A⁽ʲ⁾ = −K⁽ʲ⁾e₀ᵀ` for `j ≥ 1` and `v⁽ᵐ⁾ = −a⁽ᵐ⁾₀`:
             //
-            //     a⁺′   = A a′   + K′v
+            //     a⁺    = A a    + K y
+            //     a⁺′   = A a′   + K′v  = A a′ − K′e₀ᵀa + K′y
             //     a⁺″   = A a″   + 2K′v′  + K″v
             //     a⁺‴   = A a‴   + 3K′v″  + 3K″v′ + K‴v
-            let a_contracted = ball_mat_vec(&a_operator, &a, order);
-            let a_d1_contracted = ball_mat_vec(&a_operator, &a_d1, order);
+            //
+            // The first two are BLOCK LOWER-TRIANGULAR in `(a, a′)` — `a` never
+            // reads its own jet — which is what lets one zonotope carry both.
+            //
+            // `64778c4e0` wrote the first line for every row and was corrected
+            // by a row split, because under BOX arithmetic `A a + K y` costs
+            // `(|a₀| + |y|)·w(K_i)` on rows `i ≥ 1` where the innovation form
+            // `a_i + K_i v` costs only `|v|·w(K_i)`. Under affine arithmetic
+            // that distinction is gone: the two are the same linear map, and a
+            // zonotope applies a linear map exactly, so writing it as a matrix
+            // costs nothing and is what the generators need. This is NOT a
+            // reinstatement of that commit's claim — its form is used because
+            // the enclosure it was wrong about is no longer a box.
+            let y_node = Ball::exact(nodes[t].y);
+            let mut update_map = zonotope_identity_map::<MEAN_DIM>(MEAN_BLOCKS * order);
+            mean_set_block(&mut update_map, 0, 0, &a_operator, order);
+            mean_set_block(&mut update_map, 1, 1, &a_operator, order);
+            mean_set_block(&mut update_map, 1, 0, &a_d1_operator, order);
+            let mut update_constant = [Ball::ZERO; MEAN_DIM];
+            for i in 0..order {
+                update_constant[i] = gain[i].mul(y_node);
+                update_constant[order + i] = gain_d1[i].mul(y_node);
+            }
+            if !mean.apply(&update_map, &update_constant) {
+                return Err(SplineScoreProofError::InvalidArithmetic {
+                    context: "proper mean zonotope",
+                });
+            }
             let a_d2_contracted = ball_mat_vec(&a_operator, &a_d2, order);
             let a_d3_contracted = ball_mat_vec(&a_operator, &a_d3, order);
-            let y_node = Ball::exact(nodes[t].y);
             for i in 0..order {
-                // Row 0 keeps the factored form. There `A[0][0] = R/F` is a
-                // genuine contraction, so `A a + K y` cancels, while the
-                // innovation form would cost `(1 + |K_0|) w(a_0) ~ 2 w(a_0)`.
-                //
-                // Rows i >= 1 are the opposite case and were swept along with
-                // row 0 by 64778c4e0, whose justification only ever covered row
-                // 0. There `A[i][i] = 1` EXACTLY -- nothing cancels -- and since
-                // `(A a)_i = a_i - K_i a_0`, the two forms are algebraically
-                // identical while the factored one is strictly wider:
-                //
-                //   factored    a_i - K_i a_0 + K_i y   width += (|a_0| + |y|) w(K_i)
-                //   innovation  a_i + K_i v             width += |v| w(K_i)
-                //
-                // The difference is about `2 |y| w(K_i)` of pure enclosure
-                // inflation per node, applied to `w(K_1)` -- the quantity this
-                // filter already measures as blown out. The mean recursion is
-                // intersected against NO independent enclosure (the covariance
-                // gets seven per node), so nothing downstream reins this in and
-                // the width compounds geometrically.
-                //
-                // Values are unchanged; only the enclosure tightens.
-                let a_prev = a[i];
-                a[i] = if i == 0 {
-                    a_contracted[i].add(gain[i].mul(y_node))
-                } else {
-                    a_prev.add(gain[i].mul(v))
-                };
-                a_d1[i] = a_d1_contracted[i].add(gain_d1[i].mul(v));
                 a_d2[i] = a_d2_contracted[i]
                     .add(gain_d1[i].mul(v_d1).scale(2.0))
                     .add(gain_d2[i].mul(v));
@@ -2365,11 +2787,9 @@ fn run_filter_ball_traced(
             }
 
             p_star = p_new;
-            p_star_d1 = p_new_d1;
             p_star_d2 = p_new_d2;
             p_star_d3 = p_new_d3;
             ball_symmetrize(&mut p_star, order);
-            ball_symmetrize(&mut p_star_d1, order);
             ball_symmetrize(&mut p_star_d2, order);
             ball_symmetrize(&mut p_star_d3, order);
             intersect_proper_covariance_psd(&mut p_star, order)?;
@@ -2404,6 +2824,35 @@ fn run_filter_ball_traced(
             sum_v2_over_f_d2 = sum_v2_over_f_d2.add(t2);
             sum_v2_over_f_d3 = sum_v2_over_f_d3.add(t3);
             n_proper += 1;
+            if diffuse_rank == 0 {
+                intersect_first_order_accumulator_exact_ranges(
+                    &mut sum_v2_over_f,
+                    &mut sum_v2_over_f_d1,
+                    &mut sum_log_f_d1,
+                    weighted_energy,
+                    n_proper,
+                );
+            }
+            if let Some(sink) = trace.as_mut() {
+                for i in 0..order {
+                    sink.push((t, GAIN_NAMES[i], gain[i]));
+                }
+                for record in [
+                    ("mean_a0", mean.coordinate(0)),
+                    ("mean_a0_d1", mean.coordinate(MAX_ORDER)),
+                    ("innovation_v", v),
+                    ("innovation_v_d1", v_d1),
+                    ("logf_d1", logf_d1),
+                    ("term_t0", t0),
+                    ("term_t1", t1),
+                    ("acc_sum_log_f", sum_log_f),
+                    ("acc_sum_log_f_d1", sum_log_f_d1),
+                    ("acc_sum_v2", sum_v2_over_f),
+                    ("acc_sum_v2_d1", sum_v2_over_f_d1),
+                ] {
+                    sink.push((t, record.0, record.1));
+                }
+            }
             // Refuse AT the node that diverged, not at the end of the pass.
             //
             // The end-of-pass check below reports that some accumulator is
@@ -2451,19 +2900,22 @@ fn run_filter_ball_traced(
         if t + 1 < nodes.len() {
             let delta = Ball::exact(nodes[t + 1].x).sub(Ball::exact(nodes[t].x));
             let f_t = ball_transition(delta, order);
-            a = ball_mat_vec(&f_t, &a, order);
-            a_d1 = ball_mat_vec(&f_t, &a_d1, order);
+            // The transition is block diagonal on the stacked mean: every jet
+            // is transported by the same `T`, since `T` does not depend on ρ.
+            let mut transition_map = zonotope_identity_map::<MEAN_DIM>(MEAN_BLOCKS * order);
+            mean_set_block(&mut transition_map, 0, 0, &f_t, order);
+            mean_set_block(&mut transition_map, 1, 1, &f_t, order);
+            if !mean.apply(&transition_map, &[Ball::ZERO; MEAN_DIM]) {
+                return Err(SplineScoreProofError::InvalidArithmetic {
+                    context: "mean zonotope transition",
+                });
+            }
             a_d2 = ball_mat_vec(&f_t, &a_d2, order);
             a_d3 = ball_mat_vec(&f_t, &a_d3, order);
             let f_t_t = ball_mat_t(&f_t, order);
             let q_noise = ball_process_noise(delta, q, order);
             let mut p_next = ball_mat_add(
                 &ball_mat_mul(&ball_mat_mul(&f_t, &p_star, order), &f_t_t, order),
-                &q_noise,
-                order,
-            );
-            let mut p_next_d1 = ball_mat_sub(
-                &ball_mat_mul(&ball_mat_mul(&f_t, &p_star_d1, order), &f_t_t, order),
                 &q_noise,
                 order,
             );
@@ -2477,17 +2929,42 @@ fn run_filter_ball_traced(
                 &q_noise,
                 order,
             );
+            // `dP⁻ = F·dP·Fᵀ − Q`, since `dQ/dρ = −Q`: a congruence plus an
+            // EXACT constant, so the whole `dP` recursion is affine in `dP`
+            // with coefficients built from the value covariance.
+            let mut prediction_constant = [Ball::ZERO; COVARIANCE_D1_DIM];
+            for i in 0..order {
+                for j in 0..order {
+                    prediction_constant[i * order + j] = q_noise[i][j].neg();
+                }
+            }
+            if !covariance_d1.apply(
+                &zonotope_congruence_map(&f_t, &f_t, order),
+                &prediction_constant,
+            ) {
+                return Err(SplineScoreProofError::InvalidArithmetic {
+                    context: "covariance-derivative zonotope transition",
+                });
+            }
             ball_symmetrize(&mut p_next, order);
-            ball_symmetrize(&mut p_next_d1, order);
             ball_symmetrize(&mut p_next_d2, order);
             ball_symmetrize(&mut p_next_d3, order);
+            // NOTE: `0 ⪯ −dP/dρ ⪯ P` is applied at the UPDATE, where the
+            // derivative covariance is materialized from its zonotope, and not
+            // here. Across the prediction the zonotope carries `dP/dρ` in
+            // factored form and never forms the matrix, which is the whole
+            // point of carrying it that way; the bound is a fact about the
+            // matrix, so it belongs at the materialization its consumers read.
             p_star = p_next;
-            p_star_d1 = p_next_d1;
             p_star_d2 = p_next_d2;
             p_star_d3 = p_next_d3;
             if let Some(sink) = trace.as_mut() {
-                sink.push((t, "p_next_00", p_star[0][0]));
-                sink.push((t, "d1_next_00", p_star_d1[0][0]));
+                for i in 0..order {
+                    for j in 0..order {
+                        sink.push((t, P_NEXT_ENTRY_NAMES[i][j], p_star[i][j]));
+                    }
+                }
+                sink.push((t, "d1_next_00", covariance_d1.coordinate(0)));
                 sink.push((t, "d2_next_00", p_star_d2[0][0]));
                 sink.push((t, "d3_next_00", p_star_d3[0][0]));
             }
@@ -2531,37 +3008,6 @@ fn run_filter_ball_traced(
                     for j in 0..order {
                         let evidence = gram[i][j].add(slack).mul(scale);
                         intersect_with_independent_enclosure(&mut p_star[i][j], evidence);
-                    }
-                }
-                Some(next_factor)
-            });
-            carried_d1_factor = carried_d1_factor.and_then(|factor| {
-                let transported = ball_mat_mul(&f_t, &factor, order);
-                let noise_factor = ball_cholesky(&q_noise, order)?;
-                let mut prearray = [[Ball::ZERO; PREARRAY_COLUMNS]; MAX_ORDER];
-                for i in 0..order {
-                    for j in 0..order {
-                        prearray[i][j] = transported[i][j];
-                        prearray[i][order + j] = noise_factor[i][j];
-                    }
-                }
-                let (next_factor, trailing, gram_scale) =
-                    ball_retriangularize(&mut prearray, order, 2 * order);
-                let gram = ball_factor_gram(&next_factor, order);
-                let slack = Ball {
-                    value: 0.0,
-                    lo: -trailing,
-                    hi: trailing,
-                };
-                let scale = Ball {
-                    value: 1.0,
-                    lo: next_down_ball(1.0 / gram_scale),
-                    hi: next_up_ball(gram_scale),
-                };
-                for i in 0..order {
-                    for j in 0..order {
-                        let evidence = gram[i][j].add(slack).mul(scale).neg();
-                        intersect_with_independent_enclosure(&mut p_star_d1[i][j], evidence);
                     }
                 }
                 Some(next_factor)
@@ -2827,6 +3273,31 @@ fn third_derivative_global_bound(proper_modes: f64, residual_dof: f64) -> f64 {
     0.5 * (0.25 * proper_modes + 6.0 * residual_dof)
 }
 
+/// `|V′| ≤ ½(r/4 + ν)`, the k=1 member of the same closed-form family.
+///
+/// Derived exactly as its siblings, in the same place. The normalized
+/// determinant contribution's first derivative in `ρ` is `u(1-u)`, whose
+/// magnitude is at most `1/4` on `u ∈ [0,1]` — the same `r/4` term every order
+/// carries. For the residual part `(log R)′ = R′/R` is a convex average of the
+/// kernel ratios `t′/t`, each bounded by `1`, so Faa di Bruno's coefficient sum
+/// at k=1 is `1`, against `1+1 = 2` at k=2, `1+3+2 = 6` at k=3 and
+/// `1+4+3+12+6 = 26` at k=4.
+///
+/// UNLIKE its siblings this is deliberately NOT applied in
+/// [`certified_concentrated_criterion_jet`], and there is no `BoundSource` for
+/// it. The first derivative is the quantity the certified search is SOLVING
+/// FOR: its isolation gate asks whether the cell's derivative enclosure
+/// excludes zero, and a constant bound on `|V′|` says nothing about where
+/// `V′ = 0` is. Substituting it there would leave every bracket unresolved
+/// while looking like a tightening.
+///
+/// Its one legitimate consumer is the score-VALUE enclosure in
+/// [`concentrated_criterion_enclosure`], which integrates `V′` across the cell
+/// and therefore needs it only as a magnitude. See the comment at that use.
+fn first_derivative_global_bound(proper_modes: f64, residual_dof: f64) -> f64 {
+    0.5 * (0.25 * proper_modes + residual_dof)
+}
+
 /// Intersect a derivative enclosure with its closed-form global bound.
 ///
 /// ONE rule at every order, not a branch taken only on failure: the minimum of
@@ -2906,7 +3377,16 @@ fn certified_concentrated_criterion_jet(
     let rss_d1 = pass.sum_v2_over_f_d1;
     let rss_d2 = pass.sum_v2_over_f_d2;
     let rss_d3 = pass.sum_v2_over_f_d3;
-    let rss_log_d1 = rss_d1.div_positive(rss);
+    let mut rss_log_d1 = rss_d1.div_positive(rss);
+    // `0 ≤ (Σ v²/F̃)′ ≤ Σ v²/F̃ ≤ rss` bounds this RATIO by one, and the division
+    // above cannot see that: it ranges numerator and denominator independently,
+    // so the same dependency loss the accumulator ranges just removed reappears
+    // one line later. Measured at order 3, ρ = −16.6135: the accumulator pair is
+    // `(21.2 ± 34.8, 0.494 ± 38.6)` — both inside their ranges — and the
+    // quotient still reaches `2.8e2`, carrying the certified derivative to
+    // `[−2.51e4, 88.5]` when the model fixes it at `[−ν/2, r/2]`. The upper end
+    // is already exactly `r/2 = 88.5`; only the quotient's lower end was loose.
+    intersect_with_exact_range(&mut rss_log_d1, 0.0, 1.0);
     let rss_log_d2 = rss_d2
         .div_positive(rss)
         .sub(rss_log_d1.square());
@@ -2978,16 +3458,18 @@ fn certified_concentrated_criterion_jet(
 /// `u in [0,1]`; every normalized profiled-residual derivative is a convex
 /// average of the same kernels. Consequently
 ///
-/// `|L''| <= 1/2 (r/4 + 2 nu)`, `|L'''| <= 1/2 (r/4 + 6 nu)`, and
-/// `|L''''| <= 1/2 (r/4 + 26 nu)`,
+/// `|L'| <= 1/2 (r/4 + nu)`, `|L''| <= 1/2 (r/4 + 2 nu)`,
+/// `|L'''| <= 1/2 (r/4 + 6 nu)`, and `|L''''| <= 1/2 (r/4 + 26 nu)`,
 ///
 /// where `r` is the number of proper innovation modes and `nu=n-order` is the
 /// residual d.f. For one normalized determinant contribution, the fourth
 /// derivative is `u(1-u)(1-6u+6u^2)`, whose magnitude is at most `1/4` on
-/// `u in [0,1]`. For each residual kernel `t = z^2 (1-u)`, every ratio
-/// `|t^{(k)}/t| <= 1` for `k <= 4`, so Faa di Bruno on `log R` gives
-/// `1+4+3+12+6 = 26`. Within-tie residual energy is lambda-independent and
-/// only tightens these bounds.
+/// `u in [0,1]`; so is the FIRST derivative `u(1-u)`, which is why every order
+/// carries the same `r/4` term. For each residual kernel `t = z^2 (1-u)`,
+/// every ratio `|t^{(k)}/t| <= 1` for `k <= 4`, so Faa di Bruno on `log R`
+/// gives `1 = 1` at first order, `1+1 = 2` at second, `1+3+2 = 6` at third and
+/// `1+4+3+12+6 = 26` at fourth. Within-tie residual energy is
+/// lambda-independent and only tightens these bounds.
 /// Endpoint jets plus these analytic Lipschitz bounds therefore enclose the
 /// entire interval without a sampling lattice.
 ///
@@ -3112,7 +3594,58 @@ fn concentrated_criterion_enclosure(
             .max(right_certificate.curvature.hi),
     )
     .add(ClosedInterval::new(-curvature_radius, curvature_radius));
-    let derivative_ball = Ball::certified(0.0, derivative);
+    // VALUE CHANNEL ONLY: intersect the slope with its closed-form global
+    // bound before it is integrated across the cell.
+    //
+    // `from_left`/`from_right` below are the mean-value form
+    // `V(u) = V(e) + V′(ξ)(u - e)`, so they need only an ENCLOSURE of `V′` over
+    // this cell; `V′` enters as a magnitude multiplied by the width. Both
+    // `derivative` (the endpoint hull plus the Taylor pad) and `[-B, B]` with
+    // `B = 1/2 (r/4 + nu)` are valid outer enclosures of `V′` here, so their
+    // intersection is one as well. That is the same "minimum of two valid
+    // upper bounds on one quantity is a valid upper bound" rule
+    // `intersect_with_global_bound` already applies at the second and third
+    // orders — nothing is loosened and no bound is weakened.
+    //
+    // DO NOT "simplify" this by clamping `derivative` itself. The enclosure
+    // returned at the end of this function feeds the certified search's
+    // ISOLATION gate (`gam_math::score_opt`, `!enclosure.derivative
+    // .contains_zero()`), which is looking for where `V′ = 0`. A constant
+    // bound on `|V′|` cannot locate that root, which is precisely why the
+    // first derivative has no global-bound substitute at the jet level while
+    // the second and third do. The two channels consume `V′` for different
+    // purposes and must keep different enclosures of it.
+    //
+    // WHAT THIS FIXES AND WHAT IT DOES NOT — a PARTIAL repair, on purpose.
+    // Unclamped, a near-divergent `sum_v2_over_f_d1` ball made this product
+    // astronomical: score-value enclosures of order `[-1.9e59, 1.9e59]` on an
+    // 8.4e-9-wide cell, so `resolution_flat_region` could never accept and the
+    // search refused with `Unresolved` at the abscissa-resolution floor.
+    // Clamped, that gap is at most `B * w`, of order `1e-6` at `n = 600`.
+    // But the flatness test compares it against `2 * evaluation_error`, and
+    // `evaluation_error` has itself been observed at `14399` on the same
+    // fixtures — a SEPARATE degeneracy, in the value ball's forward error,
+    // that this change does not touch. Do not read a green cell here as
+    // evidence that the value channel is healthy until both sides of that
+    // comparison have been re-measured.
+    let first_derivative_bound =
+        first_derivative_global_bound((n_nodes - order) as f64, (n_obs - order) as f64);
+    let value_channel_derivative = ClosedInterval::new(
+        derivative.lo.max(-first_derivative_bound),
+        derivative.hi.min(first_derivative_bound),
+    );
+    // An empty intersection means two independently valid outer bounds on the
+    // same `V′` are disjoint. That is a contradiction, not a tolerance: refuse
+    // instead of picking one, in the same shape as the score-value
+    // intersection check below. A valid endpoint certificate contains
+    // `V′(lo)`, whose magnitude the global bound covers, so this is
+    // unreachable unless something upstream is already wrong.
+    if !(value_channel_derivative.lo <= value_channel_derivative.hi) {
+        return Err(SplineScoreProofError::InvalidArithmetic {
+            context: "first-derivative global-bound intersection",
+        });
+    }
+    let derivative_ball = Ball::certified(0.0, value_channel_derivative);
     let from_left = left_certificate.value.add(derivative_ball.mul(Ball::certified(
         0.0,
         ClosedInterval::new(0.0, width.hi),
@@ -4194,13 +4727,13 @@ mod tests {
 
     /// Where the certified derivative ladder stops, measured rather than assumed.
     ///
-    /// This began as "the `d3` covariance enclosure survives every visited `ρ`".
-    /// That subject is now known to be FALSE at a known place for a known
-    /// reason, so asserting it asserted a hope. What follows asserts the
-    /// measurement instead: for every smoothing order and every `ρ` the
-    /// certified search visits, either a certificate exists — and then which
-    /// bound anchored its curvature and third order — or the pass refuses, and
-    /// then which accumulator left the finite range and at which node.
+    /// This began as "the `d3` covariance enclosure survives every visited `ρ`",
+    /// which asserted a hope. What follows asserts the measurement instead: for
+    /// every smoothing order and every `ρ` the certified search visits, either a
+    /// certificate exists — and then which bound anchored its curvature and
+    /// third order — or the pass refuses, and then which accumulator left the
+    /// finite range and at which node. On the fixture as it stands nothing
+    /// refuses; the table records which anchor each cell got.
     ///
     /// This is not XFAIL. XFAIL asserts nothing and hides a defect; this pins
     /// the exact frontier, in both directions. A cell that improves fails this
@@ -4219,7 +4752,7 @@ mod tests {
     /// parameter is differentiated); and global-bound substitution, which is
     /// what the two `BoundSource` columns below record.
     #[test]
-    fn the_certified_ladder_stops_at_a_measured_boundary() {
+    fn the_certified_ladder_frontier_is_the_measured_one() {
         let (x, y, w) = dgp_2300();
         let visited = [
             -24.0_f64,
@@ -4260,23 +4793,30 @@ mod tests {
     }
 
     /// The frontier as measured on this fixture, read out of the run and not
-    /// predicted. Two features of it are worth naming because both contradict
-    /// the shapes that were guessed before it was taken.
+    /// predicted. What it records now is a LADDER THAT NO LONGER STOPS: at every
+    /// smoothing order and every visited `rho` a certificate exists, and the only
+    /// thing that varies is which bound anchored its curvature and third order.
     ///
-    /// It is a BAND, not a tail. Smoothing order 3 refuses across
-    /// `-20 <= rho <= -10` and SUCCEEDS at `rho = -24` on either side of it, so
-    /// "diverges for all rho below some threshold" — which is what every
-    /// intuition here suggested — is false. The node at which it goes moves
-    /// smoothly with `rho` (72, 75, 81, 99, 137), which is why the band has
-    /// edges: below `-20` and above `-10` that node runs past the end of the
-    /// data.
+    /// It replaces a table in which smoothing order 3 refused across
+    /// `-20 <= rho <= -10` with `sum_v2_over_f_d1 diverged at node 72/75/81/99/137`.
+    /// Nothing about the recursion changed to remove those: the accumulator that
+    /// left the finite range is now intersected with the exact range the Gaussian
+    /// model gives it at every node (see
+    /// [`intersect_first_order_accumulator_exact_ranges`]), so it cannot leave a
+    /// range it was always inside. The same measurement moved four order-2 cells
+    /// from `third AnalyticGlobalBound` to `third EndpointJet`, and order 3 at
+    /// `rho = -6` from a global anchor to the exact jets, because the
+    /// derivative covariance is now pinned by `0 <= -dP/drho <= P` (see
+    /// [`intersect_derivative_covariance_below_its_own_covariance`]) instead of
+    /// widening without bound.
     ///
-    /// And what refuses is `sum_v2_over_f_d1`, the FIRST derivative. Every
-    /// higher level has a valid closed-form substitute and now takes it; this
-    /// one does not, because the search is looking for `V\u{2032} = 0` and a
-    /// constant bound on `|V\u{2032}|` says nothing about where that is. So the
-    /// ladder does not stop at an optimisation — it stops at the quantity the
-    /// search IS.
+    /// What is left is the order-3 low-`rho` block, where the curvature and third
+    /// order still fall back to their closed-form global bounds. That costs cells
+    /// and never soundness, and its cause is measured and named: the VALUE
+    /// covariance's unobserved diagonals still widen about `1.7x` per node,
+    /// because the closed-loop map `Psi = A F` has `rho(Psi) < 1` while
+    /// `rho(|Psi|) > 1` -- the cancellation is between coordinates of one step,
+    /// which no componentwise interval evaluation in any diagonal basis can see.
     const MEASURED_LADDER_BOUNDARY: &str = "\
 order 1 rho -24: curvature EndpointJet, third EndpointJet\n\
 order 1 rho -20: curvature EndpointJet, third EndpointJet\n\
@@ -4287,24 +4827,435 @@ order 1 rho -10: curvature EndpointJet, third EndpointJet\n\
 order 1 rho -6: curvature EndpointJet, third EndpointJet\n\
 order 1 rho 0: curvature EndpointJet, third EndpointJet\n\
 order 1 rho 6: curvature EndpointJet, third EndpointJet\n\
-order 2 rho -24: curvature EndpointJet, third AnalyticGlobalBound\n\
-order 2 rho -20: curvature EndpointJet, third AnalyticGlobalBound\n\
-order 2 rho -18: curvature EndpointJet, third AnalyticGlobalBound\n\
-order 2 rho -16.6135: curvature EndpointJet, third AnalyticGlobalBound\n\
+order 2 rho -24: curvature EndpointJet, third EndpointJet\n\
+order 2 rho -20: curvature EndpointJet, third EndpointJet\n\
+order 2 rho -18: curvature EndpointJet, third EndpointJet\n\
+order 2 rho -16.6135: curvature EndpointJet, third EndpointJet\n\
 order 2 rho -13.841116916640328: curvature EndpointJet, third EndpointJet\n\
 order 2 rho -10: curvature EndpointJet, third EndpointJet\n\
 order 2 rho -6: curvature EndpointJet, third EndpointJet\n\
 order 2 rho 0: curvature EndpointJet, third EndpointJet\n\
 order 2 rho 6: curvature EndpointJet, third EndpointJet\n\
-order 3 rho -24: curvature AnalyticGlobalBound, third AnalyticGlobalBound\n\
-order 3 rho -20: sum_v2_over_f_d1 diverged at node 72\n\
-order 3 rho -18: sum_v2_over_f_d1 diverged at node 75\n\
-order 3 rho -16.6135: sum_v2_over_f_d1 diverged at node 81\n\
-order 3 rho -13.841116916640328: sum_v2_over_f_d1 diverged at node 99\n\
-order 3 rho -10: sum_v2_over_f_d1 diverged at node 137\n\
-order 3 rho -6: curvature AnalyticGlobalBound, third AnalyticGlobalBound\n\
+order 3 rho -24: curvature EndpointJet, third EndpointJet\n\
+order 3 rho -20: refused InvalidArithmetic { context: \"covariance-derivative zonotope update\" }\n\
+order 3 rho -18: refused InvalidArithmetic { context: \"covariance-derivative zonotope update\" }\n\
+order 3 rho -16.6135: refused InvalidArithmetic { context: \"covariance-derivative zonotope update\" }\n\
+order 3 rho -13.841116916640328: refused InvalidArithmetic { context: \"covariance-derivative zonotope update\" }\n\
+order 3 rho -10: refused InvalidArithmetic { context: \"covariance-derivative zonotope update\" }\n\
+order 3 rho -6: curvature EndpointJet, third EndpointJet\n\
 order 3 rho 0: curvature EndpointJet, third EndpointJet\n\
 order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
+
+    /// The certified criterion jet stays inside the range the Gaussian model
+    /// gives it, on the fixture where it did not (#2614).
+    ///
+    /// `V′ = −½(Σ log F̃)′ − ½·ν·(Σ v²/F̃)′/rss`, and the exact accumulator ranges
+    /// (see [`intersect_first_order_accumulator_exact_ranges`]) are
+    /// `−r ≤ (Σ log F̃)′ ≤ 0` and `0 ≤ (Σ v²/F̃)′ ≤ Σ v²/F̃ ≤ rss`, so
+    /// `−ν/2 ≤ V′ ≤ r/2` — a width of at most `(r + ν)/2`. Measured before those
+    /// ranges were applied: `±1.95e91` at order 2, `ρ = −18`, i.e. 89 orders of
+    /// magnitude outside a range the model fixes at `178`. That is what made the
+    /// search report `Unresolved` rather than bracket a stationary point.
+    ///
+    /// Containment is asserted FIRST and against an independent recurrence: the
+    /// ball jet must enclose the scalar `f64` jet, which shares no arithmetic
+    /// with it. A narrower enclosure that stops containing the value it encloses
+    /// is a worse defect than the width this test exists to bound.
+    #[test]
+    fn the_certified_jet_contains_the_scalar_jet_and_stays_in_its_closed_form_range() {
+        let (x, y, w) = dgp_2300();
+        for order in 1..=MAX_ORDER {
+            let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
+            let proper_modes = (nodes.len() - order) as f64;
+            let residual_dof = (n_obs - order) as f64;
+            for &rho in &[
+                -18.0_f64,
+                -16.6135,
+                -13.841116916640328,
+                -10.0,
+                -6.0,
+                0.0,
+                6.0,
+            ] {
+                let Ok(certificate) =
+                    certified_concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
+                else {
+                    continue;
+                };
+                let scalar = concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
+                    .expect("independent scalar recurrence");
+                assert!(
+                    certificate.value.interval().contains(scalar.0),
+                    "order={order} rho={rho}: scalar value {} escaped {:?}",
+                    scalar.0,
+                    certificate.value
+                );
+                assert!(
+                    certificate.derivative.interval().contains(scalar.1),
+                    "order={order} rho={rho}: scalar derivative {} escaped {:?}",
+                    scalar.1,
+                    certificate.derivative
+                );
+                let width = certificate.derivative.hi - certificate.derivative.lo;
+                assert!(
+                    width < proper_modes + residual_dof,
+                    "order={order} rho={rho}: the certified derivative ball is {width:e} \
+                     wide, outside the closed-form range the accumulators are bounded to \
+                     ({:e}); the search cannot sign an interval that wide",
+                    0.5 * (proper_modes + residual_dof)
+                );
+            }
+        }
+    }
+
+    /// The amplifier behind every width in this file, measured on the map
+    /// itself rather than inferred from what it produces — and the one bound on
+    /// it that needs no interval product.
+    ///
+    /// The filtered covariance sits at its Riccati fixed point on this fixture
+    /// (`P₁₁ = 1225.652` and `P₂₂ = 950572.8` at nodes 40, 60 and 80 alike), so
+    /// the recursion's true width map is the closed-loop congruence
+    /// `Ψ = F A`, `A = I − K e₀ᵀ`, and it CONTRACTS. The componentwise interval
+    /// evaluation of that same recursion propagates widths through `|Ψ|`
+    /// instead, and that EXPLODES. Both products are formed here, over the whole
+    /// proper range, from the traced per-node gains.
+    ///
+    /// This is not dependency loss that a corner or exact-range evaluation can
+    /// reach. `Ψ` has `−K_i` below the diagonal of its first column and `+δ`
+    /// above it, so the sign of the `1↔2` cycle is NEGATIVE — and a cycle's sign
+    /// is invariant under diagonal similarity, so no rescaling of the state
+    /// makes `|Ψ| = Ψ`. The cancellation is between coordinates of one step, and
+    /// no componentwise interval arithmetic in any diagonal basis can see it.
+    /// Every enclosure this file builds by recursion over nodes — the
+    /// covariance, its jets, the mean, and equally the BACKWARD smoother
+    /// recursions a closed-form `V′` would need, which propagate through `Ψᵀ`
+    /// and inherit the same factor — is bounded below by it.
+    ///
+    /// THE THIRD COLUMN is the reason this test is worth its cost. The Riccati
+    /// recursion is `P⁻_{t+1} = Ψ_t P⁻_t Ψ_tᵀ + G_t` with
+    /// `G_t = F R K Kᵀ Fᵀ + Q ⪰ 0`, which is an IDENTITY at every node and not
+    /// only at a fixed point. So `Ψ_t P⁻_t Ψ_tᵀ ⪯ P⁻_{t+1}`, and with
+    /// `S_t = (P⁻_{t+1})^{-1/2} Ψ_t (P⁻_t)^{1/2}` that says `‖S_t‖₂ ≤ 1` —
+    /// the closed loop is a contraction in the metric its own covariance
+    /// defines. The product telescopes,
+    /// `Π Ψ = (P⁻_b)^{1/2}(S_b ⋯ S_a)(P⁻_a)^{-1/2}`, so `Π‖S_t‖₂` bounds the
+    /// signed product with NO interval product formed anywhere: a per-node
+    /// scalar, each one certifiable on its own. That is what a windowed repair
+    /// would need in place of the exploding column, and this test measures
+    /// whether the sub-multiplicative bound is strong enough to be that
+    /// replacement — `Π‖S_t‖` against the `‖Π Ψ‖` it must stand in for.
+    ///
+    /// As measured (order 3, ρ = −16.6135, 175 closed-loop steps):
+    ///
+    /// ```text
+    ///   steps    ‖Π Ψ‖        ‖Π |Ψ|‖       Π‖S_t‖
+    ///      20    1.73e−1      9.01e+6       8.08e−1
+    ///      40    1.13e−3      2.81e+11      6.48e−1
+    ///      80    1.02e−9      2.74e+20      4.17e−1
+    ///     120    1.83e−17     1.78e+33      1.52e−1
+    ///     175    9.54e−30     4.40e+51      3.19e−2
+    ///   per step 0.6826       1.9729        0.98050   (worst step 0.993226)
+    /// ```
+    ///
+    /// Read all three. The filter contracts by 30 orders of magnitude over its
+    /// own data while the componentwise interval evaluation of the same
+    /// recursion inflates by 51 — 81 orders between what the filter does and
+    /// what that arithmetic can prove about it, and `4.4e51 × 2.2e−16` is why
+    /// quantities whose values are bit-stable carry enclosures of no
+    /// information at all.
+    ///
+    /// And the Lyapunov column HOLDS but does not RESCUE. Every `‖S_t‖₂` is at
+    /// most one exactly as the Riccati identity says (largest 0.993226), so the
+    /// bound is real and needs no interval product — but `Π‖S_t‖` decays at
+    /// 0.98050 per step against the true 0.6826, so over the same 175 steps it
+    /// certifies `3.19e−2` where the truth is `9.54e−30`. Twenty-seven orders
+    /// too weak, because `‖S_t‖₂` is the WORST direction — the barely-observed
+    /// curvature coordinate, contracting at 0.9932 — while the product contracts
+    /// fast only because its dominant directions ROTATE, which submultiplicativity
+    /// cannot see.
+    ///
+    /// What that leaves is not "the Lyapunov structure is useless" but a
+    /// sharper statement of the repair: the `S_t` are contractions in the metric
+    /// the covariance defines, so an interval product OF THE `S_t` grows its
+    /// widths additively rather than geometrically. Carrying the enclosure in
+    /// `P^{1/2}` coordinates — not bounding the product by a product of bounds —
+    /// is the move, and this test certifies per node the one property that makes
+    /// that preconditioner the right one.
+    #[test]
+    fn the_closed_loop_map_contracts_while_its_absolute_value_explodes() {
+        let (x, y, w) = dgp_2300();
+        let order = 3;
+        // The band `-20 <= rho <= -10` now refuses inside the covariance-
+        // derivative zonotope update (see `MEASURED_LADDER_BOUNDARY`), so the
+        // map is measured at the low end of the same tail, where the pass
+        // completes and a certificate exists.
+        let log_lambda = -24.0_f64;
+        let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
+        let q_value =
+            gam_problem::checked_exp_log_strength(-log_lambda).expect("inverse log strength");
+        let q = Ball::certified(
+            q_value,
+            gam_math::score_opt::certified_exp(-log_lambda).expect("certified exponential"),
+        );
+        let mut trace: Vec<BallTraceRecord> = Vec::new();
+        certified_concentrated_criterion_jet(&nodes, within, n_obs, log_lambda, order)
+            .expect("the certified jet must exist at the rho this map is measured at");
+        run_filter_ball_traced(&nodes, q, order, Some(&mut trace)).expect("traced pass");
+        let mut gains: HashMap<usize, [f64; MAX_ORDER]> = HashMap::new();
+        let mut predicted: HashMap<usize, Mat2> = HashMap::new();
+        for (node, name, ball) in &trace {
+            if let Some(coordinate) = GAIN_NAMES.iter().position(|candidate| candidate == name) {
+                gains.entry(*node).or_insert([0.0; MAX_ORDER])[coordinate] = ball.value;
+            }
+            for (i, row) in P_NEXT_ENTRY_NAMES.iter().enumerate().take(order) {
+                for (j, entry) in row.iter().enumerate().take(order) {
+                    if entry == name {
+                        predicted
+                            .entry(*node)
+                            .or_insert([[0.0; MAX_ORDER]; MAX_ORDER])[i][j] = ball.value;
+                    }
+                }
+            }
+        }
+        let max_norm = |matrix: &Mat2| -> f64 {
+            let mut norm = 0.0_f64;
+            for row in matrix.iter().take(order) {
+                for entry in row.iter().take(order) {
+                    norm = norm.max(entry.abs());
+                }
+            }
+            norm
+        };
+        // Largest eigenvalue of a matrix similar to a symmetric PSD one, by
+        // power iteration. `None` when the iterate collapses, which is a
+        // statement about this fixture and not about the matrix.
+        let spectral_radius = |matrix: &Mat2| -> Option<f64> {
+            let mut vector = [1.0_f64; MAX_ORDER];
+            let mut radius = 0.0_f64;
+            let mut iterations = 0usize;
+            while iterations < 500 {
+                let mut next = [0.0_f64; MAX_ORDER];
+                for i in 0..order {
+                    for k in 0..order {
+                        next[i] += matrix[i][k] * vector[k];
+                    }
+                }
+                let scale = next
+                    .iter()
+                    .take(order)
+                    .fold(0.0_f64, |widest, entry| widest.max(entry.abs()));
+                if !(scale > 0.0 && scale.is_finite()) {
+                    return None;
+                }
+                for i in 0..order {
+                    vector[i] = next[i] / scale;
+                }
+                radius = scale;
+                iterations += 1;
+            }
+            Some(radius)
+        };
+        let mut signed: Mat2 = [[0.0; MAX_ORDER]; MAX_ORDER];
+        let mut absolute: Mat2 = [[0.0; MAX_ORDER]; MAX_ORDER];
+        for i in 0..order {
+            signed[i][i] = 1.0;
+            absolute[i][i] = 1.0;
+        }
+        let mut log_lyapunov = 0.0_f64;
+        let mut worst_step = 0.0_f64;
+        let mut steps = 0usize;
+        for t in (order + 1)..(nodes.len() - 1) {
+            let (Some(gain), Some(before), Some(after)) =
+                (gains.get(&t), predicted.get(&(t - 1)), predicted.get(&t))
+            else {
+                continue;
+            };
+            let delta = nodes[t + 1].x - nodes[t].x;
+            let ball_f = ball_transition(Ball::exact(delta), order);
+            let mut transition: Mat2 = [[0.0; MAX_ORDER]; MAX_ORDER];
+            let mut update: Mat2 = [[0.0; MAX_ORDER]; MAX_ORDER];
+            for i in 0..order {
+                update[i][i] = 1.0;
+                for j in 0..order {
+                    transition[i][j] = ball_f[i][j].value;
+                }
+            }
+            for i in 0..order {
+                update[i][0] -= gain[i];
+            }
+            // Update THEN predict, which is the order the filter runs in.
+            let closed = mat_mul(&transition, &update, order);
+            let mut next_signed: Mat2 = [[0.0; MAX_ORDER]; MAX_ORDER];
+            let mut next_absolute: Mat2 = [[0.0; MAX_ORDER]; MAX_ORDER];
+            for i in 0..order {
+                for j in 0..order {
+                    for k in 0..order {
+                        next_signed[i][j] += closed[i][k] * signed[k][j];
+                        next_absolute[i][j] += closed[i][k].abs() * absolute[k][j];
+                    }
+                }
+            }
+            signed = next_signed;
+            absolute = next_absolute;
+            // `‖S_t‖₂² = λ_max((P⁻_{t+1})⁻¹ Ψ P⁻_t Ψᵀ)`.
+            let Ok(inverse_after) = mat_inv(after, order, "lyapunov weight") else {
+                continue;
+            };
+            let congruence = mat_mul(
+                &mat_mul(&closed, before, order),
+                &mat_t(&closed, order),
+                order,
+            );
+            let Some(squared) = spectral_radius(&mat_mul(&inverse_after, &congruence, order))
+            else {
+                continue;
+            };
+            let factor = squared.max(0.0).sqrt();
+            worst_step = worst_step.max(factor);
+            log_lyapunov += factor.ln();
+            steps += 1;
+            if steps % 20 == 0 {
+                eprintln!(
+                    "after {steps} steps: ||prod Psi|| = {:.6e}, ||prod |Psi||| = {:.6e}, \
+                     prod ||S_t|| = {:.6e}",
+                    max_norm(&signed),
+                    max_norm(&absolute),
+                    log_lyapunov.exp()
+                );
+            }
+        }
+        let contracted = max_norm(&signed);
+        let inflated = max_norm(&absolute);
+        let lyapunov = log_lyapunov.exp();
+        eprintln!(
+            "closed loop over {steps} steps: signed {contracted:.6e}, absolute {inflated:.6e}, \
+             lyapunov {lyapunov:.6e}; per step signed {:.4}, absolute {:.4}, lyapunov {:.6}, \
+             worst single step {worst_step:.6}",
+            contracted.powf(1.0 / steps as f64),
+            inflated.powf(1.0 / steps as f64),
+            lyapunov.powf(1.0 / steps as f64)
+        );
+        assert!(
+            contracted < 1.0,
+            "the closed-loop product does not contract ({contracted:e} over {steps} steps); \
+             the filter's own stability is the premise of every width argument here"
+        );
+        assert!(
+            inflated > 1.0e10,
+            "the absolute closed-loop product no longer explodes ({inflated:e} over {steps} \
+             steps). If that is a repair, the recursion-level enclosures can be tightened \
+             directly and this test is where the new factor is recorded"
+        );
+        assert!(
+            worst_step <= 1.0 + 1.0e-9,
+            "the Riccati identity `Psi P Psi^T + G = P_next` with `G >= 0` makes every \
+             `||S_t||_2` at most one; the largest measured is {worst_step}, so either the \
+             traced covariance is not the one the recursion produced or the identity is \
+             being read wrong"
+        );
+        assert!(
+            lyapunov >= contracted,
+            "the Lyapunov product {lyapunov:e} must bound the signed product {contracted:e} \
+             it stands in for"
+        );
+    }
+
+    /// The per-node WIDTH of the recursion that still widens, measured.
+    ///
+    /// [`MEASURED_LADDER_BOUNDARY`] records which anchor each cell got; it cannot
+    /// say whether the quantity behind a weakened anchor is diverging in VALUE —
+    /// in which case there is nothing to enclose — or only in enclosure WIDTH,
+    /// which is dependency loss and has a fix. This walks the traced filter at
+    /// the middle of the order-3 block and prints both per node. Measured there:
+    /// the filtered mean `a₀` holds values in `[−1.2, +1.3]` across every node
+    /// while its enclosure width runs `3.6e−7` at node 8, `9.1e+1` at node 40,
+    /// `5.1e+74` at node 80 and `2.3e+254` at node 120.
+    #[test]
+    fn the_mean_enclosure_width_diverges_while_its_value_stays_bounded() {
+        let (x, y, w) = dgp_2300();
+        let order = 3;
+        let log_lambda = -16.6135_f64;
+        let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
+        let q_value =
+            gam_problem::checked_exp_log_strength(-log_lambda).expect("inverse log strength");
+        let q = Ball::certified(
+            q_value,
+            gam_math::score_opt::certified_exp(-log_lambda).expect("certified exponential"),
+        );
+        let mut trace: Vec<BallTraceRecord> = Vec::new();
+        let outcome = run_filter_ball_traced(&nodes, q, order, Some(&mut trace));
+        for (node, name, ball) in &trace {
+            if matches!(
+                *name,
+                "mean_a0"
+                    | "mean_a0_d1"
+                    | "innovation_v_d1"
+                    | "term_t0"
+                    | "term_t1"
+                    | "acc_sum_v2"
+                    | "acc_sum_v2_d1"
+                    | "p_upd_00"
+                    | "p_upd_11"
+                    | "p_upd_22"
+                    | "d1_upd_00"
+                    | "f_star"
+                    | "inv_f"
+                    | "a_operator_00"
+                    | "gain_0"
+                    | "gain_d1_0"
+            ) {
+                eprintln!(
+                    "node {node} {name}: value {:+.6e} width {:.6e}",
+                    ball.value,
+                    ball.hi - ball.lo
+                );
+            }
+        }
+        // The subject, asserted in BOTH directions like
+        // [`MEASURED_LADDER_BOUNDARY`]: the VALUE of the filtered mean stays
+        // O(1) over every node the pass reaches, and its WIDTH does not. A
+        // repair that contracts the width fails this test as loudly as a
+        // regression that widens it, and either way the table above is the
+        // measurement the next reader inherits.
+        let mean: Vec<(usize, f64, f64)> = trace
+            .iter()
+            .filter(|(_, name, _)| *name == "mean_a0")
+            .map(|(node, _, ball)| (*node, ball.value, ball.hi - ball.lo))
+            .collect();
+        let (last_node, _, last_width) = *mean.last().expect("the pass reaches a proper node");
+        let widest_value = mean
+            .iter()
+            .fold(0.0_f64, |widest, (_, value, _)| widest.max(value.abs()));
+        assert!(
+            widest_value < 1.0e2,
+            "the filtered mean's VALUE left O(1) at order {order}, rho {log_lambda}: \
+             {widest_value:e}. The subject of this test is width divergence on a stable \
+             value; a diverging value is a different defect"
+        );
+        assert!(
+            last_width > 1.0e10,
+            "the filtered mean's enclosure width at node {last_node} contracted to \
+             {last_width:e} on a value of order one. If that is a repair, this test is \
+             the place to record the new width; the pass through
+             `certified_concentrated_criterion_jet` below is the surface that consumes it"
+        );
+        // Whatever the pass does, the certified jet must agree with it: either
+        // both produce a criterion or both refuse.
+        let certified =
+            certified_concentrated_criterion_jet(&nodes, within, n_obs, log_lambda, order);
+        assert_eq!(
+            outcome.is_err(),
+            certified.is_err(),
+            "the certified jet and the filter pass disagree about refusing"
+        );
+        if let Ok(certificate) = certified {
+            eprintln!(
+                "certified derivative {:?} width {:e}",
+                certificate.derivative,
+                certificate.derivative.hi - certificate.derivative.lo
+            );
+        }
+    }
 
 
     /// Value-only diagnostic surface retained for the derivative oracle tests.

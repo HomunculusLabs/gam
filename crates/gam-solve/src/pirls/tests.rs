@@ -108,7 +108,6 @@ mod tests {
         write_gamma_log_working_state, write_negative_binomial_log_working_state,
         write_poisson_log_working_state, write_tweedie_log_working_state,
     };
-    use crate::active_set;
     use crate::estimate::EstimationError;
     use crate::mixture_link::{InverseLinkJet as MixtureInverseLinkJet, state_fromspec};
     use approx::assert_relative_eq;
@@ -3299,32 +3298,6 @@ mod tests {
             direction[0]
         );
         assert_eq!(active_hint, vec![1]);
-    }
-
-    #[test]
-    pub(crate) fn working_set_kkt_diagnostics_use_active_setmultipliers() {
-        let working_constraints = LinearInequalityConstraints {
-            a: array![[1.0, 0.0], [2.0, 0.0], [0.0, 1.0]],
-            b: array![0.0, 0.0, 0.0],
-        };
-        let x = array![0.0, 0.0];
-        let lambda_true = array![1.0, 0.5, 2.0];
-        let gradient = working_constraints.a.t().dot(&lambda_true);
-
-        let kkt = active_set::working_set_kkt_diagnostics_from_multipliers(
-            &x,
-            &gradient,
-            &working_constraints,
-            &lambda_true,
-            3,
-        )
-        .expect("working-set KKT diagnostics");
-
-        assert!(kkt.primal_feasibility <= 1e-12);
-        assert!(kkt.dual_feasibility <= 1e-12);
-        assert!(kkt.complementarity <= 1e-12);
-        assert!(kkt.stationarity <= 1e-12);
-        assert_eq!(kkt.n_active, 3);
     }
 
 

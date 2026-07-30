@@ -48,7 +48,22 @@ fn duchon_spec(k: usize) -> DuchonBasisSpec {
         center_strategy: CenterStrategy::FarthestPoint { num_centers: k },
         periodic: None,
         length_scale: None,
-        power: 0.5,
+        // #2278: `2s < d` is the pure-Duchon CPD-adequacy boundary and it does
+        // NOT depend on the nullspace degree. This fixture asked for s=0.5 in
+        // d=1, i.e. 2s = 1 = d exactly on the boundary, where the Riesz kernel
+        // r^(2s-d) degenerates to r^0 and the interpolation form is not CPD on
+        // the complement of P_1. It only ever built because the guard used to
+        // carry a `p_order < 2` conjunct that this Linear nullspace bypassed;
+        // `f566a919d` removed the conjunct and the fixture became a request for
+        // a penalty the kernel cannot define.
+        //
+        // s=0 is not a relaxation of this fixture, it is the value the file
+        // header has always specified: this diagnostic compares against mgcv
+        // `bs="ds", m=c(2,0)`, whose second element IS s, and mgcv's own
+        // admissible range for d=1 is s in [0, d/2) = [0, 0.5) -- so s=0.5 was
+        // outside the reference tool's domain too, and the comparison it was
+        // driving was never like-for-like.
+        power: 0.0,
         nullspace_order: DuchonNullspaceOrder::Linear,
         identifiability: SpatialIdentifiability::None,
         aniso_log_scales: None,

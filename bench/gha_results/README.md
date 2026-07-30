@@ -1,8 +1,10 @@
-# `bench/gha_results/` — the newest numbers from every workflow, tracked in git
+# `bench/gha_results/` — the newest suite-level numbers, tracked in git
 
-Each subdirectory holds the **most recent uncompressed results** from one GitHub
-Actions workflow: accuracy and perf numbers, metric tables, and the mature
-reference tools' own figures where a workflow measures against them.
+Each subdirectory holds the **most recent uncompressed suite-level results**
+from a publishing GitHub Actions workflow: accuracy and perf numbers, metric
+tables, and the mature reference tools' own figures where a workflow measures
+against them. Focused, one-off proof runs keep their logs in workflow artifacts
+instead of committing them here.
 
 ```
 bench/gha_results/
@@ -11,7 +13,6 @@ bench/gha_results/
   large-scale/          per-method result JSON + the aggregate summary
   rust-test-suite/      MASTER_FAILURES.md
   python-contracts/     JUnit inventory
-  focused-rust-proof/   focused proof logs
   fuzz/                 fuzz findings
 ```
 

@@ -8,6 +8,11 @@ are not yet surfaced through the Python FFI payload builder". These tests pin
 that the four dispersion families now fit and serialize cleanly through the
 Python surface, that the family tag is magic-routed from ``family`` + the
 presence of a ``noise_formula``, and that a saved dispersion model round-trips.
+
+``family_name`` is the observable these tests key on precisely because it is the
+one place the two channels can be told apart: it must name the *location-scale*
+family the fit actually used, not the mean channel's likelihood. See the note
+below the imports for the defect that made it report the latter.
 """
 
 from __future__ import annotations
@@ -23,16 +28,34 @@ import numpy as np
 import gamfit
 
 
-# #1512 / #913 (OPEN BUG — these tests fail on purpose to flag it; SPEC.md
-# forbids xfail, so the failure stands as the signal): the
-# `family=<nb|gamma|tweedie|beta>` + `noise_formula=` magic-routing to the
-# dispersion location-scale families is not wired through the current Python
-# surface. `gamfit.fit(..., family="nb", noise_formula="x")` accepts the call but
-# returns the mean-only family tag ("Negative-Binomial Log", "Gamma Log",
-# "Tweedie Log", "Beta Regression Logit") instead of the
-# "<family>-location-scale" tag every test in this file asserts — reproduced
-# across all four families and the constant-noise case. Route a present
-# noise_formula to the dispersion location-scale family to green these.
+# #1512 / #913 — FIXED, and the diagnosis this header used to carry was WRONG.
+#
+# It said the `family=<nb|gamma|tweedie|beta>` + `noise_formula=` magic-routing
+# was "not wired through the current Python surface" and told the reader to
+# "route a present noise_formula to the dispersion location-scale family". The
+# routing was already wired and had been all along: `entry.rs` sends a present
+# `noise_formula` to `materialize_location_scale`,
+# `dispersion_location_scale_kind` returns the `DispersionFamilyKind`, the fit
+# runs as `FitRequest::DispersionLocationScale`, and
+# `assemble_location_scale_payload` persists the right tag. Measured on the saved
+# payload of a real fit, before any fix:
+#
+#     nb       summary='Negative-Binomial Log'  payload.family='negbin-location-scale'
+#     gamma    summary='Gamma Log'              payload.family='gamma-location-scale'
+#     tweedie  summary='Tweedie Log'            payload.family='tweedie-location-scale'
+#     beta     summary='Beta Regression Logit'  payload.family='beta-location-scale'
+#
+# Every fit had already routed correctly and persisted the correct tag. The
+# defect was one layer later, on the SUMMARY surface: `summary_json_impl` read
+# `model.likelihood().pretty_name()`, and `FittedFamily::LocationScale` carries
+# only the MEAN channel's law — so a two-channel dispersion GAMLSS and the
+# mean-only GLM of the same family were indistinguishable through `family_name`.
+# The CLI's own fit line already printed the persisted tag, so the Python summary
+# contradicted the CLI (SPEC rule 9). `FittedModel::display_family_name` is now
+# the single authority both read.
+#
+# Recorded at this length because acting on the old header would have sent the
+# next reader to rewrite routing that was already correct.
 
 
 def _heteroscedastic_count_rows(n: int, seed: int) -> list[dict[str, float]]:

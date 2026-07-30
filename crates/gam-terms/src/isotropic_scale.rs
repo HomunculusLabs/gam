@@ -10,6 +10,65 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// A coordinate-valued length in the user's ORIGINAL covariate units.
+///
+/// A basis that auto-standardizes its Euclidean input divides the coordinates
+/// by an [`IsotropicScale`] before building anything, so its `centers` — and
+/// every radius the kernel evaluates — live in the standardized frame while
+/// the range the user asked for lives here.  Keeping the two frames in
+/// distinct types is what stops a consumer from pairing them: the kernel
+/// range and the radii it is compared against must agree, and getting that
+/// wrong is a silent O(1) relative error in the kernel bandwidth that no
+/// shape or count check can see.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OriginalUnits(f64);
+
+/// A coordinate-valued length in the STANDARDIZED frame, i.e. the frame the
+/// auto-standardized `centers` and the kernel radii already live in.
+///
+/// This is the frame every radial kernel evaluation must be denominated in.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StandardizedUnits(f64);
+
+impl OriginalUnits {
+    pub const fn new(value: f64) -> Self {
+        Self(value)
+    }
+
+    /// The scalar, named for its frame so a bare extraction that feeds
+    /// standardized-frame math reads wrong at the call site.
+    pub const fn original_value(self) -> f64 {
+        self.0
+    }
+}
+
+impl StandardizedUnits {
+    pub const fn new(value: f64) -> Self {
+        Self(value)
+    }
+
+    /// The scalar, named for its frame; see [`OriginalUnits::original_value`].
+    pub const fn standardized_value(self) -> f64 {
+        self.0
+    }
+}
+
+impl fmt::Display for OriginalUnits {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+impl fmt::Display for StandardizedUnits {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
 /// A positive, finite scalar whose reciprocal is also representable.
 ///
 /// The field is private so construction, deserialization, and every frozen
@@ -42,9 +101,21 @@ impl IsotropicScale {
         self.0.to_bits()
     }
 
-    /// Convert a coordinate-valued scalar from original to standardized units.
-    pub fn to_standardized_units(self, value: f64) -> f64 {
-        value * self.reciprocal()
+    /// Convert a coordinate-valued length from original to standardized units.
+    ///
+    /// This is the ONLY conversion between the two frames.  Because it
+    /// consumes an [`OriginalUnits`] and produces a [`StandardizedUnits`],
+    /// applying it to a value that is already standardized — the
+    /// double-divide that silently halves or doubles a kernel bandwidth — is
+    /// a type error rather than a comment for the next reader to remember.
+    pub fn to_standardized_units(self, value: OriginalUnits) -> StandardizedUnits {
+        StandardizedUnits(value.original_value() * self.reciprocal())
+    }
+
+    /// The inverse of [`Self::to_standardized_units`]: express a standardized
+    /// length back in the user's original coordinate units.
+    pub fn to_original_units(self, value: StandardizedUnits) -> OriginalUnits {
+        OriginalUnits(value.standardized_value() * self.0)
     }
 
     /// Apply the uniform coordinate pullback in place.
@@ -98,6 +169,22 @@ mod tests {
         assert!(IsotropicScale::new(f64::NAN).is_err());
         assert!(IsotropicScale::new(f64::INFINITY).is_err());
         assert!(IsotropicScale::new(f64::from_bits(1)).is_err());
+    }
+
+    #[test]
+    fn the_two_frames_round_trip_through_the_only_conversion() {
+        let scale = IsotropicScale::new(4.0).unwrap();
+        let original = OriginalUnits::new(500.0);
+        let standardized = scale.to_standardized_units(original);
+        assert_eq!(standardized, StandardizedUnits::new(125.0));
+        assert_eq!(scale.to_original_units(standardized), original);
+        // The frame tag is what distinguishes the two, not the magnitude:
+        // a bare `125.0` carries no evidence of which side it came from,
+        // which is precisely the hazard the tags remove.
+        assert_eq!(
+            scale.to_standardized_units(OriginalUnits::new(125.0)),
+            StandardizedUnits::new(31.25)
+        );
     }
 
     #[test]

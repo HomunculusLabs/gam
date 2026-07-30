@@ -604,9 +604,8 @@ pub(crate) fn joint_outer_gradient_uses_projected_trace_for_rank_deficient_penal
         ..BlockwiseFitOptions::default()
     };
     let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
-    let no_d2h = |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
-        Ok(None)
-    };
+    let no_d2h =
+        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
 
     let projected = joint_outer_evaluate(
         &inner,
@@ -784,9 +783,8 @@ pub(crate) fn joint_outer_gradient_projected_trace_drops_joint_null() {
         ..BlockwiseFitOptions::default()
     };
     let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
-    let no_d2h = |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
-        Ok(None)
-    };
+    let no_d2h =
+        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
 
     let projected = joint_outer_evaluate(
         &inner,
@@ -870,9 +868,8 @@ pub(crate) fn large_scale_rho_scan_joint_outer_evaluate_is_projection_invariant(
         array![[4.0, 0.2, 7.0], [0.2, 9.0, -3.0], [7.0, -3.0, 30.0]].mapv(|v| v * n_scale);
 
     let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
-    let no_d2h = |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
-        Ok(None)
-    };
+    let no_d2h =
+        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
 
     let mut g_un_at_10 = 0.0_f64;
     let mut g_pr_at_10 = 0.0_f64;
@@ -1195,9 +1192,8 @@ pub(crate) fn large_scale_multiblock_outer_gradient_with_realistic_drift_is_boun
     // large scale + Duchon-shape S.
     let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
     let compute_dh = no_dh;
-    let no_d2h = |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
-        Ok(None)
-    };
+    let no_d2h =
+        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
 
     // ── ParameterBlockSpec for each block.
     let mk_spec = |name: &str,
@@ -1415,7 +1411,15 @@ pub(crate) fn direct_joint_hyper_never_loosens_caller_inner_tolerance() {
         eval_options.inner_tol, options.inner_tol,
         "a looser outer target cannot weaken the coefficient-stationarity contract"
     );
-    assert_eq!(eval_options.inner_max_cycles, options.inner_max_cycles);
+    // A BUDGET IS NOT A TOLERANCE. Carrying ψ derivatives raises the cycle
+    // budget to `DIRECT_JOINT_HYPER_MIN_CYCLES`, which can only make the
+    // caller's `inner_tol` MORE reachable -- it never relaxes the stationarity
+    // equation this test is named for. Pin the floored value exactly rather
+    // than the caller's 100, which asserted the pre-#2460-followup behaviour
+    // where the floor was gated on `tighten` and therefore unreachable
+    // whenever `inner_tol == outer_tol` (i.e. on every model constructor).
+    assert_eq!(eval_options.inner_max_cycles, 200);
+    assert!(eval_options.inner_max_cycles >= options.inner_max_cycles);
     assert!(strict_warm_start.is_none());
 
     let (rho_default, _) = derivative_quality_options_and_warm_start(&options, None, false);
@@ -1449,10 +1453,10 @@ pub(crate) fn direct_joint_hyper_never_loosens_caller_inner_tolerance() {
     };
     let (preserved, _) = derivative_quality_options_and_warm_start(&explicitly_tight, None, true);
     assert_eq!(preserved.inner_tol, explicitly_tight.inner_tol);
-    assert_eq!(
-        preserved.inner_max_cycles,
-        explicitly_tight.inner_max_cycles
-    );
+    // Same one-way rule as above: an already-strict inner tolerance is carried
+    // through untouched, while the ψ-derivative cycle floor still applies.
+    assert_eq!(preserved.inner_max_cycles, 200);
+    assert!(preserved.inner_max_cycles >= explicitly_tight.inner_max_cycles);
 }
 
 #[test]
@@ -2709,9 +2713,9 @@ pub(crate) fn jeffreys_psi_mixed_geometry_preserves_workspace_authority() {
             assert_eq!(psi_index, 0);
             assert_eq!(direction.len(), 1);
             self.mixed_calls.fetch_add(1, Ordering::Relaxed);
-            Ok(Some(DriftDerivResult::Dense(array![[
-                0.125 * direction[0]
-            ]])))
+            Ok(Some(DriftDerivResult::Dense(array![
+                [0.125 * direction[0]]
+            ])))
         }
     }
 
@@ -5947,3 +5951,112 @@ mod inner_solver_numerics;
 mod effective_df_floor_box_2370;
 
 mod anchored_continuation_2366;
+
+/// gam#2360. `audit_converged_identifiability` handed the drift audit a bare
+/// `vec![0.0; n]` as the pilot β. The pilot the PRE-FIT audit linearized at is
+/// `spec.initial_beta` — `pre_fit_operating_scalars` builds it that way, and
+/// zeros are only its fallback for a block with no warm start.
+///
+/// The consequence is numeric, not cosmetic. `maybe_log_audit_drift` publishes
+/// `beta_relative_change = ‖β̂ − β₀‖ / (‖β₀‖ + f64::EPSILON)`; with a zeros
+/// reference the denominator IS machine epsilon, so the number is ~1e16 for
+/// every warm-started fit however far it travelled.
+///
+/// This gates `drift_audit_beta_pair`, which is the only route
+/// `audit_converged_identifiability` has to the pair it prices — so the
+/// assertion covers the code that runs in production, not a parallel copy. It
+/// pins the warm start, the per-block zeros fallback, and the current side, and
+/// then pins the numeric separation the repair is for: a value the zeros
+/// reference could not produce.
+#[test]
+fn the_drift_audits_pilot_beta_is_the_warm_start_not_zeros_2360() {
+    let design_a =
+        Array2::<f64>::from_shape_fn((6, 2), |(i, j)| 1.0 + (i as f64) * (j as f64 + 1.0));
+    let design_b = Array2::<f64>::from_shape_fn((6, 3), |(i, j)| 0.5 - (i as f64) * 0.1 + j as f64);
+    let warm_a = array![0.25, -0.75];
+
+    let spec = |name: &str, design: Array2<f64>, initial_beta: Option<Array1<f64>>| {
+        let rows = design.nrows();
+        ParameterBlockSpec {
+            name: name.to_string(),
+            design: DesignMatrix::from(design),
+            offset: Array1::zeros(rows),
+            penalties: Vec::new(),
+            nullspace_dims: Vec::new(),
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta,
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        }
+    };
+    let specs = vec![
+        spec("warm", design_a, Some(warm_a.clone())),
+        spec("cold", design_b, None),
+    ];
+    let states = vec![
+        ParameterBlockState {
+            beta: array![0.30, -0.70],
+            eta: Array1::zeros(6),
+        },
+        ParameterBlockState {
+            beta: array![0.02, 0.0, -0.01],
+            eta: Array1::zeros(6),
+        },
+    ];
+
+    let (pilot, current) = drift_audit_beta_pair(&specs, &states);
+
+    assert_eq!(pilot.len(), 5, "the pilot is flattened over blocks, 2 + 3");
+    assert_eq!(
+        current.len(),
+        5,
+        "the current side is flattened the same way"
+    );
+    assert_eq!(
+        &pilot[..2],
+        warm_a.as_slice().expect("contiguous"),
+        "the warm start must survive into the pilot vector"
+    );
+    assert_eq!(
+        &pilot[2..],
+        &[0.0, 0.0, 0.0],
+        "zeros are the fallback for the un-warm-started block ALONE"
+    );
+    assert_eq!(
+        &current[..2],
+        &[0.30, -0.70],
+        "the current side is the converged block states, in the same order"
+    );
+    assert!(
+        pilot.iter().any(|value| *value != 0.0),
+        "an all-zero pilot is exactly the defect: it makes ‖β₀‖ = 0, so the \
+         published beta_relative_change is ‖β̂‖ / f64::EPSILON for every fit"
+    );
+
+    // The separation the repair exists for, in the published quantity's own
+    // formula. Against the real pilot this fit barely moved; against a zeros
+    // pilot the SAME β̂ reports a number no real movement could produce.
+    let relative_change = |reference: &[f64]| -> f64 {
+        let reference_norm: f64 = reference.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let diff_norm: f64 = current
+            .iter()
+            .zip(reference.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        diff_norm / (reference_norm + f64::EPSILON)
+    };
+    let honest = relative_change(&pilot);
+    let zeros = relative_change(&[0.0_f64; 5]);
+    assert!(
+        honest < 1.0,
+        "against the real pilot this fit barely moved; got {honest}"
+    );
+    assert!(
+        zeros > 1.0e15,
+        "against a zeros pilot the same fit reports {zeros}, which is the epsilon \
+         denominator rather than a movement"
+    );
+}

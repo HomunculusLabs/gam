@@ -216,13 +216,19 @@ const CERTIFIED_SPECTRUM_BYTES: usize = 512 * 1024 * 1024;
 /// Schur complement is assembled from, the Schur complement itself, the
 /// eigenvector matrix `eigh` returns, and one working copy — and that is wrong,
 /// because `eigh` is `faer`'s self-adjoint EVD behind `FaerEigh` and its
-/// tridiagonalization allocates workspace this crate never names. The marginal
-/// high-water mark over an `m = 891 -> 2038` step is **7.44** blocks
-/// (79.4 MiB -> 270.1 MiB), so the declared count is the next power of two above
-/// it. `zz_measure_certified_spectrum_peak_memory_2546` re-measures it and fails
-/// if it ever exceeds this, because a count below the realized one would let
-/// [`CERTIFIED_SPECTRUM_MAX`] admit a width that overruns
-/// [`CERTIFIED_SPECTRUM_BYTES`].
+/// tridiagonalization allocates workspace this crate never names.
+///
+/// Re-measured at `b8745892a` with each width in its own process, the marginal
+/// high-water mark over an `m = 891 -> 2038` step is **6.41 - 6.84** blocks
+/// (54.4-60.4 MiB -> 218.7-235.7 MiB), flat across `RAYON_NUM_THREADS` 1/2/4/8,
+/// so the declared count is the next power of two above it. The earlier reading
+/// of 7.44 blocks (79.4 MiB -> 270.1 MiB) was taken in a shared process and is
+/// superseded; see `zz_measure_certified_spectrum_peak_memory_2546` for why that
+/// distinction decides the number.
+///
+/// That test re-measures it and fails if it ever exceeds this, because a count
+/// below the realized one would let [`CERTIFIED_SPECTRUM_MAX`] admit a width
+/// that overruns [`CERTIFIED_SPECTRUM_BYTES`].
 ///
 /// The count is measured NEAR the cap and is not claimed constant in `m`. It is
 /// not: with the cap lifted experimentally, the same refinement ladder reached
@@ -4931,6 +4937,64 @@ mod refinement_decision_tests {
         assert_eq!(fixed.certificate.logdet_method, LogdetMethod::SparseExact);
     }
 
+    /// Process high-water resident set size in bytes, or `None` where the
+    /// kernel does not publish one.
+    fn read_hwm_bytes() -> Option<f64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmHWM:") {
+                let kb: f64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
+                return Some(kb * 1024.0);
+            }
+        }
+        None
+    }
+
+    /// Level counts whose `dense_fixture(45)` designs bracket the certified cap:
+    /// `m = 891` and `m = 2038`, the step the block count is differenced over.
+    const PEAK_MEMORY_LEVELS: [usize; 2] = [5, 6];
+
+    /// Marker the per-width child prints its reading behind, and the gate finds
+    /// it by. One definition so the writer and the reader cannot drift.
+    const CHILD_READING_MARKER: &str = "#2546-child ";
+
+    /// Build the certified spectral profile at one width and report the process
+    /// high-water mark it reached, on stdout.
+    ///
+    /// Printed rather than returned because the gate reads it from a CHILD
+    /// process, which is what makes the reading attributable.
+    fn report_certified_spectrum_peak(levels: usize) {
+        if read_hwm_bytes().is_none() {
+            println!("{CHILD_READING_MARKER}levels={levels} vmhwm_unavailable");
+            return;
+        }
+        let (x1, x2, y) = dense_fixture(45);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
+            .expect("cascade design");
+        let m = design.core.m;
+        let profile = design.core.reml_profile().expect("spectral profile");
+        let modes = profile.modes.len();
+        drop(profile);
+        let hwm = read_hwm_bytes().expect("VmHWM was readable a moment ago");
+        println!("{CHILD_READING_MARKER}levels={levels} m={m} modes={modes} vmhwm_bytes={hwm}");
+    }
+
+    /// Narrow arm of the peak-memory measurement. Run on its own it certifies
+    /// that the profile builds at this width; run as a child of the gate below
+    /// it is one of the two readings the gate differences.
+    #[test]
+    fn zz_child_certified_spectrum_peak_memory_narrow_2546() {
+        report_certified_spectrum_peak(PEAK_MEMORY_LEVELS[0]);
+    }
+
+    /// Wide arm of the peak-memory measurement; see the narrow arm.
+    #[test]
+    fn zz_child_certified_spectrum_peak_memory_wide_2546() {
+        report_certified_spectrum_peak(PEAK_MEMORY_LEVELS[1]);
+    }
+
     /// Peak resident memory of the certified spectral profile against the width
     /// it was built at, so [`CERTIFIED_SPECTRUM_BLOCKS`] is a measured number and
     /// not an inventory of the allocations this file can see.
@@ -4938,45 +5002,125 @@ mod refinement_decision_tests {
     /// The block count is what converts a memory budget into a column cap, and it
     /// is NOT knowable from this file: `eigh` is `faer`'s self-adjoint EVD behind
     /// `FaerEigh`, and its tridiagonalization allocates workspace this crate never
-    /// names. `VmHWM` is the process high-water mark, so widths are visited in
-    /// increasing order and each reading is that width's peak.
+    /// names.
+    ///
+    /// Each width is measured in its OWN CHILD PROCESS, and that is the subject
+    /// of this comment rather than an implementation note. `VmHWM` is a
+    /// PROCESS-WIDE high-water mark, so a difference of two readings taken in one
+    /// process is this route's marginal growth only if nothing else allocated
+    /// between them. Under `cargo test` the crate's ~1750 tests are threads in a
+    /// SINGLE process and that condition does not hold. Measured at `b8745892a`:
+    ///
+    /// ```text
+    /// exclusive process, host load 308-424, RAYON_NUM_THREADS 1/2/4/8
+    ///     blocks = 6.41 / 6.84 / 6.63 / 6.79      -> passes
+    /// shared process (`cargo test`), host load 1403
+    ///     blocks = 15.00                          -> fails
+    /// shared process (`cargo test`), host load 68
+    ///     passes
+    /// ```
+    ///
+    /// Load is not the variable and parallelism is not the variable: the
+    /// exclusive arms ran at loads comparable to the failing shared arm and read
+    /// 6.4-6.8 every time, flat across an 8x parallelism range. Process
+    /// exclusivity is the variable. A shared-process reading over-attributes
+    /// whatever else allocated between the two samples to this route, and the
+    /// 15.00 it produced would have condemned a correct constant — raising
+    /// [`CERTIFIED_SPECTRUM_BLOCKS`] to 16 cuts [`CERTIFIED_SPECTRUM_MAX`] from
+    /// 2896 to 2048 and narrows the exact width regime this budget exists to
+    /// open. A child process that builds one width and exits is exclusive by
+    /// construction, under either harness.
     ///
     /// The gate is that the constant is not an UNDER-estimate: a block count
     /// smaller than the realized one would let the cap admit a width that
     /// overruns the budget it was derived from.
     #[test]
     fn zz_measure_certified_spectrum_peak_memory_2546() {
-        let read_hwm_bytes = || -> Option<f64> {
-            let status = std::fs::read_to_string("/proc/self/status").ok()?;
-            for line in status.lines() {
-                if let Some(rest) = line.strip_prefix("VmHWM:") {
-                    let kb: f64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
-                    return Some(kb * 1024.0);
-                }
-            }
-            None
-        };
         if read_hwm_bytes().is_none() {
             println!("#2546 VmHWM unavailable on this platform; peak memory not measured");
             return;
         }
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(error) => {
+                println!("#2546 test binary path unavailable ({error}); peak memory not measured");
+                return;
+            }
+        };
         // Two widths, and the DIFFERENCE of their high-water marks over the
-        // difference of their `m²`: the process baseline (test binary, fixture,
-        // allocator arenas) is common to both and cancels, where a single
-        // absolute reading would attribute all of it to the narrow width.
+        // difference of their `m²`: the per-process baseline (test binary,
+        // fixture, allocator arenas) is identical in the two children and
+        // cancels, where a single absolute reading would attribute all of it to
+        // the narrow width.
         let mut readings: Vec<(usize, f64)> = Vec::new();
-        for levels in [5usize, 6] {
-            let (x1, x2, y) = dense_fixture(45);
-            let weights = vec![1.0; y.len()];
-            let axes: [&[f64]; 2] = [&x1, &x2];
-            let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
-                .expect("cascade design");
-            let m = design.core.m;
-            let profile = design.core.reml_profile().expect("spectral profile");
-            let modes = profile.modes.len();
-            drop(profile);
-            let hwm = read_hwm_bytes().expect("VmHWM was readable a moment ago");
-            println!("#2546 m={m} modes={modes} vmhwm={:.1}MiB", hwm / (1024.0 * 1024.0));
+        for child in [
+            "zz_child_certified_spectrum_peak_memory_narrow_2546",
+            "zz_child_certified_spectrum_peak_memory_wide_2546",
+        ] {
+            let path = format!("residual_cascade::refinement_decision_tests::{child}");
+            let output = std::process::Command::new(&exe)
+                .args(["--exact", path.as_str(), "--nocapture", "--test-threads=1"])
+                .output()
+                .unwrap_or_else(|error| panic!("spawn per-width child {child}: {error}"));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut reading: Option<(usize, f64)> = None;
+            for line in stdout.lines() {
+                // The marker is searched for ANYWHERE in the line, not stripped
+                // from its start. Under `--nocapture` libtest prints a test's
+                // stdout INLINE after its own `test <name> ... ` prefix, so the
+                // child's line arrives as
+                //
+                //     test residual_cascade::…::…_narrow_2546 ... #2546-child m=891 …
+                //
+                // and a prefix match reports every child as silent while the
+                // reading is sitting in the middle of the line.
+                let Some(offset) = line.find(CHILD_READING_MARKER) else {
+                    continue;
+                };
+                let rest = &line[offset + CHILD_READING_MARKER.len()..];
+                let mut width: Option<usize> = None;
+                let mut hwm: Option<f64> = None;
+                for field in rest.split_whitespace() {
+                    // Not `.ok()`. The scanner bans discarding an error here and
+                    // is right: a malformed `m=` or `vmhwm_bytes=` left the
+                    // field `None`, `reading` then stayed `None`, and the
+                    // `unwrap_or_else(|| panic!(..))` below fired with "no child
+                    // reading" -- blaming an ABSENT line for a line that was
+                    // present and unparseable. The reader is sent to look for a
+                    // missing marker that is right there.
+                    if let Some(value) = field.strip_prefix("m=") {
+                        width = Some(value.parse().unwrap_or_else(|error| {
+                            panic!(
+                                "child reading line carries an unparseable m={value:?}: \
+                                 {error}; the marker was found, so this is a malformed \
+                                 field, not a missing reading"
+                            )
+                        }));
+                    } else if let Some(value) = field.strip_prefix("vmhwm_bytes=") {
+                        hwm = Some(value.parse().unwrap_or_else(|error| {
+                            panic!(
+                                "child reading line carries an unparseable \
+                                 vmhwm_bytes={value:?}: {error}; the marker was found, \
+                                 so this is a malformed field, not a missing reading"
+                            )
+                        }));
+                    }
+                }
+                if let (Some(width), Some(hwm)) = (width, hwm) {
+                    reading = Some((width, hwm));
+                }
+            }
+            let (m, hwm) = reading.unwrap_or_else(|| {
+                panic!(
+                    "child {child} produced no reading (status {:?}).\nstdout:\n{stdout}\nstderr:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+            println!(
+                "#2546 m={m} vmhwm={:.1}MiB (own process)",
+                hwm / (1024.0 * 1024.0)
+            );
             readings.push((m, hwm));
         }
         let (narrow, narrow_hwm) = readings[0];

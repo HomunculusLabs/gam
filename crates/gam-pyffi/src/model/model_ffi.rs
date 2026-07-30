@@ -2995,7 +2995,14 @@ fn duchon_basis<'py>(
         periodic: None,
         boundary: OneDimensionalBoundary::Open,
     };
-    let built = build_duchon_basis(pts, &spec).map_err(basis_error_to_pyerr)?;
+    // Spec chart, NOT the data-metric one (gam#237). This primitive returns a
+    // design matrix and nothing else — there is no fit here to freeze a chart
+    // into and replay at predict time, so adopting a chart derived from the
+    // realized Gram made the COLUMN COUNT a function of the ROW count:
+    // `cols = min(K, n_points + d + 1)`, measured — the same 12-center d=2 spec
+    // gave 4 columns on 1 row and 12 on 30. Deriving the chart from the centers
+    // makes the width `K` for every frame size (63 of 63 configurations).
+    let built = build_duchon_basis_spec_chart(pts, &spec).map_err(basis_error_to_pyerr)?;
     Ok(built.design.to_dense().into_pyarray(py).unbind())
 }
 

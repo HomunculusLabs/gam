@@ -516,6 +516,109 @@ impl CustomFamily for OneBlockCovarianceErrorFamily {
     }
 }
 
+/// gam#2637: a trust-region step whose MODEL prediction has fallen under the
+/// objective's round-off floor, but whose REALIZED reduction is measurably
+/// above it, must be taken rather than rejected — and the radius held rather
+/// than shrunk. The numbers are the measured cycle-8 attempt-0 state of
+/// `binomial_location_scale_engine_matches_reference_flow`, where the pre-fix
+/// controller returned `rho = -inf` and shrank the radius three times in a row,
+/// freezing the solve for 31 cycles.
+#[test]
+pub(crate) fn joint_trust_region_takes_a_measured_decrease_the_model_cannot_resolve_2637() {
+    // Measured decision variables, cycle 8 attempt 0.
+    const OLD_RADIUS: f64 = 1.0;
+    const STEP_NORM: f64 = 1.423511e-6;
+    const OBJECTIVE_SCALE: f64 = 41.56290748;
+    const MEASURED_ACTUAL: f64 = 2.090494888e-9;
+    const MEASURED_PREDICTED: f64 = 2.944376434e-13;
+
+    // The branch under test is defined by these two inequalities. Assert them
+    // so a change to the floor that moves the fixture OUT of the branch fails
+    // here instead of silently making the rest of this test vacuous.
+    let noise_floor = OBJECTIVE_SCALE * JOINT_TRUST_NOISE_FLOOR_REL;
+    assert!(
+        MEASURED_PREDICTED <= noise_floor,
+        "fixture must sit under the model-resolution floor: pred={MEASURED_PREDICTED:.6e} > floor={noise_floor:.6e}"
+    );
+    assert!(
+        MEASURED_ACTUAL > noise_floor,
+        "fixture must carry a resolvable realized decrease: actual={MEASURED_ACTUAL:.6e} <= floor={noise_floor:.6e}"
+    );
+
+    let update = update_joint_trust_region_radius(
+        OLD_RADIUS,
+        STEP_NORM,
+        MEASURED_ACTUAL,
+        MEASURED_PREDICTED,
+        OBJECTIVE_SCALE,
+    );
+    assert_eq!(
+        update.decision.label(),
+        "accept_model_noise_floor",
+        "the gam#2637 branch must be the one that fired, got {}",
+        update.decision.label()
+    );
+    assert!(
+        update.accepted,
+        "a realized decrease {MEASURED_ACTUAL:.6e} above the floor {noise_floor:.6e} must be taken"
+    );
+    assert_eq!(
+        update.radius, OLD_RADIUS,
+        "the radius must be HELD, not shrunk: the chord is radius-scaled, so shrinking makes the next prediction smaller and the rejection self-reinforcing"
+    );
+
+    // Non-vacuity 1 — a model that predicts ASCENT still rejects and shrinks.
+    let ascent = update_joint_trust_region_radius(
+        OLD_RADIUS,
+        STEP_NORM,
+        MEASURED_ACTUAL,
+        -1.0,
+        OBJECTIVE_SCALE,
+    );
+    assert!(
+        !ascent.accepted,
+        "a negative predicted reduction is model disagreement and must still reject"
+    );
+    assert!(
+        ascent.radius < OLD_RADIUS,
+        "model disagreement must still shrink the radius, got {:.6e}",
+        ascent.radius
+    );
+
+    // Non-vacuity 2 — an unresolvable prediction with NO realized decrease
+    // still rejects: the branch keys on the measurement, not on the model.
+    let no_gain = update_joint_trust_region_radius(
+        OLD_RADIUS,
+        STEP_NORM,
+        -1.0e-3,
+        MEASURED_PREDICTED,
+        OBJECTIVE_SCALE,
+    );
+    assert!(
+        !no_gain.accepted,
+        "an objective that got WORSE must reject however small the prediction was"
+    );
+
+    // Non-vacuity 3 — a resolvable prediction is untouched by this change, so
+    // the ordinary gain-ratio path keeps its labels and its arithmetic.
+    let resolvable =
+        update_joint_trust_region_radius(OLD_RADIUS, STEP_NORM, 1.0e-3, 1.0e-3, OBJECTIVE_SCALE);
+    assert!(
+        resolvable.accepted,
+        "a well-resolved unit gain ratio must accept"
+    );
+    assert!(
+        (resolvable.rho - 1.0).abs() <= 1e-12,
+        "the gain ratio must still be actual/predicted, got {:.6e}",
+        resolvable.rho
+    );
+    assert_ne!(
+        resolvable.decision.label(),
+        "accept_model_noise_floor",
+        "the gam#2637 branch must not swallow steps the model CAN resolve"
+    );
+}
+
 #[test]
 pub(crate) fn effectiveridge_is_never_below_solver_floor() {
     assert!((effective_solverridge(0.0) - 1e-15).abs() < 1e-30);
@@ -572,8 +675,7 @@ pub(crate) fn objective_includes_solverridge_quadratic_term() {
     let beta = result.block_states[0].beta[0];
     let expected_penalty = 0.5 * ridge * beta * beta;
     assert!(
-        (result.penalized_objective().expect("objective present") - expected_penalty).abs()
-            < 1e-12,
+        (result.penalized_objective().expect("objective present") - expected_penalty).abs() < 1e-12,
         "penalized objective should equal ridge quadratic term when ll=0 and S=0; got {:?}, expected {}",
         result.penalized_objective(),
         expected_penalty

@@ -90,16 +90,40 @@ def test_descriptor_evaluate_d2_various_m(m: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-# #1512 triage / #237 still open: the pyffi `gamfit.duchon_basis(pts, centers,
-# m=...)` collocation path returns FEWER columns than the number of centers for
-# several (d, m, n_centers) configurations (e.g. 9 centers d=2 m=2 -> 8 cols,
-# 11 centers d=3 m=2 -> 9 cols, 10 centers d=2 -> 8 cols), while the descriptor
-# `.evaluate` path for the same config returns the full one-column-per-center
-# basis (test_descriptor_evaluate_d2_m2_thin_plate, which passes). The two
-# Duchon surfaces disagree on the default collocation/null-space augmentation.
-# SPEC.md forbids xfail, so these pyffi-duchon tests stand FAILING as the signal
-# of the open #237 inconsistency; fix the pyffi basis to emit one column per
-# center like the descriptor path to green them.
+# #237 — FIXED. The old note here said the pyffi path "returns FEWER columns than
+# the number of centers for several (d, m, n_centers) configurations", listed
+# "11 centers d=3 m=2 -> 9 cols", and blamed the D2 collocation validator. Two of
+# those three claims were wrong, and the framing sent the reader to the wrong file.
+#
+# The width was never a function of (d, m, n_centers). It was a function of the
+# EVALUATION ROW COUNT. Holding the spec completely fixed (the same 12 centers,
+# d=2, m=2) and varying only how many points you evaluate at:
+#
+#       npts     1    2    3    4    5    6    8    9   10   12   16   30
+#       before   4    5    6    7    8    9   11   12   12   12   12   12
+#       after   12   12   12   12   12   12   12   12   12   12   12   12
+#
+#   i.e. `cols = min(K, n_points + d + 1)`, independent of m — verified over 63
+#   configurations (d in {2,3,4} x m in {1,2,3} x K in {6..12}).
+#
+# So "11 centers d=3 m=2 -> 9 cols" was really 8, because that fixture passes 4
+# evaluation points (4 + 3 + 1 = 8); the comment's numbers came from a different
+# fixture. And the D2 collocation validator was not involved at all —
+# `duchon_basis` resolves with `max_op = 0` and disables all three operator
+# penalties, so the width loss happened well after that check.
+#
+# The real cause was the #1355 data-metric radial chart: `build_duchon_basis`
+# forms `G_c = (K.Z)^T(K.Z)` from the REALIZED design and keeps only the
+# eigen-directions above a numerical floor — "design columns with no realized
+# data support", in the whitening step's own words. `G_c` has rank at most n, so
+# the basis collapsed to the rank of whatever frame it was handed. Fits were
+# never affected: a fit FREEZES that chart and replays it at predict time. Only
+# the basis-only primitive, which has no fit and nothing to freeze, recomputed a
+# fresh chart per call.
+#
+# `build_duchon_basis_spec_chart` now derives the chart from the CENTERS, so the
+# width is a property of the spec: 63 of 63 configurations emit exactly K.
+# The asserts below were RIGHT all along and none of them was touched.
 def test_pyffi_duchon_basis_d2_m2_default() -> None:
     rng = np.random.default_rng(10)
     centers = rng.standard_normal((9, 2))

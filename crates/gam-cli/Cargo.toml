@@ -35,6 +35,13 @@ thiserror = "2.0.18"
 # compiled the suite, and must follow it here. Versions match the workspace root.
 rand_distr = "0.6.0"
 tempfile = "3.27.0"
+# `gam_test_support::gam_binary!()` resolves the CLI binary at RUNTIME. The
+# integration tests below cannot use `env!("CARGO_BIN_EXE_gam")`: it bakes in an
+# absolute path from the compiling machine, which does not exist on the
+# `cargo nextest archive` runner that later executes the extracted archive.
+# No dependency cycle: gam-test-support depends on gam-linalg/models/problem/
+# runtime/terms only -- neither gam-cli nor the root `gam` crate.
+gam-test-support = { path = "../gam-test-support" }
 
 [lints.rust]
 warnings = "deny"

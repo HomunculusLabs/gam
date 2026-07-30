@@ -138,6 +138,85 @@ pub fn build_duchon_basiswithworkspace(
     build_duchon_basis_uncached(data, spec, workspace)
 }
 
+/// Build a Duchon design whose COLUMN SPACE is a property of the spec alone
+/// (gam#237).
+///
+/// [`build_duchon_basis`] adopts a *data-metric* radial chart when none is
+/// frozen: it forms `G_c = (K·Z)ᵀ(K·Z)` from the realized design and keeps only
+/// the `G_c` eigen-directions above a numerical floor — "design columns with no
+/// realized data support", as the whitening step's own comment puts it. `G_c`
+/// has rank at most `n`, so the surviving width is `min(K−p, n) + p`. For a FIT
+/// that is a deliberate rank reduction and it is safe, because the fit freezes
+/// the chart into basis metadata and replays it at predict time. For a
+/// basis-evaluation primitive, with no fit and nothing to freeze, it means the
+/// design's width is a function of the frame it is handed. Measured, one spec
+/// (12 centers, `d=2`, `m=2`), varying only the evaluation row count:
+///
+/// ```text
+///   before:  1 row -> 4 cols,  5 rows -> 8,  9 rows -> 12,  30 rows -> 12
+///   after :  1 row -> 12 cols, 5 rows -> 12, 9 rows -> 12,  30 rows -> 12
+/// ```
+///
+/// A basis that changes dimension with the number of points you evaluate it at
+/// cannot be applied twice consistently, and its `basis_size` is unknowable
+/// without the data. This entry point instead derives the chart from the
+/// CENTERS — the same `Ω_c` bending eigenbasis
+/// `thin_plate_radial_reparam_data_metric` already falls back to when the
+/// realized Gram is degenerate — and freezes it into the spec before building.
+/// The width is then `K` exactly: measured across 63 configurations
+/// (`d ∈ {2,3,4}` × `m ∈ {1,2,3}` × `K ∈ {6..12}`), 63 of 63 emit `cols == K`.
+/// It is `K` rather than something smaller because `Ω_c` is the bending energy
+/// on the ALREADY constrained kernel block, whose polynomial null space has been
+/// projected out, so all `K−p` modes carry genuine curvature and none falls
+/// below the `K·ε·λ_max` roundoff floor.
+///
+/// Callers that ARE fitting should keep using [`build_duchon_basis`]: the
+/// data-metric chart is what removes the REML over-smoothing collapse (#1355),
+/// and it is legitimate there precisely because a fit persists it.
+pub fn build_duchon_basis_spec_chart(
+    data: ArrayView2<'_, f64>,
+    spec: &DuchonBasisSpec,
+) -> Result<BasisBuildResult, BasisError> {
+    // An explicitly frozen chart already makes the basis spec-determined, and
+    // the periodic/cyclic builders never reach the data-metric branch at all,
+    // so in both cases the ordinary path is already frame-independent.
+    if spec.radial_reparam.is_some() || spec.periodic.is_some() || spec.boundary.period().is_some()
+    {
+        return build_duchon_basis(data, spec);
+    }
+    let mut workspace = BasisWorkspace::default();
+    let centers = select_centers_by_strategy(data, &spec.center_strategy)?;
+    let effective_nullspace_order =
+        duchon_effective_nullspace_order(centers.view(), spec.nullspace_order);
+    let aniso = auto_seed_aniso_contrasts(centers.view(), spec.aniso_log_scales.as_deref());
+    let kernel_transform = kernel_constraint_nullspace(
+        centers.view(),
+        effective_nullspace_order,
+        &mut workspace.cache,
+    )?;
+    if kernel_transform.ncols() == 0 {
+        return build_duchon_basis(data, spec);
+    }
+    let omega_constrained = duchon_constrained_bending_penalty(
+        centers.view(),
+        spec.length_scale,
+        spec.power,
+        effective_nullspace_order,
+        aniso.as_deref(),
+        &kernel_transform,
+    )?;
+    let (v, _mu) = thin_plate_radial_reparam_from_constrained_penalty(&omega_constrained)?;
+    if v.ncols() == 0 {
+        // A degenerate chart would gut the basis; the unrotated design is a
+        // better answer than an empty one, and it is still frame-independent
+        // because nothing data-derived went into it.
+        return build_duchon_basis(data, spec);
+    }
+    let mut spec_chart = spec.clone();
+    spec_chart.radial_reparam = Some(v);
+    build_duchon_basis(data, &spec_chart)
+}
+
 fn build_duchon_basis_uncached(
     data: ArrayView2<'_, f64>,
     spec: &DuchonBasisSpec,
@@ -466,70 +545,25 @@ fn build_duchon_basis_uncached(
         // halves the cold-build kernel work for explicit native-only Duchon
         // configurations (`all_disabled()`, no frozen reparam), closing their
         // wall-time gap to `thinplate(x, z)` without changing default terms.
+        // The chart resolution itself lives in `duchon_resolve_radial_chart`, so
+        // the ψ-derivative context resolves the IDENTICAL frame from the same
+        // `(data, spec)` instead of assuming the raw `Z` (#2638).
         let mut prebuilt_raw_basis: Option<Array2<f64>> = None;
-        if frozen_radial_reparam.is_none() {
-            let kernel_cols = kernel_transform.ncols();
-            if kernel_cols > 0 {
-                // Build the un-rotated constrained kernel design once, take its
-                // realized Gram `G_c = (K·Z)ᵀ(K·Z)`, and solve the generalized
-                // eigenproblem `Ω_c v = μ G_c v` with `Ω_c = α²·ZᵀK_CC Z`.
-                let raw = build_duchon_basis_designwithworkspace(
-                    data,
-                    centers.view(),
-                    spec.length_scale,
-                    spec.power,
-                    effective_nullspace_order,
-                    aniso.as_deref(),
-                    None,
-                    workspace,
-                )?;
-                let kernel_block = raw.basis.slice(s![.., 0..kernel_cols]);
-                // Canonical row order so the realized Gram (and the near-degenerate
-                // reparam it feeds) is bit-identical under a pure row permutation (#1378).
-                let design_gram = data_metric_design_gram(kernel_block);
-                let omega_constrained = duchon_constrained_bending_penalty(
-                    centers.view(),
-                    spec.length_scale,
-                    spec.power,
-                    effective_nullspace_order,
-                    aniso.as_deref(),
-                    &kernel_transform,
-                )?;
-                let (v, _mu) =
-                    thin_plate_radial_reparam_data_metric(&omega_constrained, &design_gram)?;
-                // A degenerate reparam (no retained modes) would gut the basis;
-                // only adopt `V` when it preserves at least one radial column.
-                if v.ncols() > 0 {
-                    // The fit-time design is `[K·Z·V | P] = [(K·Z)·V | P]`,
-                    // where `K·Z` and `P` are exactly the kernel/poly blocks of
-                    // `raw` (the reparam only right-multiplies the constrained
-                    // kernel columns; the poly block is reparam-independent). So
-                    // rotate `raw`'s kernel block by `V` in place rather than
-                    // re-evaluating the kernel: `(K·Z)·V = K·(Z·V)`, the same
-                    // model space the un-fused rebuild would produce.
-                    let rotated_kernel = fast_ab(&raw.basis.slice(s![.., 0..kernel_cols]), &v);
-                    let poly_block = raw.basis.slice(s![.., kernel_cols..]);
-                    let mut fused = Array2::<f64>::zeros((
-                        raw.basis.nrows(),
-                        rotated_kernel.ncols() + poly_block.ncols(),
-                    ));
-                    fused
-                        .slice_mut(s![.., 0..rotated_kernel.ncols()])
-                        .assign(&rotated_kernel);
-                    if poly_block.ncols() > 0 {
-                        fused
-                            .slice_mut(s![.., rotated_kernel.ncols()..])
-                            .assign(&poly_block);
-                    }
-                    prebuilt_raw_basis = Some(fused);
-                    kernel_transform = fast_ab(&kernel_transform, &v);
-                    frozen_radial_reparam = Some(v);
-                } else {
-                    // No reparam adopted: `raw` already IS the fit-time design
-                    // (no rotation), so reuse it directly.
-                    prebuilt_raw_basis = Some(raw.basis);
-                }
+        if frozen_radial_reparam.is_none() && kernel_transform.ncols() > 0 {
+            let resolved = duchon_resolve_radial_chart(
+                data,
+                centers.view(),
+                spec,
+                effective_nullspace_order,
+                aniso.as_deref(),
+                &kernel_transform,
+                workspace,
+            )?;
+            if let Some(v) = resolved.reparam {
+                kernel_transform = fast_ab(&kernel_transform, &v);
+                frozen_radial_reparam = Some(v);
             }
+            prebuilt_raw_basis = Some(resolved.basis);
         }
         let basis = if let Some(basis) = prebuilt_raw_basis {
             basis
@@ -620,7 +654,12 @@ fn build_duchon_basis_uncached(
         joint_null_rotation: None,
         metadata: BasisMetadata::Duchon {
             centers,
-            length_scale: spec.length_scale,
+            // The builder standardizes nothing of its own — it emits
+            // `input_scale: ONE` — so the range it was handed IS this
+            // metadata's original-units range.  The term-collection wrapper
+            // that DID standardize replaces the scale and the range together
+            // (`term_specs.rs`), keeping the tag honest on both sides.
+            length_scale: spec.length_scale.map(crate::OriginalUnits::new),
             periodic: spec.periodic.clone(),
             power: spec.power,
             nullspace_order: effective_nullspace_order,
@@ -1278,6 +1317,278 @@ pub(crate) fn thin_plate_radial_reparam_data_metric(
     let v_full = fast_ab(&w, &p_mat); // k×m, G_c-orthonormal columns
     let keep = thin_plate_retained_radial_indices(&mu);
     Ok((v_full.select(Axis(1), &keep), mu.select(Axis(0), &keep)))
+}
+
+/// The Duchon coefficient chart resolved against one `(data, spec)` pair: the
+/// adopted data-metric radial reparameterization `V` together with the realized
+/// pre-identifiability design expressed IN that chart.
+///
+/// See [`duchon_resolve_radial_chart`] for why this is a type rather than two
+/// inlined blocks.
+pub(crate) struct DuchonResolvedRadialChart {
+    /// The adopted reparam `V`, or `None` when none was adopted (degenerate
+    /// generalized eigenproblem, or no constrained kernel columns at all).
+    pub(crate) reparam: Option<Array2<f64>>,
+    /// The realized pre-identifiability design in the resolved chart:
+    /// `[K·Z·V | P]` when `V` was adopted, `[K·Z | P]` otherwise.
+    pub(crate) basis: Array2<f64>,
+}
+
+/// Resolve the Duchon coefficient chart for a spec that does not carry one.
+///
+/// # Why this exists
+///
+/// `build_duchon_basis` ships every design column and every penalty in the
+/// `Z·V` frame, where `V` is the data-metric radial reparameterization (#1355)
+/// solving the generalized eigenproblem `Ω_c v = μ G_c v`. On a replay path
+/// (`spec.radial_reparam = Some(V)`) that chart is handed in. On a COLD path it
+/// is computed here — and until #2638 it was computed *only* here, inline in
+/// the forward builder, which meant every other consumer of the same spec
+/// silently assumed "no frozen reparam" ⇒ "no reparam", i.e. the raw `Z` frame.
+///
+/// That assumption is what broke the log-κ derivative surface. The ψ-jet
+/// builders fold `V` only `if let Some(v) = spec.radial_reparam`, so on a cold
+/// spec they assembled `dS/dψ` in the un-rotated `Z` frame — a right derivative
+/// of a matrix the forward never ships. Measured on the `_no_ident` fixture at
+/// ε = 1e-5: the returned Primary jet was 32× the true frozen-chart jet and the
+/// OperatorMass jet 242× too small, with the whole residual accounted for by
+/// chart motion (`|FD_cold − FD_frozen| = 2.49e-1` against a `|A − FD|` of
+/// 1.6e-5 once both sides sit in the same chart).
+///
+/// Routing both the forward and the derivative context through this one
+/// function makes the frame a property of `(data, spec)` rather than of which
+/// builder you happened to call.
+///
+/// # Cost
+///
+/// One `n×k` kernel materialization, which the caller gets back in
+/// [`DuchonResolvedRadialChart::basis`] — the rotated design is obtained as
+/// `(K·Z)·V = K·(Z·V)` rather than by a second kernel pass (#1718).
+pub(crate) fn duchon_resolve_radial_chart(
+    data: ArrayView2<'_, f64>,
+    centers: ArrayView2<'_, f64>,
+    spec: &DuchonBasisSpec,
+    effective_nullspace_order: DuchonNullspaceOrder,
+    aniso: Option<&[f64]>,
+    kernel_transform: &Array2<f64>,
+    workspace: &mut BasisWorkspace,
+) -> Result<DuchonResolvedRadialChart, BasisError> {
+    // Build the un-rotated constrained kernel design once, take its realized
+    // Gram `G_c = (K·Z)ᵀ(K·Z)`, and solve `Ω_c v = μ G_c v` with
+    // `Ω_c = α²·ZᵀK_CC Z`.
+    let raw = build_duchon_basis_designwithworkspace(
+        data,
+        centers,
+        spec.length_scale,
+        spec.power,
+        effective_nullspace_order,
+        aniso,
+        None,
+        workspace,
+    )?;
+    let kernel_cols = kernel_transform.ncols();
+    if kernel_cols == 0 {
+        return Ok(DuchonResolvedRadialChart {
+            reparam: None,
+            basis: raw.basis,
+        });
+    }
+    let kernel_block = raw.basis.slice(s![.., 0..kernel_cols]);
+    // Canonical row order so the realized Gram (and the near-degenerate reparam
+    // it feeds) is bit-identical under a pure row permutation (#1378).
+    let design_gram = data_metric_design_gram(kernel_block);
+    let omega_constrained = duchon_constrained_bending_penalty(
+        centers,
+        spec.length_scale,
+        spec.power,
+        effective_nullspace_order,
+        aniso,
+        kernel_transform,
+    )?;
+    let (v, _mu) = thin_plate_radial_reparam_data_metric(&omega_constrained, &design_gram)?;
+    // A degenerate reparam (no retained modes) would gut the basis; only adopt
+    // `V` when it preserves at least one radial column.
+    if v.ncols() == 0 {
+        // No reparam adopted: `raw` already IS the fit-time design.
+        return Ok(DuchonResolvedRadialChart {
+            reparam: None,
+            basis: raw.basis,
+        });
+    }
+    // The fit-time design is `[K·Z·V | P] = [(K·Z)·V | P]`, where `K·Z` and `P`
+    // are exactly the kernel/poly blocks of `raw` (the reparam only
+    // right-multiplies the constrained kernel columns; the poly block is
+    // reparam-independent). So rotate `raw`'s kernel block by `V` in place
+    // rather than re-evaluating the kernel — the same model space the un-fused
+    // rebuild would produce.
+    let rotated_kernel = fast_ab(&raw.basis.slice(s![.., 0..kernel_cols]), &v);
+    let poly_block = raw.basis.slice(s![.., kernel_cols..]);
+    let mut fused = Array2::<f64>::zeros((
+        raw.basis.nrows(),
+        rotated_kernel.ncols() + poly_block.ncols(),
+    ));
+    fused
+        .slice_mut(s![.., 0..rotated_kernel.ncols()])
+        .assign(&rotated_kernel);
+    if poly_block.ncols() > 0 {
+        fused
+            .slice_mut(s![.., rotated_kernel.ncols()..])
+            .assign(&poly_block);
+    }
+    Ok(DuchonResolvedRadialChart {
+        reparam: Some(v),
+        basis: fused,
+    })
+}
+
+/// A `DuchonBasisSpec` with every ψ-invariant chart decision resolved against
+/// the data, plus the artifacts those decisions produced.
+///
+/// See [`duchon_resolve_chart`].
+#[derive(Clone, Debug)]
+pub struct ResolvedDuchonChart {
+    /// The input spec with `center_strategy` realized to `UserProvided`,
+    /// `nullspace_order` degraded to the effective order, `aniso_log_scales`
+    /// auto-seeded, `radial_reparam` set to the adopted `V`, and
+    /// `identifiability` frozen to the realized transform.
+    ///
+    /// `build_duchon_basis(data, &resolved.spec)` reproduces
+    /// `build_duchon_basis(data, spec)` — same design, same penalties, same
+    /// metadata — because every decision the second build would re-make is
+    /// already pinned in the first.
+    pub spec: DuchonBasisSpec,
+    /// The realized centers (periodic images expanded).
+    pub centers: Array2<f64>,
+    /// The realized identifiability transform, `None` when the spec asks for
+    /// no constraint.
+    pub identifiability_transform: Option<Array2<f64>>,
+}
+
+/// Resolve every ψ-invariant chart decision a Duchon build makes, so a caller
+/// can hand the SAME chart to the forward and to its ψ-derivative.
+///
+/// # The contract this exists to make expressible
+///
+/// A Duchon basis is not determined by `spec` alone. Four decisions are taken
+/// against the data at build time and then baked into `BasisMetadata::Duchon`:
+///
+/// | decision | forward site |
+/// |---|---|
+/// | realized centers | `select_centers_by_strategy` |
+/// | effective null-space order (degraded when the centers cannot span the requested polynomial block) | `duchon_effective_nullspace_order` |
+/// | auto-seeded anisotropy contrasts | `auto_seed_aniso_contrasts` |
+/// | data-metric radial reparam `V` (#1355) | [`duchon_resolve_radial_chart`] |
+/// | identifiability transform `T`, derived from the **`V`-rotated** design | `spatial_identifiability_transform_from_design` |
+///
+/// Until #2638 the log-κ derivative context re-made only the first of these and
+/// took the raw spec value for the rest: it passed `spec.nullspace_order`
+/// (not the effective order), `spec.aniso_log_scales` (not the seeded
+/// contrasts), `None` for the reparam, and derived `T` from the **un**-rotated
+/// design. So `build_duchon_basis_log_kappa_derivatives(data, spec)` returned
+/// the ψ-jet of a basis `build_duchon_basis(data, spec)` does not build. The
+/// dominant term was the reparam: measured on a 1-D `power=1`, `Linear`
+/// fixture, the returned Primary jet was 32× the true jet and the OperatorMass
+/// jet 242× too small, each in the wrong coefficient frame.
+///
+/// Resolving once and passing the resolved spec everywhere makes that class of
+/// desync unrepresentable rather than merely fixed: a builder that reads
+/// `spec.radial_reparam` from a resolved spec cannot see `None` where the
+/// forward saw a `V`.
+///
+/// # Cost
+///
+/// One dense `n×k` kernel materialization (the design that feeds the `V`
+/// eigenproblem and the identifiability test). This is the same pass the
+/// derivative context already paid; the resolver reuses it for both.
+pub fn duchon_resolve_chart(
+    data: ArrayView2<'_, f64>,
+    spec: &DuchonBasisSpec,
+    workspace: &mut BasisWorkspace,
+) -> Result<ResolvedDuchonChart, BasisError> {
+    let original_centers = select_centers_by_strategy(data, &spec.center_strategy)?;
+    let centers = expand_periodic_centers(&original_centers, spec.periodic.as_deref())?;
+    assert_spatial_centers_below_large_scale_cap(data.ncols(), centers.view())?;
+    let effective_nullspace_order =
+        duchon_effective_nullspace_order(centers.view(), spec.nullspace_order);
+    let aniso = auto_seed_aniso_contrasts(centers.view(), spec.aniso_log_scales.as_deref());
+
+    let mut resolved = spec.clone();
+    resolved.center_strategy = CenterStrategy::UserProvided(centers.clone());
+    resolved.nullspace_order = effective_nullspace_order;
+    resolved.aniso_log_scales = aniso.clone();
+
+    // The pre-identifiability design IN the resolved radial chart. On a replay
+    // spec the chart is handed in; on a cold spec it is solved for here by the
+    // same helper the forward uses, so the two frames agree by construction.
+    let basis = match spec.radial_reparam.as_ref() {
+        Some(v) => {
+            build_duchon_basis_designwithworkspace(
+                data,
+                centers.view(),
+                spec.length_scale,
+                spec.power,
+                effective_nullspace_order,
+                aniso.as_deref(),
+                Some(v),
+                workspace,
+            )?
+            .basis
+        }
+        None => {
+            let kernel_transform = kernel_constraint_nullspace(
+                centers.view(),
+                effective_nullspace_order,
+                &mut workspace.cache,
+            )?;
+            if kernel_transform.ncols() == 0 {
+                build_duchon_basis_designwithworkspace(
+                    data,
+                    centers.view(),
+                    spec.length_scale,
+                    spec.power,
+                    effective_nullspace_order,
+                    aniso.as_deref(),
+                    None,
+                    workspace,
+                )?
+                .basis
+            } else {
+                let chart = duchon_resolve_radial_chart(
+                    data,
+                    centers.view(),
+                    spec,
+                    effective_nullspace_order,
+                    aniso.as_deref(),
+                    &kernel_transform,
+                    workspace,
+                )?;
+                resolved.radial_reparam = chart.reparam;
+                chart.basis
+            }
+        }
+    };
+
+    // `T` is a property of the REALIZED design, so it must be read off the
+    // rotated basis — the forward derives it after folding `V`, and a `T` built
+    // on the un-rotated columns constrains a different function space.
+    let identifiability_transform = spatial_identifiability_transform_from_design(
+        data,
+        basis.view(),
+        &spec.identifiability,
+        "Duchon",
+    )?;
+    resolved.identifiability = match identifiability_transform.as_ref() {
+        Some(transform) => SpatialIdentifiability::FrozenTransform {
+            transform: transform.clone(),
+        },
+        None => SpatialIdentifiability::None,
+    };
+
+    Ok(ResolvedDuchonChart {
+        spec: resolved,
+        centers,
+        identifiability_transform,
+    })
 }
 
 pub(crate) fn thin_plate_radial_reparam_from_centers(

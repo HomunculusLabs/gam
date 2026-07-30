@@ -394,10 +394,45 @@ pub(crate) fn estimate_negbin_theta_from_eta(
         negbin_theta_score_and_info_from_means(y, eta, &means, priorweights, NEGBIN_THETA_MIN)?;
     let (score_hi, _) =
         negbin_theta_score_and_info_from_means(y, eta, &means, priorweights, NEGBIN_THETA_MAX)?;
-    if !(score_lo > 0.0 && score_hi < 0.0) {
+    if !(score_lo.is_finite() && score_hi.is_finite()) {
         crate::bail_invalid_estim!(
-            "negative-binomial theta has no finite interior ML root in ({NEGBIN_THETA_MIN}, {NEGBIN_THETA_MAX}); scores=({score_lo:?}, {score_hi:?})"
+            "negative-binomial theta profile score is unrepresentable at the domain endpoints ({NEGBIN_THETA_MIN}, {NEGBIN_THETA_MAX}); scores=({score_lo:?}, {score_hi:?})"
         );
+    }
+    // `score` IS d/dtheta of the profiled NB2 log-likelihood, so its SIGN at an
+    // endpoint locates the maximizer relative to that endpoint. An interior
+    // root needs `score_lo > 0 > score_hi`; the two one-sided failures are not
+    // "no maximizer", they are a maximizer the representable domain cannot
+    // hold, and the profile's maximum over the domain is then attained AT the
+    // endpoint.
+    //
+    // `score_hi >= 0` is the equidispersed / underdispersed case: the
+    // likelihood is still rising at theta = 1e6, i.e. theta-hat is +inf and the
+    // NB2 model has collapsed onto its Poisson limit. Measured on this
+    // workspace's own fixtures the excess is not even resolvable —
+    // `scores=(6948.2, 9.06e-12)` and `scores=(137678.1, 7.45e-13)`, upper
+    // scores 15 and 17 orders of magnitude below the lower one — so refusing
+    // the WHOLE fit over it discarded a converged model to avoid returning the
+    // one value the profile actually maximizes at.
+    //
+    // `score_lo <= 0` is the mirror image at the lower rail. Both return the
+    // endpoint, which is exactly what the safeguarded bisection below would
+    // converge to if the domain were open; what it must NOT do is silently
+    // report an interior estimate, and it does not: the returned theta is the
+    // rail itself.
+    //
+    // Both endpoints failing at once is a genuinely non-monotone profile score,
+    // which no rail can represent, and keeps the fail-loud refusal.
+    if score_lo <= 0.0 && score_hi >= 0.0 {
+        crate::bail_invalid_estim!(
+            "negative-binomial theta profile score is non-monotone across ({NEGBIN_THETA_MIN}, {NEGBIN_THETA_MAX}); scores=({score_lo:?}, {score_hi:?})"
+        );
+    }
+    if score_hi >= 0.0 {
+        return Ok(NEGBIN_THETA_MAX);
+    }
+    if score_lo <= 0.0 {
+        return Ok(NEGBIN_THETA_MIN);
     }
     let mut lo = NEGBIN_THETA_MIN;
     let mut hi = NEGBIN_THETA_MAX;

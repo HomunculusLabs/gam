@@ -9,6 +9,7 @@ import csv
 import math
 import os
 import random
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -16,7 +17,28 @@ _Z_975 = 1.959963984540054
 
 
 def _gam_binary() -> str:
-    return os.environ.get("GAM_BIN", str(Path("target/debug/gam")))
+    """Resolve the `gam` CLI the way every other CLI repro in tests/ does.
+
+    CI builds the RELEASE binary (`cargo build --release -p gam-cli`) before the
+    full Python suite; this test named `target/debug/gam` unconditionally, so it
+    never reached the CLI serialization boundary it exists to guard — it died in
+    `subprocess.Popen` with `FileNotFoundError: 'target/debug/gam'`.
+    """
+
+    repo_root = Path(__file__).resolve().parents[1]
+    for candidate in (
+        os.environ.get("GAM_BIN"),
+        repo_root / "target" / "release" / "gam",
+        repo_root / "target" / "debug" / "gam",
+        shutil.which("gam"),
+    ):
+        if candidate and Path(candidate).exists():
+            return str(candidate)
+    # No skip (SPEC 16): an unbuilt CLI is a real gap in this measurement and
+    # must read red, but it must say so instead of surfacing as a bare ENOENT.
+    raise AssertionError(
+        "no `gam` CLI binary found (GAM_BIN, target/release/gam, target/debug/gam, PATH)"
+    )
 
 
 def test_cli_location_scale_uncertainty_preserves_std_error(tmp_path: Path) -> None:

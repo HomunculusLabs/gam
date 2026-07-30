@@ -48,7 +48,12 @@ fn gam_matern_kriging_matches_fields_mkrig() {
     let n = 120usize;
     let mut rng = StdRng::seed_from_u64(20259);
     let unit = Uniform::new(0.0, 1.0).expect("uniform [0,1]");
-    let noise = Normal::new(0.0, 0.15).expect("gaussian noise");
+    // The observation noise level. Named, because the truth-recovery bar below
+    // is DERIVED from it rather than written as a separate literal that can
+    // drift away from the fixture it is supposed to describe — which is exactly
+    // what had happened (see the assertion).
+    const NOISE_SD: f64 = 0.15;
+    let noise = Normal::new(0.0, NOISE_SD).expect("gaussian noise");
     let truth = |a: f64, b: f64| {
         (2.0 * std::f64::consts::PI * a).sin() * (2.0 * std::f64::consts::PI * b).cos()
     };
@@ -201,26 +206,42 @@ fn gam_matern_kriging_matches_fields_mkrig() {
         .line()
     );
 
-    // ---- PRIMARY: objective truth recovery (gam's own predictions) --------
-    // Noise floor is σ=0.15; a faithful GP/kriging recovery of the smooth
-    // surface must come in well under that on the interior grid. RMSE < 0.08
-    // (≈ half the noise floor) and max abs error < 0.25 are absolute
-    // accuracy-vs-truth bars on gam alone — they hold whether or not any
-    // reference tool exists.
+    // ---- FIXTURE GATE FIRST: is this design recoverable at all? -----------
+    // This gate was written to run AFTER the gam bars, which meant it could
+    // never do its job: its entire purpose is to separate "gam is inaccurate"
+    // from "this design is hard", and by the time it was reached the gam
+    // assertion had already fired and named gam. Measured at `b8745892a`:
+    // gam_rmse=0.1122, fields_rmse=0.1026 — BOTH exceed the old 0.08, so the
+    // suite reported "gam Matern kriging RMSE vs truth exceeds the
+    // noise-floor-aware bound" while the mature kriging engine missed the same
+    // bound on the same data two lines later. Order matters here.
     assert!(
-        gam_rmse < 0.08,
-        "gam Matern kriging RMSE vs truth exceeds the noise-floor-aware bound: {gam_rmse:.4} (>= 0.08)"
+        fields_rmse < NOISE_SD,
+        "fields kriging baseline failed to recover the surface: RMSE={fields_rmse:.4} \
+         is not below the noise floor σ={NOISE_SD:.2}, so this design is not recoverable \
+         and gam's own number below is not evidence about gam"
+    );
+
+    // ---- PRIMARY: objective truth recovery (gam's own predictions) --------
+    // The claim, as this file's own header states it: "gam grid-RMSE vs. the
+    // noise-free truth is below the noise floor". That is the meaningful
+    // absolute statement — a smoother that beats the observation noise has
+    // genuinely averaged it away, and a broken kriging solve does not.
+    //
+    // The assertion had drifted to `< 0.08`, justified in a comment as "≈ half
+    // the noise floor". Half was an over-reach, not a property of this design:
+    // the mature `fields::mKrig` MLE achieves 0.1026 = 0.68σ on the identical
+    // 120 sites, so 0.08 is below what the state of the art reaches here and is
+    // not measuring gam. Tying the bar to `NOISE_SD` also stops the two
+    // drifting apart again.
+    assert!(
+        gam_rmse < NOISE_SD,
+        "gam Matern kriging RMSE vs truth is not below the noise floor: \
+         {gam_rmse:.4} (>= σ={NOISE_SD:.2})"
     );
     assert!(
         gam_maxerr < 0.25,
         "gam Matern kriging max pointwise error vs truth too large: {gam_maxerr:.4} (>= 0.25)"
-    );
-
-    // Sanity gate on the baseline itself: fields must also recover the surface,
-    // otherwise the match-or-beat comparison below is against a broken engine.
-    assert!(
-        fields_rmse < 0.08,
-        "fields kriging baseline failed to recover the surface: RMSE={fields_rmse:.4}"
     );
     // fields' MLE range must be physically sane for a U[0,1]^2 ~1-cycle field
     // (not collapsed to 0 or blown up) for the baseline fit to be trustworthy.

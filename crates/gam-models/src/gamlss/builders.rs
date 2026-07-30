@@ -3546,13 +3546,18 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
         }
         let need_hessian = matches!(order, OuterEvalOrder::ValueGradientHessian)
             && analytic_outer_hessian_available;
+        // The evaluator's contract is "produce the criterion at THIS theta",
+        // so its refusals are per-theta refusals. `InvalidInput` says the
+        // opposite to `is_trial_point_infeasible`, and the outer boundary then
+        // graded them Fatal and killed the fit (#2627).
         let (eval, _, _) = build_eval(theta, state.warm_cache.as_ref(), need_hessian)
-            .map_err(EstimationError::InvalidInput)?;
+            .map_err(|reason| EstimationError::TrialPointRefused { reason })?;
         if !eval.inner_converged {
             state.warm_cache = Some(eval.warm_start);
-            crate::bail_invalid_estim!(
-                "binomial mean-wiggle exact spatial inner solve did not converge"
-            );
+            return Err(EstimationError::TrialPointRefused {
+                reason: "binomial mean-wiggle exact spatial inner solve did not converge"
+                    .to_string(),
+            });
         }
         let hessian_result = eval.outer_hessian.clone();
         state.last_eval = Some((
@@ -3584,13 +3589,13 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
                 return Ok(*cached_cost);
             }
             let (eval, _, _) = build_eval(theta, state.warm_cache.as_ref(), false)
-                .map_err(EstimationError::InvalidInput)?;
+                .map_err(|reason| EstimationError::TrialPointRefused { reason })?;
             if !eval.inner_converged {
                 state.warm_cache = Some(eval.warm_start);
-                crate::bail_invalid_estim!(
-                    "binomial mean-wiggle exact spatial cost inner solve did not converge"
+                return Err(EstimationError::TrialPointRefused {
+                    reason: "binomial mean-wiggle exact spatial cost inner solve did not converge"
                         .to_string(),
-                );
+                });
             }
             state.warm_cache = Some(eval.warm_start);
             Ok(eval.objective)
@@ -3615,13 +3620,13 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
         }),
         Some(|state: &mut MeanWiggleOuterState, theta: &Array1<f64>| {
             let eval = build_efs(theta, state.warm_cache.as_ref())
-                .map_err(EstimationError::InvalidInput)?;
+                .map_err(|reason| EstimationError::TrialPointRefused { reason })?;
             if !eval.inner_converged {
                 state.warm_cache = Some(eval.warm_start);
-                crate::bail_invalid_estim!(
-                    "binomial mean-wiggle exact spatial EFS inner solve did not converge"
+                return Err(EstimationError::TrialPointRefused {
+                    reason: "binomial mean-wiggle exact spatial EFS inner solve did not converge"
                         .to_string(),
-                );
+                });
             }
             state.warm_cache = Some(eval.warm_start);
             Ok(eval.efs_eval)
@@ -3643,7 +3648,7 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
                 return Ok(*cached_cost);
             }
             let (eval, _, _) = build_eval(theta, state.warm_cache.as_ref(), false)
-                .map_err(EstimationError::InvalidInput)?;
+                .map_err(|reason| EstimationError::TrialPointRefused { reason })?;
             state.warm_cache = Some(eval.warm_start);
             Ok(eval.objective)
         },

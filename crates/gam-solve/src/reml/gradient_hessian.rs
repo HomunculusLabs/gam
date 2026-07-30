@@ -2708,14 +2708,21 @@ impl<'a> RemlState<'a> {
             block_lambdas[j] = evals[r];
         }
 
-        // Penalty scores S_k β̂ (canonical basis) and λ_k = e^{ρ_k}.
-        // Computed once per inner solution on the eval bundle and reused
-        // across every assemble call sharing this bundle: β̂ =
-        // `pirls_result.beta_transformed` is fixed inside the bundle's
-        // `Arc<PirlsResult>` and `self.canonical_penalties` is fixed for the
-        // `RemlState`, so the vectors are ρ- and mode-invariant (exact hoist,
-        // identical values for every consumer).
-        let penalty_scores = bundle.canonical_penalty_scores_at_mode(&self.canonical_penalties)?;
+        // Penalty scores S_k β̂ in the TRANSFORMED frame, and λ_k = e^{ρ_k}.
+        // β̂ = `pirls_result.beta_transformed` lives in the stable
+        // reparameterized basis, so the penalties contracted against it MUST
+        // be `reparam_result.canonical_transformed` — per its own doc, "the
+        // single source of truth for penalty roots in the transformed frame"
+        // for exactly this TK-correction path. Contracting the ORIGINAL-frame
+        // `self.canonical_penalties` here (gam#2623) made the spliced
+        // ρ-gradient wrong by 4.6e-2 to 1.0 relative — sign-inverted with
+        // nine orders of error on the worst cells — whenever ‖Q_s − I‖ was
+        // large, which is what turned one outer evaluation into 178 on the
+        // fold that opened that issue. Computed once per inner solution on
+        // the eval bundle and reused across every assemble call sharing this
+        // bundle (exact hoist, identical values for every consumer).
+        let transformed_penalties = pirls_result.reparam_result.canonical_transformed.as_slice();
+        let penalty_scores = bundle.canonical_penalty_scores_at_mode(transformed_penalties)?;
         let lambdas = gam_problem::checked_exp_log_strengths(rho.iter().copied())?;
 
         // Scale converting the REPORTED deviance into negative log-likelihood.
@@ -2780,6 +2787,7 @@ impl<'a> RemlState<'a> {
             inverse_link,
             phi,
             penalty_scores,
+            penalties: transformed_penalties,
             lambdas,
             base_scaled_half_deviance,
             base_neg_score_at_mode,
@@ -2952,7 +2960,7 @@ impl<'a> RemlState<'a> {
         //     − ½ Xᵀ(c ⊙ E_p[s²]).
         let delta_mean = target.block_vecs.dot(&moments.e_t); // p
         let mut g_d = x.t().dot(&(&moments.e_neg_score - &ngs_base));
-        for (pen, &lam) in self.canonical_penalties.iter().zip(target.lambdas.iter()) {
+        for (pen, &lam) in target.penalties.iter().zip(target.lambdas.iter()) {
             g_d.scaled_add(lam, &transformed_penalty_matvec(pen, &delta_mean));
         }
         g_d.scaled_add(-0.5, &x.t().dot(&(c_weights * &sigma2)));
@@ -3115,7 +3123,7 @@ impl<'a> RemlState<'a> {
             let mut tr_sq = 0.0_f64;
             for c in 0..p {
                 let s_col = transformed_penalty_matvec(
-                    &self.canonical_penalties[j],
+                    &target.penalties[j],
                     &q_mat.column(c).to_owned(),
                 );
                 tr_sq += s_col[c];

@@ -1599,7 +1599,7 @@ fn scan_summary_payload(model: &FittedModel, scan: &ScanIntrospection) -> Summar
     }];
     SummaryPayload {
         formula: model.payload().formula.clone(),
-        family_name: model.likelihood().pretty_name().to_string(),
+        family_name: model.display_family_name(),
         model_class: prediction_model_class_label(model),
         group_metadata: model.payload().group_metadata.clone(),
         deployment_extensions: model.payload().deployment_extensions.clone(),
@@ -1723,7 +1723,7 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
         .transpose()?;
     let payload = SummaryPayload {
         formula: model.payload().formula.clone(),
-        family_name: model.likelihood().pretty_name().to_string(),
+        family_name: model.display_family_name(),
         model_class: prediction_model_class_label(&model),
         group_metadata: model.payload().group_metadata.clone(),
         deployment_extensions: model.payload().deployment_extensions.clone(),
@@ -2034,7 +2034,7 @@ fn check_dataset_json_impl(model_bytes: &[u8], dataset: EncodedDataset) -> Resul
 fn scan_report_html(model: &FittedModel, scan: &ScanIntrospection) -> Result<String, String> {
     let report_input = ReportInput {
         model_path: "<in-memory>".to_string(),
-        family_name: model.likelihood().pretty_name().to_string(),
+        family_name: model.display_family_name(),
         model_class: prediction_model_class_label(model),
         formula: model.payload().formula.clone(),
         n_obs: Some(scan.training_sample_size),
@@ -2108,7 +2108,7 @@ fn report_html_impl(model_bytes: &[u8]) -> Result<String, String> {
         .collect::<Vec<_>>();
     let report_input = ReportInput {
         model_path: "<in-memory>".to_string(),
-        family_name: model.likelihood().pretty_name().to_string(),
+        family_name: model.display_family_name(),
         model_class: prediction_model_class_label(&model),
         formula: model.payload().formula.clone(),
         n_obs: Some(fit.training_sample_size()),

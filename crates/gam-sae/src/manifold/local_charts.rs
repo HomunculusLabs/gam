@@ -107,16 +107,59 @@ const CHART_INJECTIVITY_FLOOR_FRAC: f64 = 1.0e-6;
 /// sign cocycle, mirroring the analytic-vs-fitted split in [`super::chart_atlas`].
 const TRANSITION_CONDITION_FLOOR_FRAC: f64 = 1.0e-6;
 
-/// A transition's ORIENTATION is `sgn det(F_toᵀ F_from)`, and that is meaningful
-/// only while the chart change is a local diffeomorphism, i.e. while the two
-/// tangent planes are not orthogonal. `|det(F_toᵀ F_from)| = ∏_k cos θ_k` over the
-/// principal angles between the frames, so the determinant vanishes exactly when
-/// some chart direction of one patch is invisible to the other. `1e-6` is the
-/// numerical "the planes are not orthogonal" floor (overlapping patches on a
-/// manifold sit far above it — the sphere/Möbius/cylinder fixtures run at `|det|`
-/// of order `0.5` to `1`), below which the edge is [`TransitionConditioning::Degenerate`]
-/// and contributes no sign.
-const FRAME_OVERLAP_DETERMINANT_FLOOR: f64 = 1.0e-6;
+/// The angular resolution of one chart frame, returned as a SINE, derived from the
+/// patch's own captured-variance certificate. Not a tolerance and not a knob.
+///
+/// The frame is the `d`-plane that minimises the neighborhood's off-plane residual
+/// energy, and [`ChartCertificate::captured_variance_fraction`] `= 1 − ε` says the
+/// fitted plane leaves exactly `ε` of that energy off-plane. Tilt the plane by an
+/// angle `φ`: the tilt carries `sin²φ` of the CAPTURED energy off-plane, so the
+/// tilted plane's residual is at least `sin²φ·(1 − ε)` against the fitted plane's
+/// `ε`. The neighborhood therefore cannot prefer the fitted plane over any tilt with
+///
+/// ```text
+///     sin²φ · (1 − ε) ≤ ε        ⟺        sin φ ≤ √(ε / (1 − ε)).
+/// ```
+///
+/// That angle is the frame's OWN estimation resolution — the tilt at which this
+/// neighborhood stops distinguishing one tangent plane from another. A perfectly
+/// flat patch (`ε = 0`) resolves its plane exactly; a patch whose off-plane energy
+/// has reached its in-plane energy (`ε ≥ ½`) resolves nothing at all, and the
+/// resolution saturates at `1` so that no orientation read off it is admitted.
+fn frame_angular_resolution(certificate: &ChartCertificate) -> f64 {
+    let captured = certificate.captured_variance_fraction;
+    if !captured.is_finite() || captured <= 0.5 {
+        return 1.0;
+    }
+    let captured = captured.min(1.0);
+    let epsilon = 1.0 - captured;
+    let sine = (epsilon / captured).sqrt();
+    if sine.is_finite() { sine.min(1.0) } else { 1.0 }
+}
+
+/// The two frames' COMBINED angular resolution, as a sine: `sin(φ_a + φ_b)`.
+///
+/// Principal angles between subspaces are 1-Lipschitz in the geodesic subspace
+/// metric, so replacing each fitted plane by any plane inside its own resolution
+/// moves every principal angle `θ_k` by at most `φ_a + φ_b`. This is the budget an
+/// observed `cos θ_k` must clear before its sign is a fact about the data rather
+/// than about the two local PCAs' estimation error.
+///
+/// Beyond `φ_a + φ_b = π/2` the sine turns back down, which would read as a
+/// SMALLER budget for a WORSE pair of charts; past that point no angle is resolved
+/// at all, so the budget saturates at `1` instead.
+fn combined_frame_resolution(sin_a: f64, sin_b: f64) -> f64 {
+    if !(sin_a.is_finite() && sin_b.is_finite()) || sin_a >= 1.0 || sin_b >= 1.0 {
+        return 1.0;
+    }
+    let cos_a = (1.0 - sin_a * sin_a).max(0.0).sqrt();
+    let cos_b = (1.0 - sin_b * sin_b).max(0.0).sqrt();
+    // `φ_a + φ_b > π/2` ⟺ `sin φ_a > cos φ_b`.
+    if sin_a > cos_b {
+        return 1.0;
+    }
+    (sin_a * cos_b + sin_b * cos_a).min(1.0)
+}
 
 /// Coverage multiplier for the number of farthest-point patch centers, `⌈c·√n⌉`.
 /// `√n` is the standard covering-number scaling for a fixed-radius net; `2`
@@ -407,15 +450,18 @@ impl LocalChart {
 /// Numerical conditioning of an observed fitted transition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransitionConditioning {
-    /// The frames' overlap determinant is non-degenerate (the chart change is a
-    /// local diffeomorphism) AND the shared-support cross-covariance is well
-    /// conditioned (the alignment is well posed). This is not a statistical
-    /// confidence statement about the population transition.
+    /// Every principal angle between the two tangent planes is RESOLVABLY below
+    /// `π/2` — `σ_min(F_toᵀ F_from)` clears the two frames' combined angular
+    /// resolution, so the chart change is a local diffeomorphism and its handedness
+    /// is a fact about the data rather than about the local PCAs' estimation error
+    /// — AND the shared-support cross-covariance is well conditioned (the alignment
+    /// is well posed). This is not a statistical confidence statement about the
+    /// population transition.
     WellConditioned,
-    /// Either the two tangent planes are nearly orthogonal (so the chart change is
-    /// not a diffeomorphism and no handedness exists), or the shared support did
-    /// not span all `d` chart directions (so the alignment is ambiguous). The edge
-    /// is retained as geometry but excluded from the observed sign cocycle.
+    /// Either the two tangent planes are orthogonal to within their own estimation
+    /// resolution (so no handedness is determined), or the shared support did not
+    /// span all `d` chart directions (so the alignment is ambiguous). The edge is
+    /// retained as geometry but excluded from the observed sign cocycle.
     Degenerate,
 }
 
@@ -455,6 +501,16 @@ pub struct ChartTransition {
     /// Relative Procrustes residual `‖C_to − R C_from‖_F / ‖C_to‖_F` — how coherent
     /// the two charts are on the overlap (`0` = perfectly co-oriented planes).
     pub residual: f64,
+    /// `σ_min(F_toᵀ F_from) = min_k cos θ_k`, the cosine of the LARGEST principal
+    /// angle between the two tangent planes. This is the quantity whose crossing of
+    /// zero flips [`ChartTransition::sign`].
+    pub smallest_principal_cosine: f64,
+    /// `sin(φ_to + φ_from)`, the two frames' combined angular resolution derived
+    /// from their captured-variance certificates. `sign` is admitted into the
+    /// observed cocycle only while `smallest_principal_cosine` exceeds it; the pair
+    /// is reported so a consumer can see the margin the verdict rests on rather
+    /// than only the boolean.
+    pub sign_resolution_budget: f64,
     /// Whether the observed fitted transition is numerically well conditioned.
     pub conditioning: TransitionConditioning,
 }
@@ -1179,7 +1235,37 @@ fn build_transition(
     let a_mat = frame_overlap(&chart_j.frame, &chart_i.frame);
     let det_a = determinant(&a_mat);
     let sign: i8 = if det_a >= 0.0 { 1 } else { -1 };
-    let frame_nondegenerate = det_a.abs() > FRAME_OVERLAP_DETERMINANT_FLOOR;
+
+    // RESOLVABILITY of that sign. The singular values of `A` are the cosines of the
+    // principal angles, so `det A` changes sign exactly when some `θ_k` crosses
+    // `π/2` — the handedness is a fact about the manifold only while every
+    // `cos θ_k` clears what the two frames' own estimation error could manufacture.
+    // `σ_min(A) = min_k cos θ_k` is the sharp quantity: `|det A| = ∏_k cos θ_k ≤
+    // σ_min(A)`, so gating the DETERMINANT against the same budget is the
+    // conservative relaxation, and at `d > 1` it refuses edges whose every angle is
+    // individually well resolved merely because the product of several cosines is
+    // small. The budget itself is derived from the two charts' certificates
+    // ([`frame_angular_resolution`]) rather than being a numerical floor: a floor
+    // asks "is this determinant distinguishable from zero in f64", which is a
+    // question about arithmetic, and the question the sign needs answered is
+    // whether it is distinguishable from zero given how well the two local PCAs
+    // pinned their tangent planes.
+    let sign_resolution_budget = combined_frame_resolution(
+        frame_angular_resolution(&chart_i.certificate),
+        frame_angular_resolution(&chart_j.certificate),
+    );
+    let smallest_principal_cosine = match a_mat.svd(false, false) {
+        Ok((_, sv, _)) => sv.iter().copied().fold(f64::INFINITY, f64::min),
+        // An unresolved SVD leaves the principal angles unknown, so the edge carries
+        // no handedness rather than a guessed one.
+        Err(_) => 0.0,
+    };
+    let smallest_principal_cosine = if smallest_principal_cosine.is_finite() {
+        smallest_principal_cosine
+    } else {
+        0.0
+    };
+    let frame_nondegenerate = smallest_principal_cosine > sign_resolution_budget;
 
     // ALIGNMENT: orthogonal Procrustes, minimize ‖C_to − R C_from‖_F over the
     // handedness class {R ∈ O(d) : det R = sign}. M = C_to C_fromᵀ (d × d);
@@ -1247,6 +1333,8 @@ fn build_transition(
         translation,
         sign,
         residual,
+        smallest_principal_cosine,
+        sign_resolution_budget,
         conditioning,
     }
 }
@@ -1323,8 +1411,100 @@ mod tests {
     use super::*;
 
     use crate::manifold::tests_topology_fixtures::{
-        cylinder_strip, embedded_plane, mobius_strip, spherical_band, swiss_roll,
+        cylinder_strip, embedded_plane, mobius_strip, spherical_band, swiss_roll, torus,
     };
+
+    /// The frame resolution is the tilt at which a neighborhood stops preferring its
+    /// own fitted plane, and it is read off the certificate rather than chosen.
+    ///
+    /// The three anchors are the derivation itself, not sampled behaviour: a plane
+    /// that captures everything is pinned exactly; a plane whose off-plane energy has
+    /// reached its in-plane energy is pinned not at all; and in between the resolution
+    /// is `√(ε / (1 − ε))`, whose defining property is that a tilt of that size leaks
+    /// exactly the residual the fit already carries.
+    #[test]
+    fn frame_resolution_is_the_tilt_that_leaks_the_measured_residual_2280() {
+        let pinned = ChartCertificate {
+            condition: 1.0,
+            leading_singular: 1.0,
+            smallest_captured_singular: 1.0,
+            captured_variance_fraction: 1.0,
+            min_projection_stretch: 1.0,
+        };
+        assert!(frame_angular_resolution(&pinned).abs() < 1e-15);
+
+        let unpinned = ChartCertificate {
+            captured_variance_fraction: 0.5,
+            ..pinned
+        };
+        assert!((frame_angular_resolution(&unpinned) - 1.0).abs() < 1e-15);
+
+        // A patch capturing 0.99 leaves ε = 0.01 off-plane, so a tilt of
+        // sin φ = √(0.01/0.99) leaks exactly that much of the captured energy back.
+        let good = ChartCertificate {
+            captured_variance_fraction: 0.99,
+            ..pinned
+        };
+        let sine = frame_angular_resolution(&good);
+        let leaked = sine * sine * 0.99;
+        assert!(
+            (leaked - 0.01).abs() < 1e-12,
+            "a tilt of the resolution must leak the measured residual: {leaked}"
+        );
+
+        // Two frames compose by angle, not by sine: the budget is sin(φ_a + φ_b),
+        // strictly above either alone, and it saturates rather than folding back once
+        // the pair has no resolution left.
+        let pair = combined_frame_resolution(sine, sine);
+        assert!(pair > sine && pair < 1.0, "{pair}");
+        let expected = 2.0 * sine * (1.0 - sine * sine).sqrt();
+        assert!((pair - expected).abs() < 1e-12, "{pair} vs {expected}");
+        assert!((combined_frame_resolution(0.9, 0.9) - 1.0).abs() < 1e-15);
+    }
+
+    /// The gate this replaced was a numerical floor, and the difference is not
+    /// cosmetic: on a torus whose patches span a real fraction of the minor circle,
+    /// `|det| > 1e-6` admits a handedness from tangent planes that are within a
+    /// fraction of a degree of orthogonal.
+    ///
+    /// The assertion is the non-vacuity of the change — there EXIST transitions the
+    /// retired floor admits and the derived budget refuses — plus the reason: their
+    /// largest principal angle is far closer to `π/2` than the two charts' own
+    /// estimation error can resolve.
+    #[test]
+    fn the_derived_sign_budget_refuses_edges_the_numerical_floor_admitted_2280() {
+        let z = torus(48, 20, 2.0, 0.8);
+        let config = LocalAtlasConfig::balanced(z.nrows(), 2);
+        let atlas = LocalAtlas::build(z.view(), config).expect("torus atlas builds");
+
+        let refused: Vec<&ChartTransition> = atlas
+            .transitions()
+            .iter()
+            .filter(|t| matches!(t.conditioning, TransitionConditioning::Degenerate))
+            .collect();
+        assert!(
+            !refused.is_empty(),
+            "the derived budget must bite on a torus cover of this coarseness"
+        );
+        for t in &refused {
+            assert!(
+                t.smallest_principal_cosine > 1.0e-6,
+                "every refused edge must be one the retired 1e-6 floor would have \
+                 admitted, else the change is invisible: {}",
+                t.smallest_principal_cosine
+            );
+            assert!(
+                t.smallest_principal_cosine <= t.sign_resolution_budget,
+                "a refused edge must be refused BY the budget: {} vs {}",
+                t.smallest_principal_cosine,
+                t.sign_resolution_budget
+            );
+        }
+        assert!(
+            atlas.observed_signed_edges().len() < atlas.transitions().len(),
+            "the observed cocycle must be a strict subcomplex here"
+        );
+    }
 
     /// Find any triple of patches that pairwise share a registered transition and
     /// have a non-empty triple intersection (a genuine triple overlap).

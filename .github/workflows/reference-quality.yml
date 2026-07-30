@@ -252,7 +252,47 @@ jobs:
             # though their message contains the phrase "rows, expected" (which
             # used to be matched by the broader TEST_ERROR rule below and stole
             # them; that rule is now harness-origin-only).
-            gamfit_re='IntegrationFailed|InvalidConfig|IdentifiabilityFailure|LayoutError|identifiability audit|Invalid input|could not broadcast|Newton step|transformation fit failed|workflow survival baseline failed|RemlOptimizationFailed|REML smoothing optimization'
+            #
+            # The list is keyed on gam's OWN error VARIANTS, and it was missing
+            # three of them that no wrapper puts an `IntegrationFailed` in front
+            # of. Measured on run 30460836905 re-run at `b8745892a`, these three
+            # rows were counted as METRIC_OFF -- i.e. reported as "gam ran and
+            # produced output, a quality metric missed its bound" -- when gam had
+            # in fact refused to produce a fit at all:
+            #
+            #   Optimization { context: "fit_custom_family outer smoothing", ... }
+            #     misc::quality_vs_simplex_dirichlet_regression
+            #   OrderFailures { kind: GaussianMixture, failures: [...] }
+            #     misc::quality_mixture_rung_vs_reference
+            #   NonConvergence { context: "SPD Fréchet mean", iterations: 18, ... }
+            #     misc::quality_vs_scipy_spd_frechet_mean
+            #
+            # Both buckets gate, so this never changed the run's red/green. It
+            # changed the only thing the buckets exist for: the METRIC_OFF count
+            # is the suite's headline claim about gam's ACCURACY, and a refusal
+            # silently inflating it makes gam look less accurate than it is while
+            # hiding a non-convergence. The three variants are matched with their
+            # trailing `{` so a test's prose about its own reference computation
+            # ("... Newton refit did not converge") cannot be swept in.
+            # A sixth missing variant, from the SAME family as the two above and
+            # measured on run 30460836905 (headSha 7b4d762d8):
+            #
+            #   fit_tensor_surface: finite REML optimum is value-resolved but not
+            #   an isolated stationary point (LowerBoundary)
+            #     misc::quality_llm_weekday_circle
+            #
+            # That is gam REFUSING to certify an outer-REML optimum -- a fit
+            # failure -- yet it landed in METRIC_OFF, i.e. it was reported as
+            # "gam fitted and a quality metric missed its bound". The existing
+            # `RemlOptimizationFailed|REML smoothing optimization` alternatives
+            # do not cover it: this refusal is raised by the term/solve layer
+            # (`gam-terms/src/structure/anova_atom.rs`, `grid_spline_2d.rs`,
+            # `gam-solve/src/spline_scan.rs`, `residual_cascade.rs`,
+            # `gam-sae/src/identifiability.rs`) with its own wording. All five
+            # sites share the literal phrase `REML optimum is value-resolved`,
+            # which is gam's own prose and cannot be produced by a test
+            # describing its reference tool, so that phrase is the key.
+            gamfit_re='IntegrationFailed|InvalidConfig|IdentifiabilityFailure|LayoutError|identifiability audit|Invalid input|could not broadcast|Newton step|transformation fit failed|workflow survival baseline failed|RemlOptimizationFailed|REML smoothing optimization|Optimization \{ context:|OrderFailures \{|NonConvergence \{|REML optimum is value-resolved'
             if [ "$outcome" = TEST_ERROR ]; then
               testerr=$((testerr+1))
             elif [ "$outcome" = BUILDFAIL ]; then
@@ -312,9 +352,12 @@ jobs:
               outcome=METRIC_OFF; cause=quality_metric; reason="${panicmsg:-nonzero exit $rc}"; metricoff=$((metricoff+1))
             fi
             # Sanitize to single-line cells for the TSV / markdown table; the full
-            # untouched text always remains in the per-test log artifact.
-            metric_clean=$(printf '%s' "$metric" | tr '\t|' '  ' | tr -s ' ')
-            reason_clean=$(printf '%s' "$reason" | tr '\t\n|' '   ' | tr -s ' ' | cut -c1-400)
+            # untouched text always remains in the per-test log artifact. GitHub's
+            # TSV renderer treats a bare ASCII double quote as the start of CSV
+            # quoting, so normalize quotes too instead of producing an "Illegal
+            # quoting" error that makes the tracked table unsearchable.
+            metric_clean=$(printf '%s' "$metric" | tr '\t|"' "  '" | tr -s ' ')
+            reason_clean=$(printf '%s' "$reason" | tr '\t\n|"' "   '" | tr -s ' ' | cut -c1-400)
             printf '%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\n' \
               "$i" "$outcome" "$cause" "$t" "$rc" "$dur" "$sub_passed" "$sub_failed" "$metric_clean" "$reason_clean" >> "$RES"
             printf '{"idx":%d,"outcome":"%s","cause":"%s","test":"%s","rc":%d,"dur_s":%d,"sub_passed":%s,"sub_failed":%s}\n' \

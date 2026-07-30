@@ -806,7 +806,11 @@ pub(crate) fn run_outer_with_plan(
     // phase that rejected it (validation vs solver run). When all seeds fail
     // systematically (bad analytic gradient, rank-deficient penalty, etc.) the
     // first rejection's rho + error is often the most diagnostic.
-    let mut rejection_reasons: Vec<(usize, &'static str, String)> = Vec::new();
+    // (seed index, phase, prose, PRODUCER-said-rho-local). The fourth field is
+    // the verdict the rejecting arm already had in hand; without it the
+    // post-mortem classifier in `startup_stats` re-derives one from the prose
+    // and can call a producer-recoverable refusal structural (#2627).
+    let mut rejection_reasons: Vec<(usize, &'static str, String, bool)> = Vec::new();
     let layout = cap.theta_layout();
     // Number of smoothing (ρ) coordinates, used to break a near-LAML-tie toward
     // the more-penalized basin in the non-Gaussian multi-start keep-best.
@@ -869,8 +873,13 @@ pub(crate) fn run_outer_with_plan(
         // the seed cascade has slipped into a uniform structural
         // failure mode that the remaining candidates can't escape.
         while last_classified_reason_idx < rejection_reasons.len() {
-            let (idx, phase, msg) = &rejection_reasons[last_classified_reason_idx];
-            seed_rejections.push(SeedRejection::from_message(*idx, phase, msg.clone()));
+            let (idx, phase, msg, rho_local) = &rejection_reasons[last_classified_reason_idx];
+            seed_rejections.push(SeedRejection::from_message_with_producer_verdict(
+                *idx,
+                phase,
+                msg.clone(),
+                *rho_local,
+            ));
             last_classified_reason_idx += 1;
         }
         if structural_early_exit_key.is_none() {
@@ -912,7 +921,30 @@ pub(crate) fn run_outer_with_plan(
         }
         obj.reset();
         if crate::estimate::outer_eval_capture::outer_gradient_fd_capture_enabled(cap.psi_dim) {
-            capture_outer_gradient_fd_at_seed(
+            // The audit is an OBSERVER. Its failure must not decide the fit.
+            //
+            // This call used to end in `?`. That made the claim in the comment
+            // below false in exactly the case that matters: when the audit's own
+            // `obj.eval_with_order(seed, ..)` refuses -- which is common at a
+            // cold seed on a spatial basis, where the inner solve has not
+            // converged at theta_0 -- the `?` propagated that error out of
+            // `run_plan` and ABORTED THE WHOLE RUN. With the audit disabled the
+            // identical seed would simply have been rejected, recorded in
+            // `seed_rejections`, and the cascade would have moved on to the next
+            // one, which may well succeed.
+            //
+            // So arming the audit CHANGED THE OUTCOME IT WAS MEASURING: a
+            // recoverable per-seed rejection became a hard run abort, and the
+            // capture window closed empty, so `take_outer_gradient_fd_capture()`
+            // returned `None` and the consuming test reported "no evidence"
+            // rather than the gradient disagreement it was written to detect.
+            // An instrument that perturbs its subject reports about itself.
+            //
+            // Handled exactly like the curvature-homotopy entry error directly
+            // below -- warn, reset to the pristine baseline, fall through to the
+            // ordinary seed cascade -- because it is the same situation: a
+            // non-feasibility-gating failure on an optional entry path.
+            if let Err(err) = capture_outer_gradient_fd_at_seed(
                 obj,
                 config,
                 context,
@@ -921,10 +953,18 @@ pub(crate) fn run_outer_with_plan(
                 cap.psi_dim,
                 &bounds_template.0,
                 &bounds_template.1,
-            )?;
+            ) {
+                log::warn!(
+                    "[OUTER] {context}: outer-gradient FD audit refused at seed {seed_idx} \
+                     ({err}); the audit records nothing for this seed and the seed cascade \
+                     proceeds unchanged"
+                );
+                obj.reset();
+            }
             // The audit leaves the objective pristine, so the real seed path
             // below (including any curvature homotopy) is bit-identical to a
-            // run with capture disabled.
+            // run with capture disabled -- which is now true on the refusal
+            // path as well, not only on the success path.
         }
         // Certified curvature-homotopy entry leg (#1007). When the objective
         // has a certified anchor (the SAE-manifold `η = 0` Eckart-Young
@@ -1038,7 +1078,12 @@ pub(crate) fn run_outer_with_plan(
                         saddle_escape_reseed_point = checkpoint.saddle_escape_reseed.clone();
                     }
                     retain_best_outer_checkpoint(&mut best_checkpoint, checkpoint);
-                    rejection_reasons.push((seed_idx, "certificate", error.to_string()));
+                    rejection_reasons.push((
+                        seed_idx,
+                        "certificate",
+                        error.to_string(),
+                        error.is_trial_point_infeasible(),
+                    ));
                     continue 'seed_attempts;
                 }
             }
@@ -1082,7 +1127,7 @@ pub(crate) fn run_outer_with_plan(
                         "reactive domain-entry seed probe failed before continuation: {err}"
                     );
                     log::warn!("[OUTER] {context}: rejecting seed {seed_idx}: {msg}");
-                    rejection_reasons.push((seed_idx, "domain-entry", msg));
+                    rejection_reasons.push((seed_idx, "domain-entry", msg, false));
                     continue 'seed_attempts;
                 }
             }
@@ -1207,7 +1252,7 @@ pub(crate) fn run_outer_with_plan(
                         .to_string()
                 });
                 log::warn!("[OUTER] {context}: rejecting seed {seed_idx}: {msg}");
-                rejection_reasons.push((seed_idx, "domain-entry", msg));
+                rejection_reasons.push((seed_idx, "domain-entry", msg, false));
                 continue 'seed_attempts;
             }
             // Independently re-evaluate the literal target and require a finite
@@ -1224,7 +1269,7 @@ pub(crate) fn run_outer_with_plan(
                                non-finite after certified continuation arrival"
                         .to_string();
                     log::warn!("[OUTER] {context}: rejecting seed {seed_idx}: {msg}");
-                    rejection_reasons.push((seed_idx, "domain-entry", msg));
+                    rejection_reasons.push((seed_idx, "domain-entry", msg, false));
                     continue 'seed_attempts;
                 }
                 Err(err) => {
@@ -1253,7 +1298,7 @@ pub(crate) fn run_outer_with_plan(
                         log::warn!(
                             "[OUTER] {context}: rejecting seed {seed_idx} before solver start: {err}"
                         );
-                        rejection_reasons.push((seed_idx, "validation", err.to_string()));
+                        rejection_reasons.push((seed_idx, "validation", err.to_string(), true));
                         continue 'seed_attempts;
                     }
                     Err(err) => {
@@ -1273,7 +1318,7 @@ pub(crate) fn run_outer_with_plan(
                         log::warn!(
                             "[OUTER] {context}: rejecting seed {seed_idx} before solver start: {err}"
                         );
-                        rejection_reasons.push((seed_idx, "validation", err.to_string()));
+                        rejection_reasons.push((seed_idx, "validation", err.to_string(), true));
                         continue 'seed_attempts;
                     }
                     Err(err) => {
@@ -1317,7 +1362,15 @@ pub(crate) fn run_outer_with_plan(
                                 log::warn!(
                                     "[OUTER] {context}: rejecting seed {seed_idx} before solver start: {err}"
                                 );
-                                rejection_reasons.push((seed_idx, "validation", err.to_string()));
+                                // No producer verdict: a Hessian operator that
+                                // cannot be densified is a statement about the
+                                // operator, not about this seed's rho.
+                                rejection_reasons.push((
+                                    seed_idx,
+                                    "validation",
+                                    err.to_string(),
+                                    false,
+                                ));
                                 continue 'seed_attempts;
                             }
                         }
@@ -1828,7 +1881,7 @@ pub(crate) fn run_outer_with_plan(
                             log::warn!(
                                 "[OUTER] {context}: rejecting seed {seed_idx} before device-BFGS start: {err}"
                             );
-                            rejection_reasons.push((seed_idx, "validation", err.to_string()));
+                            rejection_reasons.push((seed_idx, "validation", err.to_string(), true));
                             continue 'seed_attempts;
                         }
                         Err(err) => {
@@ -1934,7 +1987,12 @@ pub(crate) fn run_outer_with_plan(
                             }) {
                                 Ok(_) => Err(err),
                                 Err(e) => {
-                                    rejection_reasons.push((seed_idx, "validation", e.to_string()));
+                                    rejection_reasons.push((
+                                        seed_idx,
+                                        "validation",
+                                        e.to_string(),
+                                        false,
+                                    ));
                                     continue 'seed_attempts;
                                 }
                             }
@@ -1952,7 +2010,7 @@ pub(crate) fn run_outer_with_plan(
                             log::warn!(
                                 "[OUTER] {context}: rejecting seed {seed_idx} before solver start: {err}"
                             );
-                            rejection_reasons.push((seed_idx, "validation", err.to_string()));
+                            rejection_reasons.push((seed_idx, "validation", err.to_string(), true));
                             continue 'seed_attempts;
                         }
                         Err(err) => {
@@ -1975,7 +2033,7 @@ pub(crate) fn run_outer_with_plan(
                             log::warn!(
                                 "[OUTER] {context}: rejecting seed {seed_idx} before solver start: {err}"
                             );
-                            rejection_reasons.push((seed_idx, "validation", err.to_string()));
+                            rejection_reasons.push((seed_idx, "validation", err.to_string(), true));
                             continue 'seed_attempts;
                         }
                         Err(err) => {
@@ -2399,7 +2457,7 @@ pub(crate) fn run_outer_with_plan(
                         log::warn!(
                             "[OUTER] {context}: rejecting seed {seed_idx} before solver start: {err}"
                         );
-                        rejection_reasons.push((seed_idx, "validation", err.to_string()));
+                        rejection_reasons.push((seed_idx, "validation", err.to_string(), true));
                         continue 'seed_attempts;
                     }
                     Err(FixedPointOuterRunError::ImmediateFallback(err)) => {
@@ -2434,7 +2492,7 @@ pub(crate) fn run_outer_with_plan(
                         log::warn!(
                             "[OUTER] {context}: rejecting seed {seed_idx} before solver start: {err}"
                         );
-                        rejection_reasons.push((seed_idx, "validation", err.to_string()));
+                        rejection_reasons.push((seed_idx, "validation", err.to_string(), true));
                         continue 'seed_attempts;
                     }
                     Err(FixedPointOuterRunError::ImmediateFallback(err)) => {
@@ -2490,7 +2548,12 @@ pub(crate) fn run_outer_with_plan(
                             checkpoint.clone(),
                         );
                         retain_best_outer_checkpoint(&mut best_checkpoint, checkpoint);
-                        rejection_reasons.push((seed_idx, "certificate", error.to_string()));
+                        rejection_reasons.push((
+                        seed_idx,
+                        "certificate",
+                        error.to_string(),
+                        error.is_trial_point_infeasible(),
+                    ));
                         continue 'seed_attempts;
                     }
                 };
@@ -2572,7 +2635,12 @@ pub(crate) fn run_outer_with_plan(
                     seed_elapsed,
                     e,
                 );
-                rejection_reasons.push((seed_idx, "solver", e.to_string()));
+                rejection_reasons.push((
+                    seed_idx,
+                    "solver",
+                    e.to_string(),
+                    e.is_trial_point_infeasible(),
+                ));
             }
         }
     }
@@ -2771,8 +2839,13 @@ pub(crate) fn run_outer_with_plan(
         // `InnerFailure` classifier and names the structural cause when
         // every seed terminates the same way.
         while last_classified_reason_idx < rejection_reasons.len() {
-            let (idx, phase, msg) = &rejection_reasons[last_classified_reason_idx];
-            seed_rejections.push(SeedRejection::from_message(*idx, phase, msg.clone()));
+            let (idx, phase, msg, rho_local) = &rejection_reasons[last_classified_reason_idx];
+            seed_rejections.push(SeedRejection::from_message_with_producer_verdict(
+                *idx,
+                phase,
+                msg.clone(),
+                *rho_local,
+            ));
             last_classified_reason_idx += 1;
         }
         // `screened` reflects how many seeds we actually iterated. With

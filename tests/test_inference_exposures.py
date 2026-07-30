@@ -43,9 +43,36 @@ def test_predict_conformal_is_reachable_and_covers() -> None:
     data = _smooth_training_frame(seed=11, n=240)
     n = len(data["x"])
     # Train / calibrate / test split — calibration is held-out labeled data.
-    train = {"x": data["x"][: n // 2], "y": data["y"][: n // 2]}
-    calib = {"x": data["x"][n // 2 : 3 * n // 4], "y": data["y"][n // 2 : 3 * n // 4]}
-    test = {"x": data["x"][3 * n // 4 :], "y": data["y"][3 * n // 4 :]}
+    #
+    # Split by an INTERLEAVED stride, not by contiguous index. `_smooth_training_frame`
+    # builds `x = np.linspace(0.0, 6.0, n)`, i.e. a SORTED grid, so contiguous
+    # slices put the three folds on disjoint x-ranges: train `[0.00, 2.99]`,
+    # calibration `[3.01, 4.49]`, test `[4.52, 6.00]`. The model then sees only
+    # the first half-period of `sin(x)` and every test row is extrapolation
+    # 1.5-3.0 units beyond the training support — and, decisively, the
+    # calibration fold is not exchangeable with the test fold, which is the one
+    # precondition split conformal's marginal coverage theorem requires. The
+    # observed 16/60 = 0.2667 coverage was the honest consequence of a test that
+    # violated its own hypothesis, not an engine defect: the nonconformity
+    # quantile (`gam-predict/src/conformal.rs:183`, rank
+    # `ceil((n+1)(1-alpha))`, `+inf` past `n`), the level-to-alpha conversion
+    # (`gam-predict/src/lib.rs:3236`, `alpha = 1 - level`), the separate
+    # calibration design, and the response-scale comparison are all correct.
+    # A stride split keeps the same 50/25/25 proportions and makes all three
+    # folds i.i.d. draws from one distribution, which is what the guarantee is
+    # stated over.
+    index = np.arange(n)
+
+    def _fold(mask: np.ndarray) -> dict[str, list[float]]:
+        rows = index[mask]
+        return {
+            "x": [data["x"][i] for i in rows],
+            "y": [data["y"][i] for i in rows],
+        }
+
+    train = _fold(index % 4 < 2)
+    calib = _fold(index % 4 == 2)
+    test = _fold(index % 4 == 3)
 
     model = gamfit.fit(train, "y ~ s(x)")
     out = model.predict_conformal(

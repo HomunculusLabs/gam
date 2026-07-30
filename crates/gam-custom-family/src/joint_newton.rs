@@ -1893,6 +1893,12 @@ pub(crate) enum JointTrustRegionDecision {
     /// Radius was already at the floor before this update.  Persistent
     /// `RejectFloor` is the unambiguous signal of a degenerate ρ region.
     RejectFloor,
+    /// The quadratic model's predicted decrease fell to or below the
+    /// objective's own round-off floor while the REALIZED decrease stayed
+    /// measurably above it (gam#2637). The step is taken on the measurement
+    /// and the radius is held: there is no model evidence for a larger
+    /// region, and shrinking would be self-reinforcing.
+    AcceptBelowModelNoiseFloor,
 }
 
 impl JointTrustRegionDecision {
@@ -1904,6 +1910,7 @@ impl JointTrustRegionDecision {
             Self::ShrinkOnMarginalAccept => "shrink_marginal_accept",
             Self::ShrinkOnRejection => "shrink_reject",
             Self::RejectFloor => "reject_floor",
+            Self::AcceptBelowModelNoiseFloor => "accept_model_noise_floor",
         }
     }
 
@@ -1931,6 +1938,13 @@ pub(crate) struct JointTrustRegionUpdate {
     pub(crate) decision: JointTrustRegionDecision,
 }
 
+/// Relative round-off noise floor handed to the shared trust-region
+/// controller: a change in the inner objective below `|objective| ×` this is
+/// indistinguishable from f64 round-off. Named because
+/// [`update_joint_trust_region_radius`] has to reason about the SAME floor the
+/// controller applies, and two spellings of the number would be free to drift.
+pub(crate) const JOINT_TRUST_NOISE_FLOOR_REL: f64 = 1.0e-14;
+
 pub(crate) fn update_joint_trust_region_radius(
     old_radius: f64,
     step_norm: f64,
@@ -1948,16 +1962,61 @@ pub(crate) fn update_joint_trust_region_radius(
     // rejection, the `×2` grow at the boundary (`step_norm ≥ 0.99·old_radius`),
     // the `[1e-12, 1e6]` clamp, and the `RejectFloor` promotion at the floor
     // are all reproduced exactly by that controller — this is a behavior-
-    // preserving extraction, not a re-derivation.
+    // preserving extraction, not a re-derivation. The gam#2637 override below
+    // is the one deliberate deviation, and it only ever converts a rejection
+    // the controller could not justify into an accept.
     let hit_boundary = step_norm >= 0.99 * old_radius;
-    let step = opt::TrustRegionPolicy::noise_aware(1.0e-12, 1.0e6, 1.0e-14).update(
-        old_radius,
-        step_norm,
-        hit_boundary,
-        actual_reduction,
-        predicted_reduction,
-        objective_scale,
-    );
+    let step = opt::TrustRegionPolicy::noise_aware(1.0e-12, 1.0e6, JOINT_TRUST_NOISE_FLOOR_REL)
+        .update(
+            old_radius,
+            step_norm,
+            hit_boundary,
+            actual_reduction,
+            predicted_reduction,
+            objective_scale,
+        );
+    // MODEL EXHAUSTION IS NOT MODEL DISAGREEMENT (gam#2637).
+    //
+    // The controller maps two different situations onto one `rho = -inf`
+    // rejection: a model that predicts ASCENT, and a model whose predicted
+    // DESCENT is too small to resolve against the objective's own round-off
+    // floor (`predicted_reduction <= |objective| × 1e-14`). Only the first is
+    // evidence that the region was too large.
+    //
+    // The second is a trap, because the ranked candidate on the constrained
+    // path is the active-set QP chord scaled to the radius, so its predicted
+    // reduction goes as `alpha²`: shrinking makes the next prediction smaller
+    // and guarantees the next rejection. Measured on
+    // `binomial_location_scale_engine_matches_reference_flow`, cycle 8: a step
+    // whose REALIZED reduction was `+2.090494888e-9` — 5,030× the
+    // `4.156290748e-13` floor — was rejected for a prediction of
+    // `+2.944376434e-13`; three consecutive shrinks took the radius from
+    // `1.000e0` to `4.448471e-8`, below the Newton proposal's
+    // own `1.878e-7`, and the solve then spent 31 of its 40 cycles with the
+    // stationarity residual bit-frozen at `3.009e-6` against a `1.129e-11`
+    // tolerance while every accepted step moved beta by `<= 1e-10`.
+    //
+    // When the model has merely run out of resolution but the realized change
+    // is a genuine decrease ABOVE the same floor, the measurement is the better
+    // evidence: take the step and HOLD the radius. Held, not grown — a model
+    // that cannot resolve its own prediction is not evidence for a larger
+    // region either. A model that predicts ascent (`predicted_reduction < 0`)
+    // or is non-finite still rejects and shrinks exactly as before, and so does
+    // any step whose realized change fails to clear the floor.
+    let noise_floor = objective_scale.abs().max(1.0) * JOINT_TRUST_NOISE_FLOOR_REL;
+    if !step.accepted
+        && step.predicted_nonpositive
+        && predicted_reduction.is_finite()
+        && predicted_reduction >= 0.0
+        && actual_reduction > noise_floor
+    {
+        return JointTrustRegionUpdate {
+            rho: 1.0,
+            radius: old_radius,
+            accepted: true,
+            decision: JointTrustRegionDecision::AcceptBelowModelNoiseFloor,
+        };
+    }
     JointTrustRegionUpdate {
         rho: step.rho,
         radius: step.new_radius,
@@ -2512,8 +2571,6 @@ pub(crate) struct KktRefusalReport {
     pub(crate) block_carrying_residual: Option<usize>,
 
     pub(crate) hpen_eigenvalues_sorted_desc: Vec<f64>,
-    pub(crate) hpen_min_abs_eigenvalue: f64,
-    pub(crate) hpen_max_abs_eigenvalue: f64,
     pub(crate) hpen_condition_number: f64,
     pub(crate) hpen_nullity_at_rank_tol: usize,
     pub(crate) hpen_rank_tol: f64,
@@ -2859,6 +2916,42 @@ pub(crate) mod whitened_spectrum {
                 .any(|&value| value < -self.numerical_floor)
         }
 
+        /// Median `|γ_k|` over the identified modes — a spectrum scale that a
+        /// single stiff mode cannot set.
+        ///
+        /// `lambda_max_abs` is the natural scale for a RELATIVE rank test, but
+        /// it is an extremum, and one over-selected penalty mode moves it
+        /// arbitrarily far from the curvature the step actually travels. Where
+        /// the question is "does this eigenvalue carry curvature worth
+        /// exploiting?" rather than "is this matrix near-singular?", the
+        /// extremum is the wrong summary and the median is the right one: on a
+        /// spectrum `[-1e-3, 2e-3, 1e8]` the median is `2e-3`, so the `-1e-3`
+        /// minimum is recognized as the same order as a genuine mode instead of
+        /// being eleven orders below `λ_max`.
+        ///
+        /// Identified means above the machine-rank floor, matching the set the
+        /// step's denominators already use. Falls back to `lambda_max_abs` when
+        /// nothing is identified, so the caller's `.max(numerical_floor)` still
+        /// governs the degenerate case.
+        pub(crate) fn median_identified_curvature(&self) -> f64 {
+            let mut magnitudes: Vec<f64> = self
+                .gamma
+                .iter()
+                .map(|value| value.abs())
+                .filter(|value| *value > self.numerical_floor)
+                .collect();
+            if magnitudes.is_empty() {
+                return self.lambda_max_abs;
+            }
+            magnitudes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = magnitudes.len() / 2;
+            if magnitudes.len() % 2 == 1 {
+                magnitudes[mid]
+            } else {
+                0.5 * (magnitudes[mid - 1] + magnitudes[mid])
+            }
+        }
+
         /// `‖η(λ)‖²_2 = Σ_{identified k} c_k² / (γ_k + λ)²` — the squared `D`-metric
         /// norm of the trial step as a function of the Levenberg shift `λ`. Only
         /// identified (above-`null_cutoff`) modes participate; the null space carries
@@ -3187,8 +3280,47 @@ pub(crate) mod whitened_spectrum {
                 // identified set, the denominators, and the genuine hard case
                 // (`γ_min` materially negative, where filling the radius really
                 // does reduce the model quadratically) are untouched.
+                // The threshold is `rank_tol` against a spectrum scale that ONE
+                // stiff mode cannot set. `null_cutoff = rank_tol·λ_max` fails
+                // that: an unrelated penalty mode at `λ_max = 1e8` raises the
+                // bar to `1e-2` and vetoes a genuine `γ_min = -1e-3` that sits
+                // at the SAME ORDER as another identified mode (`+2e-3`) — the
+                // hard case then returns `‖δ‖ = 0` at a strict saddle, while
+                // `has_resolvable_negative_curvature` (which reads
+                // `numerical_floor`) still refuses to certify. That is a stall
+                // with no exit, and it is what `weak_negative_hard_case_uses_
+                // true_minimum_mode` pins.
+                //
+                // Swapping to `numerical_floor` does NOT work: measured, it
+                // regresses `hard_case_fill_requires_resolvable_negative_
+                // curvature_2600`. Neither `|γ_min|/λ_max` (1e-11 vs 1e-12) nor
+                // `|γ_min|/numerical_floor` (2.6e4 vs 3.2e3) separates the two
+                // fixtures — both agree to within one order — so no threshold
+                // on either yardstick can satisfy both, and picking one is
+                // fitting a constant to whichever fixture was looked at last.
+                //
+                // The MEDIAN identified curvature is the quantity that does
+                // separate them, because it is the one `λ_max` was standing in
+                // for and is not moved by a single outlier:
+                //   #2600 fixture: γ = [1, -1e-12], median 5e-1
+                //                  ⇒ bar 5e-11, |γ_min| = 1e-12 ⇒ NO fill
+                //   weak-negative: γ = [-1e-3, 2e-3, 1e8], median 2e-3
+                //                  ⇒ bar 2e-13, |γ_min| = 1e-3 ⇒ fill
+                // Ten orders of separation instead of one, and no new constant:
+                // this reuses `rank_tol`, the same relative rank tolerance the
+                // rest of the spectrum classification already uses.
+                // `null_cutoff / lambda_max_abs` recovers `rank_tol` exactly
+                // (they differ only when the floor clamps, which the `.max`
+                // below reapplies), so no new constant is introduced.
+                let fill_bar = if self.lambda_max_abs > 0.0 {
+                    let relative_tol = self.null_cutoff / self.lambda_max_abs;
+                    (relative_tol * self.median_identified_curvature())
+                        .max(self.numerical_floor)
+                } else {
+                    self.numerical_floor
+                };
                 if let Some(k_min) = k_min_witness
-                    && gamma_min_id < -self.null_cutoff
+                    && gamma_min_id < -fill_bar
                 {
                     let deficit = (trust_radius * trust_radius - hard_case_base_norm_sq).max(0.0);
                     let tau = deficit.sqrt().copysign(self.c[k_min]);
@@ -3942,8 +4074,6 @@ pub(crate) fn compute_kkt_refusal_report(
         .map(|(i, _)| i);
 
     let mut hpen_eigenvalues_sorted_desc: Vec<f64> = Vec::new();
-    let mut hpen_min_abs_eigenvalue = f64::NAN;
-    let mut hpen_max_abs_eigenvalue = f64::NAN;
     let mut hpen_condition_number = f64::NAN;
     let mut hpen_nullity_at_rank_tol = 0usize;
     let mut hpen_null_gradient_inf = f64::NAN;
@@ -3989,12 +4119,6 @@ pub(crate) fn compute_kkt_refusal_report(
                     .fold(f64::INFINITY, f64::min);
                 let cutoff = KKT_REFUSAL_RANK_TOL * max_abs;
                 hpen_nullity_at_rank_tol = sorted.iter().filter(|x| x.abs() < cutoff).count();
-                hpen_max_abs_eigenvalue = max_abs;
-                hpen_min_abs_eigenvalue = if min_abs.is_finite() {
-                    min_abs
-                } else {
-                    f64::NAN
-                };
                 hpen_condition_number = if min_abs > 0.0 && min_abs.is_finite() {
                     max_abs / min_abs
                 } else {
@@ -4082,8 +4206,6 @@ pub(crate) fn compute_kkt_refusal_report(
         block_residual_inf,
         block_carrying_residual,
         hpen_eigenvalues_sorted_desc,
-        hpen_min_abs_eigenvalue,
-        hpen_max_abs_eigenvalue,
         hpen_condition_number,
         hpen_nullity_at_rank_tol,
         hpen_rank_tol: KKT_REFUSAL_RANK_TOL,
@@ -4173,6 +4295,33 @@ impl KktRefusalReport {
         }
     }
 
+    /// Canonical signed-spectrum rendering shared by every KKT-refusal surface.
+    ///
+    /// The eigenvalues are stored algebraically in descending order, so the
+    /// endpoints — not the largest and smallest magnitudes — own the `λ_max`
+    /// and `λ_min` labels. Condition number and rank nullity remain the
+    /// separately computed magnitude diagnostics.
+    fn format_hpen_spectrum(&self) -> String {
+        let lambda_max = self
+            .hpen_eigenvalues_sorted_desc
+            .first()
+            .copied()
+            .unwrap_or(f64::NAN);
+        let lambda_min = self
+            .hpen_eigenvalues_sorted_desc
+            .last()
+            .copied()
+            .unwrap_or(f64::NAN);
+        format!(
+            "λ_max={lambda_max:.3e}, λ_min={lambda_min:.3e}, cond={:.3e}, \
+             nullity@{:.0e}={} (of {} eigenvalues)",
+            self.hpen_condition_number,
+            self.hpen_rank_tol,
+            self.hpen_nullity_at_rank_tol,
+            self.hpen_eigenvalues_sorted_desc.len(),
+        )
+    }
+
     /// Multi-line structured log emitted at the cert REFUSED site. The
     /// per-block residual / eigenspectrum / diagnosis breakdown is what
     /// makes the failure actionable (vs the legacy one-liner that only
@@ -4182,7 +4331,7 @@ impl KktRefusalReport {
             "[PIRLS/joint-Newton convergence] cycle {:>3} | cert REFUSED: residual={:.3e} > tol={:.3e} (cert)\n  \
              carrying-block: {}\n  \
              block_names={:?}, block_widths={:?}, block_grad_inf={:?}, block_penalty_grad_inf={:?}, block_residual_inf={:?}\n  \
-             H_pen spectrum: λ_max={:.3e}, λ_min={:.3e}, cond={:.3e}, nullity@{:.0e}={} (of {} eigenvalues)\n  \
+             H_pen spectrum: {}\n  \
              free-null diagnostic: {}\n  \
              cert math: linearized_rel={:.3e}, scalar_relerr={:.3e}, |Δobj|={:.3e} (tol={:.3e}), accepted_step_inf={:.3e} (tol={:.3e}), proposal_step_inf={:.3e}, trust_radius={:.3e}, |β|∞={:.3e}, active_set_rows_total={}\n  \
              diagnosis: {}",
@@ -4195,12 +4344,7 @@ impl KktRefusalReport {
             self.block_grad_inf,
             self.block_penalty_grad_inf,
             self.block_residual_inf,
-            self.hpen_max_abs_eigenvalue,
-            self.hpen_min_abs_eigenvalue,
-            self.hpen_condition_number,
-            self.hpen_rank_tol,
-            self.hpen_nullity_at_rank_tol,
-            self.hpen_eigenvalues_sorted_desc.len(),
+            self.format_hpen_spectrum(),
             self.null_direction_label(),
             self.linearized_rel,
             self.scalar_model_relerr,
@@ -4225,7 +4369,7 @@ impl KktRefusalReport {
             "cycle={} cert REFUSED: residual={:.3e} > tol={:.3e}; \
              carrying-block: {}; block_names={:?}, block_widths={:?}, \
              block_grad_inf={:?}, block_penalty_grad_inf={:?}, block_residual_inf={:?}; \
-             H_pen spectrum: λ_max={:.3e}, λ_min={:.3e}, cond={:.3e}, nullity@{:.0e}={}/{}; \
+             H_pen spectrum: {}; \
              free-null diagnostic: {}; \
              cert math: linearized_rel={:.3e}, scalar_relerr={:.3e}, |Δobj|={:.3e}, \
              accepted_step_inf={:.3e}, proposal_step_inf={:.3e}, trust_radius={:.3e}, \
@@ -4239,12 +4383,7 @@ impl KktRefusalReport {
             self.block_grad_inf,
             self.block_penalty_grad_inf,
             self.block_residual_inf,
-            self.hpen_max_abs_eigenvalue,
-            self.hpen_min_abs_eigenvalue,
-            self.hpen_condition_number,
-            self.hpen_rank_tol,
-            self.hpen_nullity_at_rank_tol,
-            self.hpen_eigenvalues_sorted_desc.len(),
+            self.format_hpen_spectrum(),
             self.null_direction_label(),
             self.linearized_rel,
             self.scalar_model_relerr,
@@ -4257,6 +4396,74 @@ impl KktRefusalReport {
             self.diagnosis.as_str(),
             self.diagnosis.guidance(),
         )
+    }
+}
+
+#[cfg(test)]
+mod kkt_refusal_spectrum_format_tests {
+    use super::*;
+
+    #[test]
+    fn indefinite_hpen_render_keeps_signed_extremes_and_magnitude_diagnostics_2659() {
+        // The negative eigenvalue has the greatest magnitude. Algebraic
+        // extrema are therefore (+5, -9), while the condition and rank cutoff
+        // must still use max|λ|=9 and min|λ|=1e-12.
+        let spectrum = vec![5.0_f64, 1.0e-12, -9.0];
+        let max_abs = spectrum
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+        let min_abs = spectrum
+            .iter()
+            .map(|value| value.abs())
+            .fold(f64::INFINITY, f64::min);
+        let rank_cutoff = KKT_REFUSAL_RANK_TOL * max_abs;
+        let nullity = spectrum
+            .iter()
+            .filter(|value| value.abs() < rank_cutoff)
+            .count();
+
+        let report = KktRefusalReport {
+            block_names: vec!["fixture".to_string()],
+            block_widths: vec![spectrum.len()],
+            block_beta_inf: vec![0.0],
+            block_grad_inf: vec![0.0],
+            block_penalty_grad_inf: vec![0.0],
+            block_residual_inf: vec![1.0],
+            block_carrying_residual: Some(0),
+            hpen_eigenvalues_sorted_desc: spectrum,
+            hpen_condition_number: max_abs / min_abs,
+            hpen_nullity_at_rank_tol: nullity,
+            hpen_rank_tol: KKT_REFUSAL_RANK_TOL,
+            hpen_null_gradient_inf: 0.0,
+            hpen_null_vector_block_inf: vec![0.0],
+            hpen_null_vector_carrying_block: None,
+            hlik_max_abs_eigenvalue: 5.0,
+            hpen_null_curvature: 1.0e-12,
+            hpen_null_likelihood_curvature: 1.0e-12,
+            active_set_rows_total: 0,
+            accepted_step_inf: 0.0,
+            proposal_step_inf: 0.0,
+            trust_radius: 1.0,
+            cycle: 1,
+            residual_tol: 1.0e-8,
+            obj_tol: 1.0e-8,
+            step_tol: 1.0e-8,
+            linearized_rel: 0.0,
+            scalar_model_relerr: 0.0,
+            objective_change: 0.0,
+            projected_residual_inf: 1.0,
+            diagnosis: KktRefusalDiagnosis::RankDeficientHPen,
+        };
+        let expected =
+            "λ_max=5.000e0, λ_min=-9.000e0, cond=9.000e12, nullity@1e-10=1 \
+             (of 3 eigenvalues)";
+
+        assert_eq!(max_abs, 9.0);
+        assert_eq!(nullity, 1);
+        assert_eq!(report.format_hpen_spectrum(), expected);
+        assert!(report.format_structured_log(4.0e-8).contains(expected));
+        assert!(report.format_bubbled_error().contains(expected));
     }
 }
 

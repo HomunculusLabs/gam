@@ -1129,10 +1129,15 @@ pub fn measure_jet_scale_spectrum(
 }
 
 /// The per-scale energy forms `Q_ℓ` (each m × m, symmetric PSD), with
-/// `Σ_ℓ Q_ℓ = Q` exactly (same blocks, one-hot weights). These are the
-/// spectral-split carriers: emitted as separate penalty candidates they let
-/// the multi-penalty REML engine learn per-level amplitudes λ_ℓ directly —
-/// scale adaptivity at ρ-speed with no rebuild and no new optimizer code.
+/// `Σ_ℓ Q_ℓ = Q` to the PSD-projection floor (same blocks, one-hot weights).
+/// These are the spectral-split carriers: emitted as separate penalty
+/// candidates they let the multi-penalty REML engine learn per-level amplitudes
+/// λ_ℓ directly — scale adaptivity at ρ-speed with no rebuild and no new
+/// optimizer code.
+///
+/// Each level is projected onto the PSD cone for the same reason the fused
+/// [`measure_jet_energy_form`] is, and the projection is load-bearing HERE in a
+/// way it is not there — see the note at the return.
 pub fn measure_jet_energy_forms_per_scale(
     centers: ArrayView2<'_, f64>,
     masses: ArrayView1<'_, f64>,
@@ -1142,7 +1147,7 @@ pub fn measure_jet_energy_forms_per_scale(
     tau0: f64,
 ) -> Result<Vec<Array2<f64>>, BasisError> {
     let n_scales = band.eps.len();
-    assemble_weighted_forms(
+    let forms = assemble_weighted_forms(
         centers,
         masses,
         band,
@@ -1160,7 +1165,39 @@ pub fn measure_jet_energy_forms_per_scale(
                 };
             }
         },
-    )
+    )?;
+    // PSD cone projection, per level. Every `Q_ℓ` is a NONNEGATIVE combination
+    // of the same analytically-PSD local residual blocks the fused energy sums,
+    // so it is PSD in exact arithmetic and only the per-block pseudo-inverse and
+    // centering cancellation put a ±ε_mach·‖Q_ℓ‖ negative in the spectrum —
+    // the identical situation `measure_jet_energy_form` floors on the cone.
+    //
+    // Skipping it here was NOT symmetric with the fused path, because the fused
+    // path normalizes ONE matrix while the builder normalizes EVERY LEVEL BY ITS
+    // OWN Frobenius scale. A level whose detail energy is numerically dead
+    // carries only that roundoff, and dividing roundoff by its own tiny norm
+    // rescales it to unit norm: a ±ε_mach relative negative becomes an O(1)
+    // absolute one. `ConstructiveQuadratic::try_from_dense_psd` then rejects the
+    // candidate and the whole multiscale BUILD fails — measured as
+    // `IndefinitePenalty { context: "measure-jet scale penalty",
+    // min_eigenvalue: -0.3039, tolerance: 1.486e-8 }`, where the tolerance is
+    // √ε_mach against a max |λ| of ~1, i.e. the certified matrix is already
+    // unit-normalized and the negative is 2e7× tolerance. No real detail
+    // spectrum is 30% negative; that is normalized roundoff.
+    //
+    // Flooring restores the invariant the signature documents, leaves a dead
+    // level as an exact-zero candidate for `filter_penalty_candidates`/REML to
+    // deselect rather than a fatal build error, and preserves `Σ_ℓ Q_ℓ = Q` to
+    // the same machine-precision floor the fused projection already accepts. It
+    // also stops `measure_jet_scale_spectrum` from being able to report a
+    // NEGATIVE detail energy `vᵀQ_ℓv`.
+    forms
+        .into_iter()
+        .enumerate()
+        .map(|(level, q_l)| {
+            project_symmetric_psd(q_l, &format!("measure-jet per-scale energy form {level}"))
+        })
+        .collect()
 }
 
 /// The support diagnostic `ε ↦ q_ε(x★)`: kernel mass of the (frozen) center
@@ -1882,7 +1919,12 @@ pub fn build_measure_jet_basis(
         metadata: BasisMetadata::MeasureJet {
             centers,
             input_scale: crate::IsotropicScale::ONE,
-            length_scale,
+            // The realized range from `realize_measure_jet_geometry`, in the
+            // same frame as `centers` and `eps_band`.  Unlike the other three
+            // Euclidean families the term-collection wrapper does NOT restore
+            // an original-units value over this, so the standardized tag
+            // survives to every consumer (#2636).
+            length_scale: crate::StandardizedUnits::new(length_scale),
             eps_band,
             // The SPEC's order field, sentinel included: 0.0 marks per-level
             // (spectral) mode and must replay as per-level — persisting the
@@ -2916,7 +2958,9 @@ mod tests {
             alpha: spec.alpha,
             tau0: spec.tau0,
             num_scales: eps_band.len(),
-            length_scale: *length_scale,
+            // MeasureJet freezes its range STANDARDIZED and replays it
+            // verbatim; the tag is what records that it is the odd family out.
+            length_scale: length_scale.standardized_value(),
             double_penalty: spec.double_penalty,
             learn_length_scale: false,
             multiscale,
@@ -3219,7 +3263,9 @@ mod tests {
             alpha: *alpha,
             tau0: *tau0,
             num_scales: eps_band.len(),
-            length_scale: *length_scale,
+            // MeasureJet freezes its range STANDARDIZED and replays it
+            // verbatim; the tag is what records that it is the odd family out.
+            length_scale: length_scale.standardized_value(),
             double_penalty: spec.double_penalty,
             learn_length_scale: spec.learn_length_scale,
             multiscale: spec.multiscale,

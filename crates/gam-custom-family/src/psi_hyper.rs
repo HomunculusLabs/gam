@@ -282,17 +282,16 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                     specs,
                     &e_a,
                 )?;
-                let psi_hdot_a =
-                    materialize_authoritative_psi_hessian_directional_derivative(
-                        family,
-                        synced_states,
-                        specs,
-                        hyper_layout,
-                        psi_workspace.as_deref(),
-                        psi_global,
-                        &e_a,
-                        total,
-                    )?;
+                let psi_hdot_a = materialize_authoritative_psi_hessian_directional_derivative(
+                    family,
+                    synced_states,
+                    specs,
+                    hyper_layout,
+                    psi_workspace.as_deref(),
+                    psi_global,
+                    &e_a,
+                    total,
+                )?;
                 if let (Some(hdot_a), Some(psi_hdot_a)) = (hdot_a, psi_hdot_a) {
                     let phi_psi_beta_a =
                             gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_phi_explicit_param_second_derivative(
@@ -1584,7 +1583,10 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             // is live here and was previously dropped, so the refusal could say
             // only how many cycles ran — which cannot tell a budget-limited
             // solve apart from a stalled one.
-            kkt_residual: inner.kkt_residual.as_ref().map(ProjectedKktResidual::inf_norm),
+            kkt_residual: inner
+                .kkt_residual
+                .as_ref()
+                .map(ProjectedKktResidual::inf_norm),
             kkt_tol: inner
                 .kkt_residual
                 .as_ref()
@@ -2778,7 +2780,6 @@ pub fn evaluate_custom_family_joint_hyper_owned<F: CustomFamily + Clone + Send +
     Ok(outer_eval_result_into_joint_hyper_owned_result(eval_result))
 }
 
-
 /// Shared-layout variant of
 /// [`evaluate_custom_family_joint_hyper_owned`].
 pub fn evaluate_custom_family_joint_hyper_owned_shared<
@@ -3585,7 +3586,6 @@ pub fn evaluate_custom_family_joint_hyper_efs_owned<
         warm_start,
     )
 }
-
 
 /// Shared-layout variant of
 /// [`evaluate_custom_family_joint_hyper_efs_owned`].

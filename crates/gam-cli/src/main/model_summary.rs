@@ -345,6 +345,60 @@ pub(crate) fn build_model_summary(
     })
 }
 
+/// Rebuild `Vb` from a saved fit that persisted only the penalized Hessian.
+///
+/// The two CLI entry points below both need this fallback, and both used to
+/// hand-roll it as `from_factorized_hessian(H)` — which is `φ = 1` and *no*
+/// constrained correction. That is not `Vb` for either of the two reasons the
+/// library's own fallback (`gam-predict`'s `conditional_prediction_backend`)
+/// handles:
+///
+/// * the module invariant is `Vb = φ·H⁻¹`, and `φ` is the profiled residual
+///   variance `σ̂²` for the scale-free profiled Gaussian (`1.0` for every family
+///   whose IRLS weight already carries the dispersion, #679); and
+/// * a fit that accepted inequality constraints has a **truncated** Laplace
+///   posterior, whose covariance is `Σ − GΔGᵀ`, not the ambient `Σ`. Where a
+///   constraint is active the ambient covariance is simply the wrong object:
+///   it describes spread along directions the feasible set does not have
+///   (#2385).
+///
+/// The two are one fix rather than two, because the correction's `lift` and
+/// `removed_normal_variance` already live on the φ-scaled covariance metric
+/// (see `PredictionCovarianceBackend::Factorized`). Subtracting a φ-scaled
+/// `GΔGᵀ` from an unscaled `H⁻¹` would be dimensionally inconsistent, so the
+/// correction cannot be routed here without also honoring `φ`.
+///
+/// Consequence of routing both through the library's constructor: a fit with no
+/// engine-level family (custom / GAMLSS) has no scalar coefficient-covariance
+/// scale and is now refused here, exactly as the library path already refuses
+/// it, instead of silently returning an unscaled `H⁻¹` labelled `Vb`.
+fn factorized_covariance_fallback(fit: &UnifiedFitResult) -> Option<Result<PredictionCovarianceBackend<'_>, String>> {
+    let hessian = fit.penalized_hessian()?;
+    let scale = match fit.coefficient_covariance_scale() {
+        Ok(scale) => scale,
+        Err(error) => {
+            return Some(Err(format!(
+                "saved model persisted only a penalized Hessian, so the reported covariance must be \
+                 reconstructed as Vb = phi*H^-1, but this fit has no scalar coefficient-covariance \
+                 scale: {error}"
+            )));
+        }
+    };
+    let constrained_correction = fit
+        .geometry
+        .as_ref()
+        .and_then(|geometry| geometry.constrained_posterior.as_ref())
+        .and_then(|posterior| posterior.correction.as_ref());
+    Some(
+        PredictionCovarianceBackend::from_factorized_hessian_scaled_with_correction(
+            SymmetricMatrix::Dense(hessian.clone()),
+            scale,
+            constrained_correction,
+        )
+        .map_err(|e| format!("failed to factor saved penalized Hessian for prediction: {e}")),
+    )
+}
+
 pub(crate) fn covariance_from_model(
     model: &SavedModel,
     mode: InferenceCovarianceMode,
@@ -354,19 +408,33 @@ pub(crate) fn covariance_from_model(
         .as_ref()
         .ok_or_else(|| "model is missing canonical fit_result payload; refit".to_string())?;
     if mode == InferenceCovarianceMode::SmoothingCorrected {
-        return fit.beta_covariance_corrected().cloned().ok_or_else(|| {
-            "saved model does not contain smoothing-corrected covariance; refit before requesting --covariance-mode corrected"
-                .to_string()
-        });
+        if let Some(cov) = fit.beta_covariance_corrected() {
+            return Ok(cov.clone());
+        }
+        // With NO smoothing coordinates the correction J·V_rho·Jᵀ is the unique
+        // zero-dimensional zero matrix, so Vp = Vb EXACTLY. This is an identity
+        // of the definition, not a fallback to a weaker uncertainty object, and
+        // the library predict path already applies it (`gam-predict`'s
+        // `select_uncertainty_backend`, the `fit.lambdas.is_empty()` branch).
+        // The CLI never did, so every SAVED fit with an empty lambda vector —
+        // a fully parametric survival fit is the common case — refused the
+        // DEFAULT `gam predict` invocation (`--mode posterior-mean
+        // --covariance-mode corrected`) with "refit before requesting", an
+        // instruction no refit could satisfy because there is no correction to
+        // compute. A fit that DOES carry smoothing coordinates keeps the hard
+        // refusal: there the correction is a real, absent term.
+        if !fit.lambdas.is_empty() {
+            return Err(
+                "saved model does not contain smoothing-corrected covariance; refit before requesting --covariance-mode corrected"
+                    .to_string(),
+            );
+        }
     }
     if let Some(cov) = fit.beta_covariance() {
         return Ok(cov.clone());
     }
-    if let Some(hessian) = fit.penalized_hessian() {
-        let backend = PredictionCovarianceBackend::from_factorized_hessian(SymmetricMatrix::Dense(
-            hessian.clone(),
-        ))
-        .map_err(|e| format!("failed to factor saved penalized Hessian for prediction: {e}"))?;
+    if let Some(backend) = factorized_covariance_fallback(fit) {
+        let backend = backend?;
         let dim = backend.nrows();
         let mut eye = Array2::<f64>::zeros((dim, dim));
         for j in 0..dim {
@@ -391,25 +459,30 @@ pub(crate) fn prediction_backend_from_model<'a>(
         .as_ref()
         .ok_or_else(|| "model is missing canonical fit_result payload; refit".to_string())?;
     if mode == InferenceCovarianceMode::SmoothingCorrected {
-        let covariance = fit.beta_covariance_corrected().ok_or_else(|| {
-            "saved model does not contain smoothing-corrected covariance; refit before requesting --covariance-mode corrected"
-                .to_string()
-        })?;
-        return Ok(PredictionCovarianceBackend::from_dense(covariance.view()));
+        if let Some(covariance) = fit.beta_covariance_corrected() {
+            return Ok(PredictionCovarianceBackend::from_dense(covariance.view()));
+        }
+        // Same zero-smoothing-coordinate identity as `covariance_from_model`
+        // above: Vp = Vb when there is no rho to integrate over. Falling
+        // through to the conditional sources is the CORRECTED answer here, not
+        // a substitution of a narrower band.
+        if !fit.lambdas.is_empty() {
+            return Err(
+                "saved model does not contain smoothing-corrected covariance; refit before requesting --covariance-mode corrected"
+                    .to_string(),
+            );
+        }
     }
     if let Some(covariance) = fit.beta_covariance() {
         return Ok(PredictionCovarianceBackend::from_dense(covariance.view()));
     }
-    if let Some(hessian) = fit.penalized_hessian() {
+    if let Some(backend) = factorized_covariance_fallback(fit) {
         // Surface the factorization error directly rather than swallowing it
         // and reporting the generic "model is missing either ..." message.
         // When the saved Hessian exists but cannot be factored (indefinite,
         // numerically degenerate, etc.) the user needs to see *why*, not a
         // confused "refit" instruction that doesn't match the real fault.
-        return PredictionCovarianceBackend::from_factorized_hessian(SymmetricMatrix::Dense(
-            hessian.clone(),
-        ))
-        .map_err(|e| format!("failed to factor saved penalized Hessian for prediction: {e}"));
+        return backend;
     }
     Err(
         "nonlinear posterior-mean prediction requires either covariance or a saved penalized Hessian; refit"

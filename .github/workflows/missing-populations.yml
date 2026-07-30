@@ -1,0 +1,1052 @@
+name: Missing test populations
+
+# #2642: three real populations were absent from every automatic verdict:
+#
+# - tests/torch was removed during collection when torch was not installed;
+# - tests marked `slow` were deselected by the ordinary `-m "not slow"` lane;
+# - Rust doctests were never requested.
+#
+# COVERAGE_POPULATIONS_JSON is the checked-in manifest for those populations.
+# It is machine-validated below and, more importantly, its selectors directly
+# drive the commands. Counts are discovered from each fresh collection/run;
+# there is no checked-in number that can silently drift as tests are added.
+#
+# This workflow consumes the newest sealed rolling runtime on the scheduled
+# commit's history and checks out that artifact's exact SHA. It never dispatches
+# a wheel build, downloads the mutable rolling release, or builds a Python wheel
+# from source. If no immutable artifact is available, every subject says
+# NOT ATTEMPTED and the workflow is red for infrastructure, not for the tests.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # The non-cancellable rolling-wheel lane starts at 04:00 UTC. Resolve its
+    # newest completed artifact once daily without polling or sleeping.
+    - cron: "30 5 * * *"
+
+concurrency:
+  # Scheduled runs are evidence and are never cancelled. A newer manual
+  # request on the same ref supersedes an older manual request.
+  group: missing-populations-${{ github.event_name == 'schedule' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  COVERAGE_POPULATIONS_JSON: >-
+    [
+      {
+        "id": "torch",
+        "runner": "pytest",
+        "selector": ["tests/torch"],
+        "excluded_by": {
+          "mechanism": "missing dependency",
+          "detail": "tests/torch/conftest.py correctly ignores the directory when torch is absent"
+        }
+      },
+      {
+        "id": "slow",
+        "runner": "pytest",
+        "selector": ["tests", "-m", "slow"],
+        "excluded_by": {
+          "mechanism": "marker deselection",
+          "detail": "the ordinary Python lane explicitly selects -m not slow"
+        }
+      },
+      {
+        "id": "doctest",
+        "runner": "cargo",
+        "selector": ["test", "--locked", "--workspace", "--doc"],
+        "excluded_by": {
+          "mechanism": "missing invocation",
+          "detail": "ordinary cargo test invocations do not request --doc"
+        }
+      }
+    ]
+
+jobs:
+  resolve-runtime:
+    name: Resolve immutable warm runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      available: ${{ steps.runtime.outputs.available }}
+      reason: ${{ steps.runtime.outputs.reason }}
+      run_id: ${{ steps.runtime.outputs.run_id }}
+      sha: ${{ steps.runtime.outputs.sha }}
+      artifact: ${{ steps.runtime.outputs.artifact }}
+    steps:
+      - name: Validate the checked-in population manifest
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            type == "array"
+            and length == 3
+            and ((map(.id) | sort) == ["doctest", "slow", "torch"])
+            and (all(.[];
+              (.runner == "pytest" or .runner == "cargo")
+              and (.selector
+                | type == "array"
+                and length > 0
+                and all(.[]; type == "string" and length > 0))
+              and (.excluded_by.mechanism | type == "string" and length > 0)
+              and (.excluded_by.detail | type == "string" and length > 0)
+            ))
+            and (all(.[]; if .id == "doctest" then .runner == "cargo" else .runner == "pytest" end))
+          ' >/dev/null <<< "$COVERAGE_POPULATIONS_JSON"
+
+          {
+            echo "### Missing-population manifest"
+            echo
+            echo "| Population | Runner | Executed selector | Normally excluded by |"
+            echo "| --- | --- | --- | --- |"
+            jq -r '
+              .[] |
+              "| `\(.id)` | `\(.runner)` | `\(.selector | join(" "))` | \(.excluded_by.mechanism): \(.excluded_by.detail) |"
+            ' <<< "$COVERAGE_POPULATIONS_JSON"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fetch commit metadata for the ancestry proof
+        id: history
+        if: ${{ !cancelled() && steps.manifest.outcome == 'success' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: .github
+
+      - name: Resolve newest immutable warm runtime on this history
+        id: runtime
+        if: ${{ !cancelled() && steps.history.outcome == 'success' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          runtime_run_id=""
+          runtime_sha=""
+          runtime_artifact=""
+          resolution_error=""
+
+          if ! runs_json=$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow wheel-nightly.yml \
+            --branch main \
+            --status success \
+            --limit 50 \
+            --json databaseId,headSha,event); then
+            resolution_error="GitHub API could not list successful rolling-wheel runs."
+          else
+            while IFS=$'\t' read -r candidate_run candidate_sha candidate_event; do
+              if [[ -z "$candidate_run" || ! "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                continue
+              fi
+              # Automatic evidence consumes automatic producers. A successful
+              # dispatch may target an old build_sha and sort newer than a more
+              # recent main artifact, so it cannot define "newest" here.
+              if [[ "$candidate_event" != "push" && "$candidate_event" != "schedule" ]]; then
+                continue
+              fi
+
+              # Requiring the artifact name to contain the producer head SHA
+              # seals the automatic producer to the source commit it advertises.
+              candidate_artifact="gamfit-runtime-${candidate_sha}"
+              if ! artifacts_json=$(gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run}/artifacts?per_page=100"); then
+                resolution_error="GitHub API could not inspect artifacts for producer run ${candidate_run}."
+                break
+              fi
+              artifact_count=$(jq \
+                --arg name "$candidate_artifact" \
+                '[.artifacts[] | select(.name == $name and .expired == false)] | length' \
+                <<< "$artifacts_json")
+              if [[ "$artifact_count" -ne 1 ]]; then
+                continue
+              fi
+
+              # The REST compare endpoint computes a full diff and can return
+              # HTTP 500 under load. We need only the commit-graph predicate,
+              # so prove it against the one metadata-only history fetch above.
+              if ! git cat-file -e "${candidate_sha}^{commit}" 2>/dev/null; then
+                continue
+              fi
+              set +e
+              git merge-base --is-ancestor "$candidate_sha" "$GITHUB_SHA"
+              ancestry_status=$?
+              set -e
+              case "$ancestry_status" in
+                0) ;;
+                1) continue ;;
+                *)
+                  resolution_error="Local commit graph could not compare ${candidate_sha} with scheduled SHA ${GITHUB_SHA}."
+                  break
+                  ;;
+              esac
+
+              runtime_run_id="$candidate_run"
+              runtime_sha="$candidate_sha"
+              runtime_artifact="$candidate_artifact"
+              break
+            done < <(jq -r '.[] | [.databaseId, .headSha, .event] | @tsv' <<< "$runs_json")
+          fi
+
+          if [[ -n "$resolution_error" ]]; then
+            {
+              echo "available=false"
+              echo "reason=GITHUB_API_ERROR"
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo
+              echo "### NOT ATTEMPTED — runtime resolution failed"
+              echo
+              echo "$resolution_error No subject was run and no result about the code was produced."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=NOT ATTEMPTED: runtime resolution failed::${resolution_error} No subject ran."
+            exit 1
+          fi
+
+          if [[ -z "$runtime_run_id" ]]; then
+            {
+              echo "available=false"
+              echo "reason=NO_IMMUTABLE_RUNTIME"
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo
+              echo "### NOT ATTEMPTED — immutable runtime unavailable"
+              echo
+              echo "No successful, unexpired \`gamfit-runtime-<head-sha>\` artifact exists"
+              echo "on the ancestry of scheduled SHA \`${GITHUB_SHA}\`."
+              echo "The workflow refused release-alias, source-build, and wheel-commission fallbacks."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=NOT ATTEMPTED: immutable runtime unavailable::No exact, sealed rolling runtime exists on the ancestry of ${GITHUB_SHA}; no subject ran."
+            exit 1
+          fi
+
+          # Artifact names are routing metadata, not proof. Open the selected
+          # immutable artifact once here and verify its sealed commit and every
+          # recorded digest before any subject is allowed to claim this runtime.
+          verification_dir="${RUNNER_TEMP}/verified-runtime-${runtime_run_id}"
+          mkdir -p "$verification_dir"
+          if ! gh run download "$runtime_run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$runtime_artifact" \
+            --dir "$verification_dir"; then
+            {
+              echo "available=false"
+              echo "reason=RUNTIME_DOWNLOAD_FAILED"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error title=NOT ATTEMPTED: sealed runtime download failed::Producer ${runtime_run_id} could not be downloaded; no subject ran."
+            exit 1
+          fi
+          if ! (
+            grep -Fx "commit=${runtime_sha}" "$verification_dir/RUNTIME_PROVENANCE.txt" &&
+            cd "$verification_dir" &&
+            tail -n +2 RUNTIME_PROVENANCE.txt | sha256sum --check --strict
+          ); then
+            {
+              echo "available=false"
+              echo "reason=RUNTIME_PROVENANCE_INVALID"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error title=NOT ATTEMPTED: sealed runtime provenance invalid::Producer ${runtime_run_id} did not verify as commit ${runtime_sha}; no subject ran."
+            exit 1
+          fi
+          mapfile -t verified_wheels < <(
+            find "$verification_dir" -maxdepth 1 -type f -name 'gamfit-*.whl' -print
+          )
+          if [[ "${#verified_wheels[@]}" -ne 1 ]]; then
+            {
+              echo "available=false"
+              echo "reason=RUNTIME_PROVENANCE_INVALID"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error title=NOT ATTEMPTED: sealed runtime contents invalid::Expected one wheel in producer ${runtime_run_id}, found ${#verified_wheels[@]}; no subject ran."
+            exit 1
+          fi
+
+          {
+            echo "available=true"
+            echo "reason=AVAILABLE"
+            printf 'run_id=%s\n' "$runtime_run_id"
+            printf 'sha=%s\n' "$runtime_sha"
+            printf 'artifact=%s\n' "$runtime_artifact"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo
+            echo "### Exact runtime provenance"
+            echo
+            echo "- scheduled workflow SHA: \`${GITHUB_SHA}\`"
+            echo "- tested source/runtime SHA: \`${runtime_sha}\`"
+            echo "- producer run: [\`${runtime_run_id}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${runtime_run_id})"
+            echo "- immutable artifact: \`${runtime_artifact}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  python-population:
+    name: Python population — ${{ matrix.population }}
+    needs: resolve-runtime
+    if: ${{ always() && !cancelled() }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        population:
+          - torch
+          - slow
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      POPULATION_ID: ${{ matrix.population }}
+      # Test-execution walls are permitted by SPEC.md. The slow population gets
+      # one bounded 40-minute serial session; torch gets 20 minutes. Compilation
+      # and environment preparation are outside these subject budgets.
+      PYTEST_BUDGET_SECONDS: ${{ matrix.population == 'slow' && '2400' || '1200' }}
+    steps:
+      - name: Require an immutable runtime (infrastructure — not a test result)
+        id: runtime_gate
+        shell: bash
+        env:
+          RUNTIME_AVAILABLE: ${{ needs.resolve-runtime.outputs.available }}
+          RUNTIME_REASON: ${{ needs.resolve-runtime.outputs.reason }}
+        run: |
+          set -euo pipefail
+          if [[ "$RUNTIME_AVAILABLE" != "true" ]]; then
+            {
+              echo "### NOT ATTEMPTED — \`${POPULATION_ID}\`"
+              echo
+              echo "Immutable runtime resolution reported \`${RUNTIME_REASON:-UNKNOWN}\`."
+              echo "No test was collected or executed."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=NOT ATTEMPTED: ${POPULATION_ID} runtime unavailable::resolver=${RUNTIME_REASON:-UNKNOWN}; no test ran."
+            exit 1
+          fi
+
+      - name: Checkout exact runtime SHA
+        id: checkout
+        if: ${{ !cancelled() && steps.runtime_gate.outcome == 'success' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-runtime.outputs.sha }}
+
+      - name: Set up Python
+        id: setup_python
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Download, verify, and install the sealed wheel
+        id: runtime_install
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_RUN_ID: ${{ needs.resolve-runtime.outputs.run_id }}
+          RUNTIME_SHA: ${{ needs.resolve-runtime.outputs.sha }}
+          RUNTIME_ARTIFACT: ${{ needs.resolve-runtime.outputs.artifact }}
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "$RUNTIME_SHA" ]]; then
+            echo "::error::Checkout HEAD does not match immutable runtime SHA ${RUNTIME_SHA}."
+            exit 1
+          fi
+
+          runtime_dir="${RUNNER_TEMP}/gamfit-runtime-${RUNTIME_RUN_ID}"
+          evidence_dir="${GITHUB_WORKSPACE}/coverage-evidence/${POPULATION_ID}"
+          mkdir -p "$runtime_dir" "$evidence_dir"
+          gh run download "$RUNTIME_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$RUNTIME_ARTIFACT" \
+            --dir "$runtime_dir"
+
+          grep -Fx "commit=${RUNTIME_SHA}" "$runtime_dir/RUNTIME_PROVENANCE.txt"
+          (
+            cd "$runtime_dir"
+            tail -n +2 RUNTIME_PROVENANCE.txt | sha256sum --check --strict
+          )
+          mapfile -t wheels < <(find "$runtime_dir" -maxdepth 1 -type f -name 'gamfit-*.whl' -print)
+          if [[ "${#wheels[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one sealed gamfit wheel; found ${#wheels[@]}."
+            exit 1
+          fi
+
+          cp "$runtime_dir/RUNTIME_PROVENANCE.txt" "$evidence_dir/runtime-provenance.txt"
+          python -m pip install --force-reinstall "${wheels[0]}"
+
+      - name: Install the population's test environment
+        id: test_environment
+        if: ${{ !cancelled() && steps.runtime_install.outcome == 'success' }}
+        # `python -` prepends its working directory to `sys.path`. Running this
+        # step in the checkout would therefore import the in-tree `gamfit/`
+        # package without its compiled extension instead of the sealed wheel.
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Every selection is collected below the repository's root
+          # `tests/conftest.py`, so even a narrow population needs the
+          # package's declared test extra. Read that one canonical manifest
+          # instead of maintaining a second dependency list in this workflow.
+          mapfile -t test_requirements < <(
+            PYPROJECT="${GITHUB_WORKSPACE}/pyproject.toml" python - <<'PY'
+          import os
+          from pathlib import Path
+          import tomllib
+
+          document = tomllib.loads(Path(os.environ["PYPROJECT"]).read_text(encoding="utf-8"))
+          for requirement in document["project"]["optional-dependencies"]["test"]:
+              print(requirement)
+          PY
+          )
+          if [[ "${#test_requirements[@]}" -eq 0 ]]; then
+            echo "::error::pyproject.toml declared an empty project.optional-dependencies.test set."
+            exit 1
+          fi
+          python -m pip install "${test_requirements[@]}"
+
+          case "$POPULATION_ID" in
+            torch)
+              # A dedicated index, not an extra index, prevents a CUDA wheel or
+              # a same-name package from another index entering this CPU lane.
+              python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+              python - <<'PY'
+          import torch
+          if torch.version.cuda is not None:
+              raise SystemExit(f"expected a CPU-only torch, got CUDA {torch.version.cuda}")
+          print(f"torch={torch.__version__} cuda={torch.version.cuda}")
+          PY
+              ;;
+            slow)
+              # `-m slow` is applied after collection, so imports from every
+              # test module must be satisfiable even though only marked items
+              # execute. These two are collection-only dependencies outside
+              # the canonical package test extra above.
+              python -m pip install 'scipy>=1.11' 'lifelines>=0.28'
+              ;;
+            *)
+              echo "::error::Population manifest selected unsupported Python id '${POPULATION_ID}'."
+              exit 1
+              ;;
+          esac
+
+          python -m pip check
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import gamfit
+
+          origin = Path(gamfit.__file__).resolve()
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          if origin.is_relative_to(workspace):
+              raise SystemExit(f"source checkout shadowed sealed wheel: {origin}")
+          print(f"gamfit={gamfit.__version__} origin={origin}")
+          PY
+          python -m pip freeze --all | sort \
+            > "${GITHUB_WORKSPACE}/coverage-evidence/${POPULATION_ID}/python-environment.txt"
+
+      - name: Collect the complete population
+        id: collect
+        if: ${{ !cancelled() && steps.test_environment.outcome == 'success' }}
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${GITHUB_WORKSPACE}/coverage-evidence/${POPULATION_ID}"
+          log_file="${evidence_dir}/collection.log"
+          count_file="${evidence_dir}/collected-count.txt"
+          selector_json=$(jq -c \
+            --arg id "$POPULATION_ID" \
+            '.[] | select(.id == $id) | .selector' \
+            <<< "$COVERAGE_POPULATIONS_JSON")
+
+          set +e
+          POPULATION_SELECTOR_JSON="$selector_json" \
+          COLLECTION_COUNT_FILE="$count_file" \
+          python - <<'PY' 2>&1 | tee "$log_file"
+          import json
+          import os
+          from pathlib import Path
+          import pytest
+
+          selector = json.loads(os.environ["POPULATION_SELECTOR_JSON"])
+          selector[0] = str(Path(os.environ["GITHUB_WORKSPACE"]) / selector[0])
+
+          class PopulationCounter:
+              def pytest_collection_finish(self, session):
+                  Path(os.environ["COLLECTION_COUNT_FILE"]).write_text(
+                      f"{len(session.items)}\n", encoding="utf-8"
+                  )
+
+          raise SystemExit(pytest.main(
+              ["--collect-only", "-q", "-p", "no:cacheprovider", *selector],
+              plugins=[PopulationCounter()],
+          ))
+          PY
+          status=${PIPESTATUS[0]}
+          set -e
+
+          collected=""
+          if [[ -f "$count_file" ]]; then
+            collected=$(tr -d '[:space:]' < "$count_file")
+          fi
+          printf 'status=%s\n' "$status" >> "$GITHUB_OUTPUT"
+          printf 'count=%s\n' "$collected" >> "$GITHUB_OUTPUT"
+
+          if [[ "$status" -ne 0 ]]; then
+            echo "::error title=${POPULATION_ID} collection failed::Collection exited ${status}; this is a subject failure, not a test pass."
+            exit 1
+          fi
+          if [[ ! "$collected" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error title=NOT ATTEMPTED: ${POPULATION_ID} collected zero tests::A zero-item selection verifies nothing."
+            exit 1
+          fi
+          echo "Collected ${collected} ${POPULATION_ID} test(s)."
+
+      - name: Run every collected test
+        id: run_population
+        if: ${{ !cancelled() && steps.collect.outcome == 'success' }}
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${GITHUB_WORKSPACE}/coverage-evidence/${POPULATION_ID}"
+          log_file="${evidence_dir}/test.log"
+          junit_file="${evidence_dir}/junit.xml"
+          mapfile -t selector < <(jq -r \
+            --arg id "$POPULATION_ID" \
+            '.[] | select(.id == $id) | .selector[]' \
+            <<< "$COVERAGE_POPULATIONS_JSON")
+          selector[0]="${GITHUB_WORKSPACE}/${selector[0]}"
+
+          extra_args=()
+          if [[ "$POPULATION_ID" == "slow" ]]; then
+            # Serial execution preserves the failing engine message instead of
+            # turning a timeout into xdist's opaque "worker gwN crashed".
+            extra_args=(-o faulthandler_timeout=300)
+          fi
+
+          set +e
+          timeout --signal=TERM --kill-after=30s "$PYTEST_BUDGET_SECONDS" \
+            python -m pytest \
+              -p no:cacheprovider \
+              -ra --tb=short \
+              --junitxml="$junit_file" \
+              "${extra_args[@]}" \
+              "${selector[@]}" \
+              2>&1 | tee "$log_file"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          read -r junit_tests junit_failures junit_errors junit_skipped < <(
+            JUNIT_FILE="$junit_file" python - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          path = Path(os.environ["JUNIT_FILE"])
+          try:
+              root = ET.parse(path).getroot()
+              suites = [
+                  node for node in root.iter()
+                  if node.tag.rsplit("}", 1)[-1] == "testsuite"
+              ]
+              if root.tag.rsplit("}", 1)[-1] == "testsuite":
+                  suites = [root]
+
+              def total(attribute):
+                  direct = root.attrib.get(attribute)
+                  if direct is not None:
+                      return int(direct)
+                  return sum(int(suite.attrib.get(attribute, "0")) for suite in suites)
+
+              print(total("tests"), total("failures"), total("errors"), total("skipped"))
+          except Exception:
+              print("-1 -1 -1 -1")
+          PY
+          )
+
+          complete=false
+          if [[ "$junit_tests" == "${{ steps.collect.outputs.count }}" ]]; then
+            complete=true
+          fi
+          timed_out=false
+          if [[ "$status" -eq 124 || "$status" -eq 137 ]]; then
+            timed_out=true
+          fi
+          {
+            printf 'status=%s\n' "$status"
+            printf 'tests=%s\n' "$junit_tests"
+            printf 'failures=%s\n' "$junit_failures"
+            printf 'errors=%s\n' "$junit_errors"
+            printf 'skipped=%s\n' "$junit_skipped"
+            printf 'complete=%s\n' "$complete"
+            printf 'timed_out=%s\n' "$timed_out"
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$timed_out" == "true" ]]; then
+            echo "::error title=${POPULATION_ID} execution budget exceeded::Collection succeeded, then the test population did not finish within ${PYTEST_BUDGET_SECONDS}s; this is a test-side hang or performance failure."
+            exit 1
+          fi
+          if [[ "$complete" != "true" ]]; then
+            echo "::error title=${POPULATION_ID} execution incomplete::JUnit recorded ${junit_tests} of ${{ steps.collect.outputs.count }} collected tests; refusing a partial verdict."
+            exit 1
+          fi
+          if [[ "$status" -ne 0 ]]; then
+            echo "::error title=${POPULATION_ID} tests failed::All ${junit_tests} collected tests reported; pytest exited ${status}."
+            exit 1
+          fi
+
+      - name: Upload population evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: missing-population-${{ matrix.population }}-${{ github.run_id }}
+          path: coverage-evidence/${{ matrix.population }}
+          if-no-files-found: ignore
+
+      - name: Classify the population verdict
+        if: ${{ always() }}
+        shell: bash
+        env:
+          RUNTIME_GATE_OUTCOME: ${{ steps.runtime_gate.outcome }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          PYTHON_OUTCOME: ${{ steps.setup_python.outcome }}
+          ENVIRONMENT_OUTCOME: ${{ steps.test_environment.outcome }}
+          COLLECTION_STATUS: ${{ steps.collect.outputs.status }}
+          COLLECTED: ${{ steps.collect.outputs.count }}
+          RUN_OUTCOME: ${{ steps.run_population.outcome }}
+          RUN_STATUS: ${{ steps.run_population.outputs.status }}
+          RUN_TESTS: ${{ steps.run_population.outputs.tests }}
+          RUN_FAILURES: ${{ steps.run_population.outputs.failures }}
+          RUN_ERRORS: ${{ steps.run_population.outputs.errors }}
+          RUN_SKIPPED: ${{ steps.run_population.outputs.skipped }}
+          RUN_COMPLETE: ${{ steps.run_population.outputs.complete }}
+          RUN_TIMED_OUT: ${{ steps.run_population.outputs.timed_out }}
+          RUNTIME_SHA: ${{ needs.resolve-runtime.outputs.sha }}
+          RUNTIME_RUN_ID: ${{ needs.resolve-runtime.outputs.run_id }}
+          RUNTIME_ARTIFACT: ${{ needs.resolve-runtime.outputs.artifact }}
+        run: |
+          set -euo pipefail
+          selector=$(jq -r \
+            --arg id "$POPULATION_ID" \
+            '.[] | select(.id == $id) | .selector | join(" ")' \
+            <<< "$COVERAGE_POPULATIONS_JSON")
+          exclusion=$(jq -r \
+            --arg id "$POPULATION_ID" \
+            '.[] | select(.id == $id) | "\(.excluded_by.mechanism): \(.excluded_by.detail)"' \
+            <<< "$COVERAGE_POPULATIONS_JSON")
+
+          state=""
+          reason=""
+          if [[ "$RUNTIME_GATE_OUTCOME" != "success" \
+             || "$CHECKOUT_OUTCOME" != "success" \
+             || "$PYTHON_OUTCOME" != "success" \
+             || "$ENVIRONMENT_OUTCOME" != "success" ]]; then
+            state="NOT ATTEMPTED"
+            reason="The exact runtime or test environment was unavailable; no subject verdict exists."
+          elif [[ "$COLLECTION_STATUS" =~ ^[0-9]+$ && "$COLLECTION_STATUS" -ne 0 ]]; then
+            state="FAIL"
+            reason="The ready environment could not collect the requested population (pytest exit ${COLLECTION_STATUS})."
+          elif [[ ! "$COLLECTED" =~ ^[1-9][0-9]*$ ]]; then
+            state="NOT ATTEMPTED"
+            reason="Collection selected zero tests, so the lane verified nothing."
+          elif [[ "$RUN_OUTCOME" == "success" \
+               && "$RUN_STATUS" == "0" \
+               && "$RUN_COMPLETE" == "true" ]]; then
+            state="PASS"
+            reason="Every collected test completed and pytest returned success."
+          else
+            state="FAIL"
+            if [[ "$RUN_TIMED_OUT" == "true" ]]; then
+              reason="The fully collected population exceeded its execution budget."
+            elif [[ "$RUN_COMPLETE" != "true" ]]; then
+              reason="The test process did not report every collected test."
+            else
+              reason="The complete population reported at least one failure or error."
+            fi
+          fi
+
+          {
+            echo "### ${state} — \`${POPULATION_ID}\` population"
+            echo
+            echo "$reason"
+            echo
+            echo "- exact source/runtime SHA: \`${RUNTIME_SHA:-<unavailable>}\`"
+            echo "- producer run: \`${RUNTIME_RUN_ID:-<unavailable>}\`"
+            echo "- immutable artifact: \`${RUNTIME_ARTIFACT:-<unavailable>}\`"
+            echo "- manifest selector: \`${selector}\`"
+            echo "- ordinary exclusion: ${exclusion}"
+            echo "- collected: \`${COLLECTED:-0}\`"
+            echo "- reported: \`${RUN_TESTS:-0}\` (failures \`${RUN_FAILURES:-0}\`, errors \`${RUN_ERRORS:-0}\`, skipped \`${RUN_SKIPPED:-0}\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$state" != "PASS" ]]; then
+            echo "::error title=${state}: ${POPULATION_ID}::${reason}"
+            exit 1
+          fi
+
+  doctest-population:
+    name: Rust population — doctest
+    needs: resolve-runtime
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      POPULATION_ID: doctest
+      # `cargo test --doc` necessarily compiles its harness before execution.
+      # This inner wall makes an exhausted build budget distinguishable from a
+      # job-level cancellation that would publish no classification.
+      DOCTEST_COLLECTION_BUDGET_SECONDS: "1200"
+      DOCTEST_RUN_BUDGET_SECONDS: "300"
+    steps:
+      - name: Require an immutable runtime (infrastructure — not a test result)
+        id: runtime_gate
+        shell: bash
+        env:
+          RUNTIME_AVAILABLE: ${{ needs.resolve-runtime.outputs.available }}
+          RUNTIME_REASON: ${{ needs.resolve-runtime.outputs.reason }}
+        run: |
+          set -euo pipefail
+          if [[ "$RUNTIME_AVAILABLE" != "true" ]]; then
+            {
+              echo "### NOT ATTEMPTED — \`doctest\`"
+              echo
+              echo "Immutable runtime resolution reported \`${RUNTIME_REASON:-UNKNOWN}\`."
+              echo "No doctest was compiled or executed."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=NOT ATTEMPTED: doctest runtime unavailable::resolver=${RUNTIME_REASON:-UNKNOWN}; no doctest ran."
+            exit 1
+          fi
+
+      - name: Checkout exact runtime SHA
+        id: checkout
+        if: ${{ !cancelled() && steps.runtime_gate.outcome == 'success' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-runtime.outputs.sha }}
+          # Root build.rs validates commit authorship and needs real history.
+          fetch-depth: 0
+
+      - name: Set up the pinned Python build environment
+        id: python_environment
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Prepare gam-pyffi's PyO3 environment
+        id: pyffi_environment
+        if: ${{ !cancelled() && steps.python_environment.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install 'numpy>=1.26'
+          python -m pip check
+          printf 'PYO3_PYTHON=%s\n' "$(command -v python)" >> "$GITHUB_ENV"
+
+      - name: Read the repository-pinned Rust toolchain
+        id: toolchain_pin
+        if: ${{ !cancelled() && steps.pyffi_environment.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          channel=$(python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          data = tomllib.loads(Path("rust-toolchain.toml").read_text(encoding="utf-8"))
+          print(data["toolchain"]["channel"])
+          PY
+          )
+          if [[ -z "$channel" || "$channel" =~ [[:space:]] ]]; then
+            echo "::error::rust-toolchain.toml contains an invalid channel."
+            exit 1
+          fi
+          printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install the pinned Rust toolchain
+        id: rust_toolchain
+        if: ${{ !cancelled() && steps.toolchain_pin.outcome == 'success' }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.toolchain_pin.outputs.channel }}
+
+      - name: Set up shared sccache
+        id: sccache_action
+        if: ${{ !cancelled() && steps.rust_toolchain.outcome == 'success' }}
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Restore Cargo registry and git caches
+        id: cargo_cache
+        if: ${{ !cancelled() && steps.sccache_action.outcome == 'success' }}
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          cache-targets: "false"
+
+      - name: Require reachable shared compiler cache
+        id: compiler_cache
+        if: ${{ !cancelled() && steps.cargo_cache.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! sccache --start-server; then
+            echo "::error title=NOT ATTEMPTED: compiler cache unavailable::Refusing a cold doctest build."
+            exit 1
+          fi
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          sccache --show-stats
+          sccache --zero-stats
+
+      - name: Collect the complete workspace doctest population
+        id: collect_doctests
+        if: ${{ !cancelled() && steps.compiler_cache.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${GITHUB_WORKSPACE}/coverage-evidence/doctest"
+          log_file="${evidence_dir}/collection.log"
+          mkdir -p "$evidence_dir"
+          mapfile -t selector < <(jq -r \
+            --arg id "$POPULATION_ID" \
+            '.[] | select(.id == $id) | .selector[]' \
+            <<< "$COVERAGE_POPULATIONS_JSON")
+
+          printf 'cargo'
+          printf ' %q' "${selector[@]}"
+          printf ' -- --list'
+          printf '\n'
+          set +e
+          timeout --signal=TERM --kill-after=30s "$DOCTEST_COLLECTION_BUDGET_SECONDS" \
+            cargo "${selector[@]}" -- --list 2>&1 | tee "$log_file"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          collected=$(awk '
+            /^[[:space:]]*[0-9]+ tests?, [[:space:]]*[0-9]+ benchmarks?$/ {
+              count += $1
+            }
+            END { print count + 0 }
+          ' "$log_file")
+          timed_out=false
+          if [[ "$status" -eq 124 || "$status" -eq 137 ]]; then
+            timed_out=true
+          fi
+          {
+            printf 'status=%s\n' "$status"
+            printf 'count=%s\n' "$collected"
+            printf 'timed_out=%s\n' "$timed_out"
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$status" -ne 0 ]]; then
+            echo "::error title=doctest collection failed::The literal workspace --doc command could not compile/list its population (exit ${status})."
+            exit 1
+          fi
+          if [[ "$collected" -eq 0 ]]; then
+            echo "::error title=NOT ATTEMPTED: doctest collected zero tests::A zero-item workspace doc population verifies nothing."
+            exit 1
+          fi
+          echo "Collected ${collected} workspace doctest(s)."
+
+      - name: Require measured warm-cache reuse during collection
+        id: cache_evidence
+        if: ${{ !cancelled() && steps.compiler_cache.outcome == 'success' && steps.collect_doctests.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${GITHUB_WORKSPACE}/coverage-evidence/doctest"
+          stats=$(sccache --show-stats)
+          printf '%s\n' "$stats" | tee "$evidence_dir/sccache-stats.txt"
+          hits=$(awk '$1 == "Cache" && $2 == "hits" { print $3; exit }' <<< "$stats")
+          printf 'hits=%s\n' "${hits:-}" >> "$GITHUB_OUTPUT"
+          if [[ ! "${hits:-}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Could not read sccache hit count; refusing unmeasured cache provenance."
+            exit 1
+          fi
+          if [[ "$hits" -eq 0 ]]; then
+            echo "::error title=NOT ATTEMPTED: cold doctest collection::Collection reused zero shared compiler objects; refusing to continue into a nominally warm proof."
+            exit 1
+          fi
+
+      - name: Run the complete workspace doctest population
+        id: run_doctests
+        if: ${{ !cancelled() && steps.collect_doctests.outcome == 'success' && steps.cache_evidence.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${GITHUB_WORKSPACE}/coverage-evidence/doctest"
+          log_file="${evidence_dir}/doctest.log"
+          mapfile -t selector < <(jq -r \
+            --arg id "$POPULATION_ID" \
+            '.[] | select(.id == $id) | .selector[]' \
+            <<< "$COVERAGE_POPULATIONS_JSON")
+
+          printf 'cargo'
+          printf ' %q' "${selector[@]}"
+          printf '\n'
+          set +e
+          timeout --signal=TERM --kill-after=30s "$DOCTEST_RUN_BUDGET_SECONDS" \
+            cargo "${selector[@]}" 2>&1 | tee "$log_file"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          read -r passed failed ignored < <(
+            awk '
+              /test result:/ {
+                for (i = 1; i < NF; i++) {
+                  if ($(i + 1) == "passed;") passed += $i
+                  if ($(i + 1) == "failed;") failed += $i
+                  if ($(i + 1) == "ignored;") ignored += $i
+                }
+              }
+              END { print passed + 0, failed + 0, ignored + 0 }
+            ' "$log_file"
+          )
+          executed=$(( passed + failed ))
+          reported=$(( executed + ignored ))
+          complete=false
+          if [[ "$reported" -eq "${{ steps.collect_doctests.outputs.count }}" \
+             && "$ignored" -eq 0 ]]; then
+            complete=true
+          fi
+          timed_out=false
+          if [[ "$status" -eq 124 || "$status" -eq 137 ]]; then
+            timed_out=true
+          fi
+          {
+            printf 'status=%s\n' "$status"
+            printf 'passed=%s\n' "$passed"
+            printf 'failed=%s\n' "$failed"
+            printf 'ignored=%s\n' "$ignored"
+            printf 'executed=%s\n' "$executed"
+            printf 'reported=%s\n' "$reported"
+            printf 'complete=%s\n' "$complete"
+            printf 'timed_out=%s\n' "$timed_out"
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$status" -ne 0 ]]; then
+            echo "::error title=workspace doctests failed::The literal workspace --doc command exited ${status}."
+            exit 1
+          fi
+          if [[ "$complete" != "true" ]]; then
+            echo "::error title=doctest execution incomplete::Cargo reported ${reported} of ${{ steps.collect_doctests.outputs.count }} collected doctests (ignored ${ignored}); refusing a partial verdict."
+            exit 1
+          fi
+
+      - name: Upload doctest evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: missing-population-doctest-${{ github.run_id }}
+          path: coverage-evidence/doctest
+          if-no-files-found: ignore
+
+      - name: Classify the doctest verdict
+        if: ${{ always() }}
+        shell: bash
+        env:
+          RUNTIME_GATE_OUTCOME: ${{ steps.runtime_gate.outcome }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          PYTHON_ENVIRONMENT_OUTCOME: ${{ steps.python_environment.outcome }}
+          PYFFI_ENVIRONMENT_OUTCOME: ${{ steps.pyffi_environment.outcome }}
+          TOOLCHAIN_PIN_OUTCOME: ${{ steps.toolchain_pin.outcome }}
+          RUST_TOOLCHAIN_OUTCOME: ${{ steps.rust_toolchain.outcome }}
+          COMPILER_CACHE_OUTCOME: ${{ steps.compiler_cache.outcome }}
+          COLLECTION_STATUS: ${{ steps.collect_doctests.outputs.status }}
+          COLLECTION_COUNT: ${{ steps.collect_doctests.outputs.count }}
+          COLLECTION_TIMED_OUT: ${{ steps.collect_doctests.outputs.timed_out }}
+          RUN_OUTCOME: ${{ steps.run_doctests.outcome }}
+          RUN_STATUS: ${{ steps.run_doctests.outputs.status }}
+          RUN_PASSED: ${{ steps.run_doctests.outputs.passed }}
+          RUN_FAILED: ${{ steps.run_doctests.outputs.failed }}
+          RUN_IGNORED: ${{ steps.run_doctests.outputs.ignored }}
+          RUN_EXECUTED: ${{ steps.run_doctests.outputs.executed }}
+          RUN_REPORTED: ${{ steps.run_doctests.outputs.reported }}
+          RUN_COMPLETE: ${{ steps.run_doctests.outputs.complete }}
+          RUN_TIMED_OUT: ${{ steps.run_doctests.outputs.timed_out }}
+          CACHE_OUTCOME: ${{ steps.cache_evidence.outcome }}
+          CACHE_HITS: ${{ steps.cache_evidence.outputs.hits }}
+          RUNTIME_SHA: ${{ needs.resolve-runtime.outputs.sha }}
+          RUNTIME_RUN_ID: ${{ needs.resolve-runtime.outputs.run_id }}
+          RUNTIME_ARTIFACT: ${{ needs.resolve-runtime.outputs.artifact }}
+        run: |
+          set -euo pipefail
+          selector=$(jq -r \
+            --arg id "$POPULATION_ID" \
+            '.[] | select(.id == $id) | .selector | join(" ")' \
+            <<< "$COVERAGE_POPULATIONS_JSON")
+          exclusion=$(jq -r \
+            --arg id "$POPULATION_ID" \
+            '.[] | select(.id == $id) | "\(.excluded_by.mechanism): \(.excluded_by.detail)"' \
+            <<< "$COVERAGE_POPULATIONS_JSON")
+
+          state=""
+          reason=""
+          cache_suffix=""
+          if [[ "$RUNTIME_GATE_OUTCOME" != "success" \
+             || "$CHECKOUT_OUTCOME" != "success" \
+             || "$PYTHON_ENVIRONMENT_OUTCOME" != "success" \
+             || "$PYFFI_ENVIRONMENT_OUTCOME" != "success" \
+             || "$TOOLCHAIN_PIN_OUTCOME" != "success" \
+             || "$RUST_TOOLCHAIN_OUTCOME" != "success" \
+             || "$COMPILER_CACHE_OUTCOME" != "success" ]]; then
+            state="NOT ATTEMPTED"
+            reason="The exact source, PyO3 environment, pinned toolchain, or shared compiler cache was unavailable; no doctest verdict exists."
+          elif [[ "$COLLECTION_TIMED_OUT" == "true" ]]; then
+            state="NOT ATTEMPTED"
+            reason="The workspace doctest harness did not finish compiling/listing within its budget, so the full population was not known."
+          elif [[ "$COLLECTION_STATUS" =~ ^[0-9]+$ && "$COLLECTION_STATUS" -ne 0 ]]; then
+            state="FAIL"
+            reason="The ready workspace failed to compile/list its doctests; documentation compile failures are real subject failures."
+          elif [[ ! "$COLLECTION_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+            state="NOT ATTEMPTED"
+            reason="The workspace doctest command collected zero tests, so the lane verified nothing."
+          elif [[ "$CACHE_OUTCOME" != "success" ]]; then
+            state="NOT ATTEMPTED"
+            reason="Collection reused no measurable shared compiler state, so the workflow refused to continue into a cold doctest run."
+          elif [[ "$RUN_STATUS" =~ ^[0-9]+$ && "$RUN_STATUS" -ne 0 ]]; then
+            state="FAIL"
+            if [[ "$RUN_TIMED_OUT" == "true" ]]; then
+              reason="The fully collected workspace doctest population exceeded its execution budget."
+            else
+              reason="The workspace doctest command failed; compile failures in documentation are real subject failures."
+            fi
+          elif [[ "$RUN_OUTCOME" == "success" \
+               && "$RUN_STATUS" == "0" \
+               && "$RUN_COMPLETE" == "true" ]]; then
+            state="PASS"
+            reason="Every collected workspace doctest executed and cargo returned success."
+          else
+            state="FAIL"
+            reason="Cargo did not report every collected doctest as executed; refusing a partial verdict."
+          fi
+
+          if [[ "$CACHE_OUTCOME" != "success" && "$COLLECTION_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+            cache_suffix=" The collection/run evidence remains recorded, but the job also failed its warm-cache contract."
+          fi
+          {
+            echo "### ${state} — \`doctest\` population"
+            echo
+            echo "${reason}${cache_suffix}"
+            echo
+            echo "- exact source/runtime SHA: \`${RUNTIME_SHA:-<unavailable>}\`"
+            echo "- producer run: \`${RUNTIME_RUN_ID:-<unavailable>}\`"
+            echo "- immutable artifact: \`${RUNTIME_ARTIFACT:-<unavailable>}\`"
+            echo "- manifest command: \`cargo ${selector}\`"
+            echo "- ordinary exclusion: ${exclusion}"
+            echo "- collected: \`${COLLECTION_COUNT:-0}\`"
+            echo "- reported: \`${RUN_REPORTED:-0}\`; executed: \`${RUN_EXECUTED:-0}\` (passed \`${RUN_PASSED:-0}\`, failed \`${RUN_FAILED:-0}\`, ignored \`${RUN_IGNORED:-0}\`)"
+            echo "- compiler-cache hits: \`${CACHE_HITS:-unavailable}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$state" != "PASS" || "$CACHE_OUTCOME" != "success" ]]; then
+            echo "::error title=${state}: doctest::${reason}${cache_suffix}"
+            exit 1
+          fi

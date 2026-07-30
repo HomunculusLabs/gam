@@ -217,6 +217,48 @@ pub fn reml_laml_evaluate(
                     .as_ref()
                     .map_or(0.0, ExactJeffreysTerm::value);
             }
+            // #2454/#2644: record the SAME two penalty-energy spellings here.
+            //
+            // The audit — and therefore the structural half of the #2454 gate
+            // ("the criterion's penalty energy and the gradient's block sum are
+            // ONE quantity") — used to be emitted only from the
+            // profiled-Gaussian arm above. Every non-Gaussian family lands on
+            // THIS arm, so the whole binomial/Poisson/Gamma/survival half of
+            // the criterion was outside the instrument, even though the
+            // exposure is identical and link-independent: `cost` reads the
+            // stable-basis `penalty_quad_value` while the gradient's
+            // `fixed_beta` channel is a per-block projection of `Σ_k λ_k q_k`
+            // rebuilt from the outer penalty coordinates. If those two spellings
+            // are not the same number, the ρ-derivative multiplies the
+            // difference by `λ_k`.
+            //
+            // `dp_cgrad = 1.0` and `phi = 1.0` are not placeholders: the
+            // documented reconstruction of the channel is `dp_cgrad · a_k / phi`,
+            // and on fixed dispersion that channel is exactly `a_k` (there is no
+            // smooth deviance floor and no profiled scale in it — the `phi` of
+            // `DispersionHandling::Fixed` scales the LIKELIHOOD, not this term).
+            // Recording 1.0/1.0 keeps one reconstruction formula true on both
+            // arms rather than making the audit's meaning branch-dependent.
+            // `dp_raw`/`dp_floored` carry the deviance-scale penalized deviance
+            // for context; no criterion term on this arm reads them.
+            if crate::estimate::outer_eval_capture::rho_outer_audit_enabled() {
+                let block_sum: f64 = lambdas
+                    .iter()
+                    .zip(solution.penalty_coords.iter())
+                    .map(|(&lambda, coord)| lambda * coord.shifted_quadratic(&solution.beta, 1.0))
+                    .sum();
+                let dp_raw = -2.0 * solution.log_likelihood + 2.0 * penalty_quad_value;
+                crate::estimate::outer_eval_capture::record_rho_penalty_energy(
+                    crate::estimate::outer_eval_capture::PenaltyEnergyAudit {
+                        stable: solution.penalty_quadratic,
+                        block_sum,
+                        dp_raw,
+                        dp_floored: dp_raw,
+                        dp_cgrad: 1.0,
+                        phi: 1.0,
+                    },
+                );
+            }
             (cost, *phi, 0.0, 0.0)
         }
     };

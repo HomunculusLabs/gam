@@ -62,6 +62,7 @@ mod rail_projection_tests;
 mod run;
 mod run_plan;
 mod seed_screening;
+pub mod soft_rho_guard_floor;
 
 pub(crate) use crate::model_types::CERTIFICATE_RAIL_MARGIN;
 pub use crate::model_types::{

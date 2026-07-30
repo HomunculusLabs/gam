@@ -976,7 +976,7 @@ pub(crate) fn sls_row_nll_wiggle<'arena, S: RuntimeJetScalar<'arena>>(
     let qdot0 = inv_sigma_exit.mul(&vars[3].mul(&vars[8]).sub(&vars[5]));
     let mut q0w = q0.clone();
     let mut q1w = q1.clone();
-    let mut m1 = vars[0].compose_unary([1.0, 0.0, 0.0, 0.0, 0.0]);
+    let mut m1 = vars[0].constant_like(1.0);
     for j in 0..pw {
         let bw = &vars[SLS_ROW_K + j];
         q0w = q0w.add(&bw.mul(&q0.compose_unary([b0e[j], b1e[j], b2e[j], b3e[j], 0.0])));
@@ -1301,8 +1301,7 @@ pub fn survival_location_scale_alo_row_geometry(
                 Some(wiggle) => {
                     let mut entry = variables[0].clone();
                     let mut exit = variables[1].clone();
-                    let mut derivative_multiplier =
-                        variables[0].compose_unary([1.0, 0.0, 0.0, 0.0, 0.0]);
+                    let mut derivative_multiplier = variables[0].constant_like(1.0);
                     for coefficient in 0..time_wiggle_dimension {
                         let beta = &variables[SLS_ROW_K + coefficient];
                         entry = entry.add(&beta.mul(&variables[0].compose_unary([

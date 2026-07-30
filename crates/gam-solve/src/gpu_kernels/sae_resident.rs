@@ -971,6 +971,7 @@ impl DeviceResidentArrowWorkspace {
             frame_builds: shared.frame_builds,
             base_builds: shared.base_builds,
             base_refactors: shared.base_refactors,
+            base_gradient_solves: shared.base_gradient_solves,
         })
     }
 
@@ -1491,9 +1492,12 @@ impl DeviceResidentArrowWorkspace {
     /// fixed for the whole loop and nothing about them needs to cross the bus more
     /// than once. Routing:
     ///
-    ///   * ridge unchanged since the last solve — reuse the ridge-keyed frame's
-    ///     factors and upload only the `O(n·d + p)` gradient. Byte-identical to
-    ///     the pre-#2539 behaviour, and it is the whole no-rejection trajectory.
+    ///   * ridge unchanged since the last solve — reuse the ridge-keyed FACTORS
+    ///     (`L_i`, `Y_i`, `L_S`) sitting on top of the resident base blocks and
+    ///     upload only the `O(n·d + p)` gradient. No POTRF runs. This is the
+    ///     whole no-rejection trajectory and it must stay free: the two-level
+    ///     split exists precisely so adopting the base frame for ridge changes
+    ///     does not put a factor chain back on the accepted step.
     ///   * ridge changed — re-factor from the already-resident base blocks. Only
     ///     the two ridge scalars, the re-diagonalised `D` (`n·d·d`) and the
     ///     gradient cross to the device, in place of a host re-pack plus a full
@@ -1526,28 +1530,7 @@ impl DeviceResidentArrowWorkspace {
         let gradient_bytes = (g_t.len() + g_beta.len()) * std::mem::size_of::<f64>();
         let readback_bytes = (n * d + p) * std::mem::size_of::<f64>();
 
-        let keyed_matches = frames
-            .keyed
-            .as_ref()
-            .is_some_and(|(rt, rb, _)| *rt == ridge_t && *rb == ridge_beta);
-        if keyed_matches {
-            match frames.keyed.as_ref() {
-                Some((_, _, frame)) => {
-                    gam_gpu::profile::telemetry_record_h2d(gradient_bytes);
-                    gam_gpu::profile::telemetry_record_kernel_launch();
-                    gam_gpu::profile::telemetry_record_d2h(readback_bytes);
-                    return frame.solve_gradient(&g_t, &g_beta).map_err(map_gpu_error);
-                }
-                None => {
-                    return Err(DeviceResidentArrowError::Solve {
-                        reason: "SAE two-level frame lost its ridge-keyed frame after matching it"
-                            .to_string(),
-                    });
-                }
-            }
-        }
-
-        // The ridge moved. Take the base-resident refactor when it is available.
+        // Level 1: the resident base blocks. Built at most once per loop.
         if !frames.base_declined && frames.base.is_none() {
             match crate::gpu_kernels::arrow_schur::ResidentBaseArrowFrameHandle::new(residual) {
                 Ok(base) => {
@@ -1570,23 +1553,69 @@ impl DeviceResidentArrowWorkspace {
             }
         }
         if let Some(base) = frames.base.as_ref() {
-            // Drop the stale ridge-keyed factors: they are keyed on a ridge this
-            // loop has left, and holding them would keep their slabs on the
-            // device for a key that no longer matches.
-            frames.keyed = None;
-            frames.base_refactors += 1;
-            gam_gpu::profile::telemetry_record_factorization();
-            gam_gpu::profile::telemetry_record_h2d(
-                gradient_bytes + n * d * d * std::mem::size_of::<f64>(),
-            );
-            gam_gpu::profile::telemetry_record_kernel_launch();
-            gam_gpu::profile::telemetry_record_d2h(readback_bytes);
-            return base
-                .refactor_and_solve_with_gradient(ridge_t, ridge_beta, &g_t, &g_beta)
-                .map_err(map_gpu_error);
+            // Level 2: the ridge-keyed factors on top of those blocks. A hit is a
+            // gradient-only solve — the accepted-step path, which must not pay a
+            // POTRF.
+            let factors_match = frames
+                .base_keyed
+                .as_ref()
+                .is_some_and(|factors| factors.matches_ridge(ridge_t, ridge_beta));
+            if !factors_match {
+                // The ridge moved. Drop the stale factors before building the new
+                // ones so a failed factor cannot leave a key naming device state
+                // that no longer matches it.
+                frames.base_keyed = None;
+                let factors = base
+                    .factor_at(ridge_t, ridge_beta)
+                    .map_err(map_gpu_error)?;
+                frames.base_refactors += 1;
+                gam_gpu::profile::telemetry_record_factorization();
+                gam_gpu::profile::telemetry_record_h2d(n * d * d * std::mem::size_of::<f64>());
+                frames.base_keyed = Some(factors);
+            } else {
+                frames.base_gradient_solves += 1;
+            }
+            match frames.base_keyed.as_ref() {
+                Some(factors) => {
+                    gam_gpu::profile::telemetry_record_h2d(gradient_bytes);
+                    gam_gpu::profile::telemetry_record_kernel_launch();
+                    gam_gpu::profile::telemetry_record_d2h(readback_bytes);
+                    return base
+                        .solve_with_factors(factors, &g_t, &g_beta)
+                        .map_err(map_gpu_error);
+                }
+                None => {
+                    return Err(DeviceResidentArrowError::Solve {
+                        reason: "SAE two-level frame lost its ridge-keyed factors after building \
+                                 them"
+                            .to_string(),
+                    });
+                }
+            }
         }
 
-        // No base frame on this host: the pre-#2539 ridge-keyed rebuild.
+        // No base frame on this host: the pre-#2539 ridge-keyed rebuild, with its
+        // own same-ridge reuse so a CPU-declined host keeps the behaviour it had.
+        let keyed_matches = frames
+            .keyed
+            .as_ref()
+            .is_some_and(|(rt, rb, _)| *rt == ridge_t && *rb == ridge_beta);
+        if keyed_matches {
+            match frames.keyed.as_ref() {
+                Some((_, _, frame)) => {
+                    gam_gpu::profile::telemetry_record_h2d(gradient_bytes);
+                    gam_gpu::profile::telemetry_record_kernel_launch();
+                    gam_gpu::profile::telemetry_record_d2h(readback_bytes);
+                    return frame.solve_gradient(&g_t, &g_beta).map_err(map_gpu_error);
+                }
+                None => {
+                    return Err(DeviceResidentArrowError::Solve {
+                        reason: "SAE two-level frame lost its ridge-keyed frame after matching it"
+                            .to_string(),
+                    });
+                }
+            }
+        }
         frames.keyed = None;
         match crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle::new(
             residual, ridge_t, ridge_beta,
@@ -1780,6 +1809,16 @@ pub struct OuterSequenceOutcome {
     /// ridge change re-packed the blocks on the host and re-uploaded them, so
     /// every one of these was a full rebuild.
     pub base_refactors: usize,
+    /// #2539: solves that hit the ridge-keyed factors and therefore ran NO
+    /// factor work at all — only the gradient crossed the bus.
+    ///
+    /// This is the counter that separates the two-level frame from a plain
+    /// base-frame adoption. A base frame used on its own re-factors on every
+    /// iterate, so this stays `0` and `base_refactors` equals the iterate count;
+    /// with the factors cached on top, an unchanged-ridge iterate lands here
+    /// instead. A trajectory whose ridge never moves must show
+    /// `base_refactors == 1`.
+    pub base_gradient_solves: usize,
 }
 
 /// The two-level device frame carried through one inner Newton loop — and, for
@@ -1815,9 +1854,14 @@ struct SharedFrameState {
     /// loop that cannot hold the base blocks stops re-attempting them on every
     /// ridge change and takes the pre-#2539 rebuild instead.
     base_declined: bool,
+    /// The ridge-keyed factors living ON TOP of `base` (#2539). A same-ridge
+    /// iterate re-solves against these and runs no POTRF; a ridge change
+    /// replaces them from blocks that never leave the device.
+    base_keyed: Option<crate::gpu_kernels::arrow_schur::ResidentBaseRidgeFactorsHandle>,
     frame_builds: usize,
     base_builds: usize,
     base_refactors: usize,
+    base_gradient_solves: usize,
 }
 
 /// One-shot engagement report for the #1017 production resident inner-step seam,
@@ -3118,13 +3162,41 @@ mod tests {
             let shared = ws
                 .device_fit_outer_sequence(&outers, &opts)
                 .expect("device outer sequence");
+            // #2539 two-level frame: on a CUDA host the base blocks upload ONCE
+            // and the ridge-keyed factors are derived from them ONCE (the ridge
+            // never moves on this all-accept sweep), after which every solve is
+            // gradient-only. The host re-pack + full re-upload path
+            // (`frame_builds`) must not run at all — its whole cost is what
+            // residency exists to remove.
             assert_eq!(
-                shared.frame_builds,
-                1,
-                "across-outer residency must build the resident frame exactly once \
-                 for an unchanged operator (got {} builds over {} outers) — a count \
-                 > 1 means the frame was needlessly re-factored per outer",
-                shared.frame_builds,
+                shared.base_builds, 1,
+                "across-outer residency must upload the ridge-independent base blocks \
+                 exactly once for an unchanged operator (got {} over {} outers)",
+                shared.base_builds,
+                outers.len()
+            );
+            assert_eq!(
+                shared.base_refactors, 1,
+                "an unchanged operator at an unchanged ridge must be factored exactly \
+                 once for the whole sweep (got {} factorizations over {} outers) — a \
+                 count equal to the solve count means the ridge-keyed factors are not \
+                 being reused and every accepted step is paying a POTRF/TRSM/Schur \
+                 chain it does not need",
+                shared.base_refactors,
+                outers.len()
+            );
+            assert_eq!(
+                shared.frame_builds, 0,
+                "a host that can hold the base blocks must never take the host re-pack \
+                 + full re-upload rebuild (got {} rebuilds)",
+                shared.frame_builds
+            );
+            assert!(
+                shared.base_gradient_solves >= outers.len() - 1,
+                "every solve past the one factorization must be gradient-only: {} \
+                 gradient solves against {} factorizations over {} outers",
+                shared.base_gradient_solves,
+                shared.base_refactors,
                 outers.len()
             );
             // Bit-parity: sharing the factor across outers must not change the
@@ -3154,17 +3226,144 @@ mod tests {
                 );
             }
             println!(
-                "[#1017 outer-seq color_arm] outers={} frame_builds={} (across-outer factor \
-                 amortized) parity<1e-9 OK",
+                "[#1017 outer-seq color_arm] outers={} base_builds={} base_refactors={} \
+                 base_gradient_solves={} frame_builds={} (across-outer factor amortized) \
+                 parity<1e-9 OK",
                 outers.len(),
+                shared.base_builds,
+                shared.base_refactors,
+                shared.base_gradient_solves,
                 shared.frame_builds
             );
         } else {
             println!(
                 "[#1017 outer-seq color_arm] no CUDA device — across-outer residency skipped; \
-                 run on the GPU node to assert frame_builds==1 + device parity"
+                 run on the GPU node to assert base_refactors==1 + device parity"
             );
         }
+    }
+
+    /// #2539: the MOVING-ridge trajectory — the one the residency fix is about.
+    ///
+    /// `outer_sequence_reuses_frame_and_matches_independent` above runs at
+    /// `initial_ridge_t = 0`, where an accepted step leaves the ridge at
+    /// `0 × lm_shrink = 0` and the key never misses. That arm measures the
+    /// accepted-step path and, by construction, none of the ridge-change cost.
+    ///
+    /// Start the ridge at a positive value and the LM arm moves it on every
+    /// accept as well as every reject, so the ridge-keyed factors miss on
+    /// essentially every iterate. Before the two-level frame each of those
+    /// misses was a host re-pack of `D`/`B`/`H_ββ` plus a full re-upload of the
+    /// `n·d×p` slabs; the fix must make every one of them an on-device refactor
+    /// from blocks that are already resident. The load-immune statement of that
+    /// is an integer: `frame_builds` — the host-rebuild counter — must be `0`
+    /// no matter how far the ridge travels.
+    ///
+    /// The arm is only meaningful if the ridge actually moves, so it asserts
+    /// that too rather than trusting the option: `base_refactors > 1` is the
+    /// fixture proving it drove the case it names.
+    #[test]
+    fn moving_ridge_takes_no_host_rebuild_and_matches_independent_2539() {
+        let ws = super::color_arm_fixture().expect("color_arm fixture");
+        let opts = DeviceResidentInnerOptions {
+            // Positive on entry: `ridge × lm_shrink` is then a NEW positive ridge
+            // on every accept, so the key misses even without a rejection.
+            initial_ridge_t: 1.0e-3,
+            initial_ridge_beta: 1.0e-3,
+            ..DeviceResidentInnerOptions::default()
+        };
+        let n = ws.shape.n;
+        let d = ws.shape.d;
+        let p = ws.shape.p;
+
+        let outers: Vec<(Vec<f64>, Vec<f64>)> = (0..3)
+            .map(|s| {
+                let g_t: Vec<f64> = (0..n * d)
+                    .map(|i| 0.01 * (((i + 3 * s) as f64) * 0.002).sin())
+                    .collect();
+                let g_beta: Vec<f64> = (0..p)
+                    .map(|j| 0.001 * (((j + 11 * s) as f64) * 0.0009).cos())
+                    .collect();
+                (g_t, g_beta)
+            })
+            .collect();
+
+        let independent = ws
+            .cpu_reference_outer_sequence(&outers, &opts)
+            .expect("cpu reference outer sequence at a moving ridge");
+        assert_eq!(independent.outers.len(), outers.len());
+
+        if !ws.device_resident() {
+            println!(
+                "[#2539 moving-ridge color_arm] no CUDA device — host-rebuild count not \
+                 observable; run on the GPU node to assert frame_builds==0"
+            );
+            return;
+        }
+
+        let shared = ws
+            .device_fit_outer_sequence(&outers, &opts)
+            .expect("device outer sequence at a moving ridge");
+
+        assert!(
+            shared.base_refactors > 1,
+            "this arm exists to drive ridge CHANGES: only {} factorization(s) means the \
+             ridge never moved and the arm measured the same thing as the fixed-ridge \
+             one (base_gradient_solves={})",
+            shared.base_refactors,
+            shared.base_gradient_solves
+        );
+        assert_eq!(
+            shared.base_builds, 1,
+            "the ridge-independent blocks are the same system at every ridge, so they \
+             upload once for the whole sweep (got {})",
+            shared.base_builds
+        );
+        assert_eq!(
+            shared.frame_builds, 0,
+            "every one of the {} ridge changes must re-factor from the resident base \
+             blocks; {} of them instead re-packed the blocks on the host and re-uploaded \
+             the n·d×p slabs, which is the per-ridge-change cost #2539 removes",
+            shared.base_refactors, shared.frame_builds
+        );
+
+        for (idx, (sh, ind)) in shared
+            .outers
+            .iter()
+            .zip(independent.outers.iter())
+            .enumerate()
+        {
+            let scale = ind
+                .t
+                .iter()
+                .chain(ind.beta.iter())
+                .fold(1.0_f64, |m, &v| m.max(v.abs()));
+            let mut max_rel = 0.0_f64;
+            for (a, b) in sh.t.iter().zip(ind.t.iter()) {
+                max_rel = max_rel.max((a - b).abs() / scale);
+            }
+            for (a, b) in sh.beta.iter().zip(ind.beta.iter()) {
+                max_rel = max_rel.max((a - b).abs() / scale);
+            }
+            assert!(
+                max_rel < 1e-9,
+                "outer {idx}: an on-device refactor at a moved ridge must solve the SAME \
+                 system the host rebuild would have (rel {max_rel:e}) — the residency fix \
+                 is a cost change, not a numerics change"
+            );
+        }
+
+        println!(
+            "[#2539 moving-ridge color_arm] outers={} base_builds={} base_refactors={} \
+             base_gradient_solves={} frame_builds={} (pre-#2539 this trajectory paid {} host \
+             re-pack + full re-uploads) parity<1e-9 OK",
+            outers.len(),
+            shared.base_builds,
+            shared.base_refactors,
+            shared.base_gradient_solves,
+            shared.frame_builds,
+            shared.base_refactors
+        );
     }
 
     /// #1017 residency-isolating per-solve bench. A full-fit wall-clock bench

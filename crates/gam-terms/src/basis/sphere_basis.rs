@@ -1036,7 +1036,9 @@ pub(crate) fn build_matern_basis_seeded(
         dropped_penalties: filtered.dropped,
         metadata: BasisMetadata::Matern {
             centers: original_centers,
-            length_scale,
+            // `input_scale: ONE` below; see the Duchon builder in
+            // `duchon_thinplate.rs` for why that makes this original units.
+            length_scale: crate::OriginalUnits::new(length_scale),
             periodic: spec.periodic.clone(),
             nu: spec.nu,
             include_intercept: spec.include_intercept,
@@ -1747,28 +1749,19 @@ pub fn build_duchon_operator_penalty_psi_derivatives(
     // assertion fires here rather than at the spec layer so the
     // scale-free path stays fractional-clean.
     let coeffs = duchon_partial_fraction_coeffs(p_order, s_order, 1.0 / length_scale);
-    let mut z_kernel =
-        kernel_constraint_nullspace(centers, effective_nullspace_order, &mut workspace.cache)?;
-    // #1355: fold the frozen data-metric radial reparam `Z' = Z·V` so the
-    // operator-penalty ψ-derivatives assemble in the SAME rotated radial basis
-    // (`K·Z·V`) that the forward build's operator collocation matrices use
-    // (`duchon_operator_penalty_candidates` threads `radial_reparam` into
-    // `build_duchon_collocation_operator_matrices`). Without this fold the
-    // derivative differentiates the operator Gram in the raw `Z` frame while
-    // the REML cost is built in the `Z·V` frame — a design↔penalty desync that
-    // makes the analytic mass/tension log-κ gradient disagree with a central
-    // finite difference of the rebuilt penalty by orders of magnitude (the
-    // native `Primary`/trend arms already fold `V`).
-    if let Some(v) = spec.radial_reparam.as_ref() {
-        if v.nrows() != z_kernel.ncols() {
-            crate::bail_dim_basis!(
-                "Duchon frozen radial reparam shape {:?} does not match constrained kernel dimension {}",
-                v.dim(),
-                z_kernel.ncols()
-            );
-        }
-        z_kernel = fast_ab(&z_kernel, v);
-    }
+    // #1355: assemble the operator-penalty ψ-derivatives in the SAME rotated
+    // radial basis (`K·Z·V`) the forward build's operator collocation matrices
+    // use (`duchon_operator_penalty_candidates` threads `radial_reparam` into
+    // `build_duchon_collocation_operator_matrices`). Differentiating the
+    // operator Gram in the raw `Z` frame while the REML cost is built in the
+    // `Z·V` frame is a design↔penalty desync that puts the analytic
+    // mass/tension log-κ gradient orders of magnitude off a central difference
+    // of the rebuilt penalty.
+    let z_kernel = duchon_frozen_radial_chart(
+        kernel_constraint_nullspace(centers, effective_nullspace_order, &mut workspace.cache)?,
+        spec,
+        "operator penalty",
+    )?;
     let n_basis = centers.nrows();
     if collocation_points.ncols() != dim {
         crate::bail_dim_basis!(
@@ -2183,21 +2176,13 @@ pub fn build_duchon_native_penalty_psi_derivatives(
     let p_order = duchon_p_from_nullspace_order(effective_nullspace_order);
     let s_order = spec.power_as_usize();
     let dim = centers.ncols();
-    let mut z =
-        kernel_constraint_nullspace(centers, effective_nullspace_order, &mut workspace.cache)?;
-    // #1355: fold the frozen data-metric reparam `Z' = Z·V` so the penalty
-    // ψ-derivatives project in the SAME rotated radial basis as the forward
-    // penalty (`Vᵀ Ω(ψ) V`), staying bit-consistent with the design.
-    if let Some(v) = spec.radial_reparam.as_ref() {
-        if v.nrows() != z.ncols() {
-            crate::bail_dim_basis!(
-                "Duchon frozen radial reparam shape {:?} does not match constrained kernel dimension {}",
-                v.dim(),
-                z.ncols()
-            );
-        }
-        z = fast_ab(&z, v);
-    }
+    // #1355: project the penalty ψ-derivatives in the SAME rotated radial basis
+    // as the forward penalty (`Vᵀ Ω(ψ) V`), bit-consistent with the design.
+    let z = duchon_frozen_radial_chart(
+        kernel_constraint_nullspace(centers, effective_nullspace_order, &mut workspace.cache)?,
+        spec,
+        "native penalty",
+    )?;
     let kernel_cols = z.ncols();
     let poly_cols = polynomial_block_from_order(centers, effective_nullspace_order).ncols();
     let total_cols = kernel_cols + poly_cols;
@@ -2466,31 +2451,16 @@ pub fn build_duchon_native_penalty_psi_derivatives(
     Ok((sources, first, second))
 }
 
+/// The chart a `(data, spec)` pair's ψ-derivative must be assembled in.
+///
+/// Thin wrapper over [`duchon_resolve_chart`]; kept as its own name because the
+/// derivative path is the caller that has to be *unable* to skip it (#2638).
 pub(crate) fn prepare_duchon_derivative_contextwithworkspace(
     data: ArrayView2<'_, f64>,
     spec: &DuchonBasisSpec,
     workspace: &mut BasisWorkspace,
-) -> Result<(Array2<f64>, Option<Array2<f64>>), BasisError> {
-    let original_centers = select_centers_by_strategy(data, &spec.center_strategy)?;
-    let centers = expand_periodic_centers(&original_centers, spec.periodic.as_deref())?;
-    assert_spatial_centers_below_large_scale_cap(data.ncols(), centers.view())?;
-    let raw_design = build_duchon_basis_designwithworkspace(
-        data,
-        centers.view(),
-        spec.length_scale,
-        spec.power,
-        spec.nullspace_order,
-        spec.aniso_log_scales.as_deref(),
-        None,
-        workspace,
-    )?;
-    let identifiability_transform = spatial_identifiability_transform_from_design(
-        data,
-        raw_design.basis.view(),
-        &spec.identifiability,
-        "Duchon",
-    )?;
-    Ok((centers, identifiability_transform))
+) -> Result<ResolvedDuchonChart, BasisError> {
+    duchon_resolve_chart(data, spec, workspace)
 }
 
 /// Validate a 1D periodic Duchon center matrix, compute the circular
@@ -3049,12 +3019,20 @@ pub fn build_matern_basis_log_kappa_derivativeswithworkspace(
             length_scale,
             identifiability_transform,
             aniso_log_scales,
+            input_scale,
             ..
         } => (
             centers.clone(),
             identifiability_transform.clone(),
             aniso_log_scales.clone(),
-            *length_scale,
+            // The value build above emits `input_scale: ONE` (it standardizes
+            // nothing of its own), so this conversion is numerically the
+            // identity — but it is the conversion the frame contract requires,
+            // and routing through it means the ψ-derivative kernel can never
+            // silently drift onto the design's frame if that ever changes.
+            input_scale
+                .to_standardized_units(*length_scale)
+                .standardized_value(),
         ),
         other => {
             return Err(BasisError::InvalidInput(format!(
@@ -3303,12 +3281,20 @@ pub fn build_matern_basis_log_kappa_aniso_derivatives(
             length_scale,
             identifiability_transform,
             aniso_log_scales,
+            input_scale,
             ..
         } => (
             centers.clone(),
             identifiability_transform.clone(),
             aniso_log_scales.clone(),
-            *length_scale,
+            // The value build above emits `input_scale: ONE` (it standardizes
+            // nothing of its own), so this conversion is numerically the
+            // identity — but it is the conversion the frame contract requires,
+            // and routing through it means the ψ-derivative kernel can never
+            // silently drift onto the design's frame if that ever changes.
+            input_scale
+                .to_standardized_units(*length_scale)
+                .standardized_value(),
         ),
         other => {
             return Err(BasisError::InvalidInput(format!(

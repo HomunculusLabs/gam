@@ -322,8 +322,10 @@ impl QuadraticCandidateComparison {
     /// That theorem requires exactly one inequality — the candidate is NO WORSE
     /// than the reference in the quadratic,
     ///
+    /// ```text
     ///     q(reference) - q(candidate)
     ///       = directional_descent - 1/2 ||delta||_M^2 = model_decrease >= 0,
+    /// ```
     ///
     /// checked at the shared tolerance. Two further exact-sign conjuncts used to
     /// stand beside it, and both were stronger than the theorem they guarded:
@@ -404,8 +406,7 @@ fn compare_quadratic_candidate_to_reference(
     let metric_delta_ref = metric.dot(&delta_ref);
     let metric_norm_squared = delta_ref.dot(&metric_delta_ref);
     let model_decrease = directional_descent - 0.5 * metric_norm_squared;
-    let tolerance =
-        1.0e-8 * (1.0 + directional_descent.abs().max(metric_norm_squared.abs()));
+    let tolerance = 1.0e-8 * (1.0 + directional_descent.abs().max(metric_norm_squared.abs()));
     Ok(QuadraticCandidateComparison {
         directional_descent,
         metric_norm_squared,
@@ -556,8 +557,8 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
         (clipped_violation, clipped_worst_row) = constraints
             .max_scaled_violation(clipped.view())
             .map_err(|error| {
-                format!("feasible-chord final endpoint classification failed: {error}")
-            })?;
+            format!("feasible-chord final endpoint classification failed: {error}")
+        })?;
     }
     if !clipped_violation.is_finite() || clipped_violation > 0.0 {
         return Err(format!(
@@ -578,7 +579,9 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
 /// When the accessible Hessian is positive definite, this routine works in the
 /// reduced system
 ///
+/// ```text
 ///     (Z' H Z) delta_z = Z' r,   delta = Z delta_z,
+/// ```
 ///
 /// where `Z` spans `null(A_active)`. If the reduced Hessian is singular or
 /// indefinite, there is no unconstrained Newton minimizer on that face. Ambient
@@ -588,7 +591,9 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
 /// the self-vanishing shift `λ` from the current trust radius. The resulting
 /// positive metric `M = H_face + λD_face` defines the constraint-aware map
 ///
+/// ```text
 ///     beta_next = argmin_{x in C} 1/2 ||x-beta||_M^2 - r' (x-beta).
+/// ```
 ///
 /// Here `beta` anchors the objective even if accumulated floating-point error
 /// has put it infinitesimally outside `C`. Such a point cannot be the feasible
@@ -596,7 +601,9 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
 /// strictly feasible projection `s` is used only as the solver seed and
 /// comparison point; the objective remains exactly the one anchored at `beta`,
 ///
+/// ```text
 ///     q_beta(x) = 1/2 x' M x - (M beta + r)' x.
+/// ```
 ///
 /// The generic active-set result is tolerance-feasible by contract. Before it
 /// can enter this exact theorem, any positive evaluated violation is clipped on
@@ -604,9 +611,11 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
 /// feasibility tolerance. The returned feasible point is certified against
 /// `s` through the exact comparison
 ///
+/// ```text
 ///     q_beta(s) - q_beta(beta_next)
 ///       = (M beta + r - M s)' (beta_next-s)
 ///         - 1/2 ||beta_next-s||_M^2 >= 0,
+/// ```
 ///
 /// while the returned step and original-Hessian KKT check remain relative to
 /// the original `beta`. Strict hard-case saddles at zero projected gradient are
@@ -816,9 +825,7 @@ fn certified_reduced_face_candidate(
              (candidate_scaled_violation={solver_candidate_violation:.6e}@{solver_candidate_worst_row:?})"
         ));
     }
-    if solver_candidate_violation
-        > gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL
-    {
+    if solver_candidate_violation > gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
         return Err(format!(
             "reduced-face QP endpoint violates the active-set feasibility contract \
              (candidate_scaled_violation={solver_candidate_violation:.6e}@{solver_candidate_worst_row:?}, \
@@ -1051,22 +1058,20 @@ mod exact_face_newton_tests {
         // its 9.005e-9 violation is below the solver's numerical feasibility
         // tolerance. The reduced-face theorem must explicitly strengthen that
         // contract rather than silently inheriting it.
-        let (raw_solver_candidate, _) =
-            gam_solve::active_set::solve_quadratic_with_constraint_set(
-                &face_metric,
-                &objective_rhs,
-                &feasible_base,
-                &constraints,
-                Some(&[0]),
-            )
-            .expect("generic tolerance-feasible QP endpoint");
+        let (raw_solver_candidate, _) = gam_solve::active_set::solve_quadratic_with_constraint_set(
+            &face_metric,
+            &objective_rhs,
+            &feasible_base,
+            &constraints,
+            Some(&[0]),
+        )
+        .expect("generic tolerance-feasible QP endpoint");
         let (raw_solver_violation, raw_solver_worst_row) = constraints
             .max_scaled_violation(raw_solver_candidate.view())
             .expect("raw solver endpoint violation");
         assert!(
             raw_solver_violation > 0.0
-                && raw_solver_violation
-                    <= gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL,
+                && raw_solver_violation <= gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL,
             "fixture must discriminate the generic tolerance contract from exact feasibility"
         );
         assert_eq!(raw_solver_worst_row, Some(0));
@@ -1098,8 +1103,7 @@ mod exact_face_newton_tests {
         )
         .expect("old comparison algebra");
         assert!(
-            infeasible_base_comparison.model_decrease
-                < -infeasible_base_comparison.tolerance
+            infeasible_base_comparison.model_decrease < -infeasible_base_comparison.tolerance
                 && !infeasible_base_comparison.certifies_no_inferiority(),
             "the infeasible-base theorem must reproduce the live false refusal"
         );
@@ -3241,13 +3245,22 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         // certificate can tell whether that escape was worth anything (#2587).
         let mut previous_escape_lambda_min: Option<f64> = None;
 
-        // Fit-level wall-clock budget guard at inner-solve ENTRY. The
-        // per-cycle guard below only fires from `cycle > 0`, so it returns a
-        // best-effort iterate once a solve has taken at least one step. But on
-        // the non-certifying constrained baseline every inner solve early-exits
-        // at cycle 0 via the divergence/stall guard, so `cycle > 0` is never
-        // reached and the per-cycle guard never fires. The outer startup then
-        // drives a whole cascade of fresh solves — one per multistart seed,
+        // #2627 — there is NO wall-clock deadline in this loop, at entry or per
+        // cycle. gam#2055 removed both, and what survived was the orphaned first
+        // half of the comment that described them: it announced a "fit-level
+        // wall-clock budget guard at inner-solve ENTRY" and a "per-cycle guard
+        // below", then ran off mid-sentence into the paragraph beneath. A reader
+        // auditing why a coupled joint-Newton solve ran past a 300 s cap found a
+        // comment promising the guard that would have stopped it. Deleted rather
+        // than reimplemented: the loop's bounds are deterministic and iteration-
+        // counted by design — `inner_loop_hard_ceiling` and the caller's
+        // `inner_max_cycles` bound the cycle count, and the residual-trend,
+        // merit-descent, and fully-rejected-stall guards below decide
+        // termination from cycle indices and residual ratios ONLY, with no
+        // wall-clock (see the no-wall-clock note at the bottom of the loop).
+        // Reintroducing a deadline here would make termination host-dependent
+        // and non-reproducible; the honest fix for a slow cycle is a smaller
+        // per-cycle cost or a tighter deterministic guard, not a clock.
         // The exact joint-Hessian route solves the penalized Newton system
         // directly. Extra damping must be wired through an accepted/rejected
         // step policy before it belongs here; keep the matvec faithful to the
@@ -5916,8 +5929,11 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                         Ok(value)
                     }
                     Ok(None) => {
-                        match joint_line_search_log_likelihood(family, &line_search_options, &states)
-                        {
+                        match joint_line_search_log_likelihood(
+                            family,
+                            &line_search_options,
+                            &states,
+                        ) {
                             Ok((value, workspace)) => {
                                 accepted_joint_workspace = workspace;
                                 Ok(value)
@@ -8412,12 +8428,13 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // vector held here belongs to the states being returned. Bind
             // the operating point with it so the consumer checks that
             // rather than trusting the loop ordering (gam#2474).
-            let retained_likelihood_score = cached_joint_gradient.as_ref().map(|score| {
-                TerminalLikelihoodScore {
-                    beta: TerminalLikelihoodScore::joint_beta(&states),
-                    score: score.clone(),
-                }
-            });
+            let retained_likelihood_score =
+                cached_joint_gradient
+                    .as_ref()
+                    .map(|score| TerminalLikelihoodScore {
+                        beta: TerminalLikelihoodScore::joint_beta(&states),
+                        score: score.clone(),
+                    });
             return Ok(BlockwiseInnerResult {
                 block_states: states,
                 terminal_working_sets: cached_eval
@@ -8631,12 +8648,13 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // vector held here belongs to the states being returned. Bind
             // the operating point with it so the consumer checks that
             // rather than trusting the loop ordering (gam#2474).
-            let retained_likelihood_score = cached_joint_gradient.as_ref().map(|score| {
-                TerminalLikelihoodScore {
-                    beta: TerminalLikelihoodScore::joint_beta(&states),
-                    score: score.clone(),
-                }
-            });
+            let retained_likelihood_score =
+                cached_joint_gradient
+                    .as_ref()
+                    .map(|score| TerminalLikelihoodScore {
+                        beta: TerminalLikelihoodScore::joint_beta(&states),
+                        score: score.clone(),
+                    });
             return Ok(BlockwiseInnerResult {
                 block_states: states,
                 terminal_working_sets: cached_eval
@@ -8711,12 +8729,13 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // vector held here belongs to the states being returned. Bind
             // the operating point with it so the consumer checks that
             // rather than trusting the loop ordering (gam#2474).
-            let retained_likelihood_score = cached_joint_gradient.as_ref().map(|score| {
-                TerminalLikelihoodScore {
-                    beta: TerminalLikelihoodScore::joint_beta(&states),
-                    score: score.clone(),
-                }
-            });
+            let retained_likelihood_score =
+                cached_joint_gradient
+                    .as_ref()
+                    .map(|score| TerminalLikelihoodScore {
+                        beta: TerminalLikelihoodScore::joint_beta(&states),
+                        score: score.clone(),
+                    });
             return Ok(BlockwiseInnerResult {
                 block_states: states,
                 terminal_working_sets: cached_eval

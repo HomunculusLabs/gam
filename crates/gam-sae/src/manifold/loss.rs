@@ -72,9 +72,28 @@ pub struct SaeManifoldLossBreakdown {
 /// criterion value and gradient are assembled from the same converged cache.
 #[derive(Debug, Clone)]
 pub struct SaeOuterRhoGradientComponents {
-    /// Direct derivative of `loss.total() + extra_penalty_energy` with respect to
-    /// log-strength coordinates, excluding the custom factor logdet and Occam terms.
+    /// Direct (no-envelope) derivative of `loss.total() + extra_penalty_energy`
+    /// with respect to log-strength coordinates, excluding the custom factor
+    /// logdet and Occam terms, PLUS the realised-rank charge's direct
+    /// ρ-differential ([`Self::rank_charge_direct_rho`], folded in by
+    /// `analytic_outer_rho_gradient_components_with_bundle`).
+    ///
+    /// #2087 — that last summand is why this is NOT the ρ-derivative of
+    /// `loss.total() + extra_penalty_energy` alone. The scalar criterion replaces
+    /// the coordinate-block `½log|H_tt|` with the realised-rank charge, so the
+    /// charge lives in the quasi-Laplace COMPLEXITY and `SaeManifoldTerm::loss`
+    /// cannot see it. An audit that finite-differences `loss.total()` and compares
+    /// it to this field is comparing two different quantities and will report the
+    /// charge as a data-fit/prior desync; subtract
+    /// [`Self::rank_charge_direct_rho`] first. The previous wording here omitted
+    /// the charge and is what licensed exactly that audit.
     pub explicit: Array1<f64>,
+    /// The realised-rank charge's direct ρ-differential, ALREADY INCLUDED in
+    /// [`Self::explicit`] and therefore NOT a separate gradient channel — do not
+    /// add it to [`Self::gradient`]. It is carried separately only so an audit can
+    /// net it out and compare the loss-visible part of `explicit` against a
+    /// frozen-θ finite difference of `loss.total()`.
+    pub rank_charge_direct_rho: Array1<f64>,
     /// `0.5 * tr(B^{-1} dB/d rho_j)` for the currently available penalty blocks.
     pub logdet_trace: Array1<f64>,
     /// Derivative contribution of `-occam`.

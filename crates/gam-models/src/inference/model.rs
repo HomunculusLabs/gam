@@ -3258,6 +3258,40 @@ impl FittedModel {
         self.payload().family_state.likelihood()
     }
 
+    /// The family label every summary surface reports (#913).
+    ///
+    /// For most model classes this is the likelihood's pretty name — `"Gaussian
+    /// Identity"`, `"Tweedie Log"`, `"Royston Parmar"`.
+    ///
+    /// A location-scale model is the exception, and reporting the likelihood's
+    /// name there is a genuine loss of information rather than a shorter
+    /// spelling: `FittedFamily::LocationScale` carries only the MEAN channel's
+    /// law, so a two-channel dispersion GAMLSS (`family="gamma"` plus a
+    /// `noise_formula`, which routes through
+    /// `materialize_location_scale`/`DispersionLocationScaleFitRequest`) and the
+    /// mean-only Gamma GLM both report `"Gamma Log"` and are indistinguishable
+    /// on the summary surface. The fine-grained tag the fit actually used is
+    /// already persisted in `payload.family` by `assemble_location_scale_payload`
+    /// — `"gaussian-location-scale"`, `"binomial-location-scale"`,
+    /// `"gamma-location-scale"`, `"negbin-location-scale"`,
+    /// `"beta-location-scale"`, `"tweedie-location-scale"` — and the CLI's own
+    /// fit line already prints exactly that tag (`run_fit.rs`,
+    /// `family={kind.family_tag()}`). Reading it here is what makes the summary
+    /// agree with the CLI (SPEC rule 9) instead of contradicting it.
+    ///
+    /// The persisted tag is only trusted when it is non-empty, so a payload
+    /// written before the tag existed degrades to the likelihood name rather
+    /// than to a blank family.
+    pub fn display_family_name(&self) -> String {
+        let payload = self.payload();
+        match &payload.family_state {
+            FittedFamily::LocationScale { .. } if !payload.family.is_empty() => {
+                payload.family.clone()
+            }
+            _ => self.likelihood().pretty_name().to_string(),
+        }
+    }
+
     #[inline]
     pub fn estimator(&self) -> FittedEstimator {
         self.payload().estimator

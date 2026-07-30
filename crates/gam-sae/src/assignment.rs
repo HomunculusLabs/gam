@@ -2119,52 +2119,44 @@ pub(crate) fn assignment_prior_grad_hdiag_weighted(
             // machine-precision support as the value path. Data-fit JVP support
             // is narrower and follows the hard forward gate.
             //
-            // #2500 — the `d` returned here is the curvature the arrow assembly
-            // writes into `block.htt` VERBATIM, and it is the ONLY assignment /
-            // coordinate prior curvature in the SAE inner system that is not
-            // PSD-majorized first (`λ_k·S_k ⊗ I` is PSD by construction; periodic
-            // ARD is `α·softplus_{τ₀}(cos κt)`; softmax is the Gershgorin radius
-            // `diag(Σ_j soft|H_kj|)`; ordered Beta--Bernoulli goes through
-            // `ordered_beta_bernoulli_psd_majorized_hdiag`). `1 − 2a` is NEGATIVE
-            // for every logit above the threshold — the sigmoid penalty
-            // `λ·σ((ℓ−θ)/τ)` is concave there — so the per-row `H_tt` block goes
-            // indefinite on exactly the atoms the gate has switched ON, and the
-            // factorization spectrally deflates that direction to unit stiffness.
-            // Measured on `threshold_gate_tiny_fixture(straddle = true)`: all ten
+            // The `d` returned here is the curvature the arrow assembly writes
+            // into `block.htt` VERBATIM.
+            //
+            // HISTORY — this block used to say `d` was the EXACT signed curvature
+            // and that it was the one assignment/coordinate prior in the SAE inner
+            // system that was not PSD-majorized first. `2956f601c` (#2520) ended
+            // that: `d` is now `psd_majorizer_hess`, and the concave half travels
+            // `threshold_gate_negative_hessian_remainder_weighted` into `ΔC`, so
+            // `A = B + ΔC` is still the exact signed operator while `B` — the thing
+            // that gets factored, and whose ½log|B| the criterion prices — is PSD
+            // like `λ_k·S_k ⊗ I`, periodic ARD's `α·softplus_{τ₀}(cos κt)`,
+            // softmax's Gershgorin radius, and
+            // `ordered_beta_bernoulli_psd_majorized_hdiag`.
+            //
+            // A MEASUREMENT IN THIS COMMENT WAS FALSIFIED, and it is kept here
+            // because the #2500 gates were written against it and still assert it:
+            // "Measured on `threshold_gate_tiny_fixture(straddle = true)`: all ten
             // rows deflate exactly one direction each, and each one is the
-            // negative-curvature logit.
+            // negative-curvature logit." NO LONGER TRUE — run 30503262222 measures
+            // `deflated_direction_count == 0` on BOTH arms of that fixture, which
+            // is what `threshold_gate_sparse_operator_is_the_installed_exact_a_\
+            // derivative_2500`, `..._is_not_the_raw_prior_on_deflated_rows_2500`
+            // and `deflation_map_applies_to_every_row_local_curvature_\
+            // coordinate_2500` report when they fail. The `1 − 2a < 0` indefinite
+            // `H_tt` those rows deflated is no longer what is factored: `d` is the
+            // majorizer. What is NOT established is the mechanism — note the
+            // majorizer is not merely non-negative but EXACTLY ZERO above the
+            // threshold (`|1 − 2a| ≫ τ₀ ≈ 1.44e-8` makes the softplus term
+            // underflow), so a vanishing diagonal entry there would if anything
+            // deflate MORE. Do not re-derive that story from this comment; measure.
             //
-            // The ρ-gradient is CORRECT under that deflation — #2500's
-            // `row_deflation_map_derivative` differentiates the conditioned block —
-            // but the conditioning itself is the #1419 pathology: a deflated
-            // direction is a data-relevant logit direction the solver then takes no
-            // step along, so the gates cannot move and the atoms cannot
-            // differentiate.
-            //
-            // MEASURED, on #1782's `planted_circle_multi_atom_threshold_gate_...`
-            // startup-validation fixture (logits all `0.5`, threshold `0`, so
-            // `a = σ(0.5) = 0.62 > ½` on EVERY gate): all 120 logit entries carry
-            // negative prior curvature at the seed, and the exact `A` is already
-            // `IndefiniteObservedInformation{joint}` there. Clamping this diagonal
-            // to its positive part removes the fixture's "dictionary did not escape
-            // total co-collapse" refusal outright — the fit runs 194s instead of
-            // dying at 35s — and surfaces a separate downstream shape defect
-            // ("could not broadcast array from shape: [2, 6] to: [1, 6]"). So the
-            // missing majorizer, not the missing operator, is what keeps that gate
-            // unevaluable.
-            //
-            // The full fix is three coupled pieces, not one clamp: majorize into
-            // `B`; carry the negative remainder in `ΔC` so `A = B + ΔC` stays the
-            // EXACT signed curvature (`ArdAxisPrior`'s
-            // `psd_majorizer_hess` / `negative_hessian_remainder` pair is the
-            // template); and add that remainder to
-            // `materialize_ard_concave_clamp_diagonal` so a mode whose only
-            // indefiniteness is the gate's own concave half is PRICED at its basin
-            // curvature under #2336's E-attributability rule rather than refused —
-            // structurally the same bounded, exactly-known `E ⪰ 0` the periodic-ARD
-            // clamp already contributes. That moves the `½log|B|` criterion of every
-            // ThresholdGate fit, so it wants its own pre-registered A/B and is
-            // deliberately NOT bundled with the #2500 gradient fix.
+            // What #2520 did NOT do: teach
+            // `materialize_ard_concave_clamp_diagonal` about this remainder, so a
+            // mode whose only indefiniteness is the gate's own concave half is
+            // still REFUSED rather than priced at its basin curvature under
+            // #2336's E-attributability rule. That is a separate change — it moves
+            // the `½log|B|` criterion of every ThresholdGate fit and wants its own
+            // pre-registered A/B.
             let sparsity_strength = rho.lambda_sparse()?;
             let inv_tau = 1.0 / temperature;
             let k = assignment.k_atoms();

@@ -60,8 +60,10 @@
 //! temporary probe is removed, `construction.rs` is split under 10k lines, and
 //! the `#[ignore]` test is cleaned, the workspace builds again and the checks
 //! below — which re-implement the simply-detectable rules over the offending
-//! files — find nothing and the test passes, with no further edits. Each check
-//! treats an absent file as "fixed" (a valid fix may delete the probe outright).
+//! files — find nothing and the test passes, with no further edits. Checks 2
+//! and 3 scan files that still exist, so an absent file there means the rule
+//! has no subject; check 1's subject is the probe's *deletion*, which is what
+//! it asserts (a content scan over a deleted file is vacuous by construction).
 
 use std::path::PathBuf;
 
@@ -99,15 +101,35 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 fn head_carries_no_build_aborting_scaffolding_ban_violations() {
     let mut offenders: Vec<String> = Vec::new();
 
-    // 1) The temporary exploratory probe must not sit in production src/ with
-    //    stdout/stderr printing or a bare `#[test]` (the `println!` /
-    //    `#[test]-without-assertions` bans). A valid fix deletes the file.
+    // 1) The temporary exploratory probe must not sit in production src/.
+    //
+    //    The landed fix DELETED the file, which is exactly why this check
+    //    cannot be a content scan: `read(PROBE)` returns `None`, the `if let`
+    //    arm never runs, and the conjunct is satisfied by an *absence* — it
+    //    would keep reading green even if the probe came back with its
+    //    `eprintln!`s stripped but its banned `#[cfg(test)] mod` declaration
+    //    and assertion-free `#[test]` intact. Assert the deletion itself,
+    //    which is the condition the fix actually established, plus the
+    //    absence of the module declaration in `estimate/mod.rs` that tripped
+    //    the `#[cfg(test)] on a src/ item` rule. Both referents are live
+    //    files, so both arms can fail.
     const PROBE: &str = "crates/gam-solve/src/estimate/gaussian_obs_coverage_probe.rs";
-    if let Some(bytes) = read(PROBE) {
+    if read(PROBE).is_some() {
+        offenders.push(format!(
+            "[exploratory probe back in src/] {PROBE} exists; the temporary #1765 \
+             coverage probe trips the println!, #[test]-without-assertions and \
+             #[cfg(test)]-on-src-item bans and must stay deleted"
+        ));
+    }
+    const ESTIMATE_MOD: &str = "crates/gam-solve/src/estimate/mod.rs";
+    if let Some(bytes) = read(ESTIMATE_MOD) {
         for (idx, raw) in bytes.split(|&b| b == b'\n').enumerate() {
             let code = strip_line_comment(raw);
-            if contains(code, b"println!(") || contains(code, b"eprintln!(") {
-                offenders.push(format!("[println! in src/ probe] {PROBE}:{}", idx + 1));
+            if contains(code, b"mod gaussian_obs_coverage_probe") {
+                offenders.push(format!(
+                    "[#[cfg(test)] probe module on a src/ item] {ESTIMATE_MOD}:{}",
+                    idx + 1
+                ));
             }
         }
     }
