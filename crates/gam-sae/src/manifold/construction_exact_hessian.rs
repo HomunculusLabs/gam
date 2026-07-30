@@ -3575,8 +3575,20 @@ impl SaeManifoldTerm {
                             // have classified this direction the same way.
                             // Diagnostic only - no control flow, no numerics,
                             // and the typed refusal below is unchanged.
+                            //
+                            // `warn`, not `debug`: this record is the ONLY place
+                            // the six numbers that discriminate the #2330 fork
+                            // exist -- a genuine saddle of L (curable upstream)
+                            // versus an A that is not the curvature of the thing
+                            // whose gradient the solve drove to zero (curable
+                            // only at this refusal site). CI captures stderr at
+                            // WARN, so at `debug` they were computed and
+                            // discarded on every abort and the fork stayed
+                            // undecidable from a CI log. It fires only on a
+                            // refusal that is about to abort the fit, so it
+                            // cannot become chatter.
                             let t_mass: f64 = (0..limit).map(|j| v[j] * v[j]).sum();
-                            log::debug!(
+                            log::warn!(
                                 "SAE exact-A saddle refusal: block={block} idx={idx} \
                                  lambda={lambda:.6e} clamp v'Ev={e_v:.6e} \
                                  basin={basin:.6e} floor={floor:.6e} \
