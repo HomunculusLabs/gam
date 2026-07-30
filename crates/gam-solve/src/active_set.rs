@@ -2295,6 +2295,36 @@ impl<'a> ConstraintSetOps<'a> {
     }
 
 
+/// Operator view of only the rows that are tight at `beta`. Inactive rows
+    /// do not constrain the tangent cone, so make them vacuous by zeroing both
+    /// their cached norm and bound while retaining the original row indexing.
+    /// This avoids materializing the potentially enormous tight submatrix and
+    /// keeps returned active ids in the parent [`ConstraintSet`] coordinates.
+    fn tangent_face(set: &'a ConstraintSet, beta: &Array1<f64>) -> Result<Self, EstimationError> {
+        let mut ops = Self::new(set, 0.0)?;
+        let values = ops.values(beta)?;
+        for row in 0..ops.nrows() {
+            if ops.norms[row] <= 0.0 {
+                if ops.bounds[row] > 0.0 {
+                    crate::bail_invalid_estim!(
+                        "infeasible zero-norm constraint row {} entered tangent-face projection",
+                        row
+                    );
+                }
+                ops.bounds[row] = 0.0;
+                continue;
+            }
+            let is_tight = ops.scaled_slack(&values, row) <= ACTIVE_SET_PRIMAL_FEASIBILITY_TOL;
+            // Tangent directions are homogeneous even when the original
+            // feasible set is affine: a_i^T d >= 0 on a tight row.
+            ops.bounds[row] = 0.0;
+            if !is_tight {
+                ops.norms[row] = 0.0;
+            }
+        }
+        Ok(ops)
+    }
+ 
     fn nrows(&self) -> usize {
         self.norms.len()
     }
@@ -2520,6 +2550,126 @@ pub fn constraint_set_rows_tight_at_point(
     Ok(tight)
 }
 
+
+/// Project a stationarity residual onto the normal cone of an operator-carried
+/// constraint set without materializing its complete tight face.
+///
+/// Lawson–Hanson discovers the required generators through batched operator
+/// products and gathers only its `O(p)` passive rows. Selection depends only
+/// on the current face geometry, never on a warm active-set history.
+/// `seed_active` is output provenance only: tight seed rows are retained in the
+/// returned sparse face even when their KKT multiplier is zero, but they never
+/// enter the Lawson–Hanson pivot order or alter the projected vector.
+pub fn project_stationarity_residual_on_constraint_set(
+    residual: &Array1<f64>,
+    beta: &Array1<f64>,
+    set: &ConstraintSet,
+    seed_active: &[usize],
+) -> Option<(Array1<f64>, Vec<usize>)> {
+    let p = residual.len();
+    if beta.len() != p || set.ncols() != p {
+        return None;
+    }
+    match set {
+        ConstraintSet::KhatriRaoCone(cone) if cone.p_left() != 1 || cone.coupled_rows() != &[0] => {
+            // Each coupled response row occupies a disjoint `p_cov` slice,
+            // and the projection Hessian is identity. The global projection is
+            // therefore the exact direct sum of small row projections. Solving
+            // all response rows in one `p_left*p_cov` KKT system needlessly
+            // pays cubic global algebra at the all-tight CTN vertex.
+            let p_cov = cone.factor().ncols();
+            let n = cone.factor().nrows();
+            let mut projected = residual.clone();
+            let mut active = Vec::new();
+            for (slot, &coefficient_row) in cone.coupled_rows().iter().enumerate() {
+                let start = coefficient_row * p_cov;
+                let end = start + p_cov;
+                let local_residual = residual.slice(s![start..end]).to_owned();
+                let local_beta = beta.slice(s![start..end]).to_owned();
+                let local_set = ConstraintSet::KhatriRaoCone(cone.single_coupled_slot(slot).ok()?);
+                let row_start = slot * n;
+                let row_end = row_start + n;
+                let local_seed: Vec<usize> = seed_active
+                    .iter()
+                    .copied()
+                    .filter(|&row| row >= row_start && row < row_end)
+                    .map(|row| row - row_start)
+                    .collect();
+                let (local_projected, local_active) =
+                    project_stationarity_residual_on_constraint_set(
+                        &local_residual,
+                        &local_beta,
+                        &local_set,
+                        &local_seed,
+                    )?;
+                projected.slice_mut(s![start..end]).assign(&local_projected);
+                active.extend(local_active.into_iter().map(|row| row_start + row));
+            }
+            Some((projected, active))
+        }
+        ConstraintSet::BlockDiagonal { blocks, .. } => {
+            // The same direct-sum identity applies to explicitly placed blocks;
+            // columns outside all blocks are unconstrained and retain their
+            // original residual components.
+            let mut projected = residual.clone();
+            let mut active = Vec::new();
+            let mut row_offset = 0usize;
+            for block in blocks {
+                let width = block.set.ncols();
+                let start = block.col_start;
+                let end = start + width;
+                let local_residual = residual.slice(s![start..end]).to_owned();
+                let local_beta = beta.slice(s![start..end]).to_owned();
+                let row_end = row_offset + block.set.nrows();
+                let local_seed: Vec<usize> = seed_active
+                    .iter()
+                    .copied()
+                    .filter(|&row| row >= row_offset && row < row_end)
+                    .map(|row| row - row_offset)
+                    .collect();
+                let (local_projected, local_active) =
+                    project_stationarity_residual_on_constraint_set(
+                        &local_residual,
+                        &local_beta,
+                        &block.set,
+                        &local_seed,
+                    )?;
+                projected.slice_mut(s![start..end]).assign(&local_projected);
+                active.extend(local_active.into_iter().map(|row| row_offset + row));
+                row_offset = row_end;
+            }
+            Some((projected, active))
+        }
+        _ => project_stationarity_residual_on_constraint_set_undivided(
+            residual,
+            beta,
+            set,
+            seed_active,
+        ),
+    }
+}
+
+fn project_stationarity_residual_on_constraint_set_undivided(
+    residual: &Array1<f64>,
+    beta: &Array1<f64>,
+    set: &ConstraintSet,
+    seed_active: &[usize],
+) -> Option<(Array1<f64>, Vec<usize>)> {
+    let ops = ConstraintSetOps::tangent_face(set, beta).ok()?;
+    let (multipliers, projected) = nonnegative_cone_projection_by_rows(
+        &ops.norms,
+        residual,
+        |candidate| ops.values(candidate).ok(),
+        |rows| ops.set.gather_rows(rows).ok().map(|gathered| gathered.a),
+    )?;
+    let mut active: Vec<usize> = multipliers.into_iter().map(|(row, _)| row).collect();
+    for &row in seed_active {
+        if row < ops.nrows() && ops.norms[row] > 0.0 && !active.contains(&row) {
+            active.push(row);
+        }
+    }
+    Some((projected, active))
+}
 
 /// Strictly-interior projection onto a [`ConstraintSet`]: the operator
 /// analogue of [`project_point_strictly_into_feasible_cone`]. Dense sets
@@ -3568,6 +3718,7 @@ mod tests {
         project_point_strictly_into_feasible_cone,
         project_point_strictly_into_feasible_constraint_set,
         project_stationarity_residual_on_constraint_cone,
+        project_stationarity_residual_on_constraint_set,
         rank_reduce_rows_pivoted_qr_with_dependence,
         scaled_constraint_slack, scan_operator_violations, solve_kkt_direction,
         solve_newton_direction_with_linear_constraints, solve_quadratic_with_constraint_set,
@@ -5459,4 +5610,178 @@ mod tests {
             "the face is a property of β, not of the gradient's sign"
         );
     }
+/// #979 CTN plateau regression: the operator-native Lawson-Hanson Moreau
+    /// solve must certify a degenerate fully-pinned vertex directly instead of
+    /// spending a primal-QP iteration budget on one-row blocker exchanges.
+    #[test]
+    fn operator_nnls_certifies_pinned_degenerate_vertex_projection_979() {
+        // Four generators in R^3 (degenerate: a4 = a1 + a2), all tight at the
+        // origin. The stationarity residual is a nonnegative combination, so
+        // the projected residual is exactly zero.
+        let a = array![
+            [1.0_f64, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let b = array![0.0_f64, 0.0, 0.0, 0.0];
+        let set = ConstraintSet::Dense(
+            LinearInequalityConstraints::new(a, b).expect("degenerate vertex cone"),
+        );
+        let beta = array![0.0_f64, 0.0, 0.0];
+        let residual = array![3.0_f64, 2.0, 0.0]; // = a1 + 2·a4
+        let (projected, active) = project_stationarity_residual_on_constraint_set(
+            &residual,
+            &beta,
+            &set,
+            &[0, 1],
+        )
+        .expect("operator NNLS must solve the degenerate vertex");
+        let closure = projected.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+        assert!(
+            closure <= 1e-9,
+            "residual is in the cone; projection must close to zero, got {closure:.3e}"
+        );
+        assert!(!active.is_empty(), "a supported face must be reported");
+
+        // A component outside the cone must survive the projection exactly.
+        let outside = array![1.0_f64, 0.0, -1.0];
+        let (projected_outside, _) =
+            project_stationarity_residual_on_constraint_set(&outside, &beta, &set, &[])
+                .expect("operator NNLS must solve the outside-component case");
+        assert_relative_eq!(projected_outside[0], 0.0, epsilon = 1e-9);
+        assert_relative_eq!(projected_outside[1], 0.0, epsilon = 1e-9);
+        assert_relative_eq!(projected_outside[2], -1.0, epsilon = 1e-9);
+    }
+
+/// The projector is a KKT certificate input, so a row that is NOT tight at
+    /// `beta` must never enter the generator set: a residual
+    /// aligned with a slack row must stay unprojected rather than be absorbed
+    /// by a constraint that is not active at the iterate.
+    #[test]
+    fn operator_nnls_excludes_rows_not_tight_at_beta() {
+        let a = array![[1.0_f64, 0.0], [0.0, 1.0]];
+        let b = array![0.0_f64, -1.0]; // row 1 has slack 1 at the origin
+        let set = ConstraintSet::Dense(
+            LinearInequalityConstraints::new(a, b).expect("half-tight system"),
+        );
+        let beta = array![0.0_f64, 0.0];
+        let residual = array![0.0_f64, 1.0];
+        let (projected, active) =
+            project_stationarity_residual_on_constraint_set(&residual, &beta, &set, &[])
+                .expect("operator NNLS must solve the half-tight system");
+        assert_relative_eq!(projected[1], 1.0, epsilon = 1e-12);
+        assert!(
+            !active.contains(&1),
+            "slack row 1 must not appear in the certified face"
+        );
+    }
+
+#[test]
+    fn separable_khatri_rao_tangent_projection_matches_dense_oracle() {
+        let cone = small_cone();
+        let set = ConstraintSet::KhatriRaoCone(cone.clone());
+        let dense = cone.to_dense().expect("dense projection oracle");
+        let beta = Array1::<f64>::zeros(set.ncols());
+        let residual = array![0.4_f64, -0.2, 1.1, -0.7, -0.9, 0.8];
+
+        let (operator_projected, _) =
+            project_stationarity_residual_on_constraint_set(&residual, &beta, &set, &[])
+                .expect("separable operator projection");
+        let (dense_projected, _) =
+            project_stationarity_residual_on_constraint_cone(&residual, &dense.a)
+                .expect("dense cone projection");
+
+        for index in 0..residual.len() {
+            assert_relative_eq!(
+                operator_projected[index],
+                dense_projected[index],
+                epsilon = 1e-8
+            );
+        }
+    }
+
+/// The current #979 production shape has hundreds of thousands of
+    /// factored rows over only 24 coefficients. Projection work must scale
+    /// with batched row products plus the coefficient-dimensional passive
+    /// set, not with one primal-QP transition per row id.
+    #[test]
+    fn operator_moreau_projection_has_coefficient_sized_support_979() {
+        let rows = 24_000;
+        let psi = Array2::from_shape_fn((rows, 3), |(row, column)| {
+            let axis = (row % 6) / 2;
+            if column == axis {
+                if row % 2 == 0 { 1.0 } else { -1.0 }
+            } else {
+                0.0
+            }
+        });
+        let cone =
+            KhatriRaoConeConstraints::new(std::sync::Arc::new(psi), vec![0], 1)
+                .expect("many-row low-dimensional cone");
+        let dense = cone.to_dense().expect("dense parity oracle");
+        let set = ConstraintSet::KhatriRaoCone(cone);
+        let beta = Array1::<f64>::zeros(3);
+        let residual = array![3.0_f64, -2.0, 1.0];
+
+        let (operator_projected, active) =
+            project_stationarity_residual_on_constraint_set(&residual, &beta, &set, &[])
+                .expect("operator Moreau projection");
+        let (_, dense_projected) =
+            nonnegative_cone_multipliers(&dense.a, &residual).expect("dense NNLS oracle");
+
+        for index in 0..residual.len() {
+            assert_relative_eq!(
+                operator_projected[index],
+                dense_projected[index],
+                epsilon = 1e-10
+            );
+            assert_relative_eq!(operator_projected[index], 0.0, epsilon = 1e-10);
+        }
+        assert!(
+            active.len() <= residual.len(),
+            "a three-dimensional cone projection gathered {} supported rows",
+            active.len()
+        );
+    }
+
+#[test]
+    fn operator_tangent_projection_does_not_constrain_interior_rows() {
+        let psi = array![[1.0_f64, 0.0], [1.0, 1.0], [1.0, -1.0]];
+        let cone = KhatriRaoConeConstraints::new(std::sync::Arc::new(psi), vec![1], 2)
+            .expect("interior tangent cone");
+        let set = ConstraintSet::KhatriRaoCone(cone);
+        // The shaped response row is strictly positive for every observation,
+        // so its tangent cone is the complete coefficient space. A projection
+        // against the original cone at the origin would incorrectly erase the
+        // shaped constant component of this residual.
+        let beta = array![0.0_f64, 0.0, 1.0, 0.0];
+        let residual = array![0.0_f64, 0.0, 1.0, 0.0];
+        let (projected, active) =
+            project_stationarity_residual_on_constraint_set(&residual, &beta, &set, &[])
+                .expect("interior tangent projection");
+
+        for index in 0..residual.len() {
+            assert_relative_eq!(projected[index], residual[index], epsilon = 1e-12);
+        }
+        assert!(active.is_empty(), "interior rows entered the tangent face");
+    }
+
+#[test]
+    fn operator_tangent_projection_homogenizes_an_affine_boundary() {
+        let set = ConstraintSet::Dense(
+            LinearInequalityConstraints::new(array![[1.0_f64, 0.0]], array![2.0])
+                .expect("affine half-space"),
+        );
+        let beta = array![2.0_f64, 0.0];
+        let residual = array![1.0_f64, -1.0];
+        let (projected, active) =
+            project_stationarity_residual_on_constraint_set(&residual, &beta, &set, &[0])
+                .expect("affine-boundary tangent projection");
+
+        assert_relative_eq!(projected[0], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(projected[1], -1.0, epsilon = 1e-12);
+        assert_eq!(active, vec![0]);
+    }
+
 }
