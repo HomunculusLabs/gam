@@ -875,7 +875,32 @@ mod tests {
             "heavy-tailed target must raise k̂ above 0.5, got {}",
             cert.k_hat
         );
-        assert_ne!(cert.certificate, RhoCertificate::PlugInCertified);
+        // This used to be `assert_ne!(.., PlugInCertified)`, which is ENTAILED
+        // by the `k̂ > 0.5` assertion five lines up: `PlugInCertified` is
+        // DEFINED as `k̂ < 0.5`. It could not distinguish `ImportanceCorrect`
+        // from `Escalate`, and it would pass for any future fourth variant.
+        //
+        // Pin the classifier against its own documented thresholds instead, at
+        // the k̂ this fixture actually produces. That discriminates all three
+        // tiers, and unlike a hard-coded expected tier it cannot go stale if
+        // the fixture's k̂ drifts within a band -- while still failing loudly if
+        // the thresholds are ever rewired.
+        let expected = RhoCertificate::from_k_hat(cert.k_hat);
+        assert_eq!(
+            cert.certificate, expected,
+            "the certificate tier must follow from k̂ = {} by the documented \
+             thresholds (k̂ < 0.5 PlugInCertified, ≤ 0.7 ImportanceCorrect, \
+             else Escalate)",
+            cert.k_hat
+        );
+        assert!(
+            matches!(
+                cert.certificate,
+                RhoCertificate::ImportanceCorrect | RhoCertificate::Escalate
+            ),
+            "a heavy-tailed target must refuse to certify the plug-in, got {:?}",
+            cert.certificate
+        );
     }
 
     #[test]

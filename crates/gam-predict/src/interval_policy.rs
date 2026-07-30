@@ -986,7 +986,7 @@ pub fn predict_with_uncertainty_generic<T: PredictionTransform>(
 /// Which point estimate the caller will accept when the inverse link is curved.
 ///
 /// SPEC: the posterior mean `E[g⁻¹(Xβ)]` is always the default. This exists only
-/// so the CLI's `--mode plugin` can ask for the cheaper plug-in `g⁻¹(η̂)`, and it
+/// so the CLI's `--mode map` can ask for the cheaper plug-in `g⁻¹(η̂)`, and it
 /// is consulted **only on the point-only path**: once an interval is requested a
 /// curved link always reports the posterior mean, because the point prediction is
 /// a property of the model and the inputs and must never depend on whether an
