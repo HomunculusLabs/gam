@@ -349,14 +349,14 @@ impl SurvivalMarginalSlopeFamily {
                     }
 
                     // ── Eq (45): objective_psi += f_i^T u_i^α ──
-                    a.0 += f_pi.dot(dir);
+                    a.0 += f_pi.dot(&dir);
 
                     let s1 = f_pi.dot(&loading);
                     match block_idx {
                         1 => a.2.scaled_add(s1, &psi_row),
                         _ => a.3.scaled_add(s1, &psi_row),
                     }
-                    let pb = f_pipi.dot(dir);
+                    let pb = f_pipi.dot(&dir);
                     if let Some(lift) = psi_lift.as_ref() {
                         Self::accumulate_score_timewiggle_psi_u(lift, &f_pi, &mut a.1, &mut a.2);
                     }
