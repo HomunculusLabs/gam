@@ -58,9 +58,9 @@ pub(crate) use gam::inference::model_payload_builders::{
     LocationScaleWiggle, SavedModelSourceMetadata, StandardPayloadInputs,
     SurvivalLocationScaleInputs, SurvivalMarginalSlopeInputs, SurvivalTimewiggle,
     SurvivalTimewiggleBeta, SurvivalTransformationInputs, TransformationNormalInputs,
-    assemble_bernoulli_marginal_slope_payload, assemble_latent_window_payload,
-    assemble_location_scale_payload, assemble_residual_cascade_payload,
-    assemble_spline_scan_payload, assemble_standard_payload,
+    apply_request_metadata, assemble_bernoulli_marginal_slope_payload,
+    assemble_latent_window_payload, assemble_location_scale_payload,
+    assemble_residual_cascade_payload, assemble_spline_scan_payload, assemble_standard_payload,
     assemble_survival_location_scale_payload, assemble_survival_marginal_slope_payload,
     assemble_survival_transformation_payload, assemble_transformation_normal_payload,
 };

@@ -1572,8 +1572,7 @@ fn run_canonical_survival_transformation(
                 noise_offset_column: fit_config.noise_offset_column.clone(),
             },
         );
-        payload.group_metadata = fit_config.group_metadata.clone();
-        payload.inference_notes = outcome.inference_notes;
+        apply_request_metadata(&mut payload, fit_config, outcome.inference_notes);
         set_saved_weight_column(&mut payload, fit_config.weight_column.clone());
         write_payload_json(out, payload)?;
     }

@@ -695,8 +695,7 @@ fn run_canonical_standard_fit(
                     fit_config,
                     result,
                 })?;
-                payload.group_metadata = fit_config.group_metadata.clone();
-                payload.inference_notes = outcome.inference_notes;
+                apply_request_metadata(&mut payload, fit_config, outcome.inference_notes);
                 write_payload_json(out, payload)?;
             }
             emit_smooth_structure_warnings("fit-end", &spatial_warnings);
@@ -727,8 +726,7 @@ fn run_canonical_standard_fit(
                     dataset.feature_ranges(),
                 );
                 payload.weight_column = fit_config.weight_column.clone();
-                payload.group_metadata = fit_config.group_metadata.clone();
-                payload.inference_notes = outcome.inference_notes;
+                apply_request_metadata(&mut payload, fit_config, outcome.inference_notes);
                 write_payload_json(out, payload)?;
             }
             Ok(())
@@ -760,8 +758,7 @@ fn run_canonical_standard_fit(
                     dataset.headers.clone(),
                     dataset.feature_ranges(),
                 )?;
-                payload.group_metadata = fit_config.group_metadata.clone();
-                payload.inference_notes = outcome.inference_notes;
+                apply_request_metadata(&mut payload, fit_config, outcome.inference_notes);
                 write_payload_json(out, payload)?;
             }
             Ok(())
