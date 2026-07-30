@@ -384,6 +384,11 @@ impl TransformationNormalFamily {
         let covariate_dense = covariate_design
             .try_row_chunk(0..n)
             .map_err(|e| format!("SCOP covariate dense materialization failed: {e}"))?;
+        let affine_shape = affine_shape_direction(
+            resp_knots.view(),
+            config.response_degree,
+            p_resp.saturating_sub(1),
+        )?;
         let (tensor_penalties, tensor_penalty_layout) = build_tensor_penalties_kronecker(
             &resp_penalties,
             covariate_penalties,
@@ -392,6 +397,7 @@ impl TransformationNormalFamily {
             weights.view(),
             p_resp,
             p_cov,
+            affine_shape.view(),
             config,
         )?;
         // Compute response median for anchoring
@@ -578,6 +584,11 @@ impl TransformationNormalFamily {
         let covariate_dense = covariate_design
             .try_row_chunk(0..n)
             .map_err(|e| format!("SCOP covariate dense materialization failed: {e}"))?;
+        let affine_shape = affine_shape_direction(
+            response_knots.view(),
+            response_degree,
+            p_resp.saturating_sub(1),
+        )?;
         let (tensor_penalties, tensor_penalty_layout) = build_tensor_penalties_kronecker(
             &response_penalties,
             covariate_penalties,
@@ -586,6 +597,7 @@ impl TransformationNormalFamily {
             weights.view(),
             p_resp,
             p_cov,
+            affine_shape.view(),
             config,
         )?;
         // Compute response median.

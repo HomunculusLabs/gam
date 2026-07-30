@@ -253,6 +253,9 @@ pub(crate) fn ctn_tensor_penalty_layout_orders_covariate_response_double() {
         build_response_basis(&response, &config).expect("response basis builds");
     let n_response = response_penalties.len();
     assert!(n_response >= 1, "toy config must carry a response roughness penalty");
+    let p_shape = val_basis.ncols() - 1;
+    let affine = affine_shape_direction(knots.view(), config.response_degree, p_shape)
+        .expect("affine shape direction");
     let weights = Array1::from_elem(response.len(), 1.0);
     let offset = Array1::zeros(response.len());
     let cov_design = array![[1.0, 0.2], [1.0, -0.1], [1.0, 0.4], [1.0, -0.3]];
@@ -317,10 +320,31 @@ pub(crate) fn ctn_tensor_penalty_layout_orders_covariate_response_double() {
         let want: f64 = if i == j { 1.0 } else { 0.0 };
         assert_eq!(value, want, "double penalty covariate factor must be identity");
     }
+    // The shape-row ridge is the ORTHOGONAL PROJECTOR onto the shape rows minus
+    // the affine direction, not the bare identity (gam#2600): a ridge that
+    // reaches the affine direction cancels the order-2 roughness's own null and
+    // makes `α = 0` — the constant transformation, where the likelihood is
+    // undefined — the penalty's unique minimiser.
+    let affine_norm_sq = affine.dot(&affine);
     for ((i, j), &value) in left.indexed_iter() {
-        let want: f64 = if i == j && i > 0 { 1.0 } else { 0.0 };
-        assert_eq!(value, want, "double penalty left factor is the shape-row ridge");
+        let identity: f64 = if i == j && i > 0 { 1.0 } else { 0.0 };
+        let want = if i > 0 && j > 0 {
+            identity - affine[i - 1] * affine[j - 1] / affine_norm_sq
+        } else {
+            identity
+        };
+        assert!(
+            (value - want).abs() <= 1e-12 * (1.0 + want.abs()),
+            "double penalty left factor [{i},{j}] = {value} != shape-row projector {want}"
+        );
     }
+    let mut beta_affine = Array1::<f64>::zeros(left.nrows());
+    beta_affine.slice_mut(s![1..]).assign(&affine);
+    let ridge_at_affine = beta_affine.dot(&left.dot(&beta_affine));
+    assert!(
+        ridge_at_affine.abs() <= 1e-12 * affine_norm_sq,
+        "the shape-row ridge must annihilate the affine transformation, got {ridge_at_affine:.6e}"
+    );
 }
 
 /// First-order κ-derivative of the response-roughness penalty `S_y ⊗ G_x(κ)`
@@ -3033,5 +3057,229 @@ pub(crate) fn ctn_response_penalty_rejects_unsupported_derivative_order() {
     assert!(
         err_extra.contains("exceeds the I-spline value degree"),
         "unexpected extra-order error: {err_extra}"
+    );
+}
+
+/// gam#2600: every CTN shape-block penalty must vanish on the AFFINE
+/// transformation.
+///
+/// The response-shape block exists to bend `h` away from the affine
+/// `(y − μ)/σ` map, so `h' ≡ const > 0` is the null this penalty family is
+/// supposed to recover as `λ → ∞`. Before the fix two of the three assembled
+/// penalties reached that direction — the extra order-1 roughness (anchored
+/// I-splines give order-`m` structural nullity `m − 1`, so order 1 is positive
+/// definite) and the double-penalty shape ridge — which put the penalty's
+/// unique minimiser at `α = 0`, i.e. `h' ≡ 0`: a CONSTANT transformation that
+/// maps every response to one score and at which the likelihood is undefined.
+/// At `λ ≈ 1370` on the wine arm that collapse was measured to be objectively
+/// better by `Δobj = +9.987e5`, buying ≈1e6 of penalty for ≈50 of likelihood at
+/// `ρ = 1.000`, and every downstream symptom followed from it.
+#[test]
+pub(crate) fn ctn_shape_penalties_annihilate_the_affine_transformation_2600() {
+    let response = skewed_response(64);
+    let config = TransformationNormalConfig::default();
+    assert!(
+        config.response_extra_penalty_orders.contains(&1) && config.double_penalty,
+        "this pin is only meaningful while the default carries the two penalties that \
+         reached the affine direction: extra orders {:?}, double_penalty {}",
+        config.response_extra_penalty_orders,
+        config.double_penalty
+    );
+    let (resp_val, resp_deriv, resp_penalties, knots, transform) =
+        build_response_basis(&response, &config).expect("response basis builds");
+    let p_resp = resp_val.ncols();
+    let p_shape = p_resp - 1;
+    let affine = affine_shape_direction(knots.view(), config.response_degree, p_shape)
+        .expect("affine shape direction");
+
+    // (1) The direction is the affine transformation itself: unit slope at every
+    // observation, to floating point. This is what makes the null-space claim
+    // below a statement about the MODEL and not about an arbitrary vector.
+    for i in 0..response.len() {
+        let slope: f64 = (0..p_shape)
+            .map(|k| affine[k] * resp_deriv[[i, k + 1]])
+            .sum();
+        assert!(
+            (slope - 1.0).abs() < 1.0e-10,
+            "affine direction must give h' = 1 at row {i}, got {slope:.17e}"
+        );
+    }
+
+    let mut beta_affine = Array1::<f64>::zeros(p_resp);
+    beta_affine.slice_mut(s![1..]).assign(&affine);
+    let affine_norm_sq = beta_affine.dot(&beta_affine);
+
+    // (2) Every response-direction penalty is zero there — and still bites on a
+    // bent shape, so the assertion cannot be satisfied by a zero matrix.
+    for (index, penalty) in resp_penalties.iter().enumerate() {
+        let quad = beta_affine.dot(&penalty.dot(&beta_affine));
+        let scale = affine_norm_sq * penalty.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+        assert!(
+            quad.abs() <= 1.0e-12 * scale,
+            "response penalty {index} does not annihilate the affine transformation: \
+             quadratic form {quad:.6e} against scale {scale:.6e}"
+        );
+        let bent = toy_probe_vector(p_resp, 101 + index as u64);
+        let bent_quad = bent.dot(&penalty.dot(&bent));
+        assert!(
+            bent_quad > 0.0,
+            "response penalty {index} is inert on a bent shape ({bent_quad:.6e}); the \
+             null-space assertion above would then be vacuous"
+        );
+    }
+
+    // (3) The same for the ASSEMBLED tensor penalties, which is what the
+    // optimizer actually sees. This is where the double-penalty ridge lives, and
+    // it is the sum over these that decides whether collapse is preferred.
+    let n = response.len();
+    let weights = Array1::<f64>::ones(n);
+    let offset = Array1::<f64>::zeros(n);
+    let family = TransformationNormalFamily::from_prebuilt_response_basis(
+        &response,
+        resp_val,
+        resp_deriv,
+        resp_penalties,
+        knots,
+        config.response_degree,
+        transform,
+        &weights,
+        &offset,
+        DesignMatrix::Dense(DenseDesignMatrix::from(Array2::<f64>::ones((n, 1)))),
+        vec![],
+        &config,
+        None,
+    )
+    .expect("intercept-only CTN family");
+    assert_eq!(
+        family.tensor_penalties.len(),
+        3,
+        "intercept-only default config assembles order-2 roughness, order-1 roughness, \
+         and the double-penalty ridge"
+    );
+    for (index, penalty) in family.tensor_penalties.iter().enumerate() {
+        let dense = penalty.to_dense();
+        let quad = beta_affine.dot(&dense.dot(&beta_affine));
+        let scale = affine_norm_sq * dense.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+        assert!(
+            quad.abs() <= 1.0e-12 * scale,
+            "tensor penalty {index} does not annihilate the affine transformation: \
+             quadratic form {quad:.6e} against scale {scale:.6e}"
+        );
+        let bent = toy_probe_vector(p_resp, 211 + index as u64);
+        let bent_quad = bent.dot(&dense.dot(&bent));
+        assert!(
+            bent_quad > 0.0,
+            "tensor penalty {index} is inert on a bent shape ({bent_quad:.6e})"
+        );
+    }
+}
+
+/// gam#2600 null recovery: at ANY smoothing strength the CTN penalized objective
+/// must prefer a non-degenerate transformation to the constant map.
+///
+/// This is the behavioural half of
+/// [`ctn_shape_penalties_annihilate_the_affine_transformation_2600`], and it is
+/// the property that actually failed. Because every shape penalty now vanishes
+/// on the affine direction, the penalized objective restricted to the affine ray
+/// `α = t · v` is the pure likelihood, and the likelihood diverges as `t → 0`
+/// (`log h' → −∞`), so no smoothing strength can buy the collapse. Before the
+/// fix the order-1 roughness and the shape ridge both grew like `t²` on that
+/// ray, so at `λ ≈ 1370` on the wine arm collapsing was better by
+/// `Δobj = +9.987e5` and the fit walked to a constant transformation.
+///
+/// The assertion is comparative and carries no tuned threshold: the collapsed
+/// point must simply score worse than the standardizing affine transformation
+/// under a smoothing strength `e^10 ≈ 2.2e4` times the data-scaled seed.
+#[test]
+pub(crate) fn ctn_penalized_objective_never_prefers_the_constant_transformation_2600() {
+    let response = skewed_response(64);
+    let n = response.len();
+    let config = TransformationNormalConfig::default();
+    let (resp_val, resp_deriv, resp_penalties, knots, transform) =
+        build_response_basis(&response, &config).expect("response basis builds");
+    let p_resp = resp_val.ncols();
+    let p_shape = p_resp - 1;
+    let affine = affine_shape_direction(knots.view(), config.response_degree, p_shape)
+        .expect("affine shape direction");
+    let weights = Array1::<f64>::ones(n);
+    let offset = Array1::<f64>::zeros(n);
+    let resp_val_kept = resp_val.clone();
+    let family = TransformationNormalFamily::from_prebuilt_response_basis(
+        &response,
+        resp_val,
+        resp_deriv,
+        resp_penalties,
+        knots,
+        config.response_degree,
+        transform,
+        &weights,
+        &offset,
+        DesignMatrix::Dense(DenseDesignMatrix::from(Array2::<f64>::ones((n, 1)))),
+        vec![],
+        &config,
+        None,
+    )
+    .expect("intercept-only CTN family");
+    // Ten e-folds above the data-scaled seed: far past the strength at which the
+    // wine arm collapsed.
+    let rho = family
+        .penalty_scale_log_lambdas()
+        .expect("data-scaled smoothing seed")
+        .mapv(|value| value + 10.0);
+    let dense: Vec<Array2<f64>> = family
+        .tensor_penalties
+        .iter()
+        .map(|penalty| penalty.to_dense())
+        .collect();
+
+    // The standardizing affine transformation `h ≈ (y − ȳ)/sd(y)`, and the same
+    // transformation scaled down by a millionfold, which is the collapse.
+    let mean = response.sum() / n as f64;
+    let variance = response.iter().map(|y| (y - mean) * (y - mean)).sum::<f64>() / n as f64;
+    let reference_slope = 1.0 / variance.sqrt();
+    let penalized_objective = |slope: f64| -> (f64, f64) {
+        let mut beta = Array1::<f64>::zeros(p_resp);
+        for k in 0..p_shape {
+            beta[k + 1] = slope * affine[k];
+        }
+        let mut shape_mean = 0.0;
+        for i in 0..n {
+            for k in 0..p_shape {
+                shape_mean += beta[k + 1] * resp_val_kept[[i, k + 1]];
+            }
+        }
+        beta[0] = -shape_mean / n as f64;
+        let quantities = family
+            .row_quantities(&beta)
+            .expect("row quantities on the affine ray");
+        let penalty: f64 = dense
+            .iter()
+            .enumerate()
+            .map(|(index, matrix)| 0.5 * rho[index].exp() * beta.dot(&matrix.dot(&beta)))
+            .sum();
+        (-quantities.log_likelihood + penalty, penalty)
+    };
+
+    let (reference_objective, reference_penalty) = penalized_objective(reference_slope);
+    let (collapsed_objective, collapsed_penalty) = penalized_objective(reference_slope * 1.0e-6);
+    assert!(
+        collapsed_objective > reference_objective,
+        "the penalized objective prefers the collapsed transformation: \
+         collapsed {collapsed_objective:.6e} <= affine {reference_objective:.6e} \
+         (penalties {collapsed_penalty:.6e} vs {reference_penalty:.6e})"
+    );
+    // Both points sit on the affine ray, so the penalty must not be what decides
+    // the comparison above. It is zero there in exact arithmetic, but it is
+    // EVALUATED as a cancelling quadratic form at coefficient scale
+    // `λ‖β‖²` — with `λ ≈ 3e7` here that carries an `ε/|Δ|` floor of order
+    // `1e-7`, so requiring it below machine epsilon of the objective would be
+    // asserting against the arithmetic rather than against the model. Assert the
+    // property that actually matters: the residual cannot flip the verdict.
+    let margin = collapsed_objective - reference_objective;
+    assert!(
+        reference_penalty.abs() + collapsed_penalty.abs() < 0.5 * margin,
+        "residual penalty on the affine ray ({reference_penalty:.6e} and \
+         {collapsed_penalty:.6e}) is not negligible against the margin it must not \
+         overturn ({margin:.6e})"
     );
 }

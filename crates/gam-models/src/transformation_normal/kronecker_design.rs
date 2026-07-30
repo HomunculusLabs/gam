@@ -406,6 +406,7 @@ pub(crate) fn build_tensor_penalties_kronecker(
     weights: ArrayView1<'_, f64>,
     p_resp: usize,
     p_cov: usize,
+    affine_shape: ArrayView1<'_, f64>,
     config: &TransformationNormalConfig,
 ) -> Result<(Vec<PenaltyMatrix>, CtnTensorPenaltyLayout), String> {
     // Function-space mass Grams under the empirical (weighted) data measure.
@@ -419,8 +420,41 @@ pub(crate) fn build_tensor_penalties_kronecker(
     // row is the conditional centering field, identified by the likelihood; keep
     // it outside every SCOP shrinkage penalty so population shifts stay freely
     // calibrated in the selected covariate span.
+    //
+    // The AFFINE direction is excluded for exactly the same reason, and gam#2600
+    // is what happens when it is not: a ridge that reaches every shape direction
+    // has its unique minimiser at `α = 0`, i.e. `h' ≡ 0`, so it cancels the
+    // order-2 roughness's affine null and there is a λ at which the penalized
+    // objective prefers a CONSTANT transformation to the data. The scale of the
+    // transformation is identified by the likelihood — `log h'` is the barrier
+    // that keeps `h'` positive — so it belongs outside the shrinkage exactly as
+    // the location does. Subtracting the rank-one orthogonal projector onto that
+    // direction keeps this an idempotent coefficient-space projector (PSD, and
+    // still full rank on every remaining weakly-identified shape×covariate
+    // direction, which is what the ridge is for).
+    if affine_shape.len() + 1 != p_resp {
+        return Err(format!(
+            "CTN double-penalty null shrinkage: affine shape direction has length {}, expected \
+             {} for a {p_resp}-column response block",
+            affine_shape.len(),
+            p_resp.saturating_sub(1),
+        ));
+    }
     let mut shape_resp = Array2::<f64>::eye(p_resp);
     shape_resp[[0, 0]] = 0.0;
+    let affine_norm_sq = affine_shape.dot(&affine_shape);
+    if !(affine_norm_sq > 0.0) || !affine_norm_sq.is_finite() {
+        return Err(format!(
+            "CTN double-penalty null shrinkage: affine shape direction has squared norm \
+             {affine_norm_sq}, which cannot define a projector"
+        ));
+    }
+    for row in 0..affine_shape.len() {
+        for col in 0..affine_shape.len() {
+            shape_resp[[row + 1, col + 1]] -=
+                affine_shape[row] * affine_shape[col] / affine_norm_sq;
+        }
+    }
 
     let mut penalties = Vec::new();
 

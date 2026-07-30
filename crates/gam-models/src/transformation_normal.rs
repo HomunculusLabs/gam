@@ -115,8 +115,8 @@ pub(crate) use penalty_scaling::*;
 pub use psi_operator::*;
 pub use response_basis::effective_response_num_internal_knots;
 pub(crate) use response_basis::{
-    assert_rowwise_kronecker_dimensions, build_response_basis, response_endpoint_value_bases,
-    response_floor_offsets,
+    affine_shape_direction, assert_rowwise_kronecker_dimensions, build_response_basis,
+    response_endpoint_value_bases, response_floor_offsets,
 };
 pub use scop_density::*;
 pub(crate) use warm_start::*;
