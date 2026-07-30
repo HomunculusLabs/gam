@@ -583,7 +583,7 @@ impl SurvivalMarginalSlopeFamily {
 
                 for axis_idx in 0..k {
                     let axis = &axes[axis_idx];
-                    let psi_row = psi_rows[axis_idx];
+                    let psi_row = &psi_rows[axis_idx];
                     let dir = &directions[axis_idx];
                     let third_stack = &third_stacks[axis_idx];
                     let mut third = Array2::from_shape_fn(
