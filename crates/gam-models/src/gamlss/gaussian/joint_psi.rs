@@ -426,25 +426,42 @@ impl LocationScaleJointPsiFamily for GaussianLocationScaleWiggleFamily {
                 ));
             }
         }
-        // Wiggle ψ path: full-data exact (= trivially unbiased). The
-        // wiggle-specific second-order from-parts function inlines 30+
-        // per-row coefficient arrays (`coeff_mm{,_a,_b,_ab}`,
-        // `coeff_ml{,_a,_b,_ab}`, `coeff_ll{,_a,_b,_ab}`, `a{,_a,_b,_ab}`,
-        // `c{,_a,_b,_ab}`, `l{,_a,_b,_ab}`, `dw_{a,b,ab}`, `s_mu*`, `s_ls*`,
-        // `s_w*`, ...) instead of packing them into a struct like the
-        // non-wiggle GLS path's `GaussianJointPsi{First,Second}Weights`.
-        // Each is row-linear in `rows.{w,m,n,kappa,...}` and the direction
-        // vectors so HT masking is theoretically clean, but threading a mask
-        // across that many call sites is brittle (any missed array silently
-        // biases the estimator). The outer score remains unbiased without
-        // touching the wiggle ψ path: HT-unbiased LL
+        // Wiggle ψ path: full-data exact (= trivially unbiased). The outer
+        // score remains unbiased without touching this path: HT-unbiased LL
         // (`log_likelihood_only_with_options`) + HT-unbiased ρ-Hessian
         // (`exact_newton_joint_hessian_workspace_with_options`) +
-        // exact-unbiased ψ (this path) = unbiased. Broadening to the wiggle
-        // ψ path is a follow-up that should refactor the inline arrays into
-        // `WiggleJointPsi{First,Second}Weights` structs mirroring
-        // `GaussianJointPsi{First,Second}Weights` so a single
-        // `apply_ht_mask_wiggle*` helper can mask everything in one place.
+        // exact-unbiased ψ (this path) = unbiased.
+        //
+        // This comment used to say the wiggle from-parts functions inline 30+
+        // per-row coefficient arrays instead of packing them, and to name
+        // "refactor them into `WiggleJointPsi{First,Second}Weights` mirroring
+        // `GaussianJointPsi{First,Second}Weights`" as the prerequisite for
+        // broadening HT subsampling here. THAT PREREQUISITE IS DONE, under
+        // different names, and the stale text sent at least one refactor pass
+        // chasing work that already existed:
+        //
+        //   * second order — `GlsWiggleSecondDirCoeffs` (wiggle.rs:359, 33
+        //     fields: `coeff_{mm,ml,ll}_{base,u,v,uv}`, `mean_wiggle_*`,
+        //     `gradient_{mu,ls}_*`, `hessian_{ml,mm}_*`), built by
+        //     `gls_wiggle_second_directional_coeffs` and destructured whole at
+        //     the top of `exact_newton_joint_psisecond_order_terms_from_parts`.
+        //   * first order — `GlsWiggleFirstDirCoeffs` (wiggle.rs:395),
+        //     destructured at wiggle.rs:793.
+        //
+        // So the gaussian wiggle second-order body is now one struct
+        // destructure and zero loose `mut` row accumulators, and a single
+        // `apply_ht_mask_wiggle*` helper over those two structs is writable
+        // today. What is NOT settled is whether masking the struct fields is
+        // SUFFICIENT: the body also derives row arrays outside the struct
+        // (`q_{a,b,ab}`, `s1_*`, `g2_*`, `s_mu*`) and matrix quantities
+        // (`basis_*`, `basis1_*`) from the direction vectors, and whether those
+        // are HT-neutral or need masking too is the actual open question.
+        //
+        // The binomial wiggle path is a different shape and is NOT covered by
+        // the above: its `exact_newton_joint_psisecond_order_terms_from_parts`
+        // is 734 lines with 21 loose `mut` row accumulators and no struct
+        // destructure, even though `BinomialWiggle{First,Second}DirectionalRows`
+        // (11 and 15 fields) exist and are referenced elsewhere in that file.
         self.exact_newton_joint_psisecond_order_terms_from_parts(
             block_states,
             derivative_blocks,
