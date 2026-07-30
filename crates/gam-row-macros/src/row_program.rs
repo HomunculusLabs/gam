@@ -1349,27 +1349,33 @@ fn materialize_directional(
     directional_reference(&name, &support, value.base.gradient.len(), fourth)
 }
 
-#[allow(clippy::too_many_arguments)]
+struct DirectionalExpressionEnvironment<'a> {
+    leaves: &'a [Leaf],
+    constants: &'a HashSet<String>,
+    dimension: usize,
+    fourth: bool,
+}
+
 fn directional_expression(
     expression: &ProgramExpr,
     owner: &str,
-    leaves: &[Leaf],
-    constants: &HashSet<String>,
+    environment: &DirectionalExpressionEnvironment<'_>,
     bindings: &HashMap<String, DirectionalJet>,
-    dimension: usize,
-    fourth: bool,
     stack_index: &mut usize,
     preludes: &mut Vec<String>,
 ) -> Result<DirectionalJet> {
+    let DirectionalExpressionEnvironment {
+        leaves,
+        constants,
+        dimension,
+        fourth,
+    } = *environment;
     let mut child = |expression: &ProgramExpr| {
         directional_expression(
             expression,
             owner,
-            leaves,
-            constants,
+            environment,
             bindings,
-            dimension,
-            fourth,
             stack_index,
             preludes,
         )
@@ -1550,6 +1556,12 @@ fn symbolic_schedule(
     target: SymbolicTarget,
 ) -> Result<SymbolicSchedule> {
     let dimension = primaries.len();
+    let expression_environment = DirectionalExpressionEnvironment {
+        leaves,
+        constants,
+        dimension,
+        fourth,
+    };
     let mut bindings = HashMap::<String, SymbolicJet>::new();
     for (axis, primary) in primaries.iter().enumerate() {
         bindings.insert(
@@ -1756,11 +1768,8 @@ fn directional_schedule(
                 let value = directional_expression(
                     value,
                     &name.to_string(),
-                    leaves,
-                    constants,
+                    &expression_environment,
                     &bindings,
-                    dimension,
-                    fourth,
                     &mut stack_index,
                     &mut preludes,
                 )?;
@@ -1790,11 +1799,8 @@ fn directional_schedule(
                     let value = directional_expression(
                         value,
                         &target_name.to_string(),
-                        leaves,
-                        constants,
+                        &expression_environment,
                         &bindings,
-                        dimension,
-                        fourth,
                         &mut stack_index,
                         &mut preludes,
                     )?;
@@ -1823,11 +1829,8 @@ fn directional_schedule(
     let result = directional_expression(
         result,
         "result",
-        leaves,
-        constants,
+        &expression_environment,
         &bindings,
-        dimension,
-        fourth,
         &mut stack_index,
         &mut result_preludes,
     )?;
