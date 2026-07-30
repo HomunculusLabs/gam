@@ -5219,7 +5219,7 @@ impl<'a> RemlState<'a> {
                 })
                 .unwrap_or_default();
             return Err(EstimationError::ParameterConstraintViolation(format!(
-                "KKT residuals exceed tolerance: primal={:.3e}, dual={:.3e}, comp={:.3e}, stat={:.3e} (stat_rel={:.3e} vs tol={:.3e}{}; ‖grad‖∞={:.3e}); active={}/{}{}{}",
+                "KKT residuals exceed tolerance: primal={:.3e}, dual={:.3e}, comp={:.3e}, stat={:.3e} (stat_rel={:.3e} vs tol={:.3e}{}; ‖grad‖∞={:.3e}); active={}/{}{}{}{}",
                 kkt.primal_feasibility,
                 kkt.dual_feasibility,
                 kkt.complementarity,
@@ -5235,7 +5235,10 @@ impl<'a> RemlState<'a> {
                 kkt.n_active,
                 kkt.n_constraints,
                 worstrow_msg,
-                reachability_msg
+                reachability_msg,
+                // A refusal is not a measurement: without this the reader cannot
+                // tell `stat` from an unprojected gradient (#2601).
+                kkt.cone_projection_note()
             )));
         }
         Ok(())
