@@ -5081,10 +5081,22 @@ mod refinement_decision_tests {
                 let mut width: Option<usize> = None;
                 let mut hwm: Option<f64> = None;
                 for field in rest.split_whitespace() {
+                    // `.ok()` is banned here for the reason it exists: this
+                    // is the ONLY reader of the child's reading, and a field
+                    // that fails to parse leaves `reading` unset, which the
+                    // `unwrap_or_else` below reports as "the child produced no
+                    // reading" — the wrong fault, pointing at the child rather
+                    // than at the malformed field the parent just saw.
                     if let Some(value) = field.strip_prefix("m=") {
-                        width = value.parse().ok();
+                        width = Some(value.parse().unwrap_or_else(|error| {
+                            panic!("child {child}: unparseable width field `m={value}`: {error}")
+                        }));
                     } else if let Some(value) = field.strip_prefix("vmhwm_bytes=") {
-                        hwm = value.parse().ok();
+                        hwm = Some(value.parse().unwrap_or_else(|error| {
+                            panic!(
+                                "child {child}: unparseable field `vmhwm_bytes={value}`: {error}"
+                            )
+                        }));
                     }
                 }
                 if let (Some(width), Some(hwm)) = (width, hwm) {

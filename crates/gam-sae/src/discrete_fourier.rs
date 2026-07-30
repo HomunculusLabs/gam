@@ -77,7 +77,10 @@ pub(crate) fn dft_in_place(re: &mut [f64], im: &mut [f64], inverse: bool) -> Res
 /// Iterative in-place radix-2 Cooley–Tukey. `re.len()` must be a power of two.
 fn fft_radix2_in_place(re: &mut [f64], im: &mut [f64], inverse: bool) {
     let n = re.len();
-    debug_assert!(n.is_power_of_two());
+    assert!(
+        n.is_power_of_two(),
+        "fft_radix2_in_place requires a power-of-two length, got {n}"
+    );
 
     // Decimation-in-time reordering: index `i` moves to its bit-reversal.
     let mut j = 0usize;

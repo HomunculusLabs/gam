@@ -105,10 +105,27 @@ fn fit_family(family: &str, data: &gam::data::EncodedDataset) -> Result<Vec<f64>
 fn gamma_log_link_smooth_lowdispersion_fits_with_finite_coefficients() {
     let data = build_data();
 
-    // Gaussian and Poisson fit the identical design/basis, proving the smooth
-    // and penalty are well-posed — only the Gamma objective was defective.
+    // Gaussian fits the identical design/basis, proving the smooth and penalty
+    // are well-posed — only the Gamma objective was defective.
     fit_family("gaussian", &data).expect("gaussian smooth fit on the same data must succeed");
-    fit_family("poisson", &data).expect("poisson smooth fit on the same data must succeed");
+
+    // The Poisson arm cannot be a SUCCESS here: `y` is a continuous Gamma
+    // realization and the count families enforce EXACT integrality
+    // (`valid_count_response` in `crates/gam-solve/src/pirls/family_state.rs`),
+    // because the Poisson log-likelihood is defined at non-integer `y` through
+    // `ln_gamma` and would otherwise evaluate a different model in silence.
+    // Asserting the refusal keeps the control — the smooth, its basis and its
+    // penalty must still be built and carried to the family's domain check —
+    // and is strictly stronger than the success that the response never
+    // qualified for.
+    let poisson_refusal = fit_family("poisson", &data)
+        .expect_err("poisson must refuse a non-integer (continuous Gamma) response");
+    assert!(
+        poisson_refusal.contains("must be a finite non-negative integer"),
+        "the poisson control must fail on the COUNT-INTEGRALITY contract (proving \
+         the smooth basis and penalty were built and reached the family), got: \
+         {poisson_refusal}"
+    );
 
     // The defect: gamma aborted at REML startup with `objective returned a
     // non-finite cost` because the inner solve never converged.

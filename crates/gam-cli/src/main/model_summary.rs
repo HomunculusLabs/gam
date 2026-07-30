@@ -408,10 +408,27 @@ pub(crate) fn covariance_from_model(
         .as_ref()
         .ok_or_else(|| "model is missing canonical fit_result payload; refit".to_string())?;
     if mode == InferenceCovarianceMode::SmoothingCorrected {
-        return fit.beta_covariance_corrected().cloned().ok_or_else(|| {
-            "saved model does not contain smoothing-corrected covariance; refit before requesting --covariance-mode corrected"
-                .to_string()
-        });
+        if let Some(cov) = fit.beta_covariance_corrected() {
+            return Ok(cov.clone());
+        }
+        // With NO smoothing coordinates the correction J·V_rho·Jᵀ is the unique
+        // zero-dimensional zero matrix, so Vp = Vb EXACTLY. This is an identity
+        // of the definition, not a fallback to a weaker uncertainty object, and
+        // the library predict path already applies it (`gam-predict`'s
+        // `select_uncertainty_backend`, the `fit.lambdas.is_empty()` branch).
+        // The CLI never did, so every SAVED fit with an empty lambda vector —
+        // a fully parametric survival fit is the common case — refused the
+        // DEFAULT `gam predict` invocation (`--mode posterior-mean
+        // --covariance-mode corrected`) with "refit before requesting", an
+        // instruction no refit could satisfy because there is no correction to
+        // compute. A fit that DOES carry smoothing coordinates keeps the hard
+        // refusal: there the correction is a real, absent term.
+        if !fit.lambdas.is_empty() {
+            return Err(
+                "saved model does not contain smoothing-corrected covariance; refit before requesting --covariance-mode corrected"
+                    .to_string(),
+            );
+        }
     }
     if let Some(cov) = fit.beta_covariance() {
         return Ok(cov.clone());
@@ -442,11 +459,19 @@ pub(crate) fn prediction_backend_from_model<'a>(
         .as_ref()
         .ok_or_else(|| "model is missing canonical fit_result payload; refit".to_string())?;
     if mode == InferenceCovarianceMode::SmoothingCorrected {
-        let covariance = fit.beta_covariance_corrected().ok_or_else(|| {
-            "saved model does not contain smoothing-corrected covariance; refit before requesting --covariance-mode corrected"
-                .to_string()
-        })?;
-        return Ok(PredictionCovarianceBackend::from_dense(covariance.view()));
+        if let Some(covariance) = fit.beta_covariance_corrected() {
+            return Ok(PredictionCovarianceBackend::from_dense(covariance.view()));
+        }
+        // Same zero-smoothing-coordinate identity as `covariance_from_model`
+        // above: Vp = Vb when there is no rho to integrate over. Falling
+        // through to the conditional sources is the CORRECTED answer here, not
+        // a substitution of a narrower band.
+        if !fit.lambdas.is_empty() {
+            return Err(
+                "saved model does not contain smoothing-corrected covariance; refit before requesting --covariance-mode corrected"
+                    .to_string(),
+            );
+        }
     }
     if let Some(covariance) = fit.beta_covariance() {
         return Ok(PredictionCovarianceBackend::from_dense(covariance.view()));
