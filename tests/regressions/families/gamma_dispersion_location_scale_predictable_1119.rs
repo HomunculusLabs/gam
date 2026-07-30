@@ -505,17 +505,71 @@ fn gamma_dispersion_posterior_mean_observation_band_is_per_row_not_scalar() {
          implied σ (min={sig_min:.4}, max={sig_max:.4}) is the scalar-dispersion bug"
     );
 
-    // (2) The implied σ must match the per-row model noise it should be built
-    //     from (allowing a little slack for the small SE(μ̂)² term and the
-    //     Gamma-mean curvature in the posterior-mean point).
+    // (2) The implied σ must match the per-row model noise -- AFTER dividing out
+    //     the band's skew gain, which the symmetric inversion above folded in.
+    //
+    //     The observation band is NOT μ ± z·√(SE² + σ²). `observation_band`
+    //     (gam-predict/src/dispersion_location_scale.rs) routes to
+    //     `family_observation_band_per_row`, which for a Gamma calls
+    //     `gamma_moment_matched_interval`: with total predictive variance V it
+    //     sets shape k = μ²/V and scale = V/μ and returns the equal-tailed
+    //     2.5%/97.5% GAMMA QUANTILES. Inverting the upper edge as if the band
+    //     were symmetric therefore does not read back √V, it reads √V·g(k):
+    //
+    //         upper − μ = (V/μ)·(Q_k − k) = √V·√k·(R(k) − 1),   R(k) = Q_k/k
+    //         half = (upper − μ)/z = √V · g(k),   g(k) = √k·(R(k) − 1)/z
+    //
+    //     g is bounded well away from 1 here, and its range is exact rather
+    //     than incidental: the true shape is ν(x) = exp(0.7 + 0.4·cos 2x) on the
+    //     grid x ∈ [−1.8, 1.8], where 2x covers ±π so cos 2x sweeps the full
+    //     [−1, 1]. Hence ν ∈ [e^0.3, e^1.1] = [1.350, 3.004] and
+    //     g ∈ [1.245, 1.335]. A symmetric readout is 24–34% high BY
+    //     CONSTRUCTION, so the previous `rel < 0.20` was not a bar at all --
+    //     it was unreachable arithmetic. Divide g out and hold the residual to
+    //     5%: four times TIGHTER than the bar it replaces, not a bump.
+    //
+    //     g is evaluated with the Wilson–Hilferty cube-root form
+    //     R(k) ≈ (1 − 1/(9k) + z/(3√k))³, checked against the two shapes whose
+    //     quantiles are solvable in closed form:
+    //       k = 1: Q₁(0.975) = −ln(0.025) = 3.68888 ⇒ g = 1.37190;
+    //              WH gives R = 3.66800, g = 1.36125  (−0.78%)
+    //       k = 2: Q₂(0.975) = χ²₄(0.975)/2 = 11.14329/2 = 5.57164 ⇒
+    //              R = 2.78582, g = 1.28853;
+    //              WH gives R = 2.78189, g = 1.28569  (−0.22%)
+    //     The error shrinks monotonically in k, so across k ≳ 1.35 it stays
+    //     under ~0.5% -- an order of magnitude inside the 5% bar.
+    //
+    //     V is reconstructed exactly as the band builds it. `observation_noise`
+    //     returns √(integrated_response_variance), the SAME array the band
+    //     consumes as `response_var`, and the band lifts it by the law of total
+    //     variance (Gamma: (m² + v)/ν = plug + v/ν) before adding Var(μ̂):
+    //         V = SE² + (σ² + SE²/ν),   ν recovered per row from σ = μ/√ν.
+    //     Both SE-dependent terms are O(SE²/σ²) here, so the assertion is
+    //     driven by the band's SHAPE, which is the per-row wiring under test.
     for i in 0..grid_n {
-        let rel = (implied_sigma[i] - per_row_noise[i]).abs() / per_row_noise[i].max(1e-9);
+        let sigma = per_row_noise[i];
+        let v = mean_se[i] * mean_se[i];
+        let nu = (pm.mean[i] / sigma.max(1e-12)).powi(2);
+        let total_var = v + sigma * sigma + v / nu.max(1e-12);
+        let k = (pm.mean[i] * pm.mean[i] / total_var.max(1e-30)).max(1e-6);
+        // Wilson–Hilferty: Q_k/k ≈ (1 − 1/(9k) + z/(3√k))³.
+        let wh = 1.0 - 1.0 / (9.0 * k) + z / (3.0 * k.sqrt());
+        let ratio = wh * wh * wh;
+        let skew_gain = k.sqrt() * (ratio - 1.0) / z;
+        let predicted_half = total_var.sqrt() * skew_gain;
+        let predicted_sigma = (predicted_half * predicted_half - v).max(0.0).sqrt();
+        let rel = (implied_sigma[i] - predicted_sigma).abs() / predicted_sigma.max(1e-9);
         assert!(
-            rel < 0.20,
+            rel < 0.05,
             "row {i}: posterior-mean band implied σ={:.4} must match the per-row model \
-             noise σ(x)={:.4} (rel err {:.3}); the scalar-dispersion band ignored σ(x)",
+             noise σ(x)={:.4} carried through the moment-matched Gamma skew gain \
+             g(k={:.3})={:.4}, i.e. {:.4} (rel err {:.3}); the scalar-dispersion band \
+             ignored σ(x)",
             implied_sigma[i],
             per_row_noise[i],
+            k,
+            skew_gain,
+            predicted_sigma,
             rel
         );
     }
