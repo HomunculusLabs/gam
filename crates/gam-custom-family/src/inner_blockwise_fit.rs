@@ -3235,13 +3235,22 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         // certificate can tell whether that escape was worth anything (#2587).
         let mut previous_escape_lambda_min: Option<f64> = None;
 
-        // Fit-level wall-clock budget guard at inner-solve ENTRY. The
-        // per-cycle guard below only fires from `cycle > 0`, so it returns a
-        // best-effort iterate once a solve has taken at least one step. But on
-        // the non-certifying constrained baseline every inner solve early-exits
-        // at cycle 0 via the divergence/stall guard, so `cycle > 0` is never
-        // reached and the per-cycle guard never fires. The outer startup then
-        // drives a whole cascade of fresh solves — one per multistart seed,
+        // #2627 — there is NO wall-clock deadline in this loop, at entry or per
+        // cycle. gam#2055 removed both, and what survived was the orphaned first
+        // half of the comment that described them: it announced a "fit-level
+        // wall-clock budget guard at inner-solve ENTRY" and a "per-cycle guard
+        // below", then ran off mid-sentence into the paragraph beneath. A reader
+        // auditing why a coupled joint-Newton solve ran past a 300 s cap found a
+        // comment promising the guard that would have stopped it. Deleted rather
+        // than reimplemented: the loop's bounds are deterministic and iteration-
+        // counted by design — `inner_loop_hard_ceiling` and the caller's
+        // `inner_max_cycles` bound the cycle count, and the residual-trend,
+        // merit-descent, and fully-rejected-stall guards below decide
+        // termination from cycle indices and residual ratios ONLY, with no
+        // wall-clock (see the no-wall-clock note at the bottom of the loop).
+        // Reintroducing a deadline here would make termination host-dependent
+        // and non-reproducible; the honest fix for a slow cycle is a smaller
+        // per-cycle cost or a tighter deterministic guard, not a clock.
         // The exact joint-Hessian route solves the penalized Newton system
         // directly. Extra damping must be wired through an accepted/rejected
         // step policy before it belongs here; keep the matvec faithful to the

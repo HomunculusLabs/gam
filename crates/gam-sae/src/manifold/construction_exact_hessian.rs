@@ -144,6 +144,20 @@ where
     // leaving every resolved direction untouched.
     let dim = x.t.len() + x.beta.len();
     let rank_floor = sae_ift_min_curvature_fraction();
+    // #2627 — anti-runaway ceiling on the TOTAL inverse-power refinement solves
+    // summed over EVERY deflation turn. The two loops nest: the outer turn
+    // deflates one direction per pass and is bounded by `dim`, the inner
+    // inverse-power refinement is bounded by `dim`, and every turn of the inner
+    // loop is a FULL preconditioned GMRES (`A⁻¹Bv`). The product is `dim²`
+    // solves, which the #2472 note undercounts by a factor of `dim` because it
+    // reads only the inner bound. This is a ceiling on the WORK, not a
+    // convergence bound: the per-direction certificates below are unchanged and
+    // still decide every solve that terminates inside the budget. It exists so
+    // that an exact `A = B + ΔC` which is near-singular at the inner mode
+    // surfaces as a typed refusal carrying its own diagnosis instead of a
+    // wall-clock SIGKILL that names nothing.
+    let inverse_power_solve_ceiling = 4usize.saturating_mul(dim).saturating_add(16);
+    let mut inverse_power_solves = 0usize;
     for _ in 0..dim {
         let ax = apply_a(&x)?;
         let bx = apply_b(&x)?;
@@ -214,6 +228,12 @@ where
         };
         normalize_b(&mut v)?;
         let mut direction_converged = false;
+        // #2627 — consecutive inverse steps whose refined direction stayed under
+        // the numerical-null floor. See the subspace certificate at the bottom of
+        // this loop for why this, and not eigenvector alignment, is the property
+        // the deflation actually needs.
+        let mut null_confirmations = 0usize;
+        const NUMERICAL_NULL_CONFIRMATIONS: usize = 2;
         for power_step in 0..dim {
             // #2472 — every turn of this loop is a FULL preconditioned GMRES
             // solve (`A⁻¹Bv`), and the loop is bounded by the Krylov dimension,
@@ -236,6 +256,15 @@ where
             // μ(x) collapsed onto μ_min — is ALREADY aligned with the offending
             // direction. Keep the best `v` and let the alignment/μ checks below
             // decide, instead of aborting the whole outer gradient.
+            if inverse_power_solves >= inverse_power_solve_ceiling {
+                return Err(format!(
+                    "solve_exact_stationarity: inverse-power refinement exceeded the \
+                     anti-runaway budget of {inverse_power_solve_ceiling} A-inverse GMRES \
+                     solves (dimension {dim}); the exact pencil is numerically singular at \
+                     this iterate and its IFT response is not identifiable"
+                ));
+            }
+            inverse_power_solves += 1;
             let refined =
                 match solve_b_preconditioned_gmres_with(&bv, |w| apply_a(w), |w| precondition(w)) {
                     Ok(mut refined) => {
@@ -284,6 +313,48 @@ where
                 return Ok(x);
             }
             if 1.0 - alignment.min(1.0) <= rank_floor {
+                direction_converged = true;
+                break;
+            }
+            // #2627 — SUBSPACE certificate, and the reason the timeouts existed.
+            //
+            // The alignment test above asks for a converged EIGENVECTOR: consecutive
+            // B-normalized iterates agreeing to `sqrt(eps)`. Inverse power iteration
+            // rotates the iterate toward the smallest-`|μ|` eigenvector at the rate
+            // `(μ_min/μ_next)^k`, so the number of steps that test costs is
+            // `log(sqrt(eps)) / log(μ_min/μ_next)` — UNBOUNDED as the two smallest
+            // near-null curvatures approach each other, and every one of those steps
+            // is a full preconditioned GMRES. A near-null CLUSTER with no interior
+            // gap is not a pathology of this operator, it is its construction: `K`
+            // atoms each contribute a rank-1 radial null to `A = B + ΔC`, so `A` has
+            // a whole band of curvatures under the floor with ratios arbitrarily
+            // close to one. At a ratio of 0.9 the test wants ~80 GMRES solves; at
+            // 0.99, ~1800. Multiply by the outer deflation turn (bounded by `dim`)
+            // and that is the `dim²`-shaped wall clock — and it is a CRITERION
+            // defect, not a loop defect. The loop bound is the correct Krylov bound;
+            // the criterion is buying a property at unbounded cost.
+            //
+            // The property is one the consumer never uses. Deflation subtracts the
+            // B-projection of `x` along `v`, and the guard that makes that
+            // legitimate is the one already enforced after this loop:
+            // `|μ(v)| < rank_floor`, i.e. `v` lies in the numerical-null invariant
+            // subspace. MEMBERSHIP in that subspace is the whole requirement; WHICH
+            // member `v` is does not enter the projection's correctness, and every
+            // vector of the cluster satisfies membership equally. Resolving the
+            // cluster's interior gap is work whose answer is discarded.
+            //
+            // Membership is what surviving inverse steps prove, by the same
+            // amplification argument the discriminator above already relies on: one
+            // inverse step amplifies smaller-`|μ|` components relative to larger
+            // ones, so a refined direction whose OWN curvature is resolved proves
+            // the seed's near-zero Rayleigh quotient was cancellation among resolved
+            // directions — that case returns above on `refined_mu.abs() >=
+            // rank_floor`. Symmetrically, a direction still under the floor after
+            // consecutive amplification steps carries genuine null content rather
+            // than a cancellation artifact. Two consecutive confirmations is that
+            // discriminator; further steps only refine which null vector.
+            null_confirmations += 1;
+            if null_confirmations >= NUMERICAL_NULL_CONFIRMATIONS {
                 direction_converged = true;
                 break;
             }
@@ -4879,4 +4950,78 @@ mod test_support {
         }
     }
 
+}
+
+#[cfg(test)]
+mod inverse_power_deflation_cost_tests_2627 {
+    use super::*;
+
+    /// #2627 — a GAPLESS near-null cluster must deflate, not exhaust the Krylov
+    /// bound.
+    ///
+    /// `A` is diagonal: fourteen resolved curvatures plus two under the numerical
+    /// null floor whose RATIO is `0.9`. That ratio is the whole fixture. The
+    /// deflation isolate rotates toward the smaller of the two at `0.9^k`, so the
+    /// eigenvector-alignment criterion — consecutive iterates agreeing to `√ε` —
+    /// needs on the order of thirty inverse steps here, and each step is a full
+    /// preconditioned GMRES. Against an inner Krylov bound of `dim = 16` it never
+    /// arrives: before the subspace certificate this call spent its whole inner
+    /// bound in GMRES on EVERY deflation turn and then raised "inverse-power
+    /// direction did not converge in the derived Krylov dimension 16". That is
+    /// the `dim²` shape, and a gapless band under the floor is not adversarial —
+    /// `K` atoms each contribute a rank-1 radial null to `A = B + ΔC`, which is
+    /// exactly such a band.
+    ///
+    /// What deflation needs from the isolate is MEMBERSHIP in the numerical-null
+    /// subspace, which the post-loop `|μ(v)| < rank_floor` guard enforces and
+    /// every member of the cluster satisfies. So the certificate is two
+    /// consecutive amplification steps that stay under the floor, and the assert
+    /// below is the consequence: the unidentifiable `1/μ` amplification is
+    /// removed and every resolved direction is returned untouched.
+    #[test]
+    fn gapless_near_null_cluster_deflates_instead_of_exhausting_the_krylov_bound_2627() {
+        const NEAR_NULL: f64 = 1.0e-10;
+        const RESOLVED: usize = 14;
+        let mut curvature: Vec<f64> = (1..=RESOLVED).map(|c| c as f64).collect();
+        curvature.push(NEAR_NULL);
+        curvature.push(0.9 * NEAR_NULL);
+        let dim = curvature.len();
+
+        let apply_a = |v: &SaeArrowVector| -> Result<SaeArrowVector, String> {
+            let mut out = v.clone();
+            for (slot, value) in out.t.iter_mut().enumerate() {
+                *value *= curvature[slot];
+            }
+            Ok(out)
+        };
+        let apply_b = |v: &SaeArrowVector| -> Result<SaeArrowVector, String> { Ok(v.clone()) };
+        let precondition = |v: &SaeArrowVector| -> Result<SaeArrowVector, String> { Ok(v.clone()) };
+        let rhs = SaeArrowVector {
+            t: Array1::from_elem(dim, 1.0),
+            beta: Array1::zeros(0),
+        };
+
+        let solved = solve_exact_stationarity_preconditioned(&rhs, &apply_a, &apply_b, precondition)
+            .expect("a gapless near-null cluster must deflate, not exhaust the Krylov bound");
+
+        for slot in 0..RESOLVED {
+            let expected = 1.0 / curvature[slot];
+            assert!(
+                (solved.t[slot] - expected).abs() <= 1.0e-6 * expected,
+                "resolved slot {slot} was disturbed by the deflation: {:.6e} vs {expected:.6e}",
+                solved.t[slot],
+            );
+        }
+        // Undeflated, each near-null slot carries the full `1/μ` amplification
+        // `1/NEAR_NULL = 1e10`. Two orders of magnitude of reduction is far
+        // outside anything round-off could produce and far inside what the
+        // deflation actually achieves.
+        for slot in RESOLVED..dim {
+            assert!(
+                solved.t[slot].abs() < 1.0e8,
+                "near-null slot {slot} still carries a 1/μ amplification: {:.3e}",
+                solved.t[slot],
+            );
+        }
+    }
 }

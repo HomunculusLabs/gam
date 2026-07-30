@@ -219,7 +219,18 @@ fn reversal_coupling_fires_sum1() {
 #[test]
 fn screen_all_pairs_ebh_selects_only_locked_pair() {
     let mut s = 0xF00D_u64;
-    let n = 1500usize;
+    // #2627 — 1024, a POWER OF TWO, replaces 1500. The permutation battery's whole
+    // cost is one phase-randomized surrogate per replicate, and that surrogate is a
+    // forward + inverse DFT per column. `discrete_fourier` takes the iterative
+    // radix-2 path only for power-of-two lengths; every other length goes through
+    // Bluestein, which evaluates three transforms of the next power of two at or
+    // above `2n − 1` — for n = 1500 that is three transforms of length 4096 in place
+    // of one of length 1024, ~12× the transcendental count, multiplied by B = 600
+    // replicates × 3 pairs. A composite `n` was silently buying the padded path.
+    // 1024 samples against a 0.06-rad phase lock leaves the signal saturated, and
+    // the e-BH ledger (m = 9, α = 0.05, threshold 180, e_max = B + 1 = 601) does not
+    // depend on n at all.
+    let n = 1024usize;
     let p = 12usize;
     let phi = 0.5_f64;
     let mut data = Array2::<f64>::zeros((n, p));
@@ -249,6 +260,15 @@ fn screen_all_pairs_ebh_selects_only_locked_pair() {
     // indicator e-value reaches only B + 1, so B must satisfy B + 1 ≥ 180; use
     // B = 600 for headroom (e_max = 601), well above the impossible former B = 50
     // (e_max = 51 < 180, the finding-22 defect).
+    //
+    // #2627 — B is NOT the knob that was reduced to bring this fixture under the
+    // cap, and must not be: the e-BH contract is `e_max = B + 1 ≥ m/α = 180`, and
+    // the headroom ratio `601/180 = 3.34` is what buys the discovery its slack of
+    // two exceeding permutations (`e = (B+1)/(1 + #exceed) ≥ 180` tolerates
+    // `#exceed ≤ 2`). Dropping to B = 200 would leave `201/180 = 1.12`, i.e. ZERO
+    // permitted exceedances — a strictly weaker screen wearing the same α. The
+    // cost was taken out of `n` instead, which the ledger does not see at all:
+    // m, α, B, the 180 threshold and the 601 e_max are all bit-identical below.
     let b = 600usize;
     let verdicts = screen_all_pairs_phase(data.view(), &mean, &cands, b, 0xEB, 0.05).unwrap();
     let proposed: Vec<(usize, usize)> = verdicts
@@ -410,7 +430,15 @@ fn ebh_rejects_dominant_e_value() {
 #[test]
 fn phase_coupling_screen_clean_on_product_fires_on_coupling() {
     let mut s = 0x21_11_u64;
-    let n = 2000usize;
+    // #2627 — 1024 (power of two) replaces 2000, and this fixture pays the cost
+    // TWICE (an independent-product screen and a coupled screen, B = 600 × 3 pairs
+    // each). The phase-randomized surrogate per replicate is a forward + inverse
+    // DFT per column; `discrete_fourier` uses iterative radix-2 only for
+    // power-of-two lengths, so n = 2000 routed every one of those transforms
+    // through Bluestein at the padded length 4096. Dropping to a power of two
+    // removes the padding and the chirp entirely. The e-BH ledger is untouched:
+    // m = 9, α = 0.05, threshold m/α = 180, e_max = B + 1 = 601.
+    let n = 1024usize;
     let p = 8usize;
     let active = vec![true; n];
 
@@ -432,7 +460,11 @@ fn phase_coupling_screen_clean_on_product_fires_on_coupling() {
         .collect();
     // Budget: m = 3 pairs × 3 channels = 9 entries ⇒ an e-BH discovery needs a
     // permutation e-value ≥ m/α = 180, and the valid indicator e-value reaches
-    // B + 1, so B + 1 ≥ 180. Use B = 600 (e_max = 601) for headroom.
+    // B + 1, so B + 1 ≥ 180. Use B = 600 (e_max = 601) for headroom. #2627 — B is
+    // held at 600 deliberately; the 601/180 = 3.34 ratio is the discovery's slack
+    // of two exceeding permutations, and cutting B would narrow the screen rather
+    // than the fixture. The cost came out of `n` (see its note above), which the
+    // ledger does not see: m, α, B, the threshold and e_max are unchanged.
     let b = 600usize;
     let cert = screen_pairwise_phase_coupling(indep.view(), &mean, &cands, b, 0xC0, 0.05).unwrap();
     eprintln!(
