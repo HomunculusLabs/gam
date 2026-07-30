@@ -3312,7 +3312,7 @@ pub(super) fn run_two_block_exact_joint_optimize(
                 + designs[0].penalties.len() as f64
                 + designs[1].penalties.len() as f64)
         },
-        |theta, specs, designs, eval_mode, _| {
+        |theta, specs, designs, eval_mode, _, _owned_value_mode| {
             assert_eq!(theta.len(), theta_dim);
             assert_eq!(specs.len(), 2);
             assert!(!designs.is_empty());
@@ -5219,7 +5219,7 @@ fn exact_joint_two_block_no_spatial_fast_path_returns_fully_frozen_specs() {
             ));
             Ok(designs[0].design.ncols() as f64 + designs[1].design.ncols() as f64)
         },
-        |theta, specs, designs, eval_mode, _| {
+        |theta, specs, designs, eval_mode, _, _owned_value_mode| {
             assert_eq!(theta.len(), theta_dim);
             assert_eq!(specs.len(), 2);
             assert_eq!(designs.len(), 2);
