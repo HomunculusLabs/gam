@@ -320,10 +320,77 @@ fn validate_saved_constraint_feasibility(
     let Some(fit) = model.fit_result.as_ref() else {
         return Ok(());
     };
+    // #2536: the geometry check below keys on `constrained_posterior`, so a fit
+    // that certified a cone without persisting one passed VACUOUSLY. That state
+    // is reachable and is not a malformed artifact: `gam-custom-family`'s
+    // covariance assembly returns `constrained_posterior: None` for a genuinely
+    // CONSTRAINED fit whose ambient precision is not positive definite (#2442's
+    // typed decline), and records that a consumer cannot tell that apart from an
+    // unconstrained fit. Draws for such a fit reach here and were admitted
+    // without any cone being applied.
+    //
+    // A monotone link-wiggle block does not need the persisted identity to be
+    // checked. Its cone is `A = I`, `b = 0`
+    // (`monotone_wiggle_nonnegative_constraints`) for every class that carries
+    // one, fixed by the block's role rather than read off the fit, so it is
+    // enforced from the block layout directly. This is the DECLARATION-keyed
+    // shape `laplace_fallback_route` uses on the sampling side, applied to the
+    // consumer that takes draws it did not produce.
+    if let Some(range) = block_range(fit, BlockRole::LinkWiggle) {
+        validate_link_wiggle_cone(model_class, range, draws)?;
+    }
     let Some(geometry) = fit.geometry.as_ref() else {
         return Ok(());
     };
     validate_constraint_geometry(model_class, geometry, draws)
+}
+
+/// Enforce the monotone link-wiggle cone `β_w ≥ 0` on supplied draws (#2536).
+///
+/// The wiggle block's coefficients multiply I-spline bases whose non-negative
+/// combinations are exactly the monotone warps; a negative coefficient is a
+/// non-monotone warp the fitted model cannot produce, so predicting from it
+/// reports a curve outside the model. Both the law and the band are the fit's
+/// own: the same `Aβ ≥ b` residual and the same
+/// `ACTIVE_SET_PRIMAL_FEASIBILITY_TOL` that [`validate_constraint_geometry`]
+/// applies to a persisted cone, reported through the same `InfeasibleDraw`
+/// error, so the two routes cannot diverge on what "feasible" means.
+///
+/// `range` is the caller's `BlockRole::LinkWiggle` block range — the same range
+/// every draw-evaluation arm in this module slices to fill the wiggle runtime.
+fn validate_link_wiggle_cone(
+    model_class: PredictModelClass,
+    range: Range<usize>,
+    draws: ArrayView2<'_, f64>,
+) -> Result<(), PosteriorPredictError> {
+    if range.end > draws.ncols() {
+        return Err(inconsistent_state_error(
+            model_class,
+            format!(
+                "the fitted monotone link-wiggle coefficient block spans {}..{}, but the supplied \
+                 draws carry only {} coefficients, so the cone `β_w ≥ 0` the fit certified cannot \
+                 be checked against them",
+                range.start,
+                range.end,
+                draws.ncols(),
+            ),
+        ));
+    }
+    let tolerance = gam_solve::pirls::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL;
+    for (draw, row) in draws.rows().into_iter().enumerate() {
+        for coefficient in range.clone() {
+            let violation = (-row[coefficient]).max(0.0);
+            if violation > tolerance {
+                return Err(PosteriorPredictError::InfeasibleDraw {
+                    draw,
+                    constraint: coefficient - range.start,
+                    violation,
+                    tolerance,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_constraint_geometry(
@@ -1103,6 +1170,77 @@ mod tests {
         assert!(matches!(
             outside,
             PosteriorPredictError::DrawOutsideCoefficientGauge { draw: 0, .. }
+        ));
+    }
+
+    /// #2536: a monotone link-wiggle block's cone `β_w ≥ 0` is structural, so it
+    /// is enforced on supplied draws whether or not the fit persisted a
+    /// `constrained_posterior`. Before this the whole feasibility gate returned
+    /// early on `constrained_posterior: None` — which #2442's typed decline
+    /// produces for a genuinely constrained fit — and admitted negative wiggle
+    /// coefficients, i.e. non-monotone warps, as feasible.
+    #[test]
+    fn the_monotone_wiggle_cone_is_enforced_without_a_persisted_posterior() {
+        // Coefficients 1..3 are the wiggle block; coefficient 0 is a mean
+        // coefficient and is unconstrained, which is what keeps the check from
+        // being a blanket non-negativity rule on the whole draw.
+        let feasible = array![[-5.0, 0.0, 2.0], [-1.0, 0.75, 0.0]];
+        validate_link_wiggle_cone(
+            PredictModelClass::GaussianLocationScale,
+            1..3,
+            feasible.view(),
+        )
+        .expect("non-negative wiggle coefficients are inside the cone the fit certified");
+
+        let infeasible = array![[-5.0, 0.0, 2.0], [-1.0, 0.75, -0.25]];
+        let error = validate_link_wiggle_cone(
+            PredictModelClass::GaussianLocationScale,
+            1..3,
+            infeasible.view(),
+        )
+        .expect_err("a negative wiggle coefficient is a non-monotone warp");
+        match error {
+            PosteriorPredictError::InfeasibleDraw {
+                draw,
+                constraint,
+                violation,
+                ..
+            } => {
+                assert_eq!(draw, 1, "the refusal must name the offending draw");
+                assert_eq!(
+                    constraint, 1,
+                    "the constraint index is the coefficient's position WITHIN the wiggle \
+                     block, matching the `A = I` cone row it violates"
+                );
+                assert!((violation - 0.25).abs() < 1.0e-12, "violation {violation}");
+            }
+            other => panic!("expected an InfeasibleDraw refusal, got {other:?}"),
+        }
+
+        // The band is the fit's own primal-feasibility tolerance, not a fresh
+        // constant: a draw inside it is a converged active coordinate, not a
+        // violation.
+        let rounding = 0.5 * gam_solve::pirls::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL;
+        let at_the_wall = array![[0.0, -rounding, 1.0]];
+        validate_link_wiggle_cone(
+            PredictModelClass::GaussianLocationScale,
+            1..3,
+            at_the_wall.view(),
+        )
+        .expect("a coordinate at its wall within the active-set band is feasible");
+
+        // A draw narrower than the block cannot be checked against the cone, and
+        // silently skipping it is the vacuous pass this gate exists to remove.
+        let narrow = array![[0.0, 1.0]];
+        let short = validate_link_wiggle_cone(
+            PredictModelClass::GaussianLocationScale,
+            1..3,
+            narrow.view(),
+        )
+        .expect_err("draws that do not span the wiggle block cannot be certified");
+        assert!(matches!(
+            short,
+            PosteriorPredictError::InconsistentModelState { .. }
         ));
     }
 
