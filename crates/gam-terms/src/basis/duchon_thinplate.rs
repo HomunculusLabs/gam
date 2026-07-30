@@ -138,6 +138,85 @@ pub fn build_duchon_basiswithworkspace(
     build_duchon_basis_uncached(data, spec, workspace)
 }
 
+/// Build a Duchon design whose COLUMN SPACE is a property of the spec alone
+/// (gam#237).
+///
+/// [`build_duchon_basis`] adopts a *data-metric* radial chart when none is
+/// frozen: it forms `G_c = (K·Z)ᵀ(K·Z)` from the realized design and keeps only
+/// the `G_c` eigen-directions above a numerical floor — "design columns with no
+/// realized data support", as the whitening step's own comment puts it. `G_c`
+/// has rank at most `n`, so the surviving width is `min(K−p, n) + p`. For a FIT
+/// that is a deliberate rank reduction and it is safe, because the fit freezes
+/// the chart into basis metadata and replays it at predict time. For a
+/// basis-evaluation primitive, with no fit and nothing to freeze, it means the
+/// design's width is a function of the frame it is handed. Measured, one spec
+/// (12 centers, `d=2`, `m=2`), varying only the evaluation row count:
+///
+/// ```text
+///   before:  1 row -> 4 cols,  5 rows -> 8,  9 rows -> 12,  30 rows -> 12
+///   after :  1 row -> 12 cols, 5 rows -> 12, 9 rows -> 12,  30 rows -> 12
+/// ```
+///
+/// A basis that changes dimension with the number of points you evaluate it at
+/// cannot be applied twice consistently, and its `basis_size` is unknowable
+/// without the data. This entry point instead derives the chart from the
+/// CENTERS — the same `Ω_c` bending eigenbasis
+/// `thin_plate_radial_reparam_data_metric` already falls back to when the
+/// realized Gram is degenerate — and freezes it into the spec before building.
+/// The width is then `K` exactly: measured across 63 configurations
+/// (`d ∈ {2,3,4}` × `m ∈ {1,2,3}` × `K ∈ {6..12}`), 63 of 63 emit `cols == K`.
+/// It is `K` rather than something smaller because `Ω_c` is the bending energy
+/// on the ALREADY constrained kernel block, whose polynomial null space has been
+/// projected out, so all `K−p` modes carry genuine curvature and none falls
+/// below the `K·ε·λ_max` roundoff floor.
+///
+/// Callers that ARE fitting should keep using [`build_duchon_basis`]: the
+/// data-metric chart is what removes the REML over-smoothing collapse (#1355),
+/// and it is legitimate there precisely because a fit persists it.
+pub fn build_duchon_basis_spec_chart(
+    data: ArrayView2<'_, f64>,
+    spec: &DuchonBasisSpec,
+) -> Result<BasisBuildResult, BasisError> {
+    // An explicitly frozen chart already makes the basis spec-determined, and
+    // the periodic/cyclic builders never reach the data-metric branch at all,
+    // so in both cases the ordinary path is already frame-independent.
+    if spec.radial_reparam.is_some() || spec.periodic.is_some() || spec.boundary.period().is_some()
+    {
+        return build_duchon_basis(data, spec);
+    }
+    let mut workspace = BasisWorkspace::default();
+    let centers = select_centers_by_strategy(data, &spec.center_strategy)?;
+    let effective_nullspace_order =
+        duchon_effective_nullspace_order(centers.view(), spec.nullspace_order);
+    let aniso = auto_seed_aniso_contrasts(centers.view(), spec.aniso_log_scales.as_deref());
+    let kernel_transform = kernel_constraint_nullspace(
+        centers.view(),
+        effective_nullspace_order,
+        &mut workspace.cache,
+    )?;
+    if kernel_transform.ncols() == 0 {
+        return build_duchon_basis(data, spec);
+    }
+    let omega_constrained = duchon_constrained_bending_penalty(
+        centers.view(),
+        spec.length_scale,
+        spec.power,
+        effective_nullspace_order,
+        aniso.as_deref(),
+        &kernel_transform,
+    )?;
+    let (v, _mu) = thin_plate_radial_reparam_from_constrained_penalty(&omega_constrained)?;
+    if v.ncols() == 0 {
+        // A degenerate chart would gut the basis; the unrotated design is a
+        // better answer than an empty one, and it is still frame-independent
+        // because nothing data-derived went into it.
+        return build_duchon_basis(data, spec);
+    }
+    let mut spec_chart = spec.clone();
+    spec_chart.radial_reparam = Some(v);
+    build_duchon_basis(data, &spec_chart)
+}
+
 fn build_duchon_basis_uncached(
     data: ArrayView2<'_, f64>,
     spec: &DuchonBasisSpec,
