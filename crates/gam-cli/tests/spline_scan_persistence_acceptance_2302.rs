@@ -60,7 +60,7 @@ fn fresh_processes_replay_saved_scan_for_predict_and_report() {
     write_query_fixture(&query_path, &query);
 
     let fit_output = run_success(
-        Command::new(gam_test_support::gam_binary!())
+        Command::new(env!("CARGO_BIN_EXE_gam"))
             .current_dir(scratch.path())
             .arg("fit")
             .arg(&train_path)
@@ -91,7 +91,7 @@ fn fresh_processes_replay_saved_scan_for_predict_and_report() {
     assert_eq!(feature_column, "x");
 
     run_success(
-        Command::new(gam_test_support::gam_binary!())
+        Command::new(env!("CARGO_BIN_EXE_gam"))
             .current_dir(scratch.path())
             .arg("predict")
             .arg(&model_path)
@@ -144,7 +144,7 @@ fn fresh_processes_replay_saved_scan_for_predict_and_report() {
     // No DATA argument is supplied: a fresh report process has only the model
     // file, so a successful scalar report necessarily comes from the scan state.
     run_success(
-        Command::new(gam_test_support::gam_binary!())
+        Command::new(env!("CARGO_BIN_EXE_gam"))
             .current_dir(scratch.path())
             .arg("report")
             .arg(&model_path),
