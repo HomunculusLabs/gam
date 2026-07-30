@@ -2027,6 +2027,45 @@ fn sae_manifold_fit_inner<'py>(
             return Ok(out.unbind());
         }
     };
+    let out = PyDict::new(py);
+    sae_fit_report_into_dict(
+        py,
+        &out,
+        report,
+        p_out,
+        assignment_kind,
+        top_k,
+        fisher_mass_residual,
+    )?;
+    Ok(out.unbind())
+}
+
+/// Serialize a completed [`gam::terms::sae::manifold::SaeFitReport`] into the
+/// shared result-dict shape the python `ManifoldSAE.from_payload` boundary reads.
+///
+/// Both producers of a fitted SAE payload write through this one function:
+/// `sae_manifold_fit_inner` (a fresh fit) and `sae_manifold_certify_external`
+/// (an externally supplied dictionary re-certified in place). It is the pyffi
+/// counterpart of gam-sae's `finalize_sae_fit_report` (#2266), which unified the
+/// same two entries one layer down where the report is built rather than
+/// marshalled.
+///
+/// Keys are inserted into `out` in the historical order, so a caller with its
+/// own *leading* keys (certification's `status` / `is_fit`) sets them before
+/// calling rather than after. `p_out` is the ambient output width the
+/// rank-reduced decoder covariance is lifted into, `assignment_prior` the
+/// canonical assignment tag the fit ran under, and `fisher_mass_residual` the
+/// per-row output-Fisher truncation diagnostic, present only when a shard
+/// carried one.
+fn sae_fit_report_into_dict<'py>(
+    py: Python<'py>,
+    out: &Bound<'py, PyDict>,
+    report: gam::terms::sae::manifold::SaeFitReport,
+    p_out: usize,
+    assignment_prior: String,
+    top_k: Option<usize>,
+    fisher_mass_residual: Option<ArrayView1<'_, f64>>,
+) -> PyResult<()> {
     let gam::terms::sae::manifold::SaeFitReport {
         term,
         rho,
@@ -2189,7 +2228,6 @@ fn sae_manifold_fit_inner<'py>(
         atoms_py.append(atom_dict)?;
     }
 
-    let out = PyDict::new(py);
     out.set_item("atoms", atoms_py)?;
     out.set_item("assignments_z", assignments.into_pyarray(py))?;
     out.set_item("logits", term.assignment.logits.clone().into_pyarray(py))?;
@@ -2234,7 +2272,7 @@ fn sae_manifold_fit_inner<'py>(
     }
     // Distinct scalars with distinct semantics: the ordinary penalized loss and
     // the terminal penalized quasi-Laplace criterion are never conflated.
-    sae_set_penalized_loss_items(&out, &loss, "penalized_loss_score")?;
+    sae_set_penalized_loss_items(out, &loss, "penalized_loss_score")?;
     out.set_item(
         "penalized_quasi_laplace_criterion",
         penalized_quasi_laplace_criterion,
@@ -2251,7 +2289,7 @@ fn sae_manifold_fit_inner<'py>(
     // trained optimum away from itself (the cold re-encode collapse).
     out.set_item("log_lambda_sparse", rho.log_lambda_sparse)?;
     out.set_item("log_ard", log_ard_py)?;
-    out.set_item("assignment_prior", assignment_kind)?;
+    out.set_item("assignment_prior", assignment_prior)?;
     out.set_item(
         "solver_plan",
         sae_streaming_plan_to_pydict(
@@ -2382,7 +2420,7 @@ fn sae_manifold_fit_inner<'py>(
         Some(json) => out.set_item("structure_certificate", json)?,
         None => out.set_item("structure_certificate", py.None())?,
     }
-    Ok(out.unbind())
+    Ok(())
 }
 
 /// Build the result-dict entry for the honest SAE trust diagnostics (#1005).
