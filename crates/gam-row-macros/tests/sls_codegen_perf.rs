@@ -60,15 +60,27 @@ fn exp_stack(value: f64) -> [f64; 5] {
 }
 
 #[inline(always)]
+fn preserve_composition_domain(point: f64, stack: [f64; 5]) -> [f64; 5] {
+    if point.is_nan() {
+        [f64::NAN; 5]
+    } else {
+        stack
+    }
+}
+
+#[inline(always)]
 fn outer_stack(
-    _value: f64,
+    composition_point: f64,
     value: f64,
     first: f64,
     second: f64,
     third: f64,
     fourth: f64,
 ) -> [f64; 5] {
-    [value, first, second, third, fourth]
+    preserve_composition_domain(
+        composition_point,
+        [value, first, second, third, fourth],
+    )
 }
 
 row_program! {
@@ -166,7 +178,7 @@ type Channels = (f64, [f64; K], [[f64; K]; K]);
 
 #[inline(always)]
 fn scaled_stack(
-    _value: f64,
+    composition_point: f64,
     scale: f64,
     value: f64,
     first: f64,
@@ -174,19 +186,36 @@ fn scaled_stack(
     third: f64,
     fourth: f64,
 ) -> [f64; 5] {
-    [
-        scale * value,
-        scale * first,
-        scale * second,
-        scale * third,
-        scale * fourth,
-    ]
+    preserve_composition_domain(
+        composition_point,
+        [
+            scale * value,
+            scale * first,
+            scale * second,
+            scale * third,
+            scale * fourth,
+        ],
+    )
 }
 
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-fn mixed_stack(
-    _value: f64,
+type MixedStackLeaf = fn(
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+) -> [f64; 5];
+
+const MIXED_STACK: MixedStackLeaf = |
+    composition_point: f64,
     censored_weight: f64,
     event_weight: f64,
     censored_value: f64,
@@ -199,7 +228,7 @@ fn mixed_stack(
     event_second: f64,
     event_third: f64,
     event_fourth: f64,
-) -> [f64; 5] {
+| -> [f64; 5] {
     let mut stack = [0.0; 5];
     if censored_weight != 0.0 {
         add_scaled(
@@ -227,8 +256,8 @@ fn mixed_stack(
             -event_weight,
         );
     }
-    stack
-}
+    preserve_composition_domain(composition_point, stack)
+};
 
 row_program! {
     fn generated_sls_direct(
@@ -272,7 +301,7 @@ row_program! {
     leaves {
         exponential => exp_stack => exp_stack_cuda,
         scaled => scaled_stack => scaled_stack_cuda,
-        mixed => mixed_stack => mixed_stack_cuda,
+        mixed => MIXED_STACK => mixed_stack_cuda,
     }
     witnesses [];
     {

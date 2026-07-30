@@ -635,14 +635,18 @@ fn sls_program_exp_stack(value: f64) -> [f64; 5] {
 
 #[inline(always)]
 fn sls_program_outer_stack(
-    _value: f64,
+    composition_point: f64,
     value: f64,
     first: f64,
     second: f64,
     third: f64,
     fourth: f64,
 ) -> [f64; 5] {
-    [value, first, second, third, fourth]
+    if composition_point.is_nan() {
+        [f64::NAN; 5]
+    } else {
+        [value, first, second, third, fourth]
+    }
 }
 
 row_program! {
