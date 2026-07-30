@@ -131,7 +131,12 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
   #
   # Same numeric-confirmation design as above: "I expect 5" must not wave
   # through 438.
-  ADDED_COUNT=$(git diff "$BASE" "$COMMIT" -- "$@" | grep -c '^+[^+]' || true)
+  # `git diff --numstat` rather than `grep -c '^+[^+]'`: that pattern requires a
+  # non-`+` character after the marker, so it does not count added BLANK lines.
+  # A real land reported 586 where git counted 608 -- a 22-line gap that reads
+  # as "the file holds more than you wrote" and invites someone to widen the
+  # number to make the guard pass, which is the one thing it must never teach.
+  ADDED_COUNT=$(git diff --numstat "$BASE" "$COMMIT" -- "$@" | awk '{a+=$1} END {print a+0}')
   LAND_ADD_THRESHOLD=${LAND_ADD_THRESHOLD:-60}
   if [ "$ADDED_COUNT" -gt "$LAND_ADD_THRESHOLD" ] \
      && [ "${LAND_EXPECT_ADDED:--1}" != "$ADDED_COUNT" ]; then
