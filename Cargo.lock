@@ -3571,6 +3571,7 @@ dependencies = [
  "gam-predict",
  "gam-runtime",
  "gam-sae",
+ "gam-test-support",
  "log",
  "ndarray 0.17.2",
  "npyz 0.9.1",
