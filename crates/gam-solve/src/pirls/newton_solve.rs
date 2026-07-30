@@ -537,16 +537,12 @@ pub(crate) fn ensure_positive_definitewithridge(
     // that matters: the criterion shifts by `½·Σ ln(1 + δ/λ_i) ≤ ½·δ·tr(H⁻¹)`,
     // far below the convergence tolerances when `λ_i ≫ δ = 1e-8`. What it
     // removes is the 9.21 jump, not the scale.
-    // WHAT HAPPENS WHEN THAT IS NOT ENOUGH IS A DELIBERATE CHOICE, AND IT IS
-    // NOT THE ONE THE SPARSE TWIN MAKES (#2657). Below, a genuinely non-PD
-    // Hessian is a REFUSAL: `eigh` is computed only to report λ_min, and δ
-    // stays exactly FIXED_STABILIZATION_RIDGE or there is no fit — so
-    // `∂δ/∂ρ = 0` holds unconditionally on this path. The sparse ladder
-    // (`ensure_sparse_positive_definitewithridge`) instead escalates to a
-    // Gershgorin-derived `τ(ρ)` and succeeds, which reintroduces a ρ-dependent
-    // δ into `0.5·log|H|` — the very thing the paragraphs above are about.
-    // Several comments on both paths describe the two as twins; on this branch
-    // they are not.
+    // WHAT HAPPENS WHEN THAT IS NOT ENOUGH IS ALSO UNIFORM (#2657). A
+    // genuinely non-PD Hessian is a REFUSAL: `eigh` is computed only to report
+    // λ_min, and δ stays exactly FIXED_STABILIZATION_RIDGE or there is no fit.
+    // The sparse twin follows the same rule, using a Gershgorin lower bound
+    // only as diagnostic evidence. Thus `∂δ/∂ρ = 0` holds on every accepted
+    // dense and sparse path.
     if ridge > 0.0 {
         for i in 0..hess.nrows() {
             hess[[i, i]] += ridge;
@@ -1753,13 +1749,19 @@ pub(super) fn should_use_sparse_native_pirls(
     )
 }
 
-/// Assemble a sparse SPD Hessian with adaptive diagonal ridge, returning the
-/// matrix, its successful Cholesky factor, and the ridge that was needed.
+/// Assemble a sparse SPD Hessian with the fixed stabilization ridge.
+///
+/// The returned matrix and factor always carry exactly
+/// [`FIXED_STABILIZATION_RIDGE`]. If that matrix cannot be factorized, the
+/// helper refuses rather than selecting a larger shift from the Hessian.
+/// Choosing a shift from `H(ρ)` would make the outer criterion's
+/// `0.5·log|H(ρ) + δI|` use `δ(ρ)` while its envelope derivative omits
+/// `∂δ/∂ρ` (#2657).
 ///
 /// Returning the factor avoids the previous double-factorization where the SPD
 /// check would factor the matrix and discard the factor, then the caller would
 /// immediately call `factorize_sparse_spd` again on the same matrix to solve.
-pub(super) fn ensure_sparse_positive_definitewithridge<F>(
+pub(super) fn ensure_sparse_positive_definite_with_fixed_ridge<F>(
     mut assemble: F,
 ) -> Result<
     (
@@ -1806,64 +1808,18 @@ where
     // A secondary consequence of the old order: when the first factorization
     // failed, `assemble(FIXED_STABILIZATION_RIDGE)` produced a BIT-IDENTICAL
     // matrix under that clamping closure, so it failed again and control fell
-    // through to the Gershgorin escalation below, which sets a DATA-DEPENDENT
+    // through to the former Gershgorin escalation, which set a DATA-DEPENDENT
     // τ(ρ) — an unbounded ρ-dependent jump in `log|H|`, strictly worse than the
-    // 9.21 one.
-    //
-    // The Gershgorin ladder below is retained, but only as the escalation for
-    // genuine indefiniteness that it was written to be.
+    // 9.21 one. That escalation is gone: the bound below diagnoses the refusal
+    // but cannot alter δ.
     let h_eps = assemble(FIXED_STABILIZATION_RIDGE)?;
     if let Ok(factor) = factorize_sparse_spd(&h_eps) {
         return Ok((h_eps, factor, FIXED_STABILIZATION_RIDGE));
     }
 
-    // Step 2 — the matrix is genuinely non-PD (rank-deficiency, wrong-sign
-    // curvature, or weight underflow in the Hessian assembly), not mere
-    // round-off. Rather than escalate a magic ridge by powers of ten until it
-    // happens to factorize — which silently perturbs the exported curvature by
-    // an unknown amount — we SURFACE the conditioning problem and set the ridge
-    // DIRECTLY from a rigorous spectral bound.
-    //
-    // Gershgorin's circle theorem gives a guaranteed lower bound on the smallest
-    // eigenvalue: λ_min(H) ≥ min_i ( H_ii − Σ_{j≠i} |H_ij| ). Adding a diagonal
-    // ridge τ shifts the whole spectrum up by τ, so choosing
-    //
-    //     τ = (margin·scale) − gershgorin_lower_bound
-    //
-    // guarantees the Gershgorin lower bound of `H + τ·I` is `≥ margin·scale > 0`,
-    // hence the shifted matrix is provably SPD. This costs ONE bound pass
-    // (O(nnz)) and ONE factorization instead of geometric trial-and-error, and
-    // the ridge is tied to the actual most-negative curvature rather than a
-    // timeout-shaped iteration count.
-    let (gershgorin_min, diag_scale) = gershgorin_min_eig_lower_bound(&h_eps);
-
-    // Round-off margin relative to the matrix scale: enough to clear the gap
-    // between the (conservative) Gershgorin bound and the pivoting tolerance of
-    // the sparse Cholesky, without over-regularizing.
-    let scale = diag_scale.max(1.0);
-    let margin = FIXED_STABILIZATION_RIDGE * scale;
-    let direct_ridge = (margin - gershgorin_min).max(FIXED_STABILIZATION_RIDGE);
-
-    log::warn!(
-        "sparse penalized Hessian is not positive definite (Gershgorin λ_min ≥ {:.3e}, \
-         diag scale {:.3e}); regularizing curvature with direct ridge {:.3e}. Exported \
-         curvature/SEs are stabilized, not exact — investigate rank-deficiency or weight \
-         underflow in the Hessian assembly.",
-        gershgorin_min,
-        scale,
-        direct_ridge,
-    );
-
-    // The Gershgorin-derived ridge is provably sufficient; the only reason it
-    // could still fail is a degenerate non-symmetric / non-finite assembly. We
-    // allow a single conservative doubling to absorb residual pivot round-off,
-    // then fail loud rather than silently shipping a heavily-ridged surrogate.
-    for ridge in [direct_ridge, direct_ridge * 2.0] {
-        let h = assemble(ridge)?;
-        if let Ok(factor) = factorize_sparse_spd(&h) {
-            return Ok((h, factor, ridge));
-        }
-    }
+    // The bound is diagnostic only. It may depend on H(ρ), but it never changes
+    // the accepted matrix or objective.
+    let gershgorin_min = gershgorin_min_eigenvalue_lower_bound(&h_eps);
 
     Err(EstimationError::HessianNotPositiveDefinite {
         min_eigenvalue: gershgorin_min,
@@ -1871,13 +1827,13 @@ where
 }
 
 /// Rigorous lower bound on the smallest eigenvalue of a symmetric sparse matrix
-/// via Gershgorin's circle theorem, plus the largest |diagonal| as a scale.
+/// via Gershgorin's circle theorem.
 ///
-/// Returns `(λ_min_lower_bound, diag_scale)`. The bound is storage-agnostic:
-/// off-diagonal magnitudes are added to the radius of both endpoints, so
-/// upper-only, lower-only, and full-symmetric storage all yield a valid (and at
-/// worst conservative) lower bound — it never over-claims positive-definiteness.
-pub(crate) fn gershgorin_min_eig_lower_bound(h: &SparseColMat<usize, f64>) -> (f64, f64) {
+/// The bound is storage-agnostic: off-diagonal magnitudes are added to the
+/// radius of both endpoints, so upper-only, lower-only, and full-symmetric
+/// storage all yield a valid (and at worst conservative) lower bound — it never
+/// over-claims positive-definiteness.
+pub(crate) fn gershgorin_min_eigenvalue_lower_bound(h: &SparseColMat<usize, f64>) -> f64 {
     let n = h.ncols();
     let mut diag = vec![0.0_f64; n];
     let mut radius = vec![0.0_f64; n];
@@ -1900,15 +1856,13 @@ pub(crate) fn gershgorin_min_eig_lower_bound(h: &SparseColMat<usize, f64>) -> (f
         }
     }
     let mut min_bound = f64::INFINITY;
-    let mut diag_scale = 0.0_f64;
     for i in 0..n {
         min_bound = min_bound.min(diag[i] - radius[i]);
-        diag_scale = diag_scale.max(diag[i].abs());
     }
     if !min_bound.is_finite() {
         min_bound = f64::NEG_INFINITY;
     }
-    (min_bound, diag_scale)
+    min_bound
 }
 
 pub(crate) fn solve_subsystem_direction(

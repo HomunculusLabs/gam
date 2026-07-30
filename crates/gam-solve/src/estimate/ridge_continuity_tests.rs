@@ -11,7 +11,7 @@
 //!
 //! Two selectors USED TO keep the bare-first shape:
 //!   * `pirls::pls_solver`'s Gaussian-identity PLS branch, and
-//!   * `pirls::newton_solve::ensure_sparse_positive_definitewithridge`.
+//!   * `pirls::newton_solve::ensure_sparse_positive_definite_with_fixed_ridge`.
 //!
 //! Both are now unconditional as well, so all four ridge selectors agree.
 //!

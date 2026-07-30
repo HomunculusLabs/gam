@@ -1495,7 +1495,7 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
             // (H + loop_lambda · I) with a non-zero loop_lambda (initial value
             // 1e-6), so it sees a different matrix.
             let (h_sparse, _factor, ridge_used) =
-                ensure_sparse_positive_definitewithridge(|ridge| {
+                ensure_sparse_positive_definite_with_fixed_ridge(|ridge| {
                     self.sparse_penalized_hessian(&solver_weights, ridge)
                 })?;
             (Array2::zeros((0, 0)), Some(h_sparse), ridge_used)

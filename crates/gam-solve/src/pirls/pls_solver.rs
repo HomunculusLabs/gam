@@ -13,7 +13,7 @@ use super::loop_driver::max_symmetric_asymmetry;
 use super::{
     FIXED_STABILIZATION_RIDGE, PirlsPenalty, PirlsWorkspace, SparseXtWxCache, StablePLSResult,
     WorkingReparamTransform, calculate_edf_from_sparse_factor,
-    calculate_edfwithworkspace_from_factor, ensure_sparse_positive_definitewithridge,
+    calculate_edfwithworkspace_from_factor, ensure_sparse_positive_definite_with_fixed_ridge,
     solve_sparse_spd,
 };
 use super::{
@@ -275,18 +275,19 @@ pub(super) fn solve_penalized_least_squares_implicit(
         //    Tikhonov RHS term `δ·μ` below was skipped, `penalty_term +=
         //    δ‖β‖²` in `loop_driver` was skipped, and every consumer of
         //    `ridge_passport.delta()` was told 0. The rewrite is redundant now
-        //    that `ensure_sparse_positive_definitewithridge` applies δ on its
+        //    that `ensure_sparse_positive_definite_with_fixed_ridge` applies δ on its
         //    first rung, and it was the mechanism that made the report differ
         //    from the application.
-        let (h_sparse, factor, ridge_used) = ensure_sparse_positive_definitewithridge(|ridge| {
-            workspace.assemble_sparse_penalized_hessian(
-                x_sparse,
-                &weights_owned,
-                s_transformed,
-                ridge,
-                precomputed_xtwx,
-            )
-        })?;
+        let (h_sparse, factor, ridge_used) =
+            ensure_sparse_positive_definite_with_fixed_ridge(|ridge| {
+                workspace.assemble_sparse_penalized_hessian(
+                    x_sparse,
+                    &weights_owned,
+                    s_transformed,
+                    ridge,
+                    precomputed_xtwx,
+                )
+            })?;
 
         // 2. RHS = X'W(z - offset) + S_λ μ + ridge_used · μ.
         // The `ridge_used · μ` term matches the diagonal ridge added to
@@ -478,7 +479,7 @@ pub(super) fn solve_penalized_least_squares_implicit(
 
     // 4. Ridge stabilization — UNCONDITIONAL, matching the dense Newton path
     // (`ensure_positive_definitewithridge`, made unconditional in `fc2b286a2`)
-    // and the sparse ladder (`ensure_sparse_positive_definitewithridge`).
+    // and the sparse selector (`ensure_sparse_positive_definite_with_fixed_ridge`).
     //
     // δ MUST NOT BE CHOSEN BY A BRANCH. `FIXED_STABILIZATION_RIDGE`'s own doc
     // (`gam_working_model.rs`) states the invariant this file has to honour:
