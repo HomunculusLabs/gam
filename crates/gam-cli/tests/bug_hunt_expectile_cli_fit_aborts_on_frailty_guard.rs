@@ -35,7 +35,7 @@ fn expectile_cli_fit_does_not_abort_on_standard_frailty_guard() {
         .tempfile()
         .expect("temp output path");
 
-    let output = Command::new(gam_test_support::gam_binary!())
+    let output = Command::new(env!("CARGO_BIN_EXE_gam"))
         .arg("fit")
         .arg(fixture)
         .arg("y ~ s(x)")
@@ -89,7 +89,7 @@ fn expectile_cli_fit_does_not_abort_on_standard_frailty_guard() {
         .suffix(".csv")
         .tempfile()
         .expect("temp generated output path");
-    let generation = Command::new(gam_test_support::gam_binary!())
+    let generation = Command::new(env!("CARGO_BIN_EXE_gam"))
         .arg("generate")
         .arg(out.path())
         .arg(fixture)
