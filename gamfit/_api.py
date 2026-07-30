@@ -21,7 +21,7 @@ from ._exceptions import map_exception
 from ._model import Model
 from ._reml_common import check_forward_state, coerce_grad_payload
 from ._response_geometry import ResponseGeometryModel, fit_response_geometry
-from ._tables import normalize_table
+from ._tables import CATEGORICAL_CELL_SENTINEL, normalize_table
 from ._validation import FormulaValidation
 from ._warnings import emit_inference_warnings
 
@@ -597,7 +597,15 @@ def _resolve_precision_hyperpriors(
             levels: list[str] = []
             if label in headers:
                 col = headers.index(label)
-                levels = sorted({row[col] for row in rows})
+                # Strip the categorical sentinel before it reaches user code.
+                # `normalize_table` prefixes every genuinely-categorical cell
+                # with CATEGORICAL_CELL_SENTINEL so the Rust side can tell a
+                # category from a numeric-looking string; Rust strips it, but
+                # this path reads the raw rows and was handing the user's
+                # precision-hyperprior callback level names like "\x00alpha".
+                levels = sorted(
+                    {row[col].removeprefix(CATEGORICAL_CELL_SENTINEL) for row in rows}
+                )
             pair = value(
                 {
                     "label": label,

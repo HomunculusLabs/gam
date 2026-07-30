@@ -94,7 +94,9 @@ def test_routability_audit_smoke():
 def test_sparse_dict_dual_certificate_smoke():
     rng = np.random.default_rng(2)
     x, _ = _planted_atoms(rng, k=6, p=12, n=300)
-    fit = sparse_dictionary_fit(x, k=6, active=1, max_epochs=12)
+    # `K` is POSITIONAL in `sparse_dictionary_fit(X, K, *, active=...)`; there is
+    # no `k` keyword, so this raised TypeError before reaching the assertions.
+    fit = sparse_dictionary_fit(x, 6, active=1, max_epochs=12)
     report = sparse_dict_dual_certificate(
         x, fit.decoder, fit.indices, fit.codes, max_candidates=8
     )

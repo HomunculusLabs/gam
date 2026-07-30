@@ -1497,13 +1497,13 @@ class MultinomialModel:
             )
         if not (0.0 < level < 1.0):
             raise ValueError(f"level must be in (0, 1), got {level}")
-        # Two-sided normal quantile for the requested level.
-        from statistics import NormalDist
-
-        z = NormalDist().inv_cdf(0.5 + level / 2.0)
+        # Pass the LEVEL, not a z-score. The pyfunction's signature is
+        # `(model_bytes, headers, rows, level = 0.95)` and the Rust side does its
+        # own `standard_normal_quantile(0.5 + 0.5 * level)`. Converting here sent
+        # z = 1.96 in as a "level", so the quantile was taken at 0.5 + 0.98.
         try:
             out = rust_module().predict_multinomial_intervals_pyfunc(
-                self._model_bytes, headers, rows, z
+                self._model_bytes, headers, rows, level
             )
         except Exception as exc:
             raise map_exception(exc) from exc

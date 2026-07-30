@@ -196,12 +196,16 @@ def test_fit_predict_summary_check_report_and_roundtrip(tmp_path: pathlib.Path) 
     )
 
     with_interval = model.predict(prediction_rows(), interval=0.95)
+    # `covariance_source` is the #2296 provenance field. This exact-list
+    # assertion was one column behind it, even though the same file already
+    # asserts the field's presence and value at two other predict sites.
     assert list(with_interval) == [
         "linear_predictor",
         "mean",
         "std_error",
         "mean_lower",
         "mean_upper",
+        "covariance_source",
     ]
     # The mean point estimate must sit strictly inside the 95% interval and
     # the interval must be non-degenerate for a well-conditioned fit.

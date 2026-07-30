@@ -106,7 +106,12 @@ def test_public_type_is_the_pyo3_model() -> None:
 
 def test_fit_has_one_native_return_and_no_sparse_variant() -> None:
     source = inspect.getsource(facade.sae_manifold_fit)
-    assert "return rust_module().sae_manifold_from_fit_payload(" in source
+    # `sae_manifold_from_fit_payload` exists nowhere in the tree; this line was
+    # its only occurrence, so the assertion could never hold. The native entry
+    # point the facade actually returns is `sae_manifold_fit_model`
+    # (gamfit/_sae_manifold.py). The contract under test -- ONE native return
+    # and no sparse variant -- is unchanged.
+    assert "return rust_module().sae_manifold_fit_model(" in source
     assert "return sparse_dictionary_fit(" not in source
     assert "return block_sparse_dictionary_fit(" not in source
 
