@@ -382,6 +382,10 @@ jobs:
       - name: Install the population's test environment
         id: test_environment
         if: ${{ !cancelled() && steps.runtime_install.outcome == 'success' }}
+        # `python -` prepends its working directory to `sys.path`. Running this
+        # step in the checkout would therefore import the in-tree `gamfit/`
+        # package without its compiled extension instead of the sealed wheel.
+        working-directory: ${{ runner.temp }}
         shell: bash
         run: |
           set -euo pipefail
