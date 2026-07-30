@@ -94,6 +94,51 @@ pub fn canonical_standard_fit_options(
     }
 }
 
+/// `FitOptions` for the programmatic blocks-forward entry point
+/// (`gaussian_reml_fit_blocks_forward` in gam-pyffi).
+///
+/// That entry documents itself as a "formula-API-bypass entry into the same
+/// joint multi-smooth REML driver" the formula path uses, but it hand-built its
+/// own 19-field `FitOptions` literal and had drifted from the canonical policy
+/// (#2630). It now derives from [`canonical_standard_fit_options`], so a new
+/// policy field reaches it automatically instead of being silently omitted, and
+/// the deviations that remain are named HERE rather than buried in the FFI.
+///
+/// Every deviation, and why:
+///
+/// * `nullspace_dims` — STRUCTURAL. This API is handed explicit per-block
+///   penalty matrices, so it needs one nullspace dimension per block, where the
+///   formula path derives them and passes an empty vector.
+/// * `skip_rho_posterior_inference: false` — DELIBERATE, and already sanctioned
+///   by the canonical policy above: "Lower-level callers that explicitly need
+///   the escalation opt in elsewhere". This is such a caller.
+/// * `persist_warm_start_disk: false` — DELIBERATE, and sanctioned by
+///   `FitConfig::persist_warm_start_disk`'s own doc: "Low-level embedding code
+///   may disable it explicitly when it owns a stronger external checkpoint
+///   transaction." A programmatic block-fit owns its own lifecycle.
+/// * `penalty_shrinkage_floor: None` and `tol: 1e-9` — PINNED, NOT ENDORSED.
+///   The canonical policy is `Some(1e-6)` and `1e-10`, and neither deviation
+///   has a stated rationale anywhere; `1e-9` in particular looks like exactly
+///   the stale-tolerance class the `1e-10` comment above was written to fix.
+///   They are pinned so that routing this call site through the seam is
+///   numerically inert, and #2630 tracks deciding them on purpose.
+///
+/// Two fields that LOOK like deviations are not: `max_iter: 200` matches
+/// `config.outer_max_iter.unwrap_or(200)`, and `ResourcePolicy::default_library()`
+/// is what `resolved_resource_policy` returns for a default config, since
+/// `for_problem` falls through to `default_library` when no marginal-slope hint
+/// is set.
+pub fn canonical_blocks_forward_fit_options(nullspace_dims: Vec<usize>) -> FitOptions {
+    let mut options =
+        canonical_standard_fit_options(&FitConfig::default(), StandardFitOptionsInputs::default());
+    options.nullspace_dims = nullspace_dims;
+    options.skip_rho_posterior_inference = false;
+    options.persist_warm_start_disk = false;
+    options.penalty_shrinkage_floor = None;
+    options.tol = 1.0e-9;
+    options
+}
+
 pub fn fit_model(request: FitRequest<'_>) -> Result<FitResult, WorkflowError> {
     let request = request;
     // Each `fit_*_model` helper still returns `Result<_, String>` internally;

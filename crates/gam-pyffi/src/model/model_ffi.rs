@@ -5331,27 +5331,17 @@ fn gaussian_reml_fit_blocks_forward<'py>(
     };
 
     let offset_zero = Array1::<f64>::zeros(n_rows);
-    let opts = gam::solver::estimate::FitOptions {
-        latent_cloglog: None,
-        mixture_link: None,
-        optimize_mixture: false,
-        sas_link: None,
-        optimize_sas: false,
-        compute_inference: true,
-        skip_rho_posterior_inference: false,
-        max_iter: 200,
-        tol: 1.0e-9,
-        nullspace_dims: vec![0; s_list.len()],
-        linear_constraints: None,
-        firth_bias_reduction: false,
-        adaptive_regularization: None,
-        penalty_shrinkage_floor: None,
-        rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
-        persist_warm_start_disk: false,
-        resource_policy: gam_runtime::resource::ResourcePolicy::default_library(),
-    };
+    // #2630: this used to be a hand-built 19-field `FitOptions` literal — the
+    // only one in non-test code that did not go through the canonical seam — and
+    // it had drifted from the policy the formula path uses on five fields. The
+    // seam now owns this variant, so a new policy field cannot silently skip
+    // the entry point that advertises itself as running the SAME driver as
+    // `gamfit.fit`. The remaining deviations and their justifications are
+    // documented on `canonical_blocks_forward_fit_options`.
+    let opts = gam::solver::fit_orchestration::canonical_blocks_forward_fit_options(vec![
+        0;
+        s_list.len()
+    ]);
     let joint_x_for_fit = joint_x.clone();
     let fit = detach_estimation_result(py, "gaussian_reml_fit_blocks_forward", move || {
         let heuristic_slice = heuristic_owned.as_ref().map(|values| values.as_slice());
