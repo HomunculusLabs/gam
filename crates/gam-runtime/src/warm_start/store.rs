@@ -7,7 +7,7 @@
 //!
 //! See [`crate::warm_start`] for the public API summary.
 
-use crate::warm_start::key::Fingerprint;
+use crate::warm_start::key::{Fingerprint, Fingerprinter};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -35,6 +35,29 @@ fn log_best_effort<E: std::fmt::Display>(operation: &str, result: Result<(), E>)
 /// On-disk schema version. Bump on incompatible format changes; old entries
 /// are then ignored at read time and evicted on the next save.
 pub(crate) const SCHEMA_VERSION: u32 = 1;
+
+/// How many times a save may lose the key-directory race before giving up.
+///
+/// A save that finds its key directory removed mid-sequence fails `NotFound`
+/// and must recreate the directory and retry. **This store no longer causes
+/// that**: `evict_overflow` used to `remove_dir` emptied key directories, which
+/// was the whole source of the gam#868 race, and that sweep is gone (see the
+/// comment at its former site) because it reclaimed no budgeted bytes. The
+/// retry is therefore defence-in-depth against a remover this process does not
+/// control — a sibling running an older build that still sweeps, or an operator
+/// cleaning the store root — rather than the mechanism correctness rests on.
+///
+/// The bound cannot be derived from the adversary, which is free to remove the
+/// directory at any rate, so no finite number of retries is provably
+/// sufficient; it exists to guarantee termination instead of describing the
+/// race. It is deliberately larger than the ONE retry this used to allow, which
+/// was justified by the claim that "the eviction window is one `remove_dir`
+/// syscall wide" — an assumption about relative timing rather than an
+/// invariant. Adding a single field to the metadata record was enough to defeat
+/// it (gam#2625), turning a deterministic test into a 2-in-5 flake. A save
+/// whose correctness depends on how many bytes the metadata occupies is not
+/// correct.
+const SAVE_KEY_DIR_RACE_RETRIES: u8 = 8;
 
 /// Default disk-budget for the whole warm-start store root (~1 GiB).
 pub(crate) const DEFAULT_SIZE_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
@@ -71,6 +94,17 @@ pub enum EntryKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OnDiskMeta {
     schema_version: u32,
+    /// Identity of the binary that wrote this entry — see
+    /// [`producer_identity`]. Compared on every read; a mismatch downgrades
+    /// [`EntryKind::Final`] to [`EntryKind::Checkpoint`], so one build can
+    /// never ship another build's terminal certificate.
+    ///
+    /// `#[serde(default)]` yields the empty string for entries written before
+    /// this field existed. That never matches a real identity, so legacy
+    /// entries are usable as seeds and never as certificates — which is the
+    /// correct reading of an entry whose producer is unknown.
+    #[serde(default)]
+    producer: String,
     written_unix_secs: u64,
     /// Nanosecond component of the write timestamp. Used to break ties in
     /// LRU eviction so entries written within the same second don't sort
@@ -442,9 +476,15 @@ impl WarmStartStore {
         let bin_final = dir.join(format!("{run_id}.bin"));
         let meta_final = dir.join(format!("{run_id}.json"));
         let mut attempt = 0u8;
+        // Resolve the producing build's identity ONCE, before the write/retry
+        // sequence: it is constant for the process, and computing it per attempt
+        // would put an allocation (and, on the first call in the process, two
+        // filesystem syscalls) inside the window a concurrent eviction races.
+        let producer = producer_identity();
         let build_meta_json = |secs: u64, subsec_nanos: u32| -> Result<Vec<u8>, StoreError> {
             let meta = OnDiskMeta {
                 schema_version: SCHEMA_VERSION,
+                producer: producer.to_string(),
                 written_unix_secs: secs,
                 written_nanos: subsec_nanos,
                 objective: objective_finite,
@@ -477,10 +517,13 @@ impl WarmStartStore {
                 build_meta_json: &build_meta_for_io,
             }) {
                 Ok(()) => break,
-                Err(e) if e.kind() == io::ErrorKind::NotFound && attempt == 0 => {
+                Err(e)
+                    if e.kind() == io::ErrorKind::NotFound
+                        && attempt < SAVE_KEY_DIR_RACE_RETRIES =>
+                {
                     // A sibling process' eviction removed the key dir mid-write.
                     // Clean up any partial temps, then retry the whole sequence
-                    // once after recreating the dir inside `write_and_promote_entry`.
+                    // after recreating the dir inside `write_and_promote_entry`.
                     log_best_effort(
                         "removing a partial payload temp after a racing eviction",
                         fs::remove_file(&bin_tmp),
@@ -619,19 +662,32 @@ impl WarmStartStore {
                     entry.meta.accessed,
                 ));
             }
-            // Sweep now-empty key dirs.
+            // An emptied key dir is deliberately LEFT IN PLACE.
+            //
+            // Removing it here was the sole cause of the gam#868 write race: the
+            // `remove_dir` could land anywhere inside a concurrent save's
+            // `create_dir_all` → write → rename sequence, so that save failed
+            // `NotFound` and needed the recreate-and-retry path below to survive.
+            //
+            // It bought nothing. This branch only ran once the directory was
+            // observed EMPTY, so it reclaimed no entry bytes — and entry bytes are
+            // the only thing the budget governs (`total` sums `meta_len + bin_len`
+            // over scanned entries, and an empty dir contributes zero). The cost of
+            // keeping it is one empty directory per key ever fitted, under
+            // `temp_dir()`; the cost of removing it was a correctness race against
+            // every sibling writer, tolerated by a retry whose sufficiency depended
+            // on the write sequence staying short enough (gam#2625 made it one field
+            // longer and turned a deterministic test into a 2-in-5 flake).
+            //
+            // Trading a race for some inodes is the right direction, so the race is
+            // not created in the first place. The retry in `save` is kept as
+            // defence-in-depth — a sibling process running an OLDER build still
+            // sweeps, and nothing stops an operator from removing a directory — but
+            // it is no longer the mechanism this store relies on.
             if scanned.is_empty()
-                && fs::read_dir(&key_dir)
-                    .map(|mut it| it.next().is_none())
-                    .unwrap_or(false)
+                && let Ok(mut index) = self.index.lock()
             {
-                log_best_effort(
-                    "removing an emptied key directory",
-                    fs::remove_dir(&key_dir),
-                );
-                if let Ok(mut index) = self.index.lock() {
-                    index.by_key_dir.remove(&key_dir);
-                }
+                index.by_key_dir.remove(&key_dir);
             }
         }
         let total: u64 = all.iter().map(|e| e.2).sum();
@@ -947,9 +1003,129 @@ fn parse_tmp_pid(name: &str) -> Option<u32> {
     pid_str.parse::<u32>().ok()
 }
 
+/// Identity of the binary running right now, as an opaque hex digest.
+///
+/// An [`EntryKind::Final`] entry is a claim that a converged optimization
+/// ended at this payload, *judged against the criterion the writing code
+/// implements*. Nothing in the key identifies that code — the fingerprint is
+/// over `(data, spec)` only — so two different builds fitting the same model
+/// share entries, and the first run of build B could resume build A's terminus
+/// and ship it at zero outer iterations. The fit then depends on machine
+/// history rather than on this build's own criterion (gam#2625).
+///
+/// The token deliberately does NOT come from a build script. Cargo records
+/// every `cargo:rustc-env` in the crate fingerprint, so a code-identity value
+/// emitted that way dirties the lib fingerprint on every build and forces a
+/// full recompile of the workspace; the root `build.rs` measures that cost and
+/// forbids it. The running executable's own path, length and mtime need no
+/// build-time support at all, and `current_exe` reaches them through an OS
+/// primitive rather than the banned `env::var` family — the same reasoning
+/// that already routes the persistent store root through `env::temp_dir`.
+///
+/// This is a PROXY for "the same code", and its error direction is chosen: a
+/// rebuild that changes nothing semantically still moves the mtime and costs a
+/// refit, while a rebuild that *does* change the criterion can never go
+/// unnoticed. A cache miss costs time; a wrongly-certified fit costs
+/// correctness. The token is therefore sufficient for the property claimed —
+/// no entry is certified across builds — and is not claimed to be a minimal
+/// one.
+///
+/// If the executable cannot be identified the token falls back to a
+/// per-process nonce. That is the conservative degradation rather than a
+/// weakening: a process can still resume the checkpoints *it* wrote, and no
+/// entry is ever certified across processes on a platform where the producing
+/// build cannot be established.
+fn producer_identity() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        let mut fp = Fingerprinter::new();
+        fp.absorb_str(
+            b"warm-start-producer-runtime-version",
+            env!("CARGO_PKG_VERSION"),
+        );
+        match std::env::current_exe() {
+            Ok(path) => {
+                fp.absorb_str(b"warm-start-producer-exe-path", &path.to_string_lossy());
+                match fs::metadata(&path) {
+                    Ok(md) => {
+                        fp.absorb_u64(b"warm-start-producer-exe-len", md.len());
+                        let mtime_nanos = md
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos())
+                            .unwrap_or_default();
+                        fp.absorb_str(
+                            b"warm-start-producer-exe-mtime-nanos",
+                            &mtime_nanos.to_string(),
+                        );
+                    }
+                    Err(error) => {
+                        log::debug!(
+                            "warm-start store: cannot stat the running executable ({error}); \
+                             falling back to a per-process producer identity, so no entry will \
+                             be certified across processes"
+                        );
+                        fp.absorb_u64(b"warm-start-producer-pid", u64::from(std::process::id()));
+                        fp.absorb_str(
+                            b"warm-start-producer-process-nonce",
+                            &nanos_since_epoch().to_string(),
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                log::debug!(
+                    "warm-start store: cannot locate the running executable ({error}); falling \
+                     back to a per-process producer identity, so no entry will be certified \
+                     across processes"
+                );
+                fp.absorb_u64(b"warm-start-producer-pid", u64::from(std::process::id()));
+                fp.absorb_str(
+                    b"warm-start-producer-process-nonce",
+                    &nanos_since_epoch().to_string(),
+                );
+            }
+        }
+        fp.finalize().to_hex()
+    })
+    .as_str()
+}
+
+/// Wall-clock nanoseconds since the epoch, or `0` if the clock is before it.
+///
+/// Only ever used to salt a fallback producer identity, never to make a
+/// decision about a fit, so a clock that cannot be read degrades to a constant
+/// rather than failing.
+fn nanos_since_epoch() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default()
+}
+
+/// Read one entry's metadata, downgrading a terminal certificate that this
+/// build did not produce.
+///
+/// This is the ONLY place metadata is deserialized, which is why the downgrade
+/// lives here: no consumer — lookup, ranking, or the eviction sweep — can
+/// observe a foreign [`EntryKind::Final`], so none of them has to remember to
+/// ask. A foreign entry keeps its payload, its objective and its timestamps
+/// and remains a perfectly good *seed*: the ρ it carries is a real optimum of
+/// a nearby criterion. What it loses is the right to be shipped as a fit that
+/// this build's outer search never ran, which is the whole defect and not the
+/// mere fact of reuse.
 fn read_meta(path: &Path) -> Result<OnDiskMeta, StoreError> {
     let bytes = fs::read(path)?;
-    let parsed: OnDiskMeta = serde_json::from_slice(&bytes)?;
+    let mut parsed: OnDiskMeta = serde_json::from_slice(&bytes)?;
+    if parsed.kind == EntryKind::Final && parsed.producer != producer_identity() {
+        log::debug!(
+            "warm-start store: {} was finalized by a different build; resuming it as a seed \
+             rather than as a terminal certificate",
+            path.display()
+        );
+        parsed.kind = EntryKind::Checkpoint;
+    }
     Ok(parsed)
 }
 
@@ -1359,22 +1535,14 @@ impl WarmStartStore {
     }
 
     fn unix_now_parts(&self) -> (u64, u32) {
-        let base = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let total = base.saturating_add(u128::from(self.test_time_offset_ns()));
+        let total = nanos_since_epoch().saturating_add(u128::from(self.test_time_offset_ns()));
         let secs = (total / 1_000_000_000u128) as u64;
         let nanos = (total % 1_000_000_000u128) as u32;
         (secs, nanos)
     }
 
     fn nanos_now(&self) -> u128 {
-        let base = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        base.saturating_add(u128::from(self.test_time_offset_ns()))
+        nanos_since_epoch().saturating_add(u128::from(self.test_time_offset_ns()))
     }
 
     fn fresh_run_id(&self) -> String {
@@ -1387,8 +1555,6 @@ impl WarmStartStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::warm_start::key::Fingerprinter;
-
     impl WarmStartStore {
         /// Advance this store's simulated monotonic clock by `dur`. Only
         /// available in tests — production code reads the real wall clock and
@@ -1934,12 +2100,27 @@ mod tests {
 
     #[test]
     fn save_survives_concurrent_eviction_removing_key_dir() {
-        // gam#868 end-to-end: hammer the same key with concurrent saves while a
-        // sibling thread repeatedly runs `evict_overflow` (which `remove_dir`s
-        // now-empty key dirs). Before the atomic-retry fix, a save whose
-        // `create_dir_all`→write/rename window straddled a `remove_dir` failed
-        // with `io: No such file or directory (os error 2)`. Every save must now
-        // succeed; we assert no save returns an error.
+        // gam#868 end-to-end: hammer the same key with four concurrent writers
+        // while a sibling thread runs `evict_overflow` continuously at a zero byte
+        // budget, so eviction is deleting entries underneath every save. Every
+        // save must still succeed; we assert none returns an error.
+        //
+        // What this no longer covers, deliberately: `evict_overflow` used to also
+        // `remove_dir` emptied key directories, and a save whose
+        // `create_dir_all`→write/rename window straddled that removal failed with
+        // ENOENT. That sweep is GONE (gam#2625 — it reclaimed no budgeted bytes and
+        // was the sole source of the race), so the hazard is designed out rather
+        // than merely survived, and this test can no longer reach it through
+        // eviction.
+        //
+        // The recreate-and-retry path that used to be the only defence still exists
+        // for a remover this process does not control, and it is covered
+        // DETERMINISTICALLY by `write_and_promote_recreates_dir_removed_before_write`
+        // — which is the right shape for it. Driving a removal from this test
+        // instead would mean inventing an adversary that deletes the directory in a
+        // loop; no finite retry bound can survive that, so the assertion would be
+        // impossible rather than demanding, and it also raises EEXIST rather than
+        // the ENOENT the retry is about.
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
 
@@ -2010,5 +2191,127 @@ mod tests {
             .unwrap();
         assert_eq!(store.lookup(&a).unwrap().unwrap().payload, b"AAA");
         assert_eq!(store.lookup(&b).unwrap().unwrap().payload, b"BBB");
+    }
+
+    /// Overwrite the `producer` field of every metadata file under `key`.
+    ///
+    /// `None` deletes the field, reproducing an entry written before the field
+    /// existed. Returns how many metadata files were rewritten so a caller can
+    /// assert it actually reached one — a helper that silently matched nothing
+    /// would make the tests below pass by doing nothing.
+    fn rewrite_producer(store: &WarmStartStore, key: &Fingerprint, producer: Option<&str>) -> usize {
+        let dir = store.key_dir(key);
+        let mut rewritten = 0usize;
+        for entry in fs::read_dir(&dir).unwrap() {
+            let p = entry.unwrap().path();
+            if p.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = fs::read(&p).unwrap();
+            let mut parsed: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            match producer {
+                Some(value) => parsed["producer"] = serde_json::json!(value),
+                None => {
+                    parsed
+                        .as_object_mut()
+                        .expect("entry metadata is a JSON object")
+                        .remove("producer");
+                }
+            }
+            fs::write(&p, serde_json::to_vec_pretty(&parsed).unwrap()).unwrap();
+            rewritten += 1;
+        }
+        rewritten
+    }
+
+    #[test]
+    fn a_final_entry_this_build_wrote_is_still_a_terminal_certificate_2625() {
+        // The control for the two downgrade tests below. Without it, a bug that
+        // downgraded EVERY entry would satisfy them both.
+        let (_d, store) = temp_store();
+        let key = key_for("producer-own");
+        store
+            .save(&key, b"mine", Some(1.0), Some(7), EntryKind::Final)
+            .unwrap();
+        let got = store.lookup(&key).unwrap().unwrap();
+        assert_eq!(got.kind, EntryKind::Final);
+        assert_eq!(got.payload, b"mine");
+    }
+
+    #[test]
+    fn a_final_entry_from_another_build_is_a_seed_not_a_certificate_2625() {
+        // gam#2625: the key is over (data, spec) only, so a different build of
+        // gam shares entries. Resuming another build's terminus certified a fit
+        // this build's outer search never ran. The entry stays usable — the rho
+        // it carries is a real optimum of a nearby criterion — but it must come
+        // back as a checkpoint, which no consumer treats as terminal.
+        let (_d, store) = temp_store();
+        let key = key_for("producer-foreign");
+        store
+            .save(&key, b"theirs", Some(1.0), Some(7), EntryKind::Final)
+            .unwrap();
+        assert_eq!(
+            rewrite_producer(&store, &key, Some("a-different-build")),
+            1,
+            "the helper must have rewritten exactly the one entry just saved"
+        );
+        let got = store.lookup(&key).unwrap().unwrap();
+        assert_eq!(
+            got.kind,
+            EntryKind::Checkpoint,
+            "a foreign terminus must be downgraded to a seed"
+        );
+        assert_eq!(
+            got.payload, b"theirs",
+            "the payload is still the best available seed and must survive"
+        );
+        assert_eq!(
+            got.objective,
+            Some(1.0),
+            "the objective travels with the seed; only the certification is withdrawn"
+        );
+    }
+
+    #[test]
+    fn a_final_entry_with_no_recorded_producer_is_a_seed_2625() {
+        // Entries written before the field existed deserialize to the empty
+        // string. An unknown producer cannot be shown to be this build, so the
+        // conservative reading is the correct one.
+        let (_d, store) = temp_store();
+        let key = key_for("producer-legacy");
+        store
+            .save(&key, b"legacy", Some(2.0), None, EntryKind::Final)
+            .unwrap();
+        assert_eq!(rewrite_producer(&store, &key, None), 1);
+        let got = store.lookup(&key).unwrap().unwrap();
+        assert_eq!(got.kind, EntryKind::Checkpoint);
+        assert_eq!(got.payload, b"legacy");
+    }
+
+    #[test]
+    fn a_checkpoint_from_another_build_is_unaffected_2625() {
+        // The downgrade is about certification, so it has nothing to say about
+        // an entry that never claimed to be terminal.
+        let (_d, store) = temp_store();
+        let key = key_for("producer-foreign-checkpoint");
+        store
+            .save(&key, b"ckpt", Some(3.0), Some(2), EntryKind::Checkpoint)
+            .unwrap();
+        assert_eq!(rewrite_producer(&store, &key, Some("a-different-build")), 1);
+        let got = store.lookup(&key).unwrap().unwrap();
+        assert_eq!(got.kind, EntryKind::Checkpoint);
+        assert_eq!(got.payload, b"ckpt");
+    }
+
+    #[test]
+    fn the_producer_identity_is_stable_within_a_process_2625() {
+        // The token is memoized, and the fix depends on it: an identity that
+        // moved between two reads in one process would downgrade the process's
+        // own terminus and silently disable resume everywhere.
+        assert_eq!(producer_identity(), producer_identity());
+        assert!(
+            !producer_identity().is_empty(),
+            "an empty token would collide with the legacy serde default"
+        );
     }
 }

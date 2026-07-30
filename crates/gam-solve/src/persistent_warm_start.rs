@@ -274,6 +274,29 @@ fn load_json_record<T: for<'de> Deserialize<'de>>(key: &str) -> Option<T> {
 /// checkpoint root there instead. The directory is durable across
 /// processes within a single boot, and `WarmStartStore::open` falls back
 /// to `None` if the path is unwritable.
+///
+/// # A FRESH WORKING DIRECTORY IS NOT A COLD CACHE
+///
+/// The root is `temp_dir()/gam/warm/v1`: machine-global, derived from nothing
+/// about the process, and shared by every gam build on the box for
+/// [`CACHE_TTL_SECS`] (ten years). Nothing about a fresh clone, a fresh `cwd`,
+/// a fresh `target/`, or a fresh process makes a fit cold. Two "cold" runs of
+/// one binary on one box have been measured at 379+ and 22 outer evaluations
+/// for this reason (gam#2625), and any before/after built that way measures
+/// machine history rather than the change under test.
+///
+/// **To get a provably cold arm, delete the root — `temp_dir()/gam/warm/v1` —
+/// between arms, and run the arms sequentially so neither populates the store
+/// the other reads.** A/B arms that run concurrently share it no matter what
+/// else differs about them.
+///
+/// Note what this does and does not buy after the gam#2625 fix. The store now
+/// records the producing binary's identity per entry and refuses to hand a
+/// *different* build's entry back as a terminal certificate, so a cross-build
+/// A/B can no longer ship the other arm's answer. It can still be **seeded** by
+/// it — a seed changes the trajectory and therefore every iteration count and
+/// timing — so clearing the root remains mandatory for a *performance* A/B even
+/// though correctness no longer depends on it.
 fn persistent_store() -> Option<WarmStartStore> {
     // Memoize the store process-wide. The root (`temp_dir()/gam/warm/v1`) is
     // constant within a process, so a single instance suffices — and reusing

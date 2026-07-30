@@ -33,6 +33,31 @@
 //! (which completed fit a resume carries is a provenance question, not a
 //! quality one), and orders checkpoints by lowest objective.
 //!
+//! # The key identifies the problem; the entry identifies its producer
+//!
+//! The fingerprint is over `(data, spec)` and deliberately absorbs nothing
+//! version-like, so a library upgrade that does not change the on-disk layout
+//! keeps every user's warm start. That is right for a *seed* — a seed only has
+//! to be close — but [`EntryKind::Final`] claims more than closeness: it claims
+//! a converged optimization ended there, judged against the criterion the
+//! writing code implements. Since the key cannot see that code, two builds
+//! fitting the same model shared entries, and one build could resume the
+//! other's terminus and ship it at zero outer iterations (#2625).
+//!
+//! Each entry therefore records the identity of the binary that wrote it, and
+//! every read compares it: **a terminal certificate from a different build (or
+//! from an unknown one) is returned as a [`EntryKind::Checkpoint`] instead.**
+//! Reuse is untouched — the payload, objective and timestamps all survive, and
+//! the iterate is still the best available seed. What is withdrawn is the right
+//! to be shipped as a fit that this build's outer search never ran. The
+//! comparison lives at the single point where metadata is deserialized, so
+//! lookup, ranking and eviction cannot observe a foreign terminus and none of
+//! them has to remember to ask.
+//!
+//! Consequently a warm hit may cost outer iterations it did not cost before,
+//! and that is the intended price: SPEC-20 allows work to survive walls via
+//! checkpoint/resume, and a resumed *seed* still has to converge here.
+//!
 //! Disk is bounded by [`StoreOptions::size_budget_bytes`] (default ~1 GiB);
 //! oldest entries are evicted to fit. Entries older than
 //! [`StoreOptions::ttl`] (default 30 days) are dropped on every save.
