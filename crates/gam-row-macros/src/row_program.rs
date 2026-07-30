@@ -1948,6 +1948,36 @@ mod tests {
             .expect("expanded function")
     }
 
+    /// Normalize generated Rust source for the substring assertions below.
+    ///
+    /// Two things are insignificant in Rust yet change the emitted token
+    /// string: whitespace, and a trailing comma before a closing delimiter.
+    /// `quote!` faithfully reproduces whichever of those the emitter's own
+    /// line-wrapping happened to produce, so pinning either one turns a purely
+    /// cosmetic edit into a test failure.
+    ///
+    /// That is not hypothetical. During #2627 this exact assertion was
+    /// "fixed" twice in OPPOSITE directions — once by removing the trailing
+    /// comma from the `ProgramExpr::Zero` emitter, once by adding it to the
+    /// expected literal — leaving the suite unsatisfiable: the generator
+    /// emitted no comma while the expectation demanded one. Neither change was
+    /// wrong about Rust; both were pinning a formatting accident.
+    ///
+    /// Normalizing whitespace AND insignificant trailing commas away makes
+    /// these assertions insensitive to formatting by construction, so they
+    /// test what they mean to test — the generated *structure* — and stop
+    /// being a tripwire for how a `quote!` happens to be wrapped.
+    fn normalized_source(source: &str) -> String {
+        let mut out = String::with_capacity(source.len());
+        for ch in source.chars().filter(|c| !c.is_whitespace()) {
+            if matches!(ch, ')' | ']' | '}') && out.ends_with(',') {
+                out.pop();
+            }
+            out.push(ch);
+        }
+        out
+    }
+
     fn emitted_item_names(input: TokenStream2) -> Vec<String> {
         let input = syn::parse2::<Input>(input).expect("parse row program");
         let expanded = expand(input).expect("expand row program");
@@ -2103,20 +2133,20 @@ mod tests {
                 }
             },
             "runtime_formula_runtime",
-        )
-        .replace(' ', "");
+        );
+        let rust = normalized_source(&rust);
 
         for formula in [
             "S:::gam_math::jet_scalar::RuntimeJetScalar<'arena>",
             "letx=(*x).clone();",
             "lety=(*y).clone();",
             "value.add_constant(shift,__row_program_workspace)",
-            "S::constant(0.0,__row_program_dimension,__row_program_workspace,)",
+            "S::constant(0.0,__row_program_dimension,__row_program_workspace)",
             "letvalue=shifted.clone();",
             "[curved.value()]",
         ] {
             assert!(
-                rust.contains(formula),
+                rust.contains(&normalized_source(formula)),
                 "missing generated runtime formula: {formula}\n{rust}"
             );
         }
