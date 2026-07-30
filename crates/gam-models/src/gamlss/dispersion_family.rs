@@ -1946,7 +1946,45 @@ fn dispersion_moment_log_precision_seed(kind: DispersionFamilyKind, yi: f64, eta
         DispersionFamilyKind::NegativeBinomial => {
             let mu = em.exp().max(1e-12);
             let e2 = (yi - mu).powi(2);
-            let excess = (e2 - mu).max(1e-6 * (mu + mu * mu));
+            // `theta_hat_row = mu^2/(e^2 - mu)` inverts a statistic whose
+            // sampling distribution STRADDLES ZERO, so the denominator has a
+            // pole inside the range the data can produce. The signal is
+            // `E[e^2 - mu] = mu^2/theta`; the noise on the same quantity is
+            // `sd[e^2] = sqrt(mu + 2 mu^2)` (Poisson-limit fourth central
+            // moment `mu + 3 mu^2`, less `(mu + mu^2)^2`'s leading `mu^2`),
+            // i.e. `~ sqrt(2) * mu`. Signal-to-noise is `~ (mu/theta)/sqrt(2)`,
+            // well under one for every `theta >~ mu`, so a large fraction of
+            // rows come out with a NEGATIVE excess carrying no information
+            // about theta at all.
+            //
+            // The old relative guard `1e-6 * (mu + mu^2)` is not a floor on
+            // anything measurable: it sits six orders of magnitude BELOW that
+            // noise, so a negative row lands on it and seeds
+            // `log theta = ln(1e6 * mu/(1 + mu)) -> ~13.8`, which
+            // `LOG_PRECISION_CEILING` then clamps to +10 -- `theta = 22026`,
+            // numerically Poisson -- for every such row. Measured: 49% of rows
+            // on the #1119 NB fixture and 61% on the generate fixture seeded at
+            // that cap. (The fraction is regime-dependent, not a fixed half:
+            // `e^2 <= mu` is `|y - mu| <= sqrt(mu)`, whose probability falls as
+            // the overdispersion grows. Both measurements are large.)
+            //
+            // The Gamma/Beta/Tweedie siblings cannot reach this state, which is
+            // why the NB arms are the only red ones in two different files
+            // whose siblings are all green: Gamma floors `e^2` itself at
+            // `1e-8 mu^2`, so saturating needs `|y - mu| <= 1e-4 mu`; Tweedie
+            // likewise floors `e^2`, and has the `y = 0` atom besides; Beta
+            // deliberately seeds a flat 0.0. Only NB floors a SIGNED
+            // difference, and only a signed difference has a pole.
+            //
+            // So floor the denominator at the statistic's own sampling
+            // resolution. The resulting cap `theta_seed <= mu^2/sqrt(mu + 2
+            // mu^2) ~ mu/sqrt(2)` errs toward MORE overdispersion -- the
+            // direction in which the log-theta Fisher information is largest
+            // (see `nb_log_precision_fisher_jensen`) -- so the block-cyclic
+            // solve still gets a usable gradient and can climb back out. Do not
+            // "simplify" this to a relative floor: the quantity being floored
+            // is not small, it is NOISE, and a relative floor cannot know that.
+            let excess = (e2 - mu).max((mu + 2.0 * mu * mu).sqrt());
             (mu * mu / excess).max(1e-6).ln()
         }
         DispersionFamilyKind::Tweedie { p } => {
