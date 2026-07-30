@@ -99,6 +99,24 @@ use gam_runtime::loop_progress::LoopProgress;
 
 const DEFAULT_GAUGE_PRIORITY: u8 = 100;
 
+/// The hard near-exact-alias boundary: the cosine above which two columns are
+/// treated as the same direction rather than as two correlated ones.
+///
+/// A declared modelling policy, not a derived quantity — it states how much
+/// residual orthogonal component is still "a distinct direction". At `0.999`
+/// that component has relative norm `√(1 − 0.999²) = 4.47e-2`, i.e. the columns
+/// subtend `2.56°`. No property of the arithmetic or of the data picks this
+/// number; only a decision about what counts as an identifiability failure does,
+/// which is why it is named here once and read everywhere rather than restated.
+///
+/// It was previously written out three times in this file — once here under a
+/// second name and once as a function-local `ALIAS_BOUNDARY_COSINE` inside each
+/// of [`pair_report_threshold`] and [`pair_halt_threshold`] — so the fact that
+/// all three were the same value, which
+/// [`REPORT_FLOOR_NEAR_EXACT`]'s own documentation calls intentional, was a
+/// coincidence between literals that nothing could check.
+const ALIAS_BOUNDARY_COSINE: f64 = 0.999;
+
 /// Lower bound on the cosine that may be reported as an `AliasedPair` when the
 /// per-pair null cosine distribution has little width (σ → 0, i.e. both columns
 /// near-uniform with leverage concentration S2 ≈ 1/n). In that regime ordinary
@@ -109,7 +127,18 @@ const DEFAULT_GAUGE_PRIORITY: u8 = 100;
 /// floor is intentionally the same as the hard alias boundary used by the
 /// pairwise gate: the report list is for structural aliases, not ordinary
 /// high-but-full-rank correlation between basis columns.
-const REPORT_FLOOR_NEAR_EXACT: f64 = 0.999;
+///
+/// That intent is now stated as the derivation it is, so the two move together.
+/// **Its consequence is load-bearing and easy to miss:** because
+/// [`pair_report_threshold`] floors at this value and ceilings at the same
+/// value, its return is identically [`ALIAS_BOUNDARY_COSINE`] — the Bonferroni
+/// `K_report·σ` band it computes cannot influence the result while the two
+/// coincide. That is the documented policy ("only structural aliases are
+/// reported"), not a bug, but it means the statistical band there is currently
+/// inert; see the note on [`pair_report_threshold`] and the test
+/// `report_threshold_is_the_alias_boundary_while_floor_equals_ceiling`, which
+/// fails the moment anyone separates the two and so surfaces the change.
+const REPORT_FLOOR_NEAR_EXACT: f64 = ALIAS_BOUNDARY_COSINE;
 
 /// Estimated audit work (rows × blocks, or rows × total columns for the
 /// pairwise sweep) above which a periodic progress ticker is attached. Below
@@ -654,8 +683,18 @@ fn pair_null_sigma(s2_a: f64, s2_b: f64, n: usize) -> f64 {
 /// alias boundary.  For a column with n_eff = 100 and m_pairs = 100: σ ≈ 0.1,
 /// K ≈ 4.3, K·σ ≈ 0.43 — but the band must still report a near-exact alias,
 /// so the effective report threshold never drops below the floor.
+/// # The K·σ band is inert while the floor equals the ceiling
+///
+/// `max(K·σ, REPORT_FLOOR_NEAR_EXACT).min(ALIAS_BOUNDARY_COSINE)` with the two
+/// bounds EQUAL returns that value for every input, so this function is
+/// identically [`ALIAS_BOUNDARY_COSINE`] and neither `σ` nor `m_pairs` can move
+/// it. (Including when `σ` is NaN: `f64::max` returns the non-NaN operand.) The
+/// coincidence is the deliberate policy recorded on
+/// [`REPORT_FLOOR_NEAR_EXACT`], but the code below reads as though a wide-σ pair
+/// were governed by its statistical band, and it is not. Written down here so
+/// the next reader does not have to re-derive it, and pinned by
+/// `report_threshold_is_the_alias_boundary_while_floor_equals_ceiling`.
 fn pair_report_threshold(s2_a: f64, s2_b: f64, n: usize, m_pairs: usize) -> f64 {
-    const ALIAS_BOUNDARY_COSINE: f64 = 0.999;
     const REPORT_BAND_FALSE_POSITIVE_RATE: f64 = 0.05;
 
     let sigma = pair_null_sigma(s2_a, s2_b, n);
@@ -685,7 +724,17 @@ fn pair_report_threshold(s2_a: f64, s2_b: f64, n: usize, m_pairs: usize) -> f64 
 ///
 /// The threshold is K_halt · σ where σ = pair_null_sigma(s2_a, s2_b, n).
 ///
-/// K_halt = 10.0 (≈ √(2 · ln(2M / α)) for M ~ 1000 pairs and α = 1e-6).
+/// K_halt = 10.0. **This is a declared 10σ rule, NOT the Bonferroni bound the
+/// line below used to claim it approximated.** `√(2 · ln(2M / α))` at
+/// `M = 1000`, `α = 1e-6` is `√(2 · ln(2e9)) = √42.83 = 6.545`, not 10 — the
+/// literal is 1.53× that, and no defensible α reproduces it (`K = 10` needs
+/// `2M/α = e^50 = 5.2e21`, i.e. `α ≈ 3.9e-19` at `M = 1000`). Unlike
+/// `K_report`, which this file does compute from its declared α, `K_halt` is a
+/// conservative constant that does not track the number of pairs at all: halting
+/// a fit is the more damaging error, so the threshold was set well above the
+/// multiplicity-corrected one. Left at its value because what it controls — how
+/// often a real fit is aborted — has not been measured; corrected here only so
+/// the stated derivation no longer contradicts the arithmetic.
 /// For a column with n_eff = 100: σ ≈ 0.1, halt threshold ≈ 1.0 → clamped
 /// to 0.999 (only near-exact aliases halt for wide-null columns).
 /// For n_eff = 10000: σ ≈ 0.01, threshold = 0.10 (moderate overlaps
@@ -695,8 +744,6 @@ fn pair_report_threshold(s2_a: f64, s2_b: f64, n: usize, m_pairs: usize) -> f64 
 /// (cos = 0.9999…) always fire the halt.  The floor 0.05 prevents
 /// pathological over-sensitivity on very long columns.
 fn pair_halt_threshold(s2_a: f64, s2_b: f64, n: usize) -> f64 {
-    const ALIAS_BOUNDARY_COSINE: f64 = 0.999;
-
     let sigma = pair_null_sigma(s2_a, s2_b, n);
     if sigma <= 0.0 {
         return ALIAS_BOUNDARY_COSINE;
@@ -3651,6 +3698,61 @@ mod tests {
             return ndarray::Array1::<f64>::zeros(n.max(1));
         }
         ndarray::Array1::linspace(-1.0, 1.0, n)
+    }
+
+    /// `pair_report_threshold` floors at `REPORT_FLOOR_NEAR_EXACT` and ceilings
+    /// at `ALIAS_BOUNDARY_COSINE`; those are the same value, so it is a constant
+    /// function and its Bonferroni `K·σ` band cannot influence what is reported.
+    ///
+    /// This is the deliberate policy, not a defect — but it is invisible at the
+    /// call site, which reads as though a wide-σ pair were governed by its
+    /// statistical band. Pinning it means that separating the floor from the
+    /// ceiling (the one edit that makes the band live) cannot happen silently:
+    /// this test fails and names what changed.
+    #[test]
+    fn report_threshold_is_the_alias_boundary_while_floor_equals_ceiling() {
+        assert_eq!(
+            REPORT_FLOOR_NEAR_EXACT, ALIAS_BOUNDARY_COSINE,
+            "the collapse this test pins holds only while the floor IS the ceiling; \
+             if you meant to separate them, the K-sigma band in \
+             pair_report_threshold is now live and this test should be replaced \
+             by one that exercises it"
+        );
+
+        // Span the inputs the threshold is a function of: the leverage
+        // concentrations that set sigma (S2 = 1/n is exactly uniform, i.e.
+        // sigma = 0; larger S2 widens the null), the row count, and the
+        // multiplicity that K_report is corrected for.
+        for &n in &[1_usize, 10, 100, 10_000] {
+            let inv_n = 1.0 / n as f64;
+            for &s2 in &[inv_n, 2.0 * inv_n, 0.5, 1.0] {
+                for &m_pairs in &[1_usize, 2, 100, 1_000, 1_000_000] {
+                    let threshold = pair_report_threshold(s2, inv_n, n, m_pairs);
+                    assert_eq!(
+                        threshold, ALIAS_BOUNDARY_COSINE,
+                        "report threshold moved off the alias boundary at \
+                         n={n}, s2={s2:e}, m_pairs={m_pairs}: got {threshold:e}"
+                    );
+                }
+            }
+        }
+
+        // The halt threshold, by contrast, IS a live function of sigma: an
+        // exactly-uniform pair (sigma = 0) sits at the boundary, while a pair
+        // with a wide null is governed by 10*sigma until that clears the
+        // boundary. Asserted so the two functions are not confused for each
+        // other, and so the halt path having a real band is on the record.
+        let uniform = 1.0 / 10_000.0;
+        assert_eq!(
+            pair_halt_threshold(uniform, uniform, 10_000),
+            ALIAS_BOUNDARY_COSINE,
+            "a zero-width null must halt only at the alias boundary"
+        );
+        let wide = pair_halt_threshold(1.0e-3, 1.0e-4, 10_000);
+        assert!(
+            wide < ALIAS_BOUNDARY_COSINE,
+            "a wide null must halt strictly below the alias boundary, got {wide:e}"
+        );
     }
 
     /// A dense block whose columns are the Legendre polynomials `P_d(x)` for the
