@@ -2960,9 +2960,13 @@ pub(crate) fn sae_value_probe_refusal_classification_is_inner_only() {
             "SaeManifoldTerm::penalized_quasi_laplace_criterion: inner solve did not converge at fixed ρ"
         )
     );
+    // #2598 — the wording here used to be a sentence no producer emits, written to
+    // match the classifier's needle rather than the crate. The real per-row refusal
+    // says "evidence", not "criterion"; all three renderings are pinned in
+    // `outer_objective::probe_refusal_classification_2593_tests`.
     assert!(
         SaeManifoldOuterObjective::is_recoverable_value_probe_refusal(
-            "SaeManifoldTerm::penalized_quasi_laplace_criterion: undamped criterion factorization hit a non-PD per-row H_tt block before KKT stationarity"
+            "SaeManifoldTerm::penalized_quasi_laplace_criterion: undamped evidence factorization hit a non-PD per-row H_tt block before KKT stationarity and the refinement budget was exhausted"
         )
     );
     // The generic "log-det unavailable" message (a real factorization defect, not

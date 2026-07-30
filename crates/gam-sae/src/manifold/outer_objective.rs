@@ -376,18 +376,64 @@ impl ProbeRefusalKind {
         Self::TotalCoCollapse,
     ];
 
+    /// The phrase this crate writes to mark an `InnerNotConverged` refusal.
+    ///
+    /// #2598 — the four markers this crate owns each have exactly one home now.
+    /// The producer INTERPOLATES the phrase and [`Self::classify`] matches the
+    /// same function, so the two copies that used to be maintained separately
+    /// cannot drift apart. (`NonPdSchur` has no marker here: gam-solve owns both
+    /// that wording and its reader — see the note in `classify`.)
+    pub(crate) fn inner_not_converged_marker() -> &'static str {
+        "inner solve did not converge at fixed ρ"
+    }
+
+    /// The phrase this crate writes to mark a `NonPdPerRow` refusal.
+    ///
+    /// #2598 — this is where the drift had already happened, fatally. `classify`
+    /// looked for
+    ///
+    /// ```text
+    /// undamped criterion factorization hit a non-PD per-row H_tt block before KKT
+    /// ```
+    ///
+    /// and not one of the three sites that raise the refusal emits it: the two
+    /// probe arms say "undamped EVIDENCE factorization hit a non-PD per-row H_tt
+    /// block before KKT stationarity", and the stationary arm says "stationary
+    /// undamped criterion factorization HAS a non-PD per-row H_tt block that
+    /// spectral unit-stiffness deflation could not condition". So `classify`
+    /// answered `None` for every per-row refusal the crate is able to produce,
+    /// `is_recoverable_value_probe_refusal` was false, and the outer optimizer
+    /// aborted the fit at exactly the ρ all three call-site comments say it must
+    /// read as +∞ and steer away from. `infeasible_non_pd_per_row` counted zero.
+    ///
+    /// The phrase below is the one common to all three producers, which is also
+    /// what the pre-#2593 TELEMETRY ladder carried — #2593 collapsed two ladders
+    /// into one and kept the wrong survivor. Every rendered message is unchanged
+    /// byte for byte, because this string IS the substring it replaced.
+    pub(crate) fn non_pd_per_row_marker() -> &'static str {
+        "non-PD per-row H_tt block"
+    }
+
+    /// The phrase this crate writes to mark an `AllZeroGatedDesign` refusal.
+    pub(crate) fn all_zero_gated_design_marker() -> &'static str {
+        "gated off at every row (all-zero gated design)"
+    }
+
+    /// The phrase this crate writes to mark a `TotalCoCollapse` refusal.
+    pub(crate) fn total_co_collapse_marker() -> &'static str {
+        "did not escape total co-collapse"
+    }
+
     /// Classify a rendered refusal, or `None` when it is a genuine defect.
     ///
     /// `None` is the fail-loud default: a message this does not recognise stays
     /// fatal and propagates, so a producer that rewords itself loses ρ-locality
     /// (one wasted seed) rather than having a real defect masked as +∞.
     pub(crate) fn classify(err: &str) -> Option<Self> {
-        if err.contains("inner solve did not converge at fixed ρ") {
+        if err.contains(Self::inner_not_converged_marker()) {
             return Some(Self::InnerNotConverged);
         }
-        if err.contains(
-            "undamped criterion factorization hit a non-PD per-row H_tt block before KKT",
-        ) {
+        if err.contains(Self::non_pd_per_row_marker()) {
             return Some(Self::NonPdPerRow);
         }
         // #1782 — at a seed ρ, a K>1 threshold-gate/softmax (or a rank-deficient
@@ -441,7 +487,7 @@ impl ProbeRefusalKind {
         // reads it as an infeasible trial and steers ρ back to where the gate
         // turns atoms on rather than treating it as a finite objective value
         // with "no candidate seeds passed outer startup validation".
-        if err.contains("gated off at every row (all-zero gated design)") {
+        if err.contains(Self::all_zero_gated_design_marker()) {
             return Some(Self::AllZeroGatedDesign);
         }
         // #2089 — a ρ whose smoothing / sparsity penalty makes every gated
@@ -460,7 +506,7 @@ impl ProbeRefusalKind {
         // "did not escape total co-collapse" marker only after the reseed budget
         // is spent and same-state disappearance is still certified, so a
         // healthy or merely-uncompetitive fit never trips it.
-        if err.contains("did not escape total co-collapse") {
+        if err.contains(Self::total_co_collapse_marker()) {
             return Some(Self::TotalCoCollapse);
         }
         None
@@ -6199,9 +6245,18 @@ mod probe_refusal_classification_2593_tests {
                  converge at fixed ρ; refusing to rank an off-optimum state"
                     .to_string()
             }
+            // #2598 — this arm used to be a FICTION. It spelled out "undamped
+            // criterion factorization hit a non-PD per-row H_tt block before KKT
+            // stationarity" to match the classifier's needle, under the doc
+            // comment above claiming it came from the producer. No producer
+            // emits that sentence, so this gate certified a classifier that
+            // answered `None` for every per-row refusal the crate can raise.
+            // Below is one of the three real renderings, all of which are pinned
+            // by `every_per_row_producer_rendering_classifies_as_non_pd_per_row`.
             ProbeRefusalKind::NonPdPerRow => {
-                "SaeManifoldTerm::penalized_quasi_laplace_criterion: undamped criterion \
-                 factorization hit a non-PD per-row H_tt block before KKT stationarity"
+                "SaeManifoldTerm::penalized_quasi_laplace_criterion: undamped evidence \
+                 factorization hit a non-PD per-row H_tt block before KKT stationarity \
+                 at an infeasible-ρ probe"
                     .to_string()
             }
             ProbeRefusalKind::NonPdSchur => ArrowSchurError::SchurFactorFailed {
@@ -6266,6 +6321,56 @@ mod probe_refusal_classification_2593_tests {
         let mut telemetry = OuterProbeTelemetry::default();
         telemetry.record_refusal_kind(defect);
         assert_eq!(telemetry.infeasible_total(), 0);
+    }
+
+    /// #2598 — all three per-row producers, which the old needle missed.
+    ///
+    /// These are the messages `construction_quasi_laplace.rs` renders at its
+    /// three per-row refusal sites, with the run-time numbers elided. Against the
+    /// pre-#2598 needle ("undamped criterion factorization hit a non-PD per-row
+    /// H_tt block before KKT") every one classified as `None`: fatal, uncounted,
+    /// and aborting the fit at a ρ all three call-site comments say must be read
+    /// as +∞. Two say "evidence" where the needle said "criterion"; the third
+    /// says "criterion factorization HAS" where the needle said "hit".
+    ///
+    /// The producers interpolate
+    /// [`ProbeRefusalKind::non_pd_per_row_marker`], so the phrase has one home
+    /// and cannot drift again. This test is the three-way coverage that
+    /// drift-freedom does not by itself give: that each surrounding sentence
+    /// really does carry the marker.
+    #[test]
+    fn every_per_row_producer_rendering_classifies_as_non_pd_per_row() {
+        let renderings = [
+            "SaeManifoldTerm::penalized_quasi_laplace_criterion: stationary undamped \
+             criterion factorization has a non-PD per-row H_tt block that spectral \
+             unit-stiffness deflation could not condition",
+            "SaeManifoldTerm::penalized_quasi_laplace_criterion: undamped evidence \
+             factorization hit a non-PD per-row H_tt block before KKT stationarity \
+             at an infeasible-ρ probe; returning the typed infeasible refusal \
+             without grinding the probe refinement budget",
+            "SaeManifoldTerm::penalized_quasi_laplace_criterion: undamped evidence \
+             factorization hit a non-PD per-row H_tt block before KKT stationarity \
+             and the refinement budget was exhausted",
+        ];
+        for rendering in renderings {
+            assert_eq!(
+                ProbeRefusalKind::classify(rendering),
+                Some(ProbeRefusalKind::NonPdPerRow),
+                "a per-row refusal the crate actually renders must classify as \
+                 NonPdPerRow: {rendering}"
+            );
+            assert!(
+                SaeManifoldOuterObjective::is_recoverable_value_probe_refusal(rendering),
+                "the outer optimizer must read this ρ as +∞ and steer, not abort: \
+                 {rendering}"
+            );
+            let mut telemetry = OuterProbeTelemetry::default();
+            telemetry.record_refusal_kind(rendering);
+            assert_eq!(
+                telemetry.infeasible_non_pd_per_row, 1,
+                "infeasible_non_pd_per_row counted zero of these before #2598: {rendering}"
+            );
+        }
     }
 
     /// The Schur conjunct is load-bearing and the two ladders disagreed on it:
