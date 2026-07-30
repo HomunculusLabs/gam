@@ -562,21 +562,30 @@ impl SurvivalMarginalSlopeFamily {
                     (g, h)
                 };
 
-                // The rigid third-order row tower depends on the fitted mode and
-                // row, but not on which ψ axis is contracted into it. Build it
-                // exactly once and preserve the existing per-axis contraction
-                // and reduction order below.
-                let third_tower = self.build_row_primary_third_tower(row, block_states)?;
-
-                for (axis_idx, axis) in axes.iter().enumerate() {
+                // Resolve every row-local ψ direction before entering the
+                // axis accumulation. The exact directional row algebra then packs
+                // up to four axes into one SIMD pass; lane extraction is bitwise
+                // identical to the former scalar `OneSeed` evaluation.
+                let mut psi_rows = Vec::with_capacity(k);
+                let mut directions = Vec::with_capacity(k);
+                for axis in &axes {
                     let psi_row = axis
                         .psi_map
                         .row_vector(row)
                         .map_err(|e| format!("survival rowwise psi map (batched): {e}"))?;
                     let dir =
                         primary_direction_from_psi_row(axis.block_idx, &psi_row, axis.beta_psi);
-                    let third_stack =
-                        Self::contract_row_primary_third_tower(&third_tower, dir.view())?;
+                    psi_rows.push(psi_row);
+                    directions.push(dir);
+                }
+                let third_stacks =
+                    self.row_primary_third_contracted_batch(row, block_states, &directions)?;
+
+                for axis_idx in 0..k {
+                    let axis = &axes[axis_idx];
+                    let psi_row = &psi_rows[axis_idx];
+                    let dir = &directions[axis_idx];
+                    let third_stack = &third_stacks[axis_idx];
                     let mut third = Array2::from_shape_fn(
                         (N_PRIMARY, N_PRIMARY),
                         |(a, b)| third_stack[a][b],
