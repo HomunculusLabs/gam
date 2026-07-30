@@ -19,6 +19,11 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 gam = { path = "../.." }
 gam-math = { path = "../gam-math" }
+# Normal (not dev) dependency on purpose: the `synthetic_*` pyfunctions are a
+# benchmark surface this extension exposes to `bench/`, so the fixtures behind
+# them have to be in the shipped graph. They already shipped — this only moves
+# them out of pyffi and into the crate that owns fixtures.
+gam-test-support = { path = "../gam-test-support" }
 gam-predict = { path = "../gam-predict" }
 gam-runtime = { path = "../gam-runtime" }
 # `extension-module` tells PyO3 NOT to link libpython (the host interpreter

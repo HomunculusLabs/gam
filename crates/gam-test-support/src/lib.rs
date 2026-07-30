@@ -15,6 +15,7 @@
 pub mod calibration;
 pub mod cli_harness;
 pub mod reference;
+pub mod synthetic;
 
 // `no_densify_design` (and the operator-backed fixture behind it) is a
 // linear-algebra fixture; it lives in `gam-linalg` alongside the operator traits

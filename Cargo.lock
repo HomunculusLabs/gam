@@ -3852,6 +3852,7 @@ dependencies = [
  "gam-math",
  "gam-predict",
  "gam-runtime",
+ "gam-test-support",
  "ndarray 0.17.2",
  "numpy",
  "pyo3",
