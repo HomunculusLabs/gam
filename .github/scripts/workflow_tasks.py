@@ -198,6 +198,113 @@ def check_python_deps():
     import numpy, pandas, lifelines, sksurv, xgboost
     print(f"python deps ok (scenario={scenario_name})")
 
+def _numeric_fit_sec(row):
+    """`fit_sec` as a positive float, or None if the row carries no usable time."""
+    if str(row.get("status", "")) != "ok":
+        return None
+    try:
+        value = float(row.get("fit_sec"))
+    except (TypeError, ValueError):
+        return None
+    if value <= 0.0 or value != value or value in (float("inf"), float("-inf")):
+        return None
+    return value
+
+
+def fit_sec_ratio_rows(rows):
+    """gam-vs-reference `fit_sec` ratios, one row per (gam arm, reference arm).
+
+    #2623: every shard has always recorded `fit_sec` for every contender and
+    nothing ever compared gam's against the mature reference tool's, so a
+    244x row on `papuan_oce4_duchon_k6` sat unread across three nightlies.
+    Pairing is by scenario: contenders named `rust_*` are gam's arms, every
+    other contender in the same scenario is a reference. That is deliberately
+    coarse — it pairs arms that differ in family or basis, and it pairs the
+    MCMC references (brms samples, so gam is legitimately faster there) — but
+    a coarse ratio that is PRINTED beats an exact one that is skipped. Rows
+    come back worst-first so the headline is the largest gap.
+
+    `fit_sec` is not symmetric between arms and the table says so: gam's is
+    wall-clock around the `gam fit` subprocess (process start + CSV read +
+    model JSON write included), the R arms' is `proc.time()` around the
+    fitting call alone. That asymmetry is worth well under a second per fold.
+    """
+    by_scenario = {}
+    for row in rows:
+        scenario = str(row.get("scenario_name", "unknown"))
+        by_scenario.setdefault(scenario, []).append(row)
+
+    pairs = []
+    for scenario in sorted(by_scenario):
+        scenario_rows = by_scenario[scenario]
+        gam_arms = []
+        reference_arms = []
+        for row in scenario_rows:
+            fit_sec = _numeric_fit_sec(row)
+            if fit_sec is None:
+                continue
+            contender = str(row.get("contender", "unknown"))
+            entry = (contender, fit_sec)
+            if contender.startswith("rust_"):
+                gam_arms.append(entry)
+            else:
+                reference_arms.append(entry)
+        for gam_contender, gam_fit in sorted(gam_arms):
+            for ref_contender, ref_fit in sorted(reference_arms):
+                pairs.append(
+                    {
+                        "scenario_name": scenario,
+                        "gam_contender": gam_contender,
+                        "gam_fit_sec": gam_fit,
+                        "reference_contender": ref_contender,
+                        "reference_fit_sec": ref_fit,
+                        "gam_over_reference": gam_fit / ref_fit,
+                    }
+                )
+    pairs.sort(key=lambda p: -p["gam_over_reference"])
+    return pairs
+
+
+def _fit_sec_ratio_summary_lines(pairs):
+    if not pairs:
+        return [
+            "",
+            "### gam vs reference fit time",
+            "",
+            "No scenario produced an `ok` gam arm and an `ok` reference arm with "
+            "a positive `fit_sec`, so there is no ratio to report.",
+        ]
+    worst = pairs[0]
+    lines = [
+        "",
+        "### gam vs reference fit time",
+        "",
+        (
+            f"Worst gam/reference `fit_sec` ratio: **{worst['gam_over_reference']:.1f}x** "
+            f"({worst['scenario_name']}: {worst['gam_contender']} "
+            f"{worst['gam_fit_sec']:.2f}s vs {worst['reference_contender']} "
+            f"{worst['reference_fit_sec']:.2f}s)."
+        ),
+        "",
+        (
+            "`fit_sec` is the sum over CV folds. gam's is wall-clock around the "
+            "`gam fit` subprocess; the R arms' is `proc.time()` around the fitting "
+            "call alone. Rows are worst-first; gam is expected to win against the "
+            "MCMC arms, which sample rather than optimize."
+        ),
+        "",
+        "| Scenario | gam arm | gam fit (s) | Reference | ref fit (s) | gam/ref |",
+        "|----------|---------|-------------|-----------|-------------|---------|",
+    ]
+    for pair in pairs:
+        lines.append(
+            f"| {pair['scenario_name']} | {pair['gam_contender']} | "
+            f"{pair['gam_fit_sec']:.2f} | {pair['reference_contender']} | "
+            f"{pair['reference_fit_sec']:.2f} | {pair['gam_over_reference']:.1f}x |"
+        )
+    return lines
+
+
 def format_results():
     from datetime import datetime, timezone
 
@@ -213,7 +320,13 @@ def format_results():
         status = str(row.get("status", "unknown"))
         if status == "ok":
             return "ok"
-        return f"failed: {row.get('error', 'unknown error')}"
+        # A contender's error text is multi-line and contains `|` (the fit
+        # log lines it quotes do), both of which terminate a markdown table
+        # cell — so every failed row used to shred the rest of the table it
+        # appeared in. Flatten to one cell; the full text is in the shard
+        # artifact and in `results.nightly.json`.
+        error = " ".join(str(row.get("error", "unknown error")).split())
+        return f"failed: {error.replace('|', '/')}"
 
     # Each `bench-<scenario>` shard artifact extracts to a `<scenario>.json`
     # file holding ONE shard payload of the shape `bench/run_suite.py` writes:
@@ -240,9 +353,14 @@ def format_results():
         rows.extend(payload["results"])
         shard_files += 1
 
+    ratio_pairs = fit_sec_ratio_rows(rows)
     merged = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "results": rows,
+        # #2623: carried alongside `results` (which `bench/generate_figures.py`
+        # and the dashboard read) so the speed comparison is in the published
+        # artifact, not only in a step summary that expires with the run.
+        "fit_sec_ratios": ratio_pairs,
     }
     with open("bench/results.nightly.json", "w") as f:
         json.dump(merged, f, indent=2)
@@ -274,6 +392,8 @@ def format_results():
         pred_s = fmt_num(r.get("predict_sec"), digits=2)
         lines.append(f"| {scen} | {contender} | {stat} | {fit_s} | {pred_s} |")
 
+    lines.extend(_fit_sec_ratio_summary_lines(ratio_pairs))
+
     summary = "\n".join(lines)
     print(summary)
 
@@ -281,6 +401,13 @@ def format_results():
     if step_summary:
         with open(step_summary, "a") as f:
             f.write(summary + "\n")
+
+    # Lets the figure steps distinguish "the nightly measured nothing" from
+    # "the nightly measured something" now that the job runs with failed legs.
+    step_output = os.environ.get("GITHUB_OUTPUT")
+    if step_output:
+        with open(step_output, "a") as f:
+            f.write(f"merged_rows={len(rows)}\n")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

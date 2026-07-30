@@ -545,6 +545,14 @@ jobs:
     needs:
       - bench-shard
       - bench-shard-serial
+    # #2623: the default `needs` gate refuses as soon as ONE per-scenario leg
+    # fails, and on this matrix at least one always does — so this job was
+    # `skipped` on every nightly and the `fit_sec` every shard recorded was
+    # read by nobody for months (gam was 130-480x mgcv on the joint-spatial
+    # scenarios in silence). `!cancelled()` aggregates whatever legs did
+    # succeed, while still declining to publish a cancelled run's partial
+    # numbers as if they were a verdict.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Set up Python
@@ -566,7 +574,12 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/workflow_tasks.py download_artifacts bench- bench/artifacts
 
+      # Writes `merged_rows` so the figure steps below can tell "the nightly
+      # measured nothing" (every leg failed — now reachable because the job no
+      # longer skips) from "the nightly measured something". Also emits the
+      # gam-vs-reference fit_sec ratio table into the step summary.
       - name: Merge shard JSON outputs
+        id: merge
         shell: bash
         run: |
           python3 .github/scripts/workflow_tasks.py format_results
@@ -591,6 +604,11 @@ jobs:
           files: |
             bench/results.nightly.json
       - name: Generate merged figures
+        # `success() &&` is load-bearing: a step-level `if:` REPLACES the
+        # implicit success() guard, so without it a failed merge step would
+        # still let the figure steps run (and fail again on a file the merge
+        # never wrote), burying the real error under a second one.
+        if: ${{ success() && steps.merge.outputs.merged_rows != '0' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -598,6 +616,11 @@ jobs:
           python3 bench/generate_figures.py bench/results.nightly.json bench/figures bench/figures.zip
 
       - name: Upload benchmark figures
+        # `success() &&` is load-bearing: a step-level `if:` REPLACES the
+        # implicit success() guard, so without it a failed merge step would
+        # still let the figure steps run (and fail again on a file the merge
+        # never wrote), burying the real error under a second one.
+        if: ${{ success() && steps.merge.outputs.merged_rows != '0' }}
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-figures
