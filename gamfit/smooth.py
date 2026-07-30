@@ -810,24 +810,22 @@ class PeriodicSplineCurve(Smooth):
         return int(self.n_knots)
 
     def _evaluate_torch(self, coords: Any) -> Any:
+        # No modulo reduction here: the Rust cyclic kernel wraps every input
+        # itself (`wrap_periodic_phase` -> `rem_euclid(period)` in
+        # gam_terms::basis::spline_eval_scalar), and it handles the roundoff
+        # case `t == period` that a Python `t - floor(t)` can produce.
         from ._basis_eval import _periodic_curve_basis
-        t = coords[:, 0]
-        # Reduce modulo 1 so the cyclic forward sees t ∈ [0, 1).
-        from ._basis_protocol import _torch
-        torch = _torch()
-        t_mod = t - torch.floor(t)
-        return _periodic_curve_basis(t_mod, int(self.n_knots), int(self.degree))
+
+        return _periodic_curve_basis(coords[:, 0], int(self.n_knots), int(self.degree))
 
     def _evaluate_numpy(self, coords: Any) -> Any:
         import numpy as np
 
         from ._basis_eval import periodic_curve_evaluate_numpy
 
-        coords_np = np.asarray(coords, dtype=np.float64)
-        # Match the torch path: reduce t modulo 1 before evaluating.
-        coords_np = coords_np.copy()
-        coords_np[:, 0] = coords_np[:, 0] - np.floor(coords_np[:, 0])
-        return periodic_curve_evaluate_numpy(self, coords_np)
+        return periodic_curve_evaluate_numpy(
+            self, np.asarray(coords, dtype=np.float64)
+        )
 
     def to_rust_descriptor(self) -> dict[str, Any]:
         out = super(PeriodicSplineCurve, self).to_rust_descriptor()

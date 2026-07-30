@@ -1575,6 +1575,107 @@ pub fn ipcw_brier_score(
     Some(acc / n_valid)
 }
 
+/// Per-subject scores read off a predicted survival path, from
+/// [`monotone_survival_and_hazard_scores`].
+#[derive(Clone, Debug, Default)]
+pub struct HazardPathScores {
+    /// `H(T_i) − δ_i·ln h(T_i)`: the negative log-likelihood of subject `i`
+    /// under the piecewise-constant hazard implied by its survival path.
+    pub log_losses: Vec<f64>,
+    /// `½∫₀^{T_i} h² − δ_i·h(T_i)`: a proper score for the hazard model, and
+    /// **not** a Brier score — see [`integrated_ipcw_brier_score`] for that.
+    pub hazard_quadratic_losses: Vec<f64>,
+}
+
+/// Repair a predicted survival matrix into a valid survival path, then read the
+/// per-subject hazard scores off it.
+///
+/// Each row of `raw` is clamped into `[eps, 1]`, forced non-increasing, and
+/// pinned to `1.0` in the first grid column. The piecewise-constant hazard on
+/// interval `k` is then `(H(t_{k+1}) − H(t_k)) / Δt_k` with `H = −ln S`, and
+/// each subject is scored at its own event time `T_i` — exactly on a grid point
+/// when one coincides, otherwise by linear accumulation inside the containing
+/// interval.
+///
+/// Returns the repaired matrix alongside the scores, because callers need the
+/// same repaired matrix for [`integrated_ipcw_brier_score`]; scoring a
+/// differently-repaired matrix would make the two metrics disagree about which
+/// prediction they scored.
+///
+/// `grid` must be strictly increasing with at least two points, `observed[i]`
+/// is `δ_i`, and every `event_times[i]` must be finite and positive — callers
+/// validate that, since what to do about a malformed input is theirs to decide.
+pub fn monotone_survival_and_hazard_scores(
+    raw: ArrayView2<f64>,
+    event_times: &[f64],
+    observed: &[bool],
+    grid: &[f64],
+    eps: f64,
+) -> (Array2<f64>, HazardPathScores) {
+    let mut surv = raw.to_owned();
+    for mut row in surv.rows_mut() {
+        row[0] = 1.0;
+        let mut prev = 1.0;
+        for value in row.iter_mut() {
+            *value = value.clamp(eps, 1.0).min(prev);
+            prev = *value;
+        }
+    }
+    let dt: Vec<f64> = grid.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    let cumhaz = surv.mapv(|value| -value.clamp(eps, 1.0).ln());
+    let mut haz = Array2::<f64>::zeros((surv.nrows(), surv.ncols() - 1));
+    for row in 0..surv.nrows() {
+        for col in 0..surv.ncols() - 1 {
+            haz[[row, col]] = ((cumhaz[[row, col + 1]] - cumhaz[[row, col]]) / dt[col]).max(0.0);
+        }
+    }
+    let mut haz_sq_prefix = Array2::<f64>::zeros((surv.nrows(), surv.ncols()));
+    for row in 0..surv.nrows() {
+        for col in 0..haz.ncols() {
+            haz_sq_prefix[[row, col + 1]] =
+                haz_sq_prefix[[row, col]] + haz[[row, col]] * haz[[row, col]] * dt[col];
+        }
+    }
+    let mut log_losses = vec![0.0; event_times.len()];
+    let mut hazard_quadratic_losses = vec![0.0; event_times.len()];
+    for (row, &time) in event_times.iter().enumerate() {
+        let mut j = grid.partition_point(|value| *value < time);
+        if j >= grid.len() {
+            j = grid.len() - 1;
+        }
+        let interval_idx = j.saturating_sub(1);
+        let (h_z, h2_int, hcum_z) = if (grid[j] - time).abs() <= GRID_COINCIDENCE_TOLERANCE {
+            (
+                haz[[row, interval_idx]],
+                haz_sq_prefix[[row, j]],
+                cumhaz[[row, j]],
+            )
+        } else {
+            let elapsed = time - grid[interval_idx];
+            let h = haz[[row, interval_idx]];
+            (
+                h,
+                haz_sq_prefix[[row, interval_idx]] + h * h * elapsed,
+                cumhaz[[row, interval_idx]] + h * elapsed,
+            )
+        };
+        log_losses[row] = hcum_z - if observed[row] { h_z.max(eps).ln() } else { 0.0 };
+        hazard_quadratic_losses[row] = 0.5 * h2_int - if observed[row] { h_z } else { 0.0 };
+    }
+    (
+        surv,
+        HazardPathScores {
+            log_losses,
+            hazard_quadratic_losses,
+        },
+    )
+}
+
+/// An event time this close to a grid point is treated as landing exactly on
+/// it, so the score reads the prefix sums directly instead of adding a
+/// zero-width interval correction.
+const GRID_COINCIDENCE_TOLERANCE: f64 = 1.0e-12;
+
 /// Integrated IPCW Brier score (IBS) — the time-integrated [`ipcw_brier_score`],
 /// matching scikit-survival's `integrated_brier_score` and `pec`'s integrated
 /// prediction-error curve.
