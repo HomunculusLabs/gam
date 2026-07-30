@@ -7875,20 +7875,66 @@ mod spatial_trial_recovery_tests {
 
     #[test]
     fn spatial_value_probe_classifier_matches_derivative_lane() {
-        let recoverable = EstimationError::InvalidInput(
-            "fit_result.beta_covariance_frequentist[0] must be finite, got NaN".to_string(),
-        );
-        let value = classify_spatial_value_probe_failure(recoverable)
-            .expect("a recoverable trial point must remain a domain refusal");
-        assert!(value.is_infinite() && value.is_sign_positive());
+        // The contract is an AGREEMENT: the value-probe lane must retreat to
+        // `+∞` on exactly the errors the derivative lane calls recoverable, and
+        // propagate every other error unchanged. Asserting the agreement over a
+        // table — rather than pinning one hand-picked error per outcome — is
+        // what keeps this gate honest when the producer's verdict moves.
+        //
+        // #2593 moved that verdict from the message text to the error VARIANT
+        // (`TrialPointRefused`), which is what the sibling
+        // `nonfinite_frequentist_covariance_is_recoverable_trial_point` pins.
+        // This fixture still carried the pre-#2593 premise — it built the
+        // non-finite-covariance refusal as an `InvalidInput` and demanded a
+        // retreat — so it asserted the exact opposite of its own sibling on the
+        // same input, and the two could not both hold. The table below carries
+        // both variants with the SAME prose, so the "prose cannot buy
+        // recoverability" rule is now part of this gate rather than only of the
+        // sibling's.
+        let nonfinite_covariance =
+            "fit_result.beta_covariance_frequentist[0] must be finite, got NaN";
+        let unrelated = "outer rho bounds are invalid";
+        let cases = [
+            EstimationError::TrialPointRefused {
+                reason: nonfinite_covariance.to_string(),
+            },
+            // A design that cannot be built at this trial hyperparameter — the
+            // other half of `is_recoverable_trial_point_error`'s verdict.
+            EstimationError::BasisError(gam_problem::BasisError::DegenerateRange(8)),
+            EstimationError::InvalidInput(nonfinite_covariance.to_string()),
+            EstimationError::InvalidInput(unrelated.to_string()),
+        ];
 
-        let fatal_message = "outer rho bounds are invalid";
-        let fatal = classify_spatial_value_probe_failure(EstimationError::InvalidInput(
-            fatal_message.to_string(),
-        ))
-        .expect_err("an evaluation-artifact failure must remain typed");
-        assert!(matches!(fatal, EstimationError::InvalidInput(_)));
-        assert!(fatal.to_string().contains(fatal_message));
+        for error in cases {
+            let message = error.to_string();
+            let derivative_lane_recovers = is_recoverable_trial_point_error(&error);
+            match classify_spatial_value_probe_failure(error) {
+                Ok(value) => {
+                    assert!(
+                        derivative_lane_recovers,
+                        "the value probe retreated on {message:?} while the derivative lane \
+                         calls it fatal — the two lanes must classify one error the same way"
+                    );
+                    assert!(
+                        value.is_infinite() && value.is_sign_positive(),
+                        "a domain refusal must retreat to +INFINITY so the line search steps \
+                         away from it; got {value} for {message:?}"
+                    );
+                }
+                Err(propagated) => {
+                    assert!(
+                        !derivative_lane_recovers,
+                        "the value probe propagated {message:?} while the derivative lane \
+                         calls it a recoverable trial point"
+                    );
+                    assert_eq!(
+                        propagated.to_string(),
+                        message,
+                        "a fatal failure must be propagated unchanged, not reworded"
+                    );
+                }
+            }
+        }
     }
 }
 
