@@ -1580,50 +1580,22 @@ impl<'a> RemlState<'a> {
         };
 
         let ctx = self.build_sparse_derivative_context(pirls_result, bundle)?;
-        // Sparse-exact `log|H|` is Cholesky-derived from `X'WX + S_λ + δI`,
-        // not a `PseudoLogdetMode::Smooth` eigenvalue sum, so the
-        // `(p − rank) · ln ε` floor leakage that motivated e33c06be on
-        // dense cannot occur here: Cholesky either succeeds (H is SPD,
-        // logdet sums true log-diagonals) or, when H is genuinely non-PD,
-        // `ensure_sparse_positive_definitewithridge` sets a ridge directly
-        // from a Gershgorin bound on λ_min (surfaced via `log::warn`) so the
-        // shift is provably sufficient rather than escalated blindly.
+        // Sparse-exact `log|H_δ|` is the ordinary Cholesky log determinant of
         //
-        // The analogous rank-deficiency concern — that a nonzero ridge
-        // δ would contribute `(p − rank(X'WX + S)) · log(δ)` to
-        // `logdet_h` while the combined penalty pseudo-logdet excludes that
-        // subspace from `log|ΣλS|_+` — is structurally out of reach on the
-        // backends that select sparse-exact:
+        //     H_δ(ρ) = X'W(ρ)X + S_λ(ρ) + FIXED_STABILIZATION_RIDGE · I.
         //
-        //   1. `estimate_sparse_native_decision` gates on H density, which
-        //      implies large p and typically n ≫ p (large-scale) — i.e.
-        //      `X'WX` is rank-full, so `X'WX + S` is rank-full, so
-        //      `p − rank(X'WX + S) = 0` and no leak term exists.
-        //   2. The small-n/high-dim regime that motivated e33c06be (n=120,
-        //      k=6 Duchon) is dense territory; it never chooses
-        //      `SparseNative` because the sparse density heuristic rejects
-        //      near-dense systems.
+        // Every sparse evaluation assembles that same declared matrix. It
+        // attempts one factorization and either returns its exact log
+        // determinant or refuses with `HessianNotPositiveDefinite`; the
+        // Gershgorin lower bound is diagnostic only and never selects δ
+        // (#2657). Thus δ contributes to the value exactly as assembled while
+        // `dδ/dρ = 0`, and no pseudo-logdet floor or range(S_+) projection
+        // correction belongs in this path.
         //
-        // Note that the conjunct doing the work is the RANK one, not "δ = 0".
-        // This paragraph used to close case 1 with "so `ridge_used = 0`", which
-        // is no longer true of any path: `ensure_sparse_positive_definitewithridge`
-        // applies `FIXED_STABILIZATION_RIDGE` on its FIRST rung and reports it,
-        // because a δ chosen by a Cholesky-success predicate is a function of ρ
-        // and breaks the envelope identity (#1575/#2519). The leak term is
-        // `(p − rank(X'WX + S)) · log δ`, so it vanishes whenever the rank is
-        // full, whatever δ is — which is exactly the argument above. δ > 0
-        // everywhere does not widen the exposure; only a rank-deficient
-        // sparse-native system would.
-        //
-        // No projection correction is emitted here; pass 0.0 through to
-        // `finish_assembly`.  If a future test exercise ever finds a
-        // sparse-native fit with genuine null directions of `X'WX + S`
-        // (δ > 0 is now universal and is not by itself the trigger),
-        // extend the combined penalty pseudo-logdet
-        // to include the ridge-matched null contributions (keeping both
-        // sides of the LAML ratio on the same p-dim space) rather than
-        // reintroducing the range(S_+) projection; Cholesky can't cheaply
-        // compute `U_S^T H U_S` without densifying H.
+        // This argument deliberately makes no claim about n versus p or the
+        // rank of the unstabilized Hessian. Sparse-native selection observes
+        // sparsity, not n, so a wide or rank-deficient system remains eligible;
+        // the fixed-ridge matrix is the criterion in that case as well.
         // Sparse-exact assembles β and H in the original basis (see `beta =
         // sparse_exact_beta_original`), so the envelope residual is mapped to
         // that basis. Sparse-native fits are unconstrained on this path.
