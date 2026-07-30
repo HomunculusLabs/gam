@@ -3116,7 +3116,37 @@ fn compact_fit_result_for_batch_preserves_unified_geometry_invariant() {
         pirls_status: gam::pirls::PirlsStatus::Converged,
         max_abs_eta: 0.4,
         constraint_kkt: None,
-        artifacts: Default::default(),
+        // This fixture declares two outer iterations over a non-empty smoothing
+        // vector, so it describes a fit whose outer loop RAN. Assembly then
+        // requires the analytic stationarity certificate that proves the run
+        // reached a stationary point -- a default `FitArtifacts` carries none,
+        // and the constructor correctly refuses:
+        //
+        //   outer iterations ran without an analytic stationarity certificate
+        //
+        // The values mirror the repository's canonical clean certificate in
+        // tests/identifiability/misc/certificate_ledger_unified.rs: a projected
+        // gradient far inside its bound, a solver-band rung, and measured PSD
+        // curvature.
+        artifacts: gam::estimate::FitArtifacts {
+            criterion_certificate: Some(gam::solver::rho_optimizer::OuterCriterionCertificate {
+                stationarity:
+                    gam::solver::rho_optimizer::OuterStationarityCertificate::AnalyticGradient {
+                        grad_norm: 1e-9,
+                        projected_grad_norm: 1e-9,
+                        bound: 1e-6,
+                        rung: gam::solver::rho_optimizer::CertifiedRung {
+                            label: "solver-band".to_string(),
+                            derived_standard: false,
+                        },
+                    },
+                curvature: gam::solver::rho_optimizer::CurvatureEvidence::Measured { psd: true },
+                lambdas_railed: Vec::new(),
+                railed_facts: Vec::new(),
+                curvature_floor: None,
+            }),
+            ..Default::default()
+        },
         inner_cycles: 3,
     })
     .unwrap_or_else(|e| {
@@ -5596,6 +5626,14 @@ fn saved_survival_marginal_slope_predictor_keeps_operator_backed_designs_lazy() 
     // populated; the standard-normal default matches the test's frozen
     // latent-z policy.
     payload.latent_measure = Some(LatentMeasureKind::StandardNormal);
+    // The marginal-slope saved-model invariant also requires an exact
+    // latent-score covariance before it will validate a payload. These tests
+    // exercise latent-z replay and lazy operator-backed designs, not covariance
+    // accuracy -- the z normalization under test is `latent_z_normalization`,
+    // a separate field -- so a minimal 1x1 unit covariance satisfies the
+    // invariant without standing in for anything the assertions read. Same
+    // rationale as the minimal `beta_covariance` above.
+    payload.survival_marginal_slope_score_covariance = Some(vec![vec![1.0]]);
     payload.logslope_baseline = Some(0.0);
     payload.link = Some(InverseLink::Standard(StandardLink::Probit));
     let model = SavedModel::from_payload(payload);
@@ -5789,6 +5827,14 @@ fn saved_survival_marginal_slope_prediction_replays_latent_z_normalization() {
     // test exercises latent-z normalization replay, so a standard-normal
     // measure (the frozen default) is correct.
     payload.latent_measure = Some(LatentMeasureKind::StandardNormal);
+    // The marginal-slope saved-model invariant also requires an exact
+    // latent-score covariance before it will validate a payload. These tests
+    // exercise latent-z replay and lazy operator-backed designs, not covariance
+    // accuracy -- the z normalization under test is `latent_z_normalization`,
+    // a separate field -- so a minimal 1x1 unit covariance satisfies the
+    // invariant without standing in for anything the assertions read. Same
+    // rationale as the minimal `beta_covariance` above.
+    payload.survival_marginal_slope_score_covariance = Some(vec![vec![1.0]]);
     payload.logslope_baseline = Some(0.0);
     payload.link = Some(InverseLink::Standard(StandardLink::Probit));
     let model = SavedModel::from_payload(payload);
