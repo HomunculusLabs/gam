@@ -860,3 +860,59 @@ fn seed_infeasibility_channel_is_named_2609() {
         outcome.err()
     );
 }
+
+/// #2609 — the seed verdict depends on the ORDER of the two lane calls, which is
+/// why the lane bisect could not see the failure it was built to attribute.
+///
+/// `efs_and_value_lanes_agree_on_finiteness_at_the_seed_2609` calls `eval` and
+/// then `eval_efs` on ONE objective. A finite `eval` parks a
+/// `probe_converged_handoff` at that exact ρ (bitwise match), and the next
+/// evaluation at the same ρ consumes it and opens AT the inner KKT optimum
+/// instead of re-tracing from the cold LSQ seed. So the first call can heal the
+/// second, and "both lanes agree" is then a statement about the second call's
+/// warm state rather than about the lane.
+///
+/// Startup validation (`seed_passes_startup_validation`) calls `eval_efs` on a
+/// FRESH objective with nothing parked. This measures both orders on separate
+/// objectives so the two are not the same experiment:
+///   * `A` — `eval_efs` alone, cold. This is what startup validation does.
+///   * `B` — `eval` then `eval_efs`, one objective. This is what the bisect does.
+/// If `A` is infeasible and `B` is finite, the verdict is a property of the cold
+/// EFS drive, and no conclusion about the criterion follows from `B`.
+#[test]
+fn seed_verdict_depends_on_lane_call_order_2609() {
+    let z = planted_circle_embedded(48, 6, 0.03);
+    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+
+    let (mut cold, seed_a) = objective_and_seed(z.view(), 4, Topo::Circle, mode);
+    let a_efs = cold.eval_efs(&seed_a).map(|evaluation| evaluation.cost);
+    eprintln!("[2609-order] A cold eval_efs FIRST      = {a_efs:?}");
+
+    let (mut warm, seed_b) = objective_and_seed(z.view(), 4, Topo::Circle, mode);
+    let b_value = warm.eval(&seed_b).map(|evaluation| evaluation.cost);
+    let b_efs = warm.eval_efs(&seed_b).map(|evaluation| evaluation.cost);
+    eprintln!("[2609-order] B eval THEN eval_efs       = {b_value:?} then {b_efs:?}");
+
+    let a_cost = a_efs.expect("the cold EFS lane must evaluate the seed");
+    let b_value_cost = b_value.expect("the value lane must evaluate the seed");
+    let b_efs_cost = b_efs.expect("the warmed EFS lane must evaluate the seed");
+    eprintln!(
+        "[2609-order] cold_efs_finite={} value_finite={} warmed_efs_finite={}",
+        a_cost.is_finite(),
+        b_value_cost.is_finite(),
+        b_efs_cost.is_finite()
+    );
+
+    // The property under test is that ONE ρ has ONE verdict. Whatever that
+    // verdict is, the two orders must agree: a seed the EFS lane accepts after a
+    // value probe is a seed it must accept without one, or the startup gate is
+    // deciding on call order rather than on the point.
+    assert_eq!(
+        a_cost.is_finite(),
+        b_efs_cost.is_finite(),
+        "the EFS lane's feasibility verdict at ONE seed rho depends on whether a value \
+         probe ran first: cold eval_efs = {a_cost}, eval_efs after eval = {b_efs_cost} \
+         (value lane {b_value_cost}). Startup validation takes the cold path, so the \
+         warmed reading cannot be cited about it."
+    );
+}
