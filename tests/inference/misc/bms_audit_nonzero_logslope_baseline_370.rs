@@ -39,14 +39,16 @@
 //!    fit (which runs the pre-fit audit end to end) with a *forced large nonzero
 //!    log-slope offset*, so `g_i = offset_s[i]` is guaranteed far from zero at
 //!    β=0. Each asserts the fit (a) returns a finite, nonempty coefficient
-//!    vector (no audit crash) and (b) completes well under a wall-clock bound
-//!    (no >600s hang regression).
+//!    vector (no audit crash) and (b) terminates on convergence rather than by
+//!    exhausting its configured outer x inner iteration budget (no >600s hang
+//!    regression).
 
 use gam::ResourcePolicy;
 use gam::families::bms::{BernoulliMarginalSlopeTermSpec, DeviationBlockConfig, LatentZPolicy};
 use gam::families::bms::{BmsLogslopeJacobian, BmsMarginalJacobian};
 use gam::families::custom_family::{
-    BlockEffectiveJacobian, BlockwiseFitOptions, FamilyLinearizationState,
+    BlockEffectiveJacobian, BlockwiseFitOptions, DEFAULT_CUSTOM_FAMILY_INNER_MAX_CYCLES,
+    FamilyLinearizationState,
 };
 use gam::families::survival::lognormal_kernel::FrailtySpec;
 use gam::terms::basis::{BSplineBasisSpec, BSplineKnotSpec};
@@ -64,11 +66,17 @@ use std::time::Instant;
 
 const SEED: u64 = 0x370_0BAD_BA5E_11AE;
 
-/// Generous wall-clock bound for the small (n=400) full-fit regression. The
-/// issue's reported failure was a >600s timeout; a healthy fit at this size is
-/// seconds. We bound at 240s so a genuine hang/blowup regression trips loudly
-/// while leaving ample headroom for a slow/loaded CI box.
-const FIT_WALLCLOCK_BUDGET_S: f64 = 240.0;
+/// The iteration budget the fit is CONFIGURED with (`BlockwiseFitOptions::default()`).
+/// #370's reported failure was a >600s timeout, and this file's own diagnosis of
+/// the flex variant (below) names the mechanism precisely: the fit does not spin
+/// in one unbounded loop, it *stalls* and burns the entire outer x inner budget.
+/// So "did the fit exhaust its budget?" is the exact discriminator — and unlike a
+/// wall-clock bound it measures the solver rather than the CI runner, which is
+/// why the 240s assert this replaces was a flake in both directions (a loaded
+/// shared runner fails it with the stall fixed; a fast runner passes it with the
+/// stall half back).
+const CONFIGURED_OUTER_MAX_ITER: usize = 60;
+const CONFIGURED_INNER_MAX_CYCLES: usize = DEFAULT_CUSTOM_FAMILY_INNER_MAX_CYCLES;
 
 fn erf_approx(x: f64) -> f64 {
     let a1 = 0.254829592;
@@ -236,13 +244,28 @@ fn assert_full_fit(
         "issue #370 (flex={flex}): BMS fit must produce finite coefficients, got {:?}",
         out.fit.beta
     );
-    // (b) no >600s-style hang regression: the small fit must finish well within
-    // the wall-clock budget.
+    // (b) no >600s-style hang regression. The stall signature is budget
+    // EXHAUSTION, so assert termination strictly inside the configured budget.
+    // Elapsed is printed as a profiling diagnostic only, never a pass/fail gate.
+    eprintln!(
+        "[BMS-370-WORK] flex={flex} outer_iterations={} inner_cycles={} \
+         outer_cost_evals={} elapsed_s={elapsed:.3}",
+        out.fit.outer_iterations, out.fit.inner_cycles, out.fit.outer_cost_evals,
+    );
     assert!(
-        elapsed < FIT_WALLCLOCK_BUDGET_S,
-        "issue #370 (flex={flex}): BMS audit+fit took {elapsed:.1}s, exceeding the \
-         {FIT_WALLCLOCK_BUDGET_S:.0}s budget — the pre-fit audit hang the issue \
-         reported (>600s timeout) appears to have regressed"
+        out.fit.outer_iterations < CONFIGURED_OUTER_MAX_ITER,
+        "issue #370 (flex={flex}): BMS audit+fit ran {} outer iterations, exhausting \
+         its configured {CONFIGURED_OUTER_MAX_ITER}-iteration outer budget \
+         (elapsed {elapsed:.1}s) \u{2014} the stall the issue reported as a >600s timeout \
+         appears to have regressed",
+        out.fit.outer_iterations,
+    );
+    assert!(
+        out.fit.inner_cycles < CONFIGURED_INNER_MAX_CYCLES,
+        "issue #370 (flex={flex}): BMS audit+fit ran {} inner cycles, exhausting its \
+         configured {CONFIGURED_INNER_MAX_CYCLES}-cycle inner budget (elapsed \
+         {elapsed:.1}s) \u{2014} the inner coupled solve is grinding rather than converging",
+        out.fit.inner_cycles,
     );
 }
 

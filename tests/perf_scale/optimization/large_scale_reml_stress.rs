@@ -21,7 +21,8 @@
 //!     and finite.
 //!   * 95% prediction-interval coverage on held-out samples must
 //!     exceed 0.85 across `N_COVERAGE_SIMS` independent simulations.
-//!   * Wallclock budget per fit is documented and asserted.
+//!   * Each fit must terminate on convergence, strictly inside the outer
+//!     iteration budget it was configured with.
 //!
 //! All randomness is seeded; failures are reproducible.
 
@@ -66,10 +67,18 @@ const N_COVERAGE_HOLDOUT: usize = 400;
 const K_COVERAGE: usize = 80;
 const PC_DIM_COVERAGE: usize = 4;
 
-// Wallclock ceilings (seconds). Generous on a developer box; documents
-// intent so that a regression makes itself loud.
-const WALLCLOCK_BUDGET_MAIN_SECS: f64 = 30.0 * 60.0; // 30 minutes
-const WALLCLOCK_BUDGET_PER_COVERAGE_FIT_SECS: f64 = 120.0;
+// Work ceilings. These replace the wall-clock ceilings this file used to
+// assert (1800s for the main fit, 120s per coverage fit). A wall-clock
+// assertion on a shared CI runner measures the runner, not the solver, so it
+// flakes in both directions; and the 1800s one could never fire at all,
+// because the harness SIGKILLs the target long before half an hour elapses —
+// dead code wearing the shape of a budget. What the fits are actually
+// supposed to demonstrate is that the REML outer loop CONVERGES rather than
+// grinding to its cap, and `max_iter` (the cap the fit is configured with)
+// is the machine-independent statement of exactly that. No new magic
+// constants: the ceiling is the fit's own configured budget.
+const MAIN_MAX_ITER: usize = 40;
+const COVERAGE_MAX_ITER: usize = 30;
 const NORMAL_95_TWO_SIDED_Z: f64 = 1.959_963_984_540_054;
 
 fn gaussian_identity_likelihood() -> LikelihoodSpec {
@@ -277,7 +286,7 @@ fn large_scale_reml_stress_main() {
         offset.view(),
         &spec,
         gaussian_identity_likelihood(),
-        &fit_options(40),
+        &fit_options(MAIN_MAX_ITER),
     )
     .expect("large-scale Duchon-on-PC fit should succeed");
     let elapsed = start.elapsed();
@@ -335,13 +344,15 @@ fn large_scale_reml_stress_main() {
     );
     assert!(pred_unc_mean.iter().all(|v| v.is_finite()));
 
-    // (4) Wallclock budget.
+    // (4) The outer loop converged inside its configured budget rather than
+    //     stopping because it ran out of iterations.
     assert!(
-        elapsed.as_secs_f64() < WALLCLOCK_BUDGET_MAIN_SECS,
-        "main large-scale stress fit exceeded wallclock budget: \
-         {:.1}s >= {:.1}s",
+        fitted.fit.outer_iterations < MAIN_MAX_ITER,
+        "main large-scale stress fit ran {} outer iterations, exhausting its \
+         configured {MAIN_MAX_ITER}-iteration REML budget (elapsed {:.1}s): the \
+         outer loop is grinding to its cap instead of converging",
+        fitted.fit.outer_iterations,
         elapsed.as_secs_f64(),
-        WALLCLOCK_BUDGET_MAIN_SECS,
     );
 
     eprintln!(
@@ -390,15 +401,17 @@ fn large_scale_reml_stress_coverage() {
             offset_tr.view(),
             &spec,
             gaussian_identity_likelihood(),
-            &fit_options(30),
+            &fit_options(COVERAGE_MAX_ITER),
         )
         .expect("coverage-sim Duchon-on-PC fit should succeed");
         let elapsed = start.elapsed();
         assert!(
-            elapsed.as_secs_f64() < WALLCLOCK_BUDGET_PER_COVERAGE_FIT_SECS,
-            "coverage-sim fit {sim_idx} exceeded per-fit budget: {:.1}s >= {:.1}s",
+            fitted.fit.outer_iterations < COVERAGE_MAX_ITER,
+            "coverage-sim fit {sim_idx} ran {} outer iterations, exhausting its \
+             configured {COVERAGE_MAX_ITER}-iteration REML budget (elapsed \
+             {:.1}s): the outer loop is grinding to its cap instead of converging",
+            fitted.fit.outer_iterations,
             elapsed.as_secs_f64(),
-            WALLCLOCK_BUDGET_PER_COVERAGE_FIT_SECS,
         );
         // Fit existence is the sealed convergence proof (SPEC 20).
 

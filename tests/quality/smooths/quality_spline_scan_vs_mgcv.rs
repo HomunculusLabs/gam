@@ -18,7 +18,6 @@ use gam::test_support::reference::{Column, QualityPair, pad_to, r_package_availa
 use gam::{
     FitConfig, encode_recordswith_inferred_schema, fit_spline_scan_from_formula, init_parallelism,
 };
-use std::process::Command;
 
 /// Known smooth truth (same family as the scan workflow gates): curvature-rich
 /// but well within what a cubic smoothing spline resolves at moderate n.
@@ -50,14 +49,6 @@ fn encode_xy(x: &[f64], y: &[f64]) -> gam::data::EncodedDataset {
         .map(|(a, b)| StringRecord::from(vec![a.to_string(), b.to_string()]))
         .collect();
     encode_recordswith_inferred_schema(headers, rows).expect("encode dataset")
-}
-
-/// Probe for a usable `Rscript` binary without failing the test: the spawn
-/// itself errs when the interpreter is genuinely absent. This gates ONLY the
-/// match-or-beat arm (`r_package_available` would panic on a missing binary
-/// before it could report the package as unavailable).
-fn rscript_available() -> bool {
-    Command::new("Rscript").arg("--version").output().is_ok()
 }
 
 #[test]
@@ -108,19 +99,19 @@ fn spline_scan_matches_or_beats_mgcv_on_truth_recovery() {
     );
 
     // ---- mgcv match-or-beat arm (environmental gate, honest skip) ----------
-    if !rscript_available() {
-        eprintln!(
-            "SKIP (match-or-beat arm only): Rscript is not installed; the gam-side \
-             absolute truth-recovery bar above already passed. Install R + mgcv to \
-             run the external-reference gate."
-        );
-        return;
-    }
+    // ONE gate, through the shared helper. `r_package_available` already
+    // treats a missing `Rscript` binary as "package unavailable" (it returns
+    // `false` from its own `--version` probe rather than panicking), so the
+    // extra local probe this test used to run first was justified by a claim
+    // about the helper that the helper's body contradicts — and it spelled
+    // the interpreter as a bare `Command::new("Rscript")` instead of going
+    // through `ReferenceKind::r().command()`, which is exactly the
+    // probe/runner drift the helper's own comment warns against.
     if !r_package_available("mgcv") {
         eprintln!(
-            "SKIP (match-or-beat arm only): R is present but the mgcv package is \
-             not loadable; the gam-side absolute truth-recovery bar above already \
-             passed. install.packages('mgcv') to run the external-reference gate."
+            "SKIP (match-or-beat arm only): Rscript/mgcv is not loadable; the \
+             gam-side absolute truth-recovery bar above already passed. Install \
+             R + mgcv to run the external-reference gate."
         );
         return;
     }

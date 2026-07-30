@@ -178,24 +178,20 @@ fn survival_marginal_slope_large_scale_repro_vm_exact_engages_and_converges() {
     // row work. After the Moré–Sorensen trust-region step + the
     // contracted-hook gate on the completion (the generic pairwise fallback
     // no longer fires at production scale), this structural shape converges
-    // in a handful of cycles. Assert a hard wall-clock budget so a
-    // re-introduction of the hang/grind fails loudly instead of timing out
-    // silently. The budget is deliberately generous relative to the observed
-    // sub-second fit at this size (n=400, centers=6) to stay non-flaky under
-    // CI contention while still being orders of magnitude below the old hang.
+    // in a handful of cycles.
+    //
+    // The guard below is the CYCLE COUNT, not the wall clock. This used to
+    // assert `fit_elapsed < 120s`, which measures the CI runner rather than
+    // the solver: a loaded shared runner fails it with the grind fixed, and a
+    // fast runner passes it with the grind half back. The cycle count is the
+    // quantity #979 actually reports (~1000-1200 cycles while hung vs a
+    // handful once converged), it is invariant to machine speed and load, and
+    // the budget sits an order of magnitude from both ends of that gap.
+    // Elapsed time is still printed, as a profiling diagnostic only.
     let fit_start = Instant::now();
     let outcome = fit_from_formula(&formula, &data, &config)
         .expect("large-scale survival marginal-slope fit should succeed under V+M");
     let fit_elapsed = fit_start.elapsed();
-    const SURVIVAL_MARGSLOPE_BUDGET_SECS: f64 = 120.0;
-    assert!(
-        fit_elapsed.as_secs_f64() < SURVIVAL_MARGSLOPE_BUDGET_SECS,
-        "survival marginal-slope fit took {:.1}s, exceeding the {:.0}s budget \
-         (gam#979 hang/grind regression): the structural duplicated-duchon + \
-         linkwiggle shape at n={N}, centers={CENTERS} must converge promptly",
-        fit_elapsed.as_secs_f64(),
-        SURVIVAL_MARGSLOPE_BUDGET_SECS,
-    );
 
     let result = match outcome {
         FitResult::SurvivalMarginalSlope(r) => r,
@@ -206,6 +202,28 @@ fn survival_marginal_slope_large_scale_repro_vm_exact_engages_and_converges() {
     };
 
     // Fit existence is the sealed convergence proof (SPEC 20).
+
+    // gam#979 grind guard, machine-independent: a hard ceiling on inner
+    // coupled joint-Newton cycles. The hang burned ~1000-1200 of them; the
+    // converged fit takes a handful.
+    const SURVIVAL_MARGSLOPE_CYCLE_BUDGET: usize = 120;
+    eprintln!(
+        "[SMGS-979-WORK] n={N} centers={CENTERS} inner_cycles={} outer_iterations={} \
+         outer_cost_evals={} elapsed_s={:.3}",
+        result.fit.inner_cycles,
+        result.fit.outer_iterations,
+        result.fit.outer_cost_evals,
+        fit_elapsed.as_secs_f64(),
+    );
+    assert!(
+        result.fit.inner_cycles <= SURVIVAL_MARGSLOPE_CYCLE_BUDGET,
+        "survival marginal-slope fit burned {} inner joint-Newton cycles, over the \
+         {SURVIVAL_MARGSLOPE_CYCLE_BUDGET}-cycle budget (gam#979 hang/grind \
+         regression): the structural duplicated-duchon + linkwiggle shape at \
+         n={N}, centers={CENTERS} must converge in a handful of cycles rather than \
+         by exhausting the inner budget",
+        result.fit.inner_cycles,
+    );
 
     let logs = log_sink().snapshot();
     // After T13's channel-aware Gram migration, the closed-form path
