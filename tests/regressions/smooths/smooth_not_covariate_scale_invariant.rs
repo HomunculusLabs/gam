@@ -281,7 +281,6 @@ fn tp_basis_is_exactly_translation_invariant() {
     };
     use gam::faer_ndarray::FaerCholesky;
     use gam::smooth::input_standardization::estimate_isotropic_scale;
-    use gam::terms::OriginalUnits;
     init_parallelism();
     let n = 400;
     let probes: Vec<f64> = (0..15).map(|i| 0.05 + 0.90 * (i as f64) / 14.0).collect();
@@ -302,10 +301,7 @@ fn tp_basis_is_exactly_translation_invariant() {
         let user_ls = 1.0_f64;
         let input_scale = estimate_isotropic_scale(x_train.view()).expect("isotropic scale");
         input_scale.standardize(&mut x_train);
-        // `user_ls` is the range a user would type: original covariate units.
-        let length_scale = input_scale
-            .to_standardized_units(OriginalUnits::new(user_ls))
-            .standardized_value();
+        let length_scale = input_scale.to_standardized_units(user_ls);
 
         let train_spec = ThinPlateBasisSpec {
             center_strategy: CenterStrategy::EqualMass { num_centers: 10 },
