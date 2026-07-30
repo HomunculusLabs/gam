@@ -1212,9 +1212,7 @@ pub(crate) fn build_periodic_duchon_basis_1d(
         joint_null_rotation: None,
         metadata: BasisMetadata::Duchon {
             centers,
-            // `input_scale: ONE` below; see the Duchon builder in
-            // `duchon_thinplate.rs` for why that makes this original units.
-            length_scale: spec.length_scale.map(crate::OriginalUnits::new),
+            length_scale: spec.length_scale,
             periodic: Some(vec![Some(period)]),
             power: spec.power,
             nullspace_order: effective_nullspace_order,
