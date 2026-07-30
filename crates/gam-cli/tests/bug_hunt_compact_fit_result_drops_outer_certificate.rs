@@ -33,7 +33,7 @@ fn standard_smooth_fit_saves_successfully_with_out() {
         .tempfile()
         .expect("temp output path");
 
-    let output = Command::new(gam_test_support::gam_binary!())
+    let output = Command::new(env!("CARGO_BIN_EXE_gam"))
         .arg("fit")
         .arg(fixture)
         .arg("y ~ s(x)")
