@@ -7419,8 +7419,15 @@ fn enforce_term_constraint_feasibility(
         );
         if let Some(kkt) = fit.constraint_kkt.as_ref() {
             msg.push_str(&format!(
-                "; KKT[primal={:.3e}, dual={:.3e}, comp={:.3e}, stat={:.3e}]",
-                kkt.primal_feasibility, kkt.dual_feasibility, kkt.complementarity, kkt.stationarity
+                "; KKT[primal={:.3e}, dual={:.3e}, comp={:.3e}, stat={:.3e}]{}",
+                kkt.primal_feasibility,
+                kkt.dual_feasibility,
+                kkt.complementarity,
+                kkt.stationarity,
+                // `stat` here is `‖grad − Aᵀλ‖∞`; on a refused cone projection
+                // no λ was ever computed, so say so rather than letting the
+                // number stand as a residual (#2601).
+                kkt.cone_projection_note()
             ));
         }
         return Err(EstimationError::ParameterConstraintViolation(msg));

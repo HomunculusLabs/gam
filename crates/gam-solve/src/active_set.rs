@@ -188,6 +188,35 @@ pub struct ConstraintKktDiagnostics {
     pub gradient_scale: f64,
 }
 
+impl ConstraintKktDiagnostics {
+    /// The note a rendered KKT verdict must carry when the cone projector
+    /// REFUSED instead of returning multipliers.
+    ///
+    /// `stationarity` is `‖grad − Aᵀλ‖∞`. On a refusal `λ` was never computed,
+    /// so the number reported in that slot is the raw gradient BY DEFAULT rather
+    /// than by measurement — and two failures with opposite remedies then render
+    /// identically: a computed `λ = 0` says this point is not stationary, a
+    /// refusal says nothing was projected at all.
+    ///
+    /// [`Self::cone_projection_refused`] has recorded which since #2601, and
+    /// until this accessor existed every reader of the numbers dropped it — the
+    /// outer REML gate's `ParameterConstraintViolation` and the post-fit
+    /// feasibility audit's `KKT[...]` suffix both rendered `stat` with no way to
+    /// say whether it had been projected. A flag that cannot change what anyone
+    /// sees is not a diagnostic.
+    ///
+    /// Returns the separator too, so a non-refusal contributes nothing rather
+    /// than a dangling one.
+    pub fn cone_projection_note(&self) -> &'static str {
+        if self.cone_projection_refused {
+            "; cone_projection=REFUSED (no multipliers computed: stat is the UNPROJECTED gradient, \
+             not a residual)"
+        } else {
+            ""
+        }
+    }
+}
+
 /// Inf-norm `‖g‖∞` used as the scale of the stationarity residual in the
 /// relative KKT criterion shared by the inner active-set solver and the outer
 /// validation gate (see [`ConstraintKktDiagnostics::gradient_scale`]).
@@ -5272,6 +5301,57 @@ mod tests {
             reconstructed_scaled[0],
             projected_scaled[0],
             epsilon = 1e-12
+        );
+    }
+
+    // #2601 — a cone-projection REFUSAL must be visible in what a reader is
+    // shown, not only in a field nobody rendered.
+    //
+    // `project_stationarity_residual_on_constraint_cone` returns `None` on a
+    // non-finite target, so a non-finite gradient on a fully active face drives
+    // the production diagnostic down the real refusal path. Both facts then have
+    // to hold: the flag is set, and the note that carries it into a rendered
+    // verdict is non-empty and says the residual is unprojected.
+    #[test]
+    fn a_refused_cone_projection_is_named_in_the_rendered_verdict_2601() {
+        // β on the boundary of both rows, so the face is fully active and the
+        // projector is actually reached (it is skipped on an empty face).
+        let beta = array![0.0, 0.0];
+        let constraints = LinearInequalityConstraints {
+            a: array![[1.0, 0.0], [0.0, 1.0]],
+            b: array![0.0, 0.0],
+        };
+
+        let finite = compute_constraint_kkt_diagnostics(&beta, &array![1.0, 2.0], &constraints);
+        assert!(
+            !finite.cone_projection_refused,
+            "a finite gradient on a full-rank active face must be projected, not refused"
+        );
+        assert_eq!(
+            finite.cone_projection_note(),
+            "",
+            "a projection that happened must contribute no note"
+        );
+
+        let refused =
+            compute_constraint_kkt_diagnostics(&beta, &array![f64::NAN, 2.0], &constraints);
+        assert_eq!(
+            refused.n_active, 2,
+            "the fixture must reach the projector: an empty active face skips it entirely"
+        );
+        assert!(
+            refused.cone_projection_refused,
+            "a non-finite target is one of the projector's documented refusals"
+        );
+        assert!(
+            refused.cone_projection_note().contains("REFUSED"),
+            "the rendered note must name the refusal; got {:?}",
+            refused.cone_projection_note()
+        );
+        assert!(
+            refused.cone_projection_note().contains("UNPROJECTED"),
+            "the note must say the reported stat was never projected; got {:?}",
+            refused.cone_projection_note()
         );
     }
 
