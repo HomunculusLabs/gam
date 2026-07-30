@@ -12,11 +12,9 @@
 //! log-space kernel bundles and treats non-positive signed sums as invalid rows.
 
 use crate::model_types::EstimationError;
-use crate::probability::signed_log_sum_exp;
+use crate::probability::{log1mexp_positive, signed_log_sum_exp};
 use crate::quadrature::{
-    IntegratedExpectationMode, QuadratureContext,
-    cloglog_log_survival_mu_derivative_gumbel_quadrature,
-    cloglog_log_survival_uses_gumbel_quadrature, lognormal_laplace_unit_log_term_shared,
+    IntegratedExpectationMode, QuadratureContext, lognormal_laplace_unit_log_term_shared,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -328,40 +326,7 @@ pub struct LogLognormalKernelBundle {
     /// [`Self::second_cumulant_ratio`] recover the exact part of a second
     /// difference instead of subtracting it away.
     pub log_laplace: Vec<f64>,
-    /// `σ^j · ∂_a^j K_0` in signed-log coordinates for `j = 0..=max_k`, where
-    /// `a = μ + ln m` is the SINGLE location the `k = 0` kernel depends on
-    /// (#2610), or `None` when the analytic branch does not apply.
-    ///
-    /// `K_0(m,μ,σ) = S(μ + ln m, σ)` because `m` and `μ` enter only through the
-    /// product `m·e^U`. That makes `∂_a` the one derivative the rung ladder is
-    /// built out of:
-    ///
-    /// ```text
-    /// m^k K_k = (−1)^k · ∂_a(∂_a − 1)···(∂_a − k + 1) K_0,
-    /// ```
-    ///
-    /// so a term list in the `K_k` basis and one in the `∂_a^j K_0` basis carry
-    /// the SAME information — but not the same conditioning. Reaching
-    /// `∂_a^4 K_0` through the rungs means evaluating `−mK_1 + 7m²K_2 − 6m³K_3 +
-    /// m⁴K_4`, whose summands are `O(1/σ)` while the sum is `O(1/σ^5)`; reading
-    /// it from here is one quadrature over an integrand that is already small.
-    /// The scaling by `σ^j` is what keeps every entry inside the representable
-    /// range: `∂_a^4 K_0` itself is `~1e-17` at `log σ = 7`.
-    ///
-    /// Entry `j = 0` is `log_values[0]` verbatim, so a term list that only
-    /// reaches `k = 0` evaluates bit-identically on either basis.
-    pub log_scaled_a_derivatives: Option<Vec<KernelSignedLog>>,
     pub mode: IntegratedExpectationMode,
-}
-
-/// One signed magnitude in logarithmic coordinates.
-///
-/// `sign` is exactly `-1.0`, `0.0`, or `1.0`; `log_abs` is `-∞` when and only
-/// when `sign` is zero.
-#[derive(Clone, Copy, Debug)]
-pub struct KernelSignedLog {
-    pub log_abs: f64,
-    pub sign: f64,
 }
 
 impl LogLognormalKernelBundle {
@@ -475,9 +440,6 @@ pub fn log_kernel_bundle(
         return Ok(LogLognormalKernelBundle {
             log_values,
             log_laplace,
-            // `a = μ + ln m` does not exist at `m = 0`, and it is not needed:
-            // this branch IS closed form, so no rung difference can cancel.
-            log_scaled_a_derivatives: None,
             mode: IntegratedExpectationMode::ExactClosedForm,
         });
     }
@@ -510,58 +472,11 @@ pub fn log_kernel_bundle(
         prefix += mu + (k as f64 + 0.5) * sigma2;
         shifted_mu += sigma2;
     }
-    // `log K_0` read out before the vector moves into the bundle; the loop above
-    // always pushes at least the `k = 0` rung.
-    let log_values_first = log_values[0];
     Ok(LogLognormalKernelBundle {
         log_values,
         log_laplace: log_laplace_values,
-        log_scaled_a_derivatives: log_scaled_a_derivative_tower(
-            quadctx,
-            mu + log_m,
-            sigma,
-            max_k,
-            log_values_first,
-        ),
         mode,
     })
-}
-
-/// The `σ^j ∂_a^j K_0` tower for one bundle, or `None` when it must not be used.
-///
-/// `None` is returned unless `ln S(a,σ)` is itself routed through the
-/// Gumbel-mixing quadrature. That condition is not a tuning knob: the tower is
-/// the μ-derivative of exactly that quadrature, so requesting it where the value
-/// came from a different branch would hand a consumer a derivative and a value
-/// off two different approximation surfaces. `None` also covers any entry that
-/// fails to come back as a finite signed magnitude, so a caller either gets the
-/// whole tower or falls back to the rung basis — never a partial mix.
-fn log_scaled_a_derivative_tower(
-    quadctx: &QuadratureContext,
-    a: f64,
-    sigma: f64,
-    max_k: usize,
-    log_k0: f64,
-) -> Option<Vec<KernelSignedLog>> {
-    if !cloglog_log_survival_uses_gumbel_quadrature(a, sigma) || !log_k0.is_finite() {
-        return None;
-    }
-    let mut tower = Vec::with_capacity(max_k + 1);
-    // Entry 0 is the kernel itself, taken verbatim from the value path so a
-    // `k = 0` term list evaluates identically on either basis.
-    tower.push(KernelSignedLog {
-        log_abs: log_k0,
-        sign: 1.0,
-    });
-    for order in 1..=max_k {
-        let (log_abs, sign) =
-            cloglog_log_survival_mu_derivative_gumbel_quadrature(quadctx, a, sigma, order);
-        if !(log_abs.is_finite() && (sign == 1.0 || sign == -1.0)) {
-            return None;
-        }
-        tower.push(KernelSignedLog { log_abs, sign });
-    }
-    Some(tower)
 }
 
 /// Computes the value-space derivative ratios `∂ⁿ_μ K_{k,m} / K_{k,m}`
@@ -649,6 +564,19 @@ pub struct KernelSumTerm {
     pub m: f64,
 }
 
+/// Log-mass separation below which a same-rung pair is differenced
+/// ANALYTICALLY rather than numerically (see
+/// [`LogKernelSumJet::analytic_log_mag_gap`]).
+///
+/// The two routes have opposite error behaviour in `dv`: the direct difference
+/// carries relative error `ε/|dv|`, the expansion `~dv³/24` from its first
+/// dropped order. They cross at `dv⁴ ≈ 24ε`, i.e. `dv ≈ 8e-4`. `1e-4` sits
+/// safely on the expansion's side of that crossing (`4e-14` expansion error
+/// against `2e-12` for the difference) and leaves every pair a runtime row
+/// actually forms — interval widths of order the observation scale — on the
+/// unchanged numerical path.
+const ANALYTIC_LOG_MASS_GAP_THRESHOLD: f64 = 1e-4;
+
 /// Derivatives of `log(Σ_j a_j · K_{k_j, m_j}(μ, σ))` with respect to μ.
 ///
 /// This is the workhorse for row-level log-likelihood derivatives in all
@@ -723,6 +651,95 @@ impl LogKernelSumJet {
         )
     }
 
+    /// `log|a₁K₁| − log|a₀K₀|` for a same-rung pair, without differencing two
+    /// `O(1)` logs (#2277).
+    ///
+    /// `log K_{k,m} = kμ + σ²k²/2 + Λ(v)` with `v = μ + kσ² + ln m`, so a pair
+    /// sharing `k` differs only through `dv = ln(m₁/m₀)` and the analytic
+    /// prefix. Subtracting the two assembled logs costs an ABSOLUTE `ε ≈
+    /// 2.2e-16`, hence a RELATIVE error `ε/|dv|` in the separation — `2e-4` at
+    /// `dv = 1e-12`. That is the whole of the #2277 narrow-interval failure:
+    /// the interval value is `log|a₀K₀| + log1mexp(δ) ≈ log|a₀K₀| + ln|δ|`, so
+    /// a relative error in `δ` lands as an absolute error in the value.
+    ///
+    /// Expanding `Λ` instead makes the leading order analytic:
+    ///
+    /// ```text
+    /// Λ(v₀ + dv) − Λ(v₀) = Λ'·dv + Λ''·dv²/2 + Λ'''·dv³/6 + O(dv⁴)
+    /// ```
+    ///
+    /// `Λ', Λ'', Λ'''` are exactly the μ-log-derivatives the ratio jet already
+    /// carries, because `∂_μ` and `∂_{ln m}` act identically on `Λ`; only the
+    /// `kμ` prefix distinguishes them, which is the `− kf` on the first order.
+    /// `dv` is formed as `ln1p((m₁ − m₀)/m₀)`: for nearby masses `m₁ − m₀` is
+    /// exact by Sterbenz and `ln1p` is accurate at small argument, so `dv`
+    /// keeps full RELATIVE precision where `ln m₁ − ln m₀` would not.
+    ///
+    /// Returns `None` unless the pair shares its rung, both masses are
+    /// strictly positive, and `|dv|` is inside
+    /// [`ANALYTIC_LOG_MASS_GAP_THRESHOLD`]; outside that range the direct
+    /// difference is both valid and more accurate and the caller must use it.
+    ///
+    /// LIMIT: the coefficient half, `ln|a₁| − ln|a₀|`, is still a numerical
+    /// difference. Interval censoring passes `a = ±exp(−unloaded mass)`, so a
+    /// narrow interval whose UNLOADED masses also nearly coincide reintroduces
+    /// the same amplification through that half; removing it needs the caller
+    /// to pass the unloaded masses rather than their exponentials.
+    fn analytic_log_mag_gap(
+        t0: KernelSumTerm,
+        t1: KernelSumTerm,
+        ratio0: &[f64; 5],
+    ) -> Option<f64> {
+        if t0.k != t1.k || t0.m <= 0.0 || t1.m <= 0.0 {
+            return None;
+        }
+        let dv = ((t1.m - t0.m) / t0.m).ln_1p();
+        if !dv.is_finite() || dv.abs() > ANALYTIC_LOG_MASS_GAP_THRESHOLD {
+            return None;
+        }
+        let kf = t0.k as f64;
+        let (r1, r2, r3) = (ratio0[1], ratio0[2], ratio0[3]);
+        let lambda1 = r1 - kf;
+        let lambda2 = r2 - r1 * r1;
+        let lambda3 = r3 - 3.0 * r1 * r2 + 2.0 * r1 * r1 * r1;
+        let kernel_gap = dv * (lambda1 + dv * (0.5 * lambda2 + dv * (lambda3 / 6.0)));
+        let coeff_gap = t1.coeff.abs().ln() - t0.coeff.abs().ln();
+        let delta = coeff_gap + kernel_gap;
+        if delta.is_finite() { Some(delta) } else { None }
+    }
+
+    /// Reduces `sign₀·e^{L₀} + sign₁·e^{L₀+δ}` to `(log|u|, sign(u))` for
+    /// `u = sign₀ + sign₁·e^δ`, so the pair's magnitude is `L₀ + log|u|`.
+    ///
+    /// The opposite-sign branch is where cancellation lives and it is exactly
+    /// `log|1 − e^δ|`, i.e. Måchler's `log1mexp` on `|δ|`, which is accurate
+    /// across the whole range of `δ` PROVIDED `δ` is itself accurate. That
+    /// proviso is why [`Self::analytic_log_mag_gap`] exists.
+    ///
+    /// Returns `None` when either sign is zero (nothing cancels; the general
+    /// path already drops a zero term correctly) or when the sum vanishes.
+    fn reduce_signed_pair(sign0: f64, sign1: f64, delta: f64) -> Option<(f64, f64)> {
+        if sign0 == 0.0 || sign1 == 0.0 || !delta.is_finite() {
+            return None;
+        }
+        if sign0 * sign1 > 0.0 {
+            // No cancellation; factor out whichever exponential is larger.
+            let log_u = if delta > 0.0 {
+                delta + (-delta).exp().ln_1p()
+            } else {
+                delta.exp().ln_1p()
+            };
+            Some((log_u, sign0.signum()))
+        } else if delta == 0.0 {
+            // Exact cancellation: the signed sum is zero, not a small positive.
+            None
+        } else {
+            // |1 − e^δ| = e^{max(δ,0)}·(1 − e^{−|δ|}).
+            let log_u = delta.max(0.0) + log1mexp_positive(delta.abs());
+            Some((log_u, sign0.signum() * -delta.signum()))
+        }
+    }
+
     fn evaluate_two_terms(
         quadctx: &QuadratureContext,
         t0: KernelSumTerm,
@@ -746,13 +763,31 @@ impl LogKernelSumJet {
         let (log_mag1, ratio1) = Self::term_log_mag_and_ratio(bundle1, t1);
         let log_mags = [log_mag0, log_mag1];
         let signs = [t0.coeff.signum(), t1.coeff.signum()];
-        let (log_s, sign_s) = signed_log_sum_exp(&log_mags, &signs);
+
+        // Narrow same-rung pairs go through the analytic separation; everything
+        // else keeps the general signed reduction, including the infinite
+        // log-magnitudes only `signed_log_sum_exp` resolves.
+        let analytic = if log_mag0.is_finite() && log_mag1.is_finite() {
+            Self::analytic_log_mag_gap(t0, t1, &ratio0).and_then(|delta| {
+                Self::reduce_signed_pair(signs[0], signs[1], delta)
+                    .map(|(log_u, sign_u)| (log_u, sign_u, delta))
+            })
+        } else {
+            None
+        };
+        let (log_s, sign_s, log_w0, log_w1) = match analytic {
+            Some((log_u, sign_u, delta)) => (log_mag0 + log_u, sign_u, -log_u, delta - log_u),
+            None => {
+                let (log_s, sign_s) = signed_log_sum_exp(&log_mags, &signs);
+                (log_s, sign_s, log_mag0 - log_s, log_mag1 - log_s)
+            }
+        };
         if !log_s.is_finite() || sign_s <= 0.0 {
             return Ok(Self::non_positive(overall_mode));
         }
 
-        let w0 = sign_s * signs[0] * (log_mag0 - log_s).exp();
-        let w1 = sign_s * signs[1] * (log_mag1 - log_s).exp();
+        let w0 = sign_s * signs[0] * log_w0.exp();
+        let w1 = sign_s * signs[1] * log_w1.exp();
         let wr1 = w0 * ratio0[1] + w1 * ratio1[1];
         let wr2 = w0 * ratio0[2] + w1 * ratio1[2];
         let wr3 = w0 * ratio0[3] + w1 * ratio1[3];
@@ -1741,54 +1776,92 @@ mod tests {
     fn survival_narrow_interval_is_log_domain_stable_issue_2277() {
         let ctx = QuadratureContext::new();
         let (mu, sigma, m_l) = (0.0_f64, 0.6_f64, 1.0_f64);
-        let ll = |gap: f64| {
-            let row = LatentSurvivalRow::interval_censored(0.0, m_l, m_l + gap, 0.0, 0.0, 0.0);
-            LatentSurvivalRowJet::evaluate(&ctx, &row, mu, sigma)
+        // Returns the row log-likelihood together with the interval width the
+        // row ACTUALLY holds.
+        //
+        // A nominal gap this narrow is not representable as `m_l + gap`: the
+        // double spacing at 1.0 is 2.22e-16, so `1e-12` is 4504.5 ulps and the
+        // constructed right mass carries the ROUNDED width — up to 1.1e-4
+        // relative away from the nominal one, and 1.1e-2 at `1e-14`. Asserting
+        // `ll(g1) − ll(g2) = ln(g1_nominal/g2_nominal)` therefore charges the
+        // kernel arithmetic for the fixture's own quantization. The law is
+        // `ll = const + log Δ` in the width the row was built with, so that is
+        // what it is asserted against.
+        let ll_and_width = |gap: f64| -> (f64, f64) {
+            let m_r = m_l + gap;
+            let row = LatentSurvivalRow::interval_censored(0.0, m_l, m_r, 0.0, 0.0, 0.0);
+            let log_lik = LatentSurvivalRowJet::evaluate(&ctx, &row, mu, sigma)
                 .unwrap()
-                .log_lik
+                .log_lik;
+            (log_lik, m_r - m_l)
         };
-        // REPRESENTABILITY and ACCURACY are different claims, and the two-term
-        // path delivers only the first at an arbitrarily narrow gap. This fixture
-        // asserted both at a gap where only one holds.
+        // REPRESENTABILITY and ACCURACY are different claims, and a previous
+        // revision of this fixture correctly observed that the differenced
+        // two-term path delivered only the first at an arbitrarily narrow gap:
+        // `evaluate_two_terms` subtracted two INDEPENDENTLY evaluated
+        // log-kernels, cancelling as many digits as a probability-space
+        // `S(L) − S(R)` would, so at `Δ = 1e-12` the separation carried ~2e-4
+        // RELATIVE error. It therefore narrowed the law to `(1e-6, 1e-9)` and
+        // kept only finiteness at `1e-12`.
         //
-        // `LogKernelSumJet::evaluate_two_terms` forms the interval mass as
-        // `signed_log_sum_exp([log K(M_L), log K(M_R)], [+1, -1])` -- it subtracts
-        // two INDEPENDENTLY evaluated log-kernels, so it cancels exactly as many
-        // digits as a probability-space `S(L) - S(R)` would. With `|log K| ~ 0.4`
-        // the roundoff on each operand is ~1e-16, so at `delta = 1e-12` the
-        // log-difference is ~5e-13 and carries ~2e-4 RELATIVE error -- about 20x
-        // the tolerance below. The `log delta` law is simply not pinnable there.
-        //
-        // What the log domain DOES buy is that the row stays FINITE where the
-        // probability-space subtraction underflows to exactly zero and
-        // `log 0 = -inf` destroys it. So the finiteness claim is asserted at the
-        // extreme gap, where it is the whole point, and the `log delta` law is
-        // asserted across three decades where the arithmetic can carry it: at
-        // `1e-9` the cancellation error is ~2e-7, and the neglected curvature term
-        // `log(1 - (S''/2S')*delta)` at `1e-6` is ~5e-7 -- both well inside 1e-5.
+        // `analytic_log_mag_gap` removes that subtraction — the separation is now
+        // a Taylor expansion of `Λ` in `dv = ln(M_R/M_L)`, whose leading order is
+        // analytic — so both claims hold at the extreme gap and the original
+        // `(1e-8, 1e-12)` pair is restored below. Finiteness is still asserted
+        // separately at `1e-12`, because it is a different property from the law
+        // and is the one the log domain buys on its own.
         assert!(
-            ll(1e-12).is_finite(),
+            ll_and_width(1e-12).0.is_finite(),
             "narrow-interval log-lik must stay finite at the extreme gap: {}",
-            ll(1e-12)
+            ll_and_width(1e-12).0
         );
-        let (g1, g2) = (1e-6_f64, 1e-9_f64);
-        let ll1 = ll(g1);
-        let ll2 = ll(g2);
+        let (ll1, width1) = ll_and_width(1e-8);
+        let (ll2, width2) = ll_and_width(1e-12);
         assert!(
             ll1.is_finite() && ll2.is_finite(),
             "narrow-interval log-lik must stay finite: ll1={ll1}, ll2={ll2}"
         );
-        // const + log Δ ⇒ ll(g1) − ll(g2) = log(g1/g2), independent of the
+        // const + log Δ ⇒ ll(Δ₁) − ll(Δ₂) = log(Δ₁/Δ₂), independent of the
         // shared const a probability-space subtraction would destroy here.
-        let expected = (g1 / g2).ln();
+        let expected = (width1 / width2).ln();
         assert!(
             (ll1 - ll2 - expected).abs() < 1e-5,
             "narrow interval must follow the log-domain log(Δ) law: \
-             ll(g1)-ll(g2)={}, expected {expected}",
+             ll(Δ₁)-ll(Δ₂)={}, expected {expected} (Δ₁={width1:e}, Δ₂={width2:e})",
             ll1 - ll2
         );
-    }
 
+        // The law is asserted over a LADDER, not one pair, because the failure
+        // mode it guards is an accuracy loss `∝ 1/Δ`: a single pair cannot tell
+        // "accurate everywhere" from "accurate at one point". The differenced
+        // form missed the pair above by 2.2557e-4 — 22× the tolerance — and the
+        // miss GREW as the gap shrank.
+        //
+        // `ll(Δ) = const + log Δ + O(Δ)`; the `O(Δ)` remainder is real, from the
+        // curvature of `log1mexp` and of `ln1p(Δ/M_L)`, with a coefficient set
+        // by `Λ''/Λ'` at this `(μ, σ, m)`. The bound is therefore an `O(Δ)` term
+        // with a deliberately generous constant PLUS a floor. The floor is the
+        // claim that matters: at `Δ = 1e-14` the bound is `1e-9`, five orders
+        // below what the differenced formulation delivered, so it asserts that
+        // the accuracy does not degrade as `1/Δ`.
+        let mut gap = 1e-6_f64;
+        let (mut previous, mut previous_width) = ll_and_width(gap);
+        while gap > 1e-13 {
+            let next_gap = gap * 1e-2;
+            let (next, next_width) = ll_and_width(next_gap);
+            let step_expected = (previous_width / next_width).ln();
+            let residual = previous - next - step_expected;
+            assert!(
+                residual.abs() < 1e-9 + 100.0 * gap,
+                "log(Δ) law must hold at every rung: Δ {previous_width:e}->{next_width:e} \
+                 gave {}, expected {step_expected}, residual {residual:e}",
+                previous - next
+            );
+            gap = next_gap;
+            previous = next;
+            previous_width = next_width;
+        }
+    }
     #[test]
     fn survival_interval_censored_neg_hessian_fd() {
         // Second μ-derivative of ℓ = log[S(L) − S(R)] for the interval kernel,
