@@ -373,10 +373,25 @@ impl NoiseModel {
                 // with φ = 1.0 regardless of the data — nearly uniform on (0,1),
                 // ~20× too much variance — even though the fit estimated φ and
                 // the caller forwarded it here.
+                // The fallback the paragraph above PROMISES, now actually wired.
+                // The arm bound `Beta { .. }`, discarded the seed, and handed a
+                // bare `None` to a helper that hard-errors on it -- so fit-free
+                // Beta construction was impossible rather than merely unfitted,
+                // and the documented behaviour existed only in the comment.
+                // `LikelihoodSpec::fixed_dispersion()` already returns exactly
+                // `Some(phi)` for Beta; it was simply never called here.
+                //
+                // This cannot re-open #770. The fitted route reaches this
+                // function only through `family_noise_parameter`, which refuses
+                // unresolved Beta scale metadata outright, so a `None` arriving
+                // here means "no fit happened", never "the fit's phi went
+                // missing". And a SUPPLIED dispersion still wins: `or_else` only
+                // fires when nothing was handed in, so the seed can never
+                // override a caller's value, including a bad one.
                 let phi = Self::require_positive_noise_parameter(
                     likelihood,
                     "beta-regression phi",
-                    gaussian_scale,
+                    gaussian_scale.or_else(|| likelihood.fixed_dispersion()),
                 )?;
                 Ok(NoiseModel::Beta {
                     phi: Array1::from_elem(nobs, phi),
