@@ -115,6 +115,41 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
     exit 7
   fi
 
+  # ADDITIONS need the same guard, for a failure that is the mirror image and
+  # strictly harder to notice.
+  #
+  # This script reads file CONTENT from the SHARED working tree, and that tree
+  # carries other lanes' uncommitted work -- measured today: 100 dirty paths,
+  # with one file sitting at +438/-202 against origin/main including a whole
+  # trace facility that exists nowhere in the history. A lane landing a
+  # five-line fix to that path would have published all of it, sight unseen,
+  # under its own commit message.
+  #
+  # The deletion guard cannot see this: adding someone else's in-flight lines is
+  # not a deletion. And unlike a revert it produces no conflict and no red test
+  # -- it just silently attributes unfinished work to whoever landed next.
+  #
+  # Same numeric-confirmation design as above: "I expect 5" must not wave
+  # through 438.
+  ADDED_COUNT=$(git diff "$BASE" "$COMMIT" -- "$@" | grep -c '^+[^+]' || true)
+  LAND_ADD_THRESHOLD=${LAND_ADD_THRESHOLD:-60}
+  if [ "$ADDED_COUNT" -gt "$LAND_ADD_THRESHOLD" ] \
+     && [ "${LAND_EXPECT_ADDED:--1}" != "$ADDED_COUNT" ]; then
+    echo "REFUSING: this would ADD $ADDED_COUNT line(s), above the $LAND_ADD_THRESHOLD-line threshold." >&2
+    echo "The shared working tree carries other lanes' uncommitted work, so a large" >&2
+    echo "addition may not all be yours. Check what you are actually publishing:" >&2
+    echo >&2
+    echo "    git diff origin/main -- $*" >&2
+    echo >&2
+    if [ "${LAND_EXPECT_ADDED:--1}" != "-1" ]; then
+      echo "You said LAND_EXPECT_ADDED=${LAND_EXPECT_ADDED}, but the commit adds $ADDED_COUNT." >&2
+      echo "That mismatch is the warning: the file holds more than you wrote." >&2
+    else
+      echo "If every added line is yours, re-run with LAND_EXPECT_ADDED=$ADDED_COUNT." >&2
+    fi
+    exit 8
+  fi
+
   if git push -q origin "$COMMIT:main" 2>/dev/null; then
     git fetch -q origin main
     if [ "$(git rev-parse origin/main)" = "$COMMIT" ]; then
