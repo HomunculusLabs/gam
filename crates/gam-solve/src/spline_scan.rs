@@ -2030,7 +2030,15 @@ struct Zonotope<const N: usize> {
 
 impl<const N: usize> Zonotope<N> {
     fn zeroed(dim: usize) -> Self {
-        debug_assert!(dim <= N);
+        // `N` is the array capacity and `dim` indexes into it, so a `dim > N`
+        // is an out-of-bounds every loop in this file would then commit. A
+        // `debug_assert!` compiles to nothing in the release profile the
+        // scan actually ships in, which is precisely where the bound stops
+        // being checked by anything else -- hence the workspace ban.
+        assert!(
+            dim <= N,
+            "zonotope dim {dim} exceeds its capacity {N}"
+        );
         Self {
             center: [0.0; N],
             generators: Vec::new(),
