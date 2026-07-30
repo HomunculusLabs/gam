@@ -417,6 +417,20 @@ fn firth_can_rescue(error: &gam_solve::estimate::EstimationError) -> bool {
         )
 }
 
+/// Whether an automatic Firth retry can use the same outer-coordinate model as
+/// the failed base fit.
+///
+/// Optimized SAS and mixture links append link-parameter coordinates to the
+/// REML problem. The Firth outer derivative does not define those coordinates,
+/// so the solver rejects that combination before evaluating its seed. Decline
+/// the rescue here, where the configuration is already known, instead of
+/// launching a retry that is statically incapable of producing a fit (#2654).
+fn firth_rescue_has_compatible_outer_coordinates(
+    options: &gam_solve::estimate::FitOptions,
+) -> bool {
+    !options.optimize_mixture && !options.optimize_sas
+}
+
 fn certified_retry_or_original<T, E>(original: E, retry: Result<T, E>) -> Result<T, E> {
     match retry {
         Ok(value) => Ok(value),
@@ -473,12 +487,13 @@ fn rescale_influence_coordinates(matrix: &mut Array2<f64>, factors: &[f64]) {
 #[cfg(test)]
 mod standard_convergence_gate_tests {
     use super::{
-        certified_retry_or_original, firth_can_rescue, rescale_covariance_coordinates,
+        certified_retry_or_original, firth_can_rescue,
+        firth_rescue_has_compatible_outer_coordinates, rescale_covariance_coordinates,
         rescale_precision_coordinates, survival_baseline_parameter_checkpoint,
         survival_pirls_status_is_certified,
     };
     use crate::survival::construction::{SurvivalBaselineConfig, SurvivalBaselineTarget};
-    use gam_solve::estimate::EstimationError;
+    use gam_solve::estimate::{EstimationError, FitOptions};
     use gam_solve::pirls::PirlsStatus;
     use ndarray::array;
 
@@ -554,6 +569,24 @@ mod standard_convergence_gate_tests {
         assert!(!firth_can_rescue(&EstimationError::InvalidInput(
             "structural mismatch".to_string()
         )));
+    }
+
+    #[test]
+    fn firth_retry_declines_every_link_parameter_outer_problem() {
+        let ordinary = FitOptions::default();
+        assert!(firth_rescue_has_compatible_outer_coordinates(&ordinary));
+
+        let sas = FitOptions {
+            optimize_sas: true,
+            ..ordinary.clone()
+        };
+        assert!(!firth_rescue_has_compatible_outer_coordinates(&sas));
+
+        let mixture = FitOptions {
+            optimize_mixture: true,
+            ..ordinary
+        };
+        assert!(!firth_rescue_has_compatible_outer_coordinates(&mixture));
     }
 }
 
@@ -794,10 +827,9 @@ pub(crate) fn fit_standard_model(
     // the retry itself carries both inner and outer convergence certificates. If
     // the retry fails, return the ORIGINAL base error unchanged; a failed rescue
     // can never replace its evidence or mint the abandoned base iterate.
-    // Structural errors are not Firth-retryable, and links without a Fisher-weight
-    // jet fall straight through to the original error (arming Firth on them would
-    // itself be rejected, then reduced back to the original error by
-    // `certified_retry_or_original`).
+    // Structural errors and link-parameter outer problems are not
+    // Firth-retryable. The latter are declined before solving because the Firth
+    // outer derivative does not define their appended link coordinates (#2654).
     let is_firth_capable_binomial = request.family.supports_firth();
     let base = fit_standard_base(&request, &request.family, &request.options);
     let fitted = match base {
@@ -805,6 +837,7 @@ pub(crate) fn fit_standard_model(
         Err(original_error)
             if is_firth_capable_binomial
                 && !request.options.firth_bias_reduction
+                && firth_rescue_has_compatible_outer_coordinates(&request.options)
                 && firth_can_rescue(&original_error) =>
         {
             let original_report = original_error.to_string();
