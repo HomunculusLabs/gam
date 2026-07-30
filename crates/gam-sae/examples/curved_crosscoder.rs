@@ -580,29 +580,6 @@ fn parse_npy_header(
     Ok((dims[0], dims[1], elem, is_f4, data_off))
 }
 
-fn f16_to_f32(h: u16) -> f32 {
-    let sign = (h >> 15) & 0x1;
-    let exp = (h >> 10) & 0x1f;
-    let mant = h & 0x3ff;
-    let bits = if exp == 0 {
-        if mant == 0 {
-            (sign as u32) << 31
-        } else {
-            let mut m = mant as u32;
-            let mut e: i32 = -1;
-            while (m & 0x400) == 0 {
-                m <<= 1;
-                e -= 1;
-            }
-            m &= 0x3ff;
-            let exp32 = (127 - 15 + 1 + e) as u32;
-            ((sign as u32) << 31) | (exp32 << 23) | (m << 13)
-        }
-    } else if exp == 0x1f {
-        ((sign as u32) << 31) | (0xff << 23) | ((mant as u32) << 13)
-    } else {
-        let exp32 = (exp as i32 - 15 + 127) as u32;
-        ((sign as u32) << 31) | (exp32 << 23) | ((mant as u32) << 13)
-    };
-    f32::from_bits(bits)
-}
+#[path = "support/f16.rs"]
+mod f16;
+use f16::f16_to_f32;
