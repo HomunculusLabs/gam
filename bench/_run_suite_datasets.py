@@ -1301,7 +1301,7 @@ def _geo_disease_eas_scenario_cfg(name: typing.Any) -> typing.Any:
             "n_pcs": n_pcs,
         }
     return {
-        "smooth_basis": "ps",
+        "smooth_basis": _psperpc_declared_basis(),
         "smooth_cols": [f"pc{i}" for i in range(1, n_pcs + 1)],
         "linear_cols": [],
         "knots": knots,
@@ -1337,6 +1337,33 @@ def _fixed_joint_spatial_pc_count(family: str, n_pcs: int) -> int:
     raise RuntimeError(f"unsupported joint spatial benchmark family: {family}")
 
 
+def _psperpc_declared_basis() -> str:
+    """The basis a `psperpc` scenario over PC columns is ACTUALLY fitted with.
+
+    #2623: these scenarios were added to measure the additive per-PC P-spline
+    route, and they used to declare `smooth_basis: "ps"` to say so. But the
+    joint-PC contract (see `_run_suite_formulas.py`) routes every set of 2+
+    PC-named smooth columns through a single multi-D smooth, and sends a 1D-only
+    request like `ps` to `duchon` — for BOTH the rust and the mgcv arm. So the
+    declared `ps` was never what ran: the recorded rust `model_spec` for
+    `papuan_oce4_psperpc_k6` was `duchon(pc1..pc4, centers=6, ...)`, identical to
+    the `papuan_oce4_duchon_k6` arm.
+
+    Declaring the real basis costs nothing and fixes two things the stale `ps`
+    broke. `_assert_basis_parity_for_scenario` only inspects scenarios whose
+    declared basis is duchon/matern, so these 19 scenarios had NO parity guard;
+    and the mgcv `k` picked up the P-spline `+4` bump, so mgcv was fitting `k=10`
+    against the rust arm's `centers=6`.
+
+    It does NOT make these scenarios measure per-PC P-splines — under the
+    joint-PC contract that is unreachable for PC-named columns by construction,
+    and each `*_psperpc_k*` leg is now an explicit duplicate of the
+    corresponding `*_duchon_k*` leg. Retiring or re-pointing them is a coverage
+    decision, not a formula bug.
+    """
+    return "duchon"
+
+
 def _papuan_oce_scenario_cfg(name: typing.Any) -> typing.Any:
     m = re.match(r"^papuan_oce(4)?_(tp|duchon|matern|psperpc)_k([0-9]+)$", str(name))
     if m is None:
@@ -1347,7 +1374,7 @@ def _papuan_oce_scenario_cfg(name: typing.Any) -> typing.Any:
     n_pcs = 4 if is_four_pc else 16
     if basis_code == "psperpc":
         return {
-            "smooth_basis": "ps",
+            "smooth_basis": _psperpc_declared_basis(),
             "smooth_cols": [f"pc{i}" for i in range(1, n_pcs + 1)],
             "linear_cols": [],
             "knots": knots,
@@ -1379,7 +1406,7 @@ def _geo_subpop16_scenario_cfg(name: typing.Any) -> typing.Any:
     knots = max(4, int(m.group(2)))
     if basis_code == "psperpc":
         return {
-            "smooth_basis": "ps",
+            "smooth_basis": _psperpc_declared_basis(),
             "smooth_cols": [f"pc{i}" for i in range(1, 17)],
             "linear_cols": [],
             "knots": knots,
@@ -1408,7 +1435,7 @@ def _geo_latlon_scenario_cfg(name: typing.Any) -> typing.Any:
     if basis_code == "psperpc":
         return {
             "mode_code": mode_code,
-            "smooth_basis": "ps",
+            "smooth_basis": _psperpc_declared_basis(),
             "smooth_cols": [f"pc{i}" for i in range(1, 7)],
             "linear_cols": [],
             "knots": knots,

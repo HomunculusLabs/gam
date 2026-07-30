@@ -682,7 +682,18 @@ def _mgcv_formula_for_scenario(scenario_name: typing.Any, ds: typing.Any) -> typ
         pc_smooth_cols, other_smooth_cols = _split_pc_columns(smooth_cols)
         if len(pc_smooth_cols) >= 2:
             pc_basis = _joint_pc_basis(basis)
-            terms.append(_mgcv_joint_spatial_term(pc_basis, pc_smooth_cols, k_val))
+            # #2623: pass the UNBUMPED knot count. `k_val` adds the P-spline
+            # `+4` knots->basis-dimension conversion, which is meaningless once
+            # the joint-PC router has replaced `ps` with a radial-basis smooth
+            # whose `k` is the same centre count the rust arm passes verbatim.
+            # Leaving the bump in gave every `psperpc` scenario mgcv `k=10`
+            # against rust `centers=6` — mgcv fitting a strictly richer basis
+            # than the arm it is benchmarked against — and no guard caught it,
+            # because the parity check only inspects scenarios whose DECLARED
+            # basis is duchon/matern. `_mgcv_joint_spatial_term` only ever
+            # emits `tp`/`ds`/`gp`, for none of which the bump applies, so
+            # `knot_count` is right here for every declared basis.
+            terms.append(_mgcv_joint_spatial_term(pc_basis, pc_smooth_cols, knot_count))
         elif len(pc_smooth_cols) == 1:
             other_smooth_cols = pc_smooth_cols + other_smooth_cols
             pc_smooth_cols = []
