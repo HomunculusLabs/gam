@@ -25,11 +25,22 @@ macro_rules! gam_binary {
 }
 
 /// Runtime resolver backing the [`gam_binary!`] macro. `compiled_in` is the
-/// call site's compile-time `CARGO_BIN_EXE_gam` (honored when present, e.g. if a
-/// future refactor moves the bin back into this package).
+/// call site's compile-time `CARGO_BIN_EXE_gam`, honored only when it still
+/// names an existing file (e.g. `gam-cli`'s own integration tests, which do
+/// receive it because the `[[bin]]` lives in their package).
 pub fn resolve_gam_binary(compiled_in: Option<&str>) -> PathBuf {
+    // `CARGO_BIN_EXE_<name>` is an ABSOLUTE path baked in at compile time. Under
+    // `cargo nextest archive` the compile happens in one job and the run happens
+    // on a different runner that extracted the archive and never built
+    // `target/<profile>/gam`, so the baked path names a file that does not exist
+    // and every spawn fails with `NotFound`. Probing it first costs one
+    // `is_file()` and loses nothing: the runtime resolution below finds the same
+    // binary whenever the compile-time path is valid.
     if let Some(path) = compiled_in {
-        return PathBuf::from(path);
+        let compiled = PathBuf::from(path);
+        if compiled.is_file() {
+            return compiled;
+        }
     }
 
     // Preferred: the binary that matches the profile this test was built under.

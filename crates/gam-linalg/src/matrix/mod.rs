@@ -7181,6 +7181,12 @@ mod tests {
         });
         let design = DenseDesignMatrix::from(Arc::clone(&op));
 
+        // `to_dense_arc` on a lazy operator routes through
+        // `LazyDense::try_governed_dense_arc`, which charges the
+        // process-global ledger and `panic_any`s on refusal; see
+        // `LEDGER_PRESSURE`.
+        let ledger = ledger_read_guard();
+        assert_eq!(*ledger, (), "ledger read guard is held for this test");
         let dense = design.to_dense_arc();
 
         assert_eq!(dense.dim(), (n, p));
@@ -7235,6 +7241,11 @@ mod tests {
         });
         let design = DesignMatrix::Dense(DenseDesignMatrix::from(Arc::clone(&op)));
 
+        // The governed arm charges the process-global ledger before it
+        // streams any row chunk, so a concurrent ledger filler turns
+        // the admission below into a refusal; see `LEDGER_PRESSURE`.
+        let ledger = ledger_read_guard();
+        assert_eq!(*ledger, (), "ledger read guard is held for this test");
         let dense = design
             .try_to_dense_governed("governed dense regression")
             .expect("small governed materialization");

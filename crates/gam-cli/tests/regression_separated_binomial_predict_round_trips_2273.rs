@@ -55,7 +55,7 @@ fn exact_separation_binomial_fit_saves_and_predicts_after_reload() {
         .tempfile()
         .expect("temp model path");
 
-    let fit = Command::new(env!("CARGO_BIN_EXE_gam"))
+    let fit = Command::new(gam_test_support::gam_binary!())
         .arg("fit")
         .arg(fixture)
         .arg("y ~ x")
@@ -87,7 +87,7 @@ fn exact_separation_binomial_fit_saves_and_predicts_after_reload() {
         .suffix(".csv")
         .tempfile()
         .expect("temp predictions path");
-    let predict = Command::new(env!("CARGO_BIN_EXE_gam"))
+    let predict = Command::new(gam_test_support::gam_binary!())
         .arg("predict")
         .arg(model.path())
         .arg(grid.path())
@@ -103,7 +103,7 @@ fn exact_separation_binomial_fit_saves_and_predicts_after_reload() {
         tail(&predict.stderr)
     );
 
-    let report = Command::new(env!("CARGO_BIN_EXE_gam"))
+    let report = Command::new(gam_test_support::gam_binary!())
         .arg("report")
         .arg(model.path())
         .arg(fixture)
