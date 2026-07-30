@@ -1290,6 +1290,19 @@ pub struct StreamingArrowSchur {
     /// `d_i ≪ K`, this is the per-row sparse apply that replaces the `O(K)`
     /// column-probe in the streaming reduced-Schur accumulation.
     pub(crate) htbeta_transpose_matvec: Option<RowHtbetaTransposeMatvec>,
+    /// Mirror of [`ArrowSchurSystem::htbeta_dense_supplement`]: the per-row
+    /// `row.htbeta` slab carries a dense contribution that must be ADDED on top
+    /// of the matrix-free operator, not used instead of it.
+    ///
+    /// This flag existed only on the dense system, which is what made #2509's
+    /// symptom possible: `from_system` zeroed every `row.htbeta` whenever an
+    /// operator was installed, so a caller that wrote a correction into the slab
+    /// and set the flag got a streaming lane that silently priced the
+    /// UNCORRECTED operator — no error, no shape mismatch, just a different
+    /// number from the dense lane. The dense helpers gate on
+    /// `htbeta_dense_supplement || htbeta_matvec.is_none()`; the streaming lane
+    /// had no way to ask the question at all.
+    pub(crate) htbeta_dense_supplement: bool,
     /// Whether streaming rows are being factored for undamped evidence rather
     /// than for a Newton step. Defaults to `false` so direct chunk callers keep
     /// the full step-accuracy guard.
@@ -1347,6 +1360,7 @@ impl StreamingArrowSchur {
             row_builder,
             htbeta_matvec: None,
             htbeta_transpose_matvec: None,
+            htbeta_dense_supplement: false,
             evidence_factorization: false,
             row_gauge_deflation: None,
         }
@@ -1361,7 +1375,12 @@ impl StreamingArrowSchur {
         // inside `accumulate_chunk` / `back_substitute`.  The row builder then
         // only carries the small `H_tt` / `g_t` blocks.
         let htbeta_matvec = sys.htbeta_matvec.clone();
-        let rows: Vec<ArrowRowBlock> = if htbeta_matvec.is_some() {
+        // ... UNLESS the slab is a SUPPLEMENT rather than a substitute. With
+        // `htbeta_dense_supplement` set, `row.htbeta` holds a dense correction
+        // that must be added on top of the operator, so zeroing it here is the
+        // #2509 defect: the streaming lane then prices the uncorrected operator
+        // and disagrees with the dense lane by exactly the dropped term.
+        let rows: Vec<ArrowRowBlock> = if htbeta_matvec.is_some() && !sys.htbeta_dense_supplement {
             sys.rows
                 .iter()
                 .map(|row| ArrowRowBlock {
@@ -1400,6 +1419,7 @@ impl StreamingArrowSchur {
         );
         streaming.htbeta_matvec = htbeta_matvec;
         streaming.htbeta_transpose_matvec = sys.htbeta_transpose_matvec.clone();
+        streaming.htbeta_dense_supplement = sys.htbeta_dense_supplement;
         // Carry the SAE evidence-path per-row gauge deflation so the streaming
         // per-row factor matches the dense `factor_blocks_for_system` exactly
         // (#1377): without it, a row with an intrinsic-dimension-flat `H_tt`
@@ -1454,7 +1474,34 @@ impl StreamingArrowSchur {
     /// When only the forward operator is installed (no adjoint), falls back to
     /// the `k`-column forward probe. Otherwise clones the dense `row.htbeta`
     /// slab.
+    ///
+    /// When [`Self::htbeta_dense_supplement`] is set, the dense slab is a
+    /// CORRECTION to the operator, not a replacement for it, so the probe result
+    /// and the slab are summed. Returning only the probe is #2509: the dense
+    /// lane adds the supplement (`sys.htbeta_dense_supplement || matvec.is_none()`)
+    /// and the streaming lane did not, so the two priced different operators
+    /// while every shape and every finiteness check still passed.
     pub(crate) fn row_htbeta(&self, row_idx: usize, row: &ArrowRowBlock, di: usize) -> Array2<f64> {
+        // Add the dense supplement to whatever the operator probe returns. Shape
+        // is asserted rather than assumed: a mis-sized supplement would
+        // otherwise broadcast or truncate into a silently wrong cross-block,
+        // which is the same class of failure this fix exists to remove.
+        let add_supplement = |mut probe: Array2<f64>| -> Array2<f64> {
+            if !self.htbeta_dense_supplement || row.htbeta.is_empty() {
+                return probe;
+            }
+            assert_eq!(
+                row.htbeta.dim(),
+                probe.dim(),
+                "row {row_idx}: dense htbeta supplement is {:?} but the operator \
+                 probe is {:?}; a supplement must be shaped like the block it corrects",
+                row.htbeta.dim(),
+                probe.dim(),
+            );
+            probe += &row.htbeta;
+            probe
+        };
+
         if let Some(op_t) = self.htbeta_transpose_matvec.as_ref() {
             // Probe the adjoint: for each latent index c, scatter e_c to obtain
             // row c of the (di × k) block.
@@ -1470,7 +1517,7 @@ impl StreamingArrowSchur {
                     mat[[c, a]] = beta_row[a];
                 }
             }
-            return mat;
+            return add_supplement(mat);
         }
         match self.htbeta_matvec.as_ref() {
             Some(op) => {
@@ -1486,7 +1533,7 @@ impl StreamingArrowSchur {
                         mat[[c, a]] = col[c];
                     }
                 }
-                mat
+                add_supplement(mat)
             }
             None => row.htbeta.clone(),
         }
