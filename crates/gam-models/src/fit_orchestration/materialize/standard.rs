@@ -333,6 +333,7 @@ pub(crate) fn materialize_standard<'a>(
     };
 
     Ok(MaterializedModel {
+        survival_time_basis: None,
         request: FitRequest::Standard(StandardFitRequest {
             data: request_data,
             y: Arc::new(y),

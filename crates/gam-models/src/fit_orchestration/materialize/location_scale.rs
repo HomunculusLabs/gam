@@ -115,6 +115,7 @@ pub(crate) fn materialize_location_scale<'a>(
             None => InverseLink::Standard(StandardLink::Logit),
         };
         Ok(MaterializedModel {
+            survival_time_basis: None,
             request: FitRequest::BinomialLocationScale(BinomialLocationScaleFitRequest {
                 data: data.values.view(),
                 spec: BinomialLocationScaleTermSpec {
@@ -146,6 +147,7 @@ pub(crate) fn materialize_location_scale<'a>(
             .into());
         }
         Ok(MaterializedModel {
+            survival_time_basis: None,
             request: FitRequest::DispersionLocationScale(DispersionLocationScaleFitRequest {
                 data: data.values.view(),
                 spec: DispersionGlmLocationScaleTermSpec {
@@ -164,6 +166,7 @@ pub(crate) fn materialize_location_scale<'a>(
         })
     } else {
         Ok(MaterializedModel {
+            survival_time_basis: None,
             request: FitRequest::GaussianLocationScale(GaussianLocationScaleFitRequest {
                 data: data.values.view(),
                 spec: GaussianLocationScaleTermSpec {

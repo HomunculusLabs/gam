@@ -1051,6 +1051,7 @@ pub fn fit_materialized_standard_with_notes(
     let current = fit_materialized_once_with_notes(MaterializedModel {
         request: FitRequest::Standard(request),
         inference_notes,
+        survival_time_basis: None,
     })?;
     finish_adaptive_spatial_fit(formula, data, config, current)
 }

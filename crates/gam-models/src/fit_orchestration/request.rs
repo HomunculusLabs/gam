@@ -744,6 +744,14 @@ impl Default for FitConfig {
 pub struct MaterializedModel<'a> {
     pub request: FitRequest<'a>,
     pub inference_notes: Vec<String>,
+    /// The survival time basis THIS materialization built, including the time
+    /// anchor it centered at. Persistence must record the basis the fit
+    /// actually used; re-deriving it downstream from the `FitConfig` silently
+    /// diverged whenever the two derivations disagreed — the left-truncation
+    /// anchor switch in `materialize_survival` had no counterpart in the save
+    /// path, so a left-truncated location-scale model persisted an anchor its
+    /// own fit never used (#2470). `None` for every non-survival request.
+    pub survival_time_basis: Option<crate::survival::SavedSurvivalTimeBasis>,
 }
 pub struct SplineScanInputs {
     /// Abscissae of the single 1-D smooth (training rows of its feature column).

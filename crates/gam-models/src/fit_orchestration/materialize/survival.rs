@@ -1497,5 +1497,11 @@ pub(crate) fn materialize_survival<'a>(
     Ok(MaterializedModel {
         request,
         inference_notes,
+        survival_time_basis: Some(
+            crate::survival::construction::SavedSurvivalTimeBasis::from_build(
+                &time_build,
+                time_anchor,
+            ),
+        ),
     })
 }

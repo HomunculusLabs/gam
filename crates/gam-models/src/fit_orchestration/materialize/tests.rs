@@ -201,6 +201,102 @@ fn survival_transformation_left_truncated_uses_median_exit_anchor() {
     );
 }
 
+/// #2470 round trip: the survival time basis a payload persists must be the one
+/// the fit was materialized with, never a second derivation from the same
+/// `FitConfig`.
+///
+/// `materialize_survival` switches the time anchor to the robust interior
+/// median exit whenever the data is left-truncated (#751/#1790), for EVERY
+/// time-basis-carrying likelihood. The save path used to re-derive the anchor
+/// with `resolve_survival_time_anchor_value`, which unconditionally takes the
+/// earliest entry — so a left-truncated location-scale model persisted an
+/// anchor its own fit never centered at, and `survival::predict` (which
+/// re-centers the design at the persisted anchor for `LocationScale`) then
+/// evaluated the basis in a different affine frame than the coefficients were
+/// fitted in.
+///
+/// `MaterializedModel::survival_time_basis` carries the realised snapshot so
+/// the two cannot disagree. Here the anchor must be the median exit (5.0), not
+/// the earliest entry (0.5).
+#[test]
+fn materialized_survival_time_basis_carries_the_left_truncated_anchor_2470() {
+    let td = tempdir().expect("tempdir");
+    let data_path = td.path().join("left_truncated_locscale.csv");
+    // Constant entry = 0.5 (genuine left truncation); nine spread exits so the
+    // median exit is exactly the middle value 5.0 and differs sharply from the
+    // earliest entry.
+    fs::write(
+        &data_path,
+        "entry,exit,event,x\n\
+         0.5,1.0,1,-0.8\n\
+         0.5,2.0,0,0.4\n\
+         0.5,3.0,1,-0.2\n\
+         0.5,4.0,1,0.7\n\
+         0.5,5.0,0,0.1\n\
+         0.5,6.0,1,-0.5\n\
+         0.5,7.0,1,0.9\n\
+         0.5,8.0,0,-0.3\n\
+         0.5,9.0,1,0.2\n",
+    )
+    .expect("write left-truncated csv");
+    let data = load_dataset_projected(
+        &data_path,
+        &[
+            "entry".to_string(),
+            "exit".to_string(),
+            "event".to_string(),
+            "x".to_string(),
+        ],
+    )
+    .expect("load left-truncated dataset");
+
+    // A `linkwiggle(...)` term routes the survival formula to the
+    // location-scale request — the variant whose save path carried the defect.
+    let materialized = materialize(
+        "Surv(entry, exit, event) ~ x + linkwiggle(degree=2, internal_knots=1)",
+        &data,
+        &FitConfig::default(),
+    )
+    .expect("left-truncated survival location-scale should materialize");
+    assert!(
+        matches!(
+            materialized.request,
+            FitRequest::SurvivalLocationScale(_)
+        ),
+        "linkwiggle(...) must route to the survival location-scale request"
+    );
+
+    let carried = materialized
+        .survival_time_basis
+        .expect("a survival materialization must carry its realised time basis");
+    let median_exit = 5.0_f64;
+    let earliest_entry = 0.5_f64;
+    assert!(
+        (carried.anchor - median_exit).abs() < 1e-9,
+        "the carried time basis must record the robust median-exit anchor \
+         ({median_exit}) the fit centered at, got {}",
+        carried.anchor
+    );
+    assert!(
+        (carried.anchor - earliest_entry).abs() > 1e-6,
+        "the carried anchor must not be the earliest entry ({earliest_entry}) — that \
+         is the re-derived value the save path used to persist"
+    );
+}
+
+/// The carrier is survival-only: a standard fit has no survival time basis to
+/// record, and must not fabricate one.
+#[test]
+fn materialized_standard_fit_carries_no_survival_time_basis_2470() {
+    let data = workflow_test_dataset();
+    let materialized = materialize("bmi ~ z", &data, &FitConfig::default())
+        .expect("standard formula should materialize");
+    assert!(
+        materialized.survival_time_basis.is_none(),
+        "a non-survival materialization must not carry a survival time basis"
+    );
+}
+
 #[test]
 fn survival_marginal_slope_matern_logslope_penalties_keep_surface_width() {
     let n = 24usize;
@@ -1471,6 +1567,7 @@ fn workflow_survival_marginal_slope_routes_logslope_linkwiggle_into_score_warp_o
     let MaterializedModel {
         request,
         inference_notes,
+        ..
     } = materialized;
     let FitRequest::SurvivalMarginalSlope(request) = request else {
         panic!("expected survival marginal-slope request");
@@ -1600,6 +1697,7 @@ fn materialize_bernoulli_marginal_slope_prunes_redundant_scalar_term() {
     let MaterializedModel {
         request,
         inference_notes,
+        ..
     } = materialized;
     let FitRequest::BernoulliMarginalSlope(request) = request else {
         panic!("expected Bernoulli marginal-slope request");

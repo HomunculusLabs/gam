@@ -53,6 +53,7 @@ pub(crate) fn materialize_transformation_normal<'a>(
     let offset = resolve_offset_column(data, col_map, config.offset_column.as_deref())?;
 
     Ok(MaterializedModel {
+        survival_time_basis: None,
         request: FitRequest::TransformationNormal(TransformationNormalFitRequest {
             data: data.values.view(),
             response: y,

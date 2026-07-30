@@ -220,6 +220,7 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
     };
 
     Ok(MaterializedModel {
+        survival_time_basis: None,
         request: FitRequest::BernoulliMarginalSlope(BernoulliMarginalSlopeFitRequest {
             data: data.values.view(),
             spec,

@@ -1455,6 +1455,10 @@ pub fn fit_formula_to_payload(
     dispatch_config.spatial_center_counts = Some(Vec::new());
     let materialized = materialize(&formula, dataset, &dispatch_config)?;
     let request = materialized.request;
+    // The time basis THIS materialization built, carried to the save path so a
+    // survival payload records the basis its own fit used instead of a second,
+    // independently re-derived one (#2470).
+    let survival_time_basis = materialized.survival_time_basis;
     // Advisories produced while materializing (e.g. the mgcv-style "k reduced to
     // the data support" / basis-degradation notes from the cr/cs/sz cap, #1541
     // #1542). The CLI prints these via `print_inference_summary`; the Python
@@ -1693,7 +1697,13 @@ pub fn fit_formula_to_payload(
                     });
                 }
             };
-            payload_for_survival_location_scale(formula, dataset, fit_config, ls_result)?
+            payload_for_survival_location_scale(
+                formula,
+                dataset,
+                fit_config,
+                ls_result,
+                survival_time_basis,
+            )?
         }
         FitRequest::SurvivalTransformation(rp_request) => {
             let fit_result = fit_model(FitRequest::SurvivalTransformation(rp_request))?;
@@ -1720,7 +1730,14 @@ pub fn fit_formula_to_payload(
                     });
                 }
             };
-            payload_for_latent_survival(formula, dataset, fit_config, frailty, lat_result)?
+            payload_for_latent_survival(
+                formula,
+                dataset,
+                fit_config,
+                frailty,
+                lat_result,
+                survival_time_basis,
+            )?
         }
         FitRequest::LatentBinary(lat_request) => {
             let frailty = lat_request.frailty.clone();
@@ -1734,7 +1751,14 @@ pub fn fit_formula_to_payload(
                     });
                 }
             };
-            payload_for_latent_binary(formula, dataset, fit_config, frailty, lat_result)?
+            payload_for_latent_binary(
+                formula,
+                dataset,
+                fit_config,
+                frailty,
+                lat_result,
+                survival_time_basis,
+            )?
         }
         FitRequest::DispersionLocationScale(ls_request) => {
             // Genuine-dispersion location-scale family (#913): NB / Gamma / Beta
@@ -2374,49 +2398,26 @@ fn payload_for_survival_location_scale(
     dataset: &EncodedDataset,
     fit_config: &FitConfig,
     ls_result: crate::fit_orchestration::SurvivalLocationScaleFitResult,
+    time_basis: Option<SavedSurvivalTimeBasis>,
 ) -> Result<FittedModelPayload, String> {
     use crate::survival::construction::{
-        build_survival_time_basis, parse_survival_baseline_config, parse_survival_likelihood_mode,
-        parse_survival_time_basis_config, resolve_survival_time_anchor_value,
+        parse_survival_baseline_config, parse_survival_likelihood_mode,
         survival_likelihood_modename,
     };
-    // Re-derive survival metadata from the formula and FitConfig so we can
-    // reproduce the saved model layout that the CLI persists.
+    // The time basis is CARRIED from the materialization that produced this fit
+    // (#2470). It is not re-derived here: `materialize_survival` switches the
+    // time anchor to the robust interior exit time whenever the data is left
+    // truncated, and the re-derivation this replaced always took the
+    // earliest-entry anchor — so a left-truncated model persisted an anchor its
+    // own fit never centered at, and predict then re-centered the design in a
+    // different affine frame than the coefficients were fitted in.
+    let time_basis = time_basis.ok_or_else(|| {
+        "survival location-scale payload requires the materialized survival time basis".to_string()
+    })?;
     let parsed = parse_formula(&formula)
         .map_err(|err| format!("failed to re-parse survival formula for FFI payload: {err}"))?;
     let (entryname, exitname, eventname) = parse_surv_response(&parsed.response)?
         .ok_or_else(|| "survival location-scale FFI requires Surv(...) response".to_string())?;
-    let col_map: HashMap<String, usize> = dataset
-        .headers
-        .iter()
-        .enumerate()
-        .map(|(i, h)| (h.clone(), i))
-        .collect();
-    let entry_idx: Option<usize> = entryname
-        .as_deref()
-        .map(|name| {
-            col_map
-                .get(name)
-                .copied()
-                .ok_or_else(|| format!("entry column '{name}' not found"))
-        })
-        .transpose()?;
-    let exit_idx = *col_map
-        .get(&exitname)
-        .ok_or_else(|| format!("exit column '{exitname}' not found"))?;
-    let n = dataset.values.nrows();
-    let mut age_entry = Array1::<f64>::zeros(n);
-    let mut age_exit = Array1::<f64>::zeros(n);
-    for i in 0..n {
-        let entry_val = entry_idx.map_or(0.0, |idx| dataset.values[[i, idx]]);
-        let (t0, t1) = crate::survival::construction::normalize_survival_time_pair(
-            entry_val,
-            dataset.values[[i, exit_idx]],
-            i,
-        )?;
-        age_entry[i] = t0;
-        age_exit[i] = t1;
-    }
     let baseline_cfg = parse_survival_baseline_config(
         &fit_config.baseline_target,
         fit_config.baseline_scale,
@@ -2425,43 +2426,6 @@ fn payload_for_survival_location_scale(
         fit_config.baseline_makeham,
     )?;
     let likelihood_mode = parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
-    let time_cfg = if parsed.timewiggle.is_some() {
-        crate::survival::construction::SurvivalTimeBasisConfig::None
-    } else {
-        parse_survival_time_basis_config(
-            &fit_config.time_basis,
-            fit_config.time_degree,
-            fit_config.time_num_internal_knots,
-            fit_config.time_smooth_lambda,
-        )?
-    };
-    let time_anchor = resolve_survival_time_anchor_value(&age_entry, None)?;
-    let mut time_build = build_survival_time_basis(
-        &age_entry,
-        &age_exit,
-        time_cfg,
-        Some((
-            fit_config.time_num_internal_knots,
-            fit_config.time_smooth_lambda,
-        )),
-    )?;
-    let resolved_time_cfg =
-        crate::survival::construction::resolved_survival_time_basis_config_from_build(
-            &time_build.basisname,
-            time_build.degree,
-            time_build.knots.as_ref(),
-            time_build.keep_cols.as_ref(),
-            time_build.smooth_lambda,
-        )?;
-    let time_anchor_row = crate::survival::construction::evaluate_survival_time_basis_row(
-        time_anchor,
-        &resolved_time_cfg,
-    )?;
-    crate::survival::construction::center_survival_time_designs_at_anchor(
-        &mut time_build.x_entry_time,
-        &mut time_build.x_exit_time,
-        &time_anchor_row,
-    )?;
 
     let fitted_inverse_link = ls_result.inverse_link.clone();
     // Compact the inner UnifiedFitResult and apply the fitted link state so
@@ -2508,7 +2472,7 @@ fn payload_for_survival_location_scale(
             survival_event: eventname,
             survivalspec: "net".to_string(),
             baseline_cfg,
-            time_basis: SavedSurvivalTimeBasis::from_build(&time_build, time_anchor),
+            time_basis,
             ridge_lambda: fit_config.ridge_lambda,
             survival_likelihood_label: survival_likelihood_modename(likelihood_mode).to_string(),
             time_parameterization: ls_result.fit.time_parameterization,
@@ -2536,6 +2500,7 @@ fn payload_for_latent_survival(
     fit_config: &FitConfig,
     request_frailty: crate::survival::lognormal_kernel::FrailtySpec,
     lat_result: crate::survival::latent::LatentSurvivalTermFitResult,
+    time_basis: Option<SavedSurvivalTimeBasis>,
 ) -> Result<FittedModelPayload, String> {
     payload_for_latent_window(
         formula,
@@ -2547,6 +2512,7 @@ fn payload_for_latent_survival(
         lat_result.design,
         Some(lat_result.latent_sd),
         true,
+        time_basis,
     )
 }
 
@@ -2556,6 +2522,7 @@ fn payload_for_latent_binary(
     fit_config: &FitConfig,
     request_frailty: crate::survival::lognormal_kernel::FrailtySpec,
     lat_result: crate::survival::latent::LatentBinaryTermFitResult,
+    time_basis: Option<SavedSurvivalTimeBasis>,
 ) -> Result<FittedModelPayload, String> {
     payload_for_latent_window(
         formula,
@@ -2567,6 +2534,7 @@ fn payload_for_latent_binary(
         lat_result.design,
         None,
         false,
+        time_basis,
     )
 }
 
@@ -2580,70 +2548,27 @@ fn payload_for_latent_window(
     cov_design: TermCollectionDesign,
     learned_latent_sd: Option<f64>,
     is_survival: bool,
+    time_basis: Option<SavedSurvivalTimeBasis>,
 ) -> Result<FittedModelPayload, String> {
-    use crate::survival::construction::{
-        build_survival_time_basis, parse_survival_baseline_config,
-        parse_survival_time_basis_config, resolve_survival_time_anchor_value,
-    };
+    use crate::survival::construction::parse_survival_baseline_config;
 
+    // Carried from the materialization that produced this fit, not re-derived
+    // (#2470) — see `payload_for_survival_location_scale` for the anchor
+    // divergence this closes.
+    let time_basis = time_basis.ok_or_else(|| {
+        "latent survival/binary payload requires the materialized survival time basis".to_string()
+    })?;
     let parsed = parse_formula(&formula).map_err(|err| {
         format!("failed to re-parse latent survival formula for FFI payload: {err}")
     })?;
     let (entryname, exitname, eventname) = parse_surv_response(&parsed.response)?
         .ok_or_else(|| "latent survival/binary FFI requires Surv(...) response".to_string())?;
-    let col_map: HashMap<String, usize> = dataset
-        .headers
-        .iter()
-        .enumerate()
-        .map(|(i, h)| (h.clone(), i))
-        .collect();
-    let entry_idx: Option<usize> = entryname
-        .as_deref()
-        .map(|name| {
-            col_map
-                .get(name)
-                .copied()
-                .ok_or_else(|| format!("entry column '{name}' not found"))
-        })
-        .transpose()?;
-    let exit_idx = *col_map
-        .get(&exitname)
-        .ok_or_else(|| format!("exit column '{exitname}' not found"))?;
-    let n = dataset.values.nrows();
-    let mut age_entry = Array1::<f64>::zeros(n);
-    let mut age_exit = Array1::<f64>::zeros(n);
-    for i in 0..n {
-        let entry_val = entry_idx.map_or(0.0, |idx| dataset.values[[i, idx]]);
-        let (t0, t1) = crate::survival::construction::normalize_survival_time_pair(
-            entry_val,
-            dataset.values[[i, exit_idx]],
-            i,
-        )?;
-        age_entry[i] = t0;
-        age_exit[i] = t1;
-    }
     let baseline_cfg = parse_survival_baseline_config(
         &fit_config.baseline_target,
         fit_config.baseline_scale,
         fit_config.baseline_shape,
         fit_config.baseline_rate,
         fit_config.baseline_makeham,
-    )?;
-    let time_cfg = parse_survival_time_basis_config(
-        &fit_config.time_basis,
-        fit_config.time_degree,
-        fit_config.time_num_internal_knots,
-        fit_config.time_smooth_lambda,
-    )?;
-    let time_anchor = resolve_survival_time_anchor_value(&age_entry, None)?;
-    let time_build = build_survival_time_basis(
-        &age_entry,
-        &age_exit,
-        time_cfg,
-        Some((
-            fit_config.time_num_internal_knots,
-            fit_config.time_smooth_lambda,
-        )),
     )?;
 
     // For latent survival, splice the fitted latent_sd into the persisted
@@ -2695,7 +2620,7 @@ fn payload_for_latent_window(
             survival_exit: exitname,
             survival_event: eventname,
             baseline_cfg,
-            time_basis: SavedSurvivalTimeBasis::from_build(&time_build, time_anchor),
+            time_basis,
             ridge_lambda: fit_config.ridge_lambda,
             beta_time,
             resolved_termspec,
