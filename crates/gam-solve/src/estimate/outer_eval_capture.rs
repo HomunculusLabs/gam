@@ -487,6 +487,16 @@ pub struct RhoOuterAudit {
     /// The original-frame vs transformed-frame penalty roots at the assembly
     /// site.
     pub penalty_frame: Option<PenaltyFrameAudit>,
+    /// Whether the #784 block-local sampled marginalization ENGAGED on this
+    /// evaluation (#2623).
+    ///
+    /// False means the splice DECLINED, so gradient channels (b), (c) and (d)
+    /// were never formed. A finite-difference comparison of those channels is
+    /// then vacuous rather than passing: it is the shape where a guard is
+    /// satisfied by an absence. Any FD row that means to exercise them must
+    /// ASSERT this true before comparing, or it silently degenerates into the
+    /// well-behaved regime where the splice never runs.
+    pub sampled_marginal_engaged: bool,
 }
 
 thread_local! {
@@ -523,6 +533,21 @@ pub(crate) fn begin_rho_outer_audit_eval() {
         if let Some(state) = audit.borrow_mut().as_mut() {
             state.criterion = None;
             state.parts = Vec::new();
+            // Engagement is decided INSIDE the evaluation, so it is cleared
+            // here and set again if the splice runs. Latching it across
+            // evaluations would let one engaged eval vouch for a later
+            // declined one (#2623).
+            state.sampled_marginal_engaged = false;
+        }
+    });
+}
+
+/// Record that the #784 sampled-marginalization splice engaged on this
+/// evaluation (#2623). No-op when the audit is disarmed.
+pub(crate) fn record_sampled_marginal_engaged() {
+    RHO_AUDIT.with(|audit| {
+        if let Some(state) = audit.borrow_mut().as_mut() {
+            state.sampled_marginal_engaged = true;
         }
     });
 }

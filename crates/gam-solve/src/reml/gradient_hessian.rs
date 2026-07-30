@@ -3024,6 +3024,12 @@ impl<'a> RemlState<'a> {
         let rowq = (&xq * x).sum_axis(ndarray::Axis(1)); // n
 
         // Per-coordinate contraction.
+        // The splice ran, so channels (b), (c) and (d) below are real on this
+        // evaluation. Recorded so an FD row can ASSERT engagement before
+        // comparing them; without that assertion the comparison is vacuous
+        // whenever the splice declines (#2623).
+        crate::estimate::outer_eval_capture::record_sampled_marginal_engaged();
+
         // WARNING (#2623) -- READ THIS BEFORE CHANGING THE SIGN IN THIS LOOP.
         //
         // The convention of the four channels is NOT settled by the contract
