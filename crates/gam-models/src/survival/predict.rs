@@ -1690,6 +1690,19 @@ impl KaplanMeier {
         Self::fit(time, &flipped)
     }
 
+    /// [`Self::at`] evaluated across a whole grid. `steps` is sorted by
+    /// construction, so each lookup is a binary search rather than the linear
+    /// scan `at` does — the difference matters when a caller evaluates a dense
+    /// grid against a step function with one step per event time.
+    pub fn on_grid(&self, grid: &[f64]) -> Vec<f64> {
+        grid.iter()
+            .map(|&t| {
+                let idx = self.steps.partition_point(|&(time, _)| time <= t);
+                if idx == 0 { 1.0 } else { self.steps[idx - 1].1 }
+            })
+            .collect()
+    }
+
     /// Right-continuous step lookup: `Ŝ(t)` = survival at the last event time
     /// `≤ t` (and `1.0` before the first event).
     pub fn at(&self, t: f64) -> f64 {
