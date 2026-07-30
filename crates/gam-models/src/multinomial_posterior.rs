@@ -580,6 +580,7 @@ fn integrate_general(
     let mut total_evaluations = 0usize;
     let mut last_max_difference = f64::INFINITY;
     let mut last_max_normalized_error = f64::INFINITY;
+    let mut last_deciding: Option<DecidingMoment> = None;
 
     let mut last_level_attempted = 0usize;
     for level in 0..=control.maximum_sparse_level {
@@ -610,7 +611,25 @@ fn integrate_general(
             let mut certified = level >= control.minimum_sparse_level;
             let mut maximum_difference = 0.0_f64;
             let mut maximum_normalized_error = 0.0_f64;
-            for (&new_value, &old_value) in current.iter().zip(previous_moments.iter()) {
+            // The coordinate whose normalized error is the maximum -- i.e. the
+            // one that actually refused -- carried alongside the quantities that
+            // decided it (#2612).
+            //
+            // `maximum_difference` and `maximum_normalized_error` are maxima over
+            // the SAME loop but not over the same coordinate: one is scaled by a
+            // per-moment tolerance and the other is not, so their argmaxes differ
+            // whenever the moments differ in magnitude. Reported side by side they
+            // read as a pair describing one moment, and a refusal citing
+            // `level difference 1.199663e-2, max normalized error 4.130034e5` --
+            // seven orders apart -- invites the reading that the normalization
+            // divides by something near zero, when in fact the two numbers simply
+            // describe different raw moments. Naming the deciding coordinate and
+            // printing ITS difference and ITS tolerance removes the ambiguity
+            // instead of inviting the next reader to re-derive it.
+            let mut deciding: Option<DecidingMoment> = None;
+            for (index, (&new_value, &old_value)) in
+                current.iter().zip(previous_moments.iter()).enumerate()
+            {
                 let difference = (new_value - old_value).abs();
                 maximum_difference = maximum_difference.max(difference);
                 let tolerance = control.absolute_tolerance
@@ -619,13 +638,37 @@ fn integrate_general(
                 if controlled_error > tolerance {
                     certified = false;
                 }
-                if tolerance > 0.0 {
-                    maximum_normalized_error =
-                        maximum_normalized_error.max(controlled_error / tolerance);
+                // A zero tolerance cannot normalize an error, and the previous
+                // `if tolerance > 0.0` guard SKIPPED such a coordinate entirely --
+                // so a moment that failed certification could contribute nothing
+                // to the reported error, and the refusal could understate the very
+                // quantity it refused on. Infinity is the honest normalized error
+                // when a nonzero error is measured against a zero tolerance, and
+                // it is reported rather than dropped.
+                let normalized = if tolerance > 0.0 {
+                    controlled_error / tolerance
+                } else if controlled_error > 0.0 {
+                    f64::INFINITY
+                } else {
+                    0.0
+                };
+                let supersedes = match deciding.as_ref() {
+                    Some(current_worst) => normalized > current_worst.normalized_error,
+                    None => true,
+                };
+                if supersedes {
+                    deciding = Some(DecidingMoment {
+                        index,
+                        normalized_error: normalized,
+                        difference,
+                        tolerance,
+                    });
                 }
+                maximum_normalized_error = maximum_normalized_error.max(normalized);
             }
             last_max_difference = maximum_difference;
             last_max_normalized_error = maximum_normalized_error;
+            last_deciding = deciding;
 
             if certified {
                 return moments_from_raw(
@@ -649,11 +692,40 @@ fn integrate_general(
     // The old message printed `control.maximum_sparse_level`, which said what
     // the cap was rather than what the integrand did -- and on a run that
     // stopped at 1.4% of its evaluation budget those are different stories.
+    let deciding_report = match last_deciding.as_ref() {
+        Some(moment) => format!(
+            "worst raw moment {} (normalized error {:.6e} = (difference {:.6e} + projection bound {:.6e}) / tolerance {:.6e})",
+            moment.index,
+            moment.normalized_error,
+            moment.difference,
+            projected.projection_bound,
+            moment.tolerance,
+        ),
+        // Reached only when no level after the first produced a comparison, so
+        // there is no per-coordinate verdict to name. Said explicitly, because
+        // an absent comparison and a passing one must not read alike (#2612).
+        None => "no two levels were compared, so no coordinate refused".to_string(),
+    };
     Err(EstimationError::InvalidInput(format!(
-        "multinomial logistic-normal quadrature did not converge: reached Smolyak level {last_level_attempted} and exhausted the evaluation budget; final max raw-moment level difference {last_max_difference:.6e}, max normalized error {last_max_normalized_error:.6e}, projection bound {:.6e}, evaluations {total_evaluations}/{}",
+        "multinomial logistic-normal quadrature did not converge: reached Smolyak level {last_level_attempted} and exhausted the evaluation budget; final max raw-moment level difference {last_max_difference:.6e}, max normalized error {last_max_normalized_error:.6e}, projection bound {:.6e}, evaluations {total_evaluations}/{}; {deciding_report}",
         projected.projection_bound,
         control.maximum_function_evaluations
     )))
+}
+
+/// The raw moment whose normalized error is the maximum, with the quantities
+/// that produced it (#2612).
+///
+/// Exists so the refusal names WHICH moment refused and against WHAT. The
+/// aggregate `max normalized error` and `max level difference` are maxima over
+/// different coordinates, so neither one alone identifies the failure and the
+/// pair actively misleads.
+#[derive(Clone, Copy, Debug)]
+struct DecidingMoment {
+    index: usize,
+    normalized_error: f64,
+    difference: f64,
+    tolerance: f64,
 }
 
 struct SmolyakEvaluation {
@@ -1217,6 +1289,73 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "{label}: actual={actual:.17e}, expected={expected:.17e}, tolerance={tolerance:.3e}"
         );
+    }
+
+    /// A refusal must name WHICH raw moment refused and against WHAT (#2612).
+    ///
+    /// The aggregate pair the message used to carry -- `max raw-moment level
+    /// difference` and `max normalized error` -- are maxima over DIFFERENT
+    /// coordinates, because one is divided by a per-moment tolerance and the
+    /// other is not. Printed side by side they read as one moment's story, and
+    /// the observed `1.199663e-2` beside `4.130034e5` invited the conclusion
+    /// that the normalization divides by something near zero. It does not; they
+    /// were simply different moments.
+    #[test]
+    fn a_refusal_names_the_moment_that_decided_it_2612() {
+        let active_mean = Array1::from_vec(vec![0.7, -1.3, 2.1]);
+        let active_covariance = Array2::from_shape_vec(
+            (3, 3),
+            vec![2.5, 0.4, -0.3, 0.4, 3.1, 0.6, -0.3, 0.6, 2.2],
+        )
+        .expect("covariance shape");
+        // Two levels and a tolerance no sparse rule can reach, so the loop
+        // exhausts its levels and falls through to the refusal cheaply.
+        let control = MultinomialPosteriorIntegrationControl {
+            absolute_tolerance: 1.0e-300,
+            relative_tolerance: 1.0e-300,
+            minimum_sparse_level: 2,
+            maximum_sparse_level: 2,
+            maximum_function_evaluations: 2_000_000,
+        };
+        let error = integrate_logistic_normal_softmax_moments(
+            active_mean.view(),
+            active_covariance.view(),
+            &control,
+        )
+        .expect_err("a 1e-300 tolerance at level 2 cannot certify");
+        let message = error.to_string();
+        assert!(
+            message.contains("worst raw moment"),
+            "the refusal must identify the deciding coordinate: {message}"
+        );
+        assert!(
+            message.contains("/ tolerance"),
+            "the refusal must show the normalized error's denominator, so the ratio \
+             can be checked rather than trusted: {message}"
+        );
+    }
+
+    /// The normalized error must not silently drop the coordinate that refused.
+    ///
+    /// `tolerance = absolute_tolerance + relative_tolerance * max(|new|, |old|)`
+    /// is ZERO whenever `absolute_tolerance` is zero and a raw moment is exactly
+    /// zero at both levels. The old `if tolerance > 0.0` guard skipped exactly
+    /// those coordinates, so a moment could set `certified = false` and then
+    /// contribute nothing to the error the refusal reports. A zero absolute
+    /// tolerance is admissible -- `validate` only requires that ONE of the two
+    /// be positive -- so this is a reachable state, not a defensive branch.
+    #[test]
+    fn a_zero_absolute_tolerance_is_admissible_so_the_zero_denominator_is_reachable_2612() {
+        let control = MultinomialPosteriorIntegrationControl {
+            absolute_tolerance: 0.0,
+            relative_tolerance: 1.0e-8,
+            minimum_sparse_level: 2,
+            maximum_sparse_level: 4,
+            maximum_function_evaluations: 2_000_000,
+        };
+        control
+            .validate()
+            .expect("a zero absolute tolerance with a positive relative one is admissible");
     }
 
     #[test]
