@@ -3558,7 +3558,10 @@ fn solve_newton_direction_with_constraint_set_impl(
 /// analogue of [`project_point_strictly_into_feasible_cone`]. Dense sets
 /// delegate to the dense projection (including its anti-parallel equality
 /// lift); the factored cone is homogeneous and one-sided, so the projection
-/// is a single identity-Hessian QP against the margin-shifted rows.
+/// is a single identity-Hessian QP against the margin-shifted rows. The QP uses
+/// the same finite dual active-set solver as production metric projection:
+/// coefficient dimension bounds its dense work, while carrier row count enters
+/// only through operator scans.
 ///
 /// A refusal is a typed [`EstimationError::ParameterConstraintViolation`]
 /// naming the failing condition (dimension mismatch, non-finite iterate, or
@@ -3582,11 +3585,6 @@ pub fn project_point_strictly_into_feasible_constraint_set(
             })
         }
         _ => {
-            let repair_guard = FeasibilityRepairGuard::enter().ok_or_else(|| {
-                EstimationError::ParameterConstraintViolation(format!(
-                    "strict-interior projection exceeded feasibility-repair depth {MAX_FEASIBILITY_REPAIR_DEPTH}"
-                ))
-            })?;
             let p = point.len();
             if set.ncols() != p {
                 return Err(EstimationError::ParameterConstraintViolation(format!(
@@ -3596,22 +3594,27 @@ pub fn project_point_strictly_into_feasible_constraint_set(
             }
             let ops = ConstraintSetOps::new(set, ACTIVE_SET_INTERIOR_SEED_MARGIN)?;
             let identity = Array2::<f64>::eye(p);
-            // min ½‖β − point‖² ⇒ Hessian = I, gradient at `point` = 0;
-            // the margin-shifted rows carry the strict-interior shift.
-            let mut direction = Array1::<f64>::zeros(p);
-            let gradient = Array1::<f64>::zeros(p);
-            let max_iterations = (p + set.nrows() + 8) * 4;
-            solve_newton_direction_with_constraint_set_impl(
+            // min ½‖β − point‖² ⇒ Hessian = I and rhs = point. This is the
+            // same strictly convex operator projection solved by the finite
+            // Goldfarb--Idnani dual path below, not the retired primal add/drop
+            // direction loop. The latter bounded work by the carrier's row
+            // count; a tiny roundoff repair on the 320k-row CTN cone could
+            // therefore spend the entire command budget enumerating row ids.
+            // Here the face rank and transition bounds depend only on p, and m
+            // contributes only full operator scans.
+            let factor = identity.cholesky(Side::Lower).map_err(|error| {
+                EstimationError::InvalidInput(format!(
+                    "strict-interior identity metric could not be factored: {error}"
+                ))
+            })?;
+            let (beta, _) = solve_operator_metric_projection_dual_active_set(
                 &identity,
-                &gradient,
                 point,
+                point,
+                &factor,
                 &ops,
-                &mut direction,
-                None,
-                max_iterations,
-                true,
+                &[],
             )?;
-            let beta = point + &direction;
             if beta.iter().any(|v| !v.is_finite()) {
                 return Err(EstimationError::ParameterConstraintViolation(
                     "strict-interior projection produced a non-finite iterate".to_string(),
@@ -3635,7 +3638,6 @@ pub fn project_point_strictly_into_feasible_constraint_set(
                     )));
                 }
             }
-            drop(repair_guard);
             Ok(beta)
         }
     }
