@@ -1316,12 +1316,262 @@ fn effective_df_floor_bound(
 /// a finer path cannot carry information. This is a self-consistency criterion,
 /// not a budget, so it introduces no tunable constant.
 ///
-/// # Failure is not an error here
+/// # Typed termination
 ///
-/// A corrector that does not converge means the path met a fold, and the
-/// continuation does not name a mode there. This returns `None` in that case and
-/// the caller keeps its existing seed: the definition improves the seed where it
-/// applies and never converts a fit that works today into a failure.
+/// A corrector that does not converge, an endpoint discrepancy that violates
+/// the continuation's contraction premise, or a path that reaches floating-point
+/// resolution means the continuation does not name a mode. Those outcomes are
+/// typed [`AnchoredContinuationRefusal`]s rather than an undifferentiated
+/// `None`. Success carries an [`AnchoredContinuationCertificate`] that records
+/// the refinement and discrepancy which proved the endpoint invariant. The
+/// production caller logs a refusal and keeps its existing seed, so declining a
+/// continuation still never turns a fit that works today into a failure.
+const MAX_CONTINUATION_DISCREPANCY_RATIO: f64 = 0.5;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AnchoredContinuationCertificate {
+    pub(crate) steps: usize,
+    pub(crate) endpoint_discrepancy: f64,
+    pub(crate) inner_tolerance: f64,
+    pub(crate) observed_contraction_factor: Option<f64>,
+}
+
+pub(crate) struct CertifiedAnchoredContinuationSeed {
+    pub(crate) warm_start: ConstrainedWarmStart,
+    pub(crate) certificate: AnchoredContinuationCertificate,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AnchoredContinuationRefusal {
+    EndpointDimensionMismatch {
+        anchor_dim: usize,
+        target_dim: usize,
+    },
+    WaypointEvaluationFailed {
+        steps: usize,
+        waypoint_index: usize,
+        reason: String,
+    },
+    WaypointNotCertified {
+        steps: usize,
+        waypoint_index: usize,
+        inner_converged: bool,
+        objective: f64,
+    },
+    EmptySweep {
+        steps: usize,
+    },
+    EndpointBlockCountMismatch {
+        steps: usize,
+        coarser_blocks: usize,
+        finer_blocks: usize,
+    },
+    EndpointBlockWidthMismatch {
+        steps: usize,
+        block_index: usize,
+        coarser_width: usize,
+        finer_width: usize,
+    },
+    EndpointCoordinateNotFinite {
+        steps: usize,
+        block_index: usize,
+        coordinate_index: usize,
+        coarser: f64,
+        finer: f64,
+    },
+    InvalidInnerTolerance {
+        tolerance: f64,
+    },
+    InvalidEndpointDiscrepancy {
+        steps: usize,
+        role: &'static str,
+        discrepancy: f64,
+    },
+    ContractionPremiseViolated {
+        steps: usize,
+        previous_discrepancy: f64,
+        discrepancy: f64,
+        observed_factor: f64,
+        required_max_factor: f64,
+    },
+    StepCountOverflow {
+        steps: usize,
+    },
+    PathResolutionExhausted {
+        steps: usize,
+        refined_steps: usize,
+    },
+}
+
+impl std::fmt::Display for AnchoredContinuationRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EndpointDimensionMismatch {
+                anchor_dim,
+                target_dim,
+            } => write!(
+                f,
+                "anchor dimension {anchor_dim} differs from target dimension {target_dim}"
+            ),
+            Self::WaypointEvaluationFailed {
+                steps,
+                waypoint_index,
+                reason,
+            } => write!(
+                f,
+                "{steps}-step sweep failed at waypoint {waypoint_index}: {reason}"
+            ),
+            Self::WaypointNotCertified {
+                steps,
+                waypoint_index,
+                inner_converged,
+                objective,
+            } => write!(
+                f,
+                "{steps}-step sweep waypoint {waypoint_index} was not a certified finite mode \
+                 (inner_converged={inner_converged}, objective={objective})"
+            ),
+            Self::EmptySweep { steps } => {
+                write!(f, "{steps}-step sweep produced no endpoint")
+            }
+            Self::EndpointBlockCountMismatch {
+                steps,
+                coarser_blocks,
+                finer_blocks,
+            } => write!(
+                f,
+                "{steps}-step endpoint has {finer_blocks} blocks but its coarser endpoint has \
+                 {coarser_blocks}"
+            ),
+            Self::EndpointBlockWidthMismatch {
+                steps,
+                block_index,
+                coarser_width,
+                finer_width,
+            } => write!(
+                f,
+                "{steps}-step endpoint block {block_index} has width {finer_width} but its \
+                 coarser endpoint has width {coarser_width}"
+            ),
+            Self::EndpointCoordinateNotFinite {
+                steps,
+                block_index,
+                coordinate_index,
+                coarser,
+                finer,
+            } => write!(
+                f,
+                "{steps}-step endpoint comparison is non-finite at block {block_index}, \
+                 coordinate {coordinate_index} (coarser={coarser}, finer={finer})"
+            ),
+            Self::InvalidInnerTolerance { tolerance } => {
+                write!(f, "inner continuation tolerance is invalid ({tolerance})")
+            }
+            Self::InvalidEndpointDiscrepancy {
+                steps,
+                role,
+                discrepancy,
+            } => write!(
+                f,
+                "{steps}-step {role} endpoint discrepancy is invalid ({discrepancy})"
+            ),
+            Self::ContractionPremiseViolated {
+                steps,
+                previous_discrepancy,
+                discrepancy,
+                observed_factor,
+                required_max_factor,
+            } => write!(
+                f,
+                "{steps}-step endpoint discrepancy violates the dyadic contraction premise: \
+                 {discrepancy:.6e} / {previous_discrepancy:.6e} = {observed_factor:.6e}, \
+                 required <= {required_max_factor:.6e}"
+            ),
+            Self::StepCountOverflow { steps } => {
+                write!(
+                    f,
+                    "doubling the {steps}-step refinement would overflow usize"
+                )
+            }
+            Self::PathResolutionExhausted {
+                steps,
+                refined_steps,
+            } => write!(
+                f,
+                "endpoint still moves at {steps} steps, but {refined_steps} steps are below the \
+                 rho path's floating-point resolution"
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ContinuationRefinement {
+    Certified(AnchoredContinuationCertificate),
+    Refine,
+}
+
+pub(crate) fn continuation_refinement_decision(
+    steps: usize,
+    previous_discrepancy: Option<f64>,
+    discrepancy: f64,
+    inner_tolerance: f64,
+) -> Result<ContinuationRefinement, AnchoredContinuationRefusal> {
+    if !inner_tolerance.is_finite() || inner_tolerance < 0.0 {
+        return Err(AnchoredContinuationRefusal::InvalidInnerTolerance {
+            tolerance: inner_tolerance,
+        });
+    }
+    if !discrepancy.is_finite() || discrepancy < 0.0 {
+        return Err(AnchoredContinuationRefusal::InvalidEndpointDiscrepancy {
+            steps,
+            role: "current",
+            discrepancy,
+        });
+    }
+    let observed_contraction_factor = if let Some(previous) = previous_discrepancy {
+        if !previous.is_finite() || previous < 0.0 {
+            return Err(AnchoredContinuationRefusal::InvalidEndpointDiscrepancy {
+                steps,
+                role: "previous",
+                discrepancy: previous,
+            });
+        }
+        let observed_factor = if previous == 0.0 {
+            if discrepancy == 0.0 {
+                0.0
+            } else {
+                f64::INFINITY
+            }
+        } else {
+            discrepancy / previous
+        };
+        if !continuation_discrepancy_satisfies_contraction_premise(previous, discrepancy) {
+            return Err(AnchoredContinuationRefusal::ContractionPremiseViolated {
+                steps,
+                previous_discrepancy: previous,
+                discrepancy,
+                observed_factor,
+                required_max_factor: MAX_CONTINUATION_DISCREPANCY_RATIO,
+            });
+        }
+        Some(observed_factor)
+    } else {
+        None
+    };
+    if discrepancy <= inner_tolerance {
+        return Ok(ContinuationRefinement::Certified(
+            AnchoredContinuationCertificate {
+                steps,
+                endpoint_discrepancy: discrepancy,
+                inner_tolerance,
+                observed_contraction_factor,
+            },
+        ));
+    }
+    Ok(ContinuationRefinement::Refine)
+}
+
 pub(crate) fn anchored_continuation_seed<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
@@ -1330,9 +1580,12 @@ pub(crate) fn anchored_continuation_seed<F: CustomFamily + Clone + Send + Sync +
     rho_prior: &gam_problem::RhoPrior,
     rho_anchor: &Array1<f64>,
     rho_target: &Array1<f64>,
-) -> Option<ConstrainedWarmStart> {
+) -> Result<CertifiedAnchoredContinuationSeed, AnchoredContinuationRefusal> {
     if rho_anchor.len() != rho_target.len() {
-        return None;
+        return Err(AnchoredContinuationRefusal::EndpointDimensionMismatch {
+            anchor_dim: rho_anchor.len(),
+            target_dim: rho_target.len(),
+        });
     }
     let path = ContinuationPath {
         family,
@@ -1349,47 +1602,44 @@ pub(crate) fn anchored_continuation_seed<F: CustomFamily + Clone + Send + Sync +
     loop {
         let endpoint = path.sweep(steps)?;
         if let Some(previous) = coarser.as_ref() {
-            let discrepancy = continuation_endpoint_discrepancy(previous, &endpoint)?;
-            if discrepancy <= options.inner_tol {
-                log::info!(
-                    "[OUTER] #2366 anchored continuation seed accepted at {steps} steps \
-                     (endpoint invariant under refinement; discrepancy {discrepancy:.3e})"
-                );
-                return Some(endpoint);
-            }
-            // Halving the step must at least halve the discretization error of a
-            // convergent continuation. A discrepancy that stops contracting is
-            // not a discretization that needs to be finer — it is the signature
-            // of a fold or a bifurcation on the path, where the continuation does
-            // not name a mode at all. Diagnosing that is what terminates this
-            // loop; there is deliberately no iteration budget, because a budget
-            // would silently return the wrong mode instead of declining.
-            if matches!(previous_discrepancy, Some(previous) if discrepancy >= previous) {
-                log::info!(
-                    "[OUTER] #2366 anchored continuation abandoned at {steps} steps: endpoint \
-                     discrepancy stopped contracting ({discrepancy:.3e} vs {:.3e}), so the path \
-                     carries a fold rather than an under-resolved segment",
-                    previous_discrepancy.unwrap_or(f64::NAN)
-                );
-                return None;
+            let discrepancy = continuation_endpoint_discrepancy(steps, previous, &endpoint)?;
+            match continuation_refinement_decision(
+                steps,
+                previous_discrepancy,
+                discrepancy,
+                options.inner_tol,
+            )? {
+                ContinuationRefinement::Certified(certificate) => {
+                    return Ok(CertifiedAnchoredContinuationSeed {
+                        warm_start: endpoint,
+                        certificate,
+                    });
+                }
+                ContinuationRefinement::Refine => {}
             }
             previous_discrepancy = Some(discrepancy);
         }
-        let refined = steps.checked_mul(2)?;
+        let refined = steps
+            .checked_mul(2)
+            .ok_or(AnchoredContinuationRefusal::StepCountOverflow { steps })?;
         if !continuation_path_resolves_steps(rho_anchor, rho_target, refined) {
-            // Refinement has reached the floating-point resolution of the path
-            // itself; a finer discretization is not representable, so the
-            // continuation limit is not attainable here.
-            log::info!(
-                "[OUTER] #2366 anchored continuation seed abandoned: endpoint still moving at \
-                 {steps} steps, and {refined} steps are below the ρ-path's floating-point \
-                 resolution"
-            );
-            return None;
+            return Err(AnchoredContinuationRefusal::PathResolutionExhausted {
+                steps,
+                refined_steps: refined,
+            });
         }
         coarser = Some(endpoint);
         steps = refined;
     }
+}
+
+/// Whether one dyadic refinement satisfies the continuation method's stated
+/// first-order contraction premise.
+pub(crate) fn continuation_discrepancy_satisfies_contraction_premise(
+    previous: f64,
+    current: f64,
+) -> bool {
+    current <= MAX_CONTINUATION_DISCREPANCY_RATIO * previous
 }
 
 /// The segment in ρ that the continuation follows, together with everything
@@ -1424,7 +1674,7 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> ContinuationPath<'_, F> {
     /// reconstructed `ρ_A + 1·(ρ − ρ_A)`: the endpoint must be the mode *at the
     /// requested ρ* bitwise, because everything downstream binds the mode and
     /// its ρ as one identity.
-    fn sweep(&self, steps: usize) -> Option<ConstrainedWarmStart> {
+    fn sweep(&self, steps: usize) -> Result<ConstrainedWarmStart, AnchoredContinuationRefusal> {
         let mut carried: Option<ConstrainedWarmStart> = None;
         for step in 0..=steps {
             let waypoint = if step == steps {
@@ -1447,13 +1697,24 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> ContinuationPath<'_, F> {
                 self.rho_prior,
                 EvalMode::ValueOnly,
             )
-            .ok()?;
+            .map_err(|error| {
+                AnchoredContinuationRefusal::WaypointEvaluationFailed {
+                    steps,
+                    waypoint_index: step,
+                    reason: error.to_string(),
+                }
+            })?;
             if !eval.inner_converged || !eval.objective.is_finite() {
-                return None;
+                return Err(AnchoredContinuationRefusal::WaypointNotCertified {
+                    steps,
+                    waypoint_index: step,
+                    inner_converged: eval.inner_converged,
+                    objective: eval.objective,
+                });
             }
             carried = Some(eval.warm_start);
         }
-        carried
+        carried.ok_or(AnchoredContinuationRefusal::EmptySweep { steps })
     }
 }
 
@@ -1464,25 +1725,49 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> ContinuationPath<'_, F> {
 /// is compared against the inner solve's own convergence tolerance rather than
 /// against a separate constant: two endpoints closer than what the corrector
 /// itself resolves are not evidence that the discretization still matters.
-/// `None` means the two endpoints do not even describe the same block structure,
-/// which is not a discrepancy but a broken comparison.
+/// Endpoints with different structures or non-finite coordinates produce a
+/// typed refusal, because they cannot furnish a meaningful discrepancy.
 fn continuation_endpoint_discrepancy(
+    steps: usize,
     coarser: &ConstrainedWarmStart,
     finer: &ConstrainedWarmStart,
-) -> Option<f64> {
+) -> Result<f64, AnchoredContinuationRefusal> {
     if coarser.block_beta.len() != finer.block_beta.len() {
-        return None;
+        return Err(AnchoredContinuationRefusal::EndpointBlockCountMismatch {
+            steps,
+            coarser_blocks: coarser.block_beta.len(),
+            finer_blocks: finer.block_beta.len(),
+        });
     }
     let mut worst = 0.0_f64;
-    for (a, b) in coarser.block_beta.iter().zip(finer.block_beta.iter()) {
+    for (block_index, (a, b)) in coarser
+        .block_beta
+        .iter()
+        .zip(finer.block_beta.iter())
+        .enumerate()
+    {
         if a.len() != b.len() {
-            return None;
+            return Err(AnchoredContinuationRefusal::EndpointBlockWidthMismatch {
+                steps,
+                block_index,
+                coarser_width: a.len(),
+                finer_width: b.len(),
+            });
         }
-        for (x, y) in a.iter().zip(b.iter()) {
+        for (coordinate_index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            if !x.is_finite() || !y.is_finite() {
+                return Err(AnchoredContinuationRefusal::EndpointCoordinateNotFinite {
+                    steps,
+                    block_index,
+                    coordinate_index,
+                    coarser: *x,
+                    finer: *y,
+                });
+            }
             worst = worst.max((x - y).abs() / (1.0 + x.abs().max(y.abs())));
         }
     }
-    Some(worst)
+    Ok(worst)
 }
 
 /// Whether a `steps`-way uniform split of the continuation path is still
@@ -2019,7 +2304,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // problem is convex the mode is already unique and the continuation would be
     // pure overhead, so it is not run. See [`anchored_continuation_seed`].
     let initial_warm_cache = if family.exact_newton_joint_hessian_beta_dependent() {
-        anchored_continuation_seed(
+        match anchored_continuation_seed(
             family,
             specs,
             &outer_options,
@@ -2027,8 +2312,26 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             &rho_prior,
             &continuation_anchor,
             &rho0,
-        )
-        .or_else(|| persistent_warm_start.clone())
+        ) {
+            Ok(certified) => {
+                log::info!(
+                    "[OUTER] #2661 anchored continuation certified at {} steps: endpoint \
+                     discrepancy {:.3e} <= inner tolerance {:.3e}; observed contraction \
+                     factor {:?}",
+                    certified.certificate.steps,
+                    certified.certificate.endpoint_discrepancy,
+                    certified.certificate.inner_tolerance,
+                    certified.certificate.observed_contraction_factor,
+                );
+                Some(certified.warm_start)
+            }
+            Err(refusal) => {
+                log::info!(
+                    "[OUTER] #2661 anchored continuation declined with typed refusal: {refusal}"
+                );
+                persistent_warm_start.clone()
+            }
+        }
     } else {
         persistent_warm_start.clone()
     };

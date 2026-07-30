@@ -12,7 +12,10 @@
 //! discriminates. A seed-invariance assertion on a unimodal problem would pass
 //! no matter what the code did.
 use super::*;
-use crate::fit::anchored_continuation_seed;
+use crate::fit::{
+    AnchoredContinuationRefusal, ContinuationRefinement, anchored_continuation_seed,
+    continuation_refinement_decision,
+};
 use crate::penalty_labels::penalty_label_layout_with_joint;
 
 /// A one-coefficient family with two known, unequal modes.
@@ -90,6 +93,38 @@ impl CustomFamily for TiltedDoubleWellFamily {
 
 const TILT: f64 = 0.3;
 
+/// #2661 witness: accepting any strict decrease makes the refinement loop
+/// operationally unbounded. A 0.999 contraction passes that old predicate on
+/// every round, while each round doubles the number of full corrector solves.
+#[test]
+fn arbitrarily_slow_progress_is_not_a_continuation_contraction_certificate_2661() {
+    let refusal = continuation_refinement_decision(4, Some(1.0), 0.999, 1e-12)
+        .expect_err("a 0.999 discrepancy ratio must terminate with a typed refusal");
+    match refusal {
+        AnchoredContinuationRefusal::ContractionPremiseViolated {
+            steps,
+            previous_discrepancy,
+            discrepancy,
+            observed_factor,
+            required_max_factor,
+        } => {
+            assert_eq!(steps, 4);
+            assert_eq!(previous_discrepancy.to_bits(), 1.0_f64.to_bits());
+            assert_eq!(discrepancy.to_bits(), 0.999_f64.to_bits());
+            assert_eq!(observed_factor.to_bits(), 0.999_f64.to_bits());
+            assert_eq!(required_max_factor.to_bits(), 0.5_f64.to_bits());
+        }
+        other => panic!("slow contraction produced the wrong typed refusal: {other:?}"),
+    }
+}
+
+#[test]
+fn exact_half_contraction_remains_admissible_2661() {
+    let decision = continuation_refinement_decision(4, Some(1.0), 0.5, 1e-12)
+        .expect("the documented half-contraction boundary must remain admissible");
+    assert_eq!(decision, ContinuationRefinement::Refine);
+}
+
 fn double_well_spec(initial_beta: f64) -> ParameterBlockSpec {
     ParameterBlockSpec {
         name: "well".to_string(),
@@ -127,6 +162,7 @@ fn double_well_options() -> BlockwiseFitOptions {
         auto_outer_subsample: false,
         outer_eval_context: None,
         cache_session: None,
+        persistent_warm_start_store: None,
         cache_mirror_sessions: Vec::new(),
         joint_penalties: None,
         independent_prior_factor_labels: Vec::new(),
@@ -173,7 +209,7 @@ fn continuation_mode(
     let penalty_counts: Vec<usize> = specs.iter().map(|spec| spec.penalties.len()).collect();
     let layout = penalty_label_layout_with_joint(specs, penalty_counts, Vec::new())
         .expect("single-penalty label layout");
-    let seed = anchored_continuation_seed(
+    let certified = anchored_continuation_seed(
         family,
         specs,
         &options,
@@ -183,7 +219,11 @@ fn continuation_mode(
         &array![rho],
     )
     .expect("the continuation from the maximally-smoothed anchor must reach the target rho");
-    seed.block_beta[0][0]
+    assert!(
+        certified.certificate.endpoint_discrepancy <= certified.certificate.inner_tolerance,
+        "a returned continuation seed must carry its endpoint-invariance certificate"
+    );
+    certified.warm_start.block_beta[0][0]
 }
 
 /// CONTROL. Without a selection rule the mode is a functional of the seed: two
