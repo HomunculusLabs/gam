@@ -1,4 +1,7 @@
 use super::*;
+// #2598 — the all-zero-gated-design and total-co-collapse refusals interpolate
+// their classifier marker rather than restating it.
+use super::outer_objective::ProbeRefusalKind;
 use crate::chart_coordinate_solve::PeriodicCurveExtrema;
 use opt::{BacktrackConfig, RidgeSchedule, backtracking_line_search, escalate_ridge};
 
@@ -4341,9 +4344,10 @@ impl SaeManifoldTerm {
                 // stays fatal for every other (genuinely defective) caller.
                 if d.iter().all(|&v| v == 0.0) {
                     return Err(format!(
-                        "refit_decoder_sequential_deflation: atom {atom} is gated off at \
-                         every row (all-zero gated design); the seed ρ leaves the reduced \
-                         problem rank-deficient (recoverable infeasible-ρ probe)"
+                        "refit_decoder_sequential_deflation: atom {atom} is {}; the seed ρ \
+                         leaves the reduced problem rank-deficient (recoverable \
+                         infeasible-ρ probe)",
+                        ProbeRefusalKind::all_zero_gated_design_marker()
                     ));
                 }
                 let beta = solve_design_least_squares(d.view(), residual.view())?;
@@ -7155,13 +7159,14 @@ impl SaeManifoldTerm {
                         )
                     };
                     return Err(format!(
-                        "SaeManifoldTerm::run_joint_fit_arrow_schur: dictionary did not escape \
-                         total co-collapse after {} reseed multi-starts: {arm}, so no residual \
+                        "SaeManifoldTerm::run_joint_fit_arrow_schur: dictionary {} after {} \
+                         reseed multi-starts: {arm}, so no residual \
                          structure could anchor K={} distinct charts for this input \
                          [EV telemetry={ev_now:.4}, decoder_norms={decoder_norms:.4?}]. \
                          Refusing to continue the degenerate \
                          fit. Try fewer atoms (a smaller K), a different atom_topology/assignment, \
                          more observations, or a different random_state.",
+                        ProbeRefusalKind::total_co_collapse_marker(),
                         crate::assignment::SAE_DICTIONARY_COCOLLAPSE_RESEED_BUDGET,
                         atom_count,
                     ));

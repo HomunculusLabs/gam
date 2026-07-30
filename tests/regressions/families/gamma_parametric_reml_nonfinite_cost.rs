@@ -85,9 +85,27 @@ fn fit_family(family: &str, data: &gam::data::EncodedDataset) -> Result<Vec<f64>
 fn gamma_log_link_ordinary_data_fits_with_finite_coefficients() {
     let data = build_data();
 
-    // Gaussian and Poisson must keep working on the identical design/response.
+    // Gaussian must keep working on the identical design/response.
     fit_family("gaussian", &data).expect("gaussian fit on the same data must succeed");
-    fit_family("poisson", &data).expect("poisson fit on the same data must succeed");
+
+    // The Poisson control cannot be a SUCCESS on this response and never should
+    // have been written as one: `y` here is a continuous Gamma draw, and the
+    // count families enforce EXACT integrality (`valid_count_response` in
+    // `crates/gam-solve/src/pirls/family_state.rs`) precisely because the
+    // Poisson log-likelihood IS defined through `ln_gamma` at non-integer `y`
+    // and would otherwise silently evaluate a different likelihood rather than
+    // fail. So the control is kept and made STRICTLY STRONGER: the pipeline
+    // must still carry this design and encoding all the way to the family's own
+    // domain check and name that check — which is the whole of what "the design
+    // and the encoding are sound" was ever evidence of — instead of asserting a
+    // success the response is not eligible for.
+    let poisson_refusal = fit_family("poisson", &data)
+        .expect_err("poisson must refuse a non-integer (continuous Gamma) response");
+    assert!(
+        poisson_refusal.contains("must be a finite non-negative integer"),
+        "the poisson control must fail on the COUNT-INTEGRALITY contract (proving \
+         the design and encoding reached the family), got: {poisson_refusal}"
+    );
 
     // The defect: gamma aborted with `objective returned a non-finite cost`.
     let beta =

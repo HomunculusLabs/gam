@@ -410,7 +410,10 @@ pub fn build_thin_plate_basiswithworkspace(
         joint_null_rotation: None,
         metadata: BasisMetadata::ThinPlate {
             centers: original_centers,
-            length_scale: spec.length_scale,
+            // `input_scale: ONE` below: the builder standardizes nothing, so
+            // the range it was handed is this metadata's original-units
+            // range.  See the Duchon builder for the full contract.
+            length_scale: crate::OriginalUnits::new(spec.length_scale),
             periodic: spec.periodic.clone(),
             identifiability_transform,
             input_scale: crate::IsotropicScale::ONE,
@@ -1846,22 +1849,33 @@ pub(crate) fn centered_design_gram(d: &Array2<f64>) -> Array2<f64> {
     if n_rows == 0 || n_cols == 0 {
         return Array2::<f64>::zeros((n_cols, n_cols));
     }
+    // (D − 1μ')'(D − 1μ') = D'D − N μ μ' holds in exact arithmetic, and the
+    // right-hand form used to be what this function computed. That form is the
+    // textbook unstable one: its cancellation error is `ε·‖D'D‖`, set by the
+    // UNcentered energy and independent of how small the centered energy is.
+    // A design whose columns are nearly constant therefore loses
+    // `log10(‖D'D‖ / ‖D_c'D_c‖)` significant digits, and what survives is no
+    // longer PSD — which the `try_from_dense_psd` bridge downstream reports as
+    // `IndefinitePenalty`, blaming the penalty for an arithmetic choice made
+    // here. Read off the #2627 16-D order-0 power-9 24-center CTN bootstrap
+    // design: the reported cutoff `4.819e-26 = n_cols·10⁻¹⁰·max|λ|` pins
+    // `max|λ| ≈ 2.0e-17` against a minimum eigenvalue of `-2.99e-20`, i.e.
+    // -1.5e-3 RELATIVE — twelve of sixteen digits gone, exactly the ratio
+    // `‖D'D‖ / ‖D_c'D_c‖ ≈ 7e12` that this subtraction cancels away.
+    //
+    // Centering FIRST and forming `D_c' D_c` is PSD BY CONSTRUCTION: it is a
+    // genuine Gram of the *computed* factor, so its spectrum is non-negative to
+    // the rounding of that one product no matter how much accuracy the
+    // subtraction `D − 1μ'` itself lost. The value is the same quantity; only
+    // the arithmetic order changes. `centered_operator_gram_and_psi_derivatives`
+    // directly below has always centered first — this site was the drifted copy.
     let inv_n = 1.0 / n_rows as f64;
-    let col_sum = d.sum_axis(Axis(0));
-    let g_raw = fast_ata(d);
-    // (D − 1μ')'(D − 1μ') = D'D − N μ μ'   where Σ = D'1 = col_sum,
-    // so the rank-1 correction is `col_sum col_sum' / N`.
-    let mut out = g_raw;
-    for i in 0..n_cols {
-        let ci = col_sum[i];
-        let row = out.row_mut(i);
-        // Subtract column i's contribution: out[i, j] -= (ci * col_sum[j]) / N.
-        let mut row = row;
-        for j in 0..n_cols {
-            row[j] -= ci * col_sum[j] * inv_n;
-        }
+    let means = d.sum_axis(Axis(0)).mapv(|v| v * inv_n);
+    let mut centered = d.clone();
+    for mut row in centered.rows_mut() {
+        row -= &means;
     }
-    out
+    fast_ata(&centered)
 }
 
 pub(crate) fn centered_operator_gram_and_psi_derivatives(

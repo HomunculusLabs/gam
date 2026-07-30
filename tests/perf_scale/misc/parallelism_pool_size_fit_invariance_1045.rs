@@ -189,17 +189,29 @@ fn bms_matern_fit_is_invariant_to_worker_pool_size() {
     let centers = 4;
     let (data, spec) = build(n, centers);
 
-    // Wide pool: as many workers as the host gives the global pool (the status
-    // quo), floored at 4 so the gate always has room for a strictly-narrower
-    // pool even on the small (4-vCPU) CI runners. Narrow pool: the #1045
-    // candidate — a shrunk worker pool. Both pools are ≥2 workers so both fits
-    // take the *parallel* row-reduction path (a `narrow == 1` pool would instead
-    // fork onto the serial fold, testing serial-vs-parallel rather than the
-    // pool-size invariance #1045 actually needs). `wide` is a rayon worker count,
-    // not a core count, so building it does not require that many physical cores;
-    // `narrow < wide` therefore holds on every host with ≥1 core and the
-    // invariance assertions below always run.
-    let wide = rayon::current_num_threads().max(4);
+    // Wide pool vs narrow pool: the #1045 candidate is a shrunk worker pool, and
+    // the claim under test is that the fit does not depend on how many workers
+    // it ran on. Both pools are ≥2 workers so both fits take the *parallel*
+    // row-reduction path (a `narrow == 1` pool would instead fork onto the serial
+    // fold, testing serial-vs-parallel rather than the pool-size invariance
+    // #1045 actually needs).
+    //
+    // `wide` is CLAMPED, not taken from the host. It used to be
+    // `rayon::current_num_threads().max(4)`, which reads the global pool and so
+    // scaled with the machine: on a 128-core box this test built a 133-thread
+    // pool and drew ~1300% CPU, and two such binaries running concurrently drove
+    // a shared 128-core node to load 404. The assertion needs only
+    // `narrow < wide`; nothing about it gets stronger as `wide` grows. So the
+    // cost scaled with the host while the coverage did not.
+    //
+    // The clamp also makes this test measure the same thing everywhere. On the
+    // 4-vCPU CI runners `current_num_threads()` was already 4, so CI has only
+    // ever gated the 4-vs-2 comparison — the 128-thread arm ran on developer and
+    // agent boxes alone, where its only effect was to distort every wall-clock
+    // measured beside it. A test that oversubscribes the machine makes its
+    // NEIGHBOURS time out, which is a false signal that costs more than the
+    // coverage it buys.
+    let wide = rayon::current_num_threads().clamp(4, 8);
     let narrow = 2usize;
     assert!(
         narrow < wide,

@@ -109,6 +109,8 @@ mod system;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_device_gauge_2660;
 
 pub(crate) use factorization::*;
 // `SPECTRAL_DEFLATION_REL_FLOOR` is consumed cross-crate (gam-sae streaming plan)

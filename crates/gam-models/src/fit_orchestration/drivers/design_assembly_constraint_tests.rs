@@ -2281,7 +2281,7 @@ fn spatial_frozen_transform_rebuild_is_exact_on_trainingrows() {
             ..
         } => (
             centers.clone(),
-            *length_scale,
+            length_scale.original_value(),
             identifiability_transform
                 .clone()
                 .expect("fit-time Option 5 should store transform"),
@@ -3928,7 +3928,7 @@ fn exact_spatial_joint_engine_aniso_iso_parity_1d() {
             rho_dim,
             &kappa_options,
         )
-        .map(|(theta_star, final_value, _timing)| (theta_star, final_value))
+        .map(|(theta_star, final_value, _seed_value, _timing)| (theta_star, final_value))
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "exact joint spatial optimization", e))
     };
 
@@ -4967,7 +4967,7 @@ fn duchon_probit_pirls_determinism_at_zero() {
 }
 
 #[test]
-fn spatial_aniso_joint_large_psi_dim_keeps_second_order_route() {
+fn spatial_aniso_joint_large_psi_dim_reserves_exact_curvature_for_terminal_mint_979() {
     let cap = gam_solve::rho_optimizer::OuterCapability {
         gradient: gam_problem::Derivative::Analytic,
         hessian: gam_problem::DeclaredHessianForm::Either,
@@ -4975,16 +4975,18 @@ fn spatial_aniso_joint_large_psi_dim_keeps_second_order_route() {
         psi_dim: 31,
         fixed_point_available: true,
         barrier_config: None,
-        prefer_gradient_only: false,
+        // Exact curvature remains declared for the terminal certificate, but
+        // search must not rebuild the fourth-order ψ tower at every iterate.
+        prefer_gradient_only: true,
         disable_fixed_point: false,
     };
+    assert!(cap.hessian.is_analytic());
     let route = gam_solve::rho_optimizer::plan(&cap);
-    assert_eq!(route.solver, gam_solve::rho_optimizer::Solver::Arc);
+    assert_eq!(route.solver, gam_solve::rho_optimizer::Solver::Bfgs);
     assert_eq!(
         route.hessian_source,
-        gam_solve::rho_optimizer::HessianSource::Analytic
+        gam_solve::rho_optimizer::HessianSource::BfgsApprox
     );
-    assert!(route.routing_log_line().contains("matrix-free=false"));
 }
 
 #[test]

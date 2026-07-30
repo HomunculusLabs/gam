@@ -125,7 +125,23 @@ fn gam_torus_tensor_cc_cc_recovers_truth_and_wraps_at_both_seams() {
         family: Some("gaussian".to_string()),
         ..FitConfig::default()
     };
-    let formula = "y ~ te(theta, phi, boundary=['periodic','periodic'], period=[2*pi, 2*pi], k=8)";
+    // k=12 per marginal, NOT k=8. The truth carries 2θ/3φ harmonics and a k=8
+    // cyclic-cubic marginal cannot represent three cycles: at k=8 the fit was
+    // BASIS-SATURATED, and the error both engines were left with was
+    // approximation error, not estimation error. Measured on identical data at
+    // `b8745892a`:
+    //
+    //   k=8  (cap  64)  gam_edf= 63.371 (99% of cap)  gam 0.06743  mgcv 0.15340
+    //                   rel_l2 gam-vs-mgcv 0.19101    -- both miss σ=0.050
+    //   k=12 (cap 144)  gam_edf=135.574 (94% of cap)  gam 0.02882  mgcv 0.02739
+    //                   rel_l2 gam-vs-mgcv 0.02007    -- both clear σ=0.050
+    //
+    // This is a strengthening, not a loosening: every bar below is unchanged and
+    // now passes with margin on BOTH engines, and the two independent
+    // implementations converge from 19.1% disagreement to 2.0% once the basis
+    // can express the signal — which is the evidence that 0.06743 was the basis
+    // talking and not the fit. The seam gaps stay exactly 0.
+    let formula = "y ~ te(theta, phi, boundary=['periodic','periodic'], period=[2*pi, 2*pi], k=12)";
     let result = fit_from_formula(formula, &ds, &cfg).expect("gam torus tensor fit");
     let FitResult::Standard(fit) = result else {
         panic!("expected a standard GAM fit for the torus tensor smooth");
@@ -196,7 +212,7 @@ fn gam_torus_tensor_cc_cc_recovers_truth_and_wraps_at_both_seams() {
         r#"
         suppressPackageStartupMessages(library(mgcv))
         train <- df[df$w > 0, ]
-        m <- gam(y ~ te(theta, phi, bs = c("cc", "cc"), k = c(8, 8)),
+        m <- gam(y ~ te(theta, phi, bs = c("cc", "cc"), k = c(12, 12)),
                  data = train, method = "REML",
                  knots = list(theta = c(0, 2 * pi), phi = c(0, 2 * pi)))
         grid <- df[df$w == 0, ]
@@ -292,7 +308,7 @@ fn gam_torus_tensor_cc_cc_recovers_truth_and_wraps_at_both_seams() {
     // The defensible, still-meaningful upper bound is the hard basis cap k²=64: a
     // genuine pathology (mass concentration / null λ) would saturate AT/beyond the
     // cap, while a signal-appropriate fit sits just under it.
-    let basis_cap = 64.0; // k×k = 8×8 doubly-cyclic tensor
+    let basis_cap = 144.0; // k×k = 12×12 doubly-cyclic tensor
     assert!(
         gam_edf > 4.0 && gam_edf <= basis_cap,
         "gam edf outside a signal-appropriate range for this torus truth: \

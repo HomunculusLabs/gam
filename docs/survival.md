@@ -103,6 +103,54 @@ It accepts the same options as `linkwiggle(...)`: `internal_knots`,
 `"location-scale"`, `"marginal-slope"`, and `"weibull"` fits, but is
 rejected for `"latent"` and `"latent-binary"`.
 
+## Left truncation and the baseline time anchor
+
+`Surv(entry, exit, event)` with `entry > 0` is **left truncation** (delayed
+entry): the row is only under observation from `entry` onward, so it
+contributes `H(exit) − H(entry)` rather than `H(exit)`. A cohort where some
+rows are followed from the time origin and others join later — staggered entry
+— counts as left-truncated too, and is the ordinary shape of a registry
+cohort.
+
+The baseline time basis is *centered* at an anchor time before fitting.
+Re-centering is an exact affine reparameterization of the baseline offset, so
+it does not change the model being fitted — only the frame the smoothing
+selection sees it in. That frame matters: anchoring a left-truncated design at
+the earliest entry leaves the design's trend coordinate large and one-signed
+across every row, and that coordinate is the unpenalized null space of the time
+penalty, so the smoothing selection is driven by an inflated score. Left
+unfixed it rejects every seed on marginal-slope fits and rails the
+transformation baseline into a covariate-independent surface.
+
+The anchor is therefore chosen as:
+
+| Data | Anchor |
+| --- | --- |
+| `survival_likelihood="marginal-slope"` | The robust interior anchor (median exit), always. |
+| Any row entering above the time origin (left truncation, including staggered entry) | The robust interior anchor (median exit). |
+| Every row entering at the time origin (ordinary right censoring) | The earliest entry age, which is ≈ the origin, so centering is a near-no-op. |
+
+Every frontend applies the same rule, from the same function, so the same
+formula, data and configuration produce the same fit through `gamfit.fit`, the
+CLI, and a `gam.fit-request` document alike.
+
+To override it, name the anchor in the data's own time units. It is then
+honored verbatim by every likelihood mode:
+
+```python
+gamfit.fit(df,
+    "Surv(entry, exit, event) ~ s(age)",
+    survival_likelihood="location-scale",
+    survival_time_anchor=55.0,
+)
+```
+
+The CLI spelling is `--survival-time-anchor 55.0` and the fit-request document
+key is `survival_time_anchor`. The chosen anchor is persisted on the saved
+model as `survival_time_anchor`, and prediction re-centers at that value, so a
+model always predicts in the frame it was fitted in. Supplying it without a
+`Surv(...)` response is a configuration error, not a silent no-op.
+
 ## Frailty
 
 `frailty_kind=` enables a latent random effect:

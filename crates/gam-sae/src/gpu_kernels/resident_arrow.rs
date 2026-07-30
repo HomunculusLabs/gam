@@ -1812,9 +1812,18 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn resident_arrow_device_matches_host_reduced_blocks_1017() {
-        match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
+        // The availability question goes through the one shared gate (#2422).
+        // The seam assertion below is this test's own and is kept; what the bare
+        // `resolve` could not do is make the skip VISIBLE — the process counter
+        // never moved and no `SKIPPED(no-cuda):` line was emitted, so a CI ledger
+        // scraping a green CPU-only run saw no trace that the device half never
+        // ran. `gpu_for_test` also panics under `GpuPolicy::Required`, so a GPU
+        // lane no longer needs a per-test opt-in.
+        let skips_before = gam_gpu::test_gate::skipped_for_absent_device();
+        match gam_gpu::test_gate::gpu_for_test("resident-arrow reduced-block parity #1017") {
+            gam_gpu::test_gate::GpuTestGate::Ready(_) => {}
+            gam_gpu::test_gate::GpuTestGate::AbsentDevice => {
+                gam_gpu::test_gate::assert_absent_device_was_counted(skips_before);
                 // #2422: a bare `return` here reported `passed` with zero
                 // assertions on every device-free runner. Without a device the
                 // Device-path constructor must REFUSE -- `ResidentRowJetHandle::new`
@@ -1833,7 +1842,6 @@ mod tests {
                 );
                 return;
             }
-            Err(error) => panic!("resident arrow CUDA admission failed: {error}"),
         }
         let n = ARROW_REDUCTION_LEAF_ROWS * 5 + 3;
         let (rows, residual) = fixture(n);

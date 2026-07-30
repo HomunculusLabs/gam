@@ -1309,8 +1309,9 @@ fn extract_spatial_operator_runtime_caches(
                     // centers; the raw metadata length_scale lives in original
                     // coordinates and would put this overlay on a different kernel
                     // range than the penalties it scales (#706).
-                    let collocation_length_scale =
-                        input_scale.to_standardized_units(*length_scale);
+                    let collocation_length_scale = input_scale
+                        .to_standardized_units(*length_scale)
+                        .standardized_value();
                     let ops = build_matern_collocation_operator_matrices(
                         centers.view(),
                         None,
@@ -1345,8 +1346,9 @@ fn extract_spatial_operator_runtime_caches(
                         ..
                     },
                 ) => {
-                    let collocation_length_scale = (*length_scale)
-                        .map(|length| input_scale.to_standardized_units(length));
+                    let collocation_length_scale = (*length_scale).map(|length| {
+                        input_scale.to_standardized_units(length).standardized_value()
+                    });
                     let ops =
                         gam_terms::basis::build_duchon_collocation_operator_matriceswithworkspace(
                             centers.view(),
@@ -2165,21 +2167,34 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
                 gam_solve::estimate::reml::reml_outer_engine::EvalMode::ValueAndGradient
             },
         )
+        // Ask the producer. `CustomFamilyError` classifies its own refusals
+        // and `EstimationError::CustomFamily(..)` delegates
+        // `is_trial_point_infeasible` straight to it; rendering it into
+        // `RemlOptimizationFailed` threw that away, and
+        // `into_objective_error` then graded a rho-local refusal Fatal, which
+        // is a hard abort of the fit rather than a retreat from this theta
+        // (#2627, the #2531/#2553/#2590 shape). `wrap_preserving_trial_point`
+        // keeps the context prose AND the verdict.
         .map_err(|e| {
-            EstimationError::RemlOptimizationFailed(format!("spatial adaptive eval failed: {e}"))
+            EstimationError::CustomFamily(e)
+                .wrap_preserving_trial_point("spatial adaptive eval failed")
         })?;
         if !owned.result.inner_converged {
             st.warm_cache = Some(owned.result.warm_start.clone());
-            return Err(EstimationError::RemlOptimizationFailed(
-                "exact spatial adaptive inner solve did not converge".to_string(),
-            ));
+            // A statement about THIS theta, not about the problem: the inner
+            // solve at another theta is a different solve.
+            return Err(EstimationError::TrialPointRefused {
+                reason: "exact spatial adaptive inner solve did not converge".to_string(),
+            });
         }
         if !owned.result.objective.is_finite()
             || owned.result.gradient.iter().any(|v| !v.is_finite())
         {
-            return Err(EstimationError::RemlOptimizationFailed(
-                "exact spatial adaptive objective returned non-finite values".to_string(),
-            ));
+            // Same class as the `OuterEval::infeasible` the sibling spatial
+            // lanes return for a non-finite cost.
+            return Err(EstimationError::TrialPointRefused {
+                reason: "exact spatial adaptive objective returned non-finite values".to_string(),
+            });
         }
         let hessian_result = if need_hessian {
             if !owned.result.outer_hessian.is_analytic() {
@@ -2252,15 +2267,14 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
                 gam_solve::estimate::reml::reml_outer_engine::EvalMode::ValueOnly,
             )
             .map_err(|e| {
-                EstimationError::RemlOptimizationFailed(format!(
-                    "spatial adaptive cost eval failed: {e}"
-                ))
+                EstimationError::CustomFamily(e)
+                    .wrap_preserving_trial_point("spatial adaptive cost eval failed")
             })?;
             if !owned.result.inner_converged {
                 st.warm_cache = Some(owned.result.warm_start);
-                return Err(EstimationError::RemlOptimizationFailed(
-                    "exact spatial adaptive cost inner solve did not converge".to_string(),
-                ));
+                return Err(EstimationError::TrialPointRefused {
+                    reason: "exact spatial adaptive cost inner solve did not converge".to_string(),
+                });
             }
             let objective = owned.result.objective;
             st.warm_cache = Some(owned.result.warm_start);
@@ -2305,15 +2319,14 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
                 st.warm_cache.as_ref(),
             )
             .map_err(|e| {
-                EstimationError::RemlOptimizationFailed(format!(
-                    "spatial adaptive EFS eval failed: {e}"
-                ))
+                EstimationError::CustomFamily(e)
+                    .wrap_preserving_trial_point("spatial adaptive EFS eval failed")
             })?;
             if !owned.result.inner_converged {
                 st.warm_cache = Some(owned.result.warm_start);
-                return Err(EstimationError::RemlOptimizationFailed(
-                    "exact spatial adaptive EFS inner solve did not converge".to_string(),
-                ));
+                return Err(EstimationError::TrialPointRefused {
+                    reason: "exact spatial adaptive EFS inner solve did not converge".to_string(),
+                });
             }
             let objective = owned.result.efs_eval.cost;
             st.warm_cache = Some(owned.result.warm_start);
@@ -2351,9 +2364,8 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
                 gam_solve::estimate::reml::reml_outer_engine::EvalMode::ValueOnly,
             )
             .map_err(|e| {
-                EstimationError::RemlOptimizationFailed(format!(
-                    "spatial adaptive screening eval failed: {e}"
-                ))
+                EstimationError::CustomFamily(e)
+                    .wrap_preserving_trial_point("spatial adaptive screening eval failed")
             })?;
             st.warm_cache = Some(owned.result.warm_start);
             Ok(owned.result.objective)
@@ -7875,20 +7887,66 @@ mod spatial_trial_recovery_tests {
 
     #[test]
     fn spatial_value_probe_classifier_matches_derivative_lane() {
-        let recoverable = EstimationError::InvalidInput(
-            "fit_result.beta_covariance_frequentist[0] must be finite, got NaN".to_string(),
-        );
-        let value = classify_spatial_value_probe_failure(recoverable)
-            .expect("a recoverable trial point must remain a domain refusal");
-        assert!(value.is_infinite() && value.is_sign_positive());
+        // The contract is an AGREEMENT: the value-probe lane must retreat to
+        // `+∞` on exactly the errors the derivative lane calls recoverable, and
+        // propagate every other error unchanged. Asserting the agreement over a
+        // table — rather than pinning one hand-picked error per outcome — is
+        // what keeps this gate honest when the producer's verdict moves.
+        //
+        // #2593 moved that verdict from the message text to the error VARIANT
+        // (`TrialPointRefused`), which is what the sibling
+        // `nonfinite_frequentist_covariance_is_recoverable_trial_point` pins.
+        // This fixture still carried the pre-#2593 premise — it built the
+        // non-finite-covariance refusal as an `InvalidInput` and demanded a
+        // retreat — so it asserted the exact opposite of its own sibling on the
+        // same input, and the two could not both hold. The table below carries
+        // both variants with the SAME prose, so the "prose cannot buy
+        // recoverability" rule is now part of this gate rather than only of the
+        // sibling's.
+        let nonfinite_covariance =
+            "fit_result.beta_covariance_frequentist[0] must be finite, got NaN";
+        let unrelated = "outer rho bounds are invalid";
+        let cases = [
+            EstimationError::TrialPointRefused {
+                reason: nonfinite_covariance.to_string(),
+            },
+            // A design that cannot be built at this trial hyperparameter — the
+            // other half of `is_recoverable_trial_point_error`'s verdict.
+            EstimationError::BasisError(gam_problem::BasisError::DegenerateRange(8)),
+            EstimationError::InvalidInput(nonfinite_covariance.to_string()),
+            EstimationError::InvalidInput(unrelated.to_string()),
+        ];
 
-        let fatal_message = "outer rho bounds are invalid";
-        let fatal = classify_spatial_value_probe_failure(EstimationError::InvalidInput(
-            fatal_message.to_string(),
-        ))
-        .expect_err("an evaluation-artifact failure must remain typed");
-        assert!(matches!(fatal, EstimationError::InvalidInput(_)));
-        assert!(fatal.to_string().contains(fatal_message));
+        for error in cases {
+            let message = error.to_string();
+            let derivative_lane_recovers = is_recoverable_trial_point_error(&error);
+            match classify_spatial_value_probe_failure(error) {
+                Ok(value) => {
+                    assert!(
+                        derivative_lane_recovers,
+                        "the value probe retreated on {message:?} while the derivative lane \
+                         calls it fatal — the two lanes must classify one error the same way"
+                    );
+                    assert!(
+                        value.is_infinite() && value.is_sign_positive(),
+                        "a domain refusal must retreat to +INFINITY so the line search steps \
+                         away from it; got {value} for {message:?}"
+                    );
+                }
+                Err(propagated) => {
+                    assert!(
+                        !derivative_lane_recovers,
+                        "the value probe propagated {message:?} while the derivative lane \
+                         calls it a recoverable trial point"
+                    );
+                    assert_eq!(
+                        propagated.to_string(),
+                        message,
+                        "a fatal failure must be propagated unchanged, not reworded"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -8179,9 +8237,11 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
                             .to_string(),
                     )
                 })?;
-                spec_operator
-                    .length_scale
-                    .set_resolved(scale.to_standardized_units(length_scale));
+                spec_operator.length_scale.set_resolved(
+                    scale
+                        .to_standardized_units(gam_terms::OriginalUnits::new(length_scale))
+                        .standardized_value(),
+                );
             }
             // #1122: the realized Matérn design always carries the operator
             // {mass, tension, stiffness} penalty triplet (`build_term` overrides

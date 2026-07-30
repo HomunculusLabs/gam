@@ -4,8 +4,8 @@ use super::*;
 use gam_data::load_dataset_projected;
 use gam_data::{ColumnKindTag, DataSchema, SchemaColumn};
 use gam_terms::basis::{
-    DuchonNullspaceOrder, center_strategy_is_auto, minimum_duchon_power_for_operator_penalties,
-    starting_num_centers,
+    DuchonNullspaceOrder, center_strategy_is_auto, default_num_centers,
+    minimum_duchon_power_for_operator_penalties, starting_num_centers,
 };
 use gam_terms::inference::formula_dsl::{
     default_linkwiggle_formulaspec, parse_linkwiggle_formulaspec,
@@ -1324,7 +1324,10 @@ fn surv_interval_degenerate_bracket_dataset() -> Dataset {
 }
 
 fn duchon_workflow_dataset() -> Dataset {
-    let n = 72usize;
+    duchon_workflow_dataset_with_rows(72)
+}
+
+fn duchon_workflow_dataset_with_rows(n: usize) -> Dataset {
     let mut values = Array2::<f64>::zeros((n, 3));
     for i in 0..n {
         let t = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
@@ -1547,9 +1550,24 @@ fn adaptive_spatial_start_is_activated_only_by_its_orchestrator() {
         adaptive_centers,
         starting_num_centers(data.values.nrows(), 2)
     );
+    // #1757 made the IMPLICIT 2-D Duchon default the low-rank thin-plate
+    // representer rank `10 * 3^(d - 1)`, which is the same rule
+    // `starting_num_centers` uses for the adaptive pilot. The raw default and
+    // the pilot start therefore COINCIDE, at every n, for d = 2 — so the
+    // `raw_centers > adaptive_centers` this replaces was unsatisfiable rather
+    // than merely unmet, and could not have distinguished the two paths.
+    // What separates them is the grow CEILING, not the start: only the
+    // orchestrated request has an owner that may escalate toward
+    // `default_num_centers`, and the raw request stays pinned at the low-rank
+    // default forever. Asserted below as two equalities and a headroom fact,
+    // which is strictly more than the single inequality it replaces.
+    assert_eq!(
+        raw_centers, adaptive_centers,
+        "the raw 2-D Duchon default and the adaptive pilot start are the same low-rank rule"
+    );
     assert!(
-        raw_centers > adaptive_centers,
-        "raw materialization must retain the ordinary basis because it has no grow-loop owner"
+        adaptive_centers <= default_num_centers(data.values.nrows(), 2),
+        "the pilot start must never exceed the validated production ceiling"
     );
     assert!(center_strategy_is_auto(&adaptive_spec.center_strategy));
 
@@ -1567,6 +1585,45 @@ fn adaptive_spatial_start_is_activated_only_by_its_orchestrator() {
     };
     assert_eq!(explicit_spec.center_strategy.planned_num_centers(2), 12);
     assert!(!center_strategy_is_auto(&explicit_spec.center_strategy));
+
+    // Second arm, at an n where the `n / COND_N_DIVISOR` conditioning cap in
+    // `default_num_centers` no longer binds: the low-rank rule `10 * 3^(d - 1)`
+    // is then STRICTLY below the production ceiling, so the orchestrator's grow
+    // loop has something to escalate. At the 72-row fixture above both numbers
+    // collapse onto the conditioning cap and the headroom is legitimately zero,
+    // which is why the strict statement needs its own, larger, fixture rather
+    // than a wider bar on the small one.
+    let wide = duchon_workflow_dataset_with_rows(200);
+    let wide_rows = wide.values.nrows();
+    let low_rank_representer_rank = 10usize * 3usize.pow(1);
+    let wide_raw = materialize("y ~ duchon(ct, st)", &wide, &FitConfig::default())
+        .expect("raw Duchon materialization at 200 rows");
+    let FitRequest::Standard(wide_raw_request) = wide_raw.request else {
+        panic!("expected standard request");
+    };
+    let SmoothBasisSpec::Duchon {
+        spec: wide_raw_spec,
+        ..
+    } = &wide_raw_request.spec.smooth_terms[0].basis
+    else {
+        panic!("expected Duchon smooth");
+    };
+    assert_eq!(
+        wide_raw_spec.center_strategy.planned_num_centers(2),
+        low_rank_representer_rank,
+        "the implicit 2-D Duchon default is the low-rank representer rank (#1757)"
+    );
+    assert_eq!(
+        starting_num_centers(wide_rows, 2),
+        low_rank_representer_rank,
+        "the adaptive pilot start uses the same low-rank rule"
+    );
+    assert!(
+        default_num_centers(wide_rows, 2) > low_rank_representer_rank,
+        "the grow-loop ceiling must strictly exceed the low-rank start at {wide_rows} rows,          or an orchestrated 2-D Duchon has nothing to escalate: ceiling={}, start={}",
+        default_num_centers(wide_rows, 2),
+        low_rank_representer_rank
+    );
 }
 
 #[test]

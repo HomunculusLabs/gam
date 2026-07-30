@@ -1419,6 +1419,30 @@ pub fn assemble_latent_window_payload(
     payload
 }
 
+/// Copy the frontend-neutral request metadata onto a freshly assembled payload.
+///
+/// These three fields are *request* metadata, not fit output: nothing in the
+/// fitted result can reconstruct them, so every save route has to copy them
+/// across by hand, and a route that copies two of the three silently persists a
+/// different model than its sibling front end does for the same canonical
+/// `gam.fit-request` document. `training_table_kind` was exactly that hole: the
+/// shared `fit_formula_to_payload` service (Python FFI) copied it, while every
+/// `gam fit --out` save route in the CLI copied only `group_metadata` and
+/// `inference_notes`, so a request document carrying `"polars"` persisted as
+/// `"polars"` from Python and as the `"unknown"` default from the CLI. This
+/// function is the single owner of that copy so the two cannot drift again;
+/// `frontend_request_metadata_parity_2470` is the executable statement of it.
+/// (#2470)
+pub fn apply_request_metadata(
+    payload: &mut FittedModelPayload,
+    fit_config: &FitConfig,
+    inference_notes: Vec<String>,
+) {
+    payload.group_metadata = fit_config.group_metadata.clone();
+    payload.training_table_kind = fit_config.training_table_kind.clone();
+    payload.inference_notes = inference_notes;
+}
+
 /// One authoritative "formula fit → saved payload" service: materialize once,
 /// dispatch on the request variant, fit, and assemble the persistence payload.
 /// Both front ends (CLI, Python FFI) must route through this function so a fit
@@ -1444,11 +1468,9 @@ pub fn fit_formula_to_payload(
             fit_config,
             result: expectile_result,
         })?;
-        payload.group_metadata = fit_config.group_metadata.clone();
-        payload.training_table_kind = fit_config.training_table_kind.clone();
         // The LAWS driver materializes its inner Gaussian design itself; there are
         // no outer materialize advisories to carry (matches `fit_from_formula`).
-        payload.inference_notes = Vec::new();
+        apply_request_metadata(&mut payload, fit_config, Vec::new());
         return Ok(payload);
     }
     // Calibrated marginal-slope chain (#461): when a CTN Stage-1 recipe is present
@@ -1533,9 +1555,7 @@ pub fn fit_formula_to_payload(
                         dataset.feature_ranges(),
                     );
                     scan_payload.weight_column = fit_config.weight_column.clone();
-                    scan_payload.group_metadata = fit_config.group_metadata.clone();
-                    scan_payload.training_table_kind = fit_config.training_table_kind.clone();
-                    scan_payload.inference_notes = inference_notes;
+                    apply_request_metadata(&mut scan_payload, fit_config, inference_notes);
                     return Ok(scan_payload);
                 }
                 FitResult::ResidualCascade(cascade) => {
@@ -1584,9 +1604,7 @@ pub fn fit_formula_to_payload(
                         dataset.feature_ranges(),
                     )
                     .map_err(|reason| WorkflowError::IntegrationFailed { reason })?;
-                    cascade_payload.group_metadata = fit_config.group_metadata.clone();
-                    cascade_payload.training_table_kind = fit_config.training_table_kind.clone();
-                    cascade_payload.inference_notes = inference_notes;
+                    apply_request_metadata(&mut cascade_payload, fit_config, inference_notes);
                     return Ok(cascade_payload);
                 }
                 _ => {
@@ -1789,9 +1807,7 @@ pub fn fit_formula_to_payload(
             payload_for_dispersion_location_scale(formula, dataset, fit_config, kind, ls_result)?
         }
     };
-    payload.group_metadata = fit_config.group_metadata.clone();
-    payload.training_table_kind = fit_config.training_table_kind.clone();
-    payload.inference_notes = inference_notes;
+    apply_request_metadata(&mut payload, fit_config, inference_notes);
     Ok(payload)
 }
 

@@ -1,8 +1,5 @@
 name: Rust CI
 
-run-name: >-
-  ${{ inputs.ledger_date != '' && format('Rust CI: nightly ledger {0}', inputs.ledger_date) || 'Rust CI: interactive' }}
-
 # REDESIGN (completeness + speed + total-failure visibility)
 # ----------------------------------------------------------
 # The previous version of this workflow had three structural defects:
@@ -59,21 +56,9 @@ on:
         description: "Number of parallel test run-shards (matrix size)."
         default: "10"
         required: false
-      ledger_date:
-        description: "UTC date for a scheduled ledger dispatch; empty means interactive."
-        default: ""
-        required: false
 
-# GitHub may drop scheduled events under load (#2437), so this expensive workflow
-# is dispatch-only. A scheduled dispatcher (retired; any future one inherits the
-# contract) supplies `ledger_date` exactly once when the current UTC ledger is
-# overdue; until one exists, ledger dispatches are manual.
-#
-# Interactive dispatches keep their ref-keyed supersession policy. A ledger
-# dispatch gets a UTC-date group with cancellation disabled, so interactive work
-# cannot destroy the ledger and duplicate ledger events cannot supersede it.
 concurrency:
-  group: rust-ci-${{ inputs.ledger_date != '' && format('ledger-{0}', inputs.ledger_date) || github.ref }}
+  group: rust-ci-${{ github.ref }}
   # NEVER cancel a run on `main`.
   #
   # The `aggregate` job is `if: always()` and ends by publishing this run's
@@ -91,7 +76,7 @@ concurrency:
   #
   # Branches and PRs keep cancelling -- there the newest push is the only one
   # anybody wants, and no ledger is written for them.
-  cancel-in-progress: ${{ inputs.ledger_date == '' && github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   actions: read
@@ -125,14 +110,8 @@ jobs:
     steps:
       - id: plan
         shell: bash
-        env:
-          LEDGER_DATE: ${{ inputs.ledger_date }}
         run: |
           set -uo pipefail
-          if [[ -n "$LEDGER_DATE" && ! "$LEDGER_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-            echo "::error::ledger_date must be an ISO UTC date (YYYY-MM-DD)."
-            exit 1
-          fi
           N="${{ github.event.inputs.shards }}"
           if ! [[ "$N" =~ ^[0-9]+$ ]] || [ "$N" -lt 1 ]; then N=10; fi
           echo "total=$N" >> "$GITHUB_OUTPUT"
@@ -623,6 +602,15 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
+      # The publisher below is a repository-local composite action. Aggregate
+      # previously downloaded only result artifacts, so the workspace contained
+      # MASTER_FAILURES.md but not `.github/actions/publish-gha-results/action.yml`;
+      # every completed suite then failed at the publish step and left the
+      # in-tree ledger stale. Check out the exact workflow SHA before using any
+      # local action.
+      - name: Checkout publisher
+        uses: actions/checkout@v5
+
       - name: Download build logs
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -1004,17 +992,6 @@ jobs:
           if-no-files-found: warn
 
 
-      # Track this run's uncompressed numbers in-tree (bench/gha_results/rust-test-suite).
-      # always() so a failed or timed-out run still publishes what it measured -
-      # those numbers are usually the interesting ones. Publishes nothing when the
-      # run produced no results, so a bad run never blanks the last good one.
-      - name: Publish results to bench/gha_results
-        if: always()
-        uses: ./.github/actions/publish-gha-results
-        with:
-          name: rust-test-suite
-          files: |
-            MASTER_FAILURES.md
       - name: Fail the run if any failure was collected
         shell: bash
         run: |
@@ -1038,6 +1015,17 @@ jobs:
             exit 1
           fi
           echo "No failures collected."
+
+      # Track this run's uncompressed ledger in-tree after the gate has assigned
+      # the job's honest status. `always()` preserves publication for red suites;
+      # the publisher itself keeps the previous ledger when no report exists.
+      - name: Publish results to bench/gha_results
+        if: always()
+        uses: ./.github/actions/publish-gha-results
+        with:
+          name: rust-test-suite
+          files: |
+            MASTER_FAILURES.md
 
   # ---------------------------------------------------------------------------
   # Python API + maturin/wheel flow. PRESERVED verbatim from the old workflow,
@@ -1094,7 +1082,8 @@ jobs:
           python -m pip install \
             'pytest>=8' 'pytest-xdist>=3' 'pytest-timeout>=2' \
             'numpy>=1.26' 'pandas>=2.0' \
-            'pyarrow>=14' 'matplotlib>=3.8' 'scikit-learn>=1.4'
+            'pyarrow>=14' 'matplotlib>=3.8' 'scikit-learn>=1.4' \
+            'lifelines>=0.28'
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2

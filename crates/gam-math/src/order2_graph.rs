@@ -599,6 +599,16 @@ impl<'arena, const K: usize> RuntimeJetScalar<'arena> for Order2Graph<'arena, K>
     }
 
     #[inline(always)]
+    fn constant_like(&self, c: f64) -> Self {
+        Self::constant(c, K, self.workspace)
+    }
+
+    #[inline(always)]
+    fn with_value(&self, value: f64) -> Self {
+        self.unary(value, 1.0, 0.0)
+    }
+
+    #[inline(always)]
     fn symmetric_quadratic_form<C: SymmetricQuadraticCoefficients>(
         inputs: &[Self],
         coefficients: &C,
@@ -821,12 +831,6 @@ impl<'arena, const K: usize> RuntimeJetScalar<'arena> for Order2Graph<'arena, K>
     }
 
     #[inline(always)]
-    fn add_constant(&self, constant: f64, workspace: &'arena Self::Workspace) -> Self {
-        assert!(std::ptr::eq(self.workspace, workspace));
-        self.unary(self.value() + constant, 1.0, 0.0)
-    }
-
-    #[inline(always)]
     fn multiply_add(&self, right: &Self, addend: &Self) -> Self {
         self.assert_compatible(right);
         self.assert_compatible(addend);
@@ -917,9 +921,7 @@ impl<'arena, const K: usize> RuntimeJetScalar<'arena> for Order2Graph<'arena, K>
         input_scale: f64,
         input_shift: f64,
         derivative_stack: [f64; 5],
-        workspace: &'arena Self::Workspace,
     ) -> Self {
-        assert!(std::ptr::eq(self.workspace, workspace));
         assert!(input_shift.is_finite(), "affine input shift must be finite");
         self.unary(
             derivative_stack[0],
@@ -1631,7 +1633,8 @@ mod tests {
         vars: &[S; 5],
         workspace: &'arena S::Workspace,
     ) -> S {
-        let right = vars[4].affine_compose(1.2, -0.1, [0.7, -1.2, 0.45, 0.0, 0.0], workspace);
+        let right =
+            vars[4].affine_compose(1.2, -0.1, [0.7, -1.2, 0.45, 0.0, 0.0]);
         let derived_left = vars[2].multiply_add(&vars[3], &vars[0]);
         let addend = S::linear_combination(vars, &[0.3, -0.8, 0.5, 1.1, -0.4], 5, workspace);
         S::shared_multiply_add_affine_composed_sum(
@@ -1690,7 +1693,7 @@ mod tests {
     ) -> S {
         let nonlinear = [
             vars[0].product(&vars[1]),
-            vars[2].affine_compose(scales[0], scales[1], stacks[0], workspace),
+            vars[2].affine_compose(scales[0], scales[1], stacks[0]),
             vars[3].multiply_add(&vars[4], &vars[5]),
         ];
         let quadratic = S::symmetric_quadratic_form(&nonlinear, coefficients, 6, workspace);
@@ -1714,7 +1717,7 @@ mod tests {
         const N: usize = 10;
         let upstream = [
             vars[0].product(&vars[1]),
-            vars[2].affine_compose(scales[0], scales[1], stacks[0], workspace),
+            vars[2].affine_compose(scales[0], scales[1], stacks[0]),
             vars[3].multiply_add(&vars[4], &vars[5]),
         ];
         let repeated_left = upstream[1].clone();

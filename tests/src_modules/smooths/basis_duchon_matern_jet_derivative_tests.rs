@@ -387,7 +387,7 @@ fn test_matern_aniso_operator_penalties_use_cross_provider() {
 fn test_duchon_public_second_derivative_matchesfd_of_public_first_derivative() {
     let data = array![[0.0, 0.0], [1.0, 0.2], [0.3, 1.1], [0.9, 0.8]];
     let centers = array![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
-    let spec = DuchonBasisSpec {
+    let mut spec = DuchonBasisSpec {
         radial_reparam: None,
         periodic: None,
         center_strategy: CenterStrategy::UserProvided(centers),
@@ -399,6 +399,16 @@ fn test_duchon_public_second_derivative_matchesfd_of_public_first_derivative() {
         operator_penalties: DuchonOperatorPenaltySpec::default(),
         boundary: OneDimensionalBoundary::Open,
     };
+    // #2638: the psi-derivatives are FROZEN-chart derivatives, and
+    // `build_duchon_basis` ADOPTS a data-metric radial reparam `V` for a spec that
+    // carries none (#1355). Replay the cold build's `V` so the analytic jet and the
+    // +/-eps rebuilds below are the same function of psi -- otherwise the second
+    // derivative is differenced against first derivatives from a different chart.
+    let cold = build_duchon_basis(data.view(), &spec).expect("cold Duchon build");
+    let BasisMetadata::Duchon { radial_reparam, .. } = &cold.metadata else {
+        panic!("expected Duchon metadata from the cold build");
+    };
+    spec.radial_reparam = radial_reparam.clone();
     let analytic = build_duchon_basis_log_kappasecond_derivative(data.view(), &spec)
         .expect("analytic Duchon second derivative should build");
 

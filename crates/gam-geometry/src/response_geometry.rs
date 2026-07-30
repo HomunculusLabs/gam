@@ -2039,8 +2039,20 @@ mod tests {
             let back = dispatch_exp_map(tangent.view(), label, base.view()).expect("dispatch exp");
             for row in 0..values.nrows() {
                 for col in 0..values.ncols() {
+                    // Same involution, same manifolds, same bound source as the
+                    // `round_trip` helper above: exp∘log at a FIXED base is
+                    // exact in reals, so the achievable residual is the ulp
+                    // scale of the maps -- a few eps ~ 1e-15 for the closed-form
+                    // ones, and 1e-13 for the one iterative logarithm (Stiefel
+                    // k >= 2, whose own inner gate is TOL = 1.0e-13). 1e-11 is
+                    // 100x that gate.
+                    //
+                    // This site was left at 1e-6 when the helper was tightened,
+                    // and named as outstanding in that commit rather than
+                    // silently skipped. Nothing about the dispatch wrapper makes
+                    // it looser than the direct call it forwards to.
                     assert!(
-                        (back[[row, col]] - values[[row, col]]).abs() < 1e-6,
+                        (back[[row, col]] - values[[row, col]]).abs() < 1e-11,
                         "{label} exp∘log mismatch at ({row},{col}): {} vs {}",
                         back[[row, col]],
                         values[[row, col]]

@@ -165,6 +165,8 @@ pub use psi_hyper::*;
 pub use warm_start::*;
 
 #[cfg(test)]
+mod soft_rho_guard_floor_2629_tests;
+#[cfg(test)]
 mod test_support;
 #[cfg(test)]
 mod tests;

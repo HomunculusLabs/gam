@@ -5642,7 +5642,11 @@ pub fn matern_operator_penalty_triplet_from_metadata(
     // directions effectively unpenalized. That mismatch is benign in 1-D
     // (no standardization) but produces a catastrophic out-of-sample blow-up in
     // every dimension where the input scale differs from one (#706).
-    let penalty_length_scale = input_scale.to_standardized_units(*length_scale);
+    // Since #2636 the two frames are distinct types, so this conversion is the
+    // only way to obtain the standardized scalar the callee requires.
+    let penalty_length_scale = input_scale
+        .to_standardized_units(*length_scale)
+        .standardized_value();
     matern_operator_penalty_triplet_at_length_scale(
         centers.view(),
         periodic.as_deref(),
@@ -8921,7 +8925,7 @@ pub fn build_single_local_smooth_term(
                 .length_scale
                 .expect("ThinPlate declares a required length-scale coordinate");
             let mut spec_local = spec.clone();
-            spec_local.length_scale = length_scale_eff;
+            spec_local.length_scale = length_scale_eff.standardized_value();
             if matches!(
                 spec_local.identifiability,
                 SpatialIdentifiability::OrthogonalToParametric
@@ -8945,7 +8949,7 @@ pub fn build_single_local_smooth_term(
                     ..
                 } => {
                     *metadata_scale = realized_input_scale;
-                    *length_scale = spec.length_scale;
+                    *length_scale = crate::OriginalUnits::new(spec.length_scale);
                 }
                 BasisMetadata::Duchon {
                     input_scale: metadata_scale,
@@ -8975,8 +8979,17 @@ pub fn build_single_local_smooth_term(
                     // · σ_geom`. `compensate(1.0, σ) = 1/σ_geom`, so divide the
                     // realized scale by it to multiply back through σ_geom. With no
                     // standardization. Restore original units before freezing.
-                    if let Some(realized) = *length_scale {
-                        *length_scale = Some(realized * realized_input_scale.get());
+                    if let Some(promoted) = *length_scale {
+                        // The promotion builder tagged its output against its
+                        // own `input_scale: ONE`, but the coordinates it saw
+                        // were already standardized by `realized_input_scale`.
+                        // So the value is a STANDARDIZED length wearing the
+                        // builder's local tag; re-base it onto the scale this
+                        // metadata is about to carry. Same arithmetic as
+                        // before (multiply through by σ_geom), now stated as
+                        // the frame conversion it always was.
+                        let promoted = crate::StandardizedUnits::new(promoted.original_value());
+                        *length_scale = Some(realized_input_scale.to_original_units(promoted));
                     }
                     *metadata_scale = realized_input_scale;
                 }
@@ -9049,7 +9062,7 @@ pub fn build_single_local_smooth_term(
                 .length_scale
                 .expect("MeasureJet declares a required length-scale coordinate");
             let mut spec_local = spec.clone();
-            spec_local.length_scale = length_scale_eff;
+            spec_local.length_scale = length_scale_eff.standardized_value();
             let mut result = build_measure_jet_basis(x.view(), &spec_local)?;
             if let BasisMetadata::MeasureJet {
                 input_scale: metadata_scale,
@@ -9092,7 +9105,9 @@ pub fn build_single_local_smooth_term(
                 .length_scale
                 .expect("Matérn declares a required length-scale coordinate");
             let mut spec_local = spec.clone();
-            spec_local.length_scale.set_resolved(length_scale_eff);
+            spec_local
+                .length_scale
+                .set_resolved(length_scale_eff.standardized_value());
             let mut result = build_matern_basiswithworkspace(x.view(), &spec_local, workspace)?;
             if let BasisMetadata::Matern {
                 input_scale: metadata_scale,
@@ -9101,7 +9116,7 @@ pub fn build_single_local_smooth_term(
             } = &mut result.metadata
             {
                 *metadata_scale = realized_input_scale;
-                *length_scale = original_length_scale;
+                *length_scale = crate::OriginalUnits::new(original_length_scale);
             }
             result
         }
@@ -9129,7 +9144,8 @@ pub fn build_single_local_smooth_term(
             let realized_input_scale = frame.input_scale;
             let length_scale_eff = frame.length_scale;
             let mut spec_local = spec.clone();
-            spec_local.length_scale = length_scale_eff;
+            spec_local.length_scale =
+                length_scale_eff.map(crate::StandardizedUnits::standardized_value);
             // The Duchon input axis is standardized in place above (`x → x/σ`,
             // scale-only, no centering). A 1-D cyclic boundary `[start, end)`
             // declared in ORIGINAL covariate units must move into that same
@@ -9146,8 +9162,12 @@ pub fn build_single_local_smooth_term(
                 spec_local.boundary.clone()
             {
                 spec_local.boundary = crate::basis::OneDimensionalBoundary::Cyclic {
-                    start: realized_input_scale.to_standardized_units(start),
-                    end: realized_input_scale.to_standardized_units(end),
+                    start: realized_input_scale
+                        .to_standardized_units(crate::OriginalUnits::new(start))
+                        .standardized_value(),
+                    end: realized_input_scale
+                        .to_standardized_units(crate::OriginalUnits::new(end))
+                        .standardized_value(),
                 };
             }
             // The SAME original-units-vs-standardized-frame reasoning applies
@@ -9160,7 +9180,9 @@ pub fn build_single_local_smooth_term(
             if let Some(periods) = spec_local.periodic.as_mut() {
                 for axis_period in periods {
                     if let Some(period) = axis_period.as_mut() {
-                        *period = realized_input_scale.to_standardized_units(*period);
+                        *period = realized_input_scale
+                            .to_standardized_units(crate::OriginalUnits::new(*period))
+                            .standardized_value();
                     }
                 }
             }
@@ -9179,7 +9201,7 @@ pub fn build_single_local_smooth_term(
             } = &mut result.metadata
             {
                 *metadata_scale = realized_input_scale;
-                *length_scale = spec.length_scale;
+                *length_scale = spec.length_scale.map(crate::OriginalUnits::new);
                 // Same convention as `length_scale`: metadata (and hence the
                 // frozen replay spec design_freezing copies it into) always
                 // stores the period in ORIGINAL covariate units, and the

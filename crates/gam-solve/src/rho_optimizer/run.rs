@@ -7714,6 +7714,51 @@ pub(crate) enum FixedPointOuterRunError {
     Failed(EstimationError),
 }
 
+/// Carries a fixed-point objective's OWN classification of a refusal across
+/// the `opt` boundary, which does not preserve it.
+///
+/// `OuterFixedPointBridge::eval_step` returns a typed `ObjectiveEvalError`
+/// whose kind is the producer's verdict: `Recoverable` for a refusal that is
+/// a property of THIS rho (a non-finite cost, a non-finite EFS step, a
+/// bubbled `RemlOptimizationFailed`, or any `EstimationError` for which
+/// `is_trial_point_infeasible()` answers true), `Fatal` only for a structural
+/// failure. `opt::FixedPoint::run` then does `err.into_message()` and hands
+/// back `FixedPointError::ObjectiveFailed { message }` -- prose, no kind.
+///
+/// `run_fixed_point_outer_solver` used to answer that String with an
+/// unconditional `fatal_outer_evaluation`, and `is_fatal_outer_evaluation()`
+/// is a hard `return Err(e)` in BOTH the seed loop (`run_plan.rs`) and the
+/// strategy ladder (`run.rs`). So one recoverable per-rho refusal at outer
+/// iteration k killed the remaining seeds and the entire fallback ladder --
+/// including the `disable_fixed_point` BFGS plan `automatic_fallback_attempts`
+/// builds for precisely this situation. The SEED evaluation in the same
+/// function never had this bug: it still holds the typed error there and asks
+/// `is_recoverable()`. Only the iterations lost the verdict, in transit.
+///
+/// This adapter is the publication slot that gets it back -- the same device
+/// `recurrent_incumbent_exit` uses to hand a value out of a moved bridge. The
+/// slot is written on EVERY evaluation (cleared to `None` on success) so a
+/// verdict can never be read stale, and an absent verdict keeps the fatal
+/// classification, making the change strictly one-directional: it can only
+/// demote a refusal the producer itself called recoverable.
+struct ClassifyingFixedPointObjective<ObjFn> {
+    inner: ObjFn,
+    last_error_recoverable: Arc<Mutex<Option<bool>>>,
+}
+
+impl<ObjFn> FixedPointObjective for ClassifyingFixedPointObjective<ObjFn>
+where
+    ObjFn: FixedPointObjective,
+{
+    fn eval_step(&mut self, x: &Array1<f64>) -> Result<FixedPointSample, ObjectiveEvalError> {
+        let outcome = self.inner.eval_step(x);
+        if let Ok(mut slot) = self.last_error_recoverable.lock() {
+            *slot = outcome.as_ref().err().map(ObjectiveEvalError::is_recoverable);
+        }
+        outcome
+    }
+}
+
 pub(crate) fn run_fixed_point_outer_solver(
     obj: &mut dyn OuterObjective,
     layout: OuterThetaLayout,
@@ -7764,6 +7809,16 @@ pub(crate) fn run_fixed_point_outer_solver(
     let tol = outer_tolerance(config.tolerance).map_err(FixedPointOuterRunError::Failed)?;
     let max_iter =
         outer_max_iterations(config.max_iter).map_err(FixedPointOuterRunError::Failed)?;
+    // Publication slot for the producer's own Recoverable/Fatal verdict on the
+    // last failed `eval_step`. `opt::FixedPoint` renders the typed error to a
+    // String before returning it, so without this the `ObjectiveFailed` arm
+    // below has nothing but prose to classify from -- and classified every
+    // refusal fatal, ladder included.
+    let last_step_error_recoverable: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+    let objective = ClassifyingFixedPointObjective {
+        inner: objective,
+        last_error_recoverable: Arc::clone(&last_step_error_recoverable),
+    };
     let mut optimizer = FixedPoint::new(seed.clone(), objective)
         // Seed validation already paid the complete EFS inner solve. Reuse that
         // exact sample so iteration zero neither repeats the expensive solve nor
@@ -7824,12 +7879,41 @@ pub(crate) fn run_fixed_point_outer_solver(
                 EstimationError::RemlOptimizationFailed(message),
             ))
         }
-        Err(FixedPointError::ObjectiveFailed { message }) => Err(FixedPointOuterRunError::Failed(
-            EstimationError::fatal_outer_evaluation(
-                "outer fixed-point evaluation",
-                EstimationError::RemlOptimizationFailed(message),
-            ),
-        )),
+        Err(FixedPointError::ObjectiveFailed { message }) => {
+            // Ask the producer, do not guess from the message. A `Recoverable`
+            // verdict means "this rho is infeasible, step away" -- the seed
+            // path directly above already routes exactly that as a non-fatal
+            // outcome, and the seed loop's response is to record a rejection
+            // and try the next seed / the next plan on the ladder. Only a
+            // FATAL evaluation (a broken artifact: bad layout, dimension
+            // mismatch, a structural `EstimationError`) may short-circuit the
+            // ladder via `is_fatal_outer_evaluation`.
+            //
+            // An absent verdict (no `eval_step` error recorded -- e.g. the
+            // non-finite-cost recovery inside `opt` itself) keeps the fatal
+            // classification, so this can only ever demote, never promote.
+            let producer_called_it_recoverable = last_step_error_recoverable
+                .lock()
+                .ok()
+                .and_then(|slot| *slot)
+                .unwrap_or(false);
+            let error = EstimationError::RemlOptimizationFailed(message);
+            if producer_called_it_recoverable {
+                log::debug!(
+                    "[OUTER] {context}: {label} fixed-point iteration raised a \
+                     producer-recoverable refusal; routing to the fallback ladder \
+                     instead of aborting the fit: {error}"
+                );
+                Err(FixedPointOuterRunError::Failed(error))
+            } else {
+                Err(FixedPointOuterRunError::Failed(
+                    EstimationError::fatal_outer_evaluation(
+                        "outer fixed-point evaluation",
+                        error,
+                    ),
+                ))
+            }
+        }
         Err(e) => Err(FixedPointOuterRunError::Failed(
             EstimationError::RemlOptimizationFailed(format!("{failure_prefix}: {e:?}")),
         )),
@@ -8810,6 +8894,94 @@ mod rail_barrier_removal_tests {
             "the interior coordinate 1 must keep the criterion gradient the \
              optimizer actually descended, barrier included"
         );
+    }
+
+    /// #2629 — on an objective whose outer coordinate is
+    /// `θ = [ρ (rho_dim), ψ/link (psi_dim)]`, the publication is θ-length with
+    /// the barrier in the leading ρ block and EXACT zeros in the trailing one.
+    ///
+    /// This is the gate the issue asks for, and it is on the seam rather than
+    /// on a call site because that is where the layout is now applied. The
+    /// mixture/SAS objective installs the same closure standard REML does — a
+    /// closure that speaks ρ — and `ClosureObjective` embeds it from the
+    /// declared `psi_dim`. The failure this refuses is specifically invisible:
+    /// every coordinate's barrier is the same order of magnitude, so a
+    /// publication shifted by one slot has the same norm as a correct one and
+    /// shows up only as a coordinate that never certifies.
+    #[test]
+    fn a_psi_bearing_objective_publishes_the_barrier_in_the_rho_block_and_zeros_elsewhere_2629() {
+        use super::{Derivative, HessianValue, OuterEval, OuterProblem};
+        // 2 ρ coordinates + 2 link coordinates, the shape a one-smooth SAS fit
+        // presents (`θ_dim = k + sas_dim`).
+        let problem = OuterProblem::new(4)
+            .with_gradient(Derivative::Analytic)
+            .with_psi_dim(2);
+        // The hook is handed the ρ BLOCK and answers over it. Distinct values so
+        // a slot shift cannot be mistaken for a correct answer.
+        let mut obj = problem
+            .build_objective(
+                (),
+                |_: &mut (), theta: &Array1<f64>| Ok(0.5 * theta.dot(theta)),
+                |_: &mut (), theta: &Array1<f64>| {
+                    Ok(OuterEval {
+                        cost: 0.5 * theta.dot(theta),
+                        gradient: theta.clone(),
+                        hessian: HessianValue::Unavailable,
+                        inner_beta_hint: None,
+                    })
+                },
+                None::<fn(&mut ())>,
+                None::<fn(&mut (), &Array1<f64>) -> Result<super::EfsEval, super::EstimationError>>,
+            )
+            .with_soft_rho_guard_gradient(|_: &mut (), rho: &Array1<f64>| {
+                assert_eq!(
+                    rho.len(),
+                    2,
+                    "the hook must receive the RHO block, not the full theta"
+                );
+                Array1::from_vec(vec![BARRIER_AT_RHO_30, 0.5 * BARRIER_AT_RHO_30])
+            });
+
+        let theta = Array1::from_vec(vec![30.0, 30.0, 0.25, -0.25]);
+        let published = super::OuterObjective::soft_rho_guard_gradient(&mut obj, &theta)
+            .expect("an objective that installed the hook must publish");
+        assert_eq!(
+            published.len(),
+            theta.len(),
+            "the publication is indexed by OUTER coordinate at every consumer, so it \
+             must be theta-length"
+        );
+        assert_eq!(published[0], BARRIER_AT_RHO_30);
+        assert_eq!(published[1], 0.5 * BARRIER_AT_RHO_30);
+        // Exact zeros, not "small": the barrier acts on ρ only, and a consumer
+        // subtracts this from a railed coordinate's gradient verbatim.
+        assert_eq!(
+            published[2], 0.0,
+            "the link slots carry no barrier and must publish EXACTLY zero"
+        );
+        assert_eq!(published[3], 0.0);
+
+        // ...and composed with the removal, a railed LINK coordinate keeps its
+        // gradient bit for bit while the railed ρ coordinates lose theirs. This
+        // is the property a hand-written θ publication would have broken.
+        let bounds = box_30(4);
+        let at_bounds = Array1::from_vec(vec![30.0, 30.0, 30.0, -30.0]);
+        let gradient = Array1::from_vec(vec![
+            BARRIER_AT_RHO_30,
+            0.5 * BARRIER_AT_RHO_30,
+            7.5e-3,
+            -2.5e-3,
+        ]);
+        let view =
+            gradient_with_rail_barrier_removed(&at_bounds, &gradient, &bounds, Some(&published));
+        assert_eq!(view[0], 0.0, "railed rho coordinate 0 loses its barrier");
+        assert_eq!(view[1], 0.0, "railed rho coordinate 1 loses its barrier");
+        assert_eq!(
+            view[2], gradient[2],
+            "a railed LINK coordinate carries no barrier and must be untouched — \
+             its box is a real constraint, not a proxy for a limit"
+        );
+        assert_eq!(view[3], gradient[3]);
     }
 
     /// A missing or mis-shaped publication is an ABSENCE, never a partial

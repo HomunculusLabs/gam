@@ -74,15 +74,24 @@ fn cache_digest_builder(namespace: &str) -> Fingerprinter {
 pub enum LatentBasisKind {
     // Basis/evaluator family for Phi(t); the per-row latent values live in LatentCoordValues.
     Matern {
+        /// Standardized-frame centers, as `BasisMetadata` stores them.
         centers: Array2<f64>,
-        length_scale: f64,
+        /// The frame `centers` live in relative to the RAW latent values
+        /// (#2643). `build_radial_distances` standardizes by this before
+        /// forming radii; without it, raw `t` was compared against
+        /// standardized centers at an original-units range.
+        input_scale: gam_terms::IsotropicScale,
+        /// Kernel range in ORIGINAL units, paired with `input_scale`.
+        length_scale: gam_terms::OriginalUnits,
         nu: MaternNu,
         aniso_log_scales: Vec<f64>,
         chunk_size: Option<usize>,
     },
     Duchon {
         centers: Array2<f64>,
-        length_scale: Option<f64>,
+        /// See [`LatentBasisKind::Matern::input_scale`].
+        input_scale: gam_terms::IsotropicScale,
+        length_scale: Option<gam_terms::OriginalUnits>,
         power: f64,
         nullspace_order: DuchonNullspaceOrder,
         aniso_log_scales: Vec<f64>,
@@ -125,6 +134,23 @@ impl LatentBasisKind {
         }
     }
 
+    /// The frame this kind's `centers` live in, relative to the raw latent
+    /// values.
+    ///
+    /// `Sphere` centers are chart coordinates consumed verbatim — the sphere
+    /// contract is `Intrinsic`, so nothing standardizes them and `ONE` is the
+    /// true frame rather than a stand-in. The bspline and PCA kinds have no
+    /// centers at all and never reach `build_radial_distances`.
+    fn input_scale(&self) -> gam_terms::IsotropicScale {
+        match self {
+            Self::Matern { input_scale, .. } | Self::Duchon { input_scale, .. } => *input_scale,
+            Self::Sphere { .. }
+            | Self::PeriodicBspline { .. }
+            | Self::TensorBspline { .. }
+            | Self::Pca { .. } => gam_terms::IsotropicScale::ONE,
+        }
+    }
+
     fn streams_radial_cache(&self) -> bool {
         matches!(
             self,
@@ -143,6 +169,7 @@ impl LatentBasisKind {
         match self {
             Self::Matern {
                 centers,
+                input_scale,
                 length_scale,
                 nu,
                 aniso_log_scales,
@@ -151,7 +178,10 @@ impl LatentBasisKind {
                 hasher.write_usize(0);
                 hasher.write_usize(centers.nrows());
                 hasher.write_usize(centers.ncols());
-                hasher.write_f64(*length_scale);
+                // Two designs with the same range in different frames are
+                // different designs, so the frame belongs in the key (#2643).
+                hasher.write_f64(input_scale.get());
+                hasher.write_f64(length_scale.original_value());
                 hasher.write_usize(matern_nu_signature(*nu));
                 hasher.write_f64_slice(aniso_log_scales);
                 hash_optional_usize(*chunk_size, &mut hasher);
@@ -159,6 +189,7 @@ impl LatentBasisKind {
             }
             Self::Duchon {
                 centers,
+                input_scale,
                 length_scale,
                 power,
                 nullspace_order,
@@ -167,7 +198,11 @@ impl LatentBasisKind {
                 hasher.write_usize(1);
                 hasher.write_usize(centers.nrows());
                 hasher.write_usize(centers.ncols());
-                hash_optional_f64(*length_scale, &mut hasher);
+                hasher.write_f64(input_scale.get());
+                hash_optional_f64(
+                    length_scale.map(gam_terms::OriginalUnits::original_value),
+                    &mut hasher,
+                );
                 hasher.write_u64(power.to_bits());
                 hash_duchon_nullspace_order(*nullspace_order, &mut hasher);
                 hasher.write_f64_slice(aniso_log_scales);
@@ -762,7 +797,9 @@ impl LatentDesignCache {
             }
         } else {
             match basis_kind.centers() {
-                Some(centers) => build_radial_distances(&latent, centers)?,
+                Some(centers) => {
+                    build_radial_distances(&latent, centers, basis_kind.input_scale())?
+                }
                 None => RadialDistanceMatrices {
                     squared: Array2::<f64>::zeros((0, 0)),
                     distance: Array2::<f64>::zeros((0, 0)),
@@ -956,8 +993,12 @@ fn latent_bits_match(latent: &LatentCoordValues, cached_bits: &[u64]) -> bool {
 fn build_radial_distances(
     latent: &LatentCoordValues,
     centers: &Array2<f64>,
+    input_scale: gam_terms::IsotropicScale,
 ) -> Result<RadialDistanceMatrices, EstimationError> {
-    let t = latent.as_matrix();
+    // `centers` are standardized and `t` is raw, so the radii are only
+    // commensurate after the same pullback the realized design applies (#2643).
+    let mut t = latent.as_matrix();
+    input_scale.standardize(&mut t);
     if t.ncols() != centers.ncols() {
         return Err(EstimationError::InvalidInput(format!(
             "latent design cache center dimension mismatch: latent d={}, centers d={}",
@@ -987,6 +1028,7 @@ fn build_basis_derivative_jets(
 ) -> Result<BasisDerivativeJets, EstimationError> {
     match basis_kind {
         LatentBasisKind::Matern {
+            input_scale,
             length_scale,
             nu,
             chunk_size,
@@ -998,8 +1040,12 @@ fn build_basis_derivative_jets(
                     ..BasisDerivativeJets::empty()
                 });
             }
+            // `distances` are standardized (see `build_radial_distances`), so
+            // the range must be too (#2643).
             let radial = RadialScalarKind::Matern {
-                length_scale: *length_scale,
+                length_scale: input_scale
+                    .to_standardized_units(*length_scale)
+                    .standardized_value(),
                 nu: *nu,
             };
             let mut phi = Array2::<f64>::zeros(distances.distance.raw_dim());

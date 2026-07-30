@@ -22,6 +22,15 @@
 /// objective↔gradient desync. The former outer-objective numerical safeguard
 /// has been removed: deflating these directions keeps the envelope term
 /// value-consistent at its analytic source.
+/// COUNTERPART FLOOR (#2253 x #2330). This is a `B`-RELATIVE ratio
+/// (`mu = x'Ax / x'Bx`), NOT an eigenvalue of `A`, so it is not comparable
+/// term-for-term with [`SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL`], which
+/// floors an absolute eigenvalue of `A` at `1e-9 * max(lambda_max(A), 1)`. The
+/// two nonetheless classify the SAME directions of the SAME operator, for the
+/// value path and the gradient path respectively, and they can disagree: see
+/// the overlap-region note on that constant for the exact crossing conditions
+/// and for the pencil-spectrum measurement that would let the two be replaced
+/// by one quantity. Deliberately left as two numbers until that is measured.
 fn sae_ift_min_curvature_fraction() -> f64 {
     f64::EPSILON.sqrt()
 }
@@ -135,6 +144,20 @@ where
     // leaving every resolved direction untouched.
     let dim = x.t.len() + x.beta.len();
     let rank_floor = sae_ift_min_curvature_fraction();
+    // #2627 — anti-runaway ceiling on the TOTAL inverse-power refinement solves
+    // summed over EVERY deflation turn. The two loops nest: the outer turn
+    // deflates one direction per pass and is bounded by `dim`, the inner
+    // inverse-power refinement is bounded by `dim`, and every turn of the inner
+    // loop is a FULL preconditioned GMRES (`A⁻¹Bv`). The product is `dim²`
+    // solves, which the #2472 note undercounts by a factor of `dim` because it
+    // reads only the inner bound. This is a ceiling on the WORK, not a
+    // convergence bound: the per-direction certificates below are unchanged and
+    // still decide every solve that terminates inside the budget. It exists so
+    // that an exact `A = B + ΔC` which is near-singular at the inner mode
+    // surfaces as a typed refusal carrying its own diagnosis instead of a
+    // wall-clock SIGKILL that names nothing.
+    let inverse_power_solve_ceiling = 4usize.saturating_mul(dim).saturating_add(16);
+    let mut inverse_power_solves = 0usize;
     for _ in 0..dim {
         let ax = apply_a(&x)?;
         let bx = apply_b(&x)?;
@@ -205,6 +228,12 @@ where
         };
         normalize_b(&mut v)?;
         let mut direction_converged = false;
+        // #2627 — consecutive inverse steps whose refined direction stayed under
+        // the numerical-null floor. See the subspace certificate at the bottom of
+        // this loop for why this, and not eigenvector alignment, is the property
+        // the deflation actually needs.
+        let mut null_confirmations = 0usize;
+        const NUMERICAL_NULL_CONFIRMATIONS: usize = 2;
         for power_step in 0..dim {
             // #2472 — every turn of this loop is a FULL preconditioned GMRES
             // solve (`A⁻¹Bv`), and the loop is bounded by the Krylov dimension,
@@ -227,6 +256,15 @@ where
             // μ(x) collapsed onto μ_min — is ALREADY aligned with the offending
             // direction. Keep the best `v` and let the alignment/μ checks below
             // decide, instead of aborting the whole outer gradient.
+            if inverse_power_solves >= inverse_power_solve_ceiling {
+                return Err(format!(
+                    "solve_exact_stationarity: inverse-power refinement exceeded the \
+                     anti-runaway budget of {inverse_power_solve_ceiling} A-inverse GMRES \
+                     solves (dimension {dim}); the exact pencil is numerically singular at \
+                     this iterate and its IFT response is not identifiable"
+                ));
+            }
+            inverse_power_solves += 1;
             let refined =
                 match solve_b_preconditioned_gmres_with(&bv, |w| apply_a(w), |w| precondition(w)) {
                     Ok(mut refined) => {
@@ -275,6 +313,48 @@ where
                 return Ok(x);
             }
             if 1.0 - alignment.min(1.0) <= rank_floor {
+                direction_converged = true;
+                break;
+            }
+            // #2627 — SUBSPACE certificate, and the reason the timeouts existed.
+            //
+            // The alignment test above asks for a converged EIGENVECTOR: consecutive
+            // B-normalized iterates agreeing to `sqrt(eps)`. Inverse power iteration
+            // rotates the iterate toward the smallest-`|μ|` eigenvector at the rate
+            // `(μ_min/μ_next)^k`, so the number of steps that test costs is
+            // `log(sqrt(eps)) / log(μ_min/μ_next)` — UNBOUNDED as the two smallest
+            // near-null curvatures approach each other, and every one of those steps
+            // is a full preconditioned GMRES. A near-null CLUSTER with no interior
+            // gap is not a pathology of this operator, it is its construction: `K`
+            // atoms each contribute a rank-1 radial null to `A = B + ΔC`, so `A` has
+            // a whole band of curvatures under the floor with ratios arbitrarily
+            // close to one. At a ratio of 0.9 the test wants ~80 GMRES solves; at
+            // 0.99, ~1800. Multiply by the outer deflation turn (bounded by `dim`)
+            // and that is the `dim²`-shaped wall clock — and it is a CRITERION
+            // defect, not a loop defect. The loop bound is the correct Krylov bound;
+            // the criterion is buying a property at unbounded cost.
+            //
+            // The property is one the consumer never uses. Deflation subtracts the
+            // B-projection of `x` along `v`, and the guard that makes that
+            // legitimate is the one already enforced after this loop:
+            // `|μ(v)| < rank_floor`, i.e. `v` lies in the numerical-null invariant
+            // subspace. MEMBERSHIP in that subspace is the whole requirement; WHICH
+            // member `v` is does not enter the projection's correctness, and every
+            // vector of the cluster satisfies membership equally. Resolving the
+            // cluster's interior gap is work whose answer is discarded.
+            //
+            // Membership is what surviving inverse steps prove, by the same
+            // amplification argument the discriminator above already relies on: one
+            // inverse step amplifies smaller-`|μ|` components relative to larger
+            // ones, so a refined direction whose OWN curvature is resolved proves
+            // the seed's near-zero Rayleigh quotient was cancellation among resolved
+            // directions — that case returns above on `refined_mu.abs() >=
+            // rank_floor`. Symmetrically, a direction still under the floor after
+            // consecutive amplification steps carries genuine null content rather
+            // than a cancellation artifact. Two consecutive confirmations is that
+            // discriminator; further steps only refine which null vector.
+            null_confirmations += 1;
+            if null_confirmations >= NUMERICAL_NULL_CONFIRMATIONS {
                 direction_converged = true;
                 break;
             }
@@ -2678,6 +2758,55 @@ impl SaeManifoldTerm {
             && matrix_free_system.is_none()
             && self.dense_exact_a_theta_adjoint_is_modelled();
 
+        // #2087/#2330 ROUTE-COHERENCE GUARD. The VALUE's log-determinant route and
+        // THIS gradient's are selected by two unrelated predicates:
+        //
+        //   value    `streaming_plan().admitted_or_error(..).direct_logdet_admitted()`
+        //            — a working-set/memory admission (construction_quasi_laplace.rs).
+        //            Admitted ⇒ ranks the exact `½log|A|`; not admitted ⇒ delegates to
+        //            the streaming implementation, which ranks the majorizer `½log|B|`.
+        //   gradient `exact_a_logdet_route` above — the bundle / matrix-free /
+        //            assignment-family triple. Nothing consults the value's admission.
+        //
+        // Nothing tied them, so a fit whose value was priced by the streaming
+        // `½log|B|` could still be handed an exact-A derivative here. The desync is
+        // `½·d/dρ log|I + B⁻¹ΔC|` — unbounded on a near-singular `A`, and invisible
+        // to `criterion_as_atoms`'s 64-ulp identity check, which re-derives the
+        // VALUE predicate and so cannot observe that the gradient took the other
+        // route. Refuse rather than return the derivative of an operator the value
+        // never ranked.
+        //
+        // SCOPE — this refuses ONLY the undocumented cell (value = B, gradient = A).
+        // The mirror cell (value = A, gradient = B, i.e. `ThresholdGate`) is the
+        // DELIBERATE staging documented on `dense_exact_a_theta_adjoint_is_modelled`
+        // and held by the matrix-free and bundle routes too; refusing it would break
+        // every ThresholdGate fit, so it is named there rather than rejected here.
+        //
+        // LIMIT — this guard reads the PLAN, so it catches a predicate mismatch, not
+        // a caller that hand-picks `penalized_quasi_laplace_criterion_streaming_exact_with_cache`
+        // on a shape the plan would have admitted (see
+        // `tests_streaming_outer_gradient_2026`, which does exactly that on purpose).
+        if exact_a_logdet_route {
+            let value_route_is_exact_a = self
+                .streaming_plan()
+                .map_err(OuterGradientError::internal)?
+                .admitted_or_error(self.n_obs(), self.output_dim(), self.k_atoms())
+                .map_err(OuterGradientError::internal)?
+                .direct_logdet_admitted();
+            if !value_route_is_exact_a {
+                return Err(OuterGradientError::internal(format!(
+                    "analytic_outer_rho_gradient_components: log-determinant route \
+                     incoherence — this gradient would differentiate the exact ½log|A|, \
+                     but at shape n={}, p={}, K={} the criterion VALUE is priced by the \
+                     streaming ½log|B| implementation (direct_logdet_admitted = false). \
+                     Returning it would desync value and gradient by ½·d/dρ log|I + B⁻¹ΔC|.",
+                    self.n_obs(),
+                    self.output_dim(),
+                    self.k_atoms()
+                )));
+            }
+        }
+
         if let Some(sparse_index) = rho.sparse_flat_index() {
             explicit[sparse_index] =
                 crate::assignment::assignment_prior_log_strength_derivative_weighted(
@@ -2828,6 +2957,15 @@ impl SaeManifoldTerm {
         // The scalar criterion replaces `½ log|H_tt|` with the realised-rank
         // charge. Its direct rho differential belongs alongside the explicit
         // penalty channels and is present on every layout (dense or probes).
+        //
+        // #2087 ATTRIBUTION — folding it in means `explicit` is no longer the
+        // ρ-derivative of `loss.total() + extra_penalty_energy`, which is what its
+        // docstring used to claim. Keep the folded summand ADDRESSABLE so an audit
+        // that finite-differences `loss.total()` (the only loss entry that pins θ̂)
+        // can net it out. Without this, such an audit's two halves are off by
+        // exactly ∓this vector — equal, opposite, and each blaming a channel that
+        // is not at fault.
+        let rank_charge_direct_rho = rank_charge.direct_rho.clone();
         explicit += &rank_charge.direct_rho;
 
         // #2080: the envelope Γ off the SAME shared low-rank logdet derivative
@@ -2978,6 +3116,7 @@ impl SaeManifoldTerm {
 
         Ok(SaeOuterRhoGradientComponents {
             explicit,
+            rank_charge_direct_rho,
             logdet_trace,
             occam,
             third_order_correction,
@@ -3383,6 +3522,41 @@ impl SaeManifoldTerm {
     /// null of `A`, unit-pinned ⇒ `log 1 = 0`, `1/λ → 0`). #2330 ACCEPTS
     /// `min_eig > −floor`; #2336's saddle-escape TRIGGERS on `min_eig < −floor` —
     /// the same constant, so the two features cannot disagree in the band.
+    ///
+    /// TWO FLOORS, ONE OPERATOR (#2330 x #2253). This constant and
+    /// [`sae_ift_min_curvature_fraction`] both classify directions of the SAME
+    /// `A = B + dC`, and they are deliberately NOT the same number because they
+    /// are not the same quantity:
+    ///
+    /// * HERE: an absolute eigenvalue of `A`, floored relative to `lambda_max(A)`
+    ///   (`1e-9 * max(lambda_max, 1)`). It asks "is this direction's own
+    ///   curvature negative enough that `1/2 log|A|` is meaningless?"
+    /// * THERE: the generalized Rayleigh quotient `mu = x'Ax / x'Bx` of the IFT
+    ///   SOLUTION, floored at `sqrt(eps) ~ 1.49e-8`. That is a `B`-RELATIVE
+    ///   ratio, not an eigenvalue of anything. It asks "did `1/mu` amplify an
+    ///   unidentified near-null into `theta_rho`?"
+    ///
+    /// THE OVERLAP REGION IS REAL AND UNMEASURED. A direction `v` with
+    /// `lambda(v)` in `(-1e-9*lambda_max, 0)` sits inside THIS band and is
+    /// priced as the radial-gauge null (`log 1 = 0`), while its `mu` can sit far
+    /// ABOVE `sqrt(eps)` whenever `v'Bv << |lambda|/sqrt(eps)` - the value calls
+    /// the direction gauge, the gradient calls it a resolved negative-curvature
+    /// direction and keeps its `A^-1` response. The converse exists too:
+    /// `|lambda| >> floor` with `mu` below `sqrt(eps)` when `v'Bv` is large, so
+    /// the value prices a direction the gradient has projected out. Neither
+    /// crossing is detected today and neither has been measured.
+    ///
+    /// UNIFYING THEM IS A MEASUREMENT, NOT AN EDIT, which is why this commit
+    /// changes no number. The two collapse into one quantity only under a common
+    /// metric - compare `lambda` in the `B` metric (the pencil eigenvalues of
+    /// `(A, B)`) at BOTH sites, so "gauge null" and "unidentified" become the
+    /// same statement. What would settle it: on a fixture that actually refuses
+    /// with `IndefiniteObservedInformation`, dump the `(A, B)` pencil spectrum
+    /// beside the plain `A` spectrum and count the directions that change class
+    /// between the two normalizations. A nonzero count IS the defect; a zero
+    /// count says the split is harmless there and both constants may stand. The
+    /// refusal-site `log::debug!` in `exact_observed_information_log_dets` emits
+    /// the per-direction half of that dump.
     pub(crate) const SAE_EXACT_A_PD_FLOOR_REL: f64 = 1.0e-9;
 
     /// #2330 Phase-2 — the EXACT observed-information Laplace log-determinants
@@ -3447,6 +3621,50 @@ impl SaeManifoldTerm {
                         }
                         let basin = lambda + e_v;
                         if basin < -floor {
+                            // NOT a step toward a saddle escape. #2336's
+                            // terminal saddle-ESCAPE was REFUTED three ways
+                            // (closed `e972387215`; both re-convergence lanes,
+                            // undamped and descent-enforcing MM/Armijo, return
+                            // to the same mode after a provably-descending step;
+                            // `GATE_SHIFT=0`, evidence tests `6a5ca5d84`). The
+                            // shipped resolution is the E-attributability
+                            // arithmetic on the lines directly above. Comments
+                            // elsewhere in this crate still promise that escape
+                            // as pending - `construction_quasi_laplace.rs:353`,
+                            // `outer_objective.rs:2622`/`:3081`/`:4118` - and
+                            // they are stale pointers to a refuted approach.
+                            //
+                            // What this emits is the surviving open question. A
+                            // refusal here means the mode is stationary AND the
+                            // exact curvature is negative by more than the clamp
+                            // explains, and every one of those magnitudes is
+                            // computed on this line and then discarded with the
+                            // eigenvector. They are the per-direction half of
+                            // the pencil-spectrum dump named on
+                            // `SAE_EXACT_A_PD_FLOOR_REL`: the coordinate-block
+                            // mass is what says whether the two floors would
+                            // have classified this direction the same way.
+                            // Diagnostic only - no control flow, no numerics,
+                            // and the typed refusal below is unchanged.
+                            //
+                            // `warn`, not `debug`: this record is the ONLY place
+                            // the six numbers that discriminate the #2330 fork
+                            // exist -- a genuine saddle of L (curable upstream)
+                            // versus an A that is not the curvature of the thing
+                            // whose gradient the solve drove to zero (curable
+                            // only at this refusal site). CI captures stderr at
+                            // WARN, so at `debug` they were computed and
+                            // discarded on every abort and the fork stayed
+                            // undecidable from a CI log. It fires only on a
+                            // refusal that is about to abort the fit, so it
+                            // cannot become chatter.
+                            let t_mass: f64 = (0..limit).map(|j| v[j] * v[j]).sum();
+                            log::warn!(
+                                "SAE exact-A saddle refusal: block={block} idx={idx} \
+                                 lambda={lambda:.6e} clamp v'Ev={e_v:.6e} \
+                                 basin={basin:.6e} floor={floor:.6e} \
+                                 max_eig={max_eig:.6e} coordinate-block mass={t_mass:.6e}"
+                            );
                             return Err(SaeCriterionError::IndefiniteObservedInformation { block });
                         }
                         basin
@@ -4732,4 +4950,78 @@ mod test_support {
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests_inverse_power_deflation_cost_2627 {
+    use super::*;
+
+    /// #2627 — a GAPLESS near-null cluster must deflate, not exhaust the Krylov
+    /// bound.
+    ///
+    /// `A` is diagonal: fourteen resolved curvatures plus two under the numerical
+    /// null floor whose RATIO is `0.9`. That ratio is the whole fixture. The
+    /// deflation isolate rotates toward the smaller of the two at `0.9^k`, so the
+    /// eigenvector-alignment criterion — consecutive iterates agreeing to `√ε` —
+    /// needs on the order of thirty inverse steps here, and each step is a full
+    /// preconditioned GMRES. Against an inner Krylov bound of `dim = 16` it never
+    /// arrives: before the subspace certificate this call spent its whole inner
+    /// bound in GMRES on EVERY deflation turn and then raised "inverse-power
+    /// direction did not converge in the derived Krylov dimension 16". That is
+    /// the `dim²` shape, and a gapless band under the floor is not adversarial —
+    /// `K` atoms each contribute a rank-1 radial null to `A = B + ΔC`, which is
+    /// exactly such a band.
+    ///
+    /// What deflation needs from the isolate is MEMBERSHIP in the numerical-null
+    /// subspace, which the post-loop `|μ(v)| < rank_floor` guard enforces and
+    /// every member of the cluster satisfies. So the certificate is two
+    /// consecutive amplification steps that stay under the floor, and the assert
+    /// below is the consequence: the unidentifiable `1/μ` amplification is
+    /// removed and every resolved direction is returned untouched.
+    #[test]
+    fn gapless_near_null_cluster_deflates_instead_of_exhausting_the_krylov_bound_2627() {
+        const NEAR_NULL: f64 = 1.0e-10;
+        const RESOLVED: usize = 14;
+        let mut curvature: Vec<f64> = (1..=RESOLVED).map(|c| c as f64).collect();
+        curvature.push(NEAR_NULL);
+        curvature.push(0.9 * NEAR_NULL);
+        let dim = curvature.len();
+
+        let apply_a = |v: &SaeArrowVector| -> Result<SaeArrowVector, String> {
+            let mut out = v.clone();
+            for (slot, value) in out.t.iter_mut().enumerate() {
+                *value *= curvature[slot];
+            }
+            Ok(out)
+        };
+        let apply_b = |v: &SaeArrowVector| -> Result<SaeArrowVector, String> { Ok(v.clone()) };
+        let precondition = |v: &SaeArrowVector| -> Result<SaeArrowVector, String> { Ok(v.clone()) };
+        let rhs = SaeArrowVector {
+            t: Array1::from_elem(dim, 1.0),
+            beta: Array1::zeros(0),
+        };
+
+        let solved = solve_exact_stationarity_preconditioned(&rhs, &apply_a, &apply_b, precondition)
+            .expect("a gapless near-null cluster must deflate, not exhaust the Krylov bound");
+
+        for slot in 0..RESOLVED {
+            let expected = 1.0 / curvature[slot];
+            assert!(
+                (solved.t[slot] - expected).abs() <= 1.0e-6 * expected,
+                "resolved slot {slot} was disturbed by the deflation: {:.6e} vs {expected:.6e}",
+                solved.t[slot],
+            );
+        }
+        // Undeflated, each near-null slot carries the full `1/μ` amplification
+        // `1/NEAR_NULL = 1e10`. Two orders of magnitude of reduction is far
+        // outside anything round-off could produce and far inside what the
+        // deflation actually achieves.
+        for slot in RESOLVED..dim {
+            assert!(
+                solved.t[slot].abs() < 1.0e8,
+                "near-null slot {slot} still carries a 1/μ amplification: {:.3e}",
+                solved.t[slot],
+            );
+        }
+    }
 }

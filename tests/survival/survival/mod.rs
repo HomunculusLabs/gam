@@ -13,6 +13,7 @@ mod survival_marginal_slope_neyman_orthogonal_reference;
 mod survival_marginal_slope_outer_gradient_fd_1040;
 mod survival_marginal_slope_stall;
 mod survival_marginal_slope_vm_exact_integration;
+mod survival_marginal_slope_weibull_n3000_seed_startup_2627;
 mod survival_multi_z_covariance_autoderiv_hard;
 mod survival_multi_z_fit_hard;
 mod survival_multi_z_marginal_slope;

@@ -111,9 +111,26 @@ pub enum TopologyRefusal {
     /// well defined as a function of the pair.
     IncoherentOverlap { pairs: usize },
     /// The `GF(2)` orientation cochain is not a cocycle: `δs ≠ 0` on this many of
-    /// the nerve's 2-simplices. The cover is too coarse for the tangent planes to
-    /// compose, so `w₁` does not exist on it.
+    /// the nerve's 2-simplices whose three edges all carry a RESOLVED sign. The
+    /// cover is too coarse for the tangent planes to compose, so `w₁` does not
+    /// exist on it.
     OrientationCocycleOpen { open_triangles: usize, total: usize },
+    /// `w₁` is a class on the NERVE, `[s] ∈ H¹(N; GF(2))`, but `s` is defined only
+    /// on the subcomplex `S ⊆ N` of edges whose handedness is resolved. Reading the
+    /// class off `S` is legitimate only while `S` sees the same 1-cycles `N` does:
+    /// if `S` is more disconnected than `N` the relative orientation across the gap
+    /// is undetermined (and an orientable reading is vacuous — no cycle crosses the
+    /// gap, so none can contradict it), and if `S` carries EXTRA 1-cycles that `N`
+    /// fills with 2-cells, a sign pattern can be non-trivial on `S` for a reason
+    /// that is not the manifold's — which is how a torus gets called a Klein
+    /// bottle. Both are refused here, on the measured Betti numbers of the two
+    /// complexes rather than on a proxy count of dropped edges.
+    OrientationSubcomplexIncomplete {
+        signed_b0: usize,
+        signed_b1: usize,
+        nerve_b0: usize,
+        nerve_b1: usize,
+    },
     /// The nerve of a `d ≥ 2` cover carries no 2-simplex, so it is a bare graph
     /// and its cycle rank is a property of the cover rather than of the manifold.
     NoTwoCells,
@@ -154,7 +171,18 @@ impl fmt::Display for TopologyRefusal {
                 total,
             } => write!(
                 f,
-                "the orientation cochain is not a cocycle: it fails to close on {open_triangles} of {total} nerve triangles"
+                "the orientation cochain is not a cocycle: it fails to close on {open_triangles} of {total} fully-signed nerve triangles"
+            ),
+            Self::OrientationSubcomplexIncomplete {
+                signed_b0,
+                signed_b1,
+                nerve_b0,
+                nerve_b1,
+            } => write!(
+                f,
+                "the resolved-sign subcomplex has (b0, b1) = ({signed_b0}, {signed_b1}) against the \
+                 nerve's ({nerve_b0}, {nerve_b1}), so it does not see the same 1-cycles and the \
+                 orientation class it carries is not the manifold's"
             ),
             Self::NoTwoCells => write!(
                 f,
@@ -194,11 +222,23 @@ pub struct ObservedTopologyInvariants {
     /// The orientation class `[s] ∈ H¹(N; GF(2))`: `NonOrientable` iff some
     /// 1-cycle carries an odd number of chart-orientation reversals.
     pub orientation_class: AtlasOrientability,
-    /// Whether `δs = 0` on every nerve 2-simplex, i.e. whether `s` is a cocycle at
-    /// all. `w₁` is only defined when this holds.
+    /// Whether `δs = 0` on every nerve 2-simplex whose three edges all carry a
+    /// resolved sign, i.e. whether `s` is a cocycle wherever it is defined. `w₁` is
+    /// only defined when this holds.
     pub orientation_cocycle_closes: bool,
-    /// Nerve triangles on which `δs ≠ 0`.
+    /// Fully-signed nerve triangles on which `δs ≠ 0`.
     pub open_orientation_triangles: usize,
+    /// Nerve triangles carrying NO cocycle constraint because at least one of their
+    /// edges joins two charts whose tangent planes are orthogonal to within their
+    /// own estimation resolution. These are neither closed nor open: `s` is not
+    /// defined on them, and counting them as failures would read a chart-conditioning
+    /// fact as a topological one.
+    pub unsigned_orientation_triangles: usize,
+    /// `GF(2)` Betti numbers of the SUBCOMPLEX carrying the sign cochain: the nerve
+    /// simplices all of whose edges have a resolved handedness. The orientation
+    /// class is read on this complex, so it is a statement about the manifold only
+    /// while these match [`ObservedTopologyInvariants::betti`].
+    pub signed_subcomplex_betti: BettiSignature,
     /// Patch pairs whose overlap components disagree in sign.
     pub incoherent_overlap_pairs: usize,
     /// Largest number of patches containing a single row. This is exactly the
@@ -298,7 +338,8 @@ impl fmt::Display for AtlasTopologyReadout {
         }
         write!(
             f,
-            ": d={} charts={} b0={} b1={} b2={} chi={} orientation={} dropped_centers={}",
+            ": d={} charts={} b0={} b1={} b2={} chi={} orientation={} \
+             open_tri={} unsigned_tri={} signed_b0={} signed_b1={} dropped_centers={}",
             inv.intrinsic_dim,
             inv.chart_count,
             inv.betti.b0,
@@ -311,6 +352,10 @@ impl fmt::Display for AtlasTopologyReadout {
                 AtlasOrientability::Orientable => "trivial",
                 AtlasOrientability::NonOrientable => "twisted",
             },
+            inv.open_orientation_triangles,
+            inv.unsigned_orientation_triangles,
+            inv.signed_subcomplex_betti.b0,
+            inv.signed_subcomplex_betti.b1,
             inv.dropped_center_count,
         )
     }
@@ -360,6 +405,12 @@ pub fn observe_atlas_topology(atlas: &LocalAtlas) -> Result<AtlasTopologyReadout
                 orientation_class: AtlasOrientability::Orientable,
                 orientation_cocycle_closes: true,
                 open_orientation_triangles: 0,
+                unsigned_orientation_triangles: 0,
+                signed_subcomplex_betti: BettiSignature {
+                    b0: 0,
+                    b1: 0,
+                    b2: Some(0),
+                },
                 incoherent_overlap_pairs: 0,
                 max_cover_multiplicity: 0,
                 mean_cover_multiplicity: 0.0,
@@ -372,12 +423,25 @@ pub fn observe_atlas_topology(atlas: &LocalAtlas) -> Result<AtlasTopologyReadout
         });
     }
 
-    // The 1-skeleton is the set of pairs joined by a NUMERICALLY WELL-CONDITIONED
-    // transition: a pair whose tangent planes are near-orthogonal, or whose shared
-    // support does not span the chart, carries no handedness and so cannot be a
-    // nerve edge for the purpose of an orientation cocycle. A pair whose several
-    // overlap components disagree in sign has a disconnected intersection and is
-    // dropped from the skeleton and counted.
+    // TWO DIFFERENT OBJECTS, on purpose.
+    //
+    // The NERVE is a combinatorial fact about the cover: patches `a` and `b` are
+    // joined iff their supports meet, which the atlas records by fitting a
+    // transition between them. Nothing about how well the two tangent planes are
+    // resolved changes which patches intersect, so nothing about it may change the
+    // nerve's homology — otherwise a chart-conditioning artifact would move `b₁`.
+    //
+    // The SIGN COCHAIN `s` lives on top of that nerve and is defined only on the
+    // edges whose handedness is resolved (see
+    // [`super::local_charts::TransitionConditioning`]). On a cover coarse enough
+    // for some patch pair's tangent planes to be orthogonal to within their own
+    // estimation resolution, `s` has a genuine hole there — and a hole in `s` is
+    // not the same event as `δs ≠ 0`, which is why the two are counted separately
+    // below.
+    //
+    // A pair whose several overlap components disagree in sign has a disconnected
+    // intersection: the nerve theorem's hypothesis fails outright, so that pair is
+    // dropped from BOTH objects and counted.
     let mut pair_sign: BTreeMap<(usize, usize), i8> = BTreeMap::new();
     let mut incoherent: BTreeSet<(usize, usize)> = BTreeSet::new();
     for (a, b, _, sign) in atlas.observed_signed_edges() {
@@ -396,8 +460,17 @@ pub fn observe_atlas_topology(atlas: &LocalAtlas) -> Result<AtlasTopologyReadout
         pair_sign.remove(key);
     }
 
+    let mut overlap_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for transition in atlas.transitions() {
+        let (a, b) = (transition.from_patch, transition.to_patch);
+        let key = (a.min(b), a.max(b));
+        if !incoherent.contains(&key) {
+            overlap_pairs.insert(key);
+        }
+    }
+
     let mut adjacency = vec![BTreeSet::<usize>::new(); chart_count];
-    for &(a, b) in pair_sign.keys() {
+    for &(a, b) in &overlap_pairs {
         if a >= chart_count || b >= chart_count {
             return Err(format!(
                 "atlas transition ({a}, {b}) is outside the {chart_count}-chart atlas"
@@ -459,6 +532,12 @@ pub fn observe_atlas_topology(atlas: &LocalAtlas) -> Result<AtlasTopologyReadout
                 orientation_class: atlas.observed_orientability(),
                 orientation_cocycle_closes: false,
                 open_orientation_triangles: 0,
+                unsigned_orientation_triangles: 0,
+                signed_subcomplex_betti: BettiSignature {
+                    b0: 0,
+                    b1: 0,
+                    b2: Some(0),
+                },
                 incoherent_overlap_pairs: incoherent.len(),
                 max_cover_multiplicity,
                 mean_cover_multiplicity,
@@ -501,15 +580,22 @@ pub fn observe_atlas_topology(atlas: &LocalAtlas) -> Result<AtlasTopologyReadout
     // three pairwise frame determinants compose, which is the Z/2 reduction of the
     // O(d) cocycle condition and carries no curvature term.
     let mut open_orientation_triangles = 0usize;
+    let mut unsigned_orientation_triangles = 0usize;
     for triangle in &inventory.triangles {
         let (a, b, c) = (triangle[0], triangle[1], triangle[2]);
-        let product = pair_sign
-            .get(&(a, b))
-            .zip(pair_sign.get(&(a, c)))
-            .zip(pair_sign.get(&(b, c)))
-            .map(|((&ab, &ac), &bc)| ab * ac * bc);
-        if product != Some(1) {
-            open_orientation_triangles += 1;
+        match (
+            pair_sign.get(&(a, b)),
+            pair_sign.get(&(a, c)),
+            pair_sign.get(&(b, c)),
+        ) {
+            (Some(&ab), Some(&ac), Some(&bc)) => {
+                if ab * ac * bc != 1 {
+                    open_orientation_triangles += 1;
+                }
+            }
+            // At least one edge's handedness is unresolved, so this triangle states
+            // nothing about `s` — neither that it closes nor that it fails to.
+            _ => unsigned_orientation_triangles += 1,
         }
     }
 
@@ -519,7 +605,49 @@ pub fn observe_atlas_topology(atlas: &LocalAtlas) -> Result<AtlasTopologyReadout
     // `LocalAtlas::observed_orientability`'s statement refined from a bit to the
     // WITNESS — which edges carry the obstruction — and the two are asserted to
     // agree by `the_gauge_and_the_atlas_agree_on_orientability_2280`.
-    let (orientation_gauge, twisted_edges) = orientation_gauge(chart_count, &adjacency, &pair_sign);
+    // The subcomplex the sign cochain actually lives on: every nerve simplex all of
+    // whose edges have a resolved handedness. Its homology is what decides whether
+    // the orientation class read off `s` is the manifold's — see
+    // [`TopologyRefusal::OrientationSubcomplexIncomplete`].
+    let all_edges_signed = |simplex: &Vec<usize>| -> bool {
+        simplex.iter().enumerate().all(|(i, &a)| {
+            simplex[(i + 1)..]
+                .iter()
+                .all(|&b| pair_sign.contains_key(&(a.min(b), a.max(b))))
+        })
+    };
+    let signed_edges: Vec<Vec<usize>> = inventory
+        .edges
+        .iter()
+        .filter(|simplex| all_edges_signed(simplex))
+        .cloned()
+        .collect();
+    let signed_triangles: Vec<Vec<usize>> = inventory
+        .triangles
+        .iter()
+        .filter(|simplex| all_edges_signed(simplex))
+        .cloned()
+        .collect();
+    let signed_tetrahedra: Vec<Vec<usize>> = inventory
+        .tetrahedra
+        .iter()
+        .filter(|simplex| all_edges_signed(simplex))
+        .cloned()
+        .collect();
+    let signed_subcomplex_betti = compute_betti(
+        &inventory.vertices,
+        &signed_edges,
+        &signed_triangles,
+        &signed_tetrahedra,
+    );
+
+    let mut signed_adjacency = vec![BTreeSet::<usize>::new(); chart_count];
+    for &(a, b) in pair_sign.keys() {
+        signed_adjacency[a].insert(b);
+        signed_adjacency[b].insert(a);
+    }
+    let (orientation_gauge, twisted_edges) =
+        orientation_gauge(chart_count, &signed_adjacency, &pair_sign);
     let orientation_class = if twisted_edges.is_empty() {
         AtlasOrientability::Orientable
     } else {
@@ -534,6 +662,8 @@ pub fn observe_atlas_topology(atlas: &LocalAtlas) -> Result<AtlasTopologyReadout
         orientation_class,
         orientation_cocycle_closes: open_orientation_triangles == 0,
         open_orientation_triangles,
+        unsigned_orientation_triangles,
+        signed_subcomplex_betti,
         incoherent_overlap_pairs: incoherent.len(),
         max_cover_multiplicity,
         mean_cover_multiplicity,
@@ -553,12 +683,17 @@ pub fn observe_atlas_topology(atlas: &LocalAtlas) -> Result<AtlasTopologyReadout
 /// Reduce the sign cochain to a gauge: one coherent sign per chart plus the edges
 /// no gauge can fix.
 ///
-/// Breadth-first over a spanning forest of the 1-skeleton, roots taken in chart
-/// order and neighbours in sorted order, so the forest — and therefore the returned
-/// witness set — is deterministic. An edge to an already-oriented chart whose sign
-/// contradicts the assignment cannot be repaired by any relabelling reachable from
-/// this root, and is returned as a twisted edge. The gauge is left untouched by
-/// such an edge, so one twist does not cascade into a spurious second one.
+/// Breadth-first over a spanning forest of the SIGNED 1-skeleton, roots taken in
+/// chart order and neighbours in sorted order, so the forest — and therefore the
+/// returned witness set — is deterministic. An edge to an already-oriented chart
+/// whose sign contradicts the assignment cannot be repaired by any relabelling
+/// reachable from this root, and is returned as a twisted edge. The gauge is left
+/// untouched by such an edge, so one twist does not cascade into a spurious second
+/// one.
+///
+/// Whether the gauge it produces is a statement about the manifold is decided
+/// separately, by comparing the signed subcomplex's homology with the nerve's; see
+/// [`TopologyRefusal::OrientationSubcomplexIncomplete`].
 fn orientation_gauge(
     chart_count: usize,
     adjacency: &[BTreeSet<usize>],
@@ -617,7 +752,21 @@ fn classify(
     if !invariants.orientation_cocycle_closes {
         return Err(TopologyRefusal::OrientationCocycleOpen {
             open_triangles: invariants.open_orientation_triangles,
-            total: triangle_count,
+            total: triangle_count - invariants.unsigned_orientation_triangles,
+        });
+    }
+    // A cocycle that closes only because it is defined nowhere states nothing, and
+    // one defined on a complex with cycles the nerve does not have states something
+    // about the wrong space. Both are the same check: the subcomplex carrying `s`
+    // must see the nerve's 1-cycles and no others.
+    if invariants.signed_subcomplex_betti.b0 != invariants.betti.b0
+        || invariants.signed_subcomplex_betti.b1 != invariants.betti.b1
+    {
+        return Err(TopologyRefusal::OrientationSubcomplexIncomplete {
+            signed_b0: invariants.signed_subcomplex_betti.b0,
+            signed_b1: invariants.signed_subcomplex_betti.b1,
+            nerve_b0: invariants.betti.b0,
+            nerve_b1: invariants.betti.b1,
         });
     }
     match invariants.intrinsic_dim {
@@ -864,22 +1013,37 @@ mod tests_2280 {
         assert_eq!(readout.invariants().euler_characteristic, 0, "{readout}");
     }
 
-    /// The torus's HOMOLOGY is measured exactly right at every sample size —
-    /// `b₁ = 2`, `b₂ = 1`, `χ = 0`, the torus signature and nothing else — but the
-    /// orientation cochain does not close on this cover, so the readout REFUSES
-    /// rather than naming a surface whose orientation class it cannot compute.
+    /// The torus is NAMED once its cover resolves the tangent planes, and refuses
+    /// honestly until then — with its homology exact the whole way.
     ///
-    /// This pins the open increment precisely: on a torus, patches large enough to
-    /// overlap span enough of the minor circle that some tangent-plane pairs are
-    /// close to orthogonal, and the sign read off their frame determinant is then an
-    /// artifact rather than a transition. Nothing about the nerve is at fault; the
-    /// cover's angular extent is. The test asserts the two halves separately so a
-    /// later fix to the sign gate turns the refusal into a `Torus` verdict without
-    /// touching the homology assertions.
+    /// Three things are pinned here, and none of them holds before the derived sign
+    /// gate ([`super::local_charts`]'s `frame_angular_resolution`) and the
+    /// nerve/cochain separation in [`observe_atlas_topology`]:
+    ///
+    /// 1. **`b₁ = 2`, `b₂ = 1`, `χ = 0` at every resolution.** The nerve is the
+    ///    cover's intersection pattern, so no chart-conditioning verdict may move
+    ///    it. Gating the sign WITHOUT separating the two objects measures
+    ///    `b₁ = 35` on the coarsest arm — the homology of whichever edges happened
+    ///    to resolve.
+    /// 2. **The fine cover names `Torus`, orientation trivial.** Under the retired
+    ///    `|det| > 1e-6` floor this arm refused with 172 open triangles: the floor
+    ///    admitted a handedness from tangent planes meeting at `89.4°`, and those
+    ///    fabricated signs are what failed to compose.
+    /// 3. **The coarse covers refuse, and refuse for the right reason.** Their
+    ///    charts capture only `~0.92` of their neighborhood variance, so each frame
+    ///    is pinned to about `16°` and a pair of them to `~31°`; roughly half the
+    ///    edges carry no resolvable handedness, the subcomplex `s` lives on has
+    ///    `b₁ = 35` against the nerve's `2`, and an orientation class read there is
+    ///    not the manifold's. Naming it anyway produces `KleinBottle` — measured,
+    ///    not hypothesised, which is why the subcomplex-completeness gate exists.
     #[test]
-    fn torus_homology_is_exact_and_the_open_sign_cocycle_refuses_2280() {
-        for (n_u, n_v) in [(48usize, 20usize), (60, 26)] {
-            let readout = read(torus(n_u, n_v, 2.0, 0.8).view(), 2);
+    fn torus_is_named_once_its_cover_resolves_the_tangent_planes_2280() {
+        for (n_u, n_v, major, minor) in [
+            (48usize, 20usize, 2.0, 0.8),
+            (60, 26, 2.0, 0.8),
+            (90, 45, 3.0, 1.5),
+        ] {
+            let readout = read(torus(n_u, n_v, major, minor).view(), 2);
             let inv = readout.invariants();
             assert_eq!(
                 (
@@ -889,19 +1053,103 @@ mod tests_2280 {
                     inv.euler_characteristic
                 ),
                 (1, 2, Some(1), 0),
-                "the torus's homology must be measured exactly: {readout}"
+                "the torus's homology must be measured exactly at every resolution: {readout}"
+            );
+        }
+
+        let fine = read(torus(90, 45, 3.0, 1.5).view(), 2);
+        assert_eq!(
+            fine.observed_manifold(),
+            Some(GraphCompressionKind::Torus),
+            "the resolved cover must name the torus: {fine}"
+        );
+        assert_eq!(
+            fine.invariants().orientation_class,
+            AtlasOrientability::Orientable,
+            "{fine}"
+        );
+        assert!(
+            fine.twisted_edges().is_empty(),
+            "an orientable surface admits a coherent gauge: {fine}"
+        );
+
+        for (n_u, n_v) in [(48usize, 20usize), (60, 26)] {
+            let coarse = read(torus(n_u, n_v, 2.0, 0.8).view(), 2);
+            let inv = coarse.invariants();
+            assert!(
+                inv.unsigned_orientation_triangles > 0,
+                "the coarse cover must have triangles `s` is not defined on: {coarse}"
             );
             assert!(
-                !inv.orientation_cocycle_closes && inv.open_orientation_triangles > 0,
-                "the torus's refusal must be the open sign cocycle: {readout}"
+                inv.signed_subcomplex_betti.b1 > inv.betti.b1,
+                "the signed subcomplex must carry cycles the nerve fills: {coarse}"
             );
             assert!(
                 matches!(
-                    readout.refusal(),
-                    Some(TopologyRefusal::OrientationCocycleOpen { .. })
+                    coarse.refusal(),
+                    Some(TopologyRefusal::OrientationSubcomplexIncomplete { .. })
                 ),
-                "{readout}"
+                "the coarse cover must refuse on the subcomplex, not name a surface: {coarse}"
             );
+        }
+    }
+
+    /// Measurement, not a gate: what the torus's sign gate actually sees, edge by
+    /// edge. Prints `σ_min(F_toᵀ F_from)` against the two charts' combined angular
+    /// resolution, plus what the retired `|det| > 1e-6` floor would have admitted,
+    /// so the difference between the two gates is a table rather than a claim.
+    #[test]
+    fn tests_zz_measure_2280_torus_sign_gate() {
+        for (n_u, n_v) in [(48usize, 20usize), (60, 26)] {
+            let z = torus(n_u, n_v, 2.0, 0.8);
+            let config = LocalAtlasConfig::balanced(z.nrows(), 2);
+            let atlas = LocalAtlas::build(z.view(), config).expect("torus atlas must build");
+            let admitted = atlas.observed_signed_edges().len();
+            let mut margins: Vec<(f64, f64, f64, usize, usize)> = atlas
+                .transitions()
+                .iter()
+                .map(|t| {
+                    (
+                        t.smallest_principal_cosine,
+                        t.sign_resolution_budget,
+                        t.residual,
+                        t.from_patch,
+                        t.to_patch,
+                    )
+                })
+                .collect();
+            margins.sort_by(|a, b| {
+                (a.0 - a.1)
+                    .partial_cmp(&(b.0 - b.1))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let det_floor_admitted = margins
+                .iter()
+                .filter(|(cos_min, _, _, _, _)| *cos_min > 1.0e-6)
+                .count();
+            eprintln!(
+                "[#2280 torus {n_u}x{n_v}] charts={} transitions={} admitted_now={admitted} \
+                 admitted_under_1e-6_cosine_floor={det_floor_admitted}",
+                atlas.chart_count(),
+                atlas.transitions().len(),
+            );
+            for (cos_min, budget, residual, a, b) in margins.iter().take(12) {
+                eprintln!(
+                    "  edge {a:>3}-{b:<3} sigma_min={cos_min:.6e} budget={budget:.6e} \
+                     margin={:+.3e} procrustes_residual={residual:.3e}",
+                    cos_min - budget
+                );
+            }
+            let caps: Vec<f64> = atlas
+                .charts()
+                .iter()
+                .map(|c| c.certificate.captured_variance_fraction)
+                .collect();
+            let worst = caps.iter().copied().fold(1.0_f64, f64::min);
+            let best = caps.iter().copied().fold(0.0_f64, f64::max);
+            eprintln!("  captured_variance_fraction: min={worst:.9} max={best:.9}");
+            let readout = observe_atlas_topology(&atlas).expect("readout");
+            eprintln!("  readout: {readout}");
         }
     }
 

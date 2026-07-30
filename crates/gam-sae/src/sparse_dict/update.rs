@@ -5532,11 +5532,27 @@ mod exact_solve_tests {
         );
         assert!(cpu_stats.cg_relative_residual <= cpu_stats.cg_residual_stop);
 
-        let device_present = cfg!(target_os = "linux")
-            && matches!(
-                gam_gpu::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto),
-                Ok(Some(_))
-            );
+        // The device arm's availability question goes through the one shared
+        // gate (#2422). The `matches!(.., Ok(Some(_)))` this replaces mapped
+        // `Err(..)` onto the same "not present" branch, so a box WITH a device
+        // and a broken driver skipped exactly like a box without one — and the
+        // skip itself was invisible, incrementing no counter and printing no
+        // greppable marker. `gpu_for_test` panics on that fault, counts a
+        // genuine absence, and panics under `GpuPolicy::Required`.
+        //
+        // The `cfg!(target_os = "linux")` conjunct is dropped rather than kept:
+        // `GpuRuntime::resolve` only ever reports a runtime on Linux, so off
+        // Linux the gate takes `AbsentDevice` and the skip is counted there. As
+        // a conjunct it would instead have produced an UNCOUNTED early return on
+        // exactly the hosts this change exists to make visible.
+        let skips_before = gam_gpu::test_gate::skipped_for_absent_device();
+        let device_present = match gam_gpu::test_gate::gpu_for_test("#1017 block-refresh parity") {
+            gam_gpu::test_gate::GpuTestGate::Ready(_) => true,
+            gam_gpu::test_gate::GpuTestGate::AbsentDevice => {
+                gam_gpu::test_gate::assert_absent_device_was_counted(skips_before);
+                false
+            }
+        };
         if !device_present {
             eprintln!("[zz1017] no CUDA device; device arm not exercised here");
             return;

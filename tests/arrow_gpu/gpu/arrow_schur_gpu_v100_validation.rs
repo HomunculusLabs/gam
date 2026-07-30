@@ -3,9 +3,12 @@
 //! pipeline against the dense reference baseline; the Layer C↔D parity test
 //! ships alongside the Layer D NVRTC implementation.
 //!
-//! Every test skips with a one-line `eprintln!` on non-Linux hosts and on
-//! Linux hosts without a CUDA runtime, so the always-on CI suite stays green
-//! on the macOS dev box and CPU CI runners. On `gam-gpu-1` (V100), the tests
+//! The whole file is `#![cfg(target_os = "linux")]`, so on the macOS dev box it
+//! compiles to nothing; on a Linux host without a CUDA runtime every test skips
+//! through `skip_without_cuda!`, whose skip is COUNTED against
+//! `gam::gpu::test_gate` and announced with the shared `SKIPPED(no-cuda):`
+//! marker (#2422) — so the always-on CI suite stays green without seven tests
+//! reporting `ok` for verifying nothing. On `gam-gpu-1` (V100), the tests
 //! cover the full pipeline:
 //!
 //! Every fixture is sized with batch (n) ≥ 8 so the workload clears the device
@@ -14,7 +17,7 @@
 //! `ArrowSchurGpuFailure::Unavailable` therefore means the device DECLINED a
 //! workload it must run — a real kernel/dispatch fault — so every such arm
 //! fails loud instead of skip-passing (the device-PCG skip-pass class fixed in
-//! eee12f6b2). Legit skips happen only on non-Linux / no-CUDA hosts.
+//! eee12f6b2). Legit skips happen only on no-CUDA hosts.
 //!
 //!   1. Dense full-Hessian parity at `(n=8, d=6, k=4)`, ridge=0.
 //!   2. Multi-size sweep `d ∈ {10, 16, 30}`, `n ∈ {12, 8, 8}`, `k=5`.
@@ -36,29 +39,32 @@ use gam::solver::gpu_kernels::arrow_schur::{
 };
 use ndarray::Array2;
 
-/// Skip the test body with a one-line message when no CUDA runtime is
-/// available. Matches the pattern used in
-/// `gam::families::bms::gpu::row::tests::bms_flex_row_kernel_matches_cpu_oracle_when_cuda_available`.
+/// Skip the test body when no CUDA runtime is available, with the skip COUNTED
+/// and announced through the one shared gate (#2422).
+///
+/// Fixed here rather than at the seven call sites: one macro is one place the
+/// next gate written in this file inherits, and a per-site fix is a fix the next
+/// site misses.
+///
+/// Two things changed. The skip now goes through
+/// `gam::gpu::test_gate::gpu_for_test`, so it increments the process-wide skip
+/// counter, prints the single greppable `SKIPPED(no-cuda):` marker a CI ledger
+/// can scrape, and — via `assert_absent_device_was_counted` — executes a real
+/// assertion instead of returning with none, which is the whole of #2422. It
+/// also panics under `GpuPolicy::Required`, so a GPU lane no longer needs a
+/// per-test opt-in, and it panics on a driver FAULT rather than reporting a
+/// broken device as an absent one.
+///
+/// The former `#[cfg(not(target_os = "linux"))]` arm is gone: this file opens
+/// with `#![cfg(target_os = "linux")]`, so that arm could never compile into any
+/// build. It read as non-Linux coverage while being unreachable text.
 macro_rules! skip_without_cuda {
     ($label:expr) => {{
-        #[cfg(not(target_os = "linux"))]
-        {
-            eprintln!(
-                "[{label}] non-Linux host — skipping CUDA validation",
-                label = $label
-            );
-            return;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if gam::gpu::device_runtime::GpuRuntime::resolve(gam::gpu::GpuPolicy::Auto)
-                .unwrap_or_else(|error| panic!("GPU probe fault in V100 validation gate: {error}"))
-                .is_none()
-            {
-                eprintln!(
-                    "[{label}] no CUDA runtime — skipping device validation",
-                    label = $label
-                );
+        let skips_before = gam::gpu::test_gate::skipped_for_absent_device();
+        match gam::gpu::test_gate::gpu_for_test($label) {
+            gam::gpu::test_gate::GpuTestGate::Ready(_) => {}
+            gam::gpu::test_gate::GpuTestGate::AbsentDevice => {
+                gam::gpu::test_gate::assert_absent_device_was_counted(skips_before);
                 return;
             }
         }

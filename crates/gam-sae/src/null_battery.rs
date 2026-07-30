@@ -6,6 +6,7 @@
 //! nulls, run an arbitrary scalar audit on observed and null data, and attach a
 //! spike-in power curve for a manufactured circle inside real residual noise.
 
+use crate::discrete_fourier::dft_in_place;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use rand::RngExt;
 use rand::SeedableRng;
@@ -619,16 +620,17 @@ pub fn phase_randomized_surrogate(
             }
             continue;
         }
+        // Forward transform of the centered, scale-normalized column. This used
+        // to be spelled as the `O(n²)` double loop over `(k, t)`; it is now the
+        // same transform in `O(n log n)` (`crate::discrete_fourier`), which is
+        // the entire cost of a Monte-Carlo replicate and therefore multiplied by
+        // every screen's replicate budget.
         let mut re = vec![0.0_f64; n];
         let mut im = vec![0.0_f64; n];
-        for k in 0..n {
-            for t in 0..n {
-                let angle = -2.0 * PI * (k as f64) * (t as f64) / (n as f64);
-                let x = location.centered_value(data[[t, col]], col)? / residual_scale;
-                re[k] += x * angle.cos();
-                im[k] += x * angle.sin();
-            }
+        for t in 0..n {
+            re[t] = location.centered_value(data[[t, col]], col)? / residual_scale;
         }
+        dft_in_place(&mut re, &mut im, false)?;
         let last_paired = (n.saturating_sub(1)) / 2;
         for k in 1..=last_paired {
             let amp = re[k].hypot(im[k]);
@@ -643,14 +645,12 @@ pub fn phase_randomized_surrogate(
             let nyquist = n / 2;
             im[nyquist] = 0.0;
         }
+        // Unnormalized inverse transform; the `1/n` stays below, inside the
+        // guarded product, exactly where the double loop applied it.
+        dft_in_place(&mut re, &mut im, true)?;
         for t in 0..n {
-            let mut acc = 0.0_f64;
-            for k in 0..n {
-                let angle = 2.0 * PI * (k as f64) * (t as f64) / (n as f64);
-                acc += re[k] * angle.cos() - im[k] * angle.sin();
-            }
             let centered = balanced_finite_product(
-                acc,
+                re[t],
                 1.0 / n as f64,
                 residual_scale,
                 "phase-randomized inverse transform",

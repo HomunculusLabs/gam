@@ -137,7 +137,7 @@ jobs:
         run: |
           python -m pip install \
             'pytest>=8' 'numpy>=1.26' 'pandas>=2.0' 'pyarrow>=14' \
-            'matplotlib>=3.8' 'scikit-learn>=1.4'
+            'matplotlib>=3.8' 'scikit-learn>=1.4' 'lifelines>=0.28'
 
       - name: Run numeric by-variable predict-clip contract (#1513)
         # s(x, by=z): the numeric by-multiplier must not be axis-clipped to its
@@ -229,6 +229,31 @@ jobs:
         # duration as a LOWER bound on the work done: the 3h 05m wall clock of
         # that run is not bounded by 300s x tests, and a test that reports as a
         # timeout may have run for arbitrarily longer than its cap says.
+        #
+        # DO NOT READ THE 36 AS A GENERAL PROPERTY -- it is a property of one run.
+        # Two later runs recorded ZERO `Failed: Timeout` entries: 30513113487
+        # (`3236fed05`, 35 errors) and a local 128-core run at `b8745892a`
+        # (22 errors). In BOTH, every error was `worker 'gwN' crashed while
+        # running ...` instead. That is not a different failure -- it is the same
+        # one wearing a different label, and the label is the point:
+        #
+        #   `--timeout-method=thread` KILLS THE WORKER rather than raising in it,
+        #   so a thread-method timeout surfaces as a worker crash and NEVER as a
+        #   `Failed: Timeout` entry. The `Failed: Timeout` string is SIGALRM-only.
+        #
+        # Proven by rerunning one of them serially with no `--timeout` at all:
+        # `test_structure_certificate_1058` does not crash, it runs 334.14s -- past
+        # the 300s cap -- and fails with a typed engine error (`inner solve did not
+        # converge at fixed rho; ||g||=3.667789e0 vs tolerance 1.221293e-2 after 990
+        # inner iterations`). Under the cap that same test is a "crash".
+        #
+        # Two consequences for anyone reading this artifact. A zero
+        # `Failed: Timeout` count is NOT evidence that nothing timed out -- count
+        # `crashed while running` instead. And the crash count is a function of
+        # MACHINE SPEED, not of the tests: a slow hosted runner pushes more tests
+        # past 300s than a fast box does, which is exactly why 36, 35 and 22 all
+        # describe the same suite. Quote any of these numbers with its run id AND
+        # its machine, never on its own.
         run: python -m pip install 'pytest-xdist>=3' 'pytest-timeout>=2'
 
       - name: Triage full Python suite on the fresh wheel (#1512)
@@ -255,6 +280,35 @@ jobs:
         # an unattended 12-hourly job must not be one version bump away from
         # aborting the suite partway and publishing a truncated inventory. 200 is
         # far above any plausible count while still bounding a true crash loop.
+        #
+        # faulthandler_timeout=240 is what makes those worker deaths DIAGNOSABLE,
+        # and without it every one of them is reason-free. pytest-timeout's thread
+        # method does produce a diagnosis -- `timeout_timer` calls
+        # `dump_stacks(terminal)` naming the exact hung frame -- and then calls
+        # `os._exit(1)` on the very next line. Under xdist that terminal is a
+        # buffered execnet channel, and `os._exit` skips every flush, so the dump
+        # is written and discarded microseconds later. That is the whole reason a
+        # timed-out test reports only `worker 'gwN' crashed while running ...`
+        # with no stack: the stack existed and was thrown away.
+        #
+        # pytest's own faulthandler plugin re-arms `dump_traceback_later` per test
+        # item and writes from C straight to fd 2, which is neither buffered by
+        # execnet nor dependent on a Python flush, so its dump survives the
+        # `os._exit` that eats pytest-timeout's. 240 < 300 is load-bearing: the
+        # dump must fire BEFORE pytest-timeout kills the worker, and 60s of margin
+        # covers a badly contended runner. `faulthandler_exit_on_timeout` stays at
+        # its default false so pytest-timeout still owns the kill and the 300s
+        # verdict is unchanged -- this adds evidence, it does not change any
+        # pass/fail outcome or any count in the JUnit artifact.
+        #
+        # MEASURED, not assumed: verified on a `time.sleep` fixture under
+        # `-n 2 --timeout=20 --timeout-method=thread`. Without it, the run emits
+        # `[gw1] node down: Not properly terminated` + `worker 'gw1' crashed while
+        # running ...` and no stack. With it, the controller log names the hung
+        # test function and its callers. Caveat worth knowing when reading the
+        # log: concurrent workers write their dumps to the same fd 2 with no
+        # locking, so simultaneous dumps interleave character-wise and need
+        # picking apart by hand. Interleaved evidence still beats none.
         working-directory: ${{ runner.temp }}
         run: |
           python -m pytest "$GITHUB_WORKSPACE/tests/" \
@@ -262,6 +316,7 @@ jobs:
             -p no:cacheprovider \
             -n auto --timeout=300 --timeout-method=thread \
             --max-worker-restart=200 \
+            -o faulthandler_timeout=240 \
             -o addopts="--import-mode=importlib" \
             --junitxml="$RUNNER_TEMP/py1512_junit.xml" \
             -q --tb=line

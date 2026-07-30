@@ -170,7 +170,18 @@ fn sae_manifold_euclidean_line_fits_through_production_engine() {
     let (z, s_true) = planted_line();
     let term = build_cold_term(&s_true, &z);
     let init_rho = dimensionless_entry_rho(&term, &z);
-    let init_rho_flat = init_rho.to_flat();
+    // `SaeManifoldOuterObjective::new` canonicalizes the seed rho against the
+    // term's assignment family (`outer_objective.rs`,
+    // `init_rho.for_assignment(term.assignment.mode)`), and for a K=1 Softmax
+    // term the sparse coordinate is STRUCTURALLY ABSENT — the layout is
+    // `[smoothness, ARD]`, pinned in `tests_rho_structural_layout_2253.rs`
+    // ("K=1 Softmax outer rho must contain only smoothness and ARD"). Flattening
+    // the raw seed first sized the outer problem at 3 while the objective
+    // reported `n_params = 2` and handed back a 2-element domain bound, so the
+    // engine refused with `outer objective-domain lower-bound dimension
+    // mismatch: parameters=3, lower=2` before taking a step. Canonicalize here,
+    // exactly as the production entry point does.
+    let init_rho_flat = init_rho.clone().for_assignment(term.assignment.mode).to_flat();
     let n_params = init_rho_flat.len();
     let mut objective = SaeManifoldOuterObjective::new(
         term,

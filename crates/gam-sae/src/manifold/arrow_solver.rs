@@ -863,14 +863,27 @@ where
     let b = rhs_flat;
     let b_norm = rhs_norm;
     let relative_floor = f64::EPSILON.sqrt();
-    // Full-memory whenever the live memory ledger admits it. There is no
-    // iteration ceiling: each restarted cycle must make a strictly
-    // representable reduction in the original residual, and inability to do so
-    // is the typed numerical-stagnation certificate.
+    // Full-memory whenever the live memory ledger admits it. Each restarted
+    // cycle must make a strictly representable reduction in the original
+    // residual, and inability to do so is the typed numerical-stagnation
+    // certificate.
+    //
+    // #2627 — that strict test alone was not a termination argument. `next_norm
+    // < residual_norm` is satisfied by a reduction of one ulp, so on a
+    // near-singular `A = B + ΔC` the restart loop contracted by `1 - O(eps)` per
+    // cycle and ran forever, each cycle costing `restart` operator applies. The
+    // two additions below are an anti-runaway ceiling on restarted cycles and a
+    // contraction-margin projection; neither is a convergence bound (see their
+    // notes at the bottom of the loop).
+    const RESTART_CYCLE_CEILING: usize = 256;
     let restart = admitted_gmres_restart(dim)?;
     let started = std::time::Instant::now();
     let mut iterations = 0usize;
     let mut cycles = 0usize;
+    // Smallest per-cycle contraction observed so far. Projecting with the BEST
+    // rate is the most optimistic estimate available, so a refusal derived from
+    // it cannot cut off a solve that any observed rate could still finish.
+    let mut best_contraction = 1.0_f64;
     let mut solution = flatten_arrow_parts(initial.t.view(), initial.beta.view());
     if solution.iter().any(|value| !value.is_finite()) {
         return Err("solve_b_preconditioned_gmres: non-finite initial solution".to_string());
@@ -1059,6 +1072,57 @@ where
                 original_norm / rhs_norm,
                 roundoff_floor / rhs_norm,
             ));
+        }
+        // #2627 — anti-runaway ceiling on restarted cycles.
+        //
+        // It must not impersonate a convergence bound, so it is placed where no
+        // solve that converges in a practical count can reach it. Full-memory
+        // GMRES (`restart == dim`) is exact within `dim` directions, so it
+        // certifies in ONE cycle up to round-off; further cycles are round-off
+        // recovery only. A memory-forced restart `m < dim` has no finite-
+        // termination theorem at all, which is precisely why an unbounded loop
+        // was never a termination argument here. `256` is more than two orders
+        // of magnitude above the single cycle a well-posed system needs, so it
+        // decides nothing about convergence — it only bounds a crawl.
+        best_contraction = best_contraction.min(next_norm / residual_norm);
+        if cycles >= RESTART_CYCLE_CEILING {
+            return Err(format!(
+                "solve_b_preconditioned_gmres: restart anti-runaway ceiling \
+                 {RESTART_CYCLE_CEILING} cycles reached after {iterations} iterations \
+                 (restart {restart}, dimension {dim}); relative original residual \
+                 {:.3e} against round-off certification floor {:.3e}, best per-cycle \
+                 contraction {best_contraction:.9}",
+                original_norm / rhs_norm,
+                roundoff_floor / rhs_norm,
+            ));
+        }
+        // Contraction MARGIN. The strict test above accepts a one-ulp reduction,
+        // which is why it could not terminate: the loop is allowed to spend the
+        // whole ceiling proving a rate that will never reach the floor. Project
+        // the cycles remaining to the round-off floor from the BEST contraction
+        // measured so far — `log(floor / current) / log(rate)` — and refuse now,
+        // naming the measured rate, when even that optimistic projection cannot
+        // land inside the ceiling. The refusal is a statement about the observed
+        // rate, not about where convergence lies: any rate that CAN finish inside
+        // the ceiling passes untouched.
+        if best_contraction > 0.0 && best_contraction < 1.0 && next_norm > roundoff_floor {
+            let projected = (roundoff_floor / next_norm).ln() / best_contraction.ln();
+            if projected.is_finite() && projected > 0.0 {
+                let remaining = (RESTART_CYCLE_CEILING - cycles) as f64;
+                if projected.ceil() > remaining {
+                    return Err(format!(
+                        "solve_b_preconditioned_gmres: restarted residual contracts too \
+                         slowly to certify — best measured per-cycle contraction \
+                         {best_contraction:.9} projects {projected:.1} further cycles to \
+                         reach the round-off floor, against {remaining} left under the \
+                         {RESTART_CYCLE_CEILING}-cycle anti-runaway ceiling (restart \
+                         {restart}, dimension {dim}, {iterations} iterations); relative \
+                         original residual {:.3e}, floor {:.3e}",
+                        original_norm / rhs_norm,
+                        roundoff_floor / rhs_norm,
+                    ));
+                }
+            }
         }
     }
 }

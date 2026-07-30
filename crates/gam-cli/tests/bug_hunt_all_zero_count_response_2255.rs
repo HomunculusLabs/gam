@@ -15,7 +15,7 @@ fn cli_refuses_all_zero_poisson_and_negative_binomial_before_optimization() {
             .suffix(".gam")
             .tempfile()
             .expect("temporary output path");
-        let output = Command::new(env!("CARGO_BIN_EXE_gam"))
+        let output = Command::new(gam_test_support::gam_binary!())
             .arg("fit")
             .arg(fixture)
             .arg("y ~ 1")

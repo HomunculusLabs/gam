@@ -1730,6 +1730,78 @@ fn cli_weibull_route_anchors_left_truncated_data_and_honors_the_override_2631() 
     }
 }
 
+/// #2631: a `--request` document's `survival_time_anchor` must reach the fit on
+/// EVERY survival route, including the ones the CLI still materializes itself.
+///
+/// `--survival-time-anchor` declares `conflicts_with = --request` precisely
+/// because the document is supposed to carry the complete scientific model
+/// configuration. Under `--request` the flag is therefore always `None`, so a
+/// survival route that read the anchor from `FitArgs` rather than from the
+/// resolved `FitConfig` would drop a document-supplied anchor without a word.
+/// This exercises the location-scale route, which `run_survival` materializes
+/// itself rather than delegating to the engine.
+#[test]
+fn cli_request_document_survival_time_anchor_reaches_the_fit_2631() {
+    const EXPLICIT_ANCHOR: f64 = 25.0;
+    let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let train_path = td.path().join("request_anchor.csv");
+    let request_path = td.path().join("request_anchor.request.json");
+    let model_path = td.path().join("request_anchor.model.json");
+    fs::write(
+        &train_path,
+        "entry,exit,event,x\n\
+         10,15,1,-0.8\n\
+         20,35,0,0.4\n\
+         40,60,1,-0.2\n\
+         80,100,0,0.7\n\
+         120,150,1,0.1\n\
+         160,220,1,-0.5\n",
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write survival csv", e));
+    fs::write(
+        &request_path,
+        format!(
+            r#"{{"schema":"gam.fit-request","schema_version":1,
+                 "formula":"Surv(entry, exit, event) ~ x",
+                 "config":{{"survival_likelihood":"location-scale",
+                            "survival_time_anchor":{EXPLICIT_ANCHOR}}}}}"#
+        ),
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write fit-request document", e));
+
+    let mut args = location_scale_fit_args(
+        train_path.clone(),
+        model_path.clone(),
+        "unused ~ when --request is supplied",
+        "1",
+    );
+    // `--request` carries the formula and the whole model configuration; the CLI
+    // rejects the conflicting flags, so they must be cleared here too.
+    args.request = Some(request_path);
+    args.formula_positional = None;
+    args.predict_noise = None;
+    args.survival_likelihood = None;
+    args.family = FamilyArg::Auto;
+    run_fit(args).unwrap_or_else(|e| {
+        panic!(
+            "{} failed: {:?}",
+            "fit from a --request document with an explicit anchor should succeed", e
+        )
+    });
+
+    let saved = SavedModel::load_from_path(&model_path)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "load fitted model", e));
+    let anchor = saved
+        .survival_time_anchor
+        .expect("a saved survival model must carry its time anchor");
+    assert!(
+        (anchor - EXPLICIT_ANCHOR).abs() <= 1e-12,
+        "a --request document's survival_time_anchor must reach the fit; \
+         requested {EXPLICIT_ANCHOR}, saved {anchor}"
+    );
+    remove_temp_file(&model_path);
+}
+
 #[test]
 fn cli_surv_predict_noise_routes_to_survival_location_scale() {
     let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
@@ -2498,6 +2570,191 @@ fn nonlinear_saved_model_with_hessian_only_remains_persistable_and_predictable()
         });
     assert_eq!(covariance.dim(), (1, 1));
     assert!((covariance[[0, 0]] - 0.5).abs() < 1e-12);
+}
+
+/// #2385: the CLI's Hessian-only covariance fallback must report the covariance
+/// of the **truncated** posterior, not the ambient Gaussian's.
+///
+/// The fixture makes the inequality maximally ACTIVE rather than merely present:
+/// one coefficient, `H = [[2]]` so the ambient `Σ = φ·H⁻¹ = 1/2`, and the single
+/// row `β ≥ 0.25` placed exactly at the ambient centre `β_unc = 0.25`. The
+/// truncated posterior is then the half-normal on `[0.25, ∞)` built from
+/// `N(0.25, 1/2)`, whose variance is the closed form `Σ·(1 − 2/π)` — an
+/// analytic reference this test does not obtain from the code under test.
+///
+/// This is the case an interval on an active face gets wrong in the direction
+/// that matters: the ambient `1/2` is 2.75× the truncated variance, so an
+/// interval built from it is far too wide and its lower endpoint crosses the
+/// very wall the fit was constrained by. Before the fix
+/// `covariance_from_model` built its backend with `from_factorized_hessian`,
+/// which passes no correction, and returned exactly the ambient `0.5`.
+#[test]
+fn hessian_only_saved_model_reports_the_truncated_covariance_on_an_active_face() {
+    use gam::pirls::LinearInequalityConstraints;
+    use gam::solver::constrained_posterior::{
+        ConstrainedPosteriorGeometry, constrained_posterior_correction_from_covariance,
+    };
+
+    let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let model_path = td.path().join("model.json");
+
+    // Σ = φ·H⁻¹ with φ = 1 (Binomial: the IRLS weight already carries the
+    // dispersion), so the ambient posterior variance is exactly 1/2.
+    let ambient = array![[0.5]];
+    let center = array![0.25];
+    let constraints = LinearInequalityConstraints::new(array![[1.0]], array![0.25])
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "build the active constraint row", e));
+    let correction = constrained_posterior_correction_from_covariance(
+        &ambient,
+        &center,
+        &constraints,
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "build the truncation correction", e))
+    .unwrap_or_else(|| {
+        panic!(
+            "a row whose wall sits exactly at the ambient centre must be retained; \
+             a `None` correction here would make this test pass by absence"
+        )
+    });
+    // Guard the fixture itself: the face is retained AND it removes variance.
+    assert_eq!(
+        correction.rows,
+        vec![0],
+        "the single constraint row must be the retained face"
+    );
+    assert!(
+        correction.removed_normal_variance[[0, 0]] > 0.0,
+        "an active face must remove normal-coordinate variance, got {:?}",
+        correction.removed_normal_variance
+    );
+
+    let fit_result = gam::estimate::UnifiedFitResult::try_from_parts(UnifiedFitResultParts {
+        blocks: vec![FittedBlock {
+            beta: array![0.25],
+            role: BlockRole::Mean,
+            edf: 0.0,
+            lambdas: Array1::zeros(0),
+        }],
+        training_sample_size: 12,
+        log_lambdas: Array1::zeros(0),
+        lambdas: Array1::zeros(0),
+        likelihood_family: Some(LikelihoodSpec::new(
+            ResponseFamily::Binomial,
+            InverseLink::Standard(StandardLink::Logit),
+        )),
+        likelihood_scale: LikelihoodScaleMetadata::FixedDispersion { phi: 1.0 },
+        log_likelihood_normalization: LogLikelihoodNormalization::UserProvided,
+        log_likelihood: -1.0,
+        deviance: 2.0,
+        reml_score: Some(0.0),
+        stable_penalty_term: 0.0,
+        penalized_objective: Some(1.0),
+        used_device: false,
+        outer_iterations: 0,
+        outer_converged: true,
+        outer_gradient_norm: None,
+        standard_deviation: 1.0,
+        covariance_conditional: None,
+        covariance_corrected: None,
+        inference: None,
+        fitted_link: FittedLinkState::Standard(None),
+        geometry: Some(FitGeometry {
+            coefficient_gauge: Gauge::identity(&[1]),
+            penalized_hessian: array![[2.0]].into(),
+            constrained_posterior: Some(ConstrainedPosteriorGeometry {
+                constraints,
+                mode: array![0.25],
+                unconstrained_center: center,
+                correction: Some(correction),
+            }),
+            working: None,
+        }),
+        block_states: Vec::new(),
+        pirls_status: gam::pirls::PirlsStatus::Converged,
+        max_abs_eta: 0.0,
+        constraint_kkt: None,
+        artifacts: Default::default(),
+        inner_cycles: 0,
+    })
+    .unwrap_or_else(|e| {
+        panic!(
+            "{} failed: {:?}",
+            "construct constrained hessian-only fit result", e
+        )
+    });
+
+    let mut payload = FittedModelPayload::new(
+        MODEL_PAYLOAD_VERSION,
+        "y ~ x".to_string(),
+        ModelKind::Standard,
+        FittedFamily::Standard {
+            likelihood: LikelihoodSpec::new(
+                ResponseFamily::Binomial,
+                InverseLink::Standard(StandardLink::Logit),
+            ),
+            link: Some(StandardLink::Logit),
+            latent_cloglog_state: None,
+            mixture_state: None,
+            sas_state: None,
+        },
+        "binomial-logit".to_string(),
+    );
+    payload.fit_result = Some(fit_result.clone());
+    payload.unified = Some(fit_result);
+    payload.data_schema = Some(DataSchema {
+        columns: vec![
+            SchemaColumn {
+                name: "x".to_string(),
+                kind: ColumnKindTag::Continuous,
+                levels: Vec::new(),
+            },
+            SchemaColumn {
+                name: "y".to_string(),
+                kind: ColumnKindTag::Binary,
+                levels: Vec::new(),
+            },
+        ],
+    });
+    payload.set_training_feature_metadata(
+        vec!["x".to_string(), "y".to_string()],
+        vec![(0.0, 1.0), (0.0, 1.0)],
+    );
+    payload.resolved_termspec = Some(empty_termspec());
+
+    let model = SavedModel::from_payload(payload);
+    model.save_to_path(&model_path).unwrap_or_else(|e| {
+        panic!(
+            "{} failed: {:?}",
+            "constrained hessian-only model should save", e
+        )
+    });
+    let loaded = SavedModel::load_from_path(&model_path)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "reload constrained hessian-only model", e));
+    let covariance =
+        covariance_from_model(&loaded, InferenceCovarianceMode::Conditional).unwrap_or_else(|e| {
+            panic!(
+                "{} failed: {:?}",
+                "recover truncated covariance from saved penalized Hessian", e
+            )
+        });
+    assert_eq!(covariance.dim(), (1, 1));
+
+    // Closed form for the half-normal on [0.25, ∞) obtained from N(0.25, 1/2).
+    let expected = 0.5 * (1.0 - 2.0 / std::f64::consts::PI);
+    let relative = (covariance[[0, 0]] - expected).abs() / expected;
+    assert!(
+        relative < 2e-3,
+        "truncated posterior variance on an active face should be {expected:.9e} \
+         (the ambient 0.5 is 2.75x too wide and puts the interval's lower endpoint \
+         through the constraint wall), got {:.9e} (relative {relative:.3e})",
+        covariance[[0, 0]]
+    );
+    assert!(
+        covariance[[0, 0]] < 0.4,
+        "the reported covariance must be strictly narrower than the ambient 0.5; \
+         got {:.9e}, which is the untruncated Gaussian",
+        covariance[[0, 0]]
+    );
 }
 
 #[test]

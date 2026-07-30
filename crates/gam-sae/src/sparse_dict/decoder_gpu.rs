@@ -29,9 +29,12 @@
 //!   the `X`/`R` and `P` updates perform the same separately rounded arithmetic
 //!   in the same row/rank order, gated by the same per-column active mask.
 //!
-//! The `device_block_cg_matches_cpu_bitwise` test pins `to_bits` equality of
-//! the full solve against the CPU backend on a giant-scale fixture, so a CUDA
-//! box and a CPU box produce the SAME fit, bit for bit.
+//! The `device_block_cg_matches_cpu_bitwise_when_available` test pins `to_bits`
+//! equality of the full solve against the CPU backend on a giant-scale fixture,
+//! so a CUDA box and a CPU box produce the SAME fit, bit for bit. Its name says
+//! `when_available` because the bit-identity claim it makes is conditional on a
+//! device being present; a name promising it unconditionally reads, on a
+//! CPU-only runner, as a guarantee nothing checked.
 //!
 //! # Policy
 //!
@@ -1004,8 +1007,10 @@ mod tests {
     /// bits from a nonzero initial solution — and a second device run must
     /// reproduce itself exactly.
     #[test]
-    fn device_block_cg_matches_cpu_bitwise() {
-        if !cuda_available_for_test("decoder_gpu::device_block_cg_matches_cpu_bitwise") {
+    fn device_block_cg_matches_cpu_bitwise_when_available() {
+        if !cuda_available_for_test(
+            "decoder_gpu::device_block_cg_matches_cpu_bitwise_when_available",
+        ) {
             // #2422: the bare `return` reported `passed` with zero assertions on
             // every device-free runner. `DeviceBlockCgBackend::try_new` under
             // `Required` routes through `GpuRuntime::require()`, so with no device

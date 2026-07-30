@@ -128,7 +128,10 @@ fn freeze_smooth_basis_from_metadata(
             },
         ) => {
             s.center_strategy = crate::basis::CenterStrategy::UserProvided(centers.clone());
-            s.length_scale = *length_scale;
+            // Original units, replayed verbatim: the next build runs this spec
+            // back through `normalize_euclidean_frame`, which re-applies the
+            // standardization. The tag names which side of that we are on.
+            s.length_scale = length_scale.original_value();
             s.identifiability = match identifiability_transform {
                 Some(z) => SpatialIdentifiability::FrozenTransform {
                     transform: z.clone(),
@@ -199,7 +202,7 @@ fn freeze_smooth_basis_from_metadata(
                 spec: DuchonBasisSpec {
                     periodic: meta_periodic.clone(),
                     center_strategy: crate::basis::CenterStrategy::UserProvided(centers.clone()),
-                    length_scale: *length_scale,
+                    length_scale: length_scale.map(crate::OriginalUnits::original_value),
                     power: *power,
                     nullspace_order: *nullspace_order,
                     identifiability,
@@ -294,7 +297,7 @@ fn freeze_smooth_basis_from_metadata(
             // contract); order_s is the sentinel-preserving mode marker and
             // masses + eps_band are the fit-data penalty quadrature (both
             // `BasisMetadata::MeasureJet`).
-            s.length_scale = *length_scale;
+            s.length_scale = length_scale.standardized_value();
             s.order_s = *order_s;
             s.alpha = *alpha;
             s.tau0 = *tau0;
@@ -336,7 +339,7 @@ fn freeze_smooth_basis_from_metadata(
             },
         ) => {
             s.center_strategy = crate::basis::CenterStrategy::UserProvided(centers.clone());
-            s.length_scale.set_resolved(*length_scale);
+            s.length_scale.set_resolved(length_scale.original_value());
             s.nu = *nu;
             s.include_intercept = *include_intercept;
             s.identifiability = match identifiability_transform {
@@ -369,7 +372,7 @@ fn freeze_smooth_basis_from_metadata(
             },
         ) => {
             s.center_strategy = crate::basis::CenterStrategy::UserProvided(centers.clone());
-            s.length_scale = *length_scale;
+            s.length_scale = length_scale.map(crate::OriginalUnits::original_value);
             s.power = *power;
             s.nullspace_order = *nullspace_order;
             s.identifiability = match identifiability_transform {

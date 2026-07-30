@@ -41,12 +41,20 @@ fn gpu_paths_match_cpu_to_1e8_on_floor_clearing_matrices() {
     // CPU-only host there is nothing to validate (the helpers would return None for
     // lack of a device, not for lack of work) — skip cleanly without the heavy
     // allocations so CPU CI stays fast and light.
-    if gam::gpu::device_runtime::GpuRuntime::resolve(gam::gpu::GpuPolicy::Auto)
-        .unwrap_or_else(|error| panic!("GPU probe fault in matrix parity test: {error}"))
-        .is_none()
-    {
-        eprintln!("SKIP gpu_paths_match_cpu_to_1e8_on_floor_clearing_matrices: no CUDA runtime");
-        return;
+    //
+    // #2422: the skip goes through the one shared gate, so it increments the
+    // process-wide counter and prints the single greppable `SKIPPED(no-cuda):`
+    // marker, and `assert_absent_device_was_counted` makes that count the
+    // assertion this path executes — the bare probe returned with none, so on
+    // every CPU-only runner this test printed `ok` having verified nothing. The
+    // gate also panics under `GpuPolicy::Required` and on a driver FAULT.
+    let skips_before = gam::gpu::test_gate::skipped_for_absent_device();
+    match gam::gpu::test_gate::gpu_for_test("gpu matmul/matvec/XtDiagX parity") {
+        gam::gpu::test_gate::GpuTestGate::Ready(_) => {}
+        gam::gpu::test_gate::GpuTestGate::AbsentDevice => {
+            gam::gpu::test_gate::assert_absent_device_was_counted(skips_before);
+            return;
+        }
     }
 
     // GEMM A·B: 2·m·n·k = 2·400·400·400 ≈ 1.28e8 ≥ 1e8.

@@ -34,7 +34,9 @@ fn try_build_spatial_term_log_kappa_derivative(
             let mut spec_local = spec.clone();
             if let Some(scale) = input_scale {
                 scale.standardize(&mut x);
-                spec_local.length_scale = scale.to_standardized_units(spec.length_scale);
+                spec_local.length_scale = scale
+                    .to_standardized_units(gam_terms::OriginalUnits::new(spec.length_scale))
+                    .standardized_value();
             }
             build_thin_plate_basis_log_kappa_derivatives(x.view(), &spec_local)
                 .map_err(EstimationError::from)?
@@ -74,9 +76,11 @@ fn try_build_spatial_term_log_kappa_derivative(
                             .to_string(),
                     )
                 })?;
-                spec_local
-                    .length_scale
-                    .set_resolved(scale.to_standardized_units(length_scale));
+                spec_local.length_scale.set_resolved(
+                    scale
+                        .to_standardized_units(gam_terms::OriginalUnits::new(length_scale))
+                        .standardized_value(),
+                );
             }
             // The realized Matérn DESIGN penalty is ALWAYS the operator-collocation
             // {mass, tension, stiffness} triplet — the term-collection assembler
@@ -105,9 +109,11 @@ fn try_build_spatial_term_log_kappa_derivative(
             let mut spec_local = spec.clone();
             if let Some(scale) = input_scale {
                 scale.standardize(&mut x);
-                spec_local.length_scale = spec
-                    .length_scale
-                    .map(|length| scale.to_standardized_units(length));
+                spec_local.length_scale = spec.length_scale.map(|length| {
+                    scale
+                        .to_standardized_units(gam_terms::OriginalUnits::new(length))
+                        .standardized_value()
+                });
             }
             let BasisMetadata::Duchon {
                 centers,
@@ -315,11 +321,16 @@ pub(crate) fn try_build_latent_coord_hyper_dirs(
                 nu,
                 include_intercept,
                 identifiability_transform,
+                input_scale,
                 ..
             },
         ) => gam_terms::basis::LatentCoordDesignDerivative::new_matern(
             latent.clone(),
             std::sync::Arc::new(centers.clone()),
+            // The metadata's own frame pair: standardized `centers` above,
+            // original-units range here. The constructor owns the single
+            // conversion between them (#2643).
+            *input_scale,
             *length_scale,
             *nu,
             *include_intercept,
@@ -334,11 +345,14 @@ pub(crate) fn try_build_latent_coord_hyper_dirs(
                 power,
                 nullspace_order,
                 identifiability_transform,
+                input_scale,
                 ..
             },
         ) => gam_terms::basis::LatentCoordDesignDerivative::new_duchon(
             latent.clone(),
             std::sync::Arc::new(centers.clone()),
+            // See the Matérn arm: the pair travels together (#2643).
+            *input_scale,
             *length_scale,
             *power,
             *nullspace_order,
@@ -1686,10 +1700,14 @@ impl SingleBlockLatentCoordDesignCache {
                     length_scale,
                     nu,
                     aniso_log_scales,
+                    input_scale,
                     ..
                 },
             ) => Ok(gam_solve::latent_cache::LatentBasisKind::Matern {
                 centers: centers.clone(),
+                // The metadata's frame pair travels together into the cache
+                // key and into the radii it builds (#2643).
+                input_scale: *input_scale,
                 length_scale: *length_scale,
                 nu: *nu,
                 aniso_log_scales: aniso_log_scales
@@ -1708,10 +1726,13 @@ impl SingleBlockLatentCoordDesignCache {
                     power,
                     nullspace_order,
                     aniso_log_scales,
+                    input_scale,
                     ..
                 },
             ) => Ok(gam_solve::latent_cache::LatentBasisKind::Duchon {
                 centers: centers.clone(),
+                // See the Matérn arm (#2643).
+                input_scale: *input_scale,
                 length_scale: *length_scale,
                 power: *power,
                 nullspace_order: *nullspace_order,
@@ -2640,7 +2661,7 @@ fn try_exact_joint_spatial_length_scale_optimization(
     } else {
         SpatialHyperKind::Isotropic
     };
-    let (theta_star, joint_final_value, kappa_timing) = run_exact_joint_spatial_optimization(
+    let (theta_star, joint_final_value, joint_seed_value, kappa_timing) = run_exact_joint_spatial_optimization(
         kind,
         data,
         y,
@@ -2666,14 +2687,79 @@ fn try_exact_joint_spatial_length_scale_optimization(
     // are outer-BFGS approximations accurate to options.tol; a tighter
     // gate would reject true improvements due to floating-point noise.
     let accept_tol = options.tol.max(1e-8 * baseline_score.abs()).max(1e-12);
-    if joint_final_value > baseline_score + accept_tol {
+    // The monotonicity certificate used to be ONE comparison —
+    // `joint_final_value <= baseline_score + accept_tol` — spanning TWO
+    // independent facts, and it therefore could not say which of them had
+    // failed. `joint_final_value` is this route's criterion at θ*;
+    // `baseline_score` is the scalar-ρ route's `fit_score` at θ0. A refusal
+    // could mean either "the optimizer ended above where it started" (a solver
+    // regression) or "the two routes disagree about the criterion at the SAME
+    // point" (a criterion inconsistency, which no amount of optimizer work can
+    // fix). `run_exact_joint_spatial_optimization` already evaluates its own
+    // criterion at θ0 to prime the evaluator, so both facts are available; state
+    // them separately so the refusal names the defect it found.
+    //
+    // The route-agreement bound is the SAME derived quantity as the acceptance
+    // bound — no second tolerance is introduced. It is two-sided because a route
+    // disagreement is a disagreement in either direction, whereas the descent
+    // contract is one-sided by construction.
+    if !joint_seed_value.is_finite() {
         return Err(EstimationError::RemlOptimizationFailed(format!(
-            "exact joint spatial optimization failed its objective-monotonicity certificate: \
-             initial={baseline_score:.6e}, final={joint_final_value:.6e}, \
-             acceptance_tolerance={accept_tol:.3e}, theta_checkpoint={:?}",
+            "exact joint spatial optimization could not evaluate its own criterion at the \
+             seed (seed_value={joint_seed_value:.6e}), so neither its descent nor its \
+             agreement with the scalar-rho route is checkable; baseline={baseline_score:.6e}"
+        )));
+    }
+    if (joint_seed_value - baseline_score).abs() > accept_tol {
+        return Err(EstimationError::RemlOptimizationFailed(format!(
+            "exact joint spatial optimization and the scalar-rho route disagree about the \
+             criterion AT THE SAME POINT theta0: joint_seed={joint_seed_value:.12e}, \
+             baseline={baseline_score:.12e}, gap={:.3e} ({:.3e} relative), \
+             agreement_tolerance={accept_tol:.3e}. The joint search is therefore minimizing a \
+             different function than the one its result is graded against; this is a criterion \
+             defect, not a solver failure (joint_final={joint_final_value:.12e}, \
+             theta_checkpoint={:?})",
+            joint_seed_value - baseline_score,
+            (joint_seed_value - baseline_score) / baseline_score.abs().max(f64::MIN_POSITIVE),
             theta_star.to_vec(),
         )));
     }
+    // Descent contract. Measured on `b8745892a`, this is the half that actually
+    // fires (`seed=6.613467e1, final=6.613469e1, initial=6.613467e1` on the
+    // binomial-logit Matérn fixture): the two routes agree at θ0 to every
+    // printed digit, and the joint search ends ABOVE the point it started from.
+    //
+    // The optimizer's certificate is a LOCAL, possibly boundary, stationarity
+    // statement at θ* (`theta_checkpoint=[30.0, …]` sits on `RHO_BOUND`), so it
+    // says nothing about θ0 — a certified stationary point of a nonconvex
+    // criterion is routinely worse than a different feasible point. Refusing the
+    // whole REML fit here treated "the search moved to a worse local optimum" as
+    // an internal failure, when this routine has already EVALUATED both
+    // candidates and can simply return the better one. `run_exact_joint_…`
+    // returns its terminal iterate, not its best, so the driver is the first
+    // place that holds both numbers.
+    //
+    // Keeping the better candidate makes the routine's own contract — "joint
+    // κ optimization never returns a point worse than its seed" — true by
+    // construction rather than checked after the fact. The regression is still
+    // a solver defect and must stay visible, so it is logged with both values
+    // and the rejected checkpoint rather than silently absorbed.
+    let (theta_star, joint_final_value) = if joint_final_value > joint_seed_value + accept_tol {
+        log::warn!(
+            "[spatial-kappa] the exact joint search terminated ABOVE its own seed \
+             (seed={joint_seed_value:.12e}, final={joint_final_value:.12e}, \
+             regression={:.3e}, acceptance_tolerance={accept_tol:.3e}); its terminal \
+             certificate is local/boundary at theta={:?} and does not dominate the seed, \
+             so the seed is kept and joint kappa optimization is a no-op for this fit. \
+             A descent method returning a point worse than its start is a solver defect \
+             in its own right and this line is the record of it.",
+            joint_final_value - joint_seed_value,
+            theta_star.to_vec(),
+        );
+        (theta0.clone(), joint_seed_value)
+    } else {
+        (theta_star, joint_final_value)
+    };
 
     let selected_lambdas = Array1::from_vec(
         gam_problem::checked_exp_log_strengths(
@@ -3620,7 +3706,7 @@ fn run_exact_joint_spatial_optimization(
     upper: &Array1<f64>,
     rho_dim: usize,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
-) -> Result<(Array1<f64>, f64, SpatialLengthScaleOptimizationTiming), EstimationError> {
+) -> Result<(Array1<f64>, f64, f64, SpatialLengthScaleOptimizationTiming), EstimationError> {
     let label = kind.label();
     let effective_offset = baseline_design
         .compose_offset(offset, "spatial joint fit")
@@ -3966,9 +4052,19 @@ fn run_exact_joint_spatial_optimization(
     // lane. The only `ValueGradientHessian` request belongs to the mint audit.
     let kphase_prime_order = OuterEvalOrder::ValueAndGradient;
     let kphase_prime_start = std::time::Instant::now();
-    drop(ctx.eval_full(theta0, kphase_prime_order, analytic_outer_hessian_available)?);
+    // The priming eval is the joint criterion AT THE SEED, and it is the only
+    // number that can tell a solver regression apart from a cross-route
+    // criterion disagreement at the acceptance gate downstream: that gate grades
+    // `final_value` (this evaluator, at θ*) against `fit_score(&best.fit)` (the
+    // scalar-ρ route, at θ0). Discarding it forced the two questions into one
+    // refusal, so a route difference of a few ulps-relative was reported as
+    // "the optimizer made the score worse". Keep it and let the caller state the
+    // two contracts separately.
+    let seed_value = ctx
+        .eval_full(theta0, kphase_prime_order, analytic_outer_hessian_available)?
+        .0;
     log::info!(
-        "[KAPPA-PHASE-PRIME] n_rows={} order={:?} elapsed_s={:.4} slow_path_resets_total={} design_revision={}",
+        "[KAPPA-PHASE-PRIME] n_rows={} order={:?} seed_value={seed_value:.12e} elapsed_s={:.4} slow_path_resets_total={} design_revision={}",
         data.nrows(),
         kphase_prime_order,
         kphase_prime_start.elapsed().as_secs_f64(),
@@ -4048,9 +4144,6 @@ fn run_exact_joint_spatial_optimization(
             // design-realization skip.
             DeclaredHessianForm::Unavailable
         },
-        // The generic single-block derivative ladder reserves order-four work
-        // for the terminal mint certificate (#2359).
-        true,
         // Single-block spatial path: penalty-like rho + spatial psi.
         // EFS/HybridEFS remain eligible (the Wood-Fasiolo PSD structure holds
         // for single-block families with β-independent joint H_L) UNLESS the
@@ -4337,7 +4430,7 @@ fn run_exact_joint_spatial_optimization(
     // optimization. For the anisotropic kind the decomposition into (ψ̄, η)
     // happens later in apply_tospec.
     let theta_star = result.rho;
-    Ok((theta_star, result.final_value, timing))
+    Ok((theta_star, result.final_value, seed_value, timing))
 }
 
 /// Apply a length scale to a single `SmoothTermSpec` (independent of any
@@ -5158,8 +5251,11 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                 // re-key must use the same effective length scale, or the fast
                 // path pairs G(ψ_new) with an S(ψ_new) from a different
                 // coordinate scale.
-                let effective_ls =
-                    ls_opt.map(|length| input_scale.to_standardized_units(length));
+                let effective_ls = ls_opt.map(|length| {
+                    input_scale
+                        .to_standardized_units(gam_terms::OriginalUnits::new(length))
+                        .standardized_value()
+                });
                 gam_terms::basis::duchon_penalties_at_length_scale(
                     centers.view(),
                     identifiability_transform.as_ref(),
@@ -5193,7 +5289,9 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                 let ls = ls_opt.ok_or_else(|| {
                     "Matérn n-free penalty re-key requires a finite length-scale".to_string()
                 })?;
-                let effective_ls = input_scale.to_standardized_units(ls);
+                let effective_ls = input_scale
+                    .to_standardized_units(gam_terms::OriginalUnits::new(ls))
+                    .standardized_value();
                 let aniso_for_penalty = aniso_from_psi.as_deref().or(aniso_log_scales.as_deref());
                 // Route through the SAME canonical operator-triplet builder the
                 // realized design uses (`matern_operator_penalty_triplet_from_
@@ -5338,8 +5436,11 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                         );
                     }
                 };
-                let effective_ls =
-                    ls_opt.map(|length| input_scale.to_standardized_units(length));
+                let effective_ls = ls_opt.map(|length| {
+                    input_scale
+                        .to_standardized_units(gam_terms::OriginalUnits::new(length))
+                        .standardized_value()
+                });
                 spec.length_scale = effective_ls;
                 spec.power = *power;
                 spec.nullspace_order = *nullspace_order;
@@ -5390,7 +5491,9 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                 let ls = ls_opt.ok_or_else(|| {
                     "Matérn n-free penalty derivative requires a finite length-scale".to_string()
                 })?;
-                let effective_ls = input_scale.to_standardized_units(ls);
+                let effective_ls = input_scale
+                    .to_standardized_units(gam_terms::OriginalUnits::new(ls))
+                    .standardized_value();
                 let penalty_centers = gam_terms::basis::expand_periodic_centers(
                     &centers.to_owned(),
                     periodic.as_deref(),
@@ -6355,11 +6458,6 @@ pub(crate) fn exact_joint_multistart_outer_problem(
     n_params: usize,
     gradient: gam_problem::Derivative,
     hessian: gam_problem::DeclaredHessianForm,
-    // Generic REML/LAML derivative ladders may reserve expensive order-four
-    // contractions for terminal certification. Callers with an explicit
-    // family-specific affordability policy can instead spend declared exact
-    // curvature during search.
-    reserve_analytic_hessian_for_certificate: bool,
     disable_fixed_point: bool,
     risk_profile: gam_problem::SeedRiskProfile,
     tolerance: f64,
@@ -6441,7 +6539,13 @@ pub(crate) fn exact_joint_multistart_outer_problem(
     let mut problem = gam_solve::rho_optimizer::OuterProblem::new(n_params)
         .with_gradient(gradient)
         .with_hessian(hessian)
-        .with_prefer_gradient_only(reserve_analytic_hessian_for_certificate)
+        // Exact REML/LAML curvature consumes the fourth-order family tower,
+        // while BFGS search needs only exact gradients. Hessian availability is
+        // a terminal-certification capability, not a warrant to rebuild that
+        // tower at every accepted iterate (#979). Keep the Hessian declared so
+        // the mint still requires exact curvature, but reserve it for that one
+        // terminal evaluation.
+        .with_prefer_gradient_only(true)
         .with_disable_fixed_point(disable_fixed_point)
         // Re-enable the automatic fallback ladder for exact joint spatial
         // problems. It was previously `Disabled` to suppress a geo-bench
@@ -6856,10 +6960,6 @@ where
         } else {
             DeclaredHessianForm::Unavailable
         },
-        // The family-specific work policy above has already withheld exact
-        // curvature when it is unaffordable. If it declared a Hessian here,
-        // spend that geometry in ARC instead of silently overriding the policy.
-        false,
         disable_fixed_point,
         seed_risk_profile,
         kappa_options.rel_tol.max(1e-6),
@@ -7013,9 +7113,16 @@ where
                         inner_beta_hint: None,
                     })
                 }
-                Err(err) => Err(EstimationError::RemlOptimizationFailed(format!(
-                    "n-block exact-joint spatial evaluation failed: {err}"
-                ))),
+                // A refusal from the exact-joint evaluator is a refusal AT
+                // THIS theta -- the same class the sibling `SpatialJointContext`
+                // objective in this file already retreats from via
+                // `is_recoverable_trial_point_error`. Reported as
+                // `RemlOptimizationFailed`, `is_trial_point_infeasible`
+                // answered false and `into_objective_error` graded it Fatal,
+                // aborting the fit instead of the trial (#2627).
+                Err(err) => Err(EstimationError::TrialPointRefused {
+                    reason: format!("n-block exact-joint spatial evaluation failed: {err}"),
+                }),
             }
         };
 
@@ -7076,9 +7183,11 @@ where
                         ctx.cache.store_cost_only(theta, cost);
                         Ok(cost)
                     }
-                    Err(err) => Err(EstimationError::RemlOptimizationFailed(format!(
-                        "n-block exact-joint spatial cost evaluation failed: {err}"
-                    ))),
+                    Err(err) => Err(EstimationError::TrialPointRefused {
+                        reason: format!(
+                            "n-block exact-joint spatial cost evaluation failed: {err}"
+                        ),
+                    }),
                 }
             },
             |ctx: &mut &mut NBlockExactJointState<'_, Mode>, theta: &Array1<f64>| {
@@ -7118,7 +7227,9 @@ where
                         elapsed_s,
                     );
                     let ExactJointEfsEvaluation { evaluation, mode } =
-                        eval_result.map_err(EstimationError::RemlOptimizationFailed)?;
+                        eval_result.map_err(|reason| EstimationError::TrialPointRefused {
+                            reason,
+                        })?;
                     // An EFS solve can select a different coefficient mode at
                     // the same theta.  Revoke any derivative memo assembled
                     // from the previous mode before installing this carrier;
@@ -7584,9 +7695,6 @@ fn try_exact_joint_latent_coord_optimization(
         theta0.len(),
         Derivative::Analytic,
         DeclaredHessianForm::Unavailable,
-        // No Hessian is declared on this route, so this lifecycle preference is
-        // inert; retain the generic terminal-reservation policy explicitly.
-        true,
         false,
         seed_risk_profile_for_likelihood_family(&family),
         options.tol,
@@ -8205,7 +8313,25 @@ where
             inside_x = probe;
         }
     }
-    Ok((inside_x + 0.5 * (outside_x - inside_x), false))
+    // The bracket is only contracted to `x_tolerance`, so its midpoint carries
+    // an error of half that width -- a floor the reported endpoint inherits no
+    // matter how exact the profile score is, and `x_tolerance` is itself
+    // floored at `sqrt(EPSILON)` regardless of the tolerance the caller asked
+    // for. `outside_x` already holds the analytic score and residual evaluated
+    // there, so one final Newton step costs no additional profile evaluation
+    // and resolves the crossing to the accuracy of the score itself. It is
+    // taken only when it lands inside the certified bracket; otherwise the
+    // midpoint stands.
+    let midpoint = inside_x + 0.5 * (outside_x - inside_x);
+    let refined = outside_x - outside_residual / outside_score;
+    let lo = inside_x.min(outside_x);
+    let hi = inside_x.max(outside_x);
+    let endpoint = if refined.is_finite() && refined >= lo && refined <= hi {
+        refined
+    } else {
+        midpoint
+    };
+    Ok((endpoint, false))
 }
 
 fn curvature_profile_ci_from_analytic_score<F>(

@@ -290,8 +290,7 @@ fn zz_measure_2608_relative_floor_wall_movement() {
 /// `range(S)` has the one eigenvalue `c²`.
 fn one_dir_term(gamma: f64) -> (Vec<ParameterBlockSpec>, PenaltyLabelLayout) {
     let c = gamma.sqrt();
-    let design =
-        DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[c]]));
+    let design = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[c]]));
     let spec = ParameterBlockSpec {
         name: "linear".to_string(),
         design,

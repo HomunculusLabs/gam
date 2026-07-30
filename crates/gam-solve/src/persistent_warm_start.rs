@@ -265,15 +265,41 @@ fn load_json_record<T: for<'de> Deserialize<'de>>(key: &str) -> Option<T> {
 
 /// Anchor the warm-start cache under the platform temp directory.
 ///
-/// Reading `XDG_CACHE_HOME` / `HOME` / `LOCALAPPDATA` (the canonical
-/// `dirs::cache_dir()` fallbacks) requires `env::var_os`, which is banned
-/// in this crate (see the build-script tripwire scan and the
-/// `feedback_no_env_vars` policy memo). `std::env::temp_dir()` resolves
-/// platform-conventional locations through OS-level primitives without
-/// going through `env::var`, so we route the persistent warm-start
-/// checkpoint root there instead. The directory is durable across
-/// processes within a single boot, and `WarmStartStore::open` falls back
-/// to `None` if the path is unwritable.
+/// **This location satisfies the no-`env::var` rule textually and violates it
+/// semantically, which is worse than an explicit read.** Both halves of the
+/// original justification are wrong, and both were measured (gam#2639):
+///
+/// * *"`dirs::cache_dir()` requires `env::var_os`, which is banned"* — the ban
+///   is a **substring scan over first-party sources** (the build script says so
+///   itself, and early-returns entirely when gam is consumed as a published
+///   dependency because "there is no first-party tree to lint"). An
+///   `env::var_os` inside the `dirs` crate is invisible to it. `dirs::cache_dir()`
+///   is therefore *exactly as compliant as* `temp_dir()`. The real objection to
+///   `dirs` is that it is not a workspace dependency — a dependency-budget
+///   question, which should be argued as one.
+/// * *"`temp_dir()` resolves through OS-level primitives without going through
+///   `env::var`"* — true of the **call**, false of the **behaviour**.
+///   `temp_dir()` honours `TMPDIR`, and this repository relies on that: two
+///   round-trip tests were made green by setting it, measurement lanes isolate
+///   themselves with it, and the section below tells readers to delete the root
+///   for a cold arm.
+///
+/// So the environment-dependence is load-bearing — it silently relocates a
+/// machine-global cache with a ten-year TTL — and invisible to every tool we
+/// have. An `env::var("TMPDIR")` would at least be greppable.
+///
+/// The repair is **not** to swap one ambient helper for another, and **not** to
+/// widen the scanner to catch `temp_dir()` (that would put a textual proxy where
+/// a property check belongs, which is the defect of gam#2651 in a new place).
+/// It is to make the root **explicit configuration with a documented default**,
+/// so isolation becomes a supported operation instead of the folklore that
+/// `TMPDIR` happens to work.
+///
+/// Until then: the directory is durable across processes within a single boot,
+/// and `WarmStartStore::open` falls back to `None` if the path cannot be
+/// created — note that it is `create_dir_all` and nothing else, so it returns
+/// `Ok` on an existing root regardless of free space, and a full filesystem is
+/// discovered only at write time (gam#2639).
 ///
 /// # A FRESH WORKING DIRECTORY IS NOT A COLD CACHE
 ///
@@ -348,16 +374,92 @@ pub(crate) fn open_outer_session(
 ///
 /// Best-effort: encoding / store failures are swallowed (a warm-start
 /// artifact is never required), oversize payloads are dropped.
+/// Why a fit-artifact record could not be persisted.
+///
+/// A warm-start cache is a pure OPTIMIZATION: nothing downstream is entitled to
+/// fail because a checkpoint could not be written. `store_fit_artifact` already
+/// returns `Ok(())` for three of the four "cannot persist" cases — an unusable
+/// artifact, an oversized payload, and no store at all. This type makes the
+/// fourth one CLASSIFIABLE rather than an opaque `String`, because those cases
+/// are not alike:
+///
+/// * [`Unwritable`](Self::Unwritable) — the FILESYSTEM refused (out of space,
+///   read-only, not permitted). Nothing is wrong with the record or the store;
+///   the environment cannot accept a write right now.
+/// * [`Encode`](Self::Encode) / [`Rejected`](Self::Rejected) — the record could
+///   not be serialized, or the store refused a write it should have accepted.
+///   Those are defects and must stay loud.
+///
+/// The distinction exists because a test cannot otherwise tell an environment
+/// refusal from a contract violation. `WarmStartStore::open` is
+/// `fs::create_dir_all(&root)?` and nothing else, so on an existing root it
+/// returns `Ok` no matter how full the filesystem is — meaning
+/// `persistent_store().is_some()` is NOT evidence that a write will succeed
+/// (gam#2639: a full tmpfs surfaced as two `gam-solve` reds, and the same
+/// exhaustion also broke the C toolchain's spill into `$TMPDIR`).
+#[derive(Debug)]
+pub enum StoreArtifactError {
+    /// The artifact could not be serialized. A defect in the record.
+    Encode(String),
+    /// The filesystem refused the write. An environment condition, not a defect.
+    Unwritable(String),
+    /// The store refused a write it should have accepted. A defect in the store.
+    Rejected(String),
+}
+
+impl std::fmt::Display for StoreArtifactError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encode(detail) => {
+                write!(f, "failed to encode fit-artifact record: {detail}")
+            }
+            Self::Unwritable(detail) => write!(
+                f,
+                "the warm-start store root cannot accept a write: {detail}"
+            ),
+            Self::Rejected(detail) => {
+                write!(f, "failed to persist fit-artifact record: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StoreArtifactError {}
+
+/// Classify a [`gam_runtime::warm_start::StoreError`] as an environment refusal
+/// or a store defect.
+///
+/// `ENOSPC` is the case gam#2639 was filed for; `ReadOnlyFilesystem` and
+/// `PermissionDenied` are the same kind of statement about the mount rather
+/// than about the record, so they are grouped with it. The `raw_os_error()`
+/// check is belt-and-braces for platforms whose `io::ErrorKind` mapping does
+/// not surface `StorageFull` (28 is `ENOSPC` on Linux and macOS).
+fn classify_store_error(error: &gam_runtime::warm_start::StoreError) -> StoreArtifactError {
+    let text = error.to_string();
+    if let gam_runtime::warm_start::StoreError::Io(io_error) = error {
+        let environmental = matches!(
+            io_error.kind(),
+            std::io::ErrorKind::StorageFull
+                | std::io::ErrorKind::ReadOnlyFilesystem
+                | std::io::ErrorKind::PermissionDenied
+        ) || io_error.raw_os_error() == Some(28);
+        if environmental {
+            return StoreArtifactError::Unwritable(text);
+        }
+    }
+    StoreArtifactError::Rejected(text)
+}
+
 pub fn store_fit_artifact(
     artifact: &crate::warm_start_artifact::FitArtifact,
-) -> Result<(), String> {
+) -> Result<(), StoreArtifactError> {
     if !artifact.is_usable() {
         // Never persist a non-finite / wrong-schema artifact: it could only
         // ever be rejected on load anyway.
         return Ok(());
     }
     let bytes = serde_json::to_vec(artifact)
-        .map_err(|e| format!("failed to encode fit-artifact record: {e}"))?;
+        .map_err(|e| StoreArtifactError::Encode(e.to_string()))?;
     if bytes.len() as u64 > MAX_ENTRY_BYTES {
         return Ok(());
     }
@@ -370,7 +472,7 @@ pub fn store_fit_artifact(
     fp.absorb_str(b"fit-artifact-descriptor", &key);
     store
         .save(&fp.finalize(), &bytes, None, None, EntryKind::Checkpoint)
-        .map_err(|e| format!("failed to persist fit-artifact record: {e}"))?;
+        .map_err(|e| classify_store_error(&e))?;
     Ok(())
 }
 
@@ -469,7 +571,28 @@ mod warm_start_artifact_tests {
         if persistent_store().is_none() {
             return;
         }
-        store_fit_artifact(&artifact).expect("store fit artifact");
+        // gam#2639: the guard above tests whether the root can be OPENED; every
+        // assertion below depends on whether it can be WRITTEN, which is a
+        // different question. `WarmStartStore::open` is `fs::create_dir_all(
+        // &root)?` and nothing else, so on an existing root it returns `Ok`
+        // however full the filesystem is — and the store then panicked through
+        // `.expect(...)` with `No space left on device (os error 28)`,
+        // reporting the environment as a gam-solve red in the very inventory
+        // other lanes triage against.
+        //
+        // The round-trip contract is NOT weakened: it is "a record that was
+        // persisted is retrievable", and that is exactly what still runs. Only
+        // the case where no record could be written at all is skipped, and only
+        // when the filesystem itself refused — `Encode` and `Rejected` are
+        // still hard failures, so a genuine store defect stays loud.
+        match store_fit_artifact(&artifact) {
+            Ok(()) => {}
+            Err(StoreArtifactError::Unwritable(reason)) => {
+                eprintln!("artifact_round_trips_on_disk_by_descriptor: {reason}");
+                return;
+            }
+            Err(other) => panic!("store fit artifact: {other}"),
+        }
         let loaded = load_fit_artifact_by_descriptor(&key_hex)
             .expect("artifact must be retrievable by descriptor key");
         assert_eq!(loaded.schema, artifact.schema);
@@ -507,7 +630,28 @@ mod warm_start_artifact_tests {
         if persistent_store().is_none() {
             return;
         }
-        store_fit_artifact(&full).expect("store full-data artifact");
+        // gam#2639: the guard above tests whether the root can be OPENED; every
+        // assertion below depends on whether it can be WRITTEN, which is a
+        // different question. `WarmStartStore::open` is `fs::create_dir_all(
+        // &root)?` and nothing else, so on an existing root it returns `Ok`
+        // however full the filesystem is — and the store then panicked through
+        // `.expect(...)` with `No space left on device (os error 28)`,
+        // reporting the environment as a gam-solve red in the very inventory
+        // other lanes triage against.
+        //
+        // The round-trip contract is NOT weakened: it is "a record that was
+        // persisted is retrievable", and that is exactly what still runs. Only
+        // the case where no record could be written at all is skipped, and only
+        // when the filesystem itself refused — `Encode` and `Rejected` are
+        // still hard failures, so a genuine store defect stays loud.
+        match store_fit_artifact(&full) {
+            Ok(()) => {}
+            Err(StoreArtifactError::Unwritable(reason)) => {
+                eprintln!("loso_fold_descriptor_matches_full_data_artifact: {reason}");
+                return;
+            }
+            Err(other) => panic!("store full-data artifact: {other}"),
+        }
         let loaded = load_fit_artifact_by_descriptor(&fold_key)
             .expect("LOSO fold must retrieve the full-data artifact");
         assert_eq!(loaded.terms[0].rho_for_term, vec![1.7]);

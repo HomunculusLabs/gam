@@ -106,10 +106,13 @@ impl EvalShared {
     /// and shared by every assemble call on the same bundle (exact hoist —
     /// see the field doc on `penalty_scores_at_mode`).
     ///
-    /// `canonical_penalties` must be the owning `RemlState`'s fixed
-    /// `canonical_penalties` slice; on a cache hit the stored length is
-    /// checked against it so a frame mismatch fails loudly instead of
-    /// silently feeding stale scores.
+    /// `canonical_penalties` must be the penalty slice in the SAME coordinate
+    /// frame as `beta_transformed` — i.e. the reparameterized set
+    /// `pirls_result.reparam_result.canonical_transformed`, not the owning
+    /// `RemlState`'s original-frame `canonical_penalties` (gam#2623: the
+    /// original-frame contraction sign-inverted the spliced ρ-gradient).
+    /// On a cache hit the stored length is checked against it so a count
+    /// mismatch fails loudly instead of silently feeding stale scores.
     pub(crate) fn canonical_penalty_scores_at_mode(
         &self,
         canonical_penalties: &[gam_terms::construction::CanonicalPenalty],
@@ -1580,6 +1583,15 @@ pub(crate) struct Gam784BlockTarget<'t> {
     /// Shared from the eval bundle's once-per-inner-solution cache
     /// (`EvalShared::canonical_penalty_scores_at_mode`).
     pub(crate) penalty_scores: Arc<Vec<Array1<f64>>>,
+    /// TRANSFORMED-frame canonical penalties — the same coordinate frame as
+    /// `x_transformed`, `block_vecs` and the mode β̂ they are contracted
+    /// against. These are `pirls_result.reparam_result.canonical_transformed`,
+    /// the documented single source of truth for penalty roots in the
+    /// transformed frame. Contracting the ORIGINAL-frame penalties here made
+    /// the spliced ρ-gradient wrong by 4.6e-2 to 1.0 relative — sign-inverted
+    /// with nine orders of error on the worst cells — whenever the stable
+    /// reparameterization was far from identity (gam#2623).
+    pub(crate) penalties: &'t [gam_terms::construction::CanonicalPenalty],
     /// `λ_k = e^{ρ_k}` per canonical penalty, aligned with `penalty_scores`.
     pub(crate) lambdas: Vec<f64>,
     /// Certified `D(eta_hat)/(2 phi)` on the exact row surface.
@@ -1914,6 +1926,7 @@ mod exact_deviance_state_cache_tests {
             inverse_link: InverseLink::Standard(StandardLink::Log),
             phi: 1.0,
             penalty_scores: Arc::new(Vec::new()),
+            penalties: &[],
             lambdas: Vec::new(),
             base_scaled_half_deviance: 0.0,
             base_neg_score_at_mode: array![0.0, 0.0],

@@ -1072,14 +1072,25 @@ mod tests {
     use super::*;
     use ndarray::Array2;
 
+    /// Route the availability question through the one shared gate (#2422).
+    ///
+    /// The previous body probed with `GpuRuntime::resolve` and announced an
+    /// absent device with a wording unique to this file. That skip was invisible
+    /// to every count: the three callers below `return` immediately after it, so
+    /// on a CPU-only runner all three printed `ok` while the process-wide skip
+    /// counter never moved and no `SKIPPED(no-cuda):` line was emitted for a
+    /// ledger to scrape. `gpu_for_test` panics on a driver FAULT, panics under
+    /// `GpuPolicy::Required`, counts the genuine absence and prints the one
+    /// greppable marker; `assert_absent_device_was_counted` then makes the count
+    /// itself the assertion this skip path executes.
     fn cuda_available_for_test(label: &str) -> bool {
-        match gam_gpu::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-            Ok(Some(_)) => true,
-            Ok(None) => {
-                eprintln!("[sparse_dict score test] no CUDA device; skipping {label}");
+        let floor = gam_gpu::test_gate::skipped_for_absent_device();
+        match gam_gpu::test_gate::gpu_for_test(label) {
+            gam_gpu::test_gate::GpuTestGate::Ready(_) => true,
+            gam_gpu::test_gate::GpuTestGate::AbsentDevice => {
+                gam_gpu::test_gate::assert_absent_device_was_counted(floor);
                 false
             }
-            Err(error) => panic!("[sparse_dict score test] CUDA admission failed: {error}"),
         }
     }
 
@@ -1196,7 +1207,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn device_route_at_issue_target_k_32k_is_bit_identical() {
+    fn device_route_at_issue_target_k_32k_is_bit_identical_when_available() {
         // #1026 HEADLINE SCALE. The issue is about "large linear SAEs" — K up to
         // ~32_000. Our other parity test pins K=4096; this one drives the router
         // at the issue's actual target width (K=32_768) to prove the device path

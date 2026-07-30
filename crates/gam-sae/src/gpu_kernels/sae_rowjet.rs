@@ -2798,6 +2798,29 @@ mod tests {
         }
     }
 
+    /// Resolve the device for the three `..._when_admitted_2304` gates, and on a
+    /// device-free host both COUNT the skip and assert the seam refuses.
+    ///
+    /// Each of those three tests opened with its own `GpuRuntime::resolve`
+    /// match. The seam assertion they ran was real, but the skip itself was
+    /// invisible: nothing incremented the #2422 counter and nothing printed the
+    /// shared `SKIPPED(no-cuda):` marker, so a CI ledger scraping a green
+    /// CPU-only run could not tell that three device-parity gates had declined.
+    /// Curing it in one helper rather than at three call sites is deliberate —
+    /// a fix applied per-site is a fix the next gate written here will miss.
+    #[cfg(target_os = "linux")]
+    fn row_jet_device_gate(label: &str) -> bool {
+        let skips_before = gam_gpu::test_gate::skipped_for_absent_device();
+        match gam_gpu::test_gate::gpu_for_test(label) {
+            gam_gpu::test_gate::GpuTestGate::Ready(_) => true,
+            gam_gpu::test_gate::GpuTestGate::AbsentDevice => {
+                gam_gpu::test_gate::assert_absent_device_was_counted(skips_before);
+                assert_row_jet_device_path_declines_without_cuda();
+                false
+            }
+        }
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn device_path_declines_on_unsupported_host_2422() {
@@ -3039,13 +3062,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn complete_device_matches_cpu_every_channel_when_admitted_2304() {
-        match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                assert_row_jet_device_path_declines_without_cuda();
-                return;
-            }
-            Err(error) => panic!("complete row-jet CUDA admission failed: {error}"),
+        if !row_jet_device_gate("complete row-jet elementwise parity #2304") {
+            return;
         }
         // A 37-row smoke fixture launches each kernel for too little time to
         // establish that the admitted production path actually occupies the
@@ -3244,13 +3262,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn contracted_device_matches_cpu_reduction_when_admitted_2304() {
-        match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                assert_row_jet_device_path_declines_without_cuda();
-                return;
-            }
-            Err(error) => panic!("contracted row-jet CUDA admission failed: {error}"),
+        if !row_jet_device_gate("contracted row-jet reduction parity #2304") {
+            return;
         }
         const ROW_COUNT: usize = 1 << 17;
         const MEASURED_PASSES: usize = 4;
@@ -3353,13 +3366,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn contracted_trace_device_matches_cpu_reduction_when_admitted_2304() {
-        match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                assert_row_jet_device_path_declines_without_cuda();
-                return;
-            }
-            Err(error) => panic!("Trace row-jet CUDA admission failed: {error}"),
+        if !row_jet_device_gate("contracted Trace row-jet reduction parity #2304") {
+            return;
         }
         const ROW_COUNT: usize = 1 << 17;
         const MEASURED_PASSES: usize = 4;

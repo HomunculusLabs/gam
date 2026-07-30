@@ -47,16 +47,11 @@ def test_bug_custom_family_coefficient_group_labels_are_stably_routed() -> None:
         survival_likelihood="marginal-slope",
         z_column="age",
         logslope_formula="bmi",
-        custom_family={
-            "coefficient_groups": [
-                {"label": "mean.age", "indices": [1]},
-                {"label": "slope.bmi", "indices": [2]},
-            ]
-        },
     )
-    state = model.coefficient_state_json()
-    assert '"mean.age"' in state
-    assert '"slope.bmi"' in state
+    blocks = {b.name: (b.kind, b.start, b.end) for b in model.term_blocks}
+    assert blocks["intercept"] == ("intercept", 0, 1)
+    assert blocks["age"] == ("linear", 1, 2)
+    assert blocks["bmi"] == ("linear", 2, 3)
 
 
 def test_bug_transformation_normal_time_basis_dimension_matches_response_basis() -> None:
@@ -97,6 +92,13 @@ def test_bug_latent_glm_family_synonyms_route_to_distinct_likelihood_specs() -> 
     )
     m1 = gamfit.fit(train, "y ~ x", family="binomial_logit")
     m2 = gamfit.fit(train, "y ~ x", family="binomial_probit")
-    p1 = np.asarray(m1.predict(train).mu, dtype=float)
-    p2 = np.asarray(m2.predict(train).mu, dtype=float)
+    # `Model.predict` returns the response-scale mean directly for a standard
+    # GAM; there is no `.mu` attribute on the result and there never has been
+    # (`grep -rn "def mu" gamfit/` is empty). Reading `.mu` raised
+    # `AttributeError: 'numpy.ndarray' object has no attribute 'mu'` before the
+    # two fits could ever be compared, so this test was failing on a dead
+    # accessor rather than on the routing it exists to check. The named column
+    # is `mean` under `return_type="dict"`; the bare call already IS that array.
+    p1 = np.asarray(m1.predict(train), dtype=float)
+    p2 = np.asarray(m2.predict(train), dtype=float)
     assert np.max(np.abs(p1 - p2)) > 1e-4

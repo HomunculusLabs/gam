@@ -396,7 +396,24 @@ fn gam_frechet_mean_dim(samples: &[Array1<f64>]) -> Array1<f64> {
             stacked[[i, k]] = v;
         }
     }
-    spd_frechet_mean(SPD_DIM, stacked.view(), None, 1e-10, REAL_ITERS)
+    // Same attainability argument as the synthetic arm — see `KARCHER_GRAD_TOL`.
+    // That constant's own doc records the measurement that motivated it: "both
+    // arms died in the solver at residuals 1.36e-8 and 7.13e-8". The 7.13e-8 is
+    // THIS arm, and it was still being handed the literal `1e-10` the constant
+    // exists to replace, so it kept dying in `spd_frechet_mean` with
+    // `NonConvergence { residual: 7.134367954582693e-8, tolerance: 1e-10 }`
+    // before reaching a single quality assertion.
+    //
+    // This is not a loosened bar. `1e-10` is a tolerance on the RIEMANNIAN
+    // GRADIENT handed to a solver whose accept test is denominated in the
+    // VALUE: near the optimum the remaining dispersion decrease is
+    // O(residual^2) ~ 5e-15, which is the same size as the `8*eps*(1+|f|)`
+    // round-off cushion in its Armijo test, so no admissible step exists and no
+    // tolerance below the sqrt(eps) floor is reachable in double precision. The
+    // achieved 7.13e-8 is in fact BELOW this constant's 1.19e-7. The bound this
+    // test enforces is the held-out match-or-beat comparison against the scipy
+    // reference further down, which is untouched.
+    spd_frechet_mean(SPD_DIM, stacked.view(), None, KARCHER_GRAD_TOL, REAL_ITERS)
         .expect("gam spd_frechet_mean (real)")
 }
 

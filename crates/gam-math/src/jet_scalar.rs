@@ -618,6 +618,15 @@ pub trait RuntimeJetScalar<'arena>: Clone {
     fn constant(c: f64, dimension: usize, workspace: &'arena Self::Workspace) -> Self;
     /// A seeded variable in a `dimension`-primary algebra.
     fn variable(x: f64, axis: usize, dimension: usize, workspace: &'arena Self::Workspace) -> Self;
+    /// A constant in the same runtime algebra as `self`.
+    ///
+    /// Implementations must construct the constant directly, with every
+    /// derivative channel exactly zero. A shaped constant is an algebra
+    /// primitive: synthesizing one through [`Self::compose_unary`] needlessly
+    /// traverses every live derivative channel.
+    fn constant_like(&self, c: f64) -> Self;
+    /// Replace only the primal value, preserving every derivative channel.
+    fn with_value(&self, value: f64) -> Self;
 
     /// Evaluate `inputs' A inputs` from the same universal semantic primitive
     /// as [`JetScalar::symmetric_quadratic_form`].
@@ -654,8 +663,8 @@ pub trait RuntimeJetScalar<'arena>: Clone {
     }
 
     /// Add a primal constant without changing derivative channels.
-    fn add_constant(&self, constant: f64, workspace: &'arena Self::Workspace) -> Self {
-        self.add(&Self::constant(constant, self.dimension(), workspace))
+    fn add_constant(&self, constant: f64) -> Self {
+        self.with_value(self.value() + constant)
     }
 
     /// Evaluate `self * right + addend` in one semantic primitive.
@@ -690,7 +699,6 @@ pub trait RuntimeJetScalar<'arena>: Clone {
         input_scale: f64,
         input_shift: f64,
         derivative_stack: [f64; 5],
-        workspace: &'arena Self::Workspace,
     ) -> Self {
         affine_compose_default(
             self,
@@ -698,7 +706,7 @@ pub trait RuntimeJetScalar<'arena>: Clone {
             input_shift,
             derivative_stack,
             Self::scale,
-            |value, constant| value.add_constant(constant, workspace),
+            |value, constant| value.add_constant(constant),
             Self::compose_unary,
         )
     }
@@ -718,7 +726,7 @@ pub trait RuntimeJetScalar<'arena>: Clone {
             |value| Self::constant(value, dimension, workspace),
             Self::add,
             Self::scale,
-            |value, constant| value.add_constant(constant, workspace),
+            |value, constant| value.add_constant(constant),
             Self::compose_unary,
         )
     }
@@ -752,7 +760,7 @@ pub trait RuntimeJetScalar<'arena>: Clone {
             Self::mul,
             Self::scale,
             Self::multiply_add,
-            |input, scale, shift, stack| input.affine_compose(scale, shift, stack, workspace),
+            |input, scale, shift, stack| input.affine_compose(scale, shift, stack),
         )
     }
     /// Number of primary derivative axes carried by this scalar.
@@ -832,6 +840,22 @@ impl<'arena> RuntimeJetScalar<'arena> for RuntimeValue {
     }
 
     #[inline(always)]
+    fn constant_like(&self, c: f64) -> Self {
+        Self {
+            value: c,
+            dimension: self.dimension,
+        }
+    }
+
+    #[inline(always)]
+    fn with_value(&self, value: f64) -> Self {
+        Self {
+            value,
+            dimension: self.dimension,
+        }
+    }
+
+    #[inline(always)]
     fn symmetric_quadratic_form<C: SymmetricQuadraticCoefficients>(
         inputs: &[Self],
         coefficients: &C,
@@ -861,14 +885,6 @@ impl<'arena> RuntimeJetScalar<'arena> for RuntimeValue {
             .map(|(input, &weight)| input.value * weight)
             .sum();
         Self { value, dimension }
-    }
-
-    #[inline(always)]
-    fn add_constant(&self, constant: f64, &(): &'arena Self::Workspace) -> Self {
-        Self {
-            value: self.value + constant,
-            dimension: self.dimension,
-        }
     }
 
     #[inline(always)]
@@ -907,7 +923,6 @@ impl<'arena> RuntimeJetScalar<'arena> for RuntimeValue {
         input_scale: f64,
         input_shift: f64,
         derivative_stack: [f64; 5],
-        workspace: &'arena Self::Workspace,
     ) -> Self {
         // Route the affine pre-composition through the shared default instead
         // of hand-rolling the zero-order shortcut: `compose_unary` already
@@ -920,7 +935,7 @@ impl<'arena> RuntimeJetScalar<'arena> for RuntimeValue {
             input_shift,
             derivative_stack,
             Self::scale,
-            |value, constant| value.add_constant(constant, workspace),
+            |value, constant| value.add_constant(constant),
             Self::compose_unary,
         )
     }
@@ -1058,6 +1073,20 @@ impl<'arena, S: JetScalar<K>, const K: usize> RuntimeJetScalar<'arena> for Fixed
     }
 
     #[inline(always)]
+    fn constant_like(&self, c: f64) -> Self {
+        Self {
+            inner: S::constant(c),
+        }
+    }
+
+    #[inline(always)]
+    fn with_value(&self, value: f64) -> Self {
+        Self {
+            inner: self.inner.compose_unary([value, 1.0, 0.0, 0.0, 0.0]),
+        }
+    }
+
+    #[inline(always)]
     fn symmetric_quadratic_form<C: SymmetricQuadraticCoefficients>(
         inputs: &[Self],
         coefficients: &C,
@@ -1098,7 +1127,7 @@ impl<'arena, S: JetScalar<K>, const K: usize> RuntimeJetScalar<'arena> for Fixed
     }
 
     #[inline(always)]
-    fn add_constant(&self, constant: f64, &(): &'arena Self::Workspace) -> Self {
+    fn add_constant(&self, constant: f64) -> Self {
         Self {
             inner: self.inner.add_constant(constant),
         }
@@ -1142,7 +1171,6 @@ impl<'arena, S: JetScalar<K>, const K: usize> RuntimeJetScalar<'arena> for Fixed
         input_scale: f64,
         input_shift: f64,
         derivative_stack: [f64; 5],
-        &(): &'arena Self::Workspace,
     ) -> Self {
         Self {
             inner: self
@@ -1371,6 +1399,24 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder1<'arena> {
         Self { arena, v: x, g }
     }
 
+    #[inline(always)]
+    fn constant_like(&self, c: f64) -> Self {
+        Self {
+            arena: self.arena,
+            v: c,
+            g: self.arena.zeros(self.dimension()),
+        }
+    }
+
+    #[inline(always)]
+    fn with_value(&self, value: f64) -> Self {
+        Self {
+            arena: self.arena,
+            v: value,
+            g: self.g,
+        }
+    }
+
     fn dimension(&self) -> usize {
         self.g.len()
     }
@@ -1566,6 +1612,27 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
     }
 
     #[inline(always)]
+    fn constant_like(&self, c: f64) -> Self {
+        let dimension = self.dimension();
+        Self {
+            arena: self.arena,
+            v: c,
+            g: self.arena.zeros(dimension),
+            h: self.arena.zeros(dimension * dimension),
+        }
+    }
+
+    #[inline(always)]
+    fn with_value(&self, value: f64) -> Self {
+        Self {
+            arena: self.arena,
+            v: value,
+            g: self.g,
+            h: self.h,
+        }
+    }
+
+    #[inline(always)]
     fn symmetric_quadratic_form<C: SymmetricQuadraticCoefficients>(
         inputs: &[Self],
         coefficients: &C,
@@ -1659,10 +1726,9 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
         input_scale: f64,
         input_shift: f64,
         derivative_stack: [f64; 5],
-        arena: &'arena DynamicJetArena,
     ) -> Self {
-        assert!(std::ptr::eq(self.arena, arena));
         assert!(input_shift.is_finite(), "affine input shift must be finite");
+        let arena = self.arena;
         let dimension = self.dimension();
         let first = derivative_stack[1] * input_scale;
         let second = derivative_stack[2] * input_scale * input_scale;
@@ -1824,17 +1890,6 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
             v: value,
             g: gradient,
             h: hessian,
-        }
-    }
-
-    #[inline(always)]
-    fn add_constant(&self, constant: f64, arena: &'arena DynamicJetArena) -> Self {
-        assert!(std::ptr::eq(self.arena, arena));
-        Self {
-            arena,
-            v: self.v + constant,
-            g: self.g,
-            h: self.h,
         }
     }
 
@@ -2142,6 +2197,22 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOneSeed<'arena> {
     }
 
     #[inline(always)]
+    fn constant_like(&self, c: f64) -> Self {
+        Self {
+            base: self.base.constant_like(c),
+            eps: self.eps.constant_like(0.0),
+        }
+    }
+
+    #[inline(always)]
+    fn with_value(&self, value: f64) -> Self {
+        Self {
+            base: self.base.with_value(value),
+            eps: self.eps,
+        }
+    }
+
+    #[inline(always)]
     fn dimension(&self) -> usize {
         self.base.dimension()
     }
@@ -2370,6 +2441,26 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOneSeedBatch<'arena> {
     }
 
     #[inline(always)]
+    fn constant_like(&self, c: f64) -> Self {
+        let eps = self
+            .base
+            .arena
+            .alloc_slice_fill_with(self.lanes(), |_| self.base.constant_like(0.0));
+        Self {
+            base: self.base.constant_like(c),
+            eps,
+        }
+    }
+
+    #[inline(always)]
+    fn with_value(&self, value: f64) -> Self {
+        Self {
+            base: self.base.with_value(value),
+            eps: self.eps,
+        }
+    }
+
+    #[inline(always)]
     fn dimension(&self) -> usize {
         self.base.dimension()
     }
@@ -2574,6 +2665,30 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicTwoSeedBatch<'arena> {
     }
 
     #[inline(always)]
+    fn constant_like(&self, c: f64) -> Self {
+        let zero = self
+            .base
+            .arena
+            .alloc_slice_fill_with(self.lanes(), |_| self.base.constant_like(0.0));
+        Self {
+            base: self.base.constant_like(c),
+            eps: zero,
+            del: zero,
+            eps_del: zero,
+        }
+    }
+
+    #[inline(always)]
+    fn with_value(&self, value: f64) -> Self {
+        Self {
+            base: self.base.with_value(value),
+            eps: self.eps,
+            del: self.del,
+            eps_del: self.eps_del,
+        }
+    }
+
+    #[inline(always)]
     fn dimension(&self) -> usize {
         self.base.dimension()
     }
@@ -2765,6 +2880,26 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicTwoSeed<'arena> {
             eps: DynamicOrder2::constant(0.0, dimension, arena),
             del: DynamicOrder2::constant(0.0, dimension, arena),
             eps_del: DynamicOrder2::constant(0.0, dimension, arena),
+        }
+    }
+
+    #[inline(always)]
+    fn constant_like(&self, c: f64) -> Self {
+        Self {
+            base: self.base.constant_like(c),
+            eps: self.eps.constant_like(0.0),
+            del: self.del.constant_like(0.0),
+            eps_del: self.eps_del.constant_like(0.0),
+        }
+    }
+
+    #[inline(always)]
+    fn with_value(&self, value: f64) -> Self {
+        Self {
+            base: self.base.with_value(value),
+            eps: self.eps,
+            del: self.del,
+            eps_del: self.eps_del,
         }
     }
 
@@ -5485,7 +5620,7 @@ mod tests {
             RuntimeJetScalar::add,
             RuntimeJetScalar::scale,
         );
-        let dynamic_add_direct = dynamic_inputs[0].add_constant(0.65, &arena);
+        let dynamic_add_direct = dynamic_inputs[0].add_constant(0.65);
         let dynamic_add_scalar = dynamic_inputs[0].add(&DynamicOrder2::constant(0.65, K, &arena));
         let dynamic_multiply_add_direct =
             dynamic_inputs[0].multiply_add(&dynamic_inputs[1], &dynamic_inputs[2]);
@@ -5822,7 +5957,6 @@ mod tests {
                 input_scales[2],
                 input_shift,
                 derivative_stacks[2],
-                &arena,
             );
             let dynamic_affine_scalar = affine_compose_default(
                 &dynamic_inputs[2],
@@ -5830,7 +5964,7 @@ mod tests {
                 input_shift,
                 derivative_stacks[2],
                 RuntimeJetScalar::scale,
-                |input, constant| input.add_constant(constant, &arena),
+                |input, constant| input.add_constant(constant),
                 RuntimeJetScalar::compose_unary,
             );
             let dynamic_sum_direct = DynamicOrder2::affine_composed_sum(
@@ -5847,7 +5981,7 @@ mod tests {
                 |value| DynamicOrder2::constant(value, K, &arena),
                 RuntimeJetScalar::add,
                 RuntimeJetScalar::scale,
-                |input, constant| input.add_constant(constant, &arena),
+                |input, constant| input.add_constant(constant),
                 RuntimeJetScalar::compose_unary,
             );
             let mut dynamic_lefts = std::array::from_fn(|term| &dynamic_inputs[term]);
@@ -5877,7 +6011,7 @@ mod tests {
                 RuntimeJetScalar::mul,
                 RuntimeJetScalar::scale,
                 RuntimeJetScalar::multiply_add,
-                |input, scale, shift, stack| input.affine_compose(scale, shift, stack, &arena),
+                |input, scale, shift, stack| input.affine_compose(scale, shift, stack),
             );
 
             for (label, actual, expected) in [
@@ -7447,6 +7581,74 @@ mod unit_tests {
                 );
             }
         }
+    }
+
+    /// #932 correctness and release racer for the runtime shaped-value
+    /// primitives. The comparison arm is the exact constant-synthesis idiom
+    /// removed from the SLS wiggle paths: a unary composition whose derivative
+    /// stack is identically zero. Both arms allocate the same runtime-width
+    /// output shape from a warm-reset arena; the only intended difference is
+    /// whether known-zero channels are written directly or computed by walking
+    /// the Faà di Bruno composition.
+    #[test]
+    fn runtime_shaped_value_primitives_are_exact_and_skip_constant_composition_932() {
+        use std::time::Instant;
+
+        const K: usize = 48;
+        let arena = DynamicJetArena::new();
+        let variable = DynamicOrder2::variable(0.75, 7, K, &arena);
+
+        let constant = variable.constant_like(1.25);
+        assert_eq!(constant.value().to_bits(), 1.25_f64.to_bits());
+        assert_eq!(constant.dimension(), K);
+        assert!(constant.g().iter().all(|&channel| channel == 0.0));
+        assert!(constant.h().iter().all(|&channel| channel == 0.0));
+
+        let replaced = variable.with_value(-2.5);
+        assert_eq!(replaced.value().to_bits(), (-2.5_f64).to_bits());
+        assert_eq!(replaced.g(), variable.g());
+        assert_eq!(replaced.h(), variable.h());
+
+        fn best_ns(mut evaluate: impl FnMut(f64) -> f64, iterations: usize) -> f64 {
+            let mut best = f64::INFINITY;
+            for _ in 0..5 {
+                let mut checksum = 0.0_f64;
+                let started = Instant::now();
+                for _ in 0..iterations {
+                    checksum += evaluate(0.75 + checksum * 1e-18);
+                }
+                assert!(checksum.is_finite());
+                best = best.min(started.elapsed().as_secs_f64());
+            }
+            best * 1e9 / iterations as f64
+        }
+
+        let iterations = if cfg!(debug_assertions) { 200 } else { 20_000 };
+        let mut direct_arena = DynamicJetArena::new();
+        let direct_ns = best_ns(
+            |value| {
+                direct_arena.reset();
+                let variable = DynamicOrder2::variable(value, 7, K, &direct_arena);
+                let constant = variable.constant_like(1.25);
+                constant.value() + constant.g()[K - 1] + constant.h()[K * K - 1]
+            },
+            iterations,
+        );
+        let mut composed_arena = DynamicJetArena::new();
+        let composed_ns = best_ns(
+            |value| {
+                composed_arena.reset();
+                let variable = DynamicOrder2::variable(value, 7, K, &composed_arena);
+                let constant = variable.compose_unary([1.25, 0.0, 0.0, 0.0, 0.0]);
+                constant.value() + constant.g()[K - 1] + constant.h()[K * K - 1]
+            },
+            iterations,
+        );
+        eprintln!(
+            "RUNTIME-CONSTANT-932 dimension={K} direct={direct_ns:.2} ns \
+             composed={composed_ns:.2} ns composed_over_direct={:.6}",
+            composed_ns / direct_ns,
+        );
     }
 
     /// The outer first/second channels carry the family derivative while each

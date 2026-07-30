@@ -89,6 +89,14 @@ pub enum RankDecision {
         sigma_r: f64,
         /// Largest dropped singular value `σ_{r+1}` (`0` when `rank == n`).
         sigma_next: f64,
+        /// Number of singular values the decision was taken on, `n`.
+        ///
+        /// Retained because `sigma_next == 0` is OVERLOADED: it means "no
+        /// dropped value exists" when `rank == n`, and "a dropped value that
+        /// happens to be exactly zero" when `rank < n`. Those two carry
+        /// different transport constraints (see [`rank_transport_radius`]) and
+        /// nothing else on the certificate tells them apart.
+        spectrum_len: usize,
         /// Multiplicative slack of the dropped side below the lower edge,
         /// `low / σ_{r+1}` (`+∞` when `σ_{r+1} = 0`); `≥ 1` by construction.
         margin_low: f64,
@@ -191,6 +199,7 @@ pub fn certified_rank(singular_values: &[f64], tol: f64, gap: f64) -> RankDecisi
         rank,
         sigma_r,
         sigma_next,
+        spectrum_len: n,
         margin_low,
         margin_high,
         tol,
@@ -251,6 +260,27 @@ pub enum RankTransport {
 ///   ε* = min( σ_r − high , low − σ_{r+1} )     (both terms ≥ 0)
 /// ```
 ///
+/// **Either half can be VACUOUS, and then its term is `+∞`, not a number.**
+/// The two conjuncts of the Certified predicate quantify over `i ≤ r` and
+/// `i > r`, and either index set can be empty:
+///
+/// * `r = 0` — no kept value. `σ_r := +∞` is a sentinel, the `i ≤ r` half is
+///   vacuous, and the dropped side alone binds.
+/// * `r = n` — no dropped value. `σ_{n+1} := 0` is likewise a sentinel, the
+///   `i > r` half is vacuous, and the KEPT side alone binds: `ε* = σ_n − high`.
+///   A perturbation cannot manufacture an `(n+1)`-th singular direction, so
+///   there is nothing on that side to push into the band. Reading the sentinel
+///   as a real dropped value would return `min(σ_n − high, low)` — sound, but
+///   not the SHARP radius this function documents, and a source of avoidable
+///   certificate renewal: for `σ = [10, 9]` at `tol = 1`, `gap = 1` the sharp
+///   radius is `9 − 2 = 7`, while the sentinel reading caps it at `low = 0.5`.
+///
+/// The `r = n` case is NOT detectable from `σ_{r+1} == 0`. When `r < n`, a
+/// dropped singular value that happens to be exactly zero is REAL and does
+/// constrain: a perturbation of norm `ε` can lift it to `ε`, and it must stay
+/// `≤ low`. The certificate carries `spectrum_len` for exactly this
+/// distinction.
+///
 /// **Claim.** For every `A` with `‖A − A₀‖₂ ≤ ε*`, `certified_rank` on `A`'s
 /// spectrum at the same `(tol, gap)` returns `Certified` with the SAME `r`.
 ///
@@ -266,8 +296,9 @@ pub enum RankTransport {
 /// **Sharpness.** `ε*` is the exact threshold, not a conservative estimate:
 /// the diagonal perturbation that lowers `σ_r` by `ε* + δ` (when the kept side
 /// is the binding term) or raises `σ_{r+1}` by `ε* + δ` (when the dropped side
-/// binds) has operator norm `ε* + δ` and pushes that value strictly inside the
-/// band, so the decision becomes Ambiguous. No larger radius is transportable.
+/// binds — available only when a dropped value exists, i.e. `r < n`) has
+/// operator norm `ε* + δ` and pushes that value strictly inside the band, so
+/// the decision becomes Ambiguous. No larger radius is transportable.
 ///
 /// **Why this is the right currency for a moving operating point.** A gate
 /// that re-ranks at a pilot point and again at the optimum compares two
@@ -286,8 +317,10 @@ pub enum RankTransport {
 pub fn rank_transport_radius(decision: &RankDecision) -> Option<f64> {
     match *decision {
         RankDecision::Certified {
+            rank,
             sigma_r,
             sigma_next,
+            spectrum_len,
             tol,
             gap,
             ..
@@ -301,7 +334,19 @@ pub fn rank_transport_radius(decision: &RankDecision) -> Option<f64> {
             } else {
                 f64::INFINITY
             };
-            let dropped_slack = low - sigma_next;
+            // `sigma_next` is `0` at full rank as a SENTINEL, not as a
+            // singular value: the `i > r` half of the Weyl argument quantifies
+            // over an empty index set, so that side imposes no constraint and
+            // its slack is `+∞`, exactly as the kept side's is at rank 0. The
+            // test cannot be `sigma_next == 0.0`, because a genuinely zero
+            // DROPPED value (`rank < spectrum_len`) does constrain — a
+            // perturbation of norm `ε` lifts it to `ε` and it must stay
+            // `≤ low`. Only the spectrum dimension separates the two.
+            let dropped_slack = if spectrum_len > 0 && rank == spectrum_len {
+                f64::INFINITY
+            } else {
+                low - sigma_next
+            };
             let radius = kept_slack.min(dropped_slack);
             // The Certified predicate makes both terms non-negative; a
             // non-finite band (a caller passing a non-finite tolerance) has no
@@ -764,6 +809,141 @@ mod tests {
             }
             other => panic!("expected Certified full rank, got {other:?}"),
         }
+    }
+
+    /// The `r = n` half of Thm 8.3 quantifies over an EMPTY index set, so a
+    /// full-rank certificate transports on its kept slack alone. The second
+    /// arm is why this cannot be sniffed from `sigma_next == 0.0`: a dropped
+    /// singular value that is exactly zero looks identical on the certificate
+    /// and DOES bind.
+    #[test]
+    fn a_full_rank_certificate_transports_on_its_kept_side_alone() {
+        // tol = 1, gap = 1 ⇒ high = 2, low = 0.5. Both values clear `high`,
+        // so the rank is 2 = n and there is no dropped side at all.
+        let full = certified_rank(&[10.0_f64, 9.0], 1.0, 1.0);
+        let RankDecision::Certified {
+            rank, sigma_next, ..
+        } = full
+        else {
+            panic!("expected a Certified reference, got {full:?}");
+        };
+        assert_eq!(rank, 2, "both values clear high = 2");
+        assert_eq!(sigma_next, 0.0, "the dropped slot holds the sentinel");
+        let radius = rank_transport_radius(&full).expect("certified ⇒ a radius");
+        assert!(
+            (radius - 7.0).abs() < 1e-12,
+            "ε* is the kept slack σ_n − high = 9 − 2 = 7; reading the sentinel as              a dropped value would cap it at low = 0.5. got {radius}"
+        );
+
+        // Sharp on that side too: exactly `ε*` still decides rank 2, and a hair
+        // past it drops σ_n into the open band.
+        match certified_rank(&[10.0 - radius, 9.0 - radius], 1.0, 1.0) {
+            RankDecision::Certified { rank: moved, .. } => assert_eq!(
+                moved, 2,
+                "a perturbation of exactly ε* must not move the certified rank"
+            ),
+            other => panic!("expected the rank to transport at ε*, got {other:?}"),
+        }
+        let past = radius + 1e-9;
+        assert!(
+            matches!(
+                certified_rank(&[10.0 - past, 9.0 - past], 1.0, 1.0),
+                RankDecision::Ambiguous { .. }
+            ),
+            "a hair past ε* must push σ_n strictly inside the band"
+        );
+
+        // Same `sigma_next == 0.0`, but here it is a REAL dropped singular
+        // value. The kept slack is still 7, yet the dropped side binds at
+        // `low − 0 = 0.5` — which is why the certificate must carry the
+        // spectrum dimension rather than test the value.
+        let with_zero = certified_rank(&[10.0_f64, 9.0, 0.0], 1.0, 1.0);
+        let RankDecision::Certified {
+            rank, sigma_next, ..
+        } = with_zero
+        else {
+            panic!("expected a Certified reference, got {with_zero:?}");
+        };
+        assert_eq!(rank, 2, "the exact zero is dropped");
+        assert_eq!(
+            sigma_next, 0.0,
+            "indistinguishable from the full-rank sentinel BY VALUE"
+        );
+        let zero_radius = rank_transport_radius(&with_zero).expect("certified ⇒ a radius");
+        assert!(
+            (zero_radius - 0.5).abs() < 1e-12,
+            "a real zero can be lifted to ε by a perturbation of norm ε and must              stay ≤ low, so ε* = 0.5 here; got {zero_radius}"
+        );
+
+        // And that is not conservatism: lifting it past `low` really does make
+        // the decision Ambiguous, so the shorter radius is earned.
+        assert!(
+            matches!(
+                certified_rank(&[10.0_f64, 9.0, zero_radius + 1e-9], 1.0, 1.0),
+                RankDecision::Ambiguous { .. }
+            ),
+            "past ε* the formerly-zero value enters the open band"
+        );
+    }
+
+    /// The consequence at the shape the identifiability audit actually hands
+    /// this function: a WELL-CONDITIONED, FULL-RANK equilibrated Gram decided
+    /// against a machine-epsilon-scaled cutoff.
+    ///
+    /// `gam-identifiability`'s `channel_aware_penalty_aware_joint_rank` poses
+    /// the decision at `tol = 100·ε·max(rows, cols)·σ_max` on an equilibrated
+    /// Gram, whose spectrum is `O(1)`. Reading the full-rank `σ_{n+1} = 0`
+    /// sentinel as a dropped value caps the radius at `low ≈ tol`, i.e. at the
+    /// ROUNDOFF scale, while the true margin is the `O(1)` distance from the
+    /// smallest kept value to the band. Any real movement of the operating
+    /// point exceeds a roundoff-scale radius, so the transported branch was
+    /// unreachable on precisely the well-identified problems where the
+    /// certificate does carry — the gate would report "endpoint agreement
+    /// only" every time and never say why it was wrong to.
+    #[test]
+    fn a_full_rank_epsilon_scaled_certificate_can_transport_at_all() {
+        // The equilibrated shape: unit diagonal ⇒ every singular value is O(1).
+        let spectrum = [1.0_f64, 0.94, 0.71, 0.55, 0.38];
+        let rows_plus_penalties = 150.0_f64;
+        let sigma_max = spectrum[0];
+        let tol = 100.0 * f64::EPSILON * rows_plus_penalties * sigma_max.max(1.0);
+        let gap = 1.0_f64;
+        let decision = certified_rank(&spectrum, tol, gap);
+        let RankDecision::Certified { rank, .. } = decision else {
+            panic!("an O(1) spectrum at a roundoff cutoff is decidable: {decision:?}");
+        };
+        assert_eq!(rank, spectrum.len(), "every value clears a roundoff cutoff");
+
+        let radius = rank_transport_radius(&decision).expect("certified ⇒ a radius");
+        let sentinel_reading = tol / (1.0 + gap);
+        assert!(
+            radius > 0.37,
+            "ε* must be the kept slack σ_n − high ≈ 0.38, an O(1) margin; got {radius:e}"
+        );
+        assert!(
+            radius > 1.0e10 * sentinel_reading,
+            "the sentinel reading is the roundoff-scale {sentinel_reading:e}; the true \
+             margin is {radius:e}, more than ten orders larger. If these were within \
+             ten orders of each other the defect this pins would not be reachable."
+        );
+
+        // And that gap is what makes the transported branch reachable: an
+        // operating-point excursion of 1e-3 — small for a fit, enormous next to
+        // roundoff — transports under the true radius and is refused under the
+        // sentinel reading.
+        let realistic_excursion = 1.0e-3_f64;
+        assert!(
+            matches!(
+                transport_certified_rank(&decision, realistic_excursion),
+                RankTransport::Transported { .. }
+            ),
+            "a 1e-3 excursion sits well inside an O(1) margin and must transport"
+        );
+        assert!(
+            realistic_excursion > sentinel_reading,
+            "under the sentinel reading the same excursion exhausts the radius, which \
+             is why the transported branch was unreachable at full rank"
+        );
     }
 
     /// Thm 8.3, the radius itself: every perturbation inside `ε*` decides the

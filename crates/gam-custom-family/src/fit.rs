@@ -72,6 +72,42 @@ fn pre_fit_operating_scalars<F: CustomFamily + ?Sized>(
         })
 }
 
+/// The `(pilot, current)` β pair the converged drift audit prices against each
+/// other, flattened over blocks in spec order.
+///
+/// The pilot is the operating point the PRE-FIT audit linearized at, and
+/// [`pre_fit_operating_scalars`] builds that from `spec.initial_beta` — zeros
+/// are its fallback for a block with no warm start, not the pilot itself.
+///
+/// Handing the drift audit a bare zero vector instead is not a cosmetic slip.
+/// `maybe_log_audit_drift` publishes
+/// `beta_relative_change = ‖β̂ − β₀‖ / (‖β₀‖ + f64::EPSILON)`, so a zeros
+/// reference puts MACHINE EPSILON in the denominator and the reported number is
+/// ~1e16 for every warm-started fit regardless of how far it actually
+/// travelled — it cannot distinguish the two cases it exists to distinguish
+/// (#2360).
+///
+/// Both halves live here so there is one place that decides the pair, and so
+/// the contract is reachable from a test: `audit_converged_identifiability` has
+/// no other route to it.
+pub(crate) fn drift_audit_beta_pair(
+    specs: &[ParameterBlockSpec],
+    raw_states: &[ParameterBlockState],
+) -> (Vec<f64>, Vec<f64>) {
+    let pilot: Vec<f64> = specs
+        .iter()
+        .flat_map(|spec| match spec.initial_beta.as_ref() {
+            Some(beta) => beta.to_vec(),
+            None => vec![0.0; spec.design.ncols()],
+        })
+        .collect();
+    let current: Vec<f64> = raw_states
+        .iter()
+        .flat_map(|state| state.beta.iter().copied())
+        .collect();
+    (pilot, current)
+}
+
 /// Re-run the unified identifiability audit at the converged raw-coordinate
 /// state when a family exposes dynamic primary scalars. Any change from the
 /// pilot verdict invalidates the gauge used by the solve, so result assembly
@@ -94,11 +130,7 @@ fn audit_converged_identifiability<F: CustomFamily + ?Sized>(
     else {
         return Ok(());
     };
-    let beta_current: Vec<f64> = raw_states
-        .iter()
-        .flat_map(|state| state.beta.iter().copied())
-        .collect();
-    let beta_pilot = vec![0.0; beta_current.len()];
+    let (beta_pilot, beta_current) = drift_audit_beta_pair(raw_specs, &raw_states);
     let drift = gam_identifiability::audit::maybe_log_audit_drift(
         raw_specs,
         &canonical.audit,
@@ -1051,9 +1083,7 @@ pub(crate) fn effective_df_floor_rho_upper_bounds(
             };
             for (joint_idx, joint) in layout.joint_specs.iter().enumerate() {
                 let Some(group) = joint.group else { continue };
-                let Some(&(_, rho_star)) =
-                    group_bounds.iter().find(|(g, _)| *g == group)
-                else {
+                let Some(&(_, rho_star)) = group_bounds.iter().find(|(g, _)| *g == group) else {
                     continue;
                 };
                 let Some(&outer) = layout.joint_to_outer.get(joint_idx) else {
@@ -1069,7 +1099,10 @@ pub(crate) fn effective_df_floor_rho_upper_bounds(
     log::debug!(
         "[EDF-FLOOR] emitted rho upper bounds (ceiling={:.3}): {:?}",
         rho_box.ceiling(),
-        upper.iter().map(|b| (b * 1e6).round() / 1e6).collect::<Vec<_>>(),
+        upper
+            .iter()
+            .map(|b| (b * 1e6).round() / 1e6)
+            .collect::<Vec<_>>(),
     );
     Ok(upper)
 }
@@ -1189,19 +1222,19 @@ fn effective_df_floor_bound(
     if unit_weight_term_edf(gammas, ceiling)? >= target {
         return Ok(None);
     }
-            // If the existing lower side of the box has already smoothed this
-            // term below the structural floor, the floor is not enforceable
-            // inside the optimizer's admissible domain. Do not manufacture an
-            // upper bound numerically indistinguishable from (or below, after
-            // the optimizer's strict bound-validation tolerance is applied)
-            // the lower bound: that turns a legitimate model into an invalid
-            // rho-box before the data likelihood is even evaluated. This case
-            // occurs for very weakly scaled range-space directions, including
-            // dispersion location-scale smooths whose unit-weight generalized
-            // eigenvalues can put the edf=1 crossing just outside the `lower`
-            // wall of the rho box. Evaluating at `lower` (the real floor) rather
-            // than `-ceiling` guarantees the crossing bracketed below is strictly
-            // inside `(lower, ceiling)`, so the emitted upper stays above `lower`.
+    // If the existing lower side of the box has already smoothed this
+    // term below the structural floor, the floor is not enforceable
+    // inside the optimizer's admissible domain. Do not manufacture an
+    // upper bound numerically indistinguishable from (or below, after
+    // the optimizer's strict bound-validation tolerance is applied)
+    // the lower bound: that turns a legitimate model into an invalid
+    // rho-box before the data likelihood is even evaluated. This case
+    // occurs for very weakly scaled range-space directions, including
+    // dispersion location-scale smooths whose unit-weight generalized
+    // eigenvalues can put the edf=1 crossing just outside the `lower`
+    // wall of the rho box. Evaluating at `lower` (the real floor) rather
+    // than `-ceiling` guarantees the crossing bracketed below is strictly
+    // inside `(lower, ceiling)`, so the emitted upper stays above `lower`.
     if unit_weight_term_edf(gammas, lower)? <= target {
         return Ok(None);
     }
@@ -2526,9 +2559,22 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     outer.last_error = Some(format!(
                         "custom-family seed-screening proxy produced non-finite score {score}"
                     ));
-                    Err(EstimationError::RemlOptimizationFailed(
-                        "custom-family seed-screening proxy produced non-finite score".to_string(),
-                    ))
+                    // Screening RANKS seeds; it does not decide whether the
+                    // problem is fittable. `rank_seeds_with_screening`
+                    // propagates this `Err` verbatim, and the seed loop then
+                    // asks `is_trial_point_infeasible()` -- answering `false`
+                    // for `RemlOptimizationFailed` routes it into
+                    // `fatal_outer_evaluation("outer seed screening")`, a hard
+                    // `return Err` that ends the fit over a ranking probe. The
+                    // sibling `Err(e)` arm immediately below already reports
+                    // its screening failure as a trial-point refusal for
+                    // exactly this reason (#2590); a non-finite score at THIS
+                    // seed is the same statement about the same seed, and was
+                    // the one shape left graded fatal (#2627).
+                    Err(EstimationError::TrialPointRefused {
+                        reason: "custom-family seed-screening proxy produced non-finite score"
+                            .to_string(),
+                    })
                 }
                 Err(e) => {
                     // A failure to screen this seed is a statement about this

@@ -576,23 +576,35 @@ mod standard_convergence_gate_tests {
 /// interval scaled by `√φ̂`. mgcv's `tw()` profiles `p` on the same exact series
 /// (`ldTweedie`) for exactly this reason.
 ///
-/// Returns `None` when the refit fails or yields a non-finite objective so the
-/// profile search can skip that node rather than abort.
-fn tweedie_profile_loglik(request: &StandardFitRequest<'_>, p: f64) -> Option<f64> {
+/// Returns `Err(reason)` when the refit fails or yields a non-finite objective.
+/// The profile search skips such a node rather than aborting, but it KEEPS the
+/// reason: when every node is unusable the reason is the only thing that says
+/// what actually went wrong, and collapsing it to a bare `None` is what made
+/// `estimate_tweedie_power` blame degenerate data for what is usually an outer
+/// REML refusal (and advise pinning `family="tweedie(p)"`, which does not help).
+fn tweedie_profile_loglik(request: &StandardFitRequest<'_>, p: f64) -> Result<f64, String> {
     if !gam_spec::is_valid_tweedie_power(p) {
-        return None;
+        return Err(format!("p={p} is not a valid Tweedie variance power"));
     }
     let family = LikelihoodSpec::new(ResponseFamily::Tweedie { p }, request.family.link.clone());
-    let fitted = fit_standard_base(request, &family, &request.options).ok()?;
+    let fitted = fit_standard_base(request, &family, &request.options)
+        .map_err(|e| format!("the mean/dispersion refit at p={p:.4} failed: {e}"))?;
     // μ = g⁻¹(Xβ̂ + offset); the Tweedie family is fixed to the log link by
     // `resolve_family`, so g⁻¹ = exp. `design.apply` reproduces the fitted
     // linear predictor exactly (same contract the expectile/predict paths use).
     // `design.apply` already folds the design's fixed affine channel (non-zero
     // B-spline endpoint anchor, #2297) into `Xβ̂`, so only the user offset is
     // added here; adding `affine_offset` again would double-count the pin.
-    let mut eta = fitted.design.apply(fitted.fit.beta.view()).ok()?;
+    let mut eta = fitted
+        .design
+        .apply(fitted.fit.beta.view())
+        .map_err(|e| format!("applying the refit design at p={p:.4} failed: {e}"))?;
     if eta.len() != request.y.len() {
-        return None;
+        return Err(format!(
+            "the refit at p={p:.4} produced {} linear-predictor rows, expected {}",
+            eta.len(),
+            request.y.len()
+        ));
     }
     eta += request.offset.as_ref();
     let mu = eta.mapv(f64::exp);
@@ -619,7 +631,10 @@ fn tweedie_profile_loglik(request: &StandardFitRequest<'_>, p: f64) -> Option<f6
         total_weight += wi;
     }
     if total_weight <= 0.0 || !weighted_pearson.is_finite() || weighted_pearson <= 0.0 {
-        return None;
+        return Err(format!(
+            "the profiled dispersion at p={p:.4} is unusable: weighted Pearson statistic \
+             {weighted_pearson:.6e} over total weight {total_weight:.6e}"
+        ));
     }
     let phi = (weighted_pearson / total_weight).clamp(PHI_MIN, PHI_MAX);
     // Evaluate the EXACT compound-Poisson–gamma density at φ̂(p) — the profile
@@ -632,8 +647,15 @@ fn tweedie_profile_loglik(request: &StandardFitRequest<'_>, p: f64) -> Option<f6
         p,
         phi,
     )
-    .ok()?;
-    Some(ll)
+    .map_err(|e| {
+        format!("the exact compound-Poisson-gamma density at p={p:.4}, phi={phi:.6e} failed: {e}")
+    })?;
+    if !ll.is_finite() {
+        return Err(format!(
+            "the exact compound-Poisson-gamma density at p={p:.4}, phi={phi:.6e} is non-finite"
+        ));
+    }
+    Ok(ll)
 }
 
 /// Estimate the Tweedie variance power `p ∈ (1, 2)` by profile likelihood, mgcv
@@ -656,7 +678,18 @@ fn estimate_tweedie_power(request: &StandardFitRequest<'_>) -> Result<f64, Strin
     let mut a = 1.0 + EPS;
     let mut b = 2.0 - EPS;
     let inv_phi_gr = (5.0_f64.sqrt() - 1.0) / 2.0; // 1/φ ≈ 0.618
-    let eval = |p: f64| tweedie_profile_loglik(request, p).unwrap_or(f64::NEG_INFINITY);
+    // Keep the FIRST reason a node was rejected. Every `eval` that fails feeds
+    // `NEG_INFINITY` into the bracket, which is the right thing for the search
+    // but erases why; if no node is ever usable, this is the only surviving
+    // account of the cause.
+    let mut first_rejection: Option<String> = None;
+    let mut eval = |p: f64| match tweedie_profile_loglik(request, p) {
+        Ok(ll) => ll,
+        Err(reason) => {
+            first_rejection.get_or_insert(reason);
+            f64::NEG_INFINITY
+        }
+    };
     // Iteration count DERIVED from the tolerance (not a magic cap): each step
     // multiplies the bracket width by `inv_phi_gr`, so `n` steps with
     // `(b−a)·inv_phi_gr^n ≤ TOL` guarantees convergence to `TOL`.
@@ -684,12 +717,22 @@ fn estimate_tweedie_power(request: &StandardFitRequest<'_>) -> Result<f64, Strin
     // A finite profile likelihood at the maximizer certifies the search found a
     // usable optimum (degenerate data — every `p` non-finite — fails here rather
     // than silently returning the interval midpoint).
-    if !tweedie_profile_loglik(request, p_hat).is_some_and(f64::is_finite) {
-        return Err(
-            "tweedie power profiling failed: the profile likelihood is non-finite across \
-             (1, 2); set an explicit power via family=\"tweedie(p)\""
-                .to_string(),
-        );
+    //
+    // NAME THE ACTUAL CAUSE. The old message asserted "the profile likelihood is
+    // non-finite across (1, 2)" and advised pinning `family="tweedie(p)"`. That
+    // reads as a statement about the data, and it is the wrong advice whenever
+    // the real failure is the per-node refit refusing to certify a fit at all —
+    // in which case pinning `p` changes nothing, because the pinned fit takes
+    // exactly the same refusing path. The profile likelihood cannot even be said
+    // to be "non-finite" there: it was never evaluated.
+    if let Err(at_maximizer) = tweedie_profile_loglik(request, p_hat) {
+        let cause = first_rejection.as_deref().unwrap_or(at_maximizer.as_str());
+        return Err(format!(
+            "tweedie power profiling failed: no variance power in (1, 2) yielded a usable \
+             profile likelihood, so `p` could not be estimated. First cause: {cause}. At the \
+             bracket midpoint p={p_hat:.4}: {at_maximizer}. Pinning the power via \
+             family=\"tweedie(p)\" only helps if the profile refits themselves were sound."
+        ));
     }
     log::info!(
         "[tweedie#2026] estimated variance power p={p_hat:.4} by golden-section profile \
@@ -2380,6 +2423,47 @@ fn survival_unified_fit_result(
         .clone()
         .map(gam_problem::dispersion_cov::PhiScaledCovariance::wrap);
     let penalized_hessian = gam_problem::dispersion_cov::UnscaledPrecision::wrap(penalized_hessian);
+
+    // #2627: on the FIXED-lambda survival path, lambda is a CONSTANT of the model
+    // rather than an estimate, so `Vp = Vb` EXACTLY and the corrected covariance
+    // must be persisted too.
+    //
+    // The caller sets `outer_iterations = 0` with no certificate on exactly one
+    // branch, and says so there: "No smoothing coordinate was optimized (e.g.
+    // the fixed-lambda parametric Weibull baseline path): the fit is
+    // fixed-outer". With no rho estimated there is no rho-variance to integrate
+    // over, so the smoothing correction `J*V_rho*J'` is the zero matrix and
+    // `Vp = Vb + 0 = Vb`. This is an identity of the definition, not a fallback
+    // to a weaker uncertainty object -- it is the same one `gam-predict`'s
+    // `select_uncertainty_backend` applies when `lambdas.is_empty()`, stated on
+    // the ESTIMATOR instead of on the coordinate count, which is what this path
+    // needs: it carries penalty blocks (so `lambdas` is non-empty) whose lambdas
+    // were never selected.
+    //
+    // What the absence cost: `gam predict` defaults to `--mode posterior-mean
+    // --covariance-mode corrected`, so EVERY interval request on a fixed-lambda
+    // survival model died with "saved model does not contain smoothing-corrected
+    // covariance; refit before requesting --covariance-mode corrected" -- an
+    // instruction no refit could satisfy, because there was no correction to
+    // compute. The sibling conditional covariance right above was persisted for
+    // the same reason under #2373; this is the other half of that fix.
+    //
+    // A fit whose lambda WAS selected keeps the typed absence. There the
+    // correction is a real, non-zero term this path does not compute, and
+    // handing back `Vb` under a corrected request would silently under-report
+    // every interval.
+    let lambda_is_fixed = outer_iterations == 0 && criterion_certificate.is_none();
+    let covariance_corrected = lambda_is_fixed
+        .then(|| covariance_conditional.clone())
+        .flatten();
+    let beta_standard_errors_corrected = covariance_corrected
+        .as_ref()
+        .map(gam_problem::se_from_covariance)
+        .transpose()
+        .map_err(|reason| {
+            format!("survival transformation corrected standard errors are invalid: {reason}")
+        })?;
+
     let inference = gam_solve::estimate::FitInference {
         edf_by_block: edf_by_block.clone(),
         penalty_block_trace,
@@ -2393,8 +2477,8 @@ fn survival_unified_fit_result(
         dispersion: gam_solve::estimate::Dispersion::UNIT,
         beta_covariance,
         beta_standard_errors,
-        beta_covariance_corrected: None,
-        beta_standard_errors_corrected: None,
+        beta_covariance_corrected: covariance_corrected.clone(),
+        beta_standard_errors_corrected,
         beta_covariance_frequentist: None,
         coefficient_influence: None,
         weighted_gram: None,
@@ -2433,7 +2517,7 @@ fn survival_unified_fit_result(
             .or(Some(summary.lastgradient_norm)),
         standard_deviation: 1.0,
         covariance_conditional,
-        covariance_corrected: None,
+        covariance_corrected,
         inference: Some(inference),
         fitted_link: FittedLinkState::Standard(None),
         geometry: Some(gam_solve::estimate::FitGeometry {

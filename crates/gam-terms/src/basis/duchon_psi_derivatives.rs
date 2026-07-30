@@ -1139,6 +1139,54 @@ pub(crate) fn duchon_phi_rrrrrr_collision(
     duchon_phi_even_derivative_collision(length_scale, p_order, s_order, k_dim, coeffs, 3)
 }
 
+/// Resolve the FROZEN radial chart that every Duchon ψ-derivative is taken in.
+///
+/// `build_duchon_basis` ADOPTS a data-metric radial reparameterization `V`
+/// whenever the constrained kernel block has columns and the spec carries no
+/// frozen one (#1355), then freezes it into
+/// `BasisMetadata::Duchon::radial_reparam`. The design, the native penalties
+/// and the operator penalties are all assembled in `Z·V`, and every
+/// ψ-derivative on this path is a FROZEN-chart derivative: `V` is held at the
+/// cold build and replayed onto the spec at each trial κ, which is exactly what
+/// the κ-optimizer does before asking for one.
+///
+/// A spec that reaches a derivative builder WITHOUT a frozen `V` therefore does
+/// not describe the penalty its own forward build would ship — that build would
+/// compute a fresh `V(ψ)` — so differentiating in the raw `Z` chart returns the
+/// exact derivative of a DIFFERENT matrix. Nothing downstream can notice: the
+/// shapes agree and the numbers are finite. That is how three finite-difference
+/// gates came to report the chart mismatch as a 10×–290× error in the analytic
+/// derivative itself, when the derivative is exact to 1.1e-7 against a
+/// same-chart difference (#2638). Refuse instead of returning it.
+///
+/// This is the ONE place the three fold sites decide the chart, so a missing
+/// `V` cannot be absorbed silently at any of them.
+pub(crate) fn duchon_frozen_radial_chart(
+    z_kernel: Array2<f64>,
+    spec: &DuchonBasisSpec,
+    site: &str,
+) -> Result<Array2<f64>, BasisError> {
+    let Some(v) = spec.radial_reparam.as_ref() else {
+        if z_kernel.ncols() == 0 {
+            // No constrained radial columns ⇒ the forward build has nothing to
+            // rotate and adopts no `V` either, so the raw chart IS its chart.
+            return Ok(z_kernel);
+        }
+        crate::bail_invalid_basis!(
+            "Duchon {site} ψ-derivative requires the frozen data-metric radial reparam V, but              the spec carries none while the constrained kernel block has {} columns. The              forward build adopts a fresh V(ψ) for this spec, so a derivative taken in the raw              Z chart is the exact derivative of a different penalty (#2638). Replay              BasisMetadata::Duchon::radial_reparam onto the spec first, as the κ-optimizer does.",
+            z_kernel.ncols()
+        );
+    };
+    if v.nrows() != z_kernel.ncols() {
+        crate::bail_dim_basis!(
+            "Duchon frozen radial reparam shape {:?} does not match constrained kernel dimension {}",
+            v.dim(),
+            z_kernel.ncols()
+        );
+    }
+    Ok(fast_ab(&z_kernel, v))
+}
+
 pub(crate) fn build_duchon_design_psi_derivativeswithworkspace(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -1162,21 +1210,13 @@ pub(crate) fn build_duchon_design_psi_derivativeswithworkspace(
     let s_order = spec.power_as_usize();
     let kappa = 1.0 / length_scale;
     let coeffs = duchon_partial_fraction_coeffs(p_order, s_order, kappa);
-    let mut z_kernel =
-        kernel_constraint_nullspace(centers, effective_nullspace_order, &mut workspace.cache)?;
-    // #1355: fold the frozen data-metric reparam `Z' = Z·V` so the design
-    // ψ-derivatives assemble in the SAME rotated radial basis as the forward
-    // design and penalty (bit-consistent nonlinear/hybrid Duchon arm).
-    if let Some(v) = spec.radial_reparam.as_ref() {
-        if v.nrows() != z_kernel.ncols() {
-            crate::bail_dim_basis!(
-                "Duchon frozen radial reparam shape {:?} does not match constrained kernel dimension {}",
-                v.dim(),
-                z_kernel.ncols()
-            );
-        }
-        z_kernel = fast_ab(&z_kernel, v);
-    }
+    // #1355/#2638: the design ψ-derivatives assemble in the SAME frozen radial
+    // chart `Z·V` as the forward design and penalty.
+    let z_kernel = duchon_frozen_radial_chart(
+        kernel_constraint_nullspace(centers, effective_nullspace_order, &mut workspace.cache)?,
+        spec,
+        "design",
+    )?;
     let poly_cols = polynomial_block_from_order(data, effective_nullspace_order).ncols();
     let p_padded = z_kernel.ncols() + poly_cols;
     if let Some(zf) = identifiability_transform
@@ -1252,20 +1292,25 @@ pub fn build_duchon_basis_log_kappa_derivativeswithworkspace(
             data, spec, workspace,
         );
     }
-    let (centers, identifiability_transform) =
-        prepare_duchon_derivative_contextwithworkspace(data, spec, workspace)?;
+    // #2638: resolve the chart the forward would build — realized centers,
+    // effective null-space order, seeded anisotropy, adopted data-metric
+    // reparam `V`, and the identifiability transform read off the `V`-rotated
+    // design — and hand the RESOLVED spec to every sub-builder below. Passing
+    // the caller's `spec` here is what let the ψ-jet assemble in the raw `Z`
+    // frame while `build_duchon_basis(data, spec)` shipped `Z·V`.
+    let chart = prepare_duchon_derivative_contextwithworkspace(data, spec, workspace)?;
     let operator_collocation_points =
-        if duchon_operator_penalties_requested(&spec.operator_penalties) {
-            let m = (DUCHON_COLLOCATION_OVERSAMPLE * centers.nrows()).min(data.nrows());
+        if duchon_operator_penalties_requested(&chart.spec.operator_penalties) {
+            let m = (DUCHON_COLLOCATION_OVERSAMPLE * chart.centers.nrows()).min(data.nrows());
             Some(select_thin_plate_knots(data, m)?)
         } else {
             None
         };
     build_duchon_basis_log_kappa_derivativeswith_collocationwithworkspace(
         data,
-        spec,
-        centers.view(),
-        identifiability_transform.as_ref(),
+        &chart.spec,
+        chart.centers.view(),
+        chart.identifiability_transform.as_ref(),
         operator_collocation_points
             .as_ref()
             .map(|points| points.view()),

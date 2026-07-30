@@ -1464,6 +1464,15 @@ fn run_gaussian_mixture_em(
     // measurably contracting. See the gate at the bottom of the loop.
     let mut budget = config.max_iter;
     let mut extension: Option<usize> = None;
+    // The parameter residual that PRICED the previous extension. A re-grant
+    // requires the residual to have at least halved since then, on top of the
+    // unchanged `rate < 1` evidence. Halving bounds the number of grants by
+    // `ceil(log2(r_first / parameter_tol))` — finite, and read off the caller's
+    // own tolerance rather than picked — so a slowly-contracting iterate still
+    // terminates while a stalled one is refused at the first boundary exactly
+    // as it is today. `INFINITY` makes the FIRST grant unconditional on this
+    // clause, so the entry into an extension is byte-identical to before.
+    let mut residual_at_last_grant = f64::INFINITY;
     let mut residual_window: std::collections::VecDeque<f64> =
         std::collections::VecDeque::with_capacity(EM_RATE_WINDOW + 1);
     let mut additional_updates = 0usize;
@@ -1583,8 +1592,30 @@ fn run_gaussian_mixture_em(
             // iterate's own projection `N*`: if it cannot meet the deadline it
             // set for itself, that failure is the honest verdict, and the
             // certificate reports the rate and projection that priced it.
+            // `extension.is_none()` used to gate this, which conflated "has
+            // already been extended once" with "is not making progress". At the
+            // second boundary the loop holds evidence IDENTICAL IN KIND to what
+            // earned the first grant — a contracting rate and a finite
+            // projection — and discarded it. The cost is not hypothetical: a
+            // k=8 mixture rung reached the boundary with a parameter residual
+            // of 1.495214e-8 against a tolerance of 1.490116e-8, over by 0.35%,
+            // with its own projection reading ONE more iteration. Meeting the
+            // grant's deadline to that precision means the trailing-window rate
+            // estimate must be right to 0.0035/658 ≈ 5 ppm per step, from an
+            // estimator whose documented log-jitter is `1/√W` = 12.5% (see
+            // `EM_RATE_WINDOW`) — four orders of magnitude of mismatch between
+            // what the policy demanded and what the measurement can deliver.
+            //
+            // The re-grant clause is therefore the residual's own progress, not
+            // a counter: contracting AND at least halved since the last grant.
+            // A rate at or above 1, or a residual that has not halved over a
+            // whole extension, still refuses at exactly the same place.
             let extend = match (contraction_rate, projected_iterations_to_tolerance) {
-                (Some(rate), Some(steps)) if rate < 1.0 && extension.is_none() => Some(steps),
+                (Some(rate), Some(steps))
+                    if rate < 1.0 && parameter_residual <= 0.5 * residual_at_last_grant =>
+                {
+                    Some(steps)
+                }
                 _ => None,
             };
             match extend {
@@ -1602,6 +1633,7 @@ fn run_gaussian_mixture_em(
                     let steps = steps.min(config.max_iter);
                     budget = budget.saturating_add(steps);
                     extension = Some(steps);
+                    residual_at_last_grant = parameter_residual;
                 }
                 None => {
                     return Err(GaussianMixtureError::DidNotConverge {

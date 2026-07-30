@@ -475,13 +475,20 @@ pub(crate) fn ensure_positive_definitewithridge(
         );
     }
 
-    // δ IS CHOSEN BY A BRANCH HERE, AND THAT IS A KNOWN DEFECT (#1575/#2519/#2614).
+    // δ IS APPLIED UNCONDITIONALLY HERE. THE HISTORY BELOW IS WHY.
     //
-    // Returning `0.0` when the bare factorization succeeds and
-    // FIXED_STABILIZATION_RIDGE when it does not makes δ a function of ρ —
-    // through a Cholesky-success predicate on a near-singular matrix — while δ
-    // is carried as `RidgePolicy::exact_full_objective()` and so enters the
-    // outer criterion through `0.5·log|H|`. Measured on the #1575
+    // This paragraph used to open "δ IS CHOSEN BY A BRANCH HERE, AND THAT IS A
+    // KNOWN DEFECT", forty lines above this same block's own statement that δ
+    // is now unconditional and above the code that applies it that way. That
+    // sentence outlived the defect it described and sent at least one later
+    // reader hunting for a branching selector that no longer exists, so it is
+    // written in the past tense now.
+    //
+    // This selector USED TO return `0.0` when the bare factorization succeeded
+    // and FIXED_STABILIZATION_RIDGE when it did not, which makes δ a function
+    // of ρ — through a Cholesky-success predicate on a near-singular matrix —
+    // while δ is carried as `RidgePolicy::exact_full_objective()` and so enters
+    // the outer criterion through `0.5·log|H|`. Measured on the #1575
     // binomial/logit fixture: the outer cost at ρ displacements of 1e-9 and
     // 1e-12 differed from its value at ρ₀ by exactly −9.2103400803 and
     // +18.4206788262 — `0.5·ln(1e8)` and `0.5·ln(1e16)` — at identical
@@ -492,11 +499,13 @@ pub(crate) fn ensure_positive_definitewithridge(
     //
     // Applying δ unconditionally removes the jump and fixes both #1575 gates
     // (REML 503.36, edf 18.38, |g| 1.5e-5, 26 inner solves — better than the
-    // 2026-07-04 healthy record on every axis). It was landed as `3213e26d3`
-    // and REVERTED here, because it also makes every companion form that
-    // assumes δ = 0 unavailable or wrong. Measured on the full `gam-solve --lib`
-    // suite: 7 failing before, 11 after. The four `rail_face_limit` refusals
-    // name the reason exactly —
+    // 2026-07-04 healthy record on every axis). It was landed as `3213e26d3`,
+    // REVERTED in `386ba9e37`, and RELANDED in `fc2b286a2` once the companion
+    // forms carried δ. The revert happened because an unconditional δ also
+    // makes every companion form that assumes δ = 0 unavailable or wrong.
+    // Measured on the full `gam-solve --lib` suite at that time: 7 failing
+    // before, 11 after. The four `rail_face_limit` refusals named the reason
+    // exactly —
     //
     //   FaceUnavailable { reason: "the limit fit needed a stabilization ridge
     //   (1.000e-8), so its criterion is not the plain LAML this form expands" }
@@ -528,6 +537,16 @@ pub(crate) fn ensure_positive_definitewithridge(
     // that matters: the criterion shifts by `½·Σ ln(1 + δ/λ_i) ≤ ½·δ·tr(H⁻¹)`,
     // far below the convergence tolerances when `λ_i ≫ δ = 1e-8`. What it
     // removes is the 9.21 jump, not the scale.
+    // WHAT HAPPENS WHEN THAT IS NOT ENOUGH IS A DELIBERATE CHOICE, AND IT IS
+    // NOT THE ONE THE SPARSE TWIN MAKES (#2657). Below, a genuinely non-PD
+    // Hessian is a REFUSAL: `eigh` is computed only to report λ_min, and δ
+    // stays exactly FIXED_STABILIZATION_RIDGE or there is no fit — so
+    // `∂δ/∂ρ = 0` holds unconditionally on this path. The sparse ladder
+    // (`ensure_sparse_positive_definitewithridge`) instead escalates to a
+    // Gershgorin-derived `τ(ρ)` and succeeds, which reintroduces a ρ-dependent
+    // δ into `0.5·log|H|` — the very thing the paragraphs above are about.
+    // Several comments on both paths describe the two as twins; on this branch
+    // they are not.
     if ridge > 0.0 {
         for i in 0..hess.nrows() {
             hess[[i, i]] += ridge;

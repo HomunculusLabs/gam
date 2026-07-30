@@ -1380,6 +1380,40 @@ def fit_array(
     return model
 
 
+SUPPORT_SAE_SCHEMA = "gamfit.ManifoldSAE/support-v2"
+
+
+def model_from_dict(payload: Any) -> Any:
+    """Rebuild a manifold-SAE from an already-decoded ``to_dict()`` payload.
+
+    :func:`load` owns the on-disk case, where the schema tag is read out of the
+    file's bytes. Callers that hold the payload itself -- because they carried
+    it in a pickle, a npz, or over a wire -- need the same tag dispatch without
+    the sniff, and this is it. Reaching past this into a concrete class is what
+    #2567 filed: an overcomplete (``K > P``) fit serializes under the support
+    tag, so ``ManifoldSAE.from_dict``, which is pinned to ``/v6``, rejects it.
+
+    Parameters
+    ----------
+    payload : mapping
+        A dict as produced by ``ManifoldSAE.to_dict()`` or
+        ``ManifoldSAESupport.to_dict()``.
+
+    Returns
+    -------
+    ManifoldSAE or ManifoldSAESupport
+        Whichever class the payload's ``schema`` names.
+    """
+    schema = payload.get("schema") if isinstance(payload, dict) else None
+    if schema == SUPPORT_SAE_SCHEMA:
+        from ._binding import rust_module  # local import avoids cycle
+
+        return rust_module().ManifoldSAESupport.from_dict(payload)
+    from ._sae_manifold import ManifoldSAE  # local import avoids cycle
+
+    return ManifoldSAE.from_dict(payload)
+
+
 def load(path: str | Path) -> Any:
     """Load a fitted model previously written with :func:`gamfit.save`.
 
@@ -1411,15 +1445,7 @@ def load(path: str | Path) -> Any:
     # and then rejected it (#2567).
     head = raw[:256].lstrip()
     if head.startswith(b"{") and b"gamfit.ManifoldSAE" in raw[:512]:
-        payload = json.loads(raw.decode("utf-8"))
-        schema = payload.get("schema") if isinstance(payload, dict) else None
-        if schema == "gamfit.ManifoldSAE/support-v2":
-            from ._binding import rust_module  # local import avoids cycle
-
-            return rust_module().ManifoldSAESupport.from_dict(payload)
-        from ._sae_manifold import ManifoldSAE  # local import avoids cycle
-
-        return ManifoldSAE.from_dict(payload)
+        return model_from_dict(json.loads(raw.decode("utf-8")))
     return loads(raw)
 
 

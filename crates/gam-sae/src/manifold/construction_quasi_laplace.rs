@@ -1001,10 +1001,11 @@ impl SaeManifoldTerm {
                             // line-search — the multi-atom non-convergence #1117 removes.
                             return Err(format!(
                                 "SaeManifoldTerm::penalized_quasi_laplace_criterion: stationary undamped \
-                                 criterion factorization has a non-PD per-row H_tt block \
+                                 criterion factorization has a {} \
                                  that spectral unit-stiffness deflation could not \
                                  condition (‖g‖={grad_norm:.6e}, tol {grad_tolerance:.6e}); \
-                                 {err}"
+                                 {err}",
+                                ProbeRefusalKind::non_pd_per_row_marker()
                             ));
                         }
                         Err(err) => {
@@ -1066,10 +1067,11 @@ impl SaeManifoldTerm {
                         if !refine_progress_extension {
                             return Err(format!(
                                 "SaeManifoldTerm::penalized_quasi_laplace_criterion: undamped evidence \
-                             factorization hit a non-PD per-row H_tt block before KKT \
+                             factorization hit a {} before KKT \
                              stationarity at an infeasible-ρ probe (‖g‖={grad_norm:.6e}, \
                              tol {grad_tolerance:.6e}); returning the typed infeasible \
-                             refusal without grinding the probe refinement budget; {err}"
+                             refusal without grinding the probe refinement budget; {err}",
+                                ProbeRefusalKind::non_pd_per_row_marker()
                             ));
                         }
                         let refine_limit = Self::refine_iteration_limit(
@@ -1112,10 +1114,11 @@ impl SaeManifoldTerm {
                             // K>1 row) never reaches this branch.
                             return Err(format!(
                                 "SaeManifoldTerm::penalized_quasi_laplace_criterion: undamped evidence \
-                             factorization hit a non-PD per-row H_tt block before KKT \
+                             factorization hit a {} before KKT \
                              stationarity (‖g‖={grad_norm:.6e}, tol {grad_tolerance:.6e}) \
                              and the refinement budget was exhausted after \
-                             {total_inner_iter} inner iterations; {err}"
+                             {total_inner_iter} inner iterations; {err}",
+                                ProbeRefusalKind::non_pd_per_row_marker()
                             ));
                         }
                         let remaining = refine_limit - total_inner_iter;
@@ -1277,12 +1280,13 @@ impl SaeManifoldTerm {
                     );
                 } else if gradient_stationary {
                     return Err(format!(
-                        "SaeManifoldTerm::penalized_quasi_laplace_criterion: inner solve did not converge at fixed ρ; \
+                        "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
                          KKT entered its admission band (raw ‖g‖={grad_norm:.6e}, quotient \
                          ‖Π⊥gauge g‖={quotient_grad_norm:.6e}, tolerance {grad_tolerance:.6e}) \
                          but an evidence-only re-entry still made a strict state/objective move \
                          after {total_inner_iter} granted iterations. Refusing to differentiate \
-                         a non-idempotent inner map."
+                         a non-idempotent inner map.",
+                        ProbeRefusalKind::inner_not_converged_marker()
                     ));
                 } else {
                     // #2228 Stage-2, budget branch — the terminal exact-Newton
@@ -1443,11 +1447,12 @@ impl SaeManifoldTerm {
                         None => (grad_norm, quotient_grad_norm),
                     };
                     return Err(format!(
-                        "SaeManifoldTerm::penalized_quasi_laplace_criterion: inner solve did not converge at fixed ρ; \
+                        "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
                          neither the KKT gradient ‖g‖={grad_norm:.6e} nor the quotient KKT gradient \
                          ‖Π⊥gauge g‖={quotient_grad_norm:.6e} met tolerance {grad_tolerance:.6e} \
                          after {total_inner_iter} inner iterations. Refusing to rank an \
-                         off-optimum Laplace criterion."
+                         off-optimum Laplace criterion.",
+                        ProbeRefusalKind::inner_not_converged_marker()
                     ));
                 }
             }
@@ -1747,12 +1752,13 @@ impl SaeManifoldTerm {
                         None => grad_norm,
                     };
                     return Err(format!(
-                        "SaeManifoldTerm::penalized_quasi_laplace_criterion: inner solve did not converge at fixed ρ; \
+                        "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
                          objective stalled for {consecutive_objective_stalls} consecutive refine \
                          rounds, but neither the raw KKT gradient ‖g‖={grad_norm:.6e} nor its \
                          quotient met tolerance {grad_tolerance:.6e}. Objective stagnation and a \
                          finite deflated factor are diagnostic only; refusing to rank or \
-                         differentiate an off-optimum Laplace criterion."
+                         differentiate an off-optimum Laplace criterion.",
+                        ProbeRefusalKind::inner_not_converged_marker()
                     ));
                 }
             } else {

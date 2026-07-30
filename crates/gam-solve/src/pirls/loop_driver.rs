@@ -109,6 +109,73 @@ pub fn nfree_skip_row_element_touches() -> u64 {
     NFREE_SKIP_ROW_ELEMENT_TOUCHES.load(Ordering::Relaxed)
 }
 
+/// Contract two vectors with a compensated accumulator and an exact product
+/// split, so the result carries ~1 ulp of its own magnitude rather than ~n ulp.
+///
+/// This exists for one contraction: `qb^T (X^T W z)` in the Gaussian
+/// zero-iteration synthesis below, where the #1033 n-free kappa-trial path
+/// recovers the deviance as `z^T W z - 2 qb^T b + qb^T G qb`. The design is
+/// never realized at the trial psi on that path, so the row-wise
+/// `sum w (y - mu)^2` is unavailable and this cancellation is the only route to
+/// the deviance. It is a large one by construction: measured on the #2624
+/// fixture, `z^T W z = 3.13466938668704074e2` against a converged
+/// `D_p = 4.0e-5` -- 7.1 orders. The profiled-Gaussian REML criterion then
+/// multiplies the RELATIVE error of `D_p` by `(n - M_p)/2`, because its whole
+/// `D_p` dependence is the single term `((n-M_p)/2) * ln(2 pi D_p/(n-M_p))`, so
+/// at n = 600 an error in `D_p` reaches the outer surface 300x magnified.
+/// Resolving this contraction to 1 ulp is therefore cheap insurance on a
+/// quantity the outer surface is unusually sensitive to, and it costs less than
+/// the spelling it replaced (one fewer matvec).
+///
+/// WHAT IT IS NOT. It was landed claiming to be the #2624 fix. **That claim was
+/// measured and is false**, and the measurements are recorded here so the claim
+/// is not re-made:
+///
+/// * Printing BOTH spellings on the SAME calls of the spatial fast path, the
+///   compensation moves `D_p` by 1.8e-14 to 1.1e-13, while the call-to-call
+///   variation of `D_p` at essentially one theta is 5.1e-12. So it perturbs the
+///   value by ~1% of the noise it was supposed to remove; the dominant carrier
+///   is upstream of this contraction (both spellings share `z^T W z` and the
+///   tensor-served `gram_at(psi)` / `rhs_at(psi)`, so a common-mode error
+///   cancels out of their difference and is invisible in it).
+/// * Against the exact row deviance on the live-row lane, it improves the gap
+///   by 2.32x at one point, 1.006x at another of the same depth, and 1.00x
+///   elsewhere.
+/// * On the non-spatial Python witness (`audit_outer_value_agreement`), a wheel
+///   built from the landing commit reproduces `value-only`, `analytic-sample`
+///   and `disagreement = 1.805e-5` BIT-IDENTICALLY to the pre-commit run.
+///
+/// The 8/13 -> 10/13 change in certified #2624 arms that accompanied the
+/// landing is therefore NOT attributable to a quieter criterion. A perturbation
+/// of this size reshuffles the outer trajectory, and on a fixture whose residual
+/// failure mode is "the multistart certifies the wrong basin" that moves arms in
+/// both directions -- which is exactly what was observed, `length_scale` 1.2,
+/// 1.0 and 0.95 gaining and 0.7 regressing.
+///
+/// Neumaier compensation on the running sum, plus `mul_add` to recover the
+/// exact product error. Falls back to the ordinary contraction on a length
+/// mismatch so a shape bug surfaces where shapes are checked, not here.
+fn compensated_dot(a: &Array1<f64>, b: &Array1<f64>) -> f64 {
+    if a.len() != b.len() {
+        return a.dot(b);
+    }
+    let mut sum = 0.0_f64;
+    let mut compensation = 0.0_f64;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        let product = x * y;
+        // `x*y - product` exactly, when an FMA is available.
+        compensation += f64::mul_add(x, y, -product);
+        let next = sum + product;
+        compensation += if sum.abs() >= product.abs() {
+            (sum - next) + product
+        } else {
+            (product - next) + sum
+        };
+        sum = next;
+    }
+    sum + compensation
+}
+
 pub(crate) fn exact_lambdas_from_rho(rho: LogSmoothingParamsView<'_>) -> Array1<f64> {
     rho.exact_exp()
 }
@@ -1311,13 +1378,26 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             // re-materialising ~16·n elements per κ callback — the #1868 fix.
             let mut grad_orig = cache.xtwx_orig.dot(&qbeta);
             grad_orig -= &cache.xtwy_orig;
+            // #2624: `z^T W z - 2 qb^T b + qb^T G qb` regrouped as
+            // `(z^T W z - qb^T b) + qb^T (G qb - b)`. The two are the same
+            // number in exact arithmetic; they are not the same computation.
+            // `G qb - b` is formed elementwise above and equals `-S beta` at the
+            // inner mode, so the second contraction is over SMALL entries and
+            // its absolute error is negligible -- which leaves exactly one
+            // contraction at the `z^T W z` magnitude for `compensated_dot` to
+            // resolve. It also drops a matvec, so it is cheaper than the
+            // spelling it replaces. See `compensated_dot` for the measured size
+            // of what this buys, which is much smaller than the claim it was
+            // landed under.
+            let residual_inner = qbeta.dot(&grad_orig);
             let gradient_data = transform_active
                 .as_ref()
                 .map(|transform| transform.apply_transpose(&grad_orig))
                 .unwrap_or(grad_orig);
-            let weighted_rss = (cache.centered_weighted_y_sq - 2.0 * qbeta.dot(&cache.xtwy_orig)
-                + qbeta.dot(&cache.xtwx_orig.dot(&qbeta)))
-            .max(0.0);
+            let weighted_rss = (cache.centered_weighted_y_sq
+                - compensated_dot(&qbeta, &cache.xtwy_orig)
+                + residual_inner)
+                .max(0.0);
             match resolved_likelihood_scale {
                 ResolvedLikelihoodScale::ProfiledGaussian
                 | ResolvedLikelihoodScale::FixedGaussian { .. } => {}

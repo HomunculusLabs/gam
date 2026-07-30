@@ -5872,6 +5872,33 @@ impl ArrowSchurError {
                 if reason.contains("not positive definite")
         )
     }
+
+    /// [`Self::is_non_pd_schur_complement`], read off a message that has already
+    /// been rendered — the same verdict for a caller that no longer holds the
+    /// value.
+    ///
+    /// #2598 — gam-sae's ρ-probe classifier is one such caller: by the time a
+    /// refusal reaches `ProbeRefusalKind::classify` the spine has flattened it
+    /// to a `String`, and it was recovering this verdict by matching two
+    /// literals of the [`Display`] impl below — in another crate. That made
+    /// **rewording either message here a silent reclassification of every
+    /// recoverable Schur refusal as a fatal defect**, with nothing failing.
+    ///
+    /// The wording knowledge now lives beside the wording. The discriminant
+    /// phrase and the reason phrase are the same conjunct the value-level
+    /// predicate above tests, and
+    /// `rendered_verdict_matches_the_value_verdict_for_every_variant_2598`
+    /// pins the two to each other for every variant, so a reword must move all
+    /// three together in this one file or fail here.
+    ///
+    /// `contains` rather than equality because callers wrap the rendered text
+    /// in their own context before it arrives.
+    ///
+    /// [`Display`]: std::fmt::Display
+    pub fn rendered_is_non_pd_schur_complement(rendered: &str) -> bool {
+        rendered.contains("Schur complement Cholesky failed")
+            && rendered.contains("not positive definite")
+    }
 }
 
 impl std::fmt::Display for ArrowSchurError {

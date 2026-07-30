@@ -1,4 +1,8 @@
 use super::*;
+// #2598 — `construction_quasi_laplace.rs` interpolates the refusal markers into
+// its ρ-local refusals instead of restating them, so the classifier and the
+// producer cannot disagree about the phrase again.
+use super::outer_objective::ProbeRefusalKind;
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_math::special::bessel_i0_centered_terms_from_log_abs;
 

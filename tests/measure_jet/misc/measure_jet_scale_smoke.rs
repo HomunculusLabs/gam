@@ -33,11 +33,30 @@ use gam::basis::{BasisMetadata, CenterStrategy, MeasureJetBasisSpec, build_measu
 use ndarray::Array2;
 
 const N_ROWS: usize = 200_000;
+/// Quarter-size reference arm. The gate is the ratio `t(N_ROWS)/t(N_SMALL)`,
+/// not either time on its own.
+const N_SMALL: usize = 50_000;
 const N_DIMS: usize = 8;
 const N_CENTERS: usize = 300;
-/// Generous-but-real wall-clock bound: slow CI machines pass with margin,
-/// an O(n²) regression in the build path cannot.
-const WALL_CLOCK_BOUND_SECS: f64 = 120.0;
+/// Ceiling on the measured 4x-rows time ratio.
+///
+/// This replaces an absolute `elapsed < 120s` bound. An absolute wall-clock
+/// bound on a shared CI runner measures the RUNNER: it fails on a loaded box
+/// with the build path healthy, and it passes on a fast box with a quadratic
+/// term already back, so it never actually gated the property the test is
+/// named for. The ratio of two builds of the SAME code on the SAME machine,
+/// seconds apart, divides the machine speed out and measures the exponent
+/// directly, which is the only thing this smoke claims to check.
+///
+/// Calibration. Every documented term of the build is linear in n at fixed
+/// m and d - the O(n*m*d) mass/design passes, the maintained-min-distance
+/// FarthestPoint sweeps, and the dominant O(n*m^2) constraint-transform GEMM
+/// - while the O(m^2*d*L) energy assembly does not grow with n at all. So a
+/// healthy 4x in rows costs AT MOST 4x in time, and in practice slightly
+/// less. An O(n^2) row-pairwise regression costs 16x. The bound sits between
+/// them in log space: 2x headroom over the healthy ceiling, 2x below the
+/// regression it exists to catch.
+const SCALING_RATIO_BOUND: f64 = 8.0;
 /// Deterministic pseudo-noise amplitude off the filament backbone.
 const JITTER: f64 = 1e-3;
 
@@ -54,9 +73,9 @@ fn hashed_unit(index: u64) -> f64 {
 /// Three deterministic 1-D strands (trig curves of the row index) embedded
 /// in 8-D, separated by per-strand offset vectors, with hashed sub-resolution
 /// jitter so the filament has honest thickness.
-fn filament_coordinate(row: usize, dim: usize) -> f64 {
+fn filament_coordinate(row: usize, dim: usize, n_rows: usize) -> f64 {
     let strand = (row % 3) as f64;
-    let t = (row / 3) as f64 / (N_ROWS / 3) as f64;
+    let t = (row / 3) as f64 / (n_rows / 3) as f64;
     let k = dim as f64;
     let freq = 1.0 + 0.45 * k + 0.6 * strand;
     let phase = 0.8 * strand + 0.37 * k;
@@ -69,9 +88,10 @@ fn filament_coordinate(row: usize, dim: usize) -> f64 {
     backbone + jitter
 }
 
-#[test]
-fn measure_jet_build_scale_smoke_200k_rows() {
-    let data = Array2::<f64>::from_shape_fn((N_ROWS, N_DIMS), |(i, k)| filament_coordinate(i, k));
+/// Build the basis once at `n` rows and return the elapsed seconds alongside
+/// the built basis.
+fn timed_build(n: usize) -> (f64, gam::basis::BasisBuildResult) {
+    let data = Array2::<f64>::from_shape_fn((n, N_DIMS), |(i, k)| filament_coordinate(i, k, n));
 
     // Multiscale (per-scale spectral split) is an explicit opt-in (#1116);
     // this smoke exercises the spectral build path, so it opts in.
@@ -86,19 +106,37 @@ fn measure_jet_build_scale_smoke_200k_rows() {
     let started = Instant::now();
     // (a) the build must succeed at filament scale.
     let built = build_measure_jet_basis(data.view(), &spec)
-        .expect("measure-jet build must succeed on a 200k-row 8-D filament");
+        .unwrap_or_else(|e| panic!("measure-jet build must succeed on an {n}-row 8-D filament: {e}"));
     let elapsed = started.elapsed().as_secs_f64();
-    let rate = N_ROWS as f64 / elapsed;
     println!(
-        "measure-jet scale smoke: n={N_ROWS} d={N_DIMS} m={N_CENTERS} \
-         build={elapsed:.2}s rate={rate:.0} rows/s"
+        "measure-jet scale smoke: n={n} d={N_DIMS} m={N_CENTERS} \
+         build={elapsed:.2}s rate={:.0} rows/s",
+        n as f64 / elapsed.max(f64::MIN_POSITIVE)
     );
+    (elapsed, built)
+}
 
-    // (b) wall-clock gate: an O(n²) pass over the rows cannot fit in here.
+#[test]
+fn measure_jet_build_scale_smoke_200k_rows() {
+    // Reference arm first, so a machine that is warming up penalises the
+    // SMALL time (raising the ratio) rather than flattering it.
+    let (t_small, _small) = timed_build(N_SMALL);
+    let (t_big, built) = timed_build(N_ROWS);
+
+    // (b) scaling gate: 4x the rows must not cost more than SCALING_RATIO_BOUND
+    //     times the seconds. An O(n²) pass over the rows costs 16x.
+    let ratio = t_big / t_small;
+    println!(
+        "measure-jet scale smoke: rows {N_SMALL}->{N_ROWS} (4.0x) cost \
+         {t_small:.2}s->{t_big:.2}s (ratio {ratio:.2}x, bound {SCALING_RATIO_BOUND:.1}x)"
+    );
     assert!(
-        elapsed < WALL_CLOCK_BOUND_SECS,
-        "measure-jet build took {elapsed:.1}s for n={N_ROWS} \
-         (bound {WALL_CLOCK_BOUND_SECS}s) — an O(n²) regression in the build path?"
+        ratio < SCALING_RATIO_BOUND,
+        "measure-jet build time grew {ratio:.2}x for a 4x row increase \
+         ({N_SMALL} rows: {t_small:.2}s -> {N_ROWS} rows: {t_big:.2}s), over the \
+         {SCALING_RATIO_BOUND:.1}x bound — every documented term of the build is \
+         linear in n at fixed m and d, so this is an O(n²) regression in the \
+         build path"
     );
 
     // (c) per-level (spectral) mode under the multiscale opt-in (#1116): one
