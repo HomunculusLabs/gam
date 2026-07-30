@@ -3024,6 +3024,45 @@ impl<'a> RemlState<'a> {
         let rowq = (&xq * x).sum_axis(ndarray::Axis(1)); // n
 
         // Per-coordinate contraction.
+        // WARNING (#2623) -- READ THIS BEFORE CHANGING THE SIGN IN THIS LOOP.
+        //
+        // The convention of the four channels is NOT settled by the contract
+        // comment above, which is self-inconsistent. The authoritative
+        // statement is on the type, in gam-problem laplace_sampler_contract:
+        //
+        //     value:        Delta_b            added to the block marginal
+        //                                      log-likelihood, SUBTRACTED
+        //                                      from the REML/LAML cost
+        //     rho_gradient: d(Delta_b)/d(rho)  explicit channel (a) ONLY
+        //
+        // So channel (a) is PLUS sampled.rho_gradient, not its negation, and a
+        // sum of four Delta_b-side channels is d(Delta_b)/d(rho), not
+        // d(cost)/d(rho). The formula above labels its left side d(cost)/d(rho)
+        // while listing (a) in Delta_b-side form, and separately calls the
+        // NEGATION of sampled.rho_gradient channel (a). A Delta_b-side term
+        // cannot appear unnegated in a cost-side total, so the label, the terms
+        // and the type contract cannot all three be right.
+        //
+        // What is settled: value is PLUS Delta_b, confirmed independently by
+        // block_sampled_marginal_recovers_analytic_quartic_correction, which
+        // checks it against a 20001-point trapezoid reference and asserts it is
+        // negative for an added quartic penalty. So the value: -sampled.value
+        // below is correct.
+        //
+        // What is OPEN: whether trace_j and mode_j below are Delta_b-side or
+        // cost-side. The two readings differ by exactly 2*(trace_j + mode_j),
+        // which #2623 measures at about 9.65 on a fold where the true slope is
+        // a three-way near-cancellation and each channel is 25-30x the sum. So
+        // the wrong reading does not perturb the search, it INVERTS it: an
+        // outer gradient of +9.4547 AT the cost minimum, Wolfe failure, and 178
+        // evaluations at one theta.
+        //
+        // DO NOT resolve this by reading, in either direction. It is decided by
+        // giving the typed rho-block audit (enable_rho_outer_audit, #2454) a row
+        // whose fixture ASSERTS the #784 splice engaged, then comparing each
+        // channel against finite differences separately. The existing FD guard
+        // cannot see it: both of its rows are deliberately well-behaved, so the
+        // splice declines and trace_j and mode_j are never exercised at all.
         let mut gradient = Array1::<f64>::zeros(n_rho + n_ext);
         for j in 0..n_rho.min(sampled.rho_gradient.len()) {
             let lam_j = target.lambdas[j];
