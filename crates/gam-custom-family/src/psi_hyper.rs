@@ -1589,6 +1589,13 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                 .kkt_residual
                 .as_ref()
                 .and_then(ProjectedKktResidual::residual_tol),
+            // `kkt_residual` is `None` off a converged iterate BY DESIGN — no
+            // caller may trust an IFT correction at a non-KKT point, so that
+            // field stays empty here and cannot be the diagnostic. The decision
+            // variables the loop's verdict was actually taken on can be
+            // reported, and they are what separates "needs more cycles" from
+            // "the exact joint stationarity gate is the blocker".
+            terminal: inner.terminal_convergence_state,
             theta_dim,
             rho_dim,
             psi_dim,

@@ -4,6 +4,50 @@ use thiserror::Error;
 
 use crate::{IdentifiabilityAudit, MapUniquenessError};
 
+/// The blockwise inner loop's terminal decision variables — the quantities its
+/// convergence verdict is actually taken on.
+///
+/// The loop certifies with
+/// `max_accepted_step <= step_tol && objective_change <= objective_tol`, and then
+/// `joint_stationarity_ok || max_proposed_step <= step_tol`. Reporting only the
+/// cycle count cannot say which of those four conjuncts failed, and they have
+/// different causes: steps still large means the solve needs more cycles, steps
+/// tiny with `joint_stationarity_ok == false` means the exact joint gate is the
+/// blocker rather than the budget, and an `objective_change` above tolerance
+/// means the iterate is still moving. This is deliberately NOT a KKT residual:
+/// `BlockwiseInnerResult::kkt_residual` is `None` off a converged iterate on
+/// purpose, because no caller may trust an IFT correction there, so the honest
+/// diagnostic is the decision variables themselves rather than a residual
+/// recomputed at a non-KKT point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InnerConvergenceTerminalState {
+    pub cycle: usize,
+    pub max_accepted_step: f64,
+    pub max_proposed_step: f64,
+    pub step_tol: f64,
+    pub objective_change: f64,
+    pub objective_tol: f64,
+    pub joint_stationarity_ok: bool,
+}
+
+impl std::fmt::Display for InnerConvergenceTerminalState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "terminal cycle {}: max_accepted_step={:.6e} (tol={:.6e}), \
+             max_proposed_step={:.6e}, objective_change={:.6e} (tol={:.6e}), \
+             joint_stationarity_ok={}",
+            self.cycle,
+            self.max_accepted_step,
+            self.step_tol,
+            self.max_proposed_step,
+            self.objective_change,
+            self.objective_tol,
+            self.joint_stationarity_ok,
+        )
+    }
+}
+
 #[derive(Debug, Clone, Error)]
 pub enum CustomFamilyError {
     #[error("custom-family invalid input in {context}: {reason}")]
@@ -39,16 +83,24 @@ pub enum CustomFamilyError {
     /// verdicts on the same error (#2553). Choosing the variant that says
     /// what happened removes the need to guess.
     #[error(
-        "custom-family inner solve did not converge after {cycles} cycle(s) \
+        "custom-family inner solve did not converge after {cycles} cycle(s) [{}] \
          (projected KKT residual |r|_inf={kkt_residual:?} against tol={kkt_tol:?}); \
          refusing to expose profile objective derivatives for theta_dim={theta_dim} \
          (rho_dim={rho_dim}, psi_dim={psi_dim}). The analytic outer gradient/Hessian \
          require the inner KKT equation F_beta(beta, theta)=0; returning a value with \
          zero or shape-only derivatives is mathematically inconsistent. This trial \
-         point is infeasible; the outer search may step away from it."
+         point is infeasible; the outer search may step away from it.",
+        match terminal {
+            Some(state) => state.to_string(),
+            None => "no terminal convergence state was recorded".to_string(),
+        }
     )]
     InnerSolveNotConverged {
         cycles: usize,
+        /// The decision variables the inner loop's verdict was taken on. See
+        /// [`InnerConvergenceTerminalState`] — a cycle count alone cannot say
+        /// which conjunct of the convergence test failed.
+        terminal: Option<InnerConvergenceTerminalState>,
         /// Sup-norm of the projected KKT residual at the terminal inner iterate,
         /// i.e. the quantity this refusal was decided against. A cycle count
         /// alone cannot distinguish a solve that ran out of budget one order

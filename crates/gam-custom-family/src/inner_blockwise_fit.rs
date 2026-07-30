@@ -2589,6 +2589,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     penalty_value: cached.penalty_value,
                     cycles: cached.cycles,
                     converged: cached.converged,
+                    terminal_convergence_state: None,
                     block_logdet_h: cached.block_logdet_h,
                     block_logdet_s: cached.block_logdet_s,
                     s_lambdas,
@@ -2714,6 +2715,11 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
     let mut lastobjective = -current_log_likelihood + current_penalty;
     let mut converged = false;
     let mut cycles_done = 0usize;
+    // The decision variables of the most recent completed cycle. Whatever cycle
+    // the loop exits on, this holds the numbers the convergence verdict was
+    // taken against, so a non-convergence refusal can name them instead of
+    // reporting only how many cycles ran.
+    let mut terminal_convergence_state: Option<gam_problem::InnerConvergenceTerminalState> = None;
     // Pre-allocate per-block eta backup buffers to avoid O(n) allocation
     // per block per cycle in the backtracking line search.
     let mut eta_backups: Vec<Array1<f64>> =
@@ -8203,6 +8209,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 penalty_value,
                 cycles: cycles_done,
                 converged,
+                terminal_convergence_state,
                 block_logdet_h: Some(block_logdet_h),
                 block_logdet_s: Some(block_logdet_s),
                 s_lambdas,
@@ -8421,6 +8428,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 penalty_value,
                 cycles: cycles_done,
                 converged,
+                terminal_convergence_state,
                 block_logdet_h,
                 block_logdet_s,
                 s_lambdas,
@@ -8500,6 +8508,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 penalty_value,
                 cycles: cycles_done,
                 converged: false,
+                terminal_convergence_state,
                 block_logdet_h: None,
                 block_logdet_s: None,
                 s_lambdas,
@@ -9029,6 +9038,20 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             beta_inf,
             exact_joint_stationarity_ok,
         );
+        // Record the verdict's inputs here, ahead of EVERY exit this cycle can
+        // take — the divergence early-exits below, the certified break, and
+        // running out of `inner_max_cycles` — so whatever survives the loop
+        // describes the cycle the loop actually left on rather than the one
+        // before it.
+        terminal_convergence_state = Some(gam_problem::InnerConvergenceTerminalState {
+            cycle,
+            max_accepted_step: max_accepted_beta_step,
+            max_proposed_step: max_proposed_beta_step,
+            step_tol,
+            objective_change,
+            objective_tol,
+            joint_stationarity_ok: exact_joint_stationarity_ok,
+        });
 
         // Divergence early-exit. See the rationale block at the top of
         // this loop. We treat "log-likelihood unchanged + Newton step
@@ -9133,6 +9156,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         converged,
         cycles_done,
         last_residual_tol,
+        terminal_convergence_state,
         has_joint_exacthessian,
     )
 }
@@ -9429,6 +9453,7 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
     converged: bool,
     cycles_done: usize,
     last_residual_tol: f64,
+    terminal_convergence_state: Option<gam_problem::InnerConvergenceTerminalState>,
     exact_joint_curvature_available: bool,
 ) -> Result<BlockwiseInnerResult, String> {
     let local_ranges = block_param_ranges(specs);
@@ -9554,6 +9579,7 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
         penalty_value,
         cycles: cycles_done,
         converged,
+        terminal_convergence_state,
         block_logdet_h,
         block_logdet_s,
         s_lambdas,

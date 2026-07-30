@@ -88,7 +88,7 @@ pub use constraint_set::{
 pub use custom_family_blockwise::{
     CUSTOM_FAMILY_RIDGE_FLOOR, ExactNewtonOuterCurvature, validate_blockspec_consistency,
 };
-pub use custom_family_error::CustomFamilyError;
+pub use custom_family_error::{CustomFamilyError, InnerConvergenceTerminalState};
 pub use dispersion::{Dispersion, DispersionError};
 pub use dispersion_cov::{
     CovarianceStandardErrorError, PhiScaledCovariance, UnscaledPrecision, se_from_covariance,

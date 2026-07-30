@@ -2618,6 +2618,10 @@ pub struct BlockwiseInnerResult {
     pub penalty_value: f64,
     pub cycles: usize,
     pub converged: bool,
+    /// The blockwise loop's terminal decision variables. Unlike `kkt_residual`
+    /// below, this is populated whether or not the solve converged — it is the
+    /// diagnostic a non-convergence refusal needs, and it is NEVER an IFT input.
+    pub terminal_convergence_state: Option<gam_problem::InnerConvergenceTerminalState>,
     /// Laplace Hessian log-determinant, defined only at a certified inner mode.
     pub block_logdet_h: Option<f64>,
     /// Penalty pseudo-logdeterminant, defined only at a certified inner mode.
