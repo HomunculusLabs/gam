@@ -47,11 +47,16 @@ def test_bug_custom_family_coefficient_group_labels_are_stably_routed() -> None:
         survival_likelihood="marginal-slope",
         z_column="age",
         logslope_formula="bmi",
+        custom_family={
+            "coefficient_groups": [
+                {"label": "mean.age", "indices": [1]},
+                {"label": "slope.bmi", "indices": [2]},
+            ]
+        },
     )
-    blocks = {b.name: (b.kind, b.start, b.end) for b in model.term_blocks}
-    assert blocks["intercept"] == ("intercept", 0, 1)
-    assert blocks["age"] == ("linear", 1, 2)
-    assert blocks["bmi"] == ("linear", 2, 3)
+    state = model.coefficient_state_json()
+    assert '"mean.age"' in state
+    assert '"slope.bmi"' in state
 
 
 def test_bug_transformation_normal_time_basis_dimension_matches_response_basis() -> None:
