@@ -23,7 +23,7 @@ fn fit_options() -> FitOptions {
         linear_constraints: None,
         firth_bias_reduction: false,
         adaptive_regularization: None,
-        penalty_shrinkage_floor: None,
+        penalty_shrinkage_floor: gam_test_support::EXACT_SUPPLIED_PENALTY_OBJECTIVE,
         rho_prior: RhoPrior::Flat,
         kronecker_penalty_system: None,
         kronecker_factored: None,

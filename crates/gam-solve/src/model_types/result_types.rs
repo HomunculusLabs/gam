@@ -1643,8 +1643,14 @@ pub struct FitOptions {
     /// pathological non-Gaussianity in the posterior (e.g., extreme skewness
     /// under logit link with high-dimensional spatial smooths).
     ///
-    /// The ridge is rho-independent, so LAML gradients remain correct without
-    /// modification (d(epsilon*I)/d(rho_k) = 0).
+    /// Rho-independence means only that the direct LAML derivatives with
+    /// respect to `rho` need no extra ridge term
+    /// (`d(epsilon * I)/d(rho_k) = 0`). An adjoint with respect to raw design,
+    /// weight, penalty, or response inputs must still use the floored system;
+    /// for inputs that determine the floor's scale or penalized-range geometry,
+    /// it must differentiate that geometry as well. A differentiable raw-block
+    /// API whose adjoint does not carry this information must disable the floor
+    /// so its forward and backward describe the same objective.
     ///
     /// Typical value: `Some(1e-6)`. Set to `None` or `Some(0.0)` to disable.
     /// Default: `Some(1e-6)`.

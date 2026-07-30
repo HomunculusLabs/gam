@@ -113,13 +113,14 @@ pub fn canonical_standard_fit_options(
 ///   the escalation opt in elsewhere". This is such a caller.
 /// * `persistent_warm_start_store: None` — DELIBERATE. A programmatic
 ///   block-fit owns its own lifecycle and never discovers ambient storage.
-/// * `penalty_shrinkage_floor: None` — PINNED, NOT ENDORSED. The canonical
-///   policy is `Some(1e-6)` and this deviation has no stated rationale
-///   anywhere. It is a different KIND of field from `tol` below: the floor
-///   changes the penalized OBJECTIVE, so changing it changes what this
-///   entry's forward computes and therefore what its adjoint differentiates.
-///   That needs a gradient measurement, not a one-line alignment, so it stays
-///   pinned and #2630 tracks deciding it on purpose.
+/// * `penalty_shrinkage_floor: None` — DELIBERATE. This differentiable entry
+///   treats the supplied penalty matrices as the exact objective. The standard
+///   formula/CLI floor changes that objective, and its scale and penalized-range
+///   geometry depend on the raw inputs. The block adjoint does not receive that
+///   floor geometry, so enabling it here would make the forward and backward
+///   represent different objectives. The A/B derivative audit in #2648
+///   therefore established `None` as this API's contract, while standard fits
+///   retain the canonical `Some(1e-6)`.
 ///
 /// `tol` is NO LONGER a deviation. It was `1e-9` against the canonical `1e-10`
 /// with no stated rationale — exactly the stale-tolerance class the `1e-10`

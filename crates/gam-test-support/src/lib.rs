@@ -17,6 +17,15 @@ pub mod cli_harness;
 pub mod reference;
 pub mod synthetic;
 
+/// No implicit modification of caller-supplied penalty matrices.
+///
+/// Low-level solver tests use this policy when their hand-constructed
+/// penalties define the exact mathematical objective under test. Production
+/// formula and CLI fits instead use the canonical stabilizing floor. Keeping
+/// this distinction named prevents solver-contract fixtures from silently
+/// drifting to a different objective when `FitOptions` grows.
+pub const EXACT_SUPPLIED_PENALTY_OBJECTIVE: Option<f64> = None;
+
 // `no_densify_design` (and the operator-backed fixture behind it) is a
 // linear-algebra fixture; it lives in `gam-linalg` alongside the operator traits
 // it exercises and is re-exported here so this crate's consumers keep their
