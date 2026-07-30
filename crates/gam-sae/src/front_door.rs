@@ -189,9 +189,9 @@ pub(crate) fn admit_topk_manifold_with_budget(
         // here, and this line is what stops that from being a silent no-op --
         // the filing's 2 h 06 m fit at 0% GPU reported success and said nothing.
         log::info!(
-            "[SAE] (#2573) lane=CurvedStreaming (K={n_atoms} > P={output_dim}, k_active={support_k}): \
+            "[SAE] lane=CurvedStreaming (K={n_atoms} > P={output_dim}, k_active={support_k}): \
              device=CPU. The support-sparse overcomplete lane has no GPU kernels, so this fit \
-             runs on the host regardless of the requested device policy."
+             runs on the host regardless of the requested device policy (#2573)."
         );
         return Ok(SaeFitAdmission {
             lane: SaeFitLane::CurvedStreaming,

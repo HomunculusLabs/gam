@@ -61,12 +61,7 @@ const SANCTIONED_FD_FILES: &[&str] = &[
     // certificate it produces is stored, copied, and reported through these files
     // (the `fd_directional` / `fd_error` / `fd_step` fields), all gated behind
     // `outer_fd_audit_eligible` and bounded by an explicit Richardson error bar.
-    // `fd_audit.rs` was folded into the two files below in a6dbd67a7: the Ridders
-    // probe now lives beside the seed evaluation it audits (`run_plan.rs`), and the
-    // certificate is held in a thread-local store (`outer_eval_capture.rs`).
-    "crates/gam-solve/src/rho_optimizer/run_plan.rs",
-    "crates/gam-solve/src/estimate/outer_eval_capture.rs",
-    "crates/gam-solve/src/estimate/mod.rs", // facade: re-exports the audit entry points only
+    "crates/gam-solve/src/rho_optimizer/fd_audit.rs",
     "crates/gam-solve/src/rho_optimizer.rs", // module decl + re-export of the audit oracle
     "crates/gam-solve/src/rho_optimizer/run.rs", // builds the FD-audit certificate from the oracle
     "crates/gam-models/src/fit_orchestration/drivers/spatial_optimization.rs", // FD-audit eligibility gate (diagnostic only)

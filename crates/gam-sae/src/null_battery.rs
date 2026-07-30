@@ -49,14 +49,6 @@ const HADAMARD_PERMUTATION_SEED_DOMAIN: u64 = 0x4841_4441_5045_524D;
 const HADAMARD_SIGN_SEED_DOMAIN: u64 = 0x4841_4441_5349_474E;
 const PER_DIMENSION_SHUFFLE_SEED_DOMAIN: u64 = 0x5045_5244_494D_5348;
 
-/// Constant-factor slack on a first-order roundoff bound. The call sites already
-/// carry the explicit `n * eps` term (`p * eps * trace` for the symmetric
-/// eigendecomposition's backward error; `m * eps / (1 - m * eps)` for a
-/// length-`m` accumulation); this is the `O(1)` factor in front of it. A bound
-/// multiplier, never a tuning knob -- enlarging it widens an acceptance
-/// envelope, it does not change any estimate.
-const ROUNDOFF_BOUND_SLACK: f64 = 64.0;
-
 /// Direction of the claim statistic under the null.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Tail {
@@ -1732,8 +1724,7 @@ fn certified_covariance_spectrum(
             "covariance trace must be finite and non-negative; got {covariance_trace}"
         ));
     }
-    let tolerance =
-        ROUNDOFF_BOUND_SLACK * eigenvalues.len() as f64 * f64::EPSILON * covariance_trace;
+    let tolerance = 64.0 * eigenvalues.len() as f64 * f64::EPSILON * covariance_trace;
     let mut certified = Vec::with_capacity(eigenvalues.len());
     for (axis, &eigenvalue) in eigenvalues.iter().enumerate() {
         if !eigenvalue.is_finite() {
@@ -2851,7 +2842,7 @@ fn certify_unit_interval(value: f64, term_count: usize, name: &str) -> Result<f6
             "{name} cannot be certified at float64 precision for {term_count} accumulated terms"
         ));
     }
-    let tolerance = ROUNDOFF_BOUND_SLACK * accumulated / (1.0 - accumulated);
+    let tolerance = 64.0 * accumulated / (1.0 - accumulated);
     if value < -tolerance || value > 1.0 + tolerance {
         return Err(format!(
             "{name} left [0, 1] beyond its {tolerance:.3e} roundoff envelope: {value}"

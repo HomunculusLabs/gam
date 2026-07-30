@@ -4787,20 +4787,6 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     step_inf,
                     step_tol,
                     resolvable_negative_curvature: has_resolvable_negative_curvature,
-                    // The refusal must carry how close this solve ever got, not
-                    // only where it happened to stand when a guard fired
-                    // (gam#2600). `min_certified_residual` is the smallest
-                    // residual the solve computed — the same quantity the
-                    // terminal WARN line reports as `best_residual_inf`, and
-                    // deliberately not the stall tracker's `best_residual_seen`,
-                    // which is written only at the post-step site and so stays
-                    // at its `inf` sentinel through a head-of-cycle exit (the
-                    // #1040 truthfulness trap). Folding in this cycle's residual
-                    // keeps the field finite whenever any residual exists, so a
-                    // cycle-0 refusal reports its own number rather than `inf`.
-                    best_stationarity_residual: min_certified_residual
-                        .min(current_stationarity_residual),
-                    cycles_since_best_residual: cycles_since_residual_improved,
                 });
             if returned_mode_curvature_pending {
                 returned_mode_curvature_pending = false;

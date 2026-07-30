@@ -93,23 +93,11 @@ fn inner_fit_core_scaling() {
 
     // The inner fit MUST use more than one core in a serial context on a
     // production-shaped N (else the per-birth grind is inherently single-core and no
-    // amount of candidate racing fixes it).
-    //
-    // THE FLOOR IS DERIVED FROM THE MACHINE, NOT PINNED. `effective` is a
-    // speedup, so it is bounded above by `cores` — the number of workers the
-    // pool actually has. A fixed `> 2.0` bar is therefore UNACHIEVABLE on a
-    // 2-core runner no matter how correct the row-parallel path is (a perfect,
-    // zero-overhead parallel solve scores exactly 2.0 there, and `>` excludes
-    // it), and simultaneously far too weak on a 32-core box. Half the pool
-    // width is the honest "genuinely fanning out" bar; it is capped at the
-    // original 2.0 so this stays exactly the pre-existing assertion on any
-    // machine with >= 4 cores, and floored at 1.25 so a 2-core box still has to
-    // show real parallel gain rather than passing on noise.
-    let floor = ((cores as f64) / 2.0).clamp(1.25, 2.0);
+    // amount of candidate racing fixes it). A conservative floor well below the true
+    // speedup keeps the assertion robust to a loaded CI box.
     assert!(
-        effective > floor,
-        "Arrow-Schur inner fit must be multi-core in a serial context \
-         (effective {effective:.2}x, floor {floor:.2}x on a {cores}-core pool); \
+        effective > 2.0,
+        "Arrow-Schur inner fit must be multi-core in a serial context (effective {effective:.2}x); \
          if this drops to ~1.0 the row-parallel path regressed or N fell below the \
          SCHUR_MATVEC_PARALLEL_ROW_MIN=256 threshold"
     );

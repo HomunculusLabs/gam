@@ -6,42 +6,6 @@ use gam::families::survival::marginal_slope::{
 use gam::probability::normal_cdf;
 use ndarray::array;
 
-// The K=1 reduction is an identity over the reals, not over IEEE-754.
-// `marginal_slope_preserving_scale` squares the probit scale once and applies
-// it to the quadratic form of the *raw* slopes (the diagonal quadratic form
-// accumulates `coefficient * slope * slope`), so production evaluates
-// `fl(fl(p*p) * fl(s*s))` while the scalar identity below folds the scale into
-// the slope first and evaluates `fl(fl(p*s) * fl(p*s))`. Same real number, up
-// to an ulp apart, so the reduction is pinned to a few-ulp bound rather than
-// to `to_bits()` equality, which would pin the association order instead.
-//
-// `magnitude` is the size of the largest intermediates the reference sums, so
-// a cancelling total is still held to the accuracy its inputs allow.
-const SCALAR_REDUCTION_ULPS: f64 = 8.0;
-
-fn ulp_of(value: f64) -> f64 {
-    let magnitude = value.abs();
-    if !magnitude.is_finite() || magnitude == 0.0 {
-        return f64::from_bits(1);
-    }
-    let next = f64::from_bits(magnitude.to_bits() + 1);
-    if next.is_finite() {
-        next - magnitude
-    } else {
-        magnitude - f64::from_bits(magnitude.to_bits() - 1)
-    }
-}
-
-fn assert_scalar_reduction(got: f64, expected: f64, magnitude: f64, context: &str) {
-    let difference = (got - expected).abs();
-    let tolerance = SCALAR_REDUCTION_ULPS * ulp_of(magnitude.abs().max(expected.abs()));
-    assert!(
-        difference <= tolerance,
-        "{context}: got={got:.17e} expected={expected:.17e} |diff|={difference:.3e} exceeds \
-         the {SCALAR_REDUCTION_ULPS}-ulp scalar-reduction tolerance {tolerance:.3e}"
-    );
-}
-
 fn assert_marginal_preservation(
     q: f64,
     slopes: &[f64],
@@ -68,14 +32,8 @@ fn survival_multi_z_k1_diagonal_matches_scalar_eta_bitwise() {
     let eta =
         survival_marginal_slope_vector_eta(q, &z, &slope, &covariance, probit_scale).expect("eta");
     let observed = probit_scale * slope[0];
-    let c = (1.0 + observed * observed).sqrt();
-    let scalar = q * c + observed * z[0];
-    assert_scalar_reduction(
-        eta,
-        scalar,
-        (q * c).abs() + (observed * z[0]).abs(),
-        "K=1 Diagonal[1.0] eta must reduce to the scalar identity",
-    );
+    let scalar = q * (1.0 + observed * observed).sqrt() + observed * z[0];
+    assert_eq!(eta.to_bits(), scalar.to_bits());
     assert_eq!(covariance.shape(), MarginalSlopeCovarianceShape::Diagonal);
     assert_marginal_preservation(q, &slope, &covariance, probit_scale);
 }
@@ -89,12 +47,7 @@ fn survival_multi_z_k1_scale_reduces_to_original_scalar_unit_variance() {
     let expected = (1.0 + observed * observed).sqrt();
     let actual =
         survival_marginal_slope_vector_scale(&slope, &covariance, probit_scale).expect("scale");
-    assert_scalar_reduction(
-        actual,
-        expected,
-        expected,
-        "K=1 unit-variance scale must reduce to sqrt(1 + (probit_scale*slope)^2)",
-    );
+    assert_eq!(actual.to_bits(), expected.to_bits());
 }
 
 #[test]
