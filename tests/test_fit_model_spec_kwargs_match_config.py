@@ -1,8 +1,10 @@
 """First-class ``fit()`` model-spec kwargs must match the ``config={...}`` escape hatch.
 
-These three fields (``noise_formula``, ``noise_offset``, ``flexible_link``) are genuine
-model-spec parameters fully wired through the FFI/core; promoting them to dedicated
-``fit()`` kwargs is pure CLI<->Python parity. This test pins two properties:
+These fields (``noise_formula``, ``noise_offset``, ``flexible_link``,
+``survival_time_anchor``) are genuine model-spec parameters fully wired through the
+FFI/core; promoting them to dedicated ``fit()`` kwargs is pure CLI<->Python parity.
+``survival_time_anchor`` joined them in #2631, where the anchor rule was collapsed to
+one function and the override had to become model configuration rather than a CLI flag. This test pins two properties:
 
 1. Passing a value via the dedicated kwarg assembles the *exact same* Rust config
    payload as passing it via ``config={...}`` (the previously documented escape hatch),
@@ -34,6 +36,7 @@ _BASE: dict[str, typing.Any] = {
     "transformation_normal": None,
     "transformation_normal_stage1": None,
     "survival_likelihood": None,
+    "survival_time_anchor": None,
     "baseline_target": None,
     "baseline_scale": None,
     "baseline_shape": None,
@@ -71,6 +74,7 @@ def _payload(**overrides: typing.Any) -> dict[str, typing.Any]:
         ("noise_formula", "s(x)", "noise_formula"),
         ("noise_offset", "logvar", "noise_offset"),
         ("flexible_link", True, "flexible_link"),
+        ("survival_time_anchor", 25.0, "survival_time_anchor"),
     ],
 )
 def test_model_spec_kwarg_matches_config_escape_hatch(
@@ -106,7 +110,12 @@ def test_unset_model_spec_kwargs_emit_no_config_keys() -> None:
     # No spurious keys when the user touches none of the three (no behavior change
     # for callers that never used these fields).
     payload = _payload()
-    for key in ("noise_formula", "noise_offset", "flexible_link"):
+    for key in (
+        "noise_formula",
+        "noise_offset",
+        "flexible_link",
+        "survival_time_anchor",
+    ):
         assert key not in payload
 
 
