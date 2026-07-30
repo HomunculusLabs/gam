@@ -40,6 +40,14 @@ impl crate::matrix::FactorizedSystem for SparseExactFactor {
     }
 }
 
+impl SparseExactFactor {
+    /// Nonzeros in the Cholesky factor `L` (see
+    /// [`SimplicialFactor::factor_nnz`]).
+    pub fn factor_nnz(&self) -> usize {
+        self.simplicial.factor_nnz()
+    }
+}
+
 pub fn dense_to_sparse(
     matrix: &Array2<f64>,
     tol: f64,
@@ -678,21 +686,33 @@ pub fn factorize_simplicial(h: &SparseColMat<usize, f64>) -> Result<SimplicialFa
     factorize_simplicial_canonical_upper(&h_upper)
 }
 
-fn factorize_simplicial_canonical_upper(
-    h_upper: &SparseColMat<usize, f64>,
-) -> Result<SimplicialFactor, LinalgError> {
-    let n = h_upper.ncols();
-    if n == 0 {
-        return Ok(SimplicialFactor {
-            l_col_ptr: vec![0],
-            l_row_idx: Vec::new(),
-            l_values: Vec::new(),
-            perm_inv: Vec::new(),
-            n: 0,
-            logdet: 0.0,
-        });
+/// Nonzero count of the AMD-ordered Cholesky factor `L` WITHOUT computing it.
+///
+/// Only the symbolic phase runs (AMD ordering, elimination tree, column counts),
+/// so this costs `O(nnz(H))` and allocates nothing of `L`'s size. Callers that
+/// must respect a memory budget before committing to a sparse direct
+/// factorization ask this first: `nnz(L)` is the fill-in, is not predictable
+/// from `nnz(H)`, and is the quantity a budget has to be stated in.
+pub fn sparse_spd_factor_nnz(h: &SparseColMat<usize, f64>) -> Result<usize, LinalgError> {
+    let h_upper = canonicalize_sparse_symmetric_upper(h, ZERO_TOL)?;
+    if h_upper.ncols() == 0 {
+        return Ok(0);
     }
+    Ok(analyze_canonical_upper(&h_upper)?.symbolic.len_val())
+}
 
+/// The symbolic half of a simplicial Cholesky: AMD ordering, the permuted
+/// self-adjoint upper matrix, and the factor's sparsity structure.
+struct SparseCholeskyAnalysis {
+    perm_inv: Vec<usize>,
+    a_perm_upper: SparseColMat<usize, f64>,
+    symbolic: simplicial::SymbolicSimplicialCholesky<usize>,
+}
+
+fn analyze_canonical_upper(
+    h_upper: &SparseColMat<usize, f64>,
+) -> Result<SparseCholeskyAnalysis, LinalgError> {
+    let n = h_upper.ncols();
     let a_nnz = h_upper.compute_nnz();
 
     // 1. AMD ordering
@@ -777,6 +797,34 @@ fn factorize_simplicial_canonical_upper(
         })?
     };
 
+    Ok(SparseCholeskyAnalysis {
+        perm_inv,
+        a_perm_upper,
+        symbolic,
+    })
+}
+
+fn factorize_simplicial_canonical_upper(
+    h_upper: &SparseColMat<usize, f64>,
+) -> Result<SimplicialFactor, LinalgError> {
+    let n = h_upper.ncols();
+    if n == 0 {
+        return Ok(SimplicialFactor {
+            l_col_ptr: vec![0],
+            l_row_idx: Vec::new(),
+            l_values: Vec::new(),
+            perm_inv: Vec::new(),
+            n: 0,
+            logdet: 0.0,
+        });
+    }
+
+    let SparseCholeskyAnalysis {
+        perm_inv,
+        a_perm_upper,
+        symbolic,
+    } = analyze_canonical_upper(h_upper)?;
+
     // 4. Numeric LLᵀ factorization
     let mut l_values = vec![0.0f64; symbolic.len_val()];
     {
@@ -824,6 +872,12 @@ fn factorize_simplicial_canonical_upper(
 }
 
 impl SimplicialFactor {
+    /// Nonzeros stored in `L` — the realized fill-in of the AMD ordering, and
+    /// the quantity a sparse-direct memory budget is stated in.
+    pub fn factor_nnz(&self) -> usize {
+        self.l_values.len()
+    }
+
     /// Reconstruct the original-order dense SPD matrix represented by this
     /// permuted sparse Cholesky factor.
     ///

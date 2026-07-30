@@ -1248,10 +1248,10 @@ fn cascade_state_rejects_corruption() {
     );
 }
 
-/// #2503/#2513 — past the dense cap, the diagnostic criterion must reach the
-/// hard λ values without solving `A = X'WX + λD`, while automatic REML must
-/// still refuse until its independent stochastic determinant has an exact-real
-/// value/derivative enclosure.
+/// #2503/#2513 — past the certified-spectrum budget, the diagnostic criterion
+/// must reach the hard λ values without solving `A = X'WX + λD`, while automatic
+/// REML must still refuse until its independent stochastic determinant has an
+/// exact-real value/derivative enclosure.
 ///
 /// The original #2503 defect was a pair of PCG solves at every λ. At the lower
 /// domain endpoint the multilevel Wendland frame is redundant across scales and
@@ -1269,13 +1269,17 @@ fn past_cap_point_criterion_is_solve_free_but_auto_reml_needs_exact_proof_2503_2
     let n = 800;
     let (axes, y, w) = sample(2, n, 0.1, 0x1032_0043);
     let xs = axis_refs(&axes);
-    // Refinement level 6 is where this shape's `4^level` column growth crosses
-    // `DENSE_GRAM_MAX = 1536` — the level `fit_residual_cascade` reaches on this
-    // fixture, and the first one that has no dense Gram to fall back on.
-    let design = ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.0, 6).expect("build");
+    // Level 7 is where this shape's `4^level` column growth crosses
+    // `CERTIFIED_SPECTRUM_MAX = 4096` — past the width whose dense Schur
+    // eigendecomposition fits its memory budget, so there is no λ-independent
+    // spectrum to enclose the score with. Level 6 (m = 2134, measured) used to
+    // sit past the gate because the gate was the `DENSE_GRAM_MAX = 1536` Gram
+    // CACHE; #2546 separated the cache budget from the proof budget, and level 6
+    // now certifies, so the refusal this gate is about lives one level finer.
+    let design = ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.0, 7).expect("build");
     assert!(
-        design.num_coeffs() > 1536,
-        "fixture must be past the dense sizing cap (m = {})",
+        design.num_coeffs() > 4096,
+        "fixture must be past the certified spectrum budget (m = {})",
         design.num_coeffs()
     );
 
@@ -1302,7 +1306,7 @@ fn past_cap_point_criterion_is_solve_free_but_auto_reml_needs_exact_proof_2503_2
         refusal,
         ResidualCascadeError::RemlScoreProofUnavailable {
             columns,
-            dense_gram_max: 1536,
+            certified_spectrum_max: 4096,
         } if columns == design.num_coeffs()
     ));
 }

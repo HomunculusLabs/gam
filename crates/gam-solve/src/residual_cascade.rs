@@ -59,12 +59,23 @@
 //! Thus the score, gradient, and curvature are analytic functions of log λ
 //! with the SAME spectral nodes at every trial. The dense route has a rigorous
 //! interval extension that isolates every stationary interval before
-//! safeguarded root refinement. The iterative route deliberately refuses
-//! automatic λ selection: its fixed-probe SLQ log-determinant has no exact-real
-//! outer enclosure. Closing the separate β-seeded residual Krylov space can
-//! make the residual exact, but cannot enclose that determinant; a merely
-//! converged residual tail is numerical point evidence only. Fixed-λ fits
-//! remain available on the iterative route.
+//! safeguarded root refinement.
+//!
+//! Which designs get that proof is set by `CERTIFIED_SPECTRUM_MAX`, NOT by the
+//! dense Gram cache. The exact spectrum is a dense symmetric eigendecomposition
+//! of the `rank × rank` Schur complement, so its bound is that
+//! decomposition's transient memory; the Gram cache's bound (`DENSE_GRAM_MAX`)
+//! is a much tighter LIFETIME budget for a per-design array. Past the cache the
+//! Schur source is assembled from the CSR rows for the duration of the
+//! decomposition and dropped, so certification continues well past it — which
+//! is what lets a cascade whose refinement crosses 1536 columns finish at all
+//! (#2546). Past the SPECTRUM budget the route deliberately refuses automatic
+//! λ selection: a fixed-probe SLQ log-determinant has no exact-real outer
+//! enclosure, and neither does an exact factorization, which returns a number at
+//! one λ and no enclosure over a λ cell. Closing the separate β-seeded
+//! residual Krylov space can make the residual exact, but cannot enclose that
+//! determinant; a merely converged residual tail is numerical point evidence
+//! only. Fixed-λ fits remain available on the iterative route.
 //!
 //! The same elimination puts the profiled RESIDUAL in the same form, making the
 //! diagnostic criterion solve-free at every λ whenever its residual rule is
@@ -118,12 +129,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use faer::Side;
+use faer::sparse::{SparseColMat, SymbolicSparseColMat};
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_math::score_opt::{
     AffineRemlProfile, ScoreJet, certified_ln_positive,
 };
+use gam_linalg::sparse_exact::{
+    SparseExactFactor, factorize_sparse_spd_strict, logdet_from_factor, solve_sparse_spd,
+    sparse_spd_factor_nnz,
+};
 use gam_terms::grid_spline_2d::{chol_solve, cholesky_logdet};
-use ndarray::Array2;
+use ndarray::{Array1, Array2};
 
 /// Bump support radius as a multiple of the level's covering radius:
 /// `δ_l = OVERLAP·h_l`. Separation ≥ h_l caps the bumps covering a point at
@@ -143,7 +159,81 @@ const REFINE_TOL: f64 = 1e-3;
 
 /// Column count up to which the normal equations go through dense Cholesky
 /// (exact logdet, no iteration); above it, PCG + SLQ. 1536² doubles ≈ 18 MB.
+///
+/// This sizes a PERSISTENT per-design cache: `Core::dense_gram` is held for the
+/// whole life of the design and reused by every solve and every λ. It does NOT
+/// bound the certified REML proof — see [`CERTIFIED_SPECTRUM_MAX`], which is a
+/// transient budget and reaches further.
 const DENSE_GRAM_MAX: usize = 1536;
+
+/// Column count up to which the CERTIFIED automatic-REML proof is available.
+///
+/// The proof is not a log-determinant, and that is the whole reason it needs its
+/// own bound. It is the λ-INDEPENDENT Schur spectrum built by
+/// [`Core::dense_cascade_spectrum`]: with `B = D^{−1/2}(G₁₁ − G₁₀G₀₀^{−1}G₀₁)
+/// D^{−1/2} = VΘV'`, every determinant mode and every residual moment is an
+/// analytic kernel of `θ_i + λ`, which is what lets
+/// [`AffineRemlProfile::enclose`] produce genuine INTERVAL extensions of the
+/// score value and its first two derivatives — the objects the KKT root and the
+/// global candidate ordering are certified in.
+///
+/// An exact factorization of `X'WX + λD` does not substitute for that, however
+/// exact it is. A factorization — dense or sparse-direct — is a POINTWISE
+/// object: it returns a number at one λ and supports no enclosure over a λ cell,
+/// so it can certify neither a score sign on an interval nor a stationary point.
+/// (The former endpoint-jet/global-Lipschitz enclosure that tried to bridge that
+/// gap did not collapse in saturated tails and was removed; see
+/// [`CascadeRemlProfile::affine_view`].) The requirement is therefore ALL
+/// eigenvalues of the `rank × rank` whitened Schur complement together with its
+/// eigenvectors, one of which is projected onto the whitened response — a dense
+/// symmetric eigendecomposition, and no sparse route replaces it.
+///
+/// So the bound is that eigendecomposition's LIVE MEMORY, and the width is
+/// DERIVED from it: `sqrt(CERTIFIED_SPECTRUM_BYTES / (blocks · 8))` = 4096
+/// columns at a 512 MiB peak over four simultaneously resident `m × m` blocks,
+/// all freed as soon as the modes are extracted. Being a transient rather than a
+/// lifetime cache is exactly why this budget can sit 2.67× further out in columns
+/// (7.1× in memory) than [`DENSE_GRAM_MAX`]: past that cap the Gram is
+/// materialized from the CSR design for the duration of the decomposition and
+/// dropped, instead of being kept for the fit.
+///
+/// Time is not the binding resource here and is not what the number is derived
+/// from: the decomposition is `O(rank³)` and is paid ONCE per cascade depth
+/// (`fit_reml` builds the profile once and the certified search then evaluates
+/// mode sums, `O(modes)` per trial, with no linear algebra at all).
+const CERTIFIED_SPECTRUM_MAX: usize =
+    (CERTIFIED_SPECTRUM_BYTES / (CERTIFIED_SPECTRUM_BLOCKS * size_of::<f64>())).isqrt();
+
+/// Live memory the certified spectral proof may hold at its peak. The largest
+/// transient this crate asks of a workstation; [`CERTIFIED_SPECTRUM_MAX`] is
+/// derived from it rather than chosen, so moving the budget moves the width and
+/// the two cannot drift apart.
+const CERTIFIED_SPECTRUM_BYTES: usize = 512 * 1024 * 1024;
+
+/// `m × m` f64 blocks simultaneously resident on the certified route: the upper
+/// Gram the Schur complement is assembled from, the Schur complement itself, the
+/// eigenvector matrix `eigh` returns, and LAPACK's working copy.
+const CERTIFIED_SPECTRUM_BLOCKS: usize = 4;
+
+/// Memory budget for the exact sparse-direct factor of `A = X'WX + λD`, stated
+/// as nonzeros of `L`.
+///
+/// Past [`DENSE_GRAM_MAX`] the design is still SPARSE — a row touches the `O(1)`
+/// bumps per level whose supports cover it, `O(qL)` nonzeros — so `A` is sparse
+/// and has an exact sparse Cholesky. Nothing about a fixed-λ log-determinant
+/// requires iteration or a stochastic estimate; what it requires is that the
+/// FILL-IN fit in memory, and `nnz(A)` does not predict `nnz(L)`. So the
+/// realized fill of the AMD ordering is measured by a symbolic pass before any
+/// numeric work is committed, and compared against this budget.
+///
+/// The number is that budget divided by the factor's own per-entry cost: the
+/// simplicial factor stores one `f64` value and one `usize` row index per
+/// nonzero, 16 bytes, and 256 MiB of factor is the largest this route will pay,
+/// so `256·2^20 / 16 = 16·2^20` nonzeros. Beyond it no exact factorization is
+/// available at all and the log-determinant falls back to the stochastic
+/// estimate — reported as [`LogdetMethod::Slq`], and never underwriting a proof,
+/// since [`ResidualCascadeDesign::fit_reml`] refuses far below this width.
+const SPARSE_FACTOR_MAX_NNZ: usize = 16 * 1024 * 1024;
 
 /// PCG convergence: relative residual ‖b − Ac‖/‖b‖ (the backward-error
 /// certificate) demanded of every solve, and the iteration cap past which
@@ -428,10 +518,19 @@ struct Core {
 /// Solver route a fit took for its log-determinant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogdetMethod {
-    /// Dense Cholesky: exact.
+    /// Exact dense linear algebra: either the dense Cholesky of `X'WX + λD` at
+    /// this λ, or the λ-independent Schur eigendecomposition the certified REML
+    /// profile is built from. Both are exact; which one ran depends on whether a
+    /// λ was fixed or selected.
     DenseExact,
+    /// Exact sparse-direct Cholesky of `X'WX + λD` at this λ (AMD-ordered
+    /// simplicial LLᵀ); the log-determinant is `2·Σ log L_jj`. Available past
+    /// the dense Gram cache, where the design is still sparse.
+    SparseExact,
     /// Diagonal control variate + stochastic Lanczos quadrature on fixed
-    /// deterministic probes.
+    /// deterministic probes. NOT exact — the only route that is not, and taken
+    /// only when the sparse factor's fill-in exceeds
+    /// [`SPARSE_FACTOR_MAX_NNZ`].
     Slq,
 }
 
@@ -532,6 +631,12 @@ pub struct ResidualCascadeFit {
     /// variance uses this one Cholesky factor instead of refactoring the same
     /// precision matrix for every prediction point.
     predict_chol: Option<Vec<f64>>,
+    /// Exact sparse-direct factor of `A = X'WX + λD` at THIS fit's λ, held when
+    /// the design is past the dense Gram cache. The posterior variance is one
+    /// solve per prediction point; replaying it through this factor is exact and
+    /// `O(nnz(L))`, where the alternative is a fresh PCG per point whose
+    /// backward error the point then inherits.
+    predict_sparse: Option<Arc<SparseExactFactor>>,
     /// Coefficients: `dim+1` polynomial entries, then level blocks.
     pub coeff: Vec<f64>,
     /// Selected (or supplied) log smoothing parameter `log λ = log σ²/τ²`.
@@ -539,8 +644,10 @@ pub struct ResidualCascadeFit {
     /// Profiled (or supplied) observation variance σ².
     pub sigma2: f64,
     /// Restricted log-likelihood at the fit, up to λ- and data-independent
-    /// additive constants (exact REML differences across λ on the dense
-    /// route; SLQ-estimated on the iterative route).
+    /// additive constants. Exact on every route whose log-determinant is exact
+    /// — dense Cholesky, the certified Schur spectrum, or the sparse direct
+    /// factor — and SLQ-estimated only when the sparse factor's fill-in
+    /// exceeded its budget, which the fit's `logdet_method` reports.
     pub restricted_loglik: f64,
     /// Penalized residual quadratic `y'Wy − c'X'Wy`.
     pub rss_pen: f64,
@@ -609,12 +716,16 @@ pub enum ResidualCascadeError {
     /// Invalid input or a numerical failure in design construction/optimization.
     Computation(String),
     /// Automatic smoothing-parameter selection needs mathematical outer
-    /// enclosures of the score value and derivatives. Past the dense Gram cap,
-    /// the stochastic log-determinant has no such proof. Exact or numerically
-    /// converged residual evidence cannot repair that independent gap.
+    /// enclosures of the score value and derivatives over λ CELLS, which only
+    /// the λ-independent Schur spectrum provides. Past
+    /// [`CERTIFIED_SPECTRUM_MAX`] the dense eigendecomposition that spectrum is
+    /// made of exceeds its memory budget, and what remains is a fixed-probe
+    /// stochastic quadrature — a pointwise estimate, not an enclosure. Exact or
+    /// numerically converged residual evidence cannot repair that gap, and
+    /// neither can an exact factorization at a point.
     RemlScoreProofUnavailable {
         columns: usize,
-        dense_gram_max: usize,
+        certified_spectrum_max: usize,
     },
     /// Stationary structure could not be isolated even though the score was
     /// certified flat at its representable value resolution.
@@ -653,14 +764,16 @@ impl std::fmt::Display for ResidualCascadeError {
             Self::Computation(reason) => f.write_str(reason),
             Self::RemlScoreProofUnavailable {
                 columns,
-                dense_gram_max,
+                certified_spectrum_max,
             } => write!(
                 f,
-                "residual cascade: automatic REML proof unavailable for the iterative \
-                 route ({columns} columns exceed the dense Gram limit {dense_gram_max}); \
-                 fixed-probe SLQ has no exact-real value/derivative enclosure, so score signs, \
-                 KKT roots, and global candidate ordering are uncertified even when the separate \
-                 residual quadrature converges; use an explicitly fixed log lambda"
+                "residual cascade: automatic REML proof unavailable because the certified \
+                 Schur eigendecomposition does not fit its memory budget ({columns} columns \
+                 exceed {certified_spectrum_max}); without the lambda-independent spectrum the \
+                 score has only a fixed-probe stochastic quadrature, which is a pointwise \
+                 estimate and not an interval enclosure, so score signs, KKT roots, and global \
+                 candidate ordering are uncertified even when the separate residual quadrature \
+                 converges; use an explicitly fixed log lambda"
             ),
             Self::RemlOptimumResolutionFlat {
                 lo,
@@ -1319,8 +1432,12 @@ impl CascadeRemlProfile<'_> {
             &spectrum.projected_square,
             &spectrum.anchor_energy,
             (core.y.len() - core.nullity()) as f64,
-            // Every whitened mode carries penalty scale 1, so the penalized
-            // determinant rank is the full Schur rank.
+            // Every whitened mode carries penalty scale 1, and the certified-null
+            // modes were already dropped when the spectrum was built (see
+            // `dense_cascade_spectrum`), so the penalized determinant rank is the
+            // number of POSITIVE Schur modes — which is what makes this
+            // enclosure's width track the score's own and not the arithmetic's
+            // failure to cancel `Z·log λ` against `rank·log λ`.
             spectrum.penalty.len(),
             self.null_logdet,
         )
@@ -1418,12 +1535,65 @@ impl CascadeRemlProfile<'_> {
 
 }
 
+/// Read `(row, col)` of a symmetric `m × m` Gram held as its row-major UPPER
+/// triangle — the encoding of both `Core::dense_gram` and
+/// [`Core::assemble_upper_gram`].
+#[inline]
+fn upper_gram_entry(gram: &[f64], m: usize, row: usize, col: usize) -> f64 {
+    let (i, j) = if row <= col { (row, col) } else { (col, row) };
+    gram[i * m + j]
+}
+
 impl Core {
     #[inline]
     fn dense_gram_entry(&self, row: usize, col: usize) -> Option<f64> {
         let gram = self.dense_gram.as_ref()?;
-        let (i, j) = if row <= col { (row, col) } else { (col, row) };
-        Some(gram[i * self.m + j])
+        Some(upper_gram_entry(gram, self.m, row, col))
+    }
+
+    /// Scatter the CSR design's row outer products into a fresh row-major UPPER
+    /// `m × m` `X'WX`: one `O(nnz·q)` pass, the same assembly `build` performs
+    /// under [`DENSE_GRAM_MAX`], just without the cap and without retaining the
+    /// result on the design.
+    fn assemble_upper_gram(&self) -> Vec<f64> {
+        let m = self.m;
+        let mut gram = vec![0.0_f64; m * m];
+        for i in 0..self.w.len() {
+            let lo = self.row_ptr[i];
+            let hi = self.row_ptr[i + 1];
+            for ea in lo..hi {
+                let ca = self.col_idx[ea] as usize;
+                let weighted = self.w[i] * self.vals[ea];
+                for eb in ea..hi {
+                    gram[ca * m + self.col_idx[eb] as usize] += weighted * self.vals[eb];
+                }
+            }
+        }
+        gram
+    }
+
+    /// The upper `X'WX` the certified spectral proof reads: the persistent cache
+    /// when the design is narrow enough to carry one, otherwise a transient
+    /// assembly from the CSR rows.
+    ///
+    /// `None` is the one honest refusal left — the design is wider than
+    /// [`CERTIFIED_SPECTRUM_MAX`], so the dense eigendecomposition the proof is
+    /// made of does not fit its memory budget. Crossing [`DENSE_GRAM_MAX`] alone
+    /// no longer forfeits the proof.
+    fn spectral_gram(&self) -> Option<std::borrow::Cow<'_, [f64]>> {
+        if let Some(gram) = &self.dense_gram {
+            return Some(std::borrow::Cow::Borrowed(gram.as_slice()));
+        }
+        if self.m > CERTIFIED_SPECTRUM_MAX {
+            return None;
+        }
+        if self.w.is_empty() {
+            // A core rebuilt from a persisted state keeps only a factored
+            // precision; there is no CSR design left to assemble a Gram from,
+            // and assembling one anyway would return zeros.
+            return None;
+        }
+        Some(std::borrow::Cow::Owned(self.assemble_upper_gram()))
     }
 
     /// Factor the unpenalized polynomial Gram block. It is tiny (`dim+1 <= 4`)
@@ -1653,8 +1823,12 @@ impl Core {
         })
     }
 
-    /// Exact Schur spectrum under the dense sizing cap, WITH the eigenbasis it
-    /// is computed from.
+    /// Exact Schur spectrum, WITH the eigenbasis it is computed from.
+    ///
+    /// `gram` is the row-major UPPER `m × m` `X'WX` — [`Self::spectral_gram`]
+    /// supplies either the persistent cache or a transient assembly, so this
+    /// routine is available at every width inside
+    /// [`CERTIFIED_SPECTRUM_MAX`] rather than only under [`DENSE_GRAM_MAX`].
     ///
     /// `eigh` returns the eigenvectors whether or not the caller keeps them.
     /// Dropping them here used to leave the residual half of the same score with
@@ -1665,23 +1839,22 @@ impl Core {
     fn dense_cascade_spectrum(
         &self,
         null_chol: &[f64],
+        gram: &[f64],
     ) -> Result<(Vec<CascadeSpectralMode>, CascadeResidualSpectrum), String> {
+        let m = self.m;
         let q = self.nullity();
-        let rank = self.m - q;
+        let rank = m - q;
         let mut schur = Array2::<f64>::zeros((rank, rank));
         let mut cross = vec![0.0; q];
         for j in 0..rank {
             for (k, value) in cross.iter_mut().enumerate() {
-                *value = self.dense_gram_entry(k, q + j).expect("dense Gram exists");
+                *value = upper_gram_entry(gram, m, k, q + j);
             }
             let projected = chol_solve(null_chol, q, &cross);
             for i in 0..=j {
-                let mut value = self
-                    .dense_gram_entry(q + i, q + j)
-                    .expect("dense Gram exists");
+                let mut value = upper_gram_entry(gram, m, q + i, q + j);
                 for (k, &coefficient) in projected.iter().enumerate() {
-                    value -=
-                        self.dense_gram_entry(q + i, k).expect("dense Gram exists") * coefficient;
+                    value -= upper_gram_entry(gram, m, q + i, k) * coefficient;
                 }
                 value /= (self.pen_diag[q + i] * self.pen_diag[q + j]).sqrt();
                 schur[(i, j)] = value;
@@ -1737,7 +1910,7 @@ impl Core {
         for (i, value) in whitened.iter_mut().enumerate() {
             let mut entry = self.rhs[q + i];
             for (k, &coefficient) in null_solved.iter().enumerate() {
-                entry -= self.dense_gram_entry(q + i, k).expect("dense Gram exists") * coefficient;
+                entry -= upper_gram_entry(gram, m, q + i, k) * coefficient;
             }
             *value = entry / self.pen_diag[q + i].sqrt();
         }
@@ -1773,12 +1946,49 @@ impl Core {
                 "residual cascade: non-finite spectral residual representation (anchor {anchor_energy})"
             ));
         }
+        // Certified-NULL modes are dropped, not carried as zeros, and the
+        // penalized determinant rank drops with them.
+        //
+        // Exact, not an approximation: with `Z` null modes,
+        // `Σ_i log(θ_i+λ) − rank·log λ = Σ_{θ>0} log(θ+λ) + Z·log λ − rank·log λ
+        //  = Σ_{θ>0} log(θ+λ) − (rank−Z)·log λ`,
+        // and a null mode's response energy is exactly zero (`Bv = 0` gives
+        // `Zv = 0`, so `v'β = (Zv)'Wy = 0`), so the residual sum is unchanged
+        // too. `determinant_parts` already skips `θ == 0` on the SCALAR path for
+        // the same reason.
+        //
+        // Carrying them costs nothing on the scalar path and real width on the
+        // INTERVAL path, which is why this is not cosmetic.
+        // `AffineRemlProfile::enclose` evaluates the same expression in interval
+        // arithmetic, where `Z·[log λ] − rank·[log λ]` does NOT cancel: it returns
+        // a width proportional to `(Z + rank)·width(log λ)` where the real
+        // function's width is proportional to the number of POSITIVE modes. On a
+        // rank-deficient wide cascade — `m` columns against `n` rows with `m ≫ n`,
+        // which is what box-filling nets produce on a small sample — `Z` is almost
+        // all of `rank`, so every score enclosure is inflated by that ratio.
+        //
+        // What this does NOT do is make such a design certifiable, and the
+        // measurement says so: a 36-row / 1725-column design still spins in
+        // `AffineRemlProfile::enclose` under `maximize_score_1d` past 900 s with
+        // all 1692 nulls dropped and only 33 modes left. So the inflation was not
+        // that design's blocker; the unidentified end of its spectrum is, and that
+        // is a separate defect. Dropping the nulls is kept because it is exact and
+        // strictly tightens every enclosure, not because it fixed that case.
+        let mut kept_eigenvalue = Vec::with_capacity(rank);
+        let mut kept_projected_square = Vec::with_capacity(rank);
+        for (index, &eigenvalue) in eigenvalues.iter().enumerate() {
+            if certified(eigenvalue) > 0.0 {
+                kept_eigenvalue.push(certified(eigenvalue));
+                kept_projected_square.push(projected_square[index]);
+            }
+        }
+        let kept = kept_eigenvalue.len();
         Ok((
             modes,
             CascadeResidualSpectrum {
-                eigenvalue: eigenvalues.iter().copied().map(certified).collect(),
-                penalty: vec![1.0; rank],
-                projected_square,
+                eigenvalue: kept_eigenvalue,
+                penalty: vec![1.0; kept],
+                projected_square: kept_projected_square,
                 anchor_energy: [anchor_energy],
             },
         ))
@@ -2196,8 +2406,13 @@ impl Core {
 
     fn reml_profile(&self) -> Result<CascadeRemlProfile<'_>, String> {
         let (null_chol, null_logdet) = self.null_gram_factor()?;
-        let (modes, residual) = if self.dense_gram.is_some() {
-            let (modes, spectrum) = self.dense_cascade_spectrum(&null_chol)?;
+        // The exact spectral form is taken whenever the dense eigendecomposition
+        // fits its memory budget — which is wider than the Gram cache, so a
+        // design past `DENSE_GRAM_MAX` still gets the certifiable profile and
+        // pays for the Gram only for the duration of the decomposition.
+        let (modes, residual) = if let Some(gram) = self.spectral_gram() {
+            let (modes, spectrum) = self.dense_cascade_spectrum(&null_chol, &gram)?;
+            drop(gram);
             (modes, CascadeResidualForm::Spectral(spectrum))
         } else {
             let modes = self.iterative_cascade_spectrum(&null_chol)?;
@@ -2524,6 +2739,134 @@ impl Core {
         Some(a)
     }
 
+    /// `A = X'WX + λD` as canonical symmetric-UPPER CSC, assembled from the CSR
+    /// design.
+    ///
+    /// A sparse accumulator, not a triplet list. `X` is transposed once
+    /// (`nnz(X)` entries), then column `j` of `A` is gathered by walking the rows
+    /// that touch column `j` and accumulating each such row's entries with
+    /// column index `≤ j` into a dense scratch of length `m`. Peak extra memory
+    /// is `O(m + nnz(X) + nnz(A))`. A triplet list would instead materialize
+    /// `Σ_i k_i(k_i+1)/2` entries — the full upper outer product of every row,
+    /// duplicates included — which scales with the ROW count rather than with
+    /// the design and is an order of magnitude past `nnz(A)` on a wide cascade.
+    ///
+    /// CSR rows are built polynomial-block-first and then level by level with
+    /// ascending `col_offset`, so a row's column indices ascend; that is what
+    /// lets the inner scan stop at the first column past `j`.
+    fn sparse_upper_system(&self, lambda: f64) -> Result<SparseColMat<usize, f64>, String> {
+        let m = self.m;
+        let n = self.w.len();
+        let mut x_col_ptr = vec![0_usize; m + 1];
+        for &c in &self.col_idx {
+            x_col_ptr[c as usize + 1] += 1;
+        }
+        for j in 0..m {
+            x_col_ptr[j + 1] += x_col_ptr[j];
+        }
+        let nnz_x = x_col_ptr[m];
+        let mut x_rows = vec![0_u32; nnz_x];
+        let mut x_vals = vec![0.0_f64; nnz_x];
+        {
+            let mut cursor = x_col_ptr.clone();
+            for i in 0..n {
+                for e in self.row_ptr[i]..self.row_ptr[i + 1] {
+                    let c = self.col_idx[e] as usize;
+                    let slot = cursor[c];
+                    x_rows[slot] = i as u32;
+                    x_vals[slot] = self.vals[e];
+                    cursor[c] = slot + 1;
+                }
+            }
+        }
+        let mut acc = vec![0.0_f64; m];
+        let mut marked = vec![false; m];
+        let mut touched: Vec<usize> = Vec::new();
+        let mut col_ptr: Vec<usize> = Vec::with_capacity(m + 1);
+        col_ptr.push(0);
+        let mut row_idx: Vec<usize> = Vec::new();
+        let mut values: Vec<f64> = Vec::new();
+        for j in 0..m {
+            touched.clear();
+            for e in x_col_ptr[j]..x_col_ptr[j + 1] {
+                let row = x_rows[e] as usize;
+                let weighted = self.w[row] * x_vals[e];
+                for f in self.row_ptr[row]..self.row_ptr[row + 1] {
+                    let c = self.col_idx[f] as usize;
+                    if c > j {
+                        break;
+                    }
+                    if !marked[c] {
+                        marked[c] = true;
+                        touched.push(c);
+                    }
+                    acc[c] += weighted * self.vals[f];
+                }
+            }
+            // The prior precision is diagonal, so it only ever lands on (j, j).
+            // The diagonal is stored unconditionally: a column the data never
+            // touches still carries `λ d_j`, and an all-zero column would make
+            // the symbolic factorization see a structurally singular matrix.
+            if !marked[j] {
+                marked[j] = true;
+                touched.push(j);
+            }
+            acc[j] += lambda * self.pen_diag[j];
+            touched.sort_unstable();
+            for &c in &touched {
+                let value = acc[c];
+                acc[c] = 0.0;
+                marked[c] = false;
+                if !value.is_finite() {
+                    return Err(format!(
+                        "residual cascade: non-finite sparse normal-equation entry ({c}, {j}) = {value}"
+                    ));
+                }
+                if value != 0.0 || c == j {
+                    row_idx.push(c);
+                    values.push(value);
+                }
+            }
+            col_ptr.push(row_idx.len());
+        }
+        let symbolic = SymbolicSparseColMat::<usize>::new_checked(m, m, col_ptr, None, row_idx);
+        Ok(SparseColMat::<usize, f64>::new(symbolic, values))
+    }
+
+    /// Exact sparse-direct factor of `A = X'WX + λD` at this λ, or `None` when
+    /// the AMD ordering's MEASURED fill-in exceeds [`SPARSE_FACTOR_MAX_NNZ`].
+    ///
+    /// The symbolic phase is run twice — once here to price the fill before
+    /// committing, once inside the factorization — because the decision has to
+    /// be made from `nnz(L)` and only the symbolic phase can supply it. That is
+    /// `O(nnz(A))` against the numeric phase's `O(Σ_j nnz(L_{:,j})²)`, so it is
+    /// not the cost being controlled.
+    fn sparse_exact_factor(&self, lambda: f64) -> Result<Option<SparseExactFactor>, String> {
+        let a = self.sparse_upper_system(lambda)?;
+        let nnz_a = a.compute_nnz();
+        let nnz_l = sparse_spd_factor_nnz(&a).map_err(|error| {
+            format!("residual cascade: sparse normal-equation symbolic analysis failed: {error}")
+        })?;
+        log::info!(
+            "[2546-FILL] m={} nnz(A)={nnz_a} nnz(L)={nnz_l} dense_upper={} \
+             fill_vs_A={:.2} fraction_of_dense={:.4}",
+            self.m,
+            self.m * (self.m + 1) / 2,
+            nnz_l as f64 / nnz_a.max(1) as f64,
+            2.0 * nnz_l as f64 / (self.m as f64 * (self.m as f64 + 1.0))
+        );
+        if nnz_l > SPARSE_FACTOR_MAX_NNZ {
+            return Ok(None);
+        }
+        factorize_sparse_spd_strict(&a).map(Some).map_err(|error| {
+            format!(
+                "residual cascade: exact sparse factorization of X'WX + {lambda} D failed \
+                 (m = {}, nnz(A) = {nnz_a}, nnz(L) = {nnz_l}): {error}",
+                self.m
+            )
+        })
+    }
+
     /// Exact log-determinant of `X'WX + λD` by dense Cholesky. Errors when
     /// the design is past the dense sizing cap.
     fn logdet_dense(&self, lambda: f64) -> Result<f64, String> {
@@ -2628,13 +2971,37 @@ impl Core {
         Ok(logdet + trace_est / SLQ_PROBES as f64)
     }
 
-    /// Log-determinant through the route the sizing contract picks.
-    fn logdet(&self, lambda: f64) -> Result<(f64, LogdetMethod), String> {
+    /// Log-determinant through the most exact route available, with the route
+    /// it took.
+    ///
+    /// `sparse` is the factor the caller has already built at this λ (see
+    /// [`Self::sparse_exact_factor`]); one factorization serves both this
+    /// determinant and every subsequent prediction solve, so it is threaded in
+    /// rather than rebuilt here.
+    fn logdet_with(
+        &self,
+        lambda: f64,
+        sparse: Option<&SparseExactFactor>,
+    ) -> Result<(f64, LogdetMethod), String> {
         if self.dense_gram.is_some() {
-            Ok((self.logdet_dense(lambda)?, LogdetMethod::DenseExact))
-        } else {
-            Ok((self.logdet_slq(lambda)?, LogdetMethod::Slq))
+            return Ok((self.logdet_dense(lambda)?, LogdetMethod::DenseExact));
         }
+        if let Some(factor) = sparse {
+            // `2·Σ log L_jj` from an exact factorization of the very matrix
+            // whose determinant is asked for. Not iterative, not stochastic.
+            let logdet = logdet_from_factor(factor).map_err(|error| {
+                format!("residual cascade: sparse log-determinant unavailable: {error}")
+            })?;
+            return Ok((logdet, LogdetMethod::SparseExact));
+        }
+        // The one route left that is not exact, and the only place a stochastic
+        // determinant survives: the AMD ordering's fill-in on this design does
+        // not fit `SPARSE_FACTOR_MAX_NNZ`, so no exact factorization exists to
+        // read a diagonal off. It is REPORTED as `Slq` on the fit's certificate
+        // and it underwrites nothing — `fit_reml` refuses at a far smaller
+        // width, so no score sign, KKT root, or candidate ordering can ever
+        // rest on this value.
+        Ok((self.logdet_slq(lambda)?, LogdetMethod::Slq))
     }
 
     /// Coefficient solve at λ: dense Cholesky when cached, else certified PCG.
@@ -3315,6 +3682,16 @@ impl ResidualCascadeDesign {
         let core = &self.core;
         let lambda = gam_problem::checked_exp_log_strength(log_lambda)
             .map_err(|error| format!("residual cascade: {error}"))?;
+        // Exact sparse-direct factor at this λ, past the dense Gram cache. One
+        // factorization serves the log-determinant AND every prediction solve
+        // this fit will later perform, so it is built once here. A core rebuilt
+        // from a persisted state has no CSR design to assemble it from and
+        // carries its own dense factor instead.
+        let sparse_factor = if core.dense_gram.is_none() && core.predict_chol.is_none() {
+            core.sparse_exact_factor(lambda)?.map(Arc::new)
+        } else {
+            None
+        };
         let (coeff, rel_res, iters) = core.solve_coeff(lambda, &core.rhs, warm)?;
         let rss_pen = core.rss_pen(&coeff);
         let dof = (core.y.len() - core.nullity()) as f64;
@@ -3336,15 +3713,15 @@ impl ResidualCascadeDesign {
         };
         let r = (core.m - core.nullity()) as f64;
         let (logdet, logdet_method) = match profile_normalized_logdet {
+            // Supplied only by `fit_reml`, which refuses unless the exact
+            // lambda-independent Schur spectrum was formed — so a normalized
+            // logdet arriving here is exact dense linear algebra by
+            // construction, at every width the certified route admits.
             Some(normalized) => (
                 normalized + r * log_lambda + core.pen_logdet_const,
-                if core.dense_gram.is_some() {
-                    LogdetMethod::DenseExact
-                } else {
-                    LogdetMethod::Slq
-                },
+                LogdetMethod::DenseExact,
             ),
-            None => core.logdet(lambda)?,
+            None => core.logdet_with(lambda, sparse_factor.as_deref())?,
         };
         // Full restricted log-likelihood at this (λ, σ²) up to λ- and σ-free
         // constants; at the profiled σ̂² the quadratic collapses to `dof`.
@@ -3362,6 +3739,7 @@ impl ResidualCascadeDesign {
             training_sample_size: std::num::NonZeroUsize::new(core.y.len())
                 .expect("ResidualCascadeDesign requires training rows"),
             predict_chol,
+            predict_sparse: sparse_factor,
             coeff,
             log_lambda,
             sigma2,
@@ -3381,18 +3759,24 @@ impl ResidualCascadeDesign {
     /// derivative enclosures, refined by safeguarded Newton/bisection, and
     /// compared with both exact boundary candidates.
     ///
-    /// Automatic selection is intentionally limited to the dense route. The
-    /// iterative route has no exact-real enclosure of its stochastic
-    /// log-determinant, even when the separate β-seeded residual Krylov space
-    /// closes. A pointwise solve or quadrature value cannot certify a score
-    /// sign, stationary point, or global ordering. Returning a typed refusal is
-    /// the only sound result; [`Self::fit_at`] remains available when the user
+    /// Automatic selection is limited to designs whose λ-independent Schur
+    /// spectrum can be formed, i.e. inside [`CERTIFIED_SPECTRUM_MAX`] — NOT to
+    /// designs that carry a dense Gram cache. The two used to be the same gate,
+    /// which meant a cascade whose refinement legitimately crossed
+    /// [`DENSE_GRAM_MAX`] could be fitted but never certified, and so could not
+    /// finish at all (#2546). The Gram is a cache; the spectrum is the proof.
+    ///
+    /// Past the spectrum budget there is no exact-real enclosure of the score,
+    /// even when the separate β-seeded residual Krylov space closes: a pointwise
+    /// solve, factorization, or quadrature value cannot certify a score sign, a
+    /// stationary point, or a global ordering. Returning a typed refusal is the
+    /// only sound result there; [`Self::fit_at`] remains available when the user
     /// explicitly fixes the smoothing parameter.
     pub fn fit_reml(&self) -> Result<ResidualCascadeFit, ResidualCascadeError> {
-        if self.core.dense_gram.is_none() {
+        if self.core.m > CERTIFIED_SPECTRUM_MAX {
             return Err(ResidualCascadeError::RemlScoreProofUnavailable {
                 columns: self.core.m,
-                dense_gram_max: DENSE_GRAM_MAX,
+                certified_spectrum_max: CERTIFIED_SPECTRUM_MAX,
             });
         }
         let profile = self.core.reml_profile()?;
@@ -3404,7 +3788,7 @@ impl ResidualCascadeDesign {
         let affine = profile.affine_view()?.ok_or(
             ResidualCascadeError::RemlScoreProofUnavailable {
                 columns: self.core.m,
-                dense_gram_max: DENSE_GRAM_MAX,
+                certified_spectrum_max: CERTIFIED_SPECTRUM_MAX,
             },
         )?;
         let search = affine
@@ -3627,6 +4011,15 @@ impl ResidualCascadeFit {
             .map_err(|error| format!("residual cascade fit: {error}"))?;
         let zsol = if let Some(l) = &self.predict_chol {
             chol_solve(l, core.m, &dense_row)
+        } else if let Some(factor) = &self.predict_sparse {
+            // Exact, through the same factorization the fit's log-determinant
+            // was read off — so the posterior variance carries no iterative
+            // backward error at all past the dense Gram cache.
+            solve_sparse_spd(factor, &Array1::from(dense_row.clone()))
+                .map_err(|error| {
+                    format!("residual cascade: sparse posterior-variance solve failed: {error}")
+                })?
+                .to_vec()
         } else {
             core.solve_coeff(lambda, &dense_row, None)?.0
         };
@@ -3947,6 +4340,10 @@ impl ResidualCascadeFit {
             training_sample_size: std::num::NonZeroUsize::new(training_sample_size)
                 .expect("nonzero wire count remains nonzero after conversion"),
             predict_chol: None,
+            // The restored core carries the dense factor itself, so
+            // `solve_coeff` replays through it; there is no CSR design left to
+            // assemble a sparse system from.
+            predict_sparse: None,
             coeff: state.coeff.clone(),
             log_lambda: state.log_lambda,
             sigma2: state.sigma2,
@@ -4174,31 +4571,152 @@ mod refinement_decision_tests {
         (x1, x2, y)
     }
 
+    /// Column count of a `dense_fixture(side)` cascade at each level count, so
+    /// the two width regimes the certified route now distinguishes are read off
+    /// the design rather than guessed from the net arithmetic.
     #[test]
-    fn iterative_route_refuses_auto_reml_but_keeps_fixed_lambda_fit() {
-        // Six levels fill a 65×65 finest box grid, taking this deliberately
-        // small data fixture past the dense Gram cap without making the test's
-        // row-wise work large.
+    fn zz_measure_cascade_width_by_level_count_2546() {
+        for levels in 4..=8 {
+            let (x1, x2, y) = dense_fixture(6);
+            let weights = vec![1.0; y.len()];
+            let axes: [&[f64]; 2] = [&x1, &x2];
+            let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
+                .expect("cascade design");
+            let m = design.core.m;
+            println!(
+                "#2546 levels={levels} m={m} gram_cached={} certified={}",
+                design.core.dense_gram.is_some(),
+                m <= CERTIFIED_SPECTRUM_MAX
+            );
+        }
+    }
+
+    /// The width regime this issue existed to open: PAST the dense Gram cache,
+    /// INSIDE the certified spectrum budget. Automatic REML must certify here.
+    ///
+    /// Before #2546 this design was fit-capable but never certifiable, because
+    /// the proof was gated on the Gram CACHE rather than on the spectrum it is
+    /// actually made of, so `fit_residual_cascade` could not finish at all once
+    /// refinement crossed 1536 columns. The assertion is the certificate itself:
+    /// a returned fit from `fit_reml` carries the KKT and ordering proofs, and
+    /// its log-determinant route is exact.
+    ///
+    /// The fixture has MORE ROWS THAN COLUMNS on purpose. A cascade whose
+    /// box-filling net outruns its sample — 36 rows against 1725 columns, say —
+    /// does not certify at any width, including widths under `DENSE_GRAM_MAX`
+    /// where the route was always open: `maximize_score_1d` subdivides for the
+    /// unidentified end of the spectrum and does not terminate. That is a
+    /// separate defect from this issue's, it predates the change here, and
+    /// putting it in this gate's fixture would measure it instead of the
+    /// capability.
+    #[test]
+    fn auto_reml_certifies_past_the_dense_gram_cache() {
+        // A 45x45 grid: 2025 rows against ~1.7k columns, so the data identify
+        // the whole Schur spectrum. That matters — a design with FEWER rows than
+        // columns is a separate, pre-existing problem for the certified search
+        // (see `the_spectral_residual_carries_no_null_modes`) and would test that
+        // instead of this.
+        let (x1, x2, y) = dense_fixture(45);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 6)
+            .expect("cascade design");
+        let m = design.core.m;
+        assert!(
+            m > DENSE_GRAM_MAX && design.core.dense_gram.is_none(),
+            "premise: the fixture must be past the dense Gram cache, got {m} columns"
+        );
+        assert!(
+            m <= CERTIFIED_SPECTRUM_MAX,
+            "premise: the fixture must be inside the certified spectrum budget, got {m} columns"
+        );
+        assert!(
+            m - design.core.nullity() <= y.len() - design.core.nullity(),
+            "premise: the data must identify every Schur mode ({m} columns, {} rows)",
+            y.len()
+        );
+        let fit = design
+            .fit_reml()
+            .expect("a design past the Gram cache but inside the spectrum budget must certify");
+        assert_eq!(fit.certificate.logdet_method, LogdetMethod::DenseExact);
+        assert!(
+            fit.log_lambda().is_finite(),
+            "certified selection must return a finite log lambda, got {}",
+            fit.log_lambda()
+        );
+    }
+
+    /// The spectral residual handed to the interval extension carries only
+    /// POSITIVE modes, and no more of them than the data can identify.
+    ///
+    /// `B = Z'WZ` for an `n × rank` whitened design, so `rank(B) ≤ n − nullity`;
+    /// on a box-filling cascade over a small sample almost every column is a
+    /// void-filling centre the data cannot pin, and the arithmetic returns
+    /// roundoff for those directions. Carrying them as zeros costs exactness
+    /// nothing on the scalar path and real enclosure width on the interval path,
+    /// so the invariant is pinned here rather than left to the enclosure's
+    /// behaviour.
+    #[test]
+    fn the_spectral_residual_carries_no_null_modes() {
         let (x1, x2, y) = dense_fixture(6);
         let weights = vec![1.0; y.len()];
         let axes: [&[f64]; 2] = [&x1, &x2];
         let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 6)
+            .expect("cascade design");
+        let core = &design.core;
+        let identifiable = core.y.len() - core.nullity();
+        assert!(
+            core.m - core.nullity() > identifiable,
+            "premise: the fixture must be rank-deficient (Schur rank {} against {identifiable} \
+             identifiable directions)",
+            core.m - core.nullity()
+        );
+        let profile = core.reml_profile().expect("spectral profile");
+        let CascadeResidualForm::Spectral(spectrum) = &profile.residual else {
+            panic!("this width must carry the spectral residual form");
+        };
+        assert!(
+            spectrum.eigenvalue.iter().all(|&theta| theta > 0.0),
+            "the spectral residual kept a non-positive mode"
+        );
+        assert_eq!(
+            spectrum.eigenvalue.len(),
+            spectrum.projected_square.len(),
+            "mode and response-energy lists must stay aligned"
+        );
+        assert_eq!(spectrum.penalty.len(), spectrum.eigenvalue.len());
+        assert!(
+            spectrum.eigenvalue.len() <= identifiable,
+            "kept {} modes against {identifiable} directions the data can identify",
+            spectrum.eigenvalue.len()
+        );
+    }
+
+    #[test]
+    fn auto_reml_refuses_past_the_certified_spectrum_budget() {
+        // One level finer than `auto_reml_certifies_past_the_dense_gram_cache`,
+        // which quadruples the finest box net and takes the design past the
+        // eigendecomposition's memory budget on the same tiny row set.
+        let (x1, x2, y) = dense_fixture(6);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 7)
             .expect("iterative-route cascade design");
         assert!(
-            design.core.m > DENSE_GRAM_MAX && design.core.dense_gram.is_none(),
-            "fixture must exercise the solved/iterative route, got {} columns",
+            design.core.m > CERTIFIED_SPECTRUM_MAX,
+            "fixture must exercise the uncertifiable route, got {} columns",
             design.core.m
         );
 
         let error = match design.fit_reml() {
-            Ok(_) => panic!("auto-REML must not claim a derivative proof on the iterative route"),
+            Ok(_) => panic!("auto-REML must not claim an enclosure it cannot form"),
             Err(error) => error,
         };
         assert!(matches!(
             error,
             ResidualCascadeError::RemlScoreProofUnavailable {
                 columns,
-                dense_gram_max: DENSE_GRAM_MAX,
+                certified_spectrum_max: CERTIFIED_SPECTRUM_MAX,
             } if columns == design.core.m
         ));
 
@@ -4206,7 +4724,161 @@ mod refinement_decision_tests {
             .fit_at(0.0, None)
             .expect("the same iterative design remains fit-capable at fixed lambda");
         assert_eq!(fixed.log_lambda(), 0.0);
-        assert_eq!(fixed.certificate.logdet_method, LogdetMethod::Slq);
+        // Refusing the PROOF is not the same as accepting a stochastic number.
+        // The fixed-λ fit's log-determinant is still exact, from a sparse direct
+        // Cholesky of the same normal equations.
+        assert_eq!(fixed.certificate.logdet_method, LogdetMethod::SparseExact);
+    }
+
+    /// Peak resident memory of the certified spectral profile against the width
+    /// it was built at, so [`CERTIFIED_SPECTRUM_BLOCKS`] is a measured number and
+    /// not an inventory of the allocations this file can see.
+    ///
+    /// The block count is what converts a memory budget into a column cap, and it
+    /// is NOT knowable from this file: `eigh` is `faer`'s self-adjoint EVD behind
+    /// `FaerEigh`, and its tridiagonalization allocates workspace this crate never
+    /// names. `VmHWM` is the process high-water mark, so widths are visited in
+    /// increasing order and each reading is that width's peak.
+    ///
+    /// The gate is that the constant is not an UNDER-estimate: a block count
+    /// smaller than the realized one would let the cap admit a width that
+    /// overruns the budget it was derived from.
+    #[test]
+    fn zz_measure_certified_spectrum_peak_memory_2546() {
+        let read_hwm_bytes = || -> Option<f64> {
+            let status = std::fs::read_to_string("/proc/self/status").ok()?;
+            for line in status.lines() {
+                if let Some(rest) = line.strip_prefix("VmHWM:") {
+                    let kb: f64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
+                    return Some(kb * 1024.0);
+                }
+            }
+            None
+        };
+        if read_hwm_bytes().is_none() {
+            println!("#2546 VmHWM unavailable on this platform; peak memory not measured");
+            return;
+        }
+        // Two widths, and the DIFFERENCE of their high-water marks over the
+        // difference of their `m²`: the process baseline (test binary, fixture,
+        // allocator arenas) is common to both and cancels, where a single
+        // absolute reading would attribute all of it to the narrow width.
+        let mut readings: Vec<(usize, f64)> = Vec::new();
+        for levels in [5usize, 6] {
+            let (x1, x2, y) = dense_fixture(45);
+            let weights = vec![1.0; y.len()];
+            let axes: [&[f64]; 2] = [&x1, &x2];
+            let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
+                .expect("cascade design");
+            let m = design.core.m;
+            let profile = design.core.reml_profile().expect("spectral profile");
+            let modes = profile.modes.len();
+            drop(profile);
+            let hwm = read_hwm_bytes().expect("VmHWM was readable a moment ago");
+            println!("#2546 m={m} modes={modes} vmhwm={:.1}MiB", hwm / (1024.0 * 1024.0));
+            readings.push((m, hwm));
+        }
+        let (narrow, narrow_hwm) = readings[0];
+        let (wide, wide_hwm) = readings[1];
+        assert!(
+            wide > narrow,
+            "the widths must increase for a high-water difference to mean anything"
+        );
+        let square_growth =
+            (wide as f64 * wide as f64 - narrow as f64 * narrow as f64) * size_of::<f64>() as f64;
+        let blocks = (wide_hwm - narrow_hwm) / square_growth;
+        println!(
+            "#2546 marginal blocks={blocks:.2} declared={CERTIFIED_SPECTRUM_BLOCKS} \
+             cap={CERTIFIED_SPECTRUM_MAX} budget_MiB={}",
+            CERTIFIED_SPECTRUM_BYTES / (1024 * 1024)
+        );
+        assert!(
+            blocks <= CERTIFIED_SPECTRUM_BLOCKS as f64,
+            "the certified route grows by {blocks:.2} m-squared blocks against a declared \
+             {CERTIFIED_SPECTRUM_BLOCKS} (m {narrow} -> {wide}); the column cap derived from \
+             CERTIFIED_SPECTRUM_BYTES is therefore an under-estimate of the memory it admits"
+        );
+    }
+
+    /// Fill-in of the sparse direct factor, against the dense triangle it
+    /// replaces, on the past-cache widths this route exists to serve.
+    ///
+    /// The sparse route is worth taking only if the AMD ordering's realized
+    /// `nnz(L)` is far below `m(m+1)/2` — the number a dense Cholesky would
+    /// store. That is a property of the design's sparsity, not an assumption, so
+    /// it is measured and asserted rather than argued: a multilevel Wendland row
+    /// touches `O(1)` bumps per level, so `A` is sparse and its factor should be
+    /// a small fraction of the dense triangle at every width here. If fill-in
+    /// ever made the sparse factor comparable to dense storage, this gate fails
+    /// and the route's premise is gone.
+    #[test]
+    fn zz_measure_sparse_factor_fill_in_2546() {
+        for levels in [6usize, 7] {
+            let (x1, x2, y) = dense_fixture(6);
+            let weights = vec![1.0; y.len()];
+            let axes: [&[f64]; 2] = [&x1, &x2];
+            let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
+                .expect("cascade design");
+            let core = &design.core;
+            let system = core.sparse_upper_system(1.0).expect("sparse normal equations");
+            let nnz_a = system.compute_nnz();
+            let nnz_l = sparse_spd_factor_nnz(&system).expect("symbolic analysis");
+            let dense_upper = core.m * (core.m + 1) / 2;
+            println!(
+                "#2546 levels={levels} m={} nnz(A)={nnz_a} nnz(L)={nnz_l} dense_upper={dense_upper} \
+                 fraction_of_dense={:.5} budget={SPARSE_FACTOR_MAX_NNZ}",
+                core.m,
+                nnz_l as f64 / dense_upper as f64
+            );
+            assert!(
+                nnz_l * 4 < dense_upper,
+                "sparse factor is not sparse at m={}: nnz(L)={nnz_l} against a dense triangle of \
+                 {dense_upper}; the sparse route's premise does not hold on this design",
+                core.m
+            );
+            assert!(
+                nnz_l <= SPARSE_FACTOR_MAX_NNZ,
+                "fill-in {nnz_l} exceeds the factor budget {SPARSE_FACTOR_MAX_NNZ} at m={}",
+                core.m
+            );
+        }
+    }
+
+    /// The sparse direct log-determinant and the dense one are the same number.
+    ///
+    /// Both are exact factorizations of the same `X'WX + λD`, so they may differ
+    /// only by floating-point summation order. The bound is the dense Cholesky's
+    /// own forward error on a log-determinant — `O(m)·eps` per diagonal term over
+    /// `m` terms — not a tuned tolerance, and it is charged on a design narrow
+    /// enough to HAVE a dense route to compare against.
+    #[test]
+    fn sparse_and_dense_logdets_agree() {
+        let (x1, x2, y) = dense_fixture(6);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 4)
+            .expect("cascade design");
+        let core = &design.core;
+        assert!(
+            core.dense_gram.is_some(),
+            "premise: the comparator needs the dense route, got m = {}",
+            core.m
+        );
+        for log_lambda in [-4.0_f64, 0.0, 4.0] {
+            let lambda = log_lambda.exp();
+            let dense = core.logdet_dense(lambda).expect("dense logdet");
+            let factor = core
+                .sparse_exact_factor(lambda)
+                .expect("sparse factorization")
+                .expect("fill-in is inside the budget on this fixture");
+            let sparse = logdet_from_factor(&factor).expect("sparse logdet");
+            let resolution = f64::EPSILON * core.m as f64 * dense.abs().max(1.0);
+            assert!(
+                (sparse - dense).abs() <= resolution,
+                "sparse and dense log-determinants disagree at log lambda {log_lambda}: \
+                 {sparse} versus {dense} (resolution {resolution})"
+            );
+        }
     }
 
     /// The residual spectral sum and a direct factorization compute the same
@@ -4237,15 +4909,20 @@ mod refinement_decision_tests {
             panic!("the dense route must carry the spectral residual form");
         };
 
-        let smallest = spectrum
-            .eigenvalue
+        // `cond(A) = (θ_max + λ)/(θ_min + λ)` is taken over EVERY Schur mode,
+        // including the certified-null ones the spectral residual now drops: a
+        // null mode still sits at exactly λ in `A`'s spectrum, and it is what
+        // sets the comparator's conditioning. Reading `spectrum.eigenvalue`
+        // instead would silently tighten the comparator's own error budget.
+        let smallest = profile
+            .modes
             .iter()
-            .copied()
+            .map(|mode| mode.eigenvalue)
             .fold(f64::INFINITY, f64::min);
-        let largest = spectrum
-            .eigenvalue
+        let largest = profile
+            .modes
             .iter()
-            .copied()
+            .map(|mode| mode.eigenvalue)
             .fold(0.0_f64, f64::max);
 
         for log_lambda in [-6.0_f64, -2.0, 0.0, 2.0, 6.0] {
@@ -4578,7 +5255,7 @@ mod refinement_decision_tests {
             }
             let (null_chol, _) = core.null_gram_factor().expect("null factor");
             let (modes, exact) = core
-                .dense_cascade_spectrum(&null_chol)
+                .dense_cascade_spectrum(&null_chol, &core.spectral_gram().expect("fixture is inside the certified spectrum budget"))
                 .expect("dense spectrum");
             let domain = certified_log_lambda_domain_from_modes(&modes).expect("domain");
             let (spectrum, certificate) = core
@@ -4655,7 +5332,7 @@ mod refinement_decision_tests {
         );
         let (null_chol, _) = core.null_gram_factor().expect("null factor");
         let (modes, exact) = core
-            .dense_cascade_spectrum(&null_chol)
+            .dense_cascade_spectrum(&null_chol, &core.spectral_gram().expect("fixture is inside the certified spectrum budget"))
             .expect("dense spectrum");
         let domain = certified_log_lambda_domain_from_modes(&modes).expect("domain");
         let (spectrum, certificate) = core
@@ -4973,7 +5650,7 @@ mod refinement_decision_tests {
 
         let (null_chol, _) = core.null_gram_factor().expect("null factor");
         let (modes, exact) = core
-            .dense_cascade_spectrum(&null_chol)
+            .dense_cascade_spectrum(&null_chol, &core.spectral_gram().expect("fixture is inside the certified spectrum budget"))
             .expect("dense spectrum");
         let (lo, hi) = certified_log_lambda_domain_from_modes(&modes).expect("domain");
         let (beta, anchor) = core.whitened_residual_rhs(&null_chol);
@@ -5032,7 +5709,7 @@ mod refinement_decision_tests {
         assert!(core.dense_gram.is_some());
         let (null_chol, _) = core.null_gram_factor().expect("null factor");
         let (modes, exact) = core
-            .dense_cascade_spectrum(&null_chol)
+            .dense_cascade_spectrum(&null_chol, &core.spectral_gram().expect("fixture is inside the certified spectrum budget"))
             .expect("dense spectrum");
         let (lo, hi) = certified_log_lambda_domain_from_modes(&modes).expect("domain");
         let (beta, anchor) = core.whitened_residual_rhs(&null_chol);
@@ -5144,7 +5821,7 @@ mod refinement_decision_tests {
             assert!(core.dense_gram.is_some());
             let (null_chol, _) = core.null_gram_factor().expect("null factor");
             let (modes, exact) = core
-                .dense_cascade_spectrum(&null_chol)
+                .dense_cascade_spectrum(&null_chol, &core.spectral_gram().expect("fixture is inside the certified spectrum budget"))
                 .expect("dense spectrum");
             let (lo, hi) = certified_log_lambda_domain_from_modes(&modes).expect("domain");
             let (beta, anchor) = core.whitened_residual_rhs(&null_chol);
