@@ -570,9 +570,12 @@ pub fn gaussian_reml_point_eval_at_rho(
 /// `roots` contains one representative from every stationary bracket isolated
 /// on `rho_window`; `root_brackets` records those location certificates and
 /// `root_gradients` makes their numerical residuals directly auditable. The
-/// selected ρ is the lowest evaluated representative or boundary, and
-/// `selected_projected_gradient_residual` is the box-KKT residual at that
-/// selection. A search cell whose stationary structure remains ambiguous at
+/// selected ρ is the lowest evaluated representative or boundary. This route's
+/// convergence claim is a *location* certificate, not a gradient one: it accepts
+/// on bracket width in ρ (`root_location_resolution`), which bounds the returned
+/// point's gradient by `h · width` through the mean value theorem and is a
+/// strictly stronger statement than any residual threshold. A search cell whose
+/// stationary structure remains ambiguous at
 /// `root_location_resolution` is not represented by a flag in a successful
 /// value: the search returns [`EstimationError::RemlDidNotConverge`] instead.
 #[derive(Clone, Debug)]
@@ -581,7 +584,6 @@ pub struct GaussianRemlStationarySet {
     pub root_brackets: Vec<[f64; 2]>,
     pub root_gradients: Vec<f64>,
     pub selected_rho: f64,
-    pub selected_projected_gradient_residual: f64,
     pub endpoint_costs: [f64; 2],
     pub rho_window: [f64; 2],
     pub root_location_resolution: f64,
@@ -621,7 +623,6 @@ pub fn gaussian_reml_stationary_set(
             root_brackets: Vec::new(),
             root_gradients: Vec::new(),
             selected_rho: init_rho.unwrap_or(0.0).clamp(RHO_LOWER, RHO_UPPER),
-            selected_projected_gradient_residual: 0.0,
             endpoint_costs,
             rho_window: [RHO_LOWER, RHO_UPPER],
             root_location_resolution: RHO_BRACKET_RESOLUTION,
@@ -655,7 +656,6 @@ pub fn gaussian_reml_stationary_set(
         root_brackets,
         root_gradients,
         selected_rho: selection.rho,
-        selected_projected_gradient_residual: selection.projected_gradient_residual,
         endpoint_costs,
         rho_window: [RHO_LOWER, RHO_UPPER],
         root_location_resolution: RHO_BRACKET_RESOLUTION,
@@ -4224,7 +4224,6 @@ struct StationaryRoot {
 #[derive(Clone, Copy, Debug)]
 struct ProfileSelection {
     rho: f64,
-    projected_gradient_residual: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -4645,17 +4644,7 @@ fn enumerate_and_select_rho_with_controls(
             "Gaussian REML profiled search produced no finite candidate".to_string(),
         ));
     }
-    let projected_gradient_residual = if best_rho == controls.lower {
-        (-best_eval.grad).max(0.0)
-    } else if best_rho == controls.upper {
-        best_eval.grad.max(0.0)
-    } else {
-        best_eval.grad.abs()
-    };
-    Ok(ProfileSelection {
-        rho: best_rho,
-        projected_gradient_residual,
-    })
+    Ok(ProfileSelection { rho: best_rho })
 }
 
 fn enumerate_and_select_rho(
@@ -4772,7 +4761,6 @@ fn rho_landscape_certificate_from_parts(
     let selection = if cache.penalty_rank == 0 {
         ProfileSelection {
             rho: init_rho.unwrap_or(0.0).clamp(RHO_LOWER, RHO_UPPER),
-            projected_gradient_residual: 0.0,
         }
     } else {
         let enclose = |a: f64, b: f64| {
