@@ -2565,17 +2565,23 @@
     /// Largest `log σ` at which the curvature meets the FD ladder's own budget,
     /// measured rather than chosen.
     ///
-    /// On main the ladder reads `0.853` at `log σ = 4` and `3.750` at `log σ = 5`
+    /// This was `4.0` while the curvature was a cancelling difference of kernel
+    /// rungs: the ladder read `0.853` at `log σ = 4` and `3.750` at `log σ = 5`
     /// (ratio of disagreement to the independently measured uncertainty), and the
-    /// 0.05-step sweep shows the curvature changing SIGN between adjacent samples
-    /// from `log σ ≈ 5.45`. The curvature is a cancelling difference, so past this
-    /// point it is noise and NO implementation can satisfy an accuracy bound —
-    /// which is why the accuracy assertion is scoped rather than deleted, and why
-    /// the certificate assertion below applies at every row instead.
+    /// 0.05-step sweep showed the curvature changing SIGN between adjacent
+    /// samples from `log σ ≈ 5.45`. No implementation could satisfy an accuracy
+    /// bound there, which is why the assertion was scoped rather than deleted.
     ///
-    /// Raise this when the cancellation is reformulated (#2610), not to make a
+    /// #2610 removed the cancellation instead of tolerating it: the log-σ
+    /// derivatives are now read in the `∂_a^j K_0` basis, where the rung sum that
+    /// used to lose thirteen digits is performed on integer coefficients. The
+    /// sweep is monotone with a step-to-step relative jump of `0.0487` at every
+    /// sample from `log σ = 4` to `7`, so the whole sampled range is inside the
+    /// budget and the cutoff no longer excludes anything the ladder tests.
+    ///
+    /// Raise this only when the numerics are reformulated again, never to make a
     /// red row pass.
-    const CURVATURE_USABLE_MAX_LOG_SIGMA: f64 = 4.0;
+    const CURVATURE_USABLE_MAX_LOG_SIGMA: f64 = 7.0;
 
     #[test]
     fn latent_log_sigma_curvature_tracks_gradient_fd_scale_ladder_2566() {
@@ -2782,6 +2788,15 @@
     /// The two channels are printed together on purpose: they come from the SAME
     /// jet call, so a step in one and not the other is the sharpest evidence
     /// available about where they part company.
+    ///
+    /// RESULT (measured): the answer was "gradual cancellation", not a routing
+    /// switch — the curve degraded into noise rather than stepping at one σ. That
+    /// is what #2610 then removed, by evaluating the derivative term lists in the
+    /// `∂_a^j K_0` basis where the cancelling rung sum is performed on integer
+    /// coefficients. This sweep is now monotone across the whole range with a
+    /// step-to-step relative jump of `0.0487` at every sample, so it has changed
+    /// role: it is no longer hunting a discontinuity, it is the regression
+    /// witness that the jump stays at the step scale.
     ///
     /// Prints only; never asserts a bound.
     #[test]

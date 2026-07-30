@@ -38,7 +38,7 @@ use crate::survival::location_scale::{
 };
 use crate::survival::lognormal_kernel::{
     FrailtyScale, FrailtySpec, HazardLoading, LatentSurvivalEventType, LatentSurvivalRow,
-    LatentSurvivalRowJet, log_kernel_bundle,
+    LatentSurvivalRowJet, LogLognormalKernelBundle, log_kernel_bundle,
 };
 use gam_linalg::matrix::{DenseDesignMatrix, DesignMatrix, LinearOperator, SymmetricMatrix};
 use gam_math::jet_scalar::{JetScalar, OneSeed, Order2, TwoSeed};
@@ -1690,6 +1690,187 @@ mod tests_kernel_recurrence {
 const LATENT_TERM_INLINE_CAPACITY: usize = 64;
 type LatentTermBuffer = SmallVec<[LatentKernelPrimaryTerm; LATENT_TERM_INLINE_CAPACITY]>;
 
+/// Highest kernel rung, `σ`-power, and `qdot`-power the `∂_a` basis handles.
+///
+/// These are structural bounds, not tolerances: the rung bound keeps every
+/// falling-factorial coefficient an exact f64 integer (`|s(12,1)| = 11! =
+/// 39916800`), and the other two size the accumulation table. A term list that
+/// exceeds any of them routes to the rung basis instead, which is always
+/// available.
+const LATENT_A_BASIS_MAX_RUNG: usize = 12;
+const LATENT_A_BASIS_MAX_TAU_EXP: usize = 12;
+const LATENT_A_BASIS_MAX_QDOT_POWER: usize = 4;
+
+/// Signed Stirling numbers of the first kind: the coefficients of the falling
+/// factorial `(x)_k = x(x−1)···(x−k+1) = Σ_j s(k,j) x^j`.
+///
+/// These are the weights that re-express a kernel rung in the `∂_a^j K_0` basis,
+/// because `m^k K_k = (−1)^k (∂_a)_k K_0` (#2610). Built by the standard
+/// recurrence `(x)_{k+1} = (x)_k · (x − k)` in integers so every entry converts
+/// to f64 exactly.
+const fn latent_falling_factorial_table()
+-> [[i64; LATENT_A_BASIS_MAX_RUNG + 1]; LATENT_A_BASIS_MAX_RUNG + 1] {
+    let mut table = [[0_i64; LATENT_A_BASIS_MAX_RUNG + 1]; LATENT_A_BASIS_MAX_RUNG + 1];
+    table[0][0] = 1;
+    let mut rung = 0usize;
+    while rung < LATENT_A_BASIS_MAX_RUNG {
+        let mut power = 0usize;
+        while power <= rung {
+            let value = table[rung][power];
+            if value != 0 {
+                table[rung + 1][power + 1] += value;
+                table[rung + 1][power] -= (rung as i64) * value;
+            }
+            power += 1;
+        }
+        rung += 1;
+    }
+    table
+}
+
+const LATENT_FALLING_FACTORIAL: [[i64; LATENT_A_BASIS_MAX_RUNG + 1];
+    LATENT_A_BASIS_MAX_RUNG + 1] = latent_falling_factorial_table();
+
+/// Evaluate one latent kernel term list as a signed log magnitude.
+///
+/// Shared by the packed order-two production path and the multi-direction
+/// oracle so the two cannot drift in either the basis they use or the
+/// accumulation order they use it in.
+fn latent_kernel_evaluate_terms(
+    bundle: &LogLognormalKernelBundle,
+    state: LatentKernelPrimaryState,
+    terms: &[LatentKernelPrimaryTerm],
+    context: &str,
+) -> Result<(f64, f64), LatentSurvivalError> {
+    let needs_qdot = terms
+        .iter()
+        .any(|term| term.coeff != 0.0 && term.qdot_power > 0);
+    if needs_qdot && !(state.qdot.is_finite() && state.qdot > 0.0) {
+        return Err(LatentSurvivalError::NumericalFailure {
+            reason: format!(
+                "{context} requires positive finite qdot for exact-event directional terms, got {}",
+                state.qdot
+            ),
+        });
+    }
+    let log_qdot = if needs_qdot { state.qdot.ln() } else { 0.0 };
+    if let Some(sum) = latent_kernel_evaluate_terms_in_a_basis(bundle, state, terms, log_qdot) {
+        return Ok(sum);
+    }
+    let mut log_mags = SmallVec::<[f64; LATENT_TERM_INLINE_CAPACITY]>::new();
+    let mut signs = SmallVec::<[f64; LATENT_TERM_INLINE_CAPACITY]>::new();
+    for term in terms {
+        if term.coeff == 0.0 {
+            continue;
+        }
+        log_mags.push(
+            term.coeff.abs().ln()
+                + term.q_exp as f64 * state.q
+                + term.tau_exp as f64 * state.log_sigma_factor
+                + term.qdot_power as f64 * log_qdot
+                + bundle.get(term.k),
+        );
+        signs.push(term.coeff.signum());
+    }
+    if log_mags.is_empty() {
+        return Ok((f64::NEG_INFINITY, 0.0));
+    }
+    Ok(signed_log_sum_exp(&log_mags, &signs))
+}
+
+/// The same term list evaluated in the `∂_a^j K_0` basis, or `None` when that
+/// basis is unavailable for this bundle or this term list (#2610).
+///
+/// The rung basis and this one are related by an exact integer change of basis,
+/// so this is not an approximation — it is the same sum with the cancellation
+/// performed on the COEFFICIENTS instead of on the values. That is the whole
+/// repair. `∂_{log σ} K_0` reaches the rung basis as `σ²(−mK_1 + m²K_2)`, whose
+/// two summands agree to `~1/(120σ²)` of their own size; in this basis the
+/// identical quantity is `σ² ∂_a² K_0`, one entry, because the `∂_a` coefficient
+/// cancels ANALYTICALLY when like powers are collected. Past `log σ ≈ 5.4` that
+/// is the difference between a curvature and its roundoff.
+///
+/// Requires `q_exp == k` on every term. That is not a restriction in practice:
+/// the differentiation rules shift `q_exp` and `k` in lockstep, and every base
+/// term the row expression builds starts on the diagonal, so the whole
+/// derivative tree stays there. A term off the diagonal routes to the rung
+/// basis rather than being handled approximately.
+fn latent_kernel_evaluate_terms_in_a_basis(
+    bundle: &LogLognormalKernelBundle,
+    state: LatentKernelPrimaryState,
+    terms: &[LatentKernelPrimaryTerm],
+    log_qdot: f64,
+) -> Option<(f64, f64)> {
+    let tower = bundle.log_scaled_a_derivatives.as_ref()?;
+    let mut max_rung = 0usize;
+    let mut max_tau_exp = 0usize;
+    let mut max_qdot_power = 0usize;
+    for term in terms {
+        if term.coeff == 0.0 {
+            continue;
+        }
+        if term.q_exp != term.k
+            || term.k >= tower.len()
+            || term.k > LATENT_A_BASIS_MAX_RUNG
+            || term.tau_exp > LATENT_A_BASIS_MAX_TAU_EXP
+            || term.qdot_power > LATENT_A_BASIS_MAX_QDOT_POWER
+        {
+            return None;
+        }
+        max_rung = max_rung.max(term.k);
+        max_tau_exp = max_tau_exp.max(term.tau_exp);
+        max_qdot_power = max_qdot_power.max(term.qdot_power);
+    }
+    // One accumulator per `(qdot_power, tau_exp, j)` monomial. Terms sharing a
+    // cell share every factor except the integer coefficient, so collecting them
+    // here is where the analytic cancellation happens — exactly, in integers
+    // scaled by one common power of σ.
+    let rung_stride = max_rung + 1;
+    let tau_stride = max_tau_exp + 1;
+    let mut coefficients =
+        SmallVec::<[f64; 256]>::from_elem(0.0, (max_qdot_power + 1) * tau_stride * rung_stride);
+    for term in terms {
+        if term.coeff == 0.0 {
+            continue;
+        }
+        let rung_parity = if term.k % 2 == 0 { 1.0 } else { -1.0 };
+        let cell = (term.qdot_power * tau_stride + term.tau_exp) * rung_stride;
+        for power in 0..=term.k {
+            let stirling = LATENT_FALLING_FACTORIAL[term.k][power];
+            if stirling != 0 {
+                coefficients[cell + power] += rung_parity * term.coeff * stirling as f64;
+            }
+        }
+    }
+    let mut log_mags = SmallVec::<[f64; LATENT_TERM_INLINE_CAPACITY]>::new();
+    let mut signs = SmallVec::<[f64; LATENT_TERM_INLINE_CAPACITY]>::new();
+    for qdot_power in 0..=max_qdot_power {
+        for tau_exp in 0..=max_tau_exp {
+            for power in 0..=max_rung {
+                let coefficient =
+                    coefficients[(qdot_power * tau_stride + tau_exp) * rung_stride + power];
+                let entry = tower[power];
+                if coefficient == 0.0 || entry.sign == 0.0 {
+                    continue;
+                }
+                // `tower` holds `σ^j ∂_a^j K_0`, so the stored `σ^j` is divided
+                // back out alongside the term's own `σ^{tau_exp}`.
+                log_mags.push(
+                    coefficient.abs().ln()
+                        + (tau_exp as f64 - power as f64) * state.log_sigma_factor
+                        + qdot_power as f64 * log_qdot
+                        + entry.log_abs,
+                );
+                signs.push(coefficient.signum() * entry.sign);
+            }
+        }
+    }
+    if log_mags.is_empty() {
+        return Some((f64::NEG_INFINITY, 0.0));
+    }
+    Some(signed_log_sum_exp(&log_mags, &signs))
+}
+
 #[inline]
 fn latent_kernel_accumulate_term_inline(
     terms: &mut LatentTermBuffer,
@@ -1888,40 +2069,9 @@ mod tests_multidir_kernel {
                 reason: format!("{context} kernel evaluation failed: {e}"),
             })?;
 
-        let evaluate_terms =
-            |terms: &[LatentKernelPrimaryTerm]| -> Result<(f64, f64), LatentSurvivalError> {
-                let mut log_mags = Vec::new();
-                let mut signs = Vec::new();
-                for term in terms {
-                    if term.coeff == 0.0 {
-                        continue;
-                    }
-                    if term.qdot_power > 0 && !(state.qdot.is_finite() && state.qdot > 0.0) {
-                        return Err(LatentSurvivalError::NumericalFailure {
-                            reason: format!(
-                                "{context} requires positive finite qdot for exact-event directional terms, got {}",
-                                state.qdot
-                            ),
-                        });
-                    }
-                    let log_qdot = if term.qdot_power > 0 {
-                        state.qdot.ln()
-                    } else {
-                        0.0
-                    };
-                    let log_mag = term.coeff.abs().ln()
-                        + term.q_exp as f64 * state.q
-                        + term.tau_exp as f64 * state.log_sigma_factor
-                        + term.qdot_power as f64 * log_qdot
-                        + bundle.get(term.k);
-                    log_mags.push(log_mag);
-                    signs.push(term.coeff.signum());
-                }
-                if log_mags.is_empty() {
-                    return Ok((f64::NEG_INFINITY, 0.0));
-                }
-                Ok(signed_log_sum_exp(&log_mags, &signs))
-            };
+        let evaluate_terms = |terms: &[LatentKernelPrimaryTerm]| {
+            latent_kernel_evaluate_terms(&bundle, state, terms, context)
+        };
 
         let (base_log_sum, base_sign) = evaluate_terms(&term_lists[0])?;
         if !(base_log_sum.is_finite() && base_sign > 0.0) {
@@ -2117,41 +2267,9 @@ fn latent_kernel_sum_order2_parts<const K: usize>(
             }
         })?;
 
-    let evaluate_terms =
-        |terms: &[LatentKernelPrimaryTerm]| -> Result<(f64, f64), LatentSurvivalError> {
-            let mut log_mags = SmallVec::<[f64; LATENT_TERM_INLINE_CAPACITY]>::new();
-            let mut signs = SmallVec::<[f64; LATENT_TERM_INLINE_CAPACITY]>::new();
-            for term in terms {
-                if term.coeff == 0.0 {
-                    continue;
-                }
-                if term.qdot_power > 0 && !(state.qdot.is_finite() && state.qdot > 0.0) {
-                    return Err(LatentSurvivalError::NumericalFailure {
-                        reason: format!(
-                            "{context} requires positive finite qdot for exact-event directional terms, got {}",
-                            state.qdot
-                        ),
-                    });
-                }
-                let log_qdot = if term.qdot_power > 0 {
-                    state.qdot.ln()
-                } else {
-                    0.0
-                };
-                log_mags.push(
-                    term.coeff.abs().ln()
-                        + term.q_exp as f64 * state.q
-                        + term.tau_exp as f64 * state.log_sigma_factor
-                        + term.qdot_power as f64 * log_qdot
-                        + bundle.get(term.k),
-                );
-                signs.push(term.coeff.signum());
-            }
-            if log_mags.is_empty() {
-                return Ok((f64::NEG_INFINITY, 0.0));
-            }
-            Ok(signed_log_sum_exp(&log_mags, &signs))
-        };
+    let evaluate_terms = |terms: &[LatentKernelPrimaryTerm]| {
+        latent_kernel_evaluate_terms(&bundle, state, terms, context)
+    };
 
     let (base_log_sum, base_sign) = evaluate_terms(base_terms)?;
     if !(base_log_sum.is_finite() && base_sign > 0.0) {

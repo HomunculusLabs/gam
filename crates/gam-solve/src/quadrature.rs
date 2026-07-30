@@ -1479,6 +1479,130 @@ fn cloglog_log_survival_gumbel_quadrature(ctx: &QuadratureContext, mu: f64, sigm
     }
 }
 
+/// Probabilists' Hermite polynomial `He_n(x)` from the three-term recurrence
+/// `He_{n+1}(x) = x·He_n(x) − n·He_{n−1}(x)`.
+///
+/// This is the polynomial factor in the Gaussian derivatives
+/// `φ^{(n)}(x) = (−1)^n He_n(x) φ(x)`, which is what carries a μ-derivative of
+/// the Gumbel-mixing survival integral back into an integral against the SAME
+/// mixing density (#2610).
+#[inline]
+fn hermite_he(n: usize, x: f64) -> f64 {
+    let mut previous = 1.0_f64;
+    if n == 0 {
+        return previous;
+    }
+    let mut current = x;
+    for order in 1..n {
+        let next = x * current - (order as f64) * previous;
+        previous = current;
+        current = next;
+    }
+    current
+}
+
+/// Whether `ln S(μ,σ)` is routed through the Gumbel-mixing quadrature.
+///
+/// Mirrors [`cloglog_log_survival_term_controlled`]'s routing predicate so a
+/// consumer of [`cloglog_log_survival_mu_derivative_gumbel_quadrature`] can ask
+/// whether the derivative it is about to request comes off the SAME
+/// approximation surface as the value. Reading the derivatives from one branch
+/// while the value came from another is the mixing this predicate exists to
+/// prevent.
+#[inline]
+pub fn cloglog_log_survival_uses_gumbel_quadrature(mu: f64, sigma: f64) -> bool {
+    mu.is_finite()
+        && sigma.is_finite()
+        && sigma > CLOGLOG_SIGMA_DEGENERATE
+        && mu + 0.5 * sigma * sigma > CLOGLOG_RARE_EVENT_LOG_MAX
+        && sigma >= CLOGLOG_LARGE_SIGMA_ASYMPTOTIC_MIN
+}
+
+/// `σ^j · ∂^j S/∂μ^j` in signed-log coordinates, off the same Gumbel-mixing
+/// quadrature that [`cloglog_log_survival_gumbel_quadrature`] uses for `ln S`.
+///
+/// The whole point is WHICH factor carries the parameters. In
+///
+/// ```text
+///   S(μ,σ) = ∫ g(η) Φ((η−μ)/σ) dη,   g(η) = exp(η − e^η),
+/// ```
+///
+/// the mixing density `g` is parameter-free, so every μ-derivative lands
+/// entirely on the Gaussian factor:
+///
+/// ```text
+///   σ^j ∂_μ^j S = (−1)^j ∫ g(η) φ^{(j−1)}((η−μ)/σ) dη
+///               = −∫ g(η) He_{j−1}((η−μ)/σ) φ((η−μ)/σ) dη,
+/// ```
+///
+/// using `φ^{(n)} = (−1)^n He_n φ`. Both signs collapse to the single leading
+/// minus. The integral is over the SAME universal η-interval and the SAME rule
+/// as the value, so no new convergence question is opened.
+///
+/// Why this matters (#2610): the rung recurrence reaches the same derivative as
+/// an alternating sum over `m^k K_k`, e.g. `∂_a^4 K_0 = −mK_1 + 7m²K_2 − 6m³K_3
+/// + m⁴K_4`. Each summand is `O(1/σ)` while the sum is `O(1/σ^5)`, so at
+/// `log σ ≈ 5.4` the result is pure roundoff and the log-σ curvature changes
+/// SIGN between adjacent samples. Here the same quantity is ONE quadrature whose
+/// integrand is already the small thing: `He_{j−1}((η−μ)/σ)φ((η−μ)/σ)` is
+/// `O(1/σ)` pointwise for even `j`, so nothing large is ever subtracted.
+///
+/// Returns `(ln|·|, sign)` with `(−∞, 0)` for an exact zero, so the magnitude
+/// survives value-space underflow exactly as the `ln S` path does (#798).
+/// `order` must be at least 1; order 0 is `ln S` itself, which
+/// [`cloglog_log_survival_gumbel_quadrature`] already returns.
+pub fn cloglog_log_survival_mu_derivative_gumbel_quadrature(
+    ctx: &QuadratureContext,
+    mu: f64,
+    sigma: f64,
+    order: usize,
+) -> (f64, f64) {
+    assert!(
+        order >= 1,
+        "the Gumbel-mixing mu-derivative quadrature starts at order 1; \
+         order 0 is ln S, which cloglog_log_survival_gumbel_quadrature returns"
+    );
+    let low = CLOGLOG_GUMBEL_QUAD_ETA_LO;
+    let high = CLOGLOG_GUMBEL_QUAD_ETA_HI;
+    let half = 0.5 * (high - low);
+    let mid = 0.5 * (low + high);
+    let rule = ctx.clenshaw_curtis_n(cloglog_gumbel_quad_nodes(sigma));
+    let log_gaussian_norm = -0.5 * (2.0 * std::f64::consts::PI).ln();
+    // Signed streaming log-sum-exp: the running sum carries a sign because the
+    // Hermite factor changes sign inside the interval. Clenshaw-Curtis weights
+    // are positive, so ln(W_i) is finite.
+    let mut running_max = f64::NEG_INFINITY;
+    let mut running_sum = 0.0_f64;
+    for (&node, &weight) in rule.nodes.iter().zip(rule.weights.iter()) {
+        let eta = half * node + mid;
+        let standardized = (eta - mu) / sigma;
+        let hermite = hermite_he(order - 1, standardized);
+        if hermite == 0.0 {
+            continue;
+        }
+        let summand = (weight * half).ln()
+            + (eta - safe_exp(eta))
+            + log_gaussian_norm
+            - 0.5 * standardized * standardized
+            + hermite.abs().ln();
+        if !summand.is_finite() {
+            continue;
+        }
+        let sign = -hermite.signum();
+        if summand > running_max {
+            running_sum = running_sum * (running_max - summand).exp() + sign;
+            running_max = summand;
+        } else {
+            running_sum += sign * (summand - running_max).exp();
+        }
+    }
+    if running_max == f64::NEG_INFINITY || running_sum == 0.0 {
+        (f64::NEG_INFINITY, 0.0)
+    } else {
+        (running_max + running_sum.abs().ln(), running_sum.signum())
+    }
+}
+
 /// Canonical log-space survival evaluator: returns `ln S(μ,σ)` with its routing
 /// mode. This is the log-domain twin of [`cloglog_survival_term_controlled`].
 ///
