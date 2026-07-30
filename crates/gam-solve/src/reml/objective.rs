@@ -2157,7 +2157,7 @@ impl<'a> RemlState<'a> {
         // pays a thread-local read rather than a coefficient clone per outer
         // evaluation. (#2461 needed this to verify its own change; #2460 owns
         // the audit.)
-        if crate::estimate::outer_eval_capture::outer_gradient_fd_capture_armed() {
+        if crate::estimate::outer_eval_capture::outer_gradient_audit_capture_armed() {
             let ext_cols = result
                 .ext_mode_response_cols
                 .as_ref()

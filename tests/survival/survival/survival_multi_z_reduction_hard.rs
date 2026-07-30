@@ -127,7 +127,49 @@ fn factor_to_full(factor: &Array2<f64>) -> Array2<f64> {
 }
 
 // ------------------------------------------------------------------
-// Test 1: survival K=1 bitwise == scalar identity, 200 fixtures.
+// Scalar-reduction comparison.
+//
+// The K=1 reduction is an identity over the reals, not over IEEE-754.
+// `marginal_slope_preserving_scale` squares the probit scale once and applies
+// it to the quadratic form of the *raw* slopes, and the diagonal quadratic
+// form accumulates `coefficient * slope * slope`, so production evaluates
+// `fl(fl(p*p) * fl(s*s))`. The scalar identity below folds the scale into the
+// slope first and evaluates `fl(fl(p*s) * fl(p*s))`. Those are the same real
+// number and differ by up to an ulp, so a `to_bits()` assertion pins the
+// association order rather than the reduction. The production representation
+// policy is deliberate, so the reduction is pinned to a few-ulp bound.
+//
+// `magnitude` is the size of the largest intermediates the reference sums, so
+// a cancelling total is still held to the accuracy its inputs allow rather
+// than to an unachievable relative bound on a near-zero result.
+// ------------------------------------------------------------------
+const SCALAR_REDUCTION_ULPS: f64 = 8.0;
+
+fn ulp_of(value: f64) -> f64 {
+    let magnitude = value.abs();
+    if !magnitude.is_finite() || magnitude == 0.0 {
+        return f64::from_bits(1);
+    }
+    let next = f64::from_bits(magnitude.to_bits() + 1);
+    if next.is_finite() {
+        next - magnitude
+    } else {
+        magnitude - f64::from_bits(magnitude.to_bits() - 1)
+    }
+}
+
+fn assert_scalar_reduction(got: f64, expected: f64, magnitude: f64, context: &str) {
+    let difference = (got - expected).abs();
+    let tolerance = SCALAR_REDUCTION_ULPS * ulp_of(magnitude.abs().max(expected.abs()));
+    assert!(
+        difference <= tolerance,
+        "{context}: got={got:.17e} expected={expected:.17e} |diff|={difference:.3e} exceeds \
+         the {SCALAR_REDUCTION_ULPS}-ulp scalar-reduction tolerance {tolerance:.3e}"
+    );
+}
+
+// ------------------------------------------------------------------
+// Test 1: survival K=1 == scalar identity to a few ulps, 200 fixtures.
 // scalar identity: eta = q * sqrt(1 + r^2) + r * z, with r = probit_scale*slope.
 // We use Diagonal([1.0]) so Sigma_11 = 1.
 // ------------------------------------------------------------------
@@ -142,19 +184,21 @@ fn survival_k1_eta_bitwise_scalar_identity_200_fixtures() {
         let probit_scale = rng.range(0.05, 2.5);
         let covariance = MarginalSlopeCovariance::diagonal(Array1::from(vec![1.0])).unwrap();
         let r = probit_scale * slope[0];
-        let scalar = q * (1.0 + r * r).sqrt() + r * z[0];
+        let c = (1.0 + r * r).sqrt();
+        let scalar = q * c + r * z[0];
         let got = survival_marginal_slope_vector_eta(q, &z, &slope, &covariance, probit_scale)
             .expect("survival K=1 eta");
-        assert_eq!(
-            got.to_bits(),
-            scalar.to_bits(),
-            "trial {trial}: survival K=1 eta drifted from scalar identity (got={got:.17e}, scalar={scalar:.17e})"
+        assert_scalar_reduction(
+            got,
+            scalar,
+            (q * c).abs() + (r * z[0]).abs(),
+            &format!("trial {trial}: survival K=1 eta drifted from scalar identity"),
         );
     }
 }
 
 // ------------------------------------------------------------------
-// Test 2: bernoulli K=1 bitwise == scalar identity, 200 fixtures.
+// Test 2: bernoulli K=1 == scalar identity to a few ulps, 200 fixtures.
 // ------------------------------------------------------------------
 #[test]
 fn bernoulli_k1_eta_bitwise_scalar_identity_200_fixtures() {
@@ -166,13 +210,15 @@ fn bernoulli_k1_eta_bitwise_scalar_identity_200_fixtures() {
         let probit_scale = rng.range(0.05, 2.5);
         let covariance = MarginalSlopeCovariance::diagonal(Array1::from(vec![1.0])).unwrap();
         let r = probit_scale * slope[0];
-        let scalar = q * (1.0 + r * r).sqrt() + r * z[0];
+        let c = (1.0 + r * r).sqrt();
+        let scalar = q * c + r * z[0];
         let got = marginal_slope_probit_eta(q, &z, &slope, &covariance, probit_scale)
             .expect("bernoulli K=1 eta");
-        assert_eq!(
-            got.to_bits(),
-            scalar.to_bits(),
-            "trial {trial}: bernoulli K=1 eta drifted from scalar identity (got={got:.17e}, scalar={scalar:.17e})"
+        assert_scalar_reduction(
+            got,
+            scalar,
+            (q * c).abs() + (r * z[0]).abs(),
+            &format!("trial {trial}: bernoulli K=1 eta drifted from scalar identity"),
         );
     }
 }

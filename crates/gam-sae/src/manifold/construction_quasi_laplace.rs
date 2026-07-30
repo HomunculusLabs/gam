@@ -761,6 +761,22 @@ impl SaeManifoldTerm {
         // the progress threshold).
         let mut last_limit_certificate: Option<f64> = None;
         let mut certificate_escalations = 0usize;
+        // #2080 -- the polish-paid window granted at the budget-exhaustion branch
+        // below is gated on `terminal_newton_polish_armed`, a FLAG that any
+        // materially descending refine round re-arms. Its two sibling lanes both
+        // carry real counters (the certificate lane's cap right here, and the
+        // progress lane's `budget_escalation_extra == 0` one-shot); this one does
+        // not. Each grant resets the effective limit to
+        // `total_inner_iter + refine_limit`, so arm -> grant -> descend -> re-arm
+        // extends ONE criterion evaluation without bound while `criterion_calls`
+        // stays flat -- which is why the probe-budget fixtures time out instead of
+        // failing their `<= 64` assertion. A flag is not a budget.
+        //
+        // Past the cap the evaluation falls through to the final-gate certificate
+        // and then to the typed non-convergence refusal the outer already maps to
+        // +inf, so nothing is silently accepted.
+        let mut polish_escalations = 0usize;
+        const POLISH_ESCALATION_ANTI_RUNAWAY_CAP: usize = 2;
         const CERTIFICATE_ESCALATION_PROGRESS: f64 = 0.7;
         const CERTIFICATE_ESCALATION_ANTI_RUNAWAY_CAP: usize = 8;
         // #1051 — objective-stagnation convergence. On an ill-conditioned
@@ -1263,7 +1279,9 @@ impl SaeManifoldTerm {
                     // loop-top KKT gate and the idempotence certificate remain
                     // the sole acceptance authority, exactly as at the stall
                     // branch.
-                    if terminal_newton_polish_armed {
+                    if terminal_newton_polish_armed
+                        && polish_escalations < POLISH_ESCALATION_ANTI_RUNAWAY_CAP
+                    {
                         terminal_newton_polish_armed = false;
                         if self.terminal_exact_newton_polish(
                             target,
@@ -1276,12 +1294,19 @@ impl SaeManifoldTerm {
                             64,
                             &mut best_seen,
                         )? {
+                            polish_escalations += 1;
                             *criterion_fixed_point = false;
                             consecutive_objective_stalls = 0;
                             saw_refine_progress = true;
                             budget_escalation_extra = total_inner_iter
                                 .saturating_sub(refine_limit)
                                 .saturating_add(refine_limit.max(1));
+                            log::debug!(
+                                "SaeManifoldTerm::penalized_quasi_laplace_criterion: polish-paid \
+                                 window {polish_escalations}/\
+                                 {POLISH_ESCALATION_ANTI_RUNAWAY_CAP} at fixed rho after \
+                                 {total_inner_iter} inner iterations"
+                            );
                             continue;
                         }
                     }
