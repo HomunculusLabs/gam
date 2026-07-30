@@ -699,7 +699,6 @@ pub trait RuntimeJetScalar<'arena>: Clone {
         input_scale: f64,
         input_shift: f64,
         derivative_stack: [f64; 5],
-        workspace: &'arena Self::Workspace,
     ) -> Self {
         affine_compose_default(
             self,
@@ -761,7 +760,7 @@ pub trait RuntimeJetScalar<'arena>: Clone {
             Self::mul,
             Self::scale,
             Self::multiply_add,
-            |input, scale, shift, stack| input.affine_compose(scale, shift, stack, workspace),
+            |input, scale, shift, stack| input.affine_compose(scale, shift, stack),
         )
     }
     /// Number of primary derivative axes carried by this scalar.
@@ -924,7 +923,6 @@ impl<'arena> RuntimeJetScalar<'arena> for RuntimeValue {
         input_scale: f64,
         input_shift: f64,
         derivative_stack: [f64; 5],
-        workspace: &'arena Self::Workspace,
     ) -> Self {
         // Route the affine pre-composition through the shared default instead
         // of hand-rolling the zero-order shortcut: `compose_unary` already
@@ -1173,7 +1171,6 @@ impl<'arena, S: JetScalar<K>, const K: usize> RuntimeJetScalar<'arena> for Fixed
         input_scale: f64,
         input_shift: f64,
         derivative_stack: [f64; 5],
-        &(): &'arena Self::Workspace,
     ) -> Self {
         Self {
             inner: self
@@ -1729,10 +1726,9 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
         input_scale: f64,
         input_shift: f64,
         derivative_stack: [f64; 5],
-        arena: &'arena DynamicJetArena,
     ) -> Self {
-        assert!(std::ptr::eq(self.arena, arena));
         assert!(input_shift.is_finite(), "affine input shift must be finite");
+        let arena = self.arena;
         let dimension = self.dimension();
         let first = derivative_stack[1] * input_scale;
         let second = derivative_stack[2] * input_scale * input_scale;
@@ -5961,7 +5957,6 @@ mod tests {
                 input_scales[2],
                 input_shift,
                 derivative_stacks[2],
-                &arena,
             );
             let dynamic_affine_scalar = affine_compose_default(
                 &dynamic_inputs[2],
@@ -6016,7 +6011,7 @@ mod tests {
                 RuntimeJetScalar::mul,
                 RuntimeJetScalar::scale,
                 RuntimeJetScalar::multiply_add,
-                |input, scale, shift, stack| input.affine_compose(scale, shift, stack, &arena),
+                |input, scale, shift, stack| input.affine_compose(scale, shift, stack),
             );
 
             for (label, actual, expected) in [
