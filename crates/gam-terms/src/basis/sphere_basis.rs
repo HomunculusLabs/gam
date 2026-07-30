@@ -2451,31 +2451,16 @@ pub fn build_duchon_native_penalty_psi_derivatives(
     Ok((sources, first, second))
 }
 
+/// The chart a `(data, spec)` pair's ψ-derivative must be assembled in.
+///
+/// Thin wrapper over [`duchon_resolve_chart`]; kept as its own name because the
+/// derivative path is the caller that has to be *unable* to skip it (#2638).
 pub(crate) fn prepare_duchon_derivative_contextwithworkspace(
     data: ArrayView2<'_, f64>,
     spec: &DuchonBasisSpec,
     workspace: &mut BasisWorkspace,
-) -> Result<(Array2<f64>, Option<Array2<f64>>), BasisError> {
-    let original_centers = select_centers_by_strategy(data, &spec.center_strategy)?;
-    let centers = expand_periodic_centers(&original_centers, spec.periodic.as_deref())?;
-    assert_spatial_centers_below_large_scale_cap(data.ncols(), centers.view())?;
-    let raw_design = build_duchon_basis_designwithworkspace(
-        data,
-        centers.view(),
-        spec.length_scale,
-        spec.power,
-        spec.nullspace_order,
-        spec.aniso_log_scales.as_deref(),
-        None,
-        workspace,
-    )?;
-    let identifiability_transform = spatial_identifiability_transform_from_design(
-        data,
-        raw_design.basis.view(),
-        &spec.identifiability,
-        "Duchon",
-    )?;
-    Ok((centers, identifiability_transform))
+) -> Result<ResolvedDuchonChart, BasisError> {
+    duchon_resolve_chart(data, spec, workspace)
 }
 
 /// Validate a 1D periodic Duchon center matrix, compute the circular
