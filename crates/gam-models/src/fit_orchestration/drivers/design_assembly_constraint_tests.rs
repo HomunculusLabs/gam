@@ -2281,7 +2281,7 @@ fn spatial_frozen_transform_rebuild_is_exact_on_trainingrows() {
             ..
         } => (
             centers.clone(),
-            *length_scale,
+            length_scale.original_value(),
             identifiability_transform
                 .clone()
                 .expect("fit-time Option 5 should store transform"),
