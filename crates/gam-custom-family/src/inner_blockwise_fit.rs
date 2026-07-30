@@ -76,6 +76,55 @@ fn constrained_search_delta_owns_trust_step(
         || (has_active_set && ambient_spectrum_has_negative_curvature == Some(false))
 }
 
+/// The per-cycle fixed inputs of the trust-region quadratic model, so a candidate
+/// step's predicted decrease can be evaluated more than once per attempt without
+/// re-threading six unchanging arguments through every call.
+struct JointTrustRegionModel<'a> {
+    source: &'a JointHessianSource,
+    ranges: &'a [(usize, usize)],
+    s_lambdas: &'a [Array2<f64>],
+    diagonal_ridge: f64,
+    joint_bundle: Option<&'a gam_problem::JointPenaltyBundle>,
+    jeffreys_curvature: Option<&'a Array2<f64>>,
+}
+
+impl JointTrustRegionModel<'_> {
+    /// Predicted decrease of the model at `delta`, on the TRUE penalized
+    /// (Firth-augmented) Hessian — bit-identically the model the accept/reject
+    /// `predicted_reduction` is computed on.
+    ///
+    /// Exists so two feasible candidate steps can be ranked on the quantity the
+    /// trust region already judges every step by, rather than on a threshold
+    /// (gam#2621). `None` when the Hessian application or the model value is not
+    /// finite, so a caller ranks against a real number or not at all.
+    fn predicted_reduction_at(
+        &self,
+        rhs: &Array1<f64>,
+        delta: &Array1<f64>,
+        hpen_delta: &mut Array1<f64>,
+        penalty_scratch: &mut Array1<f64>,
+    ) -> Option<f64> {
+        hpen_delta.fill(0.0);
+        apply_joint_penalized_hessian_into_with_workspace(
+            self.source,
+            self.ranges,
+            self.s_lambdas,
+            self.diagonal_ridge,
+            delta,
+            hpen_delta,
+            penalty_scratch,
+            self.joint_bundle,
+        )
+        .ok()?;
+        if let Some(curvature) = self.jeffreys_curvature {
+            let jeffreys_delta = curvature.dot(delta);
+            *hpen_delta += &jeffreys_delta;
+        }
+        let predicted = joint_quadratic_predicted_reduction(rhs, hpen_delta, delta);
+        predicted.is_finite().then_some(predicted)
+    }
+}
+
 /// Damping `α` of the self-concordant damped-Newton phase (gam#979 CTN/
 /// marginal-slope barrier crawl), or `None` once the undamped machinery owns
 /// the step.
@@ -5412,6 +5461,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 // bypassed QP step, which is feasible by construction);
                 // `block_step_norms` is recomputed from the projected step just
                 // below so the trust-radius bookkeeping stays consistent.
+                let mut projection_moved_the_trial = false;
                 if let Some(constraints) = joint_constraints.as_ref() {
                     let trial_beta = &beta_joint + &trial_delta;
                     if check_linear_feasibility(&trial_beta, constraints, 1e-8).is_err() {
@@ -5421,6 +5471,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                         ) {
                             Ok(projected) => {
                                 trial_delta = &projected - &beta_joint;
+                                projection_moved_the_trial = true;
                             }
                             Err(_) => {
                                 // Projection failed to find a strictly-interior
@@ -5440,6 +5491,104 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                                 );
                                 continue;
                             }
+                        }
+                    }
+                }
+                // PROJECTION-GUTTED TRUST STEP (gam#2621). The step above was sized
+                // in the UNCONSTRAINED `D`-metric ball; when the cone projection had
+                // to move it, the part of it that pointed out of the cone is gone, and
+                // what survives is no longer the step the trust region sized. Measured
+                // on the gaussian location-scale fixture: the Moré–Sorensen step sits
+                // exactly on the boundary (`‖δ‖_D = 3.926429e-1 = radius`, to every
+                // digit) and the projection returns `‖δ‖_D = 7.170632e-2` — 82% of the
+                // norm removed. Two things then went wrong at once. The controller
+                // recomputes `block_step_norms` from the PROJECTED step just below, so
+                // `step_hit_trust_boundary` compared `5.36e-2` against `3.926e-1` and
+                // was false for every block: the grow branch never fired and all three
+                // radii stayed byte-identical for 40 consecutive cycles while ρ ≈ 0.95
+                // said the model was excellent. And the surviving step bought no
+                // stationarity — the residual ROSE from `4.011e1` to `6.207e1` over
+                // those 40 cycles while the objective fell monotonically — so the solve
+                // exited on the residual-stall guard at cycle 39 of a 1200-cycle
+                // budget. A projected step cannot grow the radius that produced it, so
+                // the crawl is a fixed point of the controller, not a budget miss.
+                //
+                // `search_delta` is the active-set QP's chord: `candidate_beta −
+                // beta_joint` with BOTH endpoints in the convex cone, so every point on
+                // it is feasible and it needs no projection. It is available here and
+                // was passed over only because `constrained_search_delta_owns_trust_step`
+                // requires the AMBIENT spectrum to be curvature-free, which it is not on
+                // this fixture (`γ_min = −1.457e-1`, two modes, fourteen orders above
+                // the numerical floor) — even though that ambient negative curvature can
+                // be unreachable inside the cone, exactly as the face-authoritative arm
+                // above notes of its own case.
+                //
+                // So do not choose between them by a threshold on how much the
+                // projection took: rank them on the quantity the trust region already
+                // judges every step by, the predicted decrease of the same true
+                // penalized quadratic model that `predicted_reduction` uses below. The
+                // winner is by construction no worse than either candidate alone, there
+                // is no new constant, and the negative-curvature escape is kept whenever
+                // the projected Moré–Sorensen step really is the better step on the
+                // model. Scaling the chord uses ONE global scalar to the block radii,
+                // never per-block clipping: `β` and `β + search_delta` are both
+                // feasible, so cone convexity keeps `β + α·search_delta` feasible, while
+                // per-block clipping would leave the face. The two extra Hessian
+                // applications are paid only on an attempt where the projection actually
+                // moved the step.
+                if projection_moved_the_trial && search_joint_active_set.is_some() {
+                    let mut chord = search_delta.clone();
+                    let chord_norms = joint_trust_region_block_metric_norms(
+                        &chord,
+                        &ranges,
+                        &joint_trust_metric_diag,
+                    );
+                    let chord_alpha = chord_norms
+                        .iter()
+                        .zip(joint_block_trust_radii.iter())
+                        .filter(|(norm, _)| norm.is_finite() && **norm > 0.0)
+                        .map(|(norm, radius)| (radius / norm).min(1.0))
+                        .fold(1.0_f64, f64::min);
+                    if chord_alpha.is_finite() && chord_alpha > 0.0 {
+                        if chord_alpha < 1.0 {
+                            chord.mapv_inplace(|value| value * chord_alpha);
+                        }
+                        let candidate_model = JointTrustRegionModel {
+                            source: effective_hessian_source,
+                            ranges: &ranges,
+                            s_lambdas: &s_lambdas,
+                            diagonal_ridge: joint_mode_diagonal_ridge,
+                            joint_bundle,
+                            jeffreys_curvature: head_jeffreys_curvature.as_ref(),
+                        };
+                        let projected_gain = candidate_model.predicted_reduction_at(
+                            &rhs,
+                            &trial_delta,
+                            &mut hpen_delta,
+                            &mut tr_penalty_scratch,
+                        );
+                        let chord_gain = candidate_model.predicted_reduction_at(
+                            &rhs,
+                            &chord,
+                            &mut hpen_delta,
+                            &mut tr_penalty_scratch,
+                        );
+                        if let Some(chord_gain) = chord_gain
+                            && chord_gain > projected_gain.unwrap_or(f64::NEG_INFINITY)
+                        {
+                            log::info!(
+                                "[PIRLS/joint-Newton/TR cycle={} attempt={}] gam#2621 cone \
+                                 projection removed the trust step's descent: projected model gain \
+                                 {:?} vs feasible QP chord {:.3e} (chord α={:.3e}); taking the \
+                                 chord, which needs no projection and can still reach its trust \
+                                 boundary",
+                                cycle,
+                                trust_attempt,
+                                projected_gain,
+                                chord_gain,
+                                chord_alpha,
+                            );
+                            trial_delta = chord;
                         }
                     }
                 }
