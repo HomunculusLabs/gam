@@ -57,6 +57,13 @@ fn zz_probe_1561_ceiling_rail() {
     init_parallelism();
     eprintln!("[zz1561rail] ceiling-rail probe start");
 
+    // Every failure path below is a `continue` -- a refused fit, an unexpected
+    // fit kind. Without counting, all three seeds can bail and this probe
+    // prints "done" and reports green having measured nothing at all. That is
+    // what makes an assertion-free probe worse than a missing one: it looks
+    // like evidence.
+    let mut measured = 0usize;
+
     for seed in [321u64, 301, 304] {
         // ---- data: EXACT replication of the quality test / sigma probe draw
         // order (x then y per row, group A rows first) --------------------
@@ -189,13 +196,41 @@ fn zz_probe_1561_ceiling_rail() {
         let true_mu_b: Vec<f64> = grid_b.iter().map(|&x| mean_b(x)).collect();
         let true_ls_b: Vec<f64> = grid_b.iter().map(|&x| sigma_b(x).ln()).collect();
 
+        let rmse_mu_a = rmse(&gam_mu_a, &true_mu_a);
+        let rmse_ls_a = rmse(&gam_ls_a, &true_ls_a);
+        let rmse_mu_b = rmse(&gam_mu_b, &true_mu_b);
+        let rmse_ls_b = rmse(&gam_ls_b, &true_ls_b);
         eprintln!(
-            "[zz1561rail] seed={seed} RMSE mu_a={:.6} log_sigma_a={:.6} mu_b={:.6} log_sigma_b={:.6}",
-            rmse(&gam_mu_a, &true_mu_a),
-            rmse(&gam_ls_a, &true_ls_a),
-            rmse(&gam_mu_b, &true_mu_b),
-            rmse(&gam_ls_b, &true_ls_b)
+            "[zz1561rail] seed={seed} RMSE mu_a={rmse_mu_a:.6} \
+             log_sigma_a={rmse_ls_a:.6} mu_b={rmse_mu_b:.6} log_sigma_b={rmse_ls_b:.6}"
         );
+
+        // The probe now CHECKS what it prints. These are deliberately
+        // properties, not thresholds: this fixture exists to OBSERVE where the
+        // ceiling rails, so pinning an RMSE would convert a measurement into a
+        // bar and defeat its purpose. A non-finite RMSE, on the other hand, is
+        // never a legitimate observation -- it means the predict path returned
+        // NaN/inf and the printed line is noise.
+        for (name, value) in [
+            ("mu_a", rmse_mu_a),
+            ("log_sigma_a", rmse_ls_a),
+            ("mu_b", rmse_mu_b),
+            ("log_sigma_b", rmse_ls_b),
+        ] {
+            assert!(
+                value.is_finite(),
+                "[zz1561rail] seed={seed} truth RMSE {name} is not finite ({value}); \
+                 the printed measurement is meaningless"
+            );
+        }
+
+        measured += 1;
     }
-    eprintln!("[zz1561rail] done");
+    eprintln!("[zz1561rail] done: {measured} of 3 seeds measured");
+    assert!(
+        measured > 0,
+        "[zz1561rail] no seed reached a Gaussian location-scale fit, so the \
+         ceiling-rail probe measured nothing. Its output is empty and any \
+         conclusion drawn from this run is unsupported."
+    );
 }
