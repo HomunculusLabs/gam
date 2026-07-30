@@ -72,6 +72,42 @@ fn pre_fit_operating_scalars<F: CustomFamily + ?Sized>(
         })
 }
 
+/// The `(pilot, current)` β pair the converged drift audit prices against each
+/// other, flattened over blocks in spec order.
+///
+/// The pilot is the operating point the PRE-FIT audit linearized at, and
+/// [`pre_fit_operating_scalars`] builds that from `spec.initial_beta` — zeros
+/// are its fallback for a block with no warm start, not the pilot itself.
+///
+/// Handing the drift audit a bare zero vector instead is not a cosmetic slip.
+/// `maybe_log_audit_drift` publishes
+/// `beta_relative_change = ‖β̂ − β₀‖ / (‖β₀‖ + f64::EPSILON)`, so a zeros
+/// reference puts MACHINE EPSILON in the denominator and the reported number is
+/// ~1e16 for every warm-started fit regardless of how far it actually
+/// travelled — it cannot distinguish the two cases it exists to distinguish
+/// (#2360).
+///
+/// Both halves live here so there is one place that decides the pair, and so
+/// the contract is reachable from a test: `audit_converged_identifiability` has
+/// no other route to it.
+pub(crate) fn drift_audit_beta_pair(
+    specs: &[ParameterBlockSpec],
+    raw_states: &[ParameterBlockState],
+) -> (Vec<f64>, Vec<f64>) {
+    let pilot: Vec<f64> = specs
+        .iter()
+        .flat_map(|spec| match spec.initial_beta.as_ref() {
+            Some(beta) => beta.to_vec(),
+            None => vec![0.0; spec.design.ncols()],
+        })
+        .collect();
+    let current: Vec<f64> = raw_states
+        .iter()
+        .flat_map(|state| state.beta.iter().copied())
+        .collect();
+    (pilot, current)
+}
+
 /// Re-run the unified identifiability audit at the converged raw-coordinate
 /// state when a family exposes dynamic primary scalars. Any change from the
 /// pilot verdict invalidates the gauge used by the solve, so result assembly
@@ -94,11 +130,7 @@ fn audit_converged_identifiability<F: CustomFamily + ?Sized>(
     else {
         return Ok(());
     };
-    let beta_current: Vec<f64> = raw_states
-        .iter()
-        .flat_map(|state| state.beta.iter().copied())
-        .collect();
-    let beta_pilot = vec![0.0; beta_current.len()];
+    let (beta_pilot, beta_current) = drift_audit_beta_pair(raw_specs, &raw_states);
     let drift = gam_identifiability::audit::maybe_log_audit_drift(
         raw_specs,
         &canonical.audit,
