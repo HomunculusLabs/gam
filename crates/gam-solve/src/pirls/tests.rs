@@ -2831,13 +2831,13 @@ mod tests {
         let h4 = mu;
 
         let generic = observed_weight_noncanonical(
-            y,
+            y - mu,
             mu,
             jet.d1,
             jet.d2,
             jet.d3,
             h4,
-            variance_jet_for_weight_family(WeightFamily::Gamma, mu),
+            variance_jet_for_weight_family(WeightFamily::Gamma, mu, 1.0 - mu),
             phi,
             prior_weight,
         );
@@ -2852,6 +2852,7 @@ mod tests {
             eta,
             y,
             mu,
+            1.0 - mu,
             phi,
             prior_weight,
             jet,
@@ -3536,7 +3537,7 @@ mod root_cause_tests {
             scalar_working_state(&beta, HessianCurvatureKind::Fisher, 1.448_052e-3, 428.0);
         state.hessian = gam_linalg::matrix::SymmetricMatrix::Dense(array![[1.0e8]]);
 
-        let decrement_sq = exact_newton_decrement_sq(&state)
+        let decrement_sq = exact_newton_decrement_sq(&state, None)
             .expect("a finite positive-definite Hessian has an exact decrement");
         let threshold = 1.0e-6_f64.powi(2) * (1.0 + state.penalized_objective().abs());
 

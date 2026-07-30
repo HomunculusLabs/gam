@@ -543,14 +543,18 @@ fn separated_probit_firth_inner_solve_probe_2273() {
     }
 
     let ds = separated_dataset(6);
-    for firth in [true, false] {
+    for (formula, firth) in [
+        ("y ~ x + link(type=probit)", true),
+        ("y ~ x + link(type=cloglog)", true),
+        ("y ~ x + link(type=cloglog)", false),
+    ] {
         let cfg = FitConfig {
             family: Some("binomial".to_string()),
             firth,
             ..FitConfig::default()
         };
-        eprintln!("#2273 arm-2 probe ===== probit n=6 firth={firth} =====");
-        match fit_from_formula("y ~ x + link(type=probit)", &ds, &cfg) {
+        eprintln!("#2273 arm-2 probe ===== {formula} n=6 firth={firth} =====");
+        match fit_from_formula(formula, &ds, &cfg) {
             Ok(FitResult::Standard(StandardFitResult { fit, .. })) => eprintln!(
                 "#2273 arm-2 probe MINTED edf={:.6} beta={:?}",
                 fit.edf_total().unwrap_or(f64::NAN),
@@ -559,5 +563,172 @@ fn separated_probit_firth_inner_solve_probe_2273() {
             Ok(_) => eprintln!("#2273 arm-2 probe non-standard result"),
             Err(err) => eprintln!("#2273 arm-2 probe REFUSED: {err}"),
         }
+    }
+}
+
+/// #2273: the premise the in-loop separation retreat's removal rests on —
+/// `S(λ)` is positive definite on every column it touches.
+///
+/// `detect_logit_instability` no longer refuses a penalized binomial fit for
+/// saturating, because under a coercive penalty `β̂(λ)` is finite and unique even
+/// under exact separation, so saturation is the answer rather than a divergence.
+/// Coercivity holds iff no direction of recession of `−ℓ` lies in `null(S(λ))`,
+/// and for these designs `null(S(λ))` is exactly the span of the columns NO
+/// penalty touches — the intercept and any bare parametric term, where a
+/// separating direction is caught up front by `reject_prefit_binomial_separation`
+/// (which restricts itself to those same columns, and is right to).
+///
+/// That equality is a property of the DESIGN CONSTRUCTION, not of this issue: a
+/// smooth whose penalty set left its own linear direction unpenalized would put
+/// a separating direction back into `null(S(λ))` without any prefit column being
+/// implicated, and the retreat's removal would then be unsound for that basis.
+/// So it is asserted here rather than assumed: for every penalized column block,
+/// the summed penalty at λ = 1 must be strictly positive definite.
+#[test]
+fn penalized_blocks_are_coercive_for_every_smooth_2273() {
+    use faer::Side;
+    use gam_linalg::faer_ndarray::FaerCholesky;
+
+    for formula in [
+        "y ~ smooth(x)",
+        "y ~ x",
+        "y ~ x + smooth(x)",
+        "y ~ smooth(x) + smooth(z)",
+        "y ~ te(x, z)",
+    ] {
+        let ds = coercivity_dataset(60);
+        let parsed = parse_formula(formula).expect("the formula parses");
+        let col_map = ds.column_map();
+        let mut notes = Vec::new();
+        let policy = gam_runtime::resource::ResourcePolicy::default_library();
+        let spec = build_termspec(&parsed.terms, &ds, &col_map, &mut notes, &policy)
+            .expect("the term spec builds");
+        let design = build_term_collection_design(ds.values.view(), &spec)
+            .expect("the design builds");
+        let p = design.design.ncols();
+
+        // S(1) = Σ_k S_k, embedded into the full coefficient space.
+        let mut s_total = Array2::<f64>::zeros((p, p));
+        for penalty in &design.penalties {
+            let start = penalty.col_range.start;
+            for (local_row, global_row) in penalty.col_range.clone().enumerate() {
+                for (local_col, global_col) in penalty.col_range.clone().enumerate() {
+                    debug_assert!(global_row >= start && global_col >= start);
+                    s_total[[global_row, global_col]] += penalty.local[[local_row, local_col]];
+                }
+            }
+        }
+
+        // A column is "touched" when the penalty sum gives it any curvature at
+        // all. `null(S)` must be exactly the complement.
+        let scale = s_total
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()))
+            .max(1.0);
+        let touched: Vec<usize> = (0..p)
+            .filter(|&col| s_total[[col, col]].abs() > 1e-12 * scale)
+            .collect();
+        assert!(
+            !touched.is_empty() || formula == "y ~ x",
+            "#2273: {formula} produced no penalized column at all (p={p})"
+        );
+        if touched.is_empty() {
+            continue;
+        }
+
+        let block = {
+            let mut block = Array2::<f64>::zeros((touched.len(), touched.len()));
+            for (i, &row) in touched.iter().enumerate() {
+                for (j, &col) in touched.iter().enumerate() {
+                    block[[i, j]] = s_total[[row, col]];
+                }
+            }
+            block
+        };
+        assert!(
+            block.cholesky(Side::Lower).is_ok(),
+            "#2273: {formula}'s summed penalty is NOT positive definite on the {} columns \
+             it touches, so `null(S(λ))` is larger than the unpenalized columns the prefit \
+             separation check inspects, and a penalized binomial fit on separable data can \
+             diverge along a direction nothing refuses. p={p}, touched={touched:?}",
+            touched.len(),
+        );
+    }
+}
+
+/// Two numeric covariates so the multi-smooth and tensor formulas above have
+/// something to build on; `y` stays the separated response.
+fn coercivity_dataset(n: usize) -> gam_data::EncodedDataset {
+    assert_eq!(n % 2, 0);
+    let half = n / 2;
+    let headers: Vec<String> = ["x", "z", "y"].iter().map(|s| s.to_string()).collect();
+    let mut rows = Vec::with_capacity(n);
+    for i in 0..half {
+        let x = 1.0 + 0.1 * i as f64;
+        rows.push(StringRecord::from(vec![
+            x.to_string(),
+            (0.5 * x).to_string(),
+            "0".to_string(),
+        ]));
+    }
+    for i in 0..half {
+        let x = 10.0 + 0.1 * i as f64;
+        rows.push(StringRecord::from(vec![
+            x.to_string(),
+            (0.5 * x - 3.0).to_string(),
+            "1".to_string(),
+        ]));
+    }
+    encode_recordswith_inferred_schema(headers, rows).expect("encode")
+}
+
+/// #2273: the outer criterion of an exactly-separated penalized binomial fit must
+/// be FINITE wherever the penalized problem is coercive.
+///
+/// This is the arm-1 fix asserted on the criterion itself rather than through the
+/// optimizer, so it stays meaningful if the outer search is ever re-planned. The
+/// grid deliberately covers the region the retreat used to delete — every
+/// `ρ_range ≤ −2` and every `ρ_null ≤ 0` returned `+∞` before, including the
+/// nodes carrying the interior minimum.
+///
+/// `ρ_range = −8` and below is excluded, and legitimately: there only the rank-1
+/// null-space penalty is left on an 11-dimensional smooth block, so the objective
+/// really is unbounded along the separating direction and `+∞` is the honest
+/// reply. The boundary between the two regimes is the point of the test.
+#[test]
+fn separated_smooth_criterion_is_finite_where_the_penalty_is_coercive_2273() {
+    for n in [40usize, 60, 80, 100] {
+        let (design, y, _) = separated_smooth_design(n);
+        let weights = Array1::<f64>::ones(n);
+        let offset = design
+            .compose_offset(Array1::<f64>::zeros(n).view(), "coercive-criterion guard")
+            .expect("offset composes");
+        let opts = logit_external_options(design.nullspace_dims.clone());
+        let mut infinite = Vec::new();
+        for &rho_range in &[-4.0_f64, -2.0, 0.0, 1.0, 2.0, 4.0] {
+            for &rho_null in &[-8.0_f64, -4.0, -2.0, 0.0, 1.0, 2.0] {
+                let rho = Array1::from(vec![rho_range, rho_null]);
+                let value = evaluate_externalcost_andridge(
+                    y.view(),
+                    weights.view(),
+                    design.design.clone(),
+                    offset.view(),
+                    &design.penalties,
+                    &opts,
+                    &rho,
+                );
+                match value {
+                    Ok((cost, _)) if cost.is_finite() => {}
+                    Ok((cost, _)) => infinite.push(format!("({rho_range},{rho_null})->{cost}")),
+                    Err(err) => infinite.push(format!("({rho_range},{rho_null})->ERR {err}")),
+                }
+            }
+        }
+        assert!(
+            infinite.is_empty(),
+            "#2273: the exactly-separated `smooth(x)` criterion is not a finite function of rho \
+             at n={n} on the coercive part of the box, so the optimum is unreachable: {}",
+            infinite.join(", "),
+        );
     }
 }

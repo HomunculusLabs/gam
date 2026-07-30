@@ -1,5 +1,48 @@
 ## Unreleased
 
+- **A separated binomial fit is no longer refused for being right (#2273).** On
+  exactly-separated data — a genuine gap between the classes — `y ~ smooth(x)`
+  could not be fitted at any `n`. The in-loop separation guard turned a
+  converged, finite, well-penalized logit fit into `Unstable (possible
+  separation)` whenever its fitted linear predictor separated the classes by more
+  than an η-gap of `1e-3`, or saturated, or collapsed its working weights, or
+  drove the deviance below `1e-6` per sample. On separable data every one of
+  those is a property of the CORRECT fit: a good fit's η *does* order the
+  classes, its μ *are* near {0,1}, its weights *do* collapse. The guard exists
+  for the case where the penalized objective has no finite minimizer, which
+  happens only when a direction of recession of the log-likelihood lies in
+  `null(S(λ))` — and under the double penalty it never does, so `β̂(λ)` is finite
+  and unique even under exact separation. The criterion was therefore `+∞` over
+  the whole region containing its own optimum, and the reported symptom was a
+  line search unable to move at the seed. The saturation heuristics are gone from
+  the penalized branch; the genuinely unbounded λ are still refused, by the
+  conditioning and convergence machinery that measures them rather than by a
+  guess. The same fixture that hard-failed now mints at every `n`, with the
+  monotone, essentially linear fit the data supports (edf ≈ 1.95), and the suite
+  runs in 3.1 s instead of 17.7 s because nothing burns 200 iterations at a
+  refused trial point any more.
+
+- **Firth bias reduction is now a Newton solve on every binomial link (#2273).**
+  `WorkingState`'s Hessian is `XᵀWX + S` and deliberately omits the Jeffreys
+  coefficient Hessian `HΦ`, because the outer Laplace layer consumes the two
+  separately. Four consumers have to fold it back in, and only one did. The
+  augmented-square-root direction solve folded it in by congruence — but that
+  route is reached only when the realized curvature is Fisher, which is true just
+  for the canonical logit link. Every non-canonical binomial link (probit,
+  cloglog, …) fell through to a dense solve with the Jeffreys score in the
+  gradient and no Jeffreys curvature in the matrix, and so did the constrained
+  and bounded active-set solves, the post-loop undamped Newton polish, and the
+  exact-decrement certificate. The result was an iteration that is not Newton for
+  any objective: on the issue's 6-row separated probit fixture it contracted
+  linearly at 0.4937 per step, stopped 23 iterations later at `‖g‖ = 4.3e-7`,
+  failed its own convergence certificate and was refused — at a β̂ an independent
+  reference confirms was the right one. The omitted term is now named once, as
+  the matrix behind the quadratic correction that already existed, and folded in
+  at every site through one helper that owns the sign convention. The same solve
+  now reaches `‖g‖ = 1.2e-15` and clears its certificate by eleven orders, and
+  `link(type=probit)`/`link(type=cloglog)` fits on separated data mint through
+  the automatic Firth rescue the README promises.
+
 - **A flat-valley verdict now requires a flat valley (#2613).** The outer
   cost-stall guard — the mgcv-style stop that halts a smoothing-parameter search
   once the criterion stops improving over six consecutive **accepted** steps —

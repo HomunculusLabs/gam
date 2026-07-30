@@ -221,3 +221,171 @@ fn objective_curvature_for_direction_subtracts_the_correction_2273() {
         "a non-conforming correction must be refused, not broadcast"
     );
 }
+
+/// #2273: the noncanonical observed-information tower must evaluate on a
+/// SATURATED Bernoulli row.
+///
+/// Two independent oracles, neither of which shares code with the engine.
+///
+/// **The exact one.** For a cloglog row with `y = 0` the log-likelihood is
+/// `ℓ = log(1−μ) = −e^η` exactly, so
+///
+/// ```text
+///   W_obs = −d²ℓ/dη² = e^η,  and every η-derivative of it is also e^η.
+/// ```
+///
+/// That identity holds at every `η`, including where `V = μ(1−μ)` is `3.6e-84`,
+/// so it pins the tower with no tolerance argument to make.
+///
+/// **The high-precision one.** For `y = 1` there is no such closed form, so the
+/// reference is `mpmath` at 220 decimal digits (needed to hold `1 − 3.6e-84`
+/// exactly and differentiate through it), computed from `1−μ = exp(−e^η)` and
+/// `V = μ(1−μ)` with no gam code involved.
+///
+/// Before the tower rewrite this refused rather than answered: the closed forms
+/// divided by `φV²`, `φV³` and `φV⁴`, and at `η = 5.2593` `V⁴ = 1.7e-334`
+/// underflows to zero, so `d²W/dη²` came out NaN and the row was reported as
+/// `PIRLS row geometry is not representable` — aborting a whole fit over a
+/// number that is `3.87e-75`.
+#[test]
+fn noncanonical_observed_tower_evaluates_on_a_saturated_row_2273() {
+    use gam_problem::InverseLink;
+
+    // `η = 5.2593` is the row the #2273 cloglog n=100 fit refused; 3.6799 is the
+    // one it refused before that; the last two are ordinary interior points, so
+    // the same code path is checked where nothing is extreme.
+    const ETAS: [f64; 4] = [5.259300664374346, 3.679931643574629, 1.25, -0.75];
+    // mpmath at 220 dps, `y = 1`: (w_obs, c_obs, d_obs).
+    const Y1_REFERENCE: [(f64, f64, f64); 4] = [
+        (1.0732398640299e-79, -2.0428230353403e-77, 3.8677001533694e-75),
+        (9.2943557520704e-15, -3.4963327742703e-13, 1.2783727780206e-11),
+        (0.2854114158076, -0.39029979946258, -0.38865107866873),
+        (0.19926932328323, 0.16289984062778, 0.091777041256882),
+    ];
+
+    let link = InverseLink::Standard(StandardLink::CLogLog);
+    let mut report = String::new();
+    for (index, &eta) in ETAS.iter().enumerate() {
+        let jet = crate::mixture_link::inverse_link_jet_for_inverse_link(&link, eta)
+            .expect("the cloglog jet is defined at these eta");
+        let h4 = crate::mixture_link::inverse_link_pdfthird_derivative_for_inverse_link(&link, eta)
+            .expect("the cloglog fourth derivative is defined at these eta");
+        let one_minus_mu =
+            crate::mixture_link::inverse_link_complement_for_inverse_link(&link, eta, jet.mu);
+        let vj = variance_jet_for_weight_family(WeightFamily::Binomial, jet.mu, one_minus_mu);
+
+        // y = 0: the exact identity.
+        let zero = observed_weight_dispatch(
+            WeightFamily::Binomial,
+            WeightLink::Other,
+            eta,
+            0.0,
+            jet.mu,
+            one_minus_mu,
+            1.0,
+            1.0,
+            jet,
+            h4,
+        );
+        let exact = eta.exp();
+        report.push_str(&format!(
+            "\n  eta={eta:>20}  V={:.6e}  y=0 -> ({:.9e}, {:.9e}, {:.9e})  exact e^eta={exact:.9e}",
+            vj.v, zero.0, zero.1, zero.2,
+        ));
+        // The band widens by order, and the reason is arithmetic rather than
+        // policy. For cloglog the recurrence's terms nearly cancel — analytically
+        // `T₀ = T₁ = T₂ = T₃ = e^η/(1−(1−μ))`, and each order reaches it by
+        // subtracting `t²s` from `t²s + ts` with `t = e^η ≈ 192`, so ~log₁₀(t)
+        // ≈ 2.3 digits go per order. Measured worst case at this η: `w` to
+        // 3e-14, `c` to 1.0e-11, `d` to 6.2e-9 — one order of loss per order of
+        // derivative, exactly as the model predicts. That is the generic tower's
+        // honest accuracy on a row whose variance is 2.9e-84; the alternative it
+        // replaced was NaN.
+        for (label, value, band) in
+            [("w", zero.0, 1e-12), ("c", zero.1, 1e-10), ("d", zero.2, 1e-7)]
+        {
+            let relative = (value - exact).abs() / exact.abs();
+            assert!(
+                relative <= band,
+                "#2273: cloglog y=0 {label}_obs at eta={eta} is {value:.9e}, but -l = e^eta \
+                 exactly, so it must be {exact:.9e} (relative error {relative:.3e}, \
+                 band {band:.0e}){report}"
+            );
+        }
+
+        // y = 1: against the 220-digit reference.
+        let one = observed_weight_dispatch(
+            WeightFamily::Binomial,
+            WeightLink::Other,
+            eta,
+            1.0,
+            jet.mu,
+            one_minus_mu,
+            1.0,
+            1.0,
+            jet,
+            h4,
+        );
+        let (rw, rc, rd) = Y1_REFERENCE[index];
+        report.push_str(&format!(
+            "\n  eta={eta:>20}          y=1 -> ({:.9e}, {:.9e}, {:.9e})  mpmath ({rw:.9e}, {rc:.9e}, {rd:.9e})",
+            one.0, one.1, one.2,
+        ));
+        for (label, value, reference, band) in [
+            ("w", one.0, rw, 1e-10),
+            ("c", one.1, rc, 1e-9),
+            ("d", one.2, rd, 1e-7),
+        ] {
+            let relative = (value - reference).abs() / reference.abs();
+            assert!(
+                relative <= band,
+                "#2273: cloglog y=1 {label}_obs at eta={eta} is {value:.9e} against the \
+                 220-digit reference {reference:.9e} (relative error {relative:.3e}, \
+                 band {band:.0e}){report}"
+            );
+        }
+    }
+    eprintln!("#2273 noncanonical observed tower on saturated cloglog rows:{report}");
+}
+
+/// #2273: the complement must reach the variance, not just the working response.
+///
+/// `inverse_link_complement_for_inverse_link` already existed and the Fisher
+/// working-state path already used it; the observed-curvature path rebuilt the
+/// variance from `mu` alone. This pins the consequence at the seam rather than
+/// through a fit: past the point where `mu` rounds to exactly `1.0`, the
+/// complement-fed variance must still be positive.
+#[test]
+fn saturated_binomial_variance_is_positive_past_the_mu_rounding_point_2273() {
+    use gam_problem::InverseLink;
+
+    for (link, first_saturated_eta) in [
+        (StandardLink::CLogLog, 3.62_f64),
+        (StandardLink::Probit, 8.29_f64),
+    ] {
+        let inverse_link = InverseLink::Standard(link);
+        for eta in [first_saturated_eta, first_saturated_eta + 1.0, first_saturated_eta + 2.0] {
+            let jet = crate::mixture_link::inverse_link_jet_for_inverse_link(&inverse_link, eta)
+                .expect("the jet is defined");
+            let complement = crate::mixture_link::inverse_link_complement_for_inverse_link(
+                &inverse_link,
+                eta,
+                jet.mu,
+            );
+            let naive = VarianceJet::bernoulli(jet.mu);
+            let paired = variance_jet_for_weight_family(WeightFamily::Binomial, jet.mu, complement);
+            assert!(
+                paired.v > 0.0 && paired.v.is_finite(),
+                "#2273: {link:?} at eta={eta} has mu={:.17e}, complement={complement:.6e}, and the \
+                 paired variance is {:.6e} — a saturated row's variance must stay positive",
+                jet.mu,
+                paired.v,
+            );
+            eprintln!(
+                "#2273 saturated variance {link:?} eta={eta}: mu={:.17e} \
+                 complement={complement:.6e} V_paired={:.6e} V_naive={:.6e}",
+                jet.mu, paired.v, naive.v,
+            );
+        }
+    }
+}

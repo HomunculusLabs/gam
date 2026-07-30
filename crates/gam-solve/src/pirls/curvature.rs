@@ -16,8 +16,29 @@ impl VarianceJet {
     /// Bernoulli / binomial variance V(μ) = μ(1−μ).
     #[inline]
     pub fn bernoulli(mu: f64) -> Self {
+        Self::bernoulli_with_complement(mu, 1.0 - mu)
+    }
+
+    /// Bernoulli variance jet from the (μ, 1−μ) PAIR (#2273).
+    ///
+    /// `1.0 - mu` is a hard zero once `mu` rounds to exactly `1.0`, which a
+    /// bounded inverse link reaches far inside its tail — cloglog at `η ≈ 3.62`,
+    /// probit at `η ≈ 8.29` — while the true complement is still a perfectly
+    /// representable `~1e-18`. `V = μ(1−μ)` then collapses to `0` and every
+    /// observed-information quantity divides by it, so a row whose Fisher weight
+    /// is a healthy `1e-14` is refused as unrepresentable instead of evaluated.
+    /// [`crate::mixture_link::inverse_link_complement_for_inverse_link`] recovers
+    /// the complement from `η` without cancellation; this constructor is how it
+    /// reaches the variance.
+    ///
+    /// Only `v` changes: `v1 = 1 − 2μ` needs no complement (it is `−1` to full
+    /// precision wherever `μ` has saturated, from either expression), and
+    /// rewriting it would move existing well-conditioned fits by an ulp for no
+    /// accuracy gained.
+    #[inline]
+    pub fn bernoulli_with_complement(mu: f64, one_minus_mu: f64) -> Self {
         Self {
-            v: mu * (1.0 - mu),
+            v: mu * one_minus_mu,
             v1: 1.0 - 2.0 * mu,
             v2: -2.0,
             v3: 0.0,
@@ -95,16 +116,16 @@ impl VarianceJet {
     /// The trial count `n` enters as a prior-weight multiplier, not through
     /// the variance function itself.
     #[inline]
-    pub fn binomial_n(mu: f64) -> Self {
+    pub fn binomial_n(mu: f64, one_minus_mu: f64) -> Self {
         // V(μ) = μ(1−μ), same jet as Bernoulli
-        Self::bernoulli(mu)
+        Self::bernoulli_with_complement(mu, one_minus_mu)
     }
 
     /// Beta-regression variance V(μ) = μ(1−μ)/(1+φ).
     #[inline]
-    pub fn beta(mu: f64, phi: f64) -> Self {
+    pub fn beta(mu: f64, one_minus_mu: f64, phi: f64) -> Self {
         let scale = 1.0 / (1.0 + phi);
-        let base = Self::bernoulli(mu);
+        let base = Self::bernoulli_with_complement(mu, one_minus_mu);
         Self {
             v: base.v * scale,
             v1: base.v1 * scale,
@@ -394,12 +415,18 @@ pub(crate) fn compute_observed_hessian_curvature_arrays_into(
                 inverse_link,
                 eta_used,
             )?;
+            let one_minus_mu = crate::mixture_link::inverse_link_complement_for_inverse_link(
+                inverse_link,
+                eta_used,
+                jet.mu,
+            );
             let (w_obs, c_obs, d_obs) = observed_weight_dispatch(
                 weight_family,
                 weight_link,
                 eta_used,
                 y[i],
                 jet.mu,
+                one_minus_mu,
                 phi,
                 priorweights[i],
                 jet,
@@ -519,7 +546,7 @@ pub(crate) fn compute_observed_hessian_curvature_arrays(
 /// eta-derivatives, all pre-multiplied by `pw`.
 #[inline]
 pub fn observed_weight_noncanonical(
-    y: f64,
+    resid: f64,
     mu: f64,
     h1: f64,
     h2: f64,
@@ -529,83 +556,92 @@ pub fn observed_weight_noncanonical(
     phi: f64,
     pw: f64,
 ) -> (f64, f64, f64) {
-    let VarianceJet {
-        v,
-        v1,
-        v2,
-        v3,
-        v4: _,
-    } = vj;
-    let phi_v = phi * v;
-    let phi_v2 = phi * v * v;
-    let phi_v3 = phi * v * v * v;
+    let _ = mu;
+    // The whole tower is `T = h₁/(φV)` and its η-derivatives: `B = T₁`,
+    // `B_η = T₂`, `B_ηη = T₃`, and `W_F = h₁·T₀` with its derivatives by the
+    // product rule. `weight_ratio_tower` builds `T` by Leibniz on `T·Q = h₁`,
+    // dividing by `Q = φV` once per order.
+    //
+    // #2273 — that is the whole point. The closed forms this replaced carried
+    // `φV²`, `φV³` and `φV⁴` denominators, and for a saturating Bernoulli row
+    // those UNDERFLOW while every quantity that matters stays representable: at
+    // `η = 5.26` a cloglog row has `V = 3.6e-84`, so `V⁴ = 1.7e-334` is zero in
+    // f64 and `B_ηη` came out NaN, refusing the row as "not representable" —
+    // when the correct `B_ηη` is a perfectly ordinary number. The tower never
+    // forms a power of `V`, so the same row evaluates. It is also the identical
+    // derivation `e_obs_from_jets` uses one order higher, so the third and
+    // fourth derivatives of one object are now built by one recurrence instead
+    // of two independently-maintained algebraic expansions.
+    //
+    // `h5` is not needed for orders <= 3, so `T₄` is not read.
+    let t = weight_ratio_tower(h1, h2, h3, h4, 0.0, vj, phi);
+    let (t0, t1, t2, t3) = (t[0], t[1], t[2], t[3]);
 
-    // ---- Fisher weight and derivatives ----
+    // W_F = h₁·T and its derivatives by the product rule.
+    let w_f = h1 * t0;
+    let c_f = h2 * t0 + h1 * t1;
+    let d_f = h3 * t0 + 2.0 * h2 * t1 + h1 * t2;
+
+    // W_obs = W_F − (y−μ)·T₁, differentiated twice with `(y−μ)' = −h₁`.
+    //
+    // `resid = y − μ` is supplied rather than formed here (#2273): for a
+    // saturated Bernoulli row `y − μ` cancels to exactly zero while the true
+    // residual is the link's representable tail complement, and only the caller
+    // knows the link.
+    let w_obs = w_f - resid * t1;
+    let c_obs = c_f + h1 * t1 - resid * t2;
+    let d_obs = d_f + h2 * t1 + 2.0 * h1 * t2 - resid * t3;
+
+    (pw * w_obs, pw * c_obs, pw * d_obs)
+}
+
+/// `T = h₁/(φV)` and its first four η-derivatives, by Leibniz on `T·Q = h₁`
+/// with `Q = φ·V(μ(η))`.
+///
+/// One recurrence, dividing by `Q` once per order and never forming a power of
+/// `V`. Every noncanonical observed-information quantity is a polynomial in this
+/// tower and the inverse-link jet, so this is the single place the algebra
+/// lives.
+///
+/// `T₄` requires `h5`; callers that only need orders up to 3 may pass any value
+/// for it and ignore the last entry.
+#[inline]
+pub fn weight_ratio_tower(
+    h1: f64,
+    h2: f64,
+    h3: f64,
+    h4: f64,
+    h5: f64,
+    vj: VarianceJet,
+    phi: f64,
+) -> [f64; 5] {
+    let VarianceJet { v, v1, v2, v3, v4 } = vj;
+    let q = phi * v;
     let h1_sq = h1 * h1;
-    let w_f = h1_sq / phi_v;
-
-    // c_F = (2 h₁ h₂ V − h₁³ V₁) / (φ V²)
-    let n0 = h1_sq; // numerator of w_F
-    let n1 = 2.0 * h1 * h2; // ∂(h₁²)/∂η
-    let n2 = 2.0 * (h2 * h2 + h1 * h3); // ∂²(h₁²)/∂η²
-    let vd1 = h1 * v1; // ∂V/∂η = V'·h'
-    let vd2 = h2 * v1 + h1_sq * v2; // ∂²V/∂η²
-
-    let c_f = (n1 * v - n0 * vd1) / phi_v2;
-
-    // d_F = ∂c_F/∂η via quotient rule on c_F = (n1·v − n0·vd1) / (φ·v²)
-    // numerator of c_F and its η-derivative (cross terms cancel):
-    let numer_cf = n1 * v - n0 * vd1;
-    let dnumer_cf = n2 * v - n0 * vd2;
-    let d_f = (dnumer_cf * v - 2.0 * numer_cf * vd1) / (phi_v3);
-
-    // ---- Observed correction term B and its η-derivatives ----
-    // B = (h₂ V − h₁² V₁) / (φ V²)
-    let b_num = h2 * v - h1_sq * v1;
-    let b = b_num / phi_v2;
-
-    // B_η = (h₃ V² − 3 h₁ h₂ V V₁ − h₁³ V V₂ + 2 h₁³ V₁²) / (φ V³)
-    let b_eta_num =
-        h3 * v * v - 3.0 * h1 * h2 * v * v1 - h1_sq * h1 * v * v2 + 2.0 * h1_sq * h1 * v1 * v1;
-    let b_eta = b_eta_num / phi_v3;
-
-    // B_ηη = ∂B_η/∂η.
-    //
-    // We differentiate b_eta_num / (φ V³) using the quotient rule.
-    //
-    // Numerator derivative of b_eta_num w.r.t. η, using chain rule ∂/∂η = h₁·∂/∂μ
-    // for the V-dependent parts:
-    //
-    //   ∂/∂η [h₃ V²]               = h₄ V² + 2 h₃ V h₁ V₁
-    //   ∂/∂η [3 h₁ h₂ V V₁]        = 3(h₂² + h₁ h₃)V V₁ + 3 h₁ h₂(h₁ V₁² + V h₁ V₂)
-    //   ∂/∂η [h₁³ V V₂]            = 3 h₁² h₂ V V₂ + h₁³(h₁ V₁ V₂ + V h₁ V₃)
-    //   ∂/∂η [2 h₁³ V₁²]           = 6 h₁² h₂ V₁² + 4 h₁³ V₁ h₁ V₂
-    //                                = 6 h₁² h₂ V₁² + 4 h1_sq * h1_sq * v1 * v2
-    //
-    // Denominator derivative: ∂/∂η [φ V³] = 3 φ V² h₁ V₁.
-
     let h1_cu = h1_sq * h1;
     let h1_qu = h1_sq * h1_sq;
 
-    let db_eta_num = h4 * v * v + 2.0 * h3 * v * h1 * v1
-        - 3.0 * (h2 * h2 + h1 * h3) * v * v1
-        - 3.0 * h1 * h2 * (h1 * v1 * v1 + v * h1 * v2)
-        - 3.0 * h1_sq * h2 * v * v2
-        - h1_cu * (h1 * v1 * v2 + v * h1 * v3)
-        + 6.0 * h1_sq * h2 * v1 * v1
-        + 4.0 * h1_qu * v1 * v2;
+    // Q = phi*V and its eta-derivatives (chain rule d/deta = h1 * d/dmu on V):
+    //   Q'    = phi V1 h1
+    //   Q''   = phi (V1 h2 + V2 h1^2)
+    //   Q'''  = phi (V1 h3 + 3 V2 h1 h2 + V3 h1^3)
+    //   Q'''' = phi (V1 h4 + 4 V2 h1 h3 + 3 V2 h2^2 + 6 V3 h1^2 h2 + V4 h1^4)
+    let q1 = phi * v1 * h1;
+    let q2 = phi * (v1 * h2 + v2 * h1_sq);
+    let q3 = phi * (v1 * h3 + 3.0 * v2 * h1 * h2 + v3 * h1_cu);
+    let q4 = phi
+        * (v1 * h4 + 4.0 * v2 * h1 * h3 + 3.0 * v2 * h2 * h2 + 6.0 * v3 * h1_sq * h2 + v4 * h1_qu);
 
-    let phi_v4 = phi_v3 * v;
-    let b_etaeta = (db_eta_num * v - 3.0 * b_eta_num * h1 * v1) / phi_v4;
-
-    // ---- Assemble observed quantities ----
-    let resid = y - mu;
-
-    let w_obs = w_f - resid * b;
-    let c_obs = c_f + h1 * b - resid * b_eta;
-    let d_obs = d_f + h2 * b + 2.0 * h1 * b_eta - resid * b_etaeta;
-
-    (pw * w_obs, pw * c_obs, pw * d_obs)
+    //   T'    = (h2 - T Q')/Q
+    //   T''   = (h3 - 2 T' Q' - T Q'')/Q
+    //   T'''  = (h4 - 3 T'' Q' - 3 T' Q'' - T Q''')/Q
+    //   T'''' = (h5 - 4 T''' Q' - 6 T'' Q'' - 4 T' Q''' - T Q'''')/Q
+    let t0 = h1 / q;
+    let t1 = (h2 - t0 * q1) / q;
+    let t2 = (h3 - 2.0 * t1 * q1 - t0 * q2) / q;
+    let t3 = (h4 - 3.0 * t2 * q1 - 3.0 * t1 * q2 - t0 * q3) / q;
+    let t4 = (h5 - 4.0 * t3 * q1 - 6.0 * t2 * q2 - 4.0 * t1 * q3 - t0 * q4) / q;
+    [t0, t1, t2, t3, t4]
 }
 
 /// Per-observation third η-derivative of the observed-information weight,
@@ -633,7 +669,7 @@ pub fn observed_weight_noncanonical(
 /// `observed_weight_noncanonical`.
 #[inline]
 pub fn e_obs_from_jets(
-    y: f64,
+    resid: f64,
     mu: f64,
     h1: f64,
     h2: f64,
@@ -644,34 +680,13 @@ pub fn e_obs_from_jets(
     phi: f64,
     pw: f64,
 ) -> f64 {
-    let VarianceJet { v, v1, v2, v3, v4 } = vj;
-    let q = phi * v;
-
-    // Q = φV and its η-derivatives.
-    //   Q'    = φ V₁ h₁
-    //   Q''   = φ (V₁ h₂ + V₂ h₁²)
-    //   Q'''  = φ (V₁ h₃ + 3 V₂ h₁ h₂ + V₃ h₁³)
-    //   Q'''' = φ (V₁ h₄ + 4 V₂ h₁ h₃ + 3 V₂ h₂² + 6 V₃ h₁² h₂ + V₄ h₁⁴)
-    let h1_sq = h1 * h1;
-    let h1_cu = h1_sq * h1;
-    let h1_qu = h1_sq * h1_sq;
-
-    let q1 = phi * v1 * h1;
-    let q2 = phi * (v1 * h2 + v2 * h1_sq);
-    let q3 = phi * (v1 * h3 + 3.0 * v2 * h1 * h2 + v3 * h1_cu);
-    let q4 = phi
-        * (v1 * h4 + 4.0 * v2 * h1 * h3 + 3.0 * v2 * h2 * h2 + 6.0 * v3 * h1_sq * h2 + v4 * h1_qu);
-
-    // T = h₁/Q and T', T'', T''', T'''' via Leibniz on T·Q = h₁.
-    //   T'    = (h₂  − T·Q')/Q
-    //   T''   = (h₃  − 2 T'·Q' − T·Q'')/Q
-    //   T'''  = (h₄  − 3 T''·Q' − 3 T'·Q'' − T·Q''')/Q
-    //   T'''' = (h₅  − 4 T'''·Q' − 6 T''·Q'' − 4 T'·Q''' − T·Q'''')/Q
-    let t0 = h1 / q;
-    let t1 = (h2 - t0 * q1) / q;
-    let t2 = (h3 - 2.0 * t1 * q1 - t0 * q2) / q;
-    let t3 = (h4 - 3.0 * t2 * q1 - 3.0 * t1 * q2 - t0 * q3) / q;
-    let t4 = (h5 - 4.0 * t3 * q1 - 6.0 * t2 * q2 - 4.0 * t1 * q3 - t0 * q4) / q;
+    let _ = mu;
+    // One recurrence, shared with `observed_weight_noncanonical` (#2273): the
+    // two used to expand the same `T`-tower independently, and the lower-order
+    // one expanded it into `φV²/φV³/φV⁴` closed forms that underflow on a
+    // saturated Bernoulli row while this one does not.
+    let t = weight_ratio_tower(h1, h2, h3, h4, h5, vj, phi);
+    let (t0, t1, t2, t3, t4) = (t[0], t[1], t[2], t[3], t[4]);
 
     // Fisher weight derivatives via product rule on W_F = h₁·T.
     //   W_F^(0) = h₁ T
@@ -683,7 +698,6 @@ pub fn e_obs_from_jets(
     // Observed third derivative: differentiate W_obs = W_F − (y−μ)·T₁ thrice.
     // (resid)' = −h₁, so iterating product rule yields
     //   ∂³((y−μ)·T₁)/∂η³ = −h₃·T₁ − 3 h₂·T₂ − 3 h₁·T₃ + (y−μ)·T₄
-    let resid = y - mu;
     let e_obs = w_f3 + h3 * t1 + 3.0 * h2 * t2 + 3.0 * h1 * t3 - resid * t4;
 
     pw * e_obs
@@ -819,15 +833,24 @@ pub enum WeightLink {
     Other,
 }
 
+/// `one_minus_mu` is the cancellation-free complement of `mu` (#2273). It is a
+/// required argument rather than a derived one because only the caller knows the
+/// inverse link, and only the link can produce `1 − μ` without cancellation once
+/// `μ` has saturated to exactly `1.0`; the families whose variance does not
+/// involve the complement ignore it.
 #[inline]
-pub fn variance_jet_for_weight_family(family: WeightFamily, mu: f64) -> VarianceJet {
+pub fn variance_jet_for_weight_family(
+    family: WeightFamily,
+    mu: f64,
+    one_minus_mu: f64,
+) -> VarianceJet {
     match family {
         WeightFamily::Gaussian => VarianceJet::gaussian(),
-        WeightFamily::Binomial => VarianceJet::binomial_n(mu),
+        WeightFamily::Binomial => VarianceJet::binomial_n(mu, one_minus_mu),
         WeightFamily::Poisson => VarianceJet::poisson(mu),
         WeightFamily::Tweedie { p } => VarianceJet::tweedie(mu, p),
         WeightFamily::NegativeBinomial { theta } => VarianceJet::negative_binomial(mu, theta),
-        WeightFamily::Beta { phi } => VarianceJet::beta(mu, phi),
+        WeightFamily::Beta { phi } => VarianceJet::beta(mu, one_minus_mu, phi),
         WeightFamily::Gamma => VarianceJet::gamma(mu),
     }
 }
@@ -844,12 +867,34 @@ pub fn variance_jet_for_weight_family(family: WeightFamily, mu: f64) -> Variance
 ///
 /// `jet` and `h4` are the inverse-link derivatives used by the generic
 /// noncanonical fallback path. They may be zero for the specialized paths.
+/// `y − μ` formed from the (μ, 1−μ) pair for a two-point response (#2273).
+///
+/// For a saturated Bernoulli row `y − μ` cancels to exactly `0` at `y = 1`,
+/// silently degrading the observed information back to Fisher on precisely the
+/// rows where the two differ most. The pair carries the residual exactly:
+/// `y = 1 ⇒ y − μ = 1 − μ`, `y = 0 ⇒ y − μ = −μ`. Grouped-binomial proportions
+/// and every other family fall through to the ordinary difference, which does
+/// not cancel for them.
+#[inline]
+pub fn bernoulli_pair_residual(family: WeightFamily, y: f64, mu: f64, one_minus_mu: f64) -> f64 {
+    if matches!(family, WeightFamily::Binomial) {
+        if y == 1.0 {
+            return one_minus_mu;
+        }
+        if y == 0.0 {
+            return -mu;
+        }
+    }
+    y - mu
+}
+
 pub fn observed_weight_dispatch(
     family: WeightFamily,
     link: WeightLink,
     eta: f64,
     y: f64,
     mu: f64,
+    one_minus_mu: f64,
     phi: f64,
     prior_weight: f64,
     jet: MixtureInverseLinkJet,
@@ -873,8 +918,19 @@ pub fn observed_weight_dispatch(
         }
         _ => {
             // Generic noncanonical path via the full variance-function jet.
-            let vj = variance_jet_for_weight_family(family, mu);
-            observed_weight_noncanonical(y, mu, jet.d1, jet.d2, jet.d3, h4, vj, phi, prior_weight)
+            let vj = variance_jet_for_weight_family(family, mu, one_minus_mu);
+            let resid = bernoulli_pair_residual(family, y, mu, one_minus_mu);
+            observed_weight_noncanonical(
+                resid,
+                mu,
+                jet.d1,
+                jet.d2,
+                jet.d3,
+                h4,
+                vj,
+                phi,
+                prior_weight,
+            )
         }
     }
 }

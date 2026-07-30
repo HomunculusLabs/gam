@@ -30,7 +30,7 @@ use gam_linalg::sparse_exact::{
 };
 use gam_linalg::utils::{StableSolver, array_is_finite, inf_norm};
 use gam_problem::Coefficients;
-use ndarray::{Array1, Zip};
+use ndarray::{Array1, Array2, Zip};
 
 /// Madsen-Nielsen-Tingleff smooth Marquardt trust-region update (eq 3.17 in
 /// "Methods for non-linear least squares problems", IMM Tech Univ Denmark,
@@ -77,47 +77,27 @@ pub(super) fn madsen_lm_accept_factor(rho: f64) -> f64 {
 /// local quadratic geometry instead. Failure to factorize is not a
 /// certificate; callers simply continue the iteration.
 /// The threshold the squared Newton decrement is certified against — one
-/// definition, used by both the in-loop check and the post-loop rescue, with the
-/// arithmetic's own floor folded in (#2273).
+/// definition, used by both the in-loop check and the post-loop rescue.
 ///
-/// `decrement² = gᵀH⁻¹g` equals `2(f(β) − f(β̂))` to leading order, so it is a
-/// measurement OF THE OBJECTIVE, and nothing can resolve it below the roundoff
-/// of the objective it is differencing. `f` sums `rows` row terms each formed
-/// from `coefficients` products, so Wilkinson's growth factor
-/// `γ_{rows+coefficients+1}` ([`gam_problem::roundoff`]) bounds its relative
-/// error and a decrement under `2·γ·(1+|f|)` is arithmetic, not
-/// non-convergence.
-///
-/// Without that floor the certificate is unreachable by construction wherever
-/// `kkt² < 2γ`, which is most of the time: `kkt_tolerance` is a *gradient*
-/// tolerance, and squaring it asks the decrement for `kkt²` when the objective
-/// can only report `γ`. Measured on #2273's 6-row exactly-separated probit
-/// fixture — 2 coefficients, Fisher information with condition number 1.0009 —
-/// the solve reached `decrement² = 3.43e-15` and `Δdeviance = 5e-14`, i.e. the
-/// point where the objective stops changing in f64, and was refused against a
-/// threshold of `2.70e-20`: four orders below the `1.49e-14` the arithmetic
-/// permits. A fit at the floor was refused for not being 10⁴ times better than
-/// f64 allows.
-///
-/// The floor can only ADD certifications: it is consulted after strict KKT has
-/// already failed, and `max` never lowers the requested threshold.
-fn exact_newton_decrement_threshold(
-    kkt_tolerance: f64,
-    objective: f64,
-    rows: usize,
-    coefficients: usize,
-) -> f64 {
-    let scale = 1.0 + objective.abs();
-    let requested = kkt_tolerance * kkt_tolerance * scale;
-    let floor = gam_problem::roundoff::roundoff_growth_factor(
-        rows.saturating_add(coefficients).saturating_add(1),
-    )
-    .map(|gamma| 2.0 * gamma * scale)
-    .unwrap_or(0.0);
-    if requested >= floor { requested } else { floor }
+/// Deliberately NOT floored at the objective's roundoff. That was tried while
+/// tracing #2273 and measurement killed it: the fixture that motivated a floor
+/// (`y ~ x + link(type=probit)`, n=6, Firth) was reaching
+/// `decrement² = 3.43e-15` against a `2.70e-20` threshold, four orders past what
+/// the arithmetic seemed to allow — but the cause was the undamped Newton polish
+/// solving `X'WX + S` instead of the objective's `X'WX + S − HΦ`, so it removed
+/// only part of the residual. With the polish stepping on the right curvature
+/// the same solve reaches `‖g‖ = 1.18e-15` and `decrement² = 5.57e-31`, and
+/// clears this threshold by eleven orders. A tolerance floor next to the real
+/// defect would have hidden it, and would have loosened the inner convergence
+/// contract engine-wide to compensate for one wrong matrix.
+fn exact_newton_decrement_threshold(kkt_tolerance: f64, objective: f64) -> f64 {
+    kkt_tolerance * kkt_tolerance * (1.0 + objective.abs())
 }
 
-pub(super) fn exact_newton_decrement_sq(state: &WorkingState) -> Option<f64> {
+pub(super) fn exact_newton_decrement_sq(
+    state: &WorkingState,
+    correction: Option<&Array2<f64>>,
+) -> Option<f64> {
     if !state.gradient.iter().all(|value| value.is_finite()) {
         return None;
     }
@@ -127,11 +107,17 @@ pub(super) fn exact_newton_decrement_sq(state: &WorkingState) -> Option<f64> {
             if !hessian.iter().all(|value| value.is_finite()) {
                 return None;
             }
-            let factor = StableSolver::new().factorize(hessian).ok()?;
+            let curvature = objective_curvature_for_direction(hessian, correction).ok()?;
+            let factor = StableSolver::new().factorize(curvature.as_ref()).ok()?;
             solve_direction_with_dense_factor(&factor, &state.gradient, &mut solution);
             solution.mapv_inplace(|value| -value);
         }
         gam_linalg::matrix::SymmetricMatrix::Sparse(hessian) => {
+            // A curvature correction is dense, and `update_with_curvature`
+            // assembles densely whenever one exists, so a sparse Hessian never
+            // has one to fold in. Refuse rather than silently measure the
+            // decrement in the wrong metric if that ever changes.
+            correction.is_none().then_some(())?;
             let factor = factorize_sparse_spd(hessian).ok()?;
             solve_sparse_spd_into(&factor, &state.gradient, &mut solution).ok()?;
         }
@@ -1567,17 +1553,22 @@ where
                             // decrement here without ever forming the
                             // cancellation-prone coefficient gradient; other
                             // models use the assembled exact Hessian solve.
+                            let curvature_correction =
+                                model.objective_hessian_matrix_correction().cloned();
                             model
                                 .exact_unconstrained_decrement_sq(&beta, final_state_ref)?
-                                .or_else(|| exact_newton_decrement_sq(final_state_ref))
+                                .or_else(|| {
+                                    exact_newton_decrement_sq(
+                                        final_state_ref,
+                                        curvature_correction.as_ref(),
+                                    )
+                                })
                         } else {
                             None
                         };
                         let exact_nd_threshold = exact_newton_decrement_threshold(
                             kkt_tolerance,
                             penalizedobjective(final_state_ref, penalized_dev_scale),
-                            final_state_ref.eta.as_ref().len(),
-                            final_state_ref.gradient.len(),
                         );
                         let exact_nd_pass = exact_decrement_sq
                             .is_some_and(|decrement_sq| decrement_sq <= exact_nd_threshold);
@@ -2183,6 +2174,19 @@ where
         && options.coefficient_lower_bounds.is_none()
         && options.arrow_schur.is_none();
     if polish_allowed {
+        // #2273 state locality. The polish inverts the OBJECTIVE's curvature,
+        // and the omitted part of it (`HΦ`) is read off the model, which holds
+        // whatever point it evaluated LAST — after an LM rejection that is a
+        // candidate, not `beta`. `state.gradient`/`state.hessian` belong to
+        // `beta`, so mixing in a candidate's `HΦ` would make the step a Newton
+        // step for no point at all: the same defect
+        // `solve_unconstrained_direction` rehydrates against before building its
+        // square-root operands. Re-evaluate at `beta` first. The value is
+        // idempotent for the same coefficients; what it buys is that the model's
+        // row scratch and `HΦ` describe THIS iterate.
+        if model.objective_hessian_matrix_correction().is_some() {
+            state = model.update_with_curvature(&beta, state.hessian_curvature)?;
+        }
         if let Some(bare_h) = state.hessian.as_dense() {
             let g_norm_before =
                 constrained_stationarity_norm(&state.gradient, beta.as_ref(), None, None);
@@ -2196,11 +2200,26 @@ where
                 // iterate is β̂ + d. Factorize the BARE (undamped) penalized
                 // Hessian — `state.hessian` carries no LM ridge (the damping
                 // lived only on the throwaway `regularized` clone in the loop).
-                let direction = StableSolver::new().factorize(bare_h).ok().map(|factor| {
-                    let mut d = Array1::<f64>::zeros(state.gradient.len());
-                    solve_direction_with_dense_factor(&factor, &state.gradient, &mut d);
-                    d
-                });
+                // #2273 — the polish is a Newton step, so it has to invert the
+                // OBJECTIVE's curvature. `state.hessian` omits `HΦ`, and
+                // stepping on `X'WX + S` instead made the refinement partial
+                // (probit: ‖g‖ 1.349e-7 → 7.447e-8, where an exact step reaches
+                // the arithmetic floor) or made it fail the strict-improvement
+                // guard outright and be declined (cloglog), leaving the fit one
+                // step short of its own certificate.
+                let curvature = objective_curvature_for_direction(
+                    bare_h,
+                    model.objective_hessian_matrix_correction(),
+                )?
+                .into_owned();
+                let direction = StableSolver::new()
+                    .factorize(&curvature)
+                    .ok()
+                    .map(|factor| {
+                        let mut d = Array1::<f64>::zeros(state.gradient.len());
+                        solve_direction_with_dense_factor(&factor, &state.gradient, &mut d);
+                        d
+                    });
                 if let Some(direction) = direction {
                     let step_finite = direction.iter().all(|v| v.is_finite());
                     // Guard against a runaway step: an exact Newton refinement
@@ -2287,9 +2306,10 @@ where
     // `Converged`.
     let can_still_certify = !status.is_converged() && status != PirlsStatus::Unstable;
     let final_exact_decrement_sq = if can_still_certify && polish_allowed {
+        let curvature_correction = model.objective_hessian_matrix_correction().cloned();
         model
             .exact_unconstrained_decrement_sq(&beta, &state)?
-            .or_else(|| exact_newton_decrement_sq(&state))
+            .or_else(|| exact_newton_decrement_sq(&state, curvature_correction.as_ref()))
     } else {
         None
     };
@@ -2298,8 +2318,6 @@ where
         exact_newton_decrement_threshold(
             kkt_tolerance,
             penalizedobjective(&state, final_dev_scale),
-            state.eta.as_ref().len(),
-            state.gradient.len(),
         )
     } else {
         0.0

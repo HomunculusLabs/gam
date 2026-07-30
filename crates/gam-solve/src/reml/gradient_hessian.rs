@@ -3767,7 +3767,16 @@ impl<'a> RemlState<'a> {
                     });
                 }
                 let mu_i = mu[i];
-                let vj = pirls::variance_jet_for_weight_family(weight_family, mu_i);
+                // #2273 — the complement comes from the LINK, not from `1.0 -
+                // mu`: a saturated cloglog/probit row has `mu == 1.0` exactly,
+                // and `V = mu*(1-mu)` would be a hard zero the whole
+                // observed-information jet then divides by.
+                let one_minus_mu = crate::mixture_link::inverse_link_complement_for_inverse_link(
+                    inverse_link_ref,
+                    eta_raw,
+                    mu_i,
+                );
+                let vj = pirls::variance_jet_for_weight_family(weight_family, mu_i, one_minus_mu);
                 if !(vj.v.is_finite() && vj.v > 0.0) {
                     return Err(EstimationError::PirlsRowGeometryUnrepresentable {
                         row: i,
@@ -3778,7 +3787,9 @@ impl<'a> RemlState<'a> {
                 }
                 let pw = weights[i];
                 let y_i = y_view[i];
-                let e_i = pirls::e_obs_from_jets(y_i, mu_i, h1, h2, h3, h4, h5, vj, phi, pw);
+                let resid_i = pirls::bernoulli_pair_residual(weight_family, y_i, mu_i, one_minus_mu);
+                let e_i =
+                    pirls::e_obs_from_jets(resid_i, mu_i, h1, h2, h3, h4, h5, vj, phi, pw);
                 if e_i.is_finite() {
                     Ok(e_i)
                 } else {
