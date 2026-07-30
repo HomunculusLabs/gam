@@ -108,6 +108,14 @@ impl FitConfig {
         if !self.ridge_lambda.is_finite() || self.ridge_lambda < 0.0 {
             return Err("ridge_lambda must be finite and >= 0".to_string());
         }
+        // Normalize the survival time-anchor override through its one validator,
+        // so the CLI flag, a `--request` document, a `gamfit.fit` kwarg and a
+        // direct Rust caller are all held to the same contract and report the
+        // same message (#2631).
+        self.survival_time_anchor = self
+            .survival_time_anchor
+            .map(crate::survival::validate_survival_time_anchor_override)
+            .transpose()?;
         if self.outer_max_iter == Some(0) {
             return Err("outer_max_iter must be >= 1".to_string());
         }
@@ -159,7 +167,10 @@ mod tests {
         .resolve()
         .unwrap();
         assert_eq!(resolved.family, None);
-        assert_eq!(resolved.survival_likelihood.as_deref(), Some("transformation"));
+        assert_eq!(
+            resolved.survival_likelihood.as_deref(),
+            Some("transformation")
+        );
         assert_eq!(resolved.baseline_target, "linear");
     }
 

@@ -1394,6 +1394,342 @@ fn issue_2116_cli_standard_fit_gates_duchon_operator_penalties_for_poisson() {
     );
 }
 
+/// #2631: the CLI and the engine must resolve the SAME baseline time anchor for
+/// the same formula, data and config.
+///
+/// This is the issue's title as an assertion. `run_survival` used to carry its
+/// own copy of the anchor rule that promoted the robust interior anchor for
+/// marginal-slope only, while `materialize_survival` promoted it for any
+/// left-truncated dataset — so on this fixture the CLI centered a location-scale
+/// fit at the earliest entry (10) and `fit_from_formula` centered it at the
+/// median exit (80). Both were internally consistent, which is exactly why
+/// nothing caught it: the fits simply differed.
+///
+/// The fixture is chosen so the two candidate anchors are far apart and the
+/// median exit is exact: entries all delayed (min 10), six exits whose two
+/// central values are 60 and 100, so the median exit is 80.
+#[test]
+fn cli_and_engine_agree_on_the_left_truncated_survival_anchor_2631() {
+    const EARLIEST_ENTRY: f64 = 10.0;
+    const MEDIAN_EXIT: f64 = 80.0;
+    let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let train_path = td.path().join("left_truncated_anchor.csv");
+    let model_path = td.path().join("left_truncated_anchor.model.json");
+    fs::write(
+        &train_path,
+        "entry,exit,event,x\n\
+         10,15,1,-0.8\n\
+         20,35,0,0.4\n\
+         40,60,1,-0.2\n\
+         80,100,0,0.7\n\
+         120,150,1,0.1\n\
+         160,220,1,-0.5\n",
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write left-truncated csv", e));
+
+    let formula = "Surv(entry, exit, event) ~ x";
+
+    // ── Engine arm: the same request through `materialize`, which is what
+    // `fit_from_formula` and the Python FFI use.
+    let dataset = load_dataset_projected(
+        &train_path,
+        &[
+            "entry".to_string(),
+            "exit".to_string(),
+            "event".to_string(),
+            "x".to_string(),
+        ],
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "load left-truncated dataset", e));
+    let engine_config = gam::families::fit_orchestration::FitConfig {
+        survival_likelihood: Some("location-scale".to_string()),
+        ..gam::families::fit_orchestration::FitConfig::default()
+    }
+    .resolve()
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "resolve engine fit config", e));
+    let materialized =
+        gam::families::fit_orchestration::materialize(formula, &dataset, &engine_config)
+            .unwrap_or_else(|e| panic!("{} failed: {:?}", "engine materialization", e));
+    let engine_anchor = materialized
+        .survival_time_basis
+        .expect("a survival materialization must carry its realised time basis")
+        .anchor;
+
+    // ── CLI arm: the same request through `run_fit` -> `run_survival`.
+    run_fit(FitArgs {
+        expectile_tau: None,
+        data: train_path.clone(),
+        request: None,
+        formula_positional: Some(formula.to_string()),
+        ctn_stage1: None,
+        precision_hyperpriors: None,
+        latent_coordinates: None,
+        analytic_penalties: None,
+        smooth_descriptors: None,
+        predict_noise: None,
+        logslope_formula: None,
+        z_column: None,
+        weights_column: None,
+        offset_column: None,
+        noise_offset_column: None,
+        frailty_kind: None,
+        frailty_sd: None,
+        hazard_loading: None,
+        transformation_normal: false,
+        firth: false,
+        family: FamilyArg::Auto,
+        negative_binomial_theta: None,
+        survival_likelihood: Some("location-scale".to_string()),
+        survival_time_anchor: None,
+        baseline_target: "linear".to_string(),
+        baseline_scale: None,
+        baseline_shape: None,
+        baseline_rate: None,
+        baseline_makeham: None,
+        time_basis: "ispline".to_string(),
+        time_degree: 2,
+        time_num_internal_knots: 4,
+        time_smooth_lambda: 1e-2,
+        ridge_lambda: 1e-6,
+        threshold_time_k: None,
+        threshold_time_degree: 3,
+        sigma_time_k: None,
+        sigma_time_degree: 3,
+        adaptive_regularization: false,
+        scale_dimensions: false,
+        precompute_conformal: true,
+        pilot_subsample_threshold: 0,
+        out: Some(model_path.clone()),
+    })
+    .unwrap_or_else(|e| {
+        panic!(
+            "{} failed: {:?}",
+            "left-truncated location-scale CLI fit should succeed", e
+        )
+    });
+    let saved = SavedModel::load_from_path(&model_path)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "load CLI-fitted model", e));
+    let cli_anchor = saved
+        .survival_time_anchor
+        .expect("a saved survival model must carry its time anchor");
+
+    assert!(
+        (cli_anchor - engine_anchor).abs() <= 1e-12,
+        "the CLI and the engine must resolve the same survival time anchor for \
+         identical inputs; CLI got {cli_anchor}, engine got {engine_anchor}"
+    );
+    assert!(
+        (engine_anchor - MEDIAN_EXIT).abs() <= 1e-12,
+        "left-truncated data must anchor at the robust median exit \
+         ({MEDIAN_EXIT}), got {engine_anchor}"
+    );
+    assert!(
+        (cli_anchor - EARLIEST_ENTRY).abs() > 1.0,
+        "the CLI must not fall back to the earliest entry ({EARLIEST_ENTRY}) — \
+         that is the #2631 divergence"
+    );
+    remove_temp_file(&model_path);
+}
+
+/// #2631: `--survival-time-anchor` must be honored on the CLI's DEFAULT survival
+/// route.
+///
+/// `Transformation` and `Weibull` short-circuit to
+/// `run_canonical_survival_transformation`, which delegates to
+/// `fit_from_formula`. The anchor override used to be read only by the CLI's own
+/// anchor computation further down the function, which that route never reaches,
+/// and `FitConfig` had no field to carry it — so the flag was parsed, validated,
+/// and dropped on the floor for the default likelihood. The CLI's own comment
+/// claimed it was "honored by all paths".
+///
+/// The explicit value (25) is neither the earliest entry nor the median exit of
+/// this fixture, so only an honored override can produce it. The fixture is
+/// right-censored (`Surv(exit, event)`, entry synthesized at the origin) because
+/// the assertion is about the OVERRIDE reaching the fit, and the default anchor
+/// there is the time-origin floor — as far from 25 as the left-truncated default
+/// would be, with none of the left-truncated transformation fit's convergence
+/// fragility in the way.
+#[test]
+fn cli_survival_time_anchor_is_honored_on_the_default_transformation_route_2631() {
+    const EXPLICIT_ANCHOR: f64 = 25.0;
+    let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let train_path = td.path().join("explicit_anchor.csv");
+    let model_path = td.path().join("explicit_anchor.model.json");
+    fs::write(
+        &train_path,
+        "exit,event,x\n\
+         15,1,-0.8\n\
+         35,0,0.4\n\
+         60,1,-0.2\n\
+         100,0,0.7\n\
+         150,1,0.1\n\
+         220,1,-0.5\n",
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write survival csv", e));
+
+    run_fit(FitArgs {
+        expectile_tau: None,
+        data: train_path.clone(),
+        request: None,
+        formula_positional: Some("Surv(exit, event) ~ x".to_string()),
+        ctn_stage1: None,
+        precision_hyperpriors: None,
+        latent_coordinates: None,
+        analytic_penalties: None,
+        smooth_descriptors: None,
+        predict_noise: None,
+        logslope_formula: None,
+        z_column: None,
+        weights_column: None,
+        offset_column: None,
+        noise_offset_column: None,
+        frailty_kind: None,
+        frailty_sd: None,
+        hazard_loading: None,
+        transformation_normal: false,
+        firth: false,
+        family: FamilyArg::Auto,
+        negative_binomial_theta: None,
+        // The default route — the one that delegated to the engine and lost the
+        // flag. `Weibull` short-circuits through the same branch and is covered
+        // by the sibling test below.
+        survival_likelihood: Some("transformation".to_string()),
+        survival_time_anchor: Some(EXPLICIT_ANCHOR),
+        baseline_target: "linear".to_string(),
+        baseline_scale: None,
+        baseline_shape: None,
+        baseline_rate: None,
+        baseline_makeham: None,
+        time_basis: "ispline".to_string(),
+        time_degree: 2,
+        time_num_internal_knots: 4,
+        time_smooth_lambda: 1e-2,
+        ridge_lambda: 1e-6,
+        threshold_time_k: None,
+        threshold_time_degree: 3,
+        sigma_time_k: None,
+        sigma_time_degree: 3,
+        adaptive_regularization: false,
+        scale_dimensions: false,
+        precompute_conformal: true,
+        pilot_subsample_threshold: 0,
+        out: Some(model_path.clone()),
+    })
+    .unwrap_or_else(|e| {
+        panic!(
+            "{} failed: {:?}",
+            "explicit-anchor transformation CLI fit should succeed", e
+        )
+    });
+
+    let saved = SavedModel::load_from_path(&model_path)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "load fitted model", e));
+    let anchor = saved
+        .survival_time_anchor
+        .expect("a saved survival model must carry its time anchor");
+    assert!(
+        (anchor - EXPLICIT_ANCHOR).abs() <= 1e-12,
+        "--survival-time-anchor must be honored on the default transformation \
+         route; requested {EXPLICIT_ANCHOR}, saved {anchor}"
+    );
+    remove_temp_file(&model_path);
+}
+
+/// #2631, the left-truncated half of the default route: `Weibull` takes the same
+/// `run_canonical_survival_transformation` short-circuit as `Transformation`, and
+/// converges on a thin left-truncated fixture where the Royston-Parmar
+/// transformation fit does not — so it is where both halves of the fix can be
+/// asserted on ONE dataset.
+///
+/// Default: the robust median exit (80), not the earliest entry (10).
+/// Override: honored (25), where the old code discarded it and produced 80.
+#[test]
+fn cli_weibull_route_anchors_left_truncated_data_and_honors_the_override_2631() {
+    const MEDIAN_EXIT: f64 = 80.0;
+    const EXPLICIT_ANCHOR: f64 = 25.0;
+    let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let train_path = td.path().join("weibull_left_truncated.csv");
+    fs::write(
+        &train_path,
+        "entry,exit,event,x\n\
+         10,15,1,-0.8\n\
+         20,35,0,0.4\n\
+         40,60,1,-0.2\n\
+         80,100,0,0.7\n\
+         120,150,1,0.1\n\
+         160,220,1,-0.5\n",
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write left-truncated csv", e));
+
+    for (requested, expected) in [(None, MEDIAN_EXIT), (Some(EXPLICIT_ANCHOR), EXPLICIT_ANCHOR)] {
+        let model_path = td.path().join(match requested {
+            Some(_) => "weibull_explicit.model.json",
+            None => "weibull_default.model.json",
+        });
+        run_fit(FitArgs {
+            expectile_tau: None,
+            data: train_path.clone(),
+            request: None,
+            formula_positional: Some("Surv(entry, exit, event) ~ x".to_string()),
+            ctn_stage1: None,
+            precision_hyperpriors: None,
+            latent_coordinates: None,
+            analytic_penalties: None,
+            smooth_descriptors: None,
+            predict_noise: None,
+            logslope_formula: None,
+            z_column: None,
+            weights_column: None,
+            offset_column: None,
+            noise_offset_column: None,
+            frailty_kind: None,
+            frailty_sd: None,
+            hazard_loading: None,
+            transformation_normal: false,
+            firth: false,
+            family: FamilyArg::Auto,
+            negative_binomial_theta: None,
+            survival_likelihood: Some("weibull".to_string()),
+            survival_time_anchor: requested,
+            baseline_target: "linear".to_string(),
+            baseline_scale: None,
+            baseline_shape: None,
+            baseline_rate: None,
+            baseline_makeham: None,
+            time_basis: "ispline".to_string(),
+            time_degree: 3,
+            time_num_internal_knots: 8,
+            time_smooth_lambda: 1e-2,
+            ridge_lambda: 1e-6,
+            threshold_time_k: None,
+            threshold_time_degree: 3,
+            sigma_time_k: None,
+            sigma_time_degree: 3,
+            adaptive_regularization: false,
+            scale_dimensions: false,
+            precompute_conformal: true,
+            pilot_subsample_threshold: 0,
+            out: Some(model_path.clone()),
+        })
+        .unwrap_or_else(|e| {
+            panic!(
+                "{} failed: {:?}",
+                "left-truncated Weibull CLI fit should succeed", e
+            )
+        });
+        let saved = SavedModel::load_from_path(&model_path)
+            .unwrap_or_else(|e| panic!("{} failed: {:?}", "load fitted model", e));
+        let anchor = saved
+            .survival_time_anchor
+            .expect("a saved survival model must carry its time anchor");
+        assert!(
+            (anchor - expected).abs() <= 1e-12,
+            "requested anchor {requested:?} must resolve to {expected}, got {anchor}"
+        );
+        remove_temp_file(&model_path);
+    }
+}
+
 #[test]
 fn cli_surv_predict_noise_routes_to_survival_location_scale() {
     let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
