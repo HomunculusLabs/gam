@@ -1446,10 +1446,6 @@ impl RankCertifiedPsdPseudoinverse {
         self.pseudoinverse
     }
 
-    #[inline]
-    pub fn into_rank_and_pseudoinverse(self) -> (usize, Array2<f64>) {
-        (self.rank, self.pseudoinverse)
-    }
 }
 
 /// Compute a declared rank-truncated PSD pseudoinverse from one strict,

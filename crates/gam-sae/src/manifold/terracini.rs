@@ -791,60 +791,6 @@ fn sparse_code_amplitude(
     amplitude
 }
 
-/// Scan a set of sampled rows and produce the terracini report.
-///
-/// `rows_with_patterns` are the sampled `(row, active-atoms)`; `amplitudes` is
-/// `(N, K)` (e.g. [`SaeManifoldTerm::fitted_assignment_amplitudes`]). The cheap
-/// pairwise pass runs over every co-occurring pair; exact clique certificates run
-/// for patterns up to `cfg.max_clique_atoms`. In `Off` mode returns an empty
-/// report without touching the term.
-pub fn terracini_scan(
-    term: &SaeManifoldTerm,
-    rows_with_patterns: &[(usize, Vec<usize>)],
-    amplitudes: ArrayView2<f64>,
-    cfg: &TerraciniConfig,
-) -> TerraciniReport {
-    let mut agg = TerraciniAggregator::new(cfg.flag_margin, cfg.reservoir_cap, cfg.mode);
-    if cfg.mode == TerraciniMode::Off {
-        return agg.finish();
-    }
-    for (row, pattern) in rows_with_patterns {
-        if pattern.len() < 2 {
-            continue;
-        }
-        agg.note_row();
-        let blocks: Vec<ParseBlock> = pattern
-            .iter()
-            .map(|&k| parse_block_from_term(term, k, *row, amplitudes[[*row, k]]))
-            .collect();
-        // Cheap pairwise pass (necessary screen; upper-bounds clique margins).
-        if cfg.pair_pass {
-            for i in 0..blocks.len() {
-                for j in (i + 1)..blocks.len() {
-                    if let Ok(cert) = parse_certificate(
-                        &[blocks[i].clone(), blocks[j].clone()],
-                        cfg.noise_var,
-                        cfg.ridge,
-                    ) {
-                        agg.record_pair(
-                            blocks[i].atom,
-                            blocks[j].atom,
-                            cert.margin,
-                            cert.amplification,
-                        );
-                    }
-                }
-            }
-        }
-        // Exact clique certificate for bounded-size patterns.
-        if pattern.len() <= cfg.max_clique_atoms {
-            if let Ok(cert) = parse_certificate(&blocks, cfg.noise_var, cfg.ridge) {
-                agg.record_clique(*row, &cert);
-            }
-        }
-    }
-    agg.finish()
-}
 
 /// Reservoir-sized Terracini scan from the canonical sparse-code state.
 ///

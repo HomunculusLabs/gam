@@ -565,18 +565,6 @@ pub struct DeviceCubicMomentTable {
     pub values: Vec<f64>,
 }
 
-/// Sized handle to the per-axis 1D marginal moment table (factored consumer
-/// path). Same layout convention: alpha-major along moment exponent ν.
-#[derive(Debug)]
-pub struct DeviceMarginalTable {
-    pub n_axes: usize,
-    pub n_spans_per_axis: Vec<usize>,
-    pub n_alpha_per_axis: Vec<usize>,
-    #[cfg(target_os = "linux")]
-    pub values: cudarc::driver::CudaSlice<f64>,
-    #[cfg(not(target_os = "linux"))]
-    pub values: Vec<f64>,
-}
 
 // ────────────────────────────────────────────────────────────────────────
 // CUDA backend handle, module cache key, and NVRTC kernel source generator

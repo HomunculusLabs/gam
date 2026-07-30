@@ -1219,29 +1219,6 @@ pub fn certify_phase_circuit(
     })
 }
 
-/// Read the co-firing in-plane angles and gate-product weights for one atom pair
-/// from raw data — the input a caller needs to fit [`phase_transfer_operator`] and
-/// run an intervention shard against a real model. Returns `(θ_A, θ_B, w)`.
-pub fn coactive_angles(
-    data: ArrayView2<'_, f64>,
-    mean: &Array1<f64>,
-    cand_a: &IsaPlaneCandidate,
-    cand_b: &IsaPlaneCandidate,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let pa = plane_phases(data, mean, cand_a);
-    let pb = plane_phases(data, mean, cand_b);
-    let n = pa.theta.len();
-    let w: Vec<f64> = (0..n)
-        .map(|i| {
-            if pa.active[i] && pb.active[i] {
-                1.0
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    (pa.theta, pb.theta, w)
-}
 
 #[cfg(test)]
 mod tests {

@@ -557,10 +557,6 @@ impl GridSpline2dDesign {
         })
     }
 
-    /// Number of cells per axis (the caller-supplied K).
-    pub fn num_cells(&self) -> usize {
-        self.axes[0].cells
-    }
 
     /// Basis functions per axis, `K + 3`.
     pub fn basis_per_axis(&self) -> usize {

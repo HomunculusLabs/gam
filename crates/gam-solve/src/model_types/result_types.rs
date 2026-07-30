@@ -867,10 +867,6 @@ impl OuterStationarityCertificate {
         matches!(self, Self::FixedPoint { .. })
     }
 
-    /// Whether this optimum was certified stationary-at-asymptote.
-    pub fn is_asymptote_rail(&self) -> bool {
-        matches!(self, Self::AsymptoteRail { .. })
-    }
 
     /// The certified asymptote rails, when this is an `AsymptoteRail`.
     pub fn rails(&self) -> &[RailCoordinate] {
@@ -4352,18 +4348,6 @@ impl UnifiedFitResult {
             .or_else(|| self.geometry.as_ref().map(|geom| &geom.penalized_hessian))
     }
 
-    /// Get the φ-scaled posterior covariance as the [`PhiScaledCovariance`]
-    /// newtype if available, sourced from `FitInference::beta_covariance`.
-    ///
-    /// Prefer this over [`Self::beta_covariance`] in inference-internal
-    /// code so the φ-scaled invariant is type-enforced.
-    pub fn beta_covariance_phi_scaled(
-        &self,
-    ) -> Option<&gam_problem::dispersion_cov::PhiScaledCovariance> {
-        self.inference
-            .as_ref()
-            .and_then(|inf| inf.beta_covariance.as_ref())
-    }
 
     /// Get owned row-wise diagonal working evidence if available.
     pub fn working_geometry(&self) -> Option<&WorkingGeometry> {

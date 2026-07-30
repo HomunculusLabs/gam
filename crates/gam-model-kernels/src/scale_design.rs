@@ -227,14 +227,6 @@ impl ScaleDesignMatrixRef<'_> {
     }
 }
 
-pub fn infer_non_intercept_start(design: &Array2<f64>, weights: &Array1<f64>) -> usize {
-    infer_non_intercept_start_impl(
-        ScaleDesignMatrixRef::Dense(design),
-        weights,
-        "weighted column stats row mismatch".to_string(),
-    )
-    .unwrap_or(0)
-}
 
 fn dim_err(reason: impl Into<String>) -> ScaleDesignError {
     ScaleDesignError::IncompatibleDimensions {

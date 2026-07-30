@@ -192,9 +192,6 @@ impl LatentCoordinateCheckpoint {
         self.restart_index
     }
 
-    pub fn into_coordinates(self) -> Array1<f64> {
-        self.coordinates
-    }
 }
 
 /// Exact evidence used to accept or reject the best restart.

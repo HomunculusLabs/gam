@@ -274,9 +274,6 @@ pub fn cpu_oracle_normal_equations_solve(
     beta
 }
 
-/// The deployment target, re-exported so callers measuring throughput do not
-/// have to import the policy module directly.
-pub const DEPLOYMENT_TARGET_ROWS_PER_SEC: f64 = GPU_THROUGHPUT_TARGET_ROWS_PER_SEC;
 
 // ===========================================================================
 // FULL exact per-row encode throughput + correctness (#1412 follow-up).

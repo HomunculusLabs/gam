@@ -988,25 +988,6 @@ impl SurvivalLocationScaleChannelHessian {
     /// Number of output channels for SLS (always 3).
     pub const K: usize = 3;
 
-    /// Construct from a pre-computed `(n × 3 × 3)` tensor.
-    /// No PSD clamping is applied — caller is responsible for ensuring PSD.
-    pub fn from_full(h: ndarray::Array3<f64>) -> Self {
-        assert_eq!(
-            h.shape()[1],
-            Self::K,
-            "SurvivalLocationScaleChannelHessian: expected K={} channels, got {}",
-            Self::K,
-            h.shape()[1],
-        );
-        assert_eq!(
-            h.shape()[2],
-            Self::K,
-            "SurvivalLocationScaleChannelHessian: expected K={} channels, got {}",
-            Self::K,
-            h.shape()[2],
-        );
-        Self { h }
-    }
 
     /// Structural identity metric: W_i = I₃ for every subject.
     ///

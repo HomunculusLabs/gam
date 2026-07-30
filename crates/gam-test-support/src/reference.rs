@@ -788,18 +788,6 @@ impl QualityDiagnostics {
         self.prediction = Some(prediction_fingerprint(pred));
         self
     }
-    pub fn with_reference_gap(
-        mut self,
-        pred: &[f64],
-        reference: &[f64],
-        truth: Option<&[f64]>,
-    ) -> Self {
-        self.rmse_vs_reference = Some(rmse(pred, reference));
-        if let Some(truth) = truth {
-            self.reference_rmse_vs_truth = Some(rmse(reference, truth));
-        }
-        self
-    }
     pub fn report(&self) -> String {
         let mut out = format!("[quality-diagnostics] label={}", self.label);
         if let Some(v) = self.rmse_vs_truth {

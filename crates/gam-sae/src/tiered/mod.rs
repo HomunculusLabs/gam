@@ -540,33 +540,6 @@ pub struct TieredPrechartResidual {
     pub residual: Array2<f64>,
 }
 
-/// Apply the additive pre-chart path: Tier-0 mean first, then the optional
-/// Tier-0.5 finite-anchor sink atom, then hand only the residual to semantic
-/// dictionary/chart fitting.
-pub fn prechart_residual(
-    z: ArrayView2<'_, f64>,
-    positions: &[i64],
-    delimiter_classes: &[Option<SinkDelimiterClass>],
-    config: &TieredConfig,
-) -> Result<TieredPrechartResidual, String> {
-    let tier0 = Tier0Mean::fit(z)?;
-    let after_tier0 = tier0.apply(z)?;
-    let tier05_sink = fit_tier05_sink_atom(
-        after_tier0.view(),
-        positions,
-        delimiter_classes,
-        &config.tier05_sink,
-    )?;
-    let residual = match &tier05_sink {
-        Some(sink) => sink.residual_after_sink(after_tier0.view())?,
-        None => after_tier0,
-    };
-    Ok(TieredPrechartResidual {
-        tier0,
-        tier05_sink,
-        residual,
-    })
-}
 
 /// Knobs for a composed tiered fit.
 #[derive(Clone, Debug)]

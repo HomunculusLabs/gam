@@ -484,30 +484,6 @@ impl SaeMigrationLedger {
         }
     }
 
-    /// Record a sparse-dict dead-atom revival: a dead linear atom reseeded onto a
-    /// worst-reconstructed residual row (never a principal component). The
-    /// revival must pay evidence, not just RSS — the `dl_bits` reconstruction
-    /// charge it banks. This is the seam the streaming linear kernel wires onto
-    /// (its call site lives in `sparse_dict/stream.rs`; re-pointed in a later
-    /// increment).
-    pub fn record_revival(
-        &mut self,
-        count: usize,
-        round: Option<usize>,
-        dl_bits: f64,
-        objective: f64,
-    ) {
-        // A revival is a death (the dead atom) immediately re-born from the
-        // residual pool: record the birth in the residual-seed currency.
-        self.birth(
-            MoveStage::Linear,
-            BirthSeed::ResidualFactor,
-            count,
-            round,
-            MoveEvidence::from_dl_bits(dl_bits),
-            objective,
-        );
-    }
 }
 
 /// The ladder rung a structure-search move lands on: a `Birth` candidate is a new

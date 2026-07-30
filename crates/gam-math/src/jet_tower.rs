@@ -1748,21 +1748,6 @@ pub fn moving_limit_boundary_tower_theta_integrand<const K1: usize, const K: usi
     full - interior
 }
 
-/// Two-edge cell version of [`moving_limit_boundary_tower_theta_integrand`]:
-/// the exact boundary-flux tower of `∫_{z_L(θ)}^{z_R(θ)} G(z;θ) dz` with a
-/// θ-dependent integrand, `Φ(z_R;θ) − Φ(z_L;θ)` minus the pure-θ parts at each
-/// frozen edge. A `Fixed` edge passes a `z_edge` with zero derivative channels,
-/// so its `full` and `interior` substitutions coincide and it contributes
-/// nothing — matching the production `edge_vel = 0` short-circuit.
-pub fn cell_moving_boundary_flux_tower_theta_integrand<const K1: usize, const K: usize>(
-    phi_jet_right: &Tower4<K1>,
-    z_right: &Tower4<K>,
-    phi_jet_left: &Tower4<K1>,
-    z_left: &Tower4<K>,
-) -> Tower4<K> {
-    moving_limit_boundary_tower_theta_integrand(phi_jet_right, z_right)
-        - moving_limit_boundary_tower_theta_integrand(phi_jet_left, z_left)
-}
 
 // ── The program seam ─────────────────────────────────────────────────
 

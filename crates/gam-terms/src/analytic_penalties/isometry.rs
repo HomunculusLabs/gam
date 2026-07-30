@@ -500,44 +500,6 @@ impl IsometryPenalty {
         self
     }
 
-    /// Attach radial Duchon decoder metadata so the exact `∂J/∂t` tensor can
-    /// be rebuilt from the current target coordinates. A doc-test oracle for
-    /// this path is: build `J(t)` from `duchon_radial_first_derivative_nd`,
-    /// evaluate `grad_target(t)`, then central-difference `value(t ± h e_j)`;
-    /// the analytic component should agree to finite-difference tolerance as
-    /// `h` is refined before cancellation dominates.
-    #[must_use]
-    pub fn with_duchon_radial_source(mut self, source: Arc<IsometryDuchonRadialSource>) -> Self {
-        self.duchon_radial_source = Some(source);
-        self
-    }
-
-    /// Attach the gauge metric **from the single
-    /// [`RowMetric`](gam_problem::RowMetric)** that also drives
-    /// the reconstruction likelihood. This is the only way an `IsometryPenalty`
-    /// acquires a non-identity behavioral metric: the independent
-    /// `WeightField` setter has been removed so a gauge-metric ≠
-    /// likelihood-metric state is structurally unrepresentable. The
-    /// contraction-order invariant (`M_n = U_n^T J_n`, never materializing the
-    /// `p × p` `W_n`) is preserved by the [`WeightField::Factored`] layout the
-    /// metric emits.
-    ///
-    /// `p_out` is taken from the metric so the gauge's output dimension is
-    /// pinned to the metric's.
-    #[must_use]
-    pub fn with_row_metric(mut self, metric: &gam_problem::RowMetric) -> Self {
-        // Only a metric that drives the gauge installs a non-identity pullback
-        // weight. A Euclidean metric reduces the gauge pullback to the bare
-        // `J_nᵀ J_n`, so its `to_weight_field()` is `Identity` and the existing
-        // (default-Identity) weight is left exactly as is — bit-for-bit the
-        // pre-metric isotropic gauge. The output dimension is pinned to the
-        // metric's regardless, so the gauge and likelihood agree on `p_out`.
-        if metric.drives_gauge() {
-            self.weight = metric.to_weight_field();
-        }
-        self.p_out = metric.p_out();
-        self
-    }
 
     impl_with_weight_schedule!(scalar_weight);
 

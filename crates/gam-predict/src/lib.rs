@@ -1440,18 +1440,6 @@ impl PosteriorMeanOptions {
         }
     }
 
-    /// Credible bounds at `level` with required smoothing-corrected covariance
-    /// and no observation interval — the common default request. The
-    /// smoothing-corrected default matches [`PredictUncertaintyOptions`] so the
-    /// posterior-mean families (binomial, link-wiggle) include the same
-    /// smoothing-parameter uncertainty every other family does by default.
-    pub fn with_level(level: f64) -> Self {
-        Self {
-            confidence_level: Some(level),
-            covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
-            include_observation_interval: false,
-        }
-    }
 }
 
 /// Compute and attach TransformEta confidence bounds to a posterior-mean result.

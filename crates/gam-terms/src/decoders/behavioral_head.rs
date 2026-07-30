@@ -520,18 +520,6 @@ impl LeakageAbsorber {
         out
     }
 
-    /// The absorbed block to *append* to the reconstruction design: per-row
-    /// rows `Z_infl[n, :] = Δ`-direction in latent-code space, here the
-    /// row's latent code projected onto `Q` — the realized label-channel
-    /// leverage. Width `r`. This mirrors the survival/BMS install where the
-    /// realized Stage-1 leakage directions are appended as a null-penalized
-    /// absorbed block, making the β estimating equation orthogonal to its span.
-    pub fn absorbed_design_block(&self, t: ArrayView2<'_, f64>) -> Array2<f64> {
-        if self.q.ncols() == 0 {
-            return Array2::<f64>::zeros((t.nrows(), 0));
-        }
-        t.dot(&self.q)
-    }
 }
 
 /// Per-feature (per-atom) behavioral-significance report for the head.

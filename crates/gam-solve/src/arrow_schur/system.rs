@@ -443,55 +443,6 @@ impl ArrowSchurSystem {
         }
     }
 
-    /// Allocate a heterogeneous-row system using a caller-owned dense shared
-    /// block and row `H_tβ` slabs allocated at `htbeta_cols` columns.
-    pub fn new_with_per_row_dims_and_hbb_and_htbeta_cols(
-        per_row_dims: Vec<usize>,
-        k: usize,
-        mut hbb: Array2<f64>,
-        htbeta_cols: usize,
-    ) -> Self {
-        assert_eq!(hbb.dim(), (k, k));
-        hbb.fill(0.0);
-        let n = per_row_dims.len();
-        let max_d = per_row_dims.iter().copied().max().unwrap_or(0);
-        let row_dims: Arc<[usize]> = per_row_dims.iter().copied().collect::<Vec<_>>().into();
-        let mut off_vec = Vec::with_capacity(n + 1);
-        let mut cursor = 0usize;
-        for &di in &per_row_dims {
-            off_vec.push(cursor);
-            cursor += di;
-        }
-        off_vec.push(cursor);
-        let row_offsets: Arc<[usize]> = off_vec.into();
-        let rows = per_row_dims
-            .iter()
-            .map(|&di| ArrowRowBlock::new_with_htbeta_cols(di, htbeta_cols))
-            .collect();
-        Self {
-            rows,
-            hbb,
-            hbb_matvec: None,
-            htbeta_matvec: None,
-            htbeta_transpose_matvec: None,
-            htbeta_dense_supplement: false,
-            hbb_diag: None,
-            gb: Array1::<f64>::zeros(k),
-            d: max_d,
-            row_dims,
-            row_offsets,
-            k,
-            manifold_mode_fingerprint: EUCLIDEAN_MANIFOLD_MODE_FINGERPRINT,
-            row_hessian_fingerprint: 0,
-            analytic_row_hessian_fingerprint: 0,
-            block_offsets: Arc::from([] as [Range<usize>; 0]),
-            penalty_op: None,
-            device_sae_pcg: None,
-            cross_row_penalties: Vec::new(),
-            row_gauge_deflation: None,
-            beta_gauge_quotient: None,
-        }
-    }
 
     /// Build a fresh numerical system while reusing caller-owned assembly
     /// allocations when their shapes still match.

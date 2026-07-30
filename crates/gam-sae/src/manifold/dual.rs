@@ -37,9 +37,6 @@ impl Dual {
         Self { re, eps: 1.0 }
     }
 
-    pub fn with_eps(re: f64, eps: f64) -> Self {
-        Self { re, eps }
-    }
 
     pub fn with_derivative(re: f64, eps: f64) -> Self {
         Self { re, eps }

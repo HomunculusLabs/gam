@@ -86,13 +86,6 @@
 /// was a file-local convention; see module docs for why it must be shared.)
 pub const MADSEN_DAMPING_CAP: f64 = 1e12;
 
-/// Default consecutive-window length for a [`FlatStreak`] stagnation
-/// detector: how many successive flat readings must accumulate before the
-/// loop is declared plateaued. Two is the established in-tree streak
-/// convention (reweight.rs soft-acceptance) — one noisy reading can fake a
-/// plateau, two consecutive cannot — plus one for the headroom a merit that
-/// is genuinely creeping (not frozen) needs to escape.
-pub const PLATEAU_DEFAULT_WINDOW: usize = 3;
 
 /// Is a damped retry still alive at this damping level?
 #[inline]

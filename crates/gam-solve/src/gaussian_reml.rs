@@ -4799,33 +4799,6 @@ fn rho_landscape_certificate_from_parts(
     })
 }
 
-/// Certified profiled Gaussian-REML ρ-landscape at the given design: the
-/// outward-enclosed branch-and-bound stationary brackets, their decided count,
-/// and the compactified `ρ→∓∞` endpoint costs.
-pub fn gaussian_reml_rho_landscape_certificate(
-    x: ArrayView2<'_, f64>,
-    y: ArrayView1<'_, f64>,
-    penalty: ArrayView2<'_, f64>,
-    nullspace_dim: Option<usize>,
-    weights: Option<ArrayView1<'_, f64>>,
-    init_rho: Option<f64>,
-) -> Result<RhoLandscapeCertificate, EstimationError> {
-    if init_rho.is_some_and(|rho| !rho.is_finite()) {
-        crate::bail_invalid_estim!(
-            "Gaussian REML rho-landscape certificate requires a finite rho hint"
-        );
-    }
-    let y2 = y.insert_axis(Axis(1));
-    let prepared = prepare_gaussian_reml(x, y2.view(), penalty, nullspace_dim, weights, None)?;
-    rho_landscape_certificate_from_parts(
-        &prepared.cache,
-        prepared.ywy.view(),
-        prepared.projected_rhs_squared.view(),
-        prepared.n_effective,
-        prepared.n_outputs,
-        init_rho,
-    )
-}
 
 /// Select ρ̂ = ln λ̂ by grid-free stationary-point enumeration (allocating path).
 fn optimize_rho(

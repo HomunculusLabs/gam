@@ -160,14 +160,6 @@ impl CoordinateMapFit {
         harmonic_content(&self.harmonics)
     }
 
-    pub fn predict_delta(&self, key_t: f64) -> f64 {
-        let mut out = self.intercept;
-        for coefficient in &self.harmonics {
-            let angle = TWO_PI * coefficient.harmonic as f64 * key_t;
-            out += coefficient.cos * angle.cos() + coefficient.sin * angle.sin();
-        }
-        out
-    }
 }
 
 pub fn fit_attention_kernel(

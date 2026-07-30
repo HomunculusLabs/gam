@@ -236,15 +236,7 @@ impl GaussianPatchRowSplit {
         })
     }
 
-    #[must_use]
-    pub fn pilot_row_count(&self) -> usize {
-        self.pilot_rows.len()
-    }
 
-    #[must_use]
-    pub fn inference_row_count(&self) -> usize {
-        self.inference_rows.len()
-    }
 }
 
 /// Why the pilot projection may replace the ambient space in a certificate.

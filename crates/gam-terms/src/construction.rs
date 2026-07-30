@@ -65,59 +65,6 @@ impl PenaltyRepresentation {
         }
     }
 
-    /// Materialize this representation (Dense / Banded / Kronecker) into a
-    /// single dense symmetric penalty block.
-    pub fn to_block_dense(&self) -> Array2<f64> {
-        match self {
-            PenaltyRepresentation::Dense(matrix) => matrix.clone(),
-            PenaltyRepresentation::Banded { bands, offsets } => {
-                let dim = self.block_dimension();
-                let mut dense = Array2::zeros((dim, dim));
-                let positive_offsets: HashSet<usize> = offsets
-                    .iter()
-                    .filter_map(|&off| (off >= 0).then_some(off as usize))
-                    .collect();
-                for (band, &offset) in bands.iter().zip(offsets.iter()) {
-                    let off = offset.unsigned_abs() as usize;
-                    if offset < 0 && positive_offsets.contains(&off) {
-                        continue;
-                    }
-                    for (idx, &value) in band.iter().enumerate() {
-                        let (i, j) = if offset >= 0 {
-                            (idx, idx + off)
-                        } else {
-                            (idx + off, idx)
-                        };
-                        if i >= dim || j >= dim {
-                            continue;
-                        }
-                        dense[[i, j]] = value;
-                        dense[[j, i]] = value;
-                    }
-                }
-                dense
-            }
-            PenaltyRepresentation::Kronecker { left, right } => {
-                let (lrows, l_cols) = left.dim();
-                let (rrows, r_cols) = right.dim();
-                let mut result = Array2::zeros((lrows * rrows, l_cols * r_cols));
-                for i in 0..lrows {
-                    for j in 0..l_cols {
-                        let scale = left[(i, j)];
-                        if scale == 0.0 {
-                            continue;
-                        }
-                        let mut block = result.slice_mut(s![
-                            i * rrows..(i + 1) * rrows,
-                            j * r_cols..(j + 1) * r_cols
-                        ]);
-                        block.assign(&(right * scale));
-                    }
-                }
-                result
-            }
-        }
-    }
 }
 
 #[derive(Clone)]

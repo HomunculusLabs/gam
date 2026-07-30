@@ -994,21 +994,6 @@ impl SaeManifoldTerm {
         Ok(unc)
     }
 
-    /// Composite-likelihood model-selection charge
-    /// `tr(J A^-1)` for the complete joint fitted state.  Scores, sensitivity,
-    /// compact support, metric, weights, amplitudes, and nuisance couplings are
-    /// identical to [`Self::joint_score_sandwich`].
-    pub fn composite_likelihood_charge(
-        &self,
-        cache: &ArrowFactorCache,
-        rho: &SaeManifoldRho,
-        target: ArrayView2<'_, f64>,
-        dispersion: f64,
-    ) -> Result<CompositeLikelihoodCharge, String> {
-        let (_joint_beta_cov, joint_clic_dof) =
-            self.joint_score_sandwich(cache, rho, target, dispersion)?;
-        Ok(CompositeLikelihoodCharge { joint_clic_dof })
-    }
 }
 
 #[cfg(test)]

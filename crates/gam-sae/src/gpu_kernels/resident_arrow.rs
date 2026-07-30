@@ -138,10 +138,6 @@ impl ArrowBlocks {
         }
     }
 
-    #[inline]
-    pub fn row_g_t(&self, row: usize) -> &[f64] {
-        &self.g_t[row * self.q..(row + 1) * self.q]
-    }
 
     #[inline]
     pub fn row_h_tt(&self, row: usize) -> &[f64] {
@@ -690,22 +686,6 @@ impl ResidentRowJetHandle {
         }
     }
 
-    /// Score-only contraction `g = Jᵀ r`. Skips every curvature block; used by
-    /// the gradient-only outer passes where the Hessian is not needed.
-    pub fn contract_score_rhs(
-        &mut self,
-        rows: &[SaeSoftmaxRowJetInput],
-        residual: &[f64],
-    ) -> Result<ArrowScore, String> {
-        let blocks = self.accumulate_arrow_blocks(rows, residual, ArrowCurvature::GaussNewton)?;
-        Ok(ArrowScore {
-            n_rows: blocks.n_rows,
-            q: blocks.q,
-            n_beta: blocks.n_beta,
-            g_t: blocks.g_t,
-            g_beta: blocks.g_beta,
-        })
-    }
 
     /// Exact data-part arrow HVP through the reduced blocks. Accumulate once,
     /// apply many — a Krylov cycle pays zero device traffic per apply.
