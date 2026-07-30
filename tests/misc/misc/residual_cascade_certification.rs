@@ -415,7 +415,11 @@ fn pcg_route_certified_and_iteration_count_n_independent() {
             design.num_coeffs()
         );
         let fit = design.fit_at(0.0, None).expect("fit_at");
-        assert_eq!(fit.certificate.logdet_method, LogdetMethod::Slq);
+        // Past the Gram cache the log-determinant is an exact sparse direct
+        // Cholesky, not the stochastic estimate (#2546). This assertion pins the
+        // route, not this test's subject — which is the PCG backward error and the
+        // iteration count below, both unchanged.
+        assert_eq!(fit.certificate.logdet_method, LogdetMethod::SparseExact);
         assert!(
             fit.certificate.solve_rel_residual <= 1e-9,
             "backward-error certificate violated at n {n}: {}",
@@ -472,7 +476,11 @@ fn pcg_iteration_count_independent_of_cascade_depth() {
             continue; // need the iterative route to be engaged
         }
         let fit = design.fit_at(0.0, None).expect("fit_at");
-        assert_eq!(fit.certificate.logdet_method, LogdetMethod::Slq);
+        // Past the Gram cache the log-determinant is an exact sparse direct
+        // Cholesky, not the stochastic estimate (#2546). This assertion pins the
+        // route, not this test's subject — which is the PCG backward error and the
+        // iteration count below, both unchanged.
+        assert_eq!(fit.certificate.logdet_method, LogdetMethod::SparseExact);
         assert!(
             fit.certificate.solve_rel_residual <= 1e-9,
             "uncertified solve at depth {levels}: {}",
@@ -537,7 +545,10 @@ fn cascade_sparse_work_beats_dense_factorization_and_scales_near_linearly() {
         warm.certificate.solve_rel_residual
     );
     let fit = design.fit_at(log_lambda, None).expect("fit_at");
-    assert_eq!(fit.certificate.logdet_method, LogdetMethod::Slq);
+    // Not the dense route, which is what this assertion has always been for; past
+    // the Gram cache that is now an exact sparse direct Cholesky rather than the
+    // stochastic estimate (#2546).
+    assert_eq!(fit.certificate.logdet_method, LogdetMethod::SparseExact);
     assert!(
         fit.certificate.solve_rel_residual <= 1e-9,
         "uncertified cascade solve: {}",
