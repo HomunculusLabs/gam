@@ -19,6 +19,7 @@
 use crate::model_types::EstimationError;
 use gam_linalg::faer_ndarray::FaerEigh;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use std::collections::BTreeMap;
 
 /// Backward-error multiplier used when deciding whether a symmetric covariance
 /// eigenvalue is negative beyond floating-point eigensolver roundoff.
@@ -138,6 +139,33 @@ impl Default for MultinomialPosteriorIntegrationControl {
             // refuses in seconds is better than a budget that grinds for
             // sixteen minutes — a refusal a caller can act on beats an answer
             // it cannot wait for.
+            // AND IT IS NO LONGER THE THING THAT DECIDES A WIDE POSTERIOR.
+            //
+            // Every raise above was triggered by a posterior getting wider, and
+            // the cause was the RULE, not the ceiling. Measured on a rank-two
+            // covariance with posterior standard deviations (1, 5), against a
+            // converged tensor oracle:
+            //
+            //   sparse level 10 (  4961 evals): error 6.61e-4
+            //   sparse level 12 (  9633 evals): error 5.48e-4
+            //   sparse level 14 ( 17025 evals): error 3.50e-4
+            //   sparse level 16 ( 28033 evals): error 1.99e-4
+            //   tensor   33/dim (  1089 evals): error 1.84e-4
+            //   tensor   65/dim (  4225 evals): error 1.66e-6
+            //   tensor  129/dim ( 16641 evals): error 3.82e-9
+            //
+            // The sparse ladder decays algebraically -- a factor 3.3 for 5.6x
+            // the evaluations -- because a Smolyak grid gives one direction high
+            // order only by giving every other direction a single node, while a
+            // logistic-normal softmax needs order in EVERY wide direction at
+            // once. At rank two the tensor product the grid is assembled FROM is
+            // strictly better, reaching five more digits for fewer evaluations.
+            // So this ceiling is no longer a wall: `integrate_general` tries
+            // the sparse rule first and keeps it wherever it certifies -- which
+            // costs a few hundred evaluations and is why it is tried first --
+            // and reaching this ceiling now HANDS THE ROW to the tensor rule
+            // instead of refusing. Raising it again would only make the sparse
+            // rule spend longer before handing over (#2612).
             maximum_sparse_level: 16,
             maximum_function_evaluations: 2_000_000,
         }
@@ -277,6 +305,25 @@ impl MultinomialPosteriorIntegrationControl {
     }
 }
 
+/// Which deterministic rule produced a certified answer.
+///
+/// The rank of the retained posterior decides which rule can certify inside the
+/// evaluation budget, and the two are not interchangeable: a sparse grid is a
+/// saving only when the resolution a direction needs is much smaller than the
+/// number of directions, and at rank two it is strictly worse than the tensor
+/// product it is built from (#2612).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MultinomialPosteriorRule {
+    /// Exact reduction: the binary logistic-normal evaluator, or a covariance
+    /// that is a point mass.
+    Exact,
+    /// Tensor-product Gauss-Hermite whose one-dimensional node count is chosen
+    /// per retained posterior direction.  Carries those node counts.
+    AnisotropicTensor(Vec<usize>),
+    /// Isotropic Smolyak sparse grid, carrying the level that certified.
+    IsotropicSparse(usize),
+}
+
 /// Integrated class-probability moments for one prediction row.
 ///
 /// `class_covariance` includes the reference class and is singular in the
@@ -292,13 +339,13 @@ pub struct MultinomialPosteriorMoments {
     pub class_standard_deviation: Array1<f64>,
     /// Positive numerical rank of the active-logit covariance.
     pub latent_rank: usize,
-    /// Smolyak level that certified convergence.  `None` denotes an exact
-    /// binary reduction or an exact point-mass covariance.
-    pub sparse_level: Option<usize>,
+    /// The rule that certified convergence.
+    pub rule: MultinomialPosteriorRule,
     /// Total softmax evaluations across all attempted sparse levels.
     pub function_evaluations: usize,
-    /// Largest absolute difference among raw first/second moments at the final
-    /// two sparse levels.  Zero on the exact binary and point-mass paths.
+    /// Largest absolute difference among raw first/second moments between the
+    /// certifying rule and the coarser rule it was compared against.  Zero on
+    /// the exact binary and point-mass paths.
     pub max_raw_moment_level_difference: f64,
     /// Bound used for positive covariance eigenmodes discarded inside the
     /// eigensolver backward-error envelope.  Such modes are discarded only
@@ -481,7 +528,7 @@ fn integrate_binary(
         class_covariance,
         class_standard_deviation: Array1::from_vec(vec![standard_deviation, standard_deviation]),
         latent_rank: if active_variance > 0.0 { 1 } else { 0 },
-        sparse_level: None,
+        rule: MultinomialPosteriorRule::Exact,
         function_evaluations: 0,
         max_raw_moment_level_difference: 0.0,
         covariance_range_projection_bound: 0.0,
@@ -496,7 +543,7 @@ fn point_mass_moments(active_mean: &[f64]) -> Result<MultinomialPosteriorMoments
         class_covariance: Array2::zeros((k, k)),
         class_standard_deviation: Array1::zeros(k),
         latent_rank: 0,
-        sparse_level: None,
+        rule: MultinomialPosteriorRule::Exact,
         function_evaluations: 1,
         max_raw_moment_level_difference: 0.0,
         covariance_range_projection_bound: 0.0,
@@ -507,6 +554,11 @@ struct ProjectedGaussian {
     /// `factor factor^T` is the retained active-logit covariance.
     factor: Array2<f64>,
     projection_bound: f64,
+    /// `sqrt(lambda)` per retained direction, in the column order of `factor`.
+    /// The softmax argument is `mu + F z`, so this is the scale at which
+    /// direction `d` moves the integrand and therefore the only thing that
+    /// decides how much one-dimensional resolution that direction needs.
+    standard_deviations: Vec<f64>,
 }
 
 fn project_active_covariance(
@@ -556,8 +608,17 @@ fn project_active_covariance(
         0.0
     };
     let mut factor = Array2::<f64>::zeros((m, retained.len()));
+    let mut standard_deviations = Vec::new();
+    standard_deviations
+        .try_reserve_exact(retained.len())
+        .map_err(|error| {
+            EstimationError::InvalidInput(format!(
+                "multinomial posterior could not allocate retained standard deviations: {error}"
+            ))
+        })?;
     for (output_column, (eigenvector_column, eigenvalue)) in retained.into_iter().enumerate() {
         let scale = eigenvalue.sqrt();
+        standard_deviations.push(scale);
         for row in 0..m {
             factor[[row, output_column]] = eigenvectors[[row, eigenvector_column]] * scale;
         }
@@ -565,19 +626,388 @@ fn project_active_covariance(
     Ok(ProjectedGaussian {
         factor,
         projection_bound,
+        standard_deviations,
     })
 }
 
+/// Everything about one prediction row that every rule shares.
+struct RowIntegrand<'a> {
+    active_mean: &'a [f64],
+    projected: &'a ProjectedGaussian,
+    upper_offsets: Vec<usize>,
+    moment_count: usize,
+    k: usize,
+}
+
+impl<'a> RowIntegrand<'a> {
+    fn new(
+        active_mean: &'a [f64],
+        projected: &'a ProjectedGaussian,
+    ) -> Result<Self, EstimationError> {
+        let k = active_mean.len() + 1;
+        Ok(Self {
+            active_mean,
+            projected,
+            upper_offsets: upper_triangle_offsets(k)?,
+            moment_count: packed_moment_count(k)?,
+            k,
+        })
+    }
+
+    /// Raw moments under the tensor-product Gauss-Hermite rule whose
+    /// one-dimensional rule index is `orders[d]` in direction `d`.  Rule index
+    /// `i` carries `2i - 1` nodes, and index 1 is the single node `z = 0`, so a
+    /// direction left at 1 is evaluated at the posterior mean exactly.
+    ///
+    /// The cache is keyed by rule index rather than filled densely up to the
+    /// highest one used: this path visits indices that DOUBLE, so a dense cache
+    /// would build every rule in between, and building a rule is an
+    /// eigendecomposition of a `(2i - 1)`-square Jacobi matrix.  Filling 1..=512
+    /// to reach index 512 costs more than every quadrature evaluation in this
+    /// module put together.
+    fn tensor_moments(
+        &self,
+        rules: &mut BTreeMap<usize, GaussHermiteRule>,
+        orders: &[usize],
+        total_evaluations: &mut usize,
+        maximum_function_evaluations: usize,
+        absolute_tolerance: f64,
+    ) -> Result<Vec<f64>, EstimationError> {
+        for &order in orders {
+            if !rules.contains_key(&order) {
+                rules.insert(order, gauss_hermite_rule(order)?);
+            }
+        }
+        let axes: Vec<&GaussHermiteRule> = orders
+            .iter()
+            .map(|order| &rules[order])
+            .collect();
+        let mut workspace = QuadratureWorkspace::new(
+            self.active_mean,
+            self.projected,
+            &[],
+            &self.upper_offsets,
+            self.moment_count,
+            total_evaluations,
+            maximum_function_evaluations,
+        )?;
+        workspace.stream_axes(0, &axes, 1.0)?;
+        let (mut raw_moments, mass, absolute_weight_sum) = workspace.accumulator.finish();
+        let node_counts: Vec<usize> = orders.iter().map(|order| 2 * order - 1).collect();
+        normalize_by_mass(
+            &mut raw_moments,
+            mass,
+            absolute_weight_sum,
+            absolute_tolerance,
+            &format!("tensor rule with node counts {node_counts:?}"),
+        )?;
+        Ok(raw_moments)
+    }
+
+    /// One-dimensional rule index that resolves direction `direction` on its
+    /// own, with every other direction held at the posterior mean.
+    ///
+    /// This chooses only the SHAPE of the tensor rule.  The certificate is taken
+    /// on the full rule, so an optimistic reading here cannot certify anything
+    /// -- it can only make the certified rule cheaper or dearer.  There is no
+    /// chosen constant: the index doubles until the directional integral of
+    /// every raw moment stops moving by more than the caller's own per-moment
+    /// tolerance.
+    fn directional_rule_index(
+        &self,
+        rules: &mut BTreeMap<usize, GaussHermiteRule>,
+        direction: usize,
+        control: &MultinomialPosteriorIntegrationControl,
+        total_evaluations: &mut usize,
+    ) -> Result<usize, EstimationError> {
+        let rank = self.projected.factor.ncols();
+        let mut orders = vec![1usize; rank];
+        let mut previous: Option<Vec<f64>> = None;
+        let mut index = 1usize;
+        loop {
+            orders[direction] = index;
+            let current = self.tensor_moments(
+                rules,
+                &orders,
+                total_evaluations,
+                control.maximum_function_evaluations,
+                control.absolute_tolerance,
+            )?;
+            if let Some(previous_moments) = previous.as_ref() {
+                let resolved =
+                    current
+                        .iter()
+                        .zip(previous_moments.iter())
+                        .all(|(new_value, old_value)| {
+                            let tolerance = control.absolute_tolerance
+                                + control.relative_tolerance * new_value.abs().max(old_value.abs());
+                            (new_value - old_value).abs() <= tolerance
+                        });
+                if resolved {
+                    return Ok(index);
+                }
+            }
+            previous = Some(current);
+            let doubled = index.checked_mul(2).ok_or_else(|| {
+                EstimationError::InvalidInput(
+                    "multinomial posterior directional rule index overflowed usize".to_string(),
+                )
+            })?;
+            // No direction can usefully be sized past the point where the
+            // tensor rule carrying that order in EVERY direction would already
+            // exceed the evaluation budget: such an order can never be part of a
+            // rule this caller is allowed to evaluate.  That bound comes from
+            // the budget the caller supplied, not from a chosen ceiling.
+            if tensor_node_count(&vec![doubled; rank])
+                .map(|count| count > control.maximum_function_evaluations)
+                .unwrap_or(true)
+            {
+                return Ok(index);
+            }
+            index = doubled;
+        }
+    }
+}
+
+/// Number of nodes in the tensor rule with these one-dimensional rule indices.
+fn tensor_node_count(orders: &[usize]) -> Result<usize, EstimationError> {
+    let mut count = 1usize;
+    for &order in orders {
+        let nodes = order
+            .checked_mul(2)
+            .and_then(|value| value.checked_sub(1))
+            .ok_or_else(|| {
+                EstimationError::InvalidInput(
+                    "multinomial posterior tensor rule order overflowed usize".to_string(),
+                )
+            })?;
+        count = count.checked_mul(nodes).ok_or_else(|| {
+            EstimationError::InvalidInput(
+                "multinomial posterior tensor node count overflowed usize".to_string(),
+            )
+        })?;
+    }
+    Ok(count)
+}
+
+/// Divide accumulated moments by the rule's own total weight, after checking
+/// that the rule integrates the constant function to one.
+fn normalize_by_mass(
+    raw_moments: &mut [f64],
+    mass: f64,
+    absolute_weight_sum: f64,
+    absolute_tolerance: f64,
+    context: &str,
+) -> Result<(), EstimationError> {
+    if !(mass.is_finite() && mass > 0.0 && absolute_weight_sum.is_finite()) {
+        return Err(EstimationError::InvalidInput(format!(
+            "multinomial posterior {context} produced invalid total weight {mass} (absolute sum {absolute_weight_sum})"
+        )));
+    }
+    let mass_error = (mass - 1.0).abs();
+    let summation_envelope =
+        SUMMATION_ROUNDOFF_MULTIPLIER * f64::EPSILON * absolute_weight_sum.max(1.0);
+    if mass_error > absolute_tolerance + summation_envelope {
+        return Err(EstimationError::InvalidInput(format!(
+            "multinomial posterior {context} failed constant-function exactness: total weight {mass:.17e}, error {mass_error:.6e}, allowed {:.6e}",
+            absolute_tolerance + summation_envelope
+        )));
+    }
+    for value in raw_moments.iter_mut() {
+        *value /= mass;
+    }
+    Ok(())
+}
+
+/// The sparse rule first, and the tensor rule for what it refuses.
+///
+/// The retained posterior has `rank = number of positive covariance eigenvalues`
+/// directions, at most `K - 1`. A Smolyak grid buys its saving by giving a
+/// direction high order only when every other direction is held at a single
+/// node, which is the right trade when `rank` is large compared with the order
+/// each direction needs -- and where that holds the sparse grid certifies at a
+/// low level for a few hundred evaluations, which nothing here should make more
+/// expensive. So it is tried first and kept wherever it certifies: every row
+/// that predicts today predicts on the same rule, at the same cost, with the
+/// same numbers.
+///
+/// What changes is the row it REFUSES. A logistic-normal softmax needs
+/// one-dimensional order growing with a direction's own standard deviation --
+/// `softmax` has a transition of width O(1) in the logit while the Gaussian
+/// along that direction has width `sqrt(lambda_d)` -- so a wide posterior needs
+/// order in EVERY wide direction at once, and that is the one thing the sparse
+/// construction will not supply. Measured on a rank-two posterior with standard
+/// deviations (1, 5): the sparse ladder reaches `1.99e-4` in 28033 evaluations
+/// while the tensor product it is assembled FROM reaches `3.82e-9` in 16641
+/// (#2612). Raising the level ceiling has been the answer three times and each
+/// time bought a factor of three; the rule is what was wrong.
 fn integrate_general(
     active_mean: &[f64],
     projected: &ProjectedGaussian,
     control: &MultinomialPosteriorIntegrationControl,
 ) -> Result<MultinomialPosteriorMoments, EstimationError> {
+    let sparse_refusal = match integrate_isotropic_sparse(active_mean, projected, control, 0) {
+        Ok(moments) => return Ok(moments),
+        Err(refusal) => refusal,
+    };
+
+    let integrand = RowIntegrand::new(active_mean, projected)?;
+    let rank = projected.factor.ncols();
+    let mut rules = BTreeMap::<usize, GaussHermiteRule>::new();
+    let mut total_evaluations = 0usize;
+
+    let mut orders = vec![1usize; rank];
+    for direction in 0..rank {
+        orders[direction] = integrand.directional_rule_index(
+            &mut rules,
+            direction,
+            control,
+            &mut total_evaluations,
+        )?;
+    }
+
+    let refined: Vec<usize> = orders
+        .iter()
+        .map(|order| order.saturating_mul(2))
+        .collect();
+    let certifying_pair_cost =
+        tensor_node_count(&orders)?.saturating_add(tensor_node_count(&refined)?);
+    let remaining = control
+        .maximum_function_evaluations
+        .saturating_sub(total_evaluations);
+    if certifying_pair_cost > remaining {
+        // Neither rule fits: the sparse refusal is the one the caller can act
+        // on, and it is returned unaltered rather than restated as a tensor
+        // refusal for a rule that was never evaluated.
+        return Err(EstimationError::InvalidInput(format!(
+            "{sparse_refusal}; the tensor rule sized for this posterior would need {certifying_pair_cost} evaluations to certify, against {remaining} remaining"
+        )));
+    }
+
+    integrate_anisotropic_tensor(&integrand, &mut rules, orders, control, total_evaluations)
+}
+
+/// Tensor-product Gauss-Hermite, certified by comparing against the rule with
+/// every one-dimensional order doubled.  Doubling preserves the anisotropic
+/// profile that `directional_rule_index` measured, so refinement never undoes
+/// the direction sizing; the returned answer is always the finer of the pair.
+fn integrate_anisotropic_tensor(
+    integrand: &RowIntegrand<'_>,
+    rules: &mut BTreeMap<usize, GaussHermiteRule>,
+    mut orders: Vec<usize>,
+    control: &MultinomialPosteriorIntegrationControl,
+    mut total_evaluations: usize,
+) -> Result<MultinomialPosteriorMoments, EstimationError> {
+    let rank = orders.len();
+    let projection_bound = integrand.projected.projection_bound;
+    let mut coarse = integrand.tensor_moments(
+        rules,
+        &orders,
+        &mut total_evaluations,
+        control.maximum_function_evaluations,
+        control.absolute_tolerance,
+    )?;
+    loop {
+        let refined: Vec<usize> = orders.iter().map(|order| order * 2).collect();
+        let fine = integrand.tensor_moments(
+            rules,
+            &refined,
+            &mut total_evaluations,
+            control.maximum_function_evaluations,
+            control.absolute_tolerance,
+        )?;
+
+        let mut certified = true;
+        let mut maximum_difference = 0.0_f64;
+        let mut deciding: Option<DecidingMoment> = None;
+        for (index, (&new_value, &old_value)) in fine.iter().zip(coarse.iter()).enumerate() {
+            let difference = (new_value - old_value).abs();
+            maximum_difference = maximum_difference.max(difference);
+            let tolerance = control.absolute_tolerance
+                + control.relative_tolerance * new_value.abs().max(old_value.abs());
+            let controlled_error = difference + projection_bound;
+            if controlled_error > tolerance {
+                certified = false;
+            }
+            let normalized = if tolerance > 0.0 {
+                controlled_error / tolerance
+            } else if controlled_error > 0.0 {
+                f64::INFINITY
+            } else {
+                0.0
+            };
+            let supersedes = match deciding.as_ref() {
+                Some(current_worst) => normalized > current_worst.normalized_error,
+                None => true,
+            };
+            if supersedes {
+                deciding = Some(DecidingMoment {
+                    index,
+                    normalized_error: normalized,
+                    difference,
+                    tolerance,
+                });
+            }
+        }
+
+        let node_counts: Vec<usize> = refined.iter().map(|order| 2 * order - 1).collect();
+        if certified {
+            return moments_from_raw(
+                fine,
+                integrand.k,
+                rank,
+                MultinomialPosteriorRule::AnisotropicTensor(node_counts),
+                total_evaluations,
+                maximum_difference,
+                projection_bound,
+            );
+        }
+
+        orders = refined;
+        coarse = fine;
+        let next: Vec<usize> = orders.iter().map(|order| order * 2).collect();
+        let next_cost = tensor_node_count(&next)?;
+        if next_cost > control.maximum_function_evaluations.saturating_sub(total_evaluations) {
+            let standard_deviations: Vec<String> = integrand
+                .projected
+                .standard_deviations
+                .iter()
+                .map(|value| format!("{value:.6e}"))
+                .collect();
+            let deciding_report = match deciding.as_ref() {
+                Some(moment) => format!(
+                    "worst raw moment {} (normalized error {:.6e} = (difference {:.6e} + projection bound {:.6e}) / tolerance {:.6e})",
+                    moment.index,
+                    moment.normalized_error,
+                    moment.difference,
+                    projection_bound,
+                    moment.tolerance,
+                ),
+                None => "no raw moment was compared".to_string(),
+            };
+            return Err(EstimationError::InvalidInput(format!(
+                "multinomial logistic-normal quadrature did not converge: tensor rule with node counts {node_counts:?} over posterior standard deviations [{}] left a raw-moment difference {maximum_difference:.6e}, and doubling it again would need {next_cost} of the {} evaluations still allowed; evaluations {total_evaluations}/{}; {deciding_report}",
+                standard_deviations.join(", "),
+                control
+                    .maximum_function_evaluations
+                    .saturating_sub(total_evaluations),
+                control.maximum_function_evaluations,
+            )));
+        }
+    }
+}
+
+fn integrate_isotropic_sparse(
+    active_mean: &[f64],
+    projected: &ProjectedGaussian,
+    control: &MultinomialPosteriorIntegrationControl,
+    initial_evaluations: usize,
+) -> Result<MultinomialPosteriorMoments, EstimationError> {
     let rank = projected.factor.ncols();
     let k = active_mean.len() + 1;
     let mut rules = Vec::<GaussHermiteRule>::new();
     let mut previous: Option<Vec<f64>> = None;
-    let mut total_evaluations = 0usize;
+    let mut total_evaluations = initial_evaluations;
     let mut last_max_difference = f64::INFINITY;
     let mut last_max_normalized_error = f64::INFINITY;
     let mut last_deciding: Option<DecidingMoment> = None;
@@ -675,7 +1105,7 @@ fn integrate_general(
                     current,
                     k,
                     rank,
-                    level,
+                    MultinomialPosteriorRule::IsotropicSparse(level),
                     total_evaluations,
                     maximum_difference,
                     projected.projection_bound,
@@ -772,23 +1202,13 @@ fn evaluate_smolyak_level(
     }
 
     let (mut raw_moments, mass, absolute_weight_sum) = workspace.accumulator.finish();
-    if !(mass.is_finite() && mass > 0.0 && absolute_weight_sum.is_finite()) {
-        return Err(EstimationError::InvalidInput(format!(
-            "multinomial posterior Smolyak level {level} produced invalid total weight {mass} (absolute sum {absolute_weight_sum})"
-        )));
-    }
-    let mass_error = (mass - 1.0).abs();
-    let summation_envelope =
-        SUMMATION_ROUNDOFF_MULTIPLIER * f64::EPSILON * absolute_weight_sum.max(1.0);
-    if mass_error > absolute_tolerance + summation_envelope {
-        return Err(EstimationError::InvalidInput(format!(
-            "multinomial posterior Smolyak level {level} failed constant-function exactness: total weight {mass:.17e}, error {mass_error:.6e}, allowed {:.6e}",
-            absolute_tolerance + summation_envelope
-        )));
-    }
-    for value in &mut raw_moments {
-        *value /= mass;
-    }
+    normalize_by_mass(
+        &mut raw_moments,
+        mass,
+        absolute_weight_sum,
+        absolute_tolerance,
+        &format!("Smolyak level {level}"),
+    )?;
     Ok(SmolyakEvaluation { raw_moments })
 }
 
@@ -989,6 +1409,30 @@ impl<'a, 'b> QuadratureWorkspace<'a, 'b> {
         Ok(())
     }
 
+    /// Tensor product over one explicitly chosen rule per direction.
+    ///
+    /// `stream_tensor` above resolves each axis through `rules[index - 1]`,
+    /// which forces the rule cache to be dense; the tensor path visits indices
+    /// that double, so it resolves its axes once and hands them over directly.
+    fn stream_axes(
+        &mut self,
+        axis: usize,
+        axes: &[&GaussHermiteRule],
+        weight: f64,
+    ) -> Result<(), EstimationError> {
+        if axis == axes.len() {
+            return self.accumulate_node(weight);
+        }
+        let node_count = axes[axis].nodes.len();
+        for node_index in 0..node_count {
+            let node = axes[axis].nodes[node_index];
+            let node_weight = axes[axis].weights[node_index];
+            self.z[axis] = node;
+            self.stream_axes(axis + 1, axes, weight * node_weight)?;
+        }
+        Ok(())
+    }
+
     fn accumulate_node(&mut self, weight: f64) -> Result<(), EstimationError> {
         if *self.total_evaluations >= self.maximum_function_evaluations {
             return Err(EstimationError::InvalidInput(format!(
@@ -1149,7 +1593,7 @@ fn moments_from_raw(
     raw_moments: Vec<f64>,
     k: usize,
     latent_rank: usize,
-    sparse_level: usize,
+    rule: MultinomialPosteriorRule,
     function_evaluations: usize,
     max_level_difference: f64,
     projection_bound: f64,
@@ -1213,7 +1657,7 @@ fn moments_from_raw(
         class_covariance: covariance,
         class_standard_deviation: standard_deviation,
         latent_rank,
-        sparse_level: Some(sparse_level),
+        rule,
         function_evaluations,
         max_raw_moment_level_difference: max_level_difference,
         covariance_range_projection_bound: projection_bound,
@@ -1392,7 +1836,7 @@ mod tests {
             "binary covariance",
         );
         assert_eq!(result.latent_rank, 1);
-        assert_eq!(result.sparse_level, None);
+        assert_eq!(result.rule, MultinomialPosteriorRule::Exact);
     }
 
     #[test]
@@ -1419,7 +1863,7 @@ mod tests {
             }
         }
         assert_eq!(result.latent_rank, 0);
-        assert_eq!(result.sparse_level, None);
+        assert_eq!(result.rule, MultinomialPosteriorRule::Exact);
     }
 
     #[test]
@@ -1462,7 +1906,7 @@ mod tests {
             );
         }
         assert_eq!(result.latent_rank, 2);
-        assert!(result.sparse_level.is_some());
+        assert_ne!(result.rule, MultinomialPosteriorRule::Exact);
     }
 
     #[test]
@@ -1539,10 +1983,19 @@ mod tests {
             maximum_sparse_level: 1,
             maximum_function_evaluations: 100_000,
         };
-        let error = integrate_logistic_normal_softmax_moments(
-            active_mean.view(),
-            active_covariance.view(),
+        // Aimed at the sparse rule ITSELF rather than at the entry point:
+        // the entry point now dispatches this row to the tensor rule, which
+        // does certify it, so asserting a refusal there would be asserting the
+        // dispatch rather than the sparse rule's own level bound (#2612).
+        let symmetric = symmetrized_covariance(active_covariance.view());
+        let projected =
+            project_active_covariance(symmetric.view(), strict_control.absolute_tolerance)
+                .expect("project the active covariance");
+        let error = integrate_isotropic_sparse(
+            active_mean.as_slice().expect("contiguous active mean"),
+            &projected,
             &strict_control,
+            0,
         )
         .expect_err("one sparse refinement cannot certify this nonlinear integral");
         assert!(
@@ -1562,5 +2015,126 @@ mod tests {
         )
         .expect_err("indefinite covariance must fail");
         assert!(error.to_string().contains("not positive semidefinite"));
+    }
+
+    /// Rank-two active-logit covariance with eigenvalues `(1, 25)` in a basis
+    /// rotated off the coordinate axes: posterior standard deviations `(1, 5)`.
+    /// Built from its spectrum rather than from literals so the widths the test
+    /// is about are visible in the source.
+    fn wide_two_direction_covariance() -> Array2<f64> {
+        let eigenvalues = [1.0_f64, 25.0_f64];
+        let (sine, cosine) = 0.6_f64.sin_cos();
+        let basis = [[cosine, -sine], [sine, cosine]];
+        Array2::from_shape_fn((2, 2), |(row, column)| {
+            (0..2)
+                .map(|index| basis[row][index] * eigenvalues[index] * basis[column][index])
+                .sum()
+        })
+    }
+
+    /// A WIDE two-direction posterior: the rule that certifies it must be the
+    /// tensor product, because the sparse grid cannot reach the order it needs
+    /// (#2612).
+    ///
+    /// Measured at `origin/main` on this exact covariance, the isotropic sparse
+    /// ladder's error against a converged tensor oracle falls only algebraically
+    /// -- level 10 to level 16 buys a factor 3.3 for 5.6x the evaluations, from
+    /// `6.61e-4` to `1.99e-4` -- while the tensor product reaches `3.82e-9` at
+    /// 129 nodes per direction for 16641 evaluations, fewer than the 28033 the
+    /// sparse ladder spends to reach `1.99e-4`.
+    ///
+    /// The retained posterior here has rank two. A Smolyak grid of level `L`
+    /// over `r` directions admits only the tensor sub-rules whose
+    /// one-dimensional indices sum to at most `r + L`, so the only way it gives
+    /// one direction order `2L + 1` is by giving every other direction a single
+    /// node. Its BALANCED sub-rule -- the one that resolves both directions at
+    /// once -- carries roughly order `L` in each. The logistic-normal softmax
+    /// needs one-dimensional order growing with a direction's own standard
+    /// deviation, because the softmax transition has width O(1) in the logit
+    /// while the Gaussian along that direction has width `sqrt(lambda_d)`, so a
+    /// posterior this wide needs high order in BOTH directions simultaneously
+    /// and the sparse grid is the one construction that refuses to supply it.
+    ///
+    /// The test asserts both halves, so it cannot pass by accident:
+    ///   * the isotropic sparse rule REFUSES this row at its level ceiling, and
+    ///   * the shipped entry point certifies it and lands on an independent
+    ///     high-order tensor Gauss-Hermite oracle.
+    #[test]
+    fn a_wide_two_direction_posterior_needs_the_tensor_rule_the_sparse_grid_cannot_reach_2612() {
+        let active_mean = Array1::from_vec(vec![2.0, -1.0]);
+        let active_covariance = wide_two_direction_covariance();
+        let control = MultinomialPosteriorIntegrationControl::default();
+
+        // Half one: the sparse rule, on its own, cannot certify this row.
+        let symmetric = symmetrized_covariance(active_covariance.view());
+        let projected = project_active_covariance(symmetric.view(), control.absolute_tolerance)
+            .expect("project the active covariance");
+        assert_eq!(projected.factor.ncols(), 2, "this row must retain rank two");
+        let sparse_error = integrate_isotropic_sparse(
+            active_mean.as_slice().expect("contiguous active mean"),
+            &projected,
+            &control,
+            0,
+        )
+        .expect_err("the isotropic sparse rule must not certify this wide posterior");
+        assert!(
+            sparse_error.to_string().contains("did not converge"),
+            "unexpected sparse-rule error: {sparse_error}"
+        );
+
+        // Half two: the shipped entry point certifies it, with the tensor rule.
+        let result = integrate_logistic_normal_softmax_moments(
+            active_mean.view(),
+            active_covariance.view(),
+            &control,
+        )
+        .expect("the wide posterior must be integrable");
+        match &result.rule {
+            MultinomialPosteriorRule::AnisotropicTensor(node_counts) => {
+                assert_eq!(node_counts.len(), 2, "one node count per retained direction");
+            }
+            other => panic!("expected the tensor rule to certify this row, got {other:?}"),
+        }
+
+        // And the certified answer is the right one: an independent tensor
+        // Gauss-Hermite evaluation at an order nothing above chose.
+        // 301 nodes per direction: at this covariance the 241-node and 301-node
+        // tensor rules agree to 3.02e-12, so the oracle is converged well below
+        // what is being asserted.
+        let oracle_rule = gauss_hermite_rule(151).expect("oracle rule");
+        let mut oracle_mean = vec![0.0_f64; 3];
+        let mut mass = 0.0_f64;
+        for (&first_node, &first_weight) in oracle_rule.nodes.iter().zip(oracle_rule.weights.iter())
+        {
+            for (&second_node, &second_weight) in
+                oracle_rule.nodes.iter().zip(oracle_rule.weights.iter())
+            {
+                let weight = first_weight * second_weight;
+                mass += weight;
+                let eta = [
+                    active_mean[0]
+                        + projected.factor[[0, 0]] * first_node
+                        + projected.factor[[0, 1]] * second_node,
+                    active_mean[1]
+                        + projected.factor[[1, 0]] * first_node
+                        + projected.factor[[1, 1]] * second_node,
+                ];
+                let probability = softmax_with_reference(&eta).expect("oracle softmax");
+                for class in 0..3 {
+                    oracle_mean[class] += weight * probability[class];
+                }
+            }
+        }
+        for value in &mut oracle_mean {
+            *value /= mass;
+        }
+        for class in 0..3 {
+            assert_close(
+                result.class_mean[class],
+                oracle_mean[class],
+                1.0e-7,
+                "wide posterior class mean",
+            );
+        }
     }
 }
