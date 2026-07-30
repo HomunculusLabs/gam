@@ -177,41 +177,6 @@ jobs:
             python3 -m pip install --target bench/runtime/pydeps numpy pandas scikit-learn lifelines scikit-survival xgboost matplotlib
           fi
 
-      - name: Build compiled benchmark runtime
-        if: ${{ steps.binary-cache.outputs.cache-hit != 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo build --release -p gam-cli
-          cp target/release/gam bench/runtime/gam
-          chmod +x bench/runtime/gam
-          # Build the gamfit._rust PyO3 extension that bench/run_suite.py
-          # loads. We use `maturin build` rather than `maturin develop`
-          # because maturin 1.x's develop subcommand requires an active
-          # virtualenv (the GHA hosted runner's system python is not
-          # inside one), which fails the whole bootstrap step with
-          # "Couldn't find a virtualenv or conda environment". `build`
-          # has no such requirement; we then crack open the produced
-          # wheel and drop the compiled extension into the source-tree
-          # `gamfit/` so each shard ships through the same shared
-          # runtime artifact as before.
-          python3 -m pip install --upgrade 'maturin>=1.7,<2'
-          rm -rf dist
-          maturin build --release -i python3 -o dist
-          python3 .github/scripts/workflow_tasks.py extract_maturin_wheel
-          # Ship the freshly-built extension through the shared runtime
-          # artifact so each shard does not have to recompile it.
-          cp gamfit/_rust*.so bench/runtime/
-
-      - name: Save compiled benchmark runtime
-        if: ${{ steps.binary-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            bench/runtime/gam
-            bench/runtime/_rust*.so
-          key: ${{ steps.binary-cache.outputs.cache-primary-key }}
-
       - name: Verify staged R library is complete
         shell: bash
         env:
@@ -249,6 +214,9 @@ jobs:
             cat("staged R lib OK; all required packages loadable\n")
           '
 
+      # Dependency staging is independently valid and expensive. Persist it
+      # before compiling Rust so a source-level build failure cannot discard a
+      # complete Python/R runtime and force the next diagnostic run to rebuild it.
       - name: Save shared runtime cache
         if: ${{ steps.runtime-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
@@ -257,6 +225,41 @@ jobs:
             bench/runtime/pydeps
             bench/runtime/r-lib
           key: ${{ steps.runtime-cache.outputs.cache-primary-key }}
+
+      - name: Build compiled benchmark runtime
+        if: ${{ steps.binary-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p gam-cli
+          cp target/release/gam bench/runtime/gam
+          chmod +x bench/runtime/gam
+          # Build the gamfit._rust PyO3 extension that bench/run_suite.py
+          # loads. We use `maturin build` rather than `maturin develop`
+          # because maturin 1.x's develop subcommand requires an active
+          # virtualenv (the GHA hosted runner's system python is not
+          # inside one), which fails the whole bootstrap step with
+          # "Couldn't find a virtualenv or conda environment". `build`
+          # has no such requirement; we then crack open the produced
+          # wheel and drop the compiled extension into the source-tree
+          # `gamfit/` so each shard ships through the same shared
+          # runtime artifact as before.
+          python3 -m pip install --upgrade 'maturin>=1.7,<2'
+          rm -rf dist
+          maturin build --release -i python3 -o dist
+          python3 .github/scripts/workflow_tasks.py extract_maturin_wheel
+          # Ship the freshly-built extension through the shared runtime
+          # artifact so each shard does not have to recompile it.
+          cp gamfit/_rust*.so bench/runtime/
+
+      - name: Save compiled benchmark runtime
+        if: ${{ steps.binary-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            bench/runtime/gam
+            bench/runtime/_rust*.so
+          key: ${{ steps.binary-cache.outputs.cache-primary-key }}
 
       - name: Upload shared runtime artifact
         uses: actions/upload-artifact@v4
