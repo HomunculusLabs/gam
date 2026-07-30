@@ -971,10 +971,22 @@ impl ResponseFamily {
                 // a degenerate all-zero column. A single fractional or negative
                 // value disqualifies the whole response, keeping continuous and
                 // signed data on the conservative Gaussian default.
+                // Integer WITHIN TOLERANCE, not exactly integer. A count that
+                // has been through a CSV round-trip reads back as `2.0 - 5e-10`,
+                // and exact equality disqualifies the whole vector, so the family
+                // silently resolves to Gaussian instead of Poisson.
+                //
+                // `COUNT_INTEGER_TOL` and this predicate were removed together by
+                // a sweeper commit that left the constant's doc comment behind,
+                // still describing the `1e-9` admission it no longer performed.
+                // The sibling classifier for the same signature in
+                // `materialize/family.rs` kept `<= 1e-9`, so the two had drifted
+                // into disagreeing about what a count is.
                 let count = !y.is_empty()
-                    && y.iter()
-                        .all(|v| v.is_finite() && *v >= 0.0 && *v == v.round())
-                    && y.iter().any(|v| *v >= 2.0);
+                    && y.iter().all(|v| {
+                        v.is_finite() && *v >= 0.0 && (*v - v.round()).abs() <= COUNT_INTEGER_TOL
+                    })
+                    && y.iter().any(|v| *v >= 2.0 - COUNT_INTEGER_TOL);
                 if count {
                     Ok(Self::Poisson)
                 } else {
@@ -1079,6 +1091,7 @@ pub const GAUSSIAN_MIN_SAMPLE_SD: f64 = 1.0e-10;
 /// (CSV parse, integer→double promotion) that accumulate ULP-scale error well
 /// above `1e-12`; `1e-9` admits those without ever matching genuinely
 /// continuous data, whose fractional parts are O(1).
+pub const COUNT_INTEGER_TOL: f64 = 1.0e-9;
 
 /// Classifier for a [`ResponseDegeneracy`]. Each variant carries the family-
 /// specific evidence the caller needs to format a useful message without

@@ -3376,13 +3376,26 @@ impl FittedModel {
         }
         // Survival responses are `Surv(...)` expressions, not bare columns; the
         // underlying entry/exit columns are already prediction-required.
-        if parse_surv_response(parsed.response.as_str())
-            .map_err(|e| e.to_string())?
-            .is_some()
-            || parse_surv_interval_response(parsed.response.as_str())
-                .map_err(|e| e.to_string())?
-                .is_some()
+        // The EVENT indicator is deliberately excluded from
+        // `prediction_required_columns` -- forming a prediction never reads
+        // whether the event occurred -- but every survival DIAGNOSTIC replays
+        // the likelihood row by row and needs it. Saved survival ALO resolves
+        // its observed channel with role "survival event" and aborts with
+        // `survival event column '<name>' not found in data` when the
+        // projection drops it. This early return skipped the column on the very
+        // seam whose doc says dropping one is structurally impossible; fold it
+        // in for BOTH Surv arities, preferring the persisted fitted authority
+        // the resolver actually looks up.
+        if let Some((_entry, _exit, event)) =
+            parse_surv_response(parsed.response.as_str()).map_err(|e| e.to_string())?
         {
+            extras.push(payload.survival_event.clone().unwrap_or(event));
+            return Ok(extras);
+        }
+        if let Some((_left, _right, event)) =
+            parse_surv_interval_response(parsed.response.as_str()).map_err(|e| e.to_string())?
+        {
+            extras.push(payload.survival_event.clone().unwrap_or(event));
             return Ok(extras);
         }
         let response = parsed.response.trim();

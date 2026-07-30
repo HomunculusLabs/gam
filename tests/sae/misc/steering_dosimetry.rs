@@ -113,7 +113,17 @@ fn planted_circle(t0: f64) -> (SaeManifoldTerm, RowMetric) {
     // row-major as U_n[i, k] = u[n, i * rank + k]; the identity is u[0] = [1,0,0,1].
     let rank = p;
     let u = Array2::from_shape_vec((n, p * rank), vec![1.0, 0.0, 0.0, 1.0]).expect("u");
-    let metric = RowMetric::output_fisher(Arc::new(u), p, rank).expect("metric");
+    // The planted readout's Fisher IS the identity -- exact and complete, not a
+    // truncation -- but `RowMetric` defaults every factored output-Fisher to
+    // `UncertifiedApproximation` on purpose ("exactness must be asserted by the
+    // producer, never inferred"). The `probe = None` dose path requires an
+    // ExactFull kind and otherwise fails closed with
+    // `FactorNeedsAppliedDoseProbe`, which is exactly the three failures here:
+    // they are the only three target-dose calls that pass no probe.
+    let metric = RowMetric::output_fisher(Arc::new(u), p, rank)
+        .expect("metric")
+        .with_fisher_factor_kind(gam_problem::FisherFactorKind::ExactFull)
+        .expect("exact-full certification");
 
     (term, metric)
 }
@@ -340,7 +350,17 @@ fn planted_circle_tier0_scaled(t0: f64, scale: [f64; 2]) -> (SaeManifoldTerm, Ro
     // fixture's — an identity metric here, exactly like `planted_circle`.
     let rank = p;
     let u = Array2::from_shape_vec((n, p * rank), vec![1.0, 0.0, 0.0, 1.0]).expect("u");
-    let metric = RowMetric::output_fisher(Arc::new(u), p, rank).expect("metric");
+    // The planted readout's Fisher IS the identity -- exact and complete, not a
+    // truncation -- but `RowMetric` defaults every factored output-Fisher to
+    // `UncertifiedApproximation` on purpose ("exactness must be asserted by the
+    // producer, never inferred"). The `probe = None` dose path requires an
+    // ExactFull kind and otherwise fails closed with
+    // `FactorNeedsAppliedDoseProbe`, which is exactly the three failures here:
+    // they are the only three target-dose calls that pass no probe.
+    let metric = RowMetric::output_fisher(Arc::new(u), p, rank)
+        .expect("metric")
+        .with_fisher_factor_kind(gam_problem::FisherFactorKind::ExactFull)
+        .expect("exact-full certification");
 
     (term, metric)
 }

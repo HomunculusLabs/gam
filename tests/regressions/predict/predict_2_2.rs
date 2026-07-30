@@ -198,7 +198,14 @@ fn survival_uncertainty_bounds_stay_in_unit_interval() {
         offset.view(),
         like(ResponseFamily::RoystonParmar, StandardLink::Log),
         &cov,
-        &PredictUncertaintyOptions::default(),
+        // A bare `Array2` covariance source can only honour the conditional
+        // mode; `default()` requests `SmoothingCorrected`, which that source
+        // REFUSES by design rather than silently substituting Vb. The sibling
+        // calls in this file pin `Conditional` explicitly.
+        &PredictUncertaintyOptions {
+            covariance_mode: InferenceCovarianceMode::Conditional,
+            ..PredictUncertaintyOptions::default()
+        },
     )
     .expect("survival uncertainty prediction should succeed");
     for i in 0..pred.mean.len() {

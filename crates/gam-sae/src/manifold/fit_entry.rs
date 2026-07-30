@@ -625,7 +625,28 @@ fn fit_outer_stage_to_boundary(
                                 result: Box::new(result),
                             });
                         }
-                        Err(error) => return Err(SaeFitError::Fit(error)),
+                        // `vanished_stage_state_at` CLASSIFIES a run that has
+                        // already failed; it is not the fit's verdict. When the
+                        // classifier itself refuses -- e.g. the #2330 exact-A PSD
+                        // refusal evaluated at an infeasible terminal rho -- the
+                        // fit died of the failure directly above, and returning
+                        // the classifier's error replaces the cause of death with
+                        // a symptom observed after it. Python then reads "exact
+                        // observed-information Hessian is indefinite at the
+                        // converged mode" for a fit whose outer loop never
+                        // converged at all. The adjacent `Ok(None)` arm already
+                        // returns the right verdict; a refusal means the same
+                        // thing for the fit, so it returns the same verdict.
+                        Err(error) => {
+                            log::debug!(
+                                "SAE vanished-atom boundary probe refused at the terminal rho \
+                                 ({error}); reporting the outer non-convergence it classifies"
+                            );
+                            return Err(SaeFitError::OuterDidNotConverge {
+                                stage,
+                                result: Box::new(result),
+                            });
+                        }
                     }
                 }
                 Err(source) => {
@@ -635,7 +656,25 @@ fn fit_outer_stage_to_boundary(
                         Ok(None) => {
                             return Err(SaeFitError::OuterRun { stage, source });
                         }
-                        Err(error) => return Err(SaeFitError::Fit(error)),
+                        // `vanished_stage_state_at` CLASSIFIES a run that has
+                        // already failed; it is not the fit's verdict. When the
+                        // classifier itself refuses -- e.g. the #2330 exact-A PSD
+                        // refusal evaluated at an infeasible terminal rho -- the
+                        // fit died of the failure directly above, and returning
+                        // the classifier's error replaces the cause of death with
+                        // a symptom observed after it. Python then reads "exact
+                        // observed-information Hessian is indefinite at the
+                        // converged mode" for a fit whose outer loop never
+                        // converged at all. The adjacent `Ok(None)` arm already
+                        // returns the right verdict; a refusal means the same
+                        // thing for the fit, so it returns the same verdict.
+                        Err(error) => {
+                            log::debug!(
+                                "SAE vanished-atom boundary probe refused at the terminal rho \
+                                 ({error}); reporting the outer-run failure it classifies"
+                            );
+                            return Err(SaeFitError::OuterRun { stage, source });
+                        }
                     }
                 }
             }
@@ -645,7 +684,16 @@ fn fit_outer_stage_to_boundary(
                 Err(original) => match objective.vanished_stage_state_at(rho_flat.view()) {
                     Ok(Some(state)) => Some(state),
                     Ok(None) => return Err(SaeFitError::Fit(original)),
-                    Err(error) => return Err(SaeFitError::Fit(error)),
+                    // Same reasoning as the two arms above: a refusing classifier
+                    // does not get to overwrite the fixed-rho failure it is
+                    // classifying.
+                    Err(error) => {
+                        log::debug!(
+                            "SAE vanished-atom boundary probe refused at the fixed rho \
+                             ({error}); reporting the fit failure it classifies"
+                        );
+                        return Err(SaeFitError::Fit(original));
+                    }
                 },
             }
         };

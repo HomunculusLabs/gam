@@ -845,10 +845,17 @@ mod adaptive_bounded_duchon_tests {
     }
 
     #[test]
-    fn linear_termspec_defaults_to_null_recovery_when_field_is_omitted() {
+    fn linear_termspec_defaults_to_unpenalized_mle_when_field_is_omitted() {
+        // Parametric effects are UNPENALIZED/MLE by default -- the field's own
+        // doc says so and `default_linear_term_double_penalty()` returns false;
+        // `linear(x, double_penalty=true)` is the opt-in. This copy encoded the
+        // retired "null recovery" semantics, and the owning crate carries the
+        // OPPOSITE assertion on byte-identical JSON
+        // (`missing_linear_double_penalty_deserializes_to_unpenalized_mle`), so
+        // the two were asserting contradictory defaults for one deserialization.
         let json = r#"{"name":"x","feature_col":0}"#;
         let term: LinearTermSpec = serde_json::from_str(json).expect("deserialize linear term");
-        assert!(term.double_penalty);
+        assert!(!term.double_penalty);
         assert!(matches!(
             term.coefficient_geometry,
             LinearCoefficientGeometry::Unconstrained

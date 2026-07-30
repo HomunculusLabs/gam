@@ -7151,6 +7151,41 @@ where
                 ctx.row_set = gam_problem::outer_subsample::RowSet::All;
                 ctx.staged_pilot_active = false;
                 true
+            })
+            // Declare the terminal evaluation order, which is what makes this
+            // objective OWN its terminal coefficient mode.
+            //
+            // `ClosureObjective::owns_terminal_coefficient_mode()` is exactly
+            // `terminal_eval_order.is_some()`. Without this call it answered
+            // false, so `finalize_outer_result` fell through to `eval_efs` and
+            // the terminal owner became the Fellner-Schall mode installed by the
+            // EFS closure -- which has just invalidated the derivative memo.
+            // Certification then missed the memo on BOTH its value lane and its
+            // derivative lane and ran two fresh inner solves, warm-started off
+            // whatever preceded them. Three coefficient modes at one theta, and
+            // the published projected-gradient norm belonged to none of the
+            // states any other consumer reads.
+            //
+            // Mode discrimination was never the gap -- every memo read is already
+            // ANDed with `terminal_mode_matches`, which compares theta AND the
+            // mode objective bitwise, so a stale-mode memo cannot be served. What
+            // was missing is the declaration that routes finalization through
+            // `eval_outer`, where `install_terminal_mode` and `store_eval` sit
+            // together as the atomic pair the EFS closure's comment promises.
+            //
+            // The order must match what certification requests or the memo is
+            // missed anyway: `certify_outer_optimality_at_terminal_fidelity` asks
+            // for `ValueGradientHessian` iff the capability reports an analytic
+            // Hessian, and this problem declares `DeclaredHessianForm::Either`
+            // from the same `analytic_outer_hessian_available` flag.
+            //
+            // No `reset_fn` is added on purpose: `reset()` fires AFTER
+            // finalization, so a reset that dropped the memo would re-open the
+            // hole this closes.
+            .with_terminal_eval_order(if analytic_outer_hessian_available {
+                OuterEvalOrder::ValueGradientHessian
+            } else {
+                OuterEvalOrder::ValueAndGradient
             });
 
         problem

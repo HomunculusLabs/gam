@@ -335,7 +335,13 @@ fn duchon_2d_aniso_gaussian_fits_successfully() {
             optimize_sas: false,
             compute_inference: false,
             skip_rho_posterior_inference: false,
-            max_iter: 12,
+            // `options.max_iter` is the OUTER smoothing-parameter budget as well
+            // as the inner cycle cap (#2547), so 12 asked the outer REML search
+            // to certify stationarity within 12 iterations and then `.expect()`ed
+            // that the fit converged. The binomial sibling below carried the same
+            // defect at 8 and was raised to 100; this arm was never touched. Use
+            // the library default rather than a tuned number.
+            max_iter: 100,
             tol: 1e-4,
             nullspace_dims: vec![],
             linear_constraints: None,

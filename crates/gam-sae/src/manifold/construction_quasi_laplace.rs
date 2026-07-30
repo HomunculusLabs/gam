@@ -5689,15 +5689,37 @@ impl SaeManifoldTerm {
             ridge_ext_coord,
             ridge_beta,
         )?;
-        let log_det = arrow_log_det_from_cache(&cache).ok_or_else(|| {
-            "criterion_as_atoms: arrow_log_det_from_cache returned None".to_string()
-        })?;
+        // #2509 — the log-determinant pair MUST be the one that priced
+        // `production_value`, because the 64-ulp identity check below compares the
+        // two. `penalized_quasi_laplace_criterion_with_cache` ranks the EXACT
+        // observed information `A = ∇²_θθ L = B + ΔC` (#2330 Phase-2,
+        // `exact_observed_information_log_dets`) on the dense direct-logdet route,
+        // and only falls back to the Arrow–Schur majorizer `B` when that route is
+        // NOT admitted and it delegates to the streaming implementation (which
+        // stamps its own `B` joint value onto the cache). Reading
+        // `arrow_log_det_from_cache` / `coordinate_block_log_det` unconditionally
+        // reads `B` off the cache's per-row Cholesky + Schur factor, so on the dense
+        // route the assembled value differed from the production value by exactly
+        // `½·[(log|A| − log|A_tt|) − (log|B| − log|B_tt|)]` and this seam REFUSED
+        // every fit with `ΔC ≠ 0`. Branch on the same admission predicate the
+        // criterion branches on so both readers price one operator.
+        let direct_logdet_route = self
+            .streaming_plan()?
+            .admitted_or_error(self.n_obs(), self.output_dim(), self.k_atoms())?
+            .direct_logdet_admitted();
+        let (log_det, log_det_tt) = if direct_logdet_route {
+            self.exact_observed_information_log_dets(rho, target, &cache)?
+        } else {
+            let joint = arrow_log_det_from_cache(&cache).ok_or_else(|| {
+                "criterion_as_atoms: arrow_log_det_from_cache returned None".to_string()
+            })?;
+            (joint, coordinate_block_log_det(&cache)?)
+        };
         let residual = self.reconstruction_residual(target, rho)?;
         let dispersion =
             self.reconstruction_dispersion(&loss, &cache, rho, Some(residual.view()))?;
         let d_eff = self.per_atom_realised_rank_dof(rho, dispersion)?;
         let n_eff = self.per_atom_effective_sample_size();
-        let log_det_tt = coordinate_block_log_det(&cache)?;
         let quasi_laplace_complexity =
             rank_adjusted_quasi_laplace_complexity(log_det, log_det_tt, &d_eff, &n_eff)?;
         let occam = self.reml_occam_term(rho)?;

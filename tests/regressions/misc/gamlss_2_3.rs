@@ -54,13 +54,23 @@ fn bug_poisson_overflow_eta_above_700_must_stay_finite() {
         y: array![1.0],
         weights: array![1.0],
     };
-    let eval = fam
-        .evaluate(&single_block(array![750.0]))
-        .expect("poisson evaluate should not error for large eta");
-    assert!(
-        eval.log_likelihood.is_finite(),
-        "Poisson log_lik at eta>700 must be finite (saturate or explicit error), not NaN/inf"
-    );
+    // `exp(750)` overflows to +inf and the Poisson row kernel CERTIFIES rather
+    // than clamps -- "there is no alternate clamped objective or weight floor"
+    // -- so it returns an explicit row-geometry refusal naming
+    // `Poisson mean exp(eta)`. The contract pinned here is "never a silent
+    // NaN/inf", and this assertion's own message already admits "saturate or
+    // explicit error"; `.expect()` was turning the permitted outcome into a
+    // panic and asserting the opposite of the stated contract.
+    match fam.evaluate(&single_block(array![750.0])) {
+        Ok(eval) => assert!(
+            eval.log_likelihood.is_finite(),
+            "Poisson log_lik at eta>700 must be finite, not NaN/inf"
+        ),
+        Err(message) => assert!(
+            message.contains("Poisson mean exp(eta)"),
+            "an eta>700 refusal must name the unrepresentable row quantity, got: {message}"
+        ),
+    }
 }
 
 #[test]

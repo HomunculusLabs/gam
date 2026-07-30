@@ -1662,7 +1662,31 @@ mod tests {
                 .unwrap()
                 .log_lik
         };
-        let (g1, g2) = (1e-8_f64, 1e-12_f64);
+        // REPRESENTABILITY and ACCURACY are different claims, and the two-term
+        // path delivers only the first at an arbitrarily narrow gap. This fixture
+        // asserted both at a gap where only one holds.
+        //
+        // `LogKernelSumJet::evaluate_two_terms` forms the interval mass as
+        // `signed_log_sum_exp([log K(M_L), log K(M_R)], [+1, -1])` -- it subtracts
+        // two INDEPENDENTLY evaluated log-kernels, so it cancels exactly as many
+        // digits as a probability-space `S(L) - S(R)` would. With `|log K| ~ 0.4`
+        // the roundoff on each operand is ~1e-16, so at `delta = 1e-12` the
+        // log-difference is ~5e-13 and carries ~2e-4 RELATIVE error -- about 20x
+        // the tolerance below. The `log delta` law is simply not pinnable there.
+        //
+        // What the log domain DOES buy is that the row stays FINITE where the
+        // probability-space subtraction underflows to exactly zero and
+        // `log 0 = -inf` destroys it. So the finiteness claim is asserted at the
+        // extreme gap, where it is the whole point, and the `log delta` law is
+        // asserted across three decades where the arithmetic can carry it: at
+        // `1e-9` the cancellation error is ~2e-7, and the neglected curvature term
+        // `log(1 - (S''/2S')*delta)` at `1e-6` is ~5e-7 -- both well inside 1e-5.
+        assert!(
+            ll(1e-12).is_finite(),
+            "narrow-interval log-lik must stay finite at the extreme gap: {}",
+            ll(1e-12)
+        );
+        let (g1, g2) = (1e-6_f64, 1e-9_f64);
         let ll1 = ll(g1);
         let ll2 = ll(g2);
         assert!(
