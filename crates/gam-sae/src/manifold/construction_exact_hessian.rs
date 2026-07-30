@@ -4953,7 +4953,7 @@ mod test_support {
 }
 
 #[cfg(test)]
-mod inverse_power_deflation_cost_tests_2627 {
+mod tests_inverse_power_deflation_cost_2627 {
     use super::*;
 
     /// #2627 — a GAPLESS near-null cluster must deflate, not exhaust the Krylov
