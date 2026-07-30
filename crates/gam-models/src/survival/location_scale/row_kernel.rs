@@ -5,7 +5,7 @@ use gam_math::jet_scalar::{
     DynamicJetArena, DynamicOneSeed, DynamicOrder2, DynamicTwoSeed, JetScalar, OneSeedBatch,
     Order2AtomChannels, RuntimeJetScalar,
 };
-use gam_row_macros::row_atom;
+use gam_row_macros::{row_atom, row_program};
 use wide::f64x4;
 
 #[derive(Clone, Copy, Debug)]
@@ -628,49 +628,164 @@ fn stack_is_exactly_zero(stack: &[f64; 5]) -> bool {
 }
 
 #[inline(always)]
+fn sls_program_exp_stack(value: f64) -> [f64; 5] {
+    let exp = value.exp();
+    [exp; 5]
+}
+
+#[inline(always)]
+fn sls_program_outer_stack(
+    _value: f64,
+    value: f64,
+    first: f64,
+    second: f64,
+    third: f64,
+    fourth: f64,
+) -> [f64; 5] {
+    [value, first, second, third, fourth]
+}
+
+row_program! {
+    fn sls_row_program(
+        h0,
+        h1,
+        hdot,
+        eta_t_exit,
+        eta_t_entry,
+        eta_t_deriv,
+        eta_ls_exit,
+        eta_ls_entry,
+        eta_ls_deriv;
+        u0_active,
+        u0_value,
+        u0_first,
+        u0_second,
+        u0_third,
+        u0_fourth,
+        u1_active,
+        u1_value,
+        u1_first,
+        u1_second,
+        u1_third,
+        u1_fourth,
+        g_active,
+        g_value,
+        g_first,
+        g_second,
+        g_third,
+        g_fourth
+    )
+    emit [generic, order2];
+    leaves {
+        exponential => sls_program_exp_stack => sls_program_exp_stack_cuda,
+        outer => sls_program_outer_stack => sls_program_outer_stack_cuda,
+    }
+    witnesses [];
+    {
+        let neg_eta_ls_entry = neg(eta_ls_entry);
+        let inv_sigma_entry = compose(exponential, neg_eta_ls_entry);
+        let u0 = add(h0, neg(mul(eta_t_entry, inv_sigma_entry)));
+
+        let neg_eta_ls_exit = neg(eta_ls_exit);
+        let inv_sigma_exit = compose(exponential, neg_eta_ls_exit);
+        let u1 = add(h1, neg(mul(eta_t_exit, inv_sigma_exit)));
+        let event_inner = add(mul(eta_t_exit, eta_ls_deriv), neg(eta_t_deriv));
+        let g = add(hdot, mul(inv_sigma_exit, event_inner));
+
+        let mut nll = zero();
+        if (u0_active != 0.0) {
+            nll = compose(
+                outer,
+                u0,
+                u0_value,
+                u0_first,
+                u0_second,
+                u0_third,
+                u0_fourth
+            );
+        }
+        if (u1_active != 0.0) {
+            nll = add(
+                nll,
+                compose(
+                    outer,
+                    u1,
+                    u1_value,
+                    u1_first,
+                    u1_second,
+                    u1_third,
+                    u1_fourth
+                )
+            );
+        }
+        if (g_active != 0.0) {
+            nll = add(
+                nll,
+                compose(
+                    outer,
+                    g,
+                    g_value,
+                    g_first,
+                    g_second,
+                    g_third,
+                    g_fourth
+                )
+            );
+        }
+        return nll;
+    }
+}
+
+#[inline(always)]
+fn sls_program_activity_and_stacks(plan: &SlsOuterPlan) -> (f64, [f64; 5], f64, [f64; 5], f64) {
+    let u0_active = if stack_is_exactly_zero(&plan.u0) {
+        0.0
+    } else {
+        1.0
+    };
+    let u1 = plan.u1.unwrap_or([0.0; 5]);
+    let u1_active = if stack_is_exactly_zero(&u1) { 0.0 } else { 1.0 };
+    let g = plan.g.unwrap_or([0.0; 5]);
+    let g_active = if stack_is_exactly_zero(&g) { 0.0 } else { 1.0 };
+    (u0_active, u1, u1_active, g, g_active)
+}
+
+#[inline(always)]
 pub(crate) fn sls_row_nll<S: JetScalar<SLS_ROW_K>>(
     vars: &[S; SLS_ROW_K],
     kernel: &SurvivalExactRowKernel,
 ) -> Result<S, String> {
-    let u0 = sls_index(&vars[0], &vars[4], &vars[7]);
-    let u1 = sls_index(&vars[1], &vars[3], &vars[6]);
-    let g = sls_event_rate(&vars[2], &vars[3], &vars[5], &vars[6], &vars[8]);
     let plan = sls_outer_plan(kernel);
-
-    let mut nll = if stack_is_exactly_zero(&plan.u0) {
-        S::constant(0.0)
-    } else {
-        u0.compose_unary(plan.u0)
-    };
-    if let Some(stack) = plan.u1
-        && !stack_is_exactly_zero(&stack)
-    {
-        nll = nll.add(&u1.compose_unary(stack));
-    }
-    if let Some(stack) = plan.g
-        && !stack_is_exactly_zero(&stack)
-    {
-        nll = nll.add(&g.compose_unary(stack));
-    }
+    let (u0_active, u1, u1_active, g, g_active) = sls_program_activity_and_stacks(&plan);
+    let (nll, []) = sls_row_program(
+        &vars[0], &vars[1], &vars[2], &vars[3], &vars[4], &vars[5], &vars[6], &vars[7], &vars[8],
+        u0_active, plan.u0[0], plan.u0[1], plan.u0[2], plan.u0[3], plan.u0[4], u1_active, u1[0],
+        u1[1], u1[2], u1[3], u1[4], g_active, g[0], g[1], g[2], g[3], g[4],
+    );
     Ok(nll)
 }
 
-/// Production V/G/H schedule for the location-scale row: the structure-fused
-/// direct evaluation of the SAME three-atom outer plan [`sls_row_vgh_compiled`]
-/// lowers (`u0`/`u1`/`g` index atoms × the kernel's ln-survival / Mills /
-/// log-density stacks). The two `u1` transforms are fused and each index's
-/// live upper-triangle support is visited exactly once, with no accumulator
-/// plumbing between atoms.
-///
-/// This schedule was the retained strongest-hand baseline; it is production
-/// per SPEC line 1 (AD-derived lowerings replace hand schedules only when
-/// measured at-least-as-fast, and the release cell below measures this
-/// schedule faster than the jet-compiled lowering on every acceptance host).
-/// Correctness is pinned by
-/// `survival_ls_joint_row_kernel_agrees_with_jet_tower_program_all_channels`
-/// (every channel vs the single-source `sls_row_nll` Tower4 program) and the
-/// release cell's dense-jet parity + NaN-poisoned endpoint pins; the
-/// jet-compiled lowering stays as the mechanical oracle/racer.
+#[inline(always)]
+fn sls_row_vgh_generated(
+    primary: &[f64; SLS_ROW_K],
+    kernel: &SurvivalExactRowKernel,
+) -> (f64, [f64; SLS_ROW_K], [[f64; SLS_ROW_K]; SLS_ROW_K]) {
+    let plan = sls_outer_plan(kernel);
+    let (u0_active, u1, u1_active, g, g_active) = sls_program_activity_and_stacks(&plan);
+    let (value, gradient, hessian, []) = sls_row_program_order2(
+        primary[0], primary[1], primary[2], primary[3], primary[4], primary[5], primary[6],
+        primary[7], primary[8], u0_active, plan.u0[0], plan.u0[1], plan.u0[2], plan.u0[3],
+        plan.u0[4], u1_active, u1[0], u1[1], u1[2], u1[3], u1[4], g_active, g[0], g[1], g[2], g[3],
+        g[4],
+    );
+    (value, gradient, hessian)
+}
+
+/// Retired strongest-hand V/G/H schedule for the location-scale row. It remains
+/// test-only as the non-abstracted performance opponent for the generated
+/// whole-row [`sls_row_program_order2`] lowering.
+#[cfg(test)]
+#[inline(always)]
 fn sls_row_vgh_fused(
     p: &[f64; SLS_ROW_K],
     kernel: &SurvivalExactRowKernel,
@@ -1277,7 +1392,7 @@ pub fn survival_location_scale_alo_row_geometry(
                 .expect("owned ALO coordinates are contiguous")
                 .try_into()
                 .expect("non-wiggle coordinate count is nine");
-            let (_, score, hessian) = sls_row_vgh_fused(&primary, &kernel);
+            let (_, score, hessian) = sls_row_vgh_generated(&primary, &kernel);
             (
                 Array1::from_vec(score.to_vec()),
                 Array2::from_shape_vec(
@@ -2336,13 +2451,12 @@ impl crate::row_kernel::RowKernel<SLS_ROW_K> for SurvivalLsRowKernel<'_> {
     ) -> Result<(f64, [f64; SLS_ROW_K], [[f64; SLS_ROW_K]; SLS_ROW_K]), String> {
         // #932: value, gradient and Hessian consume the SAME scalar `u0/u1/g`
         // index expressions and outer derivative plan as `sls_row_nll`,
-        // through the structure-fused production schedule (see
-        // [`sls_row_vgh_fused`] for the SPEC-line-1 promotion rationale). The
-        // `survival_ls_joint_row_kernel_agrees_with_jet_tower_program_all_channels`
-        // oracle pins this schedule to the full Tower4 source, and the release
-        // cell pins it against the jet-compiled lowering and the dense jet.
+        // through the build-time symbolic order-2 lowering emitted from the
+        // canonical [`sls_row_program`] declaration. The release cell races the
+        // generated full V/G/H tuple against the retired strongest-hand fused
+        // schedule after exact and NaN-poisoned endpoint parity.
         match self.row_nll_inputs_opt(row)? {
-            Some((p, kernel)) => Ok(sls_row_vgh_fused(&p, &kernel)),
+            Some((p, kernel)) => Ok(sls_row_vgh_generated(&p, &kernel)),
             None => Ok((0.0, [0.0; SLS_ROW_K], [[0.0; SLS_ROW_K]; SLS_ROW_K])),
         }
     }
@@ -5472,10 +5586,8 @@ mod patterned_order2_perf_tests {
         (value, gradient, hessian)
     }
 
-    /// The PRODUCTION structure-fused schedule (promoted from this module's
-    /// strongest-hand baseline per SPEC line 1; see [`sls_row_vgh_fused`]).
-    /// Kept under its historical racer name so every parity, endpoint, and
-    /// timing pin below reads production directly.
+    /// Retired strongest-hand fused schedule, retained only as the
+    /// non-abstracted exactness and performance opponent.
     fn hand_fused(
         p: &[f64; SLS_ROW_K],
         kernel: &SurvivalExactRowKernel,
@@ -5484,13 +5596,11 @@ mod patterned_order2_perf_tests {
     }
 
     /// #932 release speed gate for the location-scale row. Production is the
-    /// structure-fused schedule ([`sls_row_vgh_fused`], measured under the
-    /// `hand_fused` racer name) and the strongest alternative is the
-    /// jet-compiled lowering (`compiled`); both consume the same frozen kernel
-    /// so timing includes row arithmetic only. Emits the harness-parsed
-    /// `hand_over_production` token (strongest-alternative time over
-    /// production time) that the MSI release harness fails closed on whenever
-    /// any measured cell is `<= 1`.
+    /// complete build-time symbolic lowering emitted from [`sls_row_program`];
+    /// the opponent is the retired strongest manually fused schedule. Both
+    /// consume the same frozen kernel and force their complete V/G/H tuple
+    /// through an optimization barrier. The harness-parsed
+    /// `hand_over_production` token is hand time over generated time.
     #[test]
     fn release_measure_sls_compiled_vs_strongest_hand_932() {
         let (p, kernel) = fixture();
@@ -5498,6 +5608,7 @@ mod patterned_order2_perf_tests {
         let got = patterned(&p, &kernel);
         let literal_seed_result = patterned_literal_seeds(&p, &kernel);
         let compiled_result = compiled(&p, &kernel);
+        let generated_full_result = sls_row_vgh_generated(&p, &kernel);
         let hand_result = hand(&p, &kernel);
         let hand_fused_result = hand_fused(&p, &kernel);
         let close = |a: f64, b: f64, label: &str| {
@@ -5510,6 +5621,7 @@ mod patterned_order2_perf_tests {
         close(got.0, want.0, "value");
         close(literal_seed_result.0, want.0, "literal-seed value");
         close(compiled_result.0, want.0, "compiled value");
+        close(generated_full_result.0, want.0, "generated-full value");
         close(hand_result.0, want.0, "hand value");
         close(hand_fused_result.0, want.0, "fused-hand value");
         for i in 0..SLS_ROW_K {
@@ -5523,6 +5635,11 @@ mod patterned_order2_perf_tests {
                 compiled_result.1[i],
                 want.1[i],
                 &format!("compiled gradient[{i}]"),
+            );
+            close(
+                generated_full_result.1[i],
+                want.1[i],
+                &format!("generated-full gradient[{i}]"),
             );
             close(hand_result.1[i], want.1[i], &format!("hand gradient[{i}]"));
             close(
@@ -5541,6 +5658,11 @@ mod patterned_order2_perf_tests {
                     compiled_result.2[i][j],
                     want.2[i][j],
                     &format!("compiled Hessian[{i},{j}]"),
+                );
+                close(
+                    generated_full_result.2[i][j],
+                    want.2[i][j],
+                    &format!("generated-full Hessian[{i},{j}]"),
                 );
                 close(
                     hand_result.2[i][j],
@@ -5577,11 +5699,17 @@ mod patterned_order2_perf_tests {
             let endpoint_want = dense(&p, &endpoint_kernel);
             let endpoint_got = hand_fused(&p, &endpoint_kernel);
             let endpoint_compiled = compiled(&p, &endpoint_kernel);
+            let endpoint_generated_full = sls_row_vgh_generated(&p, &endpoint_kernel);
             close(endpoint_got.0, endpoint_want.0, "fused-hand endpoint value");
             close(
                 endpoint_compiled.0,
                 endpoint_want.0,
                 "compiled endpoint value",
+            );
+            close(
+                endpoint_generated_full.0,
+                endpoint_want.0,
+                "generated-full endpoint value",
             );
             for i in 0..SLS_ROW_K {
                 close(
@@ -5594,6 +5722,11 @@ mod patterned_order2_perf_tests {
                     endpoint_want.1[i],
                     &format!("compiled endpoint gradient d={d} [{i}]"),
                 );
+                close(
+                    endpoint_generated_full.1[i],
+                    endpoint_want.1[i],
+                    &format!("generated-full endpoint gradient d={d} [{i}]"),
+                );
                 for j in 0..SLS_ROW_K {
                     close(
                         endpoint_got.2[i][j],
@@ -5605,20 +5738,25 @@ mod patterned_order2_perf_tests {
                         endpoint_want.2[i][j],
                         &format!("compiled endpoint Hessian d={d} [{i},{j}]"),
                     );
+                    close(
+                        endpoint_generated_full.2[i][j],
+                        endpoint_want.2[i][j],
+                        &format!("generated-full endpoint Hessian d={d} [{i},{j}]"),
+                    );
                 }
             }
         }
 
         let iterations = 2_000_000usize;
 
-        // Feedback-coupled timing barrier (no `std::hint::black_box`): each
-        // iteration nudges the primaries by a negligible multiple of the running
-        // checksum, and the checksum folds every returned channel. That
-        // loop-carried recurrence makes iteration `n`'s input depend on iteration
-        // `n-1`'s output, so the compiler can neither hoist the pure row call out
-        // of the loop nor drop it as dead. The `1e-18` scale keeps the perturbed
-        // primaries bit-adjacent to the fixture, so the measured regime is the
-        // fixture regime.
+        // Feedback-coupled timing barrier. Perturb entry log-scale `p[7]`, force
+        // the complete V/G/H tuple across `black_box`, and fold channels that
+        // genuinely depend on the perturbation.
+        // The former recurrence perturbed `p[0]` but folded only value, g[0],
+        // and H[0,0]; because this racer intentionally freezes the outer stacks,
+        // those outputs are invariant to p[0], so an inlined generated lowering
+        // could be hoisted while an outlined hand function still paid its call.
+        // This loop-carried dependency is algebraically live in every arm.
         fn best_secs<F>(
             iterations: usize,
             p: &[f64; SLS_ROW_K],
@@ -5634,9 +5772,10 @@ mod patterned_order2_perf_tests {
                 let started = Instant::now();
                 for _ in 0..iterations {
                     let mut perturbed = *p;
-                    perturbed[0] += checksum * 1e-18;
-                    let (value, gradient, hessian) = evaluate(&perturbed, kernel);
-                    checksum += value + gradient[0] + hessian[0][0];
+                    perturbed[7] += checksum * 1e-18;
+                    let (value, gradient, hessian) =
+                        std::hint::black_box(evaluate(&perturbed, kernel));
+                    checksum += value + gradient[4] + hessian[4][4] + hessian[4][7];
                 }
                 assert!(
                     checksum.is_finite(),
@@ -5648,20 +5787,39 @@ mod patterned_order2_perf_tests {
         }
 
         let hand_ns = best_secs(iterations, &p, &kernel, hand) * 1e9 / iterations as f64;
-        let hand_fused_ns =
-            best_secs(iterations, &p, &kernel, hand_fused) * 1e9 / iterations as f64;
         let dense_ns = best_secs(iterations, &p, &kernel, dense) * 1e9 / iterations as f64;
         let patterned_ns = best_secs(iterations, &p, &kernel, patterned) * 1e9 / iterations as f64;
         let literal_seeds_ns =
             best_secs(iterations, &p, &kernel, patterned_literal_seeds) * 1e9 / iterations as f64;
         let compiled_ns = best_secs(iterations, &p, &kernel, compiled) * 1e9 / iterations as f64;
+        // Interleave the acceptance pair so CPU frequency, cache warmth, and
+        // measurement order cannot systematically favor production or hand.
+        let mut hand_fused_ns = f64::INFINITY;
+        let mut generated_full_ns = f64::INFINITY;
+        for round in 0..7 {
+            if round % 2 == 0 {
+                generated_full_ns = generated_full_ns.min(
+                    best_secs(iterations, &p, &kernel, sls_row_vgh_generated) * 1e9
+                        / iterations as f64,
+                );
+                hand_fused_ns = hand_fused_ns
+                    .min(best_secs(iterations, &p, &kernel, hand_fused) * 1e9 / iterations as f64);
+            } else {
+                hand_fused_ns = hand_fused_ns
+                    .min(best_secs(iterations, &p, &kernel, hand_fused) * 1e9 / iterations as f64);
+                generated_full_ns = generated_full_ns.min(
+                    best_secs(iterations, &p, &kernel, sls_row_vgh_generated) * 1e9
+                        / iterations as f64,
+                );
+            }
+        }
         eprintln!(
-            "SLS-PATTERNED-932 hand={hand_ns:.2} ns/row production-fused={hand_fused_ns:.2} ns/row dense={dense_ns:.2} ns/row patterned={patterned_ns:.2} ns/row literal-seeds={literal_seeds_ns:.2} ns/row compiled={compiled_ns:.2} ns/row compiled/fused={:.3} patterned/fused={:.3} literal-seeds/fused={:.3} compiled/dense={:.3} hand_over_production={:.6}",
-            compiled_ns / hand_fused_ns,
-            patterned_ns / hand_fused_ns,
-            literal_seeds_ns / hand_fused_ns,
+            "SLS-PATTERNED-932 hand-generic={hand_ns:.2} ns/row strongest-hand-fused={hand_fused_ns:.2} ns/row production-generated-full={generated_full_ns:.2} ns/row dense={dense_ns:.2} ns/row patterned={patterned_ns:.2} ns/row literal-seeds={literal_seeds_ns:.2} ns/row atom-compiled={compiled_ns:.2} ns/row compiled/production={:.3} patterned/production={:.3} literal-seeds/production={:.3} compiled/dense={:.3} hand_over_production={:.6}",
+            compiled_ns / generated_full_ns,
+            patterned_ns / generated_full_ns,
+            literal_seeds_ns / generated_full_ns,
             compiled_ns / dense_ns,
-            compiled_ns / hand_fused_ns,
+            hand_fused_ns / generated_full_ns,
         );
     }
 
