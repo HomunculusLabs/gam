@@ -2192,7 +2192,16 @@ fn zz_measure_k2_wide_p_gradient_arm_vs_solver_arm_2080() {
             alpha *= 0.5;
         }
         if !accepted {
-            let _ok = arm_b.restore_mutable_state(&snapshot).is_ok();
+            // A DISCARDED restore result means the arm silently continues from a
+            // half-rolled-back state and every later reading is still attributed
+            // to the B arm. `restore_mutable_state` is documented as a TOTAL
+            // structural inverse that commits nothing on failure, so an error
+            // here is an invariant failure of this harness's own snapshot, not a
+            // recoverable condition -- and `let _ok = ...` is banned in this
+            // workspace for exactly that reason.
+            arm_b.restore_mutable_state(&snapshot).unwrap_or_else(|error| {
+                panic!("B-arm snapshot restore after a failed line search: {error:?}")
+            });
             eprintln!("[2080-AB] B/gradient line search found no acceptable step at iter={iter}");
             break;
         }

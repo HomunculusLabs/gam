@@ -2423,6 +2423,47 @@ fn survival_unified_fit_result(
         .clone()
         .map(gam_problem::dispersion_cov::PhiScaledCovariance::wrap);
     let penalized_hessian = gam_problem::dispersion_cov::UnscaledPrecision::wrap(penalized_hessian);
+
+    // #2627: on the FIXED-lambda survival path, lambda is a CONSTANT of the model
+    // rather than an estimate, so `Vp = Vb` EXACTLY and the corrected covariance
+    // must be persisted too.
+    //
+    // The caller sets `outer_iterations = 0` with no certificate on exactly one
+    // branch, and says so there: "No smoothing coordinate was optimized (e.g.
+    // the fixed-lambda parametric Weibull baseline path): the fit is
+    // fixed-outer". With no rho estimated there is no rho-variance to integrate
+    // over, so the smoothing correction `J*V_rho*J'` is the zero matrix and
+    // `Vp = Vb + 0 = Vb`. This is an identity of the definition, not a fallback
+    // to a weaker uncertainty object -- it is the same one `gam-predict`'s
+    // `select_uncertainty_backend` applies when `lambdas.is_empty()`, stated on
+    // the ESTIMATOR instead of on the coordinate count, which is what this path
+    // needs: it carries penalty blocks (so `lambdas` is non-empty) whose lambdas
+    // were never selected.
+    //
+    // What the absence cost: `gam predict` defaults to `--mode posterior-mean
+    // --covariance-mode corrected`, so EVERY interval request on a fixed-lambda
+    // survival model died with "saved model does not contain smoothing-corrected
+    // covariance; refit before requesting --covariance-mode corrected" -- an
+    // instruction no refit could satisfy, because there was no correction to
+    // compute. The sibling conditional covariance right above was persisted for
+    // the same reason under #2373; this is the other half of that fix.
+    //
+    // A fit whose lambda WAS selected keeps the typed absence. There the
+    // correction is a real, non-zero term this path does not compute, and
+    // handing back `Vb` under a corrected request would silently under-report
+    // every interval.
+    let lambda_is_fixed = outer_iterations == 0 && criterion_certificate.is_none();
+    let covariance_corrected = lambda_is_fixed
+        .then(|| covariance_conditional.clone())
+        .flatten();
+    let beta_standard_errors_corrected = covariance_corrected
+        .as_ref()
+        .map(gam_problem::se_from_covariance)
+        .transpose()
+        .map_err(|reason| {
+            format!("survival transformation corrected standard errors are invalid: {reason}")
+        })?;
+
     let inference = gam_solve::estimate::FitInference {
         edf_by_block: edf_by_block.clone(),
         penalty_block_trace,
@@ -2436,8 +2477,8 @@ fn survival_unified_fit_result(
         dispersion: gam_solve::estimate::Dispersion::UNIT,
         beta_covariance,
         beta_standard_errors,
-        beta_covariance_corrected: None,
-        beta_standard_errors_corrected: None,
+        beta_covariance_corrected: covariance_corrected.clone(),
+        beta_standard_errors_corrected,
         beta_covariance_frequentist: None,
         coefficient_influence: None,
         weighted_gram: None,
@@ -2476,7 +2517,7 @@ fn survival_unified_fit_result(
             .or(Some(summary.lastgradient_norm)),
         standard_deviation: 1.0,
         covariance_conditional,
-        covariance_corrected: None,
+        covariance_corrected,
         inference: Some(inference),
         fitted_link: FittedLinkState::Standard(None),
         geometry: Some(gam_solve::estimate::FitGeometry {
