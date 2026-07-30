@@ -189,13 +189,13 @@ const DENSE_GRAM_MAX: usize = 1536;
 /// symmetric eigendecomposition, and no sparse route replaces it.
 ///
 /// So the bound is that eigendecomposition's LIVE MEMORY, and the width is
-/// DERIVED from it: `sqrt(CERTIFIED_SPECTRUM_BYTES / (blocks · 8))` = 4096
-/// columns at a 512 MiB peak over four simultaneously resident `m × m` blocks,
-/// all freed as soon as the modes are extracted. Being a transient rather than a
-/// lifetime cache is exactly why this budget can sit 2.67× further out in columns
-/// (7.1× in memory) than [`DENSE_GRAM_MAX`]: past that cap the Gram is
-/// materialized from the CSR design for the duration of the decomposition and
-/// dropped, instead of being kept for the fit.
+/// DERIVED from it: `sqrt(CERTIFIED_SPECTRUM_BYTES / (blocks · 8))` = 2896
+/// columns at a 512 MiB peak over the [`CERTIFIED_SPECTRUM_BLOCKS`] `m × m`
+/// blocks the route was measured to hold, all freed as soon as the modes are
+/// extracted. Being a transient rather than a lifetime cache is why this budget
+/// sits 1.9× further out in columns (3.6× in memory) than [`DENSE_GRAM_MAX`]:
+/// past that cap the Gram is materialized from the CSR design for the duration
+/// of the decomposition and dropped, instead of being kept for the fit.
 ///
 /// Time is not the binding resource here and is not what the number is derived
 /// from: the decomposition is `O(rank³)` and is paid ONCE per cascade depth
@@ -210,10 +210,20 @@ const CERTIFIED_SPECTRUM_MAX: usize =
 /// the two cannot drift apart.
 const CERTIFIED_SPECTRUM_BYTES: usize = 512 * 1024 * 1024;
 
-/// `m × m` f64 blocks simultaneously resident on the certified route: the upper
-/// Gram the Schur complement is assembled from, the Schur complement itself, the
-/// eigenvector matrix `eigh` returns, and LAPACK's working copy.
-const CERTIFIED_SPECTRUM_BLOCKS: usize = 4;
+/// `m × m` f64 blocks simultaneously resident at the certified route's peak.
+///
+/// MEASURED, not counted. The obvious inventory is four — the upper Gram the
+/// Schur complement is assembled from, the Schur complement itself, the
+/// eigenvector matrix `eigh` returns, and one working copy — and that is wrong,
+/// because `eigh` is `faer`'s self-adjoint EVD behind `FaerEigh` and its
+/// tridiagonalization allocates workspace this crate never names. The marginal
+/// high-water mark over an `m = 891 -> 2038` step is **7.44** blocks
+/// (79.4 MiB -> 270.1 MiB), so the declared count is the next power of two above
+/// it. `zz_measure_certified_spectrum_peak_memory_2546` re-measures it and fails
+/// if it ever exceeds this, because a count below the realized one would let
+/// [`CERTIFIED_SPECTRUM_MAX`] admit a width that overruns
+/// [`CERTIFIED_SPECTRUM_BYTES`].
+const CERTIFIED_SPECTRUM_BLOCKS: usize = 8;
 
 /// Memory budget for the exact sparse-direct factor of `A = X'WX + λD`, stated
 /// as nonzeros of `L`.

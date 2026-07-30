@@ -210,16 +210,23 @@ fn cascade_matches_or_beats_dense_duchon_on_truth_recovery() {
     );
 }
 
-/// Arm 2 — the formula auto-route must propagate iterative automatic-REML
-/// proof refusal past the dense-kernel cliff.
+/// Arm 2 — the formula auto-route must propagate automatic-REML proof refusal
+/// past the width where the certified Schur spectrum can no longer be formed.
 ///
 /// This is intentionally a `fit_from_formula` route test, not just a direct
 /// estimator check. Once the cascade estimator is structurally selected, its
-/// refinement can exceed the dense Gram cap. PCG's solve-residual certificate
-/// does not supply the inverse-norm bound needed for an outer REML derivative
-/// enclosure, so automatic λ selection must stop with the proof-unavailable
-/// error. Falling through to the dense radial posterior would erase both that
-/// certificate boundary and the estimator the route selected.
+/// refinement can exceed `CERTIFIED_SPECTRUM_MAX`. Past that width there is no
+/// λ-independent spectrum, so the score has no interval extension and no outer
+/// derivative enclosure — a pointwise value, however exactly it is computed,
+/// cannot certify a score sign or a KKT root — and automatic λ selection must
+/// stop with the proof-unavailable error. Falling through to the dense radial
+/// posterior would erase both that certificate boundary and the estimator the
+/// route selected.
+///
+/// The refusal used to fire at the dense GRAM cap (1536 columns), which is a
+/// cache budget rather than a proof boundary; #2546 moved it to the budget the
+/// proof actually costs, so this test now asserts against the eigendecomposition
+/// wording rather than the iterative-route wording.
 #[test]
 fn past_cliff_fit_from_formula_propagates_iterative_reml_proof_refusal() {
     init_parallelism();
@@ -236,8 +243,9 @@ fn past_cliff_fit_from_formula_propagates_iterative_reml_proof_refusal() {
     };
     let message = error.to_string();
     assert!(
-        message.contains("automatic REML proof unavailable for the iterative route")
-            && message.contains("use an explicitly fixed log lambda"),
+        message.contains(
+            "automatic REML proof unavailable because the certified Schur eigendecomposition"
+        ) && message.contains("use an explicitly fixed log lambda"),
         "the selected cascade route returned the wrong refusal: {message}"
     );
 }

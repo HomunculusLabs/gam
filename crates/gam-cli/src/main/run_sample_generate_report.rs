@@ -486,7 +486,11 @@ pub(crate) fn run_report_residual_cascade(
     // different criteria and the report says which one this fit was selected on.
     match fit.certificate.logdet_method {
         gam::solver::residual_cascade::LogdetMethod::DenseExact => notes.push(
-            "The log-determinant came from a dense Cholesky: exact, with no              stochastic estimate anywhere in the criterion."
+            "The log-determinant came from exact dense linear algebra — a dense              Cholesky at the fitted lambda, or the lambda-independent Schur              eigendecomposition the certified selection is built from: exact,              with no stochastic estimate anywhere in the criterion."
+                .to_string(),
+        ),
+        gam::solver::residual_cascade::LogdetMethod::SparseExact => notes.push(
+            "The log-determinant came from an exact sparse direct Cholesky of the              normal equations at the fitted lambda: exact, with no stochastic              estimate anywhere in the criterion."
                 .to_string(),
         ),
         gam::solver::residual_cascade::LogdetMethod::Slq => notes.push(

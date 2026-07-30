@@ -1270,18 +1270,15 @@ fn past_cap_point_criterion_is_solve_free_but_auto_reml_needs_exact_proof_2503_2
     let (axes, y, w) = sample(2, n, 0.1, 0x1032_0043);
     let xs = axis_refs(&axes);
     // Level 7 is where this shape's `4^level` column growth crosses
-    // `CERTIFIED_SPECTRUM_MAX = 4096` — past the width whose dense Schur
+    // `CERTIFIED_SPECTRUM_MAX` — past the width whose dense Schur
     // eigendecomposition fits its memory budget, so there is no λ-independent
     // spectrum to enclose the score with. Level 6 (m = 2134, measured) used to
     // sit past the gate because the gate was the `DENSE_GRAM_MAX = 1536` Gram
     // CACHE; #2546 separated the cache budget from the proof budget, and level 6
     // now certifies, so the refusal this gate is about lives one level finer.
+    // The width is not asserted against a literal here: the refusal below carries
+    // the budget it was compared against, and that is the honest comparison.
     let design = ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.0, 7).expect("build");
-    assert!(
-        design.num_coeffs() > 4096,
-        "fixture must be past the certified spectrum budget (m = {})",
-        design.num_coeffs()
-    );
 
     let (lo, hi) = design.log_lambda_domain().expect("spectrum-derived domain");
     assert!(
@@ -1302,11 +1299,14 @@ fn past_cap_point_criterion_is_solve_free_but_auto_reml_needs_exact_proof_2503_2
         Err(error) => error,
         Ok(_) => panic!("point-evaluable SLQ must not escape as an exact-real REML fit"),
     };
-    assert!(matches!(
-        refusal,
-        ResidualCascadeError::RemlScoreProofUnavailable {
-            columns,
-            certified_spectrum_max: 4096,
-        } if columns == design.num_coeffs()
-    ));
+    assert!(
+        matches!(
+            refusal,
+            ResidualCascadeError::RemlScoreProofUnavailable {
+                columns,
+                certified_spectrum_max,
+            } if columns == design.num_coeffs() && columns > certified_spectrum_max
+        ),
+        "the wrong refusal for a design past the certified spectrum budget: {refusal}"
+    );
 }
