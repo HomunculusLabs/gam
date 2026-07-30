@@ -583,7 +583,7 @@ impl SurvivalMarginalSlopeFamily {
 
                 for axis_idx in 0..k {
                     let axis = &axes[axis_idx];
-                    let psi_row = &psi_rows[axis_idx];
+                    let psi_row = psi_rows[axis_idx];
                     let dir = &directions[axis_idx];
                     let third_stack = &third_stacks[axis_idx];
                     let mut third = Array2::from_shape_fn(
@@ -597,7 +597,7 @@ impl SurvivalMarginalSlopeFamily {
                     let acc = &mut accs[axis_idx];
 
                     // objective_psi += w * (f_pi · dir)
-                    acc.objective_psi += w * f_pi.dot(&dir);
+                    acc.objective_psi += w * f_pi.dot(dir);
 
                     // score_psi += w * (f_pi · loading) * psi_row, routed to
                     // the marginal or logslope block depending on axis.
@@ -607,7 +607,7 @@ impl SurvivalMarginalSlopeFamily {
                         _ => acc.score_g.scaled_add(s1, psi_row),
                     }
 
-                    let mut pb = f_pipi.dot(&dir);
+                    let mut pb = f_pipi.dot(dir);
                     if w != 1.0 {
                         pb.mapv_inplace(|v| v * w);
                     }
@@ -633,7 +633,7 @@ impl SurvivalMarginalSlopeFamily {
                         self,
                         row,
                         axis.block_idx,
-                        &psi_row,
+                        psi_row,
                         &right_primary,
                     )?;
                     acc.hessian.add_pullback(self, row, &third)?;
