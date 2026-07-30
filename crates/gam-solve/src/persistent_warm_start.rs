@@ -245,7 +245,6 @@ pub fn load_record(
         "load warm-start record",
         load_json_record(store, key),
     )
-    .flatten()
 }
 
 pub fn load_block_record(
@@ -257,11 +256,10 @@ pub fn load_block_record(
         "load custom-family warm-start record",
         load_json_record(store, key),
     )
-    .flatten()
 }
 
 pub fn store_record(store: &ConfiguredWarmStartStore, record: &PersistentWarmStartRecord) {
-    let _ = best_effort(
+    best_effort(
         store,
         "store warm-start record",
         store_json_record(store, &record.key, record),
@@ -272,7 +270,7 @@ pub fn store_block_record(
     store: &ConfiguredWarmStartStore,
     record: &PersistentBlockWarmStartRecord,
 ) {
-    let _ = best_effort(
+    best_effort(
         store,
         "store custom-family warm-start record",
         store_json_record(store, &record.key, record),
@@ -309,16 +307,16 @@ fn classify_store_error(error: StoreError) -> PersistentStoreError {
 /// for the fit and emits one diagnostic from the store capability. Encoding or
 /// store-contract defects remain loud in diagnostics and typed in the internal
 /// `try_*` functions, but persistence can never fail a statistical fit.
-fn best_effort<T>(
+fn best_effort<T: Default>(
     store: &ConfiguredWarmStartStore,
     operation: &'static str,
     result: Result<T, PersistentStoreError>,
-) -> Option<T> {
+) -> T {
     match result {
-        Ok(value) => Some(value),
+        Ok(value) => value,
         Err(PersistentStoreError::Unavailable(detail)) => {
             store.mark_unavailable(operation, &detail);
-            None
+            T::default()
         }
         Err(error @ (PersistentStoreError::Encode(_) | PersistentStoreError::Rejected(_))) => {
             log::warn!(
@@ -327,7 +325,7 @@ fn best_effort<T>(
                 store.root().display(),
                 error
             );
-            None
+            T::default()
         }
     }
 }
@@ -401,7 +399,7 @@ pub fn store_fit_artifact(
     store: &ConfiguredWarmStartStore,
     artifact: &crate::warm_start_artifact::FitArtifact,
 ) {
-    let _ = best_effort(
+    best_effort(
         store,
         "store cross-fit artifact",
         try_store_fit_artifact(store, artifact),
@@ -451,7 +449,6 @@ pub fn load_fit_artifact_by_descriptor(
         "load cross-fit artifact",
         try_load_fit_artifact_by_descriptor(store, descriptor_key_hex),
     )
-    .flatten()
 }
 
 fn try_load_fit_artifact_by_descriptor(
