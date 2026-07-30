@@ -17,115 +17,13 @@
 // paths and the Python surface is a thin wrapper (SPEC rule 8): every number is
 // computed in Rust, the FFI only marshals arrays and dicts.
 
-#[derive(Clone)]
-struct AuditSparseRoute {
-    indices: ndarray::Array2<u32>,
-    values: ndarray::Array3<f32>,
-    n_units: usize,
-    block_size: usize,
-}
+use gam::terms::sae::null_sampler::{
+    AuditSparseRoute,
+    LiveAmplitudeMoments,
+    live_amplitude_moments,
+    resample_sparse_architecture_null,
+};
 
-impl AuditSparseRoute {
-    fn new(
-        indices: ndarray::Array2<u32>,
-        values: ndarray::Array3<f32>,
-        n_units: usize,
-        block_size: usize,
-        label: &str,
-    ) -> Result<Self, String> {
-        if block_size == 0 {
-            return Err("audit_sae block_size must be >= 1".to_string());
-        }
-        if n_units == 0 {
-            return Err(format!(
-                "audit_sae {label} requires at least one routing unit"
-            ));
-        }
-        let (n_rows, width) = indices.dim();
-        if n_rows == 0 || width == 0 {
-            return Err(format!(
-                "audit_sae {label} must be a non-empty N×s route; got {:?}",
-                indices.dim()
-            ));
-        }
-        if values.shape() != [n_rows, width, block_size] {
-            return Err(format!(
-                "audit_sae {label} values shape {:?} does not match indices {:?} and block_size {block_size}",
-                values.shape(),
-                indices.dim()
-            ));
-        }
-        for row in 0..n_rows {
-            let mut live = std::collections::HashSet::with_capacity(width);
-            for slot in 0..width {
-                let unit = indices[[row, slot]] as usize;
-                if unit >= n_units {
-                    return Err(format!(
-                        "audit_sae {label} index {unit} at row {row}, slot {slot} is outside 0..{n_units}"
-                    ));
-                }
-                let mut norm2 = 0.0_f64;
-                for offset in 0..block_size {
-                    let value = values[[row, slot, offset]] as f64;
-                    if !value.is_finite() {
-                        return Err(format!(
-                            "audit_sae {label} value at row {row}, slot {slot}, offset {offset} is not finite"
-                        ));
-                    }
-                    norm2 += value * value;
-                }
-                if norm2 > 0.0 && !live.insert(unit) {
-                    return Err(format!(
-                        "audit_sae {label} repeats live unit {unit} in row {row}"
-                    ));
-                }
-            }
-        }
-        Ok(Self {
-            indices,
-            values,
-            n_units,
-            block_size,
-        })
-    }
-
-    fn nrows(&self) -> usize {
-        self.indices.nrows()
-    }
-
-    fn width(&self) -> usize {
-        self.indices.ncols()
-    }
-
-    fn gate(&self, row: usize, slot: usize) -> f64 {
-        let mut norm2 = 0.0_f64;
-        for offset in 0..self.block_size {
-            let value = self.values[[row, slot, offset]] as f64;
-            norm2 += value * value;
-        }
-        norm2.sqrt()
-    }
-
-    fn reconstruct(
-        &self,
-        decoder: ndarray::ArrayView2<'_, f32>,
-    ) -> Result<ndarray::Array2<f32>, String> {
-        if self.block_size == 1 {
-            gam::terms::sae::sparse_dict::reconstruct_sparse_rows(
-                decoder,
-                self.indices.view(),
-                self.values.index_axis(ndarray::Axis(2), 0),
-            )
-        } else {
-            gam::terms::sae::sparse_dict::reconstruct_block_sparse_rows(
-                decoder,
-                self.indices.view(),
-                self.values.view(),
-                self.block_size,
-            )
-        }
-    }
-}
 
 fn residuals_from_sparse_sae(
     data: ndarray::ArrayView2<'_, f32>,
@@ -1832,101 +1730,9 @@ fn sparse_atlas_nerve_richness_statistic(
     Ok(richness)
 }
 
-#[derive(Clone, Copy, Default)]
-struct LiveAmplitudeMoments {
-    count: usize,
-    sum: f64,
-    sum2: f64,
-}
 
-impl LiveAmplitudeMoments {
-    fn mean(self) -> f64 {
-        if self.count == 0 {
-            0.0
-        } else {
-            self.sum / self.count as f64
-        }
-    }
 
-    fn sd(self) -> f64 {
-        if self.count < 2 {
-            0.0
-        } else {
-            let n = self.count as f64;
-            ((self.sum2 - self.sum * self.sum / n) / (n - 1.0))
-                .max(0.0)
-                .sqrt()
-        }
-    }
-}
 
-fn live_amplitude_moments(route: &AuditSparseRoute) -> Vec<LiveAmplitudeMoments> {
-    let mut moments = vec![LiveAmplitudeMoments::default(); route.n_units];
-    for row in 0..route.nrows() {
-        for slot in 0..route.width() {
-            let gate = route.gate(row, slot);
-            if gate > 0.0 {
-                let unit = route.indices[[row, slot]] as usize;
-                moments[unit].count += 1;
-                moments[unit].sum += gate;
-                moments[unit].sum2 += gate * gate;
-            }
-        }
-    }
-    moments
-}
-
-fn resample_sparse_architecture_null<R: rand::Rng + ?Sized>(
-    observed: &AuditSparseRoute,
-    donor: &AuditSparseRoute,
-    rng: &mut R,
-) -> Result<AuditSparseRoute, String> {
-    use rand::RngExt;
-    let observed_moments = live_amplitude_moments(observed);
-    let donor_moments = live_amplitude_moments(donor);
-    let mut indices = ndarray::Array2::<u32>::zeros((observed.nrows(), donor.width()));
-    let mut values =
-        ndarray::Array3::<f32>::zeros((observed.nrows(), donor.width(), donor.block_size));
-    for row in 0..observed.nrows() {
-        let source = rng.random_range(0..donor.nrows());
-        for slot in 0..donor.width() {
-            let unit = donor.indices[[source, slot]] as usize;
-            indices[[row, slot]] = unit as u32;
-            let gate = donor.gate(source, slot);
-            if gate == 0.0 {
-                continue;
-            }
-            let observed_moment = observed_moments[unit];
-            let donor_moment = donor_moments[unit];
-            if observed_moment.count == 0 {
-                continue;
-            }
-            let donor_sd = donor_moment.sd();
-            let target_gate = if donor_sd > 0.0 {
-                (observed_moment.mean()
-                    + (gate - donor_moment.mean()) * observed_moment.sd() / donor_sd)
-                    .max(0.0)
-            } else {
-                observed_moment.mean()
-            };
-            if target_gate == 0.0 {
-                continue;
-            }
-            let scale = target_gate / gate;
-            for offset in 0..donor.block_size {
-                values[[row, slot, offset]] =
-                    (donor.values[[source, slot, offset]] as f64 * scale) as f32;
-            }
-        }
-    }
-    AuditSparseRoute::new(
-        indices,
-        values,
-        observed.n_units,
-        observed.block_size,
-        "architecture-matched null route",
-    )
-}
 
 /// Build the standing sparse donor null + residual spike-in calibration. Both
 /// observed and donor routing remain `N×s×b`; implicit zeros are never expanded.
