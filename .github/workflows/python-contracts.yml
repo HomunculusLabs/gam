@@ -213,6 +213,22 @@ jobs:
         # GIL around the solver (29 `py.detach(...)` sites; `fit_table` is
         # explicit about it), so that thread is schedulable while Rust runs and
         # can terminate the worker on time.
+        #
+        # MEASURED COUNTEREXAMPLE -- the paragraph above is true of the paths it
+        # names and NOT true of every path. In run 30503262222 the Python job
+        # reported 36 `Failed: Timeout (>300.0s)` entries, which is the mechanism
+        # working; but at least one SAE manifold fixture logged an elapsed time of
+        # `[1h 31m]` INSIDE that same 300s cap. A watchdog thread that cannot
+        # preempt for 91 minutes is a watchdog that did not fire, so some entry
+        # point on that path holds the GIL across the solve rather than detaching
+        # around it.
+        #
+        # Recorded rather than fixed because the fix is to find and detach that
+        # site, not to change the timeout method -- SIGALRM still cannot work
+        # here, for the reason given above. Until then, read a Python-suite
+        # duration as a LOWER bound on the work done: the 3h 05m wall clock of
+        # that run is not bounded by 300s x tests, and a test that reports as a
+        # timeout may have run for arbitrarily longer than its cap says.
         run: python -m pip install 'pytest-xdist>=3' 'pytest-timeout>=2'
 
       - name: Triage full Python suite on the fresh wheel (#1512)
