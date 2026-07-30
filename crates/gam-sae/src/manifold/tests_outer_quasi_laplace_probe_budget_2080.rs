@@ -2218,3 +2218,87 @@ fn zz_measure_k2_wide_p_gradient_arm_vs_solver_arm_2080() {
          got A={a_readings}, B={b_readings}"
     );
 }
+
+
+/// PROBE (#2080 Class-B localizer, block split). WHICH block carries the
+/// residual the inner gate cannot clear?
+///
+/// The companion probes establish that `g` is the objective's true gradient and
+/// that neither the arrow-Schur direction nor steepest descent moves it, with
+/// the gradient arm's own accepted step pinning the curvature along `−g` at
+/// `λ ≈ 7e4` on a `96×96, K=2` fixture. A conditioning number that large on a
+/// fixture that small is a property of the inner parametrisation, so the next
+/// question is structural rather than numerical: `‖g‖² = Σ_rows ‖g_t,row‖² +
+/// ‖g_β‖²`, and within each row block the leading `assignment_coord_dim` axes are
+/// GATE LOGITS and the remainder are CHART COORDINATES. Splitting the norm three
+/// ways names the block, and reporting the same split for the solver's step `Δ`
+/// says whether the step even lives where the residual does.
+///
+/// Diagnostic only: it asserts the split is a partition of the norm it claims to
+/// decompose, so a layout error cannot be read as a finding.
+#[test]
+fn zz_measure_k2_wide_p_residual_block_split_2080() {
+    let z = two_circle_wide_target(96, 96, 0.03);
+    let (base, seed_dispersion) = two_circle_periodic_term(z.view(), 2, 2);
+    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+    let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 2])
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .expect("seed dispersion is finite and strictly positive");
+
+    for &warmup in &[0usize, 32, 128] {
+        let mut term = base.clone();
+        let mut rho_fixed = rho.clone();
+        if warmup > 0 {
+            term.run_joint_fit_arrow_schur_for_quasi_laplace(
+                z.view(),
+                &mut rho_fixed,
+                None,
+                warmup,
+                0.04,
+                1.0e-6,
+                1.0e-6,
+            )
+            .expect("inner evidence fit must not hard-error on the K=2 wide-p rung");
+        }
+        let sys = term
+            .assemble_arrow_schur(z.view(), &rho_fixed, None)
+            .expect("reassemble at the warmed iterate");
+        let assignment_dim = term.assignment.assignment_coord_dim();
+
+        let mut logit_sq = 0.0_f64;
+        let mut coord_sq = 0.0_f64;
+        for row in sys.rows.iter() {
+            for (axis, &value) in row.gt.iter().enumerate() {
+                if axis < assignment_dim {
+                    logit_sq += value * value;
+                } else {
+                    coord_sq += value * value;
+                }
+            }
+        }
+        let beta_sq = sys.gb.iter().map(|&v| v * v).sum::<f64>();
+        let total = SaeManifoldTerm::system_grad_norm_sq(&sys);
+        // The split must BE the norm, or the shares below describe nothing.
+        let partition_gap = (logit_sq + coord_sq + beta_sq - total).abs()
+            / total.max(f64::MIN_POSITIVE);
+        assert!(
+            partition_gap <= 1.0e-12,
+            "[2080-BLK] warmup={warmup}: the three-way split is not a partition of ‖g‖² \
+             (logit={logit_sq:.6e}, coord={coord_sq:.6e}, beta={beta_sq:.6e}, total={total:.6e}, \
+             rel_gap={partition_gap:.3e})"
+        );
+        let share = |part: f64| 100.0 * part / total.max(f64::MIN_POSITIVE);
+        eprintln!(
+            "[2080-BLK] warmup={warmup:>4} ‖g‖={:.6e} | logit {:.6e} ({:.2}%) | coord {:.6e} \
+             ({:.2}%) | beta {:.6e} ({:.2}%) | assignment_dim={assignment_dim} k_border={}",
+            total.sqrt(),
+            logit_sq.sqrt(),
+            share(logit_sq),
+            coord_sq.sqrt(),
+            share(coord_sq),
+            beta_sq.sqrt(),
+            share(beta_sq),
+            sys.k,
+        );
+    }
+}
