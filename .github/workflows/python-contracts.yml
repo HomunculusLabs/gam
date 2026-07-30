@@ -204,6 +204,15 @@ jobs:
         # default SIGALRM method 12 of 26 timed-out tests overran the 300 s bound,
         # one by 3.2x, because the handler cannot run while the interpreter is
         # inside a Rust call.
+        #
+        # Why the thread method CAN fire where SIGALRM cannot, since it is not
+        # obvious: a Python signal handler only runs in the MAIN thread at a
+        # bytecode boundary, and the main thread is blocked inside the extension,
+        # so releasing the GIL does not help it. pytest-timeout's thread method
+        # instead arms a separate Python thread, and gam-pyffi DOES release the
+        # GIL around the solver (29 `py.detach(...)` sites; `fit_table` is
+        # explicit about it), so that thread is schedulable while Rust runs and
+        # can terminate the worker on time.
         run: python -m pip install 'pytest-xdist>=3' 'pytest-timeout>=2'
 
       - name: Triage full Python suite on the fresh wheel (#1512)
@@ -222,12 +231,21 @@ jobs:
         # collection errors abort loudly instead of being skipped past. The
         # JUnit artifact (uploaded with `if: always()`) stays the durable
         # per-file record; nothing gates pushes to main on this status.
+        #
+        # --max-worker-restart is EXPLICIT because --timeout-method=thread kills
+        # the xdist worker rather than raising in it, and the last completed run
+        # had 26 timeouts — so this job now expects ~26 worker deaths as normal
+        # operation. Whatever xdist's unconfigured default does on the Nth crash,
+        # an unattended 12-hourly job must not be one version bump away from
+        # aborting the suite partway and publishing a truncated inventory. 200 is
+        # far above any plausible count while still bounding a true crash loop.
         working-directory: ${{ runner.temp }}
         run: |
           python -m pytest "$GITHUB_WORKSPACE/tests/" \
             -m "not slow" \
             -p no:cacheprovider \
             -n auto --timeout=300 --timeout-method=thread \
+            --max-worker-restart=200 \
             -o addopts="--import-mode=importlib" \
             --junitxml="$RUNNER_TEMP/py1512_junit.xml" \
             -q --tb=line
