@@ -78,7 +78,7 @@ fn predict_uncertainty_does_not_shift_point_mean_for_linear_link() {
         .expect("temp uncertainty output path");
 
     // Fit a Gaussian (identity link) smooth: the linear/identity uncertainty arm.
-    let fit = Command::new(gam_test_support::gam_binary!())
+    let fit = Command::new(env!("CARGO_BIN_EXE_gam"))
         .arg("fit")
         .arg(train)
         .arg("y ~ s(x)")
@@ -96,7 +96,7 @@ fn predict_uncertainty_does_not_shift_point_mean_for_linear_link() {
     );
 
     // Predict WITHOUT --uncertainty (the plain plug-in point).
-    let plain = Command::new(gam_test_support::gam_binary!())
+    let plain = Command::new(env!("CARGO_BIN_EXE_gam"))
         .arg("predict")
         .arg(model.path())
         .arg(newdata)
@@ -113,7 +113,7 @@ fn predict_uncertainty_does_not_shift_point_mean_for_linear_link() {
 
     // Predict WITH --uncertainty. This must ADD std_error/bounds only, never
     // shift the point `mean` (or `linear_predictor`).
-    let uncertain = Command::new(gam_test_support::gam_binary!())
+    let uncertain = Command::new(env!("CARGO_BIN_EXE_gam"))
         .arg("predict")
         .arg(model.path())
         .arg(newdata)
