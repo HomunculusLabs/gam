@@ -210,7 +210,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // Newton step is sufficient for the cross-block residualisation: we
     // need a per-row-varying η₁ that respects event/weight structure, not
     // a converged β.
-    let (cross_block_pilot_eta, pilot_logslope_beta) = survival_nonrigid_pilot_eta(
+    let pilot = survival_nonrigid_pilot_eta(
         n,
         &location_anchor_design,
         &logslope_design.design,
@@ -223,6 +223,36 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         &spec.event_target,
         probit_scale,
     )?;
+    // Split the location half of the pilot's joint Newton step back into the
+    // two blocks it was stacked from at line ~193. `location_anchor_design`
+    // is `hstack([time_block.design_exit, marginal_design.design])`, so the
+    // split point is the time design's column count and the widths below are
+    // exact by construction — a mismatch is a structural bug in this function,
+    // not a recoverable condition, so it is an error rather than a silent skip.
+    let pilot_time_width = spec.time_block.design_exit.ncols();
+    let pilot_marginal_width = marginal_design.design.ncols();
+    if pilot.location_beta.len() != pilot_time_width + pilot_marginal_width {
+        return Err(format!(
+            "survival marginal-slope non-rigid pilot returned a location-block coefficient \
+             vector of length {} but the anchor design it was solved against stacks \
+             time_exit({}) + marginal({}) = {} columns; the pilot warm start cannot be \
+             attributed to its blocks",
+            pilot.location_beta.len(),
+            pilot_time_width,
+            pilot_marginal_width,
+            pilot_time_width + pilot_marginal_width,
+        ));
+    }
+    let pilot_time_beta = pilot
+        .location_beta
+        .slice(s![..pilot_time_width])
+        .to_owned();
+    let pilot_marginal_beta = pilot
+        .location_beta
+        .slice(s![pilot_time_width..])
+        .to_owned();
+    let pilot_logslope_beta = pilot.logslope_beta;
+    let cross_block_pilot_eta = pilot.eta1;
     let cross_block_pilot_w = survival_pilot_irls_row_metric_at_eta(
         &cross_block_pilot_eta,
         &spec.weights,
@@ -512,6 +542,63 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         && pilot_logslope_beta.iter().all(|v| v.is_finite())
     {
         hints.borrow_mut().logslope_beta = Some(pilot_logslope_beta.clone());
+    }
+    // #2627 operating-point warm start for the time and marginal blocks — the
+    // other half of the very same one-step joint Newton solve that produced
+    // the logslope seed above. Until now that half was computed, used to form
+    // the pilot's per-row `q_delta`, and then discarded, so both blocks
+    // cold-started at β = 0: the time surface pinned to the guard-linear
+    // baseline `q'(t) ≡ derivative_guard` and the covariate location surface
+    // flat. The joint objective is not concave in β (the effective row weight
+    // `c(g) = √(1 + s(g)²)` couples logslope with location multiplicatively;
+    // `custom_family_impl.rs` opts into `levenberg_on_ill_conditioning` and
+    // `exact_newton_joint_hessian_beta_dependent` for exactly that reason), so
+    // an out-of-basin start is not recoverable by the inner solver: every ρ
+    // seed's validation fit refuses with a stationarity residual that never
+    // improves, and the outer ρ-search reports `solver_started = 0` without
+    // ever starting. Seeding the two blocks at the pilot's operating point is
+    // the #1108 repair applied here — only the starting point moves; the exact
+    // objective, gradient and Hessian are unchanged, so the converged fit is
+    // still the data optimum.
+    //
+    // The time seed is NOT feasibility-checked here on purpose: `build_blocks`
+    // already routes every time hint through `project_onto_linear_constraints`
+    // against the live derivative-guard constraint set, which is the single
+    // source of truth for `γ ≥ 0` / `Aβ ≥ b`. Duplicating that projection here
+    // would fork it.
+    //
+    // Both widths are re-checked against the CURRENT designs rather than
+    // asserted: the pilot solves on the raw designs, and `build_blocks` may
+    // hand back identifiability-reduced ones (#374). A width mismatch is a
+    // real, non-buggy state, so it falls back to the cold seed — but it is
+    // logged, because a silently dropped warm start is indistinguishable from
+    // a warm start that did not help.
+    {
+        let mut hints_mut = hints.borrow_mut();
+        let time_installed = pilot_time_beta.len() == spec.time_block.design_exit.ncols()
+            && pilot_time_beta.iter().all(|v| v.is_finite());
+        if time_installed {
+            hints_mut.time_beta = Some(pilot_time_beta.clone());
+        }
+        let marginal_installed = pilot_marginal_beta.len() == marginal_design.design.ncols()
+            && pilot_marginal_beta.iter().all(|v| v.is_finite());
+        if marginal_installed {
+            hints_mut.marginal_beta = Some(pilot_marginal_beta.clone());
+        }
+        log::info!(
+            "[survival-marginal-slope/pilot] #2627 location warm start: \
+             time_installed={time_installed} (len={} vs design_exit={}), \
+             marginal_installed={marginal_installed} (len={} vs marginal={}), \
+             |time_beta|_inf={:.6e}, |marginal_beta|_inf={:.6e}",
+            pilot_time_beta.len(),
+            spec.time_block.design_exit.ncols(),
+            pilot_marginal_beta.len(),
+            marginal_design.design.ncols(),
+            pilot_time_beta.iter().fold(0.0_f64, |a, v| a.max(v.abs())),
+            pilot_marginal_beta
+                .iter()
+                .fold(0.0_f64, |a, v| a.max(v.abs())),
+        );
     }
     let exact_mode_branch =
         RefCell::new(crate::exact_mode_branch::ExactCoefficientModeBranch::default());
