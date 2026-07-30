@@ -81,7 +81,11 @@ pub trait WorkingModel {
                 state.gradient.len()
             );
         }
-        solve_newton_direction_dense(regularized_hessian, &state.gradient, direction_out)?;
+        let curvature = objective_curvature_for_direction(
+            regularized_hessian,
+            self.objective_hessian_matrix_correction(),
+        )?;
+        solve_newton_direction_dense(curvature.as_ref(), &state.gradient, direction_out)?;
         Ok(())
     }
 
@@ -121,6 +125,24 @@ pub trait WorkingModel {
     ) -> Result<f64, EstimationError> {
         assert!(array_is_finite(direction));
         Ok(0.0)
+    }
+
+    /// The same omitted curvature term as a MATRIX, so the linear system the
+    /// direction solves can describe the same objective the quadratic model
+    /// scores (#2273).
+    ///
+    /// `objective_hessian_quadratic_correction` corrects `dᵀHd`; this atom
+    /// corrects `H` itself. A model that returns `Some(HΦ)` from one must return
+    /// the matrix behind it here, or the step direction and the merit test are
+    /// built from two different curvatures — which is not a Newton step for
+    /// either objective, and converges linearly at best.
+    ///
+    /// Sign convention, fixed here so it cannot drift: the returned matrix is
+    /// SUBTRACTED from the assembled Hessian, matching the `-dᵀHΦd` sign of the
+    /// quadratic correction. PIRLS minimizes `-ℓ - Φ + ½βᵀSβ`, whose curvature
+    /// is `XᵀWX + S - HΦ`.
+    fn objective_hessian_matrix_correction(&self) -> Option<&Array2<f64>> {
+        None
     }
 
     /// Dispersion factor `k` the inner working weight carries but the reported

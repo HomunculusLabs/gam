@@ -17,7 +17,8 @@ use super::{
     compute_constraint_kkt_diagnostics, compute_lm_d2, constrained_stationarity_norm,
     effective_kkt_tolerance, linear_constraints_from_lower_bounds, pirls_soft_acceptance,
     project_coefficients_to_lower_bounds, restore_pending_arrow_latent_if_needed,
-    solve_direction_with_dense_factor, solve_newton_direction_dense,
+    objective_curvature_for_direction, solve_direction_with_dense_factor,
+    solve_newton_direction_dense,
     solve_newton_directionwith_linear_constraints, solve_newton_directionwith_lower_bounds,
     update_scaled_diagonal_in_place,
 };
@@ -75,6 +76,47 @@ pub(super) fn madsen_lm_accept_factor(rho: f64) -> f64 {
 /// objective plateau we pay for one bare factorization and certify the actual
 /// local quadratic geometry instead. Failure to factorize is not a
 /// certificate; callers simply continue the iteration.
+/// The threshold the squared Newton decrement is certified against — one
+/// definition, used by both the in-loop check and the post-loop rescue, with the
+/// arithmetic's own floor folded in (#2273).
+///
+/// `decrement² = gᵀH⁻¹g` equals `2(f(β) − f(β̂))` to leading order, so it is a
+/// measurement OF THE OBJECTIVE, and nothing can resolve it below the roundoff
+/// of the objective it is differencing. `f` sums `rows` row terms each formed
+/// from `coefficients` products, so Wilkinson's growth factor
+/// `γ_{rows+coefficients+1}` ([`gam_problem::roundoff`]) bounds its relative
+/// error and a decrement under `2·γ·(1+|f|)` is arithmetic, not
+/// non-convergence.
+///
+/// Without that floor the certificate is unreachable by construction wherever
+/// `kkt² < 2γ`, which is most of the time: `kkt_tolerance` is a *gradient*
+/// tolerance, and squaring it asks the decrement for `kkt²` when the objective
+/// can only report `γ`. Measured on #2273's 6-row exactly-separated probit
+/// fixture — 2 coefficients, Fisher information with condition number 1.0009 —
+/// the solve reached `decrement² = 3.43e-15` and `Δdeviance = 5e-14`, i.e. the
+/// point where the objective stops changing in f64, and was refused against a
+/// threshold of `2.70e-20`: four orders below the `1.49e-14` the arithmetic
+/// permits. A fit at the floor was refused for not being 10⁴ times better than
+/// f64 allows.
+///
+/// The floor can only ADD certifications: it is consulted after strict KKT has
+/// already failed, and `max` never lowers the requested threshold.
+fn exact_newton_decrement_threshold(
+    kkt_tolerance: f64,
+    objective: f64,
+    rows: usize,
+    coefficients: usize,
+) -> f64 {
+    let scale = 1.0 + objective.abs();
+    let requested = kkt_tolerance * kkt_tolerance * scale;
+    let floor = gam_problem::roundoff::roundoff_growth_factor(
+        rows.saturating_add(coefficients).saturating_add(1),
+    )
+    .map(|gamma| 2.0 * gamma * scale)
+    .unwrap_or(0.0);
+    if requested >= floor { requested } else { floor }
+}
+
 pub(super) fn exact_newton_decrement_sq(state: &WorkingState) -> Option<f64> {
     if !state.gradient.iter().all(|value| value.is_finite()) {
         return None;
@@ -895,6 +937,16 @@ where
                             .to_string(),
                     )
                 })?;
+                // #2273 — the constrained and bounded active-set solves invert
+                // the same assembled Hessian the unconstrained one does, so they
+                // need the same omitted-curvature fold-in. A Firth fit under a
+                // shape constraint is not a rarer case than an unconstrained
+                // one; it is the same defect one call deeper.
+                let dense_reg = objective_curvature_for_direction(
+                    dense_reg,
+                    model.objective_hessian_matrix_correction(),
+                )?;
+                let dense_reg = dense_reg.as_ref();
                 if let Some(lin) = options.linear_constraints.as_ref() {
                     solve_newton_directionwith_linear_constraints(
                         dense_reg,
@@ -1521,10 +1573,12 @@ where
                         } else {
                             None
                         };
-                        let exact_nd_threshold = kkt_tolerance
-                            * kkt_tolerance
-                            * (1.0
-                                + penalizedobjective(final_state_ref, penalized_dev_scale).abs());
+                        let exact_nd_threshold = exact_newton_decrement_threshold(
+                            kkt_tolerance,
+                            penalizedobjective(final_state_ref, penalized_dev_scale),
+                            final_state_ref.eta.as_ref().len(),
+                            final_state_ref.gradient.len(),
+                        );
                         let exact_nd_pass = exact_decrement_sq
                             .is_some_and(|decrement_sq| decrement_sq <= exact_nd_threshold);
                         if should_check_exact_nd {
@@ -2241,7 +2295,12 @@ where
     };
     let final_decrement_threshold = if final_exact_decrement_sq.is_some() {
         let final_dev_scale = model.penalized_deviance_scale()?;
-        kkt_tolerance * kkt_tolerance * (1.0 + penalizedobjective(&state, final_dev_scale).abs())
+        exact_newton_decrement_threshold(
+            kkt_tolerance,
+            penalizedobjective(&state, final_dev_scale),
+            state.eta.as_ref().len(),
+            state.gradient.len(),
+        )
     } else {
         0.0
     };

@@ -1477,10 +1477,19 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
         self.workspace.matvec_buf.assign(&self.lasthessian_weights);
         let solver_weights = std::mem::take(&mut self.workspace.matvec_buf);
 
+        // #2273 — a Firth fit's omitted curvature term `HΦ` is a DENSE p×p
+        // matrix (`jeffreys_pirls_diagnostics_and_hessian_from_factor` builds it
+        // from the dense reduced design), so a sparse assembled Hessian cannot
+        // carry the fold-in the Newton direction needs. Assemble densely
+        // whenever Firth is active: the sparse-native route exists to avoid a
+        // dense `p²`, and Firth has already paid it — its design factor is a
+        // dense `n×p` and its Hessian a dense `p×p`, rebuilt every iteration —
+        // so this costs nothing sparsity was still buying.
         let (penalized_hessian, sparsehessian, ridge_used) = if matches!(
             self.coordinate_design,
             WorkingCoordinateDesign::OriginalSparseNative
-        ) {
+        ) && !self.firth_bias_reduction
+        {
             // The SPD-check factor is discarded here: the downstream consumer
             // is the LM Newton step, which always factorizes
             // (H + loop_lambda · I) with a non-zero loop_lambda (initial value
@@ -1650,16 +1659,41 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
             )?;
             Ok(())
         } else {
-            solve_newton_direction_dense(regularized_hessian, &state.gradient, direction_out)?;
+            // #2273 — the assembled Hessian is `XᵀWX + S`, which omits `HΦ`, so
+            // the direction has to be solved from the objective's own curvature.
+            // The root branch above folds `HΦ` in by congruence; this branch
+            // used to drop it, and dropping it is not a small error: with the
+            // Jeffreys score in the gradient and no Jeffreys curvature in the
+            // system, the iteration is not Newton for any objective and
+            // contracts LINEARLY. Measured on the issue's n=6 exactly-separated
+            // probit fixture — the branch every non-canonical binomial link
+            // reaches, because `Observed != Fisher` there — 23 iterations at a
+            // ratio of 0.4937 per step to `‖g‖ = 4.3e-7`, ending in
+            // `StalledAtValidMinimum` and a refused fit, at a β̂ that an
+            // independent reference confirms is the right one.
+            let curvature = objective_curvature_for_direction(
+                regularized_hessian,
+                self.objective_hessian_matrix_correction(),
+            )?;
+            solve_newton_direction_dense(curvature.as_ref(), &state.gradient, direction_out)?;
             Ok(())
         }
+    }
+
+    /// The Jeffreys coefficient Hessian `HΦ`, which `WorkingState.hessian`
+    /// deliberately omits (the outer Laplace layer consumes `H₀` and `HΦ`
+    /// separately). This is the matrix behind
+    /// `objective_hessian_quadratic_correction`'s `-dᵀHΦd`, so the two are one
+    /// fact reported two ways rather than two independent choices.
+    fn objective_hessian_matrix_correction(&self) -> Option<&Array2<f64>> {
+        self.last_firth_hessian.as_ref()
     }
 
     fn objective_hessian_quadratic_correction(
         &self,
         direction: &Array1<f64>,
     ) -> Result<f64, EstimationError> {
-        let Some(firth_hessian) = self.last_firth_hessian.as_ref() else {
+        let Some(firth_hessian) = self.objective_hessian_matrix_correction() else {
             return Ok(0.0);
         };
         if firth_hessian.dim() != (direction.len(), direction.len()) {

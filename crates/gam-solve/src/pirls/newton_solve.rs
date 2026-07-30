@@ -562,6 +562,42 @@ pub(super) fn solve_direction_with_dense_factor(
     direction_out.mapv_inplace(|v| -v);
 }
 
+/// Fold a working model's omitted objective curvature into the LM-regularized
+/// Hessian the Newton direction is solved from (#2273).
+///
+/// The single place the sign convention of
+/// [`WorkingModel::objective_hessian_matrix_correction`] is applied, so the
+/// direction solve and `objective_hessian_quadratic_correction`'s `-dᵀHΦd`
+/// cannot disagree about it. Borrows when there is nothing to fold in, so the
+/// ordinary path allocates nothing.
+pub(super) fn objective_curvature_for_direction<'h>(
+    regularized_hessian: &'h Array2<f64>,
+    correction: Option<&Array2<f64>>,
+) -> Result<std::borrow::Cow<'h, Array2<f64>>, EstimationError> {
+    let Some(correction) = correction else {
+        return Ok(std::borrow::Cow::Borrowed(regularized_hessian));
+    };
+    if correction.dim() != regularized_hessian.dim() {
+        crate::bail_invalid_estim!(
+            "objective curvature correction shape {}x{} does not match the regularized \
+             Hessian {}x{}",
+            correction.nrows(),
+            correction.ncols(),
+            regularized_hessian.nrows(),
+            regularized_hessian.ncols()
+        );
+    }
+    let mut curvature = regularized_hessian - correction;
+    gam_linalg::matrix::symmetrize_in_place(&mut curvature);
+    if !curvature.iter().all(|value| value.is_finite()) {
+        crate::bail_invalid_estim!(
+            "objective curvature for the Newton direction is non-finite after folding in the \
+             model's omitted curvature term"
+        );
+    }
+    Ok(std::borrow::Cow::Owned(curvature))
+}
+
 pub(super) fn solve_newton_direction_dense(
     hessian: &Array2<f64>,
     gradient: &Array1<f64>,

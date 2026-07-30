@@ -31,6 +31,8 @@ mod working_model_trait;
 mod workspace;
 
 #[cfg(test)]
+mod firth_noncanonical_curvature_2273_tests;
+#[cfg(test)]
 mod tests;
 
 // ── Concern-module re-export glue ────────────────────────────────────────────

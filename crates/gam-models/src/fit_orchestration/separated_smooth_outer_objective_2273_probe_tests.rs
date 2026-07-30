@@ -498,3 +498,66 @@ fn separated_smooth_criterion_arms_probe_2273() {
         &firth_checkpoint,
     );
 }
+
+/// #2273 arm 2: the exactly-separated **probit** `y ~ x` fit at n=6, whose only
+/// route is the Firth rescue.
+///
+/// The refusal is `inner status StalledAtValidMinimum, outer status outer
+/// evidence was not considered because the inner mode did not report
+/// convergence, after 0 outer iteration(s); final objective 2.729456e0;
+/// stationarity residual 0.000e0 against bound 8.941e-8`. `y ~ x` carries no
+/// penalty, so ρ is empty and "0 outer iterations" is not a stall — there is no
+/// outer problem at all. The whole failure is ONE Firth-probit P-IRLS solve on 6
+/// rows and 2 coefficients.
+///
+/// An independent reference (scipy Nelder-Mead on `ℓ + ½log|XᵀWX|`, W the probit
+/// Fisher weight) puts that solve's answer at
+///
+/// ```text
+///   beta = (0.000, 1.3468)   max|eta| = 1.377   w = 0.310 .. 0.330
+///   eig(I) = (1.9183, 1.9201)  cond(I) = 1.0009   0.5*log|I| = 0.65191
+/// ```
+///
+/// so the target is as well-conditioned as a 2-parameter problem gets: no
+/// underflow, no saturation, condition number one. Whatever makes P-IRLS run its
+/// iteration budget out here is not the data.
+///
+/// This probe forwards the engine's `[PIRLS] iter …` debug lines so the
+/// iteration history is visible, and prints the refusal verbatim.
+#[test]
+fn separated_probit_firth_inner_solve_probe_2273() {
+    struct ForwardingTestLogger;
+    impl log::Log for ForwardingTestLogger {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::max_level()
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            eprintln!("[{}] {}", record.level(), record.args());
+        }
+        fn flush(&self) {}
+    }
+    static FORWARDING_TEST_LOGGER: ForwardingTestLogger = ForwardingTestLogger;
+    // Ignore the error when another test already installed a global logger.
+    if log::set_logger(&FORWARDING_TEST_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Debug);
+    }
+
+    let ds = separated_dataset(6);
+    for firth in [true, false] {
+        let cfg = FitConfig {
+            family: Some("binomial".to_string()),
+            firth,
+            ..FitConfig::default()
+        };
+        eprintln!("#2273 arm-2 probe ===== probit n=6 firth={firth} =====");
+        match fit_from_formula("y ~ x + link(type=probit)", &ds, &cfg) {
+            Ok(FitResult::Standard(StandardFitResult { fit, .. })) => eprintln!(
+                "#2273 arm-2 probe MINTED edf={:.6} beta={:?}",
+                fit.edf_total().unwrap_or(f64::NAN),
+                fit.beta.iter().map(|v| format!("{v:.6}")).collect::<Vec<_>>(),
+            ),
+            Ok(_) => eprintln!("#2273 arm-2 probe non-standard result"),
+            Err(err) => eprintln!("#2273 arm-2 probe REFUSED: {err}"),
+        }
+    }
+}
