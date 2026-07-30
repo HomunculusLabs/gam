@@ -683,15 +683,23 @@ mod tests {
     // Both callers are `cfg(target_os = "linux")` device-parity tests, so this
     // admission helper is dead off-Linux and `-D dead-code` rejects the test
     // target there (a wheel-blocking break class). Gate it with its callers.
+    /// The availability question goes through the one shared gate (#2422): the
+    /// two callers `return` on `false` with nothing asserted afterwards, so a
+    /// bare probe left both tests printing `ok` on every CPU-only runner with
+    /// the process skip counter untouched and no `SKIPPED(no-cuda):` marker for
+    /// a ledger to scrape. `gpu_for_test` panics on a driver FAULT and under
+    /// `GpuPolicy::Required`, and counts a genuine absence;
+    /// `assert_absent_device_was_counted` turns that count into the assertion
+    /// this skip path owes.
     #[cfg(target_os = "linux")]
     fn cuda_available_for_test(label: &str) -> bool {
-        match gam_gpu::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-            Ok(Some(_)) => true,
-            Ok(None) => {
-                eprintln!("[sparse_dict block-gate test] no CUDA device; skipping {label}");
+        let floor = gam_gpu::test_gate::skipped_for_absent_device();
+        match gam_gpu::test_gate::gpu_for_test(label) {
+            gam_gpu::test_gate::GpuTestGate::Ready(_) => true,
+            gam_gpu::test_gate::GpuTestGate::AbsentDevice => {
+                gam_gpu::test_gate::assert_absent_device_was_counted(floor);
                 false
             }
-            Err(error) => panic!("[sparse_dict block-gate test] CUDA admission failed: {error}"),
         }
     }
 
@@ -818,7 +826,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn device_block_route_bit_identical_gates_at_scale() {
+    fn device_block_route_bit_identical_gates_at_scale_when_available() {
         // Larger G to exercise multi-tile folding; asserts BIT-identical gates
         // (not just within tolerance) to prove the shared-arithmetic parity story
         // holds across tile boundaries.

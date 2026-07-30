@@ -2061,8 +2061,14 @@ mod tests {
             .collect();
         let amps = vec![1.0; n];
         let cpu = emulate_certified_encode_batch(&dev, &rows, &amps);
-        match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-            Ok(None) => {
+        // The availability question goes through the one shared gate (#2422), so
+        // the skip below is COUNTED and prints the shared `SKIPPED(no-cuda):`
+        // marker instead of vanishing into a green CPU-only run. The seam
+        // assertions in the absent arm are this test's own and are kept.
+        let skips_before = gam_gpu::test_gate::skipped_for_absent_device();
+        match gam_gpu::test_gate::gpu_for_test("sae certified encode device parity") {
+            gam_gpu::test_gate::GpuTestGate::AbsentDevice => {
+                gam_gpu::test_gate::assert_absent_device_was_counted(skips_before);
                 // #2422: a bare `return` here reported `passed` with zero
                 // assertions on every device-free runner. `cpu` above is the
                 // emulator's answer and is already computed, so assert it is
@@ -2082,8 +2088,7 @@ mod tests {
                 );
                 return;
             }
-            Err(error) => panic!("sae_encode CUDA admission failed: {error}"),
-            Ok(Some(_)) => {
+            gam_gpu::test_gate::GpuTestGate::Ready(_) => {
                 let devout = device::sae_certified_encode_device(&dev, &rows, &amps)
                     .expect("admitted GPU runtime must run the sae_encode kernel");
                 let mut max_coord = 0.0_f64;
