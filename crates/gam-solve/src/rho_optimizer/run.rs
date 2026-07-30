@@ -7714,6 +7714,51 @@ pub(crate) enum FixedPointOuterRunError {
     Failed(EstimationError),
 }
 
+/// Carries a fixed-point objective's OWN classification of a refusal across
+/// the `opt` boundary, which does not preserve it.
+///
+/// `OuterFixedPointBridge::eval_step` returns a typed `ObjectiveEvalError`
+/// whose kind is the producer's verdict: `Recoverable` for a refusal that is
+/// a property of THIS rho (a non-finite cost, a non-finite EFS step, a
+/// bubbled `RemlOptimizationFailed`, or any `EstimationError` for which
+/// `is_trial_point_infeasible()` answers true), `Fatal` only for a structural
+/// failure. `opt::FixedPoint::run` then does `err.into_message()` and hands
+/// back `FixedPointError::ObjectiveFailed { message }` -- prose, no kind.
+///
+/// `run_fixed_point_outer_solver` used to answer that String with an
+/// unconditional `fatal_outer_evaluation`, and `is_fatal_outer_evaluation()`
+/// is a hard `return Err(e)` in BOTH the seed loop (`run_plan.rs`) and the
+/// strategy ladder (`run.rs`). So one recoverable per-rho refusal at outer
+/// iteration k killed the remaining seeds and the entire fallback ladder --
+/// including the `disable_fixed_point` BFGS plan `automatic_fallback_attempts`
+/// builds for precisely this situation. The SEED evaluation in the same
+/// function never had this bug: it still holds the typed error there and asks
+/// `is_recoverable()`. Only the iterations lost the verdict, in transit.
+///
+/// This adapter is the publication slot that gets it back -- the same device
+/// `recurrent_incumbent_exit` uses to hand a value out of a moved bridge. The
+/// slot is written on EVERY evaluation (cleared to `None` on success) so a
+/// verdict can never be read stale, and an absent verdict keeps the fatal
+/// classification, making the change strictly one-directional: it can only
+/// demote a refusal the producer itself called recoverable.
+struct ClassifyingFixedPointObjective<ObjFn> {
+    inner: ObjFn,
+    last_error_recoverable: Arc<Mutex<Option<bool>>>,
+}
+
+impl<ObjFn> FixedPointObjective for ClassifyingFixedPointObjective<ObjFn>
+where
+    ObjFn: FixedPointObjective,
+{
+    fn eval_step(&mut self, x: &Array1<f64>) -> Result<FixedPointSample, ObjectiveEvalError> {
+        let outcome = self.inner.eval_step(x);
+        if let Ok(mut slot) = self.last_error_recoverable.lock() {
+            *slot = outcome.as_ref().err().map(ObjectiveEvalError::is_recoverable);
+        }
+        outcome
+    }
+}
+
 pub(crate) fn run_fixed_point_outer_solver(
     obj: &mut dyn OuterObjective,
     layout: OuterThetaLayout,
@@ -7764,6 +7809,16 @@ pub(crate) fn run_fixed_point_outer_solver(
     let tol = outer_tolerance(config.tolerance).map_err(FixedPointOuterRunError::Failed)?;
     let max_iter =
         outer_max_iterations(config.max_iter).map_err(FixedPointOuterRunError::Failed)?;
+    // Publication slot for the producer's own Recoverable/Fatal verdict on the
+    // last failed `eval_step`. `opt::FixedPoint` renders the typed error to a
+    // String before returning it, so without this the `ObjectiveFailed` arm
+    // below has nothing but prose to classify from -- and classified every
+    // refusal fatal, ladder included.
+    let last_step_error_recoverable: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+    let objective = ClassifyingFixedPointObjective {
+        inner: objective,
+        last_error_recoverable: Arc::clone(&last_step_error_recoverable),
+    };
     let mut optimizer = FixedPoint::new(seed.clone(), objective)
         // Seed validation already paid the complete EFS inner solve. Reuse that
         // exact sample so iteration zero neither repeats the expensive solve nor
@@ -7824,12 +7879,41 @@ pub(crate) fn run_fixed_point_outer_solver(
                 EstimationError::RemlOptimizationFailed(message),
             ))
         }
-        Err(FixedPointError::ObjectiveFailed { message }) => Err(FixedPointOuterRunError::Failed(
-            EstimationError::fatal_outer_evaluation(
-                "outer fixed-point evaluation",
-                EstimationError::RemlOptimizationFailed(message),
-            ),
-        )),
+        Err(FixedPointError::ObjectiveFailed { message }) => {
+            // Ask the producer, do not guess from the message. A `Recoverable`
+            // verdict means "this rho is infeasible, step away" -- the seed
+            // path directly above already routes exactly that as a non-fatal
+            // outcome, and the seed loop's response is to record a rejection
+            // and try the next seed / the next plan on the ladder. Only a
+            // FATAL evaluation (a broken artifact: bad layout, dimension
+            // mismatch, a structural `EstimationError`) may short-circuit the
+            // ladder via `is_fatal_outer_evaluation`.
+            //
+            // An absent verdict (no `eval_step` error recorded -- e.g. the
+            // non-finite-cost recovery inside `opt` itself) keeps the fatal
+            // classification, so this can only ever demote, never promote.
+            let producer_called_it_recoverable = last_step_error_recoverable
+                .lock()
+                .ok()
+                .and_then(|slot| *slot)
+                .unwrap_or(false);
+            let error = EstimationError::RemlOptimizationFailed(message);
+            if producer_called_it_recoverable {
+                log::debug!(
+                    "[OUTER] {context}: {label} fixed-point iteration raised a \
+                     producer-recoverable refusal; routing to the fallback ladder \
+                     instead of aborting the fit: {error}"
+                );
+                Err(FixedPointOuterRunError::Failed(error))
+            } else {
+                Err(FixedPointOuterRunError::Failed(
+                    EstimationError::fatal_outer_evaluation(
+                        "outer fixed-point evaluation",
+                        error,
+                    ),
+                ))
+            }
+        }
         Err(e) => Err(FixedPointOuterRunError::Failed(
             EstimationError::RemlOptimizationFailed(format!("{failure_prefix}: {e:?}")),
         )),
