@@ -75,13 +75,18 @@ fn separated_smooth_design(n: usize) -> (TermCollectionDesign, Array1<f64>, Arra
 }
 
 fn logit_external_options(nullspace_dims: Vec<usize>) -> ExternalOptimOptions {
+    binomial_external_options(nullspace_dims, StandardLink::Logit, false)
+}
+
+fn binomial_external_options(
+    nullspace_dims: Vec<usize>,
+    link: StandardLink,
+    firth: bool,
+) -> ExternalOptimOptions {
     // Mirrors `canonical_standard_fit_options` (`entry.rs`): the formula path's
     // outer tolerance is 1e-10 and its penalty shrinkage floor 1e-6.
     ExternalOptimOptions {
-        family: LikelihoodSpec::new(
-            ResponseFamily::Binomial,
-            InverseLink::Standard(StandardLink::Logit),
-        ),
+        family: LikelihoodSpec::new(ResponseFamily::Binomial, InverseLink::Standard(link)),
         latent_cloglog: None,
         mixture_link: None,
         optimize_mixture: false,
@@ -93,7 +98,7 @@ fn logit_external_options(nullspace_dims: Vec<usize>) -> ExternalOptimOptions {
         tol: 1e-10,
         nullspace_dims,
         linear_constraints: None,
-        firth_bias_reduction: Some(false),
+        firth_bias_reduction: Some(firth),
         penalty_shrinkage_floor: Some(1e-6),
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
@@ -300,5 +305,196 @@ fn separated_smooth_outer_criterion_probe_2273() {
         data.nrows(),
         N,
         "the probe design was built from a frame that dropped rows"
+    );
+}
+
+/// Evaluate one arm's criterion: a ρ grid, then cost/analytic-gradient/central-FD
+/// and the optimizer's own Armijo ladder at `rho_of_interest`.
+fn report_criterion_arm(
+    label: &str,
+    design: &TermCollectionDesign,
+    y: &Array1<f64>,
+    weights: &Array1<f64>,
+    offset: &Array1<f64>,
+    opts: &ExternalOptimOptions,
+    rho_axis: &[f64],
+    rho_of_interest: &Array1<f64>,
+) {
+    let cost_at = |rho: &Array1<f64>| -> (Option<f64>, Option<f64>, String) {
+        match evaluate_externalcost_andridge(
+            y.view(),
+            weights.view(),
+            design.design.clone(),
+            offset.view(),
+            &design.penalties,
+            opts,
+            rho,
+        ) {
+            Ok((cost, ridge)) if cost.is_finite() => {
+                (Some(cost), Some(ridge), format!("{cost:.12e}"))
+            }
+            Ok((cost, ridge)) => (None, Some(ridge), format!("NON-FINITE {cost}")),
+            Err(err) => (None, None, format!("ERR {err}")),
+        }
+    };
+    let grad_at = |rho: &Array1<f64>| -> Result<Array1<f64>, String> {
+        evaluate_externalgradient(
+            y.view(),
+            weights.view(),
+            design.design.clone(),
+            offset.view(),
+            &design.penalties,
+            opts,
+            rho,
+        )
+        .map_err(|err| err.to_string())
+    };
+
+    let mut grid = String::from("\n  rho1 \\ rho2");
+    for r2 in rho_axis {
+        grid.push_str(&format!("  {r2:>+8.1}"));
+    }
+    let mut best: Option<(f64, f64, f64)> = None;
+    for &r1 in rho_axis {
+        grid.push_str(&format!("\n  {r1:>+8.1}   "));
+        for &r2 in rho_axis {
+            let (cost, _, _) = cost_at(&Array1::from(vec![r1, r2]));
+            match cost {
+                Some(value) => {
+                    grid.push_str(&format!(" {value:>+9.3}"));
+                    if best.is_none_or(|(b, _, _)| value < b) {
+                        best = Some((value, r1, r2));
+                    }
+                }
+                None => grid.push_str("       inf"),
+            }
+        }
+    }
+    eprintln!("#2273 probe [{label}] criterion grid:{grid}\n  grid minimum: {best:?}");
+
+    let (f0, ridge0, label0) = cost_at(rho_of_interest);
+    let g = grad_at(rho_of_interest);
+    let mut report = format!(
+        "rho={rho_of_interest:.9e}: cost={label0} ridge={ridge0:?} g={:?}",
+        g.as_ref().map(|g| format!("{g:.9e}")),
+    );
+    if let (Some(f0), Ok(g)) = (f0, g.as_ref()) {
+        let gnorm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
+        report.push_str(&format!("\n  |g|={gnorm:.9e}"));
+        for coord in 0..rho_of_interest.len() {
+            for h in [1.0e-2_f64, 1.0e-3, 1.0e-4, 1.0e-5] {
+                let mut plus = rho_of_interest.clone();
+                let mut minus = rho_of_interest.clone();
+                plus[coord] += h;
+                minus[coord] -= h;
+                let (fp, _, fp_label) = cost_at(&plus);
+                let (fm, _, fm_label) = cost_at(&minus);
+                let text = match (fp, fm) {
+                    (Some(fp), Some(fm)) => {
+                        let fd = (fp - fm) / (2.0 * h);
+                        format!(
+                            "fd={fd:+.9e}  fd-analytic={:+.3e}  fd/analytic={:+.6}",
+                            fd - g[coord],
+                            fd / g[coord]
+                        )
+                    }
+                    _ => format!("fd=n/a (+: {fp_label}; -: {fm_label})"),
+                };
+                report.push_str(&format!(
+                    "\n  d/drho[{coord}] h={h:.0e}  analytic={:+.9e}  {text}",
+                    g[coord]
+                ));
+            }
+        }
+        let d = g.mapv(|v| -v / gnorm);
+        let c1 = 1.0e-4_f64;
+        let mut accepted: Option<f64> = None;
+        for alpha in [
+            1.0e0, 1.0e-1, 1.0e-2, 1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7, 1.0e-8, 1.0e-10,
+            1.0e-12,
+        ] {
+            let trial = rho_of_interest + &d.mapv(|v| v * alpha);
+            let (cost, _, label) = cost_at(&trial);
+            let target = -c1 * alpha * gnorm;
+            let (delta_text, accept) = match cost {
+                Some(f) => {
+                    let delta = f - f0;
+                    (format!("{delta:+.6e}"), delta <= target)
+                }
+                None => ("n/a".to_string(), false),
+            };
+            if accept && accepted.is_none() {
+                accepted = Some(alpha);
+            }
+            report.push_str(&format!(
+                "\n  alpha={alpha:.0e}  f={label}  f-f0={delta_text}  \
+                 armijo<={target:+.6e}  accept={accept}"
+            ));
+        }
+        report.push_str(&format!("\n  first accepting alpha: {accepted:?}"));
+    }
+    eprintln!("#2273 probe [{label}] {report}");
+}
+
+/// #2273: three arms of the SAME separated `smooth(x)` design.
+///
+/// `detect_logit_instability` (`pirls/loop_driver.rs`) returns `false` unless the
+/// link is logit and Firth is off, so the three arms differ in exactly whether
+/// that detector runs:
+///
+/// | arm | detector runs | criterion |
+/// |---|---|---|
+/// | binomial/logit | YES | plain LAML |
+/// | binomial/probit | no (link gate) | plain LAML |
+/// | binomial/logit + Firth | no (firth gate) | Firth-penalized LAML |
+///
+/// If the logit arm's `+inf` wall is the DETECTOR rather than a genuinely
+/// unsolvable inner problem, the probit arm — numerically the same shape of
+/// problem — is finite where logit is infinite. That is the control this test
+/// exists to run.
+#[test]
+fn separated_smooth_criterion_arms_probe_2273() {
+    const N: usize = 60;
+    let (design, y, _) = separated_smooth_design(N);
+    let weights = Array1::<f64>::ones(N);
+    let offset = design
+        .compose_offset(Array1::<f64>::zeros(N).view(), "probe")
+        .expect("offset composes");
+    let dims = design.nullspace_dims.clone();
+    let axis = [-12.0_f64, -8.0, -4.0, -2.0, 0.0, 1.0, 2.0, 4.0, 8.0, 12.0];
+    let seed = Array1::from(vec![1.0_f64, 1.0]);
+
+    report_criterion_arm(
+        "logit (detector ON)",
+        &design,
+        &y,
+        &weights,
+        &offset,
+        &binomial_external_options(dims.clone(), StandardLink::Logit, false),
+        &axis,
+        &seed,
+    );
+    report_criterion_arm(
+        "probit (detector OFF via link gate)",
+        &design,
+        &y,
+        &weights,
+        &offset,
+        &binomial_external_options(dims.clone(), StandardLink::Probit, false),
+        &axis,
+        &seed,
+    );
+    // The Firth arm's reported checkpoint from the production refusal, so the
+    // FD/ladder columns are measured exactly where the fit gave up.
+    let firth_checkpoint = Array1::from(vec![-3.999035662000272_f64, 25.906659992355834]);
+    report_criterion_arm(
+        "logit + Firth (detector OFF via firth gate)",
+        &design,
+        &y,
+        &weights,
+        &offset,
+        &binomial_external_options(dims, StandardLink::Logit, true),
+        &[-12.0, -8.0, -4.0, -2.0, 0.0, 2.0, 8.0, 16.0, 24.0, 28.0],
+        &firth_checkpoint,
     );
 }
