@@ -1035,16 +1035,6 @@ fn ball_cholesky(covariance: &BallMat, order: usize) -> Option<BallMat> {
     Some(factor)
 }
 
-/// `-M`, entrywise.
-fn ball_mat_neg(matrix: &BallMat, order: usize) -> BallMat {
-    let mut negated = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
-    for i in 0..order {
-        for j in 0..order {
-            negated[i][j] = matrix[i][j].neg();
-        }
-    }
-    negated
-}
 
 /// How many accumulators the per-node divergence check scans.
 ///
@@ -1090,20 +1080,6 @@ fn ball_factor_update(factor: &BallMat, beta: Ball, order: usize) -> BallMat {
     updated
 }
 
-/// `L Lᵀ` for a factor that need not be triangular.
-fn ball_factor_gram_full(factor: &BallMat, order: usize) -> BallMat {
-    let mut gram = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
-    for i in 0..order {
-        for j in 0..order {
-            let mut accumulator = Ball::ZERO;
-            for k in 0..order {
-                accumulator = accumulator.add(factor[i][k].mul(factor[j][k]));
-            }
-            gram[i][j] = accumulator;
-        }
-    }
-    gram
-}
 
 /// `L Lᵀ` for a lower-triangular factor.
 fn ball_factor_gram(factor: &BallMat, order: usize) -> BallMat {
@@ -1828,22 +1804,23 @@ type BallTraceRecord = (usize, &'static str, Ball);
 
 /// Stacked mean blocks carried as ONE zonotope: `(a, a′)`.
 const MEAN_BLOCKS: usize = 2;
-/// Dimension of that stacked state.
+/// Capacity of that stacked state; the ACTIVE dimension is `2·order`.
 const MEAN_DIM: usize = MEAN_BLOCKS * MAX_ORDER;
+/// Capacity of the `vec(dP/dρ)` state; the ACTIVE dimension is `order²`.
+const COVARIANCE_D1_DIM: usize = MAX_ORDER * MAX_ORDER;
 /// Generators retained before the OLDEST are folded into an axis-aligned set.
 ///
-/// Folding is exact — a box is the zonotope of its own axis generators, so the
+/// Folding is exact — a box IS the zonotope of its own axis generators, so the
 /// folded part keeps being transformed by the true map rather than by its
 /// absolute value, which is the whole point of carrying generators at all. The
-/// cap only bounds the work: `MEAN_DIM²·CAP` per node, `O(n)` overall.
-const MEAN_GENERATOR_CAP: usize = 240;
-/// `γ_{MEAN_DIM+2}` with room to spare: `2·(d+2)·u` with `u = ε/2` is `8ε`
-/// at `d = 6`, and this charges `32ε` for every floating-point dot product the
+/// cap only bounds the work: `dim²·CAP` per node, `O(n)` overall. It is well
+/// above the ~35 nodes a generator needs to decay past `ε` at the measured
+/// contraction, so folding reaches nothing that is still carrying information.
+const ZONOTOPE_GENERATOR_CAP: usize = 240;
+/// `γ_{dim+2}` with room to spare: `2·(d+2)·u` with `u = ε/2` is `11ε` at
+/// `d = 9`, and this charges `32ε` for every floating-point dot product a
 /// zonotope forms.
-const MEAN_ROUNDOFF: f64 = 32.0 * f64::EPSILON;
-
-type MeanVec = [f64; MEAN_DIM];
-type MeanMap = [[Ball; MEAN_DIM]; MEAN_DIM];
+const ZONOTOPE_ROUNDOFF: f64 = 32.0 * f64::EPSILON;
 
 /// Radius of a ball ABOUT ITS REPRESENTATIVE, which is what a zonotope centred
 /// on that representative must absorb. Not `(hi−lo)/2`: the representative is
@@ -1855,37 +1832,44 @@ fn ball_radius_about_value(ball: Ball) -> f64 {
     next_up_ball(above.max(below).max(0.0))
 }
 
-/// The stacked mean `(a, a′)` as a ZONOTOPE — a centre plus a list of error
+/// A linear recursion's state as a ZONOTOPE — a centre plus a list of error
 /// GENERATORS — rather than as componentwise intervals.
 ///
-/// This is not a tightening heuristic; a box enclosure of this recursion is
-/// impossible at any width, and the reason is arithmetic rather than numerical.
-/// Per node the mean does update-then-predict, `a ← T(A a + K y)` with
-/// `A = I − K e₀ᵀ`, so the fused per-node map at order 2 is
+/// This is not a tightening heuristic. Two of this filter's recursions cannot
+/// be carried in a box AT ANY WIDTH, and the reason is arithmetic rather than
+/// numerical. Per node the mean does update-then-predict, `a ← T(A a + K y)`
+/// with `A = I − K e₀ᵀ`, so the fused per-node map at order 2 is
 ///
 /// ```text
 ///   B = T A = [[R/F − δ·K₁ ,  δ ],
 ///              [   −K₁     ,  1 ]]
 /// ```
 ///
-/// Measured on the #2300 nodes at the ρ the certified search refuses at
+/// Measured on the #2300 nodes at the ρ the certified search refused at
 /// (`−13.841116908`): `R/F = 0.0754`, `K₁ ≈ 41.5`, `δ = 4/179`, so `δ·K₁ = 0.930`
 /// and
 ///
 /// ```text
-///   true B : trace 0.145 , det 0.0754 ⇒ |eigenvalues| = √0.0754 = 0.2746
-///   |B|    : trace 1.855 , det −0.0754 ⇒ ρ(|B|)       = 1.894
+///   true B : trace 0.145 , det 0.0754  ⇒ |eigenvalues| = √0.0754 = 0.2746
+///   |B|    : trace 1.855 , det −0.0754 ⇒ ρ(|B|)        = 1.894
 /// ```
 ///
 /// **The map contracts at 0.27 per node and its entrywise absolute value
 /// expands at 1.894.** A componentwise interval carries widths through `|B|`,
-/// because `a₀` reaches the next `a₀` by two paths — the row-0 update and row 1
+/// because `a₀` reaches the next `a₀` by two paths — the row-0 update, and row 1
 /// followed by the transition — whose widths ADD as `0.0754 + 0.930` where the
 /// exact map SUBTRACTS to `−0.855`. Over 180 nodes that is `1.894¹⁸⁰ ≈ 10⁵⁰`,
-/// and the traced widths reproduce it: `w(a₀)` runs `1e−11 → 1e20` from node 10
-/// to node 113 at a clean factor of 2.0 per node while every covariance
-/// quantity in the same pass stays flat (`w(P₀₀) = 5.6e−13`, `w(F) = 1e−10`,
-/// `w(Σ log F) = 7.4e−10`).
+/// and the traced widths reproduced it exactly: `w(a₀)` ran `1e−11 → 1e20` from
+/// node 10 to node 113 at a clean factor of 2.0 per node, while every
+/// covariance quantity in the same pass stayed flat (`w(P₀₀) = 5.6e−13`,
+/// `w(F) = 1e−10`, `w(Σ log F) = 7.4e−10`).
+///
+/// The covariance's FIRST DERIVATIVE has the same defect one tensor rank up.
+/// `dP⁺ = A·dP·Aᵀ` and `dP⁻ = F·dP·Fᵀ − Q` make `vec(dP)` a linear recursion
+/// with map `B ⊗ B`, whose true spectral radius is `0.27² = 0.075` and whose
+/// componentwise companion `|B| ⊗ |B|` is `1.894² = 3.59`. Measured at
+/// `ρ = −12.5466`, order 2: `w(dP₁₁)` runs `1.4e−2 → 7.5e2` over nodes 40..80
+/// while `w(P₀₀)` holds at `7e−12`.
 ///
 /// Two rearrangements do NOT help and are recorded so they are not retried:
 /// fusing `T` and `A` first leaves `ρ(|TA|)` at the same 1.894 — the
@@ -1895,33 +1879,34 @@ fn ball_radius_about_value(ball: Ball) -> f64 {
 /// exactly.
 ///
 /// A zonotope keeps the cancellation because it transforms each GENERATOR by
-/// the true `B`, so generator norms follow `0.27` per node and a generator is
-/// below `ε` relative after ~35 nodes. The covariance escaped the same problem
-/// by being carried as a Cholesky factor; the mean has no PSD structure to
-/// exploit, but its error IS a linear function of the accumulated roundoff and
-/// the linear map is the one that contracts.
+/// the true map, so generator norms follow `0.27` per node and a generator is
+/// below `ε` relative after ~35 nodes. The value covariance escaped the same
+/// problem by being carried as a Cholesky factor; neither the mean nor `dP`
+/// has PSD structure enough to exploit that way, but both are exactly LINEAR
+/// with coefficients this filter already encloses tightly, which is the
+/// hypothesis a zonotope needs and the Riccati update itself does not satisfy.
 ///
-/// The stacked layout is `[a₀..a_{m−1}, a′₀..a′_{m−1}]` at stride `MAX_ORDER`.
-/// `a″` and `a‴` are deliberately NOT included: the mean-jet recursion is block
-/// lower-triangular (`a` never depends on its own jets), the certificate
-/// requires only the value and the slope to be finite, and the curvature and
-/// third order already carry closed-form global bounds.
+/// `N` is the capacity; `dim` is how much of it the current smoothing order
+/// uses, and every loop stops there, so an order-1 scan pays `1`-dimensional
+/// work out of a `9`-wide array.
 #[derive(Clone, Debug)]
-struct MeanZonotope {
-    center: MeanVec,
-    generators: Vec<MeanVec>,
+struct Zonotope<const N: usize> {
+    center: [f64; N],
+    generators: Vec<[f64; N]>,
+    dim: usize,
 }
 
-impl MeanZonotope {
-    fn new() -> Self {
+impl<const N: usize> Zonotope<N> {
+    fn zeroed(dim: usize) -> Self {
+        debug_assert!(dim <= N);
         Self {
-            center: [0.0; MEAN_DIM],
+            center: [0.0; N],
             generators: Vec::new(),
+            dim,
         }
     }
 
-    /// One stacked coordinate as an ordinary ball, for the consumers that need
-    /// a scalar: the innovation, its derivative, and the trace.
+    /// One coordinate as an ordinary ball, for the consumers that need a scalar.
     fn coordinate(&self, index: usize) -> Ball {
         let mut radius = 0.0f64;
         for generator in &self.generators {
@@ -1936,30 +1921,31 @@ impl MeanZonotope {
         }
     }
 
-    /// `x ← M x + b`, exactly on the generators and with every floating-point
-    /// and interval radius charged into FRESH axis-aligned generators.
+    /// `x ← M x + b`, exactly on the generators, with every floating-point and
+    /// interval radius charged into FRESH axis-aligned generators.
     ///
     /// The fresh radii are appended as `radius·eᵢ` rather than held in a
     /// separate box field, because a box propagated as `|M|·box` would grow at
     /// `ρ(|M|)` per node — reintroducing the exact defect this type exists to
     /// remove, on a quantity too small to notice until it is `1e11`.
-    fn apply(&mut self, map: &MeanMap, constant: &[Ball; MEAN_DIM]) -> bool {
-        let mut generator_column_sum = [0.0f64; MEAN_DIM];
+    fn apply(&mut self, map: &[[Ball; N]; N], constant: &[Ball; N]) -> bool {
+        let dim = self.dim;
+        let mut generator_column_sum = [0.0f64; N];
         for generator in &self.generators {
-            for j in 0..MEAN_DIM {
+            for j in 0..dim {
                 generator_column_sum[j] += generator[j].abs();
             }
         }
 
-        let mut next_center = [0.0f64; MEAN_DIM];
-        let mut fresh_radius = [0.0f64; MEAN_DIM];
-        for i in 0..MEAN_DIM {
+        let mut next_center = [0.0f64; N];
+        let mut fresh_radius = [0.0f64; N];
+        for i in 0..dim {
             let mut center = constant[i].value;
-            // Everything the roundoff of the two dot products (centre and every
-            // generator) is charged against, summed once.
+            // Everything the roundoff of the dot products — the centre's and
+            // every generator's — is charged against, summed once.
             let mut magnitude = constant[i].value.abs();
             let mut radius = ball_radius_about_value(constant[i]);
-            for j in 0..MEAN_DIM {
+            for j in 0..dim {
                 let coefficient = map[i][j].value;
                 center += coefficient * self.center[j];
                 magnitude += (coefficient * self.center[j]).abs()
@@ -1968,15 +1954,16 @@ impl MeanZonotope {
                     * (self.center[j].abs() + generator_column_sum[j]);
             }
             next_center[i] = center;
-            fresh_radius[i] =
-                next_up_ball((radius + MEAN_ROUNDOFF * magnitude) * (1.0 + 64.0 * f64::EPSILON));
+            fresh_radius[i] = next_up_ball(
+                (radius + ZONOTOPE_ROUNDOFF * magnitude) * (1.0 + 64.0 * f64::EPSILON),
+            );
         }
 
         for generator in self.generators.iter_mut() {
             let previous = *generator;
-            for i in 0..MEAN_DIM {
+            for i in 0..dim {
                 let mut coordinate = 0.0f64;
-                for j in 0..MEAN_DIM {
+                for j in 0..dim {
                     coordinate += map[i][j].value * previous[j];
                 }
                 generator[i] = coordinate;
@@ -1984,40 +1971,41 @@ impl MeanZonotope {
         }
 
         self.center = next_center;
-        for i in 0..MEAN_DIM {
+        for i in 0..dim {
             if fresh_radius[i] > 0.0 {
-                let mut axis = [0.0f64; MEAN_DIM];
+                let mut axis = [0.0f64; N];
                 axis[i] = fresh_radius[i];
                 self.generators.push(axis);
             }
         }
         self.compact();
-        self.center.iter().all(|value| value.is_finite())
+        self.center[..dim].iter().all(|value| value.is_finite())
             && self
                 .generators
                 .iter()
-                .all(|generator| generator.iter().all(|value| value.is_finite()))
+                .all(|generator| generator[..dim].iter().all(|value| value.is_finite()))
     }
 
     /// Fold the OLDEST generators into one axis-aligned set once the list is
-    /// over the cap. Sound because a box IS a zonotope over its axes, and the
-    /// folded generators are the ones that have contracted for the longest.
+    /// over the cap. Sound because a box is a zonotope over its own axes, and
+    /// the folded generators are the ones that have contracted for the longest.
     fn compact(&mut self) {
-        if self.generators.len() <= MEAN_GENERATOR_CAP {
+        if self.generators.len() <= ZONOTOPE_GENERATOR_CAP {
             return;
         }
-        let fold = self.generators.len() - MEAN_GENERATOR_CAP / 2;
+        let dim = self.dim;
+        let fold = self.generators.len() - ZONOTOPE_GENERATOR_CAP / 2;
         let retained = self.generators.split_off(fold);
-        let mut folded = [0.0f64; MEAN_DIM];
+        let mut folded = [0.0f64; N];
         for generator in &self.generators {
-            for i in 0..MEAN_DIM {
+            for i in 0..dim {
                 folded[i] += generator[i].abs();
             }
         }
-        let mut next = Vec::with_capacity(retained.len() + MEAN_DIM);
-        for i in 0..MEAN_DIM {
+        let mut next = Vec::with_capacity(retained.len() + dim);
+        for i in 0..dim {
             if folded[i] > 0.0 {
-                let mut axis = [0.0f64; MEAN_DIM];
+                let mut axis = [0.0f64; N];
                 axis[i] = next_up_ball(folded[i] * (1.0 + 64.0 * f64::EPSILON));
                 next.push(axis);
             }
@@ -2027,19 +2015,19 @@ impl MeanZonotope {
     }
 }
 
-/// The identity stacked map, as the base every per-node map is built on.
-fn mean_identity_map() -> MeanMap {
-    let mut map = [[Ball::ZERO; MEAN_DIM]; MEAN_DIM];
-    for (i, row) in map.iter_mut().enumerate() {
+/// The identity map over the first `dim` coordinates.
+fn zonotope_identity_map<const N: usize>(dim: usize) -> [[Ball; N]; N] {
+    let mut map = [[Ball::ZERO; N]; N];
+    for (i, row) in map.iter_mut().enumerate().take(dim) {
         row[i] = Ball::ONE;
     }
     map
 }
 
-/// Write an `order × order` block of a stacked map at block row/column
-/// `(block_row, block_column)`, leaving the rest of the map untouched.
+/// Write an `order × order` block of the stacked MEAN map at block row/column
+/// `(block_row, block_column)`. The mean layout is `block·order + i`.
 fn mean_set_block(
-    map: &mut MeanMap,
+    map: &mut [[Ball; MEAN_DIM]; MEAN_DIM],
     block_row: usize,
     block_column: usize,
     block: &BallMat,
@@ -2047,9 +2035,47 @@ fn mean_set_block(
 ) {
     for i in 0..order {
         for j in 0..order {
-            map[block_row * MAX_ORDER + i][block_column * MAX_ORDER + j] = block[i][j];
+            map[block_row * order + i][block_column * order + j] = block[i][j];
         }
     }
+}
+
+/// The congruence `X ↦ L·X·Rᵀ` as a linear map on `vec(X)`, i.e. `L ⊗ R`.
+///
+/// This is what makes `dP` carryable: the derivative's update and prediction
+/// are congruences by matrices built from the VALUE covariance, which this
+/// filter already encloses to `1e−12`, so the map's own entries are tight and
+/// only the state needs the generators. The `vec` layout is `i·order + j`.
+fn zonotope_congruence_map(
+    left: &BallMat,
+    right: &BallMat,
+    order: usize,
+) -> [[Ball; COVARIANCE_D1_DIM]; COVARIANCE_D1_DIM] {
+    let mut map = [[Ball::ZERO; COVARIANCE_D1_DIM]; COVARIANCE_D1_DIM];
+    for i in 0..order {
+        for j in 0..order {
+            for k in 0..order {
+                for l in 0..order {
+                    map[i * order + j][k * order + l] = left[i][k].mul(right[j][l]);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Read `vec(X)` back out as a matrix.
+fn zonotope_to_matrix(
+    state: &Zonotope<COVARIANCE_D1_DIM>,
+    order: usize,
+) -> BallMat {
+    let mut out = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..order {
+        for j in 0..order {
+            out[i][j] = state.coordinate(i * order + j);
+        }
+    }
+    out
 }
 
 /// Diagonal names for the traced covariance jets, indexed by state coordinate.
@@ -2064,13 +2090,13 @@ fn run_filter_ball_traced(
     order: usize,
     mut trace: Option<&mut Vec<BallTraceRecord>>,
 ) -> Result<BallFilterPass, SplineScoreProofError> {
-    // `(a, a′)` together, as a zonotope; see `MeanZonotope` for why a
-    // componentwise enclosure of this recursion is impossible at any width.
-    let mut mean = MeanZonotope::new();
+    // `(a, a′)` together, and `vec(dP/dρ)`, each as a zonotope; see `Zonotope`
+    // for why a componentwise enclosure of either is impossible at any width.
+    let mut mean = Zonotope::<MEAN_DIM>::zeroed(MEAN_BLOCKS * order);
+    let mut covariance_d1 = Zonotope::<COVARIANCE_D1_DIM>::zeroed(order * order);
     let mut a_d2: BallVec = [Ball::ZERO; MAX_ORDER];
     let mut a_d3: BallVec = [Ball::ZERO; MAX_ORDER];
     let mut p_star: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
-    let mut p_star_d1: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
     let mut p_star_d2: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
     let mut p_star_d3: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
     let mut p_inf: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
@@ -2084,15 +2110,6 @@ fn run_filter_ball_traced(
     // matrix whose update and prediction contain no cancelling subtraction, and
     // the two are intersected. `None` means no evidence, never a refusal.
     let mut carried_factor: Option<BallMat> = None;
-    // ... and one for `−dP/dρ`, which obeys the SAME recursion.
-    //
-    // `P` is operator monotone increasing in the process-noise scale `q`, and
-    // `q = e^{−ρ}`, so `dP/dρ ⪯ 0` and `−dP/dρ` is PSD — at seeding it is `0`,
-    // the update carries it through the congruence `A(−D₁)Aᵀ` which preserves
-    // PSD, and the prediction is `F(−D₁)Fᵀ + Q` because `dQ/dρ = −Q`. Term for
-    // term the same recursion as the covariance, so the same carried factor
-    // applies, and `D₁`'s entries inherit the same freedom from cancellation.
-    let mut carried_d1_factor: Option<BallMat> = None;
     let mut sum_log_f = Ball::ZERO;
     let mut sum_log_f_d1 = Ball::ZERO;
     let mut sum_log_f_d2 = Ball::ZERO;
@@ -2106,9 +2123,11 @@ fn run_filter_ball_traced(
     for t in 0..nodes.len() {
         let r = Ball::ONE.div_positive(Ball::exact(nodes[t].w));
         let v = Ball::exact(nodes[t].y).sub(mean.coordinate(0));
-        let v_d1 = mean.coordinate(MAX_ORDER).neg();
+        let v_d1 = mean.coordinate(order).neg();
         let v_d2 = a_d2[0].neg();
         let v_d3 = a_d3[0].neg();
+        // `dP/dρ` materialized from its zonotope for this node's consumers.
+        let p_star_d1 = zonotope_to_matrix(&covariance_d1, order);
         let mut m_star: BallVec = [Ball::ZERO; MAX_ORDER];
         let mut m_star_d1: BallVec = [Ball::ZERO; MAX_ORDER];
         let mut m_star_d2: BallVec = [Ball::ZERO; MAX_ORDER];
@@ -2157,7 +2176,7 @@ fn run_filter_ball_traced(
                 // `M_inf[0]`, so the operator's own diagonal entry is an exact
                 // zero rather than a `1 − K₀` subtraction.
                 let a_inf = ball_update_operator(&gain_inf, Ball::ZERO, order);
-                let mut diffuse_map = mean_identity_map();
+                let mut diffuse_map = zonotope_identity_map::<MEAN_DIM>(MEAN_BLOCKS * order);
                 mean_set_block(&mut diffuse_map, 0, 0, &a_inf, order);
                 mean_set_block(&mut diffuse_map, 1, 1, &a_inf, order);
                 let mut diffuse_constant = [Ball::ZERO; MEAN_DIM];
@@ -2171,7 +2190,6 @@ fn run_filter_ball_traced(
                     });
                 }
                 let mut p_new = p_star;
-                let mut p_new_d1 = p_star_d1;
                 let mut p_new_d2 = p_star_d2;
                 let mut p_new_d3 = p_star_d3;
                 for i in 0..order {
@@ -2184,13 +2202,6 @@ fn run_filter_ball_traced(
                             .sub(subtract_left)
                             .sub(subtract_right)
                             .add(add_star);
-
-                        let subtract_left_d1 = m_inf[i].mul(m_star_d1[j]).mul(inv_f_inf);
-                        let subtract_right_d1 = m_star_d1[i].mul(m_inf[j]).mul(inv_f_inf);
-                        p_new_d1[i][j] = p_new_d1[i][j]
-                            .sub(subtract_left_d1)
-                            .sub(subtract_right_d1)
-                            .add(inf_product.mul(f_star_d1).mul(inv_f_inf_sq));
 
                         let subtract_left_d2 = m_inf[i].mul(m_star_d2[j]).mul(inv_f_inf);
                         let subtract_right_d2 = m_star_d2[i].mul(m_inf[j]).mul(inv_f_inf);
@@ -2207,12 +2218,23 @@ fn run_filter_ball_traced(
                             .add(inf_product.mul(f_star_d3).mul(inv_f_inf_sq));
                     }
                 }
+                // `D1+ = A_inf*D1*A_inf'` EXACTLY: expanding that congruence
+                // gives `D1[i][j] - c_j D1[i][0] - c_i D1[0][j] + c_i c_j D1[0][0]`
+                // with `c = M_inf/F_inf`, which is the diffuse update term for
+                // term. The other jets keep the expanded form because they are
+                // not carried as zonotopes.
+                if !covariance_d1.apply(
+                    &zonotope_congruence_map(&a_inf, &a_inf, order),
+                    &[Ball::ZERO; COVARIANCE_D1_DIM],
+                ) {
+                    return Err(SplineScoreProofError::InvalidArithmetic {
+                        context: "diffuse covariance-derivative zonotope",
+                    });
+                }
                 p_star = p_new;
-                p_star_d1 = p_new_d1;
                 p_star_d2 = p_new_d2;
                 p_star_d3 = p_new_d3;
                 ball_symmetrize(&mut p_star, order);
-                ball_symmetrize(&mut p_star_d1, order);
                 ball_symmetrize(&mut p_star_d2, order);
                 ball_symmetrize(&mut p_star_d3, order);
                 for i in 0..order {
@@ -2227,7 +2249,6 @@ fn run_filter_ball_traced(
                     p_inf = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
                     intersect_proper_covariance_psd(&mut p_star, order)?;
                     carried_factor = ball_cholesky(&p_star, order);
-                    carried_d1_factor = ball_cholesky(&ball_mat_neg(&p_star_d1, order), order);
                 }
             }
         }
@@ -2451,26 +2472,25 @@ fn run_filter_ball_traced(
             // followed is the carried factor below, not anything in this block.
 
             // dP⁺ = A · dP · Aᵀ  (the `dK` terms cancel exactly, since M⁺ = R·K)
-            let mut p_new_d1 = ball_congruence(&a_operator, &d1_pred, &a_operator, order);
-            // `dP⁺ = A·dP·Aᵀ`, so on the factor of `−dP` the update is simply
-            // `L ↦ A·L`: no subtraction, and no triangularity required until
-            // the prediction re-triangularizes it.
-            if carried_d1_factor.is_none() {
-                carried_d1_factor = ball_cholesky(&ball_mat_neg(&p_star_d1, order), order);
+            //
+            // Applied to the ZONOTOPE, not to a matrix of intervals. This is
+            // the same recursion the carried `−dP` Cholesky factor used to
+            // guard, and the factor is gone with it: a factor can only be
+            // re-seeded from an enclosure that still PROVES `−dP ⪰ 0`, so once
+            // the componentwise widths grew past that it could not come back,
+            // which is exactly the window the trace shows (`w(dP₁₁)` 1.4e−2 at
+            // node 40, 7.5e2 at node 80, back to 4e−9 at node 160 when a
+            // re-seed finally succeeded). A zonotope needs no re-seeding
+            // because it never loses the structure in the first place.
+            if !covariance_d1.apply(
+                &zonotope_congruence_map(&a_operator, &a_operator, order),
+                &[Ball::ZERO; COVARIANCE_D1_DIM],
+            ) {
+                return Err(SplineScoreProofError::InvalidArithmetic {
+                    context: "covariance-derivative zonotope update",
+                });
             }
-            carried_d1_factor = carried_d1_factor.map(|factor| {
-                let updated = ball_mat_mul(&a_operator, &factor, order);
-                let gram = ball_factor_gram_full(&updated, order);
-                for i in 0..order {
-                    for j in 0..order {
-                        intersect_with_independent_enclosure(
-                            &mut p_new_d1[i][j],
-                            gram[i][j].neg(),
-                        );
-                    }
-                }
-                updated
-            });
+            let p_new_d1 = zonotope_to_matrix(&covariance_d1, order);
             let mut gain_d1 = [Ball::ZERO; MAX_ORDER];
             for i in 0..order {
                 gain_d1[i] = p_new_d1[i][0].div_positive(r);
@@ -2566,14 +2586,14 @@ fn run_filter_ball_traced(
             // reinstatement of that commit's claim — its form is used because
             // the enclosure it was wrong about is no longer a box.
             let y_node = Ball::exact(nodes[t].y);
-            let mut update_map = mean_identity_map();
+            let mut update_map = zonotope_identity_map::<MEAN_DIM>(MEAN_BLOCKS * order);
             mean_set_block(&mut update_map, 0, 0, &a_operator, order);
             mean_set_block(&mut update_map, 1, 1, &a_operator, order);
             mean_set_block(&mut update_map, 1, 0, &a_d1_operator, order);
             let mut update_constant = [Ball::ZERO; MEAN_DIM];
             for i in 0..order {
                 update_constant[i] = gain[i].mul(y_node);
-                update_constant[MAX_ORDER + i] = gain_d1[i].mul(y_node);
+                update_constant[order + i] = gain_d1[i].mul(y_node);
             }
             if !mean.apply(&update_map, &update_constant) {
                 return Err(SplineScoreProofError::InvalidArithmetic {
@@ -2593,11 +2613,9 @@ fn run_filter_ball_traced(
             }
 
             p_star = p_new;
-            p_star_d1 = p_new_d1;
             p_star_d2 = p_new_d2;
             p_star_d3 = p_new_d3;
             ball_symmetrize(&mut p_star, order);
-            ball_symmetrize(&mut p_star_d1, order);
             ball_symmetrize(&mut p_star_d2, order);
             ball_symmetrize(&mut p_star_d3, order);
             intersect_proper_covariance_psd(&mut p_star, order)?;
@@ -2698,7 +2716,7 @@ fn run_filter_ball_traced(
             let f_t = ball_transition(delta, order);
             // The transition is block diagonal on the stacked mean: every jet
             // is transported by the same `T`, since `T` does not depend on ρ.
-            let mut transition_map = mean_identity_map();
+            let mut transition_map = zonotope_identity_map::<MEAN_DIM>(MEAN_BLOCKS * order);
             mean_set_block(&mut transition_map, 0, 0, &f_t, order);
             mean_set_block(&mut transition_map, 1, 1, &f_t, order);
             if !mean.apply(&transition_map, &[Ball::ZERO; MEAN_DIM]) {
@@ -2715,11 +2733,6 @@ fn run_filter_ball_traced(
                 &q_noise,
                 order,
             );
-            let mut p_next_d1 = ball_mat_sub(
-                &ball_mat_mul(&ball_mat_mul(&f_t, &p_star_d1, order), &f_t_t, order),
-                &q_noise,
-                order,
-            );
             let mut p_next_d2 = ball_mat_add(
                 &ball_mat_mul(&ball_mat_mul(&f_t, &p_star_d2, order), &f_t_t, order),
                 &q_noise,
@@ -2730,17 +2743,32 @@ fn run_filter_ball_traced(
                 &q_noise,
                 order,
             );
+            // `dP⁻ = F·dP·Fᵀ − Q`, since `dQ/dρ = −Q`: a congruence plus an
+            // EXACT constant, so the whole `dP` recursion is affine in `dP`
+            // with coefficients built from the value covariance.
+            let mut prediction_constant = [Ball::ZERO; COVARIANCE_D1_DIM];
+            for i in 0..order {
+                for j in 0..order {
+                    prediction_constant[i * order + j] = q_noise[i][j].neg();
+                }
+            }
+            if !covariance_d1.apply(
+                &zonotope_congruence_map(&f_t, &f_t, order),
+                &prediction_constant,
+            ) {
+                return Err(SplineScoreProofError::InvalidArithmetic {
+                    context: "covariance-derivative zonotope transition",
+                });
+            }
             ball_symmetrize(&mut p_next, order);
-            ball_symmetrize(&mut p_next_d1, order);
             ball_symmetrize(&mut p_next_d2, order);
             ball_symmetrize(&mut p_next_d3, order);
             p_star = p_next;
-            p_star_d1 = p_next_d1;
             p_star_d2 = p_next_d2;
             p_star_d3 = p_next_d3;
             if let Some(sink) = trace.as_mut() {
                 sink.push((t, "p_next_00", p_star[0][0]));
-                sink.push((t, "d1_next_00", p_star_d1[0][0]));
+                sink.push((t, "d1_next_00", covariance_d1.coordinate(0)));
                 sink.push((t, "d2_next_00", p_star_d2[0][0]));
                 sink.push((t, "d3_next_00", p_star_d3[0][0]));
             }
@@ -2784,37 +2812,6 @@ fn run_filter_ball_traced(
                     for j in 0..order {
                         let evidence = gram[i][j].add(slack).mul(scale);
                         intersect_with_independent_enclosure(&mut p_star[i][j], evidence);
-                    }
-                }
-                Some(next_factor)
-            });
-            carried_d1_factor = carried_d1_factor.and_then(|factor| {
-                let transported = ball_mat_mul(&f_t, &factor, order);
-                let noise_factor = ball_cholesky(&q_noise, order)?;
-                let mut prearray = [[Ball::ZERO; PREARRAY_COLUMNS]; MAX_ORDER];
-                for i in 0..order {
-                    for j in 0..order {
-                        prearray[i][j] = transported[i][j];
-                        prearray[i][order + j] = noise_factor[i][j];
-                    }
-                }
-                let (next_factor, trailing, gram_scale) =
-                    ball_retriangularize(&mut prearray, order, 2 * order);
-                let gram = ball_factor_gram(&next_factor, order);
-                let slack = Ball {
-                    value: 0.0,
-                    lo: -trailing,
-                    hi: trailing,
-                };
-                let scale = Ball {
-                    value: 1.0,
-                    lo: next_down_ball(1.0 / gram_scale),
-                    hi: next_up_ball(gram_scale),
-                };
-                for i in 0..order {
-                    for j in 0..order {
-                        let evidence = gram[i][j].add(slack).mul(scale).neg();
-                        intersect_with_independent_enclosure(&mut p_star_d1[i][j], evidence);
                     }
                 }
                 Some(next_factor)
@@ -4520,17 +4517,23 @@ mod tests {
     /// `-20 <= rho <= -10` and SUCCEEDS at `rho = -24` on either side of it, so
     /// "diverges for all rho below some threshold" — which is what every
     /// intuition here suggested — is false. The node at which it goes moves
-    /// smoothly with `rho` (73, 76, 82, 100, 138), which is why the band has
+    /// smoothly with `rho` (74, 77, 83, 100, 139), which is why the band has
     /// edges: below `-20` and above `-10` that node runs past the end of the
     /// data.
     ///
-    /// Re-measured after the mean became a zonotope. Every level the mean was
-    /// starving now anchors on its own endpoint jet: order 2 below `-16` gained
-    /// its third derivative, order 3 at `-24` gained BOTH, and each divergence
-    /// node moved one further into the data. What did NOT move is the band
-    /// itself, which is the useful part of this reading — `sum_v2_over_f_d1` at
-    /// order 3 is fed by the covariance's OWN first-derivative jet, and that is
-    /// a different enclosure from the mean's.
+    /// Re-measured after the mean and `dP/dρ` became zonotopes. Every level
+    /// those two were starving now anchors on its own endpoint jet: order 2 is
+    /// `EndpointJet` at both orders across the whole sweep, order 3 at `-24`
+    /// gained both and at `-6` gained its curvature, and each divergence node
+    /// moved two further into the data.
+    ///
+    /// What did NOT move is the band itself, and that is the useful part of
+    /// this reading. `sum_v2_over_f_d1` at order 3 is fed by `a′`, which the
+    /// mean zonotope carries EXACTLY — so the remaining order-3 divergence is
+    /// not an enclosure defect of the kind `Zonotope` removes. At `λ → 0` and
+    /// smoothing order 3 the mean recursion's own map stops contracting, and a
+    /// zonotope reports a genuinely growing quantity as growing. That is the
+    /// next question on this file, and it is a different one.
     ///
     /// And what refuses is `sum_v2_over_f_d1`, the FIRST derivative. Every
     /// higher level has a valid closed-form substitute and now takes it; this
@@ -4558,12 +4561,12 @@ order 2 rho -6: curvature EndpointJet, third EndpointJet\n\
 order 2 rho 0: curvature EndpointJet, third EndpointJet\n\
 order 2 rho 6: curvature EndpointJet, third EndpointJet\n\
 order 3 rho -24: curvature EndpointJet, third EndpointJet\n\
-order 3 rho -20: sum_v2_over_f_d1 diverged at node 73\n\
-order 3 rho -18: sum_v2_over_f_d1 diverged at node 76\n\
-order 3 rho -16.6135: sum_v2_over_f_d1 diverged at node 82\n\
+order 3 rho -20: sum_v2_over_f_d1 diverged at node 74\n\
+order 3 rho -18: sum_v2_over_f_d1 diverged at node 77\n\
+order 3 rho -16.6135: sum_v2_over_f_d1 diverged at node 83\n\
 order 3 rho -13.841116916640328: sum_v2_over_f_d1 diverged at node 100\n\
-order 3 rho -10: sum_v2_over_f_d1 diverged at node 138\n\
-order 3 rho -6: curvature AnalyticGlobalBound, third AnalyticGlobalBound\n\
+order 3 rho -10: sum_v2_over_f_d1 diverged at node 139\n\
+order 3 rho -6: curvature EndpointJet, third AnalyticGlobalBound\n\
 order 3 rho 0: curvature EndpointJet, third EndpointJet\n\
 order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
 
