@@ -108,7 +108,6 @@ mod tests {
         write_gamma_log_working_state, write_negative_binomial_log_working_state,
         write_poisson_log_working_state, write_tweedie_log_working_state,
     };
-    use crate::active_set;
     use crate::estimate::EstimationError;
     use crate::mixture_link::{InverseLinkJet as MixtureInverseLinkJet, state_fromspec};
     use approx::assert_relative_eq;
