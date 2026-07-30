@@ -178,29 +178,7 @@ pub(crate) fn kernel_constraint_nullspace(
     cache: &mut BasisCacheContext,
 ) -> Result<Array2<f64>, BasisError> {
     let effective_order = duchon_effective_nullspace_order(centers, order);
-    let degraded = effective_order != order;
-    // Translation-invariant side-condition frame (#1375, mirroring the #1269 tp
-    // fix). `Z = null(P(centers)ᵀ)` is mathematically invariant to subtracting a
-    // per-axis constant from `centers` (the polynomial columns `{1, x, …}` and
-    // `{1, x − x̄, …}` span the same space, so `P` has the same column space and
-    // `P^T` the same null space), but the RRQR pivoting that materialises `Z`
-    // drifts under a large coordinate mean — landing on a different orthonormal
-    // basis of the SAME null space, which would desync the design `K·Z` from the
-    // penalty `ZᵀK_CC Z` across a covariate translation. Subtract the center-cloud
-    // per-axis mean so the factorisation is location-standardized; both a raw and
-    // an already-centered caller then produce bit-identical `Z`. The mean is a
-    // fixed property of the (frozen `UserProvided`) centers, replayed identically
-    // at predict.
-    let k = centers.nrows();
-    let d = centers.ncols();
-    let center_mean: Vec<f64> = (0..d)
-        .map(|c| centers.column(c).sum() / (k.max(1) as f64))
-        .collect();
-    let mut centers_centered = centers.to_owned();
-    for c in 0..d {
-        let mu = center_mean[c];
-        centers_centered.column_mut(c).mapv_inplace(|v| v - mu);
-    }
+    let centers_centered = mean_centered_centers(centers);
     let centers = centers_centered.view();
     let key = ConstraintNullspaceCacheKey {
         centersrows: centers.nrows(),
@@ -213,21 +191,11 @@ pub(crate) fn kernel_constraint_nullspace(
         return Ok((**hit).clone());
     }
 
-    let p_k = polynomial_block_from_order(centers, effective_order);
-    let z = Arc::new(kernel_constraint_nullspace_from_matrix(p_k.view()).map_err(|err| {
-        if degraded {
-            BasisError::InvalidInput(format!(
-                "Duchon degraded from order={:?} to order={:?} due to insufficient centers ({} in dim={}); order={:?} construction then failed: {err}",
-                order,
-                effective_order,
-                centers.nrows(),
-                centers.ncols(),
-                effective_order,
-            ))
-        } else {
-            err
-        }
-    })?);
+    let z = Arc::new(duchon_constraint_nullspace_of_centered(
+        centers,
+        order,
+        effective_order,
+    )?);
 
     if let Some(hit) = cache.constraint_nullspace.map.get(&key) {
         return Ok((**hit).clone());
@@ -243,6 +211,75 @@ pub(crate) fn kernel_constraint_nullspace(
     }
 
     Ok((*z).clone())
+}
+
+/// Translation-invariant side-condition frame (#1375, mirroring the #1269 tp
+/// fix). `Z = null(P(centers)ᵀ)` is mathematically invariant to subtracting a
+/// per-axis constant from `centers` (the polynomial columns `{1, x, …}` and
+/// `{1, x − x̄, …}` span the same space, so `P` has the same column space and
+/// `P^T` the same null space), but the RRQR pivoting that materialises `Z`
+/// drifts under a large coordinate mean — landing on a different orthonormal
+/// basis of the SAME null space, which would desync the design `K·Z` from the
+/// penalty `ZᵀK_CC Z` across a covariate translation. Subtract the center-cloud
+/// per-axis mean so the factorisation is location-standardized; both a raw and
+/// an already-centered caller then produce bit-identical `Z`. The mean is a
+/// fixed property of the (frozen `UserProvided`) centers, replayed identically
+/// at predict.
+fn mean_centered_centers(centers: ArrayView2<'_, f64>) -> Array2<f64> {
+    let k = centers.nrows();
+    let d = centers.ncols();
+    let center_mean: Vec<f64> = (0..d)
+        .map(|c| centers.column(c).sum() / (k.max(1) as f64))
+        .collect();
+    let mut centers_centered = centers.to_owned();
+    for c in 0..d {
+        let mu = center_mean[c];
+        centers_centered.column_mut(c).mapv_inplace(|v| v - mu);
+    }
+    centers_centered
+}
+
+/// Factor `Z = null(P(centers)ᵀ)` for centers that are ALREADY mean-centered,
+/// wrapping a degradation context around the failure when the effective order
+/// was auto-degraded below the requested one.
+fn duchon_constraint_nullspace_of_centered(
+    centers: ArrayView2<'_, f64>,
+    order: DuchonNullspaceOrder,
+    effective_order: DuchonNullspaceOrder,
+) -> Result<Array2<f64>, BasisError> {
+    let degraded = effective_order != order;
+    let p_k = polynomial_block_from_order(centers, effective_order);
+    kernel_constraint_nullspace_from_matrix(p_k.view()).map_err(|err| {
+        if degraded {
+            BasisError::InvalidInput(format!(
+                "Duchon degraded from order={:?} to order={:?} due to insufficient centers ({} in dim={}); order={:?} construction then failed: {err}",
+                order,
+                effective_order,
+                centers.nrows(),
+                centers.ncols(),
+                effective_order,
+            ))
+        } else {
+            err
+        }
+    })
+}
+
+/// Cache-free canonical Duchon kernel-constraint null space: the SAME
+/// degrade → mean-center → RRQR construction the cached design path uses.
+/// Every consumer of a Duchon `Z` outside the workspace-cached design builder
+/// (e.g. the FFI derivative jets, which must be the exact column-for-column
+/// derivative of the forward design) must route through this one construction;
+/// re-deriving `Z` without the centering lands on a different orthonormal
+/// basis of the same null space and silently desyncs the jet's frame from the
+/// design's.
+pub fn duchon_kernel_constraint_nullspace(
+    centers: ArrayView2<'_, f64>,
+    order: DuchonNullspaceOrder,
+) -> Result<Array2<f64>, BasisError> {
+    let effective_order = duchon_effective_nullspace_order(centers, order);
+    let centers_centered = mean_centered_centers(centers);
+    duchon_constraint_nullspace_of_centered(centers_centered.view(), order, effective_order)
 }
 
 pub(crate) fn thin_plate_kernel_constraint_nullspace(

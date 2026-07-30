@@ -2673,7 +2673,7 @@ fn duchon_basis_with_jet<'py>(
         ));
     }
 
-    let requested_nullspace = duchon_nullspace_from_m(m);
+    let requested_nullspace = duchon_nullspace_order_from_m(m);
     let spec = DuchonBasisSpec {
         radial_reparam: None,
         center_strategy: CenterStrategy::UserProvided(ctrs.to_owned()),
@@ -3325,7 +3325,7 @@ fn duchon_operator_penalties<'py>(
         None,
         None,
         0.0,
-        duchon_nullspace_from_m(m),
+        duchon_nullspace_order_from_m(m),
         None,
         None,
     )
@@ -6912,7 +6912,7 @@ fn build_latent_duchon_design(
     // kernel-existence / CPD guards apply, matching every other Duchon entry
     // point which routes through this same resolver.
     let (resolved_nullspace, resolved_power) =
-        resolve_duchon_orders(latent_dim, duchon_nullspace_from_m(m), 0, None);
+        resolve_duchon_orders(latent_dim, duchon_nullspace_order_from_m(m), 0, None);
     // When the optimizer retracts the latent coordinates on a PERIODIC manifold
     // (circle / torus), the decoder MUST be a function on that manifold:
     // Φ(θ) = Φ(θ + period) per circular axis, with the kernel distance measured
@@ -6994,7 +6994,7 @@ fn build_latent_duchon_periodic_jet(
     // ambient latent dimension, so the kernel smoothness order and the Bernoulli
     // order (`user_m = duchon_p_from_nullspace_order(resolved_nullspace)`) match.
     let (resolved_nullspace, resolved_power) =
-        resolve_duchon_orders(latent_dim, duchon_nullspace_from_m(m), 0, None);
+        resolve_duchon_orders(latent_dim, duchon_nullspace_order_from_m(m), 0, None);
 
     if latent_dim == 1 {
         // 1-D circle: the forward routes to `build_periodic_duchon_basis_1d`

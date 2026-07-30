@@ -3527,7 +3527,7 @@ fn duchon_position_radial_reparam_streamed(
         periodic: None,
         length_scale: None,
         power: 0.0,
-        nullspace_order: duchon_nullspace_from_m(m),
+        nullspace_order: duchon_nullspace_order_from_m(m),
         identifiability: SpatialIdentifiability::None,
         aniso_log_scales: None,
         operator_penalties: Default::default(),
@@ -3575,7 +3575,7 @@ fn duchon_basis_1d_impl_with_radial_reparam(
         periodic: None,
         length_scale: None,
         power: 0.0,
-        nullspace_order: duchon_nullspace_from_m(m),
+        nullspace_order: duchon_nullspace_order_from_m(m),
         identifiability: SpatialIdentifiability::None,
         aniso_log_scales: None,
         operator_penalties: Default::default(),
@@ -3623,7 +3623,7 @@ fn duchon_basis_1d_derivative_impl_with_radial_reparam(
         t,
         centers,
         0.0,
-        duchon_nullspace_from_m(m),
+        duchon_nullspace_order_from_m(m),
         periodic,
         if periodic { period } else { None },
         radial_reparam.map(|v| v.view()),
@@ -4236,85 +4236,6 @@ fn periodic_knot_domain(knots: ArrayView1<'_, f64>) -> Result<(f64, f64, usize),
         ));
     }
     Ok((left, right, knots.len() - 1))
-}
-
-fn duchon_nullspace_from_m(m: usize) -> DuchonNullspaceOrder {
-    match m {
-        1 => DuchonNullspaceOrder::Zero,
-        2 => DuchonNullspaceOrder::Linear,
-        other => DuchonNullspaceOrder::Degree(other - 1),
-    }
-}
-
-fn pyffi_duchon_previous_nullspace_order(order: DuchonNullspaceOrder) -> DuchonNullspaceOrder {
-    match order {
-        DuchonNullspaceOrder::Zero => DuchonNullspaceOrder::Zero,
-        DuchonNullspaceOrder::Linear => DuchonNullspaceOrder::Zero,
-        DuchonNullspaceOrder::Degree(2) => DuchonNullspaceOrder::Linear,
-        DuchonNullspaceOrder::Degree(k) => DuchonNullspaceOrder::Degree(k - 1),
-    }
-}
-
-fn pyffi_duchon_polynomial_block(
-    points: ArrayView2<'_, f64>,
-    order: DuchonNullspaceOrder,
-) -> Array2<f64> {
-    let n_rows = points.nrows();
-    let dim = points.ncols();
-    match order {
-        DuchonNullspaceOrder::Zero => Array2::<f64>::ones((n_rows, 1)),
-        DuchonNullspaceOrder::Linear => {
-            let mut poly = Array2::<f64>::zeros((n_rows, dim + 1));
-            poly.column_mut(0).fill(1.0);
-            for axis in 0..dim {
-                poly.column_mut(axis + 1).assign(&points.column(axis));
-            }
-            poly
-        }
-        DuchonNullspaceOrder::Degree(degree) => {
-            let exponents = monomial_exponents(dim, degree);
-            let mut poly = Array2::<f64>::zeros((n_rows, exponents.len()));
-            for (col, alpha) in exponents.iter().enumerate() {
-                for row in 0..n_rows {
-                    let mut value = 1.0;
-                    for axis in 0..dim {
-                        let exp = alpha[axis];
-                        if exp != 0 {
-                            value *= points[[row, axis]].powi(exp as i32);
-                        }
-                    }
-                    poly[[row, col]] = value;
-                }
-            }
-            poly
-        }
-    }
-}
-
-fn pyffi_duchon_effective_nullspace_order(
-    centers: ArrayView2<'_, f64>,
-    order: DuchonNullspaceOrder,
-) -> DuchonNullspaceOrder {
-    let mut effective = order;
-    while effective != DuchonNullspaceOrder::Zero
-        && centers.nrows() <= pyffi_duchon_polynomial_block(centers, effective).ncols()
-    {
-        effective = pyffi_duchon_previous_nullspace_order(effective);
-    }
-    effective
-}
-
-fn pyffi_duchon_kernel_constraint_nullspace(
-    centers: ArrayView2<'_, f64>,
-    order: DuchonNullspaceOrder,
-) -> Result<Array2<f64>, String> {
-    let polynomial_block = pyffi_duchon_polynomial_block(centers, order);
-    gam::linalg::faer_ndarray::rrqr_nullspace_basis(
-        &polynomial_block,
-        gam::linalg::faer_ndarray::default_rrqr_rank_alpha(),
-    )
-    .map(|(null_basis, _)| null_basis)
-    .map_err(|err| format!("failed to build Duchon kernel constraint nullspace: {err}"))
 }
 
 /// Parse the ``nullspace_order`` keyword on the primitive Duchon bindings.

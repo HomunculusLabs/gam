@@ -83,11 +83,16 @@ fn latent_input_location_jet(
             // would diverge from the design.
             let dim_ambient = centers.ncols();
             let (resolved_nullspace, resolved_power) =
-                resolve_duchon_orders(dim_ambient, duchon_nullspace_from_m(m), 0, None);
+                resolve_duchon_orders(dim_ambient, duchon_nullspace_order_from_m(m), 0, None);
             let effective_nullspace =
-                pyffi_duchon_effective_nullspace_order(centers, resolved_nullspace);
+                duchon_effective_nullspace_order(centers, resolved_nullspace);
+            // The canonical construction (shared with the forward design via
+            // `build_duchon_basis`) mean-centers the centers before the RRQR
+            // (#1375), so the jet's `Z` is bit-identical to the design's `Z`
+            // instead of a pivot-drifted basis of the same null space.
             let radial_transform =
-                pyffi_duchon_kernel_constraint_nullspace(centers, effective_nullspace)?;
+                duchon_kernel_constraint_nullspace(centers, effective_nullspace)
+                    .map_err(|err| err.to_string())?;
             // The radial derivative differentiates the exact forward Green's
             // function: same scale-free pure Duchon spectrum (`length_scale =
             // None`, the resolved spectral power `s`), not a hard-coded

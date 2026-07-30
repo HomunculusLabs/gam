@@ -33,7 +33,7 @@ use std::path::PathBuf;
 
 use crate::basis::{
     BSplineBasisSpec, BSplineKnotSpec, CenterStrategy, ConstantCurvatureBasisSpec, DuchonBasisSpec,
-    DuchonNullspaceOrder, MaternBasisSpec, MaternLengthScale, MaternNu, MeasureJetBasisSpec,
+    MaternBasisSpec, MaternLengthScale, MaternNu, MeasureJetBasisSpec,
     OneDimensionalBoundary, SphereMethod, SphericalSplineBasisSpec, ThinPlateBasisSpec,
 };
 use crate::smooth::{
@@ -385,19 +385,11 @@ fn apply_duchon(
     symbol: &str,
 ) -> Result<(), String> {
     apply_center_strategy(&mut spec.center_strategy, descriptor, symbol)?;
-    // `m` is the spline ORDER: it selects the polynomial nullspace the smoother
-    // leaves unpenalized (1 -> mean only, 2 -> mean + linear, k -> degree k-1),
-    // mirroring `duchon_nullspace_from_m` in gam-pyffi. It is NOT the spectral
-    // power. The Riesz spectral power `s` is a separate descriptor key.
     if let Some(m_val) = descriptor.get("m") {
         let m = m_val.as_u64().filter(|m| *m >= 1).ok_or_else(|| {
             format!("smooths[{symbol:?}].m must be a positive integer (spline order)")
         })?;
-        spec.nullspace_order = match m {
-            1 => DuchonNullspaceOrder::Zero,
-            2 => DuchonNullspaceOrder::Linear,
-            other => DuchonNullspaceOrder::Degree((other - 1) as usize),
-        };
+        spec.nullspace_order = crate::basis::duchon_nullspace_order_from_m(m as usize);
     }
     if let Some(s_val) = descriptor.get("s").or_else(|| descriptor.get("power")) {
         let s = s_val

@@ -585,6 +585,19 @@ pub(crate) const DUCHON_COLLISION_TAYLOR_REL: f64 = 1e-4;
 /// bit-identical to the pre-profile behavior.
 pub(crate) const RADIAL_PROFILE_MIN_PAIRS: usize = 16_384;
 
+/// The one m→order mapping: `m` is the spline ORDER knob (mgcv's `m`), and it
+/// selects the polynomial null space the smoother leaves unpenalized
+/// (1 → mean only, 2 → mean + linear, k → total degree ≤ k−1). It is NOT the
+/// spectral power. Inverse of [`duchon_p_from_nullspace_order`].
+#[inline(always)]
+pub fn duchon_nullspace_order_from_m(m: usize) -> DuchonNullspaceOrder {
+    match m {
+        1 => DuchonNullspaceOrder::Zero,
+        2 => DuchonNullspaceOrder::Linear,
+        other => DuchonNullspaceOrder::Degree(other - 1),
+    }
+}
+
 #[inline(always)]
 pub(crate) fn duchon_p_from_nullspace_order(order: DuchonNullspaceOrder) -> usize {
     match order {
@@ -607,7 +620,7 @@ pub(crate) fn duchon_p_from_nullspace_order(order: DuchonNullspaceOrder) -> usiz
 /// center is consumed by the side constraints and the design collapses to the
 /// polynomial tail. Degrade to the highest lower null-space order with at
 /// least one constrained kernel column.
-pub(crate) fn duchon_effective_nullspace_order(
+pub fn duchon_effective_nullspace_order(
     centers: ArrayView2<'_, f64>,
     order: DuchonNullspaceOrder,
 ) -> DuchonNullspaceOrder {
