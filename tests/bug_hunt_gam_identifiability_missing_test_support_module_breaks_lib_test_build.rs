@@ -135,16 +135,69 @@ fn gam_identifiability_declares_test_support_if_referenced() {
     );
 
     let mut referencing: Vec<PathBuf> = Vec::new();
+    let mut importing_from_gam_problem: Vec<PathBuf> = Vec::new();
     for path in &sources {
         let src = fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
         if references_crate_test_support(&src) {
             referencing.push(path.clone());
         }
+        if src.contains("gam_problem::test_support") {
+            importing_from_gam_problem.push(path.clone());
+        }
     }
 
     if referencing.is_empty() {
-        // Nothing references `crate::test_support`; nothing to enforce.
+        // The subject MOVED; it did not vanish. `audit.rs` and `canonical.rs`
+        // now import `spec_from_dense` / `spec_from_dense_with_priority` from
+        // `gam_problem::test_support` rather than a crate-root
+        // `crate::test_support`, so the original needle matches nothing.
+        //
+        // Returning green on that absence retires the guard silently -- a
+        // conjunct satisfied by an absence, which is indistinguishable from a
+        // guard that ran and held. Enforce the SAME invariant at the helpers'
+        // new home instead: the E0432 that aborts the workspace lib-test phase
+        // is identical whether the unresolved module is `crate::test_support`
+        // or `gam_problem::test_support`.
+        assert!(
+            !importing_from_gam_problem.is_empty(),
+            "this guard has lost its subject entirely: no gam-identifiability \
+             source under {} references `crate::test_support` OR \
+             `gam_problem::test_support`. The shared test helpers it protects are \
+             gone -- re-point this guard at their new home or delete it, but do \
+             not leave it returning green on an absence.",
+            src_dir.display()
+        );
+
+        let host_src = Path::new(manifest).join("crates/gam-problem/src");
+        let host_module = host_src.join("test_support.rs");
+        assert!(
+            host_module.is_file(),
+            "gam-identifiability imports `gam_problem::test_support` in {} source \
+             file(s) (e.g. {}) but {} does not exist, so \
+             `cargo test -p gam-identifiability --no-run` fails with E0432 and the \
+             workspace lib-test phase aborts.",
+            importing_from_gam_problem.len(),
+            importing_from_gam_problem[0].display(),
+            host_module.display()
+        );
+
+        let host_lib_path = host_src.join("lib.rs");
+        let host_lib = fs::read_to_string(&host_lib_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", host_lib_path.display()));
+        assert!(
+            host_lib.lines().any(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("pub mod test_support")
+                    || trimmed.starts_with("pub(crate) mod test_support")
+                    || trimmed.starts_with("mod test_support")
+            }),
+            "gam-problem carries {} but {} does not declare the module, so \
+             `gam_problem::test_support` is unresolvable from gam-identifiability's \
+             test build (E0432).",
+            host_module.display(),
+            host_lib_path.display()
+        );
         return;
     }
 
