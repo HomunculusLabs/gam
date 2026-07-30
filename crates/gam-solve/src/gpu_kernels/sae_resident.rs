@@ -10,7 +10,8 @@
 use ndarray::Array1;
 
 use crate::gpu_kernels::arrow_schur::{
-    ArrowSchurGpuFailure, solve_arrow_newton_step, solve_arrow_newton_step_dense_reference,
+    ArrowSchurGpuFailure, ArrowSchurGpuSolution, solve_arrow_newton_step,
+    solve_arrow_newton_step_dense_reference,
 };
 use gam_problem::ExecutionPath;
 
@@ -667,11 +668,7 @@ impl DeviceResidentArrowWorkspace {
         // ridge reuses the resident factors and uploads only the `O(n·d + p)`
         // gradient. The CPU reference path keeps re-factoring per iterate so the
         // parity harness compares residency against a fully independent solve.
-        let mut resident_frame: Option<(
-            f64,
-            f64,
-            crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle,
-        )> = None;
+        let mut frames = SharedFrameState::default();
         let mut current_apply = accounting.apply(self, mode, &t, &beta);
         let mut current_objective =
             self.objective_from_apply(&base, half_target_energy, &current_apply, &t, &beta);
@@ -701,64 +698,14 @@ impl DeviceResidentArrowWorkspace {
             let solve_start = std::time::Instant::now();
             let solution = match mode {
                 InnerSolveMode::DeviceResident => {
-                    // Rebuild the resident frame only when the LM ridge changed; an
-                    // unchanged ridge reuses the resident factors. A build failure
-                    // becomes a Solve error so the LM-escalation arm below grows the
-                    // ridge and retries, identical to a per-iterate solve failure.
-                    let frame_matches = resident_frame
-                        .as_ref()
-                        .is_some_and(|(rt, rb, _)| *rt == ridge_t && *rb == ridge_beta);
-                    let mut frame_build_error: Option<DeviceResidentArrowError> = None;
-                    if !frame_matches {
-                        resident_frame = None;
-                        match crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle::new(
-                            &residual, ridge_t, ridge_beta,
-                        ) {
-                            Ok(frame) => {
-                                // Building a resident frame creates the device
-                                // stream/handles and runs the per-row POTRF +
-                                // border Schur factor once; record both so a
-                                // silent decline (no rebuild ⇒ no factor count)
-                                // is visible in the telemetry.
-                                gam_gpu::profile::telemetry_record_handle_creation(
-                                    self.context_id(),
-                                );
-                                gam_gpu::profile::telemetry_record_factorization();
-                                gam_gpu::profile::telemetry_record_h2d(self.frame_upload_bytes());
-                                resident_frame = Some((ridge_t, ridge_beta, frame));
-                            }
-                            Err(err) => frame_build_error = Some(map_gpu_error(err)),
-                        }
-                    }
-                    match resident_frame.as_ref() {
-                        Some((_, _, frame)) => {
-                            // Per-iterate gradient r(z) = (g_t rows, g_β), extracted
-                            // from the residual system the frame was built to match.
-                            let mut g_t = Vec::with_capacity(n * d);
-                            for row in &residual.rows {
-                                for &v in row.gt.iter() {
-                                    g_t.push(v);
-                                }
-                            }
-                            let g_beta: Vec<f64> = residual.gb.iter().copied().collect();
-                            // The resident solve uploads only the O(n·d + p)
-                            // gradient, launches the per-iterate solve kernel, and
-                            // reads back only δ.
-                            let grad_bytes =
-                                (g_t.len() + g_beta.len()) * std::mem::size_of::<f64>();
-                            gam_gpu::profile::telemetry_record_h2d(grad_bytes);
-                            gam_gpu::profile::telemetry_record_kernel_launch();
-                            gam_gpu::profile::telemetry_record_d2h(
-                                (n * d + p) * std::mem::size_of::<f64>(),
-                            );
-                            frame.solve_gradient(&g_t, &g_beta).map_err(map_gpu_error)
-                        }
-                        None => Err(frame_build_error.unwrap_or_else(|| {
-                            DeviceResidentArrowError::Solve {
-                                reason: "SAE resident frame build declined".to_string(),
-                            }
-                        })),
-                    }
+                    // #2539: one two-level frame for the whole loop. An unchanged
+                    // ridge reuses the ridge-keyed factors and uploads only the
+                    // `O(n·d + p)` gradient; a ridge change re-factors from the
+                    // resident base blocks instead of re-packing and re-uploading
+                    // the slabs. Either failure becomes a Solve error so the
+                    // LM-escalation arm below grows the ridge and retries,
+                    // identical to a per-iterate solve failure.
+                    self.resident_step(&mut frames, &residual, ridge_t, ridge_beta)
                 }
                 InnerSolveMode::DeviceReupload => {
                     // #1017 residency baseline: re-upload D/B/g and re-factor on
@@ -1022,6 +969,8 @@ impl DeviceResidentArrowWorkspace {
         Ok(OuterSequenceOutcome {
             outers: outcomes,
             frame_builds: shared.frame_builds,
+            base_builds: shared.base_builds,
+            base_refactors: shared.base_refactors,
         })
     }
 
@@ -1072,52 +1021,7 @@ impl DeviceResidentArrowWorkspace {
             let solve_start = std::time::Instant::now();
             let solution = match mode {
                 InnerSolveMode::DeviceResident => {
-                    let frame_matches = shared
-                        .frame
-                        .as_ref()
-                        .is_some_and(|(rt, rb, _)| *rt == ridge_t && *rb == ridge_beta);
-                    let mut frame_build_error: Option<DeviceResidentArrowError> = None;
-                    if !frame_matches {
-                        shared.frame = None;
-                        match crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle::new(
-                            &residual, ridge_t, ridge_beta,
-                        ) {
-                            Ok(frame) => {
-                                shared.frame_builds += 1;
-                                gam_gpu::profile::telemetry_record_handle_creation(
-                                    self.context_id(),
-                                );
-                                gam_gpu::profile::telemetry_record_factorization();
-                                gam_gpu::profile::telemetry_record_h2d(self.frame_upload_bytes());
-                                shared.frame = Some((ridge_t, ridge_beta, frame));
-                            }
-                            Err(err) => frame_build_error = Some(map_gpu_error(err)),
-                        }
-                    }
-                    match shared.frame.as_ref() {
-                        Some((_, _, frame)) => {
-                            let mut g_t = Vec::with_capacity(n * d);
-                            for row in &residual.rows {
-                                for &v in row.gt.iter() {
-                                    g_t.push(v);
-                                }
-                            }
-                            let g_beta: Vec<f64> = residual.gb.iter().copied().collect();
-                            let grad_bytes =
-                                (g_t.len() + g_beta.len()) * std::mem::size_of::<f64>();
-                            gam_gpu::profile::telemetry_record_h2d(grad_bytes);
-                            gam_gpu::profile::telemetry_record_kernel_launch();
-                            gam_gpu::profile::telemetry_record_d2h(
-                                (n * d + p) * std::mem::size_of::<f64>(),
-                            );
-                            frame.solve_gradient(&g_t, &g_beta).map_err(map_gpu_error)
-                        }
-                        None => Err(frame_build_error.unwrap_or_else(|| {
-                            DeviceResidentArrowError::Solve {
-                                reason: "SAE resident frame build declined".to_string(),
-                            }
-                        })),
-                    }
+                    self.resident_step(shared, &residual, ridge_t, ridge_beta)
                 }
                 InnerSolveMode::DeviceReupload => {
                     solve_arrow_newton_step(&residual, ridge_t, ridge_beta).map_err(map_gpu_error)
@@ -1578,6 +1482,137 @@ impl DeviceResidentArrowWorkspace {
             sys.gb[r] = apply.border_beta[r] + apply.cross_beta[r] - base.gb[r];
         }
     }
+
+    /// One per-iterate device-resident Newton solve through the two-level frame
+    /// (#2539).
+    ///
+    /// `residual` carries the CONSTANT Hessian blocks and the iterate's gradient:
+    /// `residual_into` above writes `gt`/`gb` only, so `H_tt`/`H_tβ`/`H_ββ` are
+    /// fixed for the whole loop and nothing about them needs to cross the bus more
+    /// than once. Routing:
+    ///
+    ///   * ridge unchanged since the last solve — reuse the ridge-keyed frame's
+    ///     factors and upload only the `O(n·d + p)` gradient. Byte-identical to
+    ///     the pre-#2539 behaviour, and it is the whole no-rejection trajectory.
+    ///   * ridge changed — re-factor from the already-resident base blocks. Only
+    ///     the two ridge scalars, the re-diagonalised `D` (`n·d·d`) and the
+    ///     gradient cross to the device, in place of a host re-pack plus a full
+    ///     re-upload of the `n·d×p` slabs.
+    ///   * base frame unavailable (no CUDA, or a matrix-free `H_ββ`/`H_tβ`
+    ///     operator the dense device path does not admit) — fall back to the
+    ///     pre-#2539 ridge-keyed rebuild, so a host that cannot hold the base
+    ///     blocks behaves exactly as it did.
+    ///
+    /// A numerical refusal (`RidgeBumpRequired` / `SchurFactorFailed`) is returned
+    /// rather than retried on the other arm: the caller's LM arm grows the ridge
+    /// and retries, which is what a failed frame build already did.
+    fn resident_step(
+        &self,
+        frames: &mut SharedFrameState,
+        residual: &ArrowSchurSystem,
+        ridge_t: f64,
+        ridge_beta: f64,
+    ) -> Result<ArrowSchurGpuSolution, DeviceResidentArrowError> {
+        let n = self.shape.n;
+        let d = self.shape.d;
+        let p = self.shape.p;
+        let mut g_t = Vec::with_capacity(n * d);
+        for row in &residual.rows {
+            for &v in row.gt.iter() {
+                g_t.push(v);
+            }
+        }
+        let g_beta: Vec<f64> = residual.gb.iter().copied().collect();
+        let gradient_bytes = (g_t.len() + g_beta.len()) * std::mem::size_of::<f64>();
+        let readback_bytes = (n * d + p) * std::mem::size_of::<f64>();
+
+        let keyed_matches = frames
+            .keyed
+            .as_ref()
+            .is_some_and(|(rt, rb, _)| *rt == ridge_t && *rb == ridge_beta);
+        if keyed_matches {
+            match frames.keyed.as_ref() {
+                Some((_, _, frame)) => {
+                    gam_gpu::profile::telemetry_record_h2d(gradient_bytes);
+                    gam_gpu::profile::telemetry_record_kernel_launch();
+                    gam_gpu::profile::telemetry_record_d2h(readback_bytes);
+                    return frame.solve_gradient(&g_t, &g_beta).map_err(map_gpu_error);
+                }
+                None => {
+                    return Err(DeviceResidentArrowError::Solve {
+                        reason: "SAE two-level frame lost its ridge-keyed frame after matching it"
+                            .to_string(),
+                    });
+                }
+            }
+        }
+
+        // The ridge moved. Take the base-resident refactor when it is available.
+        if !frames.base_declined && frames.base.is_none() {
+            match crate::gpu_kernels::arrow_schur::ResidentBaseArrowFrameHandle::new(residual) {
+                Ok(base) => {
+                    gam_gpu::profile::telemetry_record_handle_creation(self.context_id());
+                    gam_gpu::profile::telemetry_record_h2d(self.frame_upload_bytes());
+                    frames.base_builds += 1;
+                    frames.base = Some(base);
+                }
+                Err(err) => {
+                    frames.base_declined = true;
+                    note_resident_engagement(
+                        false,
+                        &format!(
+                            "SAE base-resident frame declined; ridge changes fall back to the \
+                             host rebuild: {}",
+                            map_gpu_error(err)
+                        ),
+                    );
+                }
+            }
+        }
+        if let Some(base) = frames.base.as_ref() {
+            // Drop the stale ridge-keyed factors: they are keyed on a ridge this
+            // loop has left, and holding them would keep their slabs on the
+            // device for a key that no longer matches.
+            frames.keyed = None;
+            frames.base_refactors += 1;
+            gam_gpu::profile::telemetry_record_factorization();
+            gam_gpu::profile::telemetry_record_h2d(
+                gradient_bytes + n * d * d * std::mem::size_of::<f64>(),
+            );
+            gam_gpu::profile::telemetry_record_kernel_launch();
+            gam_gpu::profile::telemetry_record_d2h(readback_bytes);
+            return base
+                .refactor_and_solve_with_gradient(ridge_t, ridge_beta, &g_t, &g_beta)
+                .map_err(map_gpu_error);
+        }
+
+        // No base frame on this host: the pre-#2539 ridge-keyed rebuild.
+        frames.keyed = None;
+        match crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle::new(
+            residual, ridge_t, ridge_beta,
+        ) {
+            Ok(frame) => {
+                frames.frame_builds += 1;
+                gam_gpu::profile::telemetry_record_handle_creation(self.context_id());
+                gam_gpu::profile::telemetry_record_factorization();
+                gam_gpu::profile::telemetry_record_h2d(self.frame_upload_bytes());
+                frames.keyed = Some((ridge_t, ridge_beta, frame));
+            }
+            Err(err) => return Err(map_gpu_error(err)),
+        }
+        match frames.keyed.as_ref() {
+            Some((_, _, frame)) => {
+                gam_gpu::profile::telemetry_record_h2d(gradient_bytes);
+                gam_gpu::profile::telemetry_record_kernel_launch();
+                gam_gpu::profile::telemetry_record_d2h(readback_bytes);
+                frame.solve_gradient(&g_t, &g_beta).map_err(map_gpu_error)
+            }
+            None => Err(DeviceResidentArrowError::Solve {
+                reason: "SAE resident frame build reported success without storing a frame"
+                    .to_string(),
+            }),
+        }
+    }
 }
 
 /// Upper bound on the number of row chunks the host operator apply folds. Fixes
@@ -1736,20 +1771,53 @@ pub struct DeviceResidentInnerOutcome {
 pub struct OuterSequenceOutcome {
     pub outers: Vec<DeviceResidentInnerOutcome>,
     pub frame_builds: usize,
+    /// #2539: base-block uploads across the sweep — at most `1`, because the
+    /// ridge-independent `D`/`B`/`H_ββ` blocks are the same system for every
+    /// outer at an unchanged operator.
+    pub base_builds: usize,
+    /// #2539: on-device re-factors from the resident base blocks. This is the
+    /// count that used to arrive as `frame_builds`: before the two-level split a
+    /// ridge change re-packed the blocks on the host and re-uploaded them, so
+    /// every one of these was a full rebuild.
+    pub base_refactors: usize,
 }
 
-/// Across-outer resident-frame state carried through a `device_fit_outer_sequence`
-/// sweep. Holds the single resident frame (keyed by its `(ridge_t, ridge_beta)`)
-/// reused across outers at an unchanged operator, plus the running count of frame
-/// (re)builds so the caller can assert the across-outer amortization fired.
+/// The two-level device frame carried through one inner Newton loop — and, for
+/// `device_fit_outer_sequence`, across every outer in the sweep (#1017
+/// deliverable 3, #2539).
+///
+/// `keyed` is the original ridge-keyed frame: one `(ridge_t, ridge_beta)` baked
+/// into its factors, serving cheap no-POTRF re-solves for a fresh gradient at
+/// that same ridge. `base` holds the ridge-INDEPENDENT blocks (`D = H_tt`,
+/// `B = H_tβ`, border `H_ββ`) resident and re-factors on-device at any ridge, so
+/// the `n·d×p` slabs cross the bus once per loop rather than once per ridge
+/// change.
+///
+/// The counters are integers, not timings, which is what makes the amortization
+/// falsifiable on a contended card:
+///
+///   * `frame_builds` — host re-pack + full re-upload frame builds. `1` on an
+///     all-accept trajectory at `initial_ridge_t = 0`, and after #2539 it should
+///     stay `1` even when the loop rejects, because a ridge change no longer
+///     routes here.
+///   * `base_builds` — base-block uploads. At most `1` per loop.
+///   * `base_refactors` — on-device re-factors from the resident base blocks.
+///     This is the count that used to be `frame_builds`.
 #[derive(Default)]
 struct SharedFrameState {
-    frame: Option<(
+    keyed: Option<(
         f64,
         f64,
         crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle,
     )>,
+    base: Option<crate::gpu_kernels::arrow_schur::ResidentBaseArrowFrameHandle>,
+    /// Set once the base frame construction has been refused on this host, so a
+    /// loop that cannot hold the base blocks stops re-attempting them on every
+    /// ridge change and takes the pre-#2539 rebuild instead.
+    base_declined: bool,
     frame_builds: usize,
+    base_builds: usize,
+    base_refactors: usize,
 }
 
 /// One-shot engagement report for the #1017 production resident inner-step seam,

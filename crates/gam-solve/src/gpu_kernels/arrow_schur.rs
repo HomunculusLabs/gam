@@ -623,6 +623,45 @@ impl ResidentBaseArrowFrameHandle {
             self.inner.refactor_and_solve(ridge_t, ridge_beta)
         }
     }
+
+    /// As [`Self::refactor_and_solve`], but solves for a FRESH gradient instead
+    /// of the one captured at construction (#2539).
+    ///
+    /// [`Self::refactor_and_solve`] was built for the LM ridge ladder, whose
+    /// trials re-solve the SAME system at escalating ridges, so it reads the
+    /// resident `g_t`/`g_β`. An inner Newton moves the gradient every iterate
+    /// while the Hessian blocks stay fixed, so it needs this variant: `g_t`
+    /// (`n·d` doubles) and `g_β` (`k`) cross to the device in place of the
+    /// device-to-device copy of the resident gradient, and the `D`/`B`/`H_ββ`
+    /// blocks stay resident exactly as they do there. Everything after the
+    /// gradient sourcing — POTRF/TRSM/Schur/back-substitution and their order —
+    /// is the same code, so a solve here is bit-identical to a
+    /// [`ResidentArrowFrameHandle`] rebuild at the same ridge and gradient.
+    pub fn refactor_and_solve_with_gradient(
+        &self,
+        ridge_t: f64,
+        ridge_beta: f64,
+        g_t: &[f64],
+        g_beta: &[f64],
+    ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            if ridge_t.is_nan()
+                || ridge_beta.is_nan()
+                || g_t.iter().chain(g_beta).any(|v| !v.is_finite())
+            {
+                return Err(ArrowSchurGpuFailure::SchurFactorFailed {
+                    reason: "ridge or gradient entry is not finite".to_string(),
+                });
+            }
+            Err(ArrowSchurGpuFailure::Unavailable)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.inner
+                .refactor_and_solve_with_gradient(ridge_t, ridge_beta, g_t, g_beta)
+        }
+    }
 }
 
 /// Build a GPU-backed Schur matvec closure for CPU-driven PCG at K ≥ 5000.
@@ -4575,6 +4614,53 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             ridge_t: f64,
             ridge_beta: f64,
         ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
+            self.refactor_and_solve_from(ridge_t, ridge_beta, None)
+        }
+
+        /// #2539: as [`Self::refactor_and_solve`] but against a caller-supplied
+        /// gradient. The inner Newton this serves moves the gradient every
+        /// iterate while `D`/`B`/`H_ββ` stay fixed, so the resident gradient the
+        /// LM ladder solves is stale for it.
+        pub(super) fn refactor_and_solve_with_gradient(
+            &self,
+            ridge_t: f64,
+            ridge_beta: f64,
+            g_t: &[f64],
+            g_beta: &[f64],
+        ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
+            if g_t.len() != self.n * self.d {
+                return Err(ArrowSchurGpuFailure::SchurFactorFailed {
+                    reason: format!(
+                        "base-resident frame row gradient length mismatch: got {}, expected {}",
+                        g_t.len(),
+                        self.n * self.d
+                    ),
+                });
+            }
+            if g_beta.len() != self.k {
+                return Err(ArrowSchurGpuFailure::SchurFactorFailed {
+                    reason: format!(
+                        "base-resident frame border gradient length mismatch: got {}, expected {}",
+                        g_beta.len(),
+                        self.k
+                    ),
+                });
+            }
+            self.refactor_and_solve_from(ridge_t, ridge_beta, Some((g_t, g_beta)))
+        }
+
+        /// The shared ridge-dependent factor+solve. `gradient` selects where the
+        /// right-hand side comes from: `None` reads the resident `g_t_dev` /
+        /// `gb_host` captured at construction (the LM ridge ladder), `Some`
+        /// uploads a fresh one (an inner Newton iterate). Every step after the
+        /// gradient sourcing is common, so the two callers are bit-identical at
+        /// equal ridge and equal gradient.
+        fn refactor_and_solve_from(
+            &self,
+            ridge_t: f64,
+            ridge_beta: f64,
+            gradient: Option<(&[f64], &[f64])>,
+        ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
             if ridge_t.is_nan() || ridge_beta.is_nan() {
                 return Err(ArrowSchurGpuFailure::SchurFactorFailed {
                     reason: "ridge is NaN".to_string(),
@@ -4619,14 +4705,25 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
             trsm_batched_lower_inplace(&self.blas, &self.stream, d, n, k, &l_dev, &mut y_dev)?;
 
-            // ----- u_i = L_i^{-1} g_i on a device copy of the resident base g_t.
-            let mut u_dev = self
-                .stream
-                .alloc_zeros::<f64>(n * d)
-                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-            self.stream
-                .memcpy_dtod(&self.g_t_dev, &mut u_dev)
-                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            // ----- u_i = L_i^{-1} g_i. The resident base g_t is a device-to-device
+            // copy; a caller-supplied gradient is the one extra H2D (`n·d`
+            // doubles, the same order as the ridged `D` above).
+            let mut u_dev = match gradient {
+                Some((g_t, _)) => self
+                    .stream
+                    .clone_htod(g_t)
+                    .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
+                None => {
+                    let mut resident = self
+                        .stream
+                        .alloc_zeros::<f64>(n * d)
+                        .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+                    self.stream
+                        .memcpy_dtod(&self.g_t_dev, &mut resident)
+                        .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+                    resident
+                }
+            };
             trsm_batched_lower_inplace(&self.blas, &self.stream, d, n, 1, &l_dev, &mut u_dev)?;
 
             // ----- Schur S = (H_ββ + ridge_β I) − Σ Y_iᵀ Y_i.
@@ -4648,7 +4745,10 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                 &mut schur_dev,
                 k + 1,
             )?;
-            let rhs_init: Vec<f64> = self.gb_host.iter().map(|v| -v).collect();
+            let rhs_init: Vec<f64> = match gradient {
+                Some((_, g_beta)) => g_beta.iter().map(|v| -v).collect(),
+                None => self.gb_host.iter().map(|v| -v).collect(),
+            };
             let mut rhs_dev = self
                 .stream
                 .clone_htod(&rhs_init)
