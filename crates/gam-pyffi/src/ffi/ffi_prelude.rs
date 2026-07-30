@@ -13,7 +13,7 @@ pub(crate) use faer::Side;
 pub(crate) use gam::terms::basis::create_duchon_basis_1d_derivative_dense;
 
 pub(crate) use gam::solver::estimate::{
-    BlockRole, EstimationError, ExternalOptimOptions,
+    EstimationError, ExternalOptimOptions,
     optimize_external_designwith_heuristic_lambdas,
 };
 

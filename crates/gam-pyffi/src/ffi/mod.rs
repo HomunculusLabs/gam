@@ -12,6 +12,5 @@ pub(crate) mod ffi_prelude;
 
 pub(crate) mod ffi_errors;
 
-pub(crate) mod python_literal;
 
 pub(crate) mod finite_safe_json;

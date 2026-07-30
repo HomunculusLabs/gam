@@ -17,12 +17,7 @@
 // paths and the Python surface is a thin wrapper (SPEC rule 8): every number is
 // computed in Rust, the FFI only marshals arrays and dicts.
 
-use gam::terms::sae::null_sampler::{
-    AuditSparseRoute,
-    LiveAmplitudeMoments,
-    live_amplitude_moments,
-    resample_sparse_architecture_null,
-};
+use gam::terms::sae::null_sampler::{AuditSparseRoute, resample_sparse_architecture_null};
 
 
 fn residuals_from_sparse_sae(
