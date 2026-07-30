@@ -43,6 +43,27 @@
   `link(type=probit)`/`link(type=cloglog)` fits on separated data mint through
   the automatic Firth rescue the README promises.
 
+- **A saturating binomial row is evaluated instead of refused (#2273).** Two
+  numerical defects in the non-canonical observed-information path aborted fits
+  over quantities that are perfectly representable. First, the Bernoulli variance
+  was rebuilt from `μ` alone: a bounded inverse link reaches `μ == 1.0` exactly
+  far inside its tail — cloglog at `η ≈ 3.62`, probit at `η ≈ 8.29` — so
+  `1.0 − μ` is a hard zero while the true complement is still `1e-17`, `1e-45`,
+  `1e-120`, and `V = μ(1−μ)` collapsed to zero with the whole
+  observed-information jet dividing by it. The cancellation-free complement
+  already existed and the sibling Fisher path already used it; it now reaches the
+  variance and the working residual too. Second, the closed forms for the
+  observed weight and its first two `η`-derivatives divided by `φV²`, `φV³` and
+  `φV⁴`, and `V⁴` underflows to zero at `V = 2.9e-84` — so a `d²W/dη²` of
+  `3.87e-75` came back NaN. Those expansions are replaced by the Leibniz
+  recurrence the third derivative already used one order higher, which divides by
+  `φV` once per order and never forms a power of `V`; the two orders of one object
+  are now one recurrence instead of two independently-maintained expansions.
+  Checked against two oracles that share no code with the engine: the exact
+  identity that a cloglog row with `y = 0` has `−ℓ = e^η`, so its observed
+  information and every `η`-derivative are exactly `e^η`; and mpmath at 220
+  decimal digits for `y = 1`.
+
 - **A flat-valley verdict now requires a flat valley (#2613).** The outer
   cost-stall guard — the mgcv-style stop that halts a smoothing-parameter search
   once the criterion stops improving over six consecutive **accepted** steps —
