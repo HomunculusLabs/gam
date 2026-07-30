@@ -57,7 +57,33 @@ pub fn resolve_gam_binary(compiled_in: Option<&str>) -> PathBuf {
 
     // Fallback: scan the well-known profile directories under the workspace
     // target dir and return the first that exists.
-    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
+    // WORKSPACE root, not this crate's. `CARGO_MANIFEST_DIR` here is
+    // `crates/gam-test-support`, so the previous form scanned
+    // `crates/gam-test-support/target/{release-dev,release,debug}/gam` -- a
+    // directory that cannot exist under a shared workspace target dir. The whole
+    // fallback was dead, and the "hand back a concrete path so the spawn error
+    // names it" line below then named a path nothing could ever have produced,
+    // which is worse than naming nothing: it sends the reader to look in the
+    // wrong tree.
+    //
+    // Two `parent()` hops reach the workspace root from `crates/<name>`. This is
+    // a last resort: the `current_exe()` branch above finds the binary whenever
+    // the tests were built in-tree, and that is the branch the archive lane
+    // actually takes.
+    //
+    // Deliberately NOT reading `CARGO_TARGET_DIR`: the ban scanner rejects
+    // `env::var_os`, and it is right to. A relocated target dir would make this
+    // scan miss -- but `current_exe()` above is derived from where the test
+    // binary REALLY IS, so it already handles relocation, and it handles it
+    // without a hidden environment dependency. Env-gated behaviour in a resolver
+    // is how you get a path that works on one machine and not another with no
+    // diagnostic saying which.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target = manifest
+        .parent()
+        .and_then(Path::parent)
+        .map(|workspace_root| workspace_root.join("target"))
+        .unwrap_or_else(|| manifest.join("target"));
     for profile in ["release-dev", "release", "debug"] {
         let candidate = target.join(profile).join("gam");
         if candidate.is_file() {
