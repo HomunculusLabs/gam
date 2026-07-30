@@ -103,6 +103,37 @@ impl std::fmt::Display for InnerConvergenceTerminalState {
     }
 }
 
+/// Render the projected-KKT comparison in the inner-refusal message.
+///
+/// The pair used to be printed as `|r|_inf={:?} against tol={:?}`, which on the
+/// common path renders `|r|_inf=None against tol=None` — **two absences laid out
+/// as a comparison**. That reads as a measurement that was taken and came out
+/// unfavourable, and it is the opposite: nothing was measured. It cost real time
+/// on gam#2600, where the phrase sat in every refusal while the actual decision
+/// variables (which the `[{terminal}]` block does carry) said something quite
+/// different. A missing value has to say it is missing, and which side is
+/// missing, because "the solver emitted no KKT diagnostic on this path" and "the
+/// residual is 4e5x its tolerance" call for different next steps.
+fn render_projected_kkt_comparison(residual: Option<f64>, tol: Option<f64>) -> String {
+    match (residual, tol) {
+        (Some(residual), Some(tol)) => format!(
+            "projected KKT residual |r|_inf={residual:.6e} against tol={tol:.6e}"
+        ),
+        (Some(residual), None) => format!(
+            "projected KKT residual |r|_inf={residual:.6e}; \
+             no stationarity tolerance was recorded to compare it against"
+        ),
+        (None, Some(tol)) => format!(
+            "no projected KKT residual was recorded; the stationarity tolerance \
+             on this path was {tol:.6e}"
+        ),
+        (None, None) => "this solver path emits no typed projected-KKT diagnostic, so \
+                         neither a residual nor a tolerance was recorded — read the \
+                         terminal decision variables above instead"
+            .to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Error)]
 pub enum CustomFamilyError {
     #[error("custom-family invalid input in {context}: {reason}")]
@@ -139,7 +170,7 @@ pub enum CustomFamilyError {
     /// what happened removes the need to guess.
     #[error(
         "custom-family inner solve did not converge after {cycles} cycle(s) [{}] \
-         (projected KKT residual |r|_inf={kkt_residual:?} against tol={kkt_tol:?}); \
+         ({}); \
          refusing to expose profile objective derivatives for theta_dim={theta_dim} \
          (rho_dim={rho_dim}, psi_dim={psi_dim}). The analytic outer gradient/Hessian \
          require the inner KKT equation F_beta(beta, theta)=0; returning a value with \
@@ -148,7 +179,8 @@ pub enum CustomFamilyError {
         match terminal {
             Some(state) => state.to_string(),
             None => "no terminal convergence state was recorded".to_string(),
-        }
+        },
+        render_projected_kkt_comparison(*kkt_residual, *kkt_tol)
     )]
     InnerSolveNotConverged {
         cycles: usize,
@@ -263,6 +295,65 @@ impl From<CustomFamilyError> for String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_absences_are_not_reported_as_a_comparison_2600() {
+        // `|r|_inf=None against tol=None` reads as a measurement that came out
+        // badly. Nothing was measured, and the message has to say which side is
+        // missing: "no diagnostic on this path" and "the residual is 4e5x tol"
+        // call for different next steps.
+        let absent = CustomFamilyError::InnerSolveNotConverged {
+            cycles: 53,
+            terminal: None,
+            kkt_residual: None,
+            kkt_tol: None,
+            theta_dim: 3,
+            rho_dim: 3,
+            psi_dim: 0,
+        };
+        let msg = absent.to_string();
+        assert!(
+            !msg.contains("None against"),
+            "two absences must not be laid out as a comparison: {msg}"
+        );
+        assert!(
+            msg.contains("emits no typed projected-KKT diagnostic"),
+            "the message must name the absence as an absence: {msg}"
+        );
+
+        // With both present it still reads as the comparison it is.
+        let measured = CustomFamilyError::InnerSolveNotConverged {
+            cycles: 53,
+            terminal: None,
+            kkt_residual: Some(1.906428e0),
+            kkt_tol: Some(8.307952e-4),
+            theta_dim: 3,
+            rho_dim: 3,
+            psi_dim: 0,
+        };
+        let msg = measured.to_string();
+        assert!(
+            msg.contains("|r|_inf=1.906428e0 against tol=8.307952e-4"),
+            "a real comparison must still render as one: {msg}"
+        );
+
+        // A half-present pair names WHICH half is missing rather than printing
+        // `Some(..)`/`None` and leaving the reader to work it out.
+        let half = CustomFamilyError::InnerSolveNotConverged {
+            cycles: 7,
+            terminal: None,
+            kkt_residual: Some(4.069e3),
+            kkt_tol: None,
+            theta_dim: 1,
+            rho_dim: 1,
+            psi_dim: 0,
+        };
+        let msg = half.to_string();
+        assert!(
+            msg.contains("no stationarity tolerance was recorded"),
+            "a half-present pair must name the missing half: {msg}"
+        );
+    }
 
     #[test]
     fn joint_newton_terminal_state_reports_the_best_residual_not_only_the_last_2600() {
