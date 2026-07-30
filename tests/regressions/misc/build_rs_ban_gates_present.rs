@@ -37,7 +37,11 @@ pub(crate) fn required_ban_gates() -> Vec<String> {
         format!("find_{}_param_open", "fn"),
         format!("find_{}_param_open(&sig_text)", "fn"),
         // Fuzzy comment-block cue detector.
-        format!("comment_block_has_{}{}", "defer", "ral_cue"),
+        // Fuzzy comment-PROSE detector: the relabel/paraphrase evasion gate. The
+        // block-level `comment_block_has_deferral_cue` went with the rest of the
+        // implementation-audit complex in f3ffc54e5; this line-level detector is
+        // its surviving successor and is what `scan_for_owed_work_prose` calls.
+        format!("comment_text_is_{}{}", "owed_", "work"),
         // Self-tampering guard: forbids disabling or neutering the gates.
         format!("forbid_build_rs_{}", "self_tampering"),
         // The unconditional terminal hard exit that makes any offense fatal.

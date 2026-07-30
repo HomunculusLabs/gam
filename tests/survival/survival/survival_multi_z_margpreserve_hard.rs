@@ -327,8 +327,45 @@ fn survival_multi_z_near_degenerate_full_one_tiny_eigenvalue() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Bitwise scalar reduction (K=1, Diagonal[1.0]).
+// 4. Scalar reduction (K=1, Diagonal[1.0]), to a few ulps.
+//
+// The reduction is an identity over the reals, not over IEEE-754.
+// `marginal_slope_preserving_scale` squares the probit scale once and applies
+// it to the quadratic form of the *raw* slopes (the diagonal quadratic form
+// accumulates `coefficient * slope * slope`), so production evaluates
+// `fl(fl(p*p) * fl(s*s))` while the scalar identity below folds the scale into
+// the slope first and evaluates `fl(fl(p*s) * fl(p*s))`. Same real number, up
+// to an ulp apart, so `to_bits()` equality would pin the association order
+// rather than the reduction. The production representation policy is
+// deliberate, so the reduction is pinned to a few-ulp bound instead.
+//
+// `magnitude` is the size of the largest intermediates the reference sums, so
+// a cancelling total is still held to the accuracy its inputs allow.
 // ---------------------------------------------------------------------------
+const SCALAR_REDUCTION_ULPS: f64 = 8.0;
+
+fn ulp_of(value: f64) -> f64 {
+    let magnitude = value.abs();
+    if !magnitude.is_finite() || magnitude == 0.0 {
+        return f64::from_bits(1);
+    }
+    let next = f64::from_bits(magnitude.to_bits() + 1);
+    if next.is_finite() {
+        next - magnitude
+    } else {
+        magnitude - f64::from_bits(magnitude.to_bits() - 1)
+    }
+}
+
+fn assert_scalar_reduction(got: f64, expected: f64, magnitude: f64, context: &str) {
+    let difference = (got - expected).abs();
+    let tolerance = SCALAR_REDUCTION_ULPS * ulp_of(magnitude.abs().max(expected.abs()));
+    assert!(
+        difference <= tolerance,
+        "{context}: got={got:.17e} expected={expected:.17e} |diff|={difference:.3e} exceeds \
+         the {SCALAR_REDUCTION_ULPS}-ulp scalar-reduction tolerance {tolerance:.3e}"
+    );
+}
 
 #[test]
 fn survival_multi_z_k1_eta_bitwise_matches_scalar() {
@@ -342,11 +379,13 @@ fn survival_multi_z_k1_eta_bitwise_matches_scalar() {
         let eta = survival_marginal_slope_vector_eta(q, &[z], &[slope], &covariance, probit_scale)
             .expect("eta");
         let observed = probit_scale * slope;
-        let scalar = q * (1.0 + observed * observed).sqrt() + observed * z;
-        assert_eq!(
-            eta.to_bits(),
-            scalar.to_bits(),
-            "seed={seed} eta={eta:.17e} scalar={scalar:.17e} (q={q} z={z} slope={slope} ps={probit_scale})"
+        let c = (1.0 + observed * observed).sqrt();
+        let scalar = q * c + observed * z;
+        assert_scalar_reduction(
+            eta,
+            scalar,
+            (q * c).abs() + (observed * z).abs(),
+            &format!("seed={seed} (q={q} z={z} slope={slope} ps={probit_scale})"),
         );
     }
 }

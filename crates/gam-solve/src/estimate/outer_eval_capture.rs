@@ -326,7 +326,7 @@ pub fn record_outer_selected_mode(
 /// Emitters consult this before building the evidence they would hand to
 /// [`record_outer_selected_mode`], so an unarmed fit pays a thread-local read
 /// rather than a coefficient-vector clone on every outer evaluation.
-pub fn outer_gradient_fd_capture_armed() -> bool {
+pub fn outer_gradient_audit_capture_armed() -> bool {
     FD_CAPTURE.with(|capture| {
         capture
             .borrow()
