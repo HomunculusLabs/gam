@@ -75,7 +75,7 @@ gam fit train.csv 'Surv(entry, exit, event) ~ s(age) + bmi' \
 | `--time-degree N`, `--time-num-internal-knots N`, `--time-smooth-lambda VALUE` | I-spline time basis controls (defaults `3`, `8`, `1e-2`). |
 | `--threshold-time-k N`, `--sigma-time-k N` | Enable time-varying threshold or scale tensor blocks. |
 | `--threshold-time-degree N`, `--sigma-time-degree N` | B-spline degree for the time margin of the threshold / log-sigma tensors (default `3`). |
-| `--survival-time-anchor VALUE` | Anchor time for the survival location-scale baseline. |
+| `--survival-time-anchor VALUE` | Centering anchor for the baseline time basis, in the data's own time units, honored by every survival likelihood. Omit it to let the fit choose: the robust interior median exit for `marginal-slope` and for any genuinely left-truncated dataset (any row entering above the time origin), the earliest entry age otherwise. Re-centering is an exact affine reparameterization of the baseline offset, so this picks the frame the smoothing selection sees, not the model. Also settable as `survival_time_anchor` in a `--request` document and as `survival_time_anchor=` in `gamfit.fit`. |
 | `--ridge-lambda VALUE` | Survival solver ridge regularization (default `1e-6`). |
 | `--pilot-subsample-threshold N` | Row count above which spatial length-scale optimization uses a pilot subsample (default `10000`). |
 | `--logslope-formula RHS`, `--z-column COLUMN` | Marginal-slope score-effect model. |

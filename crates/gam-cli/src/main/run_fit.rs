@@ -124,6 +124,10 @@ fn fit_request_document_from_fit_args(
         // `None` (flag unset) flows through so the Surv() seam resolves the one
         // canonical default; `Some(mode)` is the explicit request (#2301).
         survival_likelihood: args.survival_likelihood.clone(),
+        // The baseline time-basis anchor is part of the scientific model
+        // configuration this document is supposed to carry in full — the flag
+        // declares a conflict with `--request` on exactly that premise (#2631).
+        survival_time_anchor: args.survival_time_anchor,
         threshold_time_degree: Some(args.threshold_time_degree),
         threshold_time_k: args.threshold_time_k,
         time_basis: Some(args.time_basis.clone()),

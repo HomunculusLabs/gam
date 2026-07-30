@@ -293,7 +293,10 @@ pub(crate) struct FitArgs {
     /// transformation for Surv() formulas.
     #[arg(long = "survival-likelihood", value_parser = crate::config_resolve::parse_survival_likelihood_cli)]
     pub(crate) survival_likelihood: Option<String>,
-    /// Optional anchor time for survival location-scale mode.
+    /// Centering anchor for the baseline time basis, in the data's own time
+    /// units. Honored by every survival likelihood. Omit to let the fit choose:
+    /// the robust interior median exit for marginal-slope and for any genuinely
+    /// left-truncated dataset, the earliest entry age otherwise.
     #[arg(long = "survival-time-anchor", value_parser = parse_nonnegative_f64_cli)]
     pub(crate) survival_time_anchor: Option<f64>,
     /// Baseline target for transformation survival mode.

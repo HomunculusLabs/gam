@@ -284,6 +284,105 @@ fn materialized_survival_time_basis_carries_the_left_truncated_anchor_2470() {
     );
 }
 
+/// A left-truncated `Surv(...)` fixture whose earliest entry (0.5) and median
+/// exit (3.0) are far apart, so which anchor a path chose is unambiguous.
+fn left_truncated_survival_dataset() -> gam_data::EncodedDataset {
+    let td = tempdir().expect("tempdir");
+    let data_path = td.path().join("left_truncated_anchor_2631.csv");
+    fs::write(
+        &data_path,
+        "entry,exit,event,x\n\
+         0.5,1.0,1,-0.8\n\
+         0.5,2.0,0,0.4\n\
+         0.5,3.0,1,-0.2\n\
+         0.5,4.0,1,0.7\n\
+         0.5,5.0,0,0.1\n",
+    )
+    .expect("write left-truncated csv");
+    load_dataset_projected(
+        &data_path,
+        &[
+            "entry".to_string(),
+            "exit".to_string(),
+            "event".to_string(),
+            "x".to_string(),
+        ],
+    )
+    .expect("load left-truncated dataset")
+}
+
+/// #2631: an explicit `survival_time_anchor` must reach the fit through
+/// `FitConfig`, for EVERY likelihood mode the materializer can build.
+///
+/// This is the half of the divergence that was invisible from the engine side.
+/// The anchor override used to exist only as the CLI's `--survival-time-anchor`,
+/// read by the CLI's own copy of the anchor rule — so on the CLI's *default*
+/// (transformation / Weibull) route, which delegates to `fit_from_formula`, the
+/// flag was parsed, validated, and then dropped on the floor. There was no
+/// `FitConfig` field for it to arrive in.
+///
+/// The override is honored verbatim even where the default would have been the
+/// robust median exit (3.0 here): naming the anchor is overriding the
+/// conditioning heuristic on purpose.
+#[test]
+fn explicit_survival_time_anchor_reaches_the_materialized_fit_2631() {
+    let data = left_truncated_survival_dataset();
+    const EXPLICIT: f64 = 1.25;
+    for mode in ["transformation", "weibull", "location-scale", "latent"] {
+        let mut config = FitConfig::default();
+        config.survival_likelihood = Some(mode.to_string());
+        config.survival_time_anchor = Some(EXPLICIT);
+        if mode == "latent" {
+            // Latent hazard-window families require a non-linear scalar baseline.
+            config.baseline_target = "weibull".to_string();
+            config.frailty = crate::survival::lognormal_kernel::FrailtySpec::HazardMultiplier {
+                scale: crate::survival::lognormal_kernel::FrailtyScale::Learned {
+                    initial_sigma: 0.5,
+                },
+                loading: crate::survival::lognormal_kernel::HazardLoading::Full,
+            };
+        }
+        let materialized = materialize("Surv(entry, exit, event) ~ x", &data, &config)
+            .unwrap_or_else(|error| panic!("{mode} should materialize: {error}"));
+        let carried = materialized
+            .survival_time_basis
+            .unwrap_or_else(|| panic!("{mode} must carry its realised time basis"));
+        assert!(
+            (carried.anchor - EXPLICIT).abs() < 1e-12,
+            "{mode} must center at the explicit anchor {EXPLICIT}, got {}; \
+             the left-truncated default (median exit 3.0) must not win over an \
+             explicit request",
+            carried.anchor
+        );
+    }
+}
+
+/// #2631: the anchor is a survival-only knob, so like `survival_likelihood` it is
+/// refused rather than silently dropped on a non-survival response. The CLI has
+/// always refused `--survival-time-anchor` without a `Surv(...)` response; now
+/// that the knob is model configuration reachable from every front end, the
+/// engine must refuse it identically or the two surfaces disagree again — this
+/// time about which configurations are legal.
+#[test]
+fn survival_time_anchor_rejected_on_nonsurvival_response_2631() {
+    let data = nonsurvival_gaussian_dataset();
+    let mut config = FitConfig::default();
+    config.survival_time_anchor = Some(2.5);
+
+    let err = materialize("time ~ s(x)", &data, &config)
+        .err()
+        .expect("survival_time_anchor on a non-survival response must error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("survival_time_anchor"),
+        "error must name the offending knob, got: {msg}"
+    );
+    assert!(
+        msg.contains("Surv(...)"),
+        "error must point the user at the Surv(...) wrapper, got: {msg}"
+    );
+}
+
 /// The carrier is survival-only: a standard fit has no survival time basis to
 /// record, and must not fabricate one.
 #[test]

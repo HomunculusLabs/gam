@@ -256,6 +256,7 @@ def _build_fit_payload(
     transformation_normal: bool | None,
     transformation_normal_stage1: Any | None = None,
     survival_likelihood: str | None,
+    survival_time_anchor: float | None,
     baseline_target: str | None,
     baseline_scale: float | None,
     baseline_shape: float | None,
@@ -290,6 +291,7 @@ def _build_fit_payload(
         "transformation_normal": transformation_normal,
         "ctn_stage1": ctn_stage1_recipe.to_rust_recipe() if ctn_stage1_recipe else None,
         "survival_likelihood": survival_likelihood,
+        "survival_time_anchor": survival_time_anchor,
         "baseline_target": baseline_target,
         "baseline_scale": baseline_scale,
         "baseline_shape": baseline_shape,
@@ -702,6 +704,7 @@ def fit(
     transformation_normal: bool | None = ...,
     transformation_normal_stage1: CtnStage1 | Mapping[str, Any] | None = ...,
     survival_likelihood: str | None = ...,
+    survival_time_anchor: float | None = ...,
     baseline_target: str | None = ...,
     baseline_scale: float | None = ...,
     baseline_shape: float | None = ...,
@@ -744,6 +747,7 @@ def fit(
     transformation_normal: bool | None = ...,
     transformation_normal_stage1: CtnStage1 | Mapping[str, Any] | None = ...,
     survival_likelihood: str | None = ...,
+    survival_time_anchor: float | None = ...,
     baseline_target: str | None = ...,
     baseline_scale: float | None = ...,
     baseline_shape: float | None = ...,
@@ -785,6 +789,7 @@ def fit(
     transformation_normal: bool | None = None,
     transformation_normal_stage1: CtnStage1 | Mapping[str, Any] | None = None,
     survival_likelihood: str | None = None,
+    survival_time_anchor: float | None = None,
     baseline_target: str | None = None,
     baseline_scale: float | None = None,
     baseline_shape: float | None = None,
@@ -875,6 +880,16 @@ def fit(
         ``"latent"``, or ``"latent-binary"``. When omitted, every frontend
         resolves the same canonical default, ``"transformation"``.
         Corresponds to ``--survival-likelihood``.
+    survival_time_anchor:
+        Explicit centering anchor for the survival baseline time basis, in the
+        data's own time units. When omitted the fit picks it from the likelihood
+        mode and the truncation shape of the data: the robust interior median
+        exit for ``"marginal-slope"`` and for any genuinely left-truncated
+        dataset (any row entering above the time origin), the earliest entry age
+        otherwise. Re-centering is an exact affine reparameterization of the
+        baseline offset, so this selects the frame the smoothing selection sees
+        rather than the model being fitted. Corresponds to
+        ``--survival-time-anchor``.
     baseline_target:
         Parametric baseline target for survival models. One of ``"linear"``,
         ``"weibull"``, ``"gompertz"``, ``"gompertz-makeham"``. Corresponds to
@@ -1091,6 +1106,7 @@ def fit(
             ("transformation_normal", transformation_normal),
             ("transformation_normal_stage1", transformation_normal_stage1),
             ("survival_likelihood", survival_likelihood),
+            ("survival_time_anchor", survival_time_anchor),
             ("baseline_target", baseline_target),
             ("baseline_scale", baseline_scale),
             ("baseline_shape", baseline_shape),
@@ -1161,6 +1177,7 @@ def fit(
         transformation_normal=transformation_normal,
         transformation_normal_stage1=transformation_normal_stage1,
         survival_likelihood=survival_likelihood,
+        survival_time_anchor=survival_time_anchor,
         baseline_target=baseline_target,
         baseline_scale=baseline_scale,
         baseline_shape=baseline_shape,
@@ -1253,6 +1270,7 @@ def fit_array(
     transformation_normal: bool | None = None,
     transformation_normal_stage1: CtnStage1 | Mapping[str, Any] | None = None,
     survival_likelihood: str | None = None,
+    survival_time_anchor: float | None = None,
     baseline_target: str | None = None,
     baseline_scale: float | None = None,
     baseline_shape: float | None = None,
@@ -1318,6 +1336,7 @@ def fit_array(
         transformation_normal=transformation_normal,
         transformation_normal_stage1=transformation_normal_stage1,
         survival_likelihood=survival_likelihood,
+        survival_time_anchor=survival_time_anchor,
         baseline_target=baseline_target,
         baseline_scale=baseline_scale,
         baseline_shape=baseline_shape,
@@ -1536,6 +1555,7 @@ def validate_formula(
     transformation_normal: bool | None = None,
     transformation_normal_stage1: CtnStage1 | Mapping[str, Any] | None = None,
     survival_likelihood: str | None = None,
+    survival_time_anchor: float | None = None,
     baseline_target: str | None = None,
     baseline_scale: float | None = None,
     baseline_shape: float | None = None,
@@ -1584,6 +1604,7 @@ def validate_formula(
         transformation_normal=transformation_normal,
         transformation_normal_stage1=transformation_normal_stage1,
         survival_likelihood=survival_likelihood,
+        survival_time_anchor=survival_time_anchor,
         baseline_target=baseline_target,
         baseline_scale=baseline_scale,
         baseline_shape=baseline_shape,
