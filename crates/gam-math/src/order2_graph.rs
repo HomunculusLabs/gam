@@ -599,6 +599,16 @@ impl<'arena, const K: usize> RuntimeJetScalar<'arena> for Order2Graph<'arena, K>
     }
 
     #[inline(always)]
+    fn constant_like(&self, c: f64) -> Self {
+        Self::constant(c, K, self.workspace)
+    }
+
+    #[inline(always)]
+    fn with_value(&self, value: f64) -> Self {
+        self.unary(value, 1.0, 0.0)
+    }
+
+    #[inline(always)]
     fn symmetric_quadratic_form<C: SymmetricQuadraticCoefficients>(
         inputs: &[Self],
         coefficients: &C,
