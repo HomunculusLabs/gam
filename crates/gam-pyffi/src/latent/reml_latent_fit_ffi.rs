@@ -1620,72 +1620,7 @@ fn gaussian_reml_fit_batched_impl(
 ) -> Result<BatchedGaussianRemlResult, String> {
     use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
-    if row_offsets.len() < 2 {
-        return Err("row_offsets must contain at least [0, n]".to_string());
-    }
-    if row_offsets[0] != 0 || row_offsets[row_offsets.len() - 1] != x.nrows() {
-        return Err(format!(
-            "row_offsets must start at 0 and end at X.nrows(); got start={}, end={}, n={}",
-            row_offsets[0],
-            row_offsets[row_offsets.len() - 1],
-            x.nrows()
-        ));
-    }
-    for idx in 0..row_offsets.len() - 1 {
-        if row_offsets[idx] > row_offsets[idx + 1] {
-            return Err("row_offsets must be non-decreasing".to_string());
-        }
-    }
-    if y.nrows() != x.nrows() {
-        return Err(format!(
-            "batched Gaussian REML row mismatch: X has {} rows but Y has {}",
-            x.nrows(),
-            y.nrows()
-        ));
-    }
-    if x.ncols() == 0 || y.ncols() == 0 {
-        return Err("batched Gaussian REML requires non-empty X and Y columns".to_string());
-    }
-    if penalty.nrows() != x.ncols() || penalty.ncols() != x.ncols() {
-        return Err(format!(
-            "penalty shape mismatch: expected {}x{}, got {}x{}",
-            x.ncols(),
-            x.ncols(),
-            penalty.nrows(),
-            penalty.ncols()
-        ));
-    }
-    if let Some(weights) = weights {
-        if weights.len() != x.nrows() {
-            return Err(format!(
-                "weights length mismatch: expected {}, got {}",
-                x.nrows(),
-                weights.len()
-            ));
-        }
-        if weights
-            .iter()
-            .any(|value| !value.is_finite() || *value < 0.0)
-        {
-            return Err(
-                "batched Gaussian REML weights must be finite non-negative values".to_string(),
-            );
-        }
-    }
-    if x.iter()
-        .chain(y.iter())
-        .chain(penalty.iter())
-        .any(|value| !value.is_finite())
-    {
-        return Err("batched Gaussian REML inputs must be finite".to_string());
-    }
-    if let Some(lambda) = init_lambda {
-        if !lambda.is_finite() || lambda <= 0.0 {
-            return Err(format!(
-                "init_lambda must be finite and positive when provided; got {lambda}"
-            ));
-        }
-    }
+    validate_batched_reml_common(x, y, row_offsets, penalty, weights, init_lambda)?;
 
     let batch = row_offsets.len() - 1;
     let p = x.ncols();
