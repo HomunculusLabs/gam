@@ -389,9 +389,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # Every selection is collected below the repository's root
+          # `tests/conftest.py`, so even a narrow population needs the
+          # package's declared test extra. Read that one canonical manifest
+          # instead of maintaining a second dependency list in this workflow.
+          mapfile -t test_requirements < <(
+            PYPROJECT="${GITHUB_WORKSPACE}/pyproject.toml" python - <<'PY'
+          import os
+          from pathlib import Path
+          import tomllib
+
+          document = tomllib.loads(Path(os.environ["PYPROJECT"]).read_text(encoding="utf-8"))
+          for requirement in document["project"]["optional-dependencies"]["test"]:
+              print(requirement)
+          PY
+          )
+          if [[ "${#test_requirements[@]}" -eq 0 ]]; then
+            echo "::error::pyproject.toml declared an empty project.optional-dependencies.test set."
+            exit 1
+          fi
+          python -m pip install "${test_requirements[@]}"
+
           case "$POPULATION_ID" in
             torch)
-              python -m pip install 'pytest>=8'
               # A dedicated index, not an extra index, prevents a CUDA wheel or
               # a same-name package from another index entering this CPU lane.
               python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -405,10 +426,9 @@ jobs:
             slow)
               # `-m slow` is applied after collection, so imports from every
               # test module must be satisfiable even though only marked items
-              # execute. Keep this aligned with the full Python-suite extras.
-              python -m pip install \
-                'pytest>=8' 'numpy>=1.26' 'pandas>=2.0' 'scipy>=1.11' 'pyarrow>=14' \
-                'matplotlib>=3.8' 'scikit-learn>=1.4' 'lifelines>=0.28'
+              # execute. These two are collection-only dependencies outside
+              # the canonical package test extra above.
+              python -m pip install 'scipy>=1.11' 'lifelines>=0.28'
               ;;
             *)
               echo "::error::Population manifest selected unsupported Python id '${POPULATION_ID}'."
