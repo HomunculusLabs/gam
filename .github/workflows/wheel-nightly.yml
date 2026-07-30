@@ -30,6 +30,25 @@ on:
     # compile gate, which is already starved for runners (#2582).
     paths-ignore:
       - 'bench/gha_results/**'
+  # A periodic build that pushes CANNOT cancel.
+  #
+  # The push lane below deliberately cancels superseded builds, on the premise
+  # recorded under concurrency: main has one newest-writer lane, so only the
+  # newest push should spend minutes. That premise no longer holds. Measured
+  # 2026-07-30: pushes to main arrive every 1-3 minutes from a multi-lane fleet
+  # while a manylinux build takes far longer, so EVERY automatic build is
+  # superseded before it finishes -- 19 of the last 20 runs cancelled, zero
+  # successes. A rolling artifact that never rolls is worse than a slow one: the
+  # Python suites, whose only runtime is this wheel, had then gone unmeasured for
+  # over a week -- see gam#2616 and gam#2432.
+  #
+  # Scheduled runs land in a DIFFERENT concurrency group from pushes: push uses
+  # the literal runtime-main, while everything else falls through to the
+  # ref-keyed group. So a push can no longer kill one. That keeps the cheap
+  # rolling behaviour for rapid pushes and still guarantees an artifact exists
+  # on a bounded delay.
+  schedule:
+    - cron: '0 */4 * * *'
   workflow_dispatch:
     inputs:
       build_sha:
@@ -38,7 +57,10 @@ on:
         default: ""
         required: false
 
-# Main has one newest-writer lane, so superseded automatic builds are cancelled.
+# Push builds are cancelled when superseded. NOTE the premise this rests on --
+# that main has one newest-writer lane -- is FALSE under the current fleet, which
+# is why the schedule above exists: it is the lane that actually produces
+# artifacts, and pushes cannot cancel it because it keys a different group.
 # A commissioned build is keyed by the exact commit it promises and is never
 # cancelled. An ordinary empty-input dispatch keeps the existing ref-keyed lane.
 concurrency:
