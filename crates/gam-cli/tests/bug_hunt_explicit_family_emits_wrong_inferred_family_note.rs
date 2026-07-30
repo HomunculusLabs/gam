@@ -36,7 +36,7 @@ fn explicit_family_does_not_emit_wrong_inferred_family_note() {
         .tempfile()
         .expect("temp output path");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_gam"))
+    let output = Command::new(gam_test_support::gam_binary!())
         .arg("fit")
         .arg(fixture)
         .arg("y ~ s(x)")
