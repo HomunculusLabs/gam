@@ -882,6 +882,65 @@ fn cascade_matches_dense_wendland_kernel_solve() {
     );
 }
 
+/// The same fixture as `cascade_matches_dense_wendland_kernel_solve`, gated on
+/// the one property that fixture did not have: **a verdict exists**.
+///
+/// Measured before the bound (#2546, instrumented): the cascade refines
+/// 3 → 4 → 5 on these 240 rows, and the certified 1-D score search at level 5
+/// — m = 507, rank 504 against 237 identifiable directions — passed 40 000 cell
+/// subdivisions with its bracket halving cleanly at every node, having swept 8
+/// of a 58-wide log-λ domain. Levels 3 and 4 each finished in 33–39
+/// subdivisions. Nothing about that is a slow fit: past the data's rank the
+/// profiled residual interpolates, the score is flat by rank deficiency, and a
+/// criterion that admits neither an excluding derivative sign nor an isolable
+/// stationary point is subdivided at every cell the traversal reaches — a cost
+/// exponential in the domain's subdivision depth.
+///
+/// This gate deliberately accepts EITHER outcome. It is not a claim that the
+/// refusal is the right answer for this surface — whether the refinement loop
+/// should stop before it outruns the data's rank is the open capability
+/// question — only that the search returns instead of enumerating. A verdict
+/// that does not exist cannot be read at any test budget.
+#[test]
+fn wendland_fixture_cascade_returns_a_verdict_instead_of_enumerating_lambda() {
+    let n = 240;
+    let (axes, y, w) = sample(2, n, 0.05, 0x1032_0008);
+    let xs = axis_refs(&axes);
+    match fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.5) {
+        Ok(fit) => {
+            assert!(
+                fit.num_levels() >= 3,
+                "a fit must carry at least the initial refinement depth"
+            );
+        }
+        Err(ResidualCascadeError::RemlScoreSearchUndecomposable {
+            columns,
+            rank,
+            identifiable,
+            subdivisions,
+            budget,
+            ..
+        }) => {
+            assert!(
+                subdivisions > budget,
+                "the refusal must report the budget it exceeded, not a smaller count \
+                 ({subdivisions} vs {budget})"
+            );
+            assert!(
+                rank > identifiable,
+                "on this fixture the flat criterion is rank deficiency: {rank} penalized \
+                 modes from {columns} columns against {identifiable} identifiable \
+                 directions. A budget hit at rank <= identifiable would be a DIFFERENT \
+                 cause wearing this refusal, and must be diagnosed rather than accepted"
+            );
+        }
+        Err(other) => panic!(
+            "the cascade must either fit or name why the certified search cannot \
+             decompose the domain; got {other}"
+        ),
+    }
+}
+
 /// Perturb-and-solve posterior samples have mean ĉ and covariance EXACTLY
 /// `σ̂²A⁻¹` in distribution; with 512 deterministic samples the empirical
 /// moments must match the dense-oracle moments within standard Monte-Carlo

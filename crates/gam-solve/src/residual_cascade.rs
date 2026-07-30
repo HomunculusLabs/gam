@@ -753,6 +753,27 @@ pub enum ResidualCascadeError {
         max_score_gap: f64,
         score_resolution: f64,
     },
+    /// The certified 1-D score search could not decompose the λ domain within
+    /// the subdivision budget derived from that domain and the requested
+    /// resolution, so no λ was selected.
+    ///
+    /// Carries the identifiability of the design because that is the cause
+    /// whenever `rank > identifiable`: past the data's own rank the profiled
+    /// residual is an interpolation and the score is flat by rank deficiency
+    /// over whole stretches of λ, where there is no stationary point to isolate
+    /// and no derivative sign to exclude a cell by — so the search subdivides
+    /// every cell it reaches and its cost is exponential in the domain's
+    /// subdivision depth (#2546). `rank <= identifiable` means the budget was
+    /// hit for some other flat-criterion reason and the numbers say so.
+    RemlScoreSearchUndecomposable {
+        columns: usize,
+        rank: usize,
+        identifiable: usize,
+        subdivisions: usize,
+        budget: usize,
+        log_lambda_lo: f64,
+        log_lambda_hi: f64,
+    },
     /// Rounded candidate ordering is wider than its certified comparison
     /// resolution, so no unique representative may be fitted.
     RemlValueOrderingUnresolved {
@@ -804,6 +825,41 @@ impl std::fmt::Display for ResidualCascadeError {
                  [{lo}, {hi}] (maximum score gap {max_score_gap}, score resolution \
                  {score_resolution})"
             ),
+            Self::RemlScoreSearchUndecomposable {
+                columns,
+                rank,
+                identifiable,
+                subdivisions,
+                budget,
+                log_lambda_lo,
+                log_lambda_hi,
+            } => {
+                write!(
+                    f,
+                    "residual cascade: the certified REML score search spent {subdivisions} cell \
+                     subdivisions on log lambda in [{log_lambda_lo}, {log_lambda_hi}] without \
+                     decomposing it, exceeding the budget {budget} derived from that domain and \
+                     the requested resolution"
+                )?;
+                if rank > identifiable {
+                    write!(
+                        f,
+                        "; the design is rank deficient against its data — {rank} penalized Schur \
+                         modes ({columns} columns) against {identifiable} identifiable directions \
+                         — so the profiled residual interpolates and the score is flat by rank \
+                         deficiency, with no stationary point to isolate; refine less, or fix log \
+                         lambda explicitly"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "; the design is identified ({rank} penalized Schur modes from {columns} \
+                         columns against {identifiable} identifiable directions), so the flat \
+                         criterion has some other cause and the budget is reporting it rather \
+                         than diagnosing it"
+                    )
+                }
+            }
             Self::RemlValueOrderingUnresolved {
                 maximum_excess,
                 comparison_resolution,
@@ -3809,9 +3865,35 @@ impl ResidualCascadeDesign {
                 certified_spectrum_max: CERTIFIED_SPECTRUM_MAX,
             },
         )?;
-        let search = affine
-            .maximize_value_ordered(log_lambda_lo, log_lambda_hi, resolution)
-            .map_err(|error| failed(&error))?;
+        // The budget refusal is re-typed here rather than formatted into the
+        // generic computation failure: a nameless refusal at a derived depth
+        // costs a day of triage, and the two numbers that explain it —
+        // `rank` against `n - nullity` — are only available at this seam
+        // (#2546).
+        let search = match affine.maximize_value_ordered(
+            log_lambda_lo,
+            log_lambda_hi,
+            resolution,
+        ) {
+            Ok(search) => search,
+            Err(gam_math::score_opt::ScoreSearchError::SubdivisionBudget {
+                subdivisions,
+                budget,
+                ..
+            }) => {
+                let nullity = self.core.nullity();
+                return Err(ResidualCascadeError::RemlScoreSearchUndecomposable {
+                    columns: self.core.m,
+                    rank: self.core.m - nullity,
+                    identifiable: self.core.y.len().saturating_sub(nullity),
+                    subdivisions,
+                    budget,
+                    log_lambda_lo,
+                    log_lambda_hi,
+                });
+            }
+            Err(error) => return Err(ResidualCascadeError::Computation(failed(&error))),
+        };
         if search.value_certificate.maximum_excess
             > search.value_certificate.comparison_resolution
         {

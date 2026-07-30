@@ -415,6 +415,62 @@ pub enum ScoreSearchError<E> {
         requested_resolution: f64,
         enclosure: DerivativeEnclosure,
     },
+    /// The traversal asked for more cell subdivisions than
+    /// [`subdivision_budget`] allows for this domain and resolution. Reported
+    /// with the cell that was being split when the budget ran out, so the
+    /// caller can see WHERE the criterion stopped being decomposable.
+    SubdivisionBudget {
+        lo: f64,
+        hi: f64,
+        cell_lo: f64,
+        cell_hi: f64,
+        requested_resolution: f64,
+        subdivisions: usize,
+        budget: usize,
+        depth_bound: u32,
+    },
+}
+
+/// Total cell subdivisions a converging certified 1-D search may spend on
+/// `[lo, hi]` at `resolution`.
+///
+/// Two facts set the scale. First, no cell can be halved more than
+/// `D = ceil(log2((hi - lo) / resolution))` times before it is narrower than
+/// `resolution`, where the search already stops with
+/// [`ScoreSearchError::Unresolved`] — so `D` bounds the depth of the
+/// subdivision tree outright. Second, a search that is ISOLATING structure
+/// spends at most `D` subdivisions per cell it finally certifies, because each
+/// one halves the cell it is working in.
+///
+/// So the whole traversal costs at most `D` times the size of the certified
+/// decomposition, and the budget is that product with the decomposition
+/// allowed `2 D` cells — twice as many certified cells as the domain has
+/// resolvable binary levels. Measured on #2546's cascade: every terminating
+/// search on that surface spent 33–39 subdivisions at `D = 32`, i.e. about `D`,
+/// against a budget of `2 D² = 2048`; the non-terminating one passes 40 000
+/// with its bracket still halving cleanly at every node. The margin over the
+/// deepest currently-successful search is ~60x, so the budget is invisible to
+/// every search that converges and is reached in under a second by one that
+/// does not.
+///
+/// A degenerate domain still gets a budget of at least one subdivision: the
+/// bound is a backstop against unbounded breadth, never a refusal of the first
+/// split.
+pub fn subdivision_budget(lo: f64, hi: f64, resolution: f64) -> (usize, u32) {
+    let width = hi - lo;
+    if !(width.is_finite() && width > 0.0 && resolution.is_finite() && resolution > 0.0) {
+        return (1, 0);
+    }
+    let levels = (width / resolution).log2().ceil();
+    let depth_bound = if levels.is_finite() && levels >= 1.0 {
+        // `f64::MANTISSA_DIGITS`-scaled domains cannot exceed the exponent
+        // range, so the cast is saturating in practice and clamped in fact.
+        levels.min(u32::MAX as f64) as u32
+    } else {
+        1
+    };
+    let depth = depth_bound as usize;
+    (2 * depth * depth, depth_bound)
 }
 
 impl<E: fmt::Display> fmt::Display for ScoreSearchError<E> {
@@ -474,6 +530,23 @@ impl<E: fmt::Display> fmt::Display for ScoreSearchError<E> {
             } => write!(
                 f,
                 "score search: stationary structure unresolved on [{lo}, {hi}] at requested resolution {requested_resolution}: {enclosure:?}"
+            ),
+            Self::SubdivisionBudget {
+                lo,
+                hi,
+                cell_lo,
+                cell_hi,
+                requested_resolution,
+                subdivisions,
+                budget,
+                depth_bound,
+            } => write!(
+                f,
+                "score search: {subdivisions} cell subdivisions on [{lo}, {hi}] at requested \
+                 resolution {requested_resolution} exceed the budget {budget} derived from this \
+                 domain's subdivision depth bound {depth_bound}; the criterion is still \
+                 undecomposable at [{cell_lo}, {cell_hi}], so it neither excludes nor isolates \
+                 stationary structure over a region the search can only enumerate"
             ),
         }
     }
@@ -1099,11 +1172,26 @@ fn certified_domain_boundary(
 /// range is intentionally not required to contain a separately rounded scalar
 /// estimate.
 ///
-/// There is no evaluation or subdivision budget.  A successful return means
-/// every stationary interval was excluded, isolated to `resolution`, or proved
-/// score-flat at the local representable value resolution. Any interval that
-/// satisfies none of those conditions produces
+/// A successful return means every stationary interval was excluded, isolated
+/// to `resolution`, or proved score-flat at the local representable value
+/// resolution. Any interval that satisfies none of those conditions produces
 /// [`ScoreSearchError::Unresolved`].
+///
+/// The traversal is bounded by [`subdivision_budget`]. The per-cell resolution
+/// floor bounds the DEPTH of the subdivision and never its BREADTH, and those
+/// are different failures. A criterion that certifies NOTHING bottoms out on the
+/// floor after `D` subdivisions and is already typed
+/// [`ScoreSearchError::Unresolved`]. The unbounded case is the one where cells
+/// DO certify, at widths far above the floor, and there are simply too many of
+/// them: a criterion whose derivative and curvature enclosures both straddle
+/// zero over a wide region excludes no cell by a sign and isolates no root, so
+/// every cell it reaches is split until its score range collapses under the
+/// evaluator's own error — and the leaf count of that tree is exponential in the
+/// depth, 2^32 cells on a 58-wide log-λ domain at `sqrt(eps)` resolution, which
+/// is non-termination rather than slowness (#2546). Exceeding the budget is
+/// [`ScoreSearchError::SubdivisionBudget`], a statement about the CRITERION and
+/// not about the machine: the search was asked to certify more cells than a
+/// converging 1-D decomposition at this resolution consists of.
 pub fn maximize_score_1d<E, Eval, Enclose>(
     lo: f64,
     hi: f64,
@@ -1153,6 +1241,8 @@ where
             (lower_boundary.sample, ScoreOptimumLocation::LowerBoundary)
         };
 
+    let (budget, depth_bound) = subdivision_budget(lo, hi, resolution);
+    let mut subdivisions = 0usize;
     let mut stationary_points = Vec::<StationaryPoint>::new();
     let mut resolution_flat_regions = Vec::<ResolutionFlatRegion>::new();
     let mut terminal_maxima = Vec::<TerminalScoreCandidate>::new();
@@ -1352,6 +1442,19 @@ where
                 enclosure,
             });
         }
+        subdivisions += 1;
+        if subdivisions > budget {
+            return Err(ScoreSearchError::SubdivisionBudget {
+                lo,
+                hi,
+                cell_lo: node.left.sample.x,
+                cell_hi: node.right.sample.x,
+                requested_resolution: resolution,
+                subdivisions,
+                budget,
+                depth_bound,
+            });
+        }
         let middle = evaluate_sample(midpoint, &mut evaluate)?;
         // Right first, then left: the LIFO traversal emits stationary points
         // in ascending x, which makes exact-boundary de-duplication stable.
@@ -1429,8 +1532,9 @@ where
 /// There is no retry cap or acceptance fallback. Each retry contracts the
 /// target by at least one binary subdivision. If the next target is no longer
 /// representable, or the oracle cannot resolve stationary structure at that
-/// finer target, the last complete certificate is returned unchanged so the
-/// caller can issue its domain-specific typed refusal.
+/// finer target, or the finer traversal exceeds its [`subdivision_budget`], the
+/// last complete certificate is returned unchanged so the caller can issue its
+/// domain-specific typed refusal.
 pub fn maximize_score_1d_value_ordered<E, Eval, Enclose>(
     lo: f64,
     hi: f64,
@@ -1483,7 +1587,16 @@ where
             // Preserve the last complete global certificate when the oracle
             // cannot resolve stationary structure at that finer currency; the
             // caller will still reject it if its values remain unordered.
-            Err(ScoreSearchError::Unresolved { .. }) => return Ok(search),
+            //
+            // A retry that exhausts its subdivision budget is the same kind of
+            // outcome and ENDS the loop rather than contracting again: each
+            // retry's budget grows as its target shrinks, so continuing past
+            // one exhaustion would pay a whole traversal per halving down to
+            // the denormal floor — a second unbounded axis (#2546).
+            Err(
+                ScoreSearchError::Unresolved { .. }
+                | ScoreSearchError::SubdivisionBudget { .. },
+            ) => return Ok(search),
             Err(error) => return Err(error),
         }
     }
@@ -3847,6 +3960,136 @@ mod tests {
         )
         .expect_err("a derivative enclosure admitting visible score motion is not flat");
         assert!(matches!(error, ScoreSearchError::Unresolved { .. }));
+    }
+
+    /// BREADTH exhaustion, which is a different failure from the per-cell depth
+    /// floor and was #2546's non-termination.
+    ///
+    /// The oracle's derivative and curvature enclosures always straddle zero, so
+    /// no cell is ever excluded by a sign or isolated as a root; but its score
+    /// range collapses with the cell against a FIXED evaluation error, so every
+    /// cell does terminate — as resolution-flat — once it is narrower than
+    /// `2 * evaluation_error`. That is the regime the cascade is in: cells
+    /// certify, at widths far above `resolution`, and the traversal simply needs
+    /// too many of them. The flat width here is 1e-3 of a 32-wide domain, so the
+    /// decomposition is ~2^15 = 32 768 cells and no cell ever reaches the
+    /// resolution floor — `ScoreSearchError::Unresolved` cannot fire, and
+    /// without a breadth budget nothing else can either.
+    ///
+    /// Contrast `unresolved_nonflat_cell_remains_typed`, whose oracle certifies
+    /// NOTHING at any width: that one bottoms out on the depth floor after `D`
+    /// subdivisions and is already typed. The two are not interchangeable.
+    #[test]
+    fn undecomposable_criterion_exhausts_the_budget_instead_of_enumerating_the_domain() {
+        let lo = 0.0;
+        let hi = 32.0;
+        let resolution = f64::EPSILON.sqrt();
+        let flat_error = 5.0e-4;
+        let (budget, depth_bound) = subdivision_budget(lo, hi, resolution);
+        assert_eq!(depth_bound, 31, "log2(32 / sqrt(eps)) rounds up to 31");
+        assert_eq!(budget, 2 * 31 * 31);
+        let error = maximize_score_1d(
+            lo,
+            hi,
+            resolution,
+            |x| -> Result<_, String> {
+                Ok(ScoreJet {
+                    value: x,
+                    derivative: 0.0,
+                    curvature: 0.0,
+                    third: 0.0,
+                })
+            },
+            |left, right| -> Result<_, String> {
+                Ok(DerivativeEnclosure {
+                    score: ScoreValueEnclosure {
+                        value: ClosedInterval::new(left.x, right.x),
+                        evaluation_error: flat_error,
+                    },
+                    derivative: ClosedInterval::new(-1.0, 1.0),
+                    curvature: ClosedInterval::new(-1.0, 1.0),
+                })
+            },
+        )
+        .expect_err("a decomposition this large must refuse, not enumerate");
+        let ScoreSearchError::SubdivisionBudget {
+            subdivisions,
+            budget: reported_budget,
+            depth_bound: reported_depth,
+            cell_lo,
+            cell_hi,
+            ..
+        } = error
+        else {
+            panic!("expected a subdivision-budget refusal, got {error}");
+        };
+        assert_eq!(subdivisions, budget + 1, "the budget stops the split that exceeds it");
+        assert_eq!(reported_budget, budget);
+        assert_eq!(reported_depth, depth_bound);
+        assert!(
+            cell_hi - cell_lo > 2.0 * flat_error,
+            "the reported cell must be one the search could still have split and \
+             had not yet certified ({cell_lo}, {cell_hi}); a narrower cell would \
+             mean the depth floor, not the breadth budget, was binding"
+        );
+    }
+
+    /// The same budget must be invisible to a search that converges. A strictly
+    /// concave criterion over the same wide domain isolates its stationary point
+    /// in subdivisions proportional to the DEPTH, so the number of criterion
+    /// evaluations stays far below a budget scaled by the depth SQUARED.
+    #[test]
+    fn a_converging_search_stays_far_under_the_subdivision_budget() {
+        let lo = 0.0;
+        let hi = 32.0;
+        let resolution = f64::EPSILON.sqrt();
+        let (budget, depth_bound) = subdivision_budget(lo, hi, resolution);
+        let evaluations = std::cell::Cell::new(0usize);
+        let result = maximize_score_1d(
+            lo,
+            hi,
+            resolution,
+            |x| -> Result<_, String> {
+                evaluations.set(evaluations.get() + 1);
+                let shifted = x - 7.0;
+                Ok(ScoreJet {
+                    value: -shifted * shifted,
+                    derivative: -2.0 * shifted,
+                    curvature: -2.0,
+                    third: 0.0,
+                })
+            },
+            |left, right| -> Result<_, String> {
+                let x = ClosedInterval::new(left.x, right.x);
+                let shifted = x.sub(ClosedInterval::point(7.0));
+                Ok(DerivativeEnclosure {
+                    score: ScoreValueEnclosure {
+                        value: shifted.square().scale(-1.0),
+                        evaluation_error: f64::EPSILON * 1024.0,
+                    },
+                    derivative: shifted.scale(-2.0),
+                    curvature: ClosedInterval::point(-2.0),
+                })
+            },
+        )
+        .expect("a strictly concave criterion is decomposable");
+        let ScoreOptimumLocation::Stationary(index) = result.location else {
+            panic!("expected the interior maximum, got {:?}", result.location);
+        };
+        let bracket = result.stationary_points[index].bracket;
+        assert!(
+            bracket.lo <= 7.0 && bracket.hi >= 7.0,
+            "certified bracket {bracket:?} must contain the planted maximum"
+        );
+        // Every subdivision costs one midpoint evaluation, so the evaluation
+        // count bounds the subdivisions from above.
+        assert!(
+            evaluations.get() < budget / 8,
+            "a converging search used {} evaluations against budget {budget} at depth \
+             bound {depth_bound}; a budget within 8x of a converging search is a \
+             tuning parameter, not a backstop",
+            evaluations.get()
+        );
     }
 
     #[test]
