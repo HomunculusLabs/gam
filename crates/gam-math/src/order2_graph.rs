@@ -831,12 +831,6 @@ impl<'arena, const K: usize> RuntimeJetScalar<'arena> for Order2Graph<'arena, K>
     }
 
     #[inline(always)]
-    fn add_constant(&self, constant: f64, workspace: &'arena Self::Workspace) -> Self {
-        assert!(std::ptr::eq(self.workspace, workspace));
-        self.unary(self.value() + constant, 1.0, 0.0)
-    }
-
-    #[inline(always)]
     fn multiply_add(&self, right: &Self, addend: &Self) -> Self {
         self.assert_compatible(right);
         self.assert_compatible(addend);

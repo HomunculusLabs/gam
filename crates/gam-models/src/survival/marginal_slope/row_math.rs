@@ -1766,7 +1766,7 @@ mod tests {
             S::symmetric_quadratic_form(&vars[3..], covariance, dimension, workspace);
         let validated_variance = validated_vector_variance(variance.value(), inputs.probit_scale)?;
         if validated_variance != variance.value() {
-            variance = variance.add_constant(validated_variance - variance.value(), workspace);
+            variance = variance.add_constant(validated_variance - variance.value());
         }
         rigid_feature_runtime_nll(
             &[

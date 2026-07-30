@@ -528,7 +528,7 @@ fn rust_runtime_expression(expression: &ProgramExpr, leaves: &[Leaf]) -> TokenSt
             let value = rust_runtime_expression(value, leaves);
             quote!({
                 let value = #value;
-                value.add_constant(#scalar, __row_program_workspace)
+                value.add_constant(#scalar)
             })
         }
         ProgramExpr::Add(left, right) => {
@@ -2110,7 +2110,7 @@ mod tests {
             "S:::gam_math::jet_scalar::RuntimeJetScalar<'arena>",
             "letx=(*x).clone();",
             "lety=(*y).clone();",
-            "value.add_constant(shift,__row_program_workspace)",
+            "value.add_constant(shift)",
             "S::constant(0.0,__row_program_dimension,__row_program_workspace,)",
             "letvalue=shifted.clone();",
             "[curved.value()]",

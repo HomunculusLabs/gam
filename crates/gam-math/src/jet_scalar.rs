@@ -663,7 +663,7 @@ pub trait RuntimeJetScalar<'arena>: Clone {
     }
 
     /// Add a primal constant without changing derivative channels.
-    fn add_constant(&self, constant: f64, _workspace: &'arena Self::Workspace) -> Self {
+    fn add_constant(&self, constant: f64) -> Self {
         self.with_value(self.value() + constant)
     }
 
@@ -707,7 +707,7 @@ pub trait RuntimeJetScalar<'arena>: Clone {
             input_shift,
             derivative_stack,
             Self::scale,
-            |value, constant| value.add_constant(constant, workspace),
+            |value, constant| value.add_constant(constant),
             Self::compose_unary,
         )
     }
@@ -727,7 +727,7 @@ pub trait RuntimeJetScalar<'arena>: Clone {
             |value| Self::constant(value, dimension, workspace),
             Self::add,
             Self::scale,
-            |value, constant| value.add_constant(constant, workspace),
+            |value, constant| value.add_constant(constant),
             Self::compose_unary,
         )
     }
@@ -889,14 +889,6 @@ impl<'arena> RuntimeJetScalar<'arena> for RuntimeValue {
     }
 
     #[inline(always)]
-    fn add_constant(&self, constant: f64, &(): &'arena Self::Workspace) -> Self {
-        Self {
-            value: self.value + constant,
-            dimension: self.dimension,
-        }
-    }
-
-    #[inline(always)]
     fn multiply_add(&self, right: &Self, addend: &Self) -> Self {
         self.assert_same_dimension(right);
         self.assert_same_dimension(addend);
@@ -945,7 +937,7 @@ impl<'arena> RuntimeJetScalar<'arena> for RuntimeValue {
             input_shift,
             derivative_stack,
             Self::scale,
-            |value, constant| value.add_constant(constant, workspace),
+            |value, constant| value.add_constant(constant),
             Self::compose_unary,
         )
     }
@@ -1137,7 +1129,7 @@ impl<'arena, S: JetScalar<K>, const K: usize> RuntimeJetScalar<'arena> for Fixed
     }
 
     #[inline(always)]
-    fn add_constant(&self, constant: f64, &(): &'arena Self::Workspace) -> Self {
+    fn add_constant(&self, constant: f64) -> Self {
         Self {
             inner: self.inner.add_constant(constant),
         }
@@ -1902,17 +1894,6 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
             v: value,
             g: gradient,
             h: hessian,
-        }
-    }
-
-    #[inline(always)]
-    fn add_constant(&self, constant: f64, arena: &'arena DynamicJetArena) -> Self {
-        assert!(std::ptr::eq(self.arena, arena));
-        Self {
-            arena,
-            v: self.v + constant,
-            g: self.g,
-            h: self.h,
         }
     }
 
@@ -5643,7 +5624,7 @@ mod tests {
             RuntimeJetScalar::add,
             RuntimeJetScalar::scale,
         );
-        let dynamic_add_direct = dynamic_inputs[0].add_constant(0.65, &arena);
+        let dynamic_add_direct = dynamic_inputs[0].add_constant(0.65);
         let dynamic_add_scalar = dynamic_inputs[0].add(&DynamicOrder2::constant(0.65, K, &arena));
         let dynamic_multiply_add_direct =
             dynamic_inputs[0].multiply_add(&dynamic_inputs[1], &dynamic_inputs[2]);
@@ -5988,7 +5969,7 @@ mod tests {
                 input_shift,
                 derivative_stacks[2],
                 RuntimeJetScalar::scale,
-                |input, constant| input.add_constant(constant, &arena),
+                |input, constant| input.add_constant(constant),
                 RuntimeJetScalar::compose_unary,
             );
             let dynamic_sum_direct = DynamicOrder2::affine_composed_sum(
@@ -6005,7 +5986,7 @@ mod tests {
                 |value| DynamicOrder2::constant(value, K, &arena),
                 RuntimeJetScalar::add,
                 RuntimeJetScalar::scale,
-                |input, constant| input.add_constant(constant, &arena),
+                |input, constant| input.add_constant(constant),
                 RuntimeJetScalar::compose_unary,
             );
             let mut dynamic_lefts = std::array::from_fn(|term| &dynamic_inputs[term]);
