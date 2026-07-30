@@ -109,6 +109,71 @@ pub fn nfree_skip_row_element_touches() -> u64 {
     NFREE_SKIP_ROW_ELEMENT_TOUCHES.load(Ordering::Relaxed)
 }
 
+/// Contract two vectors with a compensated accumulator and an exact product
+/// split, so the result carries ~1 ulp of its own magnitude rather than ~n ulp.
+///
+/// This exists for one contraction: `qb^T (X^T W z)` in the Gaussian
+/// zero-iteration synthesis below, where the #1033 n-free kappa-trial path
+/// recovers the deviance as `z^T W z - 2 qb^T b + qb^T G qb`. The design is
+/// never realized at the trial psi on that path, so the row-wise
+/// `sum w (y - mu)^2` is unavailable and this cancellation is the only route to
+/// the deviance. It is a large one by construction: measured on the #2624
+/// fixture, `z^T W z = 3.13466938668704074e2` against a converged
+/// `D_p = 4.0e-5` -- 7.1 orders.
+///
+/// The reason 1 ulp is worth paying for is that the profiled-Gaussian REML
+/// criterion multiplies the RELATIVE error of `D_p` by `(n - M_p)/2`: its whole
+/// `D_p` dependence is the single term `((n-M_p)/2) * ln(2 pi D_p/(n-M_p))`, so
+/// at n = 600 an error in `D_p` reaches the outer surface 300x magnified. With
+/// the plain contraction `qb^T b` carried 5.00e-12 of run-to-run spread on a
+/// magnitude of 3.1e2 (88 ulp), which is 1.25e-7 RELATIVE to `D_p` and therefore
+/// 3.7e-5 on the criterion -- against a measured 3.79e-5.
+///
+/// That the spread is accumulation and not a moving `beta` is what makes this
+/// the right lever, and it was measured rather than assumed: `qb^T b` and
+/// `qb^T G qb` each moved 5.0e-12 while their cancelling combination
+/// `z^T W z - 2 qb^T b + qb^T G qb` also moved 5.06e-12. A perturbation carried
+/// by `beta` would cancel in that combination to first order (its `beta`
+/// derivative is `2(G qb - b)`, which is `-2 S beta` at the inner mode); an
+/// independent rounding error in each contraction does not. So the two spellings
+/// have the same noise, rearranging the identity cannot help, and the
+/// accumulation is the only remaining lever.
+///
+/// The consequence of not paying it is not a rounding question. A line search
+/// cannot tell a trial step from a value channel that is not a function of its
+/// argument: at a theta frozen to ten digits the criterion moved 3.79e-5 across
+/// twelve consecutive evaluations, 1e6 times more than the theta drift over
+/// those calls could produce, and the two multistart seeds that reach the best
+/// objectives both terminated `StepSizeTooSmall after 50 attempts` a factor of
+/// 1.6 and 4.3 short of their own stationarity band -- leaving a far worse but
+/// cleanly converged local optimum as the only certified candidate, which the
+/// objective-monotonicity certificate then refused (`initial=-2.569819e3,
+/// final=-1.463112e3`).
+///
+/// Neumaier compensation on the running sum, plus `mul_add` to recover the
+/// exact product error. Falls back to the ordinary contraction on a length
+/// mismatch so a shape bug surfaces where shapes are checked, not here.
+fn compensated_dot(a: &Array1<f64>, b: &Array1<f64>) -> f64 {
+    if a.len() != b.len() {
+        return a.dot(b);
+    }
+    let mut sum = 0.0_f64;
+    let mut compensation = 0.0_f64;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        let product = x * y;
+        // `x*y - product` exactly, when an FMA is available.
+        compensation += f64::mul_add(x, y, -product);
+        let next = sum + product;
+        compensation += if sum.abs() >= product.abs() {
+            (sum - next) + product
+        } else {
+            (product - next) + sum
+        };
+        sum = next;
+    }
+    sum + compensation
+}
+
 pub(crate) fn exact_lambdas_from_rho(rho: LogSmoothingParamsView<'_>) -> Array1<f64> {
     rho.exact_exp()
 }
@@ -1311,13 +1376,27 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             // re-materialising ~16·n elements per κ callback — the #1868 fix.
             let mut grad_orig = cache.xtwx_orig.dot(&qbeta);
             grad_orig -= &cache.xtwy_orig;
+            // #2624: `z^T W z - 2 qb^T b + qb^T G qb` regrouped as
+            // `(z^T W z - qb^T b) + qb^T (G qb - b)`. The two are the same
+            // number in exact arithmetic; they are not the same computation.
+            // `G qb - b` is formed elementwise above and equals `-S beta` at the
+            // inner mode, so the second contraction is over SMALL entries and
+            // its absolute error is negligible -- which leaves exactly one
+            // contraction at the `z^T W z` magnitude, and `compensated_dot`
+            // resolves that one to ~1 ulp instead of the ~88 ulp the plain
+            // contraction carried. See `compensated_dot` for why 1 ulp is the
+            // requirement here and for the measurement that rules out `beta` as
+            // the carrier. This also drops a matvec, so it is strictly cheaper
+            // than the spelling it replaces.
+            let residual_inner = qbeta.dot(&grad_orig);
             let gradient_data = transform_active
                 .as_ref()
                 .map(|transform| transform.apply_transpose(&grad_orig))
                 .unwrap_or(grad_orig);
-            let weighted_rss = (cache.centered_weighted_y_sq - 2.0 * qbeta.dot(&cache.xtwy_orig)
-                + qbeta.dot(&cache.xtwx_orig.dot(&qbeta)))
-            .max(0.0);
+            let weighted_rss = (cache.centered_weighted_y_sq
+                - compensated_dot(&qbeta, &cache.xtwy_orig)
+                + residual_inner)
+                .max(0.0);
             match resolved_likelihood_scale {
                 ResolvedLikelihoodScale::ProfiledGaussian
                 | ResolvedLikelihoodScale::FixedGaussian { .. } => {}
