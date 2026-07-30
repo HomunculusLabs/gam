@@ -1841,6 +1841,43 @@ impl SaeSupportSparseTerm {
                 atom_blocks[atom].push((row_index as u32, block_index as u32));
             }
         }
+        // #2502: stage the SAE residency payload (#1017) so the reduced-Schur
+        // PCG reads its Jacobi diagonal and its matvec off resident (L_i, Y_i)
+        // factors instead of probing the matrix-free operator once per
+        // (row, beta-column) with a triangular solve each. Profiled on the
+        // manifold coupled joint-Newton phase: the probe build was 93% of all
+        // cycles and priced ONE Newton cycle at hours (K=1024, P=128, n=50k).
+        // Only `p`, `beta_dim`, `a_phi`, and `local_jac` are read on this
+        // (CPU, InexactPcg) lane; every device consumer gates on
+        // `frame.is_some()` or Direct mode, so the empty penalty blocks can
+        // never engage a device kernel that would drop the smooth term.
+        let width = self.output_dim;
+        let a_phi: Vec<Vec<(usize, f64)>> = linearized_rows
+            .iter()
+            .map(|row| {
+                row.blocks
+                    .iter()
+                    .flat_map(|block| {
+                        block.phi.iter().enumerate().map(move |(basis, &value)| {
+                            (block.beta_offset + basis * width, value)
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        let local_jac: Vec<Vec<f64>> = linearized_rows
+            .iter()
+            .map(|row| row.jacobian.iter().copied().collect())
+            .collect();
+        system.set_device_sae_pcg_data(gam_solve::arrow_schur::DeviceSaePcgData {
+            p: width,
+            beta_dim,
+            a_phi: a_phi.into(),
+            local_jac: local_jac.into(),
+            smooth_blocks: Vec::new(),
+            sparse_g_blocks: Vec::new(),
+            frame: None,
+        });
         let operator = Arc::new(SupportBetaOperator {
             rows: linearized_rows,
             atom_blocks,
