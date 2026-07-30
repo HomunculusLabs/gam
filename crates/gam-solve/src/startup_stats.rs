@@ -38,14 +38,59 @@ pub(crate) struct SeedRejection {
     pub seed_idx: usize,
     pub phase: &'static str,
     pub failure: InnerFailure,
+    /// The PRODUCER's own verdict on this rejection, carried alongside the
+    /// prose instead of being re-derived from it.
+    ///
+    /// The seed loop rejects a candidate in arms that have the typed error in
+    /// hand and have ALREADY asked it the question -- `Err(err) if
+    /// err.is_recoverable()`, `FixedPointOuterRunError::SeedRejected(_)`, a
+    /// certification failure it can test with `is_trial_point_infeasible()`.
+    /// One line later it stored only `err.to_string()`, and
+    /// [`classify_inner_error`] re-derived a verdict from that prose. A
+    /// producer-recoverable refusal that no sentinel matched landed in
+    /// [`InnerFailure::Other`], which
+    /// [`eligible_for_generic_structural_bail`] calls STRUCTURAL -- so three
+    /// consecutive rho-local refusals skipped every remaining seed. That is
+    /// the same failure #1802 already carved `LikelihoodFailure` out of the
+    /// bail for, reached by a different route: not a variant that was
+    /// misclassified, a verdict that was thrown away before anyone asked.
+    ///
+    /// `false` means "no verdict was available here", not "the producer said
+    /// no", so a rejection that arrives as bare prose keeps its previous
+    /// eligibility exactly.
+    pub producer_called_it_rho_local: bool,
 }
 
 impl SeedRejection {
+    /// No producer verdict available: the rejection reached the seed loop as
+    /// bare prose. Conservative -- the rejection stays eligible for the
+    /// structural bail, unchanged.
+    ///
+    /// Test-only. Production rejections all flow through
+    /// [`Self::from_message_with_producer_verdict`], because every arm of the
+    /// seed loop that rejects a candidate either holds the typed error or
+    /// knows it does not; there is no third case, and leaving a verdict-free
+    /// constructor reachable from the seed loop is how the verdict got lost.
+    #[cfg(test)]
     pub(crate) fn from_message(seed_idx: usize, phase: &'static str, message: String) -> Self {
+        Self::from_message_with_producer_verdict(seed_idx, phase, message, false)
+    }
+
+    /// `rho_local` is the producer's OWN answer to "is this a statement about
+    /// this rho, or about the problem?" -- `is_recoverable()` on an
+    /// `ObjectiveEvalError`, or `is_trial_point_infeasible()` on an
+    /// `EstimationError`. It is never inferred from `message`.
+    pub(crate) fn from_message_with_producer_verdict(
+        seed_idx: usize,
+        phase: &'static str,
+        message: String,
+        rho_local: bool,
+    ) -> Self {
         Self {
             seed_idx,
             phase,
             failure: classify_inner_error(message),
+            producer_called_it_rho_local: rho_local,
         }
     }
 }
@@ -402,10 +447,17 @@ pub(crate) fn consecutive_generic_signature(
         return None;
     }
     let tail = &rejections[rejections.len() - min_run..];
-    if tail
-        .iter()
-        .any(|rej| !eligible_for_generic_structural_bail(&rej.failure))
-    {
+    // Two independent vetoes, and the producer's is checked first because it is
+    // the only one that is not a guess. `eligible_for_generic_structural_bail`
+    // reads the RECONSTRUCTED `InnerFailure`; `producer_called_it_rho_local` is
+    // what the rejecting arm itself already knew. A refusal the producer called
+    // rho-local is by definition a statement about THIS seed, and the remaining
+    // seeds are exactly what it does not speak for -- the same reason
+    // `LikelihoodFailure` is excluded (#1802), only asked for rather than
+    // inferred from wording (#2627).
+    if tail.iter().any(|rej| {
+        rej.producer_called_it_rho_local || !eligible_for_generic_structural_bail(&rej.failure)
+    }) {
         return None;
     }
     let sig = generic_signature(&tail[0].failure);
