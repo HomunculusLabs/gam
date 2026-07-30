@@ -2918,6 +2918,42 @@ pub(crate) mod whitened_spectrum {
                 .any(|&value| value < -self.numerical_floor)
         }
 
+        /// Median `|γ_k|` over the identified modes — a spectrum scale that a
+        /// single stiff mode cannot set.
+        ///
+        /// `lambda_max_abs` is the natural scale for a RELATIVE rank test, but
+        /// it is an extremum, and one over-selected penalty mode moves it
+        /// arbitrarily far from the curvature the step actually travels. Where
+        /// the question is "does this eigenvalue carry curvature worth
+        /// exploiting?" rather than "is this matrix near-singular?", the
+        /// extremum is the wrong summary and the median is the right one: on a
+        /// spectrum `[-1e-3, 2e-3, 1e8]` the median is `2e-3`, so the `-1e-3`
+        /// minimum is recognized as the same order as a genuine mode instead of
+        /// being eleven orders below `λ_max`.
+        ///
+        /// Identified means above the machine-rank floor, matching the set the
+        /// step's denominators already use. Falls back to `lambda_max_abs` when
+        /// nothing is identified, so the caller's `.max(numerical_floor)` still
+        /// governs the degenerate case.
+        pub(crate) fn median_identified_curvature(&self) -> f64 {
+            let mut magnitudes: Vec<f64> = self
+                .gamma
+                .iter()
+                .map(|value| value.abs())
+                .filter(|value| *value > self.numerical_floor)
+                .collect();
+            if magnitudes.is_empty() {
+                return self.lambda_max_abs;
+            }
+            magnitudes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = magnitudes.len() / 2;
+            if magnitudes.len() % 2 == 1 {
+                magnitudes[mid]
+            } else {
+                0.5 * (magnitudes[mid - 1] + magnitudes[mid])
+            }
+        }
+
         /// `‖η(λ)‖²_2 = Σ_{identified k} c_k² / (γ_k + λ)²` — the squared `D`-metric
         /// norm of the trial step as a function of the Levenberg shift `λ`. Only
         /// identified (above-`null_cutoff`) modes participate; the null space carries
@@ -3246,8 +3282,47 @@ pub(crate) mod whitened_spectrum {
                 // identified set, the denominators, and the genuine hard case
                 // (`γ_min` materially negative, where filling the radius really
                 // does reduce the model quadratically) are untouched.
+                // The threshold is `rank_tol` against a spectrum scale that ONE
+                // stiff mode cannot set. `null_cutoff = rank_tol·λ_max` fails
+                // that: an unrelated penalty mode at `λ_max = 1e8` raises the
+                // bar to `1e-2` and vetoes a genuine `γ_min = -1e-3` that sits
+                // at the SAME ORDER as another identified mode (`+2e-3`) — the
+                // hard case then returns `‖δ‖ = 0` at a strict saddle, while
+                // `has_resolvable_negative_curvature` (which reads
+                // `numerical_floor`) still refuses to certify. That is a stall
+                // with no exit, and it is what `weak_negative_hard_case_uses_
+                // true_minimum_mode` pins.
+                //
+                // Swapping to `numerical_floor` does NOT work: measured, it
+                // regresses `hard_case_fill_requires_resolvable_negative_
+                // curvature_2600`. Neither `|γ_min|/λ_max` (1e-11 vs 1e-12) nor
+                // `|γ_min|/numerical_floor` (2.6e4 vs 3.2e3) separates the two
+                // fixtures — both agree to within one order — so no threshold
+                // on either yardstick can satisfy both, and picking one is
+                // fitting a constant to whichever fixture was looked at last.
+                //
+                // The MEDIAN identified curvature is the quantity that does
+                // separate them, because it is the one `λ_max` was standing in
+                // for and is not moved by a single outlier:
+                //   #2600 fixture: γ = [1, -1e-12], median 5e-1
+                //                  ⇒ bar 5e-11, |γ_min| = 1e-12 ⇒ NO fill
+                //   weak-negative: γ = [-1e-3, 2e-3, 1e8], median 2e-3
+                //                  ⇒ bar 2e-13, |γ_min| = 1e-3 ⇒ fill
+                // Ten orders of separation instead of one, and no new constant:
+                // this reuses `rank_tol`, the same relative rank tolerance the
+                // rest of the spectrum classification already uses.
+                // `null_cutoff / lambda_max_abs` recovers `rank_tol` exactly
+                // (they differ only when the floor clamps, which the `.max`
+                // below reapplies), so no new constant is introduced.
+                let fill_bar = if self.lambda_max_abs > 0.0 {
+                    let relative_tol = self.null_cutoff / self.lambda_max_abs;
+                    (relative_tol * self.median_identified_curvature())
+                        .max(self.numerical_floor)
+                } else {
+                    self.numerical_floor
+                };
                 if let Some(k_min) = k_min_witness
-                    && gamma_min_id < -self.null_cutoff
+                    && gamma_min_id < -fill_bar
                 {
                     let deficit = (trust_radius * trust_radius - hard_case_base_norm_sq).max(0.0);
                     let tau = deficit.sqrt().copysign(self.c[k_min]);
