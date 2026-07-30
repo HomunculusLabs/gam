@@ -2590,7 +2590,7 @@ pub fn sas_inverse_link_pdfthird_derivative(
     //
     // The needed fourth derivative of `u(eta)` is obtained from the nested
     // composition `u(eta) = g(r(eta))` with
-    //   g = smooth_bound, r = delta * asinh(eta) - epsilon:
+    //   g = smooth_bound, r = delta * asinh(eta) + epsilon:
     //
     //   u4 = g'''' r1^4 + 6 g''' r1² r2 + 3 g'' r2² + 4 g'' r1 r3 + g' r4,
     //

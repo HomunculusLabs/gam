@@ -15,6 +15,25 @@ fn stateless_ad_output<T>(freeze: bool, output: T) -> Vec<T> {
 
 const INV_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
 const SAS_U_CLAMP: f64 = 50.0;
+/// Mirrors `SPLICE_INTERIOR_FRAC` in `crates/gam-solve/src/mixture_link.rs`.
+///
+/// Production bounds `u_raw` with `smooth_bound_jet` (`mixture_link.rs:801`), a SPLICE
+/// that is the EXACT IDENTITY on `|v| <= SPLICE_INTERIOR_FRAC * bound`: `g = v`,
+/// `d1 = 1`, and every higher derivative exactly zero. With `SAS_U_CLAMP = 50` that
+/// interior reaches `|v| <= 40`, and every probe in this file sits near
+/// `|u_raw| ~ 1.15` -- deep inside it.
+///
+/// These helpers previously modelled the bound as `bound * tanh(v / bound)`, which only
+/// RESEMBLES a bound. Its leading error is `v^3 / (3 * bound^2)`:
+/// `1.152706^3 / 7500 = 2.04e-4`, and that is precisely the `abs_err = 1.487e-4` this
+/// test still reported after the separate `+ epsilon` sign fix was applied. The tanh
+/// WAS the whole residual disagreement.
+///
+/// It hid for two reasons worth recording: the sign error was three orders larger and
+/// swamped it, and all three autodiff engines agreed with each other to `8.3e-17` --
+/// they share this reference model, so that band measures ENGINE CONSISTENCY and says
+/// nothing about fidelity to gam.
+const SPLICE_INTERIOR_FRAC: f64 = 0.8;
 
 fn sas_delta_from_raw_log_delta(raw_log_delta: f64) -> f64 {
     gam::mixture_link::sas_link_state_from_raw(0.0, raw_log_delta)
@@ -22,59 +41,16 @@ fn sas_delta_from_raw_log_delta(raw_log_delta: f64) -> f64 {
         .delta
 }
 
-fn tanh_bound_numdual<D: DualNum<f64> + Copy>(value: D, bound: f64) -> D {
-    D::from(bound) * (value / D::from(bound)).tanh()
+fn identity_bound_numdual<D: DualNum<f64> + Copy>(value: D) -> D {
+    value
 }
 
-fn tanh_bound_f1(value: F1, bound: f64) -> F1 {
-    F1::cst(bound) * (value / F1::cst(bound)).tanh()
+fn identity_bound_f1(value: F1) -> F1 {
+    value
 }
 
-fn tanh_bound_ad<T: AD>(value: T, bound: f64) -> T {
-    T::constant(bound) * (value / T::constant(bound)).tanh()
-}
-
-fn tanh_bound_d1_numdual<D: DualNum<f64> + Copy>(value: D, bound: f64) -> D {
-    let t = (value / D::from(bound)).tanh();
-    D::one() - t * t
-}
-
-fn tanh_bound_d2_numdual<D: DualNum<f64> + Copy>(value: D, bound: f64) -> D {
-    let b = D::from(bound);
-    let t = (value / b).tanh();
-    let s = D::one() - t * t;
-    D::from(-2.0) * t * s / b
-}
-
-fn tanh_bound_d3_numdual<D: DualNum<f64> + Copy>(value: D, bound: f64) -> D {
-    let b = D::from(bound);
-    let t = (value / b).tanh();
-    let s = D::one() - t * t;
-    D::from(-2.0) * s * (D::one() - D::from(3.0) * t * t) / (b * b)
-}
-
-fn tanh_bound_d1_f1(value: F1, bound: f64) -> F1 {
-    let t = (value / F1::cst(bound)).tanh();
-    F1::cst(1.0) - t * t
-}
-
-fn tanh_bound_d2_f1(value: F1, bound: f64) -> F1 {
-    let b = F1::cst(bound);
-    let t = (value / b).tanh();
-    let s = F1::cst(1.0) - t * t;
-    F1::cst(-2.0) * t * s / b
-}
-
-fn tanh_bound_d1_ad<T: AD>(value: T, bound: f64) -> T {
-    let t = (value / T::constant(bound)).tanh();
-    T::one() - t * t
-}
-
-fn tanh_bound_d2_ad<T: AD>(value: T, bound: f64) -> T {
-    let b = T::constant(bound);
-    let t = (value / b).tanh();
-    let s = T::one() - t * t;
-    T::constant(-2.0) * t * s / b
+fn identity_bound_ad<T: AD>(value: T) -> T {
+    value
 }
 
 fn normal_pdf_numdual<D: DualNum<f64> + Copy>(x: D) -> D {
@@ -92,9 +68,9 @@ fn normal_pdf_ad<T: AD>(x: T) -> T {
 fn sas_eta_d1_numdual<D: DualNum<f64> + Copy>(eta: f64, epsilon: D, log_delta: f64) -> D {
     let a = D::from(eta.asinh());
     let delta = D::from(sas_delta_from_raw_log_delta(log_delta));
-    let u_raw = delta * a - epsilon;
-    let u = tanh_bound_numdual(u_raw, SAS_U_CLAMP);
-    let g1 = tanh_bound_d1_numdual(u_raw, SAS_U_CLAMP);
+    let u_raw = delta * a + epsilon;
+    let u = identity_bound_numdual(u_raw);
+    let g1 = D::one();
     let s = u.sinh();
     let c = u.cosh();
     let z = s;
@@ -106,10 +82,10 @@ fn sas_eta_d1_numdual<D: DualNum<f64> + Copy>(eta: f64, epsilon: D, log_delta: f
 fn sas_eta_d2_numdual<D: DualNum<f64> + Copy>(eta: f64, epsilon: D, log_delta: f64) -> D {
     let a = D::from(eta.asinh());
     let delta = D::from(sas_delta_from_raw_log_delta(log_delta));
-    let u_raw = delta * a - epsilon;
-    let u = tanh_bound_numdual(u_raw, SAS_U_CLAMP);
-    let g1 = tanh_bound_d1_numdual(u_raw, SAS_U_CLAMP);
-    let g2 = tanh_bound_d2_numdual(u_raw, SAS_U_CLAMP);
+    let u_raw = delta * a + epsilon;
+    let u = identity_bound_numdual(u_raw);
+    let g1 = D::one();
+    let g2 = D::from(0.0);
     let s = u.sinh();
     let c = u.cosh();
     let z = s;
@@ -128,11 +104,11 @@ fn sas_eta_d2_numdual<D: DualNum<f64> + Copy>(eta: f64, epsilon: D, log_delta: f
 fn sas_eta_d3_numdual<D: DualNum<f64> + Copy>(eta: f64, epsilon: D, log_delta: f64) -> D {
     let a = D::from(eta.asinh());
     let delta = D::from(sas_delta_from_raw_log_delta(log_delta));
-    let u_raw = delta * a - epsilon;
-    let u = tanh_bound_numdual(u_raw, SAS_U_CLAMP);
-    let g1 = tanh_bound_d1_numdual(u_raw, SAS_U_CLAMP);
-    let g2 = tanh_bound_d2_numdual(u_raw, SAS_U_CLAMP);
-    let g3 = tanh_bound_d3_numdual(u_raw, SAS_U_CLAMP);
+    let u_raw = delta * a + epsilon;
+    let u = identity_bound_numdual(u_raw);
+    let g1 = D::one();
+    let g2 = D::from(0.0);
+    let g3 = D::from(0.0);
     let s = u.sinh();
     let c = u.cosh();
     let z = s;
@@ -156,9 +132,9 @@ fn sas_eta_d3_numdual<D: DualNum<f64> + Copy>(eta: f64, epsilon: D, log_delta: f
 fn sas_eta_d1_f1(eta: f64, epsilon: F1, log_delta: f64) -> F1 {
     let a = F1::cst(eta.asinh());
     let delta = F1::cst(sas_delta_from_raw_log_delta(log_delta));
-    let u_raw = delta * a - epsilon;
-    let u = tanh_bound_f1(u_raw, SAS_U_CLAMP);
-    let g1 = tanh_bound_d1_f1(u_raw, SAS_U_CLAMP);
+    let u_raw = delta * a + epsilon;
+    let u = identity_bound_f1(u_raw);
+    let g1 = F1::cst(1.0);
     let c = u.cosh();
     let z = u.sinh();
     let q = (eta * eta + 1.0).sqrt();
@@ -169,10 +145,10 @@ fn sas_eta_d1_f1(eta: f64, epsilon: F1, log_delta: f64) -> F1 {
 fn sas_eta_d2_f1(eta: f64, epsilon: F1, log_delta: f64) -> F1 {
     let a = F1::cst(eta.asinh());
     let delta = F1::cst(sas_delta_from_raw_log_delta(log_delta));
-    let u_raw = delta * a - epsilon;
-    let u = tanh_bound_f1(u_raw, SAS_U_CLAMP);
-    let g1 = tanh_bound_d1_f1(u_raw, SAS_U_CLAMP);
-    let g2 = tanh_bound_d2_f1(u_raw, SAS_U_CLAMP);
+    let u_raw = delta * a + epsilon;
+    let u = identity_bound_f1(u_raw);
+    let g1 = F1::cst(1.0);
+    let g2 = F1::cst(0.0);
     let s = u.sinh();
     let c = u.cosh();
     let z = s;
@@ -191,9 +167,9 @@ fn sas_eta_d2_f1(eta: f64, epsilon: F1, log_delta: f64) -> F1 {
 fn sas_eta_d1_ad<T: AD>(eta: f64, epsilon: T, log_delta: f64) -> T {
     let a = T::constant(eta.asinh());
     let delta = T::constant(sas_delta_from_raw_log_delta(log_delta));
-    let u_raw = delta * a - epsilon;
-    let u = tanh_bound_ad(u_raw, SAS_U_CLAMP);
-    let g1 = tanh_bound_d1_ad(u_raw, SAS_U_CLAMP);
+    let u_raw = delta * a + epsilon;
+    let u = identity_bound_ad(u_raw);
+    let g1 = T::one();
     let c = u.cosh();
     let z = u.sinh();
     let q = (eta * eta + 1.0).sqrt();
@@ -204,10 +180,10 @@ fn sas_eta_d1_ad<T: AD>(eta: f64, epsilon: T, log_delta: f64) -> T {
 fn sas_eta_d2_ad<T: AD>(eta: f64, epsilon: T, log_delta: f64) -> T {
     let a = T::constant(eta.asinh());
     let delta = T::constant(sas_delta_from_raw_log_delta(log_delta));
-    let u_raw = delta * a - epsilon;
-    let u = tanh_bound_ad(u_raw, SAS_U_CLAMP);
-    let g1 = tanh_bound_d1_ad(u_raw, SAS_U_CLAMP);
-    let g2 = tanh_bound_d2_ad(u_raw, SAS_U_CLAMP);
+    let u_raw = delta * a + epsilon;
+    let u = identity_bound_ad(u_raw);
+    let g1 = T::one();
+    let g2 = T::constant(0.0);
     let s = u.sinh();
     let c = u.cosh();
     let z = s;
@@ -308,6 +284,22 @@ fn sas_epsilon_eta_derivative_partials_match_three_autodiff_engines() {
     ];
 
     for (eta, epsilon, log_delta) in cases {
+        // The reference helpers above model gam.s bound as the IDENTITY, which is
+        // exact only inside `|u_raw| <= SPLICE_INTERIOR_FRAC * SAS_U_CLAMP` (0.8 *
+        // 50 = 40). Assert every probe really is interior, so a future case that
+        // reaches the splice seam fails HERE and loudly instead of silently
+        // disagreeing with production by a smooth cubic, which is exactly how the
+        // previous `bound * tanh(u / bound)` reference hid a 1.487e-4 error.
+        let interior = SPLICE_INTERIOR_FRAC * SAS_U_CLAMP;
+        let probe_u_raw = sas_delta_from_raw_log_delta(log_delta) * eta.asinh() + epsilon;
+        assert!(
+            probe_u_raw.abs() <= interior,
+            "probe (eta={eta}, epsilon={epsilon}, log_delta={log_delta}) has \
+             |u_raw|={} outside the exact-identity interior {interior}; the reference \
+             model in this file is only valid there",
+            probe_u_raw.abs()
+        );
+
         let out = sas_inverse_link_jetwith_param_partials(eta, epsilon, log_delta)
             .expect("finite SAS eta");
 
