@@ -113,9 +113,19 @@ jobs:
             ' <<< "$COVERAGE_POPULATIONS_JSON"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Fetch commit metadata for the ancestry proof
+        id: history
+        if: ${{ !cancelled() && steps.manifest.outcome == 'success' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: .github
+
       - name: Resolve newest immutable warm runtime on this history
         id: runtime
-        if: ${{ !cancelled() && steps.manifest.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.history.outcome == 'success' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -162,15 +172,24 @@ jobs:
                 continue
               fi
 
-              if ! compare_json=$(gh api \
-                "repos/${GITHUB_REPOSITORY}/compare/${candidate_sha}...${GITHUB_SHA}"); then
-                resolution_error="GitHub API could not compare ${candidate_sha} with scheduled SHA ${GITHUB_SHA}."
-                break
-              fi
-              merge_base=$(jq -r '.merge_base_commit.sha // ""' <<< "$compare_json")
-              if [[ "$merge_base" != "$candidate_sha" ]]; then
+              # The REST compare endpoint computes a full diff and can return
+              # HTTP 500 under load. We need only the commit-graph predicate,
+              # so prove it against the one metadata-only history fetch above.
+              if ! git cat-file -e "${candidate_sha}^{commit}" 2>/dev/null; then
                 continue
               fi
+              set +e
+              git merge-base --is-ancestor "$candidate_sha" "$GITHUB_SHA"
+              ancestry_status=$?
+              set -e
+              case "$ancestry_status" in
+                0) ;;
+                1) continue ;;
+                *)
+                  resolution_error="Local commit graph could not compare ${candidate_sha} with scheduled SHA ${GITHUB_SHA}."
+                  break
+                  ;;
+              esac
 
               runtime_run_id="$candidate_run"
               runtime_sha="$candidate_sha"
