@@ -322,8 +322,10 @@ impl QuadraticCandidateComparison {
     /// That theorem requires exactly one inequality — the candidate is NO WORSE
     /// than the reference in the quadratic,
     ///
+    /// ```text
     ///     q(reference) - q(candidate)
     ///       = directional_descent - 1/2 ||delta||_M^2 = model_decrease >= 0,
+    /// ```
     ///
     /// checked at the shared tolerance. Two further exact-sign conjuncts used to
     /// stand beside it, and both were stronger than the theorem they guarded:
@@ -577,7 +579,9 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
 /// When the accessible Hessian is positive definite, this routine works in the
 /// reduced system
 ///
+/// ```text
 ///     (Z' H Z) delta_z = Z' r,   delta = Z delta_z,
+/// ```
 ///
 /// where `Z` spans `null(A_active)`. If the reduced Hessian is singular or
 /// indefinite, there is no unconstrained Newton minimizer on that face. Ambient
@@ -587,7 +591,9 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
 /// the self-vanishing shift `λ` from the current trust radius. The resulting
 /// positive metric `M = H_face + λD_face` defines the constraint-aware map
 ///
+/// ```text
 ///     beta_next = argmin_{x in C} 1/2 ||x-beta||_M^2 - r' (x-beta).
+/// ```
 ///
 /// Here `beta` anchors the objective even if accumulated floating-point error
 /// has put it infinitesimally outside `C`. Such a point cannot be the feasible
@@ -595,7 +601,9 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
 /// strictly feasible projection `s` is used only as the solver seed and
 /// comparison point; the objective remains exactly the one anchored at `beta`,
 ///
+/// ```text
 ///     q_beta(x) = 1/2 x' M x - (M beta + r)' x.
+/// ```
 ///
 /// The generic active-set result is tolerance-feasible by contract. Before it
 /// can enter this exact theorem, any positive evaluated violation is clipped on
@@ -603,9 +611,11 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
 /// feasibility tolerance. The returned feasible point is certified against
 /// `s` through the exact comparison
 ///
+/// ```text
 ///     q_beta(s) - q_beta(beta_next)
 ///       = (M beta + r - M s)' (beta_next-s)
 ///         - 1/2 ||beta_next-s||_M^2 >= 0,
+/// ```
 ///
 /// while the returned step and original-Hessian KKT check remain relative to
 /// the original `beta`. Strict hard-case saddles at zero projected gradient are
