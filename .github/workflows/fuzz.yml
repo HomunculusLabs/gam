@@ -32,16 +32,37 @@ jobs:
       actions: read
     name: Fuzz vs mgcv
     runs-on: ubuntu-latest
-    # MUST exceed the trial budget below (`--max-total-seconds 3300` = 55 min)
-    # PLUS setup: apt/R/mgcv install, pip deps, and the release wheel build,
-    # which together run ~20-25 min on a cold hosted runner. At the previous
-    # 60 the job was cancelled at exactly 60:00 on EVERY run — measured
-    # 11:09:09 -> 12:09:24 on run 29684616297, and identically on the two runs
-    # before it — so the scoreboard never finished and only the handful of
-    # trials completed before the kill were ever uploaded. Keep this at least
-    # `max-total-seconds/60 + 30`; the two constants are coupled and must move
-    # together.
-    timeout-minutes: 90
+    # MUST exceed the trial budget below PLUS setup, with real margin, because
+    # BOTH of those terms are larger and softer than this comment used to assume.
+    #
+    # The 60 -> 90 raise did not fix it. Measured over the last 20 runs: ZERO
+    # successful, and 11 of 15 scheduled runs `cancelled` at exactly 1h30m — i.e.
+    # still killed by this cap, just 30 minutes later. Step timings from run
+    # 30426575556 (2026-07-29) say where it goes:
+    #
+    #   setup total                     31m36s   (05:56:48 -> 06:28:24)
+    #     of which Build release binary 14m50s
+    #     of which maturin build        14m10s
+    #   Run fuzzer                      58m36s   (06:28:24 -> 07:27:00, CANCELLED)
+    #
+    # So setup is ~32 min, not the "~20-25" claimed above, leaving 58 min for a
+    # 55-min trial budget: a 3-minute margin. And `--max-total-seconds` is a SOFT
+    # bound — it is checked between trials, so a trial already in flight carries
+    # past it, and the fuzzer overran its own 55 min by 3m36s. Three minutes of
+    # margin against a soft budget is not a budget.
+    #
+    # Why this matters more than the wasted minutes: the step ends with
+    # `exit "$status"`, which propagates the FUZZER's exit code — the actual
+    # pass/fail verdict. A cap kill means that line never runs, so the verdict has
+    # been discarded on every one of the last 20 runs. The upload/publish steps are
+    # `if: always()` and do land inside GitHub's grace window, so the numbers are
+    # in-tree; it is the RED/GREEN signal that has never once been reported. A
+    # cancelled run is not a red one.
+    #
+    # The old coupling rule (`>= max-total-seconds/60 + 30`) was satisfied at 85
+    # and still failed. The rule needs the measured setup and slack for the soft
+    # budget: keep this at least `max-total-seconds/60 + 40`.
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -110,7 +131,7 @@ jobs:
             --rust-timeout 60 \
             --r-timeout 60 \
             --max-scenario-cost 200000 \
-            --max-total-seconds 3300 \
+            --max-total-seconds 2400 \
             "${level_args[@]}" \
             2> fuzz_solver.log | tee fuzz_output.txt
           status=${PIPESTATUS[0]}
