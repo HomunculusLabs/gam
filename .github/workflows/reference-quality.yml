@@ -262,11 +262,39 @@ jobs:
             elif [ -n "$refmarker" ]; then
               outcome=REF_ERROR; cause=reference_tool; reason="$refmarker"; referr=$((referr+1))
               # If the lost reference is one the job guarantees present, this REF_ERROR
-              # is a real breakage masking a lost gam-vs-reference comparison. Tracked
-              # by comparator name (mgcv/gamlss/survival are the hard-verified R refs).
-              case "$t" in
-                *mgcv*|*gamlss*|*survival*) guaranteed_referr=$((guaranteed_referr+1)) ;;
-              esac
+              # is a real breakage masking a lost gam-vs-reference comparison.
+              #
+              # Classify by what the test's comparator ACTUALLY LOADS, not by what the
+              # test is CALLED. The previous form was `case "$t" in *mgcv*|...`, i.e. a
+              # substring match on the test NAME, and it had a live hole: a test whose
+              # comparator body is `suppressMessages(library(mgcv))` but whose name does
+              # not contain "mgcv" was counted as zero. Measured on the last complete
+              # run (30460836905): `families::quality_vs_synthetic_multinomial_deviance_
+              # identity` REF_ERRORed with an mgcv comparator, `guaranteed_referr`
+              # counted 0, and the "100% coverage for guaranteed comparators" gate
+              # passed while a guaranteed reference was in fact broken.
+              #
+              # A gate keyed on a naming convention only holds while the convention
+              # does. Read the source instead: the libtest name is
+              # `<dir>::<file-stem>::<fn>`, which maps directly onto
+              # `tests/quality/<dir>/<file-stem>.rs`.
+              qdir="${t%%::*}"
+              qrest="${t#*::}"
+              qfile="${qrest%%::*}"
+              qsrc="$GITHUB_WORKSPACE/tests/quality/$qdir/$qfile.rs"
+              if [ -f "$qsrc" ]; then
+                if grep -qaE 'library\((mgcv|gamlss|survival)\)' "$qsrc"; then
+                  guaranteed_referr=$((guaranteed_referr+1))
+                  echo "  guaranteed-comparator REF_ERROR: $t (source $qdir/$qfile.rs loads a hard-verified R reference)"
+                fi
+              else
+                # The name did not resolve to a source file, so we cannot tell which
+                # comparator was lost. Count it: an unclassifiable REF_ERROR must not
+                # be silently treated as the optional-tool case, which is the failure
+                # this whole block exists to prevent.
+                guaranteed_referr=$((guaranteed_referr+1))
+                echo "  guaranteed-comparator REF_ERROR (UNRESOLVED SOURCE, counted conservatively): $t -> $qsrc"
+              fi
             elif printf '%s' "$panicmsg" | grep -qaE 'gam-test-support/src/reference\.rs|No such file or directory'; then
               # Test/harness setup defect (bad data, missing fixture, length
               # mismatch). Gated on the panic ORIGINATING in the harness
