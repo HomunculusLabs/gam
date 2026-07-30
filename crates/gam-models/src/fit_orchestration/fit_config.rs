@@ -136,7 +136,7 @@ impl FitConfig {
     /// path, and the pyffi survival path all consult it, so the default lives in
     /// exactly one place. A non-`Surv()` formula never calls this — `Some(_)` on
     /// a non-survival response is a typed configuration error rejected by
-    /// [`reject_survival_likelihood_for_nonsurvival`], and `None` is unset.
+    /// [`reject_survival_only_config_for_nonsurvival`], and `None` is unset.
     pub fn resolved_survival_likelihood(&self) -> &str {
         self.survival_likelihood
             .as_deref()

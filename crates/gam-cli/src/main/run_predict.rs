@@ -151,7 +151,7 @@ fn build_saved_cause_specific_survival_alo_input(
     }
     let entry_active = age_entry
         .iter()
-        .map(|&entry| entry > gam::families::survival::SURVIVAL_DELAYED_ENTRY_THRESHOLD)
+        .map(|&entry| entry > gam::families::survival::ENTRY_AT_ORIGIN_THRESHOLD)
         .collect::<Vec<_>>();
 
     let termspec = resolve_termspec_for_prediction(

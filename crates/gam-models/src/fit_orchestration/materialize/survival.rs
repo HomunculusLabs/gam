@@ -319,43 +319,15 @@ pub(crate) fn materialize_survival<'a>(
             config.time_smooth_lambda,
         )?
     };
-    // Marginal-slope centers the baseline-hazard I-spline at a robust interior
-    // exit-scale time (median exit) rather than the earliest entry age: under
-    // left truncation the earliest entry is a positive left-tail point and
-    // centering there inflates the unpenalized linear-trend column, blowing up
-    // the time-block seed score so REML rejects every seed (issue #751).
-    //
-    // The exact same defect afflicts EVERY time-basis-carrying likelihood — not
-    // just marginal-slope. Under genuine left truncation `Surv(entry, exit,
-    // event)` with `entry > 0`, anchoring the Transformation (Royston-Parmar)
-    // and location-scale designs at the earliest entry leaves the centered
-    // baseline linear-trend column `X(exit) − X(anchor)` large and one-signed
-    // across all rows (every exit sits far to the right of the earliest entry).
-    // That column is the unpenalized polynomial null space of the time penalty,
-    // so it multiplies the time-block score up by hundreds at the smoothing
-    // seed, railing the transformation-survival smoothing selection into a
-    // degenerate, covariate-flat baseline whose cumulative hazard swamps the
-    // covariate smooth (predicted `H` inflated ~10³×, `S(t) ≡ 0`, covariate
-    // dependence erased — issue #1790). The robust median-exit anchor keeps that
-    // column small and two-signed (some exits below the median, some above) so
-    // the exit-event likelihood pins the linear trend and the seed score stays
-    // bounded; re-centering is an exact affine reparameterization, leaving the
-    // fitted `q(t)` and the REML objective unchanged. Apply it whenever the data
-    // is genuinely left-truncated (any entry age above the origin threshold),
-    // regardless of likelihood mode. Ordinary right-censored data (`entry == 0`)
-    // keeps the earliest-entry anchor, which is ≈ the time origin, so centering
-    // stays a near-no-op and the prior behavior is preserved bit-for-bit.
-    let is_left_truncated = age_entry
-        .iter()
-        .any(|&t| t > crate::survival::ENTRY_AT_ORIGIN_THRESHOLD);
-    let time_anchor = if survival_mode == SurvivalLikelihoodMode::MarginalSlope || is_left_truncated
-    {
-        resolve_survival_marginal_slope_time_anchor_value(&age_entry, &age_exit, None)?
-    } else if survival_mode == SurvivalLikelihoodMode::Transformation {
-        resolve_survival_transformation_time_anchor_value(&age_entry, &age_exit, None)?
-    } else {
-        resolve_survival_time_anchor_value(&age_entry, None)?
-    };
+    // The one anchor rule, shared with every other front end — see
+    // `resolve_survival_time_anchor_for_mode` for why the robust interior anchor
+    // exists (#751/#1790) and why it must not be decided twice (#2631).
+    let time_anchor = resolve_survival_time_anchor_for_mode(
+        survival_mode,
+        &age_entry,
+        &age_exit,
+        config.survival_time_anchor,
+    )?;
     let exact_derivative_guard = survival_derivative_guard_for_likelihood(survival_mode);
 
     // Build time basis

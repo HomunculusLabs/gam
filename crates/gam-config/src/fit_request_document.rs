@@ -166,6 +166,18 @@ pub struct FitRequestConfigDocument {
     pub survival_distribution: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub survival_likelihood: Option<String>,
+    /// Explicit centering anchor for the survival baseline time basis, in the
+    /// data's own time units. Omit to let the fit pick it from the likelihood
+    /// mode and the truncation shape of the data — the robust interior median
+    /// exit for marginal-slope and for any genuinely left-truncated dataset
+    /// (#751/#1790), the earliest entry age otherwise.
+    ///
+    /// The CLI's `--survival-time-anchor` declares a conflict with `--request` on
+    /// the premise that this document carries the complete scientific model
+    /// configuration; until #2631 the document had no field for it, so the
+    /// premise was false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub survival_time_anchor: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub threshold_time_degree: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]

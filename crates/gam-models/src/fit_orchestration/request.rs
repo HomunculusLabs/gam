@@ -546,6 +546,22 @@ pub struct FitConfig {
     /// (#2301 — no library-side string default). `Some(_)` on a non-survival
     /// response is a typed configuration error.
     pub survival_likelihood: Option<String>,
+    /// Explicit centering anchor for the baseline time basis, in the data's own
+    /// time units. `None` (the default) lets
+    /// [`resolve_survival_time_anchor_for_mode`] pick it from the likelihood mode
+    /// and the truncation shape of the data: the robust interior median exit for
+    /// marginal-slope and for any genuinely left-truncated dataset (#751/#1790),
+    /// the earliest entry age otherwise.
+    ///
+    /// This is model configuration, not front-end transport (#2631). It used to
+    /// exist only as the CLI's `--survival-time-anchor`, which meant the flag was
+    /// silently dropped on the CLI's own default (transformation / Weibull)
+    /// route — that route delegates to `fit_from_formula`, which had nowhere to
+    /// receive it — and a `gam.fit-request` document could not express the anchor
+    /// even though the flag declares a conflict with `--request`.
+    ///
+    /// [`resolve_survival_time_anchor_for_mode`]: crate::survival::resolve_survival_time_anchor_for_mode
+    pub survival_time_anchor: Option<f64>,
     /// Residual distribution: "gaussian", "logistic", "gumbel".
     pub survival_distribution: String,
     pub threshold_time_k: Option<usize>,
@@ -730,6 +746,7 @@ impl Default for FitConfig {
             time_num_internal_knots: 8,
             time_smooth_lambda: 1e-2,
             survival_likelihood: None,
+            survival_time_anchor: None,
             survival_distribution: "gaussian".into(),
             threshold_time_k: None,
             threshold_time_degree: 3,

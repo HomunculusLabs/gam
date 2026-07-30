@@ -178,6 +178,15 @@ pub fn resolve_fit_request_config(
     // carries the explicit request (including onto a non-survival response,
     // where it is a typed rejection).
     fit_config.survival_likelihood = json_config.survival_likelihood;
+    // Validate the anchor here rather than at the fit seam so a malformed
+    // document is refused by `canonicalize_fit_request_json` too, and so every
+    // front end reports the same message for the same bad value (#2631).
+    if let Some(anchor) = json_config.survival_time_anchor {
+        fit_config.survival_time_anchor = Some(
+            gam_models::survival::validate_survival_time_anchor_override(anchor)
+                .map_err(|error| format!("invalid survival_time_anchor: {error}"))?,
+        );
+    }
     if let Some(distribution) = json_config.survival_distribution {
         fit_config.survival_distribution = distribution;
     }

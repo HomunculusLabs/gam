@@ -44,7 +44,7 @@ use gam::families::survival::construction::{
     SURVIVAL_TIME_FLOOR, SurvivalBaselineConfig, SurvivalBaselineTarget, SurvivalLikelihoodMode,
     SurvivalTimeBasisConfig, add_survival_time_derivative_guard_offset, build_survival_time_basis,
     build_survival_time_offsets_for_likelihood, evaluate_survival_time_basis_row,
-    resolve_survival_time_anchor_value, resolved_survival_time_basis_config_from_build,
+    resolve_survival_time_anchor_for_mode, resolved_survival_time_basis_config_from_build,
     survival_derivative_guard_for_likelihood,
 };
 use gam::families::survival::location_scale::{
@@ -402,8 +402,13 @@ fn resolve_training_time_basis(
         time_build.smooth_lambda,
     )
     .expect("resolve survival time basis config");
-    let anchor =
-        resolve_survival_time_anchor_value(train_entry, None).expect("survival time anchor");
+    let anchor = resolve_survival_time_anchor_for_mode(
+        SurvivalLikelihoodMode::LocationScale,
+        train_entry,
+        train_exit,
+        None,
+    )
+    .expect("survival time anchor");
     let anchor_row =
         evaluate_survival_time_basis_row(anchor, &resolved_cfg).expect("survival anchor basis row");
     (resolved_cfg, anchor, anchor_row)

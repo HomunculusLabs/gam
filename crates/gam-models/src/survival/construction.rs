@@ -259,13 +259,6 @@ pub struct SurvivalTimeBuildOutput {
 
 pub const SURVIVAL_TIME_FLOOR: f64 = 1e-9;
 
-/// Entry ages above this value mark genuine left truncation (delayed entry): the
-/// row's cumulative-hazard interval starts at a positive left-tail time rather
-/// than the time origin. Kept in lockstep with the working-model's
-/// `ENTRY_AT_ORIGIN_THRESHOLD` so the "this row has an entry interval" and "the
-/// data is left-truncated" decisions agree.
-pub const SURVIVAL_DELAYED_ENTRY_THRESHOLD: f64 = 1e-8;
-
 /// Seed smoothing penalty `λ` used when a survival time basis is reconstructed
 /// from a build (or saved model) that did not carry an explicit `smooth_lambda`.
 /// This is only an initial value for the REML smoothing search, not a fixed
@@ -293,6 +286,19 @@ pub enum SurvivalLikelihoodMode {
     Latent,
     LatentBinary,
 }
+
+/// Every survival likelihood mode, for the cross-mode contracts that must hold
+/// for all of them (e.g. the one time-basis anchor rule). Kept exhaustive by
+/// `survival_likelihood_modes_is_exhaustive`, which dispatches on the enum so a
+/// new variant fails to compile until it is listed here.
+pub const SURVIVAL_LIKELIHOOD_MODES: [SurvivalLikelihoodMode; 6] = [
+    SurvivalLikelihoodMode::Transformation,
+    SurvivalLikelihoodMode::Weibull,
+    SurvivalLikelihoodMode::LocationScale,
+    SurvivalLikelihoodMode::MarginalSlope,
+    SurvivalLikelihoodMode::Latent,
+    SurvivalLikelihoodMode::LatentBinary,
+];
 
 pub struct SurvivalTimeWiggleBuild {
     pub penalties: Vec<Array2<f64>>,
@@ -1512,9 +1518,10 @@ pub fn build_survival_time_basis(
                     num_internal_knots,
                     BasisOptions::i_spline(),
                 )?;
-                let effective_bspline_degree = effective_degree.checked_add(1).ok_or_else(|| {
-                    "ispline degree overflow while building knot basis".to_string()
-                })?;
+                let effective_bspline_degree =
+                    effective_degree.checked_add(1).ok_or_else(|| {
+                        "ispline degree overflow while building knot basis".to_string()
+                    })?;
                 (knotvec, effective_degree, effective_bspline_degree)
             } else {
                 (knots, degree, requested_bspline_degree)
@@ -1913,144 +1920,159 @@ pub fn resolved_survival_time_basis_config_from_build(
     }
 }
 
-pub fn resolve_survival_time_anchor_value(
-    age_entry: &Array1<f64>,
-    time_anchor: Option<f64>,
-) -> Result<f64, String> {
-    if age_entry.is_empty() {
-        return Err("survival time anchor requires non-empty entry times".to_string());
+// ---------------------------------------------------------------------------
+// Survival time-basis anchor: ONE rule, three primitives
+// ---------------------------------------------------------------------------
+//
+// `center_survival_time_designs_at_anchor` subtracts the time-basis row at the
+// anchor from every entry/exit design row, so the anchor sets the origin of the
+// baseline-hazard reparameterization. WHICH time to anchor at is a function of
+// exactly three things — the likelihood mode, the entry/exit data, and an
+// optional caller override — so it is decided in exactly one place,
+// [`resolve_survival_time_anchor_for_mode`], which every front end calls.
+//
+// It used to be decided in two. `materialize_survival` (the engine path behind
+// `fit_from_formula` and the Python FFI) promoted the robust anchor for any
+// left-truncated dataset and hardcoded the override to `None`; `gam-cli`'s
+// survival path promoted it only for marginal-slope and owned the
+// `--survival-time-anchor` override. Three consequences, all of them #2631:
+//
+//   1. The same formula, data and config produced a DIFFERENT fit depending on
+//      which front end ran it — a left-truncated location-scale (or latent)
+//      model centered at the robust median exit under `fit_from_formula` and at
+//      the earliest entry under the CLI.
+//   2. Because the override lived only in the CLI copy, and the CLI's own
+//      default (transformation / Weibull) route delegates to the engine copy,
+//      `--survival-time-anchor` was SILENTLY IGNORED on the default route.
+//   3. `FitRequestConfigDocument` — the "complete scientific model
+//      configuration" that `--survival-time-anchor` declares a conflict with —
+//      had no field for the anchor at all, so a fit-request document could not
+//      express what the flag it excludes expresses.
+//
+// A rule that lives in two places is a rule that disagrees with itself. The
+// anchor is model configuration, not front-end transport, so the override now
+// travels on `FitConfig` and the rule below is the only thing that reads it.
+
+/// Validate a caller-supplied survival time-anchor override.
+///
+/// Honored verbatim by every likelihood mode (subject to the `SURVIVAL_TIME_FLOOR`
+/// clamp that keeps `log(anchor)` finite), because a caller who names the anchor
+/// is overriding the conditioning heuristic on purpose.
+pub fn validate_survival_time_anchor_override(time_anchor: f64) -> Result<f64, String> {
+    if !time_anchor.is_finite() || time_anchor < 0.0 {
+        return Err(format!(
+            "survival time anchor must be finite and non-negative, got {time_anchor}"
+        ));
     }
-    let anchor = match time_anchor {
-        Some(t_anchor) => {
-            if !t_anchor.is_finite() || t_anchor < 0.0 {
-                return Err(format!(
-                    "survival time anchor must be finite and non-negative, got {t_anchor}"
-                ));
-            }
-            t_anchor
-        }
-        None => age_entry
-            .iter()
-            .copied()
-            .min_by(f64::total_cmp)
-            .ok_or_else(|| "failed to select survival time anchor".to_string())?,
-    };
-    Ok(anchor.max(SURVIVAL_TIME_FLOOR))
+    Ok(time_anchor.max(SURVIVAL_TIME_FLOOR))
 }
 
-/// Marginal-slope centering anchor: a robust *interior* time on the **exit**
-/// scale rather than the earliest entry age.
+/// Earliest-entry anchor — the default for data that is NOT left-truncated.
 ///
-/// `center_survival_time_designs_at_anchor` subtracts the time-basis row at the
-/// anchor from every entry/exit design row, so the anchor sets the origin of
-/// the baseline-hazard I-spline's affine reparameterization. The
-/// location-scale path anchors at the minimum entry age
-/// ([`resolve_survival_time_anchor_value`]); for right-censored-only data that
-/// minimum is ≈ the time origin, so centering is nearly a no-op.
+/// With every row entering at the time origin this is `≈ 0`, so for the
+/// monotone I-spline time basis the anchor row is `≈ 0` and centering is a
+/// near-no-op: the historical (pre-#751) behavior is preserved bit-for-bit on
+/// ordinary right-censored data.
+pub fn survival_earliest_entry_time_anchor(age_entry: &Array1<f64>) -> Result<f64, String> {
+    let min_entry = age_entry
+        .iter()
+        .copied()
+        .min_by(f64::total_cmp)
+        .ok_or_else(|| "survival time anchor requires non-empty entry times".to_string())?;
+    Ok(min_entry.max(SURVIVAL_TIME_FLOOR))
+}
+
+/// Robust interior anchor — the median exit age, a time on the **exit** scale
+/// where the at-risk mass concentrates.
 ///
-/// Under **left truncation** the minimum entry age is a genuine positive
-/// *left-tail* point, and centering there leaves the centered linear-trend
-/// column `X(exit) − X(anchor)` large and one-signed across all rows (exit
-/// times sit far to the right of the earliest entry). That column is the
-/// unpenalized polynomial null space of the 2nd-difference time penalty, so the
-/// inflated, one-signed column multiplies the marginal-slope time-block score
-/// at the `γ = 0` monotone-cone seed up by hundreds — the constrained joint
-/// Newton cannot certify KKT on it and REML rejects every seed (issue #751).
+/// Under left truncation the earliest entry age is a genuine positive
+/// *left-tail* point, and centering the time basis there leaves the centered
+/// linear-trend column `X(exit) − X(anchor)` large and one-signed across all
+/// rows (every exit sits far to the right of the earliest entry). That column is
+/// the unpenalized polynomial null space of the 2nd-difference time penalty, so
+/// the inflated one-signed column multiplies the time-block score at the
+/// smoothing seed up by hundreds: the marginal-slope constrained joint Newton
+/// cannot certify KKT on it and REML rejects every seed (#751), and the
+/// transformation (Royston-Parmar) smoothing selection rails a penalty
+/// direction and collapses the baseline to a covariate-independent surface with
+/// `H` inflated ~10³× and `S(t) ≡ 0` (#1790).
 ///
-/// Centering instead at a robust interior location on the *exit* scale — the
-/// **median exit age**, where the at-risk mass concentrates — keeps the
-/// centered column small and two-signed (some exits below the median, some
-/// above), so the exit-event likelihood pins the linear trend and the seed
-/// score stays bounded. Re-centering is an exact affine reparameterization of
-/// the baseline offset: the fitted `q(t)` and the REML objective are unchanged,
-/// only the seed conditioning improves. The median is chosen (over the mean)
-/// for robustness to the heavy right tail of survival times.
-///
-/// An explicit `--survival-time-anchor` is honored verbatim (same validation as
-/// the location-scale path) so the user retains full control; the saved
-/// `survival_time_anchor` scalar round-trips to predict unchanged.
-pub fn resolve_survival_marginal_slope_time_anchor_value(
-    age_entry: &Array1<f64>,
-    age_exit: &Array1<f64>,
-    time_anchor: Option<f64>,
-) -> Result<f64, String> {
-    if age_entry.is_empty() || age_exit.is_empty() {
+/// Centering at the median exit keeps that column small and two-signed (some
+/// exits below the median, some above) so the exit-event likelihood pins the
+/// linear trend and the seed score stays bounded. The median is chosen over the
+/// mean for robustness to the heavy right tail of survival times.
+pub fn survival_robust_interior_time_anchor(age_exit: &Array1<f64>) -> Result<f64, String> {
+    if age_exit.is_empty() {
         return Err(
-            "survival marginal-slope time anchor requires non-empty entry/exit times".to_string(),
+            "survival robust interior time anchor requires non-empty exit times".to_string(),
         );
     }
-    let anchor = match time_anchor {
-        Some(t_anchor) => {
-            if !t_anchor.is_finite() || t_anchor < 0.0 {
-                return Err(format!(
-                    "survival time anchor must be finite and non-negative, got {t_anchor}"
-                ));
-            }
-            t_anchor
-        }
-        None => robust_interior_exit_anchor(age_exit),
-    };
-    Ok(anchor.max(SURVIVAL_TIME_FLOOR))
-}
-
-/// Median exit age — a robust interior time on the exit scale, where the
-/// at-risk mass concentrates. Used as the survival time-basis centering anchor
-/// whenever the earliest entry is a positive left-tail point (delayed entry):
-/// centering there keeps the reparameterized linear-trend column small and
-/// two-signed instead of large and one-signed. The median is chosen over the
-/// mean for robustness to the heavy right tail of survival times.
-fn robust_interior_exit_anchor(age_exit: &Array1<f64>) -> f64 {
     let mut sorted: Vec<f64> = age_exit.iter().copied().collect();
     sorted.sort_by(f64::total_cmp);
     let m = sorted.len();
-    if m == 0 {
-        return SURVIVAL_TIME_FLOOR;
-    }
-    if m % 2 == 1 {
+    let median = if m % 2 == 1 {
         sorted[m / 2]
     } else {
         0.5 * (sorted[m / 2 - 1] + sorted[m / 2])
-    }
+    };
+    Ok(median.max(SURVIVAL_TIME_FLOOR))
 }
 
-/// Centering anchor for the default transformation (Royston-Parmar) survival
-/// baseline.
+/// The single definition of "this dataset is genuinely left-truncated".
 ///
-/// For right-censored-only data the earliest entry age is ≈ the time origin, so
-/// [`resolve_survival_time_anchor_value`] (min entry) is nearly a no-op and is
-/// used unchanged. Under **left truncation** (every row enters at a positive
-/// delayed-entry time) that minimum is a genuine left-tail point far below the
-/// exit mass, and centering the I-spline time basis there leaves the
-/// unpenalized linear-trend column `X(exit) − X(anchor)` large and one-signed
-/// across all rows. That column is the null space of the 2nd-difference time
-/// penalty, so the inflated one-signed column blows up the transformation
-/// smoothing-parameter selection: it rails a penalty direction and collapses the
-/// baseline to a covariate-independent, cumulative-hazard-inflated degenerate
-/// fit (issue #1790 — the transformation-model analogue of the marginal-slope
-/// #751 defect). Anchoring instead at the robust interior **median exit age**
-/// keeps the centered column small and two-signed so the exit-event likelihood
-/// pins the linear trend. Re-centering is an exact affine reparameterization of
-/// the baseline offset — the fitted `q(t)` and REML objective are unchanged,
-/// only the seed conditioning improves. An explicit `time_anchor` is honored
-/// verbatim.
-pub fn resolve_survival_transformation_time_anchor_value(
+/// **Any** row entering above [`ENTRY_AT_ORIGIN_THRESHOLD`] makes the data
+/// left-truncated, not just the earliest one. Staggered entry — part of the
+/// cohort observed from the time origin, the rest joining at positive delayed
+/// entry times — is the ordinary shape of a real registry cohort, and it
+/// exhibits the #751/#1790 inflation just as fully-delayed entry does: the
+/// earliest-entry anchor is then `≈ 0`, the anchor row of a `log t` basis is
+/// evaluated at `SURVIVAL_TIME_FLOOR`, and every centered exit column is
+/// one-signed and large. Testing `min(entry) > threshold` instead would
+/// under-trigger on exactly that shape, which is why the two former copies of
+/// this predicate (`any` in the materializer, `min` inside the transformation
+/// resolver) had to be collapsed to one.
+///
+/// The threshold is the likelihood engines' own origin convention, so "this row
+/// has a delayed-entry interval" and "this dataset is left-truncated" cannot
+/// drift apart.
+pub fn survival_data_is_left_truncated(age_entry: &Array1<f64>) -> bool {
+    age_entry
+        .iter()
+        .any(|&entry| entry > crate::survival::base::ENTRY_AT_ORIGIN_THRESHOLD)
+}
+
+/// **The** survival time-basis anchor rule. Every front end calls this and
+/// nothing else.
+///
+/// * An explicit `time_anchor` wins, in every mode.
+/// * Marginal-slope always takes the robust interior anchor: its `γ = 0`
+///   monotone-cone seed is where #751 was measured, and the fix was applied
+///   there unconditionally.
+/// * Every other time-basis-carrying likelihood takes the robust interior
+///   anchor **iff the data is genuinely left-truncated**. Ordinary
+///   right-censored data keeps the earliest-entry anchor, which is `≈` the time
+///   origin, so centering stays a near-no-op and pre-#751 behavior is preserved
+///   bit-for-bit.
+///
+/// Re-centering is an exact affine reparameterization of the baseline offset, so
+/// this choice does not change the model being fitted — only the frame the
+/// smoothing selection sees it in, and the frame the saved
+/// `survival_time_anchor` must replay in.
+pub fn resolve_survival_time_anchor_for_mode(
+    survival_mode: SurvivalLikelihoodMode,
     age_entry: &Array1<f64>,
     age_exit: &Array1<f64>,
     time_anchor: Option<f64>,
 ) -> Result<f64, String> {
-    if time_anchor.is_some() {
-        return resolve_survival_time_anchor_value(age_entry, time_anchor);
+    if let Some(explicit) = time_anchor {
+        return validate_survival_time_anchor_override(explicit);
     }
-    if age_exit.is_empty() {
-        return Err(
-            "survival transformation time anchor requires non-empty exit times".to_string(),
-        );
-    }
-    let min_entry = age_entry.iter().copied().fold(f64::INFINITY, f64::min);
-    if min_entry > SURVIVAL_DELAYED_ENTRY_THRESHOLD {
-        Ok(robust_interior_exit_anchor(age_exit).max(SURVIVAL_TIME_FLOOR))
+    if survival_mode == SurvivalLikelihoodMode::MarginalSlope
+        || survival_data_is_left_truncated(age_entry)
+    {
+        survival_robust_interior_time_anchor(age_exit)
     } else {
-        resolve_survival_time_anchor_value(age_entry, None)
+        survival_earliest_entry_time_anchor(age_entry)
     }
 }
 
@@ -4184,7 +4206,8 @@ fn finish_time_varying_survival_covariate_template(
 #[cfg(test)]
 mod tests {
     use super::{
-        SurvivalBaselineConfig, SurvivalBaselineTarget, SurvivalMarginalSlopeFrozenOffsetChart,
+        SURVIVAL_LIKELIHOOD_MODES, SURVIVAL_TIME_FLOOR, SurvivalBaselineConfig,
+        SurvivalBaselineTarget, SurvivalLikelihoodMode, SurvivalMarginalSlopeFrozenOffsetChart,
         SurvivalTimeBasisConfig, baseline_chain_rule_gradient, baseline_offset_theta_partials,
         build_survival_marginal_slope_baseline_geometry,
         build_survival_marginal_slope_baseline_offsets, build_survival_time_basis,
@@ -4195,10 +4218,13 @@ mod tests {
         marginal_slope_baseline_chain_rule_hessian, marginal_slope_baseline_offset_theta_partials,
         optimize_survival_baseline_config_with_gradient,
         optimize_survival_baseline_config_with_gradient_only,
-        resolve_survival_marginal_slope_time_anchor_value, survival_baseline_config_from_theta,
-        survival_baseline_theta_from_config,
+        resolve_survival_time_anchor_for_mode, survival_baseline_config_from_theta,
+        survival_baseline_theta_from_config, survival_data_is_left_truncated,
+        survival_earliest_entry_time_anchor, survival_robust_interior_time_anchor,
+        validate_survival_time_anchor_override,
     };
     use crate::probability::normal_cdf;
+    use crate::survival::base::ENTRY_AT_ORIGIN_THRESHOLD;
     use crate::survival::{OffsetChannelCurvatures, OffsetChannelResiduals};
     use gam_terms::inference::formula_dsl::LinkWiggleFormulaSpec;
     use ndarray::{Array1, Array2, array};
@@ -4410,30 +4436,201 @@ mod tests {
         }
     }
 
+    /// The one anchor rule (#2631), exercised across every mode and every
+    /// truncation shape. Before the unification this behavior was spread over
+    /// three resolvers and two front-end copies of the mode dispatch, and the
+    /// copies disagreed.
+    ///
+    /// Marginal-slope takes the robust interior (median exit) anchor
+    /// unconditionally: its `γ = 0` monotone-cone seed is where #751 was
+    /// measured.
     #[test]
     fn marginal_slope_time_anchor_defaults_to_median_exit() {
         let age_entry = array![9.0, 1.0, 4.0, 6.0];
         let age_exit = array![20.0, 12.0, 18.0, 30.0];
-        let anchor = resolve_survival_marginal_slope_time_anchor_value(&age_entry, &age_exit, None)
-            .expect("resolve marginal-slope default time anchor");
+        let anchor = resolve_survival_time_anchor_for_mode(
+            SurvivalLikelihoodMode::MarginalSlope,
+            &age_entry,
+            &age_exit,
+            None,
+        )
+        .expect("resolve marginal-slope default time anchor");
 
+        // Even count: mean of the two central exits, 18 and 20.
         assert!(
             (anchor - 19.0).abs() <= 1e-12,
             "marginal-slope default anchor should be median exit, got {anchor}"
         );
     }
 
+    /// An explicit anchor is the caller overriding the conditioning heuristic on
+    /// purpose, so it wins in every mode — including the modes whose default
+    /// would have been the median exit.
     #[test]
-    fn marginal_slope_time_anchor_honors_explicit_value() {
+    fn explicit_time_anchor_wins_in_every_mode() {
         let age_entry = array![9.0, 1.0, 4.0, 6.0];
         let age_exit = array![20.0, 12.0, 18.0, 30.0];
-        let anchor =
-            resolve_survival_marginal_slope_time_anchor_value(&age_entry, &age_exit, Some(7.5))
-                .expect("resolve explicit marginal-slope time anchor");
+        for mode in SURVIVAL_LIKELIHOOD_MODES {
+            let anchor =
+                resolve_survival_time_anchor_for_mode(mode, &age_entry, &age_exit, Some(7.5))
+                    .expect("resolve explicit time anchor");
+            assert!(
+                (anchor - 7.5).abs() <= 1e-12,
+                "explicit anchor must round-trip for {mode:?}, got {anchor}"
+            );
+        }
+    }
 
+    /// Ordinary right-censored data (`entry == 0`) keeps the earliest-entry
+    /// anchor in every non-marginal-slope mode, so centering stays the near-no-op
+    /// it was before #751 and prior behavior is preserved bit-for-bit.
+    #[test]
+    fn right_censored_data_keeps_the_earliest_entry_anchor() {
+        let age_entry = Array1::<f64>::zeros(4);
+        let age_exit = array![20.0, 12.0, 18.0, 30.0];
+        for mode in SURVIVAL_LIKELIHOOD_MODES {
+            if mode == SurvivalLikelihoodMode::MarginalSlope {
+                continue;
+            }
+            let anchor = resolve_survival_time_anchor_for_mode(mode, &age_entry, &age_exit, None)
+                .expect("resolve right-censored time anchor");
+            assert!(
+                (anchor - SURVIVAL_TIME_FLOOR).abs() <= 1e-18,
+                "un-truncated {mode:?} must anchor at the earliest entry (floored), got {anchor}"
+            );
+        }
+    }
+
+    /// Genuine left truncation promotes the robust interior anchor for EVERY
+    /// time-basis-carrying likelihood, not just marginal-slope. This is the rule
+    /// the CLI's own copy did not implement, which is why the same data, formula
+    /// and config produced a different location-scale fit on each front end
+    /// (#2631).
+    #[test]
+    fn left_truncated_data_takes_the_robust_interior_anchor_in_every_mode() {
+        let age_entry = array![9.0, 1.0, 4.0, 6.0];
+        let age_exit = array![20.0, 12.0, 18.0, 30.0];
+        assert!(survival_data_is_left_truncated(&age_entry));
+        for mode in SURVIVAL_LIKELIHOOD_MODES {
+            let anchor = resolve_survival_time_anchor_for_mode(mode, &age_entry, &age_exit, None)
+                .expect("resolve left-truncated time anchor");
+            assert!(
+                (anchor - 19.0).abs() <= 1e-12,
+                "left-truncated {mode:?} must anchor at the median exit (19.0), got {anchor}; \
+                 the earliest entry (1.0) is the #751/#1790 defect"
+            );
+        }
+    }
+
+    /// Staggered entry — part of the cohort followed from the time origin, the
+    /// rest joining later — IS left truncation. The predicate is `any(entry >
+    /// threshold)`, not `min(entry) > threshold`: with a `min` test this shape
+    /// would fall back to an anchor at the time-origin floor, where the centered
+    /// exit columns are maximally large and one-signed. The retired
+    /// transformation-specific resolver used `min` and got exactly this case
+    /// wrong.
+    #[test]
+    fn staggered_entry_counts_as_left_truncated() {
+        let age_entry = array![0.0, 9.0, 0.0, 6.0];
+        let age_exit = array![20.0, 12.0, 18.0, 30.0];
         assert!(
-            (anchor - 7.5).abs() <= 1e-12,
-            "explicit marginal-slope anchor should round-trip, got {anchor}"
+            survival_data_is_left_truncated(&age_entry),
+            "a cohort with some rows entering at positive delayed-entry times is left-truncated"
+        );
+        for mode in SURVIVAL_LIKELIHOOD_MODES {
+            let anchor = resolve_survival_time_anchor_for_mode(mode, &age_entry, &age_exit, None)
+                .expect("resolve staggered-entry time anchor");
+            assert!(
+                (anchor - 19.0).abs() <= 1e-12,
+                "staggered-entry {mode:?} must anchor at the median exit, got {anchor}"
+            );
+        }
+    }
+
+    /// The origin convention is the likelihood engines' own: an entry exactly at
+    /// the threshold is still "at the origin", one above it is delayed entry.
+    #[test]
+    fn left_truncation_predicate_uses_the_engine_origin_threshold() {
+        assert!(!survival_data_is_left_truncated(&array![
+            0.0,
+            ENTRY_AT_ORIGIN_THRESHOLD
+        ]));
+        assert!(survival_data_is_left_truncated(&array![
+            0.0,
+            ENTRY_AT_ORIGIN_THRESHOLD * 1.000_001
+        ]));
+    }
+
+    /// Odd row counts take the true middle exit; the anchor is always floored so
+    /// `log(anchor)` stays finite.
+    #[test]
+    fn robust_interior_anchor_is_the_median_and_is_floored() {
+        assert!(
+            (survival_robust_interior_time_anchor(&array![30.0, 12.0, 18.0])
+                .expect("odd-count median")
+                - 18.0)
+                .abs()
+                <= 1e-12
+        );
+        assert_eq!(
+            survival_robust_interior_time_anchor(&array![0.0, 0.0]).expect("zero exits"),
+            SURVIVAL_TIME_FLOOR
+        );
+        assert!(survival_robust_interior_time_anchor(&Array1::<f64>::zeros(0)).is_err());
+        assert!(survival_earliest_entry_time_anchor(&Array1::<f64>::zeros(0)).is_err());
+    }
+
+    /// `SURVIVAL_LIKELIHOOD_MODES` must list every variant, or the cross-mode
+    /// contracts above silently stop covering one. The `match` is what enforces
+    /// it: adding a variant to the enum breaks this compilation until the new
+    /// mode is added to the array too.
+    #[test]
+    fn survival_likelihood_modes_is_exhaustive() {
+        fn slot(mode: SurvivalLikelihoodMode) -> usize {
+            match mode {
+                SurvivalLikelihoodMode::Transformation => 0,
+                SurvivalLikelihoodMode::Weibull => 1,
+                SurvivalLikelihoodMode::LocationScale => 2,
+                SurvivalLikelihoodMode::MarginalSlope => 3,
+                SurvivalLikelihoodMode::Latent => 4,
+                SurvivalLikelihoodMode::LatentBinary => 5,
+            }
+        }
+        let mut seen = [false; 6];
+        for mode in SURVIVAL_LIKELIHOOD_MODES {
+            let slot = slot(mode);
+            assert!(!seen[slot], "{mode:?} listed twice");
+            seen[slot] = true;
+        }
+        assert!(
+            seen.iter().all(|&hit| hit),
+            "SURVIVAL_LIKELIHOOD_MODES is missing a variant: {seen:?}"
+        );
+    }
+
+    /// A caller-supplied anchor is validated once, in one place, so every front
+    /// end refuses the same values with the same message.
+    #[test]
+    fn time_anchor_override_rejects_non_finite_and_negative_values() {
+        for bad in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                validate_survival_time_anchor_override(bad).is_err(),
+                "override {bad} must be refused"
+            );
+            assert!(
+                resolve_survival_time_anchor_for_mode(
+                    SurvivalLikelihoodMode::Transformation,
+                    &array![0.0, 1.0],
+                    &array![5.0, 6.0],
+                    Some(bad),
+                )
+                .is_err(),
+                "the rule must refuse override {bad}"
+            );
+        }
+        assert_eq!(
+            validate_survival_time_anchor_override(0.0).expect("zero is a legal anchor"),
+            SURVIVAL_TIME_FLOOR
         );
     }
 
@@ -4597,13 +4794,9 @@ mod tests {
         let age_entry = array![1.0_f64, 1.0, 1.0, 1.0];
         let age_exit = array![2.0_f64, 3.0, 5.0, 8.0];
 
-        let built = build_survival_time_basis(
-            &age_entry,
-            &age_exit,
-            SurvivalTimeBasisConfig::Linear,
-            None,
-        )
-        .expect("build linear Weibull time basis");
+        let built =
+            build_survival_time_basis(&age_entry, &age_exit, SurvivalTimeBasisConfig::Linear, None)
+                .expect("build linear Weibull time basis");
 
         assert_eq!(
             built.x_exit_time.ncols(),
@@ -4611,7 +4804,11 @@ mod tests {
             "the linear Weibull time basis must emit exactly one column (`log t`); \
              the confounded constant column was dropped in #2301"
         );
-        assert_eq!(built.x_entry_time.ncols(), 1, "entry basis width must match");
+        assert_eq!(
+            built.x_entry_time.ncols(),
+            1,
+            "entry basis width must match"
+        );
         assert_eq!(
             built.x_derivative_time.ncols(),
             1,
@@ -4636,8 +4833,9 @@ mod tests {
 
         // The frozen anchor-row evaluator agrees on the one-column width so the
         // engine's centered `(b(t) − b(anchor))·β_time` reconstruction lines up.
-        let anchor_row = super::evaluate_survival_time_basis_row(4.5, &SurvivalTimeBasisConfig::Linear)
-            .expect("evaluate linear anchor row");
+        let anchor_row =
+            super::evaluate_survival_time_basis_row(4.5, &SurvivalTimeBasisConfig::Linear)
+                .expect("evaluate linear anchor row");
         assert_eq!(anchor_row.len(), 1, "linear anchor row must be one element");
         assert!((anchor_row[0] - 4.5_f64.ln()).abs() < 1e-12);
     }

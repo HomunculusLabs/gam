@@ -58,9 +58,22 @@ pub(crate) fn reject_survival_only_terms_for_nonsurvival(
     Ok(())
 }
 
-/// Reject an explicitly-requested `config.survival_likelihood` when the response
-/// is not `Surv(...)`.
+/// Reject an explicitly-requested survival-only `FitConfig` knob when the
+/// response is not `Surv(...)`.
 ///
+/// Two knobs qualify, and they qualify for the same reason: both are read
+/// exclusively inside `materialize_survival`, and both are `Option`-typed, so
+/// "the caller asked for this" is carried by the type instead of guessed from a
+/// value.
+///
+/// * `survival_likelihood` selects the likelihood mode.
+/// * `survival_time_anchor` names the baseline time-basis centering anchor
+///   (#2631). It reached this struct as part of collapsing the anchor rule to one
+///   place; the CLI had always refused `--survival-time-anchor` without a
+///   `Surv(...)` response, and the engine must refuse it identically or the two
+///   front ends disagree again — this time about which configurations are legal.
+///
+
 /// `survival_likelihood` selects the survival likelihood mode
 /// (`"transformation"`, `"location-scale"`, `"weibull"`, `"marginal-slope"`,
 /// `"latent"`, `"latent-binary"`, …) and is read *exclusively* inside
@@ -77,9 +90,20 @@ pub(crate) fn reject_survival_only_terms_for_nonsurvival(
 /// "unset" (allowed through), and ANY `Some(mode)` is an explicit request that
 /// must be rejected on a non-survival response — the type carries the intent, so
 /// this seam no longer has to guess default-vs-explicit from a string value.
-pub(crate) fn reject_survival_likelihood_for_nonsurvival(
+pub(crate) fn reject_survival_only_config_for_nonsurvival(
     config: &FitConfig,
 ) -> Result<(), WorkflowError> {
+    if let Some(anchor) = config.survival_time_anchor {
+        return Err(WorkflowError::InvalidConfig {
+            reason: format!(
+                "survival_time_anchor={anchor} is only supported in the main survival formula \
+                 (a formula with a Surv(...) response); it centers the baseline time basis, which \
+                 exists only on the survival fit path, so for a non-survival response it is \
+                 meaningless and would otherwise be silently ignored. Wrap the response in \
+                 Surv(...) or drop the survival_time_anchor configuration."
+            ),
+        });
+    }
     // `survival_likelihood` is `None` by default across every entrance (#2301):
     // the sole canonical default is resolved to `"transformation"` at the
     // `Surv(...)` seam, not stored here. So `None` is genuinely "unset" and must

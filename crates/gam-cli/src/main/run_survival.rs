@@ -447,33 +447,19 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                 .to_string(),
         );
     }
-    // Marginal-slope centers the baseline-hazard I-spline at a robust interior
-    // exit-scale time (median exit) instead of the earliest entry age; under
-    // left truncation the earliest entry is a positive left-tail point and
-    // centering there inflates the unpenalized linear-trend column, blowing up
-    // the time-block seed score so REML rejects every seed (issue #751). The
-    // location-scale path keeps the earliest-entry anchor. The default
-    // transformation (Royston-Parmar) baseline suffers the identical pathology
-    // under left truncation — the inflated one-signed column rails the
-    // transformation smoothing selection and collapses the fit to a
-    // covariate-independent degenerate surface (issue #1790) — so it too switches
-    // to the robust interior anchor when the data is left-truncated. An explicit
-    // `--survival-time-anchor` is honored by all paths.
-    let time_anchor = if likelihood_mode == SurvivalLikelihoodMode::MarginalSlope {
-        resolve_survival_marginal_slope_time_anchor_value(
-            &age_entry,
-            &age_exit,
-            args.survival_time_anchor,
-        )?
-    } else if likelihood_mode == SurvivalLikelihoodMode::Transformation {
-        resolve_survival_transformation_time_anchor_value(
-            &age_entry,
-            &age_exit,
-            args.survival_time_anchor,
-        )?
-    } else {
-        resolve_survival_time_anchor_value(&age_entry, args.survival_time_anchor)?
-    };
+    // The one anchor rule, shared with `materialize_survival` and therefore with
+    // `fit_from_formula`, the Python FFI, and this binary's own canonical
+    // transformation/Weibull route. This site used to carry a second copy that
+    // promoted the robust interior anchor for marginal-slope only, so a
+    // left-truncated location-scale or latent fit came out differently here than
+    // through the engine (#2631). The anchor override now travels on
+    // `FitConfig`, which is what lets the canonical route honor it too.
+    let time_anchor = resolve_survival_time_anchor_for_mode(
+        likelihood_mode,
+        &age_entry,
+        &age_exit,
+        effective_config.survival_time_anchor,
+    )?;
     let exact_derivative_guard = survival_derivative_guard_for_likelihood(likelihood_mode);
     if likelihood_mode != SurvivalLikelihoodMode::Weibull {
         inference_notes.push(format!(

@@ -1908,7 +1908,7 @@ fn payload_for_survival_marginal_slope(
 ) -> Result<FittedModelPayload, String> {
     use crate::survival::construction::{
         build_survival_time_basis, parse_survival_baseline_config, parse_survival_likelihood_mode,
-        parse_survival_time_basis_config, resolve_survival_marginal_slope_time_anchor_value,
+        parse_survival_time_basis_config, resolve_survival_time_anchor_for_mode,
         survival_likelihood_modename, survival_marginal_slope_offset_baseline_config,
     };
     use ndarray::s;
@@ -1987,8 +1987,15 @@ fn payload_for_survival_marginal_slope(
             fit_config.time_smooth_lambda,
         )?
     };
-    let time_anchor =
-        resolve_survival_marginal_slope_time_anchor_value(&age_entry, &age_exit, None)?;
+    // Re-derivation, so it must ask the same question the fit asked — including
+    // the caller's explicit anchor, which this site used to ignore, persisting
+    // the median exit onto a model whose fit centered somewhere else (#2631).
+    let time_anchor = resolve_survival_time_anchor_for_mode(
+        likelihood_mode,
+        &age_entry,
+        &age_exit,
+        fit_config.survival_time_anchor,
+    )?;
     let time_build = build_survival_time_basis(
         &age_entry,
         &age_exit,

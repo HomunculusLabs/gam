@@ -1735,7 +1735,7 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
         // is an explicit request, and on a non-survival response the materializer
         // that reads it is never reached, so the knob would be silently dropped and
         // the requested model would degrade to an ordinary GAM (#1767). That is why
-        // `reject_survival_likelihood_for_nonsurvival` refuses it.
+        // `reject_survival_only_config_for_nonsurvival` refuses it.
         //
         // This fixture is a NON-survival fit, so `Some("transformation")` here was
         // asking to be rejected. The guard is correct; the fixture predates it.
@@ -2206,7 +2206,7 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         // is an explicit request, and on a non-survival response the materializer
         // that reads it is never reached, so the knob would be silently dropped and
         // the requested model would degrade to an ordinary GAM (#1767). That is why
-        // `reject_survival_likelihood_for_nonsurvival` refuses it.
+        // `reject_survival_only_config_for_nonsurvival` refuses it.
         //
         // This fixture is a NON-survival fit, so `Some("transformation")` here was
         // asking to be rejected. The guard is correct; the fixture predates it.
@@ -2349,7 +2349,7 @@ fn binomial_link_fit_args(data: PathBuf, out: PathBuf, formula: &str) -> FitArgs
         // is an explicit request, and on a non-survival response the materializer
         // that reads it is never reached, so the knob would be silently dropped and
         // the requested model would degrade to an ordinary GAM (#1767). That is why
-        // `reject_survival_likelihood_for_nonsurvival` refuses it.
+        // `reject_survival_only_config_for_nonsurvival` refuses it.
         //
         // This fixture is a NON-survival fit, so `Some("transformation")` here was
         // asking to be rejected. The guard is correct; the fixture predates it.
@@ -2511,7 +2511,7 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         // binomial Firth fit, so an explicit survival_likelihood is a knob the
         // materializer that reads it never sees. It would be dropped silently and
         // degrade the requested model to an ordinary GAM (#1767), which is why
-        // reject_survival_likelihood_for_nonsurvival refuses it.
+        // reject_survival_only_config_for_nonsurvival refuses it.
         survival_likelihood: None,
         survival_time_anchor: None,
         baseline_target: "linear".to_string(),
@@ -6168,7 +6168,7 @@ fn run_predict_survival_supports_saved_latent_survival_model() {
     });
     let p_time = time_build.x_exit_time.ncols();
     let time_anchor =
-        gam::families::survival::construction::resolve_survival_time_anchor_value(&age_entry, None)
+        gam::families::survival::construction::survival_earliest_entry_time_anchor(&age_entry)
             .unwrap_or_else(|e| {
                 panic!(
                     "{} failed: {:?}",

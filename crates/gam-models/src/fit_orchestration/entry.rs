@@ -2327,7 +2327,7 @@ fn materialize_impl<'a>(
         // non-survival branch a non-default value (e.g. "weibull") would be
         // discarded and the fit would silently degrade to an ordinary GAM
         // (#1767). Reject it at the same chokepoint.
-        reject_survival_likelihood_for_nonsurvival(effective_config)?;
+        reject_survival_only_config_for_nonsurvival(effective_config)?;
         if effective_config.transformation_normal {
             // Issue #789A: a Bernoulli marginal-slope request with
             // `transformation_normal=true` used to dispatch as a CTN fit while

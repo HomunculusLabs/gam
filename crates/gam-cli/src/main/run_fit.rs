@@ -175,6 +175,11 @@ pub(crate) fn fit_config_from_survival_args(args: &SurvivalArgs) -> Result<FitCo
         // `SurvivalArgs` already carries a resolved concrete mode; this is a
         // survival fit, so the explicit `Some` is correct.
         survival_likelihood: Some(args.survival_likelihood.clone()),
+        // The baseline time-basis anchor is model configuration, not CLI
+        // transport: carrying it here is what makes `--survival-time-anchor`
+        // reach the canonical transformation/Weibull route, which delegates to
+        // `fit_from_formula` and used to drop the flag on the floor (#2631).
+        survival_time_anchor: args.survival_time_anchor,
         survival_distribution: args.survival_distribution.clone(),
         threshold_time_k: args.threshold_time_k,
         threshold_time_degree: args.threshold_time_degree,
