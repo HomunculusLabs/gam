@@ -897,12 +897,7 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
                             eps_min,
                             eps_max,
                             n_scales: eps_band.len(),
-                            // MeasureJet is the family that stores its range
-                            // STANDARDIZED, so this row reports a standardized
-                            // length beside a standardized `eps_band` — the
-                            // section is internally consistent but the rendered
-                            // label does not say so (see #2636 discussion).
-                            length_scale: length_scale.standardized_value(),
+                            length_scale: *length_scale,
                             spec_order_s: *order_s,
                             per_scale,
                             implied_order,
