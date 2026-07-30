@@ -919,6 +919,30 @@ mod trial_point_classification_tests {
                 max_iterations: 40,
                 last_change: 1.0e-2,
             },
+            // The fifth shape. The fixture carried four while the table it
+            // covers -- and this test's own doc, five lines up -- says five, so
+            // the fixed-lambda Newton stall was the one arm nothing pinned.
+            // That is the retreat the multinomial and independent-binomial
+            // vector-GLM lanes actually emit, and it is the arm a regression
+            // flipping to `false` would have slipped past unnoticed.
+            EstimationError::FixedLambdaNewtonDidNotConverge {
+                context: "trial-point classification fixture".to_string(),
+                reason: FixedLambdaStallReason::IterationBudgetExhausted,
+                objective_value: 12.5,
+                stationarity: FixedLambdaStationarityEvidence {
+                    kind: FixedLambdaResidualKind::PenalizedGradientNorm,
+                    residual: 1.0e-3,
+                    bound: 1.0e-8,
+                },
+                checkpoint: FixedLambdaCheckpoint::new(
+                    FixedLambdaSolverStage::MultinomialNewton,
+                    vec![0.0, 0.0],
+                    2,
+                    1,
+                    40,
+                )
+                .expect("fixture checkpoint geometry is valid"),
+            },
         ];
         for error in retreats {
             assert!(
