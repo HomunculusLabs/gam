@@ -29,6 +29,7 @@ env:
   R_LIBS_USER: ${{ github.workspace }}/.r-lib
   BENCH_R_VERSION: "4.4.3"
   BENCH_RUNTIME_CACHE_VERSION: v3
+  BENCH_BINARY_CACHE_VERSION: v1
 
 jobs:
   prepare:
@@ -125,13 +126,37 @@ jobs:
         with:
           r-version: ${{ env.BENCH_R_VERSION }}
 
-      - name: Install Rust stable
+      - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Build shared runtime
+      - name: Capture compiled-runtime ABI
+        id: binary-abi
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          python_abi="$(python3 -c 'import sys; print(f"py{sys.version_info.major}{sys.version_info.minor}")')"
+          echo "key=${ID}-${VERSION_ID}-$(uname -m)-${python_abi}" >> "${GITHUB_OUTPUT}"
+
+      # The release CLI and PyO3 extension are pure functions of the Rust
+      # sources, manifests, lockfile, and pinned toolchain. Benchmark harness
+      # and workflow edits must not relink the full workspace. Unlike Cargo's
+      # incremental cache, this exact cache ships the finished executables.
+      - name: Restore compiled benchmark runtime
+        id: binary-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            bench/runtime/gam
+            bench/runtime/_rust*.so
+          key: ${{ runner.os }}-${{ steps.binary-abi.outputs.key }}-bench-binaries-${{ env.BENCH_BINARY_CACHE_VERSION }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.lock', 'Cargo.toml', 'pyproject.toml', 'build.rs', 'src/**/*.rs', 'src/**/*.pest', 'crates/**/Cargo.toml', 'crates/**/*.rs') }}
+
+      - name: Stage shared runtime dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -151,6 +176,12 @@ jobs:
             python3 -m pip install --upgrade pip setuptools wheel
             python3 -m pip install --target bench/runtime/pydeps numpy pandas scikit-learn lifelines scikit-survival xgboost matplotlib
           fi
+
+      - name: Build compiled benchmark runtime
+        if: ${{ steps.binary-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo build --release -p gam-cli
           cp target/release/gam bench/runtime/gam
           chmod +x bench/runtime/gam
@@ -171,6 +202,15 @@ jobs:
           # Ship the freshly-built extension through the shared runtime
           # artifact so each shard does not have to recompile it.
           cp gamfit/_rust*.so bench/runtime/
+
+      - name: Save compiled benchmark runtime
+        if: ${{ steps.binary-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            bench/runtime/gam
+            bench/runtime/_rust*.so
+          key: ${{ steps.binary-cache.outputs.cache-primary-key }}
 
       - name: Verify staged R library is complete
         shell: bash
