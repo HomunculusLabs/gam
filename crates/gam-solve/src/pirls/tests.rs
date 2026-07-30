@@ -982,6 +982,80 @@ mod tests {
         assert!(diag.stationarity <= 1e-10);
     }
 
+    /// The FULLY-ACTIVE face with a RANK-DEFICIENT active set — the case where a
+    /// KKT diagnostic is most likely to be wrong, and the one the other two
+    /// `compute_constraint_kkt_diagnostics` tests above cannot reach.
+    ///
+    /// Those two both use the orthogonal `[[1,0],[0,1]]` and exercise
+    /// `n_active ∈ {0, 1}`: a strictly interior point with zero gradient, and a
+    /// single active lower bound. Neither has a redundant row, and neither has an
+    /// empty tangent space.
+    ///
+    /// Here rows 0 and 1 are PARALLEL (`[1,0]` and `[2,0]`), every row is active at
+    /// `beta = 0` because every `b_i = 0`, and the gradient is placed in the
+    /// INTERIOR of the active cone as `Aᵀ·lambda` with all three multipliers
+    /// strictly positive. Three things follow that nothing else here pins:
+    ///
+    /// * `n_active == n_constraints == 3` — the tangent space is empty, so there is
+    ///   no direction left to move and every residual must vanish exactly.
+    /// * The active set is rank deficient (`rank(A) = 2 < 3`), so the multipliers
+    ///   are NOT unique: `[1, 0.5, 2]` and `[2, 0, 2]` reproduce this identical
+    ///   gradient. Anything that recovers multipliers by solving a normal-equation
+    ///   system meets a singular `AᵀA` on this fixture. Non-uniqueness must not
+    ///   become non-zero residuals — the diagnostic's job is to certify the FACE,
+    ///   not to pick a canonical `lambda`.
+    /// * Every multiplier is strictly positive, so a sign convention that flipped
+    ///   `lambda` would surface as `dual_feasibility`, not hide in a zero.
+    ///
+    /// This coverage previously lived in a test that called a
+    /// multiplier-consuming entry point; that entry point was retired with the
+    /// row-pivot CTN solver and the orphaned test was removed, which fixed the
+    /// build and dropped the degenerate case with it. Restored here against the
+    /// surviving API rather than left as a gap.
+    #[test]
+    pub(crate) fn kkt_diagnostics_vanish_on_a_rank_deficient_fully_active_face() {
+        let constraints = LinearInequalityConstraints {
+            a: array![[1.0, 0.0], [2.0, 0.0], [0.0, 1.0]],
+            b: array![0.0, 0.0, 0.0],
+        };
+        let beta = array![0.0, 0.0];
+        let lambda_true = array![1.0, 0.5, 2.0];
+        let grad = constraints.a.t().dot(&lambda_true);
+
+        let diag = compute_constraint_kkt_diagnostics(&beta, &grad, &constraints);
+
+        assert_eq!(diag.n_constraints, 3);
+        assert_eq!(
+            diag.n_active, 3,
+            "every row has b_i = 0 and beta = 0, so the whole face is active; got {}",
+            diag.n_active
+        );
+        assert!(
+            diag.primal_feasibility <= 1e-12,
+            "beta = 0 meets every row with exactly zero slack; got {}",
+            diag.primal_feasibility
+        );
+        assert!(
+            diag.dual_feasibility <= 1e-12,
+            "the gradient is A^T * lambda with lambda strictly positive, so no \
+             recovered multiplier may be negative; got {}",
+            diag.dual_feasibility
+        );
+        assert!(
+            diag.complementarity <= 1e-12,
+            "every active row has zero slack, so lambda_i * slack_i vanishes \
+             regardless of which multiplier vector is recovered; got {}",
+            diag.complementarity
+        );
+        assert!(
+            diag.stationarity <= 1e-10,
+            "the gradient lies in the cone spanned by the active normals, so \
+             ||grad - A^T lambda||_inf must vanish even though rank(A) = 2 < 3 \
+             leaves lambda non-unique; got {}",
+            diag.stationarity
+        );
+    }
+
     #[test]
     pub(crate) fn linear_constraint_active_set_releases_positive_kkt_systemmultiplier() {
         // min_d g^T d + 0.5 d^T H d, subject to A(beta + d) >= b
