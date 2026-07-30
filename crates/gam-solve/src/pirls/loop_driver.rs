@@ -119,36 +119,38 @@ pub fn nfree_skip_row_element_touches() -> u64 {
 /// `sum w (y - mu)^2` is unavailable and this cancellation is the only route to
 /// the deviance. It is a large one by construction: measured on the #2624
 /// fixture, `z^T W z = 3.13466938668704074e2` against a converged
-/// `D_p = 4.0e-5` -- 7.1 orders.
-///
-/// The reason 1 ulp is worth paying for is that the profiled-Gaussian REML
-/// criterion multiplies the RELATIVE error of `D_p` by `(n - M_p)/2`: its whole
+/// `D_p = 4.0e-5` -- 7.1 orders. The profiled-Gaussian REML criterion then
+/// multiplies the RELATIVE error of `D_p` by `(n - M_p)/2`, because its whole
 /// `D_p` dependence is the single term `((n-M_p)/2) * ln(2 pi D_p/(n-M_p))`, so
-/// at n = 600 an error in `D_p` reaches the outer surface 300x magnified. With
-/// the plain contraction `qb^T b` carried 5.00e-12 of run-to-run spread on a
-/// magnitude of 3.1e2 (88 ulp), which is 1.25e-7 RELATIVE to `D_p` and therefore
-/// 3.7e-5 on the criterion -- against a measured 3.79e-5.
+/// at n = 600 an error in `D_p` reaches the outer surface 300x magnified.
+/// Resolving this contraction to 1 ulp is therefore cheap insurance on a
+/// quantity the outer surface is unusually sensitive to, and it costs less than
+/// the spelling it replaced (one fewer matvec).
 ///
-/// That the spread is accumulation and not a moving `beta` is what makes this
-/// the right lever, and it was measured rather than assumed: `qb^T b` and
-/// `qb^T G qb` each moved 5.0e-12 while their cancelling combination
-/// `z^T W z - 2 qb^T b + qb^T G qb` also moved 5.06e-12. A perturbation carried
-/// by `beta` would cancel in that combination to first order (its `beta`
-/// derivative is `2(G qb - b)`, which is `-2 S beta` at the inner mode); an
-/// independent rounding error in each contraction does not. So the two spellings
-/// have the same noise, rearranging the identity cannot help, and the
-/// accumulation is the only remaining lever.
+/// WHAT IT IS NOT. It was landed claiming to be the #2624 fix. **That claim was
+/// measured and is false**, and the measurements are recorded here so the claim
+/// is not re-made:
 ///
-/// The consequence of not paying it is not a rounding question. A line search
-/// cannot tell a trial step from a value channel that is not a function of its
-/// argument: at a theta frozen to ten digits the criterion moved 3.79e-5 across
-/// twelve consecutive evaluations, 1e6 times more than the theta drift over
-/// those calls could produce, and the two multistart seeds that reach the best
-/// objectives both terminated `StepSizeTooSmall after 50 attempts` a factor of
-/// 1.6 and 4.3 short of their own stationarity band -- leaving a far worse but
-/// cleanly converged local optimum as the only certified candidate, which the
-/// objective-monotonicity certificate then refused (`initial=-2.569819e3,
-/// final=-1.463112e3`).
+/// * Printing BOTH spellings on the SAME calls of the spatial fast path, the
+///   compensation moves `D_p` by 1.8e-14 to 1.1e-13, while the call-to-call
+///   variation of `D_p` at essentially one theta is 5.1e-12. So it perturbs the
+///   value by ~1% of the noise it was supposed to remove; the dominant carrier
+///   is upstream of this contraction (both spellings share `z^T W z` and the
+///   tensor-served `gram_at(psi)` / `rhs_at(psi)`, so a common-mode error
+///   cancels out of their difference and is invisible in it).
+/// * Against the exact row deviance on the live-row lane, it improves the gap
+///   by 2.32x at one point, 1.006x at another of the same depth, and 1.00x
+///   elsewhere.
+/// * On the non-spatial Python witness (`audit_outer_value_agreement`), a wheel
+///   built from the landing commit reproduces `value-only`, `analytic-sample`
+///   and `disagreement = 1.805e-5` BIT-IDENTICALLY to the pre-commit run.
+///
+/// The 8/13 -> 10/13 change in certified #2624 arms that accompanied the
+/// landing is therefore NOT attributable to a quieter criterion. A perturbation
+/// of this size reshuffles the outer trajectory, and on a fixture whose residual
+/// failure mode is "the multistart certifies the wrong basin" that moves arms in
+/// both directions -- which is exactly what was observed, `length_scale` 1.2,
+/// 1.0 and 0.95 gaining and 0.7 regressing.
 ///
 /// Neumaier compensation on the running sum, plus `mul_add` to recover the
 /// exact product error. Falls back to the ordinary contraction on a length
@@ -1382,12 +1384,11 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             // `G qb - b` is formed elementwise above and equals `-S beta` at the
             // inner mode, so the second contraction is over SMALL entries and
             // its absolute error is negligible -- which leaves exactly one
-            // contraction at the `z^T W z` magnitude, and `compensated_dot`
-            // resolves that one to ~1 ulp instead of the ~88 ulp the plain
-            // contraction carried. See `compensated_dot` for why 1 ulp is the
-            // requirement here and for the measurement that rules out `beta` as
-            // the carrier. This also drops a matvec, so it is strictly cheaper
-            // than the spelling it replaces.
+            // contraction at the `z^T W z` magnitude for `compensated_dot` to
+            // resolve. It also drops a matvec, so it is cheaper than the
+            // spelling it replaces. See `compensated_dot` for the measured size
+            // of what this buys, which is much smaller than the claim it was
+            // landed under.
             let residual_inner = qbeta.dot(&grad_orig);
             let gradient_data = transform_active
                 .as_ref()
