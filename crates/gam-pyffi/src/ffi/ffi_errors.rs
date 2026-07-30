@@ -535,14 +535,14 @@ create_exception!(
 /// no `err.to_string()` flattening, no Python-side regex reclassification.
 pub(crate) fn estimation_error_to_pyerr(err: EstimationError) -> PyErr {
     let message = err.to_string();
-    estimation_error_to_pyerr_with_message(err, message)
+    estimation_error_to_pyerr_with_message(&err, message)
 }
 
 /// Select the Python exception from the innermost typed cause while retaining
 /// the complete outer message. `OuterObjectiveEvaluationFailed` records which
 /// orchestration boundary observed a fatal evaluator failure; it does not
 /// replace the source error's public class identity.
-fn estimation_error_to_pyerr_with_message(err: EstimationError, message: String) -> PyErr {
+fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String) -> PyErr {
     match err {
         EstimationError::BasisError(_) => BasisError::new_err(message),
         EstimationError::LinearSystemSolveFailed(_) => LinearSystemSolveError::new_err(message),
@@ -593,7 +593,17 @@ fn estimation_error_to_pyerr_with_message(err: EstimationError, message: String)
         // the window, loosen the outer tolerance) is the REML one.
         EstimationError::TrialPointRefused { .. } => RemlConvergenceError::new_err(message),
         EstimationError::OuterObjectiveEvaluationFailed { source, .. } => {
-            estimation_error_to_pyerr_with_message(*source, message)
+            if let Some(source) = source.estimation_error() {
+                estimation_error_to_pyerr_with_message(source, message)
+            } else {
+                // An opt client may attach a typed error that is not an engine
+                // `EstimationError`. It is still an evaluator-construction
+                // failure, not evidence that REML merely exhausted its
+                // convergence budget. Preserve the complete boundary message
+                // and expose the integration-class failure without guessing a
+                // class from that source's prose.
+                IntegrationError::new_err(message)
+            }
         }
         EstimationError::GradientUnavailable { .. } => GradientUnavailableError::new_err(message),
         EstimationError::LayoutError(_) => LayoutError::new_err(message),

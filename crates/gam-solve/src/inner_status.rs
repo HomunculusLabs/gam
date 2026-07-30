@@ -15,18 +15,28 @@
 //! - Budget exhaustion / trust-region floor without certifying. This is
 //!   between the two — sometimes structural, sometimes just unlucky.
 //!
-//! [`InnerFailure`] captures these classes. Startup accounting classifies
-//! bubbled inner errors through [`classify_inner_error`], which inspects the
-//! structured labels emitted by `inner_blockwise_fit` and the diagnostician's
-//! `KktRefusalReport`.
+//! [`InnerFailure`] captures these classes. Startup accounting projects typed
+//! engine errors through [`classify_estimation_error`]; only prose-only
+//! producers enter [`classify_inner_error`].
 
-use gam_problem::diagnostics::KktRefusalDiagnosis;
+use gam_problem::{CustomFamilyError, EstimationError, diagnostics::KktRefusalDiagnosis};
 
 /// Structured failure modes for the inner solver. Each variant carries the
 /// original message for logging plus structured fields that the outer cascade
 /// can match against without reparsing.
 #[derive(Clone, Debug)]
 pub(crate) enum InnerFailure {
+    /// The custom-family solver returned its typed terminal non-convergence
+    /// record. This is deliberately distinct from `BudgetExhausted`: the
+    /// terminal state says which convergence predicates failed, but it does not
+    /// claim that an iteration budget caused the stop.
+    InnerSolveNotConverged {
+        /// The exact producer record, retained whole rather than copied into a
+        /// second startup-only schema that could drift when the producer adds a
+        /// field.
+        source: CustomFamilyError,
+        message: String,
+    },
     /// The joint Newton constrained-stationary certificate refused. The
     /// projected KKT residual exceeded 4× the residual tolerance, and the
     /// underlying H_pen spectrum / active-set inspection classified the
@@ -70,13 +80,47 @@ pub(crate) enum InnerFailure {
 impl InnerFailure {
     pub(crate) fn message(&self) -> &str {
         match self {
-            InnerFailure::CertRefused { message, .. }
+            InnerFailure::InnerSolveNotConverged { message, .. }
+            | InnerFailure::CertRefused { message, .. }
             | InnerFailure::BudgetExhausted { message }
             | InnerFailure::TrustRegionFloor { message }
             | InnerFailure::LikelihoodFailure(message)
             | InnerFailure::Other(message) => message.as_str(),
             InnerFailure::IdentifiabilityFailure { message } => message.as_str(),
         }
+    }
+}
+
+/// Project an [`EstimationError`] into the startup classifier while its typed
+/// source is still available.
+///
+/// `display_message` is the already-contextualized message owned by the
+/// boundary carrying `error` (for example `ObjectiveEvalError::message()`).
+/// Keeping it separate from the typed fields preserves useful context without
+/// asking downstream code to recover fields from that rendering.
+pub(crate) fn classify_estimation_error(
+    error: &EstimationError,
+    display_message: String,
+) -> InnerFailure {
+    match error {
+        EstimationError::CustomFamily(
+            source @ CustomFamilyError::InnerSolveNotConverged { .. },
+        ) => InnerFailure::InnerSolveNotConverged {
+            source: source.clone(),
+            message: display_message,
+        },
+        EstimationError::OuterObjectiveEvaluationFailed { source, .. } => {
+            if let Some(source) = source.estimation_error() {
+                classify_estimation_error(source, display_message)
+            } else {
+                classify_inner_error(display_message)
+            }
+        }
+        // These sources either are already prose-only, or do not expose a
+        // startup-specific payload. Preserve the established classifier for
+        // those sources; crucially, the fully typed custom-family refusal above
+        // never enters it.
+        _ => classify_inner_error(display_message),
     }
 }
 

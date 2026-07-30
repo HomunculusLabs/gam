@@ -350,6 +350,51 @@ impl core::fmt::Debug for FixedLambdaCheckpoint {
     }
 }
 
+/// The exact error thrown across a fatal outer-objective boundary.
+///
+/// Outer orchestration receives failures through two APIs. Direct evaluators
+/// return [`EstimationError`], while optimizer-facing evaluators return
+/// [`opt::ObjectiveEvalError`], which owns both the producer's recoverable/fatal
+/// verdict and (when available) its typed source. Flattening the latter through
+/// `into_message()` and minting a fresh `RemlOptimizationFailed` destroys that
+/// source precisely where terminal classification and FFI dispatch need it.
+///
+/// This enum is the single owner of that distinction. The recursive
+/// `EstimationError` arm is boxed for a finite representation; the optimizer
+/// arm is retained whole, including its source chain and producer verdict.
+#[derive(Debug, thiserror::Error)]
+pub enum OuterObjectiveErrorSource {
+    #[error(transparent)]
+    Estimation(Box<EstimationError>),
+    #[error(transparent)]
+    Objective(opt::ObjectiveEvalError),
+}
+
+impl OuterObjectiveErrorSource {
+    /// Recover an engine error without inspecting rendered prose.
+    ///
+    /// `ObjectiveEvalError` sources created by gam's objective bridge carry the
+    /// originating `EstimationError` directly. A source owned by another
+    /// optimizer client remains typed as that client's error and correctly
+    /// returns `None`.
+    #[must_use]
+    pub fn estimation_error(&self) -> Option<&EstimationError> {
+        match self {
+            Self::Estimation(source) => Some(source),
+            Self::Objective(source) => source.downcast_ref::<EstimationError>(),
+        }
+    }
+
+    /// The optimizer-facing error, when this boundary was crossed through opt.
+    #[must_use]
+    pub fn objective_error(&self) -> Option<&opt::ObjectiveEvalError> {
+        match self {
+            Self::Estimation(_) => None,
+            Self::Objective(source) => Some(source),
+        }
+    }
+}
+
 /// A comprehensive error type for the model estimation process.
 #[derive(thiserror::Error)]
 pub enum EstimationError {
@@ -588,7 +633,7 @@ pub enum EstimationError {
     OuterObjectiveEvaluationFailed {
         context: String,
         #[source]
-        source: Box<EstimationError>,
+        source: OuterObjectiveErrorSource,
     },
 
     #[error(
@@ -835,8 +880,29 @@ impl EstimationError {
         } else {
             EstimationError::OuterObjectiveEvaluationFailed {
                 context: context.into(),
-                source: Box::new(source),
+                source: OuterObjectiveErrorSource::Estimation(Box::new(source)),
             }
+        }
+    }
+
+    /// Preserve an optimizer-facing fatal evaluator failure without reminting
+    /// its message as an unrelated [`Self::RemlOptimizationFailed`].
+    ///
+    /// The caller must have already consumed recoverable failures as rejected
+    /// trial points. Requiring the producer's fatal verdict here makes an
+    /// accidental promotion fail at the boundary that attempted it instead of
+    /// silently changing control flow.
+    pub fn fatal_objective_evaluation(
+        context: impl Into<String>,
+        source: opt::ObjectiveEvalError,
+    ) -> Self {
+        assert!(
+            source.is_fatal(),
+            "fatal_objective_evaluation requires a producer-classified fatal error"
+        );
+        EstimationError::OuterObjectiveEvaluationFailed {
+            context: context.into(),
+            source: OuterObjectiveErrorSource::Objective(source),
         }
     }
 
@@ -1163,6 +1229,55 @@ mod tests {
             nested.to_string().matches("Fatal outer-objective").count(),
             1,
             "fatal provenance must not be re-wrapped at every orchestration layer"
+        );
+    }
+
+    #[test]
+    fn fatal_optimizer_evaluation_retains_exact_typed_source_2658() {
+        let source = EstimationError::CustomFamily(CustomFamilyError::InnerSolveNotConverged {
+            cycles: 17,
+            terminal: None,
+            kkt_residual: Some(3.5),
+            kkt_tol: Some(0.25),
+            theta_dim: 4,
+            rho_dim: 3,
+            psi_dim: 1,
+        });
+        let error = EstimationError::fatal_objective_evaluation(
+            "outer fixed-point evaluation",
+            opt::ObjectiveEvalError::fatal_from(source),
+        );
+
+        let EstimationError::OuterObjectiveEvaluationFailed { source, .. } = &error else {
+            panic!("fatal objective error must retain its boundary type");
+        };
+        assert!(
+            source
+                .objective_error()
+                .is_some_and(|error| error.is_fatal())
+        );
+        let Some(EstimationError::CustomFamily(CustomFamilyError::InnerSolveNotConverged {
+            cycles,
+            kkt_residual,
+            kkt_tol,
+            theta_dim,
+            rho_dim,
+            psi_dim,
+            ..
+        })) = source.estimation_error()
+        else {
+            panic!("typed custom-family source was flattened or reminted");
+        };
+        assert_eq!(
+            (
+                *cycles,
+                *kkt_residual,
+                *kkt_tol,
+                *theta_dim,
+                *rho_dim,
+                *psi_dim,
+            ),
+            (17, Some(3.5), Some(0.25), 4, 3, 1)
         );
     }
 

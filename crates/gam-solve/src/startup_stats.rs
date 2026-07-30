@@ -8,12 +8,9 @@
 //! NaN-domain failures together with structural rank deficiencies and
 //! never named *why* the cascade is unable to land on any seed.
 //!
-//! [`StartupStats`] replaces those counters with a category breakdown
-//! derived from the structured [`InnerFailure`] classifier. The same
-//! string-sentinel parser the inner-status module uses powers the
-//! breakdown here, so a refactor of the inner solver to emit
-//! [`InnerFailure`] natively flows through this module without changes
-//! at the call site.
+//! [`StartupStats`] replaces those counters with a category breakdown derived
+//! from [`InnerFailure`]. Typed objective sources are projected directly;
+//! string classification is reserved for producers that emitted only prose.
 //!
 //! The struct also drives the seed-loop's structural early-exit: when
 //! every observed failure carries the same genuinely structural
@@ -27,8 +24,12 @@
 
 use std::fmt::Write;
 
-use crate::inner_status::{InnerFailure, classify_inner_error};
-use gam_problem::diagnostics::KktRefusalDiagnosis;
+use crate::inner_status::{InnerFailure, classify_estimation_error, classify_inner_error};
+use gam_problem::{
+    CustomFamilyError, EstimationError, InnerConvergenceTerminalState,
+    diagnostics::KktRefusalDiagnosis,
+};
+use opt::ObjectiveEvalError;
 
 /// Records one failed seed candidate along with its structured failure
 /// classification, the validation phase tag that produced it, and the
@@ -62,6 +63,44 @@ pub(crate) struct SeedRejection {
 }
 
 impl SeedRejection {
+    /// Preserve an objective producer's typed source before any orchestration
+    /// layer renders it. `into_objective_error` attaches the originating
+    /// [`EstimationError`], so a custom-family
+    /// `InnerSolveNotConverged` reaches startup accounting with every terminal
+    /// field intact.
+    pub(crate) fn from_objective_error(
+        seed_idx: usize,
+        phase: &'static str,
+        error: &ObjectiveEvalError,
+    ) -> Self {
+        let message = error.message().to_string();
+        let failure = error
+            .downcast_ref::<EstimationError>()
+            .map(|source| classify_estimation_error(source, message.clone()))
+            .unwrap_or_else(|| classify_inner_error(message));
+        Self {
+            seed_idx,
+            phase,
+            failure,
+            producer_called_it_rho_local: error.is_recoverable(),
+        }
+    }
+
+    /// Preserve a direct engine error at rejection sites that do not cross the
+    /// `opt` objective boundary.
+    pub(crate) fn from_estimation_error(
+        seed_idx: usize,
+        phase: &'static str,
+        error: &EstimationError,
+    ) -> Self {
+        Self {
+            seed_idx,
+            phase,
+            failure: classify_estimation_error(error, error.to_string()),
+            producer_called_it_rho_local: error.is_trial_point_infeasible(),
+        }
+    }
+
     /// `rho_local` is the producer's OWN answer to "is this a statement about
     /// this rho, or about the problem?" -- `is_recoverable()` on an
     /// `ObjectiveEvalError`, or `is_trial_point_infeasible()` on an
@@ -93,6 +132,7 @@ pub(crate) struct StartupStats {
     pub solver_started: usize,
     pub rejected_by_kkt: usize,
     pub rejected_by_domain: usize,
+    pub rejected_by_nonconvergence: usize,
     pub rejected_by_budget: usize,
     pub rejected_other: usize,
 }
@@ -114,6 +154,9 @@ impl StartupStats {
         };
         for rej in rejections {
             match &rej.failure {
+                InnerFailure::InnerSolveNotConverged { .. } => {
+                    stats.rejected_by_nonconvergence += 1
+                }
                 InnerFailure::CertRefused { .. } => stats.rejected_by_kkt += 1,
                 InnerFailure::LikelihoodFailure(_) => stats.rejected_by_domain += 1,
                 InnerFailure::BudgetExhausted { .. } | InnerFailure::TrustRegionFloor { .. } => {
@@ -162,6 +205,7 @@ impl StartupStats {
     pub(crate) fn total_rejected(&self) -> usize {
         self.rejected_by_kkt
             + self.rejected_by_domain
+            + self.rejected_by_nonconvergence
             + self.rejected_by_budget
             + self.rejected_other
     }
@@ -224,6 +268,7 @@ pub(crate) fn uniform_structural_key(
 /// `Other` and never reaches a structural diagnosis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FailureVariantTag {
+    InnerSolveNotConverged,
     CertRefused,
     BudgetExhausted,
     TrustRegionFloor,
@@ -234,6 +279,7 @@ pub(crate) enum FailureVariantTag {
 
 fn variant_tag(failure: &InnerFailure) -> FailureVariantTag {
     match failure {
+        InnerFailure::InnerSolveNotConverged { .. } => FailureVariantTag::InnerSolveNotConverged,
         InnerFailure::CertRefused { .. } => FailureVariantTag::CertRefused,
         InnerFailure::BudgetExhausted { .. } => FailureVariantTag::BudgetExhausted,
         InnerFailure::TrustRegionFloor { .. } => FailureVariantTag::TrustRegionFloor,
@@ -252,6 +298,10 @@ fn variant_tag(failure: &InnerFailure) -> FailureVariantTag {
 /// heavy-smoothing candidates are ever tried (#1802).
 fn eligible_for_generic_structural_bail(failure: &InnerFailure) -> bool {
     match failure {
+        // The producer defines this variant as a refusal at one theta. It may
+        // never authorize a verdict about sibling seeds, regardless of what
+        // numeric field names happen to occur in its Display.
+        InnerFailure::InnerSolveNotConverged { .. } => false,
         InnerFailure::CertRefused { .. }
         | InnerFailure::BudgetExhausted { .. }
         | InnerFailure::TrustRegionFloor { .. }
@@ -405,10 +455,37 @@ pub(crate) fn dominant_magnitude_bucket(message: &str) -> Option<MagnitudeBucket
 }
 
 pub(crate) fn generic_signature(failure: &InnerFailure) -> GenericFailureSignature {
-    (
-        variant_tag(failure),
-        dominant_magnitude_bucket(failure.message()),
-    )
+    let magnitude = match failure {
+        InnerFailure::InnerSolveNotConverged {
+            source:
+                CustomFamilyError::InnerSolveNotConverged {
+                    terminal:
+                        Some(InnerConvergenceTerminalState::JointNewton {
+                            stationarity_residual,
+                            ..
+                        }),
+                    ..
+                },
+            ..
+        } => magnitude_bucket(*stationarity_residual),
+        InnerFailure::InnerSolveNotConverged {
+            source:
+                CustomFamilyError::InnerSolveNotConverged {
+                    kkt_residual: Some(residual),
+                    ..
+                },
+            ..
+        } => magnitude_bucket(*residual),
+        _ => dominant_magnitude_bucket(failure.message()),
+    };
+    (variant_tag(failure), magnitude)
+}
+
+fn magnitude_bucket(value: f64) -> Option<MagnitudeBucket> {
+    (value.is_finite() && value != 0.0).then(|| MagnitudeBucket {
+        sign: value.signum() as i32,
+        order: value.abs().log10().floor() as i32,
+    })
 }
 
 /// `Some((signature, run_len))` when the LAST `min_run` rejections all carry
@@ -465,6 +542,7 @@ pub(crate) fn consecutive_generic_signature(
 pub(crate) fn generic_signature_label(sig: &GenericFailureSignature) -> String {
     let (tag, bucket) = sig;
     let variant = match tag {
+        FailureVariantTag::InnerSolveNotConverged => "inner_solve_not_converged",
         FailureVariantTag::CertRefused => "cert_refused",
         FailureVariantTag::BudgetExhausted => "budget_exhausted",
         FailureVariantTag::TrustRegionFloor => "trust_region_floor",
@@ -543,9 +621,10 @@ pub(crate) fn format_no_seeds_passed(
     writeln!(
         &mut out,
         "  rejection breakdown: rejected_by_kkt={}, rejected_by_domain={}, \
-         rejected_by_budget={}, rejected_other={} (total={})",
+         rejected_by_nonconvergence={}, rejected_by_budget={}, rejected_other={} (total={})",
         stats.rejected_by_kkt,
         stats.rejected_by_domain,
+        stats.rejected_by_nonconvergence,
         stats.rejected_by_budget,
         stats.rejected_other,
         stats.total_rejected(),
@@ -602,11 +681,7 @@ mod tests {
         /// or knows it does not; there is no third case, and leaving a
         /// verdict-free constructor reachable from the seed loop is how the
         /// verdict got lost.
-        pub(crate) fn from_message(
-            seed_idx: usize,
-            phase: &'static str,
-            message: String,
-        ) -> Self {
+        pub(crate) fn from_message(seed_idx: usize, phase: &'static str, message: String) -> Self {
             Self::from_message_with_producer_verdict(seed_idx, phase, message, false)
         }
     }
@@ -714,9 +789,18 @@ mod tests {
             stats.rejected_other, 1,
             "an unclassified refusal belongs in `rejected_other`"
         );
-        assert_eq!(stats.rejected_by_domain, 0, "nothing here reported a domain failure");
-        assert_eq!(stats.rejected_by_kkt, 0, "no certificate refusal was produced");
-        assert_eq!(stats.rejected_by_budget, 0, "no budget was reported exhausted");
+        assert_eq!(
+            stats.rejected_by_domain, 0,
+            "nothing here reported a domain failure"
+        );
+        assert_eq!(
+            stats.rejected_by_kkt, 0,
+            "no certificate refusal was produced"
+        );
+        assert_eq!(
+            stats.rejected_by_budget, 0,
+            "no budget was reported exhausted"
+        );
         assert_eq!(stats.total_rejected(), 1);
 
         // The rendered breakdown must not offer a bucket with no producer.
@@ -750,9 +834,86 @@ mod tests {
             rejection.failure
         );
         let stats = StartupStats::from_rejections(1, 1, 1, 0, &[rejection]);
-        assert_eq!(stats.rejected_by_domain, 1, "a real non-finite failure must still be counted");
-        assert_eq!(stats.rejected_other, 0, "and must not fall through to unclassified");
+        assert_eq!(
+            stats.rejected_by_domain, 1,
+            "a real non-finite failure must still be counted"
+        );
+        assert_eq!(
+            stats.rejected_other, 0,
+            "and must not fall through to unclassified"
+        );
         assert_eq!(stats.total_rejected(), 1);
+    }
+
+    #[test]
+    fn objective_boundary_preserves_typed_joint_newton_terminal_state_2658() {
+        let terminal = InnerConvergenceTerminalState::JointNewton {
+            cycle: 47,
+            stationarity_residual: 6.950377e-1,
+            residual_tol: 1.677281e-11,
+            step_inf: 1.734422,
+            step_tol: 1.026406e-10,
+            resolvable_negative_curvature: false,
+            best_stationarity_residual: 8.095899e-3,
+            cycles_since_best_residual: 4,
+        };
+        let source =
+            EstimationError::CustomFamily(gam_problem::CustomFamilyError::InnerSolveNotConverged {
+                cycles: 48,
+                terminal: Some(terminal),
+                kkt_residual: Some(6.950377e-1),
+                kkt_tol: Some(1.677281e-11),
+                theta_dim: 7,
+                rho_dim: 5,
+                psi_dim: 2,
+            });
+        let objective_error =
+            ObjectiveEvalError::recoverable_from(source).with_context("outer eval failed");
+        let rejection = SeedRejection::from_objective_error(3, "validation", &objective_error);
+
+        assert!(rejection.producer_called_it_rho_local);
+        match &rejection.failure {
+            InnerFailure::InnerSolveNotConverged {
+                source:
+                    CustomFamilyError::InnerSolveNotConverged {
+                        cycles,
+                        terminal: observed_terminal,
+                        kkt_residual,
+                        kkt_tol,
+                        theta_dim,
+                        rho_dim,
+                        psi_dim,
+                    },
+                message,
+            } => {
+                assert_eq!(*cycles, 48);
+                assert_eq!(*observed_terminal, Some(terminal));
+                assert_eq!(*kkt_residual, Some(6.950377e-1));
+                assert_eq!(*kkt_tol, Some(1.677281e-11));
+                assert_eq!((*theta_dim, *rho_dim, *psi_dim), (7, 5, 2));
+                assert!(message.starts_with("outer eval failed:"));
+            }
+            other => panic!("typed refusal was flattened or reclassified: {other:?}"),
+        }
+
+        let stats = StartupStats::from_rejections(4, 4, 4, 0, &[rejection.clone()]);
+        assert_eq!(stats.rejected_by_nonconvergence, 1);
+        assert_eq!(stats.rejected_by_budget, 0);
+        assert_eq!(stats.rejected_other, 0);
+        assert_eq!(stats.total_rejected(), 1);
+
+        let signature = generic_signature(&rejection.failure);
+        assert_eq!(signature.0, FailureVariantTag::InnerSolveNotConverged);
+        assert_eq!(
+            signature.1,
+            Some(MagnitudeBucket { sign: 1, order: -1 }),
+            "the signature must read the typed stationarity residual"
+        );
+        assert!(
+            consecutive_generic_signature(&[rejection.clone(), rejection.clone(), rejection], 3,)
+                .is_none(),
+            "a typed rho-local non-convergence may never trigger a sibling-seed structural bail"
+        );
     }
 
     #[test]

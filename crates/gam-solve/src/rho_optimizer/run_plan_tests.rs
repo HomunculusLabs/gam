@@ -4628,16 +4628,16 @@ fn disabled_fallback_hybrid_efs_problem_uses_bfgs_without_calling_efs() {
             let efs_calls = Arc::clone(&efs_calls);
             Some(move |_: &mut (), _: &Array1<f64>| {
                 efs_calls.fetch_add(1, Ordering::Relaxed);
-                Err(EstimationError::RemlOptimizationFailed(format!(
-                    "{} synthetic large-scale adaptive HybridEFS escape",
-                    EFS_FIRST_ORDER_FALLBACK_MARKER,
-                )))
+                Err(EstimationError::GradientUnavailable {
+                    context: "synthetic large-scale adaptive HybridEFS escape",
+                    mode: "typed first-order fallback request",
+                })
             })
         },
     );
 
     let result = problem
-        .run(&mut obj, "disabled fallback marker")
+        .run(&mut obj, "disabled fallback request")
         .expect("disabled-fallback HybridEFS-shaped problem should route directly to BFGS");
     assert_eq!(result.plan_used.solver, Solver::Bfgs);
     assert_eq!(
@@ -5264,6 +5264,12 @@ fn lower_model_rail_singleton_search_preserves_derivative_in_screening_and_mint_
         PlanRunOutcome::Converged(_) => {
             panic!("model-feasible inward descent must not pass candidate screening")
         }
+        PlanRunOutcome::FirstOrderFallbackRequested(request) => {
+            panic!(
+                "ARC singleton unexpectedly requested first-order fallback: {}",
+                request.reason()
+            )
+        }
     };
     assert!(
         objective.state.calls.iter().any(|call| {
@@ -5358,6 +5364,12 @@ fn model_upper_rail_masks_derivative_in_screening_and_mint_2514() {
         PlanRunOutcome::Converged(result) => result,
         PlanRunOutcome::Exhausted(_) => {
             panic!("a derivative frozen on the genuine model upper face must screen")
+        }
+        PlanRunOutcome::FirstOrderFallbackRequested(request) => {
+            panic!(
+                "ARC singleton unexpectedly requested first-order fallback: {}",
+                request.reason()
+            )
         }
     };
     assert!(
@@ -6733,7 +6745,7 @@ fn run_efs_skips_invalid_leading_seed_without_spending_budget() {
 }
 
 #[test]
-fn run_efs_runtime_fallback_marker_degrades_to_bfgs_immediately() {
+fn run_typed_efs_runtime_fallback_degrades_to_bfgs_immediately() {
     let mut seed_config = gam_problem::SeedConfig::default();
     seed_config.seed_budget = 2;
     let efs_calls = Arc::new(AtomicUsize::new(0));
@@ -6759,28 +6771,24 @@ fn run_efs_runtime_fallback_marker_degrades_to_bfgs_immediately() {
             let efs_calls = Arc::clone(&efs_calls);
             Some(move |_: &mut (), _: &Array1<f64>| {
                 efs_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // The runner recognizes the EFS runtime-fallback marker only on a
-                // typed `GradientUnavailable` error (the eval_efs match arm in
-                // bridges.rs), which is the semantically-correct carrier — the
-                // marker signals "no fixed-point/gradient here, degrade to
-                // first order". Carry it in `context` so
-                // `requests_immediate_first_order_fallback` fires and the attempt
-                // degrades to BFGS after this single EFS call.
+                // The EFS bridge translates typed gradient unavailability into
+                // a typed first-order fallback request; no message token
+                // participates in routing.
                 Err(EstimationError::GradientUnavailable {
-                    context: EFS_FIRST_ORDER_FALLBACK_MARKER,
+                    context: "synthetic EFS runtime escape hatch",
                     mode: "efs runtime escape hatch",
                 })
             })
         },
     );
     let result = problem
-        .run(&mut obj, "efs runtime fallback marker")
+        .run(&mut obj, "EFS runtime fallback request")
         .expect("runtime EFS escape hatch should degrade to BFGS");
     assert_eq!(result.plan_used.solver, Solver::Bfgs);
     assert_eq!(
         efs_calls.load(std::sync::atomic::Ordering::Relaxed),
         1,
-        "runtime fallback marker should abort the EFS attempt immediately"
+        "runtime fallback request should abort the EFS attempt immediately"
     );
 }
 

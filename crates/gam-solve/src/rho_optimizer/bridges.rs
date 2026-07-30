@@ -176,7 +176,7 @@ pub(crate) const PROBE_REFUSAL_FATAL_THRESHOLD_NAN_SEED: usize = 25;
 /// Sentinel prefix embedded in the fatal [`ObjectiveEvalError`] message the
 /// bridge returns when [`PROBE_REFUSAL_FATAL_THRESHOLD`] fires. The seed-loop
 /// runner matches this prefix and routes the failed seed to
-/// `rejection_reasons` rather than propagating a fatal error.
+/// typed [`SeedRejection`] accounting rather than propagating a fatal error.
 pub(crate) const PROBE_REFUSAL_FATAL_SENTINEL: &str = "OUTER_PROBE_REFUSAL_FATAL";
 
 /// Sentinel embedded in the fatal [`ObjectiveEvalError`] message the bridge
@@ -3405,7 +3405,7 @@ pub(crate) struct OuterFixedPointBridge<'a> {
     /// Consecutive HybridEFS iterations whose ψ block was zeroed after
     /// exhausting backtracking. When this reaches
     /// [`MAX_CONSECUTIVE_PSI_STAGNATION`], the bridge surfaces the
-    /// [`EFS_FIRST_ORDER_FALLBACK_MARKER`] error so the runner aborts the
+    /// typed [`FirstOrderFallbackRequest`] so the runner aborts the
     /// HybridEFS attempt and the fallback ladder routes to a joint
     /// gradient-based solver where ψ stationarity ∇_ψ V = 0 can be enforced.
     pub(crate) consecutive_psi_zero_iters: usize,
@@ -3444,10 +3444,9 @@ impl OuterFixedPointBridge<'_> {
             .fold(0.0_f64, f64::max);
         let psi_grad_inf = psi_gradient.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         if psi_step_inf <= self.fixed_point_tolerance && psi_grad_inf > self.fixed_point_tolerance {
-            return Err(ObjectiveEvalError::recoverable(format!(
-                "{} HybridEFS ψ nonstationary: ||Δψ||∞={:.3e} <= tol={:.3e} \
+            return Err(first_order_fallback_error(format!(
+                "HybridEFS ψ nonstationary: ||Δψ||∞={:.3e} <= tol={:.3e} \
                  but raw ||gψ||∞={:.3e} (rho_dim={}, psi_dim={}, n_params={}, cost={:.6e})",
-                EFS_FIRST_ORDER_FALLBACK_MARKER,
                 psi_step_inf,
                 self.fixed_point_tolerance,
                 psi_grad_inf,
@@ -3523,7 +3522,7 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
         let eval = match self.obj.eval_efs(x) {
             Ok(eval) => eval,
             Err(err @ EstimationError::GradientUnavailable { .. })
-                if requests_immediate_first_order_fallback(&err.to_string()) =>
+                if self.obj.capability().gradient == Derivative::Analytic =>
             {
                 log::warn!(
                     "[STAGE] EFS -> gradient fallback: gradient unavailable at \
@@ -3533,7 +3532,7 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
                     self.layout.psi_dim,
                     self.layout.n_params,
                 );
-                return Err(ObjectiveEvalError::recoverable(format!(
+                return Err(first_order_fallback_error(format!(
                     "outer EFS eval failed: {err}"
                 )));
             }
@@ -3546,9 +3545,9 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
             // "Fatal outer-objective evaluation failure". Structural errors
             // (dimension mismatches, invalid layouts) remain fatal below.
             Err(err @ EstimationError::RemlOptimizationFailed(_)) => {
-                return Err(ObjectiveEvalError::recoverable(format!(
-                    "outer EFS eval failed: {err}"
-                )));
+                return Err(
+                    ObjectiveEvalError::recoverable_from(err).with_context("outer EFS eval failed")
+                );
             }
             Err(err) => return Err(into_objective_error("outer EFS eval failed", err)),
         };
@@ -3628,10 +3627,9 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
                     BARRIER_CURVATURE_RELATIVE_THRESHOLD,
                 )
             {
-                return Err(ObjectiveEvalError::recoverable(format!(
-                    "{} EFS barrier curvature significant relative to inner Hessian \
+                return Err(first_order_fallback_error(format!(
+                    "EFS barrier curvature significant relative to inner Hessian \
                          (rho_dim={}, psi_dim={}, n_params={}, cost={:.6e}, ref_diag={:.3e})",
-                    EFS_FIRST_ORDER_FALLBACK_MARKER,
                     self.layout.rho_dim(),
                     self.layout.psi_dim,
                     self.layout.n_params,
@@ -3644,10 +3642,9 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
                 LOCAL_CONCENTRATION_RATIO,
                 BARRIER_CURVATURE_SATURATION,
             ) {
-                return Err(ObjectiveEvalError::recoverable(format!(
-                    "{} EFS barrier curvature locally concentrated \
+                return Err(first_order_fallback_error(format!(
+                    "EFS barrier curvature locally concentrated \
                          (rho_dim={}, psi_dim={}, n_params={}, cost={:.6e})",
-                    EFS_FIRST_ORDER_FALLBACK_MARKER,
                     self.layout.rho_dim(),
                     self.layout.psi_dim,
                     self.layout.n_params,
@@ -3807,11 +3804,10 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
                         self.layout.n_params,
                         current_cost,
                     );
-                    return Err(ObjectiveEvalError::recoverable(format!(
-                        "{} HybridEFS ψ stagnation: {} consecutive iterations \
+                    return Err(first_order_fallback_error(format!(
+                        "HybridEFS ψ stagnation: {} consecutive iterations \
                              exhausted backtracking and zeroed ψ step \
                              (rho_dim={}, psi_dim={}, n_params={}, cost={:.6e})",
-                        EFS_FIRST_ORDER_FALLBACK_MARKER,
                         self.consecutive_psi_zero_iters,
                         self.layout.rho_dim(),
                         self.layout.psi_dim,
@@ -3825,8 +3821,8 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
                     status,
                 });
             }
-            // ρ/τ-only backtracking also failed — surface the joint-solver
-            // fallback marker so the runner abandons EFS for this attempt.
+            // ρ/τ-only backtracking also failed — surface the typed
+            // joint-solver request so the runner abandons EFS for this attempt.
             log::info!(
                 "[STAGE] HybridEFS -> joint gradient fallback: ρ/τ-only step also \
                  failed all {} halvings (rho_dim={}, psi_dim={}, n_params={}, \
@@ -3837,11 +3833,10 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
                 self.layout.n_params,
                 current_cost,
             );
-            return Err(ObjectiveEvalError::recoverable(format!(
-                "{} HybridEFS step rejected after {} halvings on full vector \
+            return Err(first_order_fallback_error(format!(
+                "HybridEFS step rejected after {} halvings on full vector \
                  and {} halvings on ρ/τ-only fallback \
                  (rho_dim={}, psi_dim={}, n_params={}, cost={:.6e})",
-                EFS_FIRST_ORDER_FALLBACK_MARKER,
                 MAX_EFS_BACKTRACK,
                 MAX_EFS_BACKTRACK,
                 self.layout.rho_dim(),
@@ -3851,9 +3846,9 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
             )));
         }
 
-        // Pure-EFS path with full backtracking exhausted: there is no ψ
-        // block to escape to. Surface the same fallback marker so the
-        // runner switches to a gradient-based solver instead of looping.
+        // Pure-EFS path with full backtracking exhausted: there is no ψ block
+        // to escape to. Surface the same typed request so the runner switches
+        // to a gradient-based solver instead of looping.
         log::info!(
             "[STAGE] EFS -> gradient fallback: no α ∈ {{1, …, 2^-{}}} decreased the \
              cost (rho_dim={}, n_params={}, cost={:.6e})",
@@ -3862,10 +3857,9 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
             self.layout.n_params,
             current_cost,
         );
-        Err(ObjectiveEvalError::recoverable(format!(
-            "{} EFS step rejected after {} halvings on pure-ρ vector \
+        Err(first_order_fallback_error(format!(
+            "EFS step rejected after {} halvings on pure-ρ vector \
              (rho_dim={}, n_params={}, cost={:.6e})",
-            EFS_FIRST_ORDER_FALLBACK_MARKER,
             MAX_EFS_BACKTRACK,
             self.layout.rho_dim(),
             self.layout.n_params,

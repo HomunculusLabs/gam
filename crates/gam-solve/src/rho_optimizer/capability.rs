@@ -82,7 +82,7 @@ impl OuterThetaLayout {
         context: &str,
     ) -> Result<(), ObjectiveEvalError> {
         if theta.len() != self.n_params {
-            return Err(ObjectiveEvalError::recoverable(format!(
+            return Err(ObjectiveEvalError::fatal(format!(
                 "{context}: outer theta length mismatch: got {}, expected {} (rho_dim={}, psi_dim={})",
                 theta.len(),
                 self.n_params,
@@ -99,7 +99,7 @@ impl OuterThetaLayout {
         context: &str,
     ) -> Result<(), ObjectiveEvalError> {
         if gradient.len() != self.n_params {
-            return Err(ObjectiveEvalError::recoverable(format!(
+            return Err(ObjectiveEvalError::fatal(format!(
                 "{context}: outer gradient length mismatch: got {}, expected {} (rho_dim={}, psi_dim={})",
                 gradient.len(),
                 self.n_params,
@@ -116,7 +116,7 @@ impl OuterThetaLayout {
         context: &str,
     ) -> Result<(), ObjectiveEvalError> {
         if hessian.nrows() != self.n_params || hessian.ncols() != self.n_params {
-            return Err(ObjectiveEvalError::recoverable(format!(
+            return Err(ObjectiveEvalError::fatal(format!(
                 "{context}: outer Hessian shape mismatch: got {}x{}, expected {}x{} (rho_dim={}, psi_dim={})",
                 hessian.nrows(),
                 hessian.ncols(),
@@ -361,7 +361,47 @@ pub struct OuterPlan {
     pub hessian_source: HessianSource,
 }
 
-pub(crate) const EFS_FIRST_ORDER_FALLBACK_MARKER: &str = "[outer-efs-first-order-fallback]";
+/// A fixed-point evaluator's typed request to hand the current outer attempt
+/// to a joint first-order solver.
+///
+/// This is control flow, not a trial-point failure category. It therefore
+/// travels as the source of an [`ObjectiveEvalError`] and is recognized by
+/// downcast; neither its wording nor any sentinel embedded in that wording can
+/// change which plan runs next.
+#[derive(Clone, Debug)]
+pub(crate) struct FirstOrderFallbackRequest {
+    reason: String,
+}
+
+impl FirstOrderFallbackRequest {
+    pub(crate) fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    pub(crate) fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+impl std::fmt::Display for FirstOrderFallbackRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for FirstOrderFallbackRequest {}
+
+pub(crate) fn first_order_fallback_error(reason: impl Into<String>) -> ObjectiveEvalError {
+    ObjectiveEvalError::recoverable_from(FirstOrderFallbackRequest::new(reason))
+}
+
+pub(crate) fn first_order_fallback_request(
+    error: &ObjectiveEvalError,
+) -> Option<&FirstOrderFallbackRequest> {
+    error.downcast_ref::<FirstOrderFallbackRequest>()
+}
 
 /// Whether outer_strategy should automatically derive a retry ladder from the
 /// primary capability, or disable retries entirely.
@@ -509,10 +549,6 @@ pub fn log_plan(context: &str, cap: &OuterCapability, the_plan: &OuterPlan) {
     );
 }
 
-pub(crate) fn requests_immediate_first_order_fallback(message: &str) -> bool {
-    message.contains(EFS_FIRST_ORDER_FALLBACK_MARKER)
-}
-
 /// Disable the EFS/HybridEfs planner path, forcing BFGS-class solvers on the
 /// next attempt. Returns `None` if fixed-point is already disabled.
 pub(crate) fn disable_fixed_point(cap: &OuterCapability) -> Option<OuterCapability> {
@@ -583,7 +619,7 @@ pub(crate) fn primary_capability_for_config(
     if disabled_fallback_hybrid_efs_has_standalone_bfgs_primary(&cap, config) {
         // HybridEFS is not a standalone first-order method for ψ coordinates:
         // when ψ backtracking proves non-descent, the bridge intentionally
-        // surfaces `EFS_FIRST_ORDER_FALLBACK_MARKER` so the runner can switch
+        // surfaces a typed `FirstOrderFallbackRequest` so the runner can switch
         // to a joint gradient solver that enforces ∇ψ V = 0. With fallback
         // disabled and an analytic gradient available, selecting HybridEFS as
         // the only primary attempt is internally inconsistent; BFGS is the
@@ -596,4 +632,25 @@ pub(crate) fn primary_capability_for_config(
         cap.disable_fixed_point = true;
     }
     cap
+}
+
+#[cfg(test)]
+mod typed_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn first_order_fallback_routing_depends_on_source_type_not_message_2658() {
+        let typed = first_order_fallback_error("arbitrary human-readable reason");
+        let request =
+            first_order_fallback_request(&typed).expect("typed request must survive opt boundary");
+        assert_eq!(request.reason(), "arbitrary human-readable reason");
+
+        let marker_shaped_prose = ObjectiveEvalError::recoverable(
+            "[outer-efs-first-order-fallback] legacy-looking prose",
+        );
+        assert!(
+            first_order_fallback_request(&marker_shaped_prose).is_none(),
+            "prose must have no authority to select a solver"
+        );
+    }
 }

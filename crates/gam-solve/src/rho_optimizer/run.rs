@@ -1090,6 +1090,7 @@ impl OuterProblem {
 pub(crate) enum PlanRunOutcome {
     Converged(OuterResult),
     Exhausted(OuterResult),
+    FirstOrderFallbackRequested(FirstOrderFallbackRequest),
 }
 
 /// Which certificate concluded a CONVERGED outer run (#2235/#2241).
@@ -7065,11 +7066,11 @@ pub(crate) fn run_outer_uncertified(
     if let Some(initial_rho) = config.initial_rho.as_ref() {
         cap.theta_layout()
             .validate_point_len(initial_rho, "initial outer seed")
-            .map_err(|err| match err {
-                err => {
-                    let message = err.into_message();
-                    EstimationError::RemlOptimizationFailed(format!("{context}: {message}"))
-                }
+            .map_err(|err| {
+                EstimationError::fatal_objective_evaluation(
+                    format!("{context}: initial outer seed validation"),
+                    err,
+                )
             })?;
     }
     // Frontier ρ-scaling auto-switch (#986): at per-atom-EFS-eligible frontier
@@ -7115,7 +7116,7 @@ pub(crate) fn run_outer_uncertified(
     let mut last_error: Option<EstimationError> = None;
     let mut best_checkpoint: Option<OuterResult> = None;
 
-    for (attempt_idx, attempt_cap) in attempts.iter().enumerate() {
+    'plan_attempts: for (attempt_idx, attempt_cap) in attempts.iter().enumerate() {
         let the_plan = plan(attempt_cap);
         if attempt_idx > 0 {
             log::debug!("[OUTER] {context}: primary plan failed; falling back to {the_plan}");
@@ -7160,6 +7161,18 @@ pub(crate) fn run_outer_uncertified(
             let active_config: &OuterConfig = &active_config_owned;
             match run_outer_with_plan(obj, active_config, context, attempt_cap, &the_plan, true) {
                 Ok(PlanRunOutcome::Converged(result)) => break Ok(result),
+                Ok(PlanRunOutcome::FirstOrderFallbackRequested(request)) => {
+                    log::debug!(
+                        "[OUTER] {context}: attempt {} (plan={the_plan}) requested a joint \
+                         first-order fallback: {}",
+                        attempt_idx + 1,
+                        request.reason(),
+                    );
+                    last_error = Some(EstimationError::RemlOptimizationFailed(
+                        request.reason().to_string(),
+                    ));
+                    continue 'plan_attempts;
+                }
                 Ok(PlanRunOutcome::Exhausted(result)) => {
                     if arc_retries_left == 0
                         || matches!(
@@ -7709,13 +7722,14 @@ pub(crate) fn bfgs_axis_step_caps(
 }
 
 pub(crate) enum FixedPointOuterRunError {
-    SeedRejected(EstimationError),
-    ImmediateFallback(EstimationError),
+    SeedRejected(ObjectiveEvalError),
+    IterationRejected(ObjectiveEvalError),
+    ImmediateFallback(FirstOrderFallbackRequest),
     Failed(EstimationError),
 }
 
-/// Carries a fixed-point objective's OWN classification of a refusal across
-/// the `opt` boundary, which does not preserve it.
+/// Carries a fixed-point objective's complete typed refusal across the lossy
+/// `opt` fixed-point return boundary.
 ///
 /// `OuterFixedPointBridge::eval_step` returns a typed `ObjectiveEvalError`
 /// whose kind is the producer's verdict: `Recoverable` for a refusal that is
@@ -7723,7 +7737,9 @@ pub(crate) enum FixedPointOuterRunError {
 /// bubbled `RemlOptimizationFailed`, or any `EstimationError` for which
 /// `is_trial_point_infeasible()` answers true), `Fatal` only for a structural
 /// failure. `opt::FixedPoint::run` then does `err.into_message()` and hands
-/// back `FixedPointError::ObjectiveFailed { message }` -- prose, no kind.
+/// back `FixedPointError::ObjectiveFailed { message }`. This adapter retains
+/// the original error in a publication slot, so its producer verdict, typed
+/// source, and any first-order routing request all survive.
 ///
 /// `run_fixed_point_outer_solver` used to answer that String with an
 /// unconditional `fatal_outer_evaluation`, and `is_fatal_outer_evaluation()`
@@ -7737,24 +7753,74 @@ pub(crate) enum FixedPointOuterRunError {
 ///
 /// This adapter is the publication slot that gets it back -- the same device
 /// `recurrent_incumbent_exit` uses to hand a value out of a moved bridge. The
-/// slot is written on EVERY evaluation (cleared to `None` on success) so a
-/// verdict can never be read stale, and an absent verdict keeps the fatal
-/// classification, making the change strictly one-directional: it can only
-/// demote a refusal the producer itself called recoverable.
-struct ClassifyingFixedPointObjective<ObjFn> {
+/// slot is written on EVERY evaluation (cleared to `None` on success), so an
+/// error can never be read stale.
+pub(crate) struct RetainingObjective<ObjFn> {
     inner: ObjFn,
-    last_error_recoverable: Arc<Mutex<Option<bool>>>,
+    last_error: Arc<Mutex<Option<ObjectiveEvalError>>>,
 }
 
-impl<ObjFn> FixedPointObjective for ClassifyingFixedPointObjective<ObjFn>
+impl<ObjFn> RetainingObjective<ObjFn> {
+    pub(crate) fn new(
+        inner: ObjFn,
+        last_error: Arc<Mutex<Option<ObjectiveEvalError>>>,
+    ) -> Self {
+        Self { inner, last_error }
+    }
+
+    fn publish<T>(&self, outcome: &Result<T, ObjectiveEvalError>) {
+        *self
+            .last_error
+            .lock()
+            .expect("objective error publication lock poisoned") =
+            outcome.as_ref().err().cloned();
+    }
+}
+
+impl<ObjFn> ZerothOrderObjective for RetainingObjective<ObjFn>
+where
+    ObjFn: ZerothOrderObjective,
+{
+    fn eval_cost(&mut self, x: &Array1<f64>) -> Result<f64, ObjectiveEvalError> {
+        let outcome = self.inner.eval_cost(x);
+        self.publish(&outcome);
+        outcome
+    }
+}
+
+impl<ObjFn> FirstOrderObjective for RetainingObjective<ObjFn>
+where
+    ObjFn: FirstOrderObjective,
+{
+    fn eval_grad(&mut self, x: &Array1<f64>) -> Result<FirstOrderSample, ObjectiveEvalError> {
+        let outcome = self.inner.eval_grad(x);
+        self.publish(&outcome);
+        outcome
+    }
+
+    fn set_finite_difference_bounds(&mut self, bounds: Option<&Bounds>) {
+        self.inner.set_finite_difference_bounds(bounds);
+    }
+}
+
+impl<ObjFn> SecondOrderObjective for RetainingObjective<ObjFn>
+where
+    ObjFn: SecondOrderObjective,
+{
+    fn eval_hessian(&mut self, x: &Array1<f64>) -> Result<SecondOrderSample, ObjectiveEvalError> {
+        let outcome = self.inner.eval_hessian(x);
+        self.publish(&outcome);
+        outcome
+    }
+}
+
+impl<ObjFn> FixedPointObjective for RetainingObjective<ObjFn>
 where
     ObjFn: FixedPointObjective,
 {
     fn eval_step(&mut self, x: &Array1<f64>) -> Result<FixedPointSample, ObjectiveEvalError> {
         let outcome = self.inner.eval_step(x);
-        if let Ok(mut slot) = self.last_error_recoverable.lock() {
-            *slot = outcome.as_ref().err().map(ObjectiveEvalError::is_recoverable);
-        }
+        self.publish(&outcome);
         outcome
     }
 }
@@ -7786,20 +7852,20 @@ pub(crate) fn run_fixed_point_outer_solver(
     };
     let seed_sample = match objective.eval_step(seed) {
         Ok(sample) => sample,
+        Err(err) if first_order_fallback_request(&err).is_some() => {
+            let request = first_order_fallback_request(&err)
+                .expect("guard established a typed first-order fallback request")
+                .clone();
+            return Err(FixedPointOuterRunError::ImmediateFallback(request));
+        }
         Err(err) if err.is_recoverable() => {
-                        let message = err.into_message();
-            let err = EstimationError::RemlOptimizationFailed(message);
-            if requests_immediate_first_order_fallback(&err.to_string()) {
-                return Err(FixedPointOuterRunError::ImmediateFallback(err));
-            }
             return Err(FixedPointOuterRunError::SeedRejected(err));
         }
         Err(err) => {
-                        let message = err.into_message();
             return Err(FixedPointOuterRunError::Failed(
-                EstimationError::fatal_outer_evaluation(
+                EstimationError::fatal_objective_evaluation(
                     "outer fixed-point seed evaluation",
-                    EstimationError::RemlOptimizationFailed(message),
+                    err,
                 ),
             ));
         }
@@ -7809,16 +7875,11 @@ pub(crate) fn run_fixed_point_outer_solver(
     let tol = outer_tolerance(config.tolerance).map_err(FixedPointOuterRunError::Failed)?;
     let max_iter =
         outer_max_iterations(config.max_iter).map_err(FixedPointOuterRunError::Failed)?;
-    // Publication slot for the producer's own Recoverable/Fatal verdict on the
-    // last failed `eval_step`. `opt::FixedPoint` renders the typed error to a
-    // String before returning it, so without this the `ObjectiveFailed` arm
-    // below has nothing but prose to classify from -- and classified every
-    // refusal fatal, ladder included.
-    let last_step_error_recoverable: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
-    let objective = ClassifyingFixedPointObjective {
-        inner: objective,
-        last_error_recoverable: Arc::clone(&last_step_error_recoverable),
-    };
+    // Publication slot for the complete producer error from the last failed
+    // `eval_step`. `opt::FixedPoint` returns only its message, so this is the
+    // ownership channel for the typed source and routing request.
+    let last_step_error: Arc<Mutex<Option<ObjectiveEvalError>>> = Arc::new(Mutex::new(None));
+    let objective = RetainingObjective::new(objective, Arc::clone(&last_step_error));
     let mut optimizer = FixedPoint::new(seed.clone(), objective)
         // Seed validation already paid the complete EFS inner solve. Reuse that
         // exact sample so iteration zero neither repeats the expensive solve nor
@@ -7854,65 +7915,24 @@ pub(crate) fn run_fixed_point_outer_solver(
             );
             Ok(solution_into_outer_result(*last_solution, false, the_plan))
         }
-        Err(FixedPointError::ObjectiveFailed { message })
-            if requests_immediate_first_order_fallback(&message) =>
-        {
-            // The bridge raises `EFS_FIRST_ORDER_FALLBACK_MARKER` when the
-            // fixed-point step is not a descent direction it can rescue — a
-            // ψ-stagnation streak, or a step every halving rejected on both
-            // the full vector and the ρ/τ-only fallback. That marker is a
-            // ROUTING REQUEST ("abandon the fixed point, run the joint
-            // gradient solver that enforces ∇_ψ V = 0"), not a defect: the
-            // ladder `automatic_fallback_attempts` builds for an
-            // analytic-gradient EFS/HybridEFS primary is exactly the
-            // `disable_fixed_point` BFGS plan it is asking for.
-            //
-            // The seed evaluation above already honours it. Every LATER
-            // iteration reached this arm instead, where the blanket
-            // `fatal_outer_evaluation` classification short-circuits both
-            // `run_outer_with_plan`'s own marker check and the attempt loop in
-            // `run_outer_with_strategy` — so a HybridEFS search that descended
-            // and then asked to hand over died fatally with the fallback plan
-            // never attempted. Carry the same recoverable routing the seed
-            // path uses, so the request is honoured wherever it is raised.
-            Err(FixedPointOuterRunError::ImmediateFallback(
-                EstimationError::RemlOptimizationFailed(message),
-            ))
-        }
-        Err(FixedPointError::ObjectiveFailed { message }) => {
-            // Ask the producer, do not guess from the message. A `Recoverable`
-            // verdict means "this rho is infeasible, step away" -- the seed
-            // path directly above already routes exactly that as a non-fatal
-            // outcome, and the seed loop's response is to record a rejection
-            // and try the next seed / the next plan on the ladder. Only a
-            // FATAL evaluation (a broken artifact: bad layout, dimension
-            // mismatch, a structural `EstimationError`) may short-circuit the
-            // ladder via `is_fatal_outer_evaluation`.
-            //
-            // An absent verdict (no `eval_step` error recorded -- e.g. the
-            // non-finite-cost recovery inside `opt` itself) keeps the fatal
-            // classification, so this can only ever demote, never promote.
-            let producer_called_it_recoverable = last_step_error_recoverable
+        Err(FixedPointError::ObjectiveFailed { .. }) => {
+            let error = last_step_error
                 .lock()
-                .ok()
-                .and_then(|slot| *slot)
-                .unwrap_or(false);
-            let error = EstimationError::RemlOptimizationFailed(message);
-            if producer_called_it_recoverable {
-                log::debug!(
-                    "[OUTER] {context}: {label} fixed-point iteration raised a \
-                     producer-recoverable refusal; routing to the fallback ladder \
-                     instead of aborting the fit: {error}"
-                );
-                Err(FixedPointOuterRunError::Failed(error))
-            } else {
-                Err(FixedPointOuterRunError::Failed(
-                    EstimationError::fatal_outer_evaluation(
-                        "outer fixed-point evaluation",
-                        error,
-                    ),
-                ))
+                .expect("fixed-point objective error publication lock poisoned")
+                .take()
+                .expect("FixedPoint::ObjectiveFailed must follow a failed classified eval_step");
+            if let Some(request) = first_order_fallback_request(&error) {
+                return Err(FixedPointOuterRunError::ImmediateFallback(request.clone()));
             }
+            if error.is_recoverable() {
+                return Err(FixedPointOuterRunError::IterationRejected(error));
+            }
+            Err(FixedPointOuterRunError::Failed(
+                EstimationError::fatal_objective_evaluation(
+                    "outer fixed-point evaluation",
+                    error,
+                ),
+            ))
         }
         Err(e) => Err(FixedPointOuterRunError::Failed(
             EstimationError::RemlOptimizationFailed(format!("{failure_prefix}: {e:?}")),

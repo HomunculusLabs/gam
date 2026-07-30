@@ -2258,10 +2258,7 @@ impl<'a> RemlState<'a> {
                 .gradient
                 .as_ref()
                 .ok_or(EstimationError::GradientUnavailable {
-                    context: concat!(
-                        "[outer-efs-first-order-fallback] EFS needs gradient; ",
-                        "switch to BFGS"
-                    ),
+                    context: "EFS needs a gradient; switch to BFGS",
                     mode: "ValueAndGradient",
                 })?;
 

@@ -2219,11 +2219,16 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     })
                 }
                 Ok(eval) => {
+                    let failure = if eval.inner_converged {
+                        CustomFamilyError::trial_point(format!(
+                            "custom-family value-only outer objective was non-finite ({})",
+                            eval.objective
+                        ))
+                    } else {
+                        inner_solve_not_converged_error(&eval.inner, rho.len(), 0)
+                    };
                     outer.warm_cache = Some(eval.warm_start);
-                    outer.last_error = Some(
-                        "custom-family value-only inner solve did not converge or objective was non-finite"
-                            .to_string(),
-                    );
+                    outer.last_error = Some(failure);
                     Ok(OuterEval::infeasible(rho.len()))
                 }
                 Err(e) => {
@@ -2250,10 +2255,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     // perfectly fittable one rho away (#2553, #2590). The two
                     // costs are not comparable, so the boundary takes the safe
                     // one.
-                    outer.last_error = Some(e.clone());
-                    Err(EstimationError::CustomFamily(
-                        CustomFamilyError::trial_point(e),
-                    ))
+                    let failure = CustomFamilyError::trial_point(e);
+                    outer.last_error = Some(failure.clone());
+                    Err(EstimationError::CustomFamily(failure))
                 }
             };
         }
@@ -2283,8 +2287,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             },
         ) {
             Ok(eval) if !eval.inner_converged => {
+                let failure = inner_solve_not_converged_error(&eval.inner, rho.len(), 0);
                 outer.warm_cache = Some(eval.warm_start.clone());
-                outer.last_error = Some("custom-family inner solve did not converge".to_string());
+                outer.last_error = Some(failure);
                 // Recoverable at the trial level: the outer optimizer may
                 // retreat to another rho, but this state can never certify the
                 // outer solve or reach result assembly.
@@ -2329,9 +2334,12 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 outer.last_error = None;
                 eval
             }
-            Ok(_) => {
-                outer.last_error =
-                    Some("custom-family outer objective/derivatives became non-finite".to_string());
+            Ok(eval) => {
+                outer.last_error = Some(CustomFamilyError::trial_point(format!(
+                    "custom-family outer objective/derivatives became non-finite \
+                     (objective={})",
+                    eval.objective
+                )));
                 // Recoverable (data-driven): the objective/derivatives became
                 // non-finite at this trial rho (e.g. separation / near-singular
                 // information), so the outer optimizer retreats from this infeasible
@@ -2343,10 +2351,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 // A failure to evaluate the objective at this rho is a
                 // statement about this rho — see the value-only probe above for
                 // why the boundary owns that classification (#2590).
-                outer.last_error = Some(e.clone());
-                return Err(EstimationError::CustomFamily(
-                    CustomFamilyError::trial_point(e),
-                ));
+                let failure = CustomFamilyError::trial_point(e);
+                outer.last_error = Some(failure.clone());
+                return Err(EstimationError::CustomFamily(failure));
             }
         };
         let inner_beta_hint = Some(Array1::from_iter(
@@ -2453,11 +2460,16 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     Ok(eval.objective)
                 }
                 Ok(eval) => {
+                    let failure = if eval.inner_converged {
+                        CustomFamilyError::trial_point(format!(
+                            "custom-family value-only outer objective was non-finite ({})",
+                            eval.objective
+                        ))
+                    } else {
+                        inner_solve_not_converged_error(&eval.inner, rho.len(), 0)
+                    };
                     outer.warm_cache = Some(eval.warm_start);
-                    outer.last_error = Some(
-                        "custom-family value-only inner solve did not converge or objective was non-finite"
-                            .to_string(),
-                    );
+                    outer.last_error = Some(failure);
                     // Recoverable (data-driven): this value-only probe is the
                     // line-search cost the outer optimizer calls most often. A
                     // non-converged inner solve / non-finite objective at this trial
@@ -2470,10 +2482,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 Err(e) => {
                     // A failure to evaluate the cost at this rho is a
                     // statement about this rho (#2590).
-                    outer.last_error = Some(e.clone());
-                    Err(EstimationError::CustomFamily(
-                        CustomFamilyError::trial_point(e),
-                    ))
+                    let failure = CustomFamilyError::trial_point(e);
+                    outer.last_error = Some(failure.clone());
+                    Err(EstimationError::CustomFamily(failure))
                 }
             }
         },
@@ -2496,10 +2507,13 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         }),
         Some(|outer: &mut CustomOuterState, rho: &Array1<f64>| {
             if !label_layout.supports_direct_physical_efs() {
-                return Err(EstimationError::RemlOptimizationFailed(
-                    "custom-family EFS requires an identity per-block penalty-coordinate layout with no fixed, tied, or joint penalties"
+                let failure = CustomFamilyError::UnsupportedConfiguration {
+                    reason: "custom-family EFS requires an identity per-block \
+                         penalty-coordinate layout with no fixed, tied, or joint penalties"
                         .to_string(),
-                ));
+                };
+                outer.last_error = Some(failure.clone());
+                return Err(EstimationError::CustomFamily(failure));
             }
             let warm_ref = screened_outer_warm_start(outer.warm_cache.as_ref(), rho);
             match outerobjectiveefs(
@@ -2516,25 +2530,22 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     outer.last_error = None;
                     Ok(eval)
                 }
-                Ok((_eval, warm, false, _inner)) => {
+                Ok((_eval, warm, false, inner)) => {
+                    let failure = inner_solve_not_converged_error(&inner, rho.len(), 0);
                     outer.warm_cache = Some(warm);
-                    outer.last_error =
-                        Some("custom-family EFS inner solve did not converge".to_string());
+                    outer.last_error = Some(failure.clone());
                     // EFS cannot form a valid fixed-point update away from an
                     // inner mode. Returning an error lets the outer strategy
                     // runner try an analytically valid alternative; exhaustion
                     // remains a terminal nonconvergence error.
-                    Err(EstimationError::RemlOptimizationFailed(
-                        "custom-family EFS inner solve did not converge".to_string(),
-                    ))
+                    Err(EstimationError::CustomFamily(failure))
                 }
                 Err(e) => {
                     // A failure to build the EFS update at this rho is a
                     // statement about this rho (#2590).
-                    outer.last_error = Some(e.clone());
-                    Err(EstimationError::CustomFamily(
-                        CustomFamilyError::trial_point(e),
-                    ))
+                    let failure = CustomFamilyError::trial_point(e);
+                    outer.last_error = Some(failure.clone());
+                    Err(EstimationError::CustomFamily(failure))
                 }
             }
         }),
@@ -2555,10 +2566,11 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     Ok(score)
                 }
                 Ok((score, warm_start, _inner_converged)) => {
-                    outer.warm_cache = Some(warm_start);
-                    outer.last_error = Some(format!(
+                    let failure = CustomFamilyError::trial_point(format!(
                         "custom-family seed-screening proxy produced non-finite score {score}"
                     ));
+                    outer.warm_cache = Some(warm_start);
+                    outer.last_error = Some(failure.clone());
                     // Screening RANKS seeds; it does not decide whether the
                     // problem is fittable. `rank_seeds_with_screening`
                     // propagates this `Err` verbatim, and the seed loop then
@@ -2571,18 +2583,14 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     // exactly this reason (#2590); a non-finite score at THIS
                     // seed is the same statement about the same seed, and was
                     // the one shape left graded fatal (#2627).
-                    Err(EstimationError::TrialPointRefused {
-                        reason: "custom-family seed-screening proxy produced non-finite score"
-                            .to_string(),
-                    })
+                    Err(EstimationError::CustomFamily(failure))
                 }
                 Err(e) => {
                     // A failure to screen this seed is a statement about this
                     // seed's rho (#2590).
-                    outer.last_error = Some(e.clone());
-                    Err(EstimationError::CustomFamily(
-                        CustomFamilyError::trial_point(e),
-                    ))
+                    let failure = CustomFamilyError::trial_point(e);
+                    outer.last_error = Some(failure.clone());
+                    Err(EstimationError::CustomFamily(failure))
                 }
             }
         },
@@ -2607,12 +2615,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         .state
         .last_error
         .as_ref()
-        .map(|e| {
-            format!(
-                " last objective error: {}",
-                normalize_outer_eval_error_detail(e)
-            )
-        })
+        .map(|e| format!(" last objective error: {e}"))
         .unwrap_or_default();
 
     // SPEC 20: only the optimizer-owned certified carrier is fit authority.

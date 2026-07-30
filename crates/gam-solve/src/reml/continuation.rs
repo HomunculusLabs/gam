@@ -9,7 +9,7 @@
 use ndarray::Array1;
 
 use crate::estimate::EstimationError;
-use crate::inner_status::{InnerFailure, classify_inner_error};
+use crate::inner_status::{InnerFailure, classify_estimation_error};
 use crate::rho_optimizer::{OuterEvalOrder, OuterObjective};
 use gam_problem::OuterEval;
 
@@ -23,10 +23,8 @@ pub(crate) struct ContinuationState {
 }
 
 pub(crate) fn inner_failure_from(err: EstimationError) -> InnerFailure {
-    match err {
-        EstimationError::RemlOptimizationFailed(msg) => classify_inner_error(msg),
-        other => InnerFailure::Other(other.to_string()),
-    }
+    let message = err.to_string();
+    classify_estimation_error(&err, message)
 }
 
 /// Install a non-empty coefficient hint and evaluate one exact reactive

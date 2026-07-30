@@ -29,6 +29,36 @@ pub(crate) fn cached_inner_mode_from_result(result: &BlockwiseInnerResult) -> Ca
     }
 }
 
+/// Preserve the blockwise solver's complete terminal verdict at an outer
+/// trial-point boundary.
+///
+/// Every custom-family outer route has the exact inner result in hand when it
+/// learns that derivatives cannot be exposed. Constructing the refusal here
+/// gives that verdict one schema and one owner; storing a sentence in
+/// `CustomOuterState` and later stripping wrapper prefixes from it loses the
+/// terminal decision variables #2658 exists to surface.
+pub(crate) fn inner_solve_not_converged_error(
+    inner: &BlockwiseInnerResult,
+    rho_dim: usize,
+    psi_dim: usize,
+) -> CustomFamilyError {
+    CustomFamilyError::InnerSolveNotConverged {
+        cycles: inner.cycles,
+        terminal: inner.terminal_convergence_state,
+        kkt_residual: inner
+            .kkt_residual
+            .as_ref()
+            .map(ProjectedKktResidual::inf_norm),
+        kkt_tol: inner
+            .kkt_residual
+            .as_ref()
+            .and_then(ProjectedKktResidual::residual_tol),
+        theta_dim: rho_dim + psi_dim,
+        rho_dim,
+        psi_dim,
+    }
+}
+
 pub(crate) fn constrained_warm_start_from_inner(
     rho: &Array1<f64>,
     inner: &BlockwiseInnerResult,
@@ -1118,7 +1148,13 @@ pub(crate) struct CustomOuterState {
     /// one inner result that produced the certified objective and derivatives
     /// without re-entering the (potentially nonconvex) coefficient solver.
     pub(crate) terminal_mode: Option<CustomFamilyTerminalMode>,
-    pub(crate) last_error: Option<String>,
+    /// Typed refusal from the last failed or infeasible objective evaluation.
+    ///
+    /// This is diagnostic evidence only; it never authorizes a fit. Keeping the
+    /// source whole lets terminal reporting render it once and lets tests or
+    /// downstream classifiers inspect exact inner convergence fields without
+    /// parsing text.
+    pub(crate) last_error: Option<CustomFamilyError>,
     pub(crate) initial_gradient_norm: Option<f64>,
     /// The warm-trajectory-adaptive inner cycle cap shared with the outer-eval
     /// closures, plus the full cold budget it starts from. `reset()` restores
