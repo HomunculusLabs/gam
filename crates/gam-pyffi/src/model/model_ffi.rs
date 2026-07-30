@@ -481,6 +481,12 @@ struct SurvivalPredictionPayload {
     /// uncertainty was computed.
     #[serde(skip_serializing_if = "Option::is_none")]
     covariance_source: Option<String>,
+    /// Restriction horizon of the `rmst` column, in time units. Travels with
+    /// the column because an RMST without its horizon is not interpretable —
+    /// the same curve gives a different number at every `tau`. `None` exactly
+    /// when the grid supports no horizon and `rmst` is therefore absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rmst_tau: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -7479,6 +7485,7 @@ mod prediction_payload_tests {
             survival_se: Some(vec![vec![0.01, f64::NAN], vec![0.02, f64::NAN]]),
             eta_se: Some(vec![0.1, f64::INFINITY]),
             covariance_source: Some("smoothing-corrected".to_string()),
+            rmst_tau: Some(2.0),
         };
 
         let json = serde_json::to_string(&payload).expect("serialize must succeed");
