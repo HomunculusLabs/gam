@@ -585,8 +585,18 @@ mod tests {
             for o in 0..dout {
                 let fd = (fp[[0, o]] - fm[[0, o]]) / (2.0 * FD_H);
                 let an = jac[[0, o, i]];
+                // Bound source: the FD step's own noise floor. With
+                // `FD_H = 1e-6` and O(1) log-ratio kernels the central
+                // difference carries truncation h²·|f‴|/6 ≈ 4e-11 and
+                // cancellation roundoff ε·|f|/h ≈ 2e-10, so the realized
+                // residual is ~1e-10..1e-9. 1e-8 is ~10× that floor and is the
+                // tightest bound an h = 1e-6 instrument supports. The old 1e-6
+                // sat four orders ABOVE the floor, where a wrong 1/(d-1) versus
+                // 1/d factor on a small ILR component passes. To go tighter,
+                // change the INSTRUMENT (Richardson extrapolation or a
+                // complex-step derivative) -- do not widen this number.
                 assert!(
-                    (fd - an).abs() < 1e-6,
+                    (fd - an).abs() < 1e-8,
                     "jac[{o},{i}] analytic {an} vs FD {fd}"
                 );
             }

@@ -1622,12 +1622,41 @@ mod tests {
     fn round_trip(manifold: ResponseManifold, values: Array2<f64>) {
         let base =
             response_frechet_mean(manifold, values.view(), None, 1e-12, 500).expect("frechet mean");
+        // The six `*_round_trip_and_mean` tests used to check nothing about the
+        // MEAN: exp∘log is an involution at ANY base point, so a
+        // `response_frechet_mean` that returned `values.row(0)` passed all six.
+        // `frechet_residual` re-derives the analytic Karcher stationarity
+        // residual independently, which is the property the names claim.
+        //
+        // Bound source: the solver's OWN tolerance. `response_frechet_mean`'s
+        // only success exit is the certificate ‖Σwᵢlogₚ(xᵢ)‖ₚ ≤ tol, and it is
+        // called here with tol = 1e-12. 1e-10 is 100× that, covering only the
+        // summation-order difference between this re-derivation and the
+        // solver's own sum. Widening it past ~1e-12 stops testing the
+        // certificate at all.
+        let residual = frechet_residual(manifold, values.view(), base.view());
+        assert!(
+            residual <= 1e-10,
+            "{manifold:?} Fréchet mean is not stationary: residual {residual:.3e} > 1e-10 \
+             (the solver's success exit certified it at <= 1e-12)"
+        );
         let tangent = response_log_map(manifold, values.view(), base.view()).expect("log map");
         let back = response_exp_map(manifold, tangent.view(), base.view()).expect("exp map");
         for row in 0..values.nrows() {
             for col in 0..values.ncols() {
+                // Bound source: the ulp scale of the maps under test, NOT the
+                // quality of `base` -- log then exp at the SAME base is an
+                // involution however bad that base point is. Spd, Grassmann,
+                // Stiefel(k=1) and Poincaré are closed form on O(1) data, so
+                // their floor is a few ε ≈ 1e-15. The only iterative map
+                // reached from here is the Stiefel k ≥ 2 canonical logarithm,
+                // whose own inner gate is `TOL = 1.0e-13`
+                // (manifolds/stiefel.rs); 1e-11 is 100× that gate. The old 1e-6
+                // let a genuine 1e-8 error in exactly that k ≥ 2 logarithm --
+                // which two of these six fixtures exist to guard -- pass
+                // silently.
                 assert!(
-                    (back[[row, col]] - values[[row, col]]).abs() < 1e-6,
+                    (back[[row, col]] - values[[row, col]]).abs() < 1e-11,
                     "{manifold:?} exp∘log mismatch at ({row},{col}): {} vs {}",
                     back[[row, col]],
                     values[[row, col]]
@@ -1888,10 +1917,22 @@ mod tests {
             .expect("tight cloud has a certified global mean");
         let permuted = response_frechet_mean(manifold, reversed.view(), None, 1.0e-12, 256)
             .expect("permuted tight cloud has a certified global mean");
+        // THE ONE BOUND IN THIS FILE BEING LOOSENED, deliberately. 1.0e-12 was
+        // EXACTLY the tolerance both runs above were solved to, and a bound at
+        // the solver's own tolerance is not strict -- it is wrong. Each run may
+        // stop anywhere inside the ‖grad‖ ≤ 1e-12 stationarity ball, so two
+        // independently converged runs can legitimately differ by ~2× tol in
+        // gradient, and by more than that in displacement once the 1/κ
+        // curvature factor is applied. As written this is a live flake, not a
+        // check.
+        //
+        // Bound source: 100× the solver tolerance (1e-12) named on the two
+        // `response_frechet_mean` calls above. Still orders below any real
+        // permutation asymmetry, which would be O(the descent step), ~1e-2.
         assert!(
             (&direct - &permuted)
                 .iter()
-                .all(|value| value.abs() <= 1.0e-12)
+                .all(|value| value.abs() <= 1.0e-10)
         );
         assert!(frechet_residual(manifold, values.view(), direct.view()) <= 1.0e-12);
     }

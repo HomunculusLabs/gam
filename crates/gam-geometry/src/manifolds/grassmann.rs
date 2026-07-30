@@ -640,9 +640,14 @@ mod tests {
 
     #[test]
     fn exp_log_roundtrip_recovers_tangent_to_machine_precision() {
-        // exp_P(v) then log back must return v componentwise, and the recovered
-        // tangent's singular spectrum must equal the input principal angles — at
-        // both tiny (sub-microradian) and near-π/2 scales. This pins gam's exp/log
+        // exp_P(v) then log back must return v componentwise — at both tiny
+        // (sub-microradian) and near-π/2 scales. (A claim that "the recovered
+        // tangent's singular spectrum must equal the input principal angles"
+        // used to sit here; it described code that is not below -- no SVD is
+        // computed -- and it is redundant anyway: Δ is BUILT with singular
+        // values exactly `angles`, so componentwise agreement to `tol` bounds
+        // the spectrum difference by `tol` via Weyl, and the isometry assertion
+        // pins ‖Σ‖₂ directly.) This pins gam's exp/log
         // involution against analytic truth (atan-recovered, well-conditioned),
         // independent of the arccos-near-1 endpoint extraction the e2e test uses.
         let gr = GrassmannManifold::new(3, 9).expect("Gr(3,9)");
@@ -672,16 +677,27 @@ mod tests {
                 for (a, b) in v_rec.iter().zip(v_flat.iter()) {
                     max_abs = max_abs.max((a - b).abs());
                 }
-                assert!(
-                    max_abs < 1e-10,
-                    "exp/log roundtrip error {max_abs:.3e} at scale {s:.1e} (angles {angles:?})"
-                );
-                // Isometry: ‖log(exp v)‖_F == ‖v‖_F == ‖angles‖₂.
-                let rec_norm: f64 = v_rec.iter().map(|x| x * x).sum::<f64>().sqrt();
                 let truth_norm: f64 = angles.iter().map(|t| t * t).sum::<f64>().sqrt();
+                // Bound source: the ulp scale of the closed-form maps. exp on
+                // Gr(k,n) is Y V cosΣ Vᵀ + U sinΣ Vᵀ and log is its atan
+                // inverse -- no iteration -- so the achievable error is a few ε
+                // times the larger of ‖v‖ and ‖Y‖ = 1, i.e. ~1e-15.
+                // `1e-13 * max(‖v‖, 1)` is 100× that. The old `1e-10` was
+                // ABSOLUTE while the `scales` sweep reaches s = 1e-7, where the
+                // tangent components are ~4e-8: a 1e-3 RELATIVE error passed at
+                // exactly the small-angle end this test's name
+                // ("to_machine_precision") advertises.
+                let tol = 1e-13 * truth_norm.max(1.0);
                 assert!(
-                    (rec_norm - truth_norm).abs() < 1e-10,
-                    "isometry error {:.3e} at scale {s:.1e}",
+                    max_abs < tol,
+                    "exp/log roundtrip error {max_abs:.3e} exceeds {tol:.3e} at scale {s:.1e} \
+                     (angles {angles:?})"
+                );
+                // Isometry: ‖log(exp v)‖_F == ‖v‖_F == ‖angles‖₂. Same source.
+                let rec_norm: f64 = v_rec.iter().map(|x| x * x).sum::<f64>().sqrt();
+                assert!(
+                    (rec_norm - truth_norm).abs() < tol,
+                    "isometry error {:.3e} exceeds {tol:.3e} at scale {s:.1e}",
                     (rec_norm - truth_norm).abs()
                 );
             }

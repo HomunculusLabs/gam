@@ -1521,9 +1521,16 @@ mod jacobi_tests {
         let (evals, evecs) = jacobi_symmetric(&a).expect("large-norm SPD must converge");
         let mut sorted: Vec<f64> = evals.to_vec();
         sorted.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        // Bound source: `JACOBI_REL_TOL = 1.0e-13`, the solver's OWN convergence
+        // gate (largest off-diagonal ≤ 1e-13·‖A‖_F), relaxed 10× to 1e-12
+        // relative for the eigenvalue roundoff floor ε·‖A‖ ≈ 8e-8 absolute here
+        // (≈ 8e-16 relative). The old `1.0e-6 * want` was ±100..±300 ABSOLUTE,
+        // six orders above the gate, so it could not make the distinction this
+        // test's doc comment claims to make: real convergence versus grinding
+        // through `max_iter` and silently returning a partial diagonal.
         for (got, want) in sorted.iter().zip(lambda.iter()) {
             assert!(
-                (got - want).abs() <= 1.0e-6 * want,
+                (got - want).abs() <= 1.0e-12 * want,
                 "eigenvalue mismatch: got {got}, want {want}"
             );
         }
@@ -1533,10 +1540,16 @@ mod jacobi_tests {
             diag_e[[i, i]] = evals[i];
         }
         let recon = evecs.dot(&diag_e).dot(&evecs.t());
+        // Bound source: as above -- 10× the solver's own
+        // `JACOBI_REL_TOL = 1.0e-13`, times the matrix scale 3.0e8. The realized
+        // reconstruction error is the orthogonal-similarity roundoff
+        // ε·‖A‖ ≈ 1e-7 absolute, so 1e-12·3e8 = 3e-4 keeps ~3 orders of
+        // headroom. The old `1.0e-6 * 3.0e8` was ±300 ABSOLUTE on entries of
+        // size ~2e8: a 1.5e-6 relative check dressed up as a precision test.
         for i in 0..3 {
             for j in 0..3 {
                 assert!(
-                    (recon[[i, j]] - a[[i, j]]).abs() <= 1.0e-6 * 3.0e8,
+                    (recon[[i, j]] - a[[i, j]]).abs() <= 1.0e-12 * 3.0e8,
                     "reconstruction mismatch at ({i},{j})"
                 );
             }
