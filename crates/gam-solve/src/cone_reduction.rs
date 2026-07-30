@@ -154,10 +154,292 @@ pub fn symmetric_inertia(matrix: ArrayView2<'_, f64>, tolerance: f64) -> Result<
     Ok(inertia)
 }
 
+/// What a cone-truncated posterior's properness was decided against.
+///
+/// Every field is a measured quantity rather than a summary, because the point
+/// of this type is that a decline can name what it declined on.
+#[derive(Clone, Debug)]
+pub struct ConeProperness {
+    /// The reduced precision `M` on the recession cone's normal coordinates
+    /// `w = Ad`: `wᵀMw` is the STATIONARY value of `dᵀHd` on `{d : Ad = w}`, which
+    /// is its minimum exactly when `H` is positive definite on `null(A)`.
+    pub reduced: Array2<f64>,
+    /// `In(H)` — the ambient precision's inertia. A constrained mode is not
+    /// obliged to make this all-positive.
+    pub ambient_inertia: Inertia,
+    /// `In(M)`.
+    pub reduced_inertia: Inertia,
+    /// `In(ZᵀHZ)` for `Z` a basis of `null(A)`, obtained from Haynsworth
+    /// additivity `In(H) = In(ZᵀHZ) + In(M)` rather than by forming `Z`.
+    /// `null(A)` is the recession cone's LINEALITY space — both `±d` are
+    /// feasible there — so anything but all-positive here is impropriety.
+    pub lineality_inertia: Inertia,
+    /// `min wᵀMw` over the unit simplex. `Some(v)` with `v > 0` is a proof that
+    /// the cone-truncated posterior is proper; `Some(v)` with `v <= 0` is a
+    /// proof that it is improper. `None` means the face is too wide for the
+    /// exact `2^q` enumeration, so properness is undecided — never assumed.
+    pub copositive_minimum: Option<f64>,
+}
+
+impl ConeProperness {
+    /// `Some(true)`/`Some(false)` when properness is PROVED either way, `None`
+    /// when it is undecided. Undecided is deliberately not folded into either
+    /// answer.
+    pub fn is_proper(&self) -> Option<bool> {
+        if self.lineality_inertia.negative > 0 || self.lineality_inertia.zero > 0 {
+            return Some(false);
+        }
+        self.copositive_minimum.map(|minimum| minimum > 0.0)
+    }
+
+    /// One line naming every quantity the verdict was decided against, for a
+    /// refusal or a decline to carry.
+    pub fn summary(&self) -> String {
+        let verdict = match self.is_proper() {
+            Some(true) => "PROPER".to_string(),
+            Some(false) => "IMPROPER".to_string(),
+            None => format!(
+                "UNDECIDED (the exact enumeration is out of range at q = {})",
+                self.reduced.nrows()
+            ),
+        };
+        let copositive = match self.copositive_minimum {
+            Some(minimum) => format!("{minimum:.6e}"),
+            None => "not enumerated".to_string(),
+        };
+        format!(
+            "cone-truncated posterior is {verdict}: In(H) = ({}, {}, {}), \
+             In(M) = ({}, {}, {}), In(ZᵀHZ) = ({}, {}, {}) on null(A), \
+             min wᵀMw over the simplex = {copositive}",
+            self.ambient_inertia.positive,
+            self.ambient_inertia.zero,
+            self.ambient_inertia.negative,
+            self.reduced_inertia.positive,
+            self.reduced_inertia.zero,
+            self.reduced_inertia.negative,
+            self.lineality_inertia.positive,
+            self.lineality_inertia.zero,
+            self.lineality_inertia.negative,
+        )
+    }
+}
+
+/// The reduced precision `M` on the recession cone's normal coordinates.
+///
+/// For a feasible set `{d : Ad ≥ b}` the recession cone is `{d : Ad ≥ 0}`, and
+/// splitting `d = Zt + Nw` with `Z` a basis of `null(A)` and `w = Ad` leaves the
+/// `w`-marginal precision as the Schur complement
+/// `M = NᵀHN − NᵀHZ(ZᵀHZ)⁻¹ZᵀHN`. This computes it WITHOUT forming `Z`, `N`, or
+/// `H⁻¹`, from the defining variational identity
+///
+/// ```text
+/// wᵀMw = stat{ dᵀHd : Ad = w }
+/// ```
+///
+/// — the stationary value, which is the MINIMUM exactly when `ZᵀHZ ≻ 0` and is
+/// the algebraic Schur complement either way, so this route does not presuppose
+/// the condition the certificate above it goes on to test. Its stationarity
+/// system is the symmetric saddle point
+///
+/// ```text
+/// [ H  Aᵀ ] [ d ]   [ 0 ]
+/// [ A  0  ] [ ν ] = [ w ],        M w = −ν
+/// ```
+///
+/// so one solve per constraint row gives `M` exactly. That matters here: the
+/// reason this module exists is that `H` is INDEFINITE, so `Σ = H⁻¹` may not be
+/// a covariance and `M = (AH⁻¹Aᵀ)⁻¹` — the identity that holds when `H ≻ 0` —
+/// cannot be evaluated by inverting anything. The saddle system is indefinite by
+/// construction and needs no positive definiteness anywhere.
+///
+/// The system is nonsingular exactly when `A` has full row rank and `H` is
+/// nonsingular on `null(A)`; a failed pivot therefore refuses by naming which of
+/// those two the face broke, rather than returning a matrix built on neither.
+pub fn reduced_cone_precision(
+    hessian: ArrayView2<'_, f64>,
+    constraints: ArrayView2<'_, f64>,
+) -> Result<Array2<f64>, String> {
+    let p = hessian.nrows();
+    if hessian.ncols() != p {
+        return Err(format!(
+            "cone reduction needs a square ambient precision, got {}x{}",
+            hessian.nrows(),
+            hessian.ncols()
+        ));
+    }
+    let q = constraints.nrows();
+    if constraints.ncols() != p {
+        return Err(format!(
+            "cone reduction: the ambient precision is {p}x{p} but the constraint rows have \
+             {} columns",
+            constraints.ncols()
+        ));
+    }
+    if q == 0 {
+        return Err(
+            "cone reduction needs at least one inequality row; with none the recession cone \
+             is all of R^p and properness is just positive definiteness of H"
+                .to_string(),
+        );
+    }
+    if q > p {
+        return Err(format!(
+            "cone reduction: {q} constraint rows in {p} dimensions cannot be independent, so \
+             the reduction's coordinates are not well defined; canonicalize the face to an \
+             independent row basis first"
+        ));
+    }
+    let size = p + q;
+    let mut saddle = Array2::<f64>::zeros((size, size));
+    saddle
+        .slice_mut(ndarray::s![0..p, 0..p])
+        .assign(&hessian);
+    saddle
+        .slice_mut(ndarray::s![0..p, p..size])
+        .assign(&constraints.t());
+    saddle
+        .slice_mut(ndarray::s![p..size, 0..p])
+        .assign(&constraints);
+    if saddle.iter().any(|value| !value.is_finite()) {
+        return Err(
+            "cone reduction: the saddle system carries a non-finite entry, so neither the \
+             ambient precision nor the constraint rows can be trusted"
+                .to_string(),
+        );
+    }
+    let scale = saddle
+        .iter()
+        .fold(0.0f64, |worst, value| worst.max(value.abs()))
+        .max(1.0);
+    let floor = 1e-12 * scale;
+    let mut reduced = Array2::<f64>::zeros((q, q));
+    for column in 0..q {
+        let mut rhs = Array1::<f64>::zeros(size);
+        rhs[p + column] = 1.0;
+        let Some(solution) = symmetric_solve(&saddle, &rhs, floor) else {
+            return Err(format!(
+                "cone reduction: the saddle system [[H, Aᵀ],[A, 0]] is singular at pivot floor \
+                 {floor:.3e} while eliminating constraint row {column}. Either the {q} \
+                 constraint rows are dependent, or H is singular on null(A) — and the second \
+                 case is itself impropriety, since null(A) is the recession cone's lineality \
+                 space"
+            ));
+        };
+        for row in 0..q {
+            reduced[[row, column]] = -solution[p + row];
+        }
+    }
+    // `M` is symmetric in exact arithmetic (it is a Schur complement of a
+    // symmetric matrix); the elimination is not symmetry preserving, so the
+    // asymmetry it leaves is measured and then removed rather than assumed
+    // absent.
+    let mut worst_asymmetry = 0.0f64;
+    for row in 0..q {
+        for column in 0..q {
+            let gap = (reduced[[row, column]] - reduced[[column, row]]).abs();
+            worst_asymmetry = worst_asymmetry.max(gap);
+        }
+    }
+    let reduced_scale = reduced
+        .iter()
+        .fold(0.0f64, |worst, value| worst.max(value.abs()))
+        .max(1.0);
+    if worst_asymmetry > 1e-6 * reduced_scale {
+        return Err(format!(
+            "cone reduction: the reduced precision came back asymmetric by \
+             {worst_asymmetry:.3e} against a scale of {reduced_scale:.3e}, which a Schur \
+             complement of a symmetric matrix cannot be — the saddle solve lost the face's \
+             conditioning"
+        ));
+    }
+    for row in 0..q {
+        for column in (row + 1)..q {
+            let averaged = 0.5 * (reduced[[row, column]] + reduced[[column, row]]);
+            reduced[[row, column]] = averaged;
+            reduced[[column, row]] = averaged;
+        }
+    }
+    Ok(reduced)
+}
+
+/// Decide whether a cone-truncated Laplace posterior is proper, exactly.
+///
+/// The feasible set is `{d : Ad ≥ b}`, so `exp(−½dᵀHd − …)` is normalizable over
+/// it exactly when `dᵀHd > 0` for every nonzero `d` in the recession cone
+/// `{Ad ≥ 0}` — strict copositivity of `H` on that cone, NOT `H ≻ 0`. In the
+/// `d = Zt + Nw` coordinates that separates into two conditions, and this
+/// returns both:
+///
+/// * `ZᵀHZ ≻ 0`, i.e. properness along the cone's lineality space `null(A)`,
+///   where both `±d` are feasible so there is nothing for a constraint to do;
+/// * `M` strictly copositive on `{w ≥ 0}`, decided exactly by face enumeration.
+///
+/// `In(ZᵀHZ)` comes from Haynsworth additivity — `In(H) = In(ZᵀHZ) + In(M)` —
+/// so no null-space basis is ever formed.
+pub fn cone_properness_certificate(
+    hessian: ArrayView2<'_, f64>,
+    constraints: ArrayView2<'_, f64>,
+    tolerance: f64,
+) -> Result<ConeProperness, String> {
+    let reduced = reduced_cone_precision(hessian, constraints)?;
+    let ambient_inertia = symmetric_inertia(hessian, tolerance)
+        .map_err(|error| format!("ambient precision inertia: {error}"))?;
+    let reduced_inertia = symmetric_inertia(reduced.view(), tolerance)
+        .map_err(|error| format!("reduced precision inertia: {error}"))?;
+    let (positive, zero, negative) = (
+        ambient_inertia.positive.checked_sub(reduced_inertia.positive),
+        ambient_inertia.zero.checked_sub(reduced_inertia.zero),
+        ambient_inertia.negative.checked_sub(reduced_inertia.negative),
+    );
+    let (Some(positive), Some(zero), Some(negative)) = (positive, zero, negative) else {
+        return Err(format!(
+            "Haynsworth additivity In(H) = In(ZᵀHZ) + In(M) is violated: In(H) = ({}, {}, {}) \
+             cannot contain In(M) = ({}, {}, {}). One of the two inertias is wrong, so the \
+             lineality verdict has no basis",
+            ambient_inertia.positive,
+            ambient_inertia.zero,
+            ambient_inertia.negative,
+            reduced_inertia.positive,
+            reduced_inertia.zero,
+            reduced_inertia.negative,
+        ));
+    };
+    let lineality_inertia = Inertia {
+        positive,
+        zero,
+        negative,
+    };
+    let expected = hessian.nrows() - reduced.nrows();
+    let realized = positive + zero + negative;
+    if realized != expected {
+        return Err(format!(
+            "the lineality inertia has {realized} directions where null(A) has {expected}; \
+             In(H) − In(M) is not an inertia of the right dimension"
+        ));
+    }
+    // Only enumerate when the answer would be exact. `copositive_simplex_minimum`
+    // owns that range, and an out-of-range face reports UNDECIDED rather than
+    // borrowing a cheaper sufficient condition and calling it a proof.
+    let copositive_minimum = copositive_simplex_minimum(reduced.view())
+        .ok()
+        .map(|(minimum, _)| minimum);
+    Ok(ConeProperness {
+        reduced,
+        ambient_inertia,
+        reduced_inertia,
+        lineality_inertia,
+        copositive_minimum,
+    })
+}
+
 /// Solve `A y = b` for a small dense `A` by Gaussian elimination with partial
 /// pivoting. Returns `None` when a pivot falls below the floor, which the
 /// callers read as "this face is degenerate, skip it" rather than as an error —
 /// a singular face carries no isolated stationary point to compare.
+///
+/// The name records where it is used, not a requirement: the elimination is a
+/// general LU with row pivoting, and `reduced_cone_precision` deliberately feeds
+/// it an indefinite symmetric saddle matrix.
 fn symmetric_solve(a: &Array2<f64>, b: &Array1<f64>, floor: f64) -> Option<Array1<f64>> {
     let n = a.nrows();
     let mut work = a.clone();
@@ -454,6 +736,245 @@ mod tests {
             symmetric_inertia(congruent.view(), 1e-12).expect("congruent inertia"),
             Inertia { positive: 2, zero: 0, negative: 1 },
             "congruence preserves inertia"
+        );
+    }
+
+    /// `H⁻¹Aᵀ` one column at a time, for the tests that need an independent
+    /// route to `W = AΣAᵀ`. Only ever called on a positive definite `H`.
+    fn ambient_solve_against_rows(hessian: &Array2<f64>, constraints: &Array2<f64>) -> Array2<f64> {
+        let p = hessian.nrows();
+        let q = constraints.nrows();
+        let scale = hessian
+            .iter()
+            .fold(0.0f64, |worst, value| worst.max(value.abs()))
+            .max(1.0);
+        let mut lifted = Array2::<f64>::zeros((p, q));
+        for row in 0..q {
+            let rhs = constraints.row(row).to_owned();
+            let solution =
+                symmetric_solve(hessian, &rhs, 1e-12 * scale).expect("a PD ambient solve");
+            for i in 0..p {
+                lifted[[i, row]] = solution[i];
+            }
+        }
+        lifted
+    }
+
+    #[test]
+    fn the_reduced_precision_inverts_the_constraint_normal_covariance_when_the_ambient_is_pd() {
+        // `M = (A H⁻¹ Aᵀ)⁻¹` is the identity the #2417 decomposition uses, and it
+        // holds only when `H ≻ 0`. So it is exactly the right independent check
+        // on the saddle route, which never forms `H⁻¹`: on a PD ambient the two
+        // must agree, and the saddle route is then used on ambients where the
+        // identity's right-hand side does not exist at all.
+        let hessian = array![
+            [7.0, 1.0, 0.5, 0.0],
+            [1.0, 5.0, -1.0, 0.25],
+            [0.5, -1.0, 6.0, 1.5],
+            [0.0, 0.25, 1.5, 4.0],
+        ];
+        let constraints = array![[1.0, 0.0, -1.0, 0.0], [0.0, 2.0, 1.0, -0.5]];
+        let reduced = reduced_cone_precision(hessian.view(), constraints.view())
+            .expect("the saddle reduction on a PD ambient");
+        let lifted = ambient_solve_against_rows(&hessian, &constraints);
+        let normal_covariance = constraints.dot(&lifted);
+        let product = normal_covariance.dot(&reduced);
+        for i in 0..2 {
+            for j in 0..2 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (product[[i, j]] - expected).abs() < 1e-10,
+                    "(A H⁻¹ Aᵀ) M should be the identity, entry ({i},{j}) was {:.6e}",
+                    product[[i, j]]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_live_reduction_reproduces_the_fixture_reduced_precision_and_its_minimum() {
+        // Until now `M` existed here only as 36 constants dumped by a Python
+        // probe. This builds an ambient `H` whose reduction IS that matrix and
+        // checks that the production route recovers it — so the published
+        // copositivity minimum becomes a property of the code, not of a paste.
+        //
+        // With `A = [I_6 | 0]` the normal coordinates are the first six, the
+        // lineality space is the last three, and the reduction is the ordinary
+        // Schur complement `H₁₁ − H₁₂H₂₂⁻¹H₂₁`. Choosing `H₂₂ ≻ 0` (its min
+        // eigenvalue echoes the measured `+51.4` on `null(A)`) and a nonzero
+        // coupling `H₁₂` makes the reduction do real work rather than copy a
+        // block.
+        let (target, _) = fixture();
+        let lineality = array![[51.4, 3.0, -1.0], [3.0, 60.0, 2.0], [-1.0, 2.0, 70.0]];
+        let mut coupling = Array2::<f64>::zeros((6, 3));
+        for i in 0..6 {
+            for j in 0..3 {
+                coupling[[i, j]] = ((i + 1) as f64) * 0.5 - ((j + 1) as f64) * 1.25;
+            }
+        }
+        // `H₁₁ = M + H₁₂H₂₂⁻¹H₂₁` reverses the Schur complement exactly.
+        let mut lineality_solve = Array2::<f64>::zeros((3, 6));
+        for column in 0..6 {
+            let rhs = coupling.row(column).to_owned();
+            let solution = symmetric_solve(&lineality, &rhs, 1e-12 * 70.0)
+                .expect("the PD lineality block is invertible");
+            for i in 0..3 {
+                lineality_solve[[i, column]] = solution[i];
+            }
+        }
+        let correction = coupling.dot(&lineality_solve);
+        let mut hessian = Array2::<f64>::zeros((9, 9));
+        hessian
+            .slice_mut(ndarray::s![0..6, 0..6])
+            .assign(&(&target + &correction));
+        hessian.slice_mut(ndarray::s![0..6, 6..9]).assign(&coupling);
+        hessian
+            .slice_mut(ndarray::s![6..9, 0..6])
+            .assign(&coupling.t());
+        hessian.slice_mut(ndarray::s![6..9, 6..9]).assign(&lineality);
+        let mut constraints = Array2::<f64>::zeros((6, 9));
+        for j in 0..6 {
+            constraints[[j, j]] = 1.0;
+        }
+
+        let certificate = cone_properness_certificate(hessian.view(), constraints.view(), 1e-12)
+            .expect("a certificate on an indefinite ambient with a PD lineality block");
+        let scale = target
+            .iter()
+            .fold(0.0f64, |worst, value| worst.max(value.abs()));
+        for i in 0..6 {
+            for j in 0..6 {
+                assert!(
+                    (certificate.reduced[[i, j]] - target[[i, j]]).abs() < 1e-8 * scale,
+                    "recovered M[{i},{j}] = {:.9e}, expected {:.9e}",
+                    certificate.reduced[[i, j]],
+                    target[[i, j]]
+                );
+            }
+        }
+        assert_eq!(
+            certificate.reduced_inertia,
+            Inertia {
+                positive: 5,
+                zero: 0,
+                negative: 1
+            },
+            "In(M) = (5,0,1) survives the round trip through the ambient"
+        );
+        // The whole point of the Haynsworth route: `null(A)` never gets a basis,
+        // yet its inertia comes out right. The ambient built here is indefinite,
+        // so this is not the PD case in disguise.
+        assert_eq!(
+            certificate.lineality_inertia,
+            Inertia {
+                positive: 3,
+                zero: 0,
+                negative: 0
+            },
+            "H is PD on null(A), which is what licenses marginalizing the tangent"
+        );
+        assert_eq!(certificate.ambient_inertia.negative, 1);
+        let minimum = certificate
+            .copositive_minimum
+            .expect("q = 6 is inside the exact enumeration range");
+        assert!(
+            (minimum - 6.683215003061817).abs() < 1e-6,
+            "the live reduction's copositivity minimum was {minimum:.12e}, expected \
+             6.683215003061817"
+        );
+        assert_eq!(
+            certificate.is_proper(),
+            Some(true),
+            "a copositive M with a PD lineality block is a PROOF of properness"
+        );
+        let summary = certificate.summary();
+        assert!(
+            summary.contains("PROPER") && summary.contains("min wᵀMw"),
+            "the summary must name the quantity it decided on, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn a_negative_direction_inside_null_a_is_reported_as_impropriety() {
+        // The constraint touches only the first coordinate, so `null(A)` carries
+        // the other two — and a negative curvature there is a direction along
+        // which BOTH `±d` are feasible. No inequality can make that proper, and
+        // copositivity of `M` cannot see it, so the lineality inertia has to be
+        // the thing that decides.
+        let hessian = array![[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]];
+        let constraints = array![[1.0, 0.0, 0.0]];
+        let certificate = cone_properness_certificate(hessian.view(), constraints.view(), 1e-12)
+            .expect("a certificate on a lineality-improper ambient");
+        assert_eq!(
+            certificate.lineality_inertia.negative, 1,
+            "the negative direction lands in null(A), not in the normal coordinates"
+        );
+        assert_eq!(
+            certificate.copositive_minimum,
+            Some(1.0),
+            "M is the 1x1 block [1], so copositivity alone would have said PROPER"
+        );
+        assert_eq!(
+            certificate.is_proper(),
+            Some(false),
+            "impropriety along the cone's lineality space outranks a copositive M"
+        );
+        assert!(certificate.summary().contains("IMPROPER"));
+    }
+
+    #[test]
+    fn dependent_constraint_rows_are_refused_by_name_rather_than_reduced() {
+        // Two copies of one row make the saddle system singular. The reduction
+        // has no coordinates in that case, and the refusal has to say so — a
+        // silently pseudo-inverted `M` would be a matrix built on neither of the
+        // two conditions the certificate reports.
+        let hessian = array![[4.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 2.0]];
+        let constraints = array![[1.0, 1.0, 0.0], [1.0, 1.0, 0.0]];
+        let message = reduced_cone_precision(hessian.view(), constraints.view())
+            .expect_err("dependent rows have no reduction");
+        assert!(
+            message.contains("dependent") && message.contains("lineality"),
+            "the refusal must name both readings of a singular saddle, got: {message}"
+        );
+        // More rows than dimensions cannot be independent at all, and that is
+        // decidable without a solve.
+        let wide = Array2::<f64>::ones((4, 3));
+        let message = reduced_cone_precision(hessian.view(), wide.view())
+            .expect_err("q > p has no independent reduction");
+        assert!(
+            message.contains("cannot be independent"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_face_too_wide_for_the_exact_enumeration_reports_undecided_rather_than_proper() {
+        // `copositive_simplex_minimum` is exact because it enumerates `2^q`
+        // faces, and it owns the range where that is affordable. Past it the
+        // certificate must decline to answer: a diagonally dominant `M` here is
+        // OBVIOUSLY copositive, and reporting PROPER from that would be a
+        // sufficient condition wearing a proof's clothes.
+        let width = 21usize;
+        let mut hessian = Array2::<f64>::eye(width);
+        for j in 0..width {
+            hessian[[j, j]] = 2.0 + (j as f64);
+        }
+        let constraints = Array2::<f64>::eye(width);
+        let certificate = cone_properness_certificate(hessian.view(), constraints.view(), 1e-12)
+            .expect("a certificate on a wide face");
+        assert_eq!(
+            certificate.copositive_minimum, None,
+            "q = {width} is outside the exact range"
+        );
+        assert_eq!(
+            certificate.is_proper(),
+            None,
+            "undecided must not collapse into either verdict"
+        );
+        assert!(
+            certificate.summary().contains("UNDECIDED"),
+            "got: {}",
+            certificate.summary()
         );
     }
 

@@ -1807,11 +1807,48 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
             ) {
                 Ok(ambient) => ambient,
                 Err(reason) => {
+                    // #2442/#2529: the decline above is decided on the AMBIENT
+                    // precision, but the quantity that decides whether there is
+                    // anything to compute is a different one — whether `H` is
+                    // strictly copositive on the recession cone `{Ad ≥ 0}`. Ask
+                    // it here, exactly, so the decline names what it was decided
+                    // against instead of only reporting the absence of a
+                    // covariance. Two outcomes are genuinely different:
+                    // an UNREACHABLE proper posterior (this route's limitation,
+                    // #2529's quadrature) and an IMPROPER one (no posterior to
+                    // report, whatever the route).
+                    let certificate = gam_solve::cone_reduction::cone_properness_certificate(
+                        precision.view(),
+                        constraints.a.view(),
+                        f64::EPSILON.sqrt(),
+                    );
+                    let cone_verdict = match &certificate {
+                        Ok(certificate) => certificate.summary(),
+                        Err(error) => format!(
+                            "cone-truncated posterior properness could not be certified: {error}"
+                        ),
+                    };
+                    if let Ok(certificate) = &certificate
+                        && certificate.is_proper() == Some(false)
+                    {
+                        // Proved improper, so this is not a route limitation.
+                        // There is no proper posterior on the feasible cone at
+                        // all, and no covariance — reachable or not — would
+                        // describe one. Declining the channel here would report
+                        // a fit whose uncertainty is unbounded inside its own
+                        // feasible set.
+                        return Err(format!(
+                            "constrained fit converged at a point whose cone-truncated posterior \
+                             is provably IMPROPER, so no posterior covariance exists to report: \
+                             {cone_verdict}. The ambient gate saw only ({reason})"
+                        ));
+                    }
                     log::warn!(
                         "[custom-family covariance] constrained fit converged, but its \
                              ambient posterior precision is not positive definite, so the \
                              inequality-truncated covariance is unreachable by this route \
-                             ({reason}); reporting the fit WITHOUT a posterior covariance \
+                             ({reason}); the cone itself was certified separately and \
+                             {cone_verdict}; reporting the fit WITHOUT a posterior covariance \
                              rather than refusing the fit or substituting the zero-variance \
                              active-face answer (#2442)"
                     );
@@ -2328,8 +2365,23 @@ mod required_covariance_tests {
         Vec<Array1<f64>>,
         Array2<f64>,
     ) {
-        let unpenalized = array![[1.0, 0.0], [0.0, -2.0]];
-        let beta = array![0.0, 0.5];
+        // `[[1, 3], [3, 1]]` has eigenvalues `-2` and `4`, so the AMBIENT
+        // precision is indefinite and the SPD gate must refuse it — and it is
+        // strictly copositive on the nonnegative orthant, so the posterior
+        // truncated to `{beta >= 0}` is PROPER. Both halves are load-bearing:
+        // the test's whole claim is that a proper-but-unreachable law costs the
+        // covariance channel and nothing else, and a fixture whose law does not
+        // exist cannot exhibit that.
+        //
+        // TWO constraint rows are not a stylistic choice. With one inequality
+        // the recession cone is a half-space, which contains a full line
+        // through the origin, so it contains `d` or `-d` for EVERY direction —
+        // an indefinite `H` is then improper on it no matter which coordinate
+        // the row touches. Properness with an indefinite ambient needs a cone
+        // salient enough to exclude the negative direction together with its
+        // negation, and that takes at least two rows.
+        let unpenalized = array![[1.0, 3.0], [3.0, 1.0]];
+        let beta = array![0.25, 0.5];
         let spec = ParameterBlockSpec {
             name: "indefinite-ambient".to_string(),
             design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
@@ -2361,8 +2413,8 @@ mod required_covariance_tests {
             Ok(FamilyEvaluation {
                 log_likelihood: 0.0,
                 blockworking_sets: vec![BlockWorkingSet::ExactNewton {
-                    gradient: array![-beta[0], 2.0 * beta[1]],
-                    hessian: SymmetricMatrix::Dense(array![[1.0, 0.0], [0.0, -2.0]]),
+                    gradient: array![-beta[0] - 3.0 * beta[1], -3.0 * beta[0] - beta[1]],
+                    hessian: SymmetricMatrix::Dense(array![[1.0, 3.0], [3.0, 1.0]]),
                 }],
             })
         }
@@ -2381,8 +2433,8 @@ mod required_covariance_tests {
                 spec.name
             );
             Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
-                a: array![[1.0, 0.0]],
-                b: array![0.0],
+                a: array![[1.0, 0.0], [0.0, 1.0]],
+                b: array![0.0, 0.0],
             })))
         }
     }
@@ -2406,6 +2458,15 @@ mod required_covariance_tests {
     /// The honest answer is neither: report the fit, decline the covariance,
     /// and leave the estimand gap visible until the cone-truncated moments can
     /// be reached without inverting an indefinite `H`.
+    ///
+    /// The fixture was replaced rather than tuned. It used to be
+    /// `H = diag(1, -2)` under the single row `beta_0 >= 0`, whose cone-truncated
+    /// posterior is IMPROPER — `d = (0, 1)` is feasible with `d'Hd = -2` — so the
+    /// `expect` message below was asserting the opposite of what its own fixture
+    /// exhibited, and the test passed only because a declined covariance channel
+    /// looked the same either way. That fixture now has its own test, asserting
+    /// the refusal, directly below. See
+    /// `a_cone_improper_posterior_is_refused_by_name_rather_than_declined`.
     #[test]
     fn indefinite_ambient_precision_declines_the_covariance_and_keeps_the_fit() {
         let (specs, states, per_block, unpenalized) = indefinite_ambient_constrained_fixture();
@@ -2447,10 +2508,129 @@ mod required_covariance_tests {
         );
         assert_eq!(
             assembly.geometry.penalized_hessian.as_array(),
-            &array![[1.0, 0.0], [0.0, -2.0]],
+            &array![[1.0, 3.0], [3.0, 1.0]],
             "the full-space precision is still the honest curvature of the fit and must be \
              reported unchanged",
         );
+    }
+
+    /// The fixture the test above used to carry, kept because it is a
+    /// counterexample rather than a variant: `H = diag(1, -2)` with the single
+    /// row `beta_0 >= 0`. The recession cone is the half-space `{d_0 >= 0}`,
+    /// which contains the whole `d_0 = 0` line, so `d = (0, 1)` is feasible with
+    /// `d'Hd = -2`. The cone-truncated posterior is IMPROPER — its mass diverges
+    /// along a direction the constraint does not touch.
+    ///
+    /// It sat under an assertion that the posterior "is proper on the feasible
+    /// cone and only this ROUTE to its moments is unavailable". That reading is
+    /// false here by one line of arithmetic, and nothing in the old code could
+    /// tell the two apart: both an unreachable proper law and a nonexistent one
+    /// came back as a declined covariance channel. So this fixture must produce
+    /// the OTHER answer, and it must produce it for a stated reason.
+    ///
+    /// Declining the channel here would report a fit whose uncertainty is
+    /// unbounded inside its own feasible set, which is the same class of
+    /// fabrication as the zero-variance active-face answer the decline exists to
+    /// avoid — in the opposite direction.
+    #[test]
+    fn a_cone_improper_posterior_is_refused_by_name_rather_than_declined() {
+        let (specs, states, per_block, unpenalized) = cone_improper_constrained_fixture();
+        let options = BlockwiseFitOptions {
+            compute_covariance: true,
+            ..BlockwiseFitOptions::default()
+        };
+        let message = compute_joint_posterior(
+            &OneCoefficientLowerBoundedIndefinite,
+            &specs,
+            &states,
+            &per_block,
+            &options,
+            Some(&unpenalized),
+            None,
+            None,
+            None,
+        )
+        .expect_err("a provably improper cone-truncated posterior has no covariance to decline");
+        assert!(
+            message.contains("IMPROPER"),
+            "the refusal must carry the verdict, got: {message}"
+        );
+        assert!(
+            message.contains("In(ZᵀHZ)"),
+            "the refusal must name the quantity that decided it — the inertia on null(A),              which is where this fixture's negative direction lives — got: {message}"
+        );
+        // The ambient gate's own numbers must survive into the message too: they
+        // are what triggered the branch, and a refusal that replaced them with
+        // the cone verdict would lose the reason the route was abandoned.
+        assert!(
+            message.contains("non-PD at the converged optimum"),
+            "got: {message}"
+        );
+    }
+
+    fn cone_improper_constrained_fixture() -> (
+        Vec<ParameterBlockSpec>,
+        Vec<ParameterBlockState>,
+        Vec<Array1<f64>>,
+        Array2<f64>,
+    ) {
+        let unpenalized = array![[1.0, 0.0], [0.0, -2.0]];
+        let beta = array![0.0, 0.5];
+        let spec = ParameterBlockSpec {
+            name: "cone-improper".to_string(),
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+                Array2::zeros((1, 2)),
+            )),
+            offset: Array1::zeros(1),
+            penalties: vec![PenaltyMatrix::Dense(Array2::zeros((2, 2)))],
+            nullspace_dims: vec![2],
+            initial_log_lambdas: array![0.0],
+            initial_beta: Some(beta.clone()),
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        };
+        let state = ParameterBlockState {
+            beta,
+            eta: Array1::zeros(1),
+        };
+        (vec![spec], vec![state], vec![array![0.0]], unpenalized)
+    }
+
+    #[derive(Clone)]
+    struct OneCoefficientLowerBoundedIndefinite;
+
+    impl CustomFamily for OneCoefficientLowerBoundedIndefinite {
+        fn evaluate(&self, states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+            let beta = states[0].beta.clone();
+            Ok(FamilyEvaluation {
+                log_likelihood: 0.0,
+                blockworking_sets: vec![BlockWorkingSet::ExactNewton {
+                    gradient: array![-beta[0], 2.0 * beta[1]],
+                    hessian: SymmetricMatrix::Dense(array![[1.0, 0.0], [0.0, -2.0]]),
+                }],
+            })
+        }
+
+        fn block_linear_constraints(
+            &self,
+            states: &[ParameterBlockState],
+            block_idx: usize,
+            spec: &ParameterBlockSpec,
+        ) -> Result<Option<ConstraintSet>, String> {
+            assert_eq!(block_idx, 0);
+            assert_eq!(
+                states[block_idx].beta.len(),
+                2,
+                "block `{}` must carry both coefficients the constraint row spans",
+                spec.name
+            );
+            Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
+                a: array![[1.0, 0.0]],
+                b: array![0.0],
+            })))
+        }
     }
 
     #[test]
