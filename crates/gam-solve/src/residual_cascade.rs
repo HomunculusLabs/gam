@@ -4901,6 +4901,96 @@ mod refinement_decision_tests {
         }
     }
 
+    /// Fill-in and cost of the sparse direct factor at the width #2546 is about,
+    /// on the geometry that produces it: ~6000 uniformly scattered 2-D rows, where
+    /// `smoothness_ceiling_forces_refinement_and_certifies_residual_bias` refines
+    /// to 2169 columns.
+    ///
+    /// The earlier fill measurement used a 36-row fixture, where almost every
+    /// column is a void-filling centre carrying only a diagonal — so `nnz(A)` was
+    /// unrepresentatively small and the absolute counts meant little. This one is
+    /// data-rich, so `A` has the coupling a real cascade has.
+    ///
+    /// Timings are PRINTED, never asserted: a wall clock is not a contract (SPEC
+    /// forbids wall-clock budgets outside tests, and even here it is evidence, not
+    /// a gate). The assertion is on `nnz(L)` against the dense triangle, which is
+    /// a property of the design and the ordering alone.
+    #[test]
+    fn zz_measure_sparse_factor_fill_in_at_the_2546_width() {
+        for levels in [5usize, 6, 7] {
+            let (x1, x2, y) = scattered_fixture(6000, 0x2546_0001);
+            let weights = vec![1.0; y.len()];
+            let axes: [&[f64]; 2] = [&x1, &x2];
+            let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
+                .expect("cascade design");
+            let core = &design.core;
+            let m = core.m;
+            let dense_upper = m * (m + 1) / 2;
+
+            let assembled = std::time::Instant::now();
+            let system = core.sparse_upper_system(1.0).expect("sparse normal equations");
+            let assemble_ms = assembled.elapsed().as_secs_f64() * 1e3;
+            let nnz_a = system.compute_nnz();
+            let nnz_l = sparse_spd_factor_nnz(&system).expect("symbolic analysis");
+
+            let factored = std::time::Instant::now();
+            let sparse_logdet = core
+                .sparse_exact_factor(1.0)
+                .expect("sparse factorization")
+                .map(|factor| logdet_from_factor(&factor).expect("sparse logdet"));
+            let sparse_ms = factored.elapsed().as_secs_f64() * 1e3;
+
+            // `logdet_dense` only exists under the Gram cache, so past it the
+            // comparison would be an extrapolation of `m³/3`. It does not have to
+            // be: `assemble_predict_factor` performs the SAME dense Cholesky of
+            // the same `A` with no cap on width (it scatters the CSR rows into a
+            // full `m × m` and factors in place), so the dense cost is MEASURED at
+            // every width here rather than projected from the narrow one.
+            let dense = if core.dense_gram.is_some() {
+                let started = std::time::Instant::now();
+                let value = core.logdet_dense(1.0).expect("dense logdet");
+                Some((value, started.elapsed().as_secs_f64() * 1e3))
+            } else {
+                None
+            };
+            let uncapped_dense_ms = {
+                let started = std::time::Instant::now();
+                core.assemble_predict_factor(1.0)
+                    .expect("uncapped dense factorization");
+                started.elapsed().as_secs_f64() * 1e3
+            };
+
+            println!(
+                "#2546-FILL levels={levels} m={m} rows={} nnz(A)={nnz_a} nnz(L)={nnz_l} \
+                 dense_upper={dense_upper} nnz_L_over_dense={:.5} fill_over_A={:.3} \
+                 factor_MiB={:.1} dense_MiB={:.1} assemble_ms={assemble_ms:.1} \
+                 sparse_factor_ms={sparse_ms:.1} uncapped_dense_ms={uncapped_dense_ms:.1} \
+                 sparse_speedup={:.2}x dense_chol={dense:?} sparse_logdet={sparse_logdet:?}",
+                y.len(),
+                nnz_l as f64 / dense_upper as f64,
+                nnz_l as f64 / nnz_a.max(1) as f64,
+                (nnz_l * (size_of::<f64>() + size_of::<usize>())) as f64 / (1024.0 * 1024.0),
+                (dense_upper * size_of::<f64>()) as f64 / (1024.0 * 1024.0),
+                uncapped_dense_ms / sparse_ms.max(f64::MIN_POSITIVE)
+            );
+
+            assert!(
+                nnz_l * 4 < dense_upper,
+                "the sparse route's premise fails at m={m}: nnz(L)={nnz_l} against a dense \
+                 triangle of {dense_upper}"
+            );
+            if let Some((dense_value, _)) = dense {
+                let sparse_value = sparse_logdet.expect("fill-in is inside the budget here");
+                let resolution = f64::EPSILON * m as f64 * dense_value.abs().max(1.0);
+                assert!(
+                    (sparse_value - dense_value).abs() <= resolution,
+                    "sparse and dense log-determinants disagree at m={m}: {sparse_value} versus \
+                     {dense_value} (resolution {resolution})"
+                );
+            }
+        }
+    }
+
     /// The sparse direct log-determinant and the dense one are the same number.
     ///
     /// Both are exact factorizations of the same `X'WX + λD`, so they may differ
