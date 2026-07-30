@@ -296,5 +296,9 @@ fn separated_smooth_outer_criterion_probe_2273() {
         "the seed rho the production fit carried as its checkpoint is not even \
          evaluable from a fresh state: {seed_label}"
     );
-    let _ = data;
+    assert_eq!(
+        data.nrows(),
+        N,
+        "the probe design was built from a frame that dropped rows"
+    );
 }
