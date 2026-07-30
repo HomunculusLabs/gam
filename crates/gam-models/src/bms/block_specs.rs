@@ -3010,8 +3010,34 @@ pub fn fit_bernoulli_marginal_slope_terms(
         && let Some(vb) = solved_fit.covariance_conditional.clone()
     {
         if !matches!(latent_measure, LatentMeasureKind::StandardNormal) {
+            // gam#2484 -- a CAPABILITY statement, not a missing match arm, and
+            // not a state any caller opted into. Reaching this line proves the
+            // conditional location-scale calibration fired and its calibrated
+            // residual then failed the standard-normal adequacy gate, so the
+            // latent measure is the global-empirical one built from that
+            // residual; the `[BMS latent-z]` warning at measure selection
+            // reports which clauses failed and by how much.
+            //
+            // Why the correction cannot simply be extended here: it needs the
+            // per-row mixed derivative d²ℓ_i/dβ dζ_i, which is local in `i` only
+            // for the rigid closed-form standard-normal kernel. An empirical
+            // measure is constructed from the WHOLE ζ vector, so ℓ_i depends on
+            // ζ_i twice -- directly, and through a grid every other ζ_j helped
+            // build -- and the honest object is a full n×n sensitivity. The
+            // measure is also ESTIMATED from the same data, which is exactly the
+            // known-second-stage-kernel assumption Murphy-Topel rests on.
+            //
+            // Why returning the uncorrected `covariance_conditional` is NOT the
+            // fallback: the correction exists to ADD the first-stage
+            // generated-regressor uncertainty, so omitting it is not neutral or
+            // conservative -- the intervals come out too NARROW, and on the wire
+            // they are indistinguishable from corrected ones.
             return Err(
-                "BMS Murphy-Topel generated-regressor covariance is unavailable for a conditional latent-z calibration whose second-stage latent measure is not StandardNormal"
+                "BMS Murphy-Topel generated-regressor covariance is unavailable for a conditional latent-z calibration whose second-stage latent measure is not StandardNormal. \
+                 The conditional location-scale calibration fired and its calibrated residual then failed the standard-normal adequacy gate, so the latent measure is the global-empirical one built from that residual (the [BMS latent-z] log line at measure selection reports which adequacy clauses failed and by how much). \
+                 The correction needs a per-row mixed derivative of the score in the latent coordinate; an empirical measure is built from the whole calibrated-residual vector, so that sensitivity is not local in the row and the measure is itself estimated from the same data. \
+                 Returning the uncorrected conditional covariance is not an admissible fallback: it omits the first-stage uncertainty the correction exists to add, so the intervals would be too narrow and indistinguishable from corrected ones. \
+                 Remedy: fit without inference if only point estimates are needed, or supply a latent measure the closed-form kernel admits (gam#2484 tracks the non-local sensitivity)."
                     .to_string(),
             );
         }

@@ -1727,8 +1727,8 @@ pub(crate) fn build_latent_measure_with_geometry(
                 // empirical latent measure built from ζ, so the residual
                 // distribution stays the one the data show.
                 let zeta = cal.apply(z.view(), a_block)?;
-                let residual_is_standard_normal =
-                    latent_z_is_standard_normal_enough(&zeta, weights, policy)?;
+                let residual_adequacy = latent_z_normal_adequacy(&zeta, weights, policy)?;
+                let residual_is_standard_normal = residual_adequacy.passes();
                 let kind = if residual_is_standard_normal {
                     LatentMeasureKind::StandardNormal
                 } else {
@@ -1746,6 +1746,24 @@ pub(crate) fn build_latent_measure_with_geometry(
                         "global-empirical"
                     },
                 );
+                if !residual_is_standard_normal {
+                    // gam#2484: this pair is a legitimate POINT-ESTIMATION
+                    // state, so it is minted rather than refused here -- but a
+                    // later Murphy-Topel generated-regressor covariance request
+                    // is already determined to fail, and it used to fail three
+                    // stages away with no reference back to the decision that
+                    // caused it. Say so at the decision, with the evidence.
+                    log::warn!(
+                        "[BMS latent-z] the calibrated residual FAILED the standard-normal \
+                         adequacy gate, so the second-stage latent measure is global-empirical. \
+                         Point estimation is unaffected; a Murphy-Topel generated-regressor \
+                         covariance will be REFUSED for this fit, because that correction needs \
+                         a per-row mixed derivative and an empirical measure built from the \
+                         whole calibrated-residual vector does not have one (gam#2484). \
+                         Adequacy ledger (x = statistic / bound, x<=1 passed): {}",
+                        residual_adequacy.ledger(),
+                    );
+                }
                 return Ok((
                     kind,
                     LatentMeasureCalibration::ConditionalLocationScale(cal),
@@ -1805,11 +1823,103 @@ pub(crate) fn build_latent_measure_with_geometry(
     }
 }
 
+/// The standard-normal adequacy verdict on a latent-z sample: every statistic
+/// the gate forms, beside the bound it was judged against.
+///
+/// The gate used to return a bare `bool`, and all three of its call sites threw
+/// the evidence away. That is why "how far is the calibrated residual from
+/// standard normal when the gate trips?" could not be answered from a fit --
+/// the failing clause and its margin existed only inside the conjunction and
+/// were discarded at the `&&`. The conjunction now lives in [`Self::passes`]
+/// and the evidence survives it, which is what lets the conditional
+/// location-scale branch say what the data did (gam#2484).
+///
+/// Every field is in the units of its own clause; no field is a ratio, so a
+/// consumer can report either the raw statistic or its margin.
+#[derive(Clone, Debug)]
+pub(crate) struct LatentNormalAdequacy {
+    /// Kish effective sample size `(Σw)² / Σw²`, which sets the moment bounds.
+    pub(crate) effective_n: f64,
+    pub(crate) mean: f64,
+    pub(crate) mean_tol: f64,
+    pub(crate) sd: f64,
+    pub(crate) sd_tol: f64,
+    pub(crate) skew: f64,
+    pub(crate) skew_tol: f64,
+    pub(crate) excess_kurtosis: f64,
+    pub(crate) excess_kurtosis_tol: f64,
+    pub(crate) ks: f64,
+    pub(crate) ks_tol: f64,
+    pub(crate) tail_mass_inner: f64,
+    pub(crate) tail_bound_inner: f64,
+    pub(crate) tail_mass_outer: f64,
+    pub(crate) tail_bound_outer: f64,
+    pub(crate) max_abs: f64,
+    pub(crate) max_abs_tol: f64,
+}
+
+impl LatentNormalAdequacy {
+    /// The nine-clause conjunction that admits the closed-form standard-normal
+    /// kernel. A `NaN` statistic never passes: the `is_finite` clauses and the
+    /// comparisons both reject it, which is how a degenerate sample (constant
+    /// or non-finite) is refused without being reported as a large deviation it
+    /// was never measured to have.
+    pub(crate) fn passes(&self) -> bool {
+        self.mean.abs() <= self.mean_tol
+            && (self.sd - 1.0).abs() <= self.sd_tol
+            && self.skew.is_finite()
+            && self.skew.abs() <= self.skew_tol
+            && self.excess_kurtosis.is_finite()
+            && self.excess_kurtosis.abs() <= self.excess_kurtosis_tol
+            && self.ks.is_finite()
+            && self.ks <= self.ks_tol
+            && self.tail_mass_inner <= self.tail_bound_inner
+            && self.tail_mass_outer <= self.tail_bound_outer
+            && self.max_abs < self.max_abs_tol
+    }
+
+    /// One line naming every clause, its statistic, its bound, and the factor by
+    /// which it missed -- so a reader can tell a marginal failure from a
+    /// structural one without re-running the fit. `x` is the ratio of the
+    /// statistic to its bound; a clause with `x <= 1` passed.
+    pub(crate) fn ledger(&self) -> String {
+        fn clause(name: &str, value: f64, bound: f64) -> String {
+            format!("{name}={value:.4e}/{bound:.4e}(x{:.2})", (value / bound).abs())
+        }
+        format!(
+            "n_eff={:.1} {} {} {} {} {} {} {} {}",
+            self.effective_n,
+            clause("|mean|", self.mean, self.mean_tol),
+            clause("|sd-1|", self.sd - 1.0, self.sd_tol),
+            clause("|skew|", self.skew, self.skew_tol),
+            clause("|excess_kurtosis|", self.excess_kurtosis, self.excess_kurtosis_tol),
+            clause("ks", self.ks, self.ks_tol),
+            clause("tail_mass_inner", self.tail_mass_inner, self.tail_bound_inner),
+            clause("tail_mass_outer", self.tail_mass_outer, self.tail_bound_outer),
+            clause("max_abs", self.max_abs, self.max_abs_tol),
+        )
+    }
+}
+
+/// Whether a latent-z sample may use the closed-form standard-normal kernel.
+///
+/// Thin over [`latent_z_normal_adequacy`]: the conjunction and the evidence are
+/// the same object, and a caller that only needs the decision takes this.
 pub(crate) fn latent_z_is_standard_normal_enough(
     z: &Array1<f64>,
     weights: &Array1<f64>,
     policy: &LatentZPolicy,
 ) -> Result<bool, String> {
+    Ok(latent_z_normal_adequacy(z, weights, policy)?.passes())
+}
+
+/// Measure a latent-z sample against the standard-normal adequacy gate,
+/// returning every statistic and bound rather than only the verdict.
+pub(crate) fn latent_z_normal_adequacy(
+    z: &Array1<f64>,
+    weights: &Array1<f64>,
+    policy: &LatentZPolicy,
+) -> Result<LatentNormalAdequacy, String> {
     if z.len() != weights.len() {
         return Err(format!(
             "latent-measure auto-detection length mismatch: z={}, weights={}",
@@ -1846,8 +1956,41 @@ pub(crate) fn latent_z_is_standard_normal_enough(
         .sum::<f64>()
         / weight_sum;
     let sd = var.sqrt();
+    // The two moment bounds depend only on the effective sample size, so they
+    // are formed before the degeneracy check and stated once for both exits.
+    let mean_tol = policy.mean_tol_multiplier / effective_n.sqrt();
+    let sd_tol = policy.sd_tol_multiplier / (2.0 * (effective_n - 1.0).max(1.0)).sqrt();
     if !(mean.is_finite() && sd.is_finite() && sd > 0.0) {
-        return Ok(false);
+        // A constant or non-finite sample has no shape: every standardized
+        // statistic divides by `sd`, so skewness, kurtosis and the tail masses
+        // are UNDEFINED here rather than merely large. `NaN` is the honest
+        // entry -- `passes` rejects it through the same `is_finite` clauses the
+        // conjunction always had, so this exit refuses the standard-normal
+        // kernel exactly as the previous `Ok(false)` did, without reporting a
+        // deviation that was never measured.
+        return Ok(LatentNormalAdequacy {
+            effective_n,
+            mean,
+            mean_tol,
+            sd,
+            sd_tol,
+            skew: f64::NAN,
+            skew_tol: policy.max_abs_skew.min(AUTO_Z_NORMAL_SKEW_TOL),
+            excess_kurtosis: f64::NAN,
+            excess_kurtosis_tol: policy.max_abs_excess_kurtosis.min(AUTO_Z_NORMAL_KURT_TOL),
+            ks: f64::NAN,
+            ks_tol: AUTO_Z_NORMAL_KS_TOL,
+            tail_mass_inner: f64::NAN,
+            tail_bound_inner: AUTO_Z_NORMAL_TAIL_MASS_SLACK
+                * normal_two_sided_probability(AUTO_Z_NORMAL_TAIL_SIGMA_INNER)
+                + AUTO_Z_NORMAL_TAIL_FLOOR_INNER,
+            tail_mass_outer: f64::NAN,
+            tail_bound_outer: AUTO_Z_NORMAL_TAIL_MASS_SLACK
+                * normal_two_sided_probability(AUTO_Z_NORMAL_TAIL_SIGMA_OUTER)
+                + AUTO_Z_NORMAL_TAIL_FLOOR_OUTER,
+            max_abs: f64::NAN,
+            max_abs_tol: AUTO_Z_NORMAL_MAX_ABS,
+        });
     }
     let skew = z
         .iter()
@@ -1868,27 +2011,33 @@ pub(crate) fn latent_z_is_standard_normal_enough(
         .sum::<f64>()
         / weight_sum
         - 3.0;
-    let mean_tol = policy.mean_tol_multiplier / effective_n.sqrt();
-    let sd_tol = policy.sd_tol_multiplier / (2.0 * (effective_n - 1.0).max(1.0)).sqrt();
     let ks_to_normal = weighted_ks_to_standard_normal(z, weights, weight_sum)?;
     let tail_mass_4 = weighted_tail_mass(z, weights, weight_sum, AUTO_Z_NORMAL_TAIL_SIGMA_INNER);
     let tail_mass_6 = weighted_tail_mass(z, weights, weight_sum, AUTO_Z_NORMAL_TAIL_SIGMA_OUTER);
     let max_abs_z = z.iter().fold(0.0_f64, |acc, &zi| acc.max(zi.abs()));
     let normal_tail_4 = normal_two_sided_probability(AUTO_Z_NORMAL_TAIL_SIGMA_INNER);
     let normal_tail_6 = normal_two_sided_probability(AUTO_Z_NORMAL_TAIL_SIGMA_OUTER);
-    Ok(mean.abs() <= mean_tol
-        && (sd - 1.0).abs() <= sd_tol
-        && skew.is_finite()
-        && skew.abs() <= policy.max_abs_skew.min(AUTO_Z_NORMAL_SKEW_TOL)
-        && excess_kurtosis.is_finite()
-        && excess_kurtosis.abs() <= policy.max_abs_excess_kurtosis.min(AUTO_Z_NORMAL_KURT_TOL)
-        && ks_to_normal.is_finite()
-        && ks_to_normal <= AUTO_Z_NORMAL_KS_TOL
-        && tail_mass_4
-            <= AUTO_Z_NORMAL_TAIL_MASS_SLACK * normal_tail_4 + AUTO_Z_NORMAL_TAIL_FLOOR_INNER
-        && tail_mass_6
-            <= AUTO_Z_NORMAL_TAIL_MASS_SLACK * normal_tail_6 + AUTO_Z_NORMAL_TAIL_FLOOR_OUTER
-        && max_abs_z < AUTO_Z_NORMAL_MAX_ABS)
+    Ok(LatentNormalAdequacy {
+        effective_n,
+        mean,
+        mean_tol,
+        sd,
+        sd_tol,
+        skew,
+        skew_tol: policy.max_abs_skew.min(AUTO_Z_NORMAL_SKEW_TOL),
+        excess_kurtosis,
+        excess_kurtosis_tol: policy.max_abs_excess_kurtosis.min(AUTO_Z_NORMAL_KURT_TOL),
+        ks: ks_to_normal,
+        ks_tol: AUTO_Z_NORMAL_KS_TOL,
+        tail_mass_inner: tail_mass_4,
+        tail_bound_inner: AUTO_Z_NORMAL_TAIL_MASS_SLACK * normal_tail_4
+            + AUTO_Z_NORMAL_TAIL_FLOOR_INNER,
+        tail_mass_outer: tail_mass_6,
+        tail_bound_outer: AUTO_Z_NORMAL_TAIL_MASS_SLACK * normal_tail_6
+            + AUTO_Z_NORMAL_TAIL_FLOOR_OUTER,
+        max_abs: max_abs_z,
+        max_abs_tol: AUTO_Z_NORMAL_MAX_ABS,
+    })
 }
 
 pub(crate) fn build_global_empirical_latent_measure(
