@@ -9,7 +9,6 @@ use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-const ZERO_TOL: f64 = 1e-12;
 const PARALLEL_SPARSE_FILL_COLUMN_THRESHOLD: usize = 64;
 
 macro_rules! bail_invalid_linalg {
@@ -290,7 +289,7 @@ pub fn factorize_sparse_spd(
     // symmetric-upper and makes the sparse factor path robust to caller encoding.
     let t_start = std::time::Instant::now();
     let n_input = h.ncols();
-    let h_upper = canonicalize_sparse_symmetric_upper(h, ZERO_TOL)?;
+    let h_upper = canonicalize_sparse_symmetric_upper(h)?;
     let factor = h_upper.as_ref().sp_cholesky(Side::Upper).map_err(|_| {
         LinalgError::ModelIsIllConditioned {
             condition_number: f64::INFINITY,
@@ -376,9 +375,35 @@ pub fn factorize_sparse_spd_strict(
     })
 }
 
+/// Canonicalize a symmetric CSC matrix (upper, lower, or full storage) to
+/// symmetric-upper, averaging duplicate and mirrored entries.
+///
+/// # Which entries are dropped
+///
+/// An entry is omitted exactly when the average that produced it is
+/// indistinguishable from zero **given the arithmetic that produced it**:
+/// `|Σvᵢ / k| ≤ γ_k · Σ|vᵢ| / k`, Wilkinson's band for a `k`-operation
+/// accumulation ([`crate::roundoff::accumulation_band`]). For the ordinary case
+/// of one stored contribution this reduces to `|v| ≤ u·|v|`, i.e. only an exact
+/// zero is dropped; a mirrored pair that cancels — `+δ` against `−δ` — is
+/// dropped because the band is charged on `Σ|vᵢ|` rather than on the cancelling
+/// sum.
+///
+/// This replaces a fixed `1e-12` absolute cutoff. Absolute is the wrong shape
+/// here for two reasons, both of which the tree already knew: the entries of a
+/// penalized Hessian carry the scale of `λ` and of the weights, so `1e-12`
+/// deletes a well-conditioned small-scale system outright while deleting nothing
+/// at all from one assembled at `λ = 1e12`; and the only production caller of
+/// the sibling dense→sparse path
+/// ([`dense_to_sparse_symmetric_upper`], `matrix/symmetric.rs`) already passes
+/// `0.0`, so the two paths disagreed by twelve decades about what "structurally
+/// zero" means.
+///
+/// The predicate must stay identical to the one
+/// [`sparse_spd_factor_nnz`] sees, since that function's `nnz(L)` prediction is
+/// what a memory budget is stated in; both reach it through this function.
 fn canonicalize_sparse_symmetric_upper(
     matrix: &SparseColMat<usize, f64>,
-    tol: f64,
 ) -> Result<SparseColMat<usize, f64>, LinalgError> {
     if matrix.nrows() != matrix.ncols() {
         bail_invalid_linalg!(
@@ -391,8 +416,10 @@ fn canonicalize_sparse_symmetric_upper(
     #[derive(Default, Clone, Copy)]
     struct PairAccum {
         upper_sum: f64,
+        upper_abs: f64,
         upper_count: usize,
         lower_sum: f64,
+        lower_abs: f64,
         lower_count: usize,
     }
 
@@ -415,9 +442,11 @@ fn canonicalize_sparse_symmetric_upper(
             let slot = accum.entry((r, c)).or_default();
             if is_upper {
                 slot.upper_sum += value;
+                slot.upper_abs += value.abs();
                 slot.upper_count += 1;
             } else {
                 slot.lower_sum += value;
+                slot.lower_abs += value.abs();
                 slot.lower_count += 1;
             }
         }
@@ -425,33 +454,57 @@ fn canonicalize_sparse_symmetric_upper(
 
     let mut triplets = Vec::<Triplet<usize, usize, f64>>::new();
     for ((row, col), slot) in accum {
-        let value = if row == col {
+        // `value` is the canonical entry; `absolute` is the same average taken
+        // over `|vᵢ|` instead of `vᵢ`, and `roundings` is the number of rounded
+        // operations that produced both. Carrying all three is what lets the
+        // drop test below be the accumulation's own error band rather than a
+        // chosen magnitude.
+        let (value, absolute, roundings) = if row == col {
             let count = slot.upper_count + slot.lower_count;
             if count == 0 {
-                0.0
+                (0.0, 0.0, 0)
             } else {
-                (slot.upper_sum + slot.lower_sum) / (count as f64)
+                (
+                    (slot.upper_sum + slot.lower_sum) / (count as f64),
+                    (slot.upper_abs + slot.lower_abs) / (count as f64),
+                    count,
+                )
             }
         } else {
             let upper_avg = if slot.upper_count > 0 {
-                Some(slot.upper_sum / (slot.upper_count as f64))
+                Some((
+                    slot.upper_sum / (slot.upper_count as f64),
+                    slot.upper_abs / (slot.upper_count as f64),
+                    slot.upper_count,
+                ))
             } else {
                 None
             };
             let lower_avg = if slot.lower_count > 0 {
-                Some(slot.lower_sum / (slot.lower_count as f64))
+                Some((
+                    slot.lower_sum / (slot.lower_count as f64),
+                    slot.lower_abs / (slot.lower_count as f64),
+                    slot.lower_count,
+                ))
             } else {
                 None
             };
             match (upper_avg, lower_avg) {
-                (Some(u), Some(l)) => 0.5 * (u + l),
-                (Some(u), None) => u,
-                (None, Some(l)) => l,
-                (None, None) => 0.0,
+                // Mirroring averages the two triangles, so the band covers both
+                // accumulations plus the mirror average itself. Charging the
+                // band on `0.5·(|u| + |l|)` is what makes a mirrored pair that
+                // cancels exactly — `+δ` against `−δ`, the input encoding this
+                // canonicalization exists to repair — read as the zero it is.
+                (Some((u, ua, uk)), Some((l, la, lk))) => {
+                    (0.5 * (u + l), 0.5 * (ua + la), uk + lk + 1)
+                }
+                (Some((u, ua, uk)), None) => (u, ua, uk),
+                (None, Some((l, la, lk))) => (l, la, lk),
+                (None, None) => (0.0, 0.0, 0),
             }
         };
 
-        if value.abs() > tol {
+        if value.abs() > crate::roundoff::accumulation_band(roundings, absolute) {
             triplets.push(Triplet::new(row, col, value));
         }
     }
@@ -682,7 +735,7 @@ pub struct SimplicialFactor {
 /// The factorization uses AMD fill-reducing ordering and faer's simplicial
 /// LLᵀ numeric factorization.
 pub fn factorize_simplicial(h: &SparseColMat<usize, f64>) -> Result<SimplicialFactor, LinalgError> {
-    let h_upper = canonicalize_sparse_symmetric_upper(h, ZERO_TOL)?;
+    let h_upper = canonicalize_sparse_symmetric_upper(h)?;
     factorize_simplicial_canonical_upper(&h_upper)
 }
 
@@ -694,7 +747,7 @@ pub fn factorize_simplicial(h: &SparseColMat<usize, f64>) -> Result<SimplicialFa
 /// factorization ask this first: `nnz(L)` is the fill-in, is not predictable
 /// from `nnz(H)`, and is the quantity a budget has to be stated in.
 pub fn sparse_spd_factor_nnz(h: &SparseColMat<usize, f64>) -> Result<usize, LinalgError> {
-    let h_upper = canonicalize_sparse_symmetric_upper(h, ZERO_TOL)?;
+    let h_upper = canonicalize_sparse_symmetric_upper(h)?;
     if h_upper.ncols() == 0 {
         return Ok(0);
     }
@@ -1238,6 +1291,15 @@ mod tests {
     use super::*;
     use crate::faer_ndarray::FaerCholesky;
     use ndarray::{Array1, Array2, array};
+
+    /// Drop tolerance the dense→sparse fixtures below hand to
+    /// [`dense_to_sparse`]. These fixtures are small integer-valued matrices
+    /// with exact structural zeros, so any cutoff strictly between `0` and the
+    /// smallest stored magnitude selects the same pattern; this one is not a
+    /// production policy and no production path reads it. The production
+    /// dense→sparse caller passes `0.0`, and
+    /// [`canonicalize_sparse_symmetric_upper`] now derives its own band.
+    const ZERO_TOL: f64 = 1e-12;
 
     fn approx_eq(a: f64, b: f64, tol: f64) {
         assert!(
