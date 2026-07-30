@@ -7,10 +7,6 @@
 /// This is the same mixing function the library seeds its coordinate-partition
 /// dictionary with (`sparse_dict::coordinate_partition_frames`); kept here as one
 /// example-side copy instead of a paste in every scaling example.
-pub fn splitmix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = x;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
+pub fn splitmix64(x: u64) -> u64 {
+    gam_linalg::utils::splitmix64_hash(x)
 }

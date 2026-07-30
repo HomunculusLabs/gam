@@ -2083,12 +2083,8 @@ pub fn deterministic_cv_folds(n: usize, folds: usize) -> Vec<(Vec<usize>, Vec<us
 /// it never touches the clock or any RNG state, so the folding it drives is
 /// reproducible for a given `(seed, index)` and decorrelated across seeds.
 #[inline]
-fn splitmix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = x;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
+fn splitmix64(x: u64) -> u64 {
+    gam_linalg::utils::splitmix64_hash(x)
 }
 
 /// Deterministic, seed-reproducible, exactly balanced `folds`-way CV partition

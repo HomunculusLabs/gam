@@ -126,12 +126,8 @@ impl KFoldAssignment {
 
 /// splitmix64 — a tiny deterministic finalizer, used only for reproducible fold
 /// assignment (never for statistical sampling).
-fn splitmix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = x;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
+fn splitmix64(x: u64) -> u64 {
+    gam_linalg::utils::splitmix64_hash(x)
 }
 
 /// Result of a scalar cross-fit: the naive (double-use) artifact, the cross-fit
