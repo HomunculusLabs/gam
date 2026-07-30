@@ -4607,6 +4607,30 @@ mod refinement_decision_tests {
                 m <= CERTIFIED_SPECTRUM_MAX
             );
         }
+        // The net is GEOMETRIC, not data-subsampled: `dense_fixture(6)` above is
+        // 36 rows and still refines to 1725 columns at `levels = 6`. So the
+        // identifiability the certified search needs -- every Schur mode carried
+        // by the data -- is a race between a net set by `levels` and a sample set
+        // by `side`, and neither the level table above nor the net arithmetic
+        // says where it is won. Two guesses at it were wrong by 13 and by 8
+        // columns respectively, so it is measured here instead.
+        for side in [45_usize, 50, 60, 70, 80, 90] {
+            let (x1, x2, y) = dense_fixture(side);
+            let weights = vec![1.0; y.len()];
+            let axes: [&[f64]; 2] = [&x1, &x2];
+            let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 6)
+                .expect("cascade design");
+            let m = design.core.m;
+            let n = y.len();
+            let nullity = design.core.nullity();
+            println!(
+                "#2546-IDENT side={side} n={n} m={m} nullity={nullity} \
+                 identified={} past_cache={} certified={}",
+                m - nullity <= n - nullity,
+                m > DENSE_GRAM_MAX && design.core.dense_gram.is_none(),
+                m <= CERTIFIED_SPECTRUM_MAX
+            );
+        }
     }
 
     /// The width regime this issue existed to open: PAST the dense Gram cache,
