@@ -2940,3 +2940,228 @@ fn nb_location_scale_inner_solve_converges_on_heteroscedastic_counts() {
 // the graduated continuation is the correct canonical cold solve for this
 // family and becomes the production fix.
 // =====================================================================
+
+// =====================================================================
+// #2621 — the Gaussian location-scale-WIGGLE joint log-likelihood gradient
+//
+// This family emits `BlockWorkingSet::Diagonal` working sets and supplies an
+// exact joint HESSIAN. Before this gate it supplied no joint GRADIENT, so
+// `load_joint_gradient_evaluation` fell through to the legacy assembly, which
+// recovers a per-block score from the IRLS working set as
+// `X_bᵀ(w ⊙ (z_b − η_b))`. For this family that is wrong twice over:
+//
+//   * `z_mu = response − η_w` and `z_wiggle = response − η_mu` are GAUSS–SEIDEL
+//     working responses — each of the two location-channel blocks absorbs the
+//     other's η as an offset. That is correct for a blockwise solve and is not
+//     the gradient of the joint likelihood;
+//   * the family's predictor is `q(q0, βw) = q0 + B(q0)·βw`, so the μ block
+//     reaches `q` through `dq_dq0 = 1 + B'(q0)·βw`, and the wiggle block's
+//     design is `B(q0)` at the CURRENT `q0`, not the spec's static seed grid.
+//     The legacy assembly has neither factor.
+//
+// A per-block directional audit of the legacy gradient on the failing fixtures
+// measured realized-`Δℓ`-over-predicted-`grad·δ` ratios of `+0.2585` on μ and
+// `−6.5539` (wrong SIGN) on the wiggle block, with the independently-channelled
+// scale block exact at `+1.000000`. So the two blocks that are two halves of
+// one linear predictor were the two that disagreed.
+//
+// The gate asserts BOTH directions, because a fix that is not gated on
+// re-detecting its own symptom silently passes once the symptom moves:
+//   (a) the hook's gradient matches a central finite difference of the family's
+//       OWN `log_likelihood_only`, per coordinate, with the wiggle basis
+//       refreshed at the perturbed `q0` exactly as `refresh_all_block_etas`
+//       does at fit time;
+//   (b) the legacy working-set assembly does NOT — otherwise this test would
+//       be green on a tree where nothing had been fixed.
+#[test]
+pub(crate) fn gls_wiggle_joint_loglik_gradient_matches_finite_difference_and_legacy_does_not_2621() {
+    let (family, states, specs, xmu, xls, xw_seed) = gls_wiggle_workspace_fixture();
+    let n = family.y.len();
+    let p_mu = states[0].beta.len();
+    let p_ls = states[1].beta.len();
+    let pw = states[2].beta.len();
+    let total = p_mu + p_ls + pw;
+
+    // Rebuild the three-block state from coefficients, re-evaluating the
+    // q0-dependent wiggle basis. A frozen basis would drop the basis-drift
+    // channel from the FD reference and the FD would agree with a gradient
+    // that is wrong for the model the fit actually solves.
+    let rebuild = |beta_mu: &Array1<f64>,
+                   beta_ls: &Array1<f64>,
+                   beta_w: &Array1<f64>|
+     -> Vec<ParameterBlockState> {
+        let eta_mu = xmu.dot(beta_mu);
+        let eta_ls = xls.dot(beta_ls);
+        let eta_w = family
+            .wiggle_design(eta_mu.view())
+            .expect("wiggle basis at q0")
+            .dot(beta_w);
+        vec![
+            ParameterBlockState {
+                beta: beta_mu.clone(),
+                eta: eta_mu,
+            },
+            ParameterBlockState {
+                beta: beta_ls.clone(),
+                eta: eta_ls,
+            },
+            ParameterBlockState {
+                beta: beta_w.clone(),
+                eta: eta_w,
+            },
+        ]
+    };
+
+    let loglik = |beta_mu: &Array1<f64>, beta_ls: &Array1<f64>, beta_w: &Array1<f64>| -> f64 {
+        family
+            .log_likelihood_only(&rebuild(beta_mu, beta_ls, beta_w))
+            .expect("wiggle log likelihood")
+    };
+
+    // One measurement point: the analytic hook, the legacy working-set
+    // assembly, and a central finite difference of the family's own log
+    // likelihood, all at the same coefficients. Returns the worst per-coordinate
+    // absolute error of each candidate against the FD, scaled by the FD's own
+    // magnitude, plus the same quantity restricted to the scale block and to the
+    // wiggle block.
+    struct GradientAudit {
+        exact: f64,
+        legacy: f64,
+        legacy_scale_block: f64,
+        legacy_wiggle_block: f64,
+    }
+
+    let audit = |beta_mu: &Array1<f64>, beta_ls: &Array1<f64>, beta_w: &Array1<f64>| -> GradientAudit {
+        let point = rebuild(beta_mu, beta_ls, beta_w);
+        let evaluation = family
+            .exact_newton_joint_gradient_evaluation(&point, &specs)
+            .expect("joint gradient evaluation")
+            .expect("this family must now serve its own joint score");
+        assert_eq!(
+            evaluation.gradient.len(),
+            total,
+            "joint score must span all three blocks"
+        );
+        let value = loglik(beta_mu, beta_ls, beta_w);
+        assert!(
+            (evaluation.log_likelihood - value).abs() <= 1e-12 * (1.0 + value.abs()),
+            "the hook's log likelihood must be the family's own: got {:.12e}, expected {:.12e}",
+            evaluation.log_likelihood,
+            value,
+        );
+
+        let eps = 1e-6;
+        let mut fd = Array1::<f64>::zeros(total);
+        for j in 0..total {
+            let bump = |sign: f64| -> f64 {
+                let mut mu = beta_mu.clone();
+                let mut ls = beta_ls.clone();
+                let mut w = beta_w.clone();
+                if j < p_mu {
+                    mu[j] += sign * eps;
+                } else if j < p_mu + p_ls {
+                    ls[j - p_mu] += sign * eps;
+                } else {
+                    w[j - p_mu - p_ls] += sign * eps;
+                }
+                loglik(&mu, &ls, &w)
+            };
+            fd[j] = (bump(1.0) - bump(-1.0)) / (2.0 * eps);
+        }
+
+        // The legacy working-set assembly, reconstructed here from the family's
+        // own `evaluate` exactly as `exact_newton_joint_gradient_from_eval` does.
+        let eval = family.evaluate(&point).expect("wiggle evaluate");
+        let designs = [&xmu, &xls, &xw_seed];
+        let mut legacy = Array1::<f64>::zeros(total);
+        let mut offset = 0usize;
+        for block in 0..3 {
+            let width = point[block].beta.len();
+            match &eval.blockworking_sets[block] {
+                BlockWorkingSet::Diagonal {
+                    working_response,
+                    working_weights,
+                } => {
+                    let weighted = Array1::from_shape_fn(n, |i| {
+                        working_weights[i] * (working_response[i] - point[block].eta[i])
+                    });
+                    legacy
+                        .slice_mut(s![offset..offset + width])
+                        .assign(&designs[block].t().dot(&weighted));
+                }
+                BlockWorkingSet::ExactNewton { gradient, .. } => {
+                    legacy.slice_mut(s![offset..offset + width]).assign(gradient);
+                }
+            }
+            offset += width;
+        }
+
+        let scale = 1.0 + fd.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let worst = |candidate: &Array1<f64>, lo: usize, hi: usize| -> (usize, f64) {
+            (lo..hi).fold((lo, 0.0_f64), |(arg, worst), j| {
+                let err = (candidate[j] - fd[j]).abs() / scale;
+                if err > worst { (j, err) } else { (arg, worst) }
+            })
+        };
+
+        let (exact_arg, exact_err) = worst(&evaluation.gradient, 0, total);
+        assert!(
+            exact_err <= 5e-6,
+            "the single-source joint score must be the derivative of the family's own log \
+             likelihood: worst coordinate {exact_arg} of {total} is off by {exact_err:.3e} \
+             (relative to FD scale {scale:.6e}); analytic={:.12e} fd={:.12e}",
+            evaluation.gradient[exact_arg],
+            fd[exact_arg],
+        );
+
+        GradientAudit {
+            exact: exact_err,
+            legacy: worst(&legacy, 0, total).1,
+            legacy_scale_block: worst(&legacy, p_mu, p_mu + p_ls).1,
+            legacy_wiggle_block: worst(&legacy, p_mu + p_ls, total).1,
+        }
+    };
+
+    // (1) The shared fixture's own point. `beta_w` there is O(0.05), so
+    // `dq_dq0` is within 1e-2 of 1 and the two Gauss-Seidel offsets nearly
+    // cancel: the legacy gradient is only ~5e-4 wrong here. That is why this
+    // point alone cannot be the non-vacuity gate.
+    let mild = audit(&states[0].beta, &states[1].beta, &states[2].beta);
+
+    // (2) A stiff point in the regime the production refusals sit in: a wiggle
+    // amplitude an order up and a mean an order up, so `dq_dq0` departs from 1
+    // and the two halves of the shared linear predictor are both large. This is
+    // where the legacy assembly's missing `dq_dq0` factor and its static seed
+    // basis both bite.
+    let stiff_mu = states[0].beta.mapv(|v| v * 6.0);
+    let stiff_ls = states[1].beta.clone();
+    let stiff_w = states[2].beta.mapv(|v| v * 12.0);
+    let stiff = audit(&stiff_mu, &stiff_ls, &stiff_w);
+
+    // Non-vacuity: the legacy assembly this hook replaces must be measurably
+    // wrong, or the gate proves nothing. Reported alongside the analytic error
+    // at the same point so the separation is legible rather than asserted.
+    assert!(
+        stiff.legacy > 1e-2,
+        "the legacy working-set assembly is expected to DISAGREE with the finite \
+         difference at the stiff point — if it now agrees, the Gauss-Seidel working \
+         responses have changed and this gate no longer measures #2621: legacy is off \
+         by {:.3e} where the single-source score is off by {:.3e} (mild point: legacy \
+         {:.3e}, exact {:.3e})",
+        stiff.legacy,
+        stiff.exact,
+        mild.legacy,
+        mild.exact,
+    );
+
+    // And the error is concentrated on the wiggle block — the block that shares
+    // the mean's linear predictor — not on the independently-channelled scale
+    // block, which is what localized the fault in the first place.
+    assert!(
+        stiff.legacy_scale_block < stiff.legacy_wiggle_block,
+        "the legacy error must be concentrated on the wiggle block, not on the \
+         independently-channelled scale block: scale block {:.3e} vs wiggle block {:.3e}",
+        stiff.legacy_scale_block,
+        stiff.legacy_wiggle_block,
+    );
+}

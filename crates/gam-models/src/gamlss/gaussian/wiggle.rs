@@ -16,16 +16,30 @@ pub(crate) struct GaussianLocationScaleWiggleGeometry {
 }
 
 /// Per-row pieces of the 3-block Gaussian location-scale-wiggle joint
-/// Hessian. Both the dense path and the matrix-free workspace share these
-/// row coefficients; only the assembly differs.
+/// gradient and Hessian. Both the dense path and the matrix-free workspace
+/// share these row coefficients; only the assembly differs.
+///
+/// The gradient row channels (`coeff_mw_d`, `grad_ls_row`, `dq_dq0`) are the
+/// FIRST derivatives of the same per-row jet atom the `coeff_*` Hessian
+/// channels are the second derivatives of, so the (objective, gradient,
+/// Hessian) triple this struct assembles cannot disagree with itself (#2621).
 pub(crate) struct GaussianLocationScaleWiggleHessianRowPieces {
     pub(crate) coeff_mm: Array1<f64>,
     pub(crate) coeff_ml: Array1<f64>,
     pub(crate) coeff_ll: Array1<f64>,
     pub(crate) coeff_mw_b: Array1<f64>,
+    /// `∂f/∂q` per row, `f` the row OBJECTIVE (`−log L`). It is the wiggle
+    /// block's own gradient row channel (`∂q/∂βw = basis`) and simultaneously
+    /// the `basis_d1` half of the μ/wiggle Hessian cross block.
     pub(crate) coeff_mw_d: Array1<f64>,
     pub(crate) coeff_lw_b: Array1<f64>,
     pub(crate) coeff_ww: Array1<f64>,
+    /// `∂f/∂η_ls` per row — the scale block's gradient row channel.
+    pub(crate) grad_ls_row: Array1<f64>,
+    /// `∂q/∂q0 = 1 + basis_d1(q0)·βw`. The μ block reaches `q` only through
+    /// this factor, which is why the μ row channel is `(∂f/∂q)·dq_dq0` and
+    /// `coeff_mm` carries its derivative `f_qq·dq_dq0² + f_q·d2q_dq02`.
+    pub(crate) dq_dq0: Array1<f64>,
     pub(crate) basis: Array2<f64>,
     pub(crate) basis_d1: Array2<f64>,
 }
@@ -45,6 +59,35 @@ impl GaussianLocationScaleWiggleHessianRowPieces {
         let h_ww = xt_diag_x_dense(&self.basis, &self.coeff_ww)?;
         Ok(gaussian_pack_wiggle_joint_symmetrichessian(
             &h_mm, &h_ml, &h_mw, &h_ll, &h_lw, &h_ww,
+        ))
+    }
+
+    /// The joint LOG-LIKELIHOOD gradient `g = ∇_β log L`, contracted from the
+    /// same row channels `assemble_dense` uses, through the same three
+    /// `∂·/∂β` maps that appear in the Hessian blocks:
+    ///
+    /// * `∂q/∂β_mu = dq_dq0 · Xμ` — the factor `coeff_mm` differentiates a
+    ///   second time,
+    /// * `∂η_ls/∂β_ls = X_ls`,
+    /// * `∂q/∂βw = basis` — the matrix `h_ww` contracts `coeff_ww` with.
+    ///
+    /// The row channels are derivatives of the objective `−log L`, so the
+    /// log-likelihood gradient is their negation.
+    pub(crate) fn assemble_loglik_gradient(
+        &self,
+        xmu: &Array2<f64>,
+        x_ls: &Array2<f64>,
+    ) -> Result<Array1<f64>, String> {
+        let grad_eta_mu = -(&self.coeff_mw_d * &self.dq_dq0);
+        let grad_eta_ls = -&self.grad_ls_row;
+        let grad_q = -&self.coeff_mw_d;
+        let grad_mu = fast_atv(xmu, &grad_eta_mu);
+        let grad_ls = fast_atv(x_ls, &grad_eta_ls);
+        let grad_wiggle = fast_atv(&self.basis, &grad_q);
+        Ok(gaussian_pack_wiggle_joint_score(
+            &grad_mu,
+            &grad_ls,
+            &grad_wiggle,
         ))
     }
 }
@@ -707,6 +750,8 @@ impl GaussianLocationScaleWiggleFamily {
             coeff_mw_d,
             coeff_lw_b,
             coeff_ww,
+            grad_ls_row: generated.gradient_ls,
+            dq_dq0: geom.dq_dq0,
             basis: geom.basis,
             basis_d1: geom.basis_d1,
         })
@@ -720,6 +765,48 @@ impl GaussianLocationScaleWiggleFamily {
     ) -> Result<Option<Array2<f64>>, String> {
         let pieces = self.wiggle_hessian_row_pieces(block_states)?;
         Ok(Some(pieces.assemble_dense(xmu, x_ls)?))
+    }
+
+    /// The exact joint log-likelihood value and gradient, from the same row
+    /// pieces as [`Self::exact_newton_joint_hessian_from_designs`].
+    ///
+    /// Without this the caller falls through to the legacy assembly in
+    /// `exact_newton_joint_gradient_from_eval`, which builds `∇ log L` out of
+    /// the per-block IRLS working responses this family reports. Those are
+    /// Gauss–Seidel responses — `z_mu = response − etaw` and
+    /// `z_wiggle = response − eta_mu` each absorb the OTHER location-channel
+    /// block's η as an offset, which is correct for a blockwise solve and is
+    /// not the gradient of the joint likelihood. A per-block directional
+    /// audit of that legacy gradient measured ratios of realized `Δℓ` to
+    /// predicted `grad·δ` of `+0.2585` on μ and `−6.5539` on the wiggle block
+    /// (wrong SIGN) while the independently-channelled scale block was
+    /// `+1.000000` — so the two blocks that are two halves of one linear
+    /// predictor were the two that disagreed (#2621).
+    pub(crate) fn exact_newton_joint_gradient_from_designs(
+        &self,
+        block_states: &[ParameterBlockState],
+        xmu: &Array2<f64>,
+        x_ls: &Array2<f64>,
+    ) -> Result<ExactNewtonJointGradientEvaluation, String> {
+        let pieces = self.wiggle_hessian_row_pieces(block_states)?;
+        let gradient = pieces.assemble_loglik_gradient(xmu, x_ls)?;
+        let log_likelihood = self.log_likelihood_only(block_states)?;
+        Ok(ExactNewtonJointGradientEvaluation {
+            log_likelihood,
+            gradient,
+        })
+    }
+
+    pub(crate) fn exact_newton_joint_gradient_for_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: Option<&[ParameterBlockSpec]>,
+    ) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
+        let Some((xmu, x_ls)) = self.exact_joint_dense_block_designs(specs)? else {
+            return Ok(None);
+        };
+        self.exact_newton_joint_gradient_from_designs(block_states, &xmu, &x_ls)
+            .map(Some)
     }
 
     pub(crate) fn exact_newton_joint_hessian_directional_derivative_from_designs(
@@ -2397,6 +2484,18 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
             d_beta_u_flat,
             d_beta_v_flat,
         )
+    }
+
+    /// #2621: serve the joint score from the family's own row kernel rather
+    /// than letting the caller hand-assemble it out of this family's
+    /// Gauss–Seidel working responses. See
+    /// [`Self::exact_newton_joint_gradient_from_designs`].
+    fn exact_newton_joint_gradient_evaluation(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+    ) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
+        self.exact_newton_joint_gradient_for_specs(block_states, Some(specs))
     }
 
     fn exact_newton_joint_hessian_with_specs(
