@@ -1378,8 +1378,14 @@ pub enum BasisMetadata {
         identifiability_transform: Option<Array2<f64>>,
     },
     ThinPlate {
+        /// Kernel centers in the STANDARDIZED frame (`x / input_scale`).
         centers: Array2<f64>,
-        length_scale: f64,
+        /// Kernel range in the user's ORIGINAL units — a different frame from
+        /// `centers`.  Any consumer that evaluates the kernel against
+        /// `centers` must first go through
+        /// [`crate::IsotropicScale::to_standardized_units`]; the frame tag is
+        /// what makes forgetting that a compile error (#2636).
+        length_scale: crate::OriginalUnits,
         periodic: Option<Vec<Option<f64>>>,
         identifiability_transform: Option<Array2<f64>>,
         /// Uniform coordinate scale used for isotropic input standardization.
@@ -1423,7 +1429,14 @@ pub enum BasisMetadata {
     MeasureJet {
         centers: Array2<f64>,
         input_scale: crate::IsotropicScale,
-        length_scale: f64,
+        /// Kernel range in the STANDARDIZED frame — the SAME frame as
+        /// `centers`, and the odd one out among the four Euclidean spatial
+        /// families (ThinPlate/Matern/Duchon all store original units).  The
+        /// asymmetry is deliberate: a frozen MeasureJet range replays
+        /// verbatim.  It used to live only in a private policy enum
+        /// (`InputFrameNormalization::AutoStandardizedFreshOriginalReplayRealized`)
+        /// that the value could not carry; the tag now carries it (#2636).
+        length_scale: crate::StandardizedUnits,
         eps_band: Vec<f64>,
         order_s: f64,
         alpha: f64,
@@ -1441,8 +1454,11 @@ pub enum BasisMetadata {
         sigma_coord: Option<f64>,
     },
     Matern {
+        /// Kernel centers in the STANDARDIZED frame (`x / input_scale`).
         centers: Array2<f64>,
-        length_scale: f64,
+        /// Kernel range in the user's ORIGINAL units; see
+        /// [`BasisMetadata::ThinPlate::length_scale`] for the frame contract.
+        length_scale: crate::OriginalUnits,
         periodic: Option<Vec<Option<f64>>>,
         nu: MaternNu,
         include_intercept: bool,
@@ -1454,8 +1470,12 @@ pub enum BasisMetadata {
         aniso_log_scales: Option<Vec<f64>>,
     },
     Duchon {
+        /// Kernel centers in the STANDARDIZED frame (`x / input_scale`).
         centers: Array2<f64>,
-        length_scale: Option<f64>,
+        /// Hybrid Duchon–Matérn range in the user's ORIGINAL units, or `None`
+        /// for the pure scale-free spectrum; see
+        /// [`BasisMetadata::ThinPlate::length_scale`] for the frame contract.
+        length_scale: Option<crate::OriginalUnits>,
         periodic: Option<Vec<Option<f64>>>,
         power: f64,
         nullspace_order: DuchonNullspaceOrder,

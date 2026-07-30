@@ -1309,8 +1309,9 @@ fn extract_spatial_operator_runtime_caches(
                     // centers; the raw metadata length_scale lives in original
                     // coordinates and would put this overlay on a different kernel
                     // range than the penalties it scales (#706).
-                    let collocation_length_scale =
-                        input_scale.to_standardized_units(*length_scale);
+                    let collocation_length_scale = input_scale
+                        .to_standardized_units(*length_scale)
+                        .standardized_value();
                     let ops = build_matern_collocation_operator_matrices(
                         centers.view(),
                         None,
@@ -1345,8 +1346,9 @@ fn extract_spatial_operator_runtime_caches(
                         ..
                     },
                 ) => {
-                    let collocation_length_scale = (*length_scale)
-                        .map(|length| input_scale.to_standardized_units(length));
+                    let collocation_length_scale = (*length_scale).map(|length| {
+                        input_scale.to_standardized_units(length).standardized_value()
+                    });
                     let ops =
                         gam_terms::basis::build_duchon_collocation_operator_matriceswithworkspace(
                             centers.view(),
@@ -8225,9 +8227,11 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
                             .to_string(),
                     )
                 })?;
-                spec_operator
-                    .length_scale
-                    .set_resolved(scale.to_standardized_units(length_scale));
+                spec_operator.length_scale.set_resolved(
+                    scale
+                        .to_standardized_units(gam_terms::OriginalUnits::new(length_scale))
+                        .standardized_value(),
+                );
             }
             // #1122: the realized Matérn design always carries the operator
             // {mass, tension, stiffness} penalty triplet (`build_term` overrides

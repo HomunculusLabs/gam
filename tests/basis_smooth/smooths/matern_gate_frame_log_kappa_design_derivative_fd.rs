@@ -25,6 +25,7 @@
 //! `X_τ` error.
 
 use gam::smooth::input_standardization::estimate_isotropic_scale;
+use gam::terms::OriginalUnits;
 use gam::terms::basis::{
     BasisMetadata, CenterStrategy, MaternBasisSpec, MaternIdentifiability, MaternNu,
     build_matern_basis, build_matern_basis_log_kappa_derivatives,
@@ -73,9 +74,13 @@ fn frozen_frame_design_derivative_max_error(
     let input_scale = estimate_isotropic_scale(data).expect("isotropic scale");
     let mut xs = data.to_owned();
     input_scale.standardize(&mut xs);
-    let ls_eff = input_scale.to_standardized_units(length_scale);
+    let ls_eff = input_scale
+        .to_standardized_units(OriginalUnits::new(length_scale))
+        .standardized_value();
     // The bootstrap κ₀ the geometry is frozen at (may differ from the eval κ).
-    let ls_freeze_eff = input_scale.to_standardized_units((-freeze_rho).exp());
+    let ls_freeze_eff = input_scale
+        .to_standardized_units(OriginalUnits::new((-freeze_rho).exp()))
+        .standardized_value();
 
     // 2) Cold build with the production seed: Auto(FarthestPoint) centers so the
     //    rank reduction fires, nu/double_penalty as requested. Cold-build at the
@@ -133,7 +138,9 @@ fn frozen_frame_design_derivative_max_error(
         let ls_r = (-r).exp();
         // The frozen frame compensates by the input scale too — reproduce it so the FD
         // and the analytic derivative live in identical coordinates.
-        let ls_r_eff = input_scale.to_standardized_units(ls_r);
+        let ls_r_eff = input_scale
+            .to_standardized_units(OriginalUnits::new(ls_r))
+            .standardized_value();
         let mut s = frozen.clone();
         s.length_scale.set_resolved(ls_r_eff);
         build_matern_basis(xs.view(), &s)

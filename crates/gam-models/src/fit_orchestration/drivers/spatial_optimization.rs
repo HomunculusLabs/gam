@@ -34,7 +34,9 @@ fn try_build_spatial_term_log_kappa_derivative(
             let mut spec_local = spec.clone();
             if let Some(scale) = input_scale {
                 scale.standardize(&mut x);
-                spec_local.length_scale = scale.to_standardized_units(spec.length_scale);
+                spec_local.length_scale = scale
+                    .to_standardized_units(gam_terms::OriginalUnits::new(spec.length_scale))
+                    .standardized_value();
             }
             build_thin_plate_basis_log_kappa_derivatives(x.view(), &spec_local)
                 .map_err(EstimationError::from)?
@@ -74,9 +76,11 @@ fn try_build_spatial_term_log_kappa_derivative(
                             .to_string(),
                     )
                 })?;
-                spec_local
-                    .length_scale
-                    .set_resolved(scale.to_standardized_units(length_scale));
+                spec_local.length_scale.set_resolved(
+                    scale
+                        .to_standardized_units(gam_terms::OriginalUnits::new(length_scale))
+                        .standardized_value(),
+                );
             }
             // The realized Matérn DESIGN penalty is ALWAYS the operator-collocation
             // {mass, tension, stiffness} triplet — the term-collection assembler
@@ -105,9 +109,11 @@ fn try_build_spatial_term_log_kappa_derivative(
             let mut spec_local = spec.clone();
             if let Some(scale) = input_scale {
                 scale.standardize(&mut x);
-                spec_local.length_scale = spec
-                    .length_scale
-                    .map(|length| scale.to_standardized_units(length));
+                spec_local.length_scale = spec.length_scale.map(|length| {
+                    scale
+                        .to_standardized_units(gam_terms::OriginalUnits::new(length))
+                        .standardized_value()
+                });
             }
             let BasisMetadata::Duchon {
                 centers,
@@ -320,7 +326,14 @@ pub(crate) fn try_build_latent_coord_hyper_dirs(
         ) => gam_terms::basis::LatentCoordDesignDerivative::new_matern(
             latent.clone(),
             std::sync::Arc::new(centers.clone()),
-            *length_scale,
+            // #2643: the callee evaluates this range against the
+            // STANDARDIZED `centers` above and against RAW latent
+            // coordinates, so it needs a standardized length — but the
+            // metadata frame is original units. Reading the original
+            // value preserves today's (wrong) arithmetic exactly; the
+            // conversion, the missing 1/sigma chain factor, and an FD
+            // test belong to #2643, not to this type refactor.
+            length_scale.original_value(),
             *nu,
             *include_intercept,
             identifiability_transform.clone(),
@@ -339,7 +352,14 @@ pub(crate) fn try_build_latent_coord_hyper_dirs(
         ) => gam_terms::basis::LatentCoordDesignDerivative::new_duchon(
             latent.clone(),
             std::sync::Arc::new(centers.clone()),
-            *length_scale,
+            // #2643: the callee evaluates this range against the
+            // STANDARDIZED `centers` above and against RAW latent
+            // coordinates, so it needs a standardized length — but the
+            // metadata frame is original units. Reading the original
+            // value preserves today's (wrong) arithmetic exactly; the
+            // conversion, the missing 1/sigma chain factor, and an FD
+            // test belong to #2643, not to this type refactor.
+            length_scale.map(gam_terms::OriginalUnits::original_value),
             *power,
             *nullspace_order,
             identifiability_transform.clone(),
@@ -1690,7 +1710,14 @@ impl SingleBlockLatentCoordDesignCache {
                 },
             ) => Ok(gam_solve::latent_cache::LatentBasisKind::Matern {
                 centers: centers.clone(),
-                length_scale: *length_scale,
+                    // #2643: the callee evaluates this range against the
+                    // STANDARDIZED `centers` above and against RAW latent
+                    // coordinates, so it needs a standardized length — but the
+                    // metadata frame is original units. Reading the original
+                    // value preserves today's (wrong) arithmetic exactly; the
+                    // conversion, the missing 1/sigma chain factor, and an FD
+                    // test belong to #2643, not to this type refactor.
+                length_scale: length_scale.original_value(),
                 nu: *nu,
                 aniso_log_scales: aniso_log_scales
                     .clone()
@@ -1712,7 +1739,14 @@ impl SingleBlockLatentCoordDesignCache {
                 },
             ) => Ok(gam_solve::latent_cache::LatentBasisKind::Duchon {
                 centers: centers.clone(),
-                length_scale: *length_scale,
+                    // #2643: the callee evaluates this range against the
+                    // STANDARDIZED `centers` above and against RAW latent
+                    // coordinates, so it needs a standardized length — but the
+                    // metadata frame is original units. Reading the original
+                    // value preserves today's (wrong) arithmetic exactly; the
+                    // conversion, the missing 1/sigma chain factor, and an FD
+                    // test belong to #2643, not to this type refactor.
+                length_scale: length_scale.map(gam_terms::OriginalUnits::original_value),
                 power: *power,
                 nullspace_order: *nullspace_order,
                 aniso_log_scales: aniso_log_scales
@@ -5158,8 +5192,11 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                 // re-key must use the same effective length scale, or the fast
                 // path pairs G(ψ_new) with an S(ψ_new) from a different
                 // coordinate scale.
-                let effective_ls =
-                    ls_opt.map(|length| input_scale.to_standardized_units(length));
+                let effective_ls = ls_opt.map(|length| {
+                    input_scale
+                        .to_standardized_units(gam_terms::OriginalUnits::new(length))
+                        .standardized_value()
+                });
                 gam_terms::basis::duchon_penalties_at_length_scale(
                     centers.view(),
                     identifiability_transform.as_ref(),
@@ -5193,7 +5230,9 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                 let ls = ls_opt.ok_or_else(|| {
                     "Matérn n-free penalty re-key requires a finite length-scale".to_string()
                 })?;
-                let effective_ls = input_scale.to_standardized_units(ls);
+                let effective_ls = input_scale
+                    .to_standardized_units(gam_terms::OriginalUnits::new(ls))
+                    .standardized_value();
                 let aniso_for_penalty = aniso_from_psi.as_deref().or(aniso_log_scales.as_deref());
                 // Route through the SAME canonical operator-triplet builder the
                 // realized design uses (`matern_operator_penalty_triplet_from_
@@ -5338,8 +5377,11 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                         );
                     }
                 };
-                let effective_ls =
-                    ls_opt.map(|length| input_scale.to_standardized_units(length));
+                let effective_ls = ls_opt.map(|length| {
+                    input_scale
+                        .to_standardized_units(gam_terms::OriginalUnits::new(length))
+                        .standardized_value()
+                });
                 spec.length_scale = effective_ls;
                 spec.power = *power;
                 spec.nullspace_order = *nullspace_order;
@@ -5390,7 +5432,9 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                 let ls = ls_opt.ok_or_else(|| {
                     "Matérn n-free penalty derivative requires a finite length-scale".to_string()
                 })?;
-                let effective_ls = input_scale.to_standardized_units(ls);
+                let effective_ls = input_scale
+                    .to_standardized_units(gam_terms::OriginalUnits::new(ls))
+                    .standardized_value();
                 let penalty_centers = gam_terms::basis::expand_periodic_centers(
                     &centers.to_owned(),
                     periodic.as_deref(),

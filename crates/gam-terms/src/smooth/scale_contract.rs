@@ -244,7 +244,11 @@ pub struct BasisScaleContract {
 pub(super) struct NormalizedEuclideanFrame {
     pub coordinates: Array2<f64>,
     pub input_scale: crate::IsotropicScale,
-    pub length_scale: Option<f64>,
+    /// The realized range, in the same frame as `coordinates`.  The tag is
+    /// the contract's output: the private [`InputFrameNormalization`] decides
+    /// whether a conversion was applied, and the type carries that decision
+    /// forward instead of leaving readers to re-derive it by variant name.
+    pub length_scale: Option<crate::StandardizedUnits>,
 }
 
 impl BasisScaleContract {
@@ -295,11 +299,17 @@ impl BasisScaleContract {
     /// Standardize a Euclidean spatial input using this family's declared
     /// original-unit/replay law.  This is the sole construction path for the
     /// ThinPlate, Matérn, Duchon, and MeasureJet `input_scale` fields.
+    ///
+    /// `spec_length_scale` is deliberately UNTAGGED: whether the spec declares
+    /// its range in original or realized units is exactly the question this
+    /// contract answers, and it answers it from `input_frame` plus whether
+    /// this is a fresh build or a replay.  The returned range is tagged,
+    /// because from there on the frame is settled (#2636).
     pub(super) fn normalize_euclidean_frame(
         &self,
         mut coordinates: Array2<f64>,
         stored_scale: Option<crate::IsotropicScale>,
-        length_scale: Option<f64>,
+        spec_length_scale: Option<f64>,
     ) -> Result<NormalizedEuclideanFrame, BasisError> {
         let replay = stored_scale.is_some();
         let replay_range_is_already_realized = match self.input_frame {
@@ -322,17 +332,23 @@ impl BasisScaleContract {
 
         input_scale.standardize(&mut coordinates);
         let transformed_length = if replay_range_is_already_realized && replay {
-            length_scale
+            // The frozen spec already holds the realized range; re-applying
+            // the conversion here is the double-divide the tag now forbids
+            // everywhere downstream.
+            spec_length_scale.map(crate::StandardizedUnits::new)
         } else if replay_range_is_already_realized {
-            length_scale.map(|ell| {
+            spec_length_scale.map(|ell| {
                 if ell > 0.0 {
-                    input_scale.to_standardized_units(ell)
+                    input_scale.to_standardized_units(crate::OriginalUnits::new(ell))
                 } else {
-                    ell
+                    // A non-positive sentinel is a mode marker, not a length;
+                    // it carries no units and must survive verbatim.
+                    crate::StandardizedUnits::new(ell)
                 }
             })
         } else {
-            length_scale.map(|ell| input_scale.to_standardized_units(ell))
+            spec_length_scale
+                .map(|ell| input_scale.to_standardized_units(crate::OriginalUnits::new(ell)))
         };
 
         Ok(NormalizedEuclideanFrame {
@@ -1540,10 +1556,14 @@ mod tests {
                     .expect("rescaled frame");
                 assert_matrix_close(&actual.coordinates, &reference.coordinates, 3e-12);
                 match (actual.length_scale, reference.length_scale) {
-                    (Some(observed), Some(target)) => assert!(
+                    (Some(observed), Some(target)) => {
+                        let (observed, target) =
+                            (observed.standardized_value(), target.standardized_value());
+                        assert!(
                         (observed - target).abs() <= 3e-12 * (1.0 + target.abs()),
                         "{family:?} effective range changed at factor {factor}: {observed} vs {target}"
-                    ),
+                    );
+                    }
                     (None, None) => {}
                     pair => panic!("{family:?} changed optional range shape: {pair:?}"),
                 }

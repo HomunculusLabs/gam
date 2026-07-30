@@ -410,7 +410,10 @@ pub fn build_thin_plate_basiswithworkspace(
         joint_null_rotation: None,
         metadata: BasisMetadata::ThinPlate {
             centers: original_centers,
-            length_scale: spec.length_scale,
+            // `input_scale: ONE` below: the builder standardizes nothing, so
+            // the range it was handed is this metadata's original-units
+            // range.  See the Duchon builder for the full contract.
+            length_scale: crate::OriginalUnits::new(spec.length_scale),
             periodic: spec.periodic.clone(),
             identifiability_transform,
             input_scale: crate::IsotropicScale::ONE,

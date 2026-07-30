@@ -575,7 +575,12 @@ fn build_duchon_basis_uncached(
         joint_null_rotation: None,
         metadata: BasisMetadata::Duchon {
             centers,
-            length_scale: spec.length_scale,
+            // The builder standardizes nothing of its own — it emits
+            // `input_scale: ONE` — so the range it was handed IS this
+            // metadata's original-units range.  The term-collection wrapper
+            // that DID standardize replaces the scale and the range together
+            // (`term_specs.rs`), keeping the tag honest on both sides.
+            length_scale: spec.length_scale.map(crate::OriginalUnits::new),
             periodic: spec.periodic.clone(),
             power: spec.power,
             nullspace_order: effective_nullspace_order,

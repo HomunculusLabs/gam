@@ -1919,7 +1919,12 @@ pub fn build_measure_jet_basis(
         metadata: BasisMetadata::MeasureJet {
             centers,
             input_scale: crate::IsotropicScale::ONE,
-            length_scale,
+            // The realized range from `realize_measure_jet_geometry`, in the
+            // same frame as `centers` and `eps_band`.  Unlike the other three
+            // Euclidean families the term-collection wrapper does NOT restore
+            // an original-units value over this, so the standardized tag
+            // survives to every consumer (#2636).
+            length_scale: crate::StandardizedUnits::new(length_scale),
             eps_band,
             // The SPEC's order field, sentinel included: 0.0 marks per-level
             // (spectral) mode and must replay as per-level — persisting the
@@ -2953,7 +2958,9 @@ mod tests {
             alpha: spec.alpha,
             tau0: spec.tau0,
             num_scales: eps_band.len(),
-            length_scale: *length_scale,
+            // MeasureJet freezes its range STANDARDIZED and replays it
+            // verbatim; the tag is what records that it is the odd family out.
+            length_scale: length_scale.standardized_value(),
             double_penalty: spec.double_penalty,
             learn_length_scale: false,
             multiscale,
@@ -3256,7 +3263,9 @@ mod tests {
             alpha: *alpha,
             tau0: *tau0,
             num_scales: eps_band.len(),
-            length_scale: *length_scale,
+            // MeasureJet freezes its range STANDARDIZED and replays it
+            // verbatim; the tag is what records that it is the odd family out.
+            length_scale: length_scale.standardized_value(),
             double_penalty: spec.double_penalty,
             learn_length_scale: spec.learn_length_scale,
             multiscale: spec.multiscale,

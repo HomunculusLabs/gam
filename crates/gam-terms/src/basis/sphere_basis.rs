@@ -1036,7 +1036,9 @@ pub(crate) fn build_matern_basis_seeded(
         dropped_penalties: filtered.dropped,
         metadata: BasisMetadata::Matern {
             centers: original_centers,
-            length_scale,
+            // `input_scale: ONE` below; see the Duchon builder in
+            // `duchon_thinplate.rs` for why that makes this original units.
+            length_scale: crate::OriginalUnits::new(length_scale),
             periodic: spec.periodic.clone(),
             nu: spec.nu,
             include_intercept: spec.include_intercept,
@@ -3032,12 +3034,20 @@ pub fn build_matern_basis_log_kappa_derivativeswithworkspace(
             length_scale,
             identifiability_transform,
             aniso_log_scales,
+            input_scale,
             ..
         } => (
             centers.clone(),
             identifiability_transform.clone(),
             aniso_log_scales.clone(),
-            *length_scale,
+            // The value build above emits `input_scale: ONE` (it standardizes
+            // nothing of its own), so this conversion is numerically the
+            // identity — but it is the conversion the frame contract requires,
+            // and routing through it means the ψ-derivative kernel can never
+            // silently drift onto the design's frame if that ever changes.
+            input_scale
+                .to_standardized_units(*length_scale)
+                .standardized_value(),
         ),
         other => {
             return Err(BasisError::InvalidInput(format!(
@@ -3286,12 +3296,20 @@ pub fn build_matern_basis_log_kappa_aniso_derivatives(
             length_scale,
             identifiability_transform,
             aniso_log_scales,
+            input_scale,
             ..
         } => (
             centers.clone(),
             identifiability_transform.clone(),
             aniso_log_scales.clone(),
-            *length_scale,
+            // The value build above emits `input_scale: ONE` (it standardizes
+            // nothing of its own), so this conversion is numerically the
+            // identity — but it is the conversion the frame contract requires,
+            // and routing through it means the ψ-derivative kernel can never
+            // silently drift onto the design's frame if that ever changes.
+            input_scale
+                .to_standardized_units(*length_scale)
+                .standardized_value(),
         ),
         other => {
             return Err(BasisError::InvalidInput(format!(
