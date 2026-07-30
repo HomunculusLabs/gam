@@ -1856,7 +1856,11 @@ fn payload_for_bernoulli_marginal_slope(
         },
         SavedModelSourceMetadata {
             training_headers: dataset.headers.clone(),
-            training_feature_ranges: None,
+            // Every other adapter persists per-feature ranges; this arm alone
+            // passed `None`, so Python-saved Bernoulli marginal-slope models
+            // were the only ones that could not clip out-of-hull predict rows
+            // (#2470).
+            training_feature_ranges: Some(dataset.feature_ranges()),
             offset_column: fit_config.offset_column.clone(),
             noise_offset_column: fit_config.noise_offset_column.clone(),
         },
