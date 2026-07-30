@@ -89,43 +89,41 @@ impl Default for MultinomialPosteriorIntegrationControl {
             absolute_tolerance: tolerance,
             relative_tolerance: tolerance,
             minimum_sparse_level: 2,
-            // NO tuned level ceiling. The evaluation budget is the cost guard.
+            // The level ceiling STAYS, and here is the measurement that says so.
             //
-            // RAISED AGAIN, and that is the point (#2612). The history:
-            //   8 -> 12  (#2350): plateaued at ~1.6x tolerance having spent ~0.1% of the budget
-            //   12 -> 16 (#2612): stopped PREDICTING having spent 9633/2000000 = 0.5%
-            //   16 -> ?  (#2612): stops PREDICTING having spent 28033/2000000 = 1.4%
+            // I removed it (45e3f1876) on the argument that there were two cost
+            // guards for one cost and only one was denominated in the cost:
+            //   8 -> 12  (#2350): plateaued having spent ~0.1% of the budget
+            //   12 -> 16 (#2612): stopped predicting at 9633/2000000  = 0.5%
+            //   16 -> ?  (#2612): stops predicting at 28033/2000000 = 1.4%
+            // Three raises, one argument, and each time the level bound really
+            // was what bound. That reasoning is still right about the DEFECT.
             //
-            // Three raises, one argument each time -- "the LEVEL bound was
-            // binding, not the budget" -- and each time that was true. A
-            // constant whose justification is identical on every raise, and
-            // whose raise is triggered by whichever fixture next happens to be
-            // wide, is being fitted rather than derived. The previous comment
-            // here concluded "the ceiling, and not the evaluation budget, is
-            // the right thing to move"; it has now been moved three times on
-            // that reasoning, which is the evidence against it.
+            // It was wrong about the REPAIR, and the measurement is unambiguous.
+            // With the ceiling removed, the penguins real-data arm ran **941 s
+            // and was still going**, against a refusal in seconds before. The
+            // reason is the other half of the same observation: because the
+            // level cap always bound first, the 2,000,000-evaluation budget was
+            // NEVER calibrated to bind. It was sized on the assumption that
+            // something else would stop first, so it is not a usable sole
+            // guard — it is a backstop, and reaching it costs minutes per
+            // prediction.
             //
-            // There are TWO cost guards for one cost, and only one of them is
-            // denominated in the cost. Evaluations are what the integrand
-            // actually spends; a Smolyak level is an implementation detail of
-            // how it spends them, and the relationship between the two depends
-            // on the class count `k`, so no fixed level is the right budget for
-            // every problem. Keeping both means the wrong one always binds
-            // first -- measured at 0.1%, 0.5% and 1.4% of the real guard.
+            // So removing the binding guard without checking the remaining one
+            // was sized for the job traded a fast honest refusal for a slow
+            // grind. That is the same error as dropping a cost-relative
+            // stationarity band and leaving only its resolution floor (#2613):
+            // the two quantities are not interchangeable, and one of them was
+            // never a budget.
             //
-            // So refine until the BUDGET is exhausted. This costs nothing where
-            // nothing is wrong -- the original reasoning holds and is now the
-            // only reasoning needed: a converged integrand certifies early and
-            // never visits the deeper levels, so the headroom is only ever
-            // spent by the wide posteriors that need it. What changes is that a
-            // wide posterior is now bounded by what it costs instead of by a
-            // number chosen against the last fixture to complain.
-            //
-            // The loop terminates through the budget: `evaluate_smolyak_level`
-            // is handed `maximum_function_evaluations` and refuses once
-            // `total_evaluations` would exceed it, and that refusal propagates.
-            // Callers wanting an explicit level rail may still set this field.
-            maximum_sparse_level: usize::MAX,
+            // What a correct fix needs, and what I did not have: a budget
+            // derived from the cost per level and the per-prediction time this
+            // path is allowed to spend, so that ONE guard bounds the cost in
+            // usable time. Until that derivation exists, a level cap that
+            // refuses in seconds is better than a budget that grinds for
+            // sixteen minutes — a refusal a caller can act on beats an answer
+            // it cannot wait for.
+            maximum_sparse_level: 16,
             maximum_function_evaluations: 2_000_000,
         }
     }
