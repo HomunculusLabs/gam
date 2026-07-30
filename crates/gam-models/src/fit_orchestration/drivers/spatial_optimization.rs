@@ -2674,7 +2674,7 @@ fn try_exact_joint_spatial_length_scale_optimization(
     } else {
         SpatialHyperKind::Isotropic
     };
-    let (theta_star, joint_final_value, kappa_timing) = run_exact_joint_spatial_optimization(
+    let (theta_star, joint_final_value, joint_seed_value, kappa_timing) = run_exact_joint_spatial_optimization(
         kind,
         data,
         y,
@@ -2700,14 +2700,79 @@ fn try_exact_joint_spatial_length_scale_optimization(
     // are outer-BFGS approximations accurate to options.tol; a tighter
     // gate would reject true improvements due to floating-point noise.
     let accept_tol = options.tol.max(1e-8 * baseline_score.abs()).max(1e-12);
-    if joint_final_value > baseline_score + accept_tol {
+    // The monotonicity certificate used to be ONE comparison —
+    // `joint_final_value <= baseline_score + accept_tol` — spanning TWO
+    // independent facts, and it therefore could not say which of them had
+    // failed. `joint_final_value` is this route's criterion at θ*;
+    // `baseline_score` is the scalar-ρ route's `fit_score` at θ0. A refusal
+    // could mean either "the optimizer ended above where it started" (a solver
+    // regression) or "the two routes disagree about the criterion at the SAME
+    // point" (a criterion inconsistency, which no amount of optimizer work can
+    // fix). `run_exact_joint_spatial_optimization` already evaluates its own
+    // criterion at θ0 to prime the evaluator, so both facts are available; state
+    // them separately so the refusal names the defect it found.
+    //
+    // The route-agreement bound is the SAME derived quantity as the acceptance
+    // bound — no second tolerance is introduced. It is two-sided because a route
+    // disagreement is a disagreement in either direction, whereas the descent
+    // contract is one-sided by construction.
+    if !joint_seed_value.is_finite() {
         return Err(EstimationError::RemlOptimizationFailed(format!(
-            "exact joint spatial optimization failed its objective-monotonicity certificate: \
-             initial={baseline_score:.6e}, final={joint_final_value:.6e}, \
-             acceptance_tolerance={accept_tol:.3e}, theta_checkpoint={:?}",
+            "exact joint spatial optimization could not evaluate its own criterion at the \
+             seed (seed_value={joint_seed_value:.6e}), so neither its descent nor its \
+             agreement with the scalar-rho route is checkable; baseline={baseline_score:.6e}"
+        )));
+    }
+    if (joint_seed_value - baseline_score).abs() > accept_tol {
+        return Err(EstimationError::RemlOptimizationFailed(format!(
+            "exact joint spatial optimization and the scalar-rho route disagree about the \
+             criterion AT THE SAME POINT theta0: joint_seed={joint_seed_value:.12e}, \
+             baseline={baseline_score:.12e}, gap={:.3e} ({:.3e} relative), \
+             agreement_tolerance={accept_tol:.3e}. The joint search is therefore minimizing a \
+             different function than the one its result is graded against; this is a criterion \
+             defect, not a solver failure (joint_final={joint_final_value:.12e}, \
+             theta_checkpoint={:?})",
+            joint_seed_value - baseline_score,
+            (joint_seed_value - baseline_score) / baseline_score.abs().max(f64::MIN_POSITIVE),
             theta_star.to_vec(),
         )));
     }
+    // Descent contract. Measured on `b8745892a`, this is the half that actually
+    // fires (`seed=6.613467e1, final=6.613469e1, initial=6.613467e1` on the
+    // binomial-logit Matérn fixture): the two routes agree at θ0 to every
+    // printed digit, and the joint search ends ABOVE the point it started from.
+    //
+    // The optimizer's certificate is a LOCAL, possibly boundary, stationarity
+    // statement at θ* (`theta_checkpoint=[30.0, …]` sits on `RHO_BOUND`), so it
+    // says nothing about θ0 — a certified stationary point of a nonconvex
+    // criterion is routinely worse than a different feasible point. Refusing the
+    // whole REML fit here treated "the search moved to a worse local optimum" as
+    // an internal failure, when this routine has already EVALUATED both
+    // candidates and can simply return the better one. `run_exact_joint_…`
+    // returns its terminal iterate, not its best, so the driver is the first
+    // place that holds both numbers.
+    //
+    // Keeping the better candidate makes the routine's own contract — "joint
+    // κ optimization never returns a point worse than its seed" — true by
+    // construction rather than checked after the fact. The regression is still
+    // a solver defect and must stay visible, so it is logged with both values
+    // and the rejected checkpoint rather than silently absorbed.
+    let (theta_star, joint_final_value) = if joint_final_value > joint_seed_value + accept_tol {
+        log::warn!(
+            "[spatial-kappa] the exact joint search terminated ABOVE its own seed \
+             (seed={joint_seed_value:.12e}, final={joint_final_value:.12e}, \
+             regression={:.3e}, acceptance_tolerance={accept_tol:.3e}); its terminal \
+             certificate is local/boundary at theta={:?} and does not dominate the seed, \
+             so the seed is kept and joint kappa optimization is a no-op for this fit. \
+             A descent method returning a point worse than its start is a solver defect \
+             in its own right and this line is the record of it.",
+            joint_final_value - joint_seed_value,
+            theta_star.to_vec(),
+        );
+        (theta0.clone(), joint_seed_value)
+    } else {
+        (theta_star, joint_final_value)
+    };
 
     let selected_lambdas = Array1::from_vec(
         gam_problem::checked_exp_log_strengths(
@@ -3654,7 +3719,7 @@ fn run_exact_joint_spatial_optimization(
     upper: &Array1<f64>,
     rho_dim: usize,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
-) -> Result<(Array1<f64>, f64, SpatialLengthScaleOptimizationTiming), EstimationError> {
+) -> Result<(Array1<f64>, f64, f64, SpatialLengthScaleOptimizationTiming), EstimationError> {
     let label = kind.label();
     let effective_offset = baseline_design
         .compose_offset(offset, "spatial joint fit")
@@ -4000,9 +4065,19 @@ fn run_exact_joint_spatial_optimization(
     // lane. The only `ValueGradientHessian` request belongs to the mint audit.
     let kphase_prime_order = OuterEvalOrder::ValueAndGradient;
     let kphase_prime_start = std::time::Instant::now();
-    drop(ctx.eval_full(theta0, kphase_prime_order, analytic_outer_hessian_available)?);
+    // The priming eval is the joint criterion AT THE SEED, and it is the only
+    // number that can tell a solver regression apart from a cross-route
+    // criterion disagreement at the acceptance gate downstream: that gate grades
+    // `final_value` (this evaluator, at θ*) against `fit_score(&best.fit)` (the
+    // scalar-ρ route, at θ0). Discarding it forced the two questions into one
+    // refusal, so a route difference of a few ulps-relative was reported as
+    // "the optimizer made the score worse". Keep it and let the caller state the
+    // two contracts separately.
+    let seed_value = ctx
+        .eval_full(theta0, kphase_prime_order, analytic_outer_hessian_available)?
+        .0;
     log::info!(
-        "[KAPPA-PHASE-PRIME] n_rows={} order={:?} elapsed_s={:.4} slow_path_resets_total={} design_revision={}",
+        "[KAPPA-PHASE-PRIME] n_rows={} order={:?} seed_value={seed_value:.12e} elapsed_s={:.4} slow_path_resets_total={} design_revision={}",
         data.nrows(),
         kphase_prime_order,
         kphase_prime_start.elapsed().as_secs_f64(),
@@ -4371,7 +4446,7 @@ fn run_exact_joint_spatial_optimization(
     // optimization. For the anisotropic kind the decomposition into (ψ̄, η)
     // happens later in apply_tospec.
     let theta_star = result.rho;
-    Ok((theta_star, result.final_value, timing))
+    Ok((theta_star, result.final_value, seed_value, timing))
 }
 
 /// Apply a length scale to a single `SmoothTermSpec` (independent of any
