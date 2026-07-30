@@ -5965,17 +5965,31 @@ mod patterned_order2_perf_tests {
                 for c in 0..SLS_ROW_K {
                     dense_third_ab += dense3.t3[a][b][c] * dir_u[c];
                 }
-                let band = 1e-11 * third[a][b].abs().max(dense_third_ab.abs()).max(1.0);
+                let third_band = 1e-11
+                    * specialized_third[a][b]
+                        .abs()
+                        .max(generated_third[a][b].abs())
+                        .max(dense_third_ab.abs())
+                        .max(1.0);
                 assert!(
-                    (third[a][b] - dense_third_ab).abs() <= band,
-                    "third[{a}][{b}]: specialized {:+.15e} vs dense {dense_third_ab:+.15e}",
-                    third[a][b],
+                    (specialized_third[a][b] - dense_third_ab).abs() <= third_band
+                        && (generated_third[a][b] - dense_third_ab).abs() <= third_band,
+                    "third[{a}][{b}]: specialized {:+.15e}, generated {:+.15e}, dense {dense_third_ab:+.15e}",
+                    specialized_third[a][b],
+                    generated_third[a][b],
                 );
-                let band = 1e-11 * fourth[a][b].abs().max(dense_fourth[a][b].abs()).max(1.0);
+                let fourth_band = 1e-11
+                    * specialized_fourth[a][b]
+                        .abs()
+                        .max(generated_fourth[a][b].abs())
+                        .max(dense_fourth[a][b].abs())
+                        .max(1.0);
                 assert!(
-                    (fourth[a][b] - dense_fourth[a][b]).abs() <= band,
-                    "fourth[{a}][{b}]: specialized {:+.15e} vs dense {:+.15e}",
-                    fourth[a][b],
+                    (specialized_fourth[a][b] - dense_fourth[a][b]).abs() <= fourth_band
+                        && (generated_fourth[a][b] - dense_fourth[a][b]).abs() <= fourth_band,
+                    "fourth[{a}][{b}]: specialized {:+.15e}, generated {:+.15e}, dense {:+.15e}",
+                    specialized_fourth[a][b],
+                    generated_fourth[a][b],
                     dense_fourth[a][b],
                 );
             }
