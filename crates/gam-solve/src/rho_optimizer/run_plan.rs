@@ -979,7 +979,40 @@ pub(crate) fn run_outer_with_plan(
             obj.reset();
         }
         install_matching_initial_inner_seed(obj, config, seed, context)?;
-        if let Some(seed_cost) = obj.accept_seed_without_outer_iterations(seed)? {
+        // Zero-iteration acceptance, decided HERE rather than in the objective.
+        //
+        // Whether a seed is already stationary is a question about the
+        // stationarity BAND, and the band lives with `OuterConfig`
+        // (`outer_gradient_tolerance`), not with the objective -- which is why
+        // `accept_seed_without_outer_iterations` has never once returned `Some`
+        // in production: every implementation of it lacks the one input the
+        // decision needs, so the branch below it had never executed.
+        //
+        // Measured (#2363): a fit resumed from a prior fit's terminal
+        // certificate is stationary where it starts. |Pg| at the resumed rho is
+        // 4.225362e-9 / 6.680405e-8 / 1.369603e-7 on the three estimated-nuisance
+        // fixtures, against a band of 1.61e-5 -- inside by three to four orders
+        // of magnitude. It then takes one outer iteration to go nowhere, which
+        // this skips along with its inner solves.
+        //
+        // Two things make accepting safe rather than a gamble: the branch
+        // RE-CERTIFIES what it accepts through
+        // `CertifiedOuterCandidate::from_solver_claim` and falls back into the
+        // seed cascade when that fails, so an over-eager acceptance costs
+        // nothing; and it fires only for a rho a previous outer run already
+        // certified as terminal, never for a heuristic or a mid-run checkpoint.
+        let zero_iteration_cost = match obj.accept_seed_without_outer_iterations(seed)? {
+            Some(cost) => Some(cost),
+            None => certified_resume_is_already_stationary(
+                obj,
+                config,
+                seed,
+                &bounds_template,
+                seed_idx,
+                context,
+            ),
+        };
+        if let Some(seed_cost) = zero_iteration_cost {
             started_seeds += 1;
             let mut candidate = OuterResult::new(seed.clone(), seed_cost, 0, true, *the_plan);
             candidate.origin = OuterResultOrigin::SeedAcceptedWithoutIteration;
@@ -2807,3 +2840,46 @@ pub(crate) fn run_outer_with_plan(
 #[cfg(test)]
 #[path = "run_plan_tests.rs"]
 mod run_plan_tests;
+
+/// Is `seed` a prior fit's terminal certificate that is STILL stationary here?
+///
+/// `Some(cost)` only when all of: the seed is the resumed rho itself; a first
+/// order evaluation succeeds and is finite; and the rail-projected gradient sits
+/// inside the band the outer certificate demands. Anything else is `None` and
+/// the ordinary seed cascade runs. This refuses by default and never turns an
+/// evaluation failure into an acceptance.
+fn certified_resume_is_already_stationary(
+    obj: &mut dyn OuterObjective,
+    config: &OuterConfig,
+    seed: &Array1<f64>,
+    bounds_template: &(Array1<f64>, Array1<f64>),
+    seed_idx: usize,
+    context: &str,
+) -> Option<f64> {
+    if !config.initial_rho_is_prior_terminal_certificate {
+        return None;
+    }
+    if config.initial_rho.as_ref() != Some(seed) {
+        return None;
+    }
+    let eval = obj
+        .eval_with_order(seed, OuterEvalOrder::ValueAndGradient)
+        .ok()?;
+    if !eval.cost.is_finite() || eval.gradient.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let projected = rail_projected_gradient_norm(seed, &eval.gradient, Some(bounds_template));
+    let band = outer_gradient_tolerance(config).threshold(eval.cost, projected);
+    if projected > band {
+        log::debug!(
+            "[OUTER] {context}: resumed terminal certificate seed {seed_idx} is not stationary \
+             here (|Pg|={projected:.6e} > band {band:.6e}); running the ordinary cascade"
+        );
+        return None;
+    }
+    log::info!(
+        "[OUTER] {context}: seed {seed_idx} is a prior fit's terminal certificate and is still \
+         stationary (|Pg|={projected:.6e} <= band {band:.6e}); accepting with zero outer iterations"
+    );
+    Some(eval.cost)
+}

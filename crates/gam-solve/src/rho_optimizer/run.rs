@@ -136,6 +136,13 @@ pub(crate) struct OuterConfig {
     pub(crate) fallback_policy: FallbackPolicy,
     pub(crate) screening_cap: Option<Arc<AtomicUsize>>,
     pub(crate) screen_initial_rho: bool,
+    /// `initial_rho` came from a PRIOR FIT'S TERMINAL CERTIFICATE, not from a
+    /// heuristic, a mid-run checkpoint, or a caller's guess.
+    ///
+    /// The distinction is not where the number was stored, it is what is known
+    /// about it: a terminal certificate is a rho a previous outer run already
+    /// certified as stationary, so re-deriving it can only move it.
+    pub(crate) initial_rho_is_prior_terminal_certificate: bool,
     /// Outer-aware inner-PIRLS iteration cap (sibling of `screening_cap`).
     /// When set, the BFGS bridge drives this atomic on every accepted
     /// gradient eval to coarsen the inner Newton solve at early outer iters
@@ -226,6 +233,7 @@ impl Default for OuterConfig {
             fallback_policy: FallbackPolicy::Automatic,
             screening_cap: None,
             screen_initial_rho: false,
+            initial_rho_is_prior_terminal_certificate: false,
             outer_inner_cap: None,
             operator_initial_trust_radius: None,
             arc_initial_regularization: None,
@@ -621,6 +629,9 @@ impl OuterProblem {
             fallback_policy: self.fallback_policy,
             screening_cap: self.screening_cap.clone(),
             screen_initial_rho: self.screen_initial_rho,
+            // Only the cache's final-hit path can establish this, and it says
+            // so where it sets `initial_rho`.
+            initial_rho_is_prior_terminal_certificate: false,
             outer_inner_cap: self.outer_inner_cap.clone(),
             operator_initial_trust_radius: self.operator_initial_trust_radius,
             arc_initial_regularization: self.arc_initial_regularization,
@@ -796,6 +807,7 @@ impl OuterProblem {
                     );
                     config.initial_rho = Some(rho.clone());
                     config.screen_initial_rho = false;
+                    config.initial_rho_is_prior_terminal_certificate = true;
                     if !beta.is_empty() {
                         cached_inner_seed = Some(BoundInnerSeed {
                             theta: rho,
