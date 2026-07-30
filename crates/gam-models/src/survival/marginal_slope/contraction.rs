@@ -3,52 +3,55 @@
 
 use super::*;
 
-use gam_math::jet_scalar::{JetScalar, OneSeed, TwoSeed};
+use gam_math::jet_scalar::{OneSeed, OneSeedBatch, TwoSeed};
+use wide::f64x4;
 
 impl SurvivalMarginalSlopeFamily {
-    /// Evaluate the single-source rigid row program once through order three.
+    /// Evaluate up to four rigid third-order directional contractions in one
+    /// SIMD row-program pass.
     ///
-    /// The resulting tower is independent of the direction eventually contracted
-    /// into its third tensor. Keeping that ownership explicit lets multi-axis
-    /// callers share the expensive row-program evaluation without caching across
-    /// rows or changing contraction/reduction arithmetic.
-    pub(crate) fn build_row_primary_third_tower(
+    /// Each lane is exactly the scalar `OneSeed` algebra for one direction;
+    /// the shared row and primary values are splatted while the directions vary
+    /// by lane. More than four axes are handled in independent four-lane chunks.
+    pub(crate) fn row_primary_third_contracted_batch(
         &self,
         row: usize,
         block_states: &[ParameterBlockState],
-    ) -> Result<SparseTower3<RIGID_LINEAR_MASK>, String> {
+        directions: &[Array1<f64>],
+    ) -> Result<Vec<[[f64; N_PRIMARY]; N_PRIMARY]>, String> {
+        for dir in directions {
+            if dir.len() != N_PRIMARY {
+                return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
+                    reason: format!(
+                        "survival rigid batched third contracted: dir length {} != primary dimension {N_PRIMARY}",
+                        dir.len()
+                    ),
+                }
+                .into());
+            }
+        }
         let inputs = rigid_row_inputs(
             self,
             block_states,
             row,
-            "survival marginal-slope rigid row helper third",
+            "survival marginal-slope rigid row helper batched third",
         )?;
         let p = rigid_row_kernel_primaries(self, block_states, row)?;
-        let vars: [SparseTower3<RIGID_LINEAR_MASK>; N_PRIMARY] =
-            std::array::from_fn(|a| SparseTower3::variable(p[a], a));
-        rigid_row_nll(&vars, &inputs)
-    }
-
-    /// Contract a previously evaluated rigid row tower with one primary-space
-    /// direction. This preserves the dense tower's exact accumulation order.
-    pub(crate) fn contract_row_primary_third_tower(
-        tower: &SparseTower3<RIGID_LINEAR_MASK>,
-        dir: ArrayView1<'_, f64>,
-    ) -> Result<[[f64; N_PRIMARY]; N_PRIMARY], String> {
-        if dir.len() != N_PRIMARY {
-            return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
-                reason: format!(
-                    "survival rigid third contracted: dir length {} != primary dimension {N_PRIMARY}",
-                    dir.len()
-                ),
+        let mut out = Vec::with_capacity(directions.len());
+        for chunk in directions.chunks(4) {
+            let vars: [OneSeedBatch<N_PRIMARY>; N_PRIMARY] = std::array::from_fn(|a| {
+                let mut lane_dirs = [0.0_f64; 4];
+                for (lane, dir) in chunk.iter().enumerate() {
+                    lane_dirs[lane] = dir[a];
+                }
+                OneSeedBatch::seed_direction(f64x4::splat(p[a]), a, f64x4::new(lane_dirs))
+            });
+            let contracted = rigid_row_nll(&vars, &inputs)?;
+            for lane in 0..chunk.len() {
+                out.push(contracted.lane(lane).contracted_third());
             }
-            .into());
         }
-        let mut dir_arr = [0.0_f64; N_PRIMARY];
-        dir_arr.copy_from_slice(dir.as_slice().ok_or_else(|| {
-            "survival rigid third contracted: non-contiguous direction".to_string()
-        })?);
-        Ok(tower3_third_contracted(&tower.t3, &dir_arr))
+        Ok(out)
     }
 
     /// Build one rigid row's third-order directional contraction without
