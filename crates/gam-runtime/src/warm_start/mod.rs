@@ -7,13 +7,10 @@
 //! persisted warm-start entry.
 //!
 //! The store does not choose its own root — [`WarmStartStore::open`] takes one.
-//! The persistent checkpoint root gam-solve passes is
-//! `std::env::temp_dir()/gam/warm/v1` (see `gam_solve::persistent_warm_start`),
-//! NOT a user cache directory: `dirs::cache_dir()` reads `XDG_CACHE_HOME`/`HOME`
-//! through `env::var`, which is banned in that crate. `temp_dir()` is therefore
-//! MACHINE-LOCAL and shared by every process on the host, which is the property
-//! to keep in mind when reasoning about why two runs of the same fit differ
-//! (#2486) — searching a user cache directory for these entries finds nothing.
+//! High-level fitting accepts an explicit root and carries it through
+//! [`ConfiguredWarmStartStore`]. There is no ambient temp/cache-directory
+//! lookup and no implicit cross-process persistence: omitting the root keeps a
+//! fit disk-silent.
 //!
 //! Layout under that root:
 //!
@@ -62,10 +59,12 @@
 //! oldest entries are evicted to fit. Entries older than
 //! [`StoreOptions::ttl`] (default 30 days) are dropped on every save.
 
+mod configured;
 pub mod key;
 pub mod session;
 pub mod store;
 
+pub use configured::ConfiguredWarmStartStore;
 pub use key::{Fingerprint, Fingerprinter};
 pub use session::{LoadSource, LoadedEntry, Session};
 pub use store::{EntryKind, StoreError, StoreOptions, WarmStartEntry, WarmStartStore};

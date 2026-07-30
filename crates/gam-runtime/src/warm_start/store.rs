@@ -173,10 +173,9 @@ pub struct WarmStartStore {
     /// full directory-scanning eviction in [`Self::save_overwrite`] — see
     /// `EVICT_EVERY_N_SAVES`. The counter resyncs to ground truth after every
     /// triggered sweep. Shared across clones (`Arc`) so the eviction throttle
-    /// survives the per-operation store reuse in
-    /// `solver::persistent_warm_start::persistent_store` — otherwise every
-    /// fit reset the counter and ran a full eviction walk on its first save
-    /// (gam#1114).
+    /// survives use through clone-shared configured store capabilities —
+    /// otherwise every fit reset the counter and ran a full eviction walk on
+    /// its first save (gam#1114).
     byte_total: Arc<AtomicU64>,
     /// Monotonically increasing save counter, shared across clones. Used
     /// together with `byte_total` to throttle the eviction directory walk.
@@ -214,9 +213,8 @@ impl Clone for WarmStartStore {
             opts: self.opts.clone(),
             index: Arc::clone(&self.index),
             // Throttle counters are shared across clones so the eviction
-            // directory walk stays throttled to every Nth save across the
-            // whole process, even though `persistent_store` hands out a fresh
-            // clone per save/lookup.
+            // directory walk stays throttled to every Nth save across every
+            // clone of one explicitly configured store capability.
             byte_total: Arc::clone(&self.byte_total),
             save_counter: Arc::clone(&self.save_counter),
             last_evict_root_mtime: Arc::clone(&self.last_evict_root_mtime),
