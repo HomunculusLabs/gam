@@ -423,7 +423,6 @@ pub(super) fn detect_logit_instability(
     firth_active: bool,
     summary: &WorkingModelPirlsResult,
     finalmu: &Array1<f64>,
-    finalweights: &Array1<f64>,
     y: ArrayView1<'_, f64>,
 ) -> bool {
     // Perfect / quasi-perfect separation is a *Bernoulli/Binomial* pathology.
@@ -443,29 +442,66 @@ pub(super) fn detect_logit_instability(
         return false;
     }
 
-    // Separation-detection policy thresholds. Each is a heuristic cut-off, not
-    // a math identity: they decide when a binary-logit fit has drifted into the
-    // perfect/quasi-perfect separation regime and the inner solve must retreat.
+    // #2273 — a PENALIZED fit has nothing to detect here, and detecting it
+    // anyway deletes the optimum.
+    //
+    // What this retreat is for: when the penalized objective
+    // `−ℓ(β) + ½βᵀS(λ)β` has NO finite minimizer, there is no β̂(λ) for the
+    // outer criterion to be a function of, and the honest reply is `+∞` so the
+    // outer search backs out of that λ. That happens exactly when a direction
+    // of recession of `−ℓ` (a `d` with `sign(2yᵢ−1)·(Xd)ᵢ ≥ 0` for every row,
+    // strictly for one) lies in `null(S(λ))` — the classical separation
+    // condition (Silvapulle 1981). With no penalty at all, every separating
+    // direction qualifies, which is the `!has_penalty` branch below.
+    //
+    // Under a penalty that covers the separating direction the objective is
+    // strictly convex and coercive, so `β̂(λ)` is finite and unique **even under
+    // exact separation** — and then every signal this function used to test is
+    // a property of the CORRECT fit rather than of a divergence: on separable
+    // data a good fit's η *does* order the classes (`order_separated`), its μ
+    // *are* near {0,1} (`severe_saturation`), its working weights *do* collapse
+    // (`weights_collapsed`) and its deviance *is* tiny (`dev_extremely_small`).
+    // Refusing those is refusing the answer. Measured on #2273's n=60
+    // `y ~ smooth(x)` fixture (double penalty, so `S(λ)` is full-rank on the
+    // smooth block): the criterion was `+∞` for every `ρ_range ≤ −2` and every
+    // `ρ_null ≤ 0`, and the criterion DESCENDS into that region — its interior
+    // minimum lives inside the part this detector deleted, so the fit could
+    // never converge and the reported failure was a line search unable to move.
+    //
+    // The genuinely unbounded λ are still refused, and by measurement rather
+    // than by this heuristic. `detect_logit_instability` cannot fire on a
+    // non-logit link, so the same design fitted with `link=probit` is the
+    // control: it is finite across the coercive region (a clean interior
+    // minimum at `ρ_null ≈ −4`) and still `+∞` for `ρ_range ≤ −8`, where only
+    // the rank-1 null-space penalty is left on an 11-dimensional block and the
+    // problem really is unbounded. Along a recession direction in `null(S(λ))`
+    // the penalized Hessian `XᵀWX + S(λ)` loses definiteness — `W → 0` on the
+    // saturated rows and `dᵀS(λ)d = 0` — so `ModelIsIllConditioned` /
+    // `PirlsDidNotConverge` catch it, which is what the probit arm's remaining
+    // `+∞` cells ARE. Nothing is lost by not guessing.
+    if has_penalty {
+        return false;
+    }
+
+    // Separation-detection policy thresholds for the UNPENALIZED fit, where the
+    // MLE genuinely escapes to infinity under separation. Each is a heuristic
+    // cut-off, not a math identity.
     //
     // `ORDER_SEPARATION_ETA_GAP`: a strictly positive η-gap between the lowest
     //   η among y=1 rows and the highest among y=0 rows means the two classes
     //   are linearly separable on the linear predictor.
     // `EXTREME_ETA`: |η| this large drives μ to within machine-ε of {0,1}.
-    // `SATURATION_FRACTION` / `SEVERE_SATURATION_FRACTION`: share of fitted μ
-    //   pinned to the {0,1} boundary that flags (severe) saturation.
-    // `DEGENERATE_DEVIANCE_PER_SAMPLE` / `EXTREME_DEGENERATE_DEVIANCE_PER_SAMPLE`:
-    //   near-zero per-sample deviance means the model fits the data perfectly.
+    // `SATURATION_FRACTION`: share of fitted μ pinned to the {0,1} boundary
+    //   that flags saturation.
+    // `DEGENERATE_DEVIANCE_PER_SAMPLE`: near-zero per-sample deviance means the
+    //   model fits the data perfectly.
     // `EXTREME_BETA_NORM`: coefficient norm blow-up characteristic of the MLE
     //   escaping to infinity under separation.
-    // `WEIGHT_COLLAPSE_FRACTION`: share of working weights collapsed to ~0.
     const ORDER_SEPARATION_ETA_GAP: f64 = 1e-3;
     const EXTREME_ETA: f64 = 30.0;
     const SATURATION_FRACTION: f64 = 0.98;
-    const SEVERE_SATURATION_FRACTION: f64 = 0.995;
     const DEGENERATE_DEVIANCE_PER_SAMPLE: f64 = 1e-3;
-    const EXTREME_DEGENERATE_DEVIANCE_PER_SAMPLE: f64 = 1e-6;
     const EXTREME_BETA_NORM: f64 = 1e4;
-    const WEIGHT_COLLAPSE_FRACTION: f64 = 0.98;
 
     let n = y.len() as f64;
     if n == 0.0 {
@@ -478,15 +514,6 @@ pub(super) fn detect_logit_instability(
         finalmu
             .iter()
             .filter(|&&m| m <= SAT_EPS || m >= 1.0 - SAT_EPS)
-            .count() as f64
-            / n
-    };
-
-    let weight_collapse_fraction = {
-        const WEIGHT_EPS: f64 = 1e-8;
-        finalweights
-            .iter()
-            .filter(|&&w| w <= WEIGHT_EPS || !w.is_finite())
             .count() as f64
             / n
     };
@@ -519,15 +546,7 @@ pub(super) fn detect_logit_instability(
         || dev_per_sample < DEGENERATE_DEVIANCE_PER_SAMPLE
         || beta_norm > EXTREME_BETA_NORM;
 
-    if !has_penalty {
-        return classic_signals || order_separated;
-    }
-
-    let severe_saturation = sat_fraction > SEVERE_SATURATION_FRACTION && max_abs_eta > EXTREME_ETA;
-    let weights_collapsed = weight_collapse_fraction > WEIGHT_COLLAPSE_FRACTION;
-    let dev_extremely_small = dev_per_sample < EXTREME_DEGENERATE_DEVIANCE_PER_SAMPLE;
-
-    order_separated || severe_saturation || weights_collapsed || dev_extremely_small
+    classic_signals || order_separated
 }
 
 /// Stack λ-weighted penalty roots from canonical penalties into a single
@@ -2308,7 +2327,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         firth_active,
         &working_summary,
         &finalmu,
-        &finalweights,
         y,
     ) {
         status = PirlsStatus::Unstable;
