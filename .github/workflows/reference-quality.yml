@@ -302,6 +302,24 @@ jobs:
             echo "----- full log: $t -----"; cat "$log"; echo "----- end log: $t -----"
             echo "::endgroup::"
           done
+          # COMPLETENESS MARKER. A truncated run and a whole one are
+          # indistinguishable from the TSV alone -- a prefix of a measurement
+          # just looks like a smaller suite -- and that is exactly how a
+          # 60-of-456 fragment became the tracked artifact and got read as the
+          # suite's verdict. `N` is the count libtest enumerated BEFORE the loop,
+          # so comparing it against rows actually written is an honest
+          # self-report that survives into the published directory.
+          #
+          # This does not gate anything. It only makes a partial run say so.
+          rows_written=$(( $(wc -l < "$RES") - 1 ))
+          if [ "$rows_written" -eq "$N" ]; then
+            completeness=COMPLETE
+          else
+            completeness=PARTIAL
+          fi
+          printf 'completeness\t%s\nenumerated\t%d\nrows_written\t%d\n' \
+            "$completeness" "$N" "$rows_written" > "$(dirname "$RES")/completeness.tsv"
+          echo "COMPLETENESS=$completeness enumerated=$N rows_written=$rows_written"
           {
             echo ""
             echo "### Totals"
@@ -441,15 +459,42 @@ jobs:
 
 
       # Track this run's uncompressed numbers in-tree (bench/gha_results/reference-quality).
-      # always() so a failed or timed-out run still publishes what it measured -
-      # those numbers are usually the interesting ones. Publishes nothing when the
-      # run produced no results, so a bad run never blanks the last good one.
+      # `!cancelled()` rather than `always()` so a FAILED or timed-out run still
+      # publishes what it measured -- those numbers are usually the interesting
+      # ones -- while a CANCELLED one does not.
+      #
+      # The distinction is not hypothetical, and the old `always()` is how the
+      # tracked artifact got corrupted. `always()` INCLUDES `cancelled`, and this
+      # action replaces its subdirectory wholesale, so a run killed part-way
+      # overwrites a complete measurement with a prefix of one. Measured on the
+      # last eight commits to `bench/gha_results/reference-quality/`, by row count
+      # of `quality_results.tsv`:
+      #
+      #     dbef67293  rows=60   cancelled   <-- became the tracked artifact
+      #     c07b33604  rows=457  failure
+      #     11de0ca46  rows=457  failure
+      #     9a4cfe629  rows=2    failure
+      #     a32e1c030  rows=456  failure
+      #
+      # The 60-row fragment reported `OVERALL 37 pairs, 18 wins / 18 losses,
+      # p=0.7428` over 3 categories, replacing the complete run's `OVERALL 157
+      # pairs, 75 / 76, p=0.2066` over 6. Nothing in the artifact says it is a
+      # fragment, so every reader since took a 59-of-456 sample for the suite.
+      #
+      # The existing "publishes nothing when the run produced no results" guard
+      # does not help: it protects against EMPTY, and a cancelled run is
+      # TRUNCATED, not empty. A prefix of a measurement is the one shape that
+      # looks exactly like a smaller, better result.
+      #
+      # This job is `cancel-in-progress: false`, so the cancellations are the
+      # 6-hourly schedule overlapping its own runtime rather than a newer push.
       - name: Publish results to bench/gha_results
-        if: always()
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/publish-gha-results
         with:
           name: reference-quality
           files: |
+            /tmp/quality-report/completeness.tsv
             /tmp/quality-report/quality_results.tsv
             /tmp/quality-report/quality_results.jsonl
             /tmp/quality-report/quality-aggregate.txt
