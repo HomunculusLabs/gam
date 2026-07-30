@@ -7753,10 +7753,11 @@ fn predict_encoded_table_jackknife_plus_impl(
     }
     let stats = model.gaussian_jackknife_plus.as_ref().ok_or_else(|| {
         "jackknife+ conformal intervals require a Gaussian-identity GLM trained without \
-         prior weights, offsets, or a link wiggle. This model is ineligible (non-Gaussian \
-         family, weighted data, offset, link wiggle, or an older serialised payload). \
-         Use Model.predict_conformal(calibration=...) for split-conformal intervals on \
-         arbitrary families."
+         prior weights, offsets, or a link wiggle, AND a fit that precomputed the \
+         substrate. This model carries none (non-Gaussian family, weighted data, offset, \
+         link wiggle, an older serialised payload, or precompute_conformal=false at fit \
+         time). Use Model.predict_conformal(calibration=...) for split-conformal intervals \
+         on arbitrary families."
             .to_string()
     })?;
     if !matches!(model.predict_model_class(), PredictModelClass::Standard) {
@@ -7882,10 +7883,11 @@ fn predict_encoded_table_full_conformal_impl(
     }
     let substrate = model.full_conformal.as_ref().ok_or_else(|| {
         "exact full-conformal intervals require a Gaussian-identity GLM trained without \
-         prior weights, offsets, or a link wiggle. This model is ineligible (non-Gaussian \
-         family, weighted data, offset, link wiggle, or an older serialised payload). \
-         Use Model.predict_conformal(calibration=...) for split-conformal intervals on \
-         arbitrary families."
+         prior weights, offsets, or a link wiggle, AND a fit that precomputed the \
+         substrate. This model carries none (non-Gaussian family, weighted data, offset, \
+         link wiggle, an older serialised payload, or precompute_conformal=false at fit \
+         time). Use Model.predict_conformal(calibration=...) for split-conformal intervals \
+         on arbitrary families."
             .to_string()
     })?;
     if !matches!(model.predict_model_class(), PredictModelClass::Standard) {

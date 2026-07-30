@@ -277,6 +277,14 @@ fn standard_conformal_substrates(
     Option<crate::inference::full_conformal::GaussianJackknifePlusStats>,
     Option<crate::inference::full_conformal::ExactFullConformalSubstrate>,
 ) {
+    // #2633: these two substrates are ~94% of a saved Gaussian model at
+    // n=20,000 and grow with the training rows, to save ~5.6 ms of rebuild. A
+    // caller that keeps its training data, or never asks for a conformal
+    // interval, can decline them; see `FitConfig::precompute_conformal` for the
+    // measured trade-off and why the default is to keep them.
+    if fit_config.precompute_conformal == Some(false) {
+        return (None, None);
+    }
     let expectile = fit_config.family.as_deref().is_some_and(|family| {
         let family = family.trim().to_ascii_lowercase();
         family == "expectile" || family.starts_with("expectile(")

@@ -297,6 +297,75 @@ fn materialized_standard_fit_carries_no_survival_time_basis_2470() {
     );
 }
 
+/// #2633: `FitConfig::precompute_conformal = Some(false)` must drop BOTH
+/// conformal substrates from the saved payload, and nothing else about the fit.
+///
+/// The substrates are ~94% of a saved Gaussian model at n=20,000 and grow with
+/// the training rows, to save ~5.6 ms of rebuild. The knob lets a caller that
+/// keeps its training data decline them. Both arms are asserted so the test
+/// proves the FLAG is what removed them, rather than the fit having been
+/// ineligible for a substrate all along — an assertion on the off-arm alone
+/// would pass just as well against a model that never qualified.
+#[test]
+fn precompute_conformal_false_drops_both_substrates_2633() {
+    use crate::inference::model_payload_builders::fit_formula_to_payload;
+
+    let td = tempdir().expect("tempdir");
+    let data_path = td.path().join("conformal_optout.csv");
+    let mut csv = String::from("y,x1,x2\n");
+    for i in 0..80u32 {
+        let t = f64::from(i) / 80.0;
+        let x1 = t * 10.0;
+        let x2 = f64::from((i * 7) % 40) / 4.0;
+        let y = (x1 * 0.7).sin() * 2.0 + (x2 * 0.4).cos();
+        csv.push_str(&format!("{y:.6},{x1:.6},{x2:.6}\n"));
+    }
+    fs::write(&data_path, csv).expect("write conformal opt-out csv");
+    let data = load_dataset_projected(
+        &data_path,
+        &["y".to_string(), "x1".to_string(), "x2".to_string()],
+    )
+    .expect("load conformal opt-out dataset");
+    // Two smooths, so the single-smooth spline-scan fast path (which produces a
+    // payload with no fit_result and therefore no substrates for an unrelated
+    // reason) is not taken.
+    let formula = "y ~ s(x1, k=6) + s(x2, k=6)".to_string();
+
+    let on = fit_formula_to_payload(formula.clone(), &data, &FitConfig::default())
+        .expect("eligible gaussian fit should materialize and fit");
+    assert!(
+        on.gaussian_jackknife_plus.is_some() && on.full_conformal.is_some(),
+        "precondition: this fit must be substrate-eligible by default, otherwise the \
+         opt-out arm below proves nothing (jackknife+={}, full_conformal={})",
+        on.gaussian_jackknife_plus.is_some(),
+        on.full_conformal.is_some()
+    );
+
+    let config = FitConfig {
+        precompute_conformal: Some(false),
+        ..FitConfig::default()
+    };
+    let off = fit_formula_to_payload(formula, &data, &config)
+        .expect("opting out of the substrates must not affect fittability");
+    assert!(
+        off.gaussian_jackknife_plus.is_none(),
+        "precompute_conformal=false must drop the jackknife+ substrate"
+    );
+    assert!(
+        off.full_conformal.is_none(),
+        "precompute_conformal=false must drop the exact full-conformal substrate"
+    );
+    // The knob is about what is PERSISTED, not about how the model was fitted.
+    assert!(
+        off.unified.is_some() && off.fit_result.is_some(),
+        "opting out of the substrates must leave the fit itself on the payload"
+    );
+    assert_eq!(
+        on.formula, off.formula,
+        "the knob must not disturb anything else on the payload"
+    );
+}
+
 #[test]
 fn survival_marginal_slope_matern_logslope_penalties_keep_surface_width() {
     let n = 24usize;
