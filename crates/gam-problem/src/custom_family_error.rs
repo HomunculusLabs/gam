@@ -20,31 +20,67 @@ use crate::{IdentifiabilityAudit, MapUniquenessError};
 /// diagnostic is the decision variables themselves rather than a residual
 /// recomputed at a non-KKT point.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct InnerConvergenceTerminalState {
-    pub cycle: usize,
-    pub max_accepted_step: f64,
-    pub max_proposed_step: f64,
-    pub step_tol: f64,
-    pub objective_change: f64,
-    pub objective_tol: f64,
-    pub joint_stationarity_ok: bool,
+pub enum InnerConvergenceTerminalState {
+    /// The blockwise Gauss-Seidel route's terminal cycle.
+    Blockwise {
+        cycle: usize,
+        max_accepted_step: f64,
+        max_proposed_step: f64,
+        step_tol: f64,
+        objective_change: f64,
+        objective_tol: f64,
+        joint_stationarity_ok: bool,
+    },
+    /// The exact joint-Newton route's terminal cycle. This route DOES have a
+    /// genuine stationarity residual (the blockwise one does not, off a
+    /// converged iterate), and it has a third outcome the other lacks:
+    /// `resolvable_negative_curvature` marks a first-order stationary STRICT
+    /// SADDLE, where the score and the Newton proposal both vanish but the exact
+    /// penalized Hessian has resolvable negative curvature. That refuses
+    /// convergence deliberately, and it is nothing like exhausting a budget.
+    JointNewton {
+        cycle: usize,
+        stationarity_residual: f64,
+        residual_tol: f64,
+        step_inf: f64,
+        step_tol: f64,
+        resolvable_negative_curvature: bool,
+    },
 }
 
 impl std::fmt::Display for InnerConvergenceTerminalState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "terminal cycle {}: max_accepted_step={:.6e} (tol={:.6e}), \
-             max_proposed_step={:.6e}, objective_change={:.6e} (tol={:.6e}), \
-             joint_stationarity_ok={}",
-            self.cycle,
-            self.max_accepted_step,
-            self.step_tol,
-            self.max_proposed_step,
-            self.objective_change,
-            self.objective_tol,
-            self.joint_stationarity_ok,
-        )
+        match self {
+            Self::Blockwise {
+                cycle,
+                max_accepted_step,
+                max_proposed_step,
+                step_tol,
+                objective_change,
+                objective_tol,
+                joint_stationarity_ok,
+            } => write!(
+                f,
+                "blockwise terminal cycle {cycle}: max_accepted_step={max_accepted_step:.6e} \
+                 (tol={step_tol:.6e}), max_proposed_step={max_proposed_step:.6e}, \
+                 objective_change={objective_change:.6e} (tol={objective_tol:.6e}), \
+                 joint_stationarity_ok={joint_stationarity_ok}"
+            ),
+            Self::JointNewton {
+                cycle,
+                stationarity_residual,
+                residual_tol,
+                step_inf,
+                step_tol,
+                resolvable_negative_curvature,
+            } => write!(
+                f,
+                "joint-Newton terminal cycle {cycle}: \
+                 stationarity_residual={stationarity_residual:.6e} (tol={residual_tol:.6e}), \
+                 step_inf={step_inf:.6e} (tol={step_tol:.6e}), \
+                 resolvable_negative_curvature={resolvable_negative_curvature}"
+            ),
+        }
     }
 }
 

@@ -4769,6 +4769,25 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             let has_resolvable_negative_curvature = joint_spectrum
                 .as_ref()
                 .is_some_and(|spectrum| spectrum.has_resolvable_negative_curvature());
+            // Record THIS route's decision variables. The blockwise recorder
+            // below is on a different loop: `55968a53c` instrumented only that
+            // one, and the refusal then read `40 cycle(s) [no terminal
+            // convergence state was recorded]` — which is how it became visible
+            // that the 40 cycles were spent here, in the joint-Newton loop,
+            // rather than there. Placed ahead of every exit this cycle can take
+            // (the pre-line-search convergence exit and the strict-saddle
+            // refusal immediately below, the returned-mode break above, and
+            // running out of `inner_loop_hard_ceiling`) so whatever survives
+            // describes the cycle the loop actually left on.
+            terminal_convergence_state =
+                Some(gam_problem::InnerConvergenceTerminalState::JointNewton {
+                    cycle,
+                    stationarity_residual: current_stationarity_residual,
+                    residual_tol,
+                    step_inf,
+                    step_tol,
+                    resolvable_negative_curvature: has_resolvable_negative_curvature,
+                });
             if returned_mode_curvature_pending {
                 returned_mode_curvature_pending = false;
                 let returned_spectrum = joint_spectrum.as_ref().ok_or_else(|| {
@@ -9043,7 +9062,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         // running out of `inner_max_cycles` — so whatever survives the loop
         // describes the cycle the loop actually left on rather than the one
         // before it.
-        terminal_convergence_state = Some(gam_problem::InnerConvergenceTerminalState {
+        terminal_convergence_state = Some(gam_problem::InnerConvergenceTerminalState::Blockwise {
             cycle,
             max_accepted_step: max_accepted_beta_step,
             max_proposed_step: max_proposed_beta_step,
