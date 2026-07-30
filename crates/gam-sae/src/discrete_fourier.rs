@@ -77,9 +77,17 @@ pub(crate) fn dft_in_place(re: &mut [f64], im: &mut [f64], inverse: bool) -> Res
 /// Iterative in-place radix-2 Cooley–Tukey. `re.len()` must be a power of two.
 fn fft_radix2_in_place(re: &mut [f64], im: &mut [f64], inverse: bool) {
     let n = re.len();
+    // `assert!`, not the debug form. The scanner bans it and is right here: a
+    // radix-2 butterfly on a non-power-of-two length does not fail loudly, it
+    // silently computes the WRONG TRANSFORM -- the bit-reversal permutation
+    // below is only a permutation when `n` is a power of two, so a release
+    // build returns a plausible, wrong spectrum with no diagnostic. A check
+    // that vanishes in release is absent exactly where it matters. One
+    // `is_power_of_two()` against an O(n log n) body is not a hot path.
     assert!(
         n.is_power_of_two(),
-        "fft_radix2_in_place requires a power-of-two length, got {n}"
+        "fft_radix2_in_place requires a power-of-two length, got {n}; the caller \
+         must route other lengths to bluestein_in_place"
     );
 
     // Decimation-in-time reordering: index `i` moves to its bit-reversal.

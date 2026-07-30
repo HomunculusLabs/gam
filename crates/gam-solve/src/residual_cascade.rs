@@ -5081,20 +5081,27 @@ mod refinement_decision_tests {
                 let mut width: Option<usize> = None;
                 let mut hwm: Option<f64> = None;
                 for field in rest.split_whitespace() {
-                    // `.ok()` is banned here for the reason it exists: this
-                    // is the ONLY reader of the child's reading, and a field
-                    // that fails to parse leaves `reading` unset, which the
-                    // `unwrap_or_else` below reports as "the child produced no
-                    // reading" — the wrong fault, pointing at the child rather
-                    // than at the malformed field the parent just saw.
+                    // Not `.ok()`. The scanner bans discarding an error here and
+                    // is right: a malformed `m=` or `vmhwm_bytes=` left the
+                    // field `None`, `reading` then stayed `None`, and the
+                    // `unwrap_or_else(|| panic!(..))` below fired with "no child
+                    // reading" -- blaming an ABSENT line for a line that was
+                    // present and unparseable. The reader is sent to look for a
+                    // missing marker that is right there.
                     if let Some(value) = field.strip_prefix("m=") {
                         width = Some(value.parse().unwrap_or_else(|error| {
-                            panic!("child {child}: unparseable width field `m={value}`: {error}")
+                            panic!(
+                                "child reading line carries an unparseable m={value:?}: \
+                                 {error}; the marker was found, so this is a malformed \
+                                 field, not a missing reading"
+                            )
                         }));
                     } else if let Some(value) = field.strip_prefix("vmhwm_bytes=") {
                         hwm = Some(value.parse().unwrap_or_else(|error| {
                             panic!(
-                                "child {child}: unparseable field `vmhwm_bytes={value}`: {error}"
+                                "child reading line carries an unparseable \
+                                 vmhwm_bytes={value:?}: {error}; the marker was found, \
+                                 so this is a malformed field, not a missing reading"
                             )
                         }));
                     }
