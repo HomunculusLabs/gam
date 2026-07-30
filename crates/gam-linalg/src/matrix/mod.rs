@@ -6209,6 +6209,12 @@ mod tests {
 
     #[test]
     fn sparse_to_dense_accumulates_duplicate_entries() {
+        // `to_dense_arc` charges the process-global ledger, so this test must
+        // not overlap the ledger-pressure test; see `LEDGER_PRESSURE`. Without
+        // this guard the densification is refused and `panic_any`s, which
+        // reads as a duplicate-accumulation failure it is not.
+        let ledger = ledger_read_guard();
+        assert_eq!(*ledger, (), "ledger read guard is held for this test");
         // Build a non-canonical CSC with duplicate row index in the same column.
         // This can happen if a caller bypasses canonical constructors.
         let symbolic = SymbolicSparseColMat::new_unsorted_checked(
@@ -6235,6 +6241,9 @@ mod tests {
 
     #[test]
     fn sparse_column_extractors_accumulate_duplicate_entries() {
+        // `to_dense` charges the process-global ledger; see `LEDGER_PRESSURE`.
+        let ledger = ledger_read_guard();
+        assert_eq!(*ledger, (), "ledger read guard is held for this test");
         // Same non-canonical CSC as the to_dense fixture: column 0 carries two
         // entries at row 1 (2.0 + 3.5 = 5.5); column 1 a single -1.0 at row 0.
         // column_into and extract_columns must accumulate duplicates exactly
@@ -6281,12 +6290,43 @@ mod tests {
         assert!(err.contains("refusing to densify sparse design"));
     }
 
+    /// Serializes the tests that make the process-global memory ledger
+    /// unavailable against the tests that need it.
+    ///
+    /// `MemoryGovernor::global()` is process-wide and `cargo test` runs this
+    /// module's tests concurrently in one process, so a test that reserves
+    /// `governor.remaining_bytes()` makes EVERY concurrent densification
+    /// refuse — `SparseDesignMatrix::try_to_dense_arc` answers a refusal with
+    /// `panic_any`, which surfaces as an unrelated test failing on an
+    /// unrelated assertion. Ledger-exhausting tests take the write guard for
+    /// the whole of their pressure region; every test that densifies takes the
+    /// read guard, so they still run concurrently with each other.
+    static LEDGER_PRESSURE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    /// Guard for a test that densifies and therefore needs ledger headroom.
+    fn ledger_read_guard() -> std::sync::RwLockReadGuard<'static, ()> {
+        LEDGER_PRESSURE
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Guard for a test that makes the ledger unavailable to everyone else.
+    fn ledger_write_guard() -> std::sync::RwLockWriteGuard<'static, ()> {
+        LEDGER_PRESSURE
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// The governed sparse densification charges the process ledger for
     /// exactly the dense footprint while the owner is alive, and a full
     /// ledger routes the weighted-Gram strategy to the streaming CSC path
     /// instead of failing or allocating.
     #[test]
     fn sparse_densification_reserves_ledger_and_full_ledger_streams() {
+        // Held for the whole test: the `remaining_bytes()` filler below leaves
+        // the process ledger with nothing for any concurrent densification.
+        let ledger = ledger_write_guard();
+        assert_eq!(*ledger, (), "ledger pressure guard is held for this test");
         let triplets = [
             Triplet::new(0, 0, 1.0),
             Triplet::new(0, 1, -2.0),
@@ -6428,6 +6468,9 @@ mod tests {
         )
         .expect("sparse matrix");
         let design = SparseDesignMatrix::new(sparse.clone());
+        // `to_dense_arc` charges the process-global ledger; see `LEDGER_PRESSURE`.
+        let ledger = ledger_read_guard();
+        assert_eq!(*ledger, (), "ledger read guard is held for this test");
         let dense = design.to_dense_arc();
         let weights = array![1.0, -2.0, 0.5, -1.5];
         let (symbolic, values) = sparse.parts();
@@ -6903,6 +6946,9 @@ mod tests {
         let sparse = SparseColMat::try_new_from_triplets(3, 3, &triplets)
             .expect("sparse design should build");
         let sparse_design = DesignMatrix::from(sparse);
+        // `to_dense` charges the process-global ledger; see `LEDGER_PRESSURE`.
+        let ledger = ledger_read_guard();
+        assert_eq!(*ledger, (), "ledger read guard is held for this test");
         let dense_design = DesignMatrix::Dense(crate::matrix::DenseDesignMatrix::from(
             sparse_design.to_dense(),
         ));
@@ -6987,7 +7033,21 @@ mod tests {
         }
         let residual = h.dot(&pcg) - &rhs;
         let residual_norm = residual.dot(&residual).sqrt();
-        assert!(residual_norm < 1e-4, "residual_norm={residual_norm}");
+        // A fixed ABSOLUTE 1e-4 does not scale with the system. This is a
+        // p = 520 normal system, so ‖H·x − rhs‖₂ accumulates with the problem
+        // size and the right-hand-side magnitude; the bound has to carry the
+        // same scale or it silently tightens/loosens as the fixture changes.
+        // Scale by ‖rhs‖, the same treatment (and the same 1e-5 coefficient)
+        // that the sibling
+        // `policy_solve_matches_explicit_matrix_free_pcg_on_large_dense_system`
+        // applies to its per-coefficient bound, and for the same reason
+        // (gam#846).
+        let rhs_norm = rhs.dot(&rhs).sqrt();
+        let residual_tol = 1e-5 * (1.0 + rhs_norm);
+        assert!(
+            residual_norm < residual_tol,
+            "residual_norm={residual_norm} exceeds tol={residual_tol} (rhs_norm={rhs_norm})"
+        );
     }
 
     #[test]

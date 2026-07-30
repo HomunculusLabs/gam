@@ -1528,12 +1528,24 @@ mod tests {
         ];
         let h_sparse = dense_to_sparse_symmetric_upper(&h, ZERO_TOL).unwrap();
 
-        // Dense logdet via existing factor
-        let existing = factorize_sparse_spd(&h_sparse).unwrap();
-        let logdet_dense = existing.logdet;
+        // Genuinely DENSE reference: log det(H) = 2 · Σ_i log L_ii read off a
+        // dense LLT (`FaerCholesky`), which shares no AMD ordering, no CSC
+        // pattern and no logdet accumulator with the simplicial sparse
+        // factorization under test. The previous "dense" baseline was
+        // `factorize_sparse_spd` — a SECOND SPARSE factorization — so the test
+        // compared the sparse path with itself and could not have detected a
+        // shared logdet-accumulation defect.
+        let chol = h.cholesky(Side::Lower).unwrap();
+        let logdet_dense = 2.0 * chol.diag().iter().map(|l| l.ln()).sum::<f64>();
 
         let sfactor = factorize_simplicial(&h_sparse).unwrap();
         approx_eq(sfactor.logdet, logdet_dense, 1e-10);
+
+        // Retain the original sparse-vs-sparse agreement as a secondary check:
+        // it is weak as a reference but does pin the two sparse entry points
+        // to each other.
+        let existing = factorize_sparse_spd(&h_sparse).unwrap();
+        approx_eq(existing.logdet, logdet_dense, 1e-10);
     }
 
     // ── trace_product_sparse (rayon parallel reduction, #759) ─────────────────

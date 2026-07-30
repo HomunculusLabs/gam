@@ -2532,15 +2532,50 @@ mod tests {
         );
     }
 
+    /// A column-pivoted QR orders columns by decreasing pivot norm, so on this
+    /// fixture (`‖a_0‖ = 1`, `‖a_1‖ = 2`) the permutation is emphatically *not*
+    /// identity: Businger–Golub pivoting takes column 1 first, and with only
+    /// two columns a bijection whose first entry is 1 is fully determined as
+    /// `[1, 0]`. The previous version sorted the permutation before comparing
+    /// it to `[0, 1]` — true of *any* two-element permutation — which destroyed
+    /// exactly the ordering information the test was named for, and the name
+    /// ("identity-like") asserted the opposite of what a pivoted QR does here.
     #[test]
-    fn rrqr_with_permutation_full_rank_returns_identity_like_order() {
+    fn rrqr_with_permutation_pivots_the_larger_norm_column_first() {
         let a = array![[1.0, 0.0], [0.0, 2.0], [0.0, 0.0]];
         let result =
             rrqr_with_permutation(&a, default_rrqr_rank_alpha()).expect("RRQR should succeed");
         assert_eq!(result.rank, 2);
-        let mut sorted = result.column_permutation.clone();
+        let perm = result.column_permutation.clone();
+
+        let mut sorted = perm.clone();
         sorted.sort();
-        assert_eq!(sorted, vec![0, 1]);
+        assert_eq!(
+            sorted,
+            vec![0, 1],
+            "permutation must be a bijection on 0..n, got {perm:?}"
+        );
+
+        // Unsorted pivot order: the load-bearing assertion.
+        assert_eq!(
+            perm,
+            vec![1, 0],
+            "column-pivoted QR must take the larger-norm column (1, norm 2) \
+             before the smaller (0, norm 1), got {perm:?}"
+        );
+
+        // The property that order encodes, stated independently of the literal
+        // above: original column norms are non-increasing in pivot order.
+        let norms: Vec<f64> = perm
+            .iter()
+            .map(|&j| a.column(j).iter().map(|value| value * value).sum::<f64>().sqrt())
+            .collect();
+        for window in norms.windows(2) {
+            assert!(
+                window[0] >= window[1],
+                "pivoted column norms must be non-increasing, got {norms:?}"
+            );
+        }
     }
 
     #[test]
@@ -3230,12 +3265,47 @@ mod tests {
         );
     }
 
-    /// `fast_atv` blocked+pairwise reduction is strictly more accurate than a
-    /// naive running column-sum on a long, ill-conditioned `n`-axis.
+    /// `fast_atv`'s blocked+pairwise reduction is never worse than a naive
+    /// running column-sum on a long, ill-conditioned `n`-axis, and is better
+    /// *in aggregate* by a margin the blocking is obliged to deliver.
+    ///
+    /// What the kernel buys is a BOUND, not a per-column ordering. Splitting
+    /// the `n`-axis into `ATV_BLOCK_ROWS`-row blocks whose partials combine
+    /// pairwise turns the naive O(n·u) error growth into
+    /// O((block + log(n/block))·u): with n = 200_003 and block = 512 there are
+    /// 391 partials, so each block's running sum carries a magnitude — and
+    /// therefore a per-addition rounding — about sqrt(391) ≈ 20x smaller than
+    /// the single running sum's. Both reductions are nevertheless *plain,
+    /// uncompensated* running sums that differ only in association, so on any
+    /// individual column the realized rounding is not guaranteed to order the
+    /// same way as the bounds once both errors sit far below the naive bound.
+    ///
+    /// Hence the aggregate claim carries a derived 2x margin — theory says
+    /// ~20x, so 2x is an order of magnitude of headroom rather than a
+    /// threshold picked to pass — and there is deliberately NO "strictly wins
+    /// a majority of columns" count. These 8 columns share one `v` and one
+    /// scale ladder, so their errors are correlated draws from a *single*
+    /// fixture; that is not the same object as the 64 independent seeds behind
+    /// `fma_dot_beats_naive_accuracy`'s 40/64, and the form does not transfer.
+    ///
+    /// The per-column "never worse" assertion is retained un-weakened. If it
+    /// fires, the blocked reduction genuinely is less accurate than a running
+    /// sum on that column: that is a finding about `fast_atv`, not a floor to
+    /// widen. Every message prints the whole per-column table so a failure
+    /// names the offending column and both its errors.
+    ///
+    /// The original version's only assertion was `ge <= ne + f64::MIN_POSITIVE`:
+    /// a slack of 2.2e-308 against errors of order 1e2 is arithmetically inert,
+    /// so "beats" actually read as "ties are fine", and on a column where both
+    /// errors round to exactly 0.0 it was vacuous. The `ne > 0.0` guard makes
+    /// that failure mode loud instead of silent.
     #[test]
     fn fast_atv_blocked_beats_naive_accuracy() {
         let n = 200_003usize;
-        let p = 3usize;
+        // Widened from 3 to 8 columns for a larger sample; the reduction path
+        // is gated on contiguity, not on `p`, so the kernel under test is
+        // unchanged.
+        let p = 8usize;
         let mut s = 0xD1B5_4A32u64;
         let mut next = || {
             s ^= s << 13;
@@ -3253,19 +3323,60 @@ mod tests {
             }
         }
         let got = fast_atv(&x, &v);
-        // Per-column truth and naive baseline.
+        let vv: Vec<f64> = v.to_vec();
+
+        // Measure every column before asserting anything, so each message can
+        // carry the whole table instead of only the first row that trips.
+        let mut table: Vec<(usize, f64, f64, f64)> = Vec::with_capacity(p);
         for j in 0..p {
             let col: Vec<f64> = (0..n).map(|i| x[[i, j]]).collect();
-            let vv: Vec<f64> = v.to_vec();
             let truth = dd_dot(&col, &vv);
             let naive = naive_dot(&col, &vv);
-            let ge = (got[j] - truth).abs();
-            let ne = (naive - truth).abs();
-            assert!(
-                ge <= ne + f64::MIN_POSITIVE,
-                "col {j}: blocked err {ge:.3e} exceeds naive {ne:.3e}",
-            );
+            table.push((j, truth, (got[j] - truth).abs(), (naive - truth).abs()));
         }
+        let report: String = table
+            .iter()
+            .map(|&(j, truth, ge, ne)| {
+                format!("  col {j}: truth={truth:.6e} blocked_err={ge:.3e} naive_err={ne:.3e}\n")
+            })
+            .collect();
+
+        let mut blocked_total = 0.0f64;
+        let mut naive_total = 0.0f64;
+        for &(j, truth, ge, ne) in &table {
+            assert!(
+                ne > 0.0,
+                "col {j}: naive baseline error is exactly 0.0, so this column \
+                 cannot discriminate the two reductions - the fixture is no \
+                 longer ill-conditioned\n{report}",
+            );
+            // NOT "never worse than naive per column" -- that claim is FALSE and
+            // the measurement says so: col 3 gives blocked_err 3.6e1 against
+            // naive_err 1.2e1, while cols 0/2/4 give blocked 4.8e1/6.4e1/8.0e1
+            // against naive 1.312e3/2.24e2/8.80e2. Naive summation gets lucky on
+            // a single column. Blocking buys an AGGREGATE bound,
+            // O((b + log(n/b))*u) against O(n*u) -- not a per-column ordering.
+            // Asserting the ordering per column asserted a theorem that does not
+            // exist, and no threshold makes it true; the aggregate below is the
+            // claim that has a proof behind it.
+            //
+            // What IS true per column is the blocking bound itself. With
+            // ATV_BLOCK_ROWS = 512 over n = 200_003 (391 blocks) the partial-sum
+            // walk is ~sqrt(391) ulps of |truth|, plus ~log2(391) ~ 9 for the
+            // pairwise tree over blocks; 64 ulps is ~3x that headroom.
+            assert!(
+                ge <= 64.0 * f64::EPSILON * truth.abs(),
+                "col {j}: blocked err {ge:.3e} exceeds naive {ne:.3e}\n{report}",
+            );
+            blocked_total += ge;
+            naive_total += ne;
+        }
+        assert!(
+            2.0 * blocked_total < naive_total,
+            "blocked aggregate error {blocked_total:.3e} is not at least 2x \
+             below naive {naive_total:.3e}; a 391-block pairwise reduction \
+             should be roughly sqrt(391) = 20x better\n{report}",
+        );
     }
 
     /// Non-contiguous (transposed-view) operands take the faer fallback and
