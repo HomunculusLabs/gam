@@ -4223,6 +4223,10 @@ mod tests {
         survival_earliest_entry_time_anchor, survival_robust_interior_time_anchor,
         validate_survival_time_anchor_override,
     };
+    use super::{
+        center_survival_time_designs_at_anchor, evaluate_survival_time_basis_row,
+        resolved_survival_time_basis_config_from_build,
+    };
     use crate::probability::normal_cdf;
     use crate::survival::base::ENTRY_AT_ORIGIN_THRESHOLD;
     use crate::survival::{OffsetChannelCurvatures, OffsetChannelResiduals};
@@ -4578,6 +4582,124 @@ mod tests {
         );
         assert!(survival_robust_interior_time_anchor(&Array1::<f64>::zeros(0)).is_err());
         assert!(survival_earliest_entry_time_anchor(&Array1::<f64>::zeros(0)).is_err());
+    }
+
+    /// The MECHANISM behind the rule, measured rather than asserted (#751/#1790,
+    /// #2631).
+    ///
+    /// The robust interior anchor exists because centering a left-truncated
+    /// design at the earliest entry leaves the exit columns large and ONE-SIGNED
+    /// — that column is the unpenalized polynomial null space of the
+    /// 2nd-difference time penalty, so its inflation multiplies the time-block
+    /// score at the smoothing seed. This measures both properties directly on a
+    /// staggered-entry cohort (half the rows entering at the time origin, half at
+    /// positive delayed-entry times — the ordinary shape of a real registry
+    /// cohort, and the case a `min(entry) > threshold` predicate would have
+    /// missed):
+    ///
+    ///   * column magnitude `max |X_exit − X(anchor)|`
+    ///   * sign balance: the fraction of rows sharing the dominant sign, per
+    ///     column, worst column reported
+    ///
+    /// The earliest-entry anchor must be strictly worse on both, or the rule this
+    /// module implements has no reason to exist.
+    #[test]
+    fn robust_interior_anchor_shrinks_and_balances_the_centered_time_design() {
+        // Staggered entry: rows 0..5 observed from the origin, rows 6..11 with
+        // positive delayed entry. Exits spread over a decade of time.
+        let age_entry = array![
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 5.0, 9.0, 14.0, 22.0, 30.0
+        ];
+        let age_exit = array![
+            2.0, 4.0, 7.0, 11.0, 16.0, 23.0, 31.0, 40.0, 52.0, 68.0, 85.0, 110.0
+        ];
+        assert!(survival_data_is_left_truncated(&age_entry));
+
+        let earliest = survival_earliest_entry_time_anchor(&age_entry).expect("earliest anchor");
+        let robust = survival_robust_interior_time_anchor(&age_exit).expect("robust anchor");
+
+        // Measure both anchorings on the SAME basis (knots inferred once from the
+        // same times), so only the centering differs.
+        let build = build_survival_time_basis(
+            &age_entry,
+            &age_exit,
+            SurvivalTimeBasisConfig::ISpline {
+                degree: 3,
+                knots: Array1::zeros(0),
+                keep_cols: Vec::new(),
+                smooth_lambda: 1e-2,
+            },
+            Some((4, 1e-2)),
+        )
+        .expect("build survival time basis");
+        let resolved = resolved_survival_time_basis_config_from_build(
+            &build.basisname,
+            build.degree,
+            build.knots.as_ref(),
+            build.keep_cols.as_ref(),
+            build.smooth_lambda,
+        )
+        .expect("resolve time basis config");
+
+        // The quantity #1790 names is the centered design's component along the
+        // TREND direction — the unpenalized null space of the 2nd-difference time
+        // penalty — not any single raw column (an I-spline's last column
+        // saturates at 1 over the observed range and is one-signed under every
+        // anchor). For a monotone I-spline basis the row sum `Σ_j X_ij` is a
+        // monotone increasing function of `t_i`, so it IS that trend coordinate,
+        // and it is what "large and one-signed across all rows" is a statement
+        // about.
+        //
+        // Returns `(max |row sum|, fraction of rows sharing the dominant sign)`.
+        let measure = |anchor: f64| -> (f64, f64) {
+            let mut centered = build.clone();
+            let anchor_row =
+                evaluate_survival_time_basis_row(anchor, &resolved).expect("anchor basis row");
+            center_survival_time_designs_at_anchor(
+                &mut centered.x_entry_time,
+                &mut centered.x_exit_time,
+                &anchor_row,
+            )
+            .expect("center at anchor");
+            let dense = centered.x_exit_time.to_dense();
+            let trend: Vec<f64> = dense.rows().into_iter().map(|row| row.sum()).collect();
+            let magnitude = trend.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+            let positive = trend.iter().filter(|v| **v > 0.0).count() as f64;
+            let rows = trend.len() as f64;
+            let sign_fraction = (positive / rows).max(1.0 - positive / rows);
+            eprintln!(
+                "anchor {anchor:>10.4}: max|trend| = {magnitude:.6e}, \
+                 dominant-sign fraction = {sign_fraction:.4}, trend = {trend:?}"
+            );
+            (magnitude, sign_fraction)
+        };
+
+        let (earliest_magnitude, earliest_sign) = measure(earliest);
+        let (robust_magnitude, robust_sign) = measure(robust);
+
+        // Measured on this fixture: earliest-entry anchor (the time-origin floor)
+        // gives max|trend| = 5.000 with EVERY row positive; median-exit anchor
+        // (27.0) gives 1.140 with a 6/6 sign split. The thresholds below are
+        // loose around those numbers — they pin the phenomenon, not the digits.
+        assert!(
+            robust_magnitude < 0.5 * earliest_magnitude,
+            "the robust interior anchor must materially shrink the centered trend \
+             coordinate: earliest-entry anchor {earliest} gives max|trend| = \
+             {earliest_magnitude}, median-exit anchor {robust} gives {robust_magnitude}"
+        );
+        assert!(
+            (earliest_sign - 1.0).abs() <= 1e-12,
+            "the earliest-entry anchor is expected to leave the trend coordinate \
+             FULLY one-signed on left-truncated data — that is the #751/#1790 \
+             mechanism, and a fixture where it does not hold is not exercising the \
+             rule. Measured {earliest_sign}"
+        );
+        assert!(
+            robust_sign <= 0.6,
+            "the robust interior anchor must leave the trend coordinate two-signed \
+             (the exit-event likelihood then pins the linear trend); measured \
+             {robust_sign} of rows sharing one sign"
+        );
     }
 
     /// `SURVIVAL_LIKELIHOOD_MODES` must list every variant, or the cross-mode
