@@ -249,6 +249,21 @@ impl CoactivationExceedance {
         self.z[self.idx(a, b)]
     }
 
+    /// Observed joint activation count of the pair.
+    pub fn observed_joint(&self, a: usize, b: usize) -> f64 {
+        if a == b || a >= self.g || b >= self.g {
+            return 0.0;
+        }
+        self.obs[self.idx(a, b)]
+    }
+
+    /// Null-mean joint activation count of the pair under the fixed margins.
+    pub fn null_mean_joint(&self, a: usize, b: usize) -> f64 {
+        if a == b || a >= self.g || b >= self.g {
+            return 0.0;
+        }
+        self.null_mean[self.idx(a, b)]
+    }
 
     pub fn n_obs(&self) -> usize {
         self.n_obs

@@ -1,4 +1,7 @@
-use crate::bms::{DeviationBlockConfig, LatentZCheckMode};
+use crate::bms::{
+    DEFAULT_EMPIRICAL_LATENT_GRID_SIZE, DeviationBlockConfig, LatentMeasureSpec, LatentZCheckMode,
+    LatentZNormalizationMode, LatentZPolicy,
+};
 use crate::survival::construction::SurvivalBaselineTarget;
 use gam_problem::{InverseLink, StandardLink};
 
@@ -20,6 +23,28 @@ pub enum LatentScoreSemantics {
 }
 
 impl LatentScoreSemantics {
+    pub fn into_policy(self) -> LatentZPolicy {
+        match self {
+            Self::FrozenConditionalNormal { check_mode } => LatentZPolicy {
+                check_mode,
+                ..LatentZPolicy::frozen_transformation_normal()
+            },
+            Self::FitWeightedNormalization => LatentZPolicy::exploratory_fit_weighted(),
+            Self::EmpiricalLatentMeasure {
+                normalize_location_scale,
+            } => LatentZPolicy {
+                normalization: if normalize_location_scale {
+                    LatentZNormalizationMode::FitWeighted
+                } else {
+                    LatentZNormalizationMode::None
+                },
+                latent_measure: LatentMeasureSpec::GlobalEmpirical {
+                    grid_size: DEFAULT_EMPIRICAL_LATENT_GRID_SIZE,
+                },
+                ..LatentZPolicy::exploratory_fit_weighted()
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -62,7 +87,21 @@ impl MarginalSlopeCalibrationProtocol {
         }
     }
 
+    /// Rigid probit marginal-slope: no score-warp, no link-deviation.
+    pub fn probit_rigid() -> Self {
+        Self::probit(None, None, Self::default_latent_score())
+    }
 
+    /// Probit marginal-slope with both cubic blocks at their triple-penalty
+    /// defaults.
+    pub fn probit_with_score_and_link_wiggle() -> Self {
+        let wiggle = DeviationBlockConfig::triple_penalty_default();
+        Self::probit(
+            Some(wiggle.clone()),
+            Some(wiggle),
+            Self::default_latent_score(),
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -72,4 +111,14 @@ pub struct SurvivalMarginalSlopeProtocol {
 }
 
 impl SurvivalMarginalSlopeProtocol {
+    /// Survival marginal-slope on a Gompertz-Makeham baseline with the
+    /// supplied marginal-calibration protocol. Score-warp, link-deviation,
+    /// and latent-score semantics all flow through from `marginal` —
+    /// nothing is baked in.
+    pub fn gompertz_makeham_probit(marginal: MarginalSlopeCalibrationProtocol) -> Self {
+        Self {
+            marginal,
+            baseline_target: SurvivalBaselineTarget::GompertzMakeham,
+        }
+    }
 }

@@ -233,6 +233,63 @@ pub fn estimate_on_rows(
     })
 }
 
+pub fn estimate_on_rows_with_nulls(
+    gate_i: &[f64],
+    gate_j: &[f64],
+    continuous_context: &[f64],
+    diagnostic_labels: Option<&[usize]>,
+    rows: &[usize],
+    likelihood_weights: &[f64],
+    config: VaryingCoefficientConfig,
+    random_weight_gate_i: &[f64],
+    random_weight_gate_j: &[f64],
+) -> Result<CoactivationConditionality, String> {
+    let mut report = estimate_on_rows(
+        gate_i,
+        gate_j,
+        continuous_context,
+        diagnostic_labels,
+        rows,
+        likelihood_weights,
+        config,
+    )?;
+    let observed = selected_pair_matrix(gate_i, gate_j, rows)?;
+    let random_weight = selected_pair_matrix(random_weight_gate_i, random_weight_gate_j, rows)?;
+    let null_config = crate::null_battery::NullBatteryConfig {
+        replicates: CONDITIONALITY_NULL_REPLICATES,
+        seed: CONDITIONALITY_NULL_SEED,
+        kinds: vec![
+            crate::null_battery::NullKind::PhaseRandomized,
+            crate::null_battery::NullKind::RandomRotation,
+            crate::null_battery::NullKind::PerDimensionShuffle,
+            crate::null_battery::NullKind::ArchitectureMatchedRandomWeight,
+        ],
+        tail: crate::null_battery::Tail::Larger,
+    };
+    let nulls = crate::null_battery::run_null_battery(
+        observed.view(),
+        Some(random_weight.view()),
+        &null_config,
+        conditionality_matrix_stat,
+    )?;
+    let roc_config = crate::null_battery::SpikeInRocConfig::circle(
+        vec![CONDITIONALITY_CLAIMED_SNR],
+        CONDITIONALITY_SPIKE_TRIALS,
+        CONDITIONALITY_SPIKE_SEED,
+    );
+    let spike_in_roc =
+        crate::null_battery::default_spike_in_roc_curve(observed.view(), &roc_config)?;
+    let calibrated = crate::null_battery::calibrated_roc_claim_report(
+        "conditionality",
+        CONDITIONALITY_CLAIMED_SNR,
+        CONDITIONALITY_CLAIMED_FPR,
+        nulls,
+        spike_in_roc,
+    )?;
+    report.null_calibration =
+        Some(crate::null_battery::ClaimNullCalibration::from_calibrated_roc(calibrated)?);
+    Ok(report)
+}
 
 fn selected_pair_matrix(
     gate_i: &[f64],
