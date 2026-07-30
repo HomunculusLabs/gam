@@ -1931,8 +1931,26 @@ fn optimize_survival_transformation_smoothing(
         }
         candidate
             .set_penalty_lambdas(&lambdas)
+            // A lambda THIS TRIAL RHO produced was refused by the model. The
+            // outer search's only lever is rho, and moving it is the right
+            // response, so the verdict must be per-trial-point, not per-problem
+            // (#2531/#2590): minting `InvalidInput` here graded the refusal
+            // Fatal (`is_trial_point_infeasible` is false for it) and killed the
+            // whole seed cascade instead of retreating from one rho.
+            //
+            // `set_penalty_lambdas`'s length-mismatch arm is structurally
+            // unreachable from this call site: `lambdas` is `seed_lambdas.clone()`
+            // with only the leading `num_smoothing` entries overwritten, so its
+            // length is fixed by construction. The only reachable arm is the
+            // lambda-VALUE arm, which is rho-local.
+            //
+            // `wrap_preserving_trial_point` is deliberately NOT used here: the
+            // source only ever produces `InvalidInput`, for which that helper is
+            // a no-op, so it would be a silent non-fix.
             .map_err(|error| {
-                gam_solve::estimate::EstimationError::InvalidInput(error.to_string())
+                gam_solve::estimate::EstimationError::TrialPointRefused {
+                    reason: format!("survival smoothing trial lambda rejected: {error}"),
+                }
             })?;
         let opts = gam_solve::pirls::WorkingModelPirlsOptions {
             max_iterations: SURVIVAL_TRANSFORMATION_PIRLS_MAX_ITERATIONS,
@@ -1994,10 +2012,21 @@ fn optimize_survival_transformation_smoothing(
                 .copied()
                 .enumerate()
                 .map(|(coordinate, value)| {
+                    // The candidate lambda vector is a function of THIS trial
+                    // rho, so a domain refusal on one of its entries is
+                    // rho-local: the outer search can retreat from this point.
+                    // `InvalidInput` graded it Fatal and aborted the cascade
+                    // (#2531/#2590). Message text is preserved verbatim.
+                    //
+                    // (`wrap_preserving_trial_point` is not applicable here: the
+                    // upstream error is a `PhysicalStrengthDomainError`, not an
+                    // `EstimationError`, so the method does not exist on it.)
                     gam_problem::checked_log_strength(value).map_err(|error| {
-                        gam_solve::estimate::EstimationError::InvalidInput(format!(
-                            "survival smoothing candidate lambda {coordinate}: {error}"
-                        ))
+                        gam_solve::estimate::EstimationError::TrialPointRefused {
+                            reason: format!(
+                                "survival smoothing candidate lambda {coordinate}: {error}"
+                            ),
+                        }
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?,
@@ -2015,17 +2044,49 @@ fn optimize_survival_transformation_smoothing(
         // lists the smoothing blocks first (they are constructed first and the
         // ridge is appended last), so the leading `num_smoothing` gradient
         // entries are exactly ∂LAML/∂ρ_smooth with the ridge held fixed.
-        if grad_full.len() < num_smoothing || !cost.is_finite() {
-            return Err(gam_solve::estimate::EstimationError::InvalidInput(
-                "survival smoothing LAML cost was non-finite or gradient was too short"
-                    .to_string(),
-            ));
+        // These two conditions were fused into one `InvalidInput`, which forced
+        // a layout defect and a trial-point defect to share a verdict. They are
+        // split, layout check FIRST, so each gets the grading it earns.
+        //
+        // A gradient shorter than the smoothing block count is a LAYOUT defect
+        // of the evaluator, not a property of this rho: no choice of rho makes a
+        // gradient longer. It stays Fatal `InvalidInput`.
+        //
+        // Recorded honestly, because it cuts the other way: the framework's own
+        // `OuterThetaLayout::validate_gradient_len`
+        // (`rho_optimizer/capability.rs`) grades a gradient-length mismatch
+        // RECOVERABLE. So the "the layer below already says so" argument that
+        // justifies the cost and gradient arms below points the OPPOSITE
+        // direction here. This keeps the pre-existing Fatal grading for the
+        // layout half and changes only the halves where the framework agrees;
+        // resolving which of the two sites is miscategorized is separate work.
+        if grad_full.len() < num_smoothing {
+            return Err(gam_solve::estimate::EstimationError::InvalidInput(format!(
+                "survival smoothing LAML gradient was too short: {} entries for \
+                 {num_smoothing} smoothing coordinates",
+                grad_full.len()
+            )));
+        }
+        // A non-finite cost IS rho-local, and the framework one layer down
+        // grades exactly this condition recoverable:
+        // `rho_optimizer/objective.rs` `finite_cost_or_error` returns
+        // `ObjectiveEvalError::recoverable` for it. Grading it Fatal here
+        // contradicted the layer this closure feeds (#2531/#2590).
+        if !cost.is_finite() {
+            return Err(gam_solve::estimate::EstimationError::TrialPointRefused {
+                reason: "survival smoothing LAML cost was non-finite".to_string(),
+            });
         }
         let grad = grad_full.slice(s![..num_smoothing]).to_owned();
+        // Also rho-local, and again the layer below agrees:
+        // `rho_optimizer/objective.rs` `validate_outer_first_order` returns
+        // `ObjectiveEvalError::recoverable` for a non-finite outer gradient.
+        // `InvalidInput` was the one grading that short-circuits the seed
+        // cascade (#2531/#2590).
         if grad.iter().any(|g| !g.is_finite()) {
-            return Err(gam_solve::estimate::EstimationError::InvalidInput(
-                "survival smoothing LAML gradient was non-finite".to_string(),
-            ));
+            return Err(gam_solve::estimate::EstimationError::TrialPointRefused {
+                reason: "survival smoothing LAML gradient was non-finite".to_string(),
+            });
         }
         *eval_cache.borrow_mut() = Some((rho_smooth.to_owned(), cost, grad.clone()));
         Ok((cost, grad))
