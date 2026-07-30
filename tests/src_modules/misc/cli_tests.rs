@@ -267,7 +267,16 @@ fn core_saved_fit_result_preserves_summary_metrics() {
     summary.iterations = 60;
     summary.finalgrad_norm = 42.0;
 
-    let fit = core_saved_fit_result(array![1.0], Array1::zeros(0), 1.0, None, None, summary);
+    // The smoothing vector has to be NON-EMPTY for an outer iteration count to
+    // mean anything. With zero smoothing coordinates there is no equation for
+    // the outer loop to solve, so `UnifiedFitResult` canonicalizes the pair to
+    // the exact `Fixed` representation -- `(0, FitOuterConvergenceEvidence::
+    // Fixed)` -- on the documented grounds that dimensionality, not an
+    // implementation counter, is the semantic authority. Asserting that 60
+    // survives `Array1::zeros(0)` asked the constructor to contradict itself,
+    // and it cannot exercise "metrics survive the round-trip" on a path where
+    // the metric is definitionally absent.
+    let fit = core_saved_fit_result(array![1.0], array![1.0], 1.0, None, None, summary);
 
     assert_eq!(fit.outer_iterations, 60);
     assert_eq!(fit.outer_gradient_norm, Some(42.0));
