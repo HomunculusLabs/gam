@@ -2838,7 +2838,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
          designs: &[TermCollectionDesign],
          eval_mode,
          row_set: &crate::row_kernel::RowSet,
-         _owned_value_mode| {
+         _| {
             if let Some(err) = runaway_error.borrow().as_ref().cloned() {
                 return Err(err);
             }

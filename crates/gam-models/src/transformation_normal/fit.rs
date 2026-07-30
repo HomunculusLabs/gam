@@ -593,7 +593,7 @@ pub fn fit_transformation_normal(
          designs: &[TermCollectionDesign],
          eval_mode,
          row_set,
-         _owned_value_mode| {
+         _| {
             let rho = theta.slice(s![..joint_setup.rho_dim()]).to_owned();
             let hyper_values = theta.slice(s![joint_setup.rho_dim()..]).to_owned();
             ensure_exact_geometry(&specs[0], &designs[0], &rho, &hyper_values)?;
