@@ -8322,7 +8322,25 @@ where
             inside_x = probe;
         }
     }
-    Ok((inside_x + 0.5 * (outside_x - inside_x), false))
+    // The bracket is only contracted to `x_tolerance`, so its midpoint carries
+    // an error of half that width -- a floor the reported endpoint inherits no
+    // matter how exact the profile score is, and `x_tolerance` is itself
+    // floored at `sqrt(EPSILON)` regardless of the tolerance the caller asked
+    // for. `outside_x` already holds the analytic score and residual evaluated
+    // there, so one final Newton step costs no additional profile evaluation
+    // and resolves the crossing to the accuracy of the score itself. It is
+    // taken only when it lands inside the certified bracket; otherwise the
+    // midpoint stands.
+    let midpoint = inside_x + 0.5 * (outside_x - inside_x);
+    let refined = outside_x - outside_residual / outside_score;
+    let lo = inside_x.min(outside_x);
+    let hi = inside_x.max(outside_x);
+    let endpoint = if refined.is_finite() && refined >= lo && refined <= hi {
+        refined
+    } else {
+        midpoint
+    };
+    Ok((endpoint, false))
 }
 
 fn curvature_profile_ci_from_analytic_score<F>(
