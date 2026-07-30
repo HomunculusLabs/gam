@@ -1088,15 +1088,26 @@ mod tests_zz_measure_2280 {
     };
     use ndarray::Array2;
 
-    fn report(label: &str, z: &Array2<f64>, d: usize) {
+    /// Build the fixture's atlas, read its topology out, PRINT the measurement --
+    /// and hand the caller a verdict it cannot discard.
+    ///
+    /// This used to swallow BOTH error arms: a bare `return` on a failed build
+    /// and a bare `eprintln!` on a failed readout. All twenty-one zoo fixtures
+    /// could therefore fail to build AND fail to read out with the test still
+    /// reporting green, which is strictly worse than a skip -- a skip at least
+    /// announces itself. Both arms are now errors the caller collects.
+    ///
+    /// Deliberately NOT asserted here: that the readout's intrinsic dimension
+    /// equals the `d` the fixture passes in. `LocalAtlas::build` stores
+    /// `config.intrinsic_dim` and `observe_atlas_topology` reads it straight
+    /// back, so that comparison is a config round-trip that cannot fail on any
+    /// input -- adding it would be the same species of defect this change
+    /// exists to remove. A real dimension check needs an ESTIMATED rank (from
+    /// the local-PCA spectra), which the readout does not currently carry.
+    fn report(label: &str, z: &Array2<f64>, d: usize) -> Result<(), String> {
         let config = LocalAtlasConfig::balanced(z.nrows(), d);
-        let atlas = match crate::manifold::LocalAtlas::build(z.view(), config) {
-            Ok(atlas) => atlas,
-            Err(error) => {
-                eprintln!("{label}: atlas build failed: {error}");
-                return;
-            }
-        };
+        let atlas = crate::manifold::LocalAtlas::build(z.view(), config)
+            .map_err(|error| format!("{label}: atlas build failed: {error}"))?;
         match observe_atlas_topology(&atlas) {
             Ok(readout) => eprintln!(
                 "{label}: n={} patches={} size={} | {} | counts={:?} open_tri={} incoherent={} \
@@ -1111,8 +1122,9 @@ mod tests_zz_measure_2280 {
                 readout.invariants().max_cover_multiplicity,
                 readout.invariants().mean_cover_multiplicity,
             ),
-            Err(error) => eprintln!("{label}: readout failed: {error}"),
+            Err(error) => return Err(format!("{label}: readout failed: {error}")),
         }
+        Ok(())
     }
 
     /// Dump the recovered atlas of one fixture in a line format a plotting script
@@ -1168,29 +1180,50 @@ mod tests_zz_measure_2280 {
         dump("sphere", &sphere(400), 2);
     }
 
+    /// The contract is in the name: a "known topology zoo" is a set of fixtures
+    /// whose topology is known, so each must at minimum BUILD an atlas and READ
+    /// OUT. The body only printed, so the name was unbacked and all twenty-one
+    /// fixtures could fail silently.
+    ///
+    /// Every fixture is still attempted -- one failure must not hide the other
+    /// twenty -- and the assertion names each one that failed.
     #[test]
     fn zz_measure_known_topology_zoo_2280() {
-        report("circle", &circle(200, 2.0), 1);
-        report("circle_big", &circle(400, 2.0), 1);
-        report("trefoil_400", &trefoil_knot(400, 1.0), 1);
-        report("trefoil_600", &trefoil_knot(600, 1.0), 1);
-        report("trefoil_900", &trefoil_knot(900, 1.0), 1);
-        report("open_arc", &open_arc(200, 2.0), 1);
-        report("plane", &embedded_plane(24, 24), 2);
-        report("swiss_roll", &swiss_roll(40, 12), 2);
-        report("cylinder", &cylinder_strip(40, 10), 2);
-        report("cylinder_big", &cylinder_strip(60, 14), 2);
-        report("spherical_band", &spherical_band(20, 26), 2);
-        report("mobius", &mobius_strip(40, 10), 2);
-        report("mobius_big", &mobius_strip(60, 14), 2);
-        report("sphere_400", &sphere(400), 2);
-        report("sphere_900", &sphere(900), 2);
-        report("sphere_1600", &sphere(1600), 2);
-        report("torus_48x20", &torus(48, 20, 2.0, 0.8), 2);
-        report("torus_60x26", &torus(60, 26, 2.0, 0.8), 2);
-        report("torus_80x34", &torus(80, 34, 2.0, 0.8), 2);
-        report("torus_fat_60x30", &torus(60, 30, 3.0, 1.5), 2);
-        report("torus_fat_90x45", &torus(90, 45, 3.0, 1.5), 2);
+        let mut failures: Vec<String> = Vec::new();
+        for outcome in [
+            report("circle", &circle(200, 2.0), 1),
+            report("circle_big", &circle(400, 2.0), 1),
+            report("trefoil_400", &trefoil_knot(400, 1.0), 1),
+            report("trefoil_600", &trefoil_knot(600, 1.0), 1),
+            report("trefoil_900", &trefoil_knot(900, 1.0), 1),
+            report("open_arc", &open_arc(200, 2.0), 1),
+            report("plane", &embedded_plane(24, 24), 2),
+            report("swiss_roll", &swiss_roll(40, 12), 2),
+            report("cylinder", &cylinder_strip(40, 10), 2),
+            report("cylinder_big", &cylinder_strip(60, 14), 2),
+            report("spherical_band", &spherical_band(20, 26), 2),
+            report("mobius", &mobius_strip(40, 10), 2),
+            report("mobius_big", &mobius_strip(60, 14), 2),
+            report("sphere_400", &sphere(400), 2),
+            report("sphere_900", &sphere(900), 2),
+            report("sphere_1600", &sphere(1600), 2),
+            report("torus_48x20", &torus(48, 20, 2.0, 0.8), 2),
+            report("torus_60x26", &torus(60, 26, 2.0, 0.8), 2),
+            report("torus_80x34", &torus(80, 34, 2.0, 0.8), 2),
+            report("torus_fat_60x30", &torus(60, 30, 3.0, 1.5), 2),
+            report("torus_fat_90x45", &torus(90, 45, 3.0, 1.5), 2),
+        ] {
+            if let Err(failure) = outcome {
+                failures.push(failure);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "#2280: {} of 21 known-topology-zoo fixtures failed to build an atlas \
+             or read its topology out:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
     }
 }
 
