@@ -99,7 +99,7 @@ echo "$outcome,$cause"
     let (out, cause) = run_case(
         "",
         101,
-        "thread 'main' panicked at crates/gam-test-support/src/reference.rs:20:\nData mismatch",
+        "thread 'main' panicked at src/test_support/reference.rs:20:\nData mismatch",
         "test4",
     );
     assert_eq!(out, "TEST_ERROR");
