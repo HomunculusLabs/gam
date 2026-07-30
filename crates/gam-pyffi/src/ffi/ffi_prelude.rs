@@ -10,37 +10,20 @@ pub(crate) use csv::StringRecord;
 
 pub(crate) use faer::Side;
 
-pub(crate) use gam::families::fit_orchestration::DispersionLocationScaleFitResult;
-
 pub(crate) use gam::terms::basis::create_duchon_basis_1d_derivative_dense;
 
 pub(crate) use gam::solver::estimate::{
     BlockRole, EstimationError, ExternalOptimOptions,
-    optimize_external_designwith_heuristic_lambdas, saved_latent_cloglog_state_from_fit,
-    saved_mixture_state_from_fit, saved_sas_state_from_fit,
+    optimize_external_designwith_heuristic_lambdas,
 };
 
 pub(crate) use gam::linalg::faer_ndarray::{
-    FaerCholesky, array2_to_matmut, factorize_symmetricwith_fallback, fast_xt_diag_x,
+    array2_to_matmut, factorize_symmetricwith_fallback, fast_xt_diag_x,
 };
-
-pub(crate) use gam::families::bms::BernoulliMarginalSlopeFitResult;
 
 pub(crate) use gam::families::inverse_link::{apply_inverse_link_spec_vec, apply_inverse_link_vec};
 
-pub(crate) use gam::families::scale_design::build_scale_deviation_transform;
-
-pub(crate) use gam::families::survival::construction::{
-    SavedSurvivalTimeBasis, survival_likelihood_modename,
-};
-
-pub(crate) use gam::families::survival::predict::{
-    apply_inverse_link_state_to_fit_result, fit_result_from_saved_model_for_prediction,
-};
-
-pub(crate) use gam::families::gamlss::{
-    BinomialLocationScaleFitResult, DispersionFamilyKind, GaussianLocationScaleFitResult,
-};
+pub(crate) use gam::families::survival::predict::fit_result_from_saved_model_for_prediction;
 
 pub(crate) use gam::solver::gaussian_reml::{
     GaussianRemlMultiBackwardProblem, build_gaussian_reml_eigen_cache_batched,
@@ -82,20 +65,8 @@ pub(crate) use gam::data::{
 pub(crate) use gam::inference::formula_dsl::{parse_formula, parse_surv_response};
 
 pub(crate) use gam::inference::model::{
-    FittedEstimator, FittedFamily, FittedModel, FittedModelPayload, GroupMetadata,
-    MODEL_PAYLOAD_VERSION, ModelKind, PredictModelClass, SavedDeploymentExtension,
-    SavedLatentZNormalization, append_deployment_extension_columns,
-};
-
-pub(crate) use gam::inference::model_payload_builders::{
-    BernoulliMarginalSlopeInputs, LatentWindowInputs, LocationScaleInputs, LocationScaleResponse,
-    LocationScaleWiggle, SavedModelSourceMetadata, SurvivalLocationScaleInputs,
-    SurvivalMarginalSlopeInputs, SurvivalTimewiggle, SurvivalTimewiggleBeta,
-    SurvivalTransformationInputs, TransformationNormalInputs,
-    assemble_bernoulli_marginal_slope_payload, assemble_latent_window_payload,
-    assemble_location_scale_payload, assemble_survival_location_scale_payload,
-    assemble_survival_marginal_slope_payload, assemble_survival_transformation_payload,
-    assemble_transformation_normal_payload,
+    FittedFamily, FittedModel, FittedModelPayload, GroupMetadata, PredictModelClass,
+    SavedDeploymentExtension, append_deployment_extension_columns,
 };
 
 pub(crate) use gam_predict::posterior_bands::{self, PosteriorPredictBandsPayload};
@@ -114,10 +85,7 @@ pub(crate) use gam::geometry::sinkhorn_barycenter::{
 
 pub(crate) use gam::report::{CoefficientRow, EdfBlockRow, ReportInput, render_html};
 
-pub(crate) use gam::families::fit_orchestration::drivers::freeze_term_collection_from_design;
-pub(crate) use gam::terms::smooth::{
-    TermCollectionDesign, TermCollectionSpec, smooth_term_feature_cols,
-};
+pub(crate) use gam::terms::smooth::{TermCollectionSpec, smooth_term_feature_cols};
 // #1521: relocated DOWN into gam_terms::smooth (was families::...::drivers).
 pub(crate) use gam::terms::smooth::{
     build_term_collection_derivative_design, build_term_collection_design,
@@ -128,8 +96,6 @@ pub(crate) use gam::families::fit_orchestration::descriptors::build_analytic_pen
 pub(crate) use gam::solver::evidence::{
     RemlCandidate, compare_reml_fits as compare_reml_fits_core, log_bayes_factor,
 };
-
-pub(crate) use gam::families::survival::marginal_slope::SurvivalMarginalSlopeFitResult;
 
 pub(crate) use gam::terms::basis::{
     BasisOptions, CenterStrategy, Dense, DuchonBasisSpec, DuchonNullspaceOrder,
@@ -206,13 +172,11 @@ pub(crate) use gam::terms::{
     SheafConsistencyPenalty as CoreSheafConsistencyPenalty,
 };
 
-pub(crate) use gam::families::transformation_normal::TransformationNormalFitResult;
-
 pub(crate) use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, RhoPrior, StandardLink};
 
 pub(crate) use gam::families::fit_orchestration::{
-    FitConfig, FitRequest, FitResult, WorkflowError, fit_model, materialize,
-    materialize_structural, resolve_offset_column, resolve_weight_column,
+    FitConfig, FitRequest, WorkflowError, materialize, materialize_structural,
+    resolve_offset_column, resolve_weight_column,
 };
 
 pub(crate) use ndarray::{

@@ -17,11 +17,18 @@
 
 use crate::bms::deviation_runtime::AnchorComponentTag;
 use crate::bms::{
-    DeviationRuntime, LatentMeasureKind, LatentZConditionalCalibration, LatentZRankIntCalibration,
+    BernoulliMarginalSlopeFitResult, DeviationRuntime, LatentMeasureKind, LatentZConditionalCalibration, LatentZRankIntCalibration,
 };
 use crate::cubic_cell_kernel::ANCHORED_DEVIATION_KERNEL;
 use crate::fit_orchestration::drivers::freeze_term_collection_from_design;
-use crate::fit_orchestration::{FitConfig, StandardFitResult, expectile_tau_for_config};
+use crate::fit_orchestration::{
+    DispersionLocationScaleFitResult, FitConfig, FitRequest, FitResult, StandardFitResult,
+    WorkflowError, expectile_tau_for_config, fit_expectile_if_requested,
+    fit_materialized_standard_with_notes, fit_model, materialize,
+};
+use crate::gamlss::{
+    BinomialLocationScaleFitResult, DispersionFamilyKind, GaussianLocationScaleFitResult,
+};
 use crate::inference::model::{
     FittedEstimator, FittedFamily, FittedModelPayload, MODEL_PAYLOAD_VERSION, ModelKind,
     SavedAnchorComponent, SavedAnchorKind, SavedCompiledFlexBlock, SavedLatentZNormalization,
@@ -29,18 +36,21 @@ use crate::inference::model::{
     SavedTransformationNormalGeometry, TransformationNormalParameterization,
     TransformationScoreCalibration,
 };
-use crate::scale_design::ScaleDeviationTransform;
+use crate::scale_design::{ScaleDeviationTransform, build_scale_deviation_transform};
 use crate::survival::construction::{
     SavedSurvivalTimeBasis, SurvivalBaselineConfig, survival_baseline_targetname,
 };
+use crate::survival::marginal_slope::SurvivalMarginalSlopeFitResult;
+use crate::survival::predict::apply_inverse_link_state_to_fit_result;
 use crate::survival::location_scale::{
     ResidualDistribution, SurvivalCovariateTimeBasis, SurvivalLocationScaleTimeParameterization,
     residual_distribution_from_inverse_link,
 };
-use crate::transformation_normal::TransformationNormalFamily;
+use crate::transformation_normal::{TransformationNormalFamily, TransformationNormalFitResult};
 use faer::Side;
 use gam_data::{DataSchema, EncodedDataset};
 use gam_linalg::faer_ndarray::{FaerCholesky, array2_to_nested_vec};
+use gam_problem::BlockRole;
 use gam_problem::types::{
     InverseLink, LikelihoodSpec, ResponseFamily, StandardLink, inverse_link_to_binomial_spec,
 };
@@ -48,8 +58,10 @@ use gam_solve::estimate::{
     FittedLinkState, UnifiedFitResult, saved_latent_cloglog_state_from_fit,
     saved_mixture_state_from_fit, saved_sas_state_from_fit,
 };
+use gam_terms::inference::formula_dsl::{parse_formula, parse_surv_response};
 use gam_terms::smooth::{TermCollectionDesign, TermCollectionSpec};
 use ndarray::{Array1, Array2, s};
+use std::collections::HashMap;
 
 /// Family tag persisted for Bernoulli marginal-slope saved models.
 const FAMILY_BERNOULLI_MARGINAL_SLOPE: &str = "bernoulli-marginal-slope";
@@ -1397,6 +1409,1300 @@ pub fn assemble_latent_window_payload(
     payload.resolved_termspec = Some(inputs.resolved_termspec);
     source.apply_to(&mut payload);
     payload
+}
+
+/// One authoritative "formula fit → saved payload" service: materialize once,
+/// dispatch on the request variant, fit, and assemble the persistence payload.
+/// Both front ends (CLI, Python FFI) must route through this function so a fit
+/// requested through any surface produces an identical saved model. (#2470)
+pub fn fit_formula_to_payload(
+    formula: String,
+    dataset: &EncodedDataset,
+    fit_config: &FitConfig,
+) -> Result<FittedModelPayload, WorkflowError> {
+    // Expectile (Newey–Powell LAWS) family (#1777): the expectile estimator is an
+    // OUTER driver that wraps the standard Gaussian-identity GAM with iterative
+    // asymmetric reweighting, so it is selected *before* `materialize` (which has
+    // no expectile arm) — exactly as the in-process `fit_from_formula` does. We
+    // route it through the single shared dispatch seam so the Python API reaches
+    // the same estimator the library call does instead of failing with
+    // `unknown family 'expectile(τ)'`. The driver returns an ordinary
+    // `StandardFitResult`, so the persistence payload is built by the same
+    // `assemble_standard_payload` used for every other standard fit.
+    if let Some(expectile_result) = fit_expectile_if_requested(&formula, dataset, fit_config)? {
+        let mut payload = assemble_standard_payload(StandardPayloadInputs {
+            formula,
+            dataset,
+            fit_config,
+            result: expectile_result,
+        })?;
+        payload.group_metadata = fit_config.group_metadata.clone();
+        payload.training_table_kind = fit_config.training_table_kind.clone();
+        // The LAWS driver materializes its inner Gaussian design itself; there are
+        // no outer materialize advisories to carry (matches `fit_from_formula`).
+        payload.inference_notes = Vec::new();
+        return Ok(payload);
+    }
+    // Calibrated marginal-slope chain (#461): when a CTN Stage-1 recipe is present
+    // (config.ctn_stage1), the marginal-slope materializer cross-fits the CTN and
+    // produces the calibrated `z` out-of-fold — no z_column is needed and no
+    // Stage-1 pre-fit / synthetic column round-trip is performed here. The recipe
+    // rides on fit_config straight into materialize.
+    // Standard-fit dispatch must materialize at the adaptive structural start:
+    // this request becomes the first fitted design below. Other estimator
+    // materializers do not consume this standard-only orchestration field.
+    let mut dispatch_config = fit_config.clone();
+    dispatch_config.spatial_center_counts = Some(Vec::new());
+    let materialized = materialize(&formula, dataset, &dispatch_config)?;
+    let request = materialized.request;
+    // Advisories produced while materializing (e.g. the mgcv-style "k reduced to
+    // the data support" / basis-degradation notes from the cr/cs/sz cap, #1541
+    // #1542). The CLI prints these via `print_inference_summary`; the Python
+    // path used to drop them on the floor, so a gamfit user whose basis was
+    // silently capped got no signal at all (#1543). Carry them into the
+    // serialized payload so gamfit can surface them as `GamInferenceWarning`s
+    // and via `model.notes`.
+    let mut inference_notes = materialized.inference_notes;
+
+    let mut payload = match request {
+        FitRequest::Standard(standard_request) => {
+            // Fit the request that selected this arm, then hand its converged
+            // result to the same loop owner the CLI uses. Re-entering the
+            // formula entry point here used to materialize the spatial design a
+            // second time; before the adaptive loop landed, the first discarded
+            // design was also the old fully provisioned rank (#1689).
+            let standard_spec = standard_request.spec.clone();
+            let initial_notes = std::mem::take(&mut inference_notes);
+            let outcome = fit_materialized_standard_with_notes(
+                &formula,
+                dataset,
+                fit_config,
+                standard_request,
+                initial_notes,
+            )?;
+            inference_notes = outcome.inference_notes;
+            match outcome.result {
+                FitResult::Standard(standard_result) => {
+                    assemble_standard_payload(StandardPayloadInputs {
+                        formula,
+                        dataset,
+                        fit_config,
+                        result: standard_result,
+                    })?
+                }
+                FitResult::SplineScan(scan) => {
+                    // The scan detection is structural on the materialized
+                    // shape, so the dispatch request's single smooth is the
+                    // same 1-D B-spline the entry point scan-routed.
+                    let feature_col = match &standard_spec.smooth_terms[0].basis {
+                        gam_terms::smooth::SmoothBasisSpec::BSpline1D { feature_col, .. } => {
+                            *feature_col
+                        }
+                        _ => {
+                            return Err(WorkflowError::SchemaMismatch {
+                                reason: "spline-scan detection accepted a non-1D basis".to_string(),
+                            });
+                        }
+                    };
+                    let feature_column =
+                        dataset.headers.get(feature_col).cloned().ok_or_else(|| {
+                            WorkflowError::SchemaMismatch {
+                                reason: format!(
+                                    "spline-scan feature column {feature_col} has no header"
+                                ),
+                            }
+                        })?;
+                    let mut scan_payload = assemble_spline_scan_payload(
+                        formula,
+                        feature_column,
+                        &scan,
+                        dataset.schema.clone(),
+                        dataset.headers.clone(),
+                        dataset.feature_ranges(),
+                    );
+                    scan_payload.weight_column = fit_config.weight_column.clone();
+                    scan_payload.group_metadata = fit_config.group_metadata.clone();
+                    scan_payload.training_table_kind = fit_config.training_table_kind.clone();
+                    scan_payload.inference_notes = inference_notes;
+                    return Ok(scan_payload);
+                }
+                FitResult::ResidualCascade(cascade) => {
+                    // The cascade fires only for a single scattered radial
+                    // smooth; recover its feature columns from the dispatch
+                    // request the same way the CLI does from its parsed
+                    // formula.
+                    let feature_cols = standard_spec
+                        .smooth_terms
+                        .iter()
+                        .find_map(|term| match &term.basis {
+                            gam_terms::smooth::SmoothBasisSpec::ThinPlate {
+                                feature_cols, ..
+                            }
+                            | gam_terms::smooth::SmoothBasisSpec::Duchon {
+                                feature_cols, ..
+                            }
+                            | gam_terms::smooth::SmoothBasisSpec::Matern {
+                                feature_cols, ..
+                            } => Some(feature_cols.clone()),
+                            _ => None,
+                        })
+                        .ok_or_else(|| WorkflowError::SchemaMismatch {
+                            reason: "residual-cascade result has no radial smooth in the \
+                                     materialized request"
+                                .to_string(),
+                        })?;
+                    let feature_columns = feature_cols
+                        .into_iter()
+                        .map(|col| {
+                            dataset.headers.get(col).cloned().ok_or_else(|| {
+                                WorkflowError::SchemaMismatch {
+                                    reason: format!(
+                                        "residual-cascade feature column {col} has no header"
+                                    ),
+                                }
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut cascade_payload = assemble_residual_cascade_payload(
+                        formula,
+                        feature_columns,
+                        &cascade,
+                        dataset.schema.clone(),
+                        dataset.headers.clone(),
+                        dataset.feature_ranges(),
+                    )
+                    .map_err(|reason| WorkflowError::IntegrationFailed { reason })?;
+                    cascade_payload.group_metadata = fit_config.group_metadata.clone();
+                    cascade_payload.training_table_kind = fit_config.training_table_kind.clone();
+                    cascade_payload.inference_notes = inference_notes;
+                    return Ok(cascade_payload);
+                }
+                _ => {
+                    return Err(WorkflowError::SchemaMismatch {
+                        reason: "python binding expected the standard workflow to return a standard fit result"
+                            .to_string(),
+                    });
+                }
+            }
+        }
+        FitRequest::TransformationNormal(tn_request) => {
+            let fit_result = fit_model(FitRequest::TransformationNormal(tn_request))?;
+            let tn_result = match fit_result {
+                FitResult::TransformationNormal(result) => result,
+                _ => {
+                    return Err(WorkflowError::SchemaMismatch {
+                        reason: "python binding expected the transformation-normal workflow to return a transformation-normal fit result"
+                            .to_string(),
+                    });
+                }
+            };
+            payload_for_transformation_normal(formula, dataset, fit_config, tn_result)?
+        }
+        FitRequest::BernoulliMarginalSlope(ms_request) => {
+            let base_link = ms_request.spec.base_link.clone();
+            let frailty = ms_request.spec.frailty.clone();
+            let fit_result = fit_model(FitRequest::BernoulliMarginalSlope(ms_request))?;
+            let ms_result = match fit_result {
+                FitResult::BernoulliMarginalSlope(result) => result,
+                _ => {
+                    return Err(WorkflowError::SchemaMismatch {
+                        reason: "python binding expected the bernoulli marginal-slope workflow to return a marginal-slope fit result"
+                            .to_string(),
+                    });
+                }
+            };
+            payload_for_bernoulli_marginal_slope(
+                formula,
+                dataset,
+                fit_config,
+                base_link,
+                frailty,
+                ms_result,
+            )?
+        }
+        FitRequest::SurvivalMarginalSlope(ms_request) => {
+            let frailty = ms_request.spec.frailty.clone();
+            let fit_result = fit_model(FitRequest::SurvivalMarginalSlope(ms_request))?;
+            let ms_result = match fit_result {
+                FitResult::SurvivalMarginalSlope(result) => result,
+                _ => {
+                    return Err(WorkflowError::SchemaMismatch {
+                        reason: "python binding expected the survival marginal-slope workflow to return a survival marginal-slope fit result"
+                            .to_string(),
+                    });
+                }
+            };
+            payload_for_survival_marginal_slope(formula, dataset, fit_config, frailty, ms_result)?
+        }
+        FitRequest::GaussianLocationScale(ls_request) => {
+            let fit_result = fit_model(FitRequest::GaussianLocationScale(ls_request))?;
+            let ls_result = match fit_result {
+                FitResult::GaussianLocationScale(result) => result,
+                _ => {
+                    return Err(WorkflowError::SchemaMismatch {
+                        reason: "python binding expected the gaussian location-scale workflow to return a gaussian location-scale fit result"
+                            .to_string(),
+                    });
+                }
+            };
+            // Persist the response standardization factor the fit applied so
+            // prediction reconstructs the σ floor at `response_scale·0.01`,
+            // keeping predictive σ response-scale-equivariant (#884). The fit
+            // already mapped the log-σ `exp(η)` term to raw units via the
+            // `+ln(response_scale)` intercept shift; only the additive floor
+            // still needs the factor at reconstruction time.
+            let response_scale = ls_result.response_scale;
+            payload_for_gaussian_location_scale(
+                formula,
+                dataset,
+                fit_config,
+                ls_result,
+                response_scale,
+            )?
+        }
+        FitRequest::BinomialLocationScale(ls_request) => {
+            let weights = ls_request.spec.weights.clone();
+            let link_kind = ls_request.spec.link_kind.clone();
+            let fit_result = fit_model(FitRequest::BinomialLocationScale(ls_request))?;
+            let ls_result = match fit_result {
+                FitResult::BinomialLocationScale(result) => result,
+                _ => {
+                    return Err(WorkflowError::SchemaMismatch {
+                        reason: "python binding expected the binomial location-scale workflow to return a binomial location-scale fit result"
+                            .to_string(),
+                    });
+                }
+            };
+            payload_for_binomial_location_scale(
+                formula,
+                dataset,
+                fit_config,
+                link_kind,
+                &weights,
+                ls_result,
+            )?
+        }
+        FitRequest::SurvivalLocationScale(ls_request) => {
+            let fit_result = fit_model(FitRequest::SurvivalLocationScale(ls_request))?;
+            let ls_result = match fit_result {
+                FitResult::SurvivalLocationScale(result) => result,
+                _ => {
+                    return Err(WorkflowError::SchemaMismatch {
+                        reason: "python binding expected the survival location-scale workflow to return a survival location-scale fit result"
+                            .to_string(),
+                    });
+                }
+            };
+            payload_for_survival_location_scale(formula, dataset, fit_config, ls_result)?
+        }
+        FitRequest::SurvivalTransformation(rp_request) => {
+            let fit_result = fit_model(FitRequest::SurvivalTransformation(rp_request))?;
+            let rp_result = match fit_result {
+                FitResult::SurvivalTransformation(result) => result,
+                _ => {
+                    return Err(WorkflowError::SchemaMismatch {
+                        reason: "python binding expected the survival transformation workflow to return a survival transformation fit result"
+                            .to_string(),
+                    });
+                }
+            };
+            payload_for_survival_transformation(formula, dataset, fit_config, rp_result)?
+        }
+        FitRequest::LatentSurvival(lat_request) => {
+            let frailty = lat_request.frailty.clone();
+            let fit_result = fit_model(FitRequest::LatentSurvival(lat_request))?;
+            let lat_result = match fit_result {
+                FitResult::LatentSurvival(result) => result,
+                _ => {
+                    return Err(WorkflowError::SchemaMismatch {
+                        reason: "python binding expected the latent survival workflow to return a latent survival fit result"
+                            .to_string(),
+                    });
+                }
+            };
+            payload_for_latent_survival(formula, dataset, fit_config, frailty, lat_result)?
+        }
+        FitRequest::LatentBinary(lat_request) => {
+            let frailty = lat_request.frailty.clone();
+            let fit_result = fit_model(FitRequest::LatentBinary(lat_request))?;
+            let lat_result = match fit_result {
+                FitResult::LatentBinary(result) => result,
+                _ => {
+                    return Err(WorkflowError::SchemaMismatch {
+                        reason: "python binding expected the latent binary workflow to return a latent binary fit result"
+                            .to_string(),
+                    });
+                }
+            };
+            payload_for_latent_binary(formula, dataset, fit_config, frailty, lat_result)?
+        }
+        FitRequest::DispersionLocationScale(ls_request) => {
+            // Genuine-dispersion location-scale family (#913): NB / Gamma / Beta
+            // / Tweedie mean families whose `noise_formula` models the
+            // overdispersion channel. Magic-detected upstream from a
+            // `noise_formula` on one of those families; the FFI freezes the mean
+            // and log-precision specs and persists them via the same shared
+            // location-scale assembler the CLI uses.
+            let kind = ls_request.spec.kind;
+            let fit_result = fit_model(FitRequest::DispersionLocationScale(ls_request))?;
+            let ls_result = match fit_result {
+                FitResult::DispersionLocationScale(result) => result,
+                _ => {
+                    return Err(WorkflowError::SchemaMismatch {
+                        reason: "python binding expected the dispersion location-scale workflow to return a dispersion location-scale fit result"
+                            .to_string(),
+                    });
+                }
+            };
+            payload_for_dispersion_location_scale(formula, dataset, fit_config, kind, ls_result)?
+        }
+    };
+    payload.group_metadata = fit_config.group_metadata.clone();
+    payload.training_table_kind = fit_config.training_table_kind.clone();
+    payload.inference_notes = inference_notes;
+    Ok(payload)
+}
+
+fn payload_for_transformation_normal(
+    formula: String,
+    dataset: &EncodedDataset,
+    fit_config: &FitConfig,
+    tn_result: TransformationNormalFitResult,
+) -> Result<FittedModelPayload, String> {
+    let frozen_covariate = freeze_term_collection_from_design(
+        &tn_result.covariate_spec_resolved,
+        &tn_result.covariate_design,
+    )
+    .map_err(|err| format!("failed to freeze transformation-normal covariate spec: {err}"))?;
+
+    // Thin adapter over the shared core assembler; the FFI freezes the
+    // covariate spec from its design and reads the offset column from the
+    // FitConfig. See `assemble_transformation_normal_payload`.
+    Ok(assemble_transformation_normal_payload(
+        TransformationNormalInputs {
+            formula,
+            data_schema: dataset.schema.clone(),
+            resolved_covariate_spec: frozen_covariate,
+            fit_result: tn_result.fit.clone(),
+            family: &tn_result.family,
+            score_calibration: tn_result.score_calibration.clone(),
+        },
+        SavedModelSourceMetadata {
+            training_headers: dataset.headers.clone(),
+            training_feature_ranges: Some(dataset.feature_ranges()),
+            offset_column: fit_config.offset_column.clone(),
+            noise_offset_column: None,
+        },
+    ))
+}
+
+fn payload_for_bernoulli_marginal_slope(
+    formula: String,
+    dataset: &EncodedDataset,
+    fit_config: &FitConfig,
+    base_link: InverseLink,
+    frailty: crate::survival::lognormal_kernel::FrailtySpec,
+    ms_result: BernoulliMarginalSlopeFitResult,
+) -> Result<FittedModelPayload, String> {
+    let frozen_marginal = freeze_term_collection_from_design(
+        &ms_result.marginalspec_resolved,
+        &ms_result.marginal_design,
+    )
+    .map_err(|err| format!("failed to freeze marginal spec: {err}"))?;
+    let frozen_logslope = freeze_term_collection_from_design(
+        &ms_result.logslopespec_resolved,
+        &ms_result.logslope_design,
+    )
+    .map_err(|err| format!("failed to freeze logslope spec: {err}"))?;
+
+    let logslope_formula = fit_config
+        .logslope_formula
+        .clone()
+        .ok_or_else(|| "bernoulli marginal-slope requires logslope_formula".to_string())?;
+    let z_column = fit_config
+        .z_column
+        .clone()
+        .ok_or_else(|| "bernoulli marginal-slope requires z_column".to_string())?;
+
+    // Thin adapter over the shared core assembler. The FFI's source-specific
+    // work is freezing term collections from their designs, reading the
+    // logslope formula / z column / offset columns from the FitConfig, and
+    // persisting headers without per-feature ranges; the semantic payload is
+    // assembled by the same core path the CLI uses, so the two save routes
+    // produce identical contracts.
+    assemble_bernoulli_marginal_slope_payload(
+        BernoulliMarginalSlopeInputs {
+            formula,
+            data_schema: dataset.schema.clone(),
+            logslope_formula,
+            z_column,
+            resolved_marginalspec: frozen_marginal,
+            resolved_logslopespec: frozen_logslope,
+            fit_result: ms_result.fit.clone(),
+            p_marginal: ms_result.marginal_design.design.ncols(),
+            baseline_marginal: ms_result.baseline_marginal,
+            baseline_logslope: ms_result.baseline_logslope,
+            latent_z_normalization: SavedLatentZNormalization {
+                mean: ms_result.z_normalization.mean,
+                sd: ms_result.z_normalization.sd,
+            },
+            latent_measure: ms_result.latent_measure.clone(),
+            latent_z_rank_int_calibration: ms_result.latent_z_rank_int_calibration.clone(),
+            latent_z_conditional_calibration: ms_result.latent_z_conditional_calibration.clone(),
+            score_warp_runtime: ms_result.score_warp_runtime.as_ref(),
+            link_dev_runtime: ms_result.link_dev_runtime.as_ref(),
+            base_link,
+            frailty,
+        },
+        SavedModelSourceMetadata {
+            training_headers: dataset.headers.clone(),
+            training_feature_ranges: None,
+            offset_column: fit_config.offset_column.clone(),
+            noise_offset_column: fit_config.noise_offset_column.clone(),
+        },
+    )
+}
+
+fn payload_for_survival_marginal_slope(
+    formula: String,
+    dataset: &EncodedDataset,
+    fit_config: &FitConfig,
+    frailty: crate::survival::lognormal_kernel::FrailtySpec,
+    ms_result: SurvivalMarginalSlopeFitResult,
+) -> Result<FittedModelPayload, String> {
+    use crate::survival::construction::{
+        build_survival_time_basis, parse_survival_baseline_config, parse_survival_likelihood_mode,
+        parse_survival_time_basis_config, resolve_survival_marginal_slope_time_anchor_value,
+        survival_likelihood_modename, survival_marginal_slope_offset_baseline_config,
+    };
+    use ndarray::s;
+
+    let frozen_marginal = freeze_term_collection_from_design(
+        &ms_result.marginalspec_resolved,
+        &ms_result.marginal_design,
+    )
+    .map_err(|err| format!("failed to freeze survival marginal spec: {err}"))?;
+    let frozen_logslope = freeze_term_collection_from_design(
+        &ms_result.logslopespec_resolved,
+        &ms_result.logslope_design,
+    )
+    .map_err(|err| format!("failed to freeze survival logslope spec: {err}"))?;
+
+    let logslope_formula = fit_config
+        .logslope_formula
+        .clone()
+        .unwrap_or_else(|| "same-as-main".to_string());
+    let z_column = fit_config
+        .z_column
+        .clone()
+        .ok_or_else(|| "survival marginal-slope requires z_column".to_string())?;
+    let parsed = parse_formula(&formula)
+        .map_err(|err| format!("failed to re-parse survival marginal formula: {err}"))?;
+    let (entryname, exitname, eventname) = parse_surv_response(&parsed.response)?
+        .ok_or_else(|| "survival marginal-slope FFI requires Surv(...) response".to_string())?;
+    let col_map: HashMap<String, usize> = dataset
+        .headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| (h.clone(), i))
+        .collect();
+    // `entryname == None` is the right-censored shorthand `Surv(time, event)`:
+    // entry times are synthesized as zero, no column lookup required.
+    let entry_idx: Option<usize> = entryname
+        .as_deref()
+        .map(|name| {
+            col_map
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("entry column '{name}' not found"))
+        })
+        .transpose()?;
+    let exit_idx = *col_map
+        .get(&exitname)
+        .ok_or_else(|| format!("exit column '{exitname}' not found"))?;
+    let n = dataset.values.nrows();
+    let mut age_entry = Array1::<f64>::zeros(n);
+    let mut age_exit = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let entry_val = entry_idx.map_or(0.0, |idx| dataset.values[[i, idx]]);
+        let (t0, t1) = crate::survival::construction::normalize_survival_time_pair(
+            entry_val,
+            dataset.values[[i, exit_idx]],
+            i,
+        )?;
+        age_entry[i] = t0;
+        age_exit[i] = t1;
+    }
+    let baseline_cfg = parse_survival_baseline_config(
+        &fit_config.baseline_target,
+        fit_config.baseline_scale,
+        fit_config.baseline_shape,
+        fit_config.baseline_rate,
+        fit_config.baseline_makeham,
+    )?;
+    let likelihood_mode = parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
+    let time_cfg = if parsed.timewiggle.is_some() {
+        crate::survival::construction::SurvivalTimeBasisConfig::None
+    } else {
+        parse_survival_time_basis_config(
+            &fit_config.time_basis,
+            fit_config.time_degree,
+            fit_config.time_num_internal_knots,
+            fit_config.time_smooth_lambda,
+        )?
+    };
+    let time_anchor =
+        resolve_survival_marginal_slope_time_anchor_value(&age_entry, &age_exit, None)?;
+    let time_build = build_survival_time_basis(
+        &age_entry,
+        &age_exit,
+        time_cfg,
+        Some((
+            fit_config.time_num_internal_knots,
+            fit_config.time_smooth_lambda,
+        )),
+    )?;
+    let timewiggle = match (
+        ms_result.time_wiggle_knots.as_ref(),
+        ms_result.time_wiggle_degree,
+        ms_result.time_wiggle_ncols,
+    ) {
+        (None, None, 0) => None,
+        (Some(knots), Some(degree), ncols) if ncols > 0 => {
+            let beta_time = &ms_result
+                .fit
+                .blocks
+                .first()
+                .ok_or_else(|| {
+                    "survival marginal-slope FFI fit is missing its time block".to_string()
+                })?
+                .beta;
+            let p_base = time_build.x_exit_time.ncols();
+            if beta_time.len() != p_base + ncols {
+                return Err(format!(
+                    "survival marginal-slope FFI timewiggle width mismatch: time beta={}, base={p_base}, wiggle={ncols}",
+                    beta_time.len(),
+                ));
+            }
+            Some(SurvivalTimewiggle {
+                degree,
+                knots: knots.to_vec(),
+                penalty_orders: parsed
+                    .timewiggle
+                    .as_ref()
+                    .map(|config| config.penalty_orders.clone()),
+                double_penalty: parsed
+                    .timewiggle
+                    .as_ref()
+                    .map(|config| config.double_penalty),
+                beta: SurvivalTimewiggleBeta::Single(beta_time.slice(s![p_base..]).to_vec()),
+            })
+        }
+        _ => {
+            return Err(
+                "survival marginal-slope FFI fit has incomplete timewiggle authority".to_string(),
+            );
+        }
+    };
+    let saved_offset_baseline =
+        survival_marginal_slope_offset_baseline_config(&age_exit, &baseline_cfg);
+
+    // Thin adapter over the shared core assembler. The FFI's source-specific
+    // work is re-deriving the survival response columns, baseline config, and
+    // time basis from the formula + FitConfig and freezing its term collections
+    // from their designs; the semantic payload is assembled by the same core
+    // path the CLI uses, so the two save routes produce identical contracts.
+    Ok(assemble_survival_marginal_slope_payload(
+        SurvivalMarginalSlopeInputs {
+            formula,
+            data_schema: dataset.schema.clone(),
+            fit_result: ms_result.fit.clone(),
+            frailty,
+            survival_entry: entryname,
+            survival_exit: exitname,
+            survival_event: eventname,
+            survivalspec: "net".to_string(),
+            baseline_cfg: saved_offset_baseline,
+            time_basis: SavedSurvivalTimeBasis::from_build(&time_build, time_anchor),
+            ridge_lambda: fit_config.ridge_lambda,
+            survival_likelihood_label: survival_likelihood_modename(likelihood_mode).to_string(),
+            resolved_marginalspec: frozen_marginal,
+            resolved_logslopespec: frozen_logslope,
+            logslope_formula,
+            z_column,
+            latent_z_normalization: SavedLatentZNormalization {
+                mean: ms_result.z_normalization.mean,
+                sd: ms_result.z_normalization.sd,
+            },
+            baseline_logslope: ms_result.baseline_slope,
+            timewiggle,
+            score_warp_runtime: ms_result.score_warp_runtime.as_ref(),
+            link_dev_runtime: ms_result.link_dev_runtime.as_ref(),
+            influence_absorber_width: ms_result.influence_absorber_width,
+            influence_absorber_design: ms_result.influence_absorber_design.as_ref(),
+            score_covariance: &ms_result.score_covariance,
+        },
+        SavedModelSourceMetadata {
+            training_headers: dataset.headers.clone(),
+            training_feature_ranges: Some(dataset.feature_ranges()),
+            offset_column: fit_config.offset_column.clone(),
+            noise_offset_column: fit_config.noise_offset_column.clone(),
+        },
+    ))
+}
+
+fn payload_for_survival_transformation(
+    formula: String,
+    dataset: &EncodedDataset,
+    fit_config: &FitConfig,
+    rp_result: crate::fit_orchestration::SurvivalTransformationFitResult,
+) -> Result<FittedModelPayload, String> {
+    use crate::survival::construction::survival_likelihood_modename;
+    use ndarray::s;
+
+    let parsed = parse_formula(&formula)
+        .map_err(|err| format!("failed to re-parse survival transformation formula: {err}"))?;
+    let (entryname, exitname, eventname) = parse_surv_response(&parsed.response)?
+        .ok_or_else(|| "survival transformation FFI requires Surv(...) response".to_string())?;
+    let likelihood_label = survival_likelihood_modename(rp_result.likelihood_mode).to_string();
+
+    let cause_count = rp_result.fit.blocks.len().max(1);
+    let is_joint_cause_specific = cause_count > 1;
+
+    // Source-specific work: extract the baseline-timewiggle coefficients from
+    // the differently-shaped fit struct (one block for net, one per cause for
+    // joint cause-specific). The canonical payload is then assembled by the same
+    // shared core the CLI uses.
+    let timewiggle = rp_result
+        .baseline_timewiggle
+        .as_ref()
+        .map(|timewiggle| -> Result<SurvivalTimewiggle, String> {
+            let start = rp_result.time_base_ncols;
+            let end = start + timewiggle.ncols;
+            let beta = if is_joint_cause_specific {
+                let mut by_cause = Vec::with_capacity(cause_count);
+                for (cause_idx, block) in rp_result.fit.blocks.iter().enumerate() {
+                    if block.beta.len() < end {
+                        return Err(format!(
+                            "joint cause-specific survival timewiggle beta mismatch for cause {}: beta has {}, needs {end}",
+                            cause_idx + 1,
+                            block.beta.len()
+                        ));
+                    }
+                    by_cause.push(block.beta.slice(s![start..end]).to_vec());
+                }
+                SurvivalTimewiggleBeta::ByCause(by_cause)
+            } else {
+                let beta = &rp_result.fit.beta;
+                if beta.len() < end {
+                    return Err(format!(
+                        "survival transformation timewiggle beta mismatch: beta has {}, needs {end}",
+                        beta.len()
+                    ));
+                }
+                SurvivalTimewiggleBeta::Single(beta.slice(s![start..end]).to_vec())
+            };
+            Ok(SurvivalTimewiggle {
+                degree: timewiggle.degree,
+                knots: timewiggle.knots.to_vec(),
+                penalty_orders: parsed.timewiggle.as_ref().map(|cfg| cfg.penalty_orders.clone()),
+                double_penalty: parsed.timewiggle.as_ref().map(|cfg| cfg.double_penalty),
+                beta,
+            })
+        })
+        .transpose()?;
+
+    let payload = assemble_survival_transformation_payload(
+        SurvivalTransformationInputs {
+            formula,
+            data_schema: dataset.schema.clone(),
+            fit_result: rp_result.fit.clone(),
+            survival_entry: entryname,
+            survival_exit: exitname,
+            survival_event: eventname,
+            survivalspec: if is_joint_cause_specific {
+                "cause-specific".to_string()
+            } else {
+                "net".to_string()
+            },
+            cause_count: is_joint_cause_specific.then_some(cause_count),
+            baseline_cfg: rp_result.baseline_cfg.clone(),
+            time_basis: rp_result.time_basis.clone(),
+            ridge_lambda: fit_config.ridge_lambda,
+            survival_likelihood_label: likelihood_label,
+            resolved_termspec: rp_result.resolvedspec,
+            survival_beta_time: None,
+            timewiggle,
+        },
+        SavedModelSourceMetadata {
+            training_headers: dataset.headers.clone(),
+            training_feature_ranges: Some(dataset.feature_ranges()),
+            offset_column: fit_config.offset_column.clone(),
+            noise_offset_column: None,
+        },
+    );
+    Ok(payload)
+}
+
+fn payload_for_gaussian_location_scale(
+    formula: String,
+    dataset: &EncodedDataset,
+    fit_config: &FitConfig,
+    ls_result: GaussianLocationScaleFitResult,
+    response_scale: f64,
+) -> Result<FittedModelPayload, String> {
+    let frozen_meanspec = freeze_term_collection_from_design(
+        &ls_result.fit.meanspec_resolved,
+        &ls_result.fit.mean_design,
+    )
+    .map_err(|err| format!("failed to freeze gaussian location-scale mean spec: {err}"))?;
+    let frozen_noisespec = freeze_term_collection_from_design(
+        &ls_result.fit.noisespec_resolved,
+        &ls_result.fit.noise_design,
+    )
+    .map_err(|err| format!("failed to freeze gaussian location-scale noise spec: {err}"))?;
+
+    let noise_formula = fit_config
+        .noise_formula
+        .clone()
+        .ok_or_else(|| "gaussian location-scale requires noise_formula".to_string())?;
+
+    let fit = ls_result.fit.fit;
+    let scale_beta = fit
+        .block_by_role(BlockRole::Scale)
+        .map(|block| block.beta.to_vec());
+    let wiggle = location_scale_wiggle_from_parts(
+        ls_result.wiggle_knots,
+        ls_result.wiggle_degree,
+        ls_result.beta_link_wiggle,
+    );
+
+    // Thin adapter over the shared core assembler; the FFI freezes the mean and
+    // noise specs from their designs and reads offset columns from the
+    // FitConfig. See `assemble_location_scale_payload`.
+    assemble_location_scale_payload(
+        LocationScaleInputs {
+            formula,
+            data_schema: dataset.schema.clone(),
+            noise_formula,
+            resolved_termspec: frozen_meanspec,
+            resolved_termspec_noise: frozen_noisespec,
+            fit_result: fit,
+            beta_noise: scale_beta,
+            wiggle,
+        },
+        LocationScaleResponse::Gaussian {
+            response_scale,
+            base_link: None,
+        },
+        SavedModelSourceMetadata {
+            training_headers: dataset.headers.clone(),
+            training_feature_ranges: Some(dataset.feature_ranges()),
+            offset_column: fit_config.offset_column.clone(),
+            noise_offset_column: fit_config.noise_offset_column.clone(),
+        },
+    )
+}
+
+/// Map the optional `(knots, degree, beta)` link-wiggle parts a location-scale
+/// fit may produce into the shared [`LocationScaleWiggle`] form. All three are
+/// present together or not at all.
+fn location_scale_wiggle_from_parts(
+    knots: Option<Array1<f64>>,
+    degree: Option<usize>,
+    beta_link_wiggle: Option<Vec<f64>>,
+) -> Option<LocationScaleWiggle> {
+    match (knots, degree, beta_link_wiggle) {
+        (Some(knots), Some(degree), Some(beta_link_wiggle)) => Some(LocationScaleWiggle {
+            knots: knots.to_vec(),
+            degree,
+            beta_link_wiggle,
+        }),
+        _ => None,
+    }
+}
+
+fn payload_for_binomial_location_scale(
+    formula: String,
+    dataset: &EncodedDataset,
+    fit_config: &FitConfig,
+    link_kind: InverseLink,
+    weights: &Array1<f64>,
+    ls_result: BinomialLocationScaleFitResult,
+) -> Result<FittedModelPayload, String> {
+    let frozen_meanspec = freeze_term_collection_from_design(
+        &ls_result.fit.meanspec_resolved,
+        &ls_result.fit.mean_design,
+    )
+    .map_err(|err| format!("failed to freeze binomial location-scale threshold spec: {err}"))?;
+    let frozen_noisespec = freeze_term_collection_from_design(
+        &ls_result.fit.noisespec_resolved,
+        &ls_result.fit.noise_design,
+    )
+    .map_err(|err| format!("failed to freeze binomial location-scale noise spec: {err}"))?;
+
+    let noise_formula = fit_config
+        .noise_formula
+        .clone()
+        .ok_or_else(|| "binomial location-scale requires noise_formula".to_string())?;
+
+    let dense_mean = ls_result
+        .fit
+        .mean_design
+        .design
+        .try_to_dense_by_chunks("binomial location-scale mean design")?;
+    let dense_noise = ls_result
+        .fit
+        .noise_design
+        .design
+        .try_to_dense_by_chunks("binomial location-scale noise design")?;
+    let non_intercept_start = ls_result
+        .fit
+        .noise_design
+        .intercept_range
+        .end
+        .min(ls_result.fit.noise_design.design.ncols());
+    let binomial_noise_transform =
+        build_scale_deviation_transform(&dense_mean, &dense_noise, weights, non_intercept_start)
+            .map_err(|err| format!("failed to encode binomial noise transform: {err}"))?;
+
+    let fit = ls_result.fit.fit;
+    let scale_beta = fit
+        .block_by_role(BlockRole::Scale)
+        .map(|block| block.beta.to_vec());
+    let wiggle = location_scale_wiggle_from_parts(
+        ls_result.wiggle_knots,
+        ls_result.wiggle_degree,
+        ls_result.beta_link_wiggle,
+    );
+
+    // Thin adapter over the shared core assembler; the FFI freezes the threshold
+    // and noise specs from their designs, encodes the binomial noise
+    // scale-deviation transform, and reads offset columns from the FitConfig.
+    // See `assemble_location_scale_payload`.
+    assemble_location_scale_payload(
+        LocationScaleInputs {
+            formula,
+            data_schema: dataset.schema.clone(),
+            noise_formula,
+            resolved_termspec: frozen_meanspec,
+            resolved_termspec_noise: frozen_noisespec,
+            fit_result: fit,
+            beta_noise: scale_beta,
+            wiggle,
+        },
+        LocationScaleResponse::Binomial {
+            link: link_kind,
+            noise_transform: &binomial_noise_transform,
+        },
+        SavedModelSourceMetadata {
+            training_headers: dataset.headers.clone(),
+            training_feature_ranges: Some(dataset.feature_ranges()),
+            offset_column: fit_config.offset_column.clone(),
+            noise_offset_column: fit_config.noise_offset_column.clone(),
+        },
+    )
+}
+
+/// Assemble the saved-model payload for a genuine-dispersion location-scale fit
+/// (#913): NegativeBinomial / Gamma / Beta / Tweedie with a `noise_formula` on
+/// the overdispersion channel. Mirrors the CLI dispersion save path
+/// (`assemble_location_scale_payload` + `LocationScaleResponse::Dispersion`),
+/// deriving the persisted likelihood and mean base-link from the single
+/// source of truth on [`DispersionFamilyKind`]. The log-precision block
+/// coefficients ride in `beta_noise`; there is no link-wiggle and no response
+/// standardization for these families.
+fn payload_for_dispersion_location_scale(
+    formula: String,
+    dataset: &EncodedDataset,
+    fit_config: &FitConfig,
+    kind: DispersionFamilyKind,
+    ls_result: DispersionLocationScaleFitResult,
+) -> Result<FittedModelPayload, String> {
+    let frozen_meanspec = freeze_term_collection_from_design(
+        &ls_result.fit.meanspec_resolved,
+        &ls_result.fit.mean_design,
+    )
+    .map_err(|err| format!("failed to freeze dispersion location-scale mean spec: {err}"))?;
+    let frozen_noisespec = freeze_term_collection_from_design(
+        &ls_result.fit.noisespec_resolved,
+        &ls_result.fit.noise_design,
+    )
+    .map_err(|err| format!("failed to freeze dispersion location-scale noise spec: {err}"))?;
+
+    let noise_formula = fit_config
+        .noise_formula
+        .clone()
+        .ok_or_else(|| "dispersion location-scale requires noise_formula".to_string())?;
+
+    let fit = ls_result.fit.fit;
+    let scale_beta = fit
+        .block_by_role(BlockRole::Scale)
+        .map(|block| block.beta.to_vec());
+
+    assemble_location_scale_payload(
+        LocationScaleInputs {
+            formula,
+            data_schema: dataset.schema.clone(),
+            noise_formula,
+            resolved_termspec: frozen_meanspec,
+            resolved_termspec_noise: frozen_noisespec,
+            fit_result: fit,
+            beta_noise: scale_beta,
+            wiggle: None,
+        },
+        LocationScaleResponse::Dispersion {
+            likelihood: kind.likelihood_spec(),
+            base_link: kind.base_link(),
+            family_tag: kind.family_tag(),
+        },
+        SavedModelSourceMetadata {
+            training_headers: dataset.headers.clone(),
+            training_feature_ranges: Some(dataset.feature_ranges()),
+            offset_column: fit_config.offset_column.clone(),
+            noise_offset_column: fit_config.noise_offset_column.clone(),
+        },
+    )
+}
+
+fn payload_for_survival_location_scale(
+    formula: String,
+    dataset: &EncodedDataset,
+    fit_config: &FitConfig,
+    ls_result: crate::fit_orchestration::SurvivalLocationScaleFitResult,
+) -> Result<FittedModelPayload, String> {
+    use crate::survival::construction::{
+        build_survival_time_basis, parse_survival_baseline_config, parse_survival_likelihood_mode,
+        parse_survival_time_basis_config, resolve_survival_time_anchor_value,
+        survival_likelihood_modename,
+    };
+    // Re-derive survival metadata from the formula and FitConfig so we can
+    // reproduce the saved model layout that the CLI persists.
+    let parsed = parse_formula(&formula)
+        .map_err(|err| format!("failed to re-parse survival formula for FFI payload: {err}"))?;
+    let (entryname, exitname, eventname) = parse_surv_response(&parsed.response)?
+        .ok_or_else(|| "survival location-scale FFI requires Surv(...) response".to_string())?;
+    let col_map: HashMap<String, usize> = dataset
+        .headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| (h.clone(), i))
+        .collect();
+    let entry_idx: Option<usize> = entryname
+        .as_deref()
+        .map(|name| {
+            col_map
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("entry column '{name}' not found"))
+        })
+        .transpose()?;
+    let exit_idx = *col_map
+        .get(&exitname)
+        .ok_or_else(|| format!("exit column '{exitname}' not found"))?;
+    let n = dataset.values.nrows();
+    let mut age_entry = Array1::<f64>::zeros(n);
+    let mut age_exit = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let entry_val = entry_idx.map_or(0.0, |idx| dataset.values[[i, idx]]);
+        let (t0, t1) = crate::survival::construction::normalize_survival_time_pair(
+            entry_val,
+            dataset.values[[i, exit_idx]],
+            i,
+        )?;
+        age_entry[i] = t0;
+        age_exit[i] = t1;
+    }
+    let baseline_cfg = parse_survival_baseline_config(
+        &fit_config.baseline_target,
+        fit_config.baseline_scale,
+        fit_config.baseline_shape,
+        fit_config.baseline_rate,
+        fit_config.baseline_makeham,
+    )?;
+    let likelihood_mode = parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
+    let time_cfg = if parsed.timewiggle.is_some() {
+        crate::survival::construction::SurvivalTimeBasisConfig::None
+    } else {
+        parse_survival_time_basis_config(
+            &fit_config.time_basis,
+            fit_config.time_degree,
+            fit_config.time_num_internal_knots,
+            fit_config.time_smooth_lambda,
+        )?
+    };
+    let time_anchor = resolve_survival_time_anchor_value(&age_entry, None)?;
+    let mut time_build = build_survival_time_basis(
+        &age_entry,
+        &age_exit,
+        time_cfg,
+        Some((
+            fit_config.time_num_internal_knots,
+            fit_config.time_smooth_lambda,
+        )),
+    )?;
+    let resolved_time_cfg =
+        crate::survival::construction::resolved_survival_time_basis_config_from_build(
+            &time_build.basisname,
+            time_build.degree,
+            time_build.knots.as_ref(),
+            time_build.keep_cols.as_ref(),
+            time_build.smooth_lambda,
+        )?;
+    let time_anchor_row = crate::survival::construction::evaluate_survival_time_basis_row(
+        time_anchor,
+        &resolved_time_cfg,
+    )?;
+    crate::survival::construction::center_survival_time_designs_at_anchor(
+        &mut time_build.x_entry_time,
+        &mut time_build.x_exit_time,
+        &time_anchor_row,
+    )?;
+
+    let fitted_inverse_link = ls_result.inverse_link.clone();
+    // Compact the inner UnifiedFitResult and apply the fitted link state so
+    // downstream prediction can recover the inverse-link parameters from the
+    // saved fit_result. Mirrors the CLI's
+    // compact_saved_survival_location_scale_fit_result helper.
+    let mut fit_result = ls_result.fit.fit.clone();
+    apply_inverse_link_state_to_fit_result(&mut fit_result, &fitted_inverse_link);
+    fit_result.artifacts.survival_link_wiggle_knots = ls_result.wiggle_knots.clone();
+    fit_result.artifacts.survival_link_wiggle_degree = ls_result.wiggle_degree;
+
+    let resolved_thresholdspec = freeze_term_collection_from_design(
+        &ls_result.fit.resolved_thresholdspec,
+        &ls_result.fit.threshold_design,
+    )
+    .map_err(|err| err.to_string())?;
+    let resolved_log_sigmaspec = freeze_term_collection_from_design(
+        &ls_result.fit.resolved_log_sigmaspec,
+        &ls_result.fit.log_sigma_design,
+    )
+    .map_err(|err| err.to_string())?;
+
+    // Thin adapter over the shared core assembler. The FFI's source-specific
+    // work above re-derives the survival metadata and compacts the fit result
+    // with the fitted link state; the canonical payload is assembled by the
+    // same path the CLI uses.
+    Ok(assemble_survival_location_scale_payload(
+        SurvivalLocationScaleInputs {
+            formula,
+            data_schema: dataset.schema.clone(),
+            fit_result,
+            fitted_inverse_link: fitted_inverse_link.clone(),
+            linkwiggle_degree: ls_result.wiggle_degree,
+            linkwiggle_knots: ls_result.wiggle_knots.as_ref().map(|k| k.to_vec()),
+            beta_link_wiggle: ls_result
+                .fit
+                .fit
+                .beta_link_wiggle()
+                .as_ref()
+                .map(|b| b.to_vec()),
+            baseline_timewiggle: None,
+            survival_entry: entryname,
+            survival_exit: exitname,
+            survival_event: eventname,
+            survivalspec: "net".to_string(),
+            baseline_cfg,
+            time_basis: SavedSurvivalTimeBasis::from_build(&time_build, time_anchor),
+            ridge_lambda: fit_config.ridge_lambda,
+            survival_likelihood_label: survival_likelihood_modename(likelihood_mode).to_string(),
+            time_parameterization: ls_result.fit.time_parameterization,
+            threshold_time_basis: ls_result.fit.threshold_time_basis.clone(),
+            log_sigma_time_basis: ls_result.fit.log_sigma_time_basis.clone(),
+            formula_noise: None,
+            survival_beta_time: ls_result.fit.fit.beta_time().to_vec(),
+            survival_beta_threshold: ls_result.fit.fit.beta_threshold().to_vec(),
+            survival_beta_log_sigma: ls_result.fit.fit.beta_log_sigma().to_vec(),
+            resolved_thresholdspec,
+            resolved_log_sigmaspec,
+        },
+        SavedModelSourceMetadata {
+            training_headers: dataset.headers.clone(),
+            training_feature_ranges: Some(dataset.feature_ranges()),
+            offset_column: fit_config.offset_column.clone(),
+            noise_offset_column: fit_config.noise_offset_column.clone(),
+        },
+    ))
+}
+
+fn payload_for_latent_survival(
+    formula: String,
+    dataset: &EncodedDataset,
+    fit_config: &FitConfig,
+    request_frailty: crate::survival::lognormal_kernel::FrailtySpec,
+    lat_result: crate::survival::latent::LatentSurvivalTermFitResult,
+) -> Result<FittedModelPayload, String> {
+    payload_for_latent_window(
+        formula,
+        dataset,
+        fit_config,
+        request_frailty,
+        lat_result.fit,
+        lat_result.resolvedspec,
+        lat_result.design,
+        Some(lat_result.latent_sd),
+        true,
+    )
+}
+
+fn payload_for_latent_binary(
+    formula: String,
+    dataset: &EncodedDataset,
+    fit_config: &FitConfig,
+    request_frailty: crate::survival::lognormal_kernel::FrailtySpec,
+    lat_result: crate::survival::latent::LatentBinaryTermFitResult,
+) -> Result<FittedModelPayload, String> {
+    payload_for_latent_window(
+        formula,
+        dataset,
+        fit_config,
+        request_frailty,
+        lat_result.fit,
+        lat_result.resolvedspec,
+        lat_result.design,
+        None,
+        false,
+    )
+}
+
+fn payload_for_latent_window(
+    formula: String,
+    dataset: &EncodedDataset,
+    fit_config: &FitConfig,
+    request_frailty: crate::survival::lognormal_kernel::FrailtySpec,
+    fit: UnifiedFitResult,
+    resolvedspec: TermCollectionSpec,
+    cov_design: TermCollectionDesign,
+    learned_latent_sd: Option<f64>,
+    is_survival: bool,
+) -> Result<FittedModelPayload, String> {
+    use crate::survival::construction::{
+        build_survival_time_basis, parse_survival_baseline_config,
+        parse_survival_time_basis_config, resolve_survival_time_anchor_value,
+    };
+
+    let parsed = parse_formula(&formula).map_err(|err| {
+        format!("failed to re-parse latent survival formula for FFI payload: {err}")
+    })?;
+    let (entryname, exitname, eventname) = parse_surv_response(&parsed.response)?
+        .ok_or_else(|| "latent survival/binary FFI requires Surv(...) response".to_string())?;
+    let col_map: HashMap<String, usize> = dataset
+        .headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| (h.clone(), i))
+        .collect();
+    let entry_idx: Option<usize> = entryname
+        .as_deref()
+        .map(|name| {
+            col_map
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("entry column '{name}' not found"))
+        })
+        .transpose()?;
+    let exit_idx = *col_map
+        .get(&exitname)
+        .ok_or_else(|| format!("exit column '{exitname}' not found"))?;
+    let n = dataset.values.nrows();
+    let mut age_entry = Array1::<f64>::zeros(n);
+    let mut age_exit = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let entry_val = entry_idx.map_or(0.0, |idx| dataset.values[[i, idx]]);
+        let (t0, t1) = crate::survival::construction::normalize_survival_time_pair(
+            entry_val,
+            dataset.values[[i, exit_idx]],
+            i,
+        )?;
+        age_entry[i] = t0;
+        age_exit[i] = t1;
+    }
+    let baseline_cfg = parse_survival_baseline_config(
+        &fit_config.baseline_target,
+        fit_config.baseline_scale,
+        fit_config.baseline_shape,
+        fit_config.baseline_rate,
+        fit_config.baseline_makeham,
+    )?;
+    let time_cfg = parse_survival_time_basis_config(
+        &fit_config.time_basis,
+        fit_config.time_degree,
+        fit_config.time_num_internal_knots,
+        fit_config.time_smooth_lambda,
+    )?;
+    let time_anchor = resolve_survival_time_anchor_value(&age_entry, None)?;
+    let time_build = build_survival_time_basis(
+        &age_entry,
+        &age_exit,
+        time_cfg,
+        Some((
+            fit_config.time_num_internal_knots,
+            fit_config.time_smooth_lambda,
+        )),
+    )?;
+
+    // For latent survival, splice the fitted latent_sd into the persisted
+    // HazardMultiplier frailty (mirrors CLI behaviour at main.rs:5541).
+    let saved_family = if is_survival {
+        let frailty = match (&request_frailty, learned_latent_sd) {
+            (
+                crate::survival::lognormal_kernel::FrailtySpec::HazardMultiplier {
+                    scale: crate::survival::lognormal_kernel::FrailtyScale::Learned { .. },
+                    loading,
+                },
+                Some(sigma),
+            ) => crate::survival::lognormal_kernel::FrailtySpec::HazardMultiplier {
+                scale: crate::survival::lognormal_kernel::FrailtyScale::Fixed { sigma },
+                loading: *loading,
+            },
+            _ => request_frailty.clone(),
+        };
+        FittedFamily::LatentSurvival { frailty }
+    } else {
+        FittedFamily::LatentBinary {
+            frailty: request_frailty.clone(),
+        }
+    };
+    let model_class_label = if is_survival {
+        "latent-survival".to_string()
+    } else {
+        "latent-binary".to_string()
+    };
+    let likelihood_label = if is_survival {
+        "latent".to_string()
+    } else {
+        "latent-binary".to_string()
+    };
+
+    let beta_time = fit.beta_time().to_vec();
+    let resolved_termspec = freeze_term_collection_from_design(&resolvedspec, &cov_design)
+        .map_err(|err| err.to_string())?;
+
+    Ok(assemble_latent_window_payload(
+        LatentWindowInputs {
+            formula,
+            data_schema: dataset.schema.clone(),
+            fit_result: fit,
+            family: saved_family,
+            model_class_label,
+            likelihood_label,
+            survival_entry: entryname,
+            survival_exit: exitname,
+            survival_event: eventname,
+            baseline_cfg,
+            time_basis: SavedSurvivalTimeBasis::from_build(&time_build, time_anchor),
+            ridge_lambda: fit_config.ridge_lambda,
+            beta_time,
+            resolved_termspec,
+        },
+        SavedModelSourceMetadata {
+            training_headers: dataset.headers.clone(),
+            training_feature_ranges: Some(dataset.feature_ranges()),
+            offset_column: fit_config.offset_column.clone(),
+            noise_offset_column: fit_config.noise_offset_column.clone(),
+        },
+    ))
 }
 
 #[cfg(test)]
