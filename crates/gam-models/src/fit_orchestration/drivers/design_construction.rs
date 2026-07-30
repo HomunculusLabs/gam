@@ -2167,21 +2167,34 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
                 gam_solve::estimate::reml::reml_outer_engine::EvalMode::ValueAndGradient
             },
         )
+        // Ask the producer. `CustomFamilyError` classifies its own refusals
+        // and `EstimationError::CustomFamily(..)` delegates
+        // `is_trial_point_infeasible` straight to it; rendering it into
+        // `RemlOptimizationFailed` threw that away, and
+        // `into_objective_error` then graded a rho-local refusal Fatal, which
+        // is a hard abort of the fit rather than a retreat from this theta
+        // (#2627, the #2531/#2553/#2590 shape). `wrap_preserving_trial_point`
+        // keeps the context prose AND the verdict.
         .map_err(|e| {
-            EstimationError::RemlOptimizationFailed(format!("spatial adaptive eval failed: {e}"))
+            EstimationError::CustomFamily(e)
+                .wrap_preserving_trial_point("spatial adaptive eval failed")
         })?;
         if !owned.result.inner_converged {
             st.warm_cache = Some(owned.result.warm_start.clone());
-            return Err(EstimationError::RemlOptimizationFailed(
-                "exact spatial adaptive inner solve did not converge".to_string(),
-            ));
+            // A statement about THIS theta, not about the problem: the inner
+            // solve at another theta is a different solve.
+            return Err(EstimationError::TrialPointRefused {
+                reason: "exact spatial adaptive inner solve did not converge".to_string(),
+            });
         }
         if !owned.result.objective.is_finite()
             || owned.result.gradient.iter().any(|v| !v.is_finite())
         {
-            return Err(EstimationError::RemlOptimizationFailed(
-                "exact spatial adaptive objective returned non-finite values".to_string(),
-            ));
+            // Same class as the `OuterEval::infeasible` the sibling spatial
+            // lanes return for a non-finite cost.
+            return Err(EstimationError::TrialPointRefused {
+                reason: "exact spatial adaptive objective returned non-finite values".to_string(),
+            });
         }
         let hessian_result = if need_hessian {
             if !owned.result.outer_hessian.is_analytic() {
@@ -2254,15 +2267,14 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
                 gam_solve::estimate::reml::reml_outer_engine::EvalMode::ValueOnly,
             )
             .map_err(|e| {
-                EstimationError::RemlOptimizationFailed(format!(
-                    "spatial adaptive cost eval failed: {e}"
-                ))
+                EstimationError::CustomFamily(e)
+                    .wrap_preserving_trial_point("spatial adaptive cost eval failed")
             })?;
             if !owned.result.inner_converged {
                 st.warm_cache = Some(owned.result.warm_start);
-                return Err(EstimationError::RemlOptimizationFailed(
-                    "exact spatial adaptive cost inner solve did not converge".to_string(),
-                ));
+                return Err(EstimationError::TrialPointRefused {
+                    reason: "exact spatial adaptive cost inner solve did not converge".to_string(),
+                });
             }
             let objective = owned.result.objective;
             st.warm_cache = Some(owned.result.warm_start);
@@ -2307,15 +2319,14 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
                 st.warm_cache.as_ref(),
             )
             .map_err(|e| {
-                EstimationError::RemlOptimizationFailed(format!(
-                    "spatial adaptive EFS eval failed: {e}"
-                ))
+                EstimationError::CustomFamily(e)
+                    .wrap_preserving_trial_point("spatial adaptive EFS eval failed")
             })?;
             if !owned.result.inner_converged {
                 st.warm_cache = Some(owned.result.warm_start);
-                return Err(EstimationError::RemlOptimizationFailed(
-                    "exact spatial adaptive EFS inner solve did not converge".to_string(),
-                ));
+                return Err(EstimationError::TrialPointRefused {
+                    reason: "exact spatial adaptive EFS inner solve did not converge".to_string(),
+                });
             }
             let objective = owned.result.efs_eval.cost;
             st.warm_cache = Some(owned.result.warm_start);
@@ -2353,9 +2364,8 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
                 gam_solve::estimate::reml::reml_outer_engine::EvalMode::ValueOnly,
             )
             .map_err(|e| {
-                EstimationError::RemlOptimizationFailed(format!(
-                    "spatial adaptive screening eval failed: {e}"
-                ))
+                EstimationError::CustomFamily(e)
+                    .wrap_preserving_trial_point("spatial adaptive screening eval failed")
             })?;
             st.warm_cache = Some(owned.result.warm_start);
             Ok(owned.result.objective)

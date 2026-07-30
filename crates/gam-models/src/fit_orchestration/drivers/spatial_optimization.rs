@@ -7132,9 +7132,16 @@ where
                         inner_beta_hint: None,
                     })
                 }
-                Err(err) => Err(EstimationError::RemlOptimizationFailed(format!(
-                    "n-block exact-joint spatial evaluation failed: {err}"
-                ))),
+                // A refusal from the exact-joint evaluator is a refusal AT
+                // THIS theta -- the same class the sibling `SpatialJointContext`
+                // objective in this file already retreats from via
+                // `is_recoverable_trial_point_error`. Reported as
+                // `RemlOptimizationFailed`, `is_trial_point_infeasible`
+                // answered false and `into_objective_error` graded it Fatal,
+                // aborting the fit instead of the trial (#2627).
+                Err(err) => Err(EstimationError::TrialPointRefused {
+                    reason: format!("n-block exact-joint spatial evaluation failed: {err}"),
+                }),
             }
         };
 
@@ -7195,9 +7202,11 @@ where
                         ctx.cache.store_cost_only(theta, cost);
                         Ok(cost)
                     }
-                    Err(err) => Err(EstimationError::RemlOptimizationFailed(format!(
-                        "n-block exact-joint spatial cost evaluation failed: {err}"
-                    ))),
+                    Err(err) => Err(EstimationError::TrialPointRefused {
+                        reason: format!(
+                            "n-block exact-joint spatial cost evaluation failed: {err}"
+                        ),
+                    }),
                 }
             },
             |ctx: &mut &mut NBlockExactJointState<'_, Mode>, theta: &Array1<f64>| {
@@ -7237,7 +7246,9 @@ where
                         elapsed_s,
                     );
                     let ExactJointEfsEvaluation { evaluation, mode } =
-                        eval_result.map_err(EstimationError::RemlOptimizationFailed)?;
+                        eval_result.map_err(|reason| EstimationError::TrialPointRefused {
+                            reason,
+                        })?;
                     // An EFS solve can select a different coefficient mode at
                     // the same theta.  Revoke any derivative memo assembled
                     // from the previous mode before installing this carrier;
