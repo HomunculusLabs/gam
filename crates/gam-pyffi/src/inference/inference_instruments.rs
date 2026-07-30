@@ -36,7 +36,8 @@ use gam::inference::lawley::{
 use gam::inference::riesz::{RieszInput, SmoothFunctional, debias_with_dense_hessian};
 use gam::inference::structure_evidence::{
     AtomBirthGate, CandidateProbe, ClaimKind, GateVerdict, ProbePlan, StructureCertificate,
-    e_benjamini_hochberg, expected_resolution_budget as core_expected_resolution_budget,
+    e_benjamini_hochberg, e_bh_claim_verdicts,
+    expected_resolution_budget as core_expected_resolution_budget,
     log_e_from_p_calibrator, plan_probe_for_contested_claim as core_plan_probe_for_contested_claim,
     select_probe_by_expected_evidence as core_select_probe_by_expected_evidence,
     split_likelihood_log_e_value,
@@ -206,37 +207,21 @@ pub(crate) fn sae_structure_certificate_report(
     let cert: StructureCertificate = serde_json::from_str(certificate_json)
         .map_err(|err| py_value_error(format!("invalid structure certificate json: {err}")))?;
     let level = alpha.unwrap_or(cert.alpha);
-    if !(level > 0.0 && level < 1.0) {
-        return Err(py_value_error(format!(
-            "alpha must lie in (0, 1); got {level}"
-        )));
-    }
     let entries = &cert.entries;
-    let m = entries.len();
     let log_e: Vec<f64> = entries.iter().map(|entry| entry.log_e).collect();
-    let confirmed_idx: std::collections::HashSet<usize> = e_benjamini_hochberg(&log_e, level)
-        .map_err(|error| py_value_error(error.to_string()))?
-        .into_iter()
-        .collect();
-    // rank_of[i] = 1-based rank of claim i in descending log_e order (stable on
-    // ties, so equal log_e keep ascending index order — matching the facade's
-    // `sorted(..., reverse=True)`).
-    let mut order: Vec<usize> = (0..m).collect();
-    order.sort_by(|&a, &b| {
-        log_e[b]
-            .partial_cmp(&log_e[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let mut rank_of = vec![0usize; m];
-    for (rank0, &idx) in order.iter().enumerate() {
-        rank_of[idx] = rank0 + 1;
-    }
+    // The rank/threshold arithmetic is owned by the rule's own crate
+    // (`e_bh_claim_verdicts`, beside `e_benjamini_hochberg`), so this report
+    // cannot drift from the rule it reports on. Alpha validation happens
+    // there too.
+    let verdicts =
+        e_bh_claim_verdicts(&log_e, level).map_err(|error| py_value_error(error.to_string()))?;
+    let n_confirmed = verdicts.iter().filter(|verdict| verdict.confirmed).count();
     let claims: Vec<serde_json::Value> = entries
         .iter()
+        .zip(&verdicts)
         .enumerate()
-        .map(|(i, entry)| {
+        .map(|(i, (entry, verdict))| {
             let le = entry.log_e;
-            let threshold = (m as f64).ln() - level.ln() - (rank_of[i] as f64).ln();
             serde_json::json!({
                 "claim_index": i,
                 "claim": structure_claim_label(&entry.kind),
@@ -245,15 +230,15 @@ pub(crate) fn sae_structure_certificate_report(
                 "e_value": le.exp(),
                 "log_e": le,
                 "steps": entry.steps,
-                "confirmed": confirmed_idx.contains(&i),
-                "evidence_remaining_nats": (threshold - le).max(0.0),
+                "confirmed": verdict.confirmed,
+                "evidence_remaining_nats": verdict.evidence_remaining_nats,
             })
         })
         .collect();
     let payload = serde_json::json!({
         "alpha": level,
         "fdr_level": level,
-        "n_confirmed": confirmed_idx.len(),
+        "n_confirmed": n_confirmed,
         "claims": claims,
     });
     serde_json::to_string(&payload)

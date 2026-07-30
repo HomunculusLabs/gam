@@ -621,6 +621,52 @@ pub fn e_benjamini_hochberg(log_e_values: &[f64], alpha: f64) -> Result<Vec<usiz
     Ok(order)
 }
 
+/// Per-claim e-BH verdict: the descending-`log_e` rank the rule used, the
+/// confirmation flag, and the anytime-valid evidence budget
+/// `max(0, (ln m − ln α − ln k) − log_e)` measured against that SAME rank.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EBhClaimVerdict {
+    /// 1-based rank of the claim in descending `log_e` order (stable on ties,
+    /// so equal `log_e` keep ascending index order).
+    pub rank: usize,
+    /// Whether the e-BH rule confirms the claim at the given `alpha`.
+    pub confirmed: bool,
+    /// Nats of additional evidence the claim would need to cross its own
+    /// rank's threshold; `0.0` once confirmed.
+    pub evidence_remaining_nats: f64,
+}
+
+/// The per-claim report companion to [`e_benjamini_hochberg`]: one owner for
+/// the rank/threshold arithmetic, so a report surface cannot drift from the
+/// rule it reports on (#2470 — the Python bindings carried a second copy of
+/// the ranking and threshold formula next to the rule itself).
+pub fn e_bh_claim_verdicts(
+    log_e_values: &[f64],
+    alpha: f64,
+) -> Result<Vec<EBhClaimVerdict>, EBhError> {
+    let confirmed: std::collections::HashSet<usize> =
+        e_benjamini_hochberg(log_e_values, alpha)?.into_iter().collect();
+    let m = log_e_values.len();
+    let mut order: Vec<usize> = (0..m).collect();
+    order.sort_by(|&a, &b| log_e_values[b].total_cmp(&log_e_values[a]));
+    let mut rank_of = vec![0usize; m];
+    for (rank0, &idx) in order.iter().enumerate() {
+        rank_of[idx] = rank0 + 1;
+    }
+    let m_f = m as f64;
+    Ok((0..m)
+        .map(|i| {
+            // e_(k) ≥ m / (α k)  ⟺  log e_(k) ≥ log m − log α − log k
+            let threshold = m_f.ln() - alpha.ln() - (rank_of[i] as f64).ln();
+            EBhClaimVerdict {
+                rank: rank_of[i],
+                confirmed: confirmed.contains(&i),
+                evidence_remaining_nats: (threshold - log_e_values[i]).max(0.0),
+            }
+        })
+        .collect())
+}
+
 /// What one structural claim asserts about the dictionary. One e-process
 /// runs per claim; the kinds mirror the discovery stack's claim surface:
 /// atom existence (#976 birth), binding edges (#975), geometry
