@@ -3144,7 +3144,52 @@ pub(crate) mod whitened_spectrum {
                 // the true minimum eigenspace. Its sign is immaterial for an
                 // exactly orthogonal RHS; preserve the sign of a tiny rounded
                 // component to maximize the linear decrease when present.
-                if let Some(k_min) = k_min_witness {
+                //
+                // ── but only where there is curvature to exploit (gam#2600) ──
+                //
+                // The fill's entire payoff is the quadratic term `-½ γ_min τ²`:
+                // the linear term is what the branch condition just established
+                // is absent (`c[k_min]` at the RHS round-off floor). So it is
+                // worth taking exactly when `γ_min` is resolvably negative. The
+                // identified set that produced `gamma_min_id` drops at
+                // `numerical_floor` (the machine-rank cutoff, gam#979/#1449) —
+                // correct for the DENOMINATORS, where `λ` regularizes a
+                // weakly-identified mode into a finite `c_k/(γ_k+λ)` — but it is
+                // the wrong classification for choosing a DIRECTION TO TRAVEL:
+                // this same object calls a mode with `|γ| ≤ null_cutoff`
+                // unidentified for its convergence certificate and its gauge
+                // diagnostics. Padding the step along such a mode buys a model
+                // decrease of `½|γ_min|τ²` with `|γ_min|` at the noise level,
+                // and it costs the caller the one signal the radius controller
+                // consumes: `‖δ‖ = trust_radius` becomes true BY CONSTRUCTION at
+                // every radius, so `GrowAtBoundary` reads a tautology as evidence
+                // that the region withheld a better point, doubles, and the fill
+                // re-pads to the new radius forever.
+                //
+                // Measured on the transformation-normal wine arm (gam#2600), one
+                // mode sits in exactly that band on every cycle —
+                // `[joint-newton spectrum gam#979] λ_max=2.124846e0
+                // null_cutoff=2.124846e-10 numerical_floor=1.155695e-15
+                // band_modes=1 cert_null_modes=1` — and it is the pole. The
+                // radius then doubles for 44 consecutive cycles
+                // (8.560e1 -> 1.712e2 -> 3.424e2, `|δ|_D` equal to the radius to
+                // every printed digit) while the model decrease it buys stays at
+                // `pred = 3.288e-4, 1.298e-4, 3.581e-5` — consistent with
+                // `½|γ_min|τ²` at `|γ_min| ~ 6e-10`, and below `objective_tol`
+                // (1.42e-4). The unpenalized location field absorbs the growth
+                // and the stationarity residual rises 1.74e-1 -> 3.66e0, away
+                // from a point the solve had already reached.
+                //
+                // With no resolvable curvature at the pole and no linear term,
+                // the correct answer is the one this branch already computes for a
+                // missing witness: the Moore-Penrose base, i.e. the minimum-norm
+                // solution of the singular case. Nothing else changes — the
+                // identified set, the denominators, and the genuine hard case
+                // (`γ_min` materially negative, where filling the radius really
+                // does reduce the model quadratically) are untouched.
+                if let Some(k_min) = k_min_witness
+                    && gamma_min_id < -self.null_cutoff
+                {
                     let deficit = (trust_radius * trust_radius - hard_case_base_norm_sq).max(0.0);
                     let tau = deficit.sqrt().copysign(self.c[k_min]);
                     return self.assemble(lambda_lo, Some((k_min, tau)));
@@ -3574,6 +3619,50 @@ mod trust_region_subproblem_tests {
         assert!(
             weak_null < 1e-12,
             "true numerical-null mode must not register as weakly identified; got {weak_null}"
+        );
+    }
+
+    /// gam#2600: the hard-case fill exists to EXPLOIT negative curvature, so it
+    /// must not pad the step out to the trust boundary along a pole whose
+    /// curvature this same object classifies as unidentified. Step-side
+    /// counterpart of `weakly_identified_real_mode_blocks_premature_certification`
+    /// above: that one pins what the weak band means to the CERTIFICATE, this one
+    /// pins what it means to the DIRECTION the step travels.
+    #[test]
+    pub(crate) fn hard_case_fill_requires_resolvable_negative_curvature_2600() {
+        // λ_max = 1, p = 2 ⇒ numerical_floor ≈ 3.1e-16, null_cutoff = 1e-10.
+        // γ = [1, -1e-12]: the minimum is NEGATIVE but inside the weak band, so
+        // it carries no resolvable curvature, and `c` is exactly zero there, so
+        // the fill has no linear payoff either. Filling to the radius would buy
+        // ½·1e-12·r² — nothing — while forcing ‖δ‖ = r and handing the radius
+        // controller a boundary hit that is true at every radius.
+        let h = array![[1.0, 0.0], [0.0, -1.0e-12]];
+        let rhs = array![1.0, 0.0];
+        let d = array![1.0, 1.0];
+        let spec = WhitenedHessianSpectrum::decompose(&h, &rhs, &d, KKT_REFUSAL_RANK_TOL).unwrap();
+        let radius = 1.0e3;
+        let step = spec.trust_region_step(radius);
+        let norm = step.delta.dot(&step.delta).sqrt();
+        // The Moore-Penrose base is the Newton step on the one identified mode,
+        // `c[0]/(γ[0]+λ_lo) = 1/(1+1e-12) ≈ 1` — nowhere near the radius.
+        assert!(
+            (norm - 1.0).abs() < 1.0e-6,
+            "a null-curvature pole must yield the minimum-norm base, not a \
+             radius-filling step; norm={norm} against r={radius}"
+        );
+
+        // A resolvably negative pole still earns the fill: at γ = -1e-2, eight
+        // orders above `null_cutoff`, travelling the radius reduces the model by
+        // ½·1e-2·r², so the boundary solution is the right answer.
+        let h_real = array![[1.0, 0.0], [0.0, -1.0e-2]];
+        let spec_real =
+            WhitenedHessianSpectrum::decompose(&h_real, &rhs, &d, KKT_REFUSAL_RANK_TOL).unwrap();
+        let step_real = spec_real.trust_region_step(radius);
+        let norm_real = step_real.delta.dot(&step_real.delta).sqrt();
+        assert!(
+            (norm_real - radius).abs() <= 1.0e-6 * radius,
+            "a resolvably negative pole must still fill to the boundary; \
+             norm={norm_real} against r={radius}"
         );
     }
 
