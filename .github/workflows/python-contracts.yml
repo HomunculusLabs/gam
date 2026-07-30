@@ -229,6 +229,31 @@ jobs:
         # duration as a LOWER bound on the work done: the 3h 05m wall clock of
         # that run is not bounded by 300s x tests, and a test that reports as a
         # timeout may have run for arbitrarily longer than its cap says.
+        #
+        # DO NOT READ THE 36 AS A GENERAL PROPERTY -- it is a property of one run.
+        # Two later runs recorded ZERO `Failed: Timeout` entries: 30513113487
+        # (`3236fed05`, 35 errors) and a local 128-core run at `b8745892a`
+        # (22 errors). In BOTH, every error was `worker 'gwN' crashed while
+        # running ...` instead. That is not a different failure -- it is the same
+        # one wearing a different label, and the label is the point:
+        #
+        #   `--timeout-method=thread` KILLS THE WORKER rather than raising in it,
+        #   so a thread-method timeout surfaces as a worker crash and NEVER as a
+        #   `Failed: Timeout` entry. The `Failed: Timeout` string is SIGALRM-only.
+        #
+        # Proven by rerunning one of them serially with no `--timeout` at all:
+        # `test_structure_certificate_1058` does not crash, it runs 334.14s -- past
+        # the 300s cap -- and fails with a typed engine error (`inner solve did not
+        # converge at fixed rho; ||g||=3.667789e0 vs tolerance 1.221293e-2 after 990
+        # inner iterations`). Under the cap that same test is a "crash".
+        #
+        # Two consequences for anyone reading this artifact. A zero
+        # `Failed: Timeout` count is NOT evidence that nothing timed out -- count
+        # `crashed while running` instead. And the crash count is a function of
+        # MACHINE SPEED, not of the tests: a slow hosted runner pushes more tests
+        # past 300s than a fast box does, which is exactly why 36, 35 and 22 all
+        # describe the same suite. Quote any of these numbers with its run id AND
+        # its machine, never on its own.
         run: python -m pip install 'pytest-xdist>=3' 'pytest-timeout>=2'
 
       - name: Triage full Python suite on the fresh wheel (#1512)
