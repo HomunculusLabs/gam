@@ -147,6 +147,7 @@ fn operator_under_test(
         nu,
         include_intercept,
         identifiability_transform,
+        input_scale,
         ..
     } = metadata
     else {
@@ -162,7 +163,8 @@ fn operator_under_test(
     LatentCoordDesignDerivative::new_matern(
         latent,
         std::sync::Arc::new(centers.clone()),
-        length_scale.original_value(),
+        *input_scale,
+        *length_scale,
         *nu,
         *include_intercept,
         identifiability_transform.clone(),

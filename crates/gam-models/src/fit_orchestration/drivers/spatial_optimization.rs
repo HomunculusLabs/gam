@@ -321,19 +321,17 @@ pub(crate) fn try_build_latent_coord_hyper_dirs(
                 nu,
                 include_intercept,
                 identifiability_transform,
+                input_scale,
                 ..
             },
         ) => gam_terms::basis::LatentCoordDesignDerivative::new_matern(
             latent.clone(),
             std::sync::Arc::new(centers.clone()),
-            // #2643: the callee evaluates this range against the
-            // STANDARDIZED `centers` above and against RAW latent
-            // coordinates, so it needs a standardized length — but the
-            // metadata frame is original units. Reading the original
-            // value preserves today's (wrong) arithmetic exactly; the
-            // conversion, the missing 1/sigma chain factor, and an FD
-            // test belong to #2643, not to this type refactor.
-            length_scale.original_value(),
+            // The metadata's own frame pair: standardized `centers` above,
+            // original-units range here. The constructor owns the single
+            // conversion between them (#2643).
+            *input_scale,
+            *length_scale,
             *nu,
             *include_intercept,
             identifiability_transform.clone(),
@@ -347,19 +345,15 @@ pub(crate) fn try_build_latent_coord_hyper_dirs(
                 power,
                 nullspace_order,
                 identifiability_transform,
+                input_scale,
                 ..
             },
         ) => gam_terms::basis::LatentCoordDesignDerivative::new_duchon(
             latent.clone(),
             std::sync::Arc::new(centers.clone()),
-            // #2643: the callee evaluates this range against the
-            // STANDARDIZED `centers` above and against RAW latent
-            // coordinates, so it needs a standardized length — but the
-            // metadata frame is original units. Reading the original
-            // value preserves today's (wrong) arithmetic exactly; the
-            // conversion, the missing 1/sigma chain factor, and an FD
-            // test belong to #2643, not to this type refactor.
-            length_scale.map(gam_terms::OriginalUnits::original_value),
+            // See the Matérn arm: the pair travels together (#2643).
+            *input_scale,
+            *length_scale,
             *power,
             *nullspace_order,
             identifiability_transform.clone(),
@@ -1706,18 +1700,15 @@ impl SingleBlockLatentCoordDesignCache {
                     length_scale,
                     nu,
                     aniso_log_scales,
+                    input_scale,
                     ..
                 },
             ) => Ok(gam_solve::latent_cache::LatentBasisKind::Matern {
                 centers: centers.clone(),
-                    // #2643: the callee evaluates this range against the
-                    // STANDARDIZED `centers` above and against RAW latent
-                    // coordinates, so it needs a standardized length — but the
-                    // metadata frame is original units. Reading the original
-                    // value preserves today's (wrong) arithmetic exactly; the
-                    // conversion, the missing 1/sigma chain factor, and an FD
-                    // test belong to #2643, not to this type refactor.
-                length_scale: length_scale.original_value(),
+                // The metadata's frame pair travels together into the cache
+                // key and into the radii it builds (#2643).
+                input_scale: *input_scale,
+                length_scale: *length_scale,
                 nu: *nu,
                 aniso_log_scales: aniso_log_scales
                     .clone()
@@ -1735,18 +1726,14 @@ impl SingleBlockLatentCoordDesignCache {
                     power,
                     nullspace_order,
                     aniso_log_scales,
+                    input_scale,
                     ..
                 },
             ) => Ok(gam_solve::latent_cache::LatentBasisKind::Duchon {
                 centers: centers.clone(),
-                    // #2643: the callee evaluates this range against the
-                    // STANDARDIZED `centers` above and against RAW latent
-                    // coordinates, so it needs a standardized length — but the
-                    // metadata frame is original units. Reading the original
-                    // value preserves today's (wrong) arithmetic exactly; the
-                    // conversion, the missing 1/sigma chain factor, and an FD
-                    // test belong to #2643, not to this type refactor.
-                length_scale: length_scale.map(gam_terms::OriginalUnits::original_value),
+                // See the Matérn arm (#2643).
+                input_scale: *input_scale,
+                length_scale: *length_scale,
                 power: *power,
                 nullspace_order: *nullspace_order,
                 aniso_log_scales: aniso_log_scales

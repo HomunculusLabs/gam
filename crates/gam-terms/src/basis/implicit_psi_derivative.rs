@@ -100,7 +100,16 @@ pub struct LatentCoordDesignDerivative {
 #[derive(Debug, Clone)]
 pub(crate) struct RadialLatentCoordLocalDesignJacobian {
     pub(crate) latent: Arc<crate::latent::LatentCoordValues>,
+    /// Kernel centers in the STANDARDIZED frame, as `BasisMetadata` stores them.
     pub(crate) centers: Arc<Array2<f64>>,
+    /// The frame `centers` and `radial_kind` live in, relative to the RAW
+    /// latent coordinates the optimizer moves (#2643).
+    ///
+    /// The realized design is `phi(||t/sigma - c||; ell/sigma)`, so a Jacobian
+    /// with respect to `t` must standardize `t` before forming radii AND carry
+    /// the `1/sigma` chain factor. Both were missing: the operator compared raw
+    /// `t` against standardized centers at an original-units range.
+    pub(crate) input_scale: crate::IsotropicScale,
     pub(crate) radial_kind: RadialScalarKind,
     pub(crate) ident_transform: Option<Array2<f64>>,
     pub(crate) full_ident_transform: Option<Array2<f64>>,
@@ -281,10 +290,16 @@ impl LatentCoordDesignDerivative {
         Self { provider }
     }
 
+    /// `input_scale` and `length_scale` are the metadata's own pair: `centers`
+    /// are standardized by `input_scale`, and `length_scale` is the range in
+    /// ORIGINAL units. Taking both, and doing the one conversion here, is what
+    /// stops a caller pairing a standardized center set with an unconverted
+    /// range (#2643); the frame tags make the pairing checkable (#2636).
     pub fn new_matern(
         latent: Arc<crate::latent::LatentCoordValues>,
         centers: Arc<Array2<f64>>,
-        length_scale: f64,
+        input_scale: crate::IsotropicScale,
+        length_scale: crate::OriginalUnits,
         nu: MaternNu,
         include_intercept: bool,
         ident_transform: Option<Array2<f64>>,
@@ -296,10 +311,14 @@ impl LatentCoordDesignDerivative {
                 centers.ncols()
             );
         }
+        let length_scale = input_scale
+            .to_standardized_units(length_scale)
+            .standardized_value();
         Ok(Self::from_local_design_jacobian_provider(Arc::new(
             RadialLatentCoordLocalDesignJacobian {
                 latent,
                 centers,
+                input_scale,
                 radial_kind: RadialScalarKind::Matern { length_scale, nu },
                 ident_transform,
                 full_ident_transform: None,
@@ -309,10 +328,13 @@ impl LatentCoordDesignDerivative {
         )))
     }
 
+    /// See [`Self::new_matern`] for why this takes the metadata's frame pair
+    /// rather than a bare range.
     pub fn new_duchon(
         latent: Arc<crate::latent::LatentCoordValues>,
         centers: Arc<Array2<f64>>,
-        length_scale: Option<f64>,
+        input_scale: crate::IsotropicScale,
+        length_scale: Option<crate::OriginalUnits>,
         power: f64,
         nullspace_order: DuchonNullspaceOrder,
         full_ident_transform: Option<Array2<f64>>,
@@ -327,6 +349,15 @@ impl LatentCoordDesignDerivative {
         let effective_order = duchon_effective_nullspace_order(centers.view(), nullspace_order);
         let p_order = duchon_p_from_nullspace_order(effective_order);
         let s_order = power.max(0.0).round() as usize;
+        // The range must reach BOTH the kernel and the partial-fraction
+        // expansion in the standardized frame: `duchon_partial_fraction_coeffs`
+        // is built at `kappa = 1/ell`, so an unconverted range builds the whole
+        // expansion at the wrong kappa, not merely the kernel (#2643).
+        let length_scale = length_scale.map(|ell| {
+            input_scale
+                .to_standardized_units(ell)
+                .standardized_value()
+        });
         let radial_kind = if let Some(length_scale) = length_scale {
             RadialScalarKind::Duchon {
                 length_scale,
@@ -355,6 +386,7 @@ impl LatentCoordDesignDerivative {
             RadialLatentCoordLocalDesignJacobian {
                 latent,
                 centers,
+                input_scale,
                 radial_kind,
                 ident_transform: Some(ident_transform),
                 full_ident_transform,
@@ -527,10 +559,14 @@ impl RadialLatentCoordLocalDesignJacobian {
         center: usize,
         axis: usize,
     ) -> Result<f64, BasisError> {
+        // `centers` and the kernel range are standardized; the latent values
+        // the optimizer moves are raw. Standardize `t` before forming the
+        // radius so all three meet in one frame (#2643).
         let t_row = self.latent.row(row);
+        let reciprocal = self.input_scale.reciprocal();
         let mut r2 = 0.0_f64;
         for a in 0..self.latent.latent_dim() {
-            let delta = t_row[a] - self.centers[[center, a]];
+            let delta = t_row[a] * reciprocal - self.centers[[center, a]];
             r2 += delta * delta;
         }
         let r = r2.sqrt();
@@ -552,7 +588,10 @@ impl RadialLatentCoordLocalDesignJacobian {
             });
         }
         let (_, q, _) = self.radial_kind.eval_design_triplet(r)?;
-        Ok(q * (t_row[axis] - self.centers[[center, axis]]))
+        // d/dt phi(||t/sigma - c||) = q * (t/sigma - c)_axis * (1/sigma):
+        // the axis component is standardized like the radius, and the trailing
+        // `reciprocal` is the chain factor for the standardization itself.
+        Ok(q * (t_row[axis] * reciprocal - self.centers[[center, axis]]) * reciprocal)
     }
 
     pub(crate) fn polynomial_axis_values(&self, row: usize, axis: usize) -> Array1<f64> {
@@ -564,7 +603,12 @@ impl RadialLatentCoordLocalDesignJacobian {
             DuchonNullspaceOrder::Linear => 1usize,
             DuchonNullspaceOrder::Degree(k) => k,
         };
+        // The realized polynomial block is built on the STANDARDIZED
+        // coordinates, and its constraint nullspace was built on standardized
+        // centers, so the monomials must be evaluated at `t/sigma` and carry
+        // the same `1/sigma` chain factor as the kernel block (#2643).
         let t_row = self.latent.row(row);
+        let reciprocal = self.input_scale.reciprocal();
         let exponents = monomial_exponents(self.latent.latent_dim(), max_degree);
         let mut out = Array1::<f64>::zeros(exponents.len());
         for (col, alpha) in exponents.iter().enumerate() {
@@ -572,11 +616,11 @@ impl RadialLatentCoordLocalDesignJacobian {
             if a_axis == 0 {
                 continue;
             }
-            let mut value = a_axis as f64;
+            let mut value = a_axis as f64 * reciprocal;
             for a in 0..self.latent.latent_dim() {
                 let exp_a = if a == axis { a_axis - 1 } else { alpha[a] };
                 if exp_a != 0 {
-                    value *= t_row[a].powi(exp_a as i32);
+                    value *= (t_row[a] * reciprocal).powi(exp_a as i32);
                 }
             }
             out[col] = value;
