@@ -4869,57 +4869,6 @@ fn repeat_survival_curve<'py>(
     Ok(out.into_pyarray(py).unbind())
 }
 
-/// Non-parametric Kaplan-Meier survival estimate `S(t) = ∏_{t_i ≤ t} (1 − d_i/n_i)`
-/// (right-continuous step function), evaluated at each point in `grid`.
-/// Non-finite and non-positive times are dropped before fitting. Rows tied at
-/// the same event time are pooled into a single risk-set update, matching the
-/// standard product-limit definition.
-fn benchmark_km_curve(times: &[f64], events: &[f64], grid: &[f64]) -> Vec<f64> {
-    let mut rows: Vec<(f64, f64)> = times
-        .iter()
-        .zip(events.iter())
-        .filter(|&(&t, _)| t.is_finite() && t > 0.0)
-        .map(|(&t, &e)| (t, e))
-        .collect();
-    if rows.is_empty() {
-        return vec![1.0; grid.len()];
-    }
-    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let n_total = rows.len();
-    let mut event_step_times = Vec::<f64>::new();
-    let mut survival_after_step = Vec::<f64>::new();
-    let mut survivor = 1.0;
-    let mut i = 0usize;
-    while i < rows.len() {
-        let t = rows[i].0;
-        let mut j = i;
-        let mut deaths = 0usize;
-        while j < rows.len() && rows[j].0 == t {
-            if rows[j].1 > 0.5 {
-                deaths += 1;
-            }
-            j += 1;
-        }
-        if deaths > 0 {
-            let at_risk = (n_total - i) as f64;
-            survivor *= 1.0 - deaths as f64 / at_risk;
-            event_step_times.push(t);
-            survival_after_step.push(survivor);
-        }
-        i = j;
-    }
-    grid.iter()
-        .map(|&g| {
-            let idx = event_step_times.partition_point(|&t| t <= g);
-            if idx == 0 {
-                1.0
-            } else {
-                survival_after_step[idx - 1]
-            }
-        })
-        .collect()
-}
-
 /// The marginal (covariate-free) Kaplan-Meier survival curve fit on the
 /// training sample, evaluated at `grid`. This is the "null model" baseline
 /// [`survival_lifted_metrics_from_predictions`] scores a model's calibrated
@@ -4938,10 +4887,18 @@ fn survival_null_curve_from_train<'py>(
             train_events.len()
         )));
     }
-    let curve = benchmark_km_curve(&train_times, &train_events, &grid);
+    let curve = gam::families::survival::risk_calibration::km_curve_on_grid(
+        &train_times,
+        &train_events,
+        &grid,
+    );
     Ok(Array1::from_vec(curve).into_pyarray(py).unbind())
 }
 
+/// Thin wrapper over
+/// [`gam::families::survival::risk_calibration::cox_calibrated_survival_matrix`],
+/// which owns the univariate Cox fit and the Breslow baseline. pyffi only maps
+/// the core error into a Python exception.
 fn benchmark_survival_matrix_from_risk(
     train_times: &[f64],
     train_events: &[f64],
@@ -4949,143 +4906,14 @@ fn benchmark_survival_matrix_from_risk(
     test_risk: &[f64],
     grid: &[f64],
 ) -> PyResult<Array2<f64>> {
-    if train_times.len() != train_events.len() || train_times.len() != train_risk.len() {
-        return Err(PyValueError::new_err(format!(
-            "survival calibration length mismatch: times={} events={} risk={}",
-            train_times.len(),
-            train_events.len(),
-            train_risk.len()
-        )));
-    }
-    let mut rows: Vec<(f64, f64, f64)> = train_times
-        .iter()
-        .zip(train_events.iter())
-        .zip(train_risk.iter())
-        .filter_map(|((&time, &event), &risk)| {
-            (time.is_finite() && event.is_finite() && risk.is_finite() && time > 0.0)
-                .then_some((time, event, risk))
-        })
-        .collect();
-    if rows.is_empty() {
-        return Ok(Array2::<f64>::ones((test_risk.len(), grid.len())));
-    }
-    let risk_mean = rows.iter().map(|row| row.2).sum::<f64>() / rows.len() as f64;
-    let risk_sd = (rows
-        .iter()
-        .map(|row| {
-            let d = row.2 - risk_mean;
-            d * d
-        })
-        .sum::<f64>()
-        / rows.len() as f64)
-        .sqrt();
-    if rows.len() < 2 || risk_sd < 1.0e-12 {
-        let times: Vec<f64> = rows.iter().map(|row| row.0).collect();
-        let events: Vec<f64> = rows.iter().map(|row| row.1).collect();
-        let curve = benchmark_km_curve(&times, &events, grid);
-        let mut out = Array2::<f64>::zeros((test_risk.len(), grid.len()));
-        for mut row in out.rows_mut() {
-            for (dst, src) in row.iter_mut().zip(curve.iter()) {
-                *dst = *src;
-            }
-        }
-        return Ok(out);
-    }
-    for row in &mut rows {
-        row.2 -= risk_mean;
-    }
-    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut event_times = Vec::<(f64, usize, f64)>::new();
-    let mut i = 0usize;
-    while i < rows.len() {
-        let time = rows[i].0;
-        let mut j = i + 1;
-        let mut d = usize::from(rows[i].1 > 0.5);
-        let mut event_x = if rows[i].1 > 0.5 { rows[i].2 } else { 0.0 };
-        while j < rows.len() && rows[j].0 == time {
-            if rows[j].1 > 0.5 {
-                d += 1;
-                event_x += rows[j].2;
-            }
-            j += 1;
-        }
-        if d > 0 {
-            event_times.push((time, d, event_x));
-        }
-        i = j;
-    }
-    let mut beta = 0.0;
-    let ridge = 1.0e-8;
-    for _ in 0..50 {
-        let mut score = -ridge * beta;
-        let mut info = ridge;
-        for &(time, d, event_x) in &event_times {
-            let mut s0 = 0.0;
-            let mut s1 = 0.0;
-            let mut s2 = 0.0;
-            for &(row_time, _, x) in &rows {
-                if row_time >= time {
-                    let w = (beta * x).clamp(-50.0, 50.0).exp();
-                    s0 += w;
-                    s1 += w * x;
-                    s2 += w * x * x;
-                }
-            }
-            if s0 > 0.0 {
-                let mean = s1 / s0;
-                score += event_x - d as f64 * mean;
-                info += d as f64 * (s2 / s0 - mean * mean).max(0.0);
-            }
-        }
-        if !info.is_finite() || info <= 0.0 {
-            break;
-        }
-        let step = (score / info).clamp(-2.0, 2.0);
-        beta += step;
-        if step.abs() < 1.0e-10 {
-            break;
-        }
-    }
-    let mut baseline = Vec::<(f64, f64)>::new();
-    let mut cumulative = 0.0;
-    for &(time, d, _) in &event_times {
-        let mut s0 = 0.0;
-        for &(row_time, _, x) in &rows {
-            if row_time >= time {
-                s0 += (beta * x).clamp(-50.0, 50.0).exp();
-            }
-        }
-        if s0 > 0.0 {
-            cumulative += d as f64 / s0;
-            baseline.push((time, cumulative));
-        }
-    }
-    let mut out = Array2::<f64>::zeros((test_risk.len(), grid.len()));
-    for (row_idx, &risk) in test_risk.iter().enumerate() {
-        let x = if risk.is_finite() {
-            risk - risk_mean
-        } else {
-            0.0
-        };
-        let mult = (beta * x).clamp(-50.0, 50.0).exp();
-        let mut step_idx = 0usize;
-        let mut h0 = 0.0;
-        let mut prev = 1.0;
-        for (col_idx, &time) in grid.iter().enumerate() {
-            while step_idx < baseline.len() && baseline[step_idx].0 <= time {
-                h0 = baseline[step_idx].1;
-                step_idx += 1;
-            }
-            let value = if col_idx == 0 {
-                1.0
-            } else {
-                (-(h0 * mult)).exp().clamp(1.0e-12, 1.0).min(prev)
-            };
-            out[[row_idx, col_idx]] = value;
-            prev = value;
-        }
-    }
-    Ok(out)
+    gam::families::survival::risk_calibration::cox_calibrated_survival_matrix(
+        train_times,
+        train_events,
+        train_risk,
+        test_risk,
+        grid,
+    )
+    .map_err(PyValueError::new_err)
 }
 
 #[pyfunction]
