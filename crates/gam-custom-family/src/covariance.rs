@@ -2105,6 +2105,12 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
 /// PD; a non-PD interior returns `Ok(None)` — a typed absence, not an error,
 /// because the deep-smoothing regime legitimately reaches it. Returns the
 /// correction together with the identified interior rank.
+///
+/// When EVERY outer coordinate is excluded the answer is not an absence: with
+/// no free ρ direction `Var(ρ)` is the zero-dimensional zero matrix, so the
+/// correction is exactly `0` at identified rank `0` and `V_c = V_cond`. That
+/// is returned as a value, so an exactly-known zero correction is never
+/// confused with an undefined one.
 pub(crate) fn joint_smoothing_correction(
     v_cond: &Array2<f64>,
     specs: &[ParameterBlockSpec],
@@ -2214,7 +2220,16 @@ pub(crate) fn joint_smoothing_correction(
         .filter(|o| !excluded_outer.contains(o))
         .collect();
     if included.is_empty() {
-        return Ok(None);
+        // Every outer coordinate is railed: no free rho direction survives, so
+        // Var(rho) is the zero-dimensional zero matrix and the inflation
+        // C = A Var(rho) A^T is EXACTLY the p x p zero matrix at identified
+        // interior rank 0. This is an exact value, not a missing one — the same
+        // identity `gam-predict/src/lib.rs:325-336` relies on when `lambdas` is
+        // empty ("Vp = Vb exactly ... an identity, not a fallback to a weaker
+        // uncertainty definition"). Returning `Ok(None)` here made it
+        // indistinguishable from the genuinely-undefined non-PD-interior case
+        // below and left the fit reporting no corrected covariance at all.
+        return Ok(Some((Array2::<f64>::zeros((p_total, p_total)), 0)));
     }
     let ki = included.len();
     let mut h_sub = Array2::<f64>::zeros((ki, ki));

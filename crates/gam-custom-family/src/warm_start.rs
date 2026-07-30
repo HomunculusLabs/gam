@@ -929,6 +929,32 @@ pub fn blockwise_fit_from_parts(
             smoothing_corrected.as_ref(),
             covariance_conditional.as_ref(),
         )?;
+    // #2296 moved every display surface onto `display_coefficient_uncertainty()`
+    // (`gam-solve/src/model_types/result_types.rs:4281`), which selects on the
+    // inference block's STANDARD ERRORS and never on the covariance matrices —
+    // deliberately, so a presenter can never pair one definition's SEs with
+    // another definition's matrix. This lane published `covariance_conditional`
+    // to the top-level slot but left both inference-block conditional fields
+    // `None`, so the accessor saw no SEs under either definition, returned
+    // `None`, and `covariance_kind` / `covariance_n` / `covariance_flat` came
+    // back absent on every custom-family fit — a covariance that had been
+    // computed, validated (finite and `(p, p)`, above) and stored, then dropped
+    // at the read boundary. Publish the pair the accessor reads.
+    //
+    // `try_from_parts` requires `inference.beta_covariance` to equal the
+    // top-level `covariance_conditional` bitwise
+    // (`result_types.rs:3759-3769`), so this clones exactly that array and
+    // nothing else; `se_from_covariance` is the same diagonal gate the
+    // corrected pair goes through two lines above.
+    let conditional_se = covariance_conditional
+        .as_ref()
+        .map(gam_problem::se_from_covariance)
+        .transpose()
+        .map_err(|reason| CustomFamilyError::NumericalFailure {
+            reason: format!(
+                "conditional covariance V_cond has an invalid diagonal: {reason}"
+            ),
+        })?;
     let inference = Some(gam_solve::model_types::FitInference {
         edf_by_block: edf_by_penalty,
         penalty_block_trace: penalty_trace,
@@ -945,8 +971,10 @@ pub fn blockwise_fit_from_parts(
         penalized_hessian: geom.penalized_hessian.clone(),
         reparam_qs: None,
         dispersion: gam_solve::model_types::Dispersion::UNIT,
-        beta_covariance: None,
-        beta_standard_errors: None,
+        beta_covariance: covariance_conditional
+            .as_ref()
+            .map(|cov| gam_problem::PhiScaledCovariance::wrap(cov.clone())),
+        beta_standard_errors: conditional_se,
         beta_covariance_corrected: corrected_cov.clone(),
         beta_standard_errors_corrected: corrected_se,
         beta_covariance_frequentist: None,
