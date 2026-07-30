@@ -91,13 +91,27 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
   # refuse unless the caller says they are theirs. Fix a surprise by refetching
   # and rebuilding the file on the new tip -- never by re-running with the
   # override.
+  # The override is a COUNT, not a flag.
+  #
+  # A bare yes/no is too easy to reach for: a lane that expected five deletions
+  # set it and authorised four hundred and sixty-four, reverting two other
+  # lanes' landed work in one push. Requiring the number means the override can
+  # only confirm a quantity you already looked at -- "I expect 5" cannot
+  # silently wave through 464.
   DELETIONS=$(git diff "$BASE" "$COMMIT" -- "$@" | grep '^-[^-]' || true)
-  if [ -n "$DELETIONS" ] && [ "${LAND_DELETIONS_OK:-0}" != "1" ]; then
-    echo "REFUSING: this would DELETE lines. Read them; they may be another lane's work:" >&2
+  DELETED_COUNT=$(printf '%s' "$DELETIONS" | grep -c '^-' || true)
+  [ -z "$DELETIONS" ] && DELETED_COUNT=0
+  if [ "$DELETED_COUNT" -gt 0 ] && [ "${LAND_EXPECT_DELETIONS:--1}" != "$DELETED_COUNT" ]; then
+    echo "REFUSING: this would DELETE $DELETED_COUNT line(s). Read them; they may be another lane's work:" >&2
     printf '%s\n' "$DELETIONS" >&2
     echo >&2
-    echo "If every line above is yours, re-run with LAND_DELETIONS_OK=1." >&2
-    echo "If any is not, your file was built from a stale base: refetch and rebuild it." >&2
+    if [ "${LAND_EXPECT_DELETIONS:--1}" != "-1" ]; then
+      echo "You said LAND_EXPECT_DELETIONS=${LAND_EXPECT_DELETIONS}, but the commit deletes $DELETED_COUNT." >&2
+      echo "That mismatch is the warning: your file was built from a stale base." >&2
+    else
+      echo "If every line above is yours, re-run with LAND_EXPECT_DELETIONS=$DELETED_COUNT." >&2
+    fi
+    echo "If any line is not yours, refetch and rebuild the file on the new tip. Never widen the number to make this pass." >&2
     exit 7
   fi
 
