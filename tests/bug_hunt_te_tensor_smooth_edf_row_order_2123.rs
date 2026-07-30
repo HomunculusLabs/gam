@@ -23,23 +23,31 @@
 //! landing from collapsing the reported SEs.
 //!
 //! Observed before the fix (n=300, the exact numpy `default_rng(0)` frame from
-//! the issue, dumped to `tests/data/te_2123_*.csv`):
+//! the issue, dumped to `tests/data/te_2123_orig.csv`):
 //!   original order : edf ≈ 52.0  (railed floor)  Σ(SE) ≈ 3.84
 //!   row permutation: edf ≈ 13.5  (converged)     Σ(SE) ≈ 12.98
 //!
-//! This test fits `te(x, z)` on the frame and on four fixed row permutations,
+//! This test fits `te(x, z)` on the frame and on four seeded row permutations,
 //! then asserts the deviances match (same data / same fit quality — an anchor)
 //! and that the reported EDF agrees within a tight tolerance. It is RED before
 //! the fix and GREEN once the outer REML converges robustly regardless of row
 //! order.
 
+use gam::utils::splitmix64;
 use gam::{FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula};
 
-fn load_frame(name: &str) -> gam::data::EncodedDataset {
-    let path = format!(
-        "{}/tests/data/te_2123_{name}.csv",
-        env!("CARGO_MANIFEST_DIR")
-    );
+/// Seeds naming the four permutations. These replace the committed
+/// `te_2123_perm{1,7,101,2024}.csv` fixtures, which were byte-for-byte row
+/// permutations of `te_2123_orig.csv` (verified by comparing sorted row
+/// multisets) and so carried no data the shuffle below cannot reproduce. No
+/// PARTICULAR permutation is load-bearing — as the header records, only the
+/// original order rails while every permutation converges — but the ORIGINAL
+/// order is, so `te_2123_orig.csv` stays on disk as the exact numpy
+/// `default_rng(0)` frame from the issue.
+const PERM_SEEDS: [u64; 4] = [1, 7, 101, 2024];
+
+fn load_rows() -> (Vec<String>, Vec<csv::StringRecord>) {
+    let path = format!("{}/tests/data/te_2123_orig.csv", env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let mut lines = text.lines();
     let header = lines.next().expect("header line");
@@ -51,7 +59,23 @@ fn load_frame(name: &str) -> gam::data::EncodedDataset {
         }
         rows.push(csv::StringRecord::from(line.split(',').collect::<Vec<_>>()));
     }
-    encode_recordswith_inferred_schema(headers, rows).expect("encode dataset")
+    (headers, rows)
+}
+
+/// Fisher-Yates over the canonical `splitmix64`, so a seed always yields the
+/// same row order on every platform and every run.
+fn permuted(rows: &[csv::StringRecord], seed: u64) -> Vec<csv::StringRecord> {
+    let mut out = rows.to_vec();
+    let mut state = seed;
+    for i in (1..out.len()).rev() {
+        let j = (splitmix64(&mut state) % (i as u64 + 1)) as usize;
+        out.swap(i, j);
+    }
+    out
+}
+
+fn encode(headers: &[String], rows: &[csv::StringRecord]) -> gam::data::EncodedDataset {
+    encode_recordswith_inferred_schema(headers.to_vec(), rows.to_vec()).expect("encode dataset")
 }
 
 struct FitSummary {
@@ -61,11 +85,10 @@ struct FitSummary {
     se_sum: f64,
 }
 
-fn fit_te(name: &str) -> FitSummary {
-    let data = load_frame(name);
+fn fit_te(data: &gam::data::EncodedDataset) -> FitSummary {
     let cfg = FitConfig::default();
     let FitResult::Standard(res) =
-        fit_from_formula("y ~ te(x, z)", &data, &cfg).expect("te(x,z) fit should succeed")
+        fit_from_formula("y ~ te(x, z)", data, &cfg).expect("te(x,z) fit should succeed")
     else {
         panic!("expected a standard GAM fit for te(x, z)");
     };
@@ -91,14 +114,16 @@ fn fit_te(name: &str) -> FitSummary {
 
 #[test]
 fn te_tensor_smooth_edf_is_row_order_invariant_2123() {
-    let base = fit_te("orig");
+    let (headers, rows) = load_rows();
+    let base = fit_te(&encode(&headers, &rows));
     eprintln!(
         "original     : edf={:7.3} deviance={:.4} converged={} Σ(SE)={:.2}",
         base.edf_total, base.deviance, base.converged, base.se_sum
     );
 
-    for seed in ["perm1", "perm7", "perm101", "perm2024"] {
-        let f = fit_te(seed);
+    for seed_value in PERM_SEEDS {
+        let seed = format!("perm{seed_value}");
+        let f = fit_te(&encode(&headers, &permuted(&rows, seed_value)));
         eprintln!(
             "{seed:>9}: edf={:7.3} deviance={:.4} converged={} Σ(SE)={:.2}",
             f.edf_total, f.deviance, f.converged, f.se_sum

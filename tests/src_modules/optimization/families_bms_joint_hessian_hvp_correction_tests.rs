@@ -3137,6 +3137,7 @@ fn murphy_topel_test_calibration_basis2() -> LatentZConditionalCalibration {
     }
 }
 
+use gam_linalg::utils::splitmix64;
 /// Deterministic splitmix64 → standard-normal sampler for the Monte-Carlo
 /// oracle below (self-contained so the test carries no RNG dev-dependency and
 /// is bit-reproducible across machines).
@@ -3150,11 +3151,7 @@ impl SplitMix64 {
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        splitmix64(&mut self.state)
     }
 
     /// Uniform in (0, 1).

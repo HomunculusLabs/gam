@@ -35,6 +35,7 @@ use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
 
+use gam::utils::splitmix64;
 /// Deterministic, dependency-free PRNG (SplitMix64) for bit-reproducible data.
 struct SplitMix64 {
     state: u64,
@@ -45,11 +46,7 @@ impl SplitMix64 {
         Self { state: seed }
     }
     fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        splitmix64(&mut self.state)
     }
     fn next_uniform(&mut self) -> f64 {
         let bits = self.next_u64() >> 11;

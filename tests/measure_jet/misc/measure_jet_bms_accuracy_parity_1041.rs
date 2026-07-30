@@ -34,6 +34,7 @@ const N_TRAIN: usize = 1_500;
 const N_TEST: usize = 600;
 const CENTERS: usize = 10;
 
+use gam::utils::splitmix64;
 /// SplitMix64 — same data law as `measure_jet_bms_backend.rs` so the two
 /// tests share one generative construction.
 struct SplitMix64 {
@@ -44,11 +45,7 @@ impl SplitMix64 {
         Self { state: seed }
     }
     fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        splitmix64(&mut self.state)
     }
     fn next_unit(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64

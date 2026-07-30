@@ -51,6 +51,7 @@ fn truth_mean(x0: f64, x1: f64) -> f64 {
     B0 + B1 * x0 + B2 * x1 + G * x0 * x1
 }
 
+use gam::utils::splitmix64;
 /// Deterministic, dependency-free pseudo-random stream in `[0, 1)`. A simple
 /// SplitMix64 keeps the dataset reproducible across runs without pulling in an
 /// RNG crate, and the two covariates are drawn from independent sub-streams so
@@ -65,11 +66,7 @@ impl SplitMix64 {
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        splitmix64(&mut self.state)
     }
 
     /// Uniform in `[0, 1)`.

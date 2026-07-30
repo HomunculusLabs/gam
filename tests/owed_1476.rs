@@ -38,6 +38,7 @@ const RHO: f64 = 0.90;
 const NOISE: f64 = 0.30;
 const SEED: u64 = 1_476_011;
 
+use gam::utils::splitmix64;
 /// Deterministic SplitMix64 + Box–Muller standard-normal stream (no external RNG).
 struct SplitMix64 {
     state: u64,
@@ -47,11 +48,7 @@ impl SplitMix64 {
         Self { state: seed }
     }
     fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
+        splitmix64(&mut self.state)
     }
     fn next_unit(&mut self) -> f64 {
         let bits = self.next_u64() >> 11;

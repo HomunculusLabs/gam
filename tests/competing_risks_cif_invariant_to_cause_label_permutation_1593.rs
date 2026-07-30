@@ -48,6 +48,7 @@ use gam::{
 };
 use ndarray::{Array2, Array3};
 
+use gam::utils::splitmix64;
 /// Deterministic SplitMix64 → byte-identical data run-to-run (no external RNG),
 /// so any cross-labelling disagreement is a fit property, not sampling noise.
 struct SplitMix64 {
@@ -59,11 +60,7 @@ impl SplitMix64 {
         Self { state: seed }
     }
     fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
+        splitmix64(&mut self.state)
     }
     /// Uniform on (0, 1).
     fn unit(&mut self) -> f64 {
