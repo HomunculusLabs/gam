@@ -45,6 +45,21 @@ pub enum InnerConvergenceTerminalState {
         step_inf: f64,
         step_tol: f64,
         resolvable_negative_curvature: bool,
+        /// The smallest stationarity residual this solve actually computed, and
+        /// how many cycles have passed since it last improved.
+        ///
+        /// The terminal residual alone cannot separate a solve that never got
+        /// close from one that reached a near-tolerance point and then walked
+        /// away from it, and those are different defects with different fixes.
+        /// Measured on the transformation-normal wine arm (#2600): the terminal
+        /// residual is `1.906e0` while the smallest this same solve computed is
+        /// `1.578e-3` — 1200x better, within 1.9x of `residual_tol`, and reached
+        /// 27 cycles earlier, after which every accepted step raised the
+        /// residual again. Read from the terminal value alone that solve looks
+        /// like it never approached stationarity; read with the best value it
+        /// is a solve that drifted off a point it had essentially reached.
+        best_stationarity_residual: f64,
+        cycles_since_best_residual: usize,
     },
 }
 
@@ -73,12 +88,16 @@ impl std::fmt::Display for InnerConvergenceTerminalState {
                 step_inf,
                 step_tol,
                 resolvable_negative_curvature,
+                best_stationarity_residual,
+                cycles_since_best_residual,
             } => write!(
                 f,
                 "joint-Newton terminal cycle {cycle}: \
                  stationarity_residual={stationarity_residual:.6e} (tol={residual_tol:.6e}), \
                  step_inf={step_inf:.6e} (tol={step_tol:.6e}), \
-                 resolvable_negative_curvature={resolvable_negative_curvature}"
+                 resolvable_negative_curvature={resolvable_negative_curvature}, \
+                 best_stationarity_residual={best_stationarity_residual:.6e} \
+                 (last improved {cycles_since_best_residual} cycle(s) before this one)"
             ),
         }
     }
@@ -244,6 +263,38 @@ impl From<CustomFamilyError> for String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joint_newton_terminal_state_reports_the_best_residual_not_only_the_last_2600() {
+        // The #2600 shape: a solve that reached 1.578e-3 (within 1.9x of tol)
+        // and then drifted for 27 cycles to a terminal 1.906e0. A reader given
+        // only the terminal value concludes the solve never approached
+        // stationarity; the correct reading is that it did and left. Both
+        // numbers and the distance back to the best one must be in the message.
+        let state = InnerConvergenceTerminalState::JointNewton {
+            cycle: 52,
+            stationarity_residual: 1.906428e0,
+            residual_tol: 8.307952e-4,
+            step_inf: 4.958893e0,
+            step_tol: 8.493315e-5,
+            resolvable_negative_curvature: true,
+            best_stationarity_residual: 1.578e-3,
+            cycles_since_best_residual: 27,
+        };
+        let msg = state.to_string();
+        assert!(
+            msg.contains("stationarity_residual=1.906428e0"),
+            "message: {msg}"
+        );
+        assert!(
+            msg.contains("best_stationarity_residual=1.578000e-3"),
+            "message: {msg}"
+        );
+        assert!(
+            msg.contains("27 cycle(s) before this one"),
+            "message: {msg}"
+        );
+    }
 
     #[test]
     fn invalid_input_display_contains_context_and_reason() {
