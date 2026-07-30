@@ -73,7 +73,7 @@ fn assert_quotient_device_parity(
     cpu_beta: &Array1<f64>,
     device_t: &Array1<f64>,
     device_beta: &Array1<f64>,
-) {
+) -> Result<(), String> {
     let orbit_step = gauge_direction.dot(device_beta).abs();
     assert!(
         orbit_step <= 1.0e-12,
@@ -103,11 +103,12 @@ fn assert_quotient_device_parity(
         device_t.view(),
         device_beta.view(),
     )
-    .unwrap_or_else(|error| panic!("#2660 {label} backward-error certificate failed: {error}"));
+    .map_err(|error| format!("#2660 {label} backward-error certificate failed: {error}"))?;
     assert!(
         backward_error <= 1.0e-10,
         "#2660 {label} quotient backward error is {backward_error:e}"
     );
+    Ok(())
 }
 
 #[test]
@@ -150,7 +151,8 @@ fn device_direct_applies_beta_gauge_quotient_at_composed_cofit_shape_2660() {
         &cpu_beta,
         &device_t,
         &device_beta,
-    );
+    )
+    .expect("#2660 re-upload/fused quotient parity");
 
     let cpu_backward_error = arrow_quotient_backward_error_certificate(
         &sys,
@@ -189,7 +191,8 @@ fn device_direct_applies_beta_gauge_quotient_at_composed_cofit_shape_2660() {
         &cpu_beta,
         &fixed.delta_t,
         &fixed.delta_beta,
-    );
+    )
+    .expect("#2660 ridge-fixed resident quotient parity");
 
     let base_frame = crate::gpu_kernels::arrow_schur::ResidentBaseArrowFrameHandle::new(&sys)
         .expect("ridge-keyed resident quotient base frame");
@@ -206,5 +209,6 @@ fn device_direct_applies_beta_gauge_quotient_at_composed_cofit_shape_2660() {
         &cpu_beta,
         &keyed.delta_t,
         &keyed.delta_beta,
-    );
+    )
+    .expect("#2660 ridge-keyed resident quotient parity");
 }
