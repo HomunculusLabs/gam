@@ -62,20 +62,6 @@ pub(crate) struct SeedRejection {
 }
 
 impl SeedRejection {
-    /// No producer verdict available: the rejection reached the seed loop as
-    /// bare prose. Conservative -- the rejection stays eligible for the
-    /// structural bail, unchanged.
-    ///
-    /// There is deliberately no verdict-free constructor on this type. Every arm
-    /// of the seed loop that rejects a candidate either holds the typed error or
-    /// knows it does not; there is no third case, and a constructor that
-    /// defaults the verdict is how the verdict got lost. The tests' own
-    /// convenience wrapper lives inside `mod tests` below, where it cannot be
-    /// reached from the seed loop at all -- a `#[cfg(test)]` attribute on a
-    /// crate-level item would instead leave a second construction path that
-    /// only one build configuration ever type-checks, which the ban scanner
-    /// refuses for the same reason it refuses `debug_assert!`.
-
     /// `rho_local` is the producer's OWN answer to "is this a statement about
     /// this rho, or about the problem?" -- `is_recoverable()` on an
     /// `ObjectiveEvalError`, or `is_trial_point_infeasible()` on an
@@ -604,18 +590,26 @@ pub(crate) fn format_no_seeds_passed(
 mod tests {
     use super::*;
 
-    /// Test-only shorthand for a rejection that reached the seed loop as bare
-    /// prose. Lives here, not on `SeedRejection`, so production code cannot
-    /// construct a rejection without stating the producer's verdict.
-    fn seed_rejection_from_message(
-        seed_idx: usize,
-        phase: &'static str,
-        message: String,
-    ) -> SeedRejection {
-        SeedRejection::from_message_with_producer_verdict(seed_idx, phase, message, false)
+    impl SeedRejection {
+        /// No producer verdict available: the rejection reached the seed loop as
+        /// bare prose. Conservative -- the rejection stays eligible for the
+        /// structural bail, unchanged.
+        ///
+        /// Test-only, and defined inside `mod tests` so production code cannot
+        /// name it. Production rejections all flow through
+        /// [`Self::from_message_with_producer_verdict`], because every arm of
+        /// the seed loop that rejects a candidate either holds the typed error
+        /// or knows it does not; there is no third case, and leaving a
+        /// verdict-free constructor reachable from the seed loop is how the
+        /// verdict got lost.
+        pub(crate) fn from_message(
+            seed_idx: usize,
+            phase: &'static str,
+            message: String,
+        ) -> Self {
+            Self::from_message_with_producer_verdict(seed_idx, phase, message, false)
+        }
     }
-
-    use super::*;
 
     /// A `RemlConvergenceError`-class rejection in the shape #1036 autopsies:
     /// a non-PD per-row H_tt pivot and a stuck KKT residual, with no
@@ -623,7 +617,7 @@ mod tests {
     /// invisible to `uniform_structural_key`, but carries a quantified
     /// pivot/KKT fingerprint the generic detector keys on.
     fn reml_nonpd(seed_idx: usize, pivot: &str, kkt: &str) -> SeedRejection {
-        seed_rejection_from_message(
+        SeedRejection::from_message(
             seed_idx,
             "validation",
             format!(
@@ -634,7 +628,7 @@ mod tests {
     }
 
     fn cert_refused(seed_idx: usize, block: &str) -> SeedRejection {
-        seed_rejection_from_message(
+        SeedRejection::from_message(
             seed_idx,
             "validation",
             format!(
@@ -647,7 +641,7 @@ mod tests {
     }
 
     fn phantom_refused(seed_idx: usize, block: &str) -> SeedRejection {
-        seed_rejection_from_message(
+        SeedRejection::from_message(
             seed_idx,
             "validation",
             format!(
@@ -667,7 +661,7 @@ mod tests {
         assert_eq!(key.0, KktRefusalDiagnosis::RankDeficientHPen);
         assert_eq!(key.1.as_deref(), Some("time_surface"));
 
-        let domain = seed_rejection_from_message(
+        let domain = SeedRejection::from_message(
             0,
             "validation",
             "likelihood evaluation failed: NaN response".to_string(),
@@ -708,7 +702,7 @@ mod tests {
             "fixture must NOT claim a non-finite quantity: the point is that a              finite-beta, finite-objective refusal was being counted as one"
         );
 
-        let rejection = seed_rejection_from_message(0, "validation", message);
+        let rejection = SeedRejection::from_message(0, "validation", message);
         assert!(
             matches!(rejection.failure, InnerFailure::Other(_)),
             "a non-convergence with no budget/floor/cert/domain sentinel is              unclassified, got {:?}",
@@ -745,7 +739,7 @@ mod tests {
     /// bucket a non-finite objective has always belonged in.
     #[test]
     fn genuinely_non_finite_refusal_is_still_counted_as_domain_2651() {
-        let rejection = seed_rejection_from_message(
+        let rejection = SeedRejection::from_message(
             0,
             "validation",
             "custom-family objective returned a non-finite cost at the seed".to_string(),
@@ -796,7 +790,7 @@ mod tests {
     #[test]
     fn uniform_structural_key_rejects_mixed_failure_kinds() {
         let cert = cert_refused(0, "time_surface");
-        let domain = seed_rejection_from_message(
+        let domain = SeedRejection::from_message(
             1,
             "validation",
             "likelihood evaluation failed: NaN response".to_string(),
@@ -1034,7 +1028,7 @@ mod tests {
     #[test]
     fn generic_detector_fires_on_real_arrow_nonpd_wording() {
         let real = |seed: usize, pivot: &str| {
-            seed_rejection_from_message(
+            SeedRejection::from_message(
                 seed,
                 "validation",
                 format!(
@@ -1120,7 +1114,7 @@ mod tests {
     #[test]
     fn generic_detector_does_not_bail_on_repeated_nonfinite_objectives() {
         let nonfinite = |seed: usize| {
-            seed_rejection_from_message(
+            SeedRejection::from_message(
                 seed,
                 "validation",
                 "outer eval failed: non-finite objective at trial rho; \
@@ -1160,7 +1154,7 @@ mod tests {
     fn generic_detector_keys_on_trailing_run() {
         let rejections = vec![
             // A one-off domain miss at an exploration seed.
-            seed_rejection_from_message(
+            SeedRejection::from_message(
                 0,
                 "validation",
                 "likelihood evaluation failed: NaN".into(),
@@ -1188,9 +1182,9 @@ mod tests {
     #[test]
     fn generic_detector_excludes_unquantified_runs() {
         let rejections = vec![
-            seed_rejection_from_message(0, "validation", "opaque legacy failure".into()),
-            seed_rejection_from_message(1, "validation", "opaque legacy failure".into()),
-            seed_rejection_from_message(2, "validation", "opaque legacy failure".into()),
+            SeedRejection::from_message(0, "validation", "opaque legacy failure".into()),
+            SeedRejection::from_message(1, "validation", "opaque legacy failure".into()),
+            SeedRejection::from_message(2, "validation", "opaque legacy failure".into()),
         ];
         assert!(
             consecutive_generic_signature(&rejections, 3).is_none(),
