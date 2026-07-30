@@ -457,18 +457,17 @@ const PERMUTATIONS_4: [[usize; 4]; 24] = [
 ];
 
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
 fn hand_analytic_term<const ORDER: usize, const N: usize>(
     output: &mut [[f64; K]; K],
     active: [usize; N],
     stack: [f64; 5],
-    direction_u: &[f64; K],
-    direction_v: &[f64; K],
-    d1: impl Fn(usize) -> f64,
-    d2: impl Fn(usize, usize) -> f64,
-    third_terms: &[([usize; 3], f64)],
-    fourth_terms: &[([usize; 4], f64)],
+    directions: (&[f64; K], &[f64; K]),
+    derivatives: (impl Fn(usize) -> f64, impl Fn(usize, usize) -> f64),
+    terms: (&[([usize; 3], f64)], &[([usize; 4], f64)]),
 ) {
+    let (direction_u, direction_v) = directions;
+    let (d1, d2) = derivatives;
+    let (third_terms, fourth_terms) = terms;
     let mut first = [0.0; N];
     let mut second = [[0.0; N]; N];
     let mut second_u = [0.0; N];
@@ -591,8 +590,8 @@ fn hand_analytic_contracted<const ORDER: usize>(
             &mut output,
             [0, 4, 7],
             plan.u0,
-            direction_u,
-            direction_v,
+            (direction_u, direction_v),
+            (
             |axis| match axis {
                 0 => 1.0,
                 4 => -exponential,
@@ -604,8 +603,11 @@ fn hand_analytic_contracted<const ORDER: usize>(
                 [7, 7] => -product,
                 _ => 0.0,
             },
+            ),
+            (
             &[([1, 2, 2], -exponential), ([2, 2, 2], product)],
             &[([1, 2, 2, 2], exponential), ([2, 2, 2, 2], -product)],
+            )
         );
     }
 
@@ -616,8 +618,8 @@ fn hand_analytic_contracted<const ORDER: usize>(
             &mut output,
             [1, 3, 6],
             stack,
-            direction_u,
-            direction_v,
+            (direction_u, direction_v),
+            (
             |axis| match axis {
                 1 => 1.0,
                 3 => -exponential,
@@ -629,8 +631,11 @@ fn hand_analytic_contracted<const ORDER: usize>(
                 [6, 6] => -product,
                 _ => 0.0,
             },
+            ),
+            (
             &[([1, 2, 2], -exponential), ([2, 2, 2], product)],
             &[([1, 2, 2, 2], exponential), ([2, 2, 2, 2], -product)],
+            )
         );
     }
 
@@ -642,8 +647,8 @@ fn hand_analytic_contracted<const ORDER: usize>(
             &mut output,
             [2, 3, 5, 6, 8],
             stack,
-            direction_u,
-            direction_v,
+            (direction_u, direction_v),
+            (
             |axis| match axis {
                 2 => 1.0,
                 3 => exponential * p[8],
@@ -660,6 +665,8 @@ fn hand_analytic_contracted<const ORDER: usize>(
                 [6, 8] => -exponential * p[3],
                 _ => 0.0,
             },
+            ),
+            (
             &[
                 ([1, 3, 3], exponential * p[8]),
                 ([1, 3, 4], -exponential),
@@ -674,6 +681,7 @@ fn hand_analytic_contracted<const ORDER: usize>(
                 ([3, 3, 3, 3], product),
                 ([3, 3, 3, 4], -exponential * p[3]),
             ],
+            )
         );
     }
 
