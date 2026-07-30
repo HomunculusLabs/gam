@@ -51,7 +51,7 @@ pub fn bspline_derivative_penalty_matrix(
 ) -> Result<Array2<f64>, BasisError> {
     let (unit_factor, domain_scale) = bspline_unit_energy_factor(knot_vector, degree, order)?;
     let mut penalty = fast_ata(&unit_factor);
-    symmetrize_in_place(&mut penalty);
+    gam_linalg::matrix::symmetrize_in_place(&mut penalty);
     // Apply the exact coordinate covariance `S_x = c^(1-2m) S_u` to the
     // assembled unit Gram, not to the constructive factor: a single scalar
     // multiply per entry is exactly covariant (even the structurally-zero
@@ -199,7 +199,7 @@ pub fn ispline_function_penalties(
         cumulative.slice_mut(s![column + 1.., column]).fill(1.0);
     }
     let mut roughness = cumulative.t().dot(&bspline_roughness).dot(&cumulative);
-    symmetrize_in_place(&mut roughness);
+    gam_linalg::matrix::symmetrize_in_place(&mut roughness);
 
     let roughness_nullspace_dim = derivative_order - 1;
     let nullspace_shrinkage = if include_nullspace_shrinkage && roughness_nullspace_dim > 0 {
@@ -281,7 +281,7 @@ pub fn cyclic_bspline_derivative_penalty_matrix(
 ) -> Result<Array2<f64>, BasisError> {
     let unit_factor = cyclic_unit_energy_factor(degree, num_basis, period, order)?;
     let mut penalty = fast_ata(&unit_factor);
-    symmetrize_in_place(&mut penalty);
+    gam_linalg::matrix::symmetrize_in_place(&mut penalty);
     // Carry the exact covariance `S_x = period^(1-2m) S_u` on the assembled unit
     // Gram, not on the factor. A single scalar multiply per entry is exactly
     // covariant — the structurally-zero circulant off-band entries (whose value
@@ -565,17 +565,6 @@ fn derivative_energy_factor_spans(
 /// Exact symmetrization: the accumulation is symmetric in exact arithmetic;
 /// this removes the last-ulp asymmetry from floating-point summation order so
 /// downstream eigen/Cholesky consumers see a bit-exact symmetric matrix.
-fn symmetrize_in_place(s: &mut Array2<f64>) {
-    let n = s.nrows();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let avg = 0.5 * (s[[i, j]] + s[[j, i]]);
-            s[[i, j]] = avg;
-            s[[j, i]] = avg;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

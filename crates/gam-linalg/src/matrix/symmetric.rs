@@ -357,6 +357,18 @@ pub fn xt_diag_x_signed(
 /// Canonical single source of truth for the "average the transpose" cleanup
 /// that every Hessian/penalty assembly applies to kill the small asymmetry
 /// left by floating-point accumulation order.
+///
+/// The input must be square: the scan is driven by `nrows()` and indexes
+/// `[[j, i]]` for `j < i`, so a wider-than-tall matrix would be read outside
+/// its own column range. Every caller symmetrizes a Gram, a Hessian, a penalty
+/// or a covariance, all square by construction.
+///
+/// This function was `pub` and carried the sentence above while having no
+/// caller outside this crate; four crates (`gam-solve` twice, `gam-inference`,
+/// `gam-terms`) had each re-derived the same loop as a private `fn`. The
+/// bodies agreed, so nothing was numerically wrong -- but "single source of
+/// truth" was a claim about a state that did not hold, and any change made
+/// here would have reached none of them.
 pub fn symmetrize_in_place(matrix: &mut Array2<f64>) {
     let p = matrix.nrows();
     for i in 0..p {

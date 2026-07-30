@@ -23,6 +23,7 @@ use crate::gaussian_reml::{
     GaussianRemlBackwardResult, gaussian_reml_multi_closed_form_with_cache,
 };
 use faer::Side;
+use gam_linalg::matrix::symmetrize_in_place;
 use gam_linalg::faer_ndarray::{
     FaerCholesky, FaerEigh, default_rrqr_rank_alpha, rrqr_nullspace_basis, rrqr_with_permutation,
 };
@@ -1182,16 +1183,6 @@ fn row_quadratic(x: ArrayView2<'_, f64>, matrix: &Array2<f64>) -> Array1<f64> {
 
 fn symmetric_average(matrix: ArrayView2<'_, f64>) -> Array2<f64> {
     (&matrix + &matrix.t()) * 0.5
-}
-
-fn symmetrize_in_place(matrix: &mut Array2<f64>) {
-    for row in 0..matrix.nrows() {
-        for col in (row + 1)..matrix.ncols() {
-            let value = 0.5 * (matrix[[row, col]] + matrix[[col, row]]);
-            matrix[[row, col]] = value;
-            matrix[[col, row]] = value;
-        }
-    }
 }
 
 fn trace(matrix: &Array2<f64>) -> f64 {

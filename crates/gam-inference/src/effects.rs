@@ -7,6 +7,7 @@
 
 use faer::Side;
 use gam_linalg::faer_ndarray::FaerEigh;
+use gam_linalg::matrix::symmetrize_in_place;
 use gam_math::probability::standard_normal_quantile;
 use gam_math::quantile::quantile_from_sorted;
 use gam_solve::estimate::UnifiedFitResult;
@@ -449,16 +450,6 @@ fn validated_symmetric_matrix(matrix: ArrayView2<'_, f64>) -> Result<Array2<f64>
         }
     }
     Ok(symmetric)
-}
-
-fn symmetrize_in_place(matrix: &mut Array2<f64>) {
-    for row in 0..matrix.nrows() {
-        for column in 0..row {
-            let average = 0.5 * (matrix[[row, column]] + matrix[[column, row]]);
-            matrix[[row, column]] = average;
-            matrix[[column, row]] = average;
-        }
-    }
 }
 
 fn psd_eigendecomposition(

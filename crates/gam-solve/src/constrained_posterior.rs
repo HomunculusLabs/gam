@@ -758,7 +758,7 @@ pub fn constrained_posterior_correction(
         )?;
 
         let mut removed = &face.w - &normal_covariance;
-        symmetrize_in_place(&mut removed);
+        gam_linalg::matrix::symmetrize_in_place(&mut removed);
         certify_removed_variance(&removed, &face.w)?;
 
         return Ok(Some(ConstrainedPosteriorCorrection {
@@ -1126,17 +1126,6 @@ fn certify_removed_variance(removed: &Array2<f64>, w: &Array2<f64>) -> Result<()
         }
     }
     Ok(())
-}
-
-fn symmetrize_in_place(matrix: &mut Array2<f64>) {
-    let n = matrix.nrows();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let averaged = 0.5 * (matrix[[i, j]] + matrix[[j, i]]);
-            matrix[[i, j]] = averaged;
-            matrix[[j, i]] = averaged;
-        }
-    }
 }
 
 /// First two moments of `u ~ N(mean, covariance)` restricted to the box
