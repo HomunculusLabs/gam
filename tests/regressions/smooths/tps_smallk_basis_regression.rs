@@ -231,7 +231,7 @@ fn standard_fit_options(max_iter: usize) -> FitOptions {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
         resource_policy: gam_runtime::resource::ResourcePolicy::default_library(),
     }
 }

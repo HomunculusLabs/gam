@@ -1717,7 +1717,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
 
     let label_layout = penalty_label_layout_with_joint(specs, penalty_counts.clone(), joint_specs)?;
     let mut rho0 = label_layout.initial_rho.clone();
-    let (persistent_warm_start_key, mut persistent_warm_start) =
+    let (persistent_warm_start_cache, mut persistent_warm_start) =
         load_persistent_custom_family_warm_start::<F>(family, specs, options, rho0.len());
     // The cross-fit `FitArtifact` transfer (consume/capture below) reuses
     // per-block β/ρ from a structurally-matching prior fit under a descriptor
@@ -1725,15 +1725,13 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // `persistent_warm_start_fingerprint` contract, reusing β across fits is
     // only admissible for families that opt into persistent warm-starts by
     // providing a likelihood-data fingerprint (which is exactly what makes
-    // `persistent_warm_start_key` `Some`). Families that opt out (fingerprint
+    // `persistent_warm_start_cache` `Some`). Families that opt out (fingerprint
     // `None` ⇒ key `None`) must cold-start so repeat fits of the same model are
     // bit-reproducible: without this gate a second structurally-identical fit
     // warm-starts off the first and settles on a different point within the
     // inner solve's flat-basin tolerance (gam#1607 cluster 4 — the location-
     // scale engine-vs-reference exact-replay parity), and successive process
     // runs drift as each seeds off the previous run's on-disk artifact.
-    let cross_fit_artifact_enabled = persistent_warm_start_key.is_some();
-
     // Cross-fit warm start: when the exact response-keyed inner cache MISSES
     // (a new fold / row population / reduced width), fall back to the
     // descriptor-indexed FitArtifact store and transfer BOTH the smoothing
@@ -1747,29 +1745,32 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // KKT/REML certificate — and behavior-neutral on a cold store (no parent ⇒
     // rho0 + cold β unchanged). Any anomaly degrades that block (or the whole
     // transfer) to cold.
-    if cross_fit_artifact_enabled && persistent_warm_start.is_none() && !rho0.is_empty() {
-        if let Some(warm) = consume_fit_artifact::<F>(
-            specs,
-            &canonical.gauge,
-            &label_layout.physical_to_outer,
-            &rho0,
-        ) {
-            let beta_widths_ok = warm.block_beta.len() == specs.len()
-                && warm
-                    .block_beta
-                    .iter()
-                    .zip(specs.iter())
-                    .all(|(beta, spec)| beta.len() == spec.design.ncols());
-            if warm.rho.len() == rho0.len()
-                && warm.rho.iter().all(|v| v.is_finite())
-                && beta_widths_ok
-            {
-                rho0 = warm.rho.clone();
-                // Route the projected β through the same inner warm-start
-                // channel the exact-key path uses (`CustomOuterState::new`):
-                // the inner solve's cold-start path copies per-block β where
-                // the reduced width matches and ignores it otherwise.
-                persistent_warm_start = Some(warm);
+    if persistent_warm_start.is_none() && !rho0.is_empty() {
+        if let Some(cache) = persistent_warm_start_cache.as_ref() {
+            if let Some(warm) = consume_fit_artifact::<F>(
+                &cache.store,
+                specs,
+                &canonical.gauge,
+                &label_layout.physical_to_outer,
+                &rho0,
+            ) {
+                let beta_widths_ok = warm.block_beta.len() == specs.len()
+                    && warm
+                        .block_beta
+                        .iter()
+                        .zip(specs.iter())
+                        .all(|(beta, spec)| beta.len() == spec.design.ncols());
+                if warm.rho.len() == rho0.len()
+                    && warm.rho.iter().all(|v| v.is_finite())
+                    && beta_widths_ok
+                {
+                    rho0 = warm.rho.clone();
+                    // Route the projected β through the same inner warm-start
+                    // channel the exact-key path uses (`CustomOuterState::new`):
+                    // the inner solve's cold-start path copies per-block β where
+                    // the reduced width matches and ignores it otherwise.
+                    persistent_warm_start = Some(warm);
+                }
             }
         }
     }
@@ -1790,7 +1791,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         })?;
         let warm_start = constrained_warm_start_from_inner(&rho0, &inner);
         store_persistent_custom_family_warm_start(
-            persistent_warm_start_key.as_deref(),
+            persistent_warm_start_cache.as_ref(),
             specs,
             &warm_start,
         );
@@ -1871,8 +1872,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         // can warm-start its ρ. Best-effort; never affects this fit. Gated on
         // the same opt-in as the consume side (gam#1607) so opt-out families
         // publish nothing and stay bit-reproducible across repeat fits/runs.
-        if cross_fit_artifact_enabled {
+        if let Some(cache) = persistent_warm_start_cache.as_ref() {
             capture_fit_artifact::<F>(
+                &cache.store,
                 specs,
                 &canonical.gauge,
                 &warm_start.block_beta,
@@ -2134,12 +2136,15 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     } else {
         problem
     };
-    // Attach an explicit warm-start session when the caller supplied one.
-    // This makes the custom-family outer optimizer (BFGS / ARC depending on
-    // derivative capabilities) use the same persistent cache infrastructure as
-    // standard REML. Ordinary workflow fits leave this empty so refit-heavy CI
-    // loops do not pay shared-store lookup/checkpoint/eviction I/O.
-    let problem = if let Some(session) = options.cache_session.clone() {
+    // A low-level caller-keyed session wins. Otherwise derive the outer stream
+    // from the same explicit store and structural key used by the block record
+    // and cross-fit artifact owners.
+    let cache_session = options.cache_session.clone().or_else(|| {
+        persistent_warm_start_cache.as_ref().and_then(|cache| {
+            gam_solve::persistent_warm_start::open_outer_session(&cache.store, &cache.key)
+        })
+    });
+    let problem = if let Some(session) = cache_session {
         let key_hex = session.key().to_hex();
         log::info!(
             "[CACHE] attach key={}.. family-tag={} backend=outer-strategy mirrors={}",
@@ -2327,7 +2332,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 }
                 outer.warm_cache = Some(warm_start.clone());
                 store_persistent_custom_family_warm_start(
-                    persistent_warm_start_key.as_deref(),
+                    persistent_warm_start_cache.as_ref(),
                     specs,
                     &warm_start,
                 );
@@ -2647,7 +2652,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 .unwrap_or_else(|| rho0.to_vec());
             if let Some(warm) = obj.state.warm_cache.as_ref() {
                 store_persistent_custom_family_warm_start(
-                    persistent_warm_start_key.as_deref(),
+                    persistent_warm_start_cache.as_ref(),
                     specs,
                     warm,
                 );
@@ -2719,7 +2724,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
 
     let final_warm_start = constrained_warm_start_from_inner(&mode_rho, &inner);
     store_persistent_custom_family_warm_start(
-        persistent_warm_start_key.as_deref(),
+        persistent_warm_start_cache.as_ref(),
         specs,
         &final_warm_start,
     );
@@ -2774,8 +2779,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // ρ. Best-effort; never affects this fit's result. Gated on the same opt-in
     // as the consume side (gam#1607) so opt-out families publish nothing and
     // stay bit-reproducible across repeat fits/runs.
-    if cross_fit_artifact_enabled {
+    if let Some(cache) = persistent_warm_start_cache.as_ref() {
         capture_fit_artifact::<F>(
+            &cache.store,
             specs,
             &canonical.gauge,
             &final_warm_start.block_beta,

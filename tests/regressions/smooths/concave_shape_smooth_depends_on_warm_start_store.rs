@@ -10,10 +10,8 @@
 //! `[0, 1]`. The concave constraint binds hard, because `sin(3·π·x)` has
 //! genuinely convex stretches the constraint must fight.
 //!
-//! * The FIRST fit runs against a guaranteed-cold warm-start store (this test
-//!   points `TMPDIR` at a fresh, empty, per-run directory; the store is
-//!   anchored under `std::env::temp_dir()/gam/warm/v1` —
-//!   `src/solver/persistent_warm_start.rs:246`, `persistent_store`).
+//! * The FIRST fit runs against a guaranteed-cold, explicitly configured,
+//!   test-owned warm-start root.
 //! * The SECOND fit runs against the now-warm store, whose exact persistent
 //!   outer-iterate entry hands the REML loop a pre-converged rho seed from the
 //!   first fit.
@@ -65,7 +63,12 @@ use std::io::Write;
 /// Fit `formula` on the supplied (x, y) data and return the predicted response
 /// on a dense grid spanning [0, 1]. Panics (failing the test) if the fit aborts
 /// — that abort is exactly the release-build face of this bug.
-fn fit_and_predict_on_grid(formula: &str, x: &[f64], y: &[f64]) -> Vec<f64> {
+fn fit_and_predict_on_grid(
+    formula: &str,
+    x: &[f64],
+    y: &[f64],
+    config: &FitConfig,
+) -> Vec<f64> {
     let n = x.len();
     let mut csv = String::from("x,y\n");
     for i in 0..n {
@@ -89,11 +92,7 @@ fn fit_and_predict_on_grid(formula: &str, x: &[f64], y: &[f64]) -> Vec<f64> {
     let col = ds.column_map();
     let x_idx = col["x"];
 
-    let cfg = FitConfig {
-        persist_warm_start_disk: true,
-        ..FitConfig::default()
-    }; // gaussian / identity / REML, with explicit disk-cache opt-in
-    let result = fit_from_formula(formula, &ds, &cfg).unwrap_or_else(|e| {
+    let result = fit_from_formula(formula, &ds, config).unwrap_or_else(|e| {
         panic!("fit '{formula}' aborted (cold-store constrained-startup failure): {e}")
     });
     let FitResult::Standard(fit) = result else {
@@ -117,22 +116,11 @@ fn concave_shape_smooth_is_invariant_to_warm_start_store_state() {
     init_parallelism();
 
     // Point the persistent warm-start store at a fresh, empty, per-run
-    // directory so the FIRST fit below runs against a guaranteed-cold store.
-    // The store lives under `std::env::temp_dir()/gam/warm/v1`, and on Unix
-    // `temp_dir()` resolves `TMPDIR`.
-    let mut store_root = std::env::temp_dir();
-    store_root.push(format!("gam_cold_store_{}_{}", std::process::id(), salt()));
-    std::fs::create_dir_all(&store_root).expect("create private cold-store TMPDIR");
-    // SAFETY: single-threaded test setup, before any fit or other thread reads
-    // the environment. Edition-2024 marks `set_var` unsafe.
-    unsafe {
-        std::env::set_var("TMPDIR", &store_root);
-    }
-    assert_eq!(
-        std::env::temp_dir(),
-        store_root,
-        "TMPDIR override did not take effect; cannot guarantee a cold store"
-    );
+    // Both fits share one explicit capability rooted in a fresh directory.
+    // No process-global environment mutation or machine history is involved.
+    let store_parent = tempfile::tempdir().expect("create private store parent");
+    let config = FitConfig::default()
+        .with_persistent_warm_start_root(store_parent.path().join("warm"));
 
     // Deterministic, noise-free binding signal: sin(3·π·x) has convex stretches
     // a concave constraint must fight, so the curvature constraint binds.
@@ -148,9 +136,9 @@ fn concave_shape_smooth_is_invariant_to_warm_start_store_state() {
     let formula = "y ~ s(x, k=12, shape=concave)";
 
     // First fit: COLD store (no warm-start seed available).
-    let pred_cold = fit_and_predict_on_grid(formula, &x, &y);
+    let pred_cold = fit_and_predict_on_grid(formula, &x, &y, &config);
     // Second fit: WARM store (the first fit populated the exact persistent store).
-    let pred_warm = fit_and_predict_on_grid(formula, &x, &y);
+    let pred_warm = fit_and_predict_on_grid(formula, &x, &y, &config);
 
     assert!(
         pred_cold.iter().all(|v| v.is_finite()) && pred_warm.iter().all(|v| v.is_finite()),
@@ -181,14 +169,4 @@ fn concave_shape_smooth_is_invariant_to_warm_start_store_state() {
          predictions differ by {max_diff:.3e} (tolerance {tol:.3e}). A cache \
          must not change the fitted result."
     );
-}
-
-/// A per-run salt for the private cache directory so repeat runs never reuse
-/// (and thereby warm) a prior run's cache.
-fn salt() -> u128 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
 }

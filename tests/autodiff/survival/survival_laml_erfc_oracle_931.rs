@@ -193,7 +193,7 @@ fn production_probit_gradient_at_rho_six(oracle: &ProbitOracle) -> f64 {
         rho_prior: RhoPrior::Flat,
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let weights = Array1::<f64>::ones(oracle.y.len());
     let offset = Array1::<f64>::zeros(oracle.y.len());

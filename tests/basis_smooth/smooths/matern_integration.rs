@@ -105,7 +105,7 @@ fn matern_fit_term_collection_gaussian_simulated_10d() {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     )
     .expect("Matérn term-collection fit should succeed");
@@ -214,7 +214,7 @@ fn matern_fit_term_collection_gaussian_simulated_10dwith_exact_adaptive_regulari
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     )
     .expect("exact adaptive Matérn term-collection fit should succeed");
@@ -362,7 +362,7 @@ fn matern_3d_aniso_fits_successfully() {
                 rho_prior: Default::default(),
                 kronecker_penalty_system: None,
                 kronecker_factored: None,
-                persist_warm_start_disk: false,
+                persistent_warm_start_store: None,
             },
             &kappa_options,
         )

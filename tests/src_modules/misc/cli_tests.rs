@@ -663,6 +663,7 @@ fn location_scale_fit_args(
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
+        persistent_warm_start_root: None,
         pilot_subsample_threshold: 0,
         out: Some(out),
     }
@@ -709,6 +710,7 @@ fn cli_fit_request_replaces_formula_and_scientific_flags() {
         vec!["--ridge-lambda", "0.000001"],
         vec!["--transformation-normal"],
         vec!["--latent-coordinates", "latents.json"],
+        vec!["--persistent-warm-start-root", "caller-owned/warm"],
     ] {
         let mut argv = vec![
             "gam",
@@ -725,6 +727,29 @@ fn cli_fit_request_replaces_formula_and_scientific_flags() {
             "request mode must reject formula/scientific flag overlays"
         );
     }
+}
+
+#[test]
+fn cli_persistent_warm_start_root_is_explicit_and_preserved_exactly_2639() {
+    let cli = Cli::try_parse_from([
+        "gam",
+        "fit",
+        "train.csv",
+        "y ~ x",
+        "--persistent-warm-start-root",
+        "caller-owned/../warm",
+        "--out",
+        "model.json",
+    ])
+    .expect("an explicit persistent warm-start root should parse");
+    let Command::Fit(args) = cli.command else {
+        panic!("expected fit command");
+    };
+    assert_eq!(
+        args.persistent_warm_start_root,
+        Some(PathBuf::from("caller-owned/../warm")),
+        "the CLI must not canonicalize or relocate the requested root"
+    );
 }
 
 #[test]
@@ -1357,6 +1382,7 @@ fn issue_2116_cli_standard_fit_gates_duchon_operator_penalties_for_poisson() {
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
+        persistent_warm_start_root: None,
         pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
@@ -1498,6 +1524,7 @@ fn cli_and_engine_agree_on_the_left_truncated_survival_anchor_2631() {
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
+        persistent_warm_start_root: None,
         pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
@@ -1612,6 +1639,7 @@ fn cli_survival_time_anchor_is_honored_on_the_default_transformation_route_2631(
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
+        persistent_warm_start_root: None,
         pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
@@ -1708,6 +1736,7 @@ fn cli_weibull_route_anchors_left_truncated_data_and_honors_the_override_2631() 
             adaptive_regularization: false,
             scale_dimensions: false,
             precompute_conformal: true,
+            persistent_warm_start_root: None,
             pilot_subsample_threshold: 0,
             out: Some(model_path.clone()),
         })
@@ -1862,6 +1891,7 @@ fn cli_surv_predict_noise_routes_to_survival_location_scale() {
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
+        persistent_warm_start_root: None,
         pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
@@ -2166,6 +2196,7 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
+        persistent_warm_start_root: None,
         pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
@@ -2279,6 +2310,7 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_main_formula() {
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
+        persistent_warm_start_root: None,
         pilot_subsample_threshold: 0,
         out: None,
     })
@@ -2336,6 +2368,7 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_logslope_formula() {
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
+        persistent_warm_start_root: None,
         pilot_subsample_threshold: 0,
         out: None,
     })
@@ -2822,6 +2855,7 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         adaptive_regularization: true,
         scale_dimensions: false,
         precompute_conformal: true,
+        persistent_warm_start_root: None,
         pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     };
@@ -2965,6 +2999,7 @@ fn binomial_link_fit_args(data: PathBuf, out: PathBuf, formula: &str) -> FitArgs
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
+        persistent_warm_start_root: None,
         pilot_subsample_threshold: 0,
         out: Some(out),
     }
@@ -3124,6 +3159,7 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
+        persistent_warm_start_root: None,
         pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     };
@@ -5815,6 +5851,7 @@ fn parse_survival_time_basis_accepts_ispline() {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     };
     let cfg = parse_survival_time_basis_config(
         &args.time_basis,
@@ -5867,6 +5904,7 @@ fn parse_survival_time_basis_rejects_nonstructural_bases() {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     };
     let err = parse_survival_time_basis_config(
         &args.time_basis,
@@ -7271,6 +7309,7 @@ fn parse_survival_inverse_link_accepts_sas_init() {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     };
     args.link = Some("sas".to_string());
     args.sas_init = Some("0.15,-0.70".to_string());
@@ -7331,6 +7370,7 @@ fn survival_args_for_inverse_link_test() -> SurvivalArgs {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     }
 }
 
@@ -7452,6 +7492,7 @@ fn parse_survival_inverse_link_supports_loglog_and_cauchit() {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     };
     // `loglog` and `cauchit` are supported survival --link values (issue #1829). Each
     // routes through a single-component MixtureLinkSpec (weight 1.0) — a pure link, not
@@ -7534,6 +7575,7 @@ fn parse_survival_inverse_link_accepts_flexible_standard_links() {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     };
     args.link = Some("flexible(logit)".to_string());
     let link = parse_survival_inverse_link(&args)
@@ -7582,6 +7624,7 @@ fn parse_survival_inverse_link_rejects_flexible_blended_links() {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     };
     args.link = Some("flexible(blended(logit,probit))".to_string());
     args.mixture_rho = Some("0.2".to_string());
@@ -7631,6 +7674,7 @@ fn parse_survival_inverse_link_reports_survival_specific_supported_links() {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     };
     args.link = Some("bogus".to_string());
     let err = parse_survival_inverse_link(&args).expect_err("expected unsupported survival link");
@@ -7682,6 +7726,7 @@ fn parse_survival_inverse_link_accepts_loglog_and_cauchit() {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     };
 
     // `--link loglog` parses to a single-component LogLog mixture (weight 1.0), which
@@ -8134,6 +8179,7 @@ fn survival_integration_small_dataset_converges() {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     };
     let result = super::run_survival(args);
     assert!(
@@ -8199,6 +8245,7 @@ fn survival_timewiggle_with_parametric_baseline_skips_base_basis_requirement() {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     };
     super::run_survival(args).unwrap_or_else(|e| {
         panic!(
@@ -8268,6 +8315,7 @@ fn survival_location_scale_rejects_linkwiggle_for_mixture_inverse_link() {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     })
     .expect_err("mixture-backed survival linkwiggle should be rejected before fitting");
     assert!(
@@ -8333,6 +8381,7 @@ fn survival_location_scale_saved_fit_preserves_linkwiggle_metadata() {
         frailty_kind: None,
         frailty_sd: None,
         hazard_loading: None,
+        persistent_warm_start_store: None,
     })
     .unwrap_or_else(|e| {
         panic!(

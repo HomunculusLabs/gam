@@ -519,7 +519,7 @@ fn gaussian_identity_response_scale(
 /// The on-disk session must not be active while this computation runs (the inner
 /// solve would reload the cached β mid-anchor), so a direct call on an attached
 /// state is refused. The design-moving evaluator satisfies this precondition
-/// with `RemlState::without_persistent_warm_start_disk`; the standard evaluator
+/// with `RemlState::without_persistent_warm_start_store`; the standard evaluator
 /// calls before attaching persistence. The ρ-keyed eval/P-IRLS memos are kept:
 /// they cache a deterministic computation at a ρ the caller is about to evaluate
 /// again.
@@ -575,10 +575,7 @@ pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor_with_ext_count(
     if k == 0 || frozen.load(Ordering::Relaxed) != 0 {
         return Ok(());
     }
-    if reml_state
-        .persistent_warm_start_disk_enabled
-        .load(Ordering::Relaxed)
-    {
+    if reml_state.persistent_warm_start_store().is_some() {
         crate::bail_invalid_estim!(
             "the {family} λ-search freeze must be anchored before the persistent warm-start \
              layer is attached, or while it is scoped off (#2363/#2426); with the on-disk \
@@ -825,10 +822,10 @@ where
         heuristic_lambdas,
         &reml_seed_config,
     )?;
-    if opts.persist_warm_start_disk {
-        // Caller opted into cross-process resume (#1082): engage the on-disk
-        // warm-start layer. Default-false keeps replicate/CI loops disk-silent.
-        reml_state.enable_persistent_warm_start_disk();
+    if let Some(store) = opts.persistent_warm_start_store.clone() {
+        // Attach only after the canonical nuisance anchor so cache history
+        // cannot influence the criterion frame.
+        reml_state.attach_persistent_warm_start_store(store);
     }
     reml_state.setwarm_start_original_beta(warm_start_beta);
 
@@ -3318,7 +3315,7 @@ mod blended_mixture_link_solve_tests {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         };
 
         // The joint mixture solve must converge (no error) on data its own pure
@@ -3429,7 +3426,7 @@ mod reported_loglikelihood_normalization_tests {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         }
     }
 
@@ -3626,7 +3623,7 @@ mod negative_binomial_joint_certificate_tests {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         };
         let error = match optimize_external_design(
             y.view(),
@@ -3695,7 +3692,7 @@ mod constrained_posterior_transport_tests {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         };
         optimize_external_design(
             y.view(),

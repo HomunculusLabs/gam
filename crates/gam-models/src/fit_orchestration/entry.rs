@@ -87,10 +87,9 @@ pub fn canonical_standard_fit_options(
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        // A formula fit is recoverable across process/wall interruptions by
-        // default. The model/data fingerprinting and checkpoint cadence live
-        // in gam-solve; this canonical seam only owns the high-level policy.
-        persist_warm_start_disk: config.persist_warm_start_disk,
+        // Explicit opt-in only. Clones share the same lazy/opened store handle;
+        // no formula fit consults ambient process state.
+        persistent_warm_start_store: config.persistent_warm_start_store.clone(),
     }
 }
 
@@ -112,10 +111,8 @@ pub fn canonical_standard_fit_options(
 /// * `skip_rho_posterior_inference: false` — DELIBERATE, and already sanctioned
 ///   by the canonical policy above: "Lower-level callers that explicitly need
 ///   the escalation opt in elsewhere". This is such a caller.
-/// * `persist_warm_start_disk: false` — DELIBERATE, and sanctioned by
-///   `FitConfig::persist_warm_start_disk`'s own doc: "Low-level embedding code
-///   may disable it explicitly when it owns a stronger external checkpoint
-///   transaction." A programmatic block-fit owns its own lifecycle.
+/// * `persistent_warm_start_store: None` — DELIBERATE. A programmatic
+///   block-fit owns its own lifecycle and never discovers ambient storage.
 /// * `penalty_shrinkage_floor: None` — PINNED, NOT ENDORSED. The canonical
 ///   policy is `Some(1e-6)` and this deviation has no stated rationale
 ///   anywhere. It is a different KIND of field from `tol` below: the floor
@@ -154,7 +151,7 @@ pub fn canonical_blocks_forward_fit_options(nullspace_dims: Vec<usize>) -> FitOp
         canonical_standard_fit_options(&FitConfig::default(), StandardFitOptionsInputs::default());
     options.nullspace_dims = nullspace_dims;
     options.skip_rho_posterior_inference = false;
-    options.persist_warm_start_disk = false;
+    options.persistent_warm_start_store = None;
     options.penalty_shrinkage_floor = None;
     options
 }

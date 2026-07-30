@@ -80,7 +80,7 @@ fn fit_exposes_posterior_covariance_and_standard_errors() {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     )
     .expect("fit should succeed");
@@ -425,7 +425,7 @@ fn prediction_uncertainty_is_finite_andwell_shaped() {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     )
     .expect("fit should succeed");
@@ -542,7 +542,7 @@ fn gaussian_prediction_intervals_includeobservation_noise() {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     )
     .expect("fit should succeed");
@@ -703,7 +703,7 @@ fn mixture_uncertainty_intervals_are_clamped_to_unit_interval() {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
     )
     .expect("base fit should succeed");

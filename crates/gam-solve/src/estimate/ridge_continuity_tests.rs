@@ -132,7 +132,7 @@ fn ridge_sweep(
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     let cfg = super::external_options::resolved_external_config(&ext)
         .expect("external config resolves")

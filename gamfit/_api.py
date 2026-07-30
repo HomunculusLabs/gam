@@ -253,6 +253,7 @@ def _build_fit_payload(
     family: str,
     offset: str | None,
     weights: str | None,
+    persistent_warm_start_root: str | Path | None,
     transformation_normal: bool | None,
     transformation_normal_stage1: Any | None = None,
     survival_likelihood: str | None,
@@ -303,6 +304,11 @@ def _build_fit_payload(
         "frailty_kind": frailty_kind,
         "frailty_sd": frailty_sd,
         "hazard_loading": hazard_loading,
+        "persistent_warm_start_root": (
+            None
+            if persistent_warm_start_root is None
+            else str(persistent_warm_start_root)
+        ),
         "scale_dimensions": scale_dimensions,
         "adaptive_regularization": adaptive_regularization,
         "firth": firth,
@@ -710,6 +716,7 @@ def fit(
     family: str = ...,
     offset: str | None = ...,
     weights: str | None = ...,
+    persistent_warm_start_root: str | Path | None = ...,
     transformation_normal: bool | None = ...,
     transformation_normal_stage1: CtnStage1 | Mapping[str, Any] | None = ...,
     survival_likelihood: str | None = ...,
@@ -753,6 +760,7 @@ def fit(
     family: str = ...,
     offset: str | None = ...,
     weights: str | None = ...,
+    persistent_warm_start_root: str | Path | None = ...,
     transformation_normal: bool | None = ...,
     transformation_normal_stage1: CtnStage1 | Mapping[str, Any] | None = ...,
     survival_likelihood: str | None = ...,
@@ -795,6 +803,7 @@ def fit(
     family: str = "auto",
     offset: str | None = None,
     weights: str | None = None,
+    persistent_warm_start_root: str | Path | None = None,
     transformation_normal: bool | None = None,
     transformation_normal_stage1: CtnStage1 | Mapping[str, Any] | None = None,
     survival_likelihood: str | None = None,
@@ -865,6 +874,10 @@ def fit(
         Name of the offset column. Corresponds to ``--offset-column``.
     weights:
         Name of the observation-weight column. Corresponds to ``--weights-column``.
+    persistent_warm_start_root:
+        Explicit directory for cross-process solver warm starts. Persistence is
+        disabled when omitted. The directory is used exactly as supplied; no
+        environment or platform cache directory is consulted.
     transformation_normal:
         Fit a conditional transformation-normal model (``h(Y|x) ~ N(0,1))``).
         Corresponds to ``--transformation-normal``.
@@ -1135,6 +1148,10 @@ def fit(
                 raise ValueError(f"{arg_name} is not supported with response_geometry")
 
         nested_config = dict(config or {})
+        if persistent_warm_start_root is not None:
+            nested_config["persistent_warm_start_root"] = str(
+                persistent_warm_start_root
+            )
         # Geometry is handled by the Python wrapper; scalar coordinate fits keep
         # using the ordinary Rust standard-GAM path.
         for key in (
@@ -1183,6 +1200,7 @@ def fit(
         family=family,
         offset=offset,
         weights=weights,
+        persistent_warm_start_root=persistent_warm_start_root,
         transformation_normal=transformation_normal,
         transformation_normal_stage1=transformation_normal_stage1,
         survival_likelihood=survival_likelihood,
@@ -1276,6 +1294,7 @@ def fit_array(
     family: str = "auto",
     offset: str | None = None,
     weights: str | None = None,
+    persistent_warm_start_root: str | Path | None = None,
     transformation_normal: bool | None = None,
     transformation_normal_stage1: CtnStage1 | Mapping[str, Any] | None = None,
     survival_likelihood: str | None = None,
@@ -1342,6 +1361,7 @@ def fit_array(
         family=family,
         offset=offset,
         weights=weights,
+        persistent_warm_start_root=persistent_warm_start_root,
         transformation_normal=transformation_normal,
         transformation_normal_stage1=transformation_normal_stage1,
         survival_likelihood=survival_likelihood,
@@ -1587,6 +1607,7 @@ def validate_formula(
     family: str = "auto",
     offset: str | None = None,
     weights: str | None = None,
+    persistent_warm_start_root: str | Path | None = None,
     transformation_normal: bool | None = None,
     transformation_normal_stage1: CtnStage1 | Mapping[str, Any] | None = None,
     survival_likelihood: str | None = None,
@@ -1636,6 +1657,7 @@ def validate_formula(
         family=family,
         offset=offset,
         weights=weights,
+        persistent_warm_start_root=persistent_warm_start_root,
         transformation_normal=transformation_normal,
         transformation_normal_stage1=transformation_normal_stage1,
         survival_likelihood=survival_likelihood,

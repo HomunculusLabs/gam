@@ -289,7 +289,7 @@ where
         rho_prior: opts.rho_prior.clone(),
         kronecker_penalty_system: opts.kronecker_penalty_system.clone(),
         kronecker_factored: opts.kronecker_factored.clone(),
-        persist_warm_start_disk: opts.persist_warm_start_disk,
+        persistent_warm_start_store: opts.persistent_warm_start_store.clone(),
     };
 
     let result = optimize_external_designwith_heuristic_lambdas_andwarm_start(

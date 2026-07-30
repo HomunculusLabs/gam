@@ -729,6 +729,7 @@ pub(crate) fn fit_survival_location_scale_terms(
             timewiggle_block: spec.timewiggle_block.clone(),
             linkwiggle_block,
             cache_session: spec.cache_session.clone(),
+            persistent_warm_start_store: spec.persistent_warm_start_store.clone(),
             cache_mirror_sessions: spec.cache_mirror_sessions.clone(),
         })
     };

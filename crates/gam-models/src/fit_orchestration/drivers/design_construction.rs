@@ -3421,7 +3421,7 @@ fn adaptive_fit_options_base(options: &FitOptions, design: &TermCollectionDesign
             .terms
             .iter()
             .find_map(|t| t.kronecker_factored.clone()),
-        persist_warm_start_disk: options.persist_warm_start_disk,
+        persistent_warm_start_store: options.persistent_warm_start_store.clone(),
     }
 }
 
@@ -8014,7 +8014,7 @@ fn external_opts_for_design(
             .terms
             .iter()
             .find_map(|t| t.kronecker_factored.clone()),
-        persist_warm_start_disk: options.persist_warm_start_disk,
+        persistent_warm_start_store: options.persistent_warm_start_store.clone(),
     }
 }
 

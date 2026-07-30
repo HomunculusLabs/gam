@@ -1,16 +1,10 @@
-//! Persistent (on-disk) warm-start cache for the custom-family blockwise fit:
-//! fingerprint hashing, cache-key derivation, and record load/store.
+//! Persistent warm starts for the custom-family blockwise fit.
 //!
-//! Pure relocation from `custom_family.rs` (issue #780 decomposition): the
-//! `hash_cf_*` fingerprint primitives, the persistent cache-key derivation
-//! (`persistent_custom_family_key`, `custom_family_cache_shape`), the
-//! load/store of the on-disk `PersistentBlockWarmStartRecord`
-//! (`load_persistent_custom_family_warm_start`,
-//! `persistent_block_inner_summary`, `store_persistent_custom_family_warm_start`),
-//! and the outer→inner iteration-cap update driven by the restored warm start.
-//! No behavior change — bodies are byte-identical and the three entry points
-//! consumed elsewhere in the parent are re-imported so every call site is
-//! unchanged.
+//! This module owns response-keyed block records and descriptor-keyed
+//! cross-fit artifacts. Both namespaces use the same explicit, clone-shared
+//! store capability supplied in [`BlockwiseFitOptions`]; omitting that
+//! capability is a disk-silent cold fit. It also owns fingerprint construction
+//! and the outer→inner iteration-cap update driven by a restored warm start.
 
 use crate::{CachedInnerMode, ConstrainedWarmStart, normalize_active_sets};
 use gam_linalg::matrix::DesignMatrix;
@@ -31,6 +25,12 @@ use gam_solve::warm_start_artifact::{
     TransferProvenance, term_identity_from_block,
 };
 use gam_solve::warm_start_transfer::{TermBuildContext, TransferConfig, build_warm_start};
+
+#[derive(Clone)]
+pub(crate) struct PersistentCustomFamilyCache {
+    pub(crate) store: gam_runtime::warm_start::ConfiguredWarmStartStore,
+    pub(crate) key: String,
+}
 
 /// Build the structural identity of each block at the fit-spec layer. The
 /// returned `TermIdentityKey` is fold-invariant (keyed on block name + penalty
@@ -105,6 +105,7 @@ fn descriptor_for(specs: &[ParameterBlockSpec], family_kind: &str, n_rows: usize
 /// (length mismatch, non-finite, lift failure) silently skips the capture —
 /// a missing artifact only forfeits a future warm start, never the fit.
 pub(crate) fn capture_fit_artifact<F: CustomFamily + ?Sized>(
+    store: &gam_runtime::warm_start::ConfiguredWarmStartStore,
     specs: &[ParameterBlockSpec],
     gauge: &gam_solve::gauge::Gauge,
     reduced_block_beta: &[Array1<f64>],
@@ -176,9 +177,7 @@ pub(crate) fn capture_fit_artifact<F: CustomFamily + ?Sized>(
             n_rows,
         },
     };
-    if let Err(err) = gam_solve::persistent_warm_start::store_fit_artifact(&artifact) {
-        log::debug!("[fit-artifact] capture skipped: {err}");
-    }
+    gam_solve::persistent_warm_start::store_fit_artifact(store, &artifact);
 }
 
 /// Extract block `b`'s sub-matrix of the gauge lift `T : reduced → raw`
@@ -215,6 +214,7 @@ fn gauge_block_t(gauge: &gam_solve::gauge::Gauge, b: usize) -> Option<Array2<f64
 /// (`spec.design.ncols()`) coordinates, with `cached_inner = None` so the
 /// inner solve replays from the seed rather than reusing a stale mode.
 pub(crate) fn consume_fit_artifact<F: CustomFamily + ?Sized>(
+    store: &gam_runtime::warm_start::ConfiguredWarmStartStore,
     specs: &[ParameterBlockSpec],
     gauge: &gam_solve::gauge::Gauge,
     physical_to_outer: &[Option<usize>],
@@ -224,7 +224,8 @@ pub(crate) fn consume_fit_artifact<F: CustomFamily + ?Sized>(
     let (n_rows, ..) = custom_family_cache_shape(specs);
     let descriptor = descriptor_for(specs, family_kind, n_rows);
     let key_hex = descriptor.descriptor_key().to_hex();
-    let parent = gam_solve::persistent_warm_start::load_fit_artifact_by_descriptor(&key_hex)?;
+    let parent =
+        gam_solve::persistent_warm_start::load_fit_artifact_by_descriptor(store, &key_hex)?;
 
     // The gauge must partition into exactly the spec blocks for the per-block
     // T extraction to be meaningful; otherwise we transfer ρ only.
@@ -441,16 +442,26 @@ pub(crate) fn load_persistent_custom_family_warm_start<F: CustomFamily + ?Sized>
     specs: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
     rho_len: usize,
-) -> (Option<String>, Option<ConstrainedWarmStart>) {
+) -> (
+    Option<PersistentCustomFamilyCache>,
+    Option<ConstrainedWarmStart>,
+) {
+    let Some(store) = options.persistent_warm_start_store.clone() else {
+        return (None, None);
+    };
     let Some(key) = persistent_custom_family_key::<F>(family, specs, options) else {
         return (None, None);
     };
+    let cache = PersistentCustomFamilyCache {
+        store,
+        key: key.clone(),
+    };
     let (n_rows, block_names, block_dims) = custom_family_cache_shape(specs);
-    let Some(record) = load_block_record(&key) else {
-        return (Some(key), None);
+    let Some(record) = load_block_record(&cache.store, &key) else {
+        return (Some(cache), None);
     };
     if !record.is_compatible(&key, n_rows, &block_names, &block_dims, rho_len) {
-        return (Some(key), None);
+        return (Some(cache), None);
     }
     let active_sets = normalize_active_sets(record.active_sets);
     let cached_inner = record.inner.map(|inner| CachedInnerMode {
@@ -490,7 +501,7 @@ pub(crate) fn load_persistent_custom_family_warm_start<F: CustomFamily + ?Sized>
         "[warm-start-cache] restored custom-family persistent warm start key={key} inner={inner_status}"
     );
     (
-        Some(key),
+        Some(cache),
         Some(ConstrainedWarmStart {
             rho: Array1::from_vec(record.rho),
             block_beta: record
@@ -528,13 +539,14 @@ pub(crate) fn persistent_block_inner_summary(
 }
 
 pub(crate) fn store_persistent_custom_family_warm_start(
-    key: Option<&str>,
+    cache: Option<&PersistentCustomFamilyCache>,
     specs: &[ParameterBlockSpec],
     warm_start: &ConstrainedWarmStart,
 ) {
-    let Some(key) = key else {
+    let Some(cache) = cache else {
         return;
     };
+    let key = &cache.key;
     let (n_rows, block_names, block_dims) = custom_family_cache_shape(specs);
     if warm_start.block_beta.len() != block_dims.len()
         || warm_start
@@ -580,9 +592,7 @@ pub(crate) fn store_persistent_custom_family_warm_start(
         .collect();
     record.active_sets = warm_start.active_sets.clone();
     record.inner = persistent_block_inner_summary(warm_start);
-    if let Err(err) = store_block_record(&record) {
-        log::warn!("[warm-start-cache] failed to persist custom-family warm start: {err}");
-    }
+    store_block_record(&cache.store, &record);
 }
 
 pub(crate) const CUSTOM_OUTER_INNER_CAP_MARGIN: usize = 5;

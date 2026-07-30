@@ -116,6 +116,7 @@ fn fit_request_document_from_fit_args(
         pilot_subsample_threshold: Some(args.pilot_subsample_threshold),
         precision_hyperpriors,
         precompute_conformal: Some(args.precompute_conformal),
+        persistent_warm_start_root: args.persistent_warm_start_root.clone(),
         ridge_lambda: Some(args.ridge_lambda),
         scale_dimensions: args.scale_dimensions.then_some(true),
         sigma_time_degree: Some(args.sigma_time_degree),
@@ -198,6 +199,7 @@ pub(crate) fn fit_config_from_survival_args(args: &SurvivalArgs) -> Result<FitCo
         },
         ridge_lambda: args.ridge_lambda,
         frailty,
+        persistent_warm_start_store: args.persistent_warm_start_store.clone(),
         ..FitConfig::default()
     }
     .resolve()
@@ -338,6 +340,7 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
             frailty_kind: args.frailty_kind,
             frailty_sd: args.frailty_sd,
             hazard_loading: args.hazard_loading,
+            persistent_warm_start_store: fit_config.persistent_warm_start_store.clone(),
         };
         return run_survival(surv_args);
     }

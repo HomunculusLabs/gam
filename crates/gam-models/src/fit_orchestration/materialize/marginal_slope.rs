@@ -226,6 +226,7 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
             spec,
             options: BlockwiseFitOptions {
                 compute_covariance: true,
+                persistent_warm_start_store: config.persistent_warm_start_store.clone(),
                 // Robustness (Firth/Jeffreys stabilizer) is the unconditional
                 // default for bernoulli marginal-slope — no flag to thread.
                 ..Default::default()

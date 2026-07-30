@@ -1,6 +1,8 @@
-use gam_runtime::warm_start::{EntryKind, Fingerprinter, StoreOptions, WarmStartStore};
+use gam_runtime::warm_start::{
+    ConfiguredWarmStartStore, EntryKind, Fingerprinter, StoreError, StoreOptions,
+};
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::path::PathBuf;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -219,134 +221,156 @@ impl PersistentWarmStartRecord {
     }
 }
 
-pub fn load_record(key: &str) -> Option<PersistentWarmStartRecord> {
-    load_json_record(key)
+/// Configure persistent warm starts at the exact caller-supplied root.
+///
+/// This is lazy: request parsing and structural validation do not touch the
+/// filesystem. The first real persistence operation opens the root once, and
+/// all clones share that handle or the single best-effort unavailable decision.
+pub fn configured_store(root: PathBuf) -> ConfiguredWarmStartStore {
+    ConfiguredWarmStartStore::new(
+        root,
+        StoreOptions {
+            size_budget_bytes: MAX_TOTAL_BYTES,
+            ttl: Duration::from_secs(CACHE_TTL_SECS),
+        },
+    )
 }
 
-pub fn load_block_record(key: &str) -> Option<PersistentBlockWarmStartRecord> {
-    load_json_record(key)
+pub fn load_record(
+    store: &ConfiguredWarmStartStore,
+    key: &str,
+) -> Option<PersistentWarmStartRecord> {
+    best_effort(
+        store,
+        "load warm-start record",
+        load_json_record(store, key),
+    )
+    .flatten()
 }
 
-pub fn store_record(record: &PersistentWarmStartRecord) -> Result<(), String> {
-    store_json_record(&record.key, record)
+pub fn load_block_record(
+    store: &ConfiguredWarmStartStore,
+    key: &str,
+) -> Option<PersistentBlockWarmStartRecord> {
+    best_effort(
+        store,
+        "load custom-family warm-start record",
+        load_json_record(store, key),
+    )
+    .flatten()
 }
 
-pub fn store_block_record(record: &PersistentBlockWarmStartRecord) -> Result<(), String> {
-    store_json_record(&record.key, record)
+pub fn store_record(store: &ConfiguredWarmStartStore, record: &PersistentWarmStartRecord) {
+    let _ = best_effort(
+        store,
+        "store warm-start record",
+        store_json_record(store, &record.key, record),
+    );
 }
 
-fn store_json_record<T: Serialize>(key: &str, record: &T) -> Result<(), String> {
+pub fn store_block_record(
+    store: &ConfiguredWarmStartStore,
+    record: &PersistentBlockWarmStartRecord,
+) {
+    let _ = best_effort(
+        store,
+        "store custom-family warm-start record",
+        store_json_record(store, &record.key, record),
+    );
+}
+
+#[derive(Debug)]
+enum PersistentStoreError {
+    Encode(String),
+    Unavailable(String),
+    Rejected(String),
+}
+
+impl std::fmt::Display for PersistentStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encode(detail) => write!(f, "encode failed: {detail}"),
+            Self::Unavailable(detail) => write!(f, "filesystem unavailable: {detail}"),
+            Self::Rejected(detail) => write!(f, "store rejected operation: {detail}"),
+        }
+    }
+}
+
+fn classify_store_error(error: StoreError) -> PersistentStoreError {
+    match error {
+        StoreError::Io(error) => PersistentStoreError::Unavailable(error.to_string()),
+        StoreError::Json(error) => PersistentStoreError::Rejected(error.to_string()),
+    }
+}
+
+/// Interpret every persistent-cache failure in one place.
+///
+/// Filesystem refusal permanently disables this explicitly configured store
+/// for the fit and emits one diagnostic from the store capability. Encoding or
+/// store-contract defects remain loud in diagnostics and typed in the internal
+/// `try_*` functions, but persistence can never fail a statistical fit.
+fn best_effort<T>(
+    store: &ConfiguredWarmStartStore,
+    operation: &'static str,
+    result: Result<T, PersistentStoreError>,
+) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(PersistentStoreError::Unavailable(detail)) => {
+            store.mark_unavailable(operation, &detail);
+            None
+        }
+        Err(error @ (PersistentStoreError::Encode(_) | PersistentStoreError::Rejected(_))) => {
+            log::warn!(
+                "[warm-start-cache] persistence defect operation={} explicit_root={}: {}",
+                operation,
+                store.root().display(),
+                error
+            );
+            None
+        }
+    }
+}
+
+fn store_json_record<T: Serialize>(
+    configured: &ConfiguredWarmStartStore,
+    key: &str,
+    record: &T,
+) -> Result<(), PersistentStoreError> {
     let bytes = serde_json::to_vec(record)
-        .map_err(|e| format!("failed to encode warm-start cache record: {e}"))?;
+        .map_err(|error| PersistentStoreError::Encode(error.to_string()))?;
     if bytes.len() as u64 > MAX_ENTRY_BYTES {
         return Ok(());
     }
-    let Some(store) = persistent_store() else {
+    let Some(store) = configured.store() else {
         return Ok(());
     };
     let mut fp = Fingerprinter::new();
     fp.absorb_str(b"warm-start-key", key);
     store
         .save(&fp.finalize(), &bytes, None, None, EntryKind::Checkpoint)
-        .map_err(|e| format!("failed to persist warm-start cache record: {e}"))?;
+        .map_err(classify_store_error)?;
     Ok(())
 }
 
-fn load_json_record<T: for<'de> Deserialize<'de>>(key: &str) -> Option<T> {
-    let store = persistent_store()?;
+fn load_json_record<T: for<'de> Deserialize<'de>>(
+    configured: &ConfiguredWarmStartStore,
+    key: &str,
+) -> Result<Option<T>, PersistentStoreError> {
+    let Some(store) = configured.store() else {
+        return Ok(None);
+    };
     let mut fp = Fingerprinter::new();
     fp.absorb_str(b"warm-start-key", key);
-    let entry = store.lookup(&fp.finalize()).ok().flatten()?;
+    let Some(entry) = store.lookup(&fp.finalize()).map_err(classify_store_error)? else {
+        return Ok(None);
+    };
     if entry.payload.len() as u64 > MAX_ENTRY_BYTES {
-        return None;
+        return Ok(None);
     }
-    serde_json::from_slice(&entry.payload).ok()
-}
-
-/// Anchor the warm-start cache under the platform temp directory.
-///
-/// **This location satisfies the no-`env::var` rule textually and violates it
-/// semantically, which is worse than an explicit read.** Both halves of the
-/// original justification are wrong, and both were measured (gam#2639):
-///
-/// * *"`dirs::cache_dir()` requires `env::var_os`, which is banned"* — the ban
-///   is a **substring scan over first-party sources** (the build script says so
-///   itself, and early-returns entirely when gam is consumed as a published
-///   dependency because "there is no first-party tree to lint"). An
-///   `env::var_os` inside the `dirs` crate is invisible to it. `dirs::cache_dir()`
-///   is therefore *exactly as compliant as* `temp_dir()`. The real objection to
-///   `dirs` is that it is not a workspace dependency — a dependency-budget
-///   question, which should be argued as one.
-/// * *"`temp_dir()` resolves through OS-level primitives without going through
-///   `env::var`"* — true of the **call**, false of the **behaviour**.
-///   `temp_dir()` honours `TMPDIR`, and this repository relies on that: two
-///   round-trip tests were made green by setting it, measurement lanes isolate
-///   themselves with it, and the section below tells readers to delete the root
-///   for a cold arm.
-///
-/// So the environment-dependence is load-bearing — it silently relocates a
-/// machine-global cache with a ten-year TTL — and invisible to every tool we
-/// have. An `env::var("TMPDIR")` would at least be greppable.
-///
-/// The repair is **not** to swap one ambient helper for another, and **not** to
-/// widen the scanner to catch `temp_dir()` (that would put a textual proxy where
-/// a property check belongs, which is the defect of gam#2651 in a new place).
-/// It is to make the root **explicit configuration with a documented default**,
-/// so isolation becomes a supported operation instead of the folklore that
-/// `TMPDIR` happens to work.
-///
-/// Until then: the directory is durable across processes within a single boot,
-/// and `WarmStartStore::open` falls back to `None` if the path cannot be
-/// created — note that it is `create_dir_all` and nothing else, so it returns
-/// `Ok` on an existing root regardless of free space, and a full filesystem is
-/// discovered only at write time (gam#2639).
-///
-/// # A FRESH WORKING DIRECTORY IS NOT A COLD CACHE
-///
-/// The root is `temp_dir()/gam/warm/v1`: machine-global, derived from nothing
-/// about the process, and shared by every gam build on the box for
-/// [`CACHE_TTL_SECS`] (ten years). Nothing about a fresh clone, a fresh `cwd`,
-/// a fresh `target/`, or a fresh process makes a fit cold. Two "cold" runs of
-/// one binary on one box have been measured at 379+ and 22 outer evaluations
-/// for this reason (gam#2625), and any before/after built that way measures
-/// machine history rather than the change under test.
-///
-/// **To get a provably cold arm, delete the root — `temp_dir()/gam/warm/v1` —
-/// between arms, and run the arms sequentially so neither populates the store
-/// the other reads.** A/B arms that run concurrently share it no matter what
-/// else differs about them.
-///
-/// Note what this does and does not buy after the gam#2625 fix. The store now
-/// records the producing binary's identity per entry and refuses to hand a
-/// *different* build's entry back as a terminal certificate, so a cross-build
-/// A/B can no longer ship the other arm's answer. It can still be **seeded** by
-/// it — a seed changes the trajectory and therefore every iteration count and
-/// timing — so clearing the root remains mandatory for a *performance* A/B even
-/// though correctness no longer depends on it.
-fn persistent_store() -> Option<WarmStartStore> {
-    // Memoize the store process-wide. The root (`temp_dir()/gam/warm/v1`) is
-    // constant within a process, so a single instance suffices — and reusing
-    // it is essential, not just an optimization: `WarmStartStore` carries the
-    // per-store directory-scan / metadata cache and the eviction-throttle
-    // counters that #1114 added. Reconstructing the store on every save/lookup
-    // (as this used to) handed each fit an empty cache and a zeroed throttle,
-    // so every operation re-walked the cache root and re-read every metadata
-    // JSON from disk — the syscall storm that made several quality tests look
-    // hung. Clones returned here share the cache and throttle via `Arc`.
-    static STORE: OnceLock<Option<WarmStartStore>> = OnceLock::new();
-    STORE
-        .get_or_init(|| {
-            let root = std::env::temp_dir().join("gam").join("warm").join("v1");
-            WarmStartStore::open(
-                root,
-                StoreOptions {
-                    size_budget_bytes: MAX_TOTAL_BYTES,
-                    ttl: Duration::from_secs(CACHE_TTL_SECS),
-                },
-            )
-            .ok()
-        })
-        .clone()
+    serde_json::from_slice(&entry.payload)
+        .map(Some)
+        .map_err(|error| PersistentStoreError::Rejected(error.to_string()))
 }
 
 /// Open a [`gam_runtime::warm_start::Session`] for outer-iterate (rho-axis) checkpoints.
@@ -355,16 +379,14 @@ fn persistent_store() -> Option<WarmStartStore> {
 /// absorption (see [`load_json_record`]) so the outer-iterate keyspace
 /// is disjoint from the inner beta-record keyspace —
 /// the two layers persist different payload shapes and must not alias.
-pub(crate) fn open_outer_session(
+pub fn open_outer_session(
+    configured: &ConfiguredWarmStartStore,
     key: &str,
 ) -> Option<std::sync::Arc<gam_runtime::warm_start::Session>> {
-    let store = persistent_store()?;
     let mut fp = Fingerprinter::new();
     fp.absorb_str(b"outer-iterate-key", key);
     let fp = fp.finalize();
-    Some(std::sync::Arc::new(gam_runtime::warm_start::Session::open(
-        store, fp,
-    )))
+    configured.open_session(fp)
 }
 
 /// Persist a descriptor-indexed cross-fit [`FitArtifact`] under the
@@ -372,98 +394,35 @@ pub(crate) fn open_outer_session(
 /// an LOSO fold of the same model retrieves a prior full-data fit). The
 /// schema tag is folded into the key so legacy layouts are walled off.
 ///
-/// Best-effort: encoding / store failures are swallowed (a warm-start
-/// artifact is never required), oversize payloads are dropped.
-/// Why a fit-artifact record could not be persisted.
-///
-/// A warm-start cache is a pure OPTIMIZATION: nothing downstream is entitled to
-/// fail because a checkpoint could not be written. `store_fit_artifact` already
-/// returns `Ok(())` for three of the four "cannot persist" cases — an unusable
-/// artifact, an oversized payload, and no store at all. This type makes the
-/// fourth one CLASSIFIABLE rather than an opaque `String`, because those cases
-/// are not alike:
-///
-/// * [`Unwritable`](Self::Unwritable) — the FILESYSTEM refused (out of space,
-///   read-only, not permitted). Nothing is wrong with the record or the store;
-///   the environment cannot accept a write right now.
-/// * [`Encode`](Self::Encode) / [`Rejected`](Self::Rejected) — the record could
-///   not be serialized, or the store refused a write it should have accepted.
-///   Those are defects and must stay loud.
-///
-/// The distinction exists because a test cannot otherwise tell an environment
-/// refusal from a contract violation. `WarmStartStore::open` is
-/// `fs::create_dir_all(&root)?` and nothing else, so on an existing root it
-/// returns `Ok` no matter how full the filesystem is — meaning
-/// `persistent_store().is_some()` is NOT evidence that a write will succeed
-/// (gam#2639: a full tmpfs surfaced as two `gam-solve` reds, and the same
-/// exhaustion also broke the C toolchain's spill into `$TMPDIR`).
-#[derive(Debug)]
-pub enum StoreArtifactError {
-    /// The artifact could not be serialized. A defect in the record.
-    Encode(String),
-    /// The filesystem refused the write. An environment condition, not a defect.
-    Unwritable(String),
-    /// The store refused a write it should have accepted. A defect in the store.
-    Rejected(String),
-}
-
-impl std::fmt::Display for StoreArtifactError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Encode(detail) => {
-                write!(f, "failed to encode fit-artifact record: {detail}")
-            }
-            Self::Unwritable(detail) => write!(
-                f,
-                "the warm-start store root cannot accept a write: {detail}"
-            ),
-            Self::Rejected(detail) => {
-                write!(f, "failed to persist fit-artifact record: {detail}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for StoreArtifactError {}
-
-/// Classify a [`gam_runtime::warm_start::StoreError`] as an environment refusal
-/// or a store defect.
-///
-/// `ENOSPC` is the case gam#2639 was filed for; `ReadOnlyFilesystem` and
-/// `PermissionDenied` are the same kind of statement about the mount rather
-/// than about the record, so they are grouped with it. The `raw_os_error()`
-/// check is belt-and-braces for platforms whose `io::ErrorKind` mapping does
-/// not surface `StorageFull` (28 is `ENOSPC` on Linux and macOS).
-fn classify_store_error(error: &gam_runtime::warm_start::StoreError) -> StoreArtifactError {
-    let text = error.to_string();
-    if let gam_runtime::warm_start::StoreError::Io(io_error) = error {
-        let environmental = matches!(
-            io_error.kind(),
-            std::io::ErrorKind::StorageFull
-                | std::io::ErrorKind::ReadOnlyFilesystem
-                | std::io::ErrorKind::PermissionDenied
-        ) || io_error.raw_os_error() == Some(28);
-        if environmental {
-            return StoreArtifactError::Unwritable(text);
-        }
-    }
-    StoreArtifactError::Rejected(text)
-}
-
+/// Best-effort: the public function cannot fail a fit. Its internal `try_*`
+/// counterpart retains typed failures for contract tests, and [`best_effort`]
+/// owns the sole production interpretation.
 pub fn store_fit_artifact(
+    store: &ConfiguredWarmStartStore,
     artifact: &crate::warm_start_artifact::FitArtifact,
-) -> Result<(), StoreArtifactError> {
+) {
+    let _ = best_effort(
+        store,
+        "store cross-fit artifact",
+        try_store_fit_artifact(store, artifact),
+    );
+}
+
+fn try_store_fit_artifact(
+    configured: &ConfiguredWarmStartStore,
+    artifact: &crate::warm_start_artifact::FitArtifact,
+) -> Result<(), PersistentStoreError> {
     if !artifact.is_usable() {
         // Never persist a non-finite / wrong-schema artifact: it could only
         // ever be rejected on load anyway.
         return Ok(());
     }
     let bytes = serde_json::to_vec(artifact)
-        .map_err(|e| StoreArtifactError::Encode(e.to_string()))?;
+        .map_err(|error| PersistentStoreError::Encode(error.to_string()))?;
     if bytes.len() as u64 > MAX_ENTRY_BYTES {
         return Ok(());
     }
-    let Some(store) = persistent_store() else {
+    let Some(store) = configured.store() else {
         return Ok(());
     };
     let key = artifact.descriptor.descriptor_key().to_hex();
@@ -472,7 +431,7 @@ pub fn store_fit_artifact(
     fp.absorb_str(b"fit-artifact-descriptor", &key);
     store
         .save(&fp.finalize(), &bytes, None, None, EntryKind::Checkpoint)
-        .map_err(|e| classify_store_error(&e))?;
+        .map_err(classify_store_error)?;
     Ok(())
 }
 
@@ -484,21 +443,41 @@ pub fn store_fit_artifact(
 /// are not on a common scale, so "lowest objective" is the wrong rule.
 /// Returns `None` (cold fallback) on any miss or non-finite payload.
 pub fn load_fit_artifact_by_descriptor(
+    store: &ConfiguredWarmStartStore,
     descriptor_key_hex: &str,
 ) -> Option<crate::warm_start_artifact::FitArtifact> {
-    let store = persistent_store()?;
+    best_effort(
+        store,
+        "load cross-fit artifact",
+        try_load_fit_artifact_by_descriptor(store, descriptor_key_hex),
+    )
+    .flatten()
+}
+
+fn try_load_fit_artifact_by_descriptor(
+    configured: &ConfiguredWarmStartStore,
+    descriptor_key_hex: &str,
+) -> Result<Option<crate::warm_start_artifact::FitArtifact>, PersistentStoreError> {
+    let Some(store) = configured.store() else {
+        return Ok(None);
+    };
     let mut fp = Fingerprinter::new();
     fp.absorb_str(b"fit-artifact-key", &cache_schema_tag());
     fp.absorb_str(b"fit-artifact-descriptor", descriptor_key_hex);
-    let entry = store.lookup_latest(&fp.finalize()).ok().flatten()?;
+    let Some(entry) = store
+        .lookup_latest(&fp.finalize())
+        .map_err(classify_store_error)?
+    else {
+        return Ok(None);
+    };
     if entry.payload.len() as u64 > MAX_ENTRY_BYTES {
-        return None;
+        return Ok(None);
     }
-    let artifact: crate::warm_start_artifact::FitArtifact =
-        serde_json::from_slice(&entry.payload).ok()?;
+    let artifact: crate::warm_start_artifact::FitArtifact = serde_json::from_slice(&entry.payload)
+        .map_err(|error| PersistentStoreError::Rejected(error.to_string()))?;
     // Finite-guard on the way out: a corrupt payload must cold-fallback,
     // never poison a fit.
-    artifact.is_usable().then_some(artifact)
+    Ok(artifact.is_usable().then_some(artifact))
 }
 
 fn unix_secs_now() -> u64 {
@@ -515,6 +494,13 @@ mod warm_start_artifact_tests {
         FIT_ARTIFACT_SCHEMA, FitArtifact, FitDescriptor, GlobalFitSummary, ResponseSig,
         SerializableBasisMeta, TermArtifact, TermRole, term_identity_from_block,
     };
+    use serde::ser::Error as _;
+
+    fn isolated_store() -> (tempfile::TempDir, ConfiguredWarmStartStore) {
+        let directory = tempfile::tempdir().expect("create isolated warm-start root");
+        let store = configured_store(directory.path().join("warm"));
+        (directory, store)
+    }
 
     fn sample_artifact(family: &str, var: &str, rho: Vec<f64>) -> FitArtifact {
         // Block-layer identity (the surviving, fold-invariant identity API):
@@ -559,41 +545,15 @@ mod warm_start_artifact_tests {
 
     #[test]
     fn artifact_round_trips_on_disk_by_descriptor() {
-        // Use a unique family-kind tag so this test's descriptor key is
-        // disjoint from any other run's keyspace (the store is process-shared
-        // under the temp dir).
-        let family = format!("test-roundtrip-{}", unix_secs_now());
-        let artifact = sample_artifact(&family, "x", vec![2.5]);
+        let (_directory, store) = isolated_store();
+        let artifact = sample_artifact("test-roundtrip", "x", vec![2.5]);
         let key_hex = artifact.descriptor.descriptor_key().to_hex();
 
-        // If the platform temp dir is unwritable, the store is None and the
-        // round-trip is a no-op; only assert when persistence is available.
-        if persistent_store().is_none() {
-            return;
-        }
-        // gam#2639: the guard above tests whether the root can be OPENED; every
-        // assertion below depends on whether it can be WRITTEN, which is a
-        // different question. `WarmStartStore::open` is `fs::create_dir_all(
-        // &root)?` and nothing else, so on an existing root it returns `Ok`
-        // however full the filesystem is — and the store then panicked through
-        // `.expect(...)` with `No space left on device (os error 28)`,
-        // reporting the environment as a gam-solve red in the very inventory
-        // other lanes triage against.
-        //
-        // The round-trip contract is NOT weakened: it is "a record that was
-        // persisted is retrievable", and that is exactly what still runs. Only
-        // the case where no record could be written at all is skipped, and only
-        // when the filesystem itself refused — `Encode` and `Rejected` are
-        // still hard failures, so a genuine store defect stays loud.
-        match store_fit_artifact(&artifact) {
-            Ok(()) => {}
-            Err(StoreArtifactError::Unwritable(reason)) => {
-                eprintln!("artifact_round_trips_on_disk_by_descriptor: {reason}");
-                return;
-            }
-            Err(other) => panic!("store fit artifact: {other}"),
-        }
-        let loaded = load_fit_artifact_by_descriptor(&key_hex)
+        // The test owns a writable scratch root, so its assertion and
+        // precondition are identical. Environment refusal is exercised through
+        // the typed `try_*` seam instead of weakening the round-trip contract.
+        try_store_fit_artifact(&store, &artifact).expect("store fit artifact");
+        let loaded = load_fit_artifact_by_descriptor(&store, &key_hex)
             .expect("artifact must be retrievable by descriptor key");
         assert_eq!(loaded.schema, artifact.schema);
         assert_eq!(loaded.terms.len(), 1);
@@ -608,9 +568,10 @@ mod warm_start_artifact_tests {
 
     #[test]
     fn loso_fold_descriptor_matches_full_data_artifact() {
-        let family = format!("test-loso-{}", unix_secs_now());
+        let (_directory, store) = isolated_store();
+        let family = "test-loso";
         // Full-data fit on 1000 rows.
-        let mut full = sample_artifact(&family, "x", vec![1.7]);
+        let mut full = sample_artifact(family, "x", vec![1.7]);
         full.descriptor.row_population = Some(crate::warm_start_artifact::RowPopulationTag {
             n_rows: 1000,
             label: Some("full".to_string()),
@@ -620,40 +581,52 @@ mod warm_start_artifact_tests {
 
         // LOSO fold: same term identities, fewer rows. Its descriptor key
         // must equal the full-data key, so the load hits the stored artifact.
-        let fold = sample_artifact(&family, "x", vec![1.7]);
+        let fold = sample_artifact(family, "x", vec![1.7]);
         let fold_key = fold.descriptor.descriptor_key().to_hex();
         assert_eq!(
             full_key, fold_key,
             "fold and full descriptor keys must match"
         );
 
-        if persistent_store().is_none() {
-            return;
-        }
-        // gam#2639: the guard above tests whether the root can be OPENED; every
-        // assertion below depends on whether it can be WRITTEN, which is a
-        // different question. `WarmStartStore::open` is `fs::create_dir_all(
-        // &root)?` and nothing else, so on an existing root it returns `Ok`
-        // however full the filesystem is — and the store then panicked through
-        // `.expect(...)` with `No space left on device (os error 28)`,
-        // reporting the environment as a gam-solve red in the very inventory
-        // other lanes triage against.
-        //
-        // The round-trip contract is NOT weakened: it is "a record that was
-        // persisted is retrievable", and that is exactly what still runs. Only
-        // the case where no record could be written at all is skipped, and only
-        // when the filesystem itself refused — `Encode` and `Rejected` are
-        // still hard failures, so a genuine store defect stays loud.
-        match store_fit_artifact(&full) {
-            Ok(()) => {}
-            Err(StoreArtifactError::Unwritable(reason)) => {
-                eprintln!("loso_fold_descriptor_matches_full_data_artifact: {reason}");
-                return;
-            }
-            Err(other) => panic!("store full-data artifact: {other}"),
-        }
-        let loaded = load_fit_artifact_by_descriptor(&fold_key)
+        try_store_fit_artifact(&store, &full).expect("store full-data artifact");
+        let loaded = load_fit_artifact_by_descriptor(&store, &fold_key)
             .expect("LOSO fold must retrieve the full-data artifact");
         assert_eq!(loaded.terms[0].rho_for_term, vec![1.7]);
+    }
+
+    #[test]
+    fn io_refusal_remains_typed_before_best_effort_interpretation() {
+        let error = StoreError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(matches!(
+            classify_store_error(error),
+            PersistentStoreError::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn persistence_defects_remain_typed_before_best_effort_interpretation() {
+        struct RefusesSerialization;
+
+        impl Serialize for RefusesSerialization {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(S::Error::custom("intentional encoding refusal"))
+            }
+        }
+
+        let (_directory, store) = isolated_store();
+        assert!(matches!(
+            store_json_record(&store, "encode-defect", &RefusesSerialization),
+            Err(PersistentStoreError::Encode(_))
+        ));
+
+        let malformed_json =
+            serde_json::from_str::<serde_json::Value>("{").expect_err("fixture must be malformed");
+        assert!(matches!(
+            classify_store_error(StoreError::Json(malformed_json)),
+            PersistentStoreError::Rejected(_)
+        ));
     }
 }

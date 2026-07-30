@@ -6204,24 +6204,19 @@ pub(crate) struct RemlState<'a> {
     pub(crate) analytic_penalty_registry_fingerprint: u64,
     /// Ensures the process attempts at most one disk restore per surface.
     pub(crate) persistent_warm_start_loaded: AtomicBool,
-    /// Scoped counter disabling disk writes from cost-only posterior/probe
-    /// evaluations. In-memory warm starts still update; only JSON/bin
-    /// persistence and eviction sweeps are suppressed.
+    /// Scoped counter disabling all disk persistence from canonical anchors and
+    /// cost-only posterior/probe evaluations. In-memory warm starts still
+    /// update; loads, writes, and eviction sweeps are suppressed together so a
+    /// probe cannot inherit cache history or mutate it.
     pub(crate) persistent_warm_start_store_suppression: AtomicUsize,
-    /// Whether the cross-process ON-DISK warm-start layer is engaged at all.
+    /// Caller-configured cross-process warm-start capability.
     ///
-    /// Default `false`: the optimizer's IN-MEMORY warm start (the actual
-    /// speed lever) is always on, but the disk checkpoint — `load_record`
-    /// at fit start and `store_record` at finalize, each of which opens the
-    /// shared `WarmStartStore` and pays an eviction/dir scan that is O(cache
-    /// entries) on a network filesystem — is skipped. Disk persistence has
-    /// reuse value only ACROSS processes or across repeated identical fits;
-    /// a single in-process fit (and a fortiori a loop of distinct throwaway
-    /// fits, e.g. CI-coverage replicates each on different data, #1082/#1114)
-    /// gets zero benefit from it and pays the per-fit open/scan/save in full.
-    /// `FitConfig::persist_warm_start_disk` flips this to `true` only when the
-    /// caller explicitly asks for cross-process / repeat-fit persistence.
-    pub(crate) persistent_warm_start_disk_enabled: AtomicBool,
+    /// Empty by default: in-memory warm starts remain on, while no ambient
+    /// filesystem root is discovered. The estimate constructor attaches the
+    /// explicit capability at most once after nuisance anchoring; clones of the
+    /// capability share its lazy/opened store.
+    pub(crate) persistent_warm_start_store:
+        std::sync::OnceLock<gam_runtime::warm_start::ConfiguredWarmStartStore>,
     /// #1033: memoized fit-invariant O(n) response/weight scalars.
     ///
     /// `gaussian_weight_log_sum_half` (`½·Σ log wᵢ`),

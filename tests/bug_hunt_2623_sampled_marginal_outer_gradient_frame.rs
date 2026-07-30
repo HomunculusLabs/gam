@@ -106,7 +106,7 @@ fn fixture(n: usize, k: usize, amp: f64) -> Fixture {
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
-        persist_warm_start_disk: false,
+        persistent_warm_start_store: None,
     };
     Fixture {
         y,

@@ -1661,14 +1661,10 @@ pub struct FitOptions {
     pub kronecker_penalty_system: Option<gam_terms::smooth::KroneckerPenaltySystem>,
     /// Full Kronecker factored basis for P-IRLS factored reparameterization.
     pub kronecker_factored: Option<gam_terms::basis::KroneckerFactoredBasis>,
-    /// Engage the cross-process ON-DISK persistent warm-start layer.
-    ///
-    /// Default `false`: only the always-on in-memory warm start runs, so a
-    /// single fit and throwaway/replicate/CI-coverage loops pay zero disk I/O
-    /// (#1082). Set `true` (threaded from `FitConfig::persist_warm_start_disk`)
-    /// to engage cross-process / repeat-fit resume; the standard `RemlState`
-    /// then calls `enable_persistent_warm_start_disk()`.
-    pub persist_warm_start_disk: bool,
+    /// Explicit cross-process warm-start capability. `None` is disk-silent;
+    /// `Some` carries one lazy/opened caller-configured store through every
+    /// standard REML owner.
+    pub persistent_warm_start_store: Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
 }
 
 impl Default for FitOptions {
@@ -1692,7 +1688,7 @@ impl Default for FitOptions {
             rho_prior: gam_problem::RhoPrior::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         }
     }
 }

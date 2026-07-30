@@ -2616,6 +2616,7 @@ fn fit_cause_specific_survival_transformation_custom(
     beta0_flat: Array1<f64>,
     derivative_floor: f64,
     penalty_block_gamma_priors: &[(String, f64, f64)],
+    persistent_warm_start_store: Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
 ) -> Result<SurvivalTransformationFitResult, String> {
     let cause_count = crate::survival::cause_count_from_event_codes(spec.event_target.view())
         .into_workflow_result()?;
@@ -2791,6 +2792,7 @@ fn fit_cause_specific_survival_transformation_custom(
         // per-cause approximations at prediction time would discard the
         // cross-cause blocks and misstate CIF uncertainty (#2298).
         compute_covariance: true,
+        persistent_warm_start_store,
         ..Default::default()
     };
     let rho_prior = cause_specific_survival_rho_prior(
@@ -3083,12 +3085,13 @@ fn persistent_survival_transformation_key(
 }
 
 fn load_survival_transformation_persistent_warm_start(
+    store: &gam_runtime::warm_start::ConfiguredWarmStartStore,
     key: &str,
     spec: &SurvivalTransformationTermSpec,
     n_cols: usize,
     rho: &[f64],
 ) -> Option<(Array1<f64>, Option<f64>)> {
-    let record = gam_solve::persistent_warm_start::load_record(key)?;
+    let record = gam_solve::persistent_warm_start::load_record(store, key)?;
     if !record.is_compatible(key, spec.age_entry.len(), n_cols)
         || record.rho.len() != rho.len()
         || !record
@@ -3107,6 +3110,7 @@ fn load_survival_transformation_persistent_warm_start(
 }
 
 fn store_survival_transformation_persistent_warm_start(
+    store: &gam_runtime::warm_start::ConfiguredWarmStartStore,
     key: &str,
     spec: &SurvivalTransformationTermSpec,
     n_cols: usize,
@@ -3135,22 +3139,13 @@ fn store_survival_transformation_persistent_warm_start(
     record.last_pirls_accept_rho = summary
         .final_accept_rho
         .filter(|value| value.is_finite() && *value >= 0.0);
-    match gam_solve::persistent_warm_start::store_record(&record) {
-        Ok(()) => {
-            gam_solve::persistent_warm_start::load_record(&record.key).is_some_and(|stored| {
-                stored.rho == record.rho
-                    && stored.beta == record.beta
-                    && stored.last_inner_iters == record.last_inner_iters
-                    && stored.last_inner_converged == record.last_inner_converged
-            })
-        }
-        Err(err) => {
-            log::warn!(
-                "[warm-start-cache] failed to persist survival transformation warm start: {err}"
-            );
-            false
-        }
-    }
+    gam_solve::persistent_warm_start::store_record(store, &record);
+    gam_solve::persistent_warm_start::load_record(store, &record.key).is_some_and(|stored| {
+        stored.rho == record.rho
+            && stored.beta == record.beta
+            && stored.last_inner_iters == record.last_inner_iters
+            && stored.last_inner_converged == record.last_inner_converged
+    })
 }
 
 pub(crate) fn fit_survival_transformation_model(
@@ -3161,7 +3156,7 @@ pub(crate) fn fit_survival_transformation_model(
     let SurvivalTransformationFitRequest {
         data,
         spec,
-        cache_session: _cache_session,
+        persistent_warm_start_store,
     } = request;
     let mut baseline_cfg = spec.baseline_cfg.clone();
     let covariate_design =
@@ -3483,6 +3478,7 @@ pub(crate) fn fit_survival_transformation_model(
             beta0_flat,
             exact_derivative_guard,
             &spec.penalty_block_gamma_priors,
+            persistent_warm_start_store.clone(),
         );
     }
     // REML/LAML-select the time-smoothing λ (issue #563). With λ pinned at its
@@ -3552,12 +3548,15 @@ pub(crate) fn fit_survival_transformation_model(
         expected_beta_len,
     );
     let mut opts = opts;
-    let beta_start = match load_survival_transformation_persistent_warm_start(
-        &persistent_warm_start_key,
-        &spec,
-        expected_beta_len,
-        &rho_for_cache,
-    ) {
+    let beta_start = match persistent_warm_start_store.as_ref().and_then(|store| {
+        load_survival_transformation_persistent_warm_start(
+            store,
+            &persistent_warm_start_key,
+            &spec,
+            expected_beta_len,
+            &rho_for_cache,
+        )
+    }) {
         Some((beta, lm_lambda)) => {
             opts.initial_lm_lambda = lm_lambda;
             beta
@@ -3592,14 +3591,17 @@ pub(crate) fn fit_survival_transformation_model(
     // Persist every finite accepted iterate before enforcing the certificate:
     // an exhausted solve is resumable work, but it is never a fit. The record's
     // `last_inner_converged` bit distinguishes a final mode from a checkpoint.
-    let checkpoint_persisted = store_survival_transformation_persistent_warm_start(
-        &persistent_warm_start_key,
-        &spec,
-        expected_beta_len,
-        rho_for_cache.clone(),
-        &beta,
-        &summary,
-    );
+    let checkpoint_persisted = persistent_warm_start_store.as_ref().is_some_and(|store| {
+        store_survival_transformation_persistent_warm_start(
+            store,
+            &persistent_warm_start_key,
+            &spec,
+            expected_beta_len,
+            rho_for_cache.clone(),
+            &beta,
+            &summary,
+        )
+    });
     require_certified_survival_pirls(
         &summary,
         "survival transformation final fixed-lambda PIRLS",

@@ -61,7 +61,10 @@ pub(crate) fn materialize_transformation_normal<'a>(
             offset,
             covariate_spec,
             config: TransformationNormalConfig::default(),
-            options: BlockwiseFitOptions::default(),
+            options: BlockwiseFitOptions {
+                persistent_warm_start_store: config.persistent_warm_start_store.clone(),
+                ..BlockwiseFitOptions::default()
+            },
             kappa_options: config.spatial_optimization.clone(),
             warm_start: None,
         }),

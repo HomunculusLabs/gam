@@ -248,7 +248,7 @@ fn aniso_matern_full_outer_loop_recovers_planted_signal_r2() {
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
         kappa_options: SpatialLengthScaleOptimizationOptions {
             enabled: true,
@@ -386,7 +386,7 @@ fn fit_aniso_recovery(double_penalty: bool, num_centers: usize) -> AnisoRecovery
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
-            persist_warm_start_disk: false,
+            persistent_warm_start_store: None,
         },
         kappa_options: SpatialLengthScaleOptimizationOptions {
             enabled: true,

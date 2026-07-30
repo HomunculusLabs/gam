@@ -3520,6 +3520,7 @@ fn prepare_model_accepts_time_initializer_when_offset_completes_guard() {
         timewiggle_block: None,
         linkwiggle_block: None,
         cache_session: None,
+        persistent_warm_start_store: None,
         cache_mirror_sessions: Vec::new(),
     };
 
@@ -3595,6 +3596,7 @@ fn prepare_model_seeds_structural_time_initializer_when_offset_equals_guard() {
         timewiggle_block: None,
         linkwiggle_block: None,
         cache_session: None,
+        persistent_warm_start_store: None,
         cache_mirror_sessions: Vec::new(),
     };
 
@@ -3667,6 +3669,7 @@ fn prepare_model_assigns_distinct_descending_gauge_priorities() {
         timewiggle_block: None,
         linkwiggle_block: None,
         cache_session: None,
+        persistent_warm_start_store: None,
         cache_mirror_sessions: Vec::new(),
     };
 
@@ -3752,6 +3755,7 @@ fn prepare_model_keeps_intercept_only_log_sigma_width() {
         timewiggle_block: None,
         linkwiggle_block: None,
         cache_session: None,
+        persistent_warm_start_store: None,
         cache_mirror_sessions: Vec::new(),
     };
 
@@ -6279,6 +6283,7 @@ fn heart_failure_full_fit_structural_time_coefficients() {
         timewiggle_block: None,
         linkwiggle_block: None,
         cache_session: None,
+        persistent_warm_start_store: None,
         cache_mirror_sessions: Vec::new(),
     };
 
@@ -8290,6 +8295,7 @@ fn reduced_parametric_aft_converges_and_recovers_lognormal_mle_2112() {
         timewiggle_block: None,
         linkwiggle_block: None,
         cache_session: None,
+        persistent_warm_start_store: None,
         cache_mirror_sessions: Vec::new(),
     };
 
@@ -8444,6 +8450,7 @@ fn reduced_aft_lognormal_spec(
         timewiggle_block: None,
         linkwiggle_block: None,
         cache_session: None,
+        persistent_warm_start_store: None,
         cache_mirror_sessions: Vec::new(),
     }
 }

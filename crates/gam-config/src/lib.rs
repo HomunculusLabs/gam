@@ -255,6 +255,9 @@ pub fn resolve_fit_request_config(
     if let Some(value) = json_config.outer_max_iter {
         fit_config.outer_max_iter = Some(value);
     }
+    if let Some(root) = json_config.persistent_warm_start_root {
+        fit_config = fit_config.with_persistent_warm_start_root(root);
+    }
     if let Some(raw_gpu) = json_config.gpu {
         fit_config.gpu_policy = parse_gpu_policy(&raw_gpu)?;
     }
@@ -700,6 +703,32 @@ mod tests {
         let on = resolved_json(json!({"precompute_conformal": true}))
             .expect("precompute_conformal=true resolves");
         assert_eq!(on.precompute_conformal, Some(true));
+    }
+
+    #[test]
+    fn persistent_warm_start_is_disabled_by_default_and_preserves_explicit_root_2639() {
+        let defaulted = resolved_json(json!({})).expect("empty config resolves");
+        assert!(
+            defaulted.persistent_warm_start_store.is_none(),
+            "omitting the root must leave persistence disabled"
+        );
+
+        let exact_root = std::path::PathBuf::from("caller-owned/../warm-root");
+        let configured = resolved_json(json!({
+            "persistent_warm_start_root": exact_root
+        }))
+        .expect("an explicit persistence root resolves")
+        .persistent_warm_start_store
+        .expect("the root must become a store capability");
+        assert_eq!(
+            configured.root(),
+            exact_root,
+            "configuration must not canonicalize or relocate the caller's root"
+        );
+
+        let empty = resolved_json(json!({"persistent_warm_start_root": ""}))
+            .expect_err("an empty persistence root is not an explicit location");
+        assert!(empty.contains("persistent_warm_start_root must not be empty"));
     }
 
     #[test]
