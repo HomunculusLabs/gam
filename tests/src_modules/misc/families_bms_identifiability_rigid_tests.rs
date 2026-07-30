@@ -7867,7 +7867,26 @@ fn auto_latent_measure_routes_conditional_shift_to_location_scale() {
                     "auto latent measure with conditioning", e
                 )
             });
-    assert!(matches!(measure, LatentMeasureKind::StandardNormal));
+    // The residual measure is the EMPIRICAL one, not the standard normal, and on
+    // this fixture that is the correct answer rather than a regression. `z` is
+    // `0.8·c ± 0.35` with the sign alternating, so once the conditional
+    // location-scale correction removes `m(C)` and `√v(C)` the residual `ζ` is a
+    // TWO-POINT law — exactly the case `build_latent_measure_with_geometry`
+    // documents at its `residual_is_standard_normal` gate: matching the first two
+    // conditional moments does not make `ζ` Gaussian, and a two-point residual
+    // survives location-scale correction unchanged in shape. Admitting the
+    // closed-form standard-normal kernel there would be the defect.
+    //
+    // This assertion read `matches!(measure, LatentMeasureKind::StandardNormal)`,
+    // written before that gate existed, so it pinned the behaviour the gate was
+    // added to prevent (#2597). What #905 is actually about — that a conditional
+    // shift WITH a conditioning span routes to the conditional correction — is the
+    // next assertion, and it is unchanged.
+    assert!(
+        matches!(measure, LatentMeasureKind::GlobalEmpirical { .. }),
+        "a two-point conditional residual must keep an empirical latent measure, \
+         not the closed-form standard normal"
+    );
     assert!(
         matches!(
             calibration,
