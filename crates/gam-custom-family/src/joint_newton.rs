@@ -1893,6 +1893,12 @@ pub(crate) enum JointTrustRegionDecision {
     /// Radius was already at the floor before this update.  Persistent
     /// `RejectFloor` is the unambiguous signal of a degenerate ρ region.
     RejectFloor,
+    /// The quadratic model's predicted decrease fell to or below the
+    /// objective's own round-off floor while the REALIZED decrease stayed
+    /// measurably above it (gam#2637). The step is taken on the measurement
+    /// and the radius is held: there is no model evidence for a larger
+    /// region, and shrinking would be self-reinforcing.
+    AcceptBelowModelNoiseFloor,
 }
 
 impl JointTrustRegionDecision {
@@ -1904,6 +1910,7 @@ impl JointTrustRegionDecision {
             Self::ShrinkOnMarginalAccept => "shrink_marginal_accept",
             Self::ShrinkOnRejection => "shrink_reject",
             Self::RejectFloor => "reject_floor",
+            Self::AcceptBelowModelNoiseFloor => "accept_model_noise_floor",
         }
     }
 
@@ -1931,6 +1938,13 @@ pub(crate) struct JointTrustRegionUpdate {
     pub(crate) decision: JointTrustRegionDecision,
 }
 
+/// Relative round-off noise floor handed to the shared trust-region
+/// controller: a change in the inner objective below `|objective| ×` this is
+/// indistinguishable from f64 round-off. Named because
+/// [`update_joint_trust_region_radius`] has to reason about the SAME floor the
+/// controller applies, and two spellings of the number would be free to drift.
+pub(crate) const JOINT_TRUST_NOISE_FLOOR_REL: f64 = 1.0e-14;
+
 pub(crate) fn update_joint_trust_region_radius(
     old_radius: f64,
     step_norm: f64,
@@ -1948,16 +1962,61 @@ pub(crate) fn update_joint_trust_region_radius(
     // rejection, the `×2` grow at the boundary (`step_norm ≥ 0.99·old_radius`),
     // the `[1e-12, 1e6]` clamp, and the `RejectFloor` promotion at the floor
     // are all reproduced exactly by that controller — this is a behavior-
-    // preserving extraction, not a re-derivation.
+    // preserving extraction, not a re-derivation. The gam#2637 override below
+    // is the one deliberate deviation, and it only ever converts a rejection
+    // the controller could not justify into an accept.
     let hit_boundary = step_norm >= 0.99 * old_radius;
-    let step = opt::TrustRegionPolicy::noise_aware(1.0e-12, 1.0e6, 1.0e-14).update(
-        old_radius,
-        step_norm,
-        hit_boundary,
-        actual_reduction,
-        predicted_reduction,
-        objective_scale,
-    );
+    let step = opt::TrustRegionPolicy::noise_aware(1.0e-12, 1.0e6, JOINT_TRUST_NOISE_FLOOR_REL)
+        .update(
+            old_radius,
+            step_norm,
+            hit_boundary,
+            actual_reduction,
+            predicted_reduction,
+            objective_scale,
+        );
+    // MODEL EXHAUSTION IS NOT MODEL DISAGREEMENT (gam#2637).
+    //
+    // The controller maps two different situations onto one `rho = -inf`
+    // rejection: a model that predicts ASCENT, and a model whose predicted
+    // DESCENT is too small to resolve against the objective's own round-off
+    // floor (`predicted_reduction <= |objective| × 1e-14`). Only the first is
+    // evidence that the region was too large.
+    //
+    // The second is a trap, because the ranked candidate on the constrained
+    // path is the active-set QP chord scaled to the radius, so its predicted
+    // reduction goes as `alpha²`: shrinking makes the next prediction smaller
+    // and guarantees the next rejection. Measured on
+    // `binomial_location_scale_engine_matches_reference_flow`, cycle 8: a step
+    // whose REALIZED reduction was `+2.090494888e-9` — 5,030× the
+    // `4.156290748e-13` floor — was rejected for a prediction of
+    // `+2.944376434e-13`; three consecutive shrinks took the radius from
+    // `1.000e0` to `4.448471e-8`, below the Newton proposal's
+    // own `1.878e-7`, and the solve then spent 31 of its 40 cycles with the
+    // stationarity residual bit-frozen at `3.009e-6` against a `1.129e-11`
+    // tolerance while every accepted step moved beta by `<= 1e-10`.
+    //
+    // When the model has merely run out of resolution but the realized change
+    // is a genuine decrease ABOVE the same floor, the measurement is the better
+    // evidence: take the step and HOLD the radius. Held, not grown — a model
+    // that cannot resolve its own prediction is not evidence for a larger
+    // region either. A model that predicts ascent (`predicted_reduction < 0`)
+    // or is non-finite still rejects and shrinks exactly as before, and so does
+    // any step whose realized change fails to clear the floor.
+    let noise_floor = objective_scale.abs().max(1.0) * JOINT_TRUST_NOISE_FLOOR_REL;
+    if !step.accepted
+        && step.predicted_nonpositive
+        && predicted_reduction.is_finite()
+        && predicted_reduction >= 0.0
+        && actual_reduction > noise_floor
+    {
+        return JointTrustRegionUpdate {
+            rho: 1.0,
+            radius: old_radius,
+            accepted: true,
+            decision: JointTrustRegionDecision::AcceptBelowModelNoiseFloor,
+        };
+    }
     JointTrustRegionUpdate {
         rho: step.rho,
         radius: step.new_radius,
