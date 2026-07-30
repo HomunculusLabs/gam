@@ -54,7 +54,8 @@ use gam::families::survival::construction::build_survival_timewiggle_from_baseli
 use gam::families::survival::construction::parse_survival_baseline_config;
 use gam::families::survival::construction::{SurvivalBaselineConfig, evaluate_survival_baseline};
 use gam::families::survival::location_scale::{
-    ResidualDistribution, project_onto_linear_constraints,
+    ResidualDistribution, SurvivalLocationScaleTimeParameterization,
+    project_onto_linear_constraints,
 };
 use gam::families::survival::lognormal_kernel::FrailtyScale;
 use gam::families::wiggle::{
@@ -67,7 +68,7 @@ use gam::inference::data::{
 use gam::inference::formula_dsl::{ParsedTerm, parse_linkwiggle_formulaspec};
 use gam::inference::model::{
     ColumnKindTag, FittedModelPayload, MODEL_PAYLOAD_VERSION, ModelKind, SavedCompiledFlexBlock,
-    SavedLatentZNormalization, SchemaColumn,
+    SavedLatentZNormalization, SavedSurvivalLocationScaleStructure, SchemaColumn,
 };
 use gam::inference::model_payload_builders::{
     BernoulliMarginalSlopeInputs, SavedModelSourceMetadata,
@@ -1573,6 +1574,17 @@ fn saved_prediction_runtime_rejects_location_scale_survival_payload_drift() {
     payload.fit_result = Some(fit_result.clone());
     payload.unified = Some(fit_result);
     payload.survival_likelihood = Some("location-scale".to_string());
+    // Every location-scale survival artifact must carry the exact replay
+    // structure: the field deliberately has no serde default, so a v11 artifact
+    // states `null` for non-location-scale families or carries the complete
+    // structure. Without it the runtime refuses on the MISSING STRUCTURE check
+    // before it ever reaches the coefficient-drift refusal this test pins, and
+    // the assertion reads a message about the wrong defect.
+    payload.survival_location_scale_structure = Some(SavedSurvivalLocationScaleStructure {
+        time_parameterization: SurvivalLocationScaleTimeParameterization::MonotoneWarp,
+        threshold_time_basis: None,
+        log_sigma_time_basis: None,
+    });
     payload.survival_beta_time = Some(vec![9.9]);
     payload.survival_beta_threshold = Some(vec![0.2]);
     payload.survival_beta_log_sigma = Some(vec![-0.3]);
