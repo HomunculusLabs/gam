@@ -1279,6 +1279,21 @@ where
                  rho: &Array1<f64>,
                  face: &[usize]| { state.rail_face_limit(rho, face) },
             );
+            // #2545: publish the soft rho-guard BARRIER's own ρ-gradient so the
+            // certificate can subtract it where the barrier is not part of the
+            // optimality condition (a railed coordinate, and the tail probes).
+            // The `log cosh` barrier's gradient saturates at `w·a = 1.3333e-7`
+            // rather than decaying, and `project_gradient_vector` keeps exactly
+            // that positive part at an upper rail — so before this hook existed,
+            // |Pg| ≥ 1.3333e-7 at every upper rail and a λ=∞ face could never
+            // certify however clean the fit. It reads the SAME atom `build_prior`
+            // reads, at the SAME weight-anchored coordinate, so the subtraction
+            // cannot drift from the addition.
+            let obj = obj.with_soft_rho_guard_gradient(
+                |state: &mut &mut crate::estimate::reml::RemlState<'_>, rho: &Array1<f64>| {
+                    state.soft_rho_guard_gradient(rho)
+                },
+            );
             // Standard REML publishes its current original-basis coefficients
             // and consumes a cached coefficient vector through the symmetric
             // hook below. The runner calls it only after reset and only for the
@@ -1696,10 +1711,25 @@ where
             // it must be projected against the box that certificate used
             // (#2412) — otherwise a railed coordinate's outward pull is scored
             // against a bound derived without it.
+            // #2545: this residual is weighed against the CERTIFICATE's own
+            // bound two lines down, so it must be the quantity the certificate
+            // judged. The criterion's `log cosh` barrier leaves a saturated
+            // `+w*a = 1.3333e-7` at every rail that the KKT projection retains,
+            // and the certificate now removes it on exactly the railed
+            // coordinates — leaving it in here would refuse a fit the
+            // certificate just certified, which is the same two-spellings-of-one-
+            // tolerance failure in a different place.
+            let rho_barrier = reml_state.soft_rho_guard_gradient(&final_rho);
+            let rail_bounds = (rho_lower, rho_upper);
             let rho_residual = crate::rho_optimizer::rail_projected_gradient_norm(
                 &final_rho,
-                &rho_gradient,
-                Some(&(rho_lower, rho_upper)),
+                &crate::rho_optimizer::gradient_with_rail_barrier_removed(
+                    &final_rho,
+                    &rho_gradient,
+                    &crate::rho_optimizer::rail_relaxed_bounds(&rail_bounds),
+                    Some(&rho_barrier),
+                ),
+                Some(&rail_bounds),
             );
             let rho_bound = outer_result
                 .criterion_certificate
@@ -2443,10 +2473,22 @@ where
         // refusal below, so it uses the certificate's rail-relaxed box (#2412)
         // -- the same projection the certified |Pg| was measured with, even
         // though this gate never weighs one against the other.
+        // #2545: "the same projection the certified |Pg| was measured with" now
+        // includes the certificate's removal of the soft rho-guard barrier on
+        // railed coordinates, so the shipped number keeps meaning the same thing
+        // as the certified one. `finalgrad` itself stays the raw criterion
+        // gradient — this is the projected residual, not the gradient.
+        let bounds = (lower, upper);
+        let barrier = reml_state.soft_rho_guard_gradient(&final_rho);
         let projected = crate::rho_optimizer::rail_projected_gradient_norm(
             &final_rho,
-            &gradient,
-            Some(&(lower, upper)),
+            &crate::rho_optimizer::gradient_with_rail_barrier_removed(
+                &final_rho,
+                &gradient,
+                &crate::rho_optimizer::rail_relaxed_bounds(&bounds),
+                Some(&barrier),
+            ),
+            Some(&bounds),
         );
         (value, gradient, projected)
     };

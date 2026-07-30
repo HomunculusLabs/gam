@@ -1375,6 +1375,19 @@ fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
             iso_kappa_fd_variant_driver(label, 80, family, false, false, &SATURATED);
         let mut checked = 0usize;
         let mut worst_fraction = 0.0f64;
+        // #2545 receipt: `(rho, residual, c = residual*e^rho)` per probe. The
+        // residual is what the CERTIFICATE now judges at a rail — #2545 subtracts
+        // the barrier from the certificate's view of the gradient, leaving exactly
+        // this — so the assertions after the loop are that fix's acceptance
+        // measurement, taken on the same fixture and the same ladder the defect
+        // was measured on. NOTE the scope: this fixture is UNWEIGHTED, so the
+        // weight anchor is exactly 0 and the closed form below coincides with the
+        // anchored one the shipped subtraction uses. The anchored case is gated
+        // separately, on a weighted state, by gam-solve's
+        // `soft_rho_guard_gradient_is_evaluated_at_the_weight_anchor` — a formula
+        // validated only where one of its inputs is zero has not been validated
+        // in that input, which is exactly how this one nearly shipped wrong.
+        let mut face_tail: Vec<(f64, f64, f64)> = Vec::new();
         // #2545: the aggregate `worst_fraction` printed at the end is a max over
         // probes AND components, and reading it as a per-ρ number produced a
         // published "the floor is 1.5-2.1x w*a, so something else saturates"
@@ -1408,6 +1421,7 @@ fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
                  c=residual*e^rho={:.4e}",
                 residual * value.exp()
             );
+            face_tail.push((value, residual, residual * value.exp()));
             for (j, &observed) in grad.iter().enumerate() {
                 if j + 1 == grad.len() {
                     assert!(
@@ -1436,6 +1450,80 @@ fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
         eprintln!(
             "[#2450-gate] {label}: {checked} rho components, worst \
              {worst_fraction:.3e} of the retired Normal(0,3) contribution"
+        );
+
+        // ── #2545 acceptance: the residual under the barrier IS the λ=∞ face ──
+        //
+        // Three statements, each of which the printed decomposition above was
+        // only ever asserting by eye:
+        //
+        // 1. every residual is POSITIVE — the barrier is not over-subtracted, so
+        //    the removal cannot manufacture a face out of a sign error;
+        // 2. `c = residual·e^ρ` is CONSTANT across the ladder — the control that
+        //    says this is the criterion's own tail and not the instrument's
+        //    noise floor. Measured 87.512 / 87.512 / 87.511 / 87.474 at
+        //    ρ = 21/24/27/30, a spread of 4.3e-4 relative, so a 1% band is two
+        //    orders of headroom over the measurement and still refuses a
+        //    divergent `ĉ` (the pre-#2450 failure this whole family is about);
+        // 3. the residual at the deepest probe is ORDERS below the
+        //    barrier-bearing gradient the certificate used to be handed. That is
+        //    the number the fix is accepted on: `max|g_rho| = 1.332521e-7` with
+        //    the barrier in, `residual = 8.185450e-12` with it out — a factor
+        //    6.1e-5, which the 1e-3 bar states as a relative claim so it cannot
+        //    be satisfied by the fixture merely getting smaller.
+        assert_eq!(
+            face_tail.len(),
+            SATURATED.len(),
+            "{label}: the #2545 decomposition must cover every saturated probe"
+        );
+        for (value, residual, _) in &face_tail {
+            assert!(
+                *residual > 0.0 && residual.is_finite(),
+                "{label} rho={value}: the residual under the soft rho-guard barrier \
+                 must be a positive finite REML tail, got {residual:+.6e}. A \
+                 NEGATIVE residual would mean the barrier's closed form OVERSTATES \
+                 the barrier the criterion actually added, and the #2545 \
+                 subtraction would be minting a face out of a sign error."
+            );
+        }
+        let c_min = face_tail.iter().map(|(_, _, c)| *c).fold(f64::MAX, f64::min);
+        let c_max = face_tail.iter().map(|(_, _, c)| *c).fold(0.0f64, f64::max);
+        assert!(
+            c_max - c_min <= 1.0e-2 * c_max,
+            "{label}: the pencil constant c = residual*e^rho must be CONSTANT \
+             across the probe ladder — that constancy is what makes the residual \
+             the criterion's lambda=infinity face tail rather than instrument \
+             noise, and it is the control on #2545's subtraction. Got \
+             [{c_min:.5e}, {c_max:.5e}], spread {:.3e} relative.",
+            (c_max - c_min) / c_max
+        );
+        let (deepest_rho, deepest_residual, _) = face_tail[face_tail.len() - 1];
+        let deepest_probe = format!("rhoALL@{deepest_rho}");
+        let deepest_max = grads
+            .iter()
+            .find(|(name, _)| *name == deepest_probe)
+            .map(|(_, grad)| {
+                grad.iter()
+                    .take(grad.len().saturating_sub(1))
+                    .fold(0.0f64, |acc, v| acc.max(v.abs()))
+            })
+            .unwrap_or_else(|| panic!("{label}: probe {deepest_probe} missing"));
+        assert!(
+            deepest_residual <= 1.0e-3 * deepest_max,
+            "{label} rho={deepest_rho}: with the soft rho-guard barrier removed \
+             from the certificate's view (#2545) the residual must be ORDERS below \
+             the barrier-bearing gradient the certificate used to judge. Got \
+             residual={deepest_residual:.6e} against max|g_rho|={deepest_max:.6e}, a \
+             fraction {:.3e}. If this fails, the barrier is no longer the dominant \
+             term at a saturated rho and the subtraction is no longer the fix.",
+            deepest_residual / deepest_max
+        );
+        eprintln!(
+            "[#2545-accept] {label}: certificate-visible residual at rho={deepest_rho} \
+             is {deepest_residual:.6e} (predicted c*e^-rho = {:.6e}), \
+             {:.3e} of the barrier-bearing {deepest_max:.6e}; c in [{c_min:.5e}, {c_max:.5e}]",
+            c_max * (-deepest_rho).exp(),
+            deepest_residual / deepest_max
         );
     }
 }

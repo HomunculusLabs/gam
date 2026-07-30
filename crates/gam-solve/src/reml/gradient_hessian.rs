@@ -3814,6 +3814,33 @@ impl<'a> RemlState<'a> {
         )
     }
 
+    /// The soft numerical-guard barrier's own ρ-gradient at `rho` — the term
+    /// the certificate must subtract before it judges a λ=∞ face (#2545).
+    ///
+    /// This is a PROJECTION of [`Self::soft_rho_guard_prior_atom`], never a
+    /// re-derivation. That is the whole point: the criterion adds
+    /// `soft.gradient()` inside `build_prior`, and this returns the SAME array
+    /// from the SAME atom evaluated at the SAME weight-anchored coordinate
+    /// `ρ̃ = ρ − rho_weight_anchor`. A certificate that subtracted a re-derived
+    /// `w·a·tanh(a·ρ)` would silently drift from the criterion the moment the
+    /// anchor is nonzero — i.e. on every weighted fit, where the raw-ρ form is
+    /// simply a different function (#877's λ̂ weight-rescale invariance is
+    /// exactly what the anchor buys, and a raw-ρ subtraction would spend it).
+    ///
+    /// Why the certificate is entitled to subtract it at all: the barrier is
+    /// NOT part of the declared criterion. `configured_rho_prior_atom` is the
+    /// prior the user declared; this one is added unconditionally at
+    /// `RHO_SOFT_PRIOR_WEIGHT = 1e-6` to keep the outer search off the
+    /// `ρ → ±RHO_BOUND` walls. At an ACTIVE rail the walls are enforced exactly
+    /// by the box projection, so the barrier's only remaining effect there is a
+    /// `+w·a` gradient the KKT projection retains — a standing stationarity
+    /// residual no fit can clear. See the subtraction sites in
+    /// `rho_optimizer::run` for the scope: railed coordinates and the tail
+    /// probes, never an interior stationarity test.
+    pub(crate) fn soft_rho_guard_gradient(&self, rho: &Array1<f64>) -> Array1<f64> {
+        self.soft_rho_guard_prior_atom(rho).gradient().clone()
+    }
+
     // Gamma(a, b) precision hyperprior identity.
     //
     // For one penalty block, lambda = exp(rho) and

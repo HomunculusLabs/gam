@@ -1201,6 +1201,139 @@ mod tests {
         );
     }
 
+    /// #2545 — the barrier gradient the CERTIFICATE subtracts is evaluated at
+    /// the weight-anchored coordinate `ρ̃ = ρ − rho_weight_anchor`, exactly like
+    /// the one the CRITERION adds.
+    ///
+    /// This gate exists because of a specific near-miss. The subtrahend's closed
+    /// form was validated as `w·a·tanh(a·ρ) = 1.332439e-7` against a measurement
+    /// of `1.332439e-7` — a seven-figure match, on an UNWEIGHTED fixture, where
+    /// the anchor is exactly `0` and the raw-ρ and anchored forms are the same
+    /// function. A formula validated only where one of its inputs is zero has not
+    /// been validated in that input. Had the certificate subtracted the raw-ρ
+    /// form, every WEIGHTED fit would have had a subtrahend that is not the term
+    /// the criterion added, reintroducing exactly the weight dependence
+    /// `rho_weight_anchor` exists to remove (#877: λ̂ is invariant to a global
+    /// rescale `w → c·w`) — trading a rail that cannot certify for a certificate
+    /// that moves when you rescale the weights.
+    ///
+    /// So the fixture is deliberately the weighted one (all weights `c = 4`,
+    /// Gaussian-identity, anchor `ln 4 ≈ 1.3863`) and the probe ρ's are chosen
+    /// where `tanh` is NOT saturated: at ρ=5 the anchored value is `5.970e-8`
+    /// against the raw form's `7.769e-8`, a 30% gap. At ρ=30 the two agree to
+    /// 3e-5 relative, which is why a saturated probe could never have caught this.
+    #[test]
+    pub(crate) fn soft_rho_guard_gradient_is_evaluated_at_the_weight_anchor() {
+        let n = 50usize;
+        let p = 3usize;
+        let mut x = Array2::<f64>::zeros((n, p));
+        let mut y = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let t = (i as f64) / ((n - 1) as f64);
+            x[[i, 0]] = 1.0;
+            x[[i, 1]] = t;
+            x[[i, 2]] = t * t;
+            y[i] = (1.0 + (3.0 * t).sin()).round().max(0.0);
+        }
+        let mut s = Array2::<f64>::zeros((p, p));
+        s[[2, 2]] = 1.0;
+        let c = 4.0_f64;
+        let w = Array1::<f64>::from_elem(n, c);
+        let cfg = RemlConfig::external(gaussian_identity_glm_spec(), 1e-10, false);
+        let state = build_logit_state(&y, &w, &x, &s, &cfg);
+        let anchor = state.rho_weight_anchor();
+        assert!(
+            (anchor - c.ln()).abs() <= 1e-12 && anchor.abs() > 1.0,
+            "this gate is only meaningful where the anchor is materially nonzero; \
+             got {anchor:.6e}"
+        );
+
+        let weight = crate::estimate::RHO_SOFT_PRIOR_WEIGHT;
+        let sharpness = crate::estimate::RHO_SOFT_PRIOR_SHARPNESS;
+        let bound = crate::estimate::RHO_BOUND;
+        let a = sharpness / bound;
+        let rho = array![5.0, -3.0, 30.0];
+        let published = state.soft_rho_guard_gradient(&rho);
+        assert_eq!(
+            published.len(),
+            rho.len(),
+            "the published barrier gradient must be one entry per rho coordinate"
+        );
+        for (k, &value) in rho.iter().enumerate() {
+            let anchored = weight * a * (a * (value - anchor)).tanh();
+            let raw = weight * a * (a * value).tanh();
+            assert!(
+                (published[k] - anchored).abs() <= 1e-18,
+                "coordinate {k} (rho={value}): the published barrier gradient must be \
+                 the ANCHORED closed form {anchored:.12e}, got {:.12e}",
+                published[k]
+            );
+            // The discriminator: at the unsaturated probes the raw-rho form is a
+            // different number, so a subtrahend that dropped the anchor could not
+            // pass the assertion above.
+            if value.abs() < 10.0 {
+                assert!(
+                    (raw - anchored).abs() > 1e-9 * anchored.abs().max(1e-30),
+                    "coordinate {k} (rho={value}) must DISCRIMINATE the anchored form \
+                     from the raw-rho one, else this gate cannot catch a dropped \
+                     anchor: anchored={anchored:.12e} raw={raw:.12e}"
+                );
+            }
+        }
+
+        // And it is the SAME emission the criterion adds, not a parallel one:
+        // `build_prior` reads `soft_rho_guard_prior_atom(rho).gradient()`.
+        let atom = state.soft_rho_guard_prior_atom(&rho);
+        assert_eq!(
+            published,
+            *atom.gradient(),
+            "the published barrier gradient must be the criterion's own atom \
+             emission bit for bit, so the certificate's subtraction cannot drift \
+             from the criterion's addition"
+        );
+
+        // The invariance itself, not just the formula. Under `w → c·w` the
+        // pure-REML optimum slides `ρ̂ → ρ̂ + log c` and the anchor slides by the
+        // same `log c`, so ρ̃ — and therefore everything the certificate
+        // subtracts — is UNCHANGED at the corresponding coordinate. This is the
+        // property #877 bought and the one a raw-ρ subtrahend would have spent:
+        // it is asserted here as a bitwise identity between two states built on
+        // weights that differ by a factor of `c`.
+        let unit_weights = Array1::<f64>::ones(n);
+        let unit_state = build_logit_state(&y, &unit_weights, &x, &s, &cfg);
+        assert_eq!(
+            unit_state.rho_weight_anchor(),
+            0.0,
+            "the unweighted arm must anchor at 0, else this pair does not isolate \
+             the rescale"
+        );
+        //
+        // The bar is roundoff, not bit-identity, and the distinction is the
+        // arithmetic rather than a hedge: the rescaled arm evaluates
+        // `(rho + ln c) - anchor` where the unrescaled one evaluates `rho - 0`,
+        // and `(x + h) - h != x` in f64. Measured spread at these probes is
+        // 4e-17 relative (5 ULP at rho=-3, exact at the other two), so 1e-12 is
+        // five orders inside the measurement while still refusing the 30% gap a
+        // dropped anchor would open at rho=5.
+        let slid = &rho + c.ln();
+        let rescaled = state.soft_rho_guard_gradient(&slid);
+        let unrescaled = unit_state.soft_rho_guard_gradient(&rho);
+        for k in 0..rho.len() {
+            let scale = unrescaled[k].abs().max(1.0e-30);
+            assert!(
+                (rescaled[k] - unrescaled[k]).abs() <= 1.0e-12 * scale,
+                "coordinate {k}: the barrier gradient the certificate subtracts must \
+                 be the SAME at corresponding coordinates under a global weight \
+                 rescale w -> c*w (#877/#2545) — a subtrahend evaluated at raw rho \
+                 would differ here and make the certificate weight-dependent. \
+                 rescaled={:.17e} unrescaled={:.17e} rel={:.3e}",
+                rescaled[k],
+                unrescaled[k],
+                (rescaled[k] - unrescaled[k]).abs() / scale
+            );
+        }
+    }
+
     pub(crate) fn beta_original_from_bundle(bundle: &EvalShared) -> Array1<f64> {
         let pr = bundle.pirls_result.as_ref();
         match pr.coordinate_frame {
