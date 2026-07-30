@@ -12,6 +12,14 @@ name: Python Contracts
 # tests tracked by #1512.
 
 on:
+  # The #1512 full-suite inventory is this workflow's deliverable and it had NO
+  # automatic trigger on main: every run since 2026-07-07 was a hand-dispatched
+  # workflow_dispatch. So the Python surface's verdict was only ever as fresh as
+  # the last person who remembered to ask for it, and gam#2616's headline count
+  # was measured 276 commits before it was read. A surface nobody schedules is a
+  # surface that goes dark without anything turning red.
+  schedule:
+    - cron: '0 */12 * * *'
   workflow_dispatch:
   pull_request:
     paths:
@@ -28,8 +36,16 @@ on:
       - ".github/workflows/python-contracts.yml"
 
 concurrency:
-  group: python-contracts-${{ github.ref }}
-  cancel-in-progress: true
+  # Keyed on the EVENT as well as the ref, and cancelling only for pull_request.
+  # Superseding a PR's own newer push is right. Cancelling a 3-hour scheduled
+  # inventory because someone dispatched one is not: both lanes key `main` on the
+  # old expression, so either would silently destroy the other's measurement and
+  # a cancelled run is not a red one. That is the exact failure mode measured on
+  # wheel-nightly.yml (19 of 20 runs cancelled, zero successful, nothing red),
+  # and this workflow carried the same shape. Same-event dispatches now QUEUE
+  # instead of killing each other, which costs latency and preserves the result.
+  group: python-contracts-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -60,11 +76,27 @@ jobs:
     # could not produce one.
     #
     # The header's "20-30 min" estimate predates a much larger tests/ directory.
-    # 150 leaves the fixed ~25 min wheel build plus real room for the suite,
-    # while staying a bound rather than an open budget — every test inside it is
-    # already capped at 300 s by pytest-timeout, so this cannot become the
-    # multi-hour wedge that test.yml's unbounded equivalent became (2c75e2016).
-    timeout-minutes: 150
+    #
+    # 150 then failed the same way 60 did, twice: runs 30477445056 and
+    # 30498582489 were both CANCELLED at exactly 2h30m with the triage step
+    # mid-suite (23:26:50 -> 01:39:19, 2h12m of pytest), so neither produced a
+    # JUnit inventory and gam#2616 had no re-measurement for 20 hours.
+    #
+    # The reason 150 was believed sufficient was the claim below it — "every test
+    # inside it is already capped at 300 s by pytest-timeout, so this cannot
+    # become the multi-hour wedge". That premise is FALSE, and measured false in
+    # the last completed run's own artifact (30432774305): of the 26 tests killed
+    # by pytest-timeout, 12 ran LONGER than the 300 s bound, the worst for 959.7 s
+    # — 3.2x over. The default timeout method is SIGALRM, and a Python-level
+    # signal handler only runs at a bytecode boundary, so a fit that spends its
+    # time inside the Rust extension is not preempted until that native call
+    # returns. `--timeout-method=thread` below makes the bound real; this cap is
+    # the backstop, not the mechanism.
+    #
+    # 300 is sized off a measured suite (3796 s of pytest at the last completed
+    # run, >7900 s at the two cancelled ones) plus the fixed ~17 min wheel build,
+    # and stays a bound rather than an open budget.
+    timeout-minutes: 300
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -167,7 +199,11 @@ jobs:
         if: ${{ !cancelled() }}
         # The full tests/ triage below fits hundreds of real models; xdist
         # parallelizes across the runner's cores and pytest-timeout bounds any
-        # single hang so one stuck fit cannot wedge the whole job.
+        # single hang so one stuck fit cannot wedge the whole job — but only with
+        # --timeout-method=thread, see the timeout-minutes note above. Under the
+        # default SIGALRM method 12 of 26 timed-out tests overran the 300 s bound,
+        # one by 3.2x, because the handler cannot run while the interpreter is
+        # inside a Rust call.
         run: python -m pip install 'pytest-xdist>=3' 'pytest-timeout>=2'
 
       - name: Triage full Python suite on the fresh wheel (#1512)
@@ -191,7 +227,7 @@ jobs:
           python -m pytest "$GITHUB_WORKSPACE/tests/" \
             -m "not slow" \
             -p no:cacheprovider \
-            -n auto --timeout=300 \
+            -n auto --timeout=300 --timeout-method=thread \
             -o addopts="--import-mode=importlib" \
             --junitxml="$RUNNER_TEMP/py1512_junit.xml" \
             -q --tb=line
