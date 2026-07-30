@@ -420,6 +420,14 @@ pub struct RhoGradientParts {
 /// per-block projection of). They are the same mathematical quantity, so any
 /// disagreement is a floating-point one; the ρ-derivative multiplies it by
 /// `λ_k`, which is why it must be measured rather than assumed small.
+///
+/// Recorded on BOTH dispersion arms (#2644). The channel reconstruction
+/// `dp_cgrad · (½λ_k q_k) / phi` is what the three scalars are for, and it is
+/// kept true on both: the profiled-Gaussian arm supplies the smooth
+/// deviance-floor chain factor and the profiled scale, while fixed dispersion
+/// — where the channel is bare `½λ_k q_k` — supplies `dp_cgrad = phi = 1.0`.
+/// `dp_raw`/`dp_floored` are the penalized deviance; on the fixed arm no
+/// criterion term reads them and they are equal.
 #[derive(Clone, Copy, Debug)]
 pub struct PenaltyEnergyAudit {
     pub stable: f64,
