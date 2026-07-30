@@ -761,12 +761,29 @@ impl SaeManifoldTerm {
         border: &[SaeBorderChannel],
         window: &mut std::collections::VecDeque<SaeRowJets>,
     ) -> Result<usize, String> {
+        self.refill_jet_window_with_row_dims(start, &cache.row_dims, second_jets, border, window)
+    }
+
+    /// [`Self::refill_jet_window`] against the per-row dimensions read directly
+    /// off an ArrowSchurSystem (`sys.row_dims`) instead of a factor cache.
+    ///
+    /// #2509 Phase-2b: the only thing the jet window ever took from the cache
+    /// was this layout vector, so the exact-`A` row assembly — which must run
+    /// before any factorization — can share the identical jet seam.
+    pub(crate) fn refill_jet_window_with_row_dims(
+        &self,
+        start: usize,
+        row_dims: &[usize],
+        second_jets: &[Array4<f64>],
+        border: &[SaeBorderChannel],
+        window: &mut std::collections::VecDeque<SaeRowJets>,
+    ) -> Result<usize, String> {
         if let AssignmentMode::Softmax { temperature, .. } = self.assignment.mode {
             // #2560 — one cgroup-aware budget reading per window, passed down,
             // instead of one per planner call.
             let host_budget = crate::manifold::sae_host_in_core_budget_bytes().0;
-            let q = cache.row_dims[start];
-            let same_shape_rows = cache.row_dims[start..]
+            let q = row_dims[start];
+            let same_shape_rows = row_dims[start..]
                 .iter()
                 .take_while(|&&candidate| candidate == q)
                 .count();
@@ -790,7 +807,7 @@ impl SaeManifoldTerm {
             let mut assignments = Array1::<f64>::zeros(self.k_atoms());
             let mut shared_beta_layout = None;
             for row in start..start + tile_rows {
-                let vars = self.row_vars_for_cache_row(row, cache)?;
+                let vars = self.row_vars_for_row_dim(row, row_dims[row])?;
                 self.assignment.try_assignments_row_into(
                     row,
                     assignments.as_slice_mut().ok_or_else(|| {
@@ -830,7 +847,7 @@ impl SaeManifoldTerm {
             return Ok(start + tile_rows);
         }
 
-        let vars = self.row_vars_for_cache_row(start, cache)?;
+        let vars = self.row_vars_for_row_dim(start, row_dims[start])?;
         let mut a = Array1::<f64>::zeros(self.k_atoms());
         self.assignment.try_assignments_row_into(
             start,

@@ -2737,15 +2737,21 @@ impl SaeManifoldTerm {
         // recomputed chunk-by-chunk in `streaming_exact_arrow_log_det` to bound
         // peak memory.
         //
-        // ⚠ #2509 — that recomputation prices the Arrow–Schur MAJORIZER `B`,
-        // while the dense lane's `exact_observed_information_log_dets` prices the
-        // exact observed information `A = B + ΔC` (#2330 Phase-2). The two are
-        // equal only where `ΔC ≡ 0`; elsewhere the criteria differ by exactly
-        // `½·[(log|A| − log|A_tt|) − (log|B| − log|B_tt|)]`. Making this route
-        // price `A` needs the four `apply_exact_hessian_minus_b` channels in
-        // ASSEMBLED per-row block form (they are already row-local for every mode
-        // except `OrderedBetaBernoulli`, whose prior couples rows within an atom
-        // column and is therefore not arrow-structured).
+        // #2509 Phase-2b — that recomputation now prices the exact observed
+        // information `A = B + ΔC` on BOTH of its branches, via
+        // [`Self::exact_a_evidence_system`]: the four
+        // `apply_exact_hessian_minus_b` channels are assembled into per-row arrow
+        // blocks and folded into a second system whose log-determinant the
+        // criterion takes. `OrderedBetaBernoulli` — the one channel that couples
+        // rows within an atom column and therefore has no per-row arrow block —
+        // REFUSES by name rather than falling back to `B`.
+        //
+        // The cache returned here is still `B`: it is the Newton/IFT scale and
+        // the positive-definite preconditioner, and `apply_exact_hessian_minus_b`
+        // adds `ΔC` on top of it, so promoting it to `A` would double-count.
+        // Before this, the criteria differed by exactly
+        // `½·[(log|A| − log|A_tt|) − (log|B| − log|B_tt|)]` — 22.32 units on the
+        // `reml_retries_refinement_after_non_pd_undamped_evidence_factor` witness.
         let mut converged_cache = self.converge_inner_for_undamped_logdet(
             target,
             rho,
@@ -2910,6 +2916,173 @@ impl SaeManifoldTerm {
         self.streaming_exact_arrow_log_det_with_lane(target, rho, registry, rank_inputs, None)
     }
 
+    /// #2509/#2515 Phase-2b — the arrow evidence operator carrying the EXACT
+    /// observed information `A = ∇²_θθ L`, derived from an already-assembled
+    /// Arrow–Schur majorizer `B` by folding in the per-row `ΔC = A − B` blocks.
+    ///
+    /// The Laplace criterion is `½log|∇²_θθ(objective)|`, and `A` IS that
+    /// Hessian by construction. `B` is the positive-definite scale /
+    /// preconditioner for `A` (see `sae_ift_min_curvature_fraction`); a
+    /// preconditioner is not the operator it preconditions. Pricing `log|B|`
+    /// here while the dense lane prices `log|A|` is exactly the defect: the same
+    /// statistical state was ranked ~22 criterion units apart because a host
+    /// memory predicate, not the model, chose the operator.
+    ///
+    /// **`B` is returned untouched.** This is a SECOND operator, not a mutation:
+    /// the Newton/IFT solves keep `B` as their (positive-definite, factorable)
+    /// scale, and `apply_exact_hessian_minus_b` — which adds `ΔC` on top of `B`
+    /// itself — cannot double-count `ΔC`.
+    ///
+    /// **Ordering.** The `ΔC` assembler needs only the arrow LAYOUT — per-row
+    /// dimensions and the border dimension — never a factorization, so it reads
+    /// `row_dims` / `k` off the UNFACTORED system. That removes the apparent
+    /// factor-then-assemble two-pass: `ArrowFactorCache` was only ever being
+    /// used as a carrier for those two layout facts (see
+    /// [`Self::border_channels_for_border_dim`],
+    /// [`Self::row_vars_for_row_dim`], `refill_jet_window_with_row_dims`).
+    ///
+    /// `ΔC_ββ ≡ 0` (the decoder is linear in β), so `hbb` / `penalty_op` are
+    /// untouched and the whole correction lands in the row blocks and the
+    /// eliminated Schur sum.
+    ///
+    /// `ΔC_tβ` is carried by COMPOSING the installed matrix-free row operator
+    /// rather than by a dense supplement, because
+    /// `StreamingArrowSchur::from_system` drops the dense `row.htbeta` slabs
+    /// whenever a row operator is installed — writing `ΔC` there would be
+    /// silently discarded, i.e. would price `B` while claiming `A`. Systems with
+    /// no row operator carry `ΔC` in the dense slab, which for them IS the
+    /// operator.
+    pub(crate) fn exact_a_evidence_system(
+        &self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        majorizer: &ArrowSchurSystem,
+    ) -> Result<ArrowSchurSystem, String> {
+        let border_dim = majorizer.k;
+        let row_dims: Vec<usize> = majorizer.row_dims.to_vec();
+        // The assembled blocks are `O(Σ q_i·(q_i + K))`. Refuse above the
+        // in-core budget rather than OOM: an admitted-then-killed run reads as a
+        // green route. (Follow-up: an active-atom-sparse `ΔC_tβ` operator, which
+        // removes the `K` factor entirely.)
+        let delta_bytes: u128 = row_dims
+            .iter()
+            .map(|&q| (q as u128) * ((q as u128) + (border_dim as u128)) * 8)
+            .sum();
+        let budget = crate::manifold::sae_host_in_core_budget_bytes().0 as u128;
+        if delta_bytes > budget {
+            return Err(format!(
+                "SaeManifoldTerm::exact_a_evidence_system: the assembled exact-A correction needs \
+                 {delta_bytes} bytes over {} rows at border {border_dim}, above the {budget}-byte \
+                 in-core budget; this route must refuse rather than price the Arrow-Schur \
+                 majorizer B and call it the exact observed information A (#2509)",
+                row_dims.len()
+            ));
+        }
+        let delta =
+            self.assemble_exact_hessian_minus_b_rows(rho, target, &row_dims, border_dim)?;
+        if delta.len() != majorizer.rows.len() {
+            return Err(format!(
+                "SaeManifoldTerm::exact_a_evidence_system: assembled {} exact-A correction rows \
+                 for a {}-row arrow system",
+                delta.len(),
+                majorizer.rows.len()
+            ));
+        }
+        let border = self.border_channels_for_border_dim(border_dim)?;
+        let mut system = majorizer.clone();
+        // The CUDA descriptor describes `B`'s cross-block sparsity, so it cannot
+        // stand in for `A`; the generic closures are the authoritative path.
+        system.device_sae_pcg = None;
+        for (row_idx, (row, block)) in system.rows.iter_mut().zip(delta.iter()).enumerate() {
+            let q = block.tt.nrows();
+            if row.htt.dim() != (q, q) {
+                return Err(format!(
+                    "SaeManifoldTerm::exact_a_evidence_system: row {row_idx} exact-A correction is \
+                     {q}x{q} but the arrow row block is {:?}",
+                    row.htt.dim()
+                ));
+            }
+            for a in 0..q {
+                for b in 0..q {
+                    row.htt[[a, b]] += block.tt[[a, b]];
+                }
+            }
+        }
+        match (
+            majorizer.htbeta_matvec.clone(),
+            majorizer.htbeta_transpose_matvec.clone(),
+        ) {
+            (None, _) => {
+                for (row_idx, (row, block)) in
+                    system.rows.iter_mut().zip(delta.iter()).enumerate()
+                {
+                    let q = block.tt.nrows();
+                    if row.htbeta.dim() != (q, border_dim) {
+                        return Err(format!(
+                            "SaeManifoldTerm::exact_a_evidence_system: row {row_idx} has no \
+                             matrix-free cross-block operator and its dense slab is {:?}, not \
+                             ({q}, {border_dim}); the exact-A correction has nowhere to land",
+                            row.htbeta.dim()
+                        ));
+                    }
+                    for a in 0..q {
+                        for (beta_pos, channel) in border.iter().enumerate() {
+                            row.htbeta[[a, channel.index]] += block.tbeta[[a, beta_pos]];
+                        }
+                    }
+                }
+            }
+            (Some(base_forward), Some(base_transpose)) => {
+                let blocks: std::sync::Arc<Vec<Array2<f64>>> = std::sync::Arc::new(
+                    delta.iter().map(|block| block.tbeta.clone()).collect(),
+                );
+                let indices: std::sync::Arc<Vec<usize>> =
+                    std::sync::Arc::new(border.iter().map(|channel| channel.index).collect());
+                let forward_blocks = std::sync::Arc::clone(&blocks);
+                let forward_indices = std::sync::Arc::clone(&indices);
+                let transpose_blocks = std::sync::Arc::clone(&blocks);
+                let transpose_indices = std::sync::Arc::clone(&indices);
+                system.set_row_htbeta_operator(
+                    move |row, x, out| {
+                        base_forward(row, x, out);
+                        let block = &forward_blocks[row];
+                        for a in 0..block.nrows() {
+                            let mut acc = 0.0_f64;
+                            for (beta_pos, &index) in forward_indices.iter().enumerate() {
+                                acc += block[[a, beta_pos]] * x[index];
+                            }
+                            out[a] += acc;
+                        }
+                    },
+                    move |row, v, out| {
+                        base_transpose(row, v, out);
+                        let block = &transpose_blocks[row];
+                        for a in 0..block.nrows() {
+                            let va = v[a];
+                            if va == 0.0 {
+                                continue;
+                            }
+                            for (beta_pos, &index) in transpose_indices.iter().enumerate() {
+                                out[index] += block[[a, beta_pos]] * va;
+                            }
+                        }
+                    },
+                );
+            }
+            (Some(_), None) => {
+                return Err(
+                    "SaeManifoldTerm::exact_a_evidence_system: the majorizer installed a \
+                     matrix-free cross-block operator without its declared sparse transpose, so \
+                     the exact-A correction cannot be composed without changing which operator \
+                     the reduced Schur applies (#2509)"
+                        .to_string(),
+                );
+            }
+        }
+        system.refresh_row_hessian_fingerprint();
+        Ok(system)
+    }
+
     /// Assemble the one whole-row matrix-free evidence system at the current
     /// fitted state. The dense reduced Schur is never formed: the returned
     /// system retains only the structured shared-block and row-cross operators.
@@ -2918,13 +3091,22 @@ impl SaeManifoldTerm {
     /// log-determinant and by #2230's exact-stationarity IFT solve, ensuring the
     /// value and assignment-strength residual cannot reassemble different
     /// operators. Optional rank inputs are accumulated from the same full chunk.
+    /// The returned pair is the system and the whole-row CHUNK TERM it was
+    /// assembled from.
+    ///
+    /// The chunk term — not `self` — is the term whose `last_row_layout` /
+    /// `last_frames_active` describe the returned system's arrow layout, because
+    /// it is the receiver `assemble_arrow_schur_scaled` was called on. Anything
+    /// that reads that layout back (the #2509 exact-`A` row assembly) must use
+    /// this term, or it can silently index a DIFFERENT active-set layout than the
+    /// system it is correcting.
     pub(crate) fn assemble_full_matrix_free_evidence_system(
         &self,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
         registry: Option<&AnalyticPenaltyRegistry>,
         mut rank_inputs: Option<&mut StreamingRankInputs>,
-    ) -> Result<ArrowSchurSystem, String> {
+    ) -> Result<(ArrowSchurSystem, SaeManifoldTerm), String> {
         let n_total = self.n_obs();
         let full_logits = self.assignment.logits.slice(s![0..n_total, ..]).to_owned();
         let full_coords: Vec<Array2<f64>> = self
@@ -2958,7 +3140,7 @@ impl SaeManifoldTerm {
         // now so the stale-pair guard compares two identities from the same
         // assembled operator instead of the constructor sentinel `0`.
         system.refresh_row_hessian_fingerprint();
-        Ok(system)
+        Ok((system, full_chunk))
     }
 
     /// Streaming reduced-Schur evidence `log|H| = Σ log|H_tt| + log|S|` with the
@@ -3034,19 +3216,24 @@ impl SaeManifoldTerm {
             // Assemble the WHOLE system once (a single "chunk" over all rows) so the
             // matrix-free reduced-Schur apply `v ↦ S·v` can iterate every row; the
             // per-row block storage is exactly what the inner solve already holds.
-            let sys = self.assemble_full_matrix_free_evidence_system(
+            let (sys, chunk_term) = self.assemble_full_matrix_free_evidence_system(
                 target,
                 rho,
                 registry,
                 rank_inputs.as_deref_mut(),
             )?;
+            // #2509/#2515 Phase-2b: the log-determinant is the LAPLACE
+            // normalizer, so it must be taken off the exact observed information
+            // `A = B + ΔC`, not off the Arrow-Schur majorizer `B`. `B` itself is
+            // returned unchanged below as the solve/IFT scale.
+            let a_sys = chunk_term.exact_a_evidence_system(target, rho, &sys)?;
             // #2080: the reduced-Schur `log|S|` term. `lane = None` runs the
             // bit-identical SLQ estimate; `lane = Some(state)` swaps in the frozen
             // derived-rank rational surrogate (matrix-free, value+ρ-gradient one
             // functional). `log_det_tt` (the Σ log|H_tt| coordinate block) is exact
             // on the shared factorization either way.
             let (log_det_tt, log_det_schur) = matrix_free_arrow_evidence_log_det_surrogate(
-                &sys,
+                &a_sys,
                 0.0,
                 0.0,
                 &options,
@@ -3128,6 +3315,12 @@ impl SaeManifoldTerm {
             let sys = chunk
                 .assemble_arrow_schur_scaled(z_chunk, rho, registry, penalty_scale)
                 .map_err(|err| format!("SaeManifoldTerm::streaming_exact_arrow_log_det: {err}"))?;
+            // #2509/#2515 Phase-2b — same substitution as the matrix-free branch:
+            // the Laplace normalizer is `log|A|`, and every `ΔC` channel except
+            // ordered Beta-Bernoulli is row-local, so the correction is
+            // chunk-additive exactly as the majorizer is. (`penalty_scale` scales
+            // only β-side penalties, and `ΔC_ββ ≡ 0`.)
+            let sys = chunk.exact_a_evidence_system(z_chunk, rho, &sys)?;
             let mut streaming = StreamingArrowSchur::from_system(&sys, sys.rows.len().max(1));
             let (chunk_log_det_tt, chunk_schur) = streaming
                 .reduced_schur_and_log_det_tt(0.0, 0.0, &options)
@@ -4152,14 +4345,29 @@ impl SaeManifoldTerm {
         &self,
         cache: &ArrowFactorCache,
     ) -> Result<Vec<SaeBorderChannel>, String> {
+        self.border_channels_for_border_dim(cache.k)
+    }
+
+    /// [`Self::border_channels_for_cache`] against a border dimension read
+    /// directly off an ArrowSchurSystem instead of a factor cache.
+    ///
+    /// #2509 Phase-2b: the exact-`A` row assembly must run BEFORE anything is
+    /// factored (its blocks are what gets factored), so it cannot take its
+    /// layout from an `ArrowFactorCache`. `cache.k` and `sys.k` are the same
+    /// border dimension by construction — the cache is built from the system —
+    /// so this is the same layout with the factorization ordering removed.
+    pub(crate) fn border_channels_for_border_dim(
+        &self,
+        border_dim: usize,
+    ) -> Result<Vec<SaeBorderChannel>, String> {
         let p = self.output_dim();
-        let frames_active = self.last_frames_active && cache.k == self.factored_border_dim();
+        let frames_active = self.last_frames_active && border_dim == self.factored_border_dim();
         let offsets = if frames_active {
             self.factored_beta_offsets()
         } else {
             self.beta_offsets()
         };
-        let mut channels = Vec::with_capacity(cache.k);
+        let mut channels = Vec::with_capacity(border_dim);
         for (atom_idx, atom) in self.atoms.iter().enumerate() {
             let m = atom.basis_size();
             let frame = if frames_active {
@@ -4183,11 +4391,11 @@ impl SaeManifoldTerm {
                 }
             }
         }
-        if channels.len() != cache.k {
+        if channels.len() != border_dim {
             return Err(format!(
                 "border channel layout has {} entries but cache border has {}",
                 channels.len(),
-                cache.k
+                border_dim
             ));
         }
         Ok(channels)
@@ -4198,7 +4406,17 @@ impl SaeManifoldTerm {
         row: usize,
         cache: &ArrowFactorCache,
     ) -> Result<Vec<SaeLocalRowVar>, String> {
-        let q_row = cache.row_dims[row];
+        self.row_vars_for_row_dim(row, cache.row_dims[row])
+    }
+
+    /// [`Self::row_vars_for_cache_row`] against a row dimension read directly
+    /// off an ArrowSchurSystem (`sys.row_dims[row]`) instead of a factor cache.
+    /// Same layout, no factorization prerequisite (#2509 Phase-2b).
+    pub(crate) fn row_vars_for_row_dim(
+        &self,
+        row: usize,
+        q_row: usize,
+    ) -> Result<Vec<SaeLocalRowVar>, String> {
         let mut vars: Vec<Option<SaeLocalRowVar>> = vec![None; q_row];
         match self.last_row_layout {
             Some(ref layout) => {

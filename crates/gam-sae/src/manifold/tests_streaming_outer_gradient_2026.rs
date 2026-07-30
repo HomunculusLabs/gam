@@ -539,7 +539,7 @@ fn assignment_strength_trace_from_probes_matches_dense_softmax() {
     let target = Array2::<f64>::from_shape_fn((n, p), |(row, col)| {
         fitted[[row, col]] + 1.0e-3 * ((row + 2 * col) as f64 * 0.17).sin()
     });
-    let system = term
+    let (system, _chunk_term) = term
         .assemble_full_matrix_free_evidence_system(target.view(), &rho, None, None)
         .expect("softmax matrix-free evidence system");
     let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
@@ -615,7 +615,7 @@ fn complete_matrix_free_outer_gradient_matches_dense_softmax() {
         fitted[[row, col]] + 1.0e-3 * ((row + 2 * col) as f64 * 0.17).sin()
     });
 
-    let system = term
+    let (system, _chunk_term) = term
         .assemble_full_matrix_free_evidence_system(target.view(), &rho, None, None)
         .expect("softmax matrix-free evidence system");
     let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
