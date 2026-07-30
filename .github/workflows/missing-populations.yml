@@ -426,9 +426,14 @@ jobs:
             slow)
               # `-m slow` is applied after collection, so imports from every
               # test module must be satisfiable even though only marked items
-              # execute. These two are collection-only dependencies outside
-              # the canonical package test extra above.
-              python -m pip install 'scipy>=1.11' 'lifelines>=0.28'
+              # execute. scipy/lifelines are collection-only dependencies
+              # outside the canonical package test extra above. xdist and
+              # pytest-timeout are execution machinery for this population:
+              # one wedged native fit must be recorded as one red item without
+              # hiding every item ordered after it.
+              python -m pip install \
+                'scipy>=1.11' 'lifelines>=0.28' \
+                'pytest-xdist>=3' 'pytest-timeout>=2'
               ;;
             *)
               echo "::error::Population manifest selected unsupported Python id '${POPULATION_ID}'."
@@ -527,9 +532,28 @@ jobs:
 
           extra_args=()
           if [[ "$POPULATION_ID" == "slow" ]]; then
-            # Serial execution preserves the failing engine message instead of
-            # turning a timeout into xdist's opaque "worker gwN crashed".
-            extra_args=(-o faulthandler_timeout=300)
+            # Two workers are the minimum work-conserving topology in which one
+            # native fit may wedge while an independent worker continues to
+            # measure the population. A five-minute item wall matches the
+            # repository's existing Python fit contract; faulthandler fires
+            # four-fifths of the way there so the native stack is durable before
+            # pytest-timeout's thread method terminates the worker.
+            #
+            # Thread-method timeouts deliberately kill an xdist worker. Permit
+            # at most one replacement per collected item: enough for every
+            # distinct timeout to be reported, while a restart loop remains
+            # bounded by the measured population itself rather than a magic
+            # constant.
+            item_budget_seconds=300
+            faulthandler_seconds=$((item_budget_seconds * 4 / 5))
+            extra_args=(
+              -n 2
+              --dist=worksteal
+              "--max-worker-restart=${{ steps.collect.outputs.count }}"
+              "--timeout=${item_budget_seconds}"
+              --timeout-method=thread
+              -o "faulthandler_timeout=${faulthandler_seconds}"
+            )
           fi
 
           set +e
