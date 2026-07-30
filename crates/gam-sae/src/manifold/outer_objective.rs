@@ -410,9 +410,23 @@ impl ProbeRefusalKind {
         // Schur defect (a `SchurFactorFailed` whose reason is NOT a non-PD
         // pivot, e.g. "non-finite entry" or "non-square") still hard-errors
         // and is not silently masked as a recoverable probe.
-        if err.contains("Schur complement Cholesky failed")
-            && err.contains("not positive definite")
-        {
+        //
+        // #2598 — that conjunct used to be two string literals HERE, matching
+        // the `Display` impl of a type in ANOTHER crate. Rewording either
+        // message in gam-solve reclassified every recoverable Schur refusal as
+        // a fatal defect, silently, with nothing failing. The wording now lives
+        // beside the wording it reads: `ArrowSchurError` owns both the
+        // rendering and this reader, and its own
+        // `rendered_verdict_matches_the_value_verdict_for_every_variant_2598`
+        // pins the rendered reader to the value predicate
+        // (`is_non_pd_schur_complement`) for every variant. Nothing about the
+        // classification changes; what changes is that a reword can no longer
+        // land without failing a test.
+        //
+        // This stays a parse rather than a match on the value because the spine
+        // between the refusal and here is `Result<_, String>` — the rest of
+        // #2598.
+        if ArrowSchurError::rendered_is_non_pd_schur_complement(err) {
             return Some(Self::NonPdSchur);
         }
         // #2087 — at a seed ρ a K>1 threshold-gate assignment can give an
@@ -6167,31 +6181,42 @@ mod decoder_smoothness_dispatch_2393_tests {
 /// #2593 — the coverage the two independent substring ladders did not have.
 #[cfg(test)]
 mod probe_refusal_classification_2593_tests {
-    use super::{OuterProbeTelemetry, ProbeRefusalKind, SaeManifoldOuterObjective};
+    use super::{ArrowSchurError, OuterProbeTelemetry, ProbeRefusalKind, SaeManifoldOuterObjective};
 
     /// One representative rendered message per kind, taken from the producer
     /// that emits it.
-    fn representative(kind: ProbeRefusalKind) -> &'static str {
+    ///
+    /// #2598 — the Schur arm is RENDERED FROM THE PRODUCER rather than
+    /// transcribed from it. A hard-coded copy of another crate's `Display`
+    /// output makes this gate self-referential: gam-solve rewords, production
+    /// stops classifying, and the test keeps passing on a string production no
+    /// longer emits. Building the message from a real `ArrowSchurError` makes
+    /// the input the production text by construction.
+    fn representative(kind: ProbeRefusalKind) -> String {
         match kind {
             ProbeRefusalKind::InnerNotConverged => {
                 "SaeManifoldTerm::penalized_quasi_laplace_criterion: inner solve did not \
                  converge at fixed ρ; refusing to rank an off-optimum state"
+                    .to_string()
             }
             ProbeRefusalKind::NonPdPerRow => {
                 "SaeManifoldTerm::penalized_quasi_laplace_criterion: undamped criterion \
                  factorization hit a non-PD per-row H_tt block before KKT stationarity"
+                    .to_string()
             }
-            ProbeRefusalKind::NonPdSchur => {
-                "arrow-Schur: Schur complement Cholesky failed: leading minor is not \
-                 positive definite"
+            ProbeRefusalKind::NonPdSchur => ArrowSchurError::SchurFactorFailed {
+                reason: "leading minor is not positive definite".to_string(),
             }
+            .to_string(),
             ProbeRefusalKind::AllZeroGatedDesign => {
                 "run_joint_fit_arrow_schur: atom 2 is gated off at every row (all-zero \
                  gated design)"
+                    .to_string()
             }
             ProbeRefusalKind::TotalCoCollapse => {
                 "run_joint_fit_arrow_schur: reseed budget spent and the fit did not \
                  escape total co-collapse"
+                    .to_string()
             }
         }
     }
@@ -6209,16 +6234,16 @@ mod probe_refusal_classification_2593_tests {
         for kind in ProbeRefusalKind::ALL {
             let message = representative(kind);
             assert_eq!(
-                ProbeRefusalKind::classify(message),
+                ProbeRefusalKind::classify(&message),
                 Some(kind),
                 "representative message must classify as its own kind: {message}"
             );
             assert!(
-                SaeManifoldOuterObjective::is_recoverable_value_probe_refusal(message),
+                SaeManifoldOuterObjective::is_recoverable_value_probe_refusal(&message),
                 "a classified refusal is ρ-local by construction: {message}"
             );
             let mut telemetry = OuterProbeTelemetry::default();
-            telemetry.record_refusal_kind(message);
+            telemetry.record_refusal_kind(&message);
             assert_eq!(
                 telemetry.infeasible_total(),
                 1,
