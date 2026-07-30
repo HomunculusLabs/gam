@@ -78,6 +78,29 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
     exit 5
   fi
 
+  # Path-scoping cannot see a STALE BLOB INSIDE a named path.
+  #
+  # If the working-tree copy of a file you named was edited from an older base,
+  # landing it silently deletes whatever another lane added to that same file in
+  # the interim -- and `--numstat` does not show it: a real case today reported
+  # `110 13` where the honest change was `105 0`, and the 13 were another lane's
+  # test block, indistinguishable from an ordinary edit until the `-` lines were
+  # read. The paths were all correctly named, so the guard above passes.
+  #
+  # So: every deletion must be seen before it lands. Print the removed lines and
+  # refuse unless the caller says they are theirs. Fix a surprise by refetching
+  # and rebuilding the file on the new tip -- never by re-running with the
+  # override.
+  DELETIONS=$(git diff "$BASE" "$COMMIT" -- "$@" | grep '^-[^-]' || true)
+  if [ -n "$DELETIONS" ] && [ "${LAND_DELETIONS_OK:-0}" != "1" ]; then
+    echo "REFUSING: this would DELETE lines. Read them; they may be another lane's work:" >&2
+    printf '%s\n' "$DELETIONS" >&2
+    echo >&2
+    echo "If every line above is yours, re-run with LAND_DELETIONS_OK=1." >&2
+    echo "If any is not, your file was built from a stale base: refetch and rebuild it." >&2
+    exit 7
+  fi
+
   if git push -q origin "$COMMIT:main" 2>/dev/null; then
     git fetch -q origin main
     if [ "$(git rev-parse origin/main)" = "$COMMIT" ]; then
