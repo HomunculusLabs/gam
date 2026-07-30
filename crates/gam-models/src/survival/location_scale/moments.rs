@@ -213,71 +213,49 @@ where
     }
 }
 
-/// Symmetric fraction-to-boundary clip of ONE coordinate's realized
-/// displacement in a `β ≥ 0` cone-constrained block (#2390, pattern from
-/// #2375).
-///
-/// Returns `α_j · d_j` for the largest `α_j ∈ [0, 1]` that keeps BOTH
-/// `β̂_j + α_j·d_j` and `β̂_j − α_j·d_j` on the half-line `β_j ≥ 0`:
-///
-/// ```text
-///   α_j = min( 1,  max(β̂_j, 0) / |d_j| ),        α_j = 1 when d_j = 0
-///   α_j · d_j = d_j                    if |d_j| ≤ max(β̂_j, 0)
-///             = sign(d_j)·max(β̂_j, 0)  otherwise
-/// ```
-///
-/// The clipped form is returned rather than the factor because the second
-/// branch is then EXACT: `β̂_j ± sign(d_j)·β̂_j` is `0` or `2·β̂_j` with no
-/// rounding, so no realized coordinate can land an ulp below the wall the way
-/// `β̂_j + (β̂_j/|d_j|)·d_j` can.
-///
-/// Depending only on `|d_j|` makes the clip sign-symmetric (`clip(β̂_j, −d_j) =
-/// −clip(β̂_j, d_j)`), so a symmetric quadrature rule displaced by the clipped
-/// amount stays symmetric about `β̂` and the posterior mean of every linear
-/// functional is exactly unbiased. A coordinate already pinned at its wall
-/// (`β̂_j ≤ 0` from round-off, with `d_j ≠ 0`) collapses ITS OWN displacement to
-/// zero rather than admitting an infeasible vector; an interior coordinate
-/// (`|d_j| ≤ β̂_j`) is returned bit-for-bit unchanged. A non-finite `d_j` is
-/// passed through so it fails loudly downstream instead of being silently
-/// sanitized to the wall.
-///
-/// # Why per coordinate, and not one factor for the whole block
-///
-/// The cone the fit certifies for the monotone link-wiggle block is `A = I`,
-/// `b = 0` (`monotone_wiggle_nonnegative_constraints`) — a Cartesian product
-/// of independent half-lines. Coordinate `j`'s wall constrains coordinate `j`
-/// and nothing else, so the feasibility clip is separable. A single global
-/// `min_j` factor is the fraction-to-boundary rule for a step along ONE ray of
-/// a coupled polytope; #2375's spherical-radial cubature nodes
-/// (`β̂ ± α_k·f_{·,k}`) genuinely have that shape and correctly carry one
-/// factor per direction. The conditional-mean displacement here does not: each
-/// coordinate of `regression · z` moves independently, and a global factor
-/// lets the tightest coordinate's wall govern every other coordinate.
-///
-/// That is not conservatism, it is silent erasure. The terminal covariance is
-/// already computed on the ACTIVE FACE (`Σ = Z (ZᵀHZ)⁻¹ Zᵀ`, zero rows and
-/// columns for constraints tight within `ACTIVE_SET_WORKING_FACE_TOL = 1e-10`),
-/// so a genuinely PINNED coordinate arrives with an exactly-zero covariance row
-/// and contributes `d_j = 0` — it never binds a global minimum in the first
-/// place. The coordinates that DO bind are the near-wall but still-slack ones
-/// just outside that band, and the inner constrained solve's own KKT tolerance
-/// band is `1e-6·scale + 1e-10` (see `MONOTONE_WIGGLE_ACTIVE_SET_TOL`), so
-/// that region is routinely occupied. For such a coordinate
-/// `max(β̂_j, 0)/|d_j|` is on the order of `1e-8`; a global factor multiplies
-/// EVERY coordinate's displacement by it, freezing the conditional mean at
-/// `β̂_w` for every latent node. The response-moment integral then degenerates
-/// to a plug-in at the mode and drops the entire link-wiggle ↔
-/// `(h, threshold, log σ)` cross-covariance — a wrong number with no symptom,
-/// which is the #2385 shape all over again.
-#[inline]
-pub(crate) fn cone_clipped_coordinate_displacement(beta: f64, displacement: f64) -> f64 {
-    let wall = beta.max(0.0);
-    if displacement.abs() > wall {
-        wall.copysign(displacement)
-    } else {
-        displacement
-    }
-}
+// #2446: THE FRACTION-TO-BOUNDARY CLIP ON THE REALIZED CONDITIONAL MEAN OF THE
+// `β_w ≥ 0` BLOCK IS GONE (it was `cone_clipped_coordinate_displacement`, #2390
+// / #2375). It was the THIRD owner of ONE correction.
+//
+// The cone is truncated once, upstream: since `0b8611a65` the covariance
+// reaching `exact_survival_response_moments_row` is `Σ_π` and
+// `beta_link_wiggle` is `E_π[β_w]`. `7a358c067` deleted the second owner — the
+// `[0, ∞)` truncation of the scalar warp — for exactly that reason. The clip was
+// the same correction a third time, applied to the conditional MEAN, and it is
+// the one that cost a MOMENT rather than a tail.
+//
+// It cannot be defended as a support guarantee. After `7a358c067` the scalar
+// warp is integrated over the WHOLE line, so 2–4 % of the law's mass already
+// sits at `w < 0`. Pinning the LOCATION inside the cone while the draw around it
+// is unconstrained makes no realized warp feasible; it only deletes the spread
+// of the location. Feasible location + infeasible draw is not a support
+// guarantee, and its price is a wrong second moment in exactly the quantity
+// `response_standard_error` reports.
+//
+// What it cost, in closed form. This function integrates the joint Gaussian
+// `N(E_π[β], Σ_π)` as an outer 3-D Gaussian over `y = (h, threshold, log σ)`
+// times an inner 1-D Gaussian over `w | y`. That factorization is EXACT for a
+// joint Gaussian only when the conditional mean is the affine one,
+// `E[β_w] + Σ_wy Σ_yy⁻¹ (y − μ_y)`. The clip was a nonlinear map of it, so the
+// nested rule stopped integrating the law it claims. When the wiggle basis row
+// `b` is deterministic the whole predictor is one scalar Gaussian and the
+// identity is checkable exactly:
+//
+//     E[η] = μ_h + q0 + bᵀE_π[β_w]
+//   Var[η] = aᵀΣ_hh a + 2·aᵀΣ_hw b + bᵀΣ_ww b
+//
+// The unclipped rule reproduces both to quadrature precision. The clipped rule
+// undershot `Var[η]` by essentially the entire cross term — `0.518 → 0.168` at
+// the near-wall fixture in
+// `nested_response_moment_rule_reproduces_the_scalar_gaussian_law_2446`, a
+// factor of three in a reported variance.
+//
+// Per-coordinate rather than one global `min_j` was the right call about
+// global-vs-separable and did not save it: a NEAR-WALL fit has EVERY coordinate
+// near its wall, so the per-coordinate form erases every coordinate's
+// cross-covariance with `(h, threshold, log σ)` anyway. That is the "silent
+// erasure" the clip's own note warned a global factor would cause, reached by a
+// different route.
 
 // Exact response moments must stay in the original Gaussian coordinates:
 // [h, threshold, log_sigma] for non-wiggle predictions, with a nested
@@ -389,32 +367,29 @@ pub(crate) fn exact_survival_response_moments_row(
             15,
             "survival response-moment projected covariance",
             |x, z| {
-                // #2390 (#2385 instance, pattern from #2375): `cond_mean` is a
-                // REALIZED coefficient vector for the cone-constrained
-                // link-wiggle block (`β_w ≥ 0`, the structural monotone
-                // I-spline warp the fit certified). A cone coordinate at or
-                // near its wall has `β̂_w,j ≈ 0`, so an unconstrained
-                // conditional displacement manufactures a warp the model does
-                // not admit. Clip each coordinate's displacement by its OWN
-                // symmetric fraction-to-boundary factor: the cone is a product
-                // of independent half-lines, so coordinate `j`'s wall binds
-                // coordinate `j` alone and a single global factor would let the
-                // tightest wall freeze the whole block (see
-                // `cone_clipped_coordinate_displacement`). The clip depends
-                // only on `|d_j|`, so the realized vector at `−z` is the exact
-                // mirror of the one at `+z` and the rule stays symmetric about
-                // `β̂` (the posterior mean of linear functionals stays exactly
-                // unbiased). An interior `β̂` with modest spread leaves every
-                // coordinate untouched, recovering the unconstrained rule
-                // verbatim.
+                // #2446: `cond_mean` is `E_π[β_w] + Σ_wy Σ_yy⁻¹ (y − μ_y)`, the
+                // AFFINE conditional mean of the link-wiggle block given the
+                // realized `y = (h, threshold, log σ)`. `regression · z` is that
+                // displacement written in the standardized `y` coordinates the
+                // outer rule integrates over, so this loop and the constant
+                // `cov_cond` below are the exact conditional law of a joint
+                // Gaussian — which is what makes the outer×inner factorization
+                // below an identity rather than an approximation.
+                //
+                // Nothing is clipped back into the `β_w ≥ 0` cone here. The cone
+                // is truncated ONCE, upstream (see the note above the function):
+                // clipping the displacement was a third application of the same
+                // correction, it deleted the block's cross-covariance with
+                // `(h, threshold, log σ)` at exactly the near-wall fits the cone
+                // matters for, and it bought no feasibility because the inner
+                // integral already runs over the whole line.
                 let mut cond_mean = beta_w.to_owned();
                 for j in 0..pw {
                     let mut displacement = 0.0;
                     for (col, &latent) in z.iter().enumerate() {
                         displacement += regression[[j, col]] * latent;
                     }
-                    cond_mean[j] +=
-                        cone_clipped_coordinate_displacement(beta_w[j], displacement);
+                    cond_mean[j] += displacement;
                 }
                 let q0 = survival_q0_from_eta(x[1], x[2]);
                 let q0_arr = Array1::from_vec(vec![q0]);
