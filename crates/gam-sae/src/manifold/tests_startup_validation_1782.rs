@@ -327,16 +327,32 @@ fn all_assignment_topology_combinations_pass_startup_validation_1782() {
             AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
         ),
     ];
+    // Measure every cell before judging any of them. Unwrapping inside the loop
+    // made the FIRST failing cell decide what got measured: `circle/ordered_beta_bernoulli`
+    // is case 1, so while #2609 was open the other four cells never ran, and the
+    // claim "only that cell fails" was not something this test could support.
+    let mut verdicts: Vec<(&str, Result<f64, String>)> = Vec::new();
     for (label, topo, mode) in cases {
         let result = seed_passes_startup_validation(z.view(), k, topo, mode);
         match &result {
             Ok(cost) => eprintln!("REPRO1782 {label}: startup OK (cost={cost:.4e})"),
             Err(e) => eprintln!("REPRO1782 {label}: startup ERR={e}"),
         }
-        result.unwrap_or_else(|e| {
-            panic!("#1782 {label} must pass outer startup validation, got: {e}")
-        });
+        verdicts.push((label, result));
     }
+    let failures: Vec<String> = verdicts
+        .iter()
+        .filter_map(|(label, result)| {
+            result.as_ref().err().map(|e| format!("{label}: {e}"))
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "#1782: {} of {} assignment/topology cells failed outer startup validation:\n  {}",
+        failures.len(),
+        verdicts.len(),
+        failures.join("\n  ")
+    );
 }
 
 /// Run the real outer `OuterProblem::run` ("SAE manifold") cascade — the exact
@@ -751,3 +767,96 @@ fn d2_portfolio_loses_at_measured_parameter_parity_2502() {
     );
 }
 
+
+/// #2609 attribution. Both lanes were already shown to agree on `Ok(+inf)`, and
+/// `+inf` is the documented infeasible encoding — so the open question is WHICH
+/// of the four channels that can emit it actually fires here. `eval` collapses
+/// all four into one value, so reading the value cannot answer it, and
+/// `log::debug!` cannot either: a `--lib` test binary installs no logger backend.
+///
+/// This calls the criterion the objective calls, on a term this test builds
+/// itself, and matches the TYPED outcome:
+///   * `Err(VanishedAtoms)`          — fixed-K structural boundary
+///   * `Err(IndefiniteObservedInformation)` — `½log|A|` undefined at the mode
+///   * `Err(Numerical)`              — a genuine defect (never mapped to `+inf`)
+///   * `Ok(non-finite)`              — the assembled-value class
+/// and prints the same readout for the two assignments that PASS on identical
+/// data, so the discriminating channel is named rather than inferred.
+#[test]
+fn seed_infeasibility_channel_is_named_2609() {
+    let z = planted_circle_embedded(48, 6, 0.03);
+    let modes: [(&str, AssignmentMode); 3] = [
+        (
+            "ordered_beta_bernoulli",
+            AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
+        ),
+        ("softmax", AssignmentMode::softmax(1.0)),
+        ("threshold_gate", AssignmentMode::threshold_gate(1.0, 0.0)),
+    ];
+    for (label, mode) in modes {
+        let (mut term, seed_dispersion) = build_term(z.view(), 4, Topo::Circle, mode);
+        let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 4])
+            .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+            .unwrap();
+        let warm = term.warm_start_latents_from_amortized_encoder(z.view(), &rho);
+        let outcome = term.penalized_quasi_laplace_criterion_with_refine_policy_and_lane(
+            z.view(),
+            &rho,
+            None,
+            8,
+            0.04,
+            1.0e-6,
+            1.0e-6,
+            true,
+            None,
+        );
+        let channel = match &outcome {
+            Ok((cost, _)) if cost.is_finite() => format!("FINITE cost={cost:.6e}"),
+            Ok((cost, _)) => format!("ASSEMBLED-NON-FINITE cost={cost}"),
+            Err(SaeCriterionError::VanishedAtoms(atoms)) => {
+                format!("VANISHED-ATOMS {atoms}")
+            }
+            Err(SaeCriterionError::IndefiniteObservedInformation { block }) => {
+                format!("INDEFINITE-OBSERVED-INFORMATION block={block}")
+            }
+            Err(SaeCriterionError::Numerical(message)) => {
+                format!("NUMERICAL(fatal, never mapped to +inf) {message}")
+            }
+        };
+        println!("[2609-channel] circle/{label}: {channel}  warm_start={warm:?}");
+    }
+    // The invariant this run must not violate: the criterion is being asked at a
+    // seed the production planner would hand it, so a `Numerical` refusal here
+    // would be a defect that never reaches the `+inf` convention at all. Every
+    // other outcome is a legitimate verdict and is reported above.
+    let (mut term, seed_dispersion) = build_term(
+        z.view(),
+        4,
+        Topo::Circle,
+        AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
+    );
+    let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 4])
+        .seed_scaled_by_dispersion_for_assignment(
+            seed_dispersion,
+            AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
+        )
+        .unwrap();
+    let outcome = term.penalized_quasi_laplace_criterion_with_refine_policy_and_lane(
+        z.view(),
+        &rho,
+        None,
+        8,
+        0.04,
+        1.0e-6,
+        1.0e-6,
+        true,
+        None,
+    );
+    let fatal = matches!(&outcome, Err(SaeCriterionError::Numerical(_)));
+    assert!(
+        !fatal,
+        "the seed criterion returned a fatal Numerical refusal, which the +inf \
+         infeasible convention does not cover: {:?}",
+        outcome.err()
+    );
+}

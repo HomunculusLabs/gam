@@ -1362,12 +1362,29 @@ fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
     /// ρ ≥ 21 is where the ladder measured the REML part's own ρ-derivative
     /// below 1e-10, so anything left is not the REML tail.
     const SATURATED: [f64; 4] = [21.0, 24.0, 27.0, 30.0];
+    /// `RHO_SOFT_PRIOR_WEIGHT`, `RHO_SOFT_PRIOR_SHARPNESS` and `RHO_BOUND`,
+    /// mirrored because they are crate-private to `gam-solve`. Only the printed
+    /// decomposition below reads them; the assertion is stated against the
+    /// retired prior and does not depend on them.
+    const GUARD_WEIGHT: f64 = 1.0e-6;
+    const GUARD_SHARPNESS: f64 = 4.0;
+    const GUARD_BOUND: f64 = 30.0;
 
     for (label, family) in [("matern_gaussian", LikelihoodSpec::gaussian_identity())] {
         let IsoKappaFdReport { analytic_by_probe: grads, .. } =
             iso_kappa_fd_variant_driver(label, 80, family, false, false, &SATURATED);
         let mut checked = 0usize;
         let mut worst_fraction = 0.0f64;
+        // #2545: the aggregate `worst_fraction` printed at the end is a max over
+        // probes AND components, and reading it as a per-ρ number produced a
+        // published "the floor is 1.5-2.1x w*a, so something else saturates"
+        // that a per-probe decomposition then refuted. Print the decomposition
+        // the claim actually needs: at each probe, max|g| over the ρ components
+        // against the soft guard's own closed form `w*a*tanh(a*rho)`, plus the
+        // residual and the tail-law constant `c = residual*e^rho` it implies.
+        // The guard's contribution does NOT decay, so `residual` is the REML
+        // tail and a constant `c` across probes is the λ=∞ face this gate is
+        // about; `residual = 0` says the gradient IS the guard and nothing else.
         for value in SATURATED {
             let probe = format!("rhoALL@{value}");
             let grad = &grads
@@ -1376,6 +1393,21 @@ fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
                 .unwrap_or_else(|| panic!("{label}: probe {probe} missing"))
                 .1;
             let retired = value / (RETIRED_PRIOR_SD * RETIRED_PRIOR_SD);
+            let mut rho_max = 0.0f64;
+            for (j, &observed) in grad.iter().enumerate() {
+                if j + 1 < grad.len() {
+                    rho_max = rho_max.max(observed.abs());
+                }
+            }
+            let a = GUARD_SHARPNESS / GUARD_BOUND;
+            let guard = GUARD_WEIGHT * a * (a * value).tanh();
+            let residual = rho_max - guard;
+            eprintln!(
+                "[#2545-floor] {probe}: max|g_rho|={rho_max:.6e}  \
+                 guard=w*a*tanh(a*rho)={guard:.6e}  residual={residual:+.6e}  \
+                 c=residual*e^rho={:.4e}",
+                residual * value.exp()
+            );
             for (j, &observed) in grad.iter().enumerate() {
                 if j + 1 == grad.len() {
                     assert!(
