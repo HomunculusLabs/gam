@@ -146,7 +146,7 @@ def _fully_populated_payload() -> dict[str, typing.Any]:
             "frailty_kind": "gaussian-shift",
             "frailty_sd": 0.4,
             "hazard_loading": "full",
-            "persistent_warm_start_root": "/projects/standard/gam/warm",
+            "persistent_warm_start_root": "warm-start-fixture",
             "scale_dimensions": True,
             "adaptive_regularization": True,
             "firth": True,

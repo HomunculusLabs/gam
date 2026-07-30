@@ -79,7 +79,7 @@ def _payload(**overrides: typing.Any) -> dict[str, typing.Any]:
         ("survival_time_anchor", 25.0, "survival_time_anchor"),
         (
             "persistent_warm_start_root",
-            "/projects/standard/gam/warm",
+            "warm-start-fixture",
             "persistent_warm_start_root",
         ),
     ],

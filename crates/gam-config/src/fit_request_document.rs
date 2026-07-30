@@ -374,7 +374,7 @@ mod tests {
                         rate: 0.5,
                     },
                 )])),
-                persistent_warm_start_root: Some(PathBuf::from("/projects/standard/gam/warm")),
+                persistent_warm_start_root: Some(PathBuf::from("warm-start-fixture")),
                 smooth_descriptors: Some(
                     serde_json::from_value(json!({
                         "x": {"centers": 8, "kind": "duchon", "vars": ["x"]}
