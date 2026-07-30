@@ -149,6 +149,12 @@ fn resolved_auto_matern_scale(spec: &TermCollectionSpec, channel: &str) -> f64 {
 #[test]
 fn survival_marginal_slope_auto_matern_logslope_centers12_converges() {
     init_parallelism();
+    // The production fitter already emits deterministic phase/evaluation
+    // telemetry. Install the repository's flush-per-record test backend so a
+    // runner-enforced hang bound preserves the last completed phase instead of
+    // yielding an empty log. This is configured in code, not by an environment
+    // variable, and therefore makes every invocation equally observable.
+    gam_runtime::test_support::install_diagnostic_logger();
 
     // No CUDA driver in CI on macOS.
     #[cfg(target_os = "macos")]
