@@ -2559,9 +2559,22 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     outer.last_error = Some(format!(
                         "custom-family seed-screening proxy produced non-finite score {score}"
                     ));
-                    Err(EstimationError::RemlOptimizationFailed(
-                        "custom-family seed-screening proxy produced non-finite score".to_string(),
-                    ))
+                    // Screening RANKS seeds; it does not decide whether the
+                    // problem is fittable. `rank_seeds_with_screening`
+                    // propagates this `Err` verbatim, and the seed loop then
+                    // asks `is_trial_point_infeasible()` -- answering `false`
+                    // for `RemlOptimizationFailed` routes it into
+                    // `fatal_outer_evaluation("outer seed screening")`, a hard
+                    // `return Err` that ends the fit over a ranking probe. The
+                    // sibling `Err(e)` arm immediately below already reports
+                    // its screening failure as a trial-point refusal for
+                    // exactly this reason (#2590); a non-finite score at THIS
+                    // seed is the same statement about the same seed, and was
+                    // the one shape left graded fatal (#2627).
+                    Err(EstimationError::TrialPointRefused {
+                        reason: "custom-family seed-screening proxy produced non-finite score"
+                            .to_string(),
+                    })
                 }
                 Err(e) => {
                     // A failure to screen this seed is a statement about this
