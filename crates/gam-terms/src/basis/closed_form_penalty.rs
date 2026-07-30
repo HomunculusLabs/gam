@@ -467,7 +467,6 @@ pub fn matern_kernel_value(d: usize, ell: usize, kappa: f64, r: f64) -> f64 {
 
 pub(crate) const DUCHON_SMALL_CHI_SERIES_MAX: f64 = 0.125;
 const DUCHON_SMALL_CHI_SERIES_MAX_TERMS: usize = 96;
-pub(crate) const DUCHON_SMALL_CHI_SERIES_REL_TOL: f64 = 4.0e-16;
 
 #[inline]
 pub(crate) fn use_duchon_small_chi_riesz_series(kappa: f64, r: f64) -> bool {
@@ -519,6 +518,10 @@ pub(crate) fn duchon_small_chi_riesz_series_radial_derivatives(
     );
 
     let mut total = vec![KahanSum::default(); max_order + 1];
+    // `Σ|terms|` per output order, tracked alongside the compensated `Σ terms`
+    // because the truncation band below is charged on the terms and not on
+    // their (alternating, cancelling) total.
+    let mut absolute = vec![0.0_f64; max_order + 1];
     let mut coeff = 1.0_f64;
     let kappa_sq = kappa * kappa;
     let base = a + b;
@@ -578,15 +581,47 @@ pub(crate) fn duchon_small_chi_riesz_series_radial_derivatives(
 
         if let Some(block) = block {
             for (order, value) in block.into_iter().enumerate() {
-                total[order].add(scale * value);
+                let summand = scale * value;
+                total[order].add(summand);
+                absolute[order] += summand.abs();
             }
         }
 
-        let total_norm = total
+        // Truncate once the newest term has fallen inside the roundoff the
+        // accumulation has ALREADY committed: below that band another term
+        // cannot move the computed partial sum, so continuing buys nothing.
+        //
+        // `total` is Kahan-compensated, whose forward error is `2u·Σ|terms|`
+        // with no dependence on the term count (Higham, ASNA 2nd ed., Thm 4.8 —
+        // shedding the `n` is the whole reason to pay for the compensation);
+        // forming each summand costs one further rounding (`scale * value`),
+        // which is the `1` handed to `compensated_band`. The band is measured
+        // against `Σ|terms|` rather than `|Σ terms|` because this series
+        // alternates in sign: the error is charged on the terms, and a bound
+        // taken over their cancelling total understates it.
+        //
+        // The previous test was `4.0e-16 * max(|Σ terms|, 1.0)`. Its relative
+        // factor was a hand-written stand-in for `2u` (`= 4.44e-16`) that does
+        // not track `f64::EPSILON`, and its `max(_, 1.0)` turned the test
+        // ABSOLUTE for any kernel whose derivatives are smaller than unity —
+        // truncating those series at `4.0e-16` however large the dropped terms
+        // were relative to the answer. The band below is scale-free.
+        let accumulated_band = absolute
             .iter()
-            .map(|acc| acc.sum().abs())
+            .copied()
+            .map(|absolute_sum| gam_linalg::roundoff::compensated_band(1, absolute_sum))
             .fold(0.0_f64, f64::max);
-        if n >= 4 && term_norm <= DUCHON_SMALL_CHI_SERIES_REL_TOL * total_norm.max(1.0) {
+        // Terms with `n < kappa_derivative_order` are annihilated by the `κ`
+        // partial (`kappa_factor == 0.0` above), so they are structurally zero
+        // rather than converged; the tail test needs the first non-vanishing
+        // term plus one more to compare it against. The literal `4` this
+        // replaces is exactly this expression at the largest
+        // `kappa_derivative_order` the function accepts (2); the value and η
+        // series (order 0) may now reach the test two terms sooner, which
+        // cannot truncate them, because `use_duchon_small_chi_riesz_series`
+        // admits this chart only for `κR ≤ 1/8` and consecutive terms there
+        // shrink by `O((κR)²) ≈ 1.6e-2` — many decades above the band.
+        if n >= kappa_derivative_order + 2 && term_norm <= accumulated_band {
             break;
         }
 
