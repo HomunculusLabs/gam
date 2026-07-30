@@ -4144,9 +4144,6 @@ fn run_exact_joint_spatial_optimization(
             // design-realization skip.
             DeclaredHessianForm::Unavailable
         },
-        // The generic single-block derivative ladder reserves order-four work
-        // for the terminal mint certificate (#2359).
-        true,
         // Single-block spatial path: penalty-like rho + spatial psi.
         // EFS/HybridEFS remain eligible (the Wood-Fasiolo PSD structure holds
         // for single-block families with β-independent joint H_L) UNLESS the
@@ -6461,11 +6458,6 @@ pub(crate) fn exact_joint_multistart_outer_problem(
     n_params: usize,
     gradient: gam_problem::Derivative,
     hessian: gam_problem::DeclaredHessianForm,
-    // Generic REML/LAML derivative ladders may reserve expensive order-four
-    // contractions for terminal certification. Callers with an explicit
-    // family-specific affordability policy can instead spend declared exact
-    // curvature during search.
-    reserve_analytic_hessian_for_certificate: bool,
     disable_fixed_point: bool,
     risk_profile: gam_problem::SeedRiskProfile,
     tolerance: f64,
@@ -6547,7 +6539,13 @@ pub(crate) fn exact_joint_multistart_outer_problem(
     let mut problem = gam_solve::rho_optimizer::OuterProblem::new(n_params)
         .with_gradient(gradient)
         .with_hessian(hessian)
-        .with_prefer_gradient_only(reserve_analytic_hessian_for_certificate)
+        // Exact REML/LAML curvature consumes the fourth-order family tower,
+        // while BFGS search needs only exact gradients. Hessian availability is
+        // a terminal-certification capability, not a warrant to rebuild that
+        // tower at every accepted iterate (#979). Keep the Hessian declared so
+        // the mint still requires exact curvature, but reserve it for that one
+        // terminal evaluation.
+        .with_prefer_gradient_only(true)
         .with_disable_fixed_point(disable_fixed_point)
         // Re-enable the automatic fallback ladder for exact joint spatial
         // problems. It was previously `Disabled` to suppress a geo-bench
@@ -6962,10 +6960,6 @@ where
         } else {
             DeclaredHessianForm::Unavailable
         },
-        // The family-specific work policy above has already withheld exact
-        // curvature when it is unaffordable. If it declared a Hessian here,
-        // spend that geometry in ARC instead of silently overriding the policy.
-        false,
         disable_fixed_point,
         seed_risk_profile,
         kappa_options.rel_tol.max(1e-6),
@@ -7701,9 +7695,6 @@ fn try_exact_joint_latent_coord_optimization(
         theta0.len(),
         Derivative::Analytic,
         DeclaredHessianForm::Unavailable,
-        // No Hessian is declared on this route, so this lifecycle preference is
-        // inert; retain the generic terminal-reservation policy explicitly.
-        true,
         false,
         seed_risk_profile_for_likelihood_family(&family),
         options.tol,
