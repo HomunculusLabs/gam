@@ -324,7 +324,20 @@ fn efs_ard_fixed_point_recovers_cost_criterion_argmin_and_stays_finite() {
     let target = array![[0.4, 0.01], [1.1, -0.01], [-0.7, 0.01], [0.2, -0.01]];
     let term = build_collapse_probe_term(coords);
 
-    let init_rho = SaeManifoldRho::new(0.0, 0.0, vec![array![0.0, 0.0]]);
+    // The OBJECTIVE owns the flat layout: `SaeManifoldOuterObjective::new`
+    // opens with `init_rho.for_assignment(term.assignment.mode)`, because a
+    // K=1 Softmax and every hard TopK are STRUCTURAL absences of the
+    // assignment-strength coordinate, not frozen coordinates. This probe term
+    // is one of those, so the objective's flat vector is
+    // `[smooth, axis0, axis1]` -- not `[sparse, smooth, axis0, axis1]`.
+    // Flattening an unbound rho here produced a length-4 vector against a
+    // length-3 layout and `eval_efs` refused it at `from_flat`. Bind the seed
+    // through the same call the objective makes, and take every index from the
+    // rho itself below, so a layout change cannot silently re-stale this test.
+    let init_rho =
+        SaeManifoldRho::new(0.0, 0.0, vec![array![0.0, 0.0]]).for_assignment(term.assignment.mode);
+    // Atom 0, axis 1 = the deliberately collapsing axis this test measures.
+    let collapsing_axis_index = init_rho.ard_flat_index(0, 1);
     let mut obj = SaeManifoldOuterObjective::new(
         term.clone(),
         target.clone(),
@@ -352,8 +365,7 @@ fn efs_ard_fixed_point_recovers_cost_criterion_argmin_and_stays_finite() {
             rho_flat[i] += s;
             step_norm += s * s;
         }
-        // index 3 = atom 0, axis 1 (layout [sparse, smooth, axis0, axis1]).
-        converged_log_alpha1 = rho_flat[3];
+        converged_log_alpha1 = rho_flat[collapsing_axis_index];
         assert!(
             converged_log_alpha1.is_finite() && converged_log_alpha1 < 30.0,
             "EFS α on the collapsing axis must stay finite (no clamp); got log α={converged_log_alpha1}"
@@ -372,7 +384,14 @@ fn efs_ard_fixed_point_recovers_cost_criterion_argmin_and_stays_finite() {
     let base_term = term;
     let cost_at = |la1: f64| -> f64 {
         let mut t = base_term.clone();
-        let rho = SaeManifoldRho::new(rho_flat[0], rho_flat[1], vec![array![rho_flat[2], la1]]);
+        // Rebuild through `from_flat`, the exact inverse of the layout the
+        // objective just optimised over. Re-deriving the rho from positional
+        // literals is what made this probe read the wrong coordinate.
+        let mut probe = rho_flat.clone();
+        probe[collapsing_axis_index] = la1;
+        let rho = init_rho
+            .from_flat(probe.view())
+            .expect("probe rho must round-trip the objective's own flat layout");
         t.penalized_quasi_laplace_criterion(target.view(), &rho, None, 50, 1.0, 1.0e-6, 1.0e-6)
             .expect("criterion should evaluate")
             .0
