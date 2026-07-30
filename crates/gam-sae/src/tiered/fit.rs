@@ -665,7 +665,7 @@ fn fit_tier2_support(
         }
     }
     let tss = peel.baseline_energy;
-    let explained_variance = if tss > 0.0 { 1.0 - rss / tss } else { f64::NAN };
+    let explained_variance = crate::tiered::explained_variance_from_sums(rss, tss);
 
     Ok(Tier2SupportFit {
         mean,

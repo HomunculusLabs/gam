@@ -520,8 +520,10 @@ fn exact_null_report(
             total_sum_squares += centered * centered;
         }
     }
+    // Same 0.0-for-undefined presentation as the primary report, and the same
+    // reason for branching on the total rather than on the result.
     let reconstruction_r2 = if total_sum_squares > 0.0 {
-        1.0 - residual_sum_squares / total_sum_squares
+        crate::tiered::explained_variance_from_sums(residual_sum_squares, total_sum_squares)
     } else {
         0.0
     };
@@ -1346,7 +1348,18 @@ fn finalize_sae_fit_report(
             tss += centered * centered;
         }
     }
-    let reconstruction_r2 = if tss > 0.0 { 1.0 - rss / tss } else { 0.0 };
+    // A constant target leaves nothing to explain, so the shared policy calls the
+    // ratio undefined. This headline has always shown 0.0 there and Python reads
+    // it as a float, so the substitution is made here, in the open, rather than
+    // by a fourth private copy of the formula. The branch is on `tss`, NOT on
+    // `ev.is_nan()`: a NaN arriving through `rss` means the fit itself went
+    // non-finite, and reporting that as 0.0 would disguise a broken fit as a
+    // useless one.
+    let reconstruction_r2 = if tss > 0.0 {
+        crate::tiered::explained_variance_from_sums(rss, tss)
+    } else {
+        0.0
+    };
 
     let reported_log_alpha = match term.assignment.mode {
         AssignmentMode::OrderedBetaBernoulli { alpha, .. } => alpha.ln(),

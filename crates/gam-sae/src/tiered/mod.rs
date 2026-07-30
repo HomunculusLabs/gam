@@ -749,6 +749,21 @@ pub struct TieredSaeFit<T2> {
     pub explained_variance: f64,
 }
 
+/// `1 − RSS/TSS` — the one definition of explained variance in the SAE stack.
+///
+/// Returns `NaN` when `tss` is not positive. With no variance to explain the
+/// ratio is genuinely undefined, and `NaN` says so; a reporting surface that
+/// wants to show `0.0` for a constant target has to substitute it deliberately
+/// at the point of display rather than inherit the choice by accident.
+///
+/// This exists because the same three-line policy was written out four times
+/// across the SAE stack, and the copies had already drifted on exactly that
+/// degenerate case — two returned `0.0`, one returned `NaN`, for the same
+/// question about the same quantity.
+pub fn explained_variance_from_sums(rss: f64, tss: f64) -> f64 {
+    if tss > 0.0 { 1.0 - rss / tss } else { f64::NAN }
+}
+
 /// Explained variance `1 − RSS/TSS` of `recon` against `z`, with the total sum of
 /// squares taken about the supplied Tier-0 `mean` (the honest tiered baseline: a
 /// model must beat "predict the shared mean", not "predict zero").
@@ -766,10 +781,7 @@ pub fn explained_variance_vs_mean(
     }
     let baseline = &z - &mean.view().insert_axis(Axis(0));
     let tss: f64 = baseline.iter().map(|&v| v * v).sum();
-    if tss <= 0.0 {
-        return f64::NAN;
-    }
-    1.0 - rss / tss
+    explained_variance_from_sums(rss, tss)
 }
 
 #[cfg(test)]
@@ -903,4 +915,80 @@ mod tests {
              to what Tier-2 must model; fit the raw residual instead"
         );
     }
+
+    #[test]
+    fn explained_variance_is_undefined_when_there_is_no_variance_to_explain() {
+        // The shared policy answers "undefined", not "explains nothing" — the
+        // two are different claims and the reporting surface has to pick.
+        assert!(explained_variance_from_sums(0.0, 0.0).is_nan());
+        assert!(explained_variance_from_sums(1.0, 0.0).is_nan());
+        assert!(explained_variance_from_sums(0.0, -1.0).is_nan());
+    }
+
+    #[test]
+    fn explained_variance_propagates_a_non_finite_residual() {
+        // A NaN arriving through RSS means the fit went non-finite. That must
+        // survive as NaN: reporting surfaces substitute 0.0 for the UNDEFINED
+        // case (tss = 0), and if they keyed that substitution off `is_nan()`
+        // instead they would disguise a broken fit as a merely useless one.
+        assert!(explained_variance_from_sums(f64::NAN, 1.0).is_nan());
+        assert!(explained_variance_from_sums(f64::INFINITY, 1.0).is_infinite());
+    }
+
+    #[test]
+    fn explained_variance_recovers_a_known_fraction() {
+        // Ground truth rather than self-consistency: a reconstruction that
+        // leaves exactly a quarter of the centered energy must score 0.75.
+        assert!((explained_variance_from_sums(0.25, 1.0) - 0.75).abs() < 1e-15);
+        // A reconstruction no better than the mean scores 0; one worse than the
+        // mean scores negative, which is meaningful and must not be clamped.
+        assert!((explained_variance_from_sums(1.0, 1.0) - 0.0).abs() < 1e-15);
+        assert!(explained_variance_from_sums(2.0, 1.0) < 0.0);
+    }
+
+    #[test]
+    fn explained_variance_vs_mean_measures_about_the_mean_not_zero() {
+        // Two columns with a large offset and small spread: measured about the
+        // mean the model explains three quarters; measured about ZERO the same
+        // reconstruction would score ~1.0 purely from the offset. This pins
+        // which baseline the SAE headline uses.
+        let z = array![[10.0, 20.0], [12.0, 22.0], [14.0, 24.0]];
+        let mean = Array1::from(vec![12.0, 22.0]);
+        // Residual of 1.0 in each of two rows, per column => rss = 4.
+        let recon = array![[11.0, 21.0], [12.0, 22.0], [15.0, 25.0]];
+        let ev = explained_variance_vs_mean(z.view(), recon.view(), &mean);
+        // tss about the mean = 2*(4) = 8 per column pair: (-2,0,2) twice => 16.
+        let expected = 1.0 - 4.0 / 16.0;
+        assert!(
+            (ev - expected).abs() < 1e-12,
+            "ev {ev} vs {expected}: baseline must be the mean, not zero"
+        );
+        assert!(ev < 0.99, "a zero baseline would inflate this to nearly 1");
+    }
+
+    #[test]
+    fn explained_variance_vs_mean_agrees_with_the_shared_policy() {
+        // The convenience wrapper must be the same function as the raw policy,
+        // which is the property that stopped holding when the copies drifted.
+        let z = array![[1.0, -2.0], [3.0, 4.0], [-5.0, 6.0]];
+        let recon = array![[0.5, -1.0], [2.0, 4.5], [-4.0, 5.0]];
+        let mean = Array1::from(vec![
+            z.column(0).sum() / 3.0,
+            z.column(1).sum() / 3.0,
+        ]);
+        let mut rss = 0.0;
+        let mut tss = 0.0;
+        for r in 0..z.nrows() {
+            for c in 0..z.ncols() {
+                let d = z[[r, c]] - recon[[r, c]];
+                rss += d * d;
+                let m = z[[r, c]] - mean[c];
+                tss += m * m;
+            }
+        }
+        let direct = explained_variance_from_sums(rss, tss);
+        let wrapped = explained_variance_vs_mean(z.view(), recon.view(), &mean);
+        assert!((direct - wrapped).abs() < 1e-12, "{direct} vs {wrapped}");
+    }
+
 }
