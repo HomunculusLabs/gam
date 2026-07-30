@@ -4295,6 +4295,33 @@ impl KktRefusalReport {
         }
     }
 
+    /// Canonical signed-spectrum rendering shared by every KKT-refusal surface.
+    ///
+    /// The eigenvalues are stored algebraically in descending order, so the
+    /// endpoints — not the largest and smallest magnitudes — own the `λ_max`
+    /// and `λ_min` labels. Condition number and rank nullity remain the
+    /// separately computed magnitude diagnostics.
+    fn format_hpen_spectrum(&self) -> String {
+        let lambda_max = self
+            .hpen_eigenvalues_sorted_desc
+            .first()
+            .copied()
+            .unwrap_or(f64::NAN);
+        let lambda_min = self
+            .hpen_eigenvalues_sorted_desc
+            .last()
+            .copied()
+            .unwrap_or(f64::NAN);
+        format!(
+            "λ_max={lambda_max:.3e}, λ_min={lambda_min:.3e}, cond={:.3e}, \
+             nullity@{:.0e}={} (of {} eigenvalues)",
+            self.hpen_condition_number,
+            self.hpen_rank_tol,
+            self.hpen_nullity_at_rank_tol,
+            self.hpen_eigenvalues_sorted_desc.len(),
+        )
+    }
+
     /// Multi-line structured log emitted at the cert REFUSED site. The
     /// per-block residual / eigenspectrum / diagnosis breakdown is what
     /// makes the failure actionable (vs the legacy one-liner that only
@@ -4304,7 +4331,7 @@ impl KktRefusalReport {
             "[PIRLS/joint-Newton convergence] cycle {:>3} | cert REFUSED: residual={:.3e} > tol={:.3e} (cert)\n  \
              carrying-block: {}\n  \
              block_names={:?}, block_widths={:?}, block_grad_inf={:?}, block_penalty_grad_inf={:?}, block_residual_inf={:?}\n  \
-             H_pen spectrum: λ_max={:.3e}, λ_min={:.3e}, cond={:.3e}, nullity@{:.0e}={} (of {} eigenvalues)\n  \
+             H_pen spectrum: {}\n  \
              free-null diagnostic: {}\n  \
              cert math: linearized_rel={:.3e}, scalar_relerr={:.3e}, |Δobj|={:.3e} (tol={:.3e}), accepted_step_inf={:.3e} (tol={:.3e}), proposal_step_inf={:.3e}, trust_radius={:.3e}, |β|∞={:.3e}, active_set_rows_total={}\n  \
              diagnosis: {}",
@@ -4317,26 +4344,7 @@ impl KktRefusalReport {
             self.block_grad_inf,
             self.block_penalty_grad_inf,
             self.block_residual_inf,
-            // ALGEBRAIC extremes, off the signed descending spectrum. These
-            // rendered `hpen_max_abs_eigenvalue`/`hpen_min_abs_eigenvalue` -- the
-            // largest and smallest MAGNITUDES -- so `{-1.691, .., +5.777e4}`
-            // printed byte-identically to `{+1.691, .., +5.777e4}`, and an
-            // indefinite H_pen read as contradicting the
-            // `resolvable_negative_curvature` flag in the same refusal (#2659).
-            // `cond` and `nullity` are magnitude questions and are unchanged;
-            // only these two labels were wrong.
-            self.hpen_eigenvalues_sorted_desc
-                .first()
-                .copied()
-                .unwrap_or(f64::NAN),
-            self.hpen_eigenvalues_sorted_desc
-                .last()
-                .copied()
-                .unwrap_or(f64::NAN),
-            self.hpen_condition_number,
-            self.hpen_rank_tol,
-            self.hpen_nullity_at_rank_tol,
-            self.hpen_eigenvalues_sorted_desc.len(),
+            self.format_hpen_spectrum(),
             self.null_direction_label(),
             self.linearized_rel,
             self.scalar_model_relerr,
@@ -4361,7 +4369,7 @@ impl KktRefusalReport {
             "cycle={} cert REFUSED: residual={:.3e} > tol={:.3e}; \
              carrying-block: {}; block_names={:?}, block_widths={:?}, \
              block_grad_inf={:?}, block_penalty_grad_inf={:?}, block_residual_inf={:?}; \
-             H_pen spectrum: λ_max={:.3e}, λ_min={:.3e}, cond={:.3e}, nullity@{:.0e}={}/{}; \
+             H_pen spectrum: {}; \
              free-null diagnostic: {}; \
              cert math: linearized_rel={:.3e}, scalar_relerr={:.3e}, |Δobj|={:.3e}, \
              accepted_step_inf={:.3e}, proposal_step_inf={:.3e}, trust_radius={:.3e}, \
@@ -4375,26 +4383,7 @@ impl KktRefusalReport {
             self.block_grad_inf,
             self.block_penalty_grad_inf,
             self.block_residual_inf,
-            // ALGEBRAIC extremes, off the signed descending spectrum. These
-            // rendered `hpen_max_abs_eigenvalue`/`hpen_min_abs_eigenvalue` -- the
-            // largest and smallest MAGNITUDES -- so `{-1.691, .., +5.777e4}`
-            // printed byte-identically to `{+1.691, .., +5.777e4}`, and an
-            // indefinite H_pen read as contradicting the
-            // `resolvable_negative_curvature` flag in the same refusal (#2659).
-            // `cond` and `nullity` are magnitude questions and are unchanged;
-            // only these two labels were wrong.
-            self.hpen_eigenvalues_sorted_desc
-                .first()
-                .copied()
-                .unwrap_or(f64::NAN),
-            self.hpen_eigenvalues_sorted_desc
-                .last()
-                .copied()
-                .unwrap_or(f64::NAN),
-            self.hpen_condition_number,
-            self.hpen_rank_tol,
-            self.hpen_nullity_at_rank_tol,
-            self.hpen_eigenvalues_sorted_desc.len(),
+            self.format_hpen_spectrum(),
             self.null_direction_label(),
             self.linearized_rel,
             self.scalar_model_relerr,
@@ -4407,6 +4396,74 @@ impl KktRefusalReport {
             self.diagnosis.as_str(),
             self.diagnosis.guidance(),
         )
+    }
+}
+
+#[cfg(test)]
+mod kkt_refusal_spectrum_format_tests {
+    use super::*;
+
+    #[test]
+    fn indefinite_hpen_render_keeps_signed_extremes_and_magnitude_diagnostics_2659() {
+        // The negative eigenvalue has the greatest magnitude. Algebraic
+        // extrema are therefore (+5, -9), while the condition and rank cutoff
+        // must still use max|λ|=9 and min|λ|=1e-12.
+        let spectrum = vec![5.0_f64, 1.0e-12, -9.0];
+        let max_abs = spectrum
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+        let min_abs = spectrum
+            .iter()
+            .map(|value| value.abs())
+            .fold(f64::INFINITY, f64::min);
+        let rank_cutoff = KKT_REFUSAL_RANK_TOL * max_abs;
+        let nullity = spectrum
+            .iter()
+            .filter(|value| value.abs() < rank_cutoff)
+            .count();
+
+        let report = KktRefusalReport {
+            block_names: vec!["fixture".to_string()],
+            block_widths: vec![spectrum.len()],
+            block_beta_inf: vec![0.0],
+            block_grad_inf: vec![0.0],
+            block_penalty_grad_inf: vec![0.0],
+            block_residual_inf: vec![1.0],
+            block_carrying_residual: Some(0),
+            hpen_eigenvalues_sorted_desc: spectrum,
+            hpen_condition_number: max_abs / min_abs,
+            hpen_nullity_at_rank_tol: nullity,
+            hpen_rank_tol: KKT_REFUSAL_RANK_TOL,
+            hpen_null_gradient_inf: 0.0,
+            hpen_null_vector_block_inf: vec![0.0],
+            hpen_null_vector_carrying_block: None,
+            hlik_max_abs_eigenvalue: 5.0,
+            hpen_null_curvature: 1.0e-12,
+            hpen_null_likelihood_curvature: 1.0e-12,
+            active_set_rows_total: 0,
+            accepted_step_inf: 0.0,
+            proposal_step_inf: 0.0,
+            trust_radius: 1.0,
+            cycle: 1,
+            residual_tol: 1.0e-8,
+            obj_tol: 1.0e-8,
+            step_tol: 1.0e-8,
+            linearized_rel: 0.0,
+            scalar_model_relerr: 0.0,
+            objective_change: 0.0,
+            projected_residual_inf: 1.0,
+            diagnosis: KktRefusalDiagnosis::RankDeficientHPen,
+        };
+        let expected =
+            "λ_max=5.000e0, λ_min=-9.000e0, cond=9.000e12, nullity@1e-10=1 \
+             (of 3 eigenvalues)";
+
+        assert_eq!(max_abs, 9.0);
+        assert_eq!(nullity, 1);
+        assert_eq!(report.format_hpen_spectrum(), expected);
+        assert!(report.format_structured_log(4.0e-8).contains(expected));
+        assert!(report.format_bubbled_error().contains(expected));
     }
 }
 
