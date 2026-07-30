@@ -35,6 +35,7 @@ from importlib import metadata as _metadata
 from pathlib import Path
 
 from ._api import (
+    SUPPORT_SAE_SCHEMA,
     CtnStage1,
     SharedPrecisionGroup,
     bspline_basis,
@@ -75,6 +76,7 @@ from ._api import (
     gaussian_weighted_ridge_batch,
     load,
     loads,
+    model_from_dict,
     save,
     mechanism_sparsity_jacobian,
     periodic_spline_curve_basis,
