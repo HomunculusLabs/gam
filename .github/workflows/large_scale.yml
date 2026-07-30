@@ -389,6 +389,12 @@ jobs:
     needs:
       - resolve-runtime
       - benchmark
+    # A failed method is a measured result and its JSON is usually the most
+    # useful evidence in the run. Override the default success-only `needs`
+    # gate so aggregation still collects every completed method after a red
+    # matrix leg. A cancelled workflow is different: its arbitrary prefix is
+    # not a suite result and must not replace the last complete measurement.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
