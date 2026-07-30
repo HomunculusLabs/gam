@@ -2111,7 +2111,7 @@ mod tests {
             "letx=(*x).clone();",
             "lety=(*y).clone();",
             "value.add_constant(shift,__row_program_workspace)",
-            "S::constant(0.0,__row_program_dimension,__row_program_workspace)",
+            "S::constant(0.0,__row_program_dimension,__row_program_workspace,)",
             "letvalue=shifted.clone();",
             "[curved.value()]",
         ] {
