@@ -542,8 +542,18 @@ bs = BSplines(age.reshape(-1, 1), df=[10], degree=[3])
 exog = sm.add_constant(badh.reshape(-1, 1))
 fam = sm.families.Poisson(link=sm.families.links.Log())
 g = GLMGam(y, exog=exog, smoother=bs, alpha=[1.0], family=fam)
-alpha_opt, _ = g.select_penweight()
-g = GLMGam(y, exog=exog, smoother=bs, alpha=alpha_opt, family=fam)
+# select_penweight() saves and restores `self.scale`/`self.scaletype`, which
+# GLMGam only creates inside `_fit_pirls`. On a never-fitted model it dies with
+# "'GLMGam' object has no attribute 'scale'" INSIDE statsmodels
+# (generalized_additive_model.py). Fit once at the starting alpha first - the
+# order statsmodels' own GAM example uses - then search.
+g.fit()
+# select_penweight() returns a THREE-tuple (alpha, fit_res, history); a
+# two-name unpack raises ValueError. Read element 0, tolerating a bare array.
+sel = g.select_penweight()
+alpha_opt = sel[0] if isinstance(sel, tuple) else sel
+alpha_opt = np.asarray(alpha_opt, dtype=float).reshape(-1)
+g = GLMGam(y, exog=exog, smoother=bs, alpha=list(alpha_opt), family=fam)
 res = g.fit()
 
 # Predict held-out rows: pass the test exog (constant + badh) and the raw test

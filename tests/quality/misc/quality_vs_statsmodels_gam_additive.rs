@@ -187,8 +187,12 @@ fn gam_additive_matches_statsmodels_gam() {
         ],
         r#"
 import numpy as np
-from statsmodels.gam.api import GLMGam, BSplines, CyclicCubicSplines
-from statsmodels.gam.smooth_basis import GenericSmoothers
+from statsmodels.gam.api import GLMGam
+from statsmodels.gam.smooth_basis import (
+    GenericSmoothers,
+    UnivariateBSplines,
+    UnivariateCubicCyclicSplines,
+)
 import statsmodels.api as sm
 
 x1 = np.asarray(df["x1"], dtype=float)
@@ -196,15 +200,30 @@ x2 = np.asarray(df["x2"], dtype=float)
 x3 = np.asarray(df["x3"], dtype=float)
 y  = np.asarray(df["y"],  dtype=float)
 
-# Individual smoothers, each on its own covariate.
-bs1 = BSplines(x1.reshape(-1, 1), df=[10], degree=[3])
-cc2 = CyclicCubicSplines(x2.reshape(-1, 1), df=[8])
-bs3 = BSplines(x3.reshape(-1, 1), df=[12], degree=[3])
+# Individual smoothers, each on its own covariate. These must be the
+# UNIVARIATE components, not the additive wrappers: GenericSmoothers builds
+# its per-term penalty list by reading `.cov_der2` off every child
+# (statsmodels/gam/smooth_basis.py, AdditiveGamSmoother.__init__), and only
+# the Univariate* classes carry that attribute. Handing it BSplines /
+# CyclicCubicSplines (which expose `.penalty_matrices` instead) raises
+# `AttributeError: 'BSplines' object has no attribute 'cov_der2'` before any
+# fit happens. The bases built here are identical to what
+# BSplines(df=[10], degree=[3]) / CyclicCubicSplines(df=[8]) construct
+# internally, one variable at a time.
+bs1 = UnivariateBSplines(x1, df=10, degree=3, variable_name="x1")
+cc2 = UnivariateCubicCyclicSplines(x2, df=8, variable_name="x2")
+bs3 = UnivariateBSplines(x3, df=12, degree=3, variable_name="x3")
 smoothers = GenericSmoothers(np.column_stack([x1, x2, x3]), [bs1, cc2, bs3])
 
 alpha0 = [1.0, 1.0, 1.0]
 gam = GLMGam(y, smoother=smoothers, alpha=alpha0,
              family=sm.families.Gaussian(sm.families.links.Identity()))
+# select_penweight() saves and restores `self.scale`/`self.scaletype`, but
+# GLMGam only creates those attributes inside `_fit_pirls`. Calling it on a
+# never-fitted model therefore dies with "'GLMGam' object has no attribute
+# 'scale'" INSIDE statsmodels. Fit once at the starting alpha first - this is
+# the order statsmodels' own GAM example uses - then search.
+gam.fit()
 # GCV search over the per-smoother penalty weights, then refit at the optimum.
 # select_penweight()'s return shape has varied across statsmodels versions
 # (bare alpha array vs (alpha, ...) tuple); normalize to the alpha vector so a
@@ -412,9 +431,23 @@ k   = int(np.asarray(df["test_n"], dtype=float)[0])
 xte = np.asarray(df["test_range"], dtype=float)[:k]
 
 # Penalized cubic B-spline smoother of range, fit on the TRAINING rows only.
-bs = BSplines(xtr.reshape(-1, 1), df=[20], degree=[3])
+# The boundary knots must span the PREDICTION domain as well as the training
+# domain: the held-out lidar rows include both extremes of `range` (390 and
+# 720) while the training rows stop at 391/718, and statsmodels' B-spline
+# evaluator refuses any point outside its outermost knots
+# ("some data points fall outside the outermost knots"). Only the two boundary
+# knots move; the interior knots stay at the training quantiles.
+lo = float(min(xtr.min(), xte.min()))
+hi = float(max(xtr.max(), xte.max()))
+bs = BSplines(xtr.reshape(-1, 1), df=[20], degree=[3],
+              knot_kwds=[dict(lower_bound=lo, upper_bound=hi)])
 gam = GLMGam(ytr, smoother=bs, alpha=[1.0],
              family=sm.families.Gaussian(sm.families.links.Identity()))
+# select_penweight() reads `self.scale`/`self.scaletype`, which GLMGam only
+# creates inside `_fit_pirls`; on an unfitted model it raises "'GLMGam' object
+# has no attribute 'scale'" inside statsmodels. Fit once at the starting alpha
+# first, then search.
+gam.fit()
 # GCV search over the penalty weight, then refit at the optimum (statsmodels'
 # analogue of gam's REML smoothing-parameter selection).
 sel = gam.select_penweight()
@@ -426,8 +459,13 @@ res = gam.fit()
 
 # Predict the held-out range by mapping the new covariate through the SAME
 # spline basis (bs.transform) and evaluating the fitted GAM there.
-exog_smooth = bs.transform(xte.reshape(-1, 1))
-test_pred = np.asarray(res.predict(exog_smooth=exog_smooth), dtype=float).reshape(-1)
+# `res.predict(exog_smooth=...)` already pushes its argument through the
+# fitted smoother's own basis (GLMGamResults._tranform_predict_exog with
+# transform=True), so it must be handed the RAW covariate. Passing
+# bs.transform(...) applied the basis TWICE: the second pass fed spline-basis
+# values (in [0,1]) to a basis knotted on the lidar range (390..720).
+test_pred = np.asarray(res.predict(exog_smooth=xte.reshape(-1, 1)),
+                       dtype=float).reshape(-1)
 assert test_pred.shape[0] == k, f"expected {k} held-out predictions, got {test_pred.shape}"
 emit("test_pred", test_pred)
 "#,

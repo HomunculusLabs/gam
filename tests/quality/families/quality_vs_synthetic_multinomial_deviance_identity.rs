@@ -305,25 +305,41 @@ fn multinomial_recovers_decision_boundary_on_held_out_split() {
     let r_body = r#"
 suppressMessages(library(mgcv))
 tr <- df[df$is_train > 0.5, ]
-te <- df[df$is_train < 0.5, ]
+te_rows <- df[df$is_train < 0.5, ]
 tr$yc <- as.integer(round(tr$yc))
 # multinom(K) models classes 0..K against reference 0; gam uses K-1=2 active.
-# optimizer: mgcv's DEFAULT outer optimizer is "newton", and on this fit it
-# diverges before returning -- `Error in if (sum(uconv.ind) == 0) ... : missing
-# value where TRUE/FALSE needed` out of `gam.outer -> newton`, which is that
-# routine reading a NaN smoothing gradient. "bfgs" is mgcv's own documented
-# outer alternative for exactly that case. Without it the reference never fits
-# and the arm reports REF_ERROR instead of a comparable log-loss.
+#
+# INTERACTION SPELLING: in mgcv a `te(x1, x2)` tensor product CONTAINS the x1
+# and x2 main effects, so `s(x1) + s(x2) + te(x1, x2)` duplicates that
+# main-effect space and is rank-deficient by construction (see `?ti`, which
+# documents `ti` as the term to use precisely when the main effects are also
+# in the model). The duplicated space is what made the outer
+# smoothing-parameter iteration go NaN: first as
+# `Error in if (sum(uconv.ind) == 0) ... : missing value where TRUE/FALSE
+# needed` under the default "newton" optimizer, and then -- after switching to
+# "bfgs", which only moved where the NaN surfaced -- as
+# `Error in qr.default(...) : NA/NaN/Inf in foreign function call (arg 1)`,
+# raised from `kappa()`, i.e. mgcv taking the condition number of a matrix
+# that had already gone non-finite. `ti()` is mgcv's identifiable spelling of
+# the SAME function space (marginal main effects plus the pure interaction),
+# so the baseline is not weakened, merely written the way mgcv requires. The
+# penalty DECOMPOSITION differs, so the resulting log-loss is a NEW baseline
+# number, not a resumption of the old one.
+# With an identifiable model the stock outer optimizer is fine, so the "bfgs"
+# workaround is dropped; `method = "REML"` is stated explicitly to match the
+# criterion gam minimises (general families use REML regardless).
+#
+# NOTE: the held-out frame is `te_rows`, not `te` -- a data frame named `te`
+# SHADOWS mgcv's `te()` term constructor in the formula environment.
 fit <- gam(
   list(
-    yc ~ s(x1, bs = "cc", k = 8) + s(x2, bs = "tp", k = 5) + te(x1, x2, bs = c("cc","tp")),
-        ~ s(x1, bs = "cc", k = 8) + s(x2, bs = "tp", k = 5) + te(x1, x2, bs = c("cc","tp"))
+    yc ~ s(x1, bs = "cc", k = 8) + s(x2, bs = "tp", k = 5) + ti(x1, x2, bs = c("cc","tp")),
+        ~ s(x1, bs = "cc", k = 8) + s(x2, bs = "tp", k = 5) + ti(x1, x2, bs = c("cc","tp"))
   ),
-  family = multinom(K = 2), data = tr,
-  optimizer = c("outer", "bfgs")
+  family = multinom(K = 2), data = tr, method = "REML"
 )
 # predict type="response" gives P(class=1..K) per row as a (n x K) matrix.
-pr <- predict(fit, newdata = te, type = "response")
+pr <- predict(fit, newdata = te_rows, type = "response")
 pr <- as.matrix(pr)
 if (ncol(pr) == 2) {           # some mgcv builds return only the K active cols
   pr <- cbind(1 - rowSums(pr), pr)
@@ -331,7 +347,7 @@ if (ncol(pr) == 2) {           # some mgcv builds return only the K active cols
 # Clamp + renormalize for a clean simplex.
 pr[pr < 1e-12] <- 1e-12
 pr <- pr / rowSums(pr)
-ytrue <- as.integer(round(te$yc))            # 0-based class codes
+ytrue <- as.integer(round(te_rows$yc))       # 0-based class codes
 pred  <- max.col(pr) - 1L                     # 0-based argmax
 acc <- mean(pred == ytrue)
 ll  <- -mean(log(pr[cbind(seq_len(nrow(pr)), ytrue + 1L)]))
