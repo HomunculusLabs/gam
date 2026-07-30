@@ -62,7 +62,6 @@ pub(crate) struct StartupStats {
     pub solver_started: usize,
     pub rejected_by_kkt: usize,
     pub rejected_by_domain: usize,
-    pub rejected_by_objective: usize,
     pub rejected_by_budget: usize,
     pub rejected_other: usize,
 }
@@ -94,17 +93,36 @@ impl StartupStats {
                 // with `rejected_by_kkt` so the seed-screening
                 // structural early-exit accounting sees it.
                 InnerFailure::IdentifiabilityFailure { .. } => stats.rejected_by_kkt += 1,
-                InnerFailure::Other(msg) => {
-                    if msg.contains("non-finite")
-                        || msg.contains("not finite")
-                        || msg.contains("Infinity")
-                        || msg.contains("inf")
-                    {
-                        stats.rejected_by_objective += 1;
-                    } else {
-                        stats.rejected_other += 1;
-                    }
-                }
+                // `Other` is the variant `classify_inner_error` reaches when
+                // none of its sentinels matched: "still rejected, the cascade
+                // cannot say why". Counting it under a bucket that names a
+                // cause re-asserts by substring exactly what the classifier
+                // just declined to conclude.
+                //
+                // The bucket this used to feed, `rejected_by_objective`, is
+                // gone rather than repaired, because it had no correct
+                // producer to repair it for (gam#2651):
+                //
+                //   * `non-finite` / `not finite` were unreachable here —
+                //     `classify_inner_error` routes both to `LikelihoodFailure`
+                //     before this point, i.e. to `rejected_by_domain`, which is
+                //     where a genuinely non-finite objective has always been
+                //     counted;
+                //   * `Infinity` is subsumed by `inf`, which is tested first;
+                //   * `inf` matched EVERY joint-Newton refusal, because the
+                //     terminal-state Display renders the field NAME `step_inf=`.
+                //     Measured on the binomial location-scale wiggle spatial
+                //     fixture: four non-convergences with finite beta and finite
+                //     objective reported as `rejected_by_objective=4`, which sent
+                //     a reader hunting a non-finite objective that never existed.
+                //
+                // So the test could never separate anything: `rejected_other`
+                // was unreachable for that whole family and the bucket was a
+                // confident wrong label. This is the same defect
+                // `classify_inner_error` records thirty lines above for
+                // `rejected_by_budget`, and it gets the same answer — an honest
+                // "unclassified" beats a confident wrong label.
+                InnerFailure::Other(_) => stats.rejected_other += 1,
             }
         }
         stats
@@ -113,7 +131,6 @@ impl StartupStats {
     pub(crate) fn total_rejected(&self) -> usize {
         self.rejected_by_kkt
             + self.rejected_by_domain
-            + self.rejected_by_objective
             + self.rejected_by_budget
             + self.rejected_other
     }
@@ -209,14 +226,30 @@ fn eligible_for_generic_structural_bail(failure: &InnerFailure) -> bool {
         | InnerFailure::TrustRegionFloor { .. }
         | InnerFailure::IdentifiabilityFailure { .. } => true,
         InnerFailure::LikelihoodFailure(_) => false,
-        InnerFailure::Other(message) => {
-            let lower = message.to_ascii_lowercase();
-            !(lower.contains("non-finite")
-                || lower.contains("not finite")
-                || lower.contains("nan")
-                || lower.contains("infinite"))
-        }
+        // The only prose reader of `Other` left in this file (gam#2651). It is
+        // a conservative backstop, not a classifier: `Other` by construction has
+        // no type to consult, and the cost of a false "structural" here is the
+        // #1802 failure above, so anything that even looks non-finite is denied
+        // the bail. `non-finite` / `not finite` are deliberately absent —
+        // `classify_inner_error` routes both to `LikelihoodFailure`, which this
+        // function already answers `false` for, so testing them here only
+        // created a second needle list free to drift from the first (gam#2593).
+        InnerFailure::Other(message) => !message_may_report_non_finite(message),
     }
+}
+
+/// Does this unclassified message look like it is reporting a non-finite
+/// quantity? Deliberately over-broad and deliberately NOT a classifier: the
+/// only caller uses it to withhold a structural verdict, where a false positive
+/// costs one extra seed attempt and a false negative costs the whole fit.
+///
+/// It is a named function rather than an inline needle list so there is exactly
+/// one place to read, and so that a future second reader has something to share
+/// instead of a second list — the drift that made two classifiers of one
+/// message disagree in gam#2651 and gam#2593.
+fn message_may_report_non_finite(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("nan") || lower.contains("infinite")
 }
 
 /// Signed order-of-magnitude bucket of the dominant diagnostic numeric:
@@ -472,10 +505,9 @@ pub(crate) fn format_no_seeds_passed(
     writeln!(
         &mut out,
         "  rejection breakdown: rejected_by_kkt={}, rejected_by_domain={}, \
-         rejected_by_objective={}, rejected_by_budget={}, rejected_other={} (total={})",
+         rejected_by_budget={}, rejected_other={} (total={})",
         stats.rejected_by_kkt,
         stats.rejected_by_domain,
-        stats.rejected_by_objective,
         stats.rejected_by_budget,
         stats.rejected_other,
         stats.total_rejected(),
@@ -586,6 +618,82 @@ mod tests {
             structural_key(&phantom).is_none(),
             "well-conditioned phantom multipliers are rho-local certificate refusals, not structural seed-loop keys"
         );
+    }
+
+    /// gam#2651: a joint-Newton non-convergence must not be counted under a
+    /// bucket that names a cause it cannot know. The message is the real one —
+    /// `InnerConvergenceTerminalState::JointNewton`'s Display renders the field
+    /// NAME `step_inf=`, which is what the deleted `rejected_by_objective`
+    /// substring test matched on every such refusal.
+    #[test]
+    fn joint_newton_non_convergence_is_unclassified_not_an_objective_failure_2651() {
+        // Verbatim shape of the refusal, from the binomial location-scale
+        // wiggle spatial fixture at origin/main.
+        let message = "custom-family inner solve did not converge after 48 cycle(s)             [joint-Newton terminal cycle 47: stationarity_residual=6.950377e-1             (tol=1.677281e-11), step_inf=1.734422e0 (tol=1.026406e-10),             resolvable_negative_curvature=false, best_stationarity_residual=8.095899e-3             (last improved 4 cycle(s) before this one)]"
+            .to_string();
+
+        // The trap must still be present in the input, or this test proves
+        // nothing about the classification that has to survive it.
+        assert!(
+            message.contains("inf"),
+            "fixture must still carry the `inf` substring the old test matched;              if the terminal-state field names changed, re-derive this fixture              from a real refusal rather than deleting the assertion"
+        );
+        assert!(
+            !message.contains("non-finite") && !message.contains("NaN"),
+            "fixture must NOT claim a non-finite quantity: the point is that a              finite-beta, finite-objective refusal was being counted as one"
+        );
+
+        let rejection = SeedRejection::from_message(0, "validation", message);
+        assert!(
+            matches!(rejection.failure, InnerFailure::Other(_)),
+            "a non-convergence with no budget/floor/cert/domain sentinel is              unclassified, got {:?}",
+            rejection.failure
+        );
+
+        let stats = StartupStats::from_rejections(4, 4, 4, 0, &[rejection]);
+        assert_eq!(
+            stats.rejected_other, 1,
+            "an unclassified refusal belongs in `rejected_other`"
+        );
+        assert_eq!(stats.rejected_by_domain, 0, "nothing here reported a domain failure");
+        assert_eq!(stats.rejected_by_kkt, 0, "no certificate refusal was produced");
+        assert_eq!(stats.rejected_by_budget, 0, "no budget was reported exhausted");
+        assert_eq!(stats.total_rejected(), 1);
+
+        // The rendered breakdown must not offer a bucket with no producer.
+        let rendered = format_no_seeds_passed(
+            "custom family",
+            &StartupStats::from_rejections(4, 4, 4, 0, &[]),
+            &[],
+            None,
+            "",
+        );
+        assert!(
+            !rendered.contains("rejected_by_objective"),
+            "the breakdown must not print a bucket nothing can correctly produce, got:
+{rendered}"
+        );
+    }
+
+    /// Non-vacuity for the above: a refusal that genuinely reports a non-finite
+    /// quantity is still counted, and still counted as a DOMAIN failure — the
+    /// bucket a non-finite objective has always belonged in.
+    #[test]
+    fn genuinely_non_finite_refusal_is_still_counted_as_domain_2651() {
+        let rejection = SeedRejection::from_message(
+            0,
+            "validation",
+            "custom-family objective returned a non-finite cost at the seed".to_string(),
+        );
+        assert!(
+            matches!(rejection.failure, InnerFailure::LikelihoodFailure(_)),
+            "a non-finite report is a likelihood/domain failure, got {:?}",
+            rejection.failure
+        );
+        let stats = StartupStats::from_rejections(1, 1, 1, 0, &[rejection]);
+        assert_eq!(stats.rejected_by_domain, 1, "a real non-finite failure must still be counted");
+        assert_eq!(stats.rejected_other, 0, "and must not fall through to unclassified");
+        assert_eq!(stats.total_rejected(), 1);
     }
 
     #[test]
