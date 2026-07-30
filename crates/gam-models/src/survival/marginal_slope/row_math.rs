@@ -156,19 +156,35 @@ pub(crate) fn survival_rigid_pilot_eta(
 /// the chain factor `dη₁/dq = c(g)` is absorbed into a per-row scaling of
 /// the location anchor before the solve.
 ///
-/// Returns `(eta1, beta_logslope)`: the per-row observed index `eta1` (used by
+/// Returns a [`NonRigidPilot`]: the per-row observed index `eta1` (used by
 /// the cross-block W metric, unchanged from the legacy scalar return) AND the
-/// one-step IRLS estimate of the logslope-surface coefficients `beta_logslope`
-/// (the `G`-block portion of the joint Newton step). The latter is the #808
-/// operating-point WARM START for the logslope block's `initial_beta`: on
-/// clustered-PC designs the logslope block is EXACTLY W-null at the `g = 0`
-/// seed (the slope-channel IRLS weight vanishes at the null slope), so the
-/// inner joint-Newton cannot take its first step and freezes; seeding the
-/// block at the pilot's `g ≈ 0.3` operating point (where the slope channel
-/// carries information and the block is full-rank) breaks the chicken-and-egg
-/// and lets the inner converge to the true data optimum — preserving the
-/// log-slope estimand rather than dropping/pinning it. Self-correcting: it is
-/// just a warm start, so the converged fit is the data optimum (zero bias).
+/// one-step IRLS estimate of the joint coefficients, split back into the
+/// `[T_exit | M]` location half and the `G` logslope half.
+///
+/// `logslope_beta` is the #808 operating-point WARM START for the logslope
+/// block's `initial_beta`: on clustered-PC designs the logslope block is
+/// EXACTLY W-null at the `g = 0` seed (the slope-channel IRLS weight vanishes
+/// at the null slope), so the inner joint-Newton cannot take its first step
+/// and freezes; seeding the block at the pilot's `g ≈ 0.3` operating point
+/// (where the slope channel carries information and the block is full-rank)
+/// breaks the chicken-and-egg and lets the inner converge to the true data
+/// optimum — preserving the log-slope estimand rather than dropping/pinning
+/// it. Self-correcting: it is just a warm start, so the converged fit is the
+/// data optimum (zero bias).
+///
+/// `location_beta` is the `[T_exit | M]` half of the SAME joint Newton step
+/// (#2627). It used to be computed, folded into `q_delta` for the η₁ return,
+/// and then dropped on the floor — leaving the time and marginal blocks to
+/// cold-start at β = 0 (the guard-linear baseline `q'(t) ≡ derivative_guard`)
+/// on an objective that is not concave in the joint β, because the effective
+/// row weight `c(g) = √(1 + s(g)²)` couples the logslope coefficients
+/// multiplicatively with the location ones. Every ρ-seed's validation fit then
+/// started from the same out-of-basin point and refused, which surfaces as
+/// `solver_started = 0` — the outer ρ-search never begins and the fit measures
+/// none of its own subject. Returning this half costs nothing (it is already
+/// solved for) and is the exact analogue of the #1108 latent-survival repair:
+/// only the STARTING POINT moves. The exact objective, gradient and Hessian
+/// are untouched, so the reported MLE is unchanged.
 pub(crate) fn survival_nonrigid_pilot_eta(
     n: usize,
     location_anchor_design: &DesignMatrix,
@@ -181,7 +197,7 @@ pub(crate) fn survival_nonrigid_pilot_eta(
     sample_weights: &Array1<f64>,
     event: &Array1<f64>,
     probit_scale: f64,
-) -> Result<(Array1<f64>, Array1<f64>), String> {
+) -> Result<NonRigidPilot, String> {
     if location_anchor_design.nrows() != n
         || logslope_design.nrows() != n
         || z_primary.len() != n
@@ -208,8 +224,8 @@ pub(crate) fn survival_nonrigid_pilot_eta(
     let p_g = logslope_design.ncols();
     let p_joint = p_loc + p_g;
     if p_joint == 0 {
-        return Ok((
-            survival_rigid_pilot_eta(
+        return Ok(NonRigidPilot {
+            eta1: survival_rigid_pilot_eta(
                 n,
                 z_primary,
                 offset_exit,
@@ -218,8 +234,9 @@ pub(crate) fn survival_nonrigid_pilot_eta(
                 baseline_slope,
                 probit_scale,
             ),
-            Array1::<f64>::zeros(p_g),
-        ));
+            location_beta: Array1::<f64>::zeros(p_loc),
+            logslope_beta: Array1::<f64>::zeros(p_g),
+        });
     }
     // Starting pilot (offset-only). Decompose into q_exit and slope so the
     // chain rule below can attribute the η₁ Newton step back to each piece.
@@ -417,9 +434,27 @@ pub(crate) fn survival_nonrigid_pilot_eta(
         };
         pilot_eta[i] = capped;
     }
-    // Logslope-surface warm start (#808): the finite `G`-block portion of the
-    // joint Newton step seeds the logslope block off the W-null `g = 0` point.
-    Ok((pilot_eta, beta_g))
+    // Warm starts (#808 logslope, #2627 location). Both halves of the SAME
+    // joint Newton step; `beta_step` was already finite-checked above, so
+    // neither half can carry a non-finite entry past this point.
+    Ok(NonRigidPilot {
+        eta1: pilot_eta,
+        location_beta: beta_loc,
+        logslope_beta: beta_g,
+    })
+}
+
+/// One-step non-rigid pilot output: the per-row η₁ the cross-block W metric
+/// consumes, plus both halves of the joint Newton step that produced it.
+///
+/// `location_beta` is laid out exactly as the `location_anchor_design` passed
+/// to [`survival_nonrigid_pilot_eta`] — `[time_exit | marginal]` — so the
+/// caller splits it at the time design's column count. Every entry of both
+/// vectors is finite by construction.
+pub(crate) struct NonRigidPilot {
+    pub(crate) eta1: Array1<f64>,
+    pub(crate) location_beta: Array1<f64>,
+    pub(crate) logslope_beta: Array1<f64>,
 }
 
 pub fn survival_marginal_slope_vector_scale(
