@@ -4624,39 +4624,68 @@ impl SaeSupportSparseTerm {
                     // decoders is a strict decrease of its own objective, so
                     // this test accepts everything the unpolished one accepted
                     // and additionally the moves quantization was vetoing.
-                    moved.solve_coordinates_fixed_decoder(
+                    // A proposal that cannot be polished is a REJECTED proposal,
+                    // never a dead fit.
+                    //
+                    // This branch runs INSIDE `candidate && previous_candidate`:
+                    // the certificate has already been met, and the code
+                    // immediately below it returns that certificate. So a bare
+                    // `?` on the polish threw away a stationary,
+                    // certificate-meeting incumbent because a speculative move
+                    // nobody asked for would not converge — and it reported the
+                    // PROPOSAL's non-convergence as the whole fit's error, from a
+                    // function whose caller has no way to know a proposal was
+                    // ever made.
+                    //
+                    // The plateau branch below already refuses to make that
+                    // trade, for this reason, in these words. This one did not.
+                    // Measured on `examples/issue_2575_joint_rate`: the
+                    // `n=120 P=8 K=12 s=2` arm reaches certified 5.793e-7 against
+                    // a 1e-6 tolerance and is nonetheless reported as stalled,
+                    // carrying `solve_coordinates_fixed_decoder did not recur
+                    // within 256 cycles` as its refusal (#2575).
+                    match moved.solve_coordinates_fixed_decoder(
                         target,
                         ard_precisions,
                         max_iter,
                         tolerance,
                         trust_radius,
-                    )?;
-                    let after =
-                        moved.penalized_objective(target, lambda_smooth, ard_precisions)?;
-                    if after < objective {
-                        log::info!(
-                            "support move accepted at cycle {iteration}: objective \
-                             {objective:.6e} -> {after:.6e}"
-                        );
-                        *self = moved;
-                        self.reconstruct_into(&mut fitted_state)?;
-                        last_reroute_cycle = iteration;
-                        objective_at_last_reroute = after;
-                        // The map itself changed, so every difference the
-                        // accelerator holds describes a map that no longer
-                        // exists, and the two-cycle recurrence has to be
-                        // re-established against the new support.
-                        accelerator.reset();
-                        taken_step.clear();
-                        taken_step.resize(self.coordinate_state_len(), 0.0);
-                        last_objective = None;
-                        previous_candidate = false;
-                        continue;
+                    ) {
+                        Err(error) => {
+                            log::info!(
+                                "support move unpolishable at cycle {iteration}, \
+                                 rejected: {error}"
+                            );
+                        }
+                        Ok(_) => {
+                            let after = moved
+                                .penalized_objective(target, lambda_smooth, ard_precisions)?;
+                            if after < objective {
+                                log::info!(
+                                    "support move accepted at cycle {iteration}: objective \
+                                     {objective:.6e} -> {after:.6e}"
+                                );
+                                *self = moved;
+                                self.reconstruct_into(&mut fitted_state)?;
+                                last_reroute_cycle = iteration;
+                                objective_at_last_reroute = after;
+                                // The map itself changed, so every difference the
+                                // accelerator holds describes a map that no longer
+                                // exists, and the two-cycle recurrence has to be
+                                // re-established against the new support.
+                                accelerator.reset();
+                                taken_step.clear();
+                                taken_step.resize(self.coordinate_state_len(), 0.0);
+                                last_objective = None;
+                                previous_candidate = false;
+                                continue;
+                            }
+                            log::info!(
+                                "support move rejected at cycle {iteration}: objective \
+                                 {objective:.6e} -> {after:.6e}"
+                            );
+                        }
                     }
-                    log::info!(
-                        "support move rejected at cycle {iteration}: objective \
-                         {objective:.6e} -> {after:.6e}"
-                    );
                 }
                 log::info!(
                     "support fixed-point cycle {iteration}: raw KKT max={:.3e} rel={:.3e} \
