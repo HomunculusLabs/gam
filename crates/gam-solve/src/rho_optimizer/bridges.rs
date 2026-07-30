@@ -2262,6 +2262,63 @@ pub(crate) fn first_order_inner_cap_schedule(
 #[path = "inner_cap_schedule_tests.rs"]
 mod inner_cap_schedule_tests;
 
+
+/// Apply the accepted-iter inner-PIRLS cap schedule shared by the two ARC
+/// bridges. `OuterFirstOrderBridge::eval_grad` and
+/// `OuterSecondOrderBridge::eval_hessian` drive it from the same three fields,
+/// so one body keeps the logged transition identical across both. The BFGS and
+/// operator bridges use different schedule inputs and keep their own.
+fn apply_arc_inner_cap_schedule(
+    outer_inner_cap: Option<&InnerProgressFeedback>,
+    last_g_norm: Option<f64>,
+    g_norm_initial: Option<f64>,
+) {
+if let Some(feedback) = outer_inner_cap {
+    // Use the observer-fed accepted-iter counter (opt 0.5.0
+    // OptimizerObserver) instead of `eval_count / 2`; the
+    // observer increments only on rho-accepted steps, so the
+    // schedule no longer relaxes the cap on rejected trials.
+    let arc_iter = feedback.accepted_iter.load(Ordering::Relaxed);
+    let g_ratio = match (last_g_norm, g_norm_initial) {
+        (Some(g), Some(g0)) if g0 > 0.0 => Some(g / g0),
+        _ => None,
+    };
+    let snapshot = feedback.snapshot();
+    let cap = first_order_inner_cap_schedule(arc_iter, g_ratio, snapshot);
+    let prev = feedback.cap.swap(cap, Ordering::Relaxed);
+    if prev != cap {
+        let ratio_str = match g_ratio {
+            Some(r) => format!("{:.3e}", r),
+            None => "n/a".to_string(),
+        };
+        let snap_str = match snapshot {
+            Some(s) => format!(
+                "last_iters={} converged={} ift_residual={} accept_rho={}",
+                s.last_iters,
+                s.last_converged,
+                match s.last_ift_residual {
+                    Some(r) => format!("{:.3e}", r),
+                    None => "n/a".to_string(),
+                },
+                match s.last_accept_rho {
+                    Some(r) => format!("{:.3}", r),
+                    None => "n/a".to_string(),
+                },
+            ),
+            None => "no-history".to_string(),
+        };
+        log::info!(
+            "[OUTER schedule] inner-PIRLS cap transition (ARC bridge) arc_iter={} g_ratio={} {} prev={} new={} ({})",
+            arc_iter,
+            ratio_str,
+            snap_str,
+            prev,
+            cap,
+            if cap == 0 { "uncapped" } else { "capped" }
+        );
+    }
+}
+}
 pub(crate) struct OuterSecondOrderBridge<'a> {
     pub(crate) obj: &'a mut dyn OuterObjective,
     pub(crate) layout: OuterThetaLayout,
@@ -2359,56 +2416,11 @@ impl ZerothOrderObjective for OuterSecondOrderBridge<'_> {
 impl FirstOrderObjective for OuterSecondOrderBridge<'_> {
     fn eval_grad(&mut self, x: &Array1<f64>) -> Result<FirstOrderSample, ObjectiveEvalError> {
         self.layout.validate_point_len(x, "outer eval failed")?;
-        if let Some(feedback) = self.outer_inner_cap.as_ref() {
-            // The ARC bridge increments `eval_count` in BOTH `eval_grad` and
-            // `eval_hessian`. ARC calls both per outer iter, so `eval_count
-            // / 2` is the correct iter index for the schedule. Without this
-            // divisor the schedule would lift to full inner-cap at ARC iter
-            // 3 instead of iter 6.
-            // Use the observer-fed accepted-iter counter (opt 0.5.0
-            // OptimizerObserver) instead of `eval_count / 2`; the
-            // observer increments only on rho-accepted steps, so the
-            // schedule no longer relaxes the cap on rejected trials.
-            let arc_iter = feedback.accepted_iter.load(Ordering::Relaxed);
-            let g_ratio = match (self.last_g_norm, self.g_norm_initial) {
-                (Some(g), Some(g0)) if g0 > 0.0 => Some(g / g0),
-                _ => None,
-            };
-            let snapshot = feedback.snapshot();
-            let cap = first_order_inner_cap_schedule(arc_iter, g_ratio, snapshot);
-            let prev = feedback.cap.swap(cap, Ordering::Relaxed);
-            if prev != cap {
-                let ratio_str = match g_ratio {
-                    Some(r) => format!("{:.3e}", r),
-                    None => "n/a".to_string(),
-                };
-                let snap_str = match snapshot {
-                    Some(s) => format!(
-                        "last_iters={} converged={} ift_residual={} accept_rho={}",
-                        s.last_iters,
-                        s.last_converged,
-                        match s.last_ift_residual {
-                            Some(r) => format!("{:.3e}", r),
-                            None => "n/a".to_string(),
-                        },
-                        match s.last_accept_rho {
-                            Some(r) => format!("{:.3}", r),
-                            None => "n/a".to_string(),
-                        },
-                    ),
-                    None => "no-history".to_string(),
-                };
-                log::info!(
-                    "[OUTER schedule] inner-PIRLS cap transition (ARC bridge) arc_iter={} g_ratio={} {} prev={} new={} ({})",
-                    arc_iter,
-                    ratio_str,
-                    snap_str,
-                    prev,
-                    cap,
-                    if cap == 0 { "uncapped" } else { "capped" }
-                );
-            }
-        }
+        apply_arc_inner_cap_schedule(
+            self.outer_inner_cap.as_ref(),
+            self.last_g_norm,
+            self.g_norm_initial,
+        );
         let stage_start = std::time::Instant::now();
         log::info!(
             "[STAGE] outer eval start order=ValueAndGradient dim={}",
@@ -2660,51 +2672,11 @@ impl OuterSecondOrderBridge<'_> {
 impl SecondOrderObjective for OuterSecondOrderBridge<'_> {
     fn eval_hessian(&mut self, x: &Array1<f64>) -> Result<SecondOrderSample, ObjectiveEvalError> {
         self.layout.validate_point_len(x, "outer eval failed")?;
-        if let Some(feedback) = self.outer_inner_cap.as_ref() {
-            // Use the observer-fed accepted-iter counter (opt 0.5.0
-            // OptimizerObserver) instead of `eval_count / 2`; the
-            // observer increments only on rho-accepted steps, so the
-            // schedule no longer relaxes the cap on rejected trials.
-            let arc_iter = feedback.accepted_iter.load(Ordering::Relaxed);
-            let g_ratio = match (self.last_g_norm, self.g_norm_initial) {
-                (Some(g), Some(g0)) if g0 > 0.0 => Some(g / g0),
-                _ => None,
-            };
-            let snapshot = feedback.snapshot();
-            let cap = first_order_inner_cap_schedule(arc_iter, g_ratio, snapshot);
-            let prev = feedback.cap.swap(cap, Ordering::Relaxed);
-            if prev != cap {
-                let ratio_str = match g_ratio {
-                    Some(r) => format!("{:.3e}", r),
-                    None => "n/a".to_string(),
-                };
-                let snap_str = match snapshot {
-                    Some(s) => format!(
-                        "last_iters={} converged={} ift_residual={} accept_rho={}",
-                        s.last_iters,
-                        s.last_converged,
-                        match s.last_ift_residual {
-                            Some(r) => format!("{:.3e}", r),
-                            None => "n/a".to_string(),
-                        },
-                        match s.last_accept_rho {
-                            Some(r) => format!("{:.3}", r),
-                            None => "n/a".to_string(),
-                        },
-                    ),
-                    None => "no-history".to_string(),
-                };
-                log::info!(
-                    "[OUTER schedule] inner-PIRLS cap transition (ARC bridge) arc_iter={} g_ratio={} {} prev={} new={} ({})",
-                    arc_iter,
-                    ratio_str,
-                    snap_str,
-                    prev,
-                    cap,
-                    if cap == 0 { "uncapped" } else { "capped" }
-                );
-            }
-        }
+        apply_arc_inner_cap_schedule(
+            self.outer_inner_cap.as_ref(),
+            self.last_g_norm,
+            self.g_norm_initial,
+        );
         let stage_start = std::time::Instant::now();
         log::info!(
             "[STAGE] outer eval start order=ValueGradientHessian dim={}",

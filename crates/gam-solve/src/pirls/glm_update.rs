@@ -55,6 +55,69 @@ fn certify_bernoulli_rows(
     rows.into_iter().collect()
 }
 
+/// Scatter certified Bernoulli rows into the PIRLS working vectors, and into
+/// the working-derivative buffers when the caller supplied them. The closed-form
+/// and integrated link updates differ only in how they certify the rows; this
+/// write-out is the same for both.
+fn scatter_certified_bernoulli_rows(
+    certified: &[CertifiedBernoulliRow],
+    mu: &mut Array1<f64>,
+    weights: &mut Array1<f64>,
+    z: &mut Array1<f64>,
+    derivatives: Option<WorkingDerivativeBuffersMut<'_>>,
+) {
+    if let Some(mut derivs) = derivatives {
+        let WorkingSlices {
+            mu: mu_s,
+            weights: weights_s,
+            z: z_s,
+        } = working_slices(mu, weights, z);
+        let WorkingDerivSlices {
+            c: c_s,
+            d: d_s,
+            dmu: dmu_s,
+            d2: d2_s,
+            d3: d3_s,
+        } = working_deriv_slices(&mut derivs);
+        mu_s.par_iter_mut()
+            .zip(weights_s.par_iter_mut())
+            .zip(z_s.par_iter_mut())
+            .zip(c_s.par_iter_mut())
+            .zip(d_s.par_iter_mut())
+            .zip(dmu_s.par_iter_mut())
+            .zip(d2_s.par_iter_mut())
+            .zip(d3_s.par_iter_mut())
+            .zip(certified.par_iter())
+            .for_each(
+                |((((((((mu_o, w_o), z_o), c_o), d_o), dmu_o), d2_o), d3_o), row)| {
+                    *mu_o = row.geometry.mu;
+                    *w_o = row.geometry.weight;
+                    *z_o = row.geometry.z;
+                    *c_o = row.geometry.c;
+                    *d_o = row.geometry.d;
+                    *dmu_o = row.jet.d1;
+                    *d2_o = row.jet.d2;
+                    *d3_o = row.jet.d3;
+                },
+            );
+    } else {
+        let WorkingSlices {
+            mu: mu_s,
+            weights: weights_s,
+            z: z_s,
+        } = working_slices(mu, weights, z);
+        mu_s.par_iter_mut()
+            .zip(weights_s.par_iter_mut())
+            .zip(z_s.par_iter_mut())
+            .zip(certified.par_iter())
+            .for_each(|(((mu_o, w_o), z_o), row)| {
+                *mu_o = row.geometry.mu;
+                *w_o = row.geometry.weight;
+                *z_o = row.geometry.z;
+            });
+    }
+}
+
 pub fn update_glmvectors(
     y: ArrayView1<f64>,
     eta: &Array1<f64>,
@@ -75,56 +138,7 @@ pub fn update_glmvectors(
         | LinkFunction::Sas
         | LinkFunction::BetaLogistic => {
             let certified = certify_bernoulli_rows(y, eta, inverse_link, priorweights)?;
-            if let Some(mut derivs) = derivatives {
-                let WorkingSlices {
-                    mu: mu_s,
-                    weights: weights_s,
-                    z: z_s,
-                } = working_slices(mu, weights, z);
-                let WorkingDerivSlices {
-                    c: c_s,
-                    d: d_s,
-                    dmu: dmu_s,
-                    d2: d2_s,
-                    d3: d3_s,
-                } = working_deriv_slices(&mut derivs);
-                mu_s.par_iter_mut()
-                    .zip(weights_s.par_iter_mut())
-                    .zip(z_s.par_iter_mut())
-                    .zip(c_s.par_iter_mut())
-                    .zip(d_s.par_iter_mut())
-                    .zip(dmu_s.par_iter_mut())
-                    .zip(d2_s.par_iter_mut())
-                    .zip(d3_s.par_iter_mut())
-                    .zip(certified.par_iter())
-                    .for_each(
-                        |((((((((mu_o, w_o), z_o), c_o), d_o), dmu_o), d2_o), d3_o), row)| {
-                            *mu_o = row.geometry.mu;
-                            *w_o = row.geometry.weight;
-                            *z_o = row.geometry.z;
-                            *c_o = row.geometry.c;
-                            *d_o = row.geometry.d;
-                            *dmu_o = row.jet.d1;
-                            *d2_o = row.jet.d2;
-                            *d3_o = row.jet.d3;
-                        },
-                    );
-            } else {
-                let WorkingSlices {
-                    mu: mu_s,
-                    weights: weights_s,
-                    z: z_s,
-                } = working_slices(mu, weights, z);
-                mu_s.par_iter_mut()
-                    .zip(weights_s.par_iter_mut())
-                    .zip(z_s.par_iter_mut())
-                    .zip(certified.par_iter())
-                    .for_each(|(((mu_o, w_o), z_o), row)| {
-                        *mu_o = row.geometry.mu;
-                        *w_o = row.geometry.weight;
-                        *z_o = row.geometry.z;
-                    });
-            }
+            scatter_certified_bernoulli_rows(&certified, mu, weights, z, derivatives);
             Ok(())
         }
         LinkFunction::Identity => {
@@ -312,56 +326,7 @@ pub fn update_glmvectors_integrated_for_link(
         })
         .collect();
     let certified: Vec<CertifiedBernoulliRow> = certified.into_iter().collect::<Result<_, _>>()?;
-    if let Some(mut derivs) = derivatives {
-        let WorkingSlices {
-            mu: mu_s,
-            weights: weights_s,
-            z: z_s,
-        } = working_slices(mu, weights, z);
-        let WorkingDerivSlices {
-            c: c_s,
-            d: d_s,
-            dmu: dmu_s,
-            d2: d2_s,
-            d3: d3_s,
-        } = working_deriv_slices(&mut derivs);
-        mu_s.par_iter_mut()
-            .zip(weights_s.par_iter_mut())
-            .zip(z_s.par_iter_mut())
-            .zip(c_s.par_iter_mut())
-            .zip(d_s.par_iter_mut())
-            .zip(dmu_s.par_iter_mut())
-            .zip(d2_s.par_iter_mut())
-            .zip(d3_s.par_iter_mut())
-            .zip(certified.par_iter())
-            .for_each(
-                |((((((((mu_o, w_o), z_o), c_o), d_o), dmu_o), d2_o), d3_o), row)| {
-                    *mu_o = row.geometry.mu;
-                    *w_o = row.geometry.weight;
-                    *z_o = row.geometry.z;
-                    *c_o = row.geometry.c;
-                    *d_o = row.geometry.d;
-                    *dmu_o = row.jet.d1;
-                    *d2_o = row.jet.d2;
-                    *d3_o = row.jet.d3;
-                },
-            );
-    } else {
-        let WorkingSlices {
-            mu: mu_s,
-            weights: weights_s,
-            z: z_s,
-        } = working_slices(mu, weights, z);
-        mu_s.par_iter_mut()
-            .zip(weights_s.par_iter_mut())
-            .zip(z_s.par_iter_mut())
-            .zip(certified.par_iter())
-            .for_each(|(((mu_o, w_o), z_o), row)| {
-                *mu_o = row.geometry.mu;
-                *w_o = row.geometry.weight;
-                *z_o = row.geometry.z;
-            });
-    }
+    scatter_certified_bernoulli_rows(&certified, mu, weights, z, derivatives);
     Ok(())
 }
 
