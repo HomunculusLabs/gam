@@ -174,15 +174,52 @@ jobs:
             # `library(gamboostLSS)`.
             cp -a "${R_LIBS_USER}/." bench/runtime/r-lib/
             python3 -m pip install --upgrade pip setuptools wheel
-            python3 -m pip install --target bench/runtime/pydeps numpy pandas scikit-learn lifelines scikit-survival xgboost matplotlib
+            BENCH_PYTHON_PACKAGES="$(sed -n 's/^python-packages=//p' \
+              bench/runtime-dependencies.txt)"
+            if [ -z "${BENCH_PYTHON_PACKAGES}" ]; then
+              echo "::error title=Missing benchmark dependencies::bench/runtime-dependencies.txt has no python-packages entry."
+              exit 1
+            fi
+            IFS=',' read -r -a bench_python_packages <<< "${BENCH_PYTHON_PACKAGES}"
+            python3 -m pip install --target bench/runtime/pydeps \
+              "${bench_python_packages[@]}"
           fi
 
-      - name: Verify staged R library is complete
+      - name: Verify staged runtime is complete
         shell: bash
         env:
+          STAGED_PYDEPS: ${{ github.workspace }}/bench/runtime/pydeps
           STAGED_R_LIB: ${{ github.workspace }}/bench/runtime/r-lib
         run: |
           set -euo pipefail
+          # Every imported module must resolve inside the staged artifact.
+          # Merely importing against the runner's system site-packages would
+          # let an incomplete cache pass here and fail later in clean shards.
+          PYTHONNOUSERSITE=1 PYTHONPATH="${STAGED_PYDEPS}" python3 - <<'PY'
+          import importlib
+          import os
+          from pathlib import Path
+
+          staged = Path(os.environ["STAGED_PYDEPS"]).resolve()
+          modules = (
+              "numpy",
+              "pandas",
+              "pyarrow",
+              "sklearn",
+              "lifelines",
+              "sksurv",
+              "xgboost",
+              "matplotlib",
+          )
+          for name in modules:
+              module = importlib.import_module(name)
+              origin = Path(module.__file__).resolve()
+              if not origin.is_relative_to(staged):
+                  raise RuntimeError(
+                      f"{name} resolved outside staged pydeps: {origin}"
+                  )
+          print("staged Python runtime OK; all required packages loadable")
+          PY
           # Run the same `library(...)` smoke check the shards run, but
           # do it here, ONCE, against the staged `bench/runtime/r-lib` so
           # a missing R package fails the bootstrap (and refuses to save

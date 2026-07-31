@@ -67,7 +67,14 @@ runs:
         python3 --version
         Rscript --version
         python3 -m pip install --upgrade pip setuptools wheel
-        python3 -m pip install numpy pandas scikit-learn lifelines scikit-survival xgboost
+        BENCH_PYTHON_PACKAGES="$(sed -n 's/^python-packages=//p' \
+          "${GITHUB_WORKSPACE:?}/bench/runtime-dependencies.txt")"
+        if [ -z "${BENCH_PYTHON_PACKAGES}" ]; then
+          echo "::error title=Missing benchmark dependencies::bench/runtime-dependencies.txt has no python-packages entry."
+          exit 1
+        fi
+        IFS=',' read -r -a bench_python_packages <<< "${BENCH_PYTHON_PACKAGES}"
+        python3 -m pip install "${bench_python_packages[@]}"
         # Prefer Posit's binary CRAN mirror (set by r-lib/actions/setup-r as
         # RSPM) for fast, reliable Linux binary installs. Source builds from
         # cloud.r-project.org regularly fail on the runner for packages with

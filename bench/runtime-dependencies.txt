@@ -6,5 +6,5 @@
 # file and therefore produce a new exact cache key.
 python=3.11
 r=4.4.3
-python-packages=numpy,pandas,scikit-learn,lifelines,scikit-survival,xgboost,matplotlib
+python-packages=numpy,pandas,pyarrow,scikit-learn,lifelines,scikit-survival,xgboost,matplotlib
 r-packages=mgcv,jsonlite,survival,glmnet,gamlss,gamlss.dist,gamboostLSS,mboost,bamlss,brms
