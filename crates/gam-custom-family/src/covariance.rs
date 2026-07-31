@@ -778,6 +778,21 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm_from_gradient(
     // mis-refuses a genuinely-optimal constrained iterate. `None` ⇒ no box path
     // (byte-identical to the pre-fix / linear-constraint behaviour).
     joint_lower_bounds: Option<&Array1<f64>>,
+    // gam#2612: `Σ_t λ_t (M⊗S_t)·β` — the full-width joint penalty's contribution,
+    // exactly as
+    // [`exact_newton_joint_projected_stationarity_vector_from_gradient`] already
+    // takes it. Without it this gate prices `S_perblock·β − ∇ℓ`, and a family
+    // whose smoothing rides ENTIRELY on the joint bundle has per-block
+    // `s_lambdas` identically zero, so the gate measures `−∇ℓ` — which at the
+    // penalized optimum IS `S_joint·β̂`. Measured on the penguins multinomial:
+    // the refusing residual and `‖S_joint·β̂‖∞` agree to seven significant
+    // figures (`3.356046e-1`), and the gate floors there from cycle 4 to 1199
+    // while the objective decrement sits three orders INSIDE its tolerance. The
+    // certificate was refusing a converged point because it was not measuring a
+    // residual at all. Same failure the `∇Φ` fold above this call site already
+    // fixes for the Jeffreys term. `None` ⇒ no joint penalty, byte-identical for
+    // every per-block-only family.
+    joint_penalty_score: Option<&Array1<f64>>,
 ) -> Result<f64, String> {
     if states.len() != specs.len() || states.len() != s_lambdas.len() {
         return Err(
@@ -809,6 +824,15 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm_from_gradient(
             total_p
         ) }.into());
     }
+    if let Some(js) = joint_penalty_score
+        && js.len() != total_p
+    {
+        return Err(CustomFamilyError::DimensionMismatch { reason: format!(
+            "exact-newton joint stationarity check from gradient: joint penalty score length mismatch, got {}, expected {}",
+            js.len(),
+            total_p
+        ) }.into());
+    }
 
     // Same KKT projection as `exact_newton_joint_stationarity_inf_norm`:
     // multipliers at active lower bounds are not convergence defects, so we
@@ -830,6 +854,9 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm_from_gradient(
         let width = specs[b].design.ncols();
         let mut residual =
             s_lambdas[b].dot(&states[b].beta) - gradient.slice(ndarray::s![offset..offset + width]);
+        if let Some(js) = joint_penalty_score {
+            residual += &js.slice(ndarray::s![offset..offset + width]);
+        }
         if ridge_policy.accounts_for_objective() && ridge > 0.0 {
             residual += &states[b].beta.mapv(|v| ridge * v);
         }

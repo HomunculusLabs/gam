@@ -1063,6 +1063,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             &block_constraints,
             Some(cached_active_sets.as_slice()),
             joint_lower_bounds.as_ref(),
+            joint_penalty_stationarity_score(options, specs, &states).as_ref(),
         )?;
         if current_kkt_norm.is_finite() {
             min_certified_residual = min_certified_residual.min(current_kkt_norm);
@@ -4070,6 +4071,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             &block_constraints,
             Some(cached_active_sets.as_slice()),
             joint_lower_bounds.as_ref(),
+            joint_penalty_stationarity_score(options, specs, &states).as_ref(),
         )?;
         prev_kkt_norm = Some(residual);
         // Record this cycle's KKT residual for the steady-geometric-descent

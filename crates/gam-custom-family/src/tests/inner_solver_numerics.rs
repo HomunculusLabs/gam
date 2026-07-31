@@ -4395,6 +4395,7 @@ pub(crate) fn joint_stationarity_from_gradient_projects_coupled_linear_constrain
         &[Some(constraints.clone())],
         None,
         None,
+        None,
     )
     .expect("stationarity projection should succeed");
     assert_relative_eq!(projected, 0.0_f64, epsilon = 1e-10);
@@ -4425,6 +4426,7 @@ pub(crate) fn joint_stationarity_from_gradient_projects_coupled_linear_constrain
         0.0,
         RidgePolicy::exact_full_objective(),
         &[Some(constraints)],
+        None,
         None,
         None,
     )
@@ -4483,6 +4485,7 @@ pub(crate) fn stationarity_projects_valid_lower_bound_multiplier_but_keeps_wrong
         &[None],
         None,
         Some(&lower_bounds),
+        None,
     )
     .expect("box-bound stationarity projection should succeed");
     // The valid +626 multiplier is projected out; the wrong-signed −5 remains.
@@ -4498,6 +4501,7 @@ pub(crate) fn stationarity_projects_valid_lower_bound_multiplier_but_keeps_wrong
         0.0,
         RidgePolicy::exact_full_objective(),
         &[None],
+        None,
         None,
         None,
     )
