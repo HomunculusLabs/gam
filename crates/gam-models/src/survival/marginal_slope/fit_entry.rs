@@ -1466,7 +1466,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             });
             let cycle_budget_evidence = || {
                 let load_cap = |cap: &Option<Arc<AtomicUsize>>| {
-                    cap.as_ref().map(|value| value.load(Ordering::Relaxed))
+                    cap.as_ref().map(|value| value.load(std::sync::atomic::Ordering::Relaxed))
                 };
                 format!(
                     "inner cycle budget inputs: base={}, screening_cap={:?}, outer_cap={:?}",
