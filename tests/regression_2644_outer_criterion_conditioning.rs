@@ -214,3 +214,96 @@ fn te_with_disparate_scales_certifies() {
          {error}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Reporting probe: `misc::broad_sweep_batch_h::matern_low_n_does_not_crash`.
+//
+// `y ~ matern(x, nu=5/2)`, Gaussian, **15 rows**, one coordinate — the
+// smallest witness of an outer-criterion refusal in the suite, and the one
+// that fires on the joint-spatial route-AGREEMENT half of the certificate
+// rather than its descent half. It refuses in 0.6 s with
+//
+//   joint_seed = 2.787290435812e0   baseline = 2.787290399076e0
+//   gap = 3.674e-8 (1.318e-8 relative)   agreement_tolerance = 2.787e-8
+//
+// bit-identically across two nightlies on different runners and two local
+// runs. This is the residue `9e8ca98da` left open when it closed the
+// O(eps*kappa) log-determinant family, and the root-scale work could not have
+// touched it.
+//
+// MEASURED (2026-07-31, at `04671c5b3`), by widening the in-tree
+// `[#1271-diag]` from `{:.6}` to `{:.17e}` and adding `beta` and
+// `h_total_original` to it. Both routes evaluate at a BIT-IDENTICAL `rho`:
+//
+//   logS, logH                          bit-identical to 17 digits
+//   h_total_original (all 49 entries)   bit-identical (max|H1-H2| = 0.0)
+//   pirls_edf                           identical
+//   beta                                differs in COORDINATE 0 ALONE, by
+//                                       2.13012903753208305e-1; coordinates
+//                                       1..6 agree to ~10 digits
+//   H[0][0] = 1.50000000100000008e1 = n + 1e-8, so coordinate 0 is the
+//   intercept and it carries the absolute `FIXED_STABILIZATION_RIDGE`, which
+//   that constant's own doc says `penalty_term` carries as `ridge*||beta||^2`.
+//
+// The gap is then fully accounted for, with no free parameter:
+//
+//   ridge * (b0'^2 - b0^2) = 7.7024058e-10   vs measured dDp = 7.7024051e-10
+//                                            (ratio 1.00000009)
+//   (n/2) * dDp / Dp       = 3.6736410122e-8 vs measured gap = 3.673641e-8
+//
+// So 100% of the disagreement is `(n/2)*d log(rss+pen)`, 0% is either
+// log-determinant, and the ONLY term that notices the intercept moving is the
+// 1e-8 ridge. The refusal is the certificate correctly reporting that the
+// criterion assigns two values to one predictor.
+//
+// REFUTED along the way, so nobody re-runs them: the offset seam (instrumented
+// `compose_offset` itself; both routes compose an identically ZERO offset from
+// an identically zero affine channel), and the Gaussian sufficient-statistic
+// cache (`[gaussian-fixed-cache]` is built 11 times, on both routes).
+//
+// STILL OPEN: what makes the two routes solve different systems at all. Both
+// report the same `H` with `lambda_min = 1.386e-1` and a strictly convex
+// quadratic has one minimizer, so the designs must differ while
+// `X'X + S_lambda + delta I` stays bit-identical. Their own logs disagree at
+// the same `rho` on `inner pirls solve ... max_eta` (0.6 vs 0.8) and on
+// `reml_laml cost_only_done ... ext_dim` (0 vs 1).
+//
+// This probe PRINTS and never fails: the defect is real but unfixed, and a
+// gate here would be a second red on a known-open cause.
+// ─────────────────────────────────────────────────────────────────────────
+
+fn mk_1d(n: usize, f: impl Fn(f64) -> f64, sigma: f64, seed: u64) -> EncodedDataset {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let u = Uniform::new(0.0_f64, 1.0).expect("uniform");
+    let noise = Normal::new(0.0, sigma).expect("normal");
+    let mut x: Vec<f64> = (0..n).map(|_| u.sample(&mut rng)).collect();
+    x.sort_by(|a, b| a.partial_cmp(b).expect("finite draws"));
+    let y: Vec<f64> = x.iter().map(|&t| f(t) + noise.sample(&mut rng)).collect();
+    let headers = ["x", "y"].into_iter().map(String::from).collect();
+    let rows: Vec<StringRecord> = x
+        .iter()
+        .zip(y.iter())
+        .map(|(a, b)| StringRecord::from(vec![a.to_string(), b.to_string()]))
+        .collect();
+    encode_recordswith_inferred_schema(headers, rows).expect("encode")
+}
+
+#[test]
+fn zz_probe_2644_matern_low_n_route_agreement() {
+    gam_solve::progress_log::init_logging_at(log::LevelFilter::Info);
+    let ds = mk_1d(15, |t| t.powi(2), 0.05, 7);
+    let cfg = FitConfig {
+        family: Some("gaussian".to_string()),
+        ..FitConfig::default()
+    };
+    let started = std::time::Instant::now();
+    let outcome = fit_from_formula("y ~ matern(x, nu=5/2)", &ds, &cfg);
+    println!(
+        "[probe-2644-lown] elapsed={:.2}s",
+        started.elapsed().as_secs_f64()
+    );
+    match outcome {
+        Ok(_) => println!("[probe-2644-lown] FIT OK"),
+        Err(e) => println!("[probe-2644-lown] FIT ERR: {e}"),
+    }
+}
