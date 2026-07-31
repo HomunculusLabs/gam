@@ -39,6 +39,65 @@
 //! allowed name (`test_support`), never `pub(crate) mod …`. The whole module is
 //! `cfg(test)`, so the substrate carries no dead code into the shipped build.
 
+pub(super) struct RigidStandardNormalRow {
+    pub(super) marginal: super::family::BernoulliMarginalLinkMap,
+    pub(super) g: f64,
+    pub(super) z: f64,
+    pub(super) y: f64,
+    pub(super) w: f64,
+    pub(super) probit_scale: f64,
+}
+
+impl gam_math::jet_tower::RowProgram<2> for RigidStandardNormalRow {
+    fn n_rows(&self) -> usize {
+        1
+    }
+
+    fn primaries(&self, row: usize) -> Result<[f64; 2], String> {
+        if row != 0 {
+            return Err(format!("RigidStandardNormalRow: row {row} out of range"));
+        }
+        Ok([self.marginal.eta_value(), self.g])
+    }
+
+    fn eval<S: gam_math::jet_scalar::JetScalar<2>>(
+        &self,
+        row: usize,
+        p: &[S; 2],
+    ) -> Result<S, String> {
+        if row != 0 {
+            return Err(format!("RigidStandardNormalRow: row {row} out of range"));
+        }
+        super::gradient_paths::rigid_standard_normal_row_nll_generic(
+            p,
+            self.marginal,
+            self.z,
+            self.y,
+            self.w,
+            self.probit_scale,
+        )
+    }
+}
+
+pub(super) fn rigid_standard_normal_tower(
+    marginal: super::family::BernoulliMarginalLinkMap,
+    g: f64,
+    z: f64,
+    y: f64,
+    w: f64,
+    probit_scale: f64,
+) -> Result<gam_math::jet_tower::Tower4<2>, String> {
+    let program = RigidStandardNormalRow {
+        marginal,
+        g,
+        z,
+        y,
+        w,
+        probit_scale,
+    };
+    gam_math::jet_tower::program_full_tower(&program, 0).map(|tower| *tower)
+}
+
 /// Generic second-order jet over a runtime primary count, mirroring the survival
 /// flex `FlexJet` trait. `compose_unary` is the Faà di Bruno composition
 /// `f ∘ self` with the unary derivative stack `[f, f′, f″, f‴, f⁗]` at the value
