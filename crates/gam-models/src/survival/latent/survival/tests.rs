@@ -2690,15 +2690,38 @@
         );
     }
 
+    /// An exact midpoint has no unique NEAREST binary64, but it has a unique
+    /// CORRECTLY ROUNDED one: ties-to-even, the mode `certified_round`'s own
+    /// doc comment names and the mode every binary64 operation downstream of it
+    /// uses. This pins the rounded values, not a refusal -- refusing the tie
+    /// killed all seven outer seeds of the gam#2538 frailty fit in 0.49 s.
     #[test]
-    fn latent_cumulant_expansion_refuses_exact_rounding_tie_2597() {
+    fn latent_cumulant_expansion_rounds_an_exact_tie_to_even_2597() {
+        // `2^-53` is exactly half an ulp at 1.0, so this is the midpoint
+        // between 1.0 and `1 + 2^-52`. 1.0 has the even significand.
         let midpoint = LatentExactExpansion::scalar(1.0)
             .add(LatentExactExpansion::scalar(2.0_f64.powi(-53)))
             .expect("the two-term midpoint has exact expansion support");
-        let error = midpoint
-            .certified_round()
-            .expect_err("a midpoint has no unique nearest binary64");
-        assert_eq!(error, "the exact cumulant lies on a binary64 rounding tie");
+        assert_eq!(
+            midpoint
+                .certified_round()
+                .expect("an exact tie rounds to even, it is not unroundable"),
+            1.0,
+        );
+
+        // One ulp up, the midpoint between `1 + 2^-52` (odd significand) and
+        // `1 + 2^-51` (even) must round the OTHER way, so the assertion above
+        // cannot be satisfied by a rule that simply returns the lower value.
+        let odd = f64::from_bits(1.0_f64.to_bits() + 1);
+        let upper_midpoint = LatentExactExpansion::scalar(odd)
+            .add(LatentExactExpansion::scalar(2.0_f64.powi(-53)))
+            .expect("the two-term midpoint has exact expansion support");
+        assert_eq!(
+            upper_midpoint
+                .certified_round()
+                .expect("an exact tie rounds to even, it is not unroundable"),
+            f64::from_bits(1.0_f64.to_bits() + 2),
+        );
     }
 
     /// #2566 analytic/FD authority split across the measured scale cliff.

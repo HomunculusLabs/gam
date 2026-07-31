@@ -1766,7 +1766,33 @@ impl LatentExactExpansion {
             Some(std::cmp::Ordering::Less) if residual_sign > 0.0 => Ok(candidate),
             Some(std::cmp::Ordering::Greater) if residual_sign < 0.0 => Ok(candidate),
             Some(std::cmp::Ordering::Equal) => {
-                Err("the exact cumulant lies on a binary64 rounding tie")
+                // An exact midpoint is not an unroundable value. IEEE-754's
+                // default mode -- round to nearest, ties to EVEN -- makes it
+                // unique, and it is the mode every binary64 operation
+                // downstream of this one already uses. This function's own doc
+                // comment names that rule ("Unique nearest-even binary64
+                // rounding"), so refusing here contradicted the contract and
+                // was stricter than the arithmetic the result feeds.
+                //
+                // It is not a measure-zero case in practice. Measured on
+                // gam#2538 at current main: the latent-survival frailty fit
+                // rejects ALL SEVEN outer seeds in 0.49 s with
+                // `latent survival numerator derivative mask 0b0011 has no
+                // certified binary64 value`, because at the beta = 0 outer
+                // seed the cumulant is a small dyadic rational and lands
+                // exactly on a midpoint. The certification refused precisely
+                // the inputs it can round exactly.
+                //
+                // `candidate` and `adjacent` are bit-adjacent -- `next_up` /
+                // `next_down` are `to_bits() +/- 1` -- so exactly one of the
+                // two has an even significand, and the low bit of the pattern
+                // is that significand's LSB. Selecting the even one IS the
+                // tie-to-even neighbour; no tolerance and no choice enter.
+                Ok(if candidate.to_bits() % 2 == 0 {
+                    candidate
+                } else {
+                    adjacent
+                })
             }
             _ => Err("the exact cumulant lies outside the candidate binary64 rounding cell"),
         }
