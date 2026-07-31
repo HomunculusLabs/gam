@@ -19,6 +19,36 @@ fn arrow_solve_options_own_gpu_policy_2322() {
     assert_eq!(required.gpu_policy, gam_gpu::GpuPolicy::Required);
 }
 
+/// #2548: matrix-free SAE assembly reclaims the dense shared-block workspace.
+/// A diagnostic that reads `hbb` directly then sees an empty matrix and silently
+/// assigns zero curvature to the decoder gradient. The public diagonal accessor
+/// must follow the installed operator, exactly like the solve does.
+#[test]
+fn shared_block_diagonal_survives_dense_workspace_reclamation_2548() {
+    use crate::arrow_schur::prelude::SharedBetaMatvec;
+    use std::sync::Arc;
+
+    let mut system =
+        ArrowSchurSystem::new_with_empty_hbb_and_htbeta_cols(0, 0, 3, 0);
+    let expected = array![2.0, 5.0, 11.0];
+    let diagonal = expected.clone();
+    let matvec: SharedBetaMatvec = Arc::new(
+        move |input: ArrayView1<'_, f64>, output: &mut Array1<f64>| {
+            for component in 0..output.len() {
+                output[component] = diagonal[component] * input[component];
+            }
+        },
+    );
+    system.set_penalty_op(Arc::new(MatvecDiagPenaltyOp::new(
+        3,
+        matvec,
+        expected.clone(),
+    )));
+
+    assert_eq!(system.hbb.dim(), (0, 0));
+    assert_eq!(system.shared_block_diagonal(), expected);
+}
+
 /// #1995: compact SAE rows hand `block_gemm_subtract` dense scratch matrices
 /// whose nonzeros occupy only the active top-k beta columns. The CPU fallback
 /// must produce the same Schur update as a dense GEMM while doing work only on

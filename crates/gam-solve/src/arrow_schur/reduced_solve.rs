@@ -2651,8 +2651,7 @@ impl ReducedSchurDiagonalPreconditioner {
         if sys.k == 0 {
             return None;
         }
-        let mut diag = Array1::<f64>::zeros(sys.k);
-        sys.penalty_diagonal_add(diag.as_slice_mut()?);
+        let mut diag = sys.shared_block_diagonal();
         for value in diag.iter_mut() {
             *value += ridge_beta;
             if !(value.is_finite() && *value > 0.0) {

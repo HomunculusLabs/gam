@@ -653,7 +653,27 @@ impl ArrowSchurSystem {
     /// `BlockPenaltyOp` / `KroneckerPenaltyOp` to avoid `O(K²)` allocation
     /// for structured smoothness penalties.
     pub fn set_penalty_op(&mut self, op: Arc<dyn BetaPenaltyOp>) {
+        assert_eq!(
+            op.dim(),
+            self.k,
+            "shared beta operator dimension must match the ArrowSchurSystem border"
+        );
         self.penalty_op = Some(op);
+    }
+
+    /// The authoritative diagonal of the assembled shared `H_ββ` block.
+    ///
+    /// SAE's matrix-free assembly reclaims the dense [`Self::hbb`] workspace
+    /// after installing the equivalent structured operator. Reading `hbb`
+    /// directly after that point therefore returns an empty/zero block even
+    /// though the solve sees nonzero curvature. This accessor follows the same
+    /// operator -> explicit diagonal -> dense dispatch as every Schur solve and
+    /// preconditioner, so diagnostics cannot silently certify a different
+    /// shared block than the optimizer used.
+    pub fn shared_block_diagonal(&self) -> Array1<f64> {
+        let mut diagonal = vec![0.0_f64; self.k];
+        self.penalty_diagonal_add(&mut diagonal);
+        Array1::from_vec(diagonal)
     }
 
     pub fn set_device_sae_pcg_data(&mut self, data: DeviceSaePcgData) {

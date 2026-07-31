@@ -1386,6 +1386,25 @@ fn sae_manifold_certify_external<'py>(
                 report.inner.quotient_gradient_norm,
             )?;
             inner.set_item("stationarity_bound", report.inner.stationarity_bound)?;
+            let parameter_space = PyDict::new(py);
+            let parameter_certifies = report.inner.parameter_space.certifies();
+            match &report.inner.parameter_space {
+                gam::terms::sae::manifold::SaeParameterSpaceKktAudit::Resolved {
+                    scaled_gradient_max,
+                    stationarity_bound,
+                } => {
+                    parameter_space.set_item("status", "resolved")?;
+                    parameter_space
+                        .set_item("scaled_gradient_max", scaled_gradient_max)?;
+                    parameter_space.set_item("stationarity_bound", stationarity_bound)?;
+                }
+                gam::terms::sae::manifold::SaeParameterSpaceKktAudit::Unresolved(reason) => {
+                    parameter_space.set_item("status", "unresolved")?;
+                    parameter_space.set_item("reason", reason.to_string())?;
+                }
+            }
+            parameter_space.set_item("certifies", parameter_certifies)?;
+            inner.set_item("parameter_space", parameter_space)?;
             inner.set_item("certifies", report.inner.certifies())?;
             out.set_item("inner_kkt", inner)?;
             let outer = PyDict::new(py);

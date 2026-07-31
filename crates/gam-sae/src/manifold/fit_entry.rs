@@ -46,7 +46,8 @@ use crate::tiered::Tier0Mean;
 use super::{
     AmortizedEncoderConsistency, AssignmentMode, CoordinateFidelityCertificate, CrossFitConfig,
     CrossFitReport, SaeManifoldFitDiagnostics, SaeManifoldLoss, SaeManifoldOuterObjective,
-    SaeManifoldRho, SaeManifoldTerm, SaeOuterTermination, SaeShapeUncertainty,
+    SaeInnerKktScaleError, SaeManifoldRho, SaeManifoldTerm, SaeOuterTermination,
+    SaeShapeUncertainty,
     SaeTrustDiagnostics, TopologyPersistenceCertificate, VanishedAtoms,
     cross_fit_reconstruction_ev,
 };
@@ -255,10 +256,52 @@ pub struct SaeFitReport {
 /// optimizer is invoked to form these values; they are read directly from the
 /// analytic joint system assembled at the supplied `(term, rho)`.
 #[derive(Clone, Debug, PartialEq)]
+pub enum SaeParameterSpaceKktAudit {
+    Resolved {
+        scaled_gradient_max: f64,
+        stationarity_bound: f64,
+    },
+    Unresolved(SaeInnerKktScaleError),
+}
+
+impl SaeParameterSpaceKktAudit {
+    pub fn certifies(&self) -> bool {
+        match self {
+            Self::Resolved {
+                scaled_gradient_max,
+                stationarity_bound,
+            } => {
+                scaled_gradient_max.is_finite()
+                    && stationarity_bound.is_finite()
+                    && *stationarity_bound >= 0.0
+                    && scaled_gradient_max <= stationarity_bound
+            }
+            Self::Unresolved(_) => false,
+        }
+    }
+}
+
+impl std::fmt::Display for SaeParameterSpaceKktAudit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resolved {
+                scaled_gradient_max,
+                stationarity_bound,
+            } => write!(
+                formatter,
+                "scaled_max={scaled_gradient_max:.6e}, bound={stationarity_bound:.6e}"
+            ),
+            Self::Unresolved(reason) => write!(formatter, "unresolved ({reason})"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct SaeInstalledInnerKktAudit {
     pub raw_gradient_norm: f64,
     pub quotient_gradient_norm: f64,
     pub stationarity_bound: f64,
+    pub parameter_space: SaeParameterSpaceKktAudit,
 }
 
 impl SaeInstalledInnerKktAudit {
@@ -267,7 +310,7 @@ impl SaeInstalledInnerKktAudit {
             self.raw_gradient_norm,
             self.quotient_gradient_norm,
             self.stationarity_bound,
-        )
+        ) || self.parameter_space.certifies()
     }
 }
 
@@ -306,10 +349,21 @@ fn installed_inner_kkt_audit(
     let lambda_smooth = rho.lambda_smooth_vec().map_err(SaeFitError::Fit)?;
     let quotient_gradient_norm =
         term.quotient_gradient_norm_from_system(&system, raw_gradient_norm_sq, &lambda_smooth);
+    let parameter_space = match SaeManifoldTerm::system_scaled_grad_max(&system) {
+        Ok(scaled_gradient_max) => match term.inner_iterate_max() {
+            Ok(iterate_max) => SaeParameterSpaceKktAudit::Resolved {
+                scaled_gradient_max,
+                stationarity_bound: super::SAE_MANIFOLD_INNER_GRAD_REL_TOL * iterate_max,
+            },
+            Err(reason) => SaeParameterSpaceKktAudit::Unresolved(reason),
+        },
+        Err(reason) => SaeParameterSpaceKktAudit::Unresolved(reason),
+    };
     Ok(SaeInstalledInnerKktAudit {
         raw_gradient_norm,
         quotient_gradient_norm,
         stationarity_bound: super::SAE_MANIFOLD_INNER_GRAD_REL_TOL * term.inner_iterate_scale(),
+        parameter_space,
     })
 }
 
@@ -1855,10 +1909,12 @@ pub fn run_sae_manifold_certify(
             inner_audit.clone(),
             None,
             format!(
-                "installed external state failed inner KKT stationarity: raw={:.6e}, quotient={:.6e}, bound={:.6e}",
+                "installed external state failed inner KKT stationarity: raw={:.6e}, \
+                 quotient={:.6e}, bound={:.6e}, parameter-space={}",
                 inner_audit.raw_gradient_norm,
                 inner_audit.quotient_gradient_norm,
                 inner_audit.stationarity_bound,
+                inner_audit.parameter_space,
             ),
         ));
     }

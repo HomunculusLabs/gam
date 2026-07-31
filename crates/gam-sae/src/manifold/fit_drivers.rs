@@ -1869,6 +1869,63 @@ impl SaeManifoldTerm {
         1.0 + iterate_norm_sq.sqrt()
     }
 
+    /// Intensive companion to [`Self::inner_iterate_scale`] for a
+    /// componentwise, curvature-scaled KKT certificate.
+    ///
+    /// A decoder gradient component and its curvature are both sums over rows;
+    /// their ratio is therefore a displacement in decoder-parameter space, not
+    /// a gradient-space quantity. Comparing the largest such displacement with
+    /// `1 + max |parameter|` keeps the two sides in the same units and removes
+    /// row-count, atom-count, and basis-scale extensivity. Non-finite installed
+    /// state is a typed refusal, never an infinite bound that certifies
+    /// everything.
+    pub(crate) fn inner_iterate_max(&self) -> Result<f64, SaeInnerKktScaleError> {
+        let mut max_abs = 0.0_f64;
+        for (component, &value) in self.assignment.logits.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(SaeInnerKktScaleError::NonFiniteIterate {
+                    family: "assignment-logit",
+                    group: 0,
+                    component,
+                    value,
+                });
+            }
+            max_abs = max_abs.max(value.abs());
+        }
+        for (atom, coords) in self.assignment.coords.iter().enumerate() {
+            let matrix = coords.as_matrix();
+            for (component, &value) in matrix.iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(SaeInnerKktScaleError::NonFiniteIterate {
+                        family: "coordinate",
+                        group: atom,
+                        component,
+                        value,
+                    });
+                }
+                max_abs = max_abs.max(value.abs());
+            }
+        }
+        for (atom, manifold_atom) in self.atoms.iter().enumerate() {
+            for (component, &value) in manifold_atom.decoder_coefficients().iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(SaeInnerKktScaleError::NonFiniteIterate {
+                        family: "decoder",
+                        group: atom,
+                        component,
+                        value,
+                    });
+                }
+                max_abs = max_abs.max(value.abs());
+            }
+        }
+        let scale = 1.0 + max_abs;
+        if !scale.is_finite() {
+            return Err(SaeInnerKktScaleError::IterateScaleOverflow { max_abs });
+        }
+        Ok(scale)
+    }
+
     /// Machine-null eigenspace of a finite symmetric PSD decoder operator.
     ///
     /// The admissible floor is the standard floating-point dot-product backward

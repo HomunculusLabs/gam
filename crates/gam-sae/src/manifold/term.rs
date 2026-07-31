@@ -78,6 +78,121 @@ pub(crate) const SAE_MANIFOLD_INNER_STEP_REL_TOL: f64 = 1.0e-4;
 /// accepting inner-solve convergence.
 pub(crate) const SAE_MANIFOLD_INNER_GRAD_REL_TOL: f64 = 1.0e-5;
 
+/// Parameter block whose diagonal curvature is used to express an inner-KKT
+/// gradient in the units of that block's parameters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SaeInnerKktScaleBlock {
+    CoordinateRow { row: usize },
+    SharedDecoder,
+}
+
+impl std::fmt::Display for SaeInnerKktScaleBlock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CoordinateRow { row } => write!(formatter, "coordinate row {row}"),
+            Self::SharedDecoder => formatter.write_str("shared decoder"),
+        }
+    }
+}
+
+/// Typed refusal to manufacture a parameter-space KKT certificate when its
+/// curvature or iterate scale is not mathematically defined.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SaeInnerKktScaleError {
+    GradientCurvatureShapeMismatch {
+        block: SaeInnerKktScaleBlock,
+        gradient_len: usize,
+        curvature_rows: usize,
+        curvature_cols: usize,
+    },
+    NonFiniteGradient {
+        block: SaeInnerKktScaleBlock,
+        component: usize,
+        value: f64,
+    },
+    InvalidCurvature {
+        block: SaeInnerKktScaleBlock,
+        component: usize,
+        gradient: f64,
+        curvature: f64,
+    },
+    NonFiniteScaledGradient {
+        block: SaeInnerKktScaleBlock,
+        component: usize,
+        gradient: f64,
+        curvature: f64,
+    },
+    NonFiniteIterate {
+        family: &'static str,
+        group: usize,
+        component: usize,
+        value: f64,
+    },
+    IterateScaleOverflow {
+        max_abs: f64,
+    },
+}
+
+impl std::fmt::Display for SaeInnerKktScaleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GradientCurvatureShapeMismatch {
+                block,
+                gradient_len,
+                curvature_rows,
+                curvature_cols,
+            } => write!(
+                formatter,
+                "{block} gradient length {gradient_len} is incompatible with curvature shape \
+                 ({curvature_rows}, {curvature_cols})"
+            ),
+            Self::NonFiniteGradient {
+                block,
+                component,
+                value,
+            } => write!(
+                formatter,
+                "{block} gradient component {component} is non-finite ({value})"
+            ),
+            Self::InvalidCurvature {
+                block,
+                component,
+                gradient,
+                curvature,
+            } => write!(
+                formatter,
+                "{block} component {component} cannot be scaled: gradient={gradient}, \
+                 curvature={curvature}"
+            ),
+            Self::NonFiniteScaledGradient {
+                block,
+                component,
+                gradient,
+                curvature,
+            } => write!(
+                formatter,
+                "{block} component {component} scaled gradient overflowed: \
+                 |{gradient}| / {curvature}"
+            ),
+            Self::NonFiniteIterate {
+                family,
+                group,
+                component,
+                value,
+            } => write!(
+                formatter,
+                "{family} iterate group {group}, component {component} is non-finite ({value})"
+            ),
+            Self::IterateScaleOverflow { max_abs } => write!(
+                formatter,
+                "parameter-space iterate scale overflowed at max_abs={max_abs}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SaeInnerKktScaleError {}
+
 /// Relative per-refine-round penalised-objective decrease below which the inner
 /// solve is treated as having reached its numerical fixed point (#1051). On an
 /// ill-conditioned penalised bilinear fit the KKT gradient and undamped step

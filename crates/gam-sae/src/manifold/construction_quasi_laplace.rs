@@ -1852,6 +1852,118 @@ impl SaeManifoldTerm {
             + sys.gb.iter().map(|&v| v * v).sum::<f64>()
     }
 
+    /// Largest componentwise Jacobi-scaled KKT gradient in parameter units.
+    ///
+    /// Each gradient component is divided by the diagonal curvature of its own
+    /// block before the blocks are aggregated. The ordering is load-bearing:
+    /// decoder gradients and curvatures are both extensive in the rows assigned
+    /// to an atom, while coordinate components are row-local. Normalizing an
+    /// already-aggregated L2 norm would retain a spurious `sqrt(K)` dependence;
+    /// the max of individually scaled components is intensive in both `n` and
+    /// `K`.
+    pub fn system_scaled_grad_max(
+        sys: &ArrowSchurSystem,
+    ) -> Result<f64, SaeInnerKktScaleError> {
+        let mut scaled_max = 0.0_f64;
+        for (row_index, row) in sys.rows.iter().enumerate() {
+            let gradient_len = row.gt.len();
+            let (curvature_rows, curvature_cols) = row.htt.dim();
+            let block = SaeInnerKktScaleBlock::CoordinateRow { row: row_index };
+            if (curvature_rows, curvature_cols) != (gradient_len, gradient_len) {
+                return Err(
+                    SaeInnerKktScaleError::GradientCurvatureShapeMismatch {
+                        block,
+                        gradient_len,
+                        curvature_rows,
+                        curvature_cols,
+                    },
+                );
+            }
+            for component in 0..gradient_len {
+                let gradient = row.gt[component];
+                if !gradient.is_finite() {
+                    return Err(SaeInnerKktScaleError::NonFiniteGradient {
+                        block,
+                        component,
+                        value: gradient,
+                    });
+                }
+                let curvature = row.htt[[component, component]];
+                if !curvature.is_finite()
+                    || curvature < 0.0
+                    || (curvature == 0.0 && gradient != 0.0)
+                {
+                    return Err(SaeInnerKktScaleError::InvalidCurvature {
+                        block,
+                        component,
+                        gradient,
+                        curvature,
+                    });
+                }
+                if curvature > 0.0 {
+                    let scaled = gradient.abs() / curvature;
+                    if !scaled.is_finite() {
+                        return Err(SaeInnerKktScaleError::NonFiniteScaledGradient {
+                            block,
+                            component,
+                            gradient,
+                            curvature,
+                        });
+                    }
+                    scaled_max = scaled_max.max(scaled);
+                }
+            }
+        }
+
+        let block = SaeInnerKktScaleBlock::SharedDecoder;
+        let diagonal = sys.shared_block_diagonal();
+        if sys.gb.len() != sys.k || diagonal.len() != sys.k {
+            return Err(
+                SaeInnerKktScaleError::GradientCurvatureShapeMismatch {
+                    block,
+                    gradient_len: sys.gb.len(),
+                    curvature_rows: diagonal.len(),
+                    curvature_cols: diagonal.len(),
+                },
+            );
+        }
+        for component in 0..sys.k {
+            let gradient = sys.gb[component];
+            if !gradient.is_finite() {
+                return Err(SaeInnerKktScaleError::NonFiniteGradient {
+                    block,
+                    component,
+                    value: gradient,
+                });
+            }
+            let curvature = diagonal[component];
+            if !curvature.is_finite()
+                || curvature < 0.0
+                || (curvature == 0.0 && gradient != 0.0)
+            {
+                return Err(SaeInnerKktScaleError::InvalidCurvature {
+                    block,
+                    component,
+                    gradient,
+                    curvature,
+                });
+            }
+            if curvature > 0.0 {
+                let scaled = gradient.abs() / curvature;
+                if !scaled.is_finite() {
+                    return Err(SaeInnerKktScaleError::NonFiniteScaledGradient {
+                        block,
+                        component,
+                        gradient,
+                        curvature,
+                    });
+                }
+                scaled_max = scaled_max.max(scaled);
+            }
+        }
+        Ok(scaled_max)
+    }
+
     /// The sole acceptance gate for a differentiable inner-envelope root.
     /// Objective stagnation, a finite deflated factor, or a small Newton
     /// decrement may diagnose conditioning but cannot substitute for raw or
