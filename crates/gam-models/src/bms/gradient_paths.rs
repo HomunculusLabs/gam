@@ -5,6 +5,7 @@ use gam_linalg::matrix::{FiniteSignedWeightsView, LinearOperator};
 use gam_math::jet_scalar::SymmetricQuadraticCoefficients;
 use gam_math::jet_tower::Tower4;
 use gam_math::probability::normal_logcdf_derivatives;
+use gam_row_macros::row_program;
 use opt::{BacktrackConfig, RidgeSchedule, backtracking_line_search, escalate_ridge};
 
 pub(crate) fn standardize_latent_z_with_policy(
@@ -1595,6 +1596,82 @@ pub(super) fn rigid_standard_normal_neglog_only(
     Ok(-w * logcdf)
 }
 
+#[inline(always)]
+fn rigid_supplied_link_stack(
+    composition_point: f64,
+    value: f64,
+    first: f64,
+    second: f64,
+    third: f64,
+    fourth: f64,
+) -> [f64; 5] {
+    if composition_point.is_nan() {
+        [f64::NAN; 5]
+    } else {
+        [value, first, second, third, fourth]
+    }
+}
+
+#[inline(always)]
+fn rigid_observed_scale_stack(observed_slope: f64) -> [f64; 5] {
+    let scale = (1.0 + observed_slope * observed_slope).sqrt();
+    let inverse = scale.recip();
+    let inverse_squared = inverse * inverse;
+    let inverse_cubed = inverse_squared * inverse;
+    let inverse_fifth = inverse_cubed * inverse_squared;
+    let inverse_seventh = inverse_fifth * inverse_squared;
+    [
+        scale,
+        observed_slope * inverse,
+        inverse_cubed,
+        -3.0 * observed_slope * inverse_fifth,
+        (12.0 * observed_slope * observed_slope - 3.0) * inverse_seventh,
+    ]
+}
+
+row_program! {
+    fn rigid_standard_normal_program(
+        marginal_eta,
+        logslope;
+        marginal_q,
+        marginal_q1,
+        marginal_q2,
+        marginal_q3,
+        marginal_q4,
+        probit_scale,
+        latent_score,
+        outcome_sign,
+        weight
+    )
+    emit [generic, order2, third, fourth];
+    leaves {
+        supplied_link => rigid_supplied_link_stack => rigid_supplied_link_stack_cuda,
+        observed_scale => rigid_observed_scale_stack => rigid_observed_scale_stack_cuda,
+        signed_probit => signed_probit_neglog_unary_stack => signed_probit_neglog_unary_stack_cuda,
+    }
+    witnesses [];
+    {
+        let q = compose(
+            supplied_link,
+            marginal_eta,
+            marginal_q,
+            marginal_q1,
+            marginal_q2,
+            marginal_q3,
+            marginal_q4
+        );
+        let observed_logslope = scale(logslope, probit_scale);
+        let observed_scale_value = compose(observed_scale, observed_logslope);
+        let latent_index = add(
+            mul(q, observed_scale_value),
+            scale(observed_logslope, latent_score)
+        );
+        let signed_margin = scale(latent_index, outcome_sign);
+        let nll = compose(signed_probit, signed_margin, weight);
+        return nll;
+    }
+}
+
 /// The rigid standard-normal Bernoulli row negative log-likelihood, written
 /// ONCE over the generic [`JetScalar`] interface (#932 scalar cutover).
 ///
@@ -1633,20 +1710,33 @@ pub(crate) fn rigid_standard_normal_row_nll_generic<S: gam_math::jet_scalar::Jet
     w: f64,
     probit_scale: f64,
 ) -> Result<S, String> {
-    // The order-≤4 signed observed margin `m = (2y−1)·η`, written ONCE in
-    // `rigid_standard_normal_signed_margin` over `S: JetScalar<2>` and shared
-    // verbatim with the batched builder's Pass-A jet (#932 single source).
-    let signed = rigid_standard_normal_signed_margin(p, marginal, z, y, probit_scale);
-    // Preserve the production fail-fast: a NaN (non-`+∞`) signed margin is an
-    // upstream domain failure, not a tail saturation.
-    let m = signed.value();
+    let outcome_sign = 2.0 * y - 1.0;
+    let m = outcome_sign
+        * marginal_slope_standard_normal_scalar_eta(
+            marginal.q,
+            p[1].value(),
+            z,
+            probit_scale,
+        );
     if !(m.is_finite() || m == f64::INFINITY) {
         return Err(format!(
             "non-finite signed margin in rigid probit row NLL: {m}"
         ));
     }
-    // NLL = −w·logΦ(m) via the fused single-Mills-ratio probit neglog stack.
-    Ok(signed.compose_unary(signed_probit_neglog_unary_stack(m, w)))
+    let (nll, []) = rigid_standard_normal_program(
+        &p[0],
+        &p[1],
+        marginal.q,
+        marginal.q1,
+        marginal.q2,
+        marginal.q3,
+        marginal.q4,
+        probit_scale,
+        z,
+        outcome_sign,
+        w,
+    );
+    Ok(nll)
 }
 
 /// The order-≤4 signed observed margin `m = (2y−1)·η` of one rigid
@@ -1888,23 +1978,28 @@ pub(super) fn rigid_standard_normal_row_kernel(
     w: f64,
     probit_scale: f64,
 ) -> Result<(f64, [f64; 2], [[f64; 2]; 2]), String> {
-    // #932 cutover: value/gradient/Hessian derive from the SAME single generic
-    // row-NLL expression (`rigid_standard_normal_row_nll_generic`) every other
-    // channel consumer uses, routed through the `RowProgram` seam at the
-    // packed `Order2<2>` scalar — there is no longer a hand-assembled `Tower2<2>`
-    // here. Seeds `[marginal η, g]` exactly as the deleted inline form did, so it
-    // is bit-identical (the `rigid_bernoulli_*_agrees_with_jet_tower_program_all_channels`
-    // oracle pins v/g/H ≤ 1e-12), while sharing one definition with the third/
-    // fourth/full-tower channels.
-    let program = RigidStandardNormalRow {
-        marginal,
+    let outcome_sign = 2.0 * y - 1.0;
+    let signed_margin =
+        outcome_sign * marginal_slope_standard_normal_scalar_eta(marginal.q, g, z, probit_scale);
+    if !(signed_margin.is_finite() || signed_margin == f64::INFINITY) {
+        return Err(format!(
+            "non-finite signed margin in rigid probit row NLL: {signed_margin}"
+        ));
+    }
+    let (value, gradient, hessian, []) = rigid_standard_normal_program_order2(
+        marginal.eta_value(),
         g,
-        z,
-        y,
-        w,
+        marginal.q,
+        marginal.q1,
+        marginal.q2,
+        marginal.q3,
+        marginal.q4,
         probit_scale,
-    };
-    gam_math::jet_tower::program_row_kernel(&program, 0)
+        z,
+        outcome_sign,
+        w,
+    );
+    Ok((value, gradient, hessian))
 }
 
 /// Mixed `(primary, z)` second derivative of the rigid standard-normal row
@@ -2832,14 +2927,12 @@ mod jet_tower_oracle_tests {
         }
     }
 
-    /// Original HAND value/gradient/Hessian path for the rigid standard-normal
-    /// Bernoulli row, reconstructed verbatim from the pre-#932 production code
-    /// (`RigidProbitKernel::new` + `rigid_transformed_gradient` +
-    /// `rigid_transformed_hessian`, deleted in ee8a40b2a). This is the path the
-    /// shipped jet kernel ([`rigid_standard_normal_row_kernel`]) replaced, kept
-    /// here as an independent perf-and-correctness witness: the jet path must be
-    /// numerically equal to it (≤1e-9 rel) and at least as fast (see
-    /// `bench_rigid_vgh_jet_vs_hand`).
+    /// Strongest direct HAND value/gradient/Hessian schedule for the rigid
+    /// standard-normal Bernoulli row. It retains the closed-form chain from the
+    /// pre-#932 production code but uses the current fused value/derivative
+    /// probit stack, so the opponent pays one tail-kernel evaluation rather
+    /// than preserving the historical redundant two-call implementation.
+    #[inline(always)]
     fn hand_rigid_vgh(
         marginal: BernoulliMarginalLinkMap,
         g: f64,
@@ -2859,18 +2952,13 @@ mod jet_tower_oracle_tests {
         // η = q·c(g) + s_f·g·z, m = (2y−1)·η  (marginal_slope_standard_normal_scalar_eta).
         let eta = q * c + observed_logslope * z;
         let m = s * eta;
-        let (logcdf, _) = signed_probit_logcdf_and_mills_ratio(m);
-        // ONE transcendental via the Mills ratio (k1..k4 of the original 4th-order
-        // kernel; only k1, k2 feed value/grad/Hessian, the rest is the waste the
-        // jet Order2 path elides).
-        let (k1, k2, _k3, _k4) =
-            signed_probit_neglog_derivatives_up_to_fourth(m, w).expect("hand kernel");
+        let stack = signed_probit_neglog_unary_stack(m, w);
+        let (k1, k2) = (stack[1], stack[2]);
         let u1 = s * k1;
         let u2 = k2;
         let eta_q = c;
         let eta_g = q * c1 + probit_scale * z;
-        // value = −w·logΦ(m).
-        let value = -w * logcdf;
+        let value = stack[0];
         // rigid_transformed_gradient (in (η, g) primaries).
         let gradient = [u1 * eta_q * marginal.q1, u1 * eta_g];
         // primary_hessian in (q-index, g).
@@ -2887,6 +2975,31 @@ mod jet_tower_oracle_tests {
             [h01 * marginal.q1, h11],
         ];
         (value, gradient, hessian)
+    }
+
+    #[inline(never)]
+    fn measured_production_rigid_vgh(
+        marginal: BernoulliMarginalLinkMap,
+        g: f64,
+        z: f64,
+        y: f64,
+        w: f64,
+        probit_scale: f64,
+    ) -> (f64, [f64; 2], [[f64; 2]; 2]) {
+        rigid_standard_normal_row_kernel(marginal, g, z, y, w, probit_scale)
+            .expect("generated rigid row")
+    }
+
+    #[inline(never)]
+    fn measured_hand_rigid_vgh(
+        marginal: BernoulliMarginalLinkMap,
+        g: f64,
+        z: f64,
+        y: f64,
+        w: f64,
+        probit_scale: f64,
+    ) -> (f64, [f64; 2], [[f64; 2]; 2]) {
+        hand_rigid_vgh(marginal, g, z, y, w, probit_scale)
     }
 
     /// The shipped jet value/grad/Hessian kernel must equal the original HAND
@@ -3004,16 +3117,27 @@ mod jet_tower_oracle_tests {
             );
 
             let production_ns = best_ns(iterations, g, |perturbed_g| {
-                rigid_standard_normal_row_kernel(marginal, perturbed_g, z, y, w, probit_scale)
-                    .expect("jet kernel")
+                measured_production_rigid_vgh(
+                    marginal,
+                    perturbed_g,
+                    z,
+                    y,
+                    w,
+                    probit_scale,
+                )
             });
             let hand_ns = best_ns(iterations, g, |perturbed_g| {
-                hand_rigid_vgh(marginal, perturbed_g, z, y, w, probit_scale)
+                measured_hand_rigid_vgh(marginal, perturbed_g, z, y, w, probit_scale)
             });
             eprintln!(
                 "RIGID-BERNOULLI-VGH-932 y={y:.0} production={production_ns:.2} ns/row \
                  hand={hand_ns:.2} ns/row hand_over_production={:.6}",
                 hand_ns / production_ns,
+            );
+            assert!(
+                production_ns < hand_ns,
+                "generated rigid BMS y={y:.0} must beat strongest hand: \
+                 production={production_ns:.2} ns/row hand={hand_ns:.2} ns/row",
             );
         }
     }
