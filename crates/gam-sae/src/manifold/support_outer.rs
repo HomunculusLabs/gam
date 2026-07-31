@@ -351,7 +351,10 @@ struct SaeSupportOuterObjective {
     /// Every uncached solve and reset advances it before touching the state, so
     /// a cache entry can never survive a failed or intervening evaluation.
     state_revision: u64,
-    #[cfg(test)]
+    /// Uncached-solve counter. Unconditional rather than `#[cfg(test)]`:
+    /// the ban scanner rejects `#[cfg(test)]` on a `src/` item (it is not a
+    /// dead-code escape hatch), and one `usize` per outer solve is not worth a
+    /// cfg split.
     uncached_evaluations: usize,
     /// The FROZEN reduced-Schur log-determinant surrogate for this outer solve
     /// — the same #2080 lane the dense manifold criterion runs on.
@@ -614,10 +617,7 @@ impl SaeSupportOuterObjective {
         // is gone before the revision advances.
         self.last_evaluation = None;
         self.state_revision = self.state_revision.wrapping_add(1);
-        #[cfg(test)]
-        {
-            self.uncached_evaluations += 1;
-        }
+        self.uncached_evaluations += 1;
         let evaluation = self.evaluate_uncached(rho)?;
         // The implementation always computes the analytic gradient alongside
         // the value. A value request therefore populates a gradient-capable
@@ -902,7 +902,6 @@ pub fn run_sae_support_outer(
         random_state: request.random_state,
         last_evaluation: None,
         state_revision: 0,
-        #[cfg(test)]
         uncached_evaluations: 0,
         logdet_surrogate: None,
     };
