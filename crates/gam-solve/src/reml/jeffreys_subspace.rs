@@ -1142,6 +1142,23 @@ impl JointJeffreysPlan {
         self.reduced_dim != 0 && self.gate_weight != 0.0
     }
 
+    /// Exact gated Jeffreys log-volume represented by this authoritative
+    /// spectrum. Value-only callers must use this instead of invoking the full
+    /// term with an always-`None` derivative closure: that route needlessly
+    /// fans out every canonical coefficient axis before discarding them.
+    pub fn value(&self) -> f64 {
+        if !self.is_active() {
+            return 0.0;
+        }
+        self.gate_weight
+            * 0.5
+            * self
+                .evals
+                .iter()
+                .map(|&lambda| jeffreys_antiderivative(lambda, self.floor))
+                .sum::<f64>()
+    }
+
     fn coefficient_dim(&self) -> usize {
         self.z_j.nrows()
     }
@@ -1481,6 +1498,15 @@ where
     })
 }
 
+/// Exact value-only joint Jeffreys evaluation from one prepared reduced
+/// spectrum. Performs no coefficient-direction allocation or Rayon fan-out.
+pub fn joint_jeffreys_value(
+    h_joint: ArrayView2<'_, f64>,
+    z_j: ArrayView2<'_, f64>,
+) -> Result<f64, String> {
+    JointJeffreysPlan::prepare(h_joint, z_j).map(|plan| plan.value())
+}
+
 /// Batched joint-Jeffreys evaluation with a lazy all-axes derivative provider.
 ///
 /// `hessian_axes` is invoked exactly once when the prepared conditioning gate is
@@ -1510,6 +1536,7 @@ where
     if !plan.is_active() {
         return Ok((0.0, Array1::zeros(p), Array2::zeros((p, p))));
     }
+    let phi = plan.value();
     let m = plan.reduced_dim;
     let z_j = plan.z_j;
     let evals = plan.evals;
@@ -1595,23 +1622,7 @@ where
     } else {
         None
     };
-    // SINGLE-EMISSION (gam#931). The Jeffreys value and first derivative are
-    // emitted by the atom below from one spectrum and one floor. The live call
-    // site supplies the same reduced drifts it already needs for curvature; the
-    // atom owns the scalar projection (`g`, `g'_λ`, and `g'_floor`) so no inline
-    // value/gradient branch can drift from it.
-    let value_atom = super::atoms::JeffreysLogdetAtom {
-        eigvals: evals.clone(),
-        floor,
-        gate_weight,
-        reduced_drift: HashMap::new(),
-        floor_drift: HashMap::new(),
-        stratum: super::atoms::StratumFingerprint {
-            kept_rank: m,
-            min_relative_eigengap: 0.0,
-        },
-    };
-    let phi = super::atoms::CriterionAtom::value(&value_atom);
+    // The plan's value() is the single emission of this spectrum/floor/gate.
     // Gradient: grad[k] = ½ tr(K · Z_Jᵀ Hdot[e_k] Z_J) = ½ Σ_i d_i (Ṽ_k)_ii with
     // Ṽ_k = Vᵀ D_k V the reduced derivative rotated into the eigenbasis. For the
     // inner-Newton dense path the Hessian is beta-dependent through the working
