@@ -3390,13 +3390,29 @@ fn intercept_only_binomial_mean_wiggle_model(
     let mut beta_joint = Array1::zeros(1 + beta_wiggle.len());
     beta_joint[0] = beta_eta;
     beta_joint.slice_mut(s![1..]).assign(&beta_wiggle);
+    // `saved_fit_summary_fixture()` is Gaussian: it pairs a Gaussian family with
+    // `ProfiledGaussian` scale metadata. This helper declares whatever family the
+    // caller passed -- Binomial Probit for the link-wiggle generation test -- and
+    // `family_noise_parameter` refuses that pairing outright:
+    //
+    //   Binomial Probit generative scale is unresolved: family and
+    //   likelihood-scale metadata are inconsistent: ProfiledGaussian
+    //
+    // so the test died in `run_generate_unified` before reaching any assertion it
+    // exists to make. Production cannot reach this state -- the fit drivers set
+    // `family.default_scale_metadata()` -- so it was the fixture contradicting
+    // itself, not a defect in generation. Derive both fields from the declared
+    // family so the two cannot diverge again.
+    let mut summary = saved_fit_summary_fixture();
+    summary.likelihood_family = Some(family.clone());
+    summary.likelihood_scale = family.default_scale_metadata();
     let mut fit_result = core_saved_fit_result(
         beta_joint.clone(),
         Array1::zeros(0),
         1.0,
         Some(covariance.clone()),
         Some(covariance),
-        saved_fit_summary_fixture(),
+        summary,
     );
     fit_result.blocks = vec![
         gam::estimate::FittedBlock {
