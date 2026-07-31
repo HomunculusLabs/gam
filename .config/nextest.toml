@@ -309,64 +309,78 @@ test-group = 'diagnostic-probes'
 [profile.sae-inner-consumers]
 default-filter = 'package(gam-sae) and not test(/(^|::)zz/) and test(/^manifold::(sae_contract_probe_tests|tests_outer_quasi_laplace_probe_budget_2080|tests_inner_convergence_rate_2267|tests_certify_external_2266|tests_two_tier_2023|tests_tier0_primary_path_2023|tests_stall_diagnostic_2234|tests_indefinite_a_refusal_2336|tests_inner_budget_trajectory_2015|tests_rank_charge_2101|tests_streaming_efs_cache_1026)::/)'
 
-# gam#2664: seven `basis_smooth` tests are CORRECT and were being SIGKILLed at
-# the 600s default (300s period x terminate-after 2), so a full-target run
-# reported them as TIMED OUT and they were counted as non-green. Same
-# lost-coverage failure as the hifreq / SAE-resident / survival exemptions
-# above, and the same remedy: give ONLY these a budget that lets their
-# assertions run.
+# gam#2664: THESE TESTS ARE NOT SLOW. The per-test budgets that used to sit here
+# (900s/1200s/2100s/3000s, landed in `1e49b0d60`) were derived from wall clocks
+# that measured NODE CONTENTION, not runtime, and they are removed.
 #
-# MEASURED, not assumed. Re-ran exactly the 14 timed-out tests under a 3000s
-# ceiling (MSI cn1062, origin/main 0d55b0586, lane clean, R present) and seven
-# of them PASSED:
+# What the original measurement got wrong. Eight `basis_smooth` tests were
+# reported as TIMED OUT at the 600s default and re-measured under a 3000s
+# ceiling at 592.489s .. 2941.067s, which read as "correct but legitimately
+# slow". Re-measured again with BOTH thread knobs bounded
+# (`RAYON_NUM_THREADS=8` x `--test-threads=4` on a 32-core allocation, so the
+# PRODUCT equals the allocation) on MSI acn16 at `origin/main c04797af8`:
 #
-#   duchon_lazy_chunked_path_is_exercised_and_recovers_truth          592.489s
-#   te_k_sweep_uniform_quality_on_easy_2d_truth                       603.240s
-#   cycle_69_matern_explicit_vs_auto_length_scale                     674.461s
-#   ridge_2d_truth_recovered_by_2d_families                           983.392s
-#   cycle_68_matern_sinusoid_recovery_rmse                           1602.301s
-#   matern_nu_sweep_uniform_quality_on_sin1                          1911.679s
-#   matern_very_small_length_scale_stable                            2089.098s
-#   matern_all_nu_values_fit_reasonably                              2941.067s
+#   8 tests run: 8 passed, 295 skipped                    [83.966s TOTAL]
 #
-# Budgets are ~2x the measured time rather than a flat raise: those numbers come
-# from a run of 14 tests on one node, so a full-target sweep at higher
-# parallelism will be slower, and a per-test ceiling keeps the hang detection
-# this file exists for. A global raise would blind the whole suite instead.
+#   cycle_69_matern_explicit_vs_auto_length_scale     24.451s   (was  674.461s)
+#   ridge_2d_truth_recovered_by_2d_families           30.354s   (was  983.392s)
+#   te_k_sweep_uniform_quality_on_easy_2d_truth       31.215s   (was  603.240s)
+#   cycle_68_matern_sinusoid_recovery_rmse            32.367s   (was 1602.301s)
+#   matern_nu_sweep_uniform_quality_on_sin1           37.726s   (was 1911.679s)
+#   duchon_lazy_chunked_path_is_exercised             41.086s   (was  592.489s)
+#   matern_very_small_length_scale_stable             41.387s   (was 2089.098s)
+#   matern_all_nu_values_fit_reasonably               53.610s   (was 2941.067s)
 #
-# Filters match the TEST NAME only (no binary prefix), matching every other
-# override in this file: nextest's `test()` predicate does not see the binary
-# name, so a `basis_smooth.*` prefix would match nothing and silently re-measure
-# the 600s default -- the exact failure mode recorded for #2539 above.
+# 14x to 55x. None of them reaches the 300s SLOW period, let alone the 600s
+# kill. Budgets of ~50x the true runtime are not a fix; they are exactly the
+# "global raise blinds the hang detection this file exists for" failure the
+# header of this file warns about, applied per-test.
 #
-# Three others TERMINATE even at 3000s and deliberately get NO budget here:
-# `smooth_term_lr_size_calibration::exhaustive_null_simulation_size_grid`,
-# `smooth_term_lr_size_calibration::null_simulation_size_is_calibrated_small_n`
-# and `spline_scan_workflow_equivalence::spline_scan_million_row_fit_scales_linearly_and_recovers_truth`.
-# Two are explicit null SIMULATIONS and one is a million-row scaling test, so
-# what ceiling they need -- and whether they should run in the default profile
-# at all -- is a different question from un-killing a 10-49 minute quality test.
+# THE ACTUAL MECHANISM, because it is invisible and gets WORSE with more CPUs:
+# nextest takes `--test-threads` from the visible CPU count, AND each test then
+# opens its own rayon pool of that same size. A 16-core allocation therefore
+# runs 16 binaries x 16 rayon threads = 256 threads on 16 cores; a 32-core
+# allocation runs 1024 on 32. Asking for a bigger machine makes it
+# quadratically worse. The remedy is to bound BOTH knobs in the RUNNER so their
+# product equals the allocation -- it does not belong in per-test budgets here,
+# because the tests are not the thing that is wrong.
 #
-# The three that still FAIL under the same ceiling are left at the default,
-# because they are genuine failures rather than slow tests, and one of them
-# (`aniso_demo_population_z_scores_are_equalized_for_iso_and_aniso`) fails in
-# 0.148s — it was never a timing phenomenon at all.
-
-[[profile.default.overrides]]
-filter = 'test(/(duchon_lazy_chunked_path_is_exercised_and_recovers_truth|te_k_sweep_uniform_quality_on_easy_2d_truth|cycle_69_matern_explicit_vs_auto_length_scale)/)'
-slow-timeout = { period = "600s", terminate-after = 3 }
-
-[[profile.default.overrides]]
-filter = 'test(/ridge_2d_truth_recovered_by_2d_families/)'
-slow-timeout = { period = "600s", terminate-after = 4 }
-
-[[profile.default.overrides]]
-filter = 'test(/(cycle_68_matern_sinusoid_recovery_rmse|matern_nu_sweep_uniform_quality_on_sin1|matern_very_small_length_scale_stable)/)'
-slow-timeout = { period = "600s", terminate-after = 7 }
-
-[[profile.default.overrides]]
-filter = 'test(/matern_all_nu_values_fit_reasonably/)'
-slow-timeout = { period = "600s", terminate-after = 10 }
+# A related trap that corrupted the diagnostics while leaving the
+# oversubscription in place: GNU `nproc` honors `OMP_NUM_THREADS`, and MSI's
+# `R/4.4.2-openblas-rocky8` module sets it to 1. In any script that loads an R
+# module, `nproc` reports 1 and is NOT a CPU count. It does not affect Rust,
+# since nextest and rayon use affinity-based `num_cpus`.
+#
+# VERIFIED BY REMOVING THEM. Full `basis_smooth` target, DEFAULT profile, these
+# overrides stripped, threads bounded (`RAYON_NUM_THREADS=4` x
+# `--test-threads=8` on 32 cores), MSI acn16:
+#
+#   303 tests run: 294 passed, 7 failed, 2 timed out          [681.210s]
+#
+# and all eight run comfortably inside the plain 600s cap:
+#
+#   cycle_69_matern_explicit_vs_auto_length_scale     17.460s
+#   te_k_sweep_uniform_quality_on_easy_2d_truth       25.527s
+#   ridge_2d_truth_recovered_by_2d_families           25.471s
+#   cycle_68_matern_sinusoid_recovery_rmse            29.286s
+#   matern_nu_sweep_uniform_quality_on_sin1           29.269s
+#   matern_very_small_length_scale_stable             33.006s
+#   matern_all_nu_values_fit_reasonably               41.632s
+#   duchon_lazy_chunked_path_is_exercised             58.864s
+#
+# The same run also corrects a SECOND mis-measurement. Both
+# `smooth_term_lr_size_calibration` tests were recorded as "still TERMINATE even
+# at a 3000s ceiling" and treated as unbounded null simulations. Under bounded
+# threads they COMPLETE AND FAIL, in 105.652s and 150.231s. They are ordinary
+# failures, not runaway simulations; the oversubscription was hiding a verdict,
+# not producing one.
+#
+# Only two tests in the target genuinely reach the 600s cap:
+# `spline_scan_million_row_fit_scales_linearly_and_recovers_truth` (a million-row
+# scaling test) and
+# `aniso_demo_population_z_scores_are_equalized_for_iso_and_aniso`. Neither gets
+# a budget here: whether they belong in the default profile at all is a separate
+# question from a mis-measured ceiling.
 
 # gam#2668: a WALL-CLOCK assertion cannot share the machine.
 #
