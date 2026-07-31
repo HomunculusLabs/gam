@@ -1197,11 +1197,13 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
     ///
     ///     Σᵢ wᵢ xᵢ yᵢᵀ = Xᵀ diag(w) Y.
     ///
-    /// Dense and dense-operator pairs use bounded, row-chunked BLAS-3 Grams.
-    /// A pair touching a sparse design keeps the sparse-aware row-outer
-    /// primitive. This decision is made per block pair, not for the whole
-    /// Hessian: a single sparse derivative design must not force unrelated
-    /// dense time, marginal, and log-slope blocks back to scalar BLAS-1.
+    /// Every pair whose dense row panels fit the fixed working-set budget uses
+    /// bounded, row-chunked BLAS-3 Grams, irrespective of its source storage.
+    /// A sparse pair stays on the sparse-aware row-outer primitive only when
+    /// densifying both panels would exceed that budget. This decision is made
+    /// per block pair, not for the whole Hessian: sparse is a storage choice,
+    /// not a reason to force a small 800×12 derivative design through thousands
+    /// of scalar row-view updates.
     /// Operator panels are materialized under a fixed byte budget, while
     /// materialized designs are borrowed as zero-copy views. The method claims
     /// only the full-data unit-weight row measure; Horvitz–Thompson row sets
@@ -1237,10 +1239,6 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
                 rows: std::ops::Range<usize>,
                 label: &str,
             ) -> Result<ndarray::CowArray<'a, f64, ndarray::Ix2>, String> {
-                assert!(
-                    !design.is_sparse(),
-                    "dense Hessian Gram chunk requires dense-backed design ({label})",
-                );
                 match design.as_dense_ref() {
                     Some(full) => Ok(full.slice(s![rows, ..]).into()),
                     None => design
@@ -1272,7 +1270,22 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
                         right.nrows(),
                     ));
                 }
-                if left.is_sparse() || right.is_sparse() {
+                // Storage does not determine the arithmetic schedule. A
+                // sparse panel that is small enough to fit the same bounded
+                // dense working set is materialized once per chunk and closed
+                // by BLAS-3; only an over-budget sparse pair streams row outers.
+                const PANEL_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+                const MAX_CHUNK_ROWS: usize = 8_192;
+                let columns_per_row = left
+                    .ncols()
+                    .saturating_add(right.ncols())
+                    .max(1);
+                let bytes_per_row =
+                    columns_per_row.saturating_mul(std::mem::size_of::<f64>());
+                let full_panel_bytes = n.saturating_mul(bytes_per_row);
+                let sparse_requires_streaming = (left.is_sparse() || right.is_sparse())
+                    && full_panel_bytes > PANEL_BUDGET_BYTES;
+                if sparse_requires_streaming {
                     for row in 0..n {
                         let weight = weights[row];
                         if weight == 0.0 {
@@ -1293,17 +1306,9 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
                     return Ok(());
                 }
 
-                // Bound the two simultaneous operator panels. A wide pair gets
-                // shorter chunks automatically; a narrow pair gets at most
-                // 8K rows so each Gram remains a cache-friendly work unit.
-                const PANEL_BUDGET_BYTES: usize = 64 * 1024 * 1024;
-                const MAX_CHUNK_ROWS: usize = 8_192;
-                let columns_per_row = left
-                    .ncols()
-                    .saturating_add(right.ncols())
-                    .max(1);
-                let bytes_per_row =
-                    columns_per_row.saturating_mul(std::mem::size_of::<f64>());
+                // Bound the two simultaneous dense/operator/sparse panels. A
+                // wide pair gets shorter chunks automatically; a narrow pair
+                // gets at most 8K rows so each Gram is cache-friendly.
                 let chunk_rows = (PANEL_BUDGET_BYTES / bytes_per_row)
                     .max(1)
                     .min(MAX_CHUNK_ROWS);
