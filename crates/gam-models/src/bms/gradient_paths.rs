@@ -2967,9 +2967,18 @@ mod jet_tower_oracle_tests {
                  hand={hand_ns:.2} ns/row hand_over_production={:.6}",
                 hand_ns / production_ns,
             );
-            // #932: release-only. This ratio is not generated without optimization,
-            // so in debug it gates on noise -- measured, this assertion fails in the
-            // default test lane. The parity/correctness checks around it are
+            // #932: release-only -- but NOT because the test lane is unoptimized.
+            // It is not: [profile.test] sets opt-level = 2. The difference is
+            // CODEGEN LAYOUT. [profile.test.package.gam-models] sets
+            // codegen-units = 16 and the test profile carries no LTO, while
+            // [profile.release] is codegen-units = 1 + lto = "thin".
+            // Cargo.toml's own note records that CGU splitting is what blocks LLVM
+            // from inlining hot accessors into the per-row loops, and that
+            // "release is unaffected: it already carries thin-LTO +
+            // codegen-units = 1". A compiled-vs-hand ratio whose whole margin is
+            // cross-CGU inlining therefore measures a different thing here than in
+            // the shipped profile. Measured: this assertion fails in the default
+            // test lane. The parity/correctness checks around it are
             // build-independent and still run in every build.
             assert!(
                 cfg!(debug_assertions) || production_ns < hand_ns,

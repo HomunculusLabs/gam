@@ -514,9 +514,18 @@ mod oracle_tests {
             // noise-bounded not-slower contract and report the ratio as a
             // DIAGNOSTIC token; the real specialization wins live at orders 3
             // and 4 below, which keep the fail-closed token.
-            // #932: release-only. This ratio is not generated without optimization,
-            // so in debug it gates on noise -- measured, this assertion fails in the
-            // default test lane. The parity/correctness checks around it are
+            // #932: release-only -- but NOT because the test lane is unoptimized.
+            // It is not: [profile.test] sets opt-level = 2. The difference is
+            // CODEGEN LAYOUT. [profile.test.package.gam-models] sets
+            // codegen-units = 16 and the test profile carries no LTO, while
+            // [profile.release] is codegen-units = 1 + lto = "thin".
+            // Cargo.toml's own note records that CGU splitting is what blocks LLVM
+            // from inlining hot accessors into the per-row loops, and that
+            // "release is unaffected: it already carries thin-LTO +
+            // codegen-units = 1". A compiled-vs-hand ratio whose whole margin is
+            // cross-CGU inlining therefore measures a different thing here than in
+            // the shipped profile. Measured: this assertion fails in the default
+            // test lane. The parity/correctness checks around it are
             // build-independent and still run in every build.
             assert!(
                 cfg!(debug_assertions) || production_ns <= generic_ns * 1.05,
@@ -705,9 +714,18 @@ mod oracle_tests {
 
         let (production_ns, hand_ns) =
             paired_medians(input, 400_000, production_order4, hand_order4);
-        // #932: release-only. This ratio is not generated without optimization,
-        // so in debug it gates on noise -- measured, this assertion fails in the
-        // default test lane. The parity/correctness checks around it are
+        // #932: release-only -- but NOT because the test lane is unoptimized.
+        // It is not: [profile.test] sets opt-level = 2. The difference is
+        // CODEGEN LAYOUT. [profile.test.package.gam-models] sets
+        // codegen-units = 16 and the test profile carries no LTO, while
+        // [profile.release] is codegen-units = 1 + lto = "thin".
+        // Cargo.toml's own note records that CGU splitting is what blocks LLVM
+        // from inlining hot accessors into the per-row loops, and that
+        // "release is unaffected: it already carries thin-LTO +
+        // codegen-units = 1". A compiled-vs-hand ratio whose whole margin is
+        // cross-CGU inlining therefore measures a different thing here than in
+        // the shipped profile. Measured: this assertion fails in the default
+        // test lane. The parity/correctness checks around it are
         // build-independent and still run in every build.
         assert!(
             cfg!(debug_assertions) || hand_ns > production_ns,
