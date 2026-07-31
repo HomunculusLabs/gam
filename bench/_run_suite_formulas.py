@@ -94,7 +94,12 @@ def _scenario_fit_mapping(scenario_name: typing.Any) -> typing.Any:
             smooth_cols=["s_temp", "year", "h_rain", "w_rain", "h_temp"],
             linear_cols=[],
             smooth_basis="ps",
-            knots=7,
+            # Five-fold CV leaves 30 training rows.  A marginal cubic P-spline
+            # contributes knots+3 centered coefficients in both engines, so
+            # knots=2 gives 1 + 5*(2+3) = 26 free coefficients.  The former
+            # knots=7 mapping requested 51 coefficients and made mgcv's
+            # comparison arm mathematically inestimable rather than slow.
+            knots=2,
             double_penalty=True,
         ),
         "wine_temp_vs_year": dict(
@@ -834,5 +839,4 @@ def _is_matern_rust_scenario(s_cfg: typing.Any) -> bool:
     if cfg is None:
         return False
     return bool(_canonical_smooth_basis(cfg.get("smooth_basis", "ps")) == "matern")
-
 

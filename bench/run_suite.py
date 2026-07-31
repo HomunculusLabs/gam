@@ -2245,6 +2245,50 @@ def _assert_basis_parity_for_scenario(s_cfg: typing.Any, *, ds: dict[str, typing
         )
 
 
+def _assert_marginal_pspline_basis_budget(
+    s_cfg: dict[str, typing.Any],
+    ds: dict[str, typing.Any],
+    folds: list[Fold],
+) -> None:
+    """Reject CV comparisons whose declared marginal P-spline design cannot be estimated.
+
+    Rust and mgcv use the same free dimension for these mappings: a centered
+    cubic marginal smooth contributes ``knots + 3`` coefficients, in addition
+    to the intercept and declared linear terms.  Penalization can regularize a
+    wide Rust solve, but it cannot make an mgcv comparison with more
+    coefficients than observations estimable.  Failing before either contender
+    runs keeps a benchmark configuration error from being misreported as a
+    backend accuracy or performance result.
+    """
+
+    if not folds or not _is_contender_enabled(s_cfg, "r_mgcv"):
+        return
+    cfg = _scenario_fit_mapping(s_cfg["name"])
+    if cfg is None or _canonical_smooth_basis(cfg.get("smooth_basis", "ps")) != "ps":
+        return
+    smooth_cols = list(cfg.get("smooth_cols") or [])
+    if not smooth_cols and cfg.get("smooth_col"):
+        smooth_cols = [cfg["smooth_col"]]
+    # Multi-axis PC mappings are emitted as one joint spatial smooth, not as
+    # independent marginal P-splines, so this exact dimension identity does not
+    # apply to them.
+    pc_smooth_cols, _ = _split_pc_columns(smooth_cols)
+    if len(pc_smooth_cols) >= 2:
+        return
+    knots = int(cfg.get("knots", 8))
+    free_coefficients = (
+        1 + len(cfg.get("linear_cols", [])) + len(smooth_cols) * (knots + 3)
+    )
+    min_train_rows = min(len(fold.train_idx) for fold in folds)
+    if free_coefficients >= min_train_rows:
+        raise RuntimeError(
+            "invalid marginal P-spline benchmark basis budget for "
+            f"{s_cfg['name']}: {free_coefficients} free coefficients require fewer "
+            f"than {min_train_rows} rows in every CV training fold; reduce knots or "
+            "the number of marginal smooths"
+        )
+
+
 def _extra_excluded_contenders_for_profile() -> set[str]:
     if _BENCH_CI_PROFILE == "lean":
         return set(_LEAN_PROFILE_EXCLUDED_CONTENDERS)
@@ -2379,6 +2423,7 @@ def main() -> None:
         ds = dataset_for_scenario(s_cfg)
         folds = folds_for_dataset(ds)
         _assert_basis_parity_for_scenario(s_cfg, ds=ds)
+        _assert_marginal_pspline_basis_budget(s_cfg, ds, folds)
         with _workspace_tempdir(prefix="gam_bench_shared_folds_") as shared_td:
             shared_fold_artifacts = build_shared_fold_artifacts(ds, folds, Path(shared_td))
             if ds["family"] != "survival":

@@ -1540,7 +1540,6 @@ def loads(model_bytes: bytes) -> Model:
             _training_table_kind=str(multinomial_metadata["training_table_kind"]),
         )
     try:
-        rust_module().load_model(model_bytes)
         training_table_kind = rust_module().required_saved_model_payload_string(
             model_bytes, "training_table_kind"
         )

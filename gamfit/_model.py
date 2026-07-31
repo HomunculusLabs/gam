@@ -115,10 +115,14 @@ class Model:
     metadata, and :meth:`save` / :meth:`dumps` for persistence.
     """
 
-    __slots__ = ("_model_bytes", "_training_table_kind")
+    __slots__ = ("_model_bytes", "_prediction_model", "_training_table_kind")
 
     def __init__(self, *, _model_bytes: bytes, _training_table_kind: str) -> None:
         self._model_bytes = _model_bytes
+        try:
+            self._prediction_model = rust_module().compile_model(_model_bytes)
+        except Exception as exc:
+            raise map_exception(exc) from exc
         self._training_table_kind = _training_table_kind
 
     def predict(
@@ -313,17 +317,14 @@ class Model:
                 row_ids=row_ids,
                 restore=restore_output_table,
             )
-        opts_json = rust_module().build_model_predict_payload_json(
-            self._model_bytes,
-            headers,
-            rows,
-            interval,
-            covariance_mode,
-            observation_interval,
-        )
         try:
             raw = rust_module().predict_table(
-                self._model_bytes, headers, rows, opts_json
+                self._prediction_model,
+                headers,
+                rows,
+                interval,
+                covariance_mode,
+                observation_interval,
             )
         except Exception as exc:
             raise map_exception(exc) from exc

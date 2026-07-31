@@ -4873,7 +4873,7 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(torch_from_fitted, module)?)?;
     module.add_function(wrap_pyfunction!(fit_table, module)?)?;
     module.add_function(wrap_pyfunction!(fit_array, module)?)?;
-    module.add_function(wrap_pyfunction!(load_model, module)?)?;
+    module.add_function(wrap_pyfunction!(compile_model, module)?)?;
     module.add_function(wrap_pyfunction!(bayes_factor_log_diff, module)?)?;
     module.add_function(wrap_pyfunction!(saved_model_payload_string, module)?)?;
     module.add_function(wrap_pyfunction!(inference_notes_from_model, module)?)?;
@@ -7226,14 +7226,25 @@ fn escape_html(value: &str) -> String {
     out
 }
 
-fn predict_encoded_table_impl(
-    model_bytes: &[u8],
+fn predict_encoded_table_configured_impl(
+    model: &FittedModel,
     source: EncodedDataset,
-    options_json: Option<&str>,
+    interval: Option<f64>,
+    covariance_mode: Option<String>,
+    observation_interval: Option<bool>,
 ) -> Result<String, PredictError> {
-    let model = load_model_impl(model_bytes)?;
     let model_class = model.predict_model_class();
-    let expected_names = required_prediction_columns(&model).map_err(PredictError::Other)?;
+    parse_covariance_mode(covariance_mode.as_deref()).map_err(PredictError::Other)?;
+    let time_grid =
+        default_survival_time_grid_from_model(model, &source).map_err(PredictError::Other)?;
+    let options = PyPredictOptions {
+        interval,
+        time_grid,
+        covariance_mode,
+        observation_interval,
+        conformal_level: None,
+    };
+    let expected_names = required_prediction_columns(model).map_err(PredictError::Other)?;
     let present_names = source.headers.iter().cloned().collect::<BTreeSet<_>>();
     let missing = expected_names
         .difference(&present_names)
@@ -7243,8 +7254,9 @@ fn predict_encoded_table_impl(
         return Err(PredictError::SchemaMismatch(missing.join(" ")));
     }
     let dataset =
-        dataset_with_model_schema_from_encoded(&model, &source).map_err(PredictError::Other)?;
-    predict_dataset_impl(&model, model_class, dataset, options_json).map_err(PredictError::Other)
+        dataset_with_model_schema_from_encoded(model, &source).map_err(PredictError::Other)?;
+    predict_dataset_with_options_impl(model, model_class, dataset, &options)
+        .map_err(PredictError::Other)
 }
 
 fn predict_array_impl(
@@ -7277,17 +7289,16 @@ fn predict_array_impl(
     columns_to_array(columns)
 }
 
-fn predict_dataset_impl(
+fn predict_dataset_with_options_impl(
     model: &FittedModel,
     model_class: PredictModelClass,
     dataset: EncodedDataset,
-    options_json: Option<&str>,
+    options: &PyPredictOptions,
 ) -> Result<String, String> {
-    let options = parse_predict_options(options_json)?;
     if matches!(model_class, PredictModelClass::Survival) {
-        return predict_table_survival(model, &dataset, &options);
+        return predict_table_survival(model, &dataset, options);
     }
-    let (columns, provenance) = predict_columns(model, dataset, &options)?;
+    let (columns, provenance) = predict_columns(model, dataset, options)?;
     serde_json::to_string(&PredictionPayload {
         columns,
         model_class: prediction_model_class_label(model),

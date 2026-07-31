@@ -327,6 +327,38 @@ class RunSuiteMappingTests(unittest.TestCase):
         )
         self.assertEqual(ignored_required, [])
 
+    def test_wine_gamair_basis_fits_every_cv_training_fold(self) -> None:
+        cfg = _RUN_SUITE._scenario_fit_mapping("wine_gamair")
+        self.assertEqual(cfg["knots"], 2)
+        folds = [
+            _RUN_SUITE.Fold(
+                train_idx=_RUN_SUITE.np.arange(30),
+                test_idx=_RUN_SUITE.np.arange(30, 38),
+            )
+        ]
+        _RUN_SUITE._assert_marginal_pspline_basis_budget(
+            {"name": "wine_gamair"},
+            {"family": "gaussian"},
+            folds,
+        )
+
+    def test_marginal_pspline_basis_budget_rejects_wide_cv_design(self) -> None:
+        folds = [
+            _RUN_SUITE.Fold(
+                train_idx=_RUN_SUITE.np.arange(25),
+                test_idx=_RUN_SUITE.np.arange(25, 30),
+            )
+        ]
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"wine_gamair: 26 free coefficients require fewer than 25 rows",
+        ):
+            _RUN_SUITE._assert_marginal_pspline_basis_budget(
+                {"name": "wine_gamair"},
+                {"family": "gaussian"},
+                folds,
+            )
+
     def assert_joint_mapping(self, scenario_name: str, expected_dim: int, expected_knots: int) -> None:
         cfg = _RUN_SUITE._scenario_fit_mapping(scenario_name)
         self.assertIsNotNone(cfg, scenario_name)

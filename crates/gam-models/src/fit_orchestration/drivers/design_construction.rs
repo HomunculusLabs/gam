@@ -331,7 +331,7 @@ fn fit_term_collection_on_realized_design(
     // term's signal lives in its penalty null space (#1271 single-penalty tp/ps,
     // #1266 double-penalty selection). Length-safe: only fires when the inner ρ
     // aligns 1:1 with the penalty blocks (see `relax_smoothing_rho_prior`).
-    base_fit_opts.rho_prior = relax_smoothing_rho_prior(options, design, y, weights);
+    base_fit_opts.rho_prior = relax_smoothing_rho_prior(options, design);
     let fitted = FittedTermCollection {
         fit: fit_gamwith_heuristic_lambdas(
             design.design.clone(),
@@ -2778,8 +2778,6 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
 fn relax_smoothing_rho_prior(
     options: &FitOptions,
     design: &TermCollectionDesign,
-    y: ArrayView1<'_, f64>,
-    weights: ArrayView1<'_, f64>,
 ) -> gam_spec::RhoPrior {
     use gam_terms::basis::BasisMetadata;
     let base = &options.rho_prior;
@@ -3001,70 +2999,23 @@ fn relax_smoothing_rho_prior(
     } else {
         gam_spec::RhoPrior::Flat
     };
-    // DOUBLE-PENALTY NULL-SPACE SELECTION (#1392, mgcv `select=TRUE`). A
-    // double-penalty smooth carries a second `DoublePenaltyNullspace` ridge on
-    // the term's penalty null space ({1, x} for a 1-D bend) whose only job is
-    // selection: drive its λ UP (toward the prior's finite well-penalized mode
-    // λ* = θ², not to ∞) to shrink the null-space (linear) component OUT when
-    // the data does not support it, exactly as mgcv's `select=TRUE` adds a
-    // null-space penalty. On an over-parameterized `p > n` fit
-    // (`wine_gamair`: 5 `ps` smooths on ~26 rows) the symmetric relaxed prior
-    // above leaves this ridge's outer score flat on the select-out side, so REML
-    // stalls it at λ ≈ 0.11 — the null space is kept, the EDF rails up, and
-    // held-out prediction collapses (#1392). The RANGE-space (`Primary`) bending
-    // coordinate's smoothing selection must NOT be touched, so this select-out
-    // bias is gated to `DoublePenaltyNullspace` coordinates only and is applied
-    // ONLY in the under-determined regime — in the well-determined regime the
-    // relaxable coordinates stay byte-flat (`Flat`) so a clean `n > p` fit is
-    // unchanged (no regression on ordinary smooth recovery).
-    //
-    // The strong select-out PC prior is applied to the `DoublePenaltyNullspace`
-    // coordinate ONLY in the UNDER-DETERMINED regime, where the outer score is
-    // genuinely flat on the select-out side and REML needs the active push. In the
-    // WELL-DETERMINED regime the null space gets the wide
-    // `nullspace_degeneracy_prior` instead (see below) — an active select-out mode
-    // there would over-shrink a genuinely-supported collinear null space (#1476).
-    // The RANGE-space (`Primary`) bending coordinate is untouched (stays `Flat`
-    // when well-determined), so ordinary single-smooth recovery is unchanged.
-    //
-    let nullspace_select_prior = gam_spec::RhoPrior::PenalizedComplexity {
-        upper: NULLSPACE_SELECT_PC_UPPER,
-        tail_prob: NULLSPACE_SELECT_PC_TAIL_PROB,
-    };
-    // WELL-DETERMINED NULL-SPACE DEGENERACY BREAKER (#1476). When the fit is
-    // well-determined (`n ≥ 2·p`) the strong `nullspace_select_prior` above is the
-    // WRONG tool for the Gaussian null-space coordinate: its finite well-penalized
-    // mode at `λ* = θ² ≈ 8483` is an aggressive select-OUT pull that drags a
-    // GENUINELY-SUPPORTED null space (a real linear/constant component) toward
-    // collapse — the #1476 over-shrink. But leaving the coordinate fully `Flat`
-    // (the previous well-determined behaviour) is the OTHER failure: under
-    // concurvity (`s(x1)+s(x2)`, corr ≈ 0.9) the two smooths' null-space (linear)
-    // directions are near-collinear, so the joint REML objective is essentially
-    // FLAT along the "transfer the shared linear signal between the two smooths"
-    // ridge; with zero curvature on that coordinate REML cannot certify an
-    // interior stationary point and one smooth's `λ_nullspace` rails to the ρ
-    // bound (≈1e13), annihilating its genuine linear signal to `EDF ≈ 0` while the
-    // other absorbs it. The principled fix is NEITHER a select-out mode NOR a
-    // flat coordinate: it is a WIDE, weakly-informative symmetric Gaussian that
-    // contributes strictly-positive termination curvature `1/sd²` (breaking the
-    // concurvity flat-ridge degeneracy so REML lands an interior allocation) while
-    // its gradient `ρ/sd²` at any plausible optimum is negligible — so REML, not
-    // the prior, chooses how the shared linear signal is split. This adds no
-    // directional select-out bias, so it does NOT over-shrink a supported null
-    // space (#1476); a genuinely-UNSUPPORTED null space is still selected out
-    // because REML's own score drives its `λ` up and the weak symmetric pull
-    // barely opposes it (#1266 irrelevant-covariate shrinkage, #1371 single-smooth
-    // recovery preserved). The strong PC select-out remains in the
-    // UNDER-DETERMINED regime, where the score IS flat on the select-out side and
-    // REML needs the active push (#1392 wine `p > n`).
+    // A null-space coordinate always gets the same wide, symmetric degeneracy
+    // prior.  It supplies the strictly-positive curvature needed to certify an
+    // interior solution under concurvity or p > n, while its gradient is too
+    // small to decide whether a polynomial component is retained or selected
+    // out.  That decision belongs to REML.  In particular, the default
+    // criterion must not inspect y and then install an aggressive, directional
+    // prior: the former PC policy had mode λ≈8,483 and therefore forced every
+    // null-space λ in wine_gamair to ≈8,470, erasing supported linear signal.
+    // Using a response-dependent pre-fit regression to decide which prior to
+    // apply was also not a coherent marginal-likelihood objective.
     let nullspace_degeneracy_prior = gam_spec::RhoPrior::Normal {
         mean: 0.0,
         sd: NULLSPACE_WELLDET_DEGENERACY_RHO_SD,
     };
     let per_coord = coords
         .iter()
-        .enumerate()
-        .map(|(coord_idx, info)| {
+        .map(|info| {
             let relax = info
                 .termname
                 .as_deref()
@@ -3073,72 +3024,8 @@ fn relax_smoothing_rho_prior(
                 return base.clone();
             }
             let is_nullspace = matches!(info.penalty.source, PenaltySource::DoublePenaltyNullspace);
-            // The relaxed per-coordinate prior is FAMILY-AGNOSTIC: the choice
-            // depends only on the coordinate's role (bending vs null-space
-            // selection) and on whether the data over-determines the model, NOT
-            // on the response family or link. (Length-safety — the only thing the
-            // family/link can break via auxiliary ρ coordinates — is already
-            // gated above by `length_safe`; reaching this point means the inner ρ
-            // aligns 1:1 with `penaltyinfo` for Gaussian and non-Gaussian alike.)
-            //
-            // The previous code split here on `gaussian_identity` and pinned the
-            // non-Gaussian null-space coordinate to the AGGRESSIVE PC select-out
-            // prior in BOTH determinacy regimes. That select-out prior has a
-            // finite well-penalized mode at λ* ≈ θ² ≈ 8483, which carves a SECOND,
-            // deep basin into the 2-D (bending, null-space) outer REML surface at
-            // large λ_null. On a well-determined non-Gaussian double-penalty `ps`
-            // smooth the outer ARC then has two competing basins — the genuine
-            // bending optimum and the prior-induced high-λ_null shelf — and the
-            // expensive non-Gaussian multi-start lands the wrong one: the fit
-            // ships a right-boundary blow-up (Tweedie `s(x)` pred ≈ 1.4–2.0× truth
-            // at x=1 on data whose null space is unsupported) and, on the hard
-            // seeds, a falsely-"converged" EDF-inflated under-smooth (#1477; the
-            // same genus as the #1426 Gamma/log overfit). The Gaussian path does
-            // NOT do this — #1476 deliberately switched its well-determined
-            // null-space coordinate to the wide, weakly-informative degeneracy
-            // prior precisely because the active select-out over-shrinks /
-            // destabilises a well-determined fit. Non-Gaussian needs the identical
-            // treatment, so the determinacy gate now applies to BOTH families:
-            //
-            //   * BENDING (range-space) coordinate → `relaxed_prior` (firth
-            //     one-sided barrier when well-determined = pure REML = mgcv; wide
-            //     #1089 `Normal` when under-determined).
-            //   * NULL-SPACE selection coordinate → the AGGRESSIVE PC select-out
-            //     ONLY when under-determined (`p > n`, #1392 wine: the outer score
-            //     is flat on the select-out side and REML needs the active push);
-            //     otherwise the gentle, wide degeneracy prior (#1476), which adds
-            //     termination curvature without biasing which λ_null REML lands on
-            //     — so a genuinely-unsupported null space is still selected out by
-            //     REML's own score (the sin-data linear trend → λ_null large) and a
-            //     genuinely-supported one is not over-shrunk.
             if is_nullspace {
-                // The aggressive select-out prior is only ever justified when the
-                // data is INDIFFERENT to the null-space (polynomial) component —
-                // its steep `θ·e^{−ρ/2}` wall (θ ≈ 92, cost reaching ~1e8 at the
-                // ρ box edge) is a near-hard constraint that dominates the base
-                // REML criterion by many orders of magnitude, so it CANNOT be
-                // overridden by the likelihood once applied. The `n < 2·p`
-                // under-determined proxy alone is far too broad: a perfectly
-                // well-posed linear signal that lives ENTIRELY in the null space
-                // (e.g. `y = x` fit with `s(x)`, `p = 8`, any `n < 16`) is
-                // over-parameterised by that count yet strongly determines its
-                // null-space (slope) coefficient. Select-out there annihilates the
-                // true slope and silently ships a flat line (#2355). Before
-                // applying the select-out, verify the data does NOT clearly support
-                // this coordinate's null-space directions; if it does, fall back to
-                // the wide, weakly-informative degeneracy Normal (which supplies
-                // termination curvature without a directional select-out bias) so
-                // pure REML — matching mgcv `select=TRUE` — recovers the component.
-                // The check is conservative: it only downgrades when the null space
-                // is UNAMBIGUOUSLY supported, so a genuinely-unsupported null space
-                // (#1392 wine `p > n`) keeps its select-out byte-for-byte.
-                if underdetermined
-                    && !nullspace_directions_are_supported(design, coord_idx, y, weights)
-                {
-                    nullspace_select_prior.clone()
-                } else {
-                    nullspace_degeneracy_prior.clone()
-                }
+                nullspace_degeneracy_prior.clone()
             } else {
                 relaxed_prior.clone()
             }
@@ -3147,209 +3034,6 @@ fn relax_smoothing_rho_prior(
     gam_spec::RhoPrior::Independent(per_coord)
 }
 
-/// Fraction of the null-space-conditional response variance the null-space
-/// directions of `design.penalties[penalty_idx]` must explain before their
-/// smoothing coordinate is treated as data-SUPPORTED (and therefore exempt from
-/// the aggressive `nullspace_select_prior`). Deliberately high: only an
-/// unambiguously-supported null space is downgraded, so a genuinely-unsupported
-/// one (#1392) keeps its select-out.
-const NULLSPACE_SUPPORT_FRACTION_THRESHOLD: f64 = 0.5;
-
-/// Does the data clearly support the null-space (polynomial) component that the
-/// `DoublePenaltyNullspace` penalty `design.penalties[penalty_idx]` selects on?
-///
-/// The null-space ridge `S₂` penalizes exactly the bending-penalty null space
-/// (`{1, x}` for a 1-D P-spline; the affine trend for a thin-plate). Its RANGE
-/// spans those design directions `Z = X[:, col_range] · V₊(S₂)`. We ask whether
-/// `Z` explains a substantial fraction of the response variance that the
-/// *structurally-unpenalized* columns `C` (intercept + parametric fixed effects)
-/// leave unexplained — a weighted partial-`R²` of the null-space block:
-///
-/// ```text
-///   support = (RSS(y | C) − RSS(y | [C, Z])) / RSS(y | C).
-/// ```
-///
-/// This is a cheap, low-dimensional (`≤ |C| + rank(S₂)` columns, always
-/// well-posed even when `p > n`) evidence test that mirrors what mgcv's REML
-/// would conclude from the marginal likelihood: a null space carrying real
-/// signal (a slope, a linear trend) yields `support → 1`; an unsupported one
-/// yields `support → 0`. Returns `false` on any degeneracy (missing dense
-/// design, empty null space, vanishing residual variance) so the caller keeps
-/// the existing select-out behaviour whenever the test cannot be trusted.
-fn nullspace_directions_are_supported(
-    design: &TermCollectionDesign,
-    penalty_idx: usize,
-    y: ArrayView1<'_, f64>,
-    weights: ArrayView1<'_, f64>,
-) -> bool {
-    use gam_linalg::faer_ndarray::FaerEigh;
-
-    let Some(pen) = design.penalties.get(penalty_idx) else {
-        return false;
-    };
-    let col_range = pen.col_range.clone();
-    if col_range.is_empty() {
-        return false;
-    }
-    let x = design.design.to_dense();
-    let n = x.nrows();
-    if n == 0 || y.len() != n || weights.len() != n || x.ncols() < col_range.end {
-        return false;
-    }
-    // Response with the design's fixed affine channel removed (the fit sees
-    // `affine_offset + X·β`, so the estimable part of the response is
-    // `y − affine_offset`). Fall back to raw `y` if the channel is absent.
-    let mut resp = y.to_owned();
-    if design.affine_offset.len() == n {
-        resp -= &design.affine_offset;
-    }
-
-    // Null-space design directions `Z = X[:, col_range] · V₊(S₂)`, where `V₊`
-    // are the eigenvectors of the (PSD) ridge with strictly-positive eigenvalue.
-    let Ok((evals, evecs)) = pen.local.eigh(faer::Side::Lower) else {
-        return false;
-    };
-    let max_eig = evals.iter().cloned().fold(0.0_f64, |m, v| m.max(v));
-    if !(max_eig > 0.0) {
-        return false;
-    }
-    let tol = 1.0e-9 * max_eig;
-    let pos_cols: Vec<usize> = (0..evals.len()).filter(|&j| evals[j] > tol).collect();
-    if pos_cols.is_empty() {
-        return false;
-    }
-    let xblock = x.slice(s![.., col_range.clone()]);
-    let mut z = Array2::<f64>::zeros((n, pos_cols.len()));
-    for (out_j, &j) in pos_cols.iter().enumerate() {
-        let v = evecs.column(j);
-        // Guard against a col_range / local-matrix width disagreement.
-        if v.len() != xblock.ncols() {
-            return false;
-        }
-        z.column_mut(out_j).assign(&xblock.dot(&v));
-    }
-
-    // Structurally-unpenalized control columns `C`: intercept + parametric
-    // fixed-effect ranges. These are the directions that are always free, so the
-    // null-space block must EARN its keep beyond them (a linear covariate `x`
-    // must not let a collinear smooth's null space claim spurious support).
-    let mut control: Vec<usize> = design.intercept_range.clone().collect();
-    for (_, r) in &design.linear_ranges {
-        control.extend(r.clone());
-    }
-    control.retain(|&c| c < x.ncols());
-    let mut cmat = Array2::<f64>::zeros((n, control.len().max(1)));
-    if control.is_empty() {
-        // No explicit intercept column: control for the mean with a constant.
-        cmat.column_mut(0).fill(1.0);
-    } else {
-        for (out_j, &c) in control.iter().enumerate() {
-            cmat.column_mut(out_j).assign(&x.column(c));
-        }
-    }
-
-    let rss_c = weighted_regression_rss(cmat.view(), resp.view(), weights);
-    let Some(rss_c) = rss_c else { return false };
-    // If the controls already explain essentially all of the response, the null
-    // space cannot be "supported" in any meaningful sense — keep select-out.
-    let base_scale = weighted_total_ss(resp.view(), weights);
-    if !(rss_c > 1.0e-12 * base_scale.max(f64::MIN_POSITIVE)) {
-        return false;
-    }
-    let mut cz = Array2::<f64>::zeros((n, cmat.ncols() + z.ncols()));
-    cz.slice_mut(s![.., ..cmat.ncols()]).assign(&cmat);
-    cz.slice_mut(s![.., cmat.ncols()..]).assign(&z);
-    let Some(rss_cz) = weighted_regression_rss(cz.view(), resp.view(), weights) else {
-        return false;
-    };
-
-    let support = (rss_c - rss_cz) / rss_c;
-    support.is_finite() && support > NULLSPACE_SUPPORT_FRACTION_THRESHOLD
-}
-
-/// Weighted total sum of squares of `y` about its weighted mean, `Σ wᵢ(yᵢ − ȳ)²`.
-fn weighted_total_ss(y: ArrayView1<'_, f64>, w: ArrayView1<'_, f64>) -> f64 {
-    let mut sw = 0.0;
-    let mut swy = 0.0;
-    for (&yi, &wi) in y.iter().zip(w.iter()) {
-        if wi > 0.0 && yi.is_finite() {
-            sw += wi;
-            swy += wi * yi;
-        }
-    }
-    if sw <= 0.0 {
-        return 0.0;
-    }
-    let mean = swy / sw;
-    let mut ss = 0.0;
-    for (&yi, &wi) in y.iter().zip(w.iter()) {
-        if wi > 0.0 && yi.is_finite() {
-            ss += wi * (yi - mean) * (yi - mean);
-        }
-    }
-    ss
-}
-
-/// Weighted least-squares residual sum of squares of `y` on the columns of `d`,
-/// `min_b Σ wᵢ(yᵢ − dᵢ·b)²`, via ridge-stabilised normal equations
-/// `(DᵀWD + εI) b = DᵀW y`. The tiny relative ridge only regularises an exactly
-/// rank-deficient `D` (e.g. duplicated control columns); it does not perturb a
-/// well-posed low-dimensional solve enough to move the coarse support verdict.
-/// Returns `None` if the factorisation fails.
-fn weighted_regression_rss(
-    d: ArrayView2<'_, f64>,
-    y: ArrayView1<'_, f64>,
-    w: ArrayView1<'_, f64>,
-) -> Option<f64> {
-    use gam_linalg::faer_ndarray::FaerCholesky;
-
-    let m = d.ncols();
-    if m == 0 {
-        return Some(weighted_total_ss(y, w));
-    }
-    let mut gram = Array2::<f64>::zeros((m, m));
-    let mut rhs = Array1::<f64>::zeros(m);
-    for row in 0..d.nrows() {
-        let wi = w[row];
-        if !(wi > 0.0) || !y[row].is_finite() {
-            continue;
-        }
-        let dr = d.row(row);
-        for a in 0..m {
-            let wda = wi * dr[a];
-            rhs[a] += wda * y[row];
-            for b in a..m {
-                gram[[a, b]] += wda * dr[b];
-            }
-        }
-    }
-    for a in 0..m {
-        for b in (a + 1)..m {
-            gram[[b, a]] = gram[[a, b]];
-        }
-    }
-    let trace = (0..m).map(|i| gram[[i, i]]).sum::<f64>();
-    if !(trace > 0.0) {
-        return Some(weighted_total_ss(y, w));
-    }
-    let ridge = 1.0e-10 * trace / (m as f64);
-    for i in 0..m {
-        gram[[i, i]] += ridge;
-    }
-    let chol = gram.cholesky(faer::Side::Lower).ok()?;
-    let beta = chol.solvevec(&rhs);
-    let mut rss = 0.0;
-    for row in 0..d.nrows() {
-        let wi = w[row];
-        if !(wi > 0.0) || !y[row].is_finite() {
-            continue;
-        }
-        let fitted = d.row(row).dot(&beta);
-        let resid = y[row] - fitted;
-        rss += wi * resid * resid;
-    }
-    Some(rss)
-}
 
 /// Standard deviation of the wide, weakly-informative symmetric `Normal` prior
 /// placed on a relaxable smooth's log-λ coordinates when the fit is
@@ -3365,35 +3049,6 @@ fn weighted_regression_rss(
 /// curvature without further benefit.
 const RELAX_UNDERDETERMINED_RHO_SD: f64 = 15.0;
 
-/// Distance-scale bound `upper` (`P(d > upper) = tail_prob` on the marginal-SD
-/// scale `d = exp(-ρ/2)`) of the penalized-complexity prior placed on a
-/// relaxable smooth's `DoublePenaltyNullspace` selection coordinate when the fit
-/// is under-determined (`n < 2·p`); see [`relax_smoothing_rho_prior`].
-///
-/// The null-space ridge exists only to SELECT the linear/constant null-space
-/// component out (mgcv `select=TRUE`): we want its `λ` driven UP (`d → 0`)
-/// unless the data clearly buys the null-space wiggle. The PC prior is the
-/// convex bowl `C(ρ) = ρ/2 + θ e^{-ρ/2}` with the steep exponential wall on the
-/// `λ → 0` (null space kept, `d > upper`) side and a FINITE interior mode at
-/// `ρ* = 2 ln θ` (`λ* = θ²`). A small `upper` puts that wall close in, so the
-/// coordinate's λ is selected up toward the well-penalized mode; the data can
-/// still keep the null space when it genuinely earns it (the over-smoothing side
-/// of the bowl, gradient `→ +1/2` only in the far tail, pulls ρ back DOWN toward
-/// λ* — there is no λ → ∞ runaway). `0.05` places the wall at a marginal-SD
-/// scale two decades below unit, biasing toward select-out on the
-/// over-parameterized `p > n` wine fit while staying weakly informative.
-const NULLSPACE_SELECT_PC_UPPER: f64 = 0.05;
-
-/// Tail probability `α` (`P(d > upper) = α`) calibrating the rate
-/// `θ = −ln(α)/upper` of the [`NULLSPACE_SELECT_PC_UPPER`] penalized-complexity
-/// select-out prior. A small `α` makes the wall against the kept-null-space
-/// (`λ → 0`) side steep; combined with the small `upper` it yields a strong
-/// θ ≈ 92 so REML moves the under-determined null-space ridge off its stalled
-/// λ ≈ 0.11 toward select-out. The PC bowl has a FINITE mode at `λ* = θ² ≈ 8483`
-/// (`ρ* = 2 ln θ ≈ 9.05`), NOT a hard `λ → ∞` cap: beyond the mode the gradient
-/// turns positive (approaching `+1/2` only as `ρ → +∞`) and, the objective being
-/// minimized, pulls ρ back DOWN toward λ*. See [`relax_smoothing_rho_prior`].
-const NULLSPACE_SELECT_PC_TAIL_PROB: f64 = 0.01;
 
 fn adaptive_fit_options_base(options: &FitOptions, design: &TermCollectionDesign) -> FitOptions {
     FitOptions {

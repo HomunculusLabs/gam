@@ -15,13 +15,13 @@
 //! `status=Converged` with no warning: a silent wrong answer for every
 //! `n ∈ [5, 15]` while `n ≥ 16` (well-determined) fit correctly.
 //!
-//! FIX. The select-out is now gated on a cheap data-adaptive support test: it is
-//! applied only when the data does NOT clearly support the null-space
-//! directions. A pure linear signal (`y = x`) lives entirely in the null space,
-//! so it is detected as supported and the coordinate falls back to the wide
-//! degeneracy Normal — letting pure REML (matching mgcv `select=TRUE`) recover
-//! the slope. A genuinely-unsupported null space (`p > n` over-parameterization,
-//! #1392) is still selected out.
+//! FIX. Default smoothing priors must not depend on the observed response.
+//! Every double-penalty null-space coordinate therefore receives only the same
+//! wide symmetric degeneracy Normal. It supplies enough curvature to make the
+//! outer objective proper without choosing "supported" directions before the
+//! fit; REML itself decides whether a linear component is retained or shrunk.
+//! This recovers `y = x`, while a genuinely irrelevant null space is still
+//! selected out by the likelihood-plus-REML criterion.
 //!
 //! This test asserts the RECOVERED behaviour directly (no reference tool): for a
 //! sweep of `n` spanning the previously-collapsing range it requires EDF ≈ 2 and
@@ -118,8 +118,8 @@ fn linear_data_recovers_line_not_flat_collapse() {
     // line:
     //   * `n ∈ [9, 15]` (`n > p`): the aggressive null-space select-out prior
     //     shipped a flat line at the response mean (EDF ≈ 1.08) — a silent wrong
-    //     answer. The data-adaptive gate now recognises the fully-supported
-    //     linear component and lets pure REML recover the slope.
+    //     answer. The response-independent degeneracy prior now leaves the
+    //     retention decision to REML, which recovers the linear component.
     //   * `n ∈ [5, 8]` (`n ≈ p`): the summed-penalty profiled-diagonal SEED
     //     heuristic honestly refused this near-degenerate corner, and that
     //     refusal was propagated as a fatal fit error instead of merely dropping
@@ -160,14 +160,13 @@ fn linear_data_recovers_line_not_flat_collapse() {
 }
 
 /// Complementary guard (opposite direction from the recovery test): the
-/// data-adaptive downgrade must NOT be so eager that it disables the select-out
-/// for a genuinely-UNSUPPORTED null space. On an under-determined smooth of a
+/// The response-independent prior must still allow REML to select out a
+/// genuinely unsupported null space. On an under-determined smooth of a
 /// signal that carries neither a linear trend nor smooth structure, the
-/// null-space select-out must still fire and the whole smooth must collapse to
+/// whole smooth must collapse to
 /// the mean (EDF ≈ 1) — the #1266 irrelevant-covariate / #1392 `p > n` shrinkage
-/// behaviour the aggressive prior exists to provide. A regression that widened
-/// the gate into "always downgrade" would spuriously KEEP the null space here
-/// (EDF ≈ 2), which this test catches.
+/// behaviour. A regression that made the degeneracy prior informative enough to
+/// retain a spurious direction would produce EDF ≈ 2, which this test catches.
 #[test]
 fn unsupported_nullspace_is_still_selected_out() {
     init_parallelism();
@@ -185,7 +184,6 @@ fn unsupported_nullspace_is_still_selected_out() {
     assert!(
         edf < 1.4,
         "an unsupported null space must stay selected out (EDF≈1); got EDF={edf:.4} \
-         — the data-adaptive downgrade has become too eager and is keeping a \
-         spurious linear component (#1266/#1392 regression)"
+         — REML is keeping a spurious linear component (#1266/#1392 regression)"
     );
 }

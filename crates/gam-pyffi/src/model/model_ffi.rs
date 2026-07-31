@@ -81,6 +81,17 @@ struct PyPredictOptions {
     conformal_level: Option<f64>,
 }
 
+/// Validated, typed fitted model retained by the Python `Model` shell.
+///
+/// Persistence remains byte-based, but hot prediction calls share this
+/// immutable value instead of reparsing and revalidating the JSON archive on
+/// every batch. `Arc` makes detaching prediction from the GIL a constant-time
+/// ownership transfer without cloning the potentially large fitted payload.
+#[pyclass(name = "_FittedModel", frozen)]
+struct PyFittedModel {
+    model: Arc<FittedModel>,
+}
+
 /// Parse the public `covariance_mode` string into the engine enum. `None`
 /// keeps the engine default (required smoothing-corrected). The vocabulary is
 /// owned by `InferenceCovarianceMode::from_str` — the same parser the CLI's
@@ -1539,6 +1550,22 @@ fn default_survival_time_grid_impl(
         .map_err(py_value_error)
 }
 
+fn default_survival_time_grid_from_model(
+    model: &FittedModel,
+    dataset: &EncodedDataset,
+) -> Result<Option<Vec<f64>>, String> {
+    if !matches!(model.predict_model_class(), PredictModelClass::Survival) {
+        return Ok(None);
+    }
+    let training_hi =
+        gam::families::survival::predict::survival_training_time_upper_bound(model.payload());
+    gam::families::survival::predict::default_survival_time_grid(
+        model.payload().formula.as_str(),
+        dataset,
+        training_hi,
+    )
+}
+
 #[pyfunction(signature = (headers, rows, formula, config_json = None, fisher_rao_w = None))]
 fn fit_table(
     py: Python<'_>,
@@ -1590,10 +1617,12 @@ fn fit_array(
 }
 
 #[pyfunction]
-fn load_model(py: Python<'_>, model_bytes: Vec<u8>) -> PyResult<()> {
-    detach_py_result(py, "load_model", move || {
-        load_model_impl(&model_bytes)?;
-        Ok(())
+fn compile_model(py: Python<'_>, model_bytes: Vec<u8>) -> PyResult<PyFittedModel> {
+    let model = detach_py_result(py, "compile_model", move || {
+        load_model_impl(&model_bytes)
+    })?;
+    Ok(PyFittedModel {
+        model: Arc::new(model),
     })
 }
 
@@ -1850,18 +1879,27 @@ fn build_model_predict_payload_json(
     build_predict_payload_json(interval, time_grid, covariance_mode, observation_interval)
 }
 
-#[pyfunction]
+#[pyfunction(signature = (model, headers, rows, interval, covariance_mode=None, observation_interval=None))]
 fn predict_table(
     py: Python<'_>,
-    model_bytes: Vec<u8>,
+    model: PyRef<'_, PyFittedModel>,
     headers: Vec<String>,
     rows: PyRef<'_, PyEncodedTable>,
-    options_json: Option<String>,
+    interval: Option<f64>,
+    covariance_mode: Option<String>,
+    observation_interval: Option<bool>,
 ) -> PyResult<String> {
     rows.require_headers(&headers).map_err(py_value_error)?;
     let dataset = rows.dataset.clone();
+    let model = Arc::clone(&model.model);
     detach_predict_result(py, "predict_table", move || {
-        predict_encoded_table_impl(&model_bytes, dataset, options_json.as_deref())
+        predict_encoded_table_configured_impl(
+            &model,
+            dataset,
+            interval,
+            covariance_mode,
+            observation_interval,
+        )
     })
 }
 

@@ -753,6 +753,16 @@ write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
                     "error": err.strip() or out.strip(),
                 }
             fold_row = json.loads(out_path.read_text())
+            if fold_row.get("status") != "ok":
+                return {
+                    "contender": contender_name,
+                    "scenario_name": scenario["name"],
+                    "status": "failed",
+                    "error": str(
+                        fold_row.get("error")
+                        or f"{contender_name} fold {fold_id} returned status={fold_row.get('status')!r}"
+                    ),
+                }
             if ds["family"] == "survival":
                 all_df = pd.DataFrame(ds["rows"])
                 train_df = all_df.iloc[fold.train_idx].copy()
@@ -2997,6 +3007,5 @@ def run_external_xgboost_aft_cv(scenario: typing.Any, *, ds: dict[str, typing.An
         plot_payload=plot_payload,
         model_spec=f"{cv_rows[0]['model_spec']} {_evaluation_suffix(folds)}",
     )
-
 
 
