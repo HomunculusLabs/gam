@@ -51,7 +51,7 @@ impl<'a> RemlState<'a> {
         let has_dense_constraints =
             self.linear_constraints.is_some() || self.coefficient_lower_bounds.is_some();
         let x_sparse = self.x.as_sparse();
-        let nnz_x = x_sparse.map(|s| s.val().len()).unwrap_or(0);
+        let nnz_x = x_sparse.map(|s| s.val().len());
         let dense_backend =
             |reason: &'static str,
              nnz_h_upper_est: Option<usize>,
@@ -189,7 +189,7 @@ mod tests {
 
         assert!(matches!(decision.geometry, RemlGeometry::DenseSpectral));
         assert_eq!(decision.reason, "penalized_hessian_too_dense");
-        assert_eq!(decision.nnz_x, triplets.len());
+        assert_eq!(decision.nnz_x, Some(triplets.len()));
         assert!(
             decision
                 .density_h_upper_est
@@ -209,7 +209,7 @@ mod tests {
             geometry: RemlGeometry::DenseSpectral,
             reason: "penalized_hessian_too_dense",
             p: 111,
-            nnz_x: 35_520,
+            nnz_x: Some(35_520),
             nnz_h_upper_est: Some(4_096),
             density_h_upper_est: Some(0.6654),
         };
@@ -232,6 +232,7 @@ mod tests {
 
         let unmeasured = SparseRemlDecision {
             reason: "design_not_sparse",
+            nnz_x: None,
             nnz_h_upper_est: None,
             density_h_upper_est: None,
             ..measured
@@ -244,6 +245,21 @@ mod tests {
         assert!(
             !rendered.contains("density_h_est=0"),
             "an unmeasured density must never render as a number: {rendered}"
+        );
+        // `design_not_sparse` is precisely the route with no sparse
+        // representation to count nonzeros from, and `nnz_x=0` reads as a
+        // measured emptiness. Measured on #2569: the same fit that logged
+        // `design_not_sparse … nnz_x=0` counted 583,674 design nonzeros one
+        // gate later, because the design was a lazy conditioning wrapper over
+        // a sparse matrix rather than a dense one.
+        assert!(
+            rendered.contains("nnz_x=na"),
+            "a route with no sparse representation must report the absence of a \
+             nonzero count, not a zero: {rendered}"
+        );
+        assert!(
+            !rendered.contains("nnz_x=0"),
+            "an uncounted design must never render as an empty one: {rendered}"
         );
     }
 }

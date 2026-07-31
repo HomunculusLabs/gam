@@ -44,17 +44,25 @@ impl SparsePirlsDecision {
         )
     }
 
+    /// Emit at `info`, beside the `[reml-geometry]` verdict this is the twin
+    /// of (#2569). Both gates ask "is this design's penalized Hessian sparse
+    /// enough", and only this one measures a density — but it sat at `debug`,
+    /// so an `--log-level info` trace showed the REML gate saying
+    /// `density_h_est=na` on a route that decided before measuring, with the
+    /// measurement that would have answered the question suppressed one gate
+    /// away. Volume stays bounded by the dedup below: a distinct decision logs
+    /// once, then only at repetition counts that are powers of two.
     pub(crate) fn log_once(&self) {
         let path = self.path_str();
         let key = self.format_fields(path);
         let repetition_count = pirls_decision_repetition_count(key.clone());
         if repetition_count == 1 {
-            log::debug!("[pirls-path] {key}");
+            log::info!("[pirls-path] {key}");
             return;
         }
 
         if should_log_pirls_decision_summary(repetition_count) {
-            log::debug!(
+            log::info!(
                 "[pirls-path] repeated path={} reason={} count={} (suppressing identical decisions)",
                 path,
                 self.reason,

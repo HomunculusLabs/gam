@@ -4920,7 +4920,13 @@ pub(crate) struct SparseRemlDecision {
     pub(crate) geometry: RemlGeometry,
     pub(crate) reason: &'static str,
     pub(crate) p: usize,
-    pub(crate) nnz_x: usize,
+    /// Design nonzeros, or `None` when the design has no sparse representation
+    /// to count them from. Not the same statement as "the design has none":
+    /// `design_not_sparse` fires whenever `as_sparse()` returns `None`, which
+    /// includes a lazy operator wrapping a genuinely sparse matrix — and this
+    /// field used to render that case as `nnz_x=0`, a measurement-shaped zero
+    /// for a design measured at 583,674 nonzeros one gate later.
+    pub(crate) nnz_x: Option<usize>,
     pub(crate) nnz_h_upper_est: Option<usize>,
     pub(crate) density_h_upper_est: Option<f64>,
 }
@@ -5413,17 +5419,20 @@ impl PenalizedGeometry for EvalShared {
 impl SparseRemlDecision {
     /// One-line rendering of the quantities this routing verdict was decided
     /// from, for emission beside the `backend=`/`geometry=` label itself
-    /// (#2465). `nnz_h_est`/`density_h_est` read `na` on the routes that
-    /// decide before any structure is measured — that absence is itself the
-    /// basis, and it is what tells `penalized_hessian_too_dense` (a density
-    /// genuinely measured above the threshold) apart from `design_not_sparse`
-    /// and its four siblings, which never measure one.
+    /// (#2465). `nnz_x`/`nnz_h_est`/`density_h_est` read `na` on the routes
+    /// that decide before the corresponding structure is measured — that
+    /// absence is itself the basis, and it is what tells
+    /// `penalized_hessian_too_dense` (a density genuinely measured above the
+    /// threshold) apart from `design_not_sparse` and its four siblings, which
+    /// never measure one.
     pub(crate) fn basis(&self) -> String {
         format!(
             "reason={} p={} nnz_x={} nnz_h_est={} density_h_est={} threshold={:.4}",
             self.reason,
             self.p,
-            self.nnz_x,
+            self.nnz_x
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "na".to_string()),
             self.nnz_h_upper_est
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "na".to_string()),
