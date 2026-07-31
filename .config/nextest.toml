@@ -308,3 +308,107 @@ test-group = 'diagnostic-probes'
 # already red — read it before building anything that relies on saddle handling.
 [profile.sae-inner-consumers]
 default-filter = 'package(gam-sae) and not test(/(^|::)zz/) and test(/^manifold::(sae_contract_probe_tests|tests_outer_quasi_laplace_probe_budget_2080|tests_inner_convergence_rate_2267|tests_certify_external_2266|tests_two_tier_2023|tests_tier0_primary_path_2023|tests_stall_diagnostic_2234|tests_indefinite_a_refusal_2336|tests_inner_budget_trajectory_2015|tests_rank_charge_2101|tests_streaming_efs_cache_1026)::/)'
+
+# gam#2664: seven `basis_smooth` tests are CORRECT and were being SIGKILLed at
+# the 600s default (300s period x terminate-after 2), so a full-target run
+# reported them as TIMED OUT and they were counted as non-green. Same
+# lost-coverage failure as the hifreq / SAE-resident / survival exemptions
+# above, and the same remedy: give ONLY these a budget that lets their
+# assertions run.
+#
+# MEASURED, not assumed. Re-ran exactly the 14 timed-out tests under a 3000s
+# ceiling (MSI cn1062, origin/main 0d55b0586, lane clean, R present) and seven
+# of them PASSED:
+#
+#   duchon_lazy_chunked_path_is_exercised_and_recovers_truth          592.489s
+#   te_k_sweep_uniform_quality_on_easy_2d_truth                       603.240s
+#   cycle_69_matern_explicit_vs_auto_length_scale                     674.461s
+#   ridge_2d_truth_recovered_by_2d_families                           983.392s
+#   cycle_68_matern_sinusoid_recovery_rmse                           1602.301s
+#   matern_nu_sweep_uniform_quality_on_sin1                          1911.679s
+#   matern_very_small_length_scale_stable                            2089.098s
+#   matern_all_nu_values_fit_reasonably                              2941.067s
+#
+# Budgets are ~2x the measured time rather than a flat raise: those numbers come
+# from a run of 14 tests on one node, so a full-target sweep at higher
+# parallelism will be slower, and a per-test ceiling keeps the hang detection
+# this file exists for. A global raise would blind the whole suite instead.
+#
+# Filters match the TEST NAME only (no binary prefix), matching every other
+# override in this file: nextest's `test()` predicate does not see the binary
+# name, so a `basis_smooth.*` prefix would match nothing and silently re-measure
+# the 600s default -- the exact failure mode recorded for #2539 above.
+#
+# Three others TERMINATE even at 3000s and deliberately get NO budget here:
+# `smooth_term_lr_size_calibration::exhaustive_null_simulation_size_grid`,
+# `smooth_term_lr_size_calibration::null_simulation_size_is_calibrated_small_n`
+# and `spline_scan_workflow_equivalence::spline_scan_million_row_fit_scales_linearly_and_recovers_truth`.
+# Two are explicit null SIMULATIONS and one is a million-row scaling test, so
+# what ceiling they need -- and whether they should run in the default profile
+# at all -- is a different question from un-killing a 10-49 minute quality test.
+#
+# The three that still FAIL under the same ceiling are left at the default,
+# because they are genuine failures rather than slow tests, and one of them
+# (`aniso_demo_population_z_scores_are_equalized_for_iso_and_aniso`) fails in
+# 0.148s — it was never a timing phenomenon at all.
+
+[[profile.default.overrides]]
+filter = 'test(/(duchon_lazy_chunked_path_is_exercised_and_recovers_truth|te_k_sweep_uniform_quality_on_easy_2d_truth|cycle_69_matern_explicit_vs_auto_length_scale)/)'
+slow-timeout = { period = "600s", terminate-after = 3 }
+
+[[profile.default.overrides]]
+filter = 'test(/ridge_2d_truth_recovered_by_2d_families/)'
+slow-timeout = { period = "600s", terminate-after = 4 }
+
+[[profile.default.overrides]]
+filter = 'test(/(cycle_68_matern_sinusoid_recovery_rmse|matern_nu_sweep_uniform_quality_on_sin1|matern_very_small_length_scale_stable)/)'
+slow-timeout = { period = "600s", terminate-after = 7 }
+
+[[profile.default.overrides]]
+filter = 'test(/matern_all_nu_values_fit_reasonably/)'
+slow-timeout = { period = "600s", terminate-after = 10 }
+
+# gam#2668: a WALL-CLOCK assertion cannot share the machine.
+#
+# `misc::large_scale_dense_regression_guard::large_scale_dense_logit_regression_guard`
+# asserts `elapsed < 30.0` to catch "many tens of seconds when the inner loop
+# grinds". Measured on MSI acn145, same lane, same warm target, `-j1`:
+#
+#   standalone, f233578cd (nothing else running)           10.546s   PASS
+#   standalone, eacbe8a95 (same lane/node, later main)      2.077s   PASS
+#
+# -- so the fit is FIVE TIMES FASTER on current main than at the commit the
+# loaded runs below were measured against, from perf work I did not make. The
+# 32.490s below was parallel load, not a regression: an isolated A/B in one lane
+# clears every commit involved.
+#
+# and inside the full 494-test `regressions` sweep, at three commits:
+#
+#   SWEEP  (f233578cd, n39)                                24.408s   PASS
+#   PSD4   (f233578cd, cn1066)                             29.540s   PASS   <- 0.46s of margin
+#   POST   (25e58a020, cn1059)                             32.490s   FAIL
+#
+# So parallel load inflated this fit by roughly 3x, and the baseline-to-baseline
+# spread (5.1s) is LARGER than the step that tipped it over (3.0s). The guard was
+# measuring the machine, not the fit.
+#
+# It is NOT currently failing -- at 2.077s standalone there is ~14x headroom, so
+# even a 3x load penalty passes comfortably. This override is here because that
+# margin is not something the test controls: it moved 10.5s -> 2.1s on unrelated
+# perf work and can move back, and when it is marginal the failure is
+# unattributable to any commit (see the three loaded numbers above, whose
+# same-commit spread exceeds the step that tipped it over). Reserving the slots
+# removes the load term permanently, so the assertion measures the fit.
+#
+# Raising the threshold is not the fix. The regression it exists to catch is
+# "many tens of seconds", which is the same order as the load inflation — so any
+# threshold that tolerates a loaded run also tolerates the regression.
+#
+# `threads-required = "num-test-threads"` reserves every slot for the duration,
+# so the test runs alone and `elapsed` measures the fit. The cost is bounded and
+# small: one ~10s test that cannot overlap, against a target whose slowest single
+# tests already run for 20-49 minutes. The companion assertion
+# `outer_iterations <= 50` two lines above stays as the load-independent guard.
+[[profile.default.overrides]]
+filter = 'test(/large_scale_dense_logit_regression_guard/)'
+threads-required = 'num-test-threads'
