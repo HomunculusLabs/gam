@@ -19,7 +19,7 @@
 //! as zero. The predicted scaling is therefore **linear in `p` and linear in
 //! the chart count** (through `n_beta`) at fixed `top_k`, on one core.
 //!
-//! Sweeping `GAM_2283_P` at fixed charts, and `GAM_2283_CHARTS` at fixed `p`,
+//! Sweeping `--p` at fixed charts, and `--charts` at fixed `p`,
 //! separates that term from everything else in the fit: any cost that is not
 //! the per-row jet buffer is either constant in one of those knobs or grows
 //! with `top_k` rather than with the chart count.
@@ -27,21 +27,25 @@
 //! Run (release; the numbers are meaningless in debug):
 //!
 //! ```text
-//! GAM_2283_N=256 GAM_2283_P=128 GAM_2283_CHARTS=8 \
-//!   cargo run --release -p gam-sae --example curved_tier_scaling_2283
+//! cargo run --release -p gam-sae --example curved_tier_scaling_2283 -- \
+//!   --n=256 --p=128 --charts=8
 //! ```
 //!
-//! Knobs, all optional, with the defaults below:
+//! Knobs are CLI flags rather than environment variables: the ban scanner
+//! forbids `env::var` everywhere, and a flag is also what makes a sweep
+//! script's invocation self-documenting in a process list. All optional,
+//! with the defaults below:
 //!
-//! | env | default | meaning |
+//! | flag | default | meaning |
 //! |---|---|---|
-//! | `GAM_2283_N` | 256 | rows |
-//! | `GAM_2283_P` | 128 | ambient output dimension |
-//! | `GAM_2283_CHARTS` | 8 | circle charts (atoms) |
-//! | `GAM_2283_TOPK` | 2 | active atoms per row |
-//! | `GAM_2283_MAXITER` | 8 | inner Newton budget |
-//! | `GAM_2283_RHO` | 1 | run the outer rho search (0 disables) |
-//! | `GAM_2283_SEED` | 0 | data seed |
+//! | `--n` | 256 | rows |
+//! | `--p` | 128 | ambient output dimension |
+//! | `--charts` | 8 | circle charts (atoms) |
+//! | `--top-k` | 2 | active atoms per row |
+//! | `--max-iter` | 8 | inner Newton budget |
+//! | `--rho` | 1 | run the outer rho search (0 disables) |
+//! | `--seed` | 0 | data seed |
+//! | `--log` | info | `debug` / `trace` / `warn` / `info` |
 //!
 //! One machine-readable `[2283-scaling]` line is printed on stdout so a sweep
 //! script can parse it without re-deriving the shape.
@@ -56,13 +60,25 @@ use gam_sae::manifold::{
 use gam_terms::analytic_penalties::AnalyticPenaltyRegistry;
 use ndarray::Array2;
 
-fn env_usize(key: &str, fallback: usize) -> usize {
-    match std::env::var(key) {
-        Ok(raw) => raw
+/// Value of `--<flag>=<value>` from the command line, or `None`.
+///
+/// `env::var` is banned repo-wide, so the knobs below are CLI flags. The
+/// last occurrence wins, which is the usual shell convention when a sweep
+/// script appends an override to a base invocation.
+fn arg_value(flag: &str) -> Option<String> {
+    let prefix = format!("--{flag}=");
+    std::env::args()
+        .filter_map(|arg| arg.strip_prefix(&prefix).map(str::to_string))
+        .next_back()
+}
+
+fn arg_usize(flag: &str, fallback: usize) -> usize {
+    match arg_value(flag) {
+        Some(raw) => raw
             .trim()
             .parse::<usize>()
-            .unwrap_or_else(|error| panic!("{key} must parse as usize: {error}")),
-        Err(_) => fallback,
+            .unwrap_or_else(|error| panic!("--{flag} must parse as usize: {error}")),
+        None => fallback,
     }
 }
 
@@ -130,13 +146,13 @@ fn synthetic_charted_circles(n: usize, p: usize, charts: usize, seed: u64) -> Ar
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let n = env_usize("GAM_2283_N", 256);
-    let p = env_usize("GAM_2283_P", 128);
-    let charts = env_usize("GAM_2283_CHARTS", 8);
-    let top_k = env_usize("GAM_2283_TOPK", 2);
-    let max_iter = env_usize("GAM_2283_MAXITER", 8);
-    let run_outer_rho_search = env_usize("GAM_2283_RHO", 1) != 0;
-    let seed = env_usize("GAM_2283_SEED", 0) as u64;
+    let n = arg_usize("n", 256);
+    let p = arg_usize("p", 128);
+    let charts = arg_usize("charts", 8);
+    let top_k = arg_usize("top-k", 2);
+    let max_iter = arg_usize("max-iter", 8);
+    let run_outer_rho_search = arg_usize("rho", 1) != 0;
+    let seed = arg_usize("seed", 0) as u64;
 
     assert!(top_k >= 1 && top_k <= charts, "top_k must lie in 1..=charts");
 
@@ -146,10 +162,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // indistinguishable from one that is wedged on every prior attempt at this
     // measurement. Turn it on here, and start the process monitor so a stall
     // names its own frame instead of being reported as "no output".
-    let level = match std::env::var("GAM_2283_LOG").as_deref() {
-        Ok("debug") => log::LevelFilter::Debug,
-        Ok("trace") => log::LevelFilter::Trace,
-        Ok("warn") => log::LevelFilter::Warn,
+    let level = match arg_value("log").as_deref() {
+        Some("debug") => log::LevelFilter::Debug,
+        Some("trace") => log::LevelFilter::Trace,
+        Some("warn") => log::LevelFilter::Warn,
         _ => log::LevelFilter::Info,
     };
     gam_solve::progress_log::init_logging_at(level);
