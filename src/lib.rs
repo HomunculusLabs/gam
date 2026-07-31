@@ -41,8 +41,6 @@
 //! - [`linalg`] — faer ↔ ndarray bridges + numerics helpers
 //! - [`gpu`] — runtime CUDA dispatch for hot linear algebra paths
 
-include!(concat!(env!("OUT_DIR"), "/lint_errors.rs"));
-
 // `config_resolve` was extracted from `src/main/` so the CLI driver and the
 // Python FFI (gam-pyffi) can share the same JSON → FitConfig resolver; pull
 // the current crate in under the `gam` alias so the file can keep using
