@@ -7497,6 +7497,38 @@ fn rigid_survival_all_axes_build_once_equals_per_axis_sweep_979() {
             "fixture coefficient width should be time(1)+marginal({p_m})+logslope({p_g})"
         );
 
+        // ---- Dense Hessian: BLAS-3 override vs canonical row scatter ---------
+        // Exercise the production dispatcher (which selects the dense-design
+        // override) against the generic per-row implementation at the same
+        // cached primary Hessians.  The GEMM reduction may reassociate the row
+        // sum, so equality is numerical rather than bitwise; the allowed error
+        // is scaled to the largest entry instead of hiding a structural block
+        // or sign error behind a fixed absolute tolerance.
+        let cache = crate::row_kernel::build_row_kernel_cache(&kernel, &RowSet::All)
+            .expect("rigid row-kernel cache");
+        let blas3 = crate::row_kernel::row_kernel_hessian_dense(
+            &kernel,
+            &cache,
+            &RowSet::All,
+        )
+        .expect("dense-design BLAS-3 Hessian");
+        let scalar = crate::row_kernel::row_kernel_hessian_dense_generic(
+            &kernel,
+            &RowSet::All,
+            &cache.hessians,
+        );
+        let scale = scalar.iter().fold(1.0_f64, |acc, value| acc.max(value.abs()));
+        let max_hessian_gap = blas3
+            .iter()
+            .zip(scalar.iter())
+            .map(|(fast, reference)| (fast - reference).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_hessian_gap <= 2.0e-12 * scale,
+            "frailty {frailty:?}: dense-Hessian BLAS-3 override differs from row-scatter \
+             oracle: max_gap={max_hessian_gap:e}, scale={scale:e}"
+        );
+
         // ---- FIRST directional derivative: override vs per-axis sweep --------
         let batched = row_kernel_directional_derivative_all_axes(&kernel, &RowSet::All)
             .expect("build-once all-axes first directional derivative");
