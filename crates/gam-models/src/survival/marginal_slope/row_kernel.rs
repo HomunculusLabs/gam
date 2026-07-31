@@ -1835,12 +1835,12 @@ impl SurvivalMarginalSlopeRowKernel {
     /// override docstring. Builds the per-row `t4` towers and the fixed-direction
     /// projection once, then closes every axis from that single build in the
     /// generic per-axis sweep's reduction order.
-    fn second_directional_derivative_all_axes_build_once(
+    fn second_directional_derivative_all_axes_from_towers(
         &self,
         d_beta_u: &[f64],
+        towers: &[SparseTower4<RIGID_LINEAR_MASK>],
     ) -> Result<Vec<Array2<f64>>, String> {
         let p = self.n_coefficients();
-        let towers = self.build_row_towers()?;
         (0..p)
             .into_par_iter()
             .map(|a| {
@@ -1857,6 +1857,47 @@ impl SurvivalMarginalSlopeRowKernel {
                 })
             })
             .collect()
+    }
+
+    fn second_directional_derivative_all_axes_build_once(
+        &self,
+        d_beta_u: &[f64],
+    ) -> Result<Vec<Array2<f64>>, String> {
+        let towers = self.build_row_towers()?;
+        self.second_directional_derivative_all_axes_from_towers(d_beta_u, &towers)
+    }
+
+    /// Multi-fixed-direction form used by the outer Jeffreys drift. Every
+    /// direction is evaluated in the same order as the singular build-once
+    /// method, but all of them share the one beta-fixed fourth-order row tower.
+    /// This removes K-1 identical tower builds from one K-coordinate REML
+    /// gradient without changing any matrix contraction or row reduction.
+    pub(crate) fn second_directional_derivative_all_axes_many_build_once(
+        &self,
+        d_beta_us: &[Array1<f64>],
+    ) -> Result<Vec<Vec<Array2<f64>>>, String> {
+        let p = self.n_coefficients();
+        let mut directions = Vec::with_capacity(d_beta_us.len());
+        for (index, direction) in d_beta_us.iter().enumerate() {
+            let slice = direction
+                .as_slice()
+                .ok_or_else(|| format!("non-contiguous fixed direction {index}"))?;
+            if slice.len() != p {
+                return Err(format!(
+                    "fixed direction {index} has {} entries, expected {p}",
+                    slice.len(),
+                ));
+            }
+            directions.push(slice);
+        }
+        let towers = self.build_row_towers()?;
+        let mut batches = Vec::with_capacity(directions.len());
+        for direction in directions {
+            batches.push(
+                self.second_directional_derivative_all_axes_from_towers(direction, &towers)?,
+            );
+        }
+        Ok(batches)
     }
 
     /// gam#979 Jeffreys wide-p contracted-trace-Hessian for the rigid survival
