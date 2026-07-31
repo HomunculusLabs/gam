@@ -568,6 +568,40 @@ pub(crate) const EFFECTIVE_DF_FLOOR: f64 = 1.0;
 /// because those two statements have very different standing and the code used
 /// to read as the second. Deriving the value is #2615; the measurements below
 /// are what is actually known.
+/// RETRACTED 2026-07-31 (#2612), BY RE-MEASUREMENT AT THE EXACT QUADRATURE.
+/// Two claims above are refuted, and by one cause: every number in the
+/// `0.5 → 0.85 → 0.90` record was produced through the isotropic Smolyak path
+/// that #2612 subsequently showed was NOT converging on this posterior (off by
+/// four orders at level 16; it went on to refuse outright at the same settings).
+/// The exact conditioned three-class quadrature that replaced it disagrees.
+/// Re-measured on the same fixture, same split, at `c98f0b0d6`:
+///
+///  * "Posterior width therefore accounts for `0.011` nats." It accounts for
+///    `0.137102`. The same fit reports `0.161820` posterior-mean against
+///    `0.024718` plug-in — a factor of 12.5. Do not cite `0.011` again.
+///
+///  * "Moving this constant is the right instrument and not a coincidence." A
+///    same-base control arm at `f = 0.50` — the value #2612 was opened at, and
+///    the far end of the recorded `0.26080 → 0.12057` curve — measures held-out
+///    log-loss `0.160210`, against `0.161820` at `f = 0.90`. That is `0.0016`
+///    nats, not `0.14`. **On this fixture this constant is INERT**, and the
+///    curve it was selected from does not exist at the exact quadrature.
+///
+/// WHY AN UPPER BOUND CANNOT BITE HERE, which is the part worth keeping. This
+/// floor manufactures an UPPER ρ bound. On penguins four of the eight live
+/// null-space λ sit EXACTLY on the ρ box's LOWER wall, `2.173913043e-4` — which
+/// is `multinomial_formula_min_lambda` on this split to every digit
+/// (`8.0e-4 × 0.25 × 50/46`, with 46 the training Chinstrap count). REML is
+/// railed at the least-smoothed value the box permits and is pushing further, so
+/// a ceiling sitting above it never binds. The issue's framing — and this
+/// constant — are about OVER-smoothing; this fixture is railed at the UNDER-
+/// smoothed wall.
+///
+/// The constant this fixture actually reads out is
+/// `MULTINOMIAL_FORMULA_PRIOR_PSEUDO_OBS` in `gam-models::multinomial`, where
+/// the measurement is recorded. None of this makes `0.90` wrong; it makes the
+/// evidence for it void, so the value stands unsupported rather than supported,
+/// and it is NOT re-derivable from the sweep above.
 pub(crate) const EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION: f64 = 0.90;
 
 /// Uniform ρ = log λ over-smoothing ceiling for the custom-family outer box, on

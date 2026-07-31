@@ -256,6 +256,56 @@ const MULTINOMIAL_FORMULA_FISHER_INFO_PER_OBS: f64 = 0.25;
 /// previously fixture-calibrated large-support floor `τ · ¼ = 2e-4` exactly at
 /// the calibration point, now expressed as an effective-prior-strength rather
 /// than a tuned λ value.
+///
+/// MEASURED 2026-07-31 (#2612). This value is not inert and it has never been
+/// measured against the quantity it controls. On the penguins real-data arm
+/// (stride-3, `n_train = 228`, minority class 46, so the wall is
+/// `8.0e-4 × 0.25 × 50/46 = 2.173913043e-4`), **four of the eight live
+/// null-space λ sit on this wall exactly** — `ratio_to_wall = 1.000000`. They
+/// are boundary solutions, not stationary points of the REML criterion: the box
+/// stopped them, and the box is this constant.
+///
+/// Everything downstream is therefore a readout of it. Sweeping ONLY this
+/// constant, same base commit, same split, exact conditioned quadrature:
+///
+/// ```text
+///   pseudo_obs   λ wall      posterior log-loss   plug-in log-loss   calib gap
+///   8.0e-4       2.174e-4    0.161820             0.024718           +0.1187
+///   8.0e-3       2.174e-3    0.069526             0.025097           +0.0401
+///   8.0e-2       2.174e-2    0.065275             0.035297           +0.0360
+/// ```
+///
+/// `calib gap` is `mean predicted probability on the argmax class − held-out
+/// accuracy` (accuracy is `0.982456` in every row; no reference tool involved).
+/// A 10× wall MORE THAN HALVES the published posterior log-loss while the mode
+/// barely moves, so the width is this constant's and the mode is not.
+///
+/// An exact subspace attribution — same fit, saved Laplace covariance zeroed
+/// outside one subspace at a time — says the width does not sit where the wall
+/// is applied. Cost in nats above the plug-in, shipped wall / 10× wall:
+///
+/// ```text
+///   intercept (2 coords, unpenalized)   0.071778  →  0.014949
+///   range space (64 coords, edf≈6e-4)   0.062538  →  0.034422
+///   null space (8 coords, ON the wall)  0.002564  →  0.000989
+/// ```
+///
+/// The railed coordinates carry 1.9% of the cost, yet tightening their prior
+/// tenfold cuts the UNPENALIZED intercept's marginal contribution 4.8×. The
+/// near-flat prior on the linear direction does not make that direction wide; it
+/// makes the joint Hessian near-singular, and the width surfaces on whatever is
+/// correlated with it. Attribution by marginal block therefore names the
+/// carrier, not the cause.
+///
+/// DO NOT TUNE THIS ON THAT CURVE. Choosing `8.0e-3` because it clears a
+/// held-out log-loss bar on one dataset is the objection #2615 raised against
+/// choosing `EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION`, and the sweep above is
+/// diagnostic evidence, not a selection procedure. The measurement says the
+/// criterion has no interior optimum here — a quasi-separated multinomial's
+/// marginal likelihood keeps rewarding a flatter prior on the separating
+/// direction — so the repair is a prior that is derived for that regime (the
+/// Jeffreys/Firth path this same issue is already driving), not a wall chosen to
+/// stop the slide at a convenient place.
 const MULTINOMIAL_FORMULA_PRIOR_PSEUDO_OBS: f64 = 8.0e-4;
 
 /// Reference class support `n_ref`: the effective sample size per class at which
