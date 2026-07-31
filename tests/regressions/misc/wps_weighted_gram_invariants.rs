@@ -197,12 +197,28 @@ fn penalized_hessian_times_influence_equals_weighted_gram() {
                     worst = worst.max((hf[[i, j]] - xwx[[i, j]]).abs());
                 }
             }
+            // `H*F = H(I - H^-1 S) = H - S` is the RAW difference, while the
+            // stored `weighted_gram` is `symmetrize(H - S)` (`optimizer.rs`
+            // symmetrizes `xwx` in place and deliberately does NOT symmetrize
+            // `F`). So this gap is `antisym(H - S)` plus whatever `H*H^-1 != I`
+            // contributes. Both H and S are supposed to be symmetric, so measure
+            // H's own asymmetry: if it is O(gap), the defect is upstream and
+            // symmetrizing `xwx` is hiding it; if it is at round-off, the gap is
+            // conditioning in `H^-1` instead. Two different repairs, and the
+            // message could not tell them apart.
+            let mut worst_h_asym = 0.0_f64;
+            for i in 0..h.nrows() {
+                for j in 0..h.ncols() {
+                    worst_h_asym = worst_h_asym.max((h[[i, j]] - h[[j, i]]).abs());
+                }
+            }
             // Round-off only: H·F = X'WX is exact in real arithmetic.
             assert!(
                 worst <= 1e-8 * scale,
                 "H·F must equal X'WX (the genuine PSD weighted Gram); max \
                  entrywise gap {worst:.3e} (scale {scale:.3e}, wiggle={wiggle}, \
-                 seed={seed}). A non-zero gap means F was either reassembled in \
+                 seed={seed}); max|H-H^T|={worst_h_asym:.3e}. \
+                 A non-zero gap means F was either reassembled in \
                  the wrong basis (#1027 root cause) or symmetrized after the \
                  fact — `symmetrize_in_place(F)` makes \
                  H·F_sym = (X'WX + H·X'WX·H⁻¹)/2 ≠ X'WX."
