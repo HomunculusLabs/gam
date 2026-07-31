@@ -399,7 +399,12 @@ def test_fit_transport_invert_rejects_non_finite_targets():
     # inverse target must raise ValueError rather than silently returning a
     # boundary coordinate.
     frm = np.linspace(0.0, 1.0, 64)
-    g = gamfit.fit_transport(frm, 0.5 * frm, "interval", "interval")
+    # Keep the setup inside the estimable REML regime. An exact affine response
+    # lies wholly in the second-derivative penalty nullspace, has zero residual
+    # scale, and therefore has no identifiable smoothing parameter or posterior;
+    # that unrelated refusal used to prevent this test from reaching invert().
+    target = 0.5 * frm + 0.01 * np.sin(2.0 * math.pi * frm)
+    g = gamfit.fit_transport(frm, target, "interval", "interval")
     for bad in (np.nan, np.inf, -np.inf):
         with pytest.raises(ValueError):
             g.invert(np.array([bad]))
