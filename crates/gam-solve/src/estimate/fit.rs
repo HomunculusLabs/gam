@@ -283,7 +283,6 @@ where
         nullspace_dims,
         linear_constraints: opts.linear_constraints.clone(),
         firth_bias_reduction: Some(opts.firth_bias_reduction),
-        penalty_shrinkage_floor: opts.penalty_shrinkage_floor,
         // Propagate caller's rho_prior so inner outer-REML minimizes the
         // same objective as paths that build ExternalOptimOptions directly.
         rho_prior: opts.rho_prior.clone(),

@@ -657,16 +657,10 @@ pub(super) fn build_sparse_native_reparam_result(
     p: usize,
 ) -> ReparamResult {
     // Map the engine penalty back into identity (original) coordinates. The
-    // engine returns `s_transformed = Qsᵀ S Qs` (and `e_transformed = E Qs`)
-    // with `S = S_λ + shrinkage·P_range` already folded in (so it matches the
-    // reported `log_det`/`det1`). With the sparse-native `qs = I` we need that
-    // SAME penalty expressed in original coordinates: `S_orig = Qs S_transformed
-    // Qsᵀ`. Rebuilding `S_orig` from the bare lambda-weighted canonical sum
-    // would DROP the shrinkage ridge and desync the inner penalized Hessian from
-    // the penalty log-determinant the REML criterion uses for this fit — the
-    // cross-backend λ-selection divergence (#1266 class). Round-tripping the
-    // engine penalty through `Qs` keeps the inner solve, EDF, and REML logdet on
-    // one penalty.
+    // The engine returns `s_transformed = Qsᵀ S Qs` (and
+    // `e_transformed = E Qs`). With sparse-native `qs = I`, round-trip that
+    // declared penalty to original coordinates so the inner solve, EDF, and
+    // REML logdet all use exactly the same matrix.
     let qs = &base.qs;
     let s_orig = if qs.nrows() == p && qs.ncols() == base.s_transformed.nrows() {
         // S_orig = Qs · S_transformed · Qsᵀ
@@ -700,7 +694,6 @@ pub(super) fn build_sparse_native_reparam_result(
     // right coordinate frame. We keep them as-is in canonical_transformed.
     let canonical_transformed: Vec<gam_terms::construction::CanonicalPenalty> = penalties.to_vec();
     ReparamResult {
-        penalty_shrinkage_ridge: base.penalty_shrinkage_ridge,
         s_transformed: s_orig,
         log_det: base.log_det,
         det1: base.det1,
@@ -734,9 +727,6 @@ pub(super) fn build_diagonal_penalty_from_kronecker(
         let joint_null = structural_sigma <= KRONECKER_STRUCTURAL_ZERO_TOL;
         if kron_result.has_double_penalty && lambdas.len() > d && joint_null {
             sigma += lambdas[d];
-        }
-        if structural_sigma > KRONECKER_STRUCTURAL_ZERO_TOL {
-            sigma += kron_result.penalty_shrinkage_ridge;
         }
         diag[flat] = sigma;
         if sigma > 0.0 {
@@ -851,11 +841,6 @@ pub struct PenaltyConfig<'a> {
     pub p: usize,
     pub coefficient_lower_bounds: Option<&'a Array1<f64>>,
     pub linear_constraints_original: Option<&'a LinearInequalityConstraints>,
-    /// Relative shrinkage floor for eigenvalues of the penalized block.
-    /// If `Some(epsilon)`, a rho-independent ridge of `epsilon * max_balanced_eigenvalue`
-    /// is added to prevent barely-penalized directions from causing pathological
-    /// non-Gaussianity in the posterior. Typical value: `1e-6`. `None` disables.
-    pub penalty_shrinkage_floor: Option<f64>,
     /// When set, the penalties have Kronecker (tensor-product) structure.
     /// The reparameterization engine will use factored Qs = U_1 ⊗ ... ⊗ U_d
     /// instead of eigendecomposing the full p×p balanced penalty.
@@ -987,7 +972,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
                 &kron.marginal_dims,
                 lambdas_slice,
                 kron.has_double_penalty,
-                penalty.penalty_shrinkage_floor,
             )?;
         let transform = Arc::new(KroneckerQsTransform::new(&kron_result));
         let penalty_diag = build_diagonal_penalty_from_kronecker(&kron_result, lambdas_slice);
@@ -1083,32 +1067,19 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     // *consistent with the REML penalty log-determinant it reports* — see the
     // sparse-native `reparam` below. The dense path keeps `qs ≠ I`; the
     // sparse-native path discards `qs` (identity coords) and reuses only the
-    // shrinkage-folded `s_transformed`/`e_transformed`.
+    // declared `s_transformed`/`e_transformed`.
     let dense_reparam_result = if !use_sparse_native && penalty.kronecker_factored.is_none() {
         Some(stable_reparameterization_engine_canonical(
             penalty.canonical_penalties,
             lambdas_slice,
             EngineDims::new(penalty.p, penalty.canonical_penalties.len()),
             penalty.reparam_invariant,
-            penalty.penalty_shrinkage_floor,
         )?)
     } else {
         None
     };
-    // Sparse-native reparam result, in identity (original) coordinates with the
-    // penalty shrinkage floor folded in. This MUST drive the inner penalized
-    // solve too: when `penalty_shrinkage_floor` is explicitly active
-    // the dense engine adds `shrinkage·P_range` to every penalized range
-    // direction of `S_λ` and rebuilds `s_transformed = EᵀE` from the floored
-    // roots, so `base.log_det` (the REML penalty pseudo-logdet) is the
-    // determinant of `S_λ + shrinkage·P_range`, NOT of the bare `S_λ`. Building
-    // the inner Hessian from an UN-shrunk `S_λ` (the previous behaviour, via the
-    // `cheap_s_lambda` row-sum) while reporting the shrunk `log_det` made the
-    // sparse-native REML surface internally inconsistent — the penalty-logdet
-    // term and the inner H / EDF / β̂ lived on different penalties — which biased
-    // λ-selection relative to the dense and Kronecker backends for the SAME
-    // model (the #1266 cross-backend divergence class). Reusing the engine's
-    // shrinkage-folded penalty here makes all three backends solve the same
+    // Sparse-native reparameterization in identity (original) coordinates.
+    // Reusing the engine's declared penalty keeps all backends on the same
     // penalized objective.
     let sparse_native_reparam = if use_sparse_native && penalty.kronecker_factored.is_none() {
         let base = stable_reparameterization_engine_canonical(
@@ -1116,7 +1087,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             lambdas_slice,
             EngineDims::new(penalty.p, penalty.canonical_penalties.len()),
             penalty.reparam_invariant,
-            penalty.penalty_shrinkage_floor,
         )?;
         Some(build_sparse_native_reparam_result(
             base,
@@ -1145,13 +1115,8 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         penalty_diag.clone()
     } else if use_sparse_native {
         // Sparse-native inner penalty in original (identity) coordinates. Use
-        // the shrinkage-folded `s_transformed`/`e_transformed` from
-        // `sparse_native_reparam` so the inner penalized Hessian
-        // `H = XᵀWX + S` matches the penalty whose log-determinant the REML
-        // criterion reports for this fit (`base.log_det`). Falling back to the
-        // bare lambda-weighted sum here (the prior behaviour) omitted the
-        // `penalty_shrinkage_floor` ridge and desynced the inner solve from the
-        // REML logdet, biasing λ-selection vs the dense/Kronecker backends.
+        // the reparameterized declared root and Gram so `H = XᵀWX + S` matches
+        // the penalty whose log-determinant REML reports.
         let sparse_reparam = sparse_native_reparam
             .as_ref()
             .expect("sparse_native_reparam should be present for sparse-native path");
@@ -2696,7 +2661,6 @@ mod tests {
             log_det: 0.0,
             det1: Array1::zeros(3),
             det2: Array2::zeros((3, 3)),
-            penalty_shrinkage_ridge: 0.5,
             has_double_penalty: true,
             marginal_dims: vec![2usize, 2usize],
         };

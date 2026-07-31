@@ -162,10 +162,6 @@ impl std::fmt::Debug for ReparameterizedInner<'_> {
 /// * **R5, orthogonality** — `‖Qsᵀ Qs − I‖_∞` must sit below a `p`-derived
 ///   floor; a non-orthogonal `Qs` would silently distort every conjugated
 ///   eigenvalue and trace.
-/// * **R5, shrinkage ridge** — `ReparamResult.penalty_shrinkage_ridge` must be
-///   exactly `0.0`. A nonzero `ρ`-independent shrinkage ridge changes the prior
-///   normalizer and must be handled explicitly upstream, never silently folded
-///   through the conjugation.
 pub fn assemble_reparameterized_inner<'dp>(
     ctx: &RawInnerReparamContext<'_>,
     deriv_provider: Option<Box<dyn HessianDerivativeProvider + 'dp>>,
@@ -225,15 +221,6 @@ pub fn assemble_reparameterized_inner<'dp>(
              exceeds tolerance {orth_tol:.3e} (p = {p})"
         ));
     }
-    if reparam.penalty_shrinkage_ridge != 0.0 {
-        return Err(format!(
-            "reparameterized inner: ReparamResult carries a nonzero shrinkage ridge \
-             ({:.3e}); a ρ-independent shrinkage ridge changes the prior normalizer and \
-             must be resolved upstream, never silently conjugated",
-            reparam.penalty_shrinkage_ridge
-        ));
-    }
-
     // ── Similarity transform of the inner solution ─────────────────────────
     // H′ = Qsᵀ H Qs, β̂′ = Qsᵀ β̂.
     let hessian_transformed = qs.t().dot(ctx.hessian).dot(qs);
@@ -424,9 +411,9 @@ mod tests {
         e
     }
 
-    /// A minimal `ReparamResult` carrying only the fields the helper reads
-    /// (`qs`, `penalty_shrinkage_ridge`); the rest are inert placeholders.
-    fn reparam_with(qs: Array2<f64>, shrinkage_ridge: f64) -> ReparamResult {
+    /// A minimal `ReparamResult` carrying only the fields the helper reads;
+    /// the rest are inert placeholders.
+    fn reparam_with(qs: Array2<f64>) -> ReparamResult {
         let p = qs.nrows();
         ReparamResult {
             s_transformed: Array2::zeros((p, p)),
@@ -436,7 +423,6 @@ mod tests {
             canonical_transformed: Vec::new(),
             e_transformed: Array2::zeros((0, p)),
             u_truncated: Array2::zeros((p, 0)),
-            penalty_shrinkage_ridge: shrinkage_ridge,
         }
     }
 
@@ -453,7 +439,7 @@ mod tests {
         let h = deterministic_spd(p);
         let beta = Array1::from_shape_fn(p, |i| (i as f64 - 3.5) * 0.3);
         let qs = deterministic_orthogonal(p);
-        let reparam = reparam_with(qs.clone(), 0.0);
+        let reparam = reparam_with(qs.clone());
 
         let ctx = RawInnerReparamContext {
             hessian: &h,
@@ -530,7 +516,7 @@ mod tests {
         let h = deterministic_spd(p);
         let beta = Array1::from_shape_fn(p, |i| (i as f64) * 0.11 - 0.3);
         let qs = deterministic_orthogonal(p);
-        let reparam = reparam_with(qs, 0.0);
+        let reparam = reparam_with(qs);
 
         let ctx = RawInnerReparamContext {
             hessian: &h,
@@ -581,7 +567,7 @@ mod tests {
         let lambdas = vec![1.0];
         // Qs = 2·I: QsᵀQs = 4I, defect 3 ≫ tolerance.
         let bad_qs = 2.0 * Array2::<f64>::eye(p);
-        let reparam = reparam_with(bad_qs, 0.0);
+        let reparam = reparam_with(bad_qs);
 
         let ctx = RawInnerReparamContext {
             hessian: &h,
@@ -592,27 +578,6 @@ mod tests {
         let err = assemble_reparameterized_inner(&ctx, None, &reparam)
             .expect_err("non-orthogonal Qs must be rejected");
         assert!(err.contains("not orthogonal"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn nonzero_shrinkage_ridge_is_rejected() {
-        let p = 4;
-        let h = deterministic_spd(p);
-        let beta = Array1::zeros(p);
-        let penalties = vec![embed(&diff_block(4), 0, p)];
-        let lambdas = vec![1.0];
-        let qs = deterministic_orthogonal(p);
-        let reparam = reparam_with(qs, 1e-3); // nonzero shrinkage ridge
-
-        let ctx = RawInnerReparamContext {
-            hessian: &h,
-            beta: &beta,
-            penalties_embedded: &penalties,
-            lambdas: &lambdas,
-        };
-        let err = assemble_reparameterized_inner(&ctx, None, &reparam)
-            .expect_err("nonzero shrinkage ridge must be rejected");
-        assert!(err.contains("shrinkage ridge"), "unexpected error: {err}");
     }
 
     // ── Test (4): conjugated-provider trace invariance ──────────────────────

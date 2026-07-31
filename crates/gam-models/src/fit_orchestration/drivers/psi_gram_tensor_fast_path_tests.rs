@@ -143,7 +143,6 @@ fn psi_gram_tensor_fast_path_skips_n_row_lane_and_matches_streamed() {
             compute_inference: false,
             max_iter: 200,
             tol: 1e-12,
-            penalty_shrinkage_floor: None,
             ..FitOptions::default()
         },
     );
@@ -572,7 +571,6 @@ fn psi_gram_skip_forced_rotation_beta_error_ladder_diag() {
             compute_inference: false,
             max_iter: 200,
             tol: 1e-12,
-            penalty_shrinkage_floor: None,
             ..FitOptions::default()
         },
     );

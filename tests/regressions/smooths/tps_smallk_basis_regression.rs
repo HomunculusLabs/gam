@@ -227,7 +227,6 @@ fn standard_fit_options(max_iter: usize) -> FitOptions {
             enabled: false,
             ..Default::default()
         }),
-        penalty_shrinkage_floor: None,
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,

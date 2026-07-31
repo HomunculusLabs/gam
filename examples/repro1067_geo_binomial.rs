@@ -147,7 +147,6 @@ fn fit_options() -> FitOptions {
         linear_constraints: None,
         firth_bias_reduction: false,
         adaptive_regularization: None,
-        penalty_shrinkage_floor: None,
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,

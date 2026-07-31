@@ -26,7 +26,6 @@ fn opts() -> FitOptions {
         linear_constraints: None,
         firth_bias_reduction: false,
         adaptive_regularization: None,
-        penalty_shrinkage_floor: None,
         rho_prior: RhoPrior::Flat,
         kronecker_penalty_system: None,
         kronecker_factored: None,

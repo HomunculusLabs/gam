@@ -37,7 +37,7 @@
 //!    is the value+gradient surface for Gaussian, Binomial (canonical
 //!    *and* non-canonical link, with/without Firth), Poisson, Gamma, Beta
 //!    and Tweedie — selected through `ExternalOptimOptions::family` /
-//!    `link` / `firth_bias_reduction` / `penalty_shrinkage_floor` /
+//!    `link` / `firth_bias_reduction` /
 //!    `nullspace_dims`. Exercising it across families + the four boundary
 //!    regimes covers the gaussian-closed-form score, the binomial-Firth
 //!    Jeffreys-Φ term, and the rank-deficient `penalty_subspace_trace`
@@ -196,7 +196,6 @@ fn glm_opts(family: LikelihoodSpec, nullspace_dims: Vec<usize>) -> ExternalOptim
         nullspace_dims,
         linear_constraints: None,
         firth_bias_reduction: None,
-        penalty_shrinkage_floor: None,
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
@@ -607,38 +606,7 @@ fn glm_objective_gradient_consistent_interior_multifamily() {
     }
 }
 
-// --- Regime R1: eigenvalue near the ridge / shrinkage floor ------------
-//
-// `penalty_shrinkage_floor` clamps the smallest penalized-block
-// eigenvalue from below by a relative floor; the floor is exactly where
-// `#808` / `3b6601bf5` desynced (the value applied the clamp but the
-// gradient differentiated the un-clamped surface, or vice versa). We turn
-// the floor on AND drive ρ to a large value so that — at λ = exp(ρ) huge —
-// the smallest effective curvature is genuinely pinned against the floor,
-// putting the evaluation in the regime the clamp governs.
-
-#[test]
-fn glm_objective_gradient_consistent_at_shrinkage_floor_boundary() {
-    let fix = gaussian_single_block(111);
-    let mut opts = glm_opts(
-        standard_spec(ResponseFamily::Gaussian, StandardLink::Identity),
-        vec![1],
-    );
-    opts.penalty_shrinkage_floor = Some(1e-6);
-
-    // Large ρ pushes the penalized eigenvalues so the shrinkage floor is
-    // the binding constraint on the smallest one; moderate-large ρ sits
-    // right on the activation boundary.
-    for rho in [
-        Array1::from(vec![6.0_f64]),
-        Array1::from(vec![9.0_f64]),
-        Array1::from(vec![12.0_f64]),
-    ] {
-        assert_glm_consistent("boundary/shrinkage-floor", &fix, &opts, &rho, TOL_BOUNDARY);
-    }
-}
-
-// --- Regime R2: near-degenerate eigenvalue pair (Daleckii–Krein) -------
+// --- Regime R1: near-degenerate eigenvalue pair (Daleckii–Krein) -------
 
 #[test]
 fn glm_objective_gradient_consistent_near_degenerate_eigenpair() {

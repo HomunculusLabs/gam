@@ -144,7 +144,6 @@ fn external_options(
         nullspace_dims: design.nullspace_dims.clone(),
         linear_constraints: design.linear_constraints.clone(),
         firth_bias_reduction: Some(false),
-        penalty_shrinkage_floor: None,
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,

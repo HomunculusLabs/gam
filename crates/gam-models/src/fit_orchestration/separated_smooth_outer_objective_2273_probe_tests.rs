@@ -99,7 +99,6 @@ fn binomial_external_options(
         nullspace_dims,
         linear_constraints: None,
         firth_bias_reduction: Some(firth),
-        penalty_shrinkage_floor: Some(1e-6),
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,

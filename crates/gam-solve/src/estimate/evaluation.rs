@@ -155,7 +155,6 @@ where
         None,
         fit_linear_constraints,
     )?;
-    reml_state.set_penalty_shrinkage_floor(opts.penalty_shrinkage_floor);
     reml_state.set_rho_prior(opts.rho_prior.clone());
     reml_state.set_link_states(
         cfg.link_kind.mixture_state().cloned(),
@@ -338,7 +337,6 @@ where
         None,
         fit_linear_constraints,
     )?;
-    reml_state.set_penalty_shrinkage_floor(tight_opts.penalty_shrinkage_floor);
     reml_state.set_rho_prior(tight_opts.rho_prior.clone());
     reml_state.set_link_states(
         cfg.link_kind.mixture_state().cloned(),
@@ -451,7 +449,6 @@ where
         None,
         fit_linear_constraints,
     )?;
-    reml_state.set_penalty_shrinkage_floor(opts.penalty_shrinkage_floor);
     reml_state.set_rho_prior(opts.rho_prior.clone());
     reml_state.set_link_states(
         cfg.link_kind.mixture_state().cloned(),

@@ -346,7 +346,6 @@ pub(crate) fn sigma_cubature_evaluate_gpu_stream_pool(
             lambdas_slice,
             engine_dims,
             Some(&state.reparam_invariant),
-            state.penalty_shrinkage_floor,
         )
         .map_err(|e| gam_gpu::gpu_err!("sigma reparam engine: {e:?}"))?;
 

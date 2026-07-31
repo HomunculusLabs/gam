@@ -189,7 +189,6 @@ fn production_probit_gradient_at_rho_six(oracle: &ProbitOracle) -> f64 {
         nullspace_dims: vec![1],
         linear_constraints: None,
         firth_bias_reduction: None,
-        penalty_shrinkage_floor: None,
         rho_prior: RhoPrior::Flat,
         kronecker_penalty_system: None,
         kronecker_factored: None,

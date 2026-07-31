@@ -96,7 +96,6 @@ mod zz_measure_2425_kappa_tests {
             compute_inference: false,
             max_iter: 200,
             tol: 1e-12,
-            penalty_shrinkage_floor: None,
             ..FitOptions::default()
         };
         (
@@ -310,7 +309,6 @@ mod zz_measure_2425_kappa_tests {
         };
         let fit_opts = FitOptions {
             max_iter: 40,
-            penalty_shrinkage_floor: None,
             ..FitOptions::default()
         };
         let kappa_options = SpatialLengthScaleOptimizationOptions {

@@ -4416,7 +4416,6 @@ impl<'a> RemlState<'a> {
             nullspace_dims,
             coefficient_lower_bounds,
             linear_constraints,
-            penalty_shrinkage_floor: None,
             rho_prior: RhoPrior::Flat,
             cache_manager: EvalCacheManager::new(),
             arena: RemlArena::new(),
@@ -4663,20 +4662,6 @@ impl<'a> RemlState<'a> {
         factored: gam_terms::basis::KroneckerFactoredBasis,
     ) {
         self.kronecker_factored = Some(factored);
-    }
-
-    /// Sets the shrinkage floor for penalized block eigenvalues.
-    /// The ridge magnitude will be `epsilon * max_balanced_eigenvalue` (rho-independent).
-    /// This prevents barely-penalized directions from causing pathological
-    /// non-Gaussianity in the posterior. Typical value: `Some(1e-6)`.
-    pub(crate) fn set_penalty_shrinkage_floor(&mut self, floor: Option<f64>) {
-        self.penalty_shrinkage_floor = floor;
-        *self
-            .persistent_warm_start_key
-            .write()
-            .expect("persistent warm-start key lock poisoned") = None;
-        self.persistent_warm_start_loaded
-            .store(false, Ordering::Relaxed);
     }
 
     pub(crate) fn set_rho_prior(&mut self, prior: RhoPrior) {
@@ -5627,13 +5612,6 @@ impl<'a> RemlState<'a> {
         hasher.write_bool(self.config.firth_bias_reduction);
         hasher.write_str(&format!("{:?}", self.runtime_mixture_link_state));
         hasher.write_str(&format!("{:?}", self.runtime_sas_link_state));
-        match self.penalty_shrinkage_floor {
-            Some(value) => {
-                hasher.write_bool(true);
-                hasher.write_f64(value);
-            }
-            None => hasher.write_bool(false),
-        }
         hasher.write_str(&format!("{:?}", self.rho_prior));
 
         hash_array_view(&mut hasher, self.y);
@@ -7542,7 +7520,6 @@ impl<'a> RemlState<'a> {
                 p: self.p,
                 coefficient_lower_bounds: self.coefficient_lower_bounds.as_ref(),
                 linear_constraints_original: self.linear_constraints.as_ref(),
-                penalty_shrinkage_floor: self.penalty_shrinkage_floor,
                 kronecker_factored: self.kronecker_factored.as_ref(),
             };
             let pirls_start = std::time::Instant::now();
@@ -7662,7 +7639,6 @@ impl<'a> RemlState<'a> {
                     p: self.p,
                     coefficient_lower_bounds: self.coefficient_lower_bounds.as_ref(),
                     linear_constraints_original: self.linear_constraints.as_ref(),
-                    penalty_shrinkage_floor: self.penalty_shrinkage_floor,
                     kronecker_factored: self.kronecker_factored.as_ref(),
                 };
                 let cold = pirls::fit_model_for_fixed_rho_with_adaptive_kkt(
@@ -8339,7 +8315,6 @@ impl<'a> RemlState<'a> {
             p: self.p,
             coefficient_lower_bounds: self.coefficient_lower_bounds.as_ref(),
             linear_constraints_original: self.linear_constraints.as_ref(),
-            penalty_shrinkage_floor: self.penalty_shrinkage_floor,
             kronecker_factored: self.kronecker_factored.as_ref(),
         };
 

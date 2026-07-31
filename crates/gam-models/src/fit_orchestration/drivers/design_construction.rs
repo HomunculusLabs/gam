@@ -3064,7 +3064,6 @@ fn adaptive_fit_options_base(options: &FitOptions, design: &TermCollectionDesign
         linear_constraints: design.linear_constraints.clone(),
         firth_bias_reduction: options.firth_bias_reduction,
         adaptive_regularization: None,
-        penalty_shrinkage_floor: options.penalty_shrinkage_floor,
         // Propagate user-supplied rho_prior so the baseline/refit and the
         // joint optimizer minimize the same REML objective.
         rho_prior: options.rho_prior.clone(),
@@ -7657,7 +7656,6 @@ fn external_opts_for_design(
         nullspace_dims: design.nullspace_dims.clone(),
         linear_constraints: design.linear_constraints.clone(),
         firth_bias_reduction: Some(options.firth_bias_reduction),
-        penalty_shrinkage_floor: options.penalty_shrinkage_floor,
         rho_prior: options.rho_prior.clone(),
         // Propagate Kronecker structure so the joint optimizer minimizes the
         // same REML surface as the baseline/refit (adaptive_fit_options_base).

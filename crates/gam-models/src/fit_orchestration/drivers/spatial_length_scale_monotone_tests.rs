@@ -300,7 +300,6 @@ mod spatial_length_scale_monotone_tests {
         };
         let fit_opts = FitOptions {
             max_iter: 40,
-            penalty_shrinkage_floor: None,
             ..FitOptions::default()
         };
         let weights = Array1::ones(n);
@@ -459,7 +458,6 @@ mod spatial_length_scale_monotone_tests {
         };
         let fit_opts = FitOptions {
             max_iter: 40,
-            penalty_shrinkage_floor: None,
             ..FitOptions::default()
         };
         /// The ρ box the joint spatial route hands its optimizer, mirrored from
@@ -583,7 +581,6 @@ mod spatial_length_scale_monotone_tests {
         };
         let fit_opts = FitOptions {
             max_iter: 40,
-            penalty_shrinkage_floor: None,
             ..FitOptions::default()
         };
         // Verbatim from the refusal strings, θ = [ρ₀, ρ₁, ρ₂, ψ].
@@ -780,7 +777,6 @@ mod spatial_length_scale_monotone_tests {
         };
         let fit_opts = FitOptions {
             max_iter: 40,
-            penalty_shrinkage_floor: None,
             ..FitOptions::default()
         };
         let baseline = fit_term_collection_forspec(

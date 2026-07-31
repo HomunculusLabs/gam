@@ -234,7 +234,6 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
             linear_constraints: None,
             firth_bias_reduction: false,
             adaptive_regularization: None,
-            penalty_shrinkage_floor: None,
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,

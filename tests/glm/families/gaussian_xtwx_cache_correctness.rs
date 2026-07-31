@@ -156,7 +156,6 @@ fn fit_at_rho(
             p,
             coefficient_lower_bounds: None,
             linear_constraints_original: None,
-            penalty_shrinkage_floor: None,
             kronecker_factored: None,
         },
         &cfg,

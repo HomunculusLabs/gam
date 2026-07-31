@@ -28,10 +28,6 @@ pub struct StandardFitOptionsInputs {
     pub linear_constraints: Option<gam_solve::pirls::LinearInequalityConstraints>,
     pub firth_bias_reduction: bool,
     pub adaptive_regularization: Option<AdaptiveRegularizationOptions>,
-    /// `Some` only when a caller (the forced-Firth CLI branch) overrides the
-    /// canonical default. `None` keeps the exact declared penalty, without an
-    /// implicit properization prior.
-    pub penalty_shrinkage_floor_override: Option<Option<f64>>,
 }
 
 /// The single source of truth for standard-fit `FitOptions` *policy*.
@@ -40,7 +36,7 @@ pub struct StandardFitOptionsInputs {
 /// Python / PyO3 path) and the `gam` CLI's `run_fit` — construct their
 /// `StandardFitRequest` options through this function, so the outer REML
 /// optimization policy (`compute_inference`, `skip_rho_posterior_inference`,
-/// `tol`, `max_iter` default, `penalty_shrinkage_floor`) is identical by
+/// `tol` and `max_iter` default) is identical by
 /// construction. New policy fields must be set HERE, never re-derived at a call
 /// site, which is what makes Python/CLI behavioral divergence structurally
 /// impossible rather than enforced by parallel-but-equal code (#1196).
@@ -82,13 +78,6 @@ pub fn canonical_standard_fit_options(
         linear_constraints: inputs.linear_constraints,
         firth_bias_reduction: inputs.firth_bias_reduction,
         adaptive_regularization: inputs.adaptive_regularization,
-        // A rho-independent ridge is still a different statistical model:
-        // it changes the final-function penalty and therefore the fitted
-        // posterior. Numerical conditioning must be handled by the linear
-        // solver, not by silently changing the estimator. Callers that
-        // deliberately want the documented proper-complexity prior can opt in
-        // through the explicit override.
-        penalty_shrinkage_floor: inputs.penalty_shrinkage_floor_override.unwrap_or(None),
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
@@ -118,15 +107,6 @@ pub fn canonical_standard_fit_options(
 ///   the escalation opt in elsewhere". This is such a caller.
 /// * `persistent_warm_start_store: None` — DELIBERATE. A programmatic
 ///   block-fit owns its own lifecycle and never discovers ambient storage.
-/// * `penalty_shrinkage_floor: None` — DELIBERATE. This differentiable entry
-///   treats the supplied penalty matrices as the exact objective. The standard
-///   formula/CLI floor changes that objective, and its scale and penalized-range
-///   geometry depend on the raw inputs. The block adjoint does not receive that
-///   floor geometry, so enabling it here would make the forward and backward
-///   represent different objectives. The A/B derivative audit in #2648
-///   therefore established `None` as this API's contract, while standard fits
-///   retain the canonical `Some(1e-6)`.
-///
 /// `tol` is NO LONGER a deviation. It was `1e-9` against the canonical `1e-10`
 /// with no stated rationale — exactly the stale-tolerance class the `1e-10`
 /// comment above was written to fix — and this is the surface where it costs
@@ -158,7 +138,6 @@ pub fn canonical_blocks_forward_fit_options(nullspace_dims: Vec<usize>) -> FitOp
     options.nullspace_dims = nullspace_dims;
     options.skip_rho_posterior_inference = false;
     options.persistent_warm_start_store = None;
-    options.penalty_shrinkage_floor = None;
     options
 }
 
@@ -1345,14 +1324,7 @@ fn finish_adaptive_spatial_fit(
         // cannot drift between the CLI and library entry points.
         let standard_options =
             canonical_standard_fit_options(&config, StandardFitOptionsInputs::default());
-        // A rho-independent shrinkage floor prevents EDF from approaching the
-        // algebraic ceiling more closely than that floor even when lambda tends
-        // to zero. Include it in the resolution tolerance; otherwise the
-        // canonical 1e-6 floor would make a 1e-10 saturation predicate
-        // unreachable and the grow loop would remain dormant in production.
-        let resolution_tol = standard_options
-            .tol
-            .max(standard_options.penalty_shrinkage_floor.unwrap_or(0.0));
+        let resolution_tol = standard_options.tol;
         let candidates =
             adaptive_spatial_candidates(current_standard, data.values.nrows(), resolution_tol)?;
         if candidates.is_empty() {

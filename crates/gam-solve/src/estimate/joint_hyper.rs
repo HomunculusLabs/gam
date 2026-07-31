@@ -98,7 +98,6 @@ pub(crate) fn validate_joint_hyper_direction_shapes(
 
 pub struct ExternalJointHyperEvaluator<'a> {
     pub(crate) conditioning: ParametricColumnConditioning,
-    pub(crate) penalty_shrinkage_floor: Option<f64>,
     pub(crate) kronecker_penalty_system: Option<gam_terms::smooth::KroneckerPenaltySystem>,
     pub(crate) kronecker_factored: Option<gam_terms::basis::KroneckerFactoredBasis>,
     pub(crate) reml_state: RemlState<'a>,
@@ -251,7 +250,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             None,
             fit_linear_constraints.clone(),
         )?;
-        reml_state.set_penalty_shrinkage_floor(opts.penalty_shrinkage_floor);
         reml_state.set_rho_prior(opts.rho_prior.clone());
         reml_state.set_link_states(
             config.link_kind.mixture_state().cloned(),
@@ -269,7 +267,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
 
         Ok(Self {
             conditioning,
-            penalty_shrinkage_floor: opts.penalty_shrinkage_floor,
             kronecker_penalty_system: opts.kronecker_penalty_system.clone(),
             kronecker_factored: opts.kronecker_factored.clone(),
             reml_state,
@@ -893,8 +890,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         if fast_path {
             validate_joint_hyper_direction_shapes(x, s_list.len(), theta, rho_dim, &hyper_dirs)?;
 
-            self.reml_state
-                .set_penalty_shrinkage_floor(self.penalty_shrinkage_floor);
             self.reml_state.setwarm_start_original_beta(warm_start_beta);
             // #1033b: the design did not change (fast path) but ψ moved, so the
             // GaussianFixedCache and conditioned ψ-derivatives are keyed to the
@@ -1035,8 +1030,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         // #1033 instrumentation: this is the slow (n-row) reconditioning lane.
         self.slow_path_reset_count
             .set(self.slow_path_reset_count.get().wrapping_add(1));
-        self.reml_state
-            .set_penalty_shrinkage_floor(self.penalty_shrinkage_floor);
         self.reml_state.setwarm_start_original_beta(warm_start_beta);
         self.last_canonical_revision = design_revision;
         // #1264: freeze the reduced-basis reference ψ this slow-path reset pins,
@@ -1249,8 +1242,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             _ => false,
         };
         if fast_path {
-            self.reml_state
-                .set_penalty_shrinkage_floor(self.penalty_shrinkage_floor);
             self.reml_state.setwarm_start_original_beta(warm_start_beta);
             // #1111 / #1033 mechanism (c): a BFGS line-search VALUE probe can
             // carry its own ψ-keyed frozen-W first-step Gram staged by
@@ -1334,8 +1325,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         // #1033 instrumentation: this is the slow (n-row) reconditioning lane.
         self.slow_path_reset_count
             .set(self.slow_path_reset_count.get().wrapping_add(1));
-        self.reml_state
-            .set_penalty_shrinkage_floor(self.penalty_shrinkage_floor);
         self.reml_state.setwarm_start_original_beta(warm_start_beta);
         self.last_canonical_revision = design_revision;
         // #1264: freeze the reduced-basis reference ψ this slow-path reset pins.

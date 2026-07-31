@@ -144,11 +144,6 @@ fn assert_parity_for(formula: &str, ds: &gam::inference::data::EncodedDataset, c
         got.compute_inference, canonical.compute_inference,
         "materialized FitOptions.compute_inference must equal the shared canonical policy"
     );
-    assert_eq!(
-        got.penalty_shrinkage_floor, canonical.penalty_shrinkage_floor,
-        "materialized FitOptions.penalty_shrinkage_floor must equal the shared canonical policy"
-    );
-
     if !compare_beta {
         // Unconstrained control: the policy parity above is the assertion of
         // interest; the scan/dense representation split (see fn docs) makes the

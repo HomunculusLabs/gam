@@ -3907,7 +3907,6 @@ fn spatial_aniso_joint_exact_hessian_materializes_small_case() {
         compute_inference: false,
         max_iter: 120,
         tol: 1e-10,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
 
@@ -4074,7 +4073,6 @@ fn exact_spatial_joint_engine_aniso_iso_parity_1d() {
         compute_inference: false,
         max_iter: 200,
         tol: 1e-12,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
 
@@ -4249,7 +4247,6 @@ fn psi_gram_tensor_lane_matches_streamed_reml_cost_and_gradient() {
         compute_inference: false,
         max_iter: 200,
         tol: 1e-12,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
 
@@ -4653,7 +4650,6 @@ fn psi_gram_tensor_e2e_kappa_optimum_matches_streamed() {
             compute_inference: false,
             max_iter: 200,
             tol: 1e-12,
-            penalty_shrinkage_floor: None,
             ..FitOptions::default()
         },
     );
@@ -5114,7 +5110,6 @@ fn duchon_probit_pirls_determinism_at_zero() {
         // ever "passed" because the near-stationary band silently carried a
         // 1e-6 floor, since removed.
         tol: 1e-6,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
 
@@ -5937,7 +5932,6 @@ fn external_joint_evaluator_reuse_matches_fresh_state_after_theta_update() {
         compute_inference: false,
         max_iter: 40,
         tol: 1e-7,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
 
@@ -6537,7 +6531,6 @@ fn duchon_terms_participate_in_kappa_optimization() {
 
     let fit_opts = FitOptions {
         max_iter: 40,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
     let y = Array1::linspace(0.0, 1.0, data.nrows());
@@ -6949,7 +6942,6 @@ fn pure_duchon_aniso_fit_optimizes_without_introducing_hybrid_scale() {
 
     let fit_opts = FitOptions {
         max_iter: 40,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
 

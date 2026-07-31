@@ -280,7 +280,6 @@ fn iso_kappa_fd_fit_options() -> FitOptions {
         compute_inference: false,
         max_iter: 200,
         tol: 1e-12,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     }
 }
@@ -741,7 +740,6 @@ fn iso_kappa_matern_2d_psi_fd_step_sweep_diagnostic() {
         compute_inference: false,
         max_iter: 200,
         tol: 1e-12,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
     let design = build_term_collection_design(data.view(), &spec).unwrap();
@@ -1661,7 +1659,6 @@ fn zz_measure_psi_only_rho1_fd_step_law_2425() {
         compute_inference: false,
         max_iter: 200,
         tol: 1e-12,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
     let external_opts = external_opts_for_design(
@@ -2058,7 +2055,6 @@ fn iso_kappa_duchon_outer_gradient_matches_centered_fd() {
         compute_inference: false,
         max_iter: 200,
         tol: 1e-12,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
 
@@ -2379,7 +2375,6 @@ fn zz_measure_monotone_fixture_through_checkable_evaluator_2454() {
         compute_inference: false,
         max_iter: 200,
         tol: 1e-12,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
     let family = LikelihoodSpec::gaussian_identity();
@@ -2657,7 +2652,6 @@ fn rho_gradient_part_ladder_family_2454(
         compute_inference: false,
         max_iter: 200,
         tol: 1e-12,
-        penalty_shrinkage_floor: None,
         ..FitOptions::default()
     };
     let design = build_term_collection_design(data.view(), &spec)

@@ -83,9 +83,6 @@ pub struct ExternalOptimOptions {
     /// - `Some(false)`: force Firth off
     /// - `None`: use family default behavior
     pub firth_bias_reduction: Option<bool>,
-    /// Relative shrinkage floor for penalized block eigenvalues.
-    /// See [`FitOptions::penalty_shrinkage_floor`] for details.
-    pub penalty_shrinkage_floor: Option<f64>,
     /// Fixed prior on smoothing parameters for explicit joint HMC sampling
     /// flows. Standard fitting stays on the REML/Laplace path.
     pub rho_prior: gam_problem::RhoPrior,

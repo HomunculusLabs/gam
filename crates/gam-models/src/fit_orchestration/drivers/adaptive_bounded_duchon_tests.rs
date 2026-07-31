@@ -229,7 +229,6 @@ mod adaptive_bounded_duchon_tests {
                 &lambdas,
                 p_total,
                 &invariant,
-                None,
             )
             .expect("stable reparameterization");
             let max_asym = max_asymmetry(&reparam.s_transformed);
@@ -356,7 +355,6 @@ mod adaptive_bounded_duchon_tests {
         };
         let fit_opts = FitOptions {
             max_iter: 40,
-            penalty_shrinkage_floor: None,
             ..FitOptions::default()
         };
 
@@ -664,7 +662,6 @@ mod adaptive_bounded_duchon_tests {
             LikelihoodSpec::gaussian_identity(),
             &FitOptions {
                 max_iter: 40,
-                penalty_shrinkage_floor: None,
                 ..FitOptions::default()
             },
             &SpatialLengthScaleOptimizationOptions {
@@ -743,7 +740,6 @@ mod adaptive_bounded_duchon_tests {
             LikelihoodSpec::gaussian_identity(),
             &FitOptions {
                 max_iter: 40,
-                penalty_shrinkage_floor: None,
                 ..FitOptions::default()
             },
         )
@@ -1550,7 +1546,6 @@ mod adaptive_bounded_duchon_tests {
                     min_epsilon: 1e-6,
                     ..AdaptiveRegularizationOptions::default()
                 }),
-                penalty_shrinkage_floor: None,
                 ..FitOptions::default()
             },
         )
@@ -1646,7 +1641,6 @@ mod adaptive_bounded_duchon_tests {
                     min_epsilon: 1e-6,
                     ..AdaptiveRegularizationOptions::default()
                 }),
-                penalty_shrinkage_floor: None,
                 ..FitOptions::default()
             },
         )
@@ -1743,7 +1737,6 @@ mod adaptive_bounded_duchon_tests {
                     min_epsilon: 1e-6,
                     ..AdaptiveRegularizationOptions::default()
                 }),
-                penalty_shrinkage_floor: None,
                 ..FitOptions::default()
             },
         )
@@ -1907,7 +1900,6 @@ mod adaptive_bounded_duchon_tests {
             LikelihoodSpec::gaussian_identity(),
             &FitOptions {
                 max_iter: 20,
-                penalty_shrinkage_floor: None,
                 ..FitOptions::default()
             },
         )
@@ -2039,7 +2031,6 @@ mod adaptive_bounded_duchon_tests {
                     enabled: true,
                     ..AdaptiveRegularizationOptions::default()
                 }),
-                penalty_shrinkage_floor: None,
                 ..FitOptions::default()
             },
         )

@@ -113,7 +113,6 @@ fn firth_inner_solve(link: StandardLink) -> PirlsResult {
         p,
         coefficient_lower_bounds: None,
         linear_constraints_original: None,
-        penalty_shrinkage_floor: None,
         kronecker_factored: None,
     };
     let rho = Array1::<f64>::zeros(0);

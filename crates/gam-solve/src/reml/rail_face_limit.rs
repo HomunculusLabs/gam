@@ -69,10 +69,6 @@ impl RemlState<'_> {
             Some(
                 "the link carries runtime state, so the criterion is not one the closed forms model",
             )
-        } else if self.penalty_shrinkage_floor.is_some() {
-            Some(
-                "a penalty shrinkage floor perturbs S_lambda away from the pencil this form assumes",
-            )
         } else if !self
             .rho_prior
             .upper_tail_gradient_vanishes_everywhere(rho.len())
@@ -243,7 +239,6 @@ impl RemlState<'_> {
             p: pinned,
             coefficient_lower_bounds: None,
             linear_constraints_original: None,
-            penalty_shrinkage_floor: None,
             kronecker_factored: None,
         };
         let reduced_rho = Array1::from(reduced_rho);

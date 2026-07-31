@@ -759,7 +759,6 @@ where
         None,
         fit_linear_constraints.clone(),
     )?;
-    reml_state.set_penalty_shrinkage_floor(opts.penalty_shrinkage_floor);
     reml_state.set_rho_prior(opts.rho_prior.clone());
     if let Some(kron) = opts.kronecker_penalty_system.clone() {
         reml_state.set_kronecker_penalty_system(kron);
@@ -1893,7 +1892,6 @@ where
                 p,
                 coefficient_lower_bounds: None,
                 linear_constraints_original: fit_linear_constraints.as_ref(),
-                penalty_shrinkage_floor: opts.penalty_shrinkage_floor,
                 kronecker_factored: None,
             },
             &pirls::PirlsConfig {
@@ -3329,7 +3327,6 @@ mod blended_mixture_link_solve_tests {
             nullspace_dims: vec![2],
             linear_constraints: None,
             firth_bias_reduction: None,
-            penalty_shrinkage_floor: None,
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
@@ -3440,7 +3437,6 @@ mod reported_loglikelihood_normalization_tests {
             nullspace_dims: vec![2],
             linear_constraints: None,
             firth_bias_reduction: None,
-            penalty_shrinkage_floor: None,
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
@@ -3637,7 +3633,6 @@ mod negative_binomial_joint_certificate_tests {
             nullspace_dims: Vec::new(),
             linear_constraints: None,
             firth_bias_reduction: None,
-            penalty_shrinkage_floor: None,
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,
@@ -3706,7 +3701,6 @@ mod constrained_posterior_transport_tests {
                     .expect("one nonnegative coefficient"),
             ),
             firth_bias_reduction: None,
-            penalty_shrinkage_floor: None,
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,

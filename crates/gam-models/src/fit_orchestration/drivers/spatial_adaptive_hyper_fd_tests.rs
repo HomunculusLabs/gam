@@ -172,7 +172,6 @@ fn exact_spatial_adaptive_joint_hypergradient_matches_finite_difference() {
         LikelihoodSpec::gaussian_identity(),
         &FitOptions {
             max_iter: 30,
-            penalty_shrinkage_floor: None,
             ..FitOptions::default()
         },
     )
@@ -358,7 +357,6 @@ fn adaptive_hyper_derivative_dispatch_matches_reference() {
         LikelihoodSpec::gaussian_identity(),
         &FitOptions {
             max_iter: 20,
-            penalty_shrinkage_floor: None,
             ..FitOptions::default()
         },
     )

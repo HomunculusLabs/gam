@@ -367,7 +367,6 @@ fn binomial_logit_first_outer_line_search_ladder_1575() {
         nullspace_dims: vec![2; N_SMOOTH],
         linear_constraints: None,
         firth_bias_reduction: Some(false),
-        penalty_shrinkage_floor: None,
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
@@ -399,7 +398,6 @@ fn binomial_logit_first_outer_line_search_ladder_1575() {
         None,
     )
     .expect("the outer REML state builds on the #1575 fixture");
-    state.set_penalty_shrinkage_floor(ext.penalty_shrinkage_floor);
     state.set_rho_prior(ext.rho_prior.clone());
     state.set_link_states(
         cfg.link_kind.mixture_state().cloned(),
@@ -555,7 +553,6 @@ fn binomial_logit_outer_objective_is_a_function_of_rho_1575() {
         nullspace_dims: vec![2; N_SMOOTH],
         linear_constraints: None,
         firth_bias_reduction: Some(false),
-        penalty_shrinkage_floor: None,
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
@@ -587,7 +584,6 @@ fn binomial_logit_outer_objective_is_a_function_of_rho_1575() {
         None,
     )
     .expect("the outer REML state builds on the #1575 fixture");
-    state.set_penalty_shrinkage_floor(ext.penalty_shrinkage_floor);
     state.set_rho_prior(ext.rho_prior.clone());
     state.set_link_states(
         cfg.link_kind.mixture_state().cloned(),
@@ -736,7 +732,6 @@ fn binomial_logit_inner_solve_refusal_is_carried_state_1575() {
         nullspace_dims: vec![2; N_SMOOTH],
         linear_constraints: None,
         firth_bias_reduction: Some(false),
-        penalty_shrinkage_floor: None,
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
@@ -768,7 +763,6 @@ fn binomial_logit_inner_solve_refusal_is_carried_state_1575() {
         None,
     )
     .expect("the outer REML state builds on the #1575 fixture");
-    state.set_penalty_shrinkage_floor(ext.penalty_shrinkage_floor);
     state.set_rho_prior(ext.rho_prior.clone());
     state.set_link_states(
         cfg.link_kind.mixture_state().cloned(),
@@ -964,7 +958,6 @@ fn binomial_logit_inner_refusal_names_its_carried_datum_1575() {
         nullspace_dims: vec![2; N_SMOOTH],
         linear_constraints: None,
         firth_bias_reduction: Some(false),
-        penalty_shrinkage_floor: None,
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,

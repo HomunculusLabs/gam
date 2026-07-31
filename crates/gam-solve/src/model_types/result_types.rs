@@ -1640,29 +1640,6 @@ pub struct FitOptions {
     /// line searches, final refits, and inference all optimize the same target.
     pub firth_bias_reduction: bool,
     pub adaptive_regularization: Option<AdaptiveRegularizationOptions>,
-    /// Relative shrinkage floor for penalized block eigenvalues.
-    ///
-    /// When `Some(epsilon)`, a rho-independent ridge of magnitude
-    /// `epsilon * max_balanced_eigenvalue` is added to each eigenvalue of the
-    /// combined penalty on the penalized block. This acts as a weak proper
-    /// complexity prior that prevents barely-penalized directions from causing
-    /// pathological non-Gaussianity in the posterior (e.g., extreme skewness
-    /// under logit link with high-dimensional spatial smooths).
-    ///
-    /// Rho-independence means only that the direct LAML derivatives with
-    /// respect to `rho` need no extra ridge term
-    /// (`d(epsilon * I)/d(rho_k) = 0`). An adjoint with respect to raw design,
-    /// weight, penalty, or response inputs must still use the floored system;
-    /// for inputs that determine the floor's scale or penalized-range geometry,
-    /// it must differentiate that geometry as well. A differentiable raw-block
-    /// API whose adjoint does not carry this information must disable the floor
-    /// so its forward and backward describe the same objective.
-    ///
-    /// Typical explicit value: `Some(1e-6)`. Set to `None` or `Some(0.0)` to
-    /// disable. The default is `None`: adding this ridge changes the estimator,
-    /// so it must be an explicit modelling choice rather than a numerical
-    /// fallback.
-    pub penalty_shrinkage_floor: Option<f64>,
     /// Fixed prior on smoothing parameters for explicit joint HMC sampling
     /// flows.
     ///
@@ -1698,7 +1675,6 @@ impl Default for FitOptions {
             linear_constraints: None,
             firth_bias_reduction: false,
             adaptive_regularization: None,
-            penalty_shrinkage_floor: None,
             rho_prior: gam_problem::RhoPrior::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,

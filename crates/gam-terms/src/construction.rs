@@ -684,9 +684,6 @@ pub struct ReparamResult {
     /// These vectors span the structural null space used by positive-part
     /// log-determinant conventions.
     pub u_truncated: Array2<f64>,
-    /// The rho-independent shrinkage ridge magnitude that was added to each
-    /// eigenvalue of the penalized block. Zero means no shrinkage was applied.
-    pub penalty_shrinkage_ridge: f64,
 }
 
 /// The coefficient frame a set of penalty roots is expressed in.
@@ -2194,40 +2191,8 @@ pub fn precompute_reparam_invariant_from_canonical(
     })
 }
 
-fn structurally_penalized_columns(penalties: &[CanonicalPenalty], p: usize) -> Vec<bool> {
-    let mut active = vec![false; p];
-    for cp in penalties {
-        let local = cp.local_ref();
-        let scale = local.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max);
-        if scale <= 0.0 {
-            continue;
-        }
-        let tol = scale * 1e-12;
-        for local_col in 0..cp.block_dim() {
-            let mut column_active = false;
-            for row in 0..cp.block_dim() {
-                if local[[row, local_col]].abs() > tol || local[[local_col, row]].abs() > tol {
-                    column_active = true;
-                    break;
-                }
-            }
-            if column_active {
-                active[cp.col_range.start + local_col] = true;
-            }
-        }
-    }
-    active
-}
-
 /// Apply stable reparameterization using precomputed lambda-invariant structures.
 ///
-/// `penalty_shrinkage_floor`: optional relative shrinkage floor for eigenvalues
-/// of the penalized block. If `Some(epsilon)`, a rho-independent ridge of
-/// magnitude `epsilon * max_balanced_eigenvalue` is added to each eigenvalue
-/// of the combined penalty on the penalized block. This prevents barely-penalized
-/// directions from causing pathological non-Gaussianity in the posterior (e.g.,
-/// extreme skewness under logit link with high-dimensional spatial smooths).
-/// A typical value is `1e-6`. Set to `None` or `Some(0.0)` to disable.
 /// Write the penalized-block spectrum and rotation from a right-singular
 /// factorization of the stacked scaled roots `E = [√λₖ Rₖ]ₖ`.
 ///
@@ -2302,7 +2267,6 @@ pub fn stable_reparameterizationwith_invariant(
     lambdas: &[f64],
     p: usize,
     invariant: &ReparamInvariant,
-    penalty_shrinkage_floor: Option<f64>,
 ) -> Result<ReparamResult, EstimationError> {
     let m = penalties.len();
 
@@ -2336,7 +2300,6 @@ pub fn stable_reparameterizationwith_invariant(
             e_transformed: Array2::zeros((0, p)),
             // All modes truncated when no penalties; already in transformed frame.
             u_truncated: Array2::eye(p),
-            penalty_shrinkage_ridge: 0.0,
         });
     }
 
@@ -2353,7 +2316,6 @@ pub fn stable_reparameterizationwith_invariant(
             canonical_transformed,
             e_transformed: Array2::zeros((0, p)),
             u_truncated,
-            penalty_shrinkage_ridge: 0.0,
         });
     }
 
@@ -2571,64 +2533,7 @@ pub fn stable_reparameterizationwith_invariant(
     // - Runtime lambda dependence only appears in the penalized block eigenvalues.
     // This avoids basis mixing inside the degenerate zero-eigenspace.
     let structural_rank = penalized_rank;
-    let mut range_eigs_sorted: Vec<f64> = range_eigenvalues_sorted;
-    let structurally_penalized_cols = structurally_penalized_columns(penalties, p);
-
-    // Shrinkage floor: add a rho-independent ridge to the penalized block eigenvalues.
-    // This prevents barely-penalized directions from causing pathological non-Gaussianity
-    // in the posterior (extreme skewness under non-canonical links like logit with
-    // high-dimensional spatial smooths). The ridge magnitude is proportional to the
-    // balanced penalty's max eigenvalue (lambda-independent scale), so LAML gradients
-    // w.r.t. rho remain correct: d(epsilon * I)/d(rho_k) = 0.
-    //
-    // The shrinkage ridge is a real prior contribution: it changes the quadratic
-    // form, the penalty pseudo-logdet, and downstream Hessians. It is currently
-    // surfaced through `ReparamResult::penalty_shrinkage_ridge` and consumed by
-    // PIRLS/REML via that per-call channel. The longer-term home is a
-    // `RidgePassport` with `RidgePolicy::explicit_stabilization_full` scoped to
-    // the penalized block so the same delta is reflected in serialization, the
-    // Laplace Hessian, and the prior logdet without callers having to thread an
-    // additional scalar — once the ridge-ledger plumbing covers per-block
-    // ScaledIdentity passports.
-    let shrinkage_ridge = penalty_shrinkage_floor
-        .filter(|&eps| eps > 0.0)
-        .map(|eps| eps * invariant.max_balanced_eigenvalue)
-        .unwrap_or(0.0);
-    if shrinkage_ridge > 0.0 {
-        let min_eig_before = range_eigs_sorted
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
-        let mut shrinkage_floor_applied = 0usize;
-        for eig_idx in 0..range_eigs_sorted.len() {
-            let mut penalized_energy = 0.0;
-            for original_col in 0..p {
-                if structurally_penalized_cols[original_col] {
-                    let mut coordinate = 0.0;
-                    for pen_col in 0..penalized_rank {
-                        coordinate +=
-                            q_pen[(original_col, pen_col)] * range_rotation[(pen_col, eig_idx)];
-                    }
-                    penalized_energy += coordinate * coordinate;
-                }
-            }
-            if penalized_energy > 1e-8 {
-                range_eigs_sorted[eig_idx] += shrinkage_ridge;
-                shrinkage_floor_applied += 1;
-            }
-        }
-        // Log when the floor materially changes the smallest eigenvalue (>1% relative shift).
-        if min_eig_before > 0.0 && shrinkage_ridge / min_eig_before > 0.01 {
-            log::debug!(
-                "Penalty shrinkage floor active: ridge={:.3e} (min_eig_before={:.3e}, ratio={:.1e}, max_bal_eig={:.3e}, applied_dirs={})",
-                shrinkage_ridge,
-                min_eig_before,
-                shrinkage_ridge / min_eig_before,
-                invariant.max_balanced_eigenvalue,
-                shrinkage_floor_applied,
-            );
-        }
-    }
+    let range_eigs_sorted: Vec<f64> = range_eigenvalues_sorted;
 
     let eigenvalue_floor = invariant.max_balanced_eigenvalue.max(1.0) * 1e-12;
     let qs = compose_qs_from_split(&q_pen, &q_null, p);
@@ -2808,7 +2713,6 @@ pub fn stable_reparameterizationwith_invariant(
         canonical_transformed,
         e_transformed: mat_to_array(&e_transformed_mat),
         u_truncated: mat_to_array(&u_truncated_mat),
-        penalty_shrinkage_ridge: shrinkage_ridge,
     })
 }
 
@@ -2829,16 +2733,13 @@ impl EngineDims {
 ///
 /// When `cached_invariant` is `Some`, reuses the precomputed eigendecomposition
 /// (the hot path inside the REML loop). When `None`, computes the invariant on
-/// the fly (the post-REML refit path). Merging both cases into a single entry
-/// point ensures `penalty_shrinkage_floor` is always applied regardless of
-/// whether a cached invariant is available.
+/// the fly (the post-REML refit path).
 /// Stable reparameterization from block-local canonical penalties.
 pub fn stable_reparameterization_engine_canonical(
     penalties: &[CanonicalPenalty],
     lambdas: &[f64],
     dims: EngineDims,
     cached_invariant: Option<&ReparamInvariant>,
-    penalty_shrinkage_floor: Option<f64>,
 ) -> Result<ReparamResult, EstimationError> {
     let owned;
     let invariant = match cached_invariant {
@@ -2848,13 +2749,7 @@ pub fn stable_reparameterization_engine_canonical(
             &owned
         }
     };
-    stable_reparameterizationwith_invariant(
-        penalties,
-        lambdas,
-        dims.p,
-        invariant,
-        penalty_shrinkage_floor,
-    )
+    stable_reparameterizationwith_invariant(penalties, lambdas, dims.p, invariant)
 }
 
 // ---------------------------------------------------------------------------
@@ -2884,8 +2779,6 @@ pub struct KroneckerReparamResult {
     pub det1: Array1<f64>,
     /// Second derivatives of log|S|₊ w.r.t. ρ.
     pub det2: Array2<f64>,
-    /// Shrinkage ridge added to eigenvalues (if any).
-    pub penalty_shrinkage_ridge: f64,
     /// Whether a double penalty (global ridge) is present.
     pub has_double_penalty: bool,
     /// Marginal basis dimensions.
@@ -2925,7 +2818,7 @@ impl KroneckerReparamResult {
                 lambdas,
                 d,
                 has_double,
-                self.penalty_shrinkage_ridge,
+                0.0,
             );
             s[[flat, flat]] = sigma;
             flat += 1;
@@ -2995,7 +2888,7 @@ impl KroneckerReparamResult {
                     lambdas,
                     d,
                     has_double,
-                    self.penalty_shrinkage_ridge,
+                    0.0,
                 );
                 vals.push(if sigma > 0.0 { sigma.sqrt() } else { 0.0 });
 
@@ -3038,7 +2931,6 @@ impl KroneckerReparamResult {
             canonical_transformed,
             e_transformed,
             u_truncated,
-            penalty_shrinkage_ridge: self.penalty_shrinkage_ridge,
         })
     }
 }
@@ -3055,15 +2947,15 @@ const KRONECKER_STRUCTURAL_ZERO_TOL: f64 = 1e-12;
 /// the #1172/#1185 tensor-penalty math.
 ///
 /// For the multi-index cell `multi_idx`, accumulates:
-///   - `sigma`            = Σ_k λ_k · μ_k  (+ joint-null double-penalty term + ridge)
+///   - `sigma`            = Σ_k λ_k · μ_k  (+ joint-null double-penalty term + declared objective ridge)
 ///   - `structural_sigma` = Σ_k μ_k        (unweighted; classifies joint-null cells)
 ///   - `joint_null`       = whether the cell lies in the joint null space
 ///
 /// `marginal_eigenvalues[k][multi_idx[k]]` is the k-th marginal eigenvalue μ_k.
 /// The double-penalty (global ridge) term `λ_d` is added only on joint-null
-/// cells; the structural shrinkage `ridge` is added only on structurally
-/// penalized cells. This mirrors the gated logic fixed in #1172/#1185 and MUST
-/// be kept identical across every caller.
+/// cells; an explicit objective ridge is added only on structurally penalized
+/// cells. This mirrors the gated logic fixed in #1172/#1185 and MUST be kept
+/// identical across every caller.
 #[inline]
 fn kronecker_cell_sigma(
     marginal_eigenvalues: &[ArrayView1<'_, f64>],
@@ -3071,7 +2963,7 @@ fn kronecker_cell_sigma(
     lambdas: &[f64],
     d: usize,
     has_double_penalty: bool,
-    ridge: f64,
+    objective_ridge: f64,
 ) -> (f64, f64, bool) {
     let mut sigma = 0.0;
     let mut structural_sigma = 0.0;
@@ -3085,7 +2977,7 @@ fn kronecker_cell_sigma(
         sigma += lambdas[d];
     }
     if structural_sigma > KRONECKER_STRUCTURAL_ZERO_TOL {
-        sigma += ridge;
+        sigma += objective_ridge;
     }
     (sigma, structural_sigma, joint_null)
 }
@@ -3113,7 +3005,7 @@ pub fn kronecker_logdet_and_derivatives(
     marginal_dims: &[usize],
     lambdas: &[f64],
     has_double_penalty: bool,
-    ridge: f64,
+    objective_ridge: f64,
 ) -> (f64, Array1<f64>, Array2<f64>) {
     let d = marginal_dims.len();
     let n_pen = d + if has_double_penalty { 1 } else { 0 };
@@ -3131,7 +3023,7 @@ pub fn kronecker_logdet_and_derivatives(
             lambdas,
             d,
             has_double_penalty,
-            ridge,
+            objective_ridge,
         );
 
         if sigma > tol {
@@ -3204,7 +3096,6 @@ pub fn kronecker_reparameterization_engine(
     marginal_dims: &[usize],
     lambdas: &[f64],
     has_double_penalty: bool,
-    penalty_shrinkage_floor: Option<f64>,
 ) -> Result<KroneckerReparamResult, EstimationError> {
     let d = marginal_dims.len();
     if marginal_designs.len() != d || marginal_penalties.len() != d {
@@ -3223,7 +3114,6 @@ pub fn kronecker_reparameterization_engine(
         marginal_dims,
         lambdas,
         has_double_penalty,
-        penalty_shrinkage_floor,
     )
 }
 
@@ -3233,26 +3123,18 @@ pub fn kronecker_reparameterization_engine(
 /// Bit-identical to `kronecker_reparameterization_engine` for the same marginal
 /// data — the only difference is that the `eigh()` / `B_k U_k` work was hoisted
 /// out of the per-iterate path into the cached `invariant`. Only the λ-dependent
-/// `kronecker_logdet_and_derivatives` sweep and `floor * max_bal` scaling run here.
+/// `kronecker_logdet_and_derivatives` sweep runs here.
 pub fn kronecker_reparameterization_engine_with_invariant(
     invariant: &KroneckerInvariantStructure,
     marginal_dims: &[usize],
     lambdas: &[f64],
     has_double_penalty: bool,
-    penalty_shrinkage_floor: Option<f64>,
 ) -> Result<KroneckerReparamResult, EstimationError> {
     // Arc refcount bumps — the underlying eigensystems / reparameterized
     // marginals are λ-invariant and shared with the cache, not deep-copied.
     let marginal_eigenvalues = Arc::clone(&invariant.marginal_eigenvalues);
     let marginal_qs = Arc::clone(&invariant.marginal_qs);
     let reparameterized_marginals = Arc::clone(&invariant.reparameterized_marginals);
-
-    // Compute shrinkage ridge from balanced penalty eigenvalue scale.
-    let penalty_shrinkage_ridge = if let Some(floor) = penalty_shrinkage_floor {
-        floor * invariant.max_balanced_eigenvalue
-    } else {
-        0.0
-    };
 
     let marginal_eigenvalue_views: Vec<_> = marginal_eigenvalues
         .iter()
@@ -3263,7 +3145,7 @@ pub fn kronecker_reparameterization_engine_with_invariant(
         marginal_dims,
         lambdas,
         has_double_penalty,
-        penalty_shrinkage_ridge,
+        0.0,
     );
 
     Ok(KroneckerReparamResult {
@@ -3273,7 +3155,6 @@ pub fn kronecker_reparameterization_engine_with_invariant(
         log_det,
         det1,
         det2,
-        penalty_shrinkage_ridge,
         has_double_penalty,
         marginal_dims: marginal_dims.to_vec(),
     })
@@ -3443,7 +3324,7 @@ mod tests {
         let lambdas = vec![2.0];
         let inv = precompute_reparam_invariant_from_canonical(&canonical, p)
             .expect("precompute invariant");
-        let rep = stable_reparameterizationwith_invariant(&canonical, &lambdas, p, &inv, None)
+        let rep = stable_reparameterizationwith_invariant(&canonical, &lambdas, p, &inv)
             .expect("stable reparam");
 
         let expected = rep.qs.t().dot(&inv.split.q_null);
@@ -3481,7 +3362,7 @@ mod tests {
 
         let lambdas_inf = vec![f64::INFINITY, 3.0];
         let inf_result =
-            stable_reparameterizationwith_invariant(&canonical, &lambdas_inf, p, &inv, None);
+            stable_reparameterizationwith_invariant(&canonical, &lambdas_inf, p, &inv);
         assert!(
             inf_result.is_err(),
             "an infinite lambda must surface as an error, not be silently clamped (#1074)"
@@ -3491,7 +3372,7 @@ mod tests {
         // the function is robust to large-but-finite penalties; only the
         // non-finite input is rejected.
         let lambdas_big = vec![1e300_f64, 3.0];
-        let rep = stable_reparameterizationwith_invariant(&canonical, &lambdas_big, p, &inv, None)
+        let rep = stable_reparameterizationwith_invariant(&canonical, &lambdas_big, p, &inv)
             .expect("stable reparam at large-but-finite lambda");
         assert!(
             rep.s_transformed.iter().all(|v| v.is_finite()),
@@ -3518,82 +3399,9 @@ mod tests {
         let lambdas: Vec<f64> = Vec::new();
         let inv = precompute_reparam_invariant_from_canonical(&canonical, p)
             .expect("precompute invariant");
-        let rep = stable_reparameterizationwith_invariant(&canonical, &lambdas, p, &inv, None)
+        let rep = stable_reparameterizationwith_invariant(&canonical, &lambdas, p, &inv)
             .expect("stable reparam");
         assert_eq!(rep.u_truncated, Array2::<f64>::eye(p));
-    }
-
-    #[test]
-    fn dense_shrinkage_floor_skips_structurally_unpenalized_range_columns() {
-        let p = 3usize;
-        let canonical = canonical_from_roots(&[array![[1.0, 0.0, 0.0]]], p);
-        let invariant = super::ReparamInvariant {
-            split: super::SubspaceSplit {
-                q_pen: array![[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]],
-                q_null: array![[0.0], [0.0], [1.0]],
-            },
-            qs_base: Array2::eye(p),
-            has_nonzero: true,
-            max_balanced_eigenvalue: 1.0,
-        };
-
-        let rep =
-            stable_reparameterizationwith_invariant(&canonical, &[2.0], p, &invariant, Some(1e-6))
-                .expect("stable reparameterization");
-        assert!(rep.s_transformed[[0, 0]] > 2.0);
-        assert!(
-            rep.s_transformed[[1, 1]] <= 1e-11,
-            "structurally unpenalized range coordinate received shrinkage ridge: {}",
-            rep.s_transformed[[1, 1]]
-        );
-    }
-
-    #[test]
-    fn kronecker_shrinkage_floor_preserves_joint_null_space() {
-        let marginal_designs = vec![Array2::<f64>::eye(2), Array2::<f64>::eye(2)];
-        let marginal_penalties = vec![
-            array![[0.0, 0.0], [0.0, 2.0]],
-            array![[0.0, 0.0], [0.0, 3.0]],
-        ];
-        let marginal_dims = vec![2usize, 2usize];
-        let lambdas = vec![5.0, 7.0];
-
-        let rep = super::kronecker_reparameterization_engine(
-            &marginal_designs,
-            &marginal_penalties,
-            &marginal_dims,
-            &lambdas,
-            false,
-            Some(1e-6),
-        )
-        .expect("kronecker reparameterization");
-        assert!(rep.penalty_shrinkage_ridge > 0.0);
-
-        let s = rep.materialize_s_transformed(&lambdas);
-        assert!(
-            s[[0, 0]].abs() <= 1e-14,
-            "joint tensor null direction must remain unpenalized, got {}",
-            s[[0, 0]]
-        );
-        assert!(s[[1, 1]] > lambdas[1] * 3.0);
-        assert!(s[[2, 2]] > lambdas[0] * 2.0);
-        assert!(s[[3, 3]] > lambdas[0] * 2.0 + lambdas[1] * 3.0);
-
-        let tensor_roots = vec![
-            array![
-                [0.0, 0.0, 2.0_f64.sqrt(), 0.0],
-                [0.0, 0.0, 0.0, 2.0_f64.sqrt()]
-            ],
-            array![
-                [0.0, 3.0_f64.sqrt(), 0.0, 0.0],
-                [0.0, 0.0, 0.0, 3.0_f64.sqrt()]
-            ],
-        ];
-        let dense = rep
-            .materialize_dense_artifact_result(&tensor_roots, &lambdas, 4)
-            .expect("dense artifact materialization");
-        assert_eq!(dense.e_transformed.nrows(), 3);
-        assert_eq!(dense.u_truncated.ncols(), 1);
     }
 
     #[test]
@@ -3627,14 +3435,13 @@ mod tests {
             vec![5.0, 0.0],
             vec![1e-3, 1e3],
         ] {
-            for floor in [None, Some(1e-6)] {
+            {
                 let unmemoized = super::kronecker_reparameterization_engine(
                     &marginal_designs,
                     &marginal_penalties,
                     &marginal_dims,
                     &lambdas,
                     true,
-                    floor,
                 )
                 .expect("unmemoized engine");
                 let memoized = super::kronecker_reparameterization_engine_with_invariant(
@@ -3642,15 +3449,10 @@ mod tests {
                     &marginal_dims,
                     &lambdas,
                     true,
-                    floor,
                 )
                 .expect("memoized engine");
 
                 assert_eq!(memoized.log_det.to_bits(), unmemoized.log_det.to_bits());
-                assert_eq!(
-                    memoized.penalty_shrinkage_ridge.to_bits(),
-                    unmemoized.penalty_shrinkage_ridge.to_bits()
-                );
                 for (a, b) in memoized.det1.iter().zip(unmemoized.det1.iter()) {
                     assert_eq!(a.to_bits(), b.to_bits());
                 }
@@ -3695,7 +3497,6 @@ mod tests {
             &marginal_dims,
             &lambdas,
             true,
-            None,
         )
         .expect("kronecker reparameterization");
 
@@ -3750,7 +3551,7 @@ mod tests {
         let lambdas = vec![4.0];
         let inv = precompute_reparam_invariant_from_canonical(&canonical, p)
             .expect("precompute invariant");
-        let rep = stable_reparameterizationwith_invariant(&canonical, &lambdas, p, &inv, None)
+        let rep = stable_reparameterizationwith_invariant(&canonical, &lambdas, p, &inv)
             .expect("stable reparam");
 
         assert_eq!(rep.e_transformed.nrows(), 1);
@@ -3796,7 +3597,7 @@ mod tests {
 
         let inv = precompute_reparam_invariant_from_canonical(&canonical, p)
             .expect("precompute invariant");
-        let rep = stable_reparameterizationwith_invariant(&canonical, &lambdas, p, &inv, None)
+        let rep = stable_reparameterizationwith_invariant(&canonical, &lambdas, p, &inv)
             .expect("stable reparam");
 
         assert_eq!(rep.e_transformed.nrows(), p);
@@ -3885,7 +3686,6 @@ mod tests {
             &[q1, q2],
             &lambdas,
             false,
-            None,
         )
         .unwrap();
 
@@ -3914,7 +3714,6 @@ mod tests {
                 &[q1, q2],
                 &lam_plus,
                 false,
-                None,
             )
             .unwrap();
             let result_minus = super::kronecker_reparameterization_engine(
@@ -3923,7 +3722,6 @@ mod tests {
                 &[q1, q2],
                 &lam_minus,
                 false,
-                None,
             )
             .unwrap();
             let fd_deriv = (result_plus.log_det - result_minus.log_det) / (2.0 * eps);

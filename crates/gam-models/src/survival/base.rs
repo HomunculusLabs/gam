@@ -2814,10 +2814,6 @@ impl WorkingModelSurvival {
             &lambdas,
             p,
             &reparam_invariant,
-            // No shrinkage floor at this seam: any stabilization ridge is a
-            // real penalty block in `s_k_embedded`, and the helper (R5) rejects
-            // a nonzero ρ-independent shrinkage ridge on the ReparamResult.
-            None,
         )
         .map_err(|e| EstimationError::InvalidInput(e.to_string()))?;
 
@@ -6795,7 +6791,7 @@ mod tests {
         let invariant =
             precompute_reparam_invariant_from_canonical(&canonical, p).expect("reparam invariant");
         let reparam_prod =
-            stable_reparameterizationwith_invariant(&canonical, &lambdas, p, &invariant, None)
+            stable_reparameterizationwith_invariant(&canonical, &lambdas, p, &invariant)
                 .expect("production reparameterization");
 
         let hessian_logdet_mode = if rail_model

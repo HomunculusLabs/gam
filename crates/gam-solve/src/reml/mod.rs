@@ -5878,8 +5878,6 @@ pub(crate) struct RemlState<'a> {
     pub(crate) nullspace_dims: Vec<usize>,
     pub(crate) coefficient_lower_bounds: Option<Array1<f64>>,
     pub(crate) linear_constraints: Option<crate::pirls::LinearInequalityConstraints>,
-    /// Relative shrinkage floor for penalized block eigenvalues (rho-independent).
-    pub(crate) penalty_shrinkage_floor: Option<f64>,
     /// Explicit prior on log smoothing parameters used by the REML/LAML objective.
     pub(crate) rho_prior: gam_problem::RhoPrior,
 
