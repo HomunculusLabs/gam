@@ -84,6 +84,14 @@ class WorkflowTasks2623Tests(unittest.TestCase):
         self.assertTrue(comparison["passed"])
         self.assertFalse(verdict["certified"], "one targeted scenario cannot certify the full suite")
 
+        rows[0]["rmse"] = 0.4 + 0.5 * _TASKS.ACCURACY_NUMERICAL_EQUIVALENCE
+        verdict = _TASKS.matched_benchmark_verdict(rows)
+        comparison = verdict["comparisons"][0]
+        self.assertTrue(
+            comparison["passed"],
+            "sub-sqrt(epsilon) cross-language differences are numerical equivalence",
+        )
+
         rows[0]["rmse"] = 0.4000001
         verdict = _TASKS.matched_benchmark_verdict(rows)
         comparison = verdict["comparisons"][0]
@@ -98,6 +106,34 @@ class WorkflowTasks2623Tests(unittest.TestCase):
         failed = [m["measure"] for m in comparison["accuracy"] if not m["passed"]]
         self.assertEqual(failed, ["r2"])
         self.assertFalse(comparison["passed"])
+
+    def test_matched_verdict_does_not_invent_inapplicable_reference_pairs(self) -> None:
+        rows = [
+            {
+                "scenario_name": "papuan_oce4_duchon_k6",
+                "contender": "rust_gam",
+                "status": "ok",
+                "fit_sec": 1.0,
+                "predict_sec": 0.1,
+                "auc": 0.8,
+            },
+            {
+                "scenario_name": "papuan_oce4_duchon_k6",
+                "contender": "r_mgcv",
+                "status": "ok",
+                "fit_sec": 1.0,
+                "predict_sec": 0.1,
+                "auc": 0.8,
+            },
+            {
+                "scenario_name": "papuan_oce4_duchon_k6",
+                "contender": "rust_gamlss",
+                "status": "failed",
+            },
+        ]
+        verdict = _TASKS.matched_benchmark_verdict(rows)
+        self.assertEqual(len(verdict["comparisons"]), 1)
+        self.assertEqual(verdict["comparisons"][0]["gam_contender"], "rust_gam")
 
 
 if __name__ == "__main__":

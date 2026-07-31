@@ -268,6 +268,12 @@ ACCURACY_DIRECTIONS = {
     "rmse": "lower",
     "mae": "lower",
 }
+# Independent binary64 LAPACK/optimizer paths are not bitwise comparable.
+# sqrt(epsilon) is the conventional forward-error scale at which a stable
+# floating-point result loses a meaningful directional ordering: below it,
+# calling one arm "more accurate" than the other is reporting roundoff, not a
+# model-quality difference. Keep this many orders tighter than sampling error.
+ACCURACY_NUMERICAL_EQUIVALENCE = sys.float_info.epsilon ** 0.5
 
 
 def _finite_number(value):
@@ -299,7 +305,12 @@ def matched_benchmark_verdict(rows, *, maximum_slowdown=1.2):
         for gam_contender, reference_contender in MATCHED_BENCHMARK_CONTENDERS.items():
             gam_row = by_scenario_contender.get((scenario, gam_contender))
             reference_row = by_scenario_contender.get((scenario, reference_contender))
-            if gam_row is None and reference_row is None:
+            # Reference presence is the applicability witness for a matched
+            # pair. The runner always emits an explicit failed row when an
+            # enabled reference errors, so absence means that pair is not part
+            # of this scenario (for example gaulss on a binomial GAM). A stray
+            # failed diagnostic gam arm must not invent a missing comparison.
+            if reference_row is None:
                 continue
             comparison = {
                 "scenario_name": scenario,
@@ -355,7 +366,9 @@ def matched_benchmark_verdict(rows, *, maximum_slowdown=1.2):
                         }
                     )
                     continue
-                tolerance = 1e-12 * max(1.0, abs(gam_value), abs(reference_value))
+                tolerance = ACCURACY_NUMERICAL_EQUIVALENCE * max(
+                    1.0, abs(gam_value), abs(reference_value)
+                )
                 passed = (
                     gam_value + tolerance >= reference_value
                     if direction == "higher"
@@ -368,6 +381,7 @@ def matched_benchmark_verdict(rows, *, maximum_slowdown=1.2):
                         "gam": gam_value,
                         "reference": reference_value,
                         "gam_minus_reference": gam_value - reference_value,
+                        "numerical_equivalence_tolerance": tolerance,
                         "passed": passed,
                     }
                 )
@@ -401,7 +415,11 @@ def matched_benchmark_verdict(rows, *, maximum_slowdown=1.2):
     return {
         "contract": {
             "maximum_slowdown": maximum_slowdown,
-            "accuracy": "no loss on every shared reported accuracy measure",
+            "accuracy": (
+                "no loss on every shared reported accuracy measure, with "
+                "sqrt(binary64 epsilon) relative numerical equivalence"
+            ),
+            "accuracy_numerical_equivalence": ACCURACY_NUMERICAL_EQUIVALENCE,
             "missing_or_failed_pairs": "fail",
             "full_suite_required": True,
         },
