@@ -37,7 +37,6 @@ mod quality_vs_mass_ordinal_polr;
 mod quality_vs_mgcv_bike_sharing_torus;
 mod quality_vs_mgcv_pair_surface_live_backend;
 mod quality_vs_mgcv_thin_plate_1d;
-mod quality_vs_nnet_multinom_penguins_species;
 mod quality_vs_pygam_logistic_1d_shape;
 mod quality_vs_python_scipy_alr_geometric_mean;
 mod quality_vs_r_fields_mkriging;

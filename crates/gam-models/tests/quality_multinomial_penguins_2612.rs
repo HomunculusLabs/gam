@@ -1,4 +1,4 @@
-//! End-to-end OBJECTIVE quality: gam's penalized multinomial-logit (softmax) GAM
+//! Dedicated end-to-end OBJECTIVE quality: gam's penalized multinomial-logit (softmax) GAM
 //! must classify penguin SPECIES from morphometric measurements at least as well
 //! as the canonical multinomial reference, on a REAL, freely-downloadable dataset.
 //!
@@ -60,17 +60,21 @@
 //! estimand-matched at that column.
 
 use csv::StringRecord;
-use gam::families::multinomial::{
+use gam_models::multinomial::{
     MultinomialFitRequest, fit_penalized_multinomial_formula, predict_multinomial_formula,
     predict_multinomial_formula_plugin,
 };
-use gam::test_support::reference::{Column, relative_l2, run_r};
-use gam::{FitConfig, encode_recordswith_inferred_schema, init_parallelism};
+use gam_data::encode_recordswith_inferred_schema;
+use gam_models::fit_orchestration::FitConfig;
+use gam_test_support::reference::{Column, relative_l2, run_r};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-const PENGUINS_CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/datasets/penguins.csv");
+const PENGUINS_CSV: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../bench/datasets/penguins.csv"
+);
 
 /// Number of species classes (Adelie, Chinstrap, Gentoo).
 const K: usize = 3;
@@ -78,6 +82,37 @@ const K: usize = 3;
 /// Held-out split: every 4th row (index % 4 == 0) is test, the rest is train.
 /// Fixed, data-order, no RNG — reproducible across runs.
 const TEST_STRIDE: usize = 4;
+
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            eprintln!("{}", record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static STDERR_LOGGER: StderrLogger = StderrLogger;
+
+/// The production facade additionally registers optional inference hooks that
+/// are above `gam-models` in the crate graph. This acceptance exercises the
+/// multinomial model itself, so it needs only the same Faer/Rayon execution
+/// backend; keeping the test at its owning crate avoids linking the unrelated
+/// root quality catalog.
+fn init_parallelism() {
+    if std::env::var_os("RUST_LOG").is_some() {
+        let _ = log::set_logger(&STDERR_LOGGER);
+        log::set_max_level(log::LevelFilter::Info);
+    }
+    faer::set_global_parallelism(faer::Par::rayon(0));
+}
 
 /// One parsed penguin row: four numeric body measurements and the species label
 /// (a non-numeric string the multinomial driver treats as a categorical class).
