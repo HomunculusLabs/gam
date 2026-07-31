@@ -4868,6 +4868,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     best_stationarity_residual: min_certified_residual
                         .min(current_stationarity_residual),
                     cycles_since_best_residual: cycles_since_residual_improved,
+                    termination_reason: gam_problem::JointNewtonTerminalReason::CycleBudget,
                 });
             if returned_mode_curvature_pending {
                 returned_mode_curvature_pending = false;
@@ -6560,6 +6561,36 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                             consecutive_all_reject_at_floor_cycles
                         )
                     };
+                    let rejection_counts = [
+                        model_rejects,
+                        likelihood_rejects,
+                        objective_rejects,
+                        feasibility_rejects,
+                    ];
+                    let typed_termination_reason = if consecutive_identical_rejected_cycles
+                        >= IDENTICAL_REJECTED_STALL_MAX_CYCLES
+                    {
+                        gam_problem::JointNewtonTerminalReason::FullyRejectedExactFixedPoint {
+                            consecutive_cycles: consecutive_identical_rejected_cycles,
+                            joint_trust_radius,
+                            rejection_counts,
+                        }
+                    } else {
+                        gam_problem::JointNewtonTerminalReason::FullyRejectedAtTrustRegionFloor {
+                            consecutive_cycles: consecutive_all_reject_at_floor_cycles,
+                            joint_trust_radius,
+                            rejection_counts,
+                        }
+                    };
+                    if let Some(
+                        gam_problem::InnerConvergenceTerminalState::JointNewton {
+                            termination_reason,
+                            ..
+                        },
+                    ) = terminal_convergence_state.as_mut()
+                    {
+                        *termination_reason = typed_termination_reason;
+                    }
                     log::warn!(
                         "[PIRLS/joint-Newton convergence] cycle {:>3} | fully-rejected stall \
                          early-exit: every trust-region attempt rejected (by any of the model / \
