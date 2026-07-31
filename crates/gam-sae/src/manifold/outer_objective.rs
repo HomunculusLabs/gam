@@ -2940,6 +2940,40 @@ impl SaeManifoldOuterObjective {
         }
     }
 
+    /// Install the authoritative lower-envelope basin at `rho_flat` into the
+    /// accepted objective state. An exact-rho value-probe handoff is already the
+    /// selected envelope argmin and is consumed directly; otherwise the shared
+    /// envelope selector is run and its finite argmin handoff is required.
+    ///
+    /// Returns `false` only when every admissible basin has an undefined
+    /// quasi-Laplace value at this rho. A finite selector result without its
+    /// exact-rho converged-state handoff is a protocol violation, never a reason
+    /// to continue from a different warm-start trajectory.
+    fn install_authoritative_envelope_basin(
+        &mut self,
+        rho_flat: ArrayView1<'_, f64>,
+    ) -> Result<bool, String> {
+        if let Some(converged) = self.take_probe_converged_handoff(rho_flat) {
+            self.term = converged;
+            self.seeded_beta = None;
+            return Ok(true);
+        }
+
+        let (cost, _beta) = self.authoritative_envelope_value_probe(rho_flat)?;
+        if Self::probe_value_is_infeasible(cost) {
+            return Ok(false);
+        }
+        let converged = self
+            .take_probe_converged_handoff(rho_flat)
+            .ok_or_else(|| {
+                "SAE basin-envelope protocol violated: a finite probe at the requested rho did not install its exact-rho converged-state handoff"
+                    .to_string()
+            })?;
+        self.term = converged;
+        self.seeded_beta = None;
+        Ok(true)
+    }
+
     /// Re-converge one saved basin `member` at `rho_flat` through the
     /// authoritative full-refine drive, returning `(criterion,
     /// converged_term)`. PURE w.r.t. `self`: `term`, `current_rho`,
@@ -3061,39 +3095,12 @@ impl SaeManifoldOuterObjective {
     ) -> Result<(EfsEval, Vec<FixedPointCoordinateCertificate>), String> {
         self.fit_verdict = None;
         self.probe_telemetry.criterion_calls += 1;
-        // #2080 (a) — this lane commits a new accepted basin below; drop any
-        // pending probe handoff so it can never be installed across that
-        // mutation (the handoff is only valid against the basin its probe ran
-        // from).
-        self.probe_converged_handoff = None;
-        // #2230/#2087 — the EFS lane commits a new accepted basin below; the
-        // saved envelope basins are keyed to the pre-step accepted basin.
-        self.basin_bundle.clear();
         let rho = self.baseline_rho.from_flat(rho_flat)?;
         let n_params = rho.to_flat().len();
         // #2231 Inc-B — scale the block columns for this ρ before the EFS inner
         // solve reads `self.target` (idempotent; no-op for a plain SAE).
         self.apply_block_scaling(&rho)?;
-        if let Some(beta) = self.seeded_beta.take()
-            && beta.len() == self.term.beta_dim()
-        {
-            self.term.set_flat_beta(beta.view())?;
-        }
-        // #1026 massive-K: in the streaming regime the dense evidence cache is
-        // infeasible (O((K·M·p)²)), so `penalized_quasi_laplace_criterion_with_cache` hard-errors
-        // ("cost-only streaming route is required"). But the EFS lane IS the
-        // intended streaming-regime descent, and its ARD/smoothness traces below
-        // are already matrix-free-gated — they only need the per-row factored
-        // arrow cache, which the streaming criterion produces (and now returns).
-        // Route through it so the Fellner–Schall step runs matrix-free at large K;
-        // dense-admitted fits keep the byte-for-byte dense path.
-        // #2080: the streaming criterion emits one indivisible value/gradient
-        // artifact: factor cache, exact matrix-free operator, and the frozen
-        // `(probes, S^-1 probes)` bundle. Reassembling the operator after the
-        // value would both duplicate the dominant pass and risk differentiating
-        // a different functional.
         let direct_logdet_admitted = self.term.streaming_plan()?.direct_logdet_admitted();
-        let criterion = self.evaluate_outer_criterion_route(&rho, direct_logdet_admitted, true);
         let infeasible_evaluation = |reason: &str| {
             (
                 EfsEval {
@@ -3115,6 +3122,68 @@ impl SaeManifoldOuterObjective {
                     .collect(),
             )
         };
+
+        // #2609/#2087 — select the SAME lower-envelope basin as the value and
+        // analytic lanes BEFORE crossing the EFS accepted-basin mutation seam.
+        // Clearing first made a cold EFS call drive the criterion from the raw
+        // LSQ term while `eval` selected and installed the finite envelope
+        // argmin: one rho therefore returned +inf or a finite value solely by
+        // call order. An exact-rho handoff is still valid before this mutation;
+        // otherwise the shared selector installs its converged argmin. The
+        // streaming and `inner_max_iter == 0` freeze contracts retain their
+        // historical single-pass paths: the envelope itself deliberately
+        // bypasses multi-basin reconvergence in those regimes, and pre-running
+        // it here would only duplicate the dominant evaluation.
+        if direct_logdet_admitted && self.inner_max_iter != 0 {
+            match self.install_authoritative_envelope_basin(rho_flat) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.probe_converged_handoff = None;
+                    self.basin_bundle.clear();
+                    self.current_rho = rho;
+                    return Ok(infeasible_evaluation(
+                        "the authoritative basin envelope is infeasible at this rho",
+                    ));
+                }
+                Err(err) if Self::is_recoverable_value_probe_refusal(&err) => {
+                    self.probe_telemetry.record_refusal_kind(&err);
+                    self.probe_telemetry.infeasible_criterion_evals += 1;
+                    self.probe_converged_handoff = None;
+                    self.basin_bundle.clear();
+                    self.current_rho = rho;
+                    return Ok(infeasible_evaluation(
+                        "infeasible penalized quasi-Laplace basin envelope",
+                    ));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        // #2080/#2230 — selection above consumed any valid exact-rho handoff.
+        // The EFS criterion drive below now commits that selected basin, so no
+        // handoff or saved member keyed to the pre-commit accepted state may
+        // survive across the mutation.
+        self.probe_converged_handoff = None;
+        self.basin_bundle.clear();
+        if let Some(beta) = self.seeded_beta.take()
+            && beta.len() == self.term.beta_dim()
+        {
+            self.term.set_flat_beta(beta.view())?;
+        }
+        // #1026 massive-K: in the streaming regime the dense evidence cache is
+        // infeasible (O((K·M·p)²)), so `penalized_quasi_laplace_criterion_with_cache` hard-errors
+        // ("cost-only streaming route is required"). But the EFS lane IS the
+        // intended streaming-regime descent, and its ARD/smoothness traces below
+        // are already matrix-free-gated — they only need the per-row factored
+        // arrow cache, which the streaming criterion produces (and now returns).
+        // Route through it so the Fellner–Schall step runs matrix-free at large K;
+        // dense-admitted fits keep the byte-for-byte dense path.
+        // #2080: the streaming criterion emits one indivisible value/gradient
+        // artifact: factor cache, exact matrix-free operator, and the frozen
+        // `(probes, S^-1 probes)` bundle. Reassembling the operator after the
+        // value would both duplicate the dominant pass and risk differentiating
+        // a different functional.
+        let criterion = self.evaluate_outer_criterion_route(&rho, direct_logdet_admitted, true);
         let evaluation = match criterion {
             Ok(evaluated) => evaluated,
             Err(SaeCriterionError::VanishedAtoms(atoms)) => {
@@ -4060,84 +4129,22 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 inner_beta_hint: None,
             });
         }
-        // #2080 (a) — the accepted gradient point is evaluated at the exact ρ of
-        // the line search's last successful value probe; when that probe's
-        // converged inner state was handed off, install it so the criterion's
-        // convergence loop opens AT the inner KKT optimum instead of re-tracing
-        // the probe's deterministic Newton trajectory from the accepted basin.
-        // Same converged optimum ⇒ identical criterion value and identical
-        // stationary factor cache for the analytic gradient below (see
-        // `ProbeConvergedHandoff`). The pending seeded-β hint was already applied
-        // by that probe pre-convergence, so it is consumed with the handoff.
-        let probe_handoff_installed = if let Some(converged) =
-            self.take_probe_converged_handoff(rho.view())
-        {
-            self.term = converged;
-            self.seeded_beta = None;
-            true
-        } else {
-            // #2087/#2253/#2510 envelope-consistency — every outer lane
-            // prices the basin lower envelope min_b V_b(rho). An empty
-            // bundle means the envelope has not been seeded yet; it must
-            // never select a different, single-trajectory objective. On
-            // any exact-rho handoff miss, run the authoritative selector
-            // at this rho. The selector owns dense discovery/member
-            // reconvergence and the streaming/freeze bypass, and every
-            // finite outcome must park its exact-rho argmin handoff.
-            let probe_cost = match self.authoritative_envelope_value_probe(rho.view()) {
-                Ok((cost, _beta)) => cost,
-                Err(err) if Self::is_recoverable_value_probe_refusal(&err) => {
-                    self.probe_telemetry.record_refusal_kind(&err);
-                    log::debug!("SAE criterion eval mapped refusal to +inf: {err}");
-                    self.probe_telemetry.infeasible_criterion_evals += 1;
-                    return Ok(OuterEval::infeasible(rho.len()));
-                }
-                Err(err) => return Err(EstimationError::RemlOptimizationFailed(err)),
-            };
-            if Self::probe_value_is_infeasible(probe_cost) {
+        // #2080/#2087/#2253/#2510 — every dense analytic sample begins in the
+        // authoritative envelope argmin. The shared installer consumes a valid
+        // exact-rho probe handoff or runs the selector on a miss; either path
+        // installs a converged state and consumes the pending seeded-β hint.
+        // The selector owns the amortized basin-entry warm start, so no second
+        // warm-start drive is permitted after installation.
+        match self.install_authoritative_envelope_basin(rho.view()) {
+            Ok(true) => {}
+            Ok(false) => return Ok(OuterEval::infeasible(rho.len())),
+            Err(err) if Self::is_recoverable_value_probe_refusal(&err) => {
+                self.probe_telemetry.record_refusal_kind(&err);
+                log::debug!("SAE criterion eval mapped refusal to +inf: {err}");
+                self.probe_telemetry.infeasible_criterion_evals += 1;
                 return Ok(OuterEval::infeasible(rho.len()));
             }
-            let converged = self
-                    .take_probe_converged_handoff(rho.view())
-                    .ok_or_else(|| {
-                        EstimationError::RemlOptimizationFailed(
-                            "SAE basin-envelope protocol violated: a finite probe at the requested rho did not install its exact-rho converged-state handoff"
-                                .to_string(),
-                        )
-                    })?;
-            self.term = converged;
-            self.seeded_beta = None;
-            true
-        };
-        if let Some(beta) = self.seeded_beta.take() {
-            if beta.len() != self.term.beta_dim() {
-                return Err(EstimationError::RemlOptimizationFailed(format!(
-                    "seeded decoder has length {}; expected {}",
-                    beta.len(),
-                    self.term.beta_dim()
-                )));
-            }
-            self.term
-                .set_flat_beta(beta.view())
-                .map_err(EstimationError::RemlOptimizationFailed)?;
-        }
-        // #1154 — warm-start the inner latent coords from the amortized encoder
-        // built on the running dictionary at this ρ (Design A), exactly as the
-        // value-probe lane (`evaluate_authoritative_criterion`) does. The accepted
-        // iterate's inner solve then refines from the cheap one-mat-vec seed to
-        // the SAME stationary point, so the exact penalized quasi-Laplace λ-gradient computed below
-        // is untouched — the warm-start changes only the basin entry, never the
-        // root. A degenerate atlas may certify zero rows; an actual encoder
-        // failure is propagated.
-        // Skipped under a #2080 (a) handoff: the installed state is already AT
-        // the converged optimum for this ρ, and the encoder warm-start is a
-        // basin-ENTRY heuristic that would only move latents off it.
-        if !probe_handoff_installed && !self.audit_installed_state {
-            let warm_start_outcome = self
-                .term
-                .warm_start_latents_from_amortized_encoder(self.target.view(), &rho_state);
-            self.record_warm_start(warm_start_outcome)
-                .map_err(EstimationError::RemlOptimizationFailed)?;
+            Err(err) => return Err(EstimationError::RemlOptimizationFailed(err)),
         }
         // Dense and streaming analytic samples use one route-selected authority.
         // The streaming artifact retains the exact matrix-free system and frozen

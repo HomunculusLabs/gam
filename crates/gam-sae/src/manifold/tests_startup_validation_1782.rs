@@ -191,12 +191,13 @@ fn seed_passes_startup_validation(
     let eval = objective.eval_efs(&seed).map_err(|e| e.to_string())?;
     if eval.cost == f64::INFINITY {
         // `+inf` is not a numerical accident here: `OuterEval::infeasible` uses it
-        // as the CONVENTIONAL representation of an infeasible trial point, so this
-        // is the criterion delivering a feasibility VERDICT. Saying "non-finite"
-        // instead sends the reader hunting a singularity that does not exist
-        // (#2609 records a full pass lost to exactly that).
+        // as the conventional representation of an infeasible trial point. Name
+        // the EFS startup lane that produced the verdict; #2609 demonstrated that
+        // attributing it to the criterion was false when a different basin-entry
+        // path at the same rho had a finite criterion.
         return Err(
-            "seed rejected: the criterion reports this rho INFEASIBLE (cost = +inf, the              conventional infeasible encoding) — look at the feasibility test and the              seed, not at a numerical divergence"
+            "seed rejected: the EFS startup lane reports this rho INFEASIBLE \
+             (cost = +inf, the conventional infeasible encoding)"
                 .to_string(),
         );
     }
@@ -214,9 +215,11 @@ fn seed_passes_startup_validation(
     Ok(eval.cost)
 }
 
-/// #2609 bisect: the EFS lane and the ordinary value lane evaluate the SAME
-/// seed of the SAME model, so if one is finite and the other is not, the
-/// divergence is in the LANE rather than in the model, the data, or the seed.
+/// #2609 sequential-lane sanity check. The ordinary value lane selects and
+/// installs the authoritative basin before EFS evaluates the same seed, so both
+/// calls must remain finite. This ordering cannot diagnose the cold EFS entry
+/// path: `seed_verdict_depends_on_lane_call_order_2609` below uses independent
+/// objectives for that purpose.
 ///
 /// `circle/ordered_beta_bernoulli` is the cell that reports
 /// "EFS seed cost is non-finite (inf)" in the matrix below — notable because
@@ -245,15 +248,14 @@ fn efs_and_value_lanes_agree_on_finiteness_at_the_seed_2609() {
     );
     assert!(
         efs_cost.is_finite(),
-        "the value lane is finite ({value_cost}) but the EFS lane is not ({efs_cost}); \
-         the two evaluate the same seed of the same model, so the divergence is in the \
-         Fellner-Schall step rather than in the model or the seed"
+        "the value lane installed a finite authoritative basin ({value_cost}) but the \
+         following EFS evaluation rejected that same seed ({efs_cost})"
     );
 }
 
-/// #2609 localisation sweep. Both lanes diverge identically, so the `+inf` is
-/// in the criterion; this asks WHICH knob of the ordered-Beta assignment
-/// carries it, by moving one at a time on identical data.
+/// #2609 value-lane localisation sweep. This varies the ordered-Beta assignment
+/// knobs on identical data and records where the authoritative envelope has a
+/// finite value; it deliberately does not infer anything about cold EFS entry.
 ///
 /// `alpha` sets the column shapes `a_k = 1/expm1((k+1)·ln(1+1/α))`, `tau` sets
 /// the concrete-logit sharpness, and `k` sets how many columns exist — so a
@@ -865,20 +867,21 @@ fn seed_infeasibility_channel_is_named_2609() {
 /// why the lane bisect could not see the failure it was built to attribute.
 ///
 /// `efs_and_value_lanes_agree_on_finiteness_at_the_seed_2609` calls `eval` and
-/// then `eval_efs` on ONE objective. A finite `eval` parks a
-/// `probe_converged_handoff` at that exact ρ (bitwise match), and the next
-/// evaluation at the same ρ consumes it and opens AT the inner KKT optimum
-/// instead of re-tracing from the cold LSQ seed. So the first call can heal the
-/// second, and "both lanes agree" is then a statement about the second call's
-/// warm state rather than about the lane.
+/// then `eval_efs` on ONE objective. A finite `eval` selects the authoritative
+/// lower-envelope basin and leaves its converged term installed, so the next
+/// evaluation at the same ρ opens AT the inner KKT optimum instead of tracing
+/// from the cold LSQ seed. Before #2609, the first call could therefore heal the
+/// second, and "both lanes agree" described mutable call history rather than the
+/// point being evaluated.
 ///
 /// Startup validation (`seed_passes_startup_validation`) calls `eval_efs` on a
 /// FRESH objective with nothing parked. This measures both orders on separate
 /// objectives so the two are not the same experiment:
 ///   * `A` — `eval_efs` alone, cold. This is what startup validation does.
 ///   * `B` — `eval` then `eval_efs`, one objective. This is what the bisect does.
-/// If `A` is infeasible and `B` is finite, the verdict is a property of the cold
-/// EFS drive, and no conclusion about the criterion follows from `B`.
+/// Both orders must now select the same authoritative basin before EFS commits
+/// its accepted state; clearing the pre-commit bundle is legal only after that
+/// selection.
 #[test]
 fn seed_verdict_depends_on_lane_call_order_2609() {
     let z = planted_circle_embedded(48, 6, 0.03);
@@ -903,16 +906,20 @@ fn seed_verdict_depends_on_lane_call_order_2609() {
         b_efs_cost.is_finite()
     );
 
-    // The property under test is that ONE ρ has ONE verdict. Whatever that
-    // verdict is, the two orders must agree: a seed the EFS lane accepts after a
-    // value probe is a seed it must accept without one, or the startup gate is
-    // deciding on call order rather than on the point.
-    assert_eq!(
+    // This planted seed has a measured finite authoritative envelope. Both EFS
+    // call orders must therefore install that basin and return a finite value;
+    // merely making both orders agree on +inf would preserve the startup defect.
+    assert!(
+        b_value_cost.is_finite(),
+        "the authoritative value lane must establish that this seed is feasible, got {b_value_cost}"
+    );
+    assert!(
         a_cost.is_finite(),
+        "cold EFS rejected a seed whose authoritative envelope is finite ({b_value_cost}); \
+         startup validation must select the basin before committing it"
+    );
+    assert!(
         b_efs_cost.is_finite(),
-        "the EFS lane's feasibility verdict at ONE seed rho depends on whether a value \
-         probe ran first: cold eval_efs = {a_cost}, eval_efs after eval = {b_efs_cost} \
-         (value lane {b_value_cost}). Startup validation takes the cold path, so the \
-         warmed reading cannot be cited about it."
+        "EFS rejected the same seed after a finite value evaluation: {b_efs_cost}"
     );
 }
