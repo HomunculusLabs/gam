@@ -1650,23 +1650,14 @@ fn rigid_standard_normal_tower_path_matches_hand_chain_witness() {
     }
 }
 
-/// #932 single-sourcing contract for the rigid standard-normal RowKernel<2>:
-/// the production uncontracted third- AND fourth-order primary tensors must be
-/// the `.t3`/`.t4` channels of the SAME `Tower4<2>` row jet that delivers value /
-/// gradient / Hessian — i.e. the entire derivative tower is mechanically derived
-/// from one row expression, with no parallel hand-written chain-rule engine.
+/// #932 exactness contract for compiler-emitted rigid full tensors.
 ///
-/// Before the cutover the fourth tensor was assembled by a separate
-/// `RigidStandardNormalChain` (hand Faà-di-Bruno q-chain) that could silently
-/// drift from the tower (the #736/#947 desync genus). This test pins
-/// `rigid_standard_normal_fourth_full == tower.t4` (and the already-cutover
-/// `rigid_standard_normal_third_full == tower.t3`) to bit identity, so any
-/// reintroduction of a divergent non-tower fourth-order path fails here. The
-/// independent-witness arm (`rigid_standard_normal_tower_path_matches_hand_chain_witness`)
-/// then certifies the tower channels themselves against a fully separate
-/// derivation; together they give prod == tower == hand-witness.
+/// Production emits the four/five distinct symmetric third/fourth components
+/// directly from the canonical row program. The dense `Tower4<2>` evaluation of
+/// that same program remains an independent exact oracle, so every generated
+/// component must agree to floating-point roundoff across the full stress grid.
 #[test]
-fn rigid_standard_normal_third_fourth_full_are_single_sourced_from_tower_932() {
+fn rigid_standard_normal_generated_full_tensors_match_tower_oracle_932() {
     let link = bernoulli_marginal_slope_probit_link();
     let eta_grid: [f64; 7] = [-6.0, -2.0, -0.4, 0.0, 0.75, 2.25, 6.0];
     let g_grid = [-1.4, -0.55, 0.0, 0.8, 1.7];
@@ -1709,17 +1700,33 @@ fn rigid_standard_normal_third_fourth_full_are_single_sourced_from_tower_932() {
                             for a in 0..2 {
                                 for b in 0..2 {
                                     for c in 0..2 {
-                                        assert_eq!(
-                                            third[a][b][c], tower.t3[a][b][c],
-                                            "third[{a}][{b}][{c}] not single-sourced from tower.t3 \
-                                             (eta={eta} g={g} z={z} y={y} w={weight} scale={probit_scale})"
+                                        let third_band = 3e-12
+                                            * third[a][b][c]
+                                                .abs()
+                                                .max(tower.t3[a][b][c].abs())
+                                                .max(1.0);
+                                        assert!(
+                                            (third[a][b][c] - tower.t3[a][b][c]).abs()
+                                                <= third_band,
+                                            "third[{a}][{b}][{c}] generated={} tower={} \
+                                             (eta={eta} g={g} z={z} y={y} w={weight} scale={probit_scale})",
+                                            third[a][b][c],
+                                            tower.t3[a][b][c],
                                         );
                                         for d in 0..2 {
-                                            assert_eq!(
-                                                fourth[a][b][c][d], tower.t4[a][b][c][d],
-                                                "fourth[{a}][{b}][{c}][{d}] not single-sourced from \
-                                                 tower.t4 (eta={eta} g={g} z={z} y={y} w={weight} \
-                                                 scale={probit_scale})"
+                                            let fourth_band = 3e-12
+                                                * fourth[a][b][c][d]
+                                                    .abs()
+                                                    .max(tower.t4[a][b][c][d].abs())
+                                                    .max(1.0);
+                                            assert!(
+                                                (fourth[a][b][c][d] - tower.t4[a][b][c][d]).abs()
+                                                    <= fourth_band,
+                                                "fourth[{a}][{b}][{c}][{d}] generated={} tower={} \
+                                                 (eta={eta} g={g} z={z} y={y} w={weight} \
+                                                 scale={probit_scale})",
+                                                fourth[a][b][c][d],
+                                                tower.t4[a][b][c][d],
                                             );
                                         }
                                     }

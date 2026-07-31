@@ -37,6 +37,7 @@ struct EmissionSurfaces {
     order2: bool,
     third: bool,
     fourth: bool,
+    full: bool,
     witnesses: bool,
     cuda: bool,
 }
@@ -49,12 +50,13 @@ impl EmissionSurfaces {
             "order2" => &mut self.order2,
             "third" => &mut self.third,
             "fourth" => &mut self.fourth,
+            "full" => &mut self.full,
             "witnesses" => &mut self.witnesses,
             "cuda" => &mut self.cuda,
             _ => {
                 return Err(syn::Error::new_spanned(
                     surface,
-                    "row_program emission surface must be one of `generic`, `runtime`, `order2`, `third`, `fourth`, `witnesses`, or `cuda`",
+                    "row_program emission surface must be one of `generic`, `runtime`, `order2`, `third`, `fourth`, `full`, `witnesses`, or `cuda`",
                 ));
             }
         };
@@ -74,6 +76,7 @@ impl EmissionSurfaces {
             || self.order2
             || self.third
             || self.fourth
+            || self.full
             || self.witnesses
             || self.cuda)
     }
@@ -1692,13 +1695,7 @@ fn dense_taylor_expression(
     let dimension = environment.dimension;
     let order = environment.order;
     let mut child = |expression: &ProgramExpr| {
-        dense_taylor_expression(
-            expression,
-            owner,
-            environment,
-            temporary_index,
-            preludes,
-        )
+        dense_taylor_expression(expression, owner, environment, temporary_index, preludes)
     };
     let value = match expression {
         ProgramExpr::Path(ident) => {
@@ -1971,6 +1968,7 @@ fn dense_taylor_schedule(
     statements: &[Statement],
     result: &ProgramExpr,
     order: usize,
+    specialize_root_compose: bool,
 ) -> Result<DenseTaylorSchedule> {
     let dimension = primaries.len();
     let mut bindings = HashMap::<String, DenseTaylorJet>::new();
@@ -2070,12 +2068,16 @@ fn dense_taylor_schedule(
         }
     }
     let mut result_preludes = Vec::new();
-    let (result, root_compose_stack) = match result {
-        ProgramExpr::Compose {
-            leaf,
-            value,
-            arguments,
-        } if order == 3 => {
+    let (result, root_compose_stack) =
+        if specialize_root_compose && order == 3 && matches!(result, ProgramExpr::Compose { .. }) {
+            let ProgramExpr::Compose {
+                leaf,
+                value,
+                arguments,
+            } = result
+            else {
+                unreachable!("matched dense Taylor root compose")
+            };
             let input = bindings.get(&value.to_string()).cloned().ok_or_else(|| {
                 syn::Error::new_spanned(value, "dense root compose input is not defined")
             })?;
@@ -2091,8 +2093,7 @@ fn dense_taylor_schedule(
                 leaf_arguments.join(", ")
             ));
             (input, Some(stack))
-        }
-        _ => {
+        } else {
             let environment = DenseTaylorExpressionEnvironment {
                 leaves,
                 constants,
@@ -2110,8 +2111,7 @@ fn dense_taylor_schedule(
                 )?,
                 None,
             )
-        }
-    };
+        };
     Ok(DenseTaylorSchedule {
         statements: dense_statements,
         result,
@@ -2648,22 +2648,11 @@ fn push_dense_taylor_derivative_array(
     source.push_str("];\n");
 }
 
-fn rust_dense_taylor_body(
-    primaries: &[Ident],
-    constants: &HashSet<String>,
-    leaves: &[Leaf],
-    statements: &[Statement],
-    result: &ProgramExpr,
-    fourth: bool,
-) -> Result<syn::Block> {
-    let dimension = primaries.len();
-    let order = if fourth { 4 } else { 3 };
-    let schedule = dense_taylor_schedule(primaries, constants, leaves, statements, result, order)?;
-    let mut source = "{\n".to_string();
+fn push_dense_taylor_schedule_body(source: &mut String, schedule: &DenseTaylorSchedule) {
     for statement in &schedule.statements {
         match statement {
             DenseTaylorStatement::Local(local) => {
-                push_preludes(&mut source, &local.preludes, "    ");
+                push_preludes(source, &local.preludes, "    ");
                 let mutable = if schedule.assigned.contains(&local.name) {
                     "mut "
                 } else {
@@ -2679,7 +2668,7 @@ fn rust_dense_taylor_body(
                     local.value.support()
                 };
                 push_dense_taylor_declaration(
-                    &mut source,
+                    source,
                     "    ",
                     &local.name,
                     mutable,
@@ -2693,13 +2682,13 @@ fn rust_dense_taylor_body(
             } => {
                 source.push_str(&format!("    if {condition} {{\n"));
                 for assignment in assignments {
-                    push_preludes(&mut source, &assignment.preludes, "        ");
+                    push_preludes(source, &assignment.preludes, "        ");
                     let support = schedule
                         .mutable_support
                         .get(&assignment.target)
                         .expect("mutable dense Taylor assignment support exists");
                     push_dense_taylor_assignment(
-                        &mut source,
+                        source,
                         "        ",
                         &assignment.target,
                         &assignment.value,
@@ -2710,7 +2699,24 @@ fn rust_dense_taylor_body(
             }
         }
     }
-    push_preludes(&mut source, &schedule.result_preludes, "    ");
+    push_preludes(source, &schedule.result_preludes, "    ");
+}
+
+fn rust_dense_taylor_body(
+    primaries: &[Ident],
+    constants: &HashSet<String>,
+    leaves: &[Leaf],
+    statements: &[Statement],
+    result: &ProgramExpr,
+    fourth: bool,
+) -> Result<syn::Block> {
+    let dimension = primaries.len();
+    let order = if fourth { 4 } else { 3 };
+    let schedule = dense_taylor_schedule(
+        primaries, constants, leaves, statements, result, order, true,
+    )?;
+    let mut source = "{\n".to_string();
+    push_dense_taylor_schedule_body(&mut source, &schedule);
     if dimension == 2 {
         if let Some(root_stack) = &schedule.root_compose_stack {
             push_dense_taylor_derivative_array(&mut source, "inner_first", &schedule.result, 1);
@@ -2870,6 +2876,98 @@ fn rust_dense_taylor_body(
             error.span(),
             format!(
                 "failed to parse generated Rust dense {order}-order row program: {error}\n{source}"
+            ),
+        )
+    })
+}
+
+fn rust_dense_taylor_uncontracted_body(
+    primaries: &[Ident],
+    constants: &HashSet<String>,
+    leaves: &[Leaf],
+    statements: &[Statement],
+    result: &ProgramExpr,
+    order: usize,
+) -> Result<syn::Block> {
+    if primaries.len() != 2 {
+        return Err(syn::Error::new_spanned(
+            &primaries[0],
+            "uncontracted row_program surfaces currently require exactly two primaries",
+        ));
+    }
+    let schedule = dense_taylor_schedule(
+        primaries,
+        constants,
+        leaves,
+        statements,
+        result,
+        order,
+        order == 3,
+    )?;
+    let mut source = "{\n".to_string();
+    push_dense_taylor_schedule_body(&mut source, &schedule);
+    if order == 3
+        && let Some(root_stack) = &schedule.root_compose_stack
+    {
+        push_dense_taylor_derivative_array(&mut source, "inner_first", &schedule.result, 1);
+        push_dense_taylor_derivative_array(&mut source, "inner_second", &schedule.result, 2);
+        push_dense_taylor_derivative_array(&mut source, "inner_third", &schedule.result, 3);
+        source.push_str(&format!(
+            "    std::array::from_fn(|axis_a| std::array::from_fn(|axis_b| {{\n\
+             \x20       std::array::from_fn(|axis_c| {{\n\
+             \x20           let inner_a = inner_first[axis_a];\n\
+             \x20           let inner_b = inner_first[axis_b];\n\
+             \x20           let inner_c = inner_first[axis_c];\n\
+             \x20           let inner_ab = inner_second[axis_a + axis_b];\n\
+             \x20           let inner_ac = inner_second[axis_a + axis_c];\n\
+             \x20           let inner_bc = inner_second[axis_b + axis_c];\n\
+             \x20           let inner_abc = inner_third[axis_a + axis_b + axis_c];\n\
+             \x20           {root_stack}[3] * inner_a * inner_b * inner_c\n\
+             \x20               + {root_stack}[2] * (inner_ab * inner_c\n\
+             \x20                   + inner_ac * inner_b + inner_bc * inner_a)\n\
+             \x20               + {root_stack}[1] * inner_abc\n\
+             \x20       }})\n\
+             \x20   }}))\n\
+             }}\n"
+        ));
+        return syn::parse_str(&source).map_err(|error| {
+            syn::Error::new(
+                error.span(),
+                format!(
+                    "failed to parse generated Rust root-compose uncontracted order-3 row program: {error}\n{source}"
+                ),
+            )
+        });
+    }
+    push_dense_taylor_derivative_array(&mut source, "derivative", &schedule.result, order);
+    if order == 3 {
+        source.push_str(
+            "    [\n\
+             \x20       [[derivative[0], derivative[1]], [derivative[1], derivative[2]]],\n\
+             \x20       [[derivative[1], derivative[2]], [derivative[2], derivative[3]]],\n\
+             \x20   ]\n\
+             }\n",
+        );
+    } else {
+        source.push_str(
+            "    [\n\
+             \x20       [\n\
+             \x20           [[derivative[0], derivative[1]], [derivative[1], derivative[2]]],\n\
+             \x20           [[derivative[1], derivative[2]], [derivative[2], derivative[3]]],\n\
+             \x20       ],\n\
+             \x20       [\n\
+             \x20           [[derivative[1], derivative[2]], [derivative[2], derivative[3]]],\n\
+             \x20           [[derivative[2], derivative[3]], [derivative[3], derivative[4]]],\n\
+             \x20       ],\n\
+             \x20   ]\n\
+             }\n",
+        );
+    }
+    syn::parse_str(&source).map_err(|error| {
+        syn::Error::new(
+            error.span(),
+            format!(
+                "failed to parse generated Rust uncontracted order-{order} row program: {error}\n{source}"
             ),
         )
     })
@@ -3558,6 +3656,43 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         quote!()
     };
 
+    let full_function = if emissions.full {
+        let third_full_name = format_ident!("{}_third_full", name);
+        let fourth_full_name = format_ident!("{}_fourth_full", name);
+        let third_full_body = rust_dense_taylor_uncontracted_body(
+            &primaries,
+            &constant_names,
+            &leaves,
+            &statements,
+            &result,
+            3,
+        )?;
+        let fourth_full_body = rust_dense_taylor_uncontracted_body(
+            &primaries,
+            &constant_names,
+            &leaves,
+            &statements,
+            &result,
+            4,
+        )?;
+        quote! {
+            #[inline(never)]
+            #visibility fn #third_full_name(
+                #(#primaries: f64,)*
+                #(#constants: f64),*
+            ) -> [[[f64; #dimension]; #dimension]; #dimension] #third_full_body
+
+            #[inline(never)]
+            #visibility fn #fourth_full_name(
+                #(#primaries: f64,)*
+                #(#constants: f64),*
+            ) -> [[[[f64; #dimension]; #dimension]; #dimension]; #dimension]
+                #fourth_full_body
+        }
+    } else {
+        quote!()
+    };
+
     let scalar_witness_function = if emissions.witnesses {
         let scalar_witness_dependencies = witness_dependencies(&statements, &witnesses);
         let scalar_witness_scalar_dependencies =
@@ -3635,6 +3770,7 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         #order2_function
         #third_function
         #fourth_function
+        #full_function
         #scalar_witness_function
         #cuda_constant
     })
@@ -3706,7 +3842,7 @@ mod tests {
     fn emits_generic_and_shared_symbolic_rust_cuda_schedules() {
         let input = syn::parse2::<Input>(quote! {
             pub(crate) fn sample(q, g; weight, event, scale)
-            emit [generic, runtime, order2, third, fourth, witnesses, cuda];
+            emit [generic, runtime, order2, third, fourth, full, witnesses, cuda];
             leaves {
                 sqrt => sqrt_stack => d_sqrt,
                 log => log_stack => d_log,
@@ -3732,6 +3868,8 @@ mod tests {
         assert!(expanded.contains("fn sample_order2"));
         assert!(expanded.contains("fn sample_third_contracted"));
         assert!(expanded.contains("fn sample_fourth_contracted"));
+        assert!(expanded.contains("fn sample_third_full"));
+        assert!(expanded.contains("fn sample_fourth_full"));
         assert!(expanded.contains("direction_u"));
         assert!(expanded.contains("direction_v"));
         assert!(expanded.contains("sqrt_stack"));
@@ -3797,7 +3935,7 @@ mod tests {
         });
         assert!(
             unknown.contains(
-                "must be one of `generic`, `runtime`, `order2`, `third`, `fourth`, `witnesses`, or `cuda`"
+                "must be one of `generic`, `runtime`, `order2`, `third`, `fourth`, `full`, `witnesses`, or `cuda`"
             )
         );
 

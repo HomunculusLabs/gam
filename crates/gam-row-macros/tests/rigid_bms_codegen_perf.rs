@@ -58,7 +58,7 @@ row_program! {
         outcome_sign,
         weight
     )
-    emit [generic, order2, third, fourth];
+    emit [generic, order2, third, fourth, full];
     leaves {
         supplied_link => supplied_link_stack => supplied_link_stack_cuda,
         observed_scale => observed_scale_stack => observed_scale_stack_cuda,
@@ -192,6 +192,40 @@ fn generated_fourth(row: Row) -> [[f64; 2]; 2] {
 }
 
 #[inline(always)]
+fn generated_third_full(row: Row) -> [[[f64; 2]; 2]; 2] {
+    generated_rigid_bms_third_full(
+        row.marginal_eta,
+        row.logslope,
+        row.marginal[0],
+        row.marginal[1],
+        row.marginal[2],
+        row.marginal[3],
+        row.marginal[4],
+        row.probit_scale,
+        row.latent_score,
+        row.outcome_sign,
+        row.weight,
+    )
+}
+
+#[inline(always)]
+fn generated_fourth_full(row: Row) -> [[[[f64; 2]; 2]; 2]; 2] {
+    generated_rigid_bms_fourth_full(
+        row.marginal_eta,
+        row.logslope,
+        row.marginal[0],
+        row.marginal[1],
+        row.marginal[2],
+        row.marginal[3],
+        row.marginal[4],
+        row.probit_scale,
+        row.latent_score,
+        row.outcome_sign,
+        row.weight,
+    )
+}
+
+#[inline(always)]
 fn margin_chain(row: Row) -> ([f64; 5], [f64; 2], [f64; 3], [f64; 4], [f64; 5]) {
     let observed_slope = row.probit_scale * row.logslope;
     let observed_stack = observed_scale_stack(observed_slope);
@@ -306,6 +340,50 @@ fn strongest_hand_fourth(row: Row) -> [[f64; 2]; 2] {
     })
 }
 
+#[inline(never)]
+fn strongest_hand_third_full(row: Row) -> [[[f64; 2]; 2]; 2] {
+    let (outer, d1, d2, d3, _) = margin_chain(row);
+    std::array::from_fn(|a| {
+        std::array::from_fn(|b| {
+            std::array::from_fn(|c| {
+                outer[3] * d1[a] * d1[b] * d1[c]
+                    + outer[2] * (d2[a + b] * d1[c] + d2[a + c] * d1[b] + d2[b + c] * d1[a])
+                    + outer[1] * d3[a + b + c]
+            })
+        })
+    })
+}
+
+#[inline(never)]
+fn strongest_hand_fourth_full(row: Row) -> [[[[f64; 2]; 2]; 2]; 2] {
+    let (outer, d1, d2, d3, d4) = margin_chain(row);
+    std::array::from_fn(|a| {
+        std::array::from_fn(|b| {
+            std::array::from_fn(|c| {
+                std::array::from_fn(|d| {
+                    outer[4] * d1[a] * d1[b] * d1[c] * d1[d]
+                        + outer[3]
+                            * (d2[a + b] * d1[c] * d1[d]
+                                + d2[a + c] * d1[b] * d1[d]
+                                + d2[a + d] * d1[b] * d1[c]
+                                + d2[b + c] * d1[a] * d1[d]
+                                + d2[b + d] * d1[a] * d1[c]
+                                + d2[c + d] * d1[a] * d1[b])
+                        + outer[2]
+                            * (d3[a + b + c] * d1[d]
+                                + d3[a + b + d] * d1[c]
+                                + d3[a + c + d] * d1[b]
+                                + d3[b + c + d] * d1[a]
+                                + d2[a + b] * d2[c + d]
+                                + d2[a + c] * d2[b + d]
+                                + d2[a + d] * d2[b + c])
+                        + outer[1] * d4[a + b + c + d]
+                })
+            })
+        })
+    })
+}
+
 fn rows() -> Vec<Row> {
     (0..512)
         .map(|index| {
@@ -353,6 +431,28 @@ fn assert_matrix(got: [[f64; 2]; 2], want: [[f64; 2]; 2]) {
     }
 }
 
+fn assert_third_full(got: [[[f64; 2]; 2]; 2], want: [[[f64; 2]; 2]; 2]) {
+    for a in 0..2 {
+        for b in 0..2 {
+            for c in 0..2 {
+                close(got[a][b][c], want[a][b][c]);
+            }
+        }
+    }
+}
+
+fn assert_fourth_full(got: [[[[f64; 2]; 2]; 2]; 2], want: [[[[f64; 2]; 2]; 2]; 2]) {
+    for a in 0..2 {
+        for b in 0..2 {
+            for c in 0..2 {
+                for d in 0..2 {
+                    close(got[a][b][c][d], want[a][b][c][d]);
+                }
+            }
+        }
+    }
+}
+
 fn sample(rows: &[Row], evaluate: impl Fn(Row) -> Channels) -> f64 {
     let started = Instant::now();
     let mut checksum = 0.0;
@@ -387,6 +487,47 @@ fn sample_matrix(rows: &[Row], evaluate: impl Fn(Row) -> [[f64; 2]; 2]) -> f64 {
     started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
 }
 
+fn sample_third_full(rows: &[Row], evaluate: impl Fn(Row) -> [[[f64; 2]; 2]; 2]) -> f64 {
+    let started = Instant::now();
+    let mut checksum = 0.0;
+    for iteration in 0..4096 {
+        for row in rows {
+            let mut perturbed = *row;
+            perturbed.logslope += checksum * 1e-24;
+            let tensor = std::hint::black_box(evaluate(perturbed));
+            checksum += tensor
+                .iter()
+                .flat_map(|plane| plane.iter())
+                .flat_map(|line| line.iter())
+                .sum::<f64>();
+        }
+        checksum *= 1e-3 + iteration as f64 * 1e-12;
+    }
+    assert!(checksum.is_finite());
+    started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
+}
+
+fn sample_fourth_full(rows: &[Row], evaluate: impl Fn(Row) -> [[[[f64; 2]; 2]; 2]; 2]) -> f64 {
+    let started = Instant::now();
+    let mut checksum = 0.0;
+    for iteration in 0..4096 {
+        for row in rows {
+            let mut perturbed = *row;
+            perturbed.logslope += checksum * 1e-24;
+            let tensor = std::hint::black_box(evaluate(perturbed));
+            checksum += tensor
+                .iter()
+                .flat_map(|cube| cube.iter())
+                .flat_map(|plane| plane.iter())
+                .flat_map(|line| line.iter())
+                .sum::<f64>();
+        }
+        checksum *= 1e-3 + iteration as f64 * 1e-12;
+    }
+    assert!(checksum.is_finite());
+    started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
+}
+
 fn median(mut values: [f64; 7]) -> f64 {
     values.sort_by(f64::total_cmp);
     values[values.len() / 2]
@@ -399,11 +540,18 @@ fn generated_rigid_bms_matches_strongest_hand_932() {
         assert_channels(generated(*row), strongest_hand(*row));
         assert_matrix(generated_third(*row), strongest_hand_third(*row));
         assert_matrix(generated_fourth(*row), strongest_hand_fourth(*row));
+        assert_third_full(generated_third_full(*row), strongest_hand_third_full(*row));
+        assert_fourth_full(
+            generated_fourth_full(*row),
+            strongest_hand_fourth_full(*row),
+        );
     }
 
     let mut order2_samples = [(0.0, 0.0); 7];
     let mut third_samples = [(0.0, 0.0); 7];
     let mut fourth_samples = [(0.0, 0.0); 7];
+    let mut third_full_samples = [(0.0, 0.0); 7];
+    let mut fourth_full_samples = [(0.0, 0.0); 7];
     for round in 0..7 {
         if round % 2 == 0 {
             order2_samples[round] = (sample(&rows, generated), sample(&rows, strongest_hand));
@@ -415,6 +563,14 @@ fn generated_rigid_bms_matches_strongest_hand_932() {
                 sample_matrix(&rows, generated_fourth),
                 sample_matrix(&rows, strongest_hand_fourth),
             );
+            third_full_samples[round] = (
+                sample_third_full(&rows, generated_third_full),
+                sample_third_full(&rows, strongest_hand_third_full),
+            );
+            fourth_full_samples[round] = (
+                sample_fourth_full(&rows, generated_fourth_full),
+                sample_fourth_full(&rows, strongest_hand_fourth_full),
+            );
         } else {
             let hand_ns = sample(&rows, strongest_hand);
             let generated_ns = sample(&rows, generated);
@@ -425,12 +581,20 @@ fn generated_rigid_bms_matches_strongest_hand_932() {
             let hand_ns = sample_matrix(&rows, strongest_hand_fourth);
             let generated_ns = sample_matrix(&rows, generated_fourth);
             fourth_samples[round] = (generated_ns, hand_ns);
+            let hand_ns = sample_third_full(&rows, strongest_hand_third_full);
+            let generated_ns = sample_third_full(&rows, generated_third_full);
+            third_full_samples[round] = (generated_ns, hand_ns);
+            let hand_ns = sample_fourth_full(&rows, strongest_hand_fourth_full);
+            let generated_ns = sample_fourth_full(&rows, generated_fourth_full);
+            fourth_full_samples[round] = (generated_ns, hand_ns);
         }
     }
     for (channel, samples) in [
         ("order2", order2_samples),
         ("third", third_samples),
         ("fourth", fourth_samples),
+        ("third_full", third_full_samples),
+        ("fourth_full", fourth_full_samples),
     ] {
         let generated_ns = median(samples.map(|sample| sample.0));
         let hand_ns = median(samples.map(|sample| sample.1));

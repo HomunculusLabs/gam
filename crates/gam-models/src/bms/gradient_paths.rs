@@ -3,6 +3,7 @@ use super::*;
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_linalg::matrix::{FiniteSignedWeightsView, LinearOperator};
 use gam_math::jet_scalar::SymmetricQuadraticCoefficients;
+#[cfg(test)]
 use gam_math::jet_tower::Tower4;
 use gam_math::probability::normal_logcdf_derivatives;
 use gam_row_macros::row_program;
@@ -1643,7 +1644,7 @@ row_program! {
         outcome_sign,
         weight
     )
-    emit [generic, order2, third, fourth];
+    emit [generic, order2, third, fourth, full];
     leaves {
         supplied_link => rigid_supplied_link_stack => rigid_supplied_link_stack_cuda,
         observed_scale => rigid_observed_scale_stack => rigid_observed_scale_stack_cuda,
@@ -1711,12 +1712,7 @@ pub(crate) fn rigid_standard_normal_row_nll_generic<S: gam_math::jet_scalar::Jet
 ) -> Result<S, String> {
     let outcome_sign = 2.0 * y - 1.0;
     let m = outcome_sign
-        * marginal_slope_standard_normal_scalar_eta(
-            marginal.q,
-            p[1].value(),
-            z,
-            probit_scale,
-        );
+        * marginal_slope_standard_normal_scalar_eta(marginal.q, p[1].value(), z, probit_scale);
     if !(m.is_finite() || m == f64::INFINITY) {
         return Err(format!(
             "non-finite signed margin in rigid probit row NLL: {m}"
@@ -1738,41 +1734,6 @@ pub(crate) fn rigid_standard_normal_row_nll_generic<S: gam_math::jet_scalar::Jet
     Ok(nll)
 }
 
-/// The order-≤4 signed observed margin `m = (2y−1)·η` of one rigid
-/// standard-normal Bernoulli row, written ONCE over `S: JetScalar<2>`:
-/// `q(η_marg)` composed onto the η primary, observed slope `b = s·g`, scale
-/// `c = √(1 + b²)`, `η = q·c + b·z`. This is the polynomial part shared by
-/// every channel consumer — the per-row / contracted / full-tower generic NLL
-/// ([`rigid_standard_normal_row_nll_generic`]) composes the probit-neglog
-/// transcendental onto it, and the batched builder's Pass-A jet
-/// ([`rigid_standard_normal_signed_jet`]) evaluates it at `Tower4<2>` — so the
-/// signed margin has a single source (#932), with no second hand-packed jet.
-#[inline]
-pub(crate) fn rigid_standard_normal_signed_margin<S: gam_math::jet_scalar::JetScalar<2>>(
-    p: &[S; 2],
-    marginal: BernoulliMarginalLinkMap,
-    z: f64,
-    y: f64,
-    probit_scale: f64,
-) -> S {
-    // q(η_marg): compose the link's q-as-function-of-η stack onto the η primary.
-    let q = p[0].compose_unary([
-        marginal.q,
-        marginal.q1,
-        marginal.q2,
-        marginal.q3,
-        marginal.q4,
-    ]);
-    let slope = p[1];
-    // observed slope b = s·g, scale c = √(1 + b²).
-    let observed_slope = slope.scale(probit_scale);
-    let b2 = observed_slope.mul(&observed_slope);
-    let c = b2.add(&S::constant(1.0)).sqrt();
-    // η = q·c + (s·g)·z, signed margin m = (2y−1)·η.
-    let eta = q.mul(&c).add(&observed_slope.scale(z));
-    eta.scale(2.0 * y - 1.0)
-}
-
 /// One row of rigid standard-normal Bernoulli data as a generic
 /// [`RowProgram<2>`] (#932 production wiring).
 ///
@@ -1785,6 +1746,7 @@ pub(crate) fn rigid_standard_normal_signed_margin<S: gam_math::jet_scalar::JetSc
 /// value/grad/Hessian and directional channels). Primaries are
 /// `[marginal η, slope g]`; the marginal link map and per-row data
 /// `(z, y, w, probit_scale)` enter as constants on the body.
+#[cfg(test)]
 pub(crate) struct RigidStandardNormalRow {
     pub(crate) marginal: BernoulliMarginalLinkMap,
     pub(crate) g: f64,
@@ -1794,6 +1756,7 @@ pub(crate) struct RigidStandardNormalRow {
     pub(crate) probit_scale: f64,
 }
 
+#[cfg(test)]
 impl gam_math::jet_tower::RowProgram<2> for RigidStandardNormalRow {
     fn n_rows(&self) -> usize {
         1
@@ -1825,6 +1788,7 @@ impl gam_math::jet_tower::RowProgram<2> for RigidStandardNormalRow {
     }
 }
 
+#[cfg(test)]
 #[inline]
 pub(crate) fn rigid_standard_normal_tower(
     marginal: BernoulliMarginalLinkMap,
@@ -1849,123 +1813,6 @@ pub(crate) fn rigid_standard_normal_tower(
         probit_scale,
     };
     gam_math::jet_tower::program_full_tower(&program, 0).map(|tower| *tower)
-}
-
-/// Branch-free `signed`-margin jet for the rigid standard-normal row kernel.
-///
-/// This is the order-≤4 polynomial part of [`rigid_standard_normal_tower`]
-/// *before* the single transcendental compose: it builds the `Tower4<2>` of the
-/// signed observed index `signed = (2y−1)·η`, `η = q·c(g) + g·(s·z)`,
-/// `c(g) = √(1 + (s·g)²)`, with no `erfc`/`exp`/`ln` call. Splitting this off
-/// lets the batched builder run all the cheap, branch-free jet products in one
-/// SIMD-friendly pass and isolate the (branchy, transcendental) Mills-ratio
-/// composition into its own tight pass. The returned jet is the SAME expression
-/// (`rigid_standard_normal_signed_margin`) the per-row `rigid_standard_normal_tower`
-/// signed margin evaluates, here at `Tower4<2>` — bit-identical by construction,
-/// not a parallel hand-packed jet (#932 single source).
-#[inline]
-fn rigid_standard_normal_signed_jet(
-    marginal: BernoulliMarginalLinkMap,
-    g: f64,
-    z: f64,
-    y: f64,
-    probit_scale: f64,
-) -> Tower4<2> {
-    // Seed `[marginal η, g]` exactly as the generic program's `primaries()`, then
-    // evaluate the one shared signed-margin expression at the all-channels scalar.
-    let p = [
-        Tower4::<2>::variable(marginal.eta_value(), 0),
-        Tower4::<2>::variable(g, 1),
-    ];
-    rigid_standard_normal_signed_margin(&p, marginal, z, y, probit_scale)
-}
-
-/// Batched, two-pass builder of the rigid standard-normal row `Tower4<2>` jets
-/// for a contiguous chunk of rows, written for the auto-vectorizer.
-///
-/// Per row the production path ([`rigid_standard_normal_tower`]) interleaves
-/// (1) cheap branch-free jet products to form the `signed` margin jet, (2) ONE
-/// branchy transcendental (`erfcx`/`exp`/`ln` via
-/// [`signed_probit_neglog_unary_stack`]) that dominates the per-row scalar-ALU
-/// budget across all `n ≈ 356k` rows, and (3) the branch-free Faà-di-Bruno
-/// `compose_unary` tensor assembly. The interleaving keeps the compiler from
-/// vectorizing the loop body because the transcendental's internal branches sit
-/// between the two pure-FMA blocks.
-///
-/// This builder runs the same work as three *separate* loops over the chunk:
-///
-/// * Pass A — build every `signed` jet (branch-free, [`rigid_standard_normal_signed_jet`]),
-///   spilling `signed.v` into a contiguous `margins` scratch buffer.
-/// * Pass B — fill the per-row unary derivative stack `[d0..d4]` from
-///   `margins`/`weights` (the transcendental, now back-to-back over a flat
-///   `&[f64]` so branch prediction and the polynomial `k1..k4` portion stream).
-/// * Pass C — `compose_unary` each `signed` jet against its stack (branch-free,
-///   pure FMA over the dense tensors → the vectorizable hot block).
-///
-/// Every scalar operation, and its order, is identical to the per-row path, so
-/// the produced jets are bit-for-bit equal; the win is making the n-row build
-/// memory-bandwidth-bound rather than scalar-ALU/branch-bound. The `fill`
-/// callback writes the consumer's per-row payload (e.g. `.t3` or `.t4`) from the
-/// finished jet, so neither tensor is materialized into an intermediate `Vec`.
-#[inline]
-pub(super) fn rigid_standard_normal_towers_batch<T>(
-    marginals: &[BernoulliMarginalLinkMap],
-    slopes: &[f64],
-    zs: &[f64],
-    ys: &[f64],
-    weights: &[f64],
-    probit_scale: f64,
-    out: &mut [T],
-    mut fill: impl FnMut(&Tower4<2>) -> Result<T, String>,
-) -> Result<(), String> {
-    let chunk = marginals.len();
-    if slopes.len() != chunk
-        || zs.len() != chunk
-        || ys.len() != chunk
-        || weights.len() != chunk
-        || out.len() != chunk
-    {
-        return Err(format!(
-            "rigid_standard_normal_towers_batch length mismatch: marginals={chunk}, \
-             slopes={}, zs={}, ys={}, weights={}, out={}",
-            slopes.len(),
-            zs.len(),
-            ys.len(),
-            weights.len(),
-            out.len()
-        ));
-    }
-
-    // Pass A: branch-free signed-margin jets + flat margin scratch.
-    let mut signed: Vec<Tower4<2>> = Vec::with_capacity(chunk);
-    let mut margins: Vec<f64> = Vec::with_capacity(chunk);
-    for i in 0..chunk {
-        let jet =
-            rigid_standard_normal_signed_jet(marginals[i], slopes[i], zs[i], ys[i], probit_scale);
-        margins.push(jet.v);
-        signed.push(jet);
-    }
-
-    // Pass B: the transcendental, isolated over a flat margin slice. Each entry
-    // is the exact `[d0..d4]` `compose_unary` consumes; the production path's
-    // fail-fast on a non-finite (non-`+∞`) margin is preserved here.
-    let mut stacks: Vec<[f64; 5]> = Vec::with_capacity(chunk);
-    for i in 0..chunk {
-        let m = margins[i];
-        if !(m.is_finite() || m == f64::INFINITY) {
-            return Err(format!(
-                "non-finite signed margin in rigid probit tower batch: {m}"
-            ));
-        }
-        stacks.push(signed_probit_neglog_unary_stack(m, weights[i]));
-    }
-
-    // Pass C: branch-free dense compose + consumer fill.
-    for i in 0..chunk {
-        let tower = signed[i].compose_unary(stacks[i]);
-        out[i] = fill(&tower)?;
-    }
-    Ok(())
 }
 
 #[inline]
@@ -2194,6 +2041,11 @@ pub(super) fn rigid_standard_normal_score_zeta_sensitivity(
     Ok(s)
 }
 
+/// Full symmetric third-order tensor emitted from the canonical row program.
+///
+/// The compiler evaluates only the four distinct two-primary components and
+/// expands symmetry in the return value; no dense tower or directional replay
+/// is present in production.
 #[inline]
 pub(super) fn rigid_standard_normal_third_full(
     marginal: BernoulliMarginalLinkMap,
@@ -2203,7 +2055,27 @@ pub(super) fn rigid_standard_normal_third_full(
     w: f64,
     probit_scale: f64,
 ) -> Result<[[[f64; 2]; 2]; 2], String> {
-    Ok(rigid_standard_normal_tower(marginal, g, z, y, w, probit_scale)?.t3)
+    let outcome_sign = 2.0 * y - 1.0;
+    let signed_margin =
+        outcome_sign * marginal_slope_standard_normal_scalar_eta(marginal.q, g, z, probit_scale);
+    if !(signed_margin.is_finite() || signed_margin == f64::INFINITY) {
+        return Err(format!(
+            "non-finite signed margin in rigid probit row NLL: {signed_margin}"
+        ));
+    }
+    Ok(rigid_standard_normal_program_third_full(
+        marginal.eta_value(),
+        g,
+        marginal.q,
+        marginal.q1,
+        marginal.q2,
+        marginal.q3,
+        marginal.q4,
+        probit_scale,
+        z,
+        outcome_sign,
+        w,
+    ))
 }
 
 #[inline]
@@ -2258,6 +2130,10 @@ pub(super) fn contract_third_full(t: &[[[f64; 2]; 2]; 2], d_eta: f64, d_g: f64) 
     ]
 }
 
+/// Full symmetric fourth-order tensor emitted from the canonical row program.
+///
+/// Only the five distinct two-primary components are evaluated; the generated
+/// return reconstructs tensor symmetry without a dense `Tower4` in production.
 #[inline]
 pub(super) fn rigid_standard_normal_fourth_full(
     marginal: BernoulliMarginalLinkMap,
@@ -2267,20 +2143,30 @@ pub(super) fn rigid_standard_normal_fourth_full(
     w: f64,
     probit_scale: f64,
 ) -> Result<[[[[f64; 2]; 2]; 2]; 2], String> {
-    // #932 single-sourcing: the full uncontracted fourth-order primary tensor is
-    // the `.t4` channel of the SAME `Tower4<2>` row jet the value/gradient/Hessian
-    // and the third-order tensor (`rigid_standard_normal_third_full` → `.t3`) are
-    // read from. The marginal latent-coordinate chain `q(η)` is already seeded
-    // into axis 0 of the tower (`q.g[0]=q1, q.h[0][0]=q2, q.t3[0][0][0]=q3,
-    // q.t4[0][0][0][0]=q4` in `rigid_standard_normal_signed_jet`), so `.t4` is
-    // delivered directly in the production `(η, g)` primary space — no separate
-    // Faà-di-Bruno q-chain reassembly. This replaces the former hand-written
-    // fourth-derivative chain rule with the mechanically-derived tower output,
-    // exactly mirroring how `.t3` is consumed;
-    // it is cross-checked term-for-term against the independent
-    // `HandRigidProbitKernel` witness in
-    // `rigid_standard_normal_tower_path_matches_hand_chain_witness`.
-    Ok(rigid_standard_normal_tower(marginal, g, z, y, w, probit_scale)?.t4)
+    // The generated schedule evaluates the five distinct symmetric components
+    // directly from the one row expression. The Tower4 path remains an
+    // independent exact oracle in tests, not a production lowering.
+    let outcome_sign = 2.0 * y - 1.0;
+    let signed_margin =
+        outcome_sign * marginal_slope_standard_normal_scalar_eta(marginal.q, g, z, probit_scale);
+    if !(signed_margin.is_finite() || signed_margin == f64::INFINITY) {
+        return Err(format!(
+            "non-finite signed margin in rigid probit row NLL: {signed_margin}"
+        ));
+    }
+    Ok(rigid_standard_normal_program_fourth_full(
+        marginal.eta_value(),
+        g,
+        marginal.q,
+        marginal.q1,
+        marginal.q2,
+        marginal.q3,
+        marginal.q4,
+        probit_scale,
+        z,
+        outcome_sign,
+        w,
+    ))
 }
 
 /// Combined uncontracted THIRD **and** FOURTH primary tensors for one rigid
@@ -3150,14 +3036,7 @@ mod jet_tower_oracle_tests {
             );
 
             let production_ns = best_ns(iterations, g, |perturbed_g| {
-                measured_production_rigid_vgh(
-                    marginal,
-                    perturbed_g,
-                    z,
-                    y,
-                    w,
-                    probit_scale,
-                )
+                measured_production_rigid_vgh(marginal, perturbed_g, z, y, w, probit_scale)
             });
             let hand_ns = best_ns(iterations, g, |perturbed_g| {
                 measured_hand_rigid_vgh(marginal, perturbed_g, z, y, w, probit_scale)
