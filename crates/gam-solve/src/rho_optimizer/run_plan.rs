@@ -9,6 +9,22 @@ fn should_start_next_seed(
     started_seeds < seed_budget || !has_certified_candidate
 }
 
+/// Parsimonious screening has exactly two roles: the flexible slot-0 basin and
+/// the deliberately promoted, more-smoothed slot-1 basin. The remaining budget
+/// is failure recovery, not an instruction to solve extra certified basins.
+const PARSIMONY_COMPARISON_SEED_COUNT: usize = 2;
+
+#[inline]
+fn should_await_promoted_parsimony_seed(
+    seed_budget: usize,
+    started_seeds: usize,
+    promoted_seed_is_redundant: bool,
+) -> bool {
+    seed_budget >= PARSIMONY_COMPARISON_SEED_COUNT
+        && started_seeds < PARSIMONY_COMPARISON_SEED_COUNT
+        && !promoted_seed_is_redundant
+}
+
 /// Evaluate the literal outer seed against the true profiled objective.
 ///
 /// Adaptive inner caps are search accelerators. A capped, nonconverged inner
@@ -2712,9 +2728,10 @@ pub(crate) fn run_outer_with_plan(
                 // parsimonious seed (slot 1) has been solved. Without this, the
                 // converged break below fires on slot 0 and the heavy basin that
                 // the screening order placed at slot 1 — precisely to let
-                // keep-best reject an overshoot — is never evaluated. Bounded to
-                // the existing seed_budget (typically 2 for non-Gaussian ARC), so
-                // this solves at most one additional seed before the break.
+                // keep-best reject an overshoot — is never evaluated. This gate
+                // waits for exactly those two comparison roles. Any larger budget
+                // exists to recover from failed candidates; it must not launch a
+                // third expensive solve after both basins already certified.
                 //
                 // #1575: but the heavy seed is only ever DECISIVE when slot 0
                 // could be beaten (an under-penalized overshoot, a flat-valley
@@ -2725,12 +2742,15 @@ pub(crate) fn run_outer_with_plan(
                 // doubling the binomial/survival outer cost-eval count for
                 // nothing. Waive the await in exactly that redundant case; every
                 // overshoot/stall/flat-valley path keeps the full guard.
+                let promoted_seed_is_redundant = best
+                    .as_ref()
+                    .is_some_and(|b| parsimony_second_seed_is_redundant(b.result(), rho_dim));
                 let non_gaussian_await_parsimony_seed = parsimonious_keep_best
-                    && seed_budget > 1
-                    && started_seeds < seed_budget
-                    && !best
-                        .as_ref()
-                        .is_some_and(|b| parsimony_second_seed_is_redundant(b.result(), rho_dim));
+                    && should_await_promoted_parsimony_seed(
+                        seed_budget,
+                        started_seeds,
+                        promoted_seed_is_redundant,
+                    );
                 if best.is_some()
                     && !quality_compare_remaining_gaussian_seeds
                     && !non_gaussian_await_parsimony_seed
