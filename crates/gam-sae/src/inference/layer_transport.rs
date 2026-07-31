@@ -32,9 +32,10 @@
 //! 3. **Composition law** — `h_{l→l+2}` vs `h_{l+1→l+2} ∘ h_{l→l+1}`. The
 //!    defect `d(t) = h_ac(t) ⊖ h_bc(h_ab(t))` (circular difference on circle
 //!    charts) is evaluated on a grid and studentized with a joint shared-row
-//!    influence sandwich. A Bonferroni max test controls the grid family under
-//!    arbitrary pointwise dependence; deterministic fits with no score
-//!    variation emit no p-value.
+//!    influence sandwich, with resolution bounded below by the fitted maps'
+//!    observed approximation error. A Bonferroni max test controls the grid
+//!    family under arbitrary pointwise dependence; deterministic fits with
+//!    neither score variation nor approximation error emit no p-value.
 //!
 //! # Gauge discipline
 //!
@@ -1297,7 +1298,9 @@ fn domain_grid(topology: ChartTopology, n: usize) -> Array1<f64> {
 /// circle targets) is computed directly in the common target chart: no gauge is
 /// selected after seeing the defect. Pointwise uncertainty is assembled from
 /// the combined observation-level influence of all three maps, retaining their
-/// shared-row covariance, and the grid is tested by a Bonferroni max statistic.
+/// shared-row covariance. Its resolution is bounded below by the three maps'
+/// observed residual scales, propagated through the composition by Minkowski's
+/// inequality, and the grid is tested by a Bonferroni max statistic.
 pub fn composition_defect(
     h_ab: &FittedTransport,
     h_bc: &FittedTransport,
@@ -1363,18 +1366,30 @@ pub fn composition_defect(
         }
     }));
 
-    // --- pointwise studentization against the composed bands ----------------
-    // Floor the band variance with BOTH a relative component (numerical guard
-    // against exact zeros) AND an absolute, coordinate-scale component. The
-    // absolute component is the fix for #2143: the delta-method band variance is
-    // a pure sampling variance that collapses on near-noiseless REML fits, so
-    // without it the irreducible spline-representation defect (which the sampling
-    // variance does not model) is studentized into a spurious rejection. The
-    // absolute floor is the squared representation tolerance relative to the
-    // target chart's coordinate span, so a machine-level composition defect on a
-    // clean chain reads as non-significant while a genuine violation (far larger
-    // defect, or real sampling variance well above the floor) is unaffected.
-    let max_var = variance.iter().copied().fold(0.0_f64, f64::max);
+    // --- pointwise studentization at the maps' identifiable resolution -------
+    // The influence sandwich is sampling variance and collapses on noiseless
+    // fits. The finite spline family is not closed under composition, however,
+    // so a direct fit and a composed pair retain approximation error even when
+    // the underlying chart maps obey the law exactly (#2143). Studentizing that
+    // representation defect against sampling variance alone therefore reverses
+    // the intended test: cleaner data can look more significantly inconsistent.
+    //
+    // Do not hide the problem behind a fixed coordinate-scale tolerance. Each
+    // fitted map already measures its own approximation resolution as residual
+    // RMS. For e_ac - e_bc - h_bc' e_ab, Minkowski's inequality gives the
+    // data-derived envelope
+    //
+    //   ||e_ac||₂ + ||e_bc||₂ + |h_bc'| ||e_ab||₂.
+    //
+    // This retains power above what the fitted representations can resolve,
+    // adapts to topology/scale/basis complexity, and has no calibration knob.
+    let mut calibrated_variance = variance;
+    for i in 0..n_grid {
+        let approximation_sd =
+            h_ac.residual_rms + h_bc.residual_rms + mid_slope[i].abs() * h_ab.residual_rms;
+        calibrated_variance[i] = calibrated_variance[i].max(approximation_sd * approximation_sd);
+    }
+    let max_var = calibrated_variance.iter().copied().fold(0.0_f64, f64::max);
     let var_floor = (max_var * 1e-12).max(f64::MIN_POSITIVE);
     let mut max_abs = 0.0_f64;
     let mut sum_abs = 0.0_f64;
@@ -1387,7 +1402,7 @@ pub fn composition_defect(
         sum_abs += a;
         sum_sq += d * d;
         if max_var > 0.0 {
-            let z = a / variance[i].max(var_floor).sqrt();
+            let z = a / calibrated_variance[i].max(var_floor).sqrt();
             max_z = max_z.max(z);
         }
     }
@@ -1395,9 +1410,10 @@ pub fn composition_defect(
     let rms_defect = (sum_sq / n_grid as f64).sqrt();
 
     // Bonferroni bound for the max studentized defect over the actual grid:
-    // valid for arbitrary dependence among pointwise contrasts. With zero
-    // empirical score variation there is no sampling law, so no p-value is
-    // emitted from deterministic fitted-grid values.
+    // valid for arbitrary dependence among pointwise contrasts. With neither
+    // empirical score variation nor observed approximation error there is no
+    // uncertainty law, so no p-value is emitted from deterministic fitted-grid
+    // values.
     let max_studentized_p_value = if max_var > 0.0 {
         let pointwise = normal_two_sided_probability(max_z);
         (n_grid as f64 * pointwise).min(1.0)

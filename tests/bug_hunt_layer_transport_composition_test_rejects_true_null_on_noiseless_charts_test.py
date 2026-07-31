@@ -7,17 +7,18 @@ variance ``var(h_ac) + var(h_bc) + h_bc′²·var(h_ab)``. That variance is a pu
 SAMPLING variance: it collapses toward zero as the adjacent REML transports
 approach noiselessness. But composing two penalized-spline chart maps is not
 closed in a single finite basis, so even a perfectly composable chain carries an
-irreducible defect at the spline-representation scale (~1e-5 of the coordinate
-span) that the sampling variance does not model. With only a RELATIVE variance
-floor (``max_var·1e-10``), that machine-level defect is studentized against a
-collapsed variance and inflated into a spurious ``composition_p_value = 0`` — and
-the test is inverted: adding realistic noise makes the defect LARGER yet the test
-correctly ACCEPTS, so a smaller, more-composable defect is judged far more
-significant.
+irreducible defect at the spline-representation scale that the sampling variance
+does not model. With only a relative numerical variance floor, that defect is
+studentized against a collapsed variance and inflated into a spurious
+``composition_p_value = 0`` — and the test is inverted: adding realistic noise
+makes the defect LARGER yet the test correctly ACCEPTS, so a smaller,
+more-composable defect is judged far more significant.
 
-The fix adds an ABSOLUTE variance floor tied to the target chart's coordinate
-span, so a representation-level defect reads as non-significant while genuine
-violations and real sampling scales (both far above the floor) are unaffected.
+The fix calibrates the statistic to the fitted maps' observed approximation
+resolution. Their residual RMS values are propagated through the composition
+with Minkowski's inequality, so no fixed coordinate-scale tolerance is needed:
+representation-level defects read as non-significant while genuine violations
+well above the maps' resolution remain detectable.
 
 For a deterministic 1-D chart chain the composition law is a mathematical
 identity, so these are type-I (true-null) calibration tests: a composable chain
@@ -72,7 +73,7 @@ def test_noiseless_accept_is_robust_across_seeds():
 
 def test_noisy_composable_chain_is_accepted_control():
     """Control: with realistic noise the sampling variance is well above the
-    floor, so the test proceeds unchanged and (correctly) accepts."""
+    representation resolution, so the test correctly accepts."""
     r = _two_hop(_circle_chain(0.05, seed=3))
     assert r["composition_p_value"] > 0.05, (
         f"noisy composable chain rejected: p={r['composition_p_value']:.3e}"
@@ -97,8 +98,7 @@ def test_smaller_defect_is_not_more_significant_than_larger():
 
 
 def test_interval_topology_noiseless_is_accepted():
-    """Exercises the Interval branch of the scale-aware floor: a composable chain
-    on an interval chart must also accept when near-noiseless."""
+    """A composable interval chain must also accept at fitted-map resolution."""
     # Interval charts are the unit interval [0, 1]; keep every coordinate
     # strictly interior so the fold-free homeomorphism fits cleanly.
     rng = np.random.default_rng(5)
