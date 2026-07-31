@@ -252,6 +252,16 @@ pub(crate) struct OuterConfig {
     ///
     /// `None` reproduces today's behaviour byte-for-byte on every path.
     pub(crate) required_projected_gradient_norm: Option<f64>,
+    /// Require the terminal mint to carry a measured, raw PSD Hessian.
+    ///
+    /// The general certificate may admit a tiny assembled negative direction
+    /// when the gradient-residue floor proves it unresolved. Profiled
+    /// nonconvex coefficient families cannot use that weaker answer: their
+    /// selected branch is a local minimum only when the analytic outer Hessian
+    /// itself is measured PSD. Declaring that requirement here lets the outer
+    /// recovery loop escape/re-optimize instead of contradicting the certificate
+    /// later during fit assembly.
+    pub(crate) require_measured_psd: bool,
 }
 
 impl Default for OuterConfig {
@@ -260,6 +270,7 @@ impl Default for OuterConfig {
             tolerance: 1e-5,
             rel_cost_tolerance: None,
             required_projected_gradient_norm: None,
+            require_measured_psd: false,
             max_iter: 200,
             model_domain_bounds: None,
             search_bounds_override: None,
@@ -311,6 +322,7 @@ pub struct OuterProblem {
     rel_cost_tolerance: Option<f64>,
     /// See [`OuterConfig::required_projected_gradient_norm`] (#2568).
     required_projected_gradient_norm: Option<f64>,
+    require_measured_psd: bool,
     max_iter: usize,
     bounds: Option<(Array1<f64>, Array1<f64>)>,
     rho_bound: f64,
@@ -349,6 +361,7 @@ impl OuterProblem {
             tolerance: 1e-5,
             rel_cost_tolerance: None,
             required_projected_gradient_norm: None,
+            require_measured_psd: false,
             max_iter: 200,
             bounds: None,
             rho_bound: 30.0,
@@ -671,6 +684,16 @@ impl OuterProblem {
         self
     }
 
+    /// Demand a measured PSD analytic Hessian at the terminal mint.
+    ///
+    /// Use this when a downstream coefficient-mode selection is only defined
+    /// for a certified local minimum, rather than for a merely stationary point
+    /// whose tiny negative curvature was cleared by the gradient-residue floor.
+    pub fn with_require_measured_psd(mut self, required: bool) -> Self {
+        self.require_measured_psd = required;
+        self
+    }
+
     /// Derive the capability flags from the builder state.
     /// `fixed_point_available` is set to `false` here; `build_objective`
     /// overrides it based on whether an EFS closure is actually provided.
@@ -693,6 +716,7 @@ impl OuterProblem {
             tolerance: self.tolerance,
             rel_cost_tolerance: self.rel_cost_tolerance,
             required_projected_gradient_norm: self.required_projected_gradient_norm,
+            require_measured_psd: self.require_measured_psd,
             max_iter: self.max_iter,
             model_domain_bounds: self.bounds.clone(),
             search_bounds_override: None,
@@ -1817,6 +1841,13 @@ pub(crate) fn certificate_hessian_is_psd_off_railed(
 ///
 /// The Weyl bound above is the correct and checkable statement. Anything that
 /// widens the floor must re-derive against it, not against `g²/2|H|`.
+pub(crate) fn certificate_meets_curvature_requirement(
+    certificate: &OuterCriterionCertificate,
+    require_measured_psd: bool,
+) -> bool {
+    !require_measured_psd || certificate.hessian_psd() == Some(true)
+}
+
 pub(crate) fn certificate_hessian_is_psd_off_railed_above_gradient_floor(
     hessian: &Array2<f64>,
     excluded: &[usize],
@@ -4419,7 +4450,9 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // status.
     result.final_hessian = analytic_hessian;
     result.criterion_certificate = Some(certificate.clone());
-    if !certificate.certifies() {
+    let curvature_requirement_met =
+        certificate_meets_curvature_requirement(&certificate, config.require_measured_psd);
+    if !certificate.certifies() || !curvature_requirement_met {
         // Mint the #2392 reseeds fresh for THIS refused point: clear any value a
         // prior (multistart / pre-polish) certification of a different ρ left on
         // the result so the resume loop never consumes a stale pull-back/freeze.
@@ -4440,9 +4473,11 @@ fn certify_outer_optimality_at_terminal_fidelity(
         // warm-started resume does by hand. Gated by `allow_tail_snap` (the same
         // one-shot reseed gate the tail snap rides) so the retry pass — which
         // runs with it `false` — can never recurse.
+        let strict_curvature_refused =
+            config.require_measured_psd && certificate.hessian_psd() == Some(false);
         if allow_tail_snap
             && certificate.is_stationary()
-            && !certificate.curvature_not_refused()
+            && (!certificate.curvature_not_refused() || strict_curvature_refused)
             && let Some(hessian) = result.final_hessian.clone()
             && let Some(gradient) = result.final_gradient.clone()
         {
@@ -4626,6 +4661,11 @@ fn certify_outer_optimality_at_terminal_fidelity(
         // refusal so a railed or budget-exhausted crawl explains which
         // certificate gate refused instead of failing silently.
         let mut summary = certificate.summary();
+        if !curvature_requirement_met {
+            summary = format!(
+                "{summary}; this objective requires a measured positive-semidefinite                  analytic Hessian at the selected local minimum"
+            );
+        }
         // `summary()` prints `lambdas_railed`, which is the λ-block report. When
         // the face the certificate actually reasoned on is wider — a joint
         // [ρ, ψ] search with a κ coordinate on its data-derived window — say so,
