@@ -246,7 +246,10 @@ pub(crate) fn external_reml_seed_config(k: usize, link: LinkFunction) -> SeedCon
         return SeedConfig {
             bounds: (-12.0, 12.0),
             max_seeds: 1,
-            seed_budget: 1,
+            // The generic lattice remains disabled. The three budget slots are
+            // for the unique analytic candidates assembled below: base,
+            // initial.sp, and the summed-penalty diagonal restriction.
+            seed_budget: 3,
             risk_profile: SeedRiskProfile::Gaussian,
             screen_max_inner_iterations: SeedConfig::default().screen_max_inner_iterations,
             num_auxiliary_trailing: 0,
@@ -1001,7 +1004,7 @@ where
             // matches the textbook profiled-REML and the curvature SIGN is
             // identifiable. Same machinery as the gam#1266 double-penalty rescue.
             let caller_seeded_rho = rho_warm_start.is_some_and(|h| h.len() == k);
-            let prepass_seed: Option<Array1<f64>> = {
+            let prepass_candidates: Vec<Array1<f64>> = {
                 // Validate the seed ρ-box ONCE, at the boundary where it enters the
                 // seed machinery, and REFUSE an inverted/non-finite interval rather
                 // than silently reordering it (#2379). An inverted `[lo, hi]` means
@@ -1117,6 +1120,9 @@ where
                     .compute_cost(&base)
                     .ok()
                     .filter(|c| c.is_finite());
+                let mut ranked_candidates: Vec<(f64, Array1<f64>)> = base_cost
+                    .map(|cost| vec![(cost, base.clone())])
+                    .unwrap_or_default();
                 // Keep the strictly-cheapest certified/scored candidate.
                 //
                 // #2607: this choice is a COMPARISON OF NUMBERS, and until now the
@@ -1145,6 +1151,9 @@ where
                         .ok()
                         .filter(|c| c.is_finite());
                     scored.push((name, candidate_cost));
+                    if let Some(cost) = candidate_cost {
+                        ranked_candidates.push((cost, candidate.clone()));
+                    }
                     let candidate_beats_best = match (candidate_cost, best_cost) {
                         (Some(cc), Some(bc)) => cc < bc,
                         (Some(_), None) => true,
@@ -1173,37 +1182,47 @@ where
                 // healthy warm-started fits stay byte-identical. The Gaussian
                 // weight-anchored emit only applies on the non-caller-seeded origin.
                 if seed_moved || (run_gaussian_anchored_prepass && !caller_seeded_rho) {
-                    // "selected seed" was the wrong words and they cost a
-                    // misfiled issue (#2607). This line reports the winner of a
-                    // three-way `compute_cost` comparison among {base,
-                    // initial_sp, summed_diagonal}; that winner becomes
-                    // `config.initial_rho`, which is ONE candidate handed to the
-                    // seed-screening cascade in `run_outer_with_plan`. The
-                    // cascade ranks it against the generated lattice and decides
-                    // where the search actually starts, so this point is not the
-                    // optimizer's starting point unless the cascade also picks
-                    // it. On `hifreq_tensor_k10` this line reads `[0,0,0] ->
-                    // [30,30,30]` — the ρ ceiling in every coordinate — and the
-                    // fit nonetheless starts interior and converges in 26 outer
-                    // iterations to edf 194.97 of p = 576. Read as "selected
-                    // seed", that line says the fit began on the wall and
-                    // returned the intercept; it did neither.
+                    // Report the start-point comparison, but do not confuse its
+                    // cheapest point with the eventual fit: Gaussian sends every
+                    // unique finite analytic candidate through a certified full
+                    // solve below and keeps the best converged REML value.
                     log::info!(
-                        "[OUTER] standard REML initial.sp prepass candidate (ONE input to the \
-                         seed-screening cascade, not the optimizer's start): {:?} -> {:?} \
+                        "[OUTER] standard REML analytic-start ranking: {:?} -> {:?} \
                          (scored: {scored_report}; bounds {:.3}..{:.3})",
                         base.as_slice().unwrap_or(&[]),
                         refined.as_slice().unwrap_or(&[]),
                         seed_bounds.lower(),
                         seed_bounds.upper(),
                     );
-                    Some(refined)
+                }
+
+                if gaussian_risk {
+                    // A start-point cost is not a basin certificate. Preserve
+                    // every unique finite analytic candidate, ordered only to
+                    // put the cheapest start first; the outer runner performs a
+                    // full certified solve from each and keeps the lowest
+                    // converged REML value. This restores multimodal robustness
+                    // without restoring the arbitrary log-lambda lattice.
+                    ranked_candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    let mut candidates = Vec::with_capacity(ranked_candidates.len());
+                    for (_, candidate) in ranked_candidates {
+                        if !candidates.iter().any(|existing| existing == &candidate) {
+                            candidates.push(candidate);
+                        }
+                    }
+                    candidates
+                } else if seed_moved
+                    || (run_gaussian_anchored_prepass && !caller_seeded_rho)
+                {
+                    vec![refined]
                 } else {
-                    None
+                    Vec::new()
                 }
             };
-            let problem = if let Some(seed) = prepass_seed {
-                problem.with_initial_rho(seed)
+            let problem = if let Some((first, remaining)) = prepass_candidates.split_first() {
+                problem
+                    .with_initial_rho(first.clone())
+                    .with_initial_rho_candidates(remaining.to_vec())
             } else {
                 problem
             };

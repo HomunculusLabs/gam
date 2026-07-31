@@ -42,7 +42,7 @@ fn gaussian_external_reml_uses_one_analytic_seed() {
     let cfg = external_reml_seed_config(2, LinkFunction::Identity);
     assert_eq!(cfg.risk_profile, SeedRiskProfile::Gaussian);
     assert_eq!(cfg.max_seeds, 1);
-    assert_eq!(cfg.seed_budget, 1);
+    assert_eq!(cfg.seed_budget, 3);
     assert_eq!(cfg.over_smoothing_probe_rho, None);
 }
 
@@ -53,7 +53,7 @@ fn high_dimensional_gaussian_external_reml_does_not_restore_a_lattice() {
     let cfg = external_reml_seed_config(REML_SEED_SCREENING_RHO_CAP, LinkFunction::Identity);
     assert_eq!(cfg.risk_profile, SeedRiskProfile::Gaussian);
     assert_eq!(cfg.max_seeds, 1);
-    assert_eq!(cfg.seed_budget, 1);
+    assert_eq!(cfg.seed_budget, 3);
     assert_eq!(cfg.over_smoothing_probe_rho, None);
 }
 

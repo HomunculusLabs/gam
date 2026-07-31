@@ -182,11 +182,6 @@ pub(crate) fn effective_seed_budget(
         // single start), so this only re-enables parsimony when a budget was
         // actually requested.
         (Solver::Arc, profile) if profile.uses_parsimonious_keep_best() => requested_budget,
-        // ARC Gaussian keeps the #1689/#1757 single-seed floor: its analytic
-        // initial.sp seed lands the correct profiled-scale basin, so a second
-        // full outer solve is redundant. (GaussianLocationScale is not floored
-        // here — it falls through to the requested budget, as before.)
-        (Solver::Arc, gam_problem::SeedRiskProfile::Gaussian) => 1,
         _ => requested_budget,
     }
 }

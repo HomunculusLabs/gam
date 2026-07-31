@@ -693,10 +693,22 @@ pub(crate) fn run_outer_with_plan(
             generated
         }
     };
-    if let Some(initial_rho) = config.initial_rho.as_ref()
-        && !seeds.iter().any(|seed| seed == initial_rho)
-    {
-        seeds.insert(0, initial_rho.clone());
+    // Explicit model-derived candidates precede the generic generator and are
+    // not truncated by `SeedConfig::max_seeds`. Insert in reverse so the
+    // primary `initial_rho` remains slot zero and the caller's candidate order
+    // is preserved. Bounds projection and exact deduplication happen below.
+    for candidate in config.initial_rho_candidates.iter().rev() {
+        if !seeds.iter().any(|seed| seed == candidate) {
+            seeds.insert(0, candidate.clone());
+        }
+    }
+    if let Some(initial_rho) = config.initial_rho.as_ref() {
+        if let Some(position) = seeds.iter().position(|seed| seed == initial_rho) {
+            let initial = seeds.remove(position);
+            seeds.insert(0, initial);
+        } else {
+            seeds.insert(0, initial_rho.clone());
+        }
     }
     if seeds.is_empty() {
         return Err(EstimationError::RemlOptimizationFailed(format!(

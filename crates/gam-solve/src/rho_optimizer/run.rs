@@ -132,6 +132,10 @@ pub(crate) struct OuterConfig {
     pub(crate) rho_bound: f64,
     pub(crate) heuristic_lambdas: Option<Vec<f64>>,
     pub(crate) initial_rho: Option<Array1<f64>>,
+    /// Additional explicit, model-derived starts. Unlike the generic seed
+    /// lattice these are supplied by the objective owner and survive the
+    /// `max_seeds` truncation; the certified keep-best loop optimizes each one.
+    pub(crate) initial_rho_candidates: Vec<Array1<f64>>,
     pub(crate) initial_inner_seed: Option<BoundInnerSeed>,
     pub(crate) fallback_policy: FallbackPolicy,
     pub(crate) screening_cap: Option<Arc<AtomicUsize>>,
@@ -278,6 +282,7 @@ impl Default for OuterConfig {
             rho_bound: 30.0,
             heuristic_lambdas: None,
             initial_rho: None,
+            initial_rho_candidates: Vec::new(),
             initial_inner_seed: None,
             fallback_policy: FallbackPolicy::Automatic,
             screening_cap: None,
@@ -329,6 +334,7 @@ pub struct OuterProblem {
     seed_config: gam_problem::SeedConfig,
     heuristic_lambdas: Option<Vec<f64>>,
     initial_rho: Option<Array1<f64>>,
+    initial_rho_candidates: Vec<Array1<f64>>,
     fallback_policy: FallbackPolicy,
     screening_cap: Option<Arc<AtomicUsize>>,
     screen_initial_rho: bool,
@@ -368,6 +374,7 @@ impl OuterProblem {
             seed_config: gam_problem::SeedConfig::default(),
             heuristic_lambdas: None,
             initial_rho: None,
+            initial_rho_candidates: Vec::new(),
             fallback_policy: FallbackPolicy::Automatic,
             screening_cap: None,
             screen_initial_rho: false,
@@ -475,6 +482,10 @@ impl OuterProblem {
     }
     pub fn with_initial_rho(mut self, rho: Array1<f64>) -> Self {
         self.initial_rho = Some(rho);
+        self
+    }
+    pub fn with_initial_rho_candidates(mut self, candidates: Vec<Array1<f64>>) -> Self {
+        self.initial_rho_candidates = candidates;
         self
     }
     pub fn with_screening_cap(mut self, screening_cap: Arc<AtomicUsize>) -> Self {
@@ -724,6 +735,7 @@ impl OuterProblem {
             rho_bound: self.rho_bound,
             heuristic_lambdas: self.heuristic_lambdas.clone(),
             initial_rho: self.initial_rho.clone(),
+            initial_rho_candidates: self.initial_rho_candidates.clone(),
             initial_inner_seed: None,
             fallback_policy: self.fallback_policy,
             screening_cap: self.screening_cap.clone(),
@@ -7072,6 +7084,11 @@ fn canonicalize_outer_config(config: &OuterConfig, perm: &[usize]) -> OuterConfi
     if let Some(initial) = config.initial_rho.as_ref() {
         canonical.initial_rho = Some(permute_arr(initial));
     }
+    canonical.initial_rho_candidates = config
+        .initial_rho_candidates
+        .iter()
+        .map(permute_arr)
+        .collect();
     if let Some(bound) = config.initial_inner_seed.as_ref() {
         canonical.initial_inner_seed = Some(BoundInnerSeed {
             theta: permute_arr(&bound.theta),

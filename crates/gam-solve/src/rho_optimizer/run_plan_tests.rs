@@ -7020,12 +7020,12 @@ fn effective_seed_budget_caps_expensive_solver_retries() {
         ),
         1
     );
-    // #1689/#1757: Arc + Gaussian is floored to a single seed (the analytic
-    // initial.sp seed lands the correct basin, so the second full outer solve is
-    // redundant), regardless of the requested budget.
+    // #2623: exact curvature proves only local convergence. Gaussian therefore
+    // retains the requested analytic-candidate budget so distinct basins are
+    // compared by their converged REML values.
     assert_eq!(
         effective_seed_budget(3, Solver::Arc, gam_problem::SeedRiskProfile::Gaussian),
-        1
+        3
     );
     // GaussianLocationScale is NOT floored (it uses lowest-cost keep-best but
     // its promoted-seed multi-start needs budget ≥ 2); it falls through to the
