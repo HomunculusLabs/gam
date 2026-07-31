@@ -2967,8 +2967,12 @@ mod jet_tower_oracle_tests {
                  hand={hand_ns:.2} ns/row hand_over_production={:.6}",
                 hand_ns / production_ns,
             );
+            // #932: release-only. This ratio is not generated without optimization,
+            // so in debug it gates on noise -- measured, this assertion fails in the
+            // default test lane. The parity/correctness checks around it are
+            // build-independent and still run in every build.
             assert!(
-                production_ns < hand_ns,
+                cfg!(debug_assertions) || production_ns < hand_ns,
                 "generated rigid BMS y={y:.0} must beat strongest hand: \
                  production={production_ns:.2} ns/row hand={hand_ns:.2} ns/row",
             );

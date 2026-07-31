@@ -514,8 +514,12 @@ mod oracle_tests {
             // noise-bounded not-slower contract and report the ratio as a
             // DIAGNOSTIC token; the real specialization wins live at orders 3
             // and 4 below, which keep the fail-closed token.
+            // #932: release-only. This ratio is not generated without optimization,
+            // so in debug it gates on noise -- measured, this assertion fails in the
+            // default test lane. The parity/correctness checks around it are
+            // build-independent and still run in every build.
             assert!(
-                production_ns <= generic_ns * 1.05,
+                cfg!(debug_assertions) || production_ns <= generic_ns * 1.05,
                 "order-2 faa_top slower than the Tower2 it specializes: \
                  faa_top={production_ns:.2} ns/row tower={generic_ns:.2} ns/row"
             );
@@ -701,8 +705,12 @@ mod oracle_tests {
 
         let (production_ns, hand_ns) =
             paired_medians(input, 400_000, production_order4, hand_order4);
+        // #932: release-only. This ratio is not generated without optimization,
+        // so in debug it gates on noise -- measured, this assertion fails in the
+        // default test lane. The parity/correctness checks around it are
+        // build-independent and still run in every build.
         assert!(
-            hand_ns > production_ns,
+            cfg!(debug_assertions) || hand_ns > production_ns,
             "order-four universal partition lowering must beat the strongest historical hand \
              factorization: production={production_ns:.3} ns hand={hand_ns:.3} ns"
         );

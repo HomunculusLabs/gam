@@ -1080,8 +1080,12 @@ mod tests {
         });
         // The prune must never be a measurable pessimization: allow only
         // timing noise (5%) against the full Tower4 composition it replaces.
+        // #932: release-only. This ratio is not generated without optimization,
+        // so in debug it gates on noise -- measured, this assertion fails in the
+        // default test lane. The parity/correctness checks around it are
+        // build-independent and still run in every build.
         assert!(
-            tower3_ns <= tower4_ns * 1.05,
+            cfg!(debug_assertions) || tower3_ns <= tower4_ns * 1.05,
             "Tower3 prune slower than the full Tower4 it prunes: \
              tower3={tower3_ns:.2} ns/row tower4={tower4_ns:.2} ns/row"
         );
