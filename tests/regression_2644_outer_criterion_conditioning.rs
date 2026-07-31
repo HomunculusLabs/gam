@@ -307,3 +307,94 @@ fn zz_probe_2644_matern_low_n_route_agreement() {
         Err(e) => println!("[probe-2644-lown] FIT ERR: {e}"),
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// A REFUTED hypothesis, kept as a passing guard because the property it
+// checks is real and worth protecting.
+//
+// #2644's decomposition showed that the outer criterion notices `beta[0]`
+// (the intercept) moving ONLY through `FIXED_STABILIZATION_RIDGE = 1e-8`:
+//
+//     ridge*(b0'^2 - b0^2) = 7.7024058e-10  vs measured dDp = 7.7024051e-10
+//                                           (ratio 1.00000009)
+//
+// I read that as a SPEC.md line 12 violation — "an intercept generally should
+// not have a penalty" — and predicted the observable harm: the criterion should
+// not be invariant under a shift in the ORIGIN of `y`. Adding a constant to the
+// response shifts the intercept by that constant and leaves the residuals,
+// `S_lambda`, `X'WX` and `log|H|` untouched, so if the ridge were charged
+// against a FIXED target the criterion would have to move by roughly
+// `(n/2)*delta*((b0+c)^2 - b0^2)/(rss+pen)`.
+//
+// MEASURED (2026-07-31), and the prediction is WRONG by nine orders:
+//
+//     v(y)    = -9.06920633442079271e0
+//     v(y+10) = -9.06920633442075186e0
+//     gap     =  4.085621e-14   relative = 4.504937e-15   (~20 machine eps)
+//     predicted, had the ridge broken this:  5.092357e-05
+//
+// The reason: the ridge is **Tikhonov centered on a moving `prior_mean_target`,
+// not on zero**. `pls_solver` augments the RHS with `r + delta*mu`, so
+// `penalty_term` carries `delta*||beta - mu||^2`; under an origin shift `mu`
+// moves with `beta` and the term is unchanged. The `delta*||beta||^2` shorthand
+// in `FIXED_STABILIZATION_RIDGE`'s own doc is what misled me — check the RHS
+// augmentation in `pls_solver`, not the doc comment.
+//
+// CONSEQUENCE, and it is the useful part: **the ridge is not the defect, it is
+// the messenger.** In #2671 the two routes move `beta[0]` by 0.213 relative to a
+// FIXED `mu`, so the ridge does charge it — which is how the disagreement
+// becomes visible at all. Exempting the intercept would make that witness go
+// green by DELETING the only term that can see two routes computing different
+// coefficients, while they went on producing different fitted models. That is
+// strictly worse than the current loud refusal, and it would have looked like a
+// successful fix. Do not do it on #2644's evidence.
+//
+// This test PASSES on main and is a guard, not a probe: a future change that
+// makes the criterion depend on the origin of `y` is a real defect and this
+// catches it directly. The bound is deliberately loose (1e-10 relative, ~5e4x
+// the measured 4.5e-15) so it fires on a mechanism, never on roundoff.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn outer_criterion_is_invariant_to_the_origin_of_y() {
+    let cfg = FitConfig {
+        family: Some("gaussian".to_string()),
+        ..FitConfig::default()
+    };
+    let base = mk_1d(15, |t| t.powi(2), 0.05, 7);
+    let mut shifted = base.clone();
+    // Column 1 is `y` (headers are ["x", "y"] in `mk_1d`).
+    const SHIFT: f64 = 10.0;
+    for r in 0..shifted.values.nrows() {
+        shifted.values[[r, 1]] += SHIFT;
+    }
+
+    let score = |ds: &EncodedDataset, label: &str| -> f64 {
+        match fit_from_formula("y ~ s(x, k=5)", ds, &cfg) {
+            Ok(gam::FitResult::Standard(fit)) => fit
+                .fit
+                .reml_score()
+                .unwrap_or_else(|| panic!("{label}: fit reports no REML criterion")),
+            Ok(_) => panic!("{label}: expected a standard fit"),
+            Err(e) => panic!("{label}: fit failed: {e}"),
+        }
+    };
+
+    let v0 = score(&base, "y");
+    let v1 = score(&shifted, "y + 10");
+    let relative = (v1 - v0).abs() / v0.abs().max(f64::MIN_POSITIVE);
+    println!(
+        "[2644-origin] v(y)={v0:.17e} v(y+{SHIFT})={v1:.17e} gap={:.6e} relative={relative:.6e}",
+        v1 - v0,
+    );
+    assert!(
+        relative < 1.0e-10,
+        "the outer REML criterion must be a function of the MODEL, and adding a constant to \
+         `y` changes no part of the model: the intercept absorbs it while residuals, S_lambda, \
+         X'WX and log|H| are untouched. Measured relative change {relative:.6e} against a \
+         1e-10 bar (main measures 4.5e-15, ~20 machine epsilons). A failure here means some \
+         term is charging the intercept against a FIXED target -- see #2644, where exactly \
+         that term, `FIXED_STABILIZATION_RIDGE`, accounts for 100% of a cross-route criterion \
+         disagreement (ratio 1.00000009)."
+    );
+}
