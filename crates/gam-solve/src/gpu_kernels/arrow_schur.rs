@@ -19,9 +19,13 @@
 
 use ndarray::{Array1, Array2, ArrayView2};
 
+use crate::arrow_schur::{ArrowPcgDiagnostics, ArrowSchurSystem, DeviceSaePcgData};
+// Consumed only by the Linux device path (`canonicalize_device_beta_factor` and
+// the `cuda` module). Importing them unconditionally makes them dead on every
+// other target, which `-D warnings` rejects on the windows-gnu cross-check.
+#[cfg(target_os = "linux")]
 use crate::arrow_schur::{
-    ArrowBetaGaugeQuotient, ArrowPcgDiagnostics, ArrowSchurSystem, ArrowSolveOptions,
-    DeviceSaePcgData, solve_dense_reduced_system,
+    ArrowBetaGaugeQuotient, ArrowSolveOptions, solve_dense_reduced_system,
 };
 use gam_linalg::triangular::{CholeskyGuard, cholesky_factor_in_place, cholesky_solve_vector};
 
@@ -207,7 +211,8 @@ fn ridge_bump_to_make_pd_colmajor(block: &[f64], d: usize) -> f64 {
 ///
 /// Device Direct forms the same reduced equation as the host path,
 /// `S_beta delta_beta = r_beta`, but stores `S_beta` column-major for
-/// cuSOLVER. When the caller declares an [`ArrowBetaGaugeQuotient`], the
+/// cuSOLVER. When the caller declares an
+/// [`ArrowBetaGaugeQuotient`](crate::arrow_schur::ArrowBetaGaugeQuotient), the
 /// mathematical system is instead
 ///
 /// `P S_beta P + Q Q^T`, with right-hand side `P r_beta`.
@@ -394,10 +399,22 @@ pub fn solve_arrow_newton_step(
 
     #[cfg(not(target_os = "linux"))]
     {
-        // Deliberately unused on this target: the floor is consumed only by the
-        // Linux device path below. `drop` rather than `let _`, which the
-        // workspace ban-scanner (build.rs) forbids in every underscore form.
-        drop(newton_schur_tikhonov_rel_floor);
+        // The floor is consumed only by the Linux device path, but it is still
+        // the caller's input on this target, so validate it rather than discard
+        // it: a host that merely lacks the device should reject a malformed
+        // request the same way, not accept it silently. (`drop` cannot serve as
+        // the "deliberately unused" marker here -- the floor is `Copy`, so
+        // `drop` is a no-op that `-D warnings` rejects, and the workspace
+        // ban-scanner forbids every underscore form.)
+        if let Some(floor) = newton_schur_tikhonov_rel_floor {
+            if !floor.is_finite() {
+                return Err(ArrowSchurGpuFailure::SchurFactorFailed {
+                    reason: format!(
+                        "newton_schur_tikhonov_rel_floor must be finite, got {floor}"
+                    ),
+                });
+            }
+        }
         if ridge_t.is_nan() || ridge_beta.is_nan() {
             return Err(ArrowSchurGpuFailure::SchurFactorFailed {
                 reason: "ridge is NaN".to_string(),
@@ -638,10 +655,17 @@ impl ResidentArrowFrameHandle {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            // Deliberately unused on this target: the floor is consumed only by the
-            // Linux device path below. `drop` rather than `let _`, which the
-            // workspace ban-scanner (build.rs) forbids in every underscore form.
-            drop(newton_schur_tikhonov_rel_floor);
+            // Validated rather than discarded on this target -- see the note in
+            // `solve_arrow_newton_step`.
+            if let Some(floor) = newton_schur_tikhonov_rel_floor {
+                if !floor.is_finite() {
+                    return Err(ArrowSchurGpuFailure::SchurFactorFailed {
+                        reason: format!(
+                            "newton_schur_tikhonov_rel_floor must be finite, got {floor}"
+                        ),
+                    });
+                }
+            }
             if ridge_t.is_nan() || ridge_beta.is_nan() {
                 return Err(ArrowSchurGpuFailure::SchurFactorFailed {
                     reason: "ridge is NaN".to_string(),
@@ -739,10 +763,17 @@ impl ResidentBaseArrowFrameHandle {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            // Deliberately unused on this target: the floor is consumed only by the
-            // Linux device path below. `drop` rather than `let _`, which the
-            // workspace ban-scanner (build.rs) forbids in every underscore form.
-            drop(newton_schur_tikhonov_rel_floor);
+            // Validated rather than discarded on this target -- see the note in
+            // `solve_arrow_newton_step`.
+            if let Some(floor) = newton_schur_tikhonov_rel_floor {
+                if !floor.is_finite() {
+                    return Err(ArrowSchurGpuFailure::SchurFactorFailed {
+                        reason: format!(
+                            "newton_schur_tikhonov_rel_floor must be finite, got {floor}"
+                        ),
+                    });
+                }
+            }
             Err(ArrowSchurGpuFailure::Unavailable)
         }
         #[cfg(target_os = "linux")]
