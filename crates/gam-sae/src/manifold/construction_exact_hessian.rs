@@ -3035,24 +3035,47 @@ impl SaeManifoldTerm {
         //
         //   value    `streaming_plan().admitted_or_error(..).direct_logdet_admitted()`
         //            — a working-set/memory admission (construction_quasi_laplace.rs).
-        //            Admitted ⇒ ranks the exact `½log|A|`; not admitted ⇒ delegates to
-        //            the streaming implementation, which ranks the majorizer `½log|B|`.
         //   gradient `exact_a_logdet_route` above — the bundle / matrix-free /
         //            assignment-family triple. Nothing consults the value's admission.
         //
-        // Nothing tied them, so a fit whose value was priced by the streaming
-        // `½log|B|` could still be handed an exact-A derivative here. The desync is
-        // `½·d/dρ log|I + B⁻¹ΔC|` — unbounded on a near-singular `A`, and invisible
+        // ⚠ WHAT EACH VALUE ROUTE PRICES CHANGED UNDER #2509 PHASE-2b (`5563a2a18`),
+        // AND THIS GUARD'S PREMISE DID NOT. Until then, "not admitted ⇒ delegates to
+        // the streaming implementation, which ranks the majorizer `½log|B|`" — which
+        // is what the rest of this comment was written against. Phase-2b moved BOTH
+        // branches of `streaming_exact_arrow_log_det_with_lane_and_system` onto the
+        // exact observed information via `exact_a_evidence_system`, so TODAY both
+        // value routes price `½log|A|` and the sentence is false. It is corrected
+        // rather than deleted because the guard below still reads the predicate it
+        // named, and a reader comparing the two needs to know which era each
+        // describes.
+        //
+        // Nothing tied the two predicates, so a fit whose value was priced by the
+        // streaming lane could still be handed an exact-A derivative here. The desync
+        // was `½·d/dρ log|I + B⁻¹ΔC|` — unbounded on a near-singular `A`, and invisible
         // to `criterion_as_atoms`'s 64-ulp identity check, which re-derives the
         // VALUE predicate and so cannot observe that the gradient took the other
         // route. Refuse rather than return the derivative of an operator the value
         // never ranked.
         //
-        // SCOPE — this refuses ONLY the undocumented cell (value = B, gradient = A).
-        // The mirror cell (value = A, gradient = B, i.e. `ThresholdGate`) is the
-        // DELIBERATE staging documented on `dense_exact_a_theta_adjoint_is_modelled`
-        // and held by the matrix-free and bundle routes too; refusing it would break
-        // every ThresholdGate fit, so it is named there rather than rejected here.
+        // SCOPE — this refuses ONLY the cell (value = B, gradient = A). Post-Phase-2b
+        // no production value route prices `B`, so the cell this fires on is now
+        // reachable only by a caller that hand-picks the streaming entry on a shape
+        // the plan would have admitted; it is retained because that caller exists
+        // (see `tests_streaming_outer_gradient_2026`) and because a future route that
+        // reintroduces a `B`-priced value must not silently acquire an `A` gradient.
+        //
+        // ⚠ THE LIVE INCOHERENCE IS NOW THE MIRROR CELL, AND THIS GUARD CANNOT SEE IT.
+        // `exact_a_logdet_route` is false whenever a derivative bundle OR a matrix-free
+        // system is present, so every streaming/bundle evaluation now pairs an `A`-priced
+        // VALUE with `B`-differentiated trace and θ-adjoint channels. That is #2515's
+        // open half, MEASURED on its fixture as `logdet_trace` gaps of `1.231477e-1`
+        // (smooth atom 0) and `5.052577e-2` (ARD) — see
+        // `exact_a_route_gap_is_two_coordinates_with_two_causes_2515`. It is NOT refused
+        // here: the same cell is the DELIBERATE `ThresholdGate` staging documented on
+        // `dense_exact_a_theta_adjoint_is_modelled`, and refusing it would take every
+        // streaming SAE fit with it. Naming it so the next reader does not conclude from
+        // this guard's existence that the value/gradient pairing is checked in both
+        // directions. It is checked in one.
         //
         // LIMIT — this guard reads the PLAN, so it catches a predicate mismatch, not
         // a caller that hand-picks `penalized_quasi_laplace_criterion_streaming_exact_with_cache`
