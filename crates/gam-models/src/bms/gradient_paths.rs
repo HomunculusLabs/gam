@@ -3,8 +3,6 @@ use super::*;
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_linalg::matrix::{FiniteSignedWeightsView, LinearOperator};
 use gam_math::jet_scalar::SymmetricQuadraticCoefficients;
-#[cfg(test)]
-use gam_math::jet_tower::Tower4;
 use gam_math::probability::normal_logcdf_derivatives;
 use gam_row_macros::row_program;
 use opt::{BacktrackConfig, RidgeSchedule, backtracking_line_search, escalate_ridge};
@@ -1687,7 +1685,7 @@ row_program! {
 /// * [`TwoSeed`](super::super::jet_scalar::TwoSeed) → contracted fourth
 ///   `Σ_{cd} ℓ_{abcd} u_c v_d` without materialising `t4`;
 /// * full [`Tower4`] → every uncontracted channel
-///   ([`rigid_standard_normal_tower`], feeding the `third_full` / `fourth_full`
+///   (`rigid_standard_normal_tower`, feeding the `third_full` / `fourth_full`
 ///   caches).
 ///
 /// Every consumer derives from THIS one expression, so the value channel and
@@ -1732,87 +1730,6 @@ pub(crate) fn rigid_standard_normal_row_nll_generic<S: gam_math::jet_scalar::Jet
         w,
     );
     Ok(nll)
-}
-
-/// One row of rigid standard-normal Bernoulli data as a generic
-/// [`RowProgram<2>`] (#932 production wiring).
-///
-/// This is the genuine production consumer of the generic program seam: the row
-/// NLL is written ONCE in [`rigid_standard_normal_row_nll_generic`] over
-/// `S: JetScalar<2>`, and this single-row program routes it through the
-/// [`gam_math::jet_tower`] `generic_*` evaluators
-/// ([`program_full_tower`](gam_math::jet_tower::program_full_tower) for
-/// the uncontracted tensors, and the cheap order-2 / contracted scalars for the
-/// value/grad/Hessian and directional channels). Primaries are
-/// `[marginal η, slope g]`; the marginal link map and per-row data
-/// `(z, y, w, probit_scale)` enter as constants on the body.
-#[cfg(test)]
-pub(crate) struct RigidStandardNormalRow {
-    pub(crate) marginal: BernoulliMarginalLinkMap,
-    pub(crate) g: f64,
-    pub(crate) z: f64,
-    pub(crate) y: f64,
-    pub(crate) w: f64,
-    pub(crate) probit_scale: f64,
-}
-
-#[cfg(test)]
-impl gam_math::jet_tower::RowProgram<2> for RigidStandardNormalRow {
-    fn n_rows(&self) -> usize {
-        1
-    }
-
-    fn primaries(&self, row: usize) -> Result<[f64; 2], String> {
-        if row != 0 {
-            return Err(format!("RigidStandardNormalRow: row {row} out of range"));
-        }
-        Ok([self.marginal.eta_value(), self.g])
-    }
-
-    fn eval<S: gam_math::jet_scalar::JetScalar<2>>(
-        &self,
-        row: usize,
-        p: &[S; 2],
-    ) -> Result<S, String> {
-        if row != 0 {
-            return Err(format!("RigidStandardNormalRow: row {row} out of range"));
-        }
-        rigid_standard_normal_row_nll_generic(
-            p,
-            self.marginal,
-            self.z,
-            self.y,
-            self.w,
-            self.probit_scale,
-        )
-    }
-}
-
-#[cfg(test)]
-#[inline]
-pub(crate) fn rigid_standard_normal_tower(
-    marginal: BernoulliMarginalLinkMap,
-    g: f64,
-    z: f64,
-    y: f64,
-    w: f64,
-    probit_scale: f64,
-) -> Result<Tower4<2>, String> {
-    // #932 cutover: the full uncontracted tower comes from the SAME single
-    // generic row-NLL expression every other channel consumer derives from,
-    // routed through the generic program seam evaluated at the all-channels
-    // `Tower4` scalar. `program_full_tower` seeds `[marginal η, g]` exactly as
-    // the previous inline `Tower4::variable` form did, so this is bit-identical
-    // while giving `RowProgram` a genuine production consumer.
-    let program = RigidStandardNormalRow {
-        marginal,
-        g,
-        z,
-        y,
-        w,
-        probit_scale,
-    };
-    gam_math::jet_tower::program_full_tower(&program, 0).map(|tower| *tower)
 }
 
 #[inline]
@@ -2397,7 +2314,7 @@ mod jet_tower_oracle_tests {
     //! The production rigid standard-normal row kernel
     //! ([`rigid_standard_normal_row_kernel`] / `_third_full` / `_fourth_full`)
     //! reads value/grad/Hessian/third/fourth straight off ONE
-    //! [`rigid_standard_normal_tower`] `Tower4<2>` — the strongest #932 form,
+    //! `rigid_standard_normal_tower` `Tower4<2>` — the strongest #932 form,
     //! where the production kernel literally *is* the single-expression jet.
     //! What was missing (unlike the two survival `RowKernel` families, which
     //! already carry `verify_kernel_channels` oracles) is an INDEPENDENT
@@ -2414,6 +2331,70 @@ mod jet_tower_oracle_tests {
     //!   transcendental).
 
     use super::*;
+
+    use gam_math::jet_tower::Tower4;
+
+    /// Single-row generic program used only by this independent derivative
+    /// oracle. Production consumes the generated row kernel directly.
+    struct RigidStandardNormalRow {
+        marginal: BernoulliMarginalLinkMap,
+        g: f64,
+        z: f64,
+        y: f64,
+        w: f64,
+        probit_scale: f64,
+    }
+
+    impl gam_math::jet_tower::RowProgram<2> for RigidStandardNormalRow {
+        fn n_rows(&self) -> usize {
+            1
+        }
+
+        fn primaries(&self, row: usize) -> Result<[f64; 2], String> {
+            if row != 0 {
+                return Err(format!("RigidStandardNormalRow: row {row} out of range"));
+            }
+            Ok([self.marginal.eta_value(), self.g])
+        }
+
+        fn eval<S: gam_math::jet_scalar::JetScalar<2>>(
+            &self,
+            row: usize,
+            p: &[S; 2],
+        ) -> Result<S, String> {
+            if row != 0 {
+                return Err(format!("RigidStandardNormalRow: row {row} out of range"));
+            }
+            rigid_standard_normal_row_nll_generic(
+                p,
+                self.marginal,
+                self.z,
+                self.y,
+                self.w,
+                self.probit_scale,
+            )
+        }
+    }
+
+    #[inline]
+    fn rigid_standard_normal_tower(
+        marginal: BernoulliMarginalLinkMap,
+        g: f64,
+        z: f64,
+        y: f64,
+        w: f64,
+        probit_scale: f64,
+    ) -> Result<Tower4<2>, String> {
+        let program = RigidStandardNormalRow {
+            marginal,
+            g,
+            z,
+            y,
+            w,
+            probit_scale,
+        };
+        gam_math::jet_tower::program_full_tower(&program, 0).map(|tower| *tower)
+    }
 
     #[test]
     fn signed_probit_stack_preserves_extreme_tail_derivatives_and_weight_sign() {
