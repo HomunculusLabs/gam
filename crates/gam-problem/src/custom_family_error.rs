@@ -418,6 +418,7 @@ mod tests {
             resolvable_negative_curvature: true,
             best_stationarity_residual: 1.578e-3,
             cycles_since_best_residual: 27,
+            termination_reason: JointNewtonTerminalReason::CycleBudget,
         };
         let msg = state.to_string();
         assert!(
