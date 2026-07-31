@@ -1658,8 +1658,10 @@ pub struct FitOptions {
     /// API whose adjoint does not carry this information must disable the floor
     /// so its forward and backward describe the same objective.
     ///
-    /// Typical value: `Some(1e-6)`. Set to `None` or `Some(0.0)` to disable.
-    /// Default: `Some(1e-6)`.
+    /// Typical explicit value: `Some(1e-6)`. Set to `None` or `Some(0.0)` to
+    /// disable. The default is `None`: adding this ridge changes the estimator,
+    /// so it must be an explicit modelling choice rather than a numerical
+    /// fallback.
     pub penalty_shrinkage_floor: Option<f64>,
     /// Fixed prior on smoothing parameters for explicit joint HMC sampling
     /// flows.
@@ -1696,7 +1698,7 @@ impl Default for FitOptions {
             linear_constraints: None,
             firth_bias_reduction: false,
             adaptive_regularization: None,
-            penalty_shrinkage_floor: Some(1e-6),
+            penalty_shrinkage_floor: None,
             rho_prior: gam_problem::RhoPrior::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,

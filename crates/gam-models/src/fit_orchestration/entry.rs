@@ -29,7 +29,8 @@ pub struct StandardFitOptionsInputs {
     pub firth_bias_reduction: bool,
     pub adaptive_regularization: Option<AdaptiveRegularizationOptions>,
     /// `Some` only when a caller (the forced-Firth CLI branch) overrides the
-    /// canonical default. `None` keeps the single-source default `Some(1e-6)`.
+    /// canonical default. `None` keeps the exact declared penalty, without an
+    /// implicit properization prior.
     pub penalty_shrinkage_floor_override: Option<Option<f64>>,
 }
 
@@ -81,9 +82,13 @@ pub fn canonical_standard_fit_options(
         linear_constraints: inputs.linear_constraints,
         firth_bias_reduction: inputs.firth_bias_reduction,
         adaptive_regularization: inputs.adaptive_regularization,
-        penalty_shrinkage_floor: inputs
-            .penalty_shrinkage_floor_override
-            .unwrap_or(Some(1e-6)),
+        // A rho-independent ridge is still a different statistical model:
+        // it changes the final-function penalty and therefore the fitted
+        // posterior. Numerical conditioning must be handled by the linear
+        // solver, not by silently changing the estimator. Callers that
+        // deliberately want the documented proper-complexity prior can opt in
+        // through the explicit override.
+        penalty_shrinkage_floor: inputs.penalty_shrinkage_floor_override.unwrap_or(None),
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,

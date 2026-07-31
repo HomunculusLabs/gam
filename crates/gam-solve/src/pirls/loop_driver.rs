@@ -1097,7 +1097,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     };
     // Sparse-native reparam result, in identity (original) coordinates with the
     // penalty shrinkage floor folded in. This MUST drive the inner penalized
-    // solve too: when `penalty_shrinkage_floor` is active (default `Some(1e-6)`)
+    // solve too: when `penalty_shrinkage_floor` is explicitly active
     // the dense engine adds `shrinkage·P_range` to every penalized range
     // direction of `S_λ` and rebuilds `s_transformed = EᵀE` from the floored
     // roots, so `base.log_det` (the REML penalty pseudo-logdet) is the
