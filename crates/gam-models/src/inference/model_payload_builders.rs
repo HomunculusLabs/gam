@@ -201,20 +201,9 @@ fn standard_null_space_metadata(
         ));
     }
     let p = design.design.ncols();
-    if hessian_dim < p {
-        return Err(format!(
-            "null-space Hessian logdet design/Hessian mismatch: design has {p} columns but \
-             Hessian is only {hessian_dim}x{hessian_dim}"
-        ));
-    }
     if design.penalties.is_empty() {
         return Ok((0, 0.0));
     }
-    let hessian = if hessian_dim > p {
-        hessian.slice(s![0..p, 0..p]).to_owned()
-    } else {
-        hessian.clone()
-    };
     let mut penalty = Array2::<f64>::zeros((p, p));
     for (idx, block) in design.penalties.iter().enumerate() {
         let range = block.col_range.clone();
@@ -244,8 +233,65 @@ fn standard_null_space_metadata(
     if q == 0 {
         return Ok((0, 0.0));
     }
-    let projected = hessian.dot(&null_basis);
-    let mut restricted = null_basis.t().dot(&projected);
+
+    // The saved Hessian lives in the active coordinates declared by the fit's
+    // gauge, while `null_basis` is expressed in the design's raw coordinates.
+    // Pull every raw null-space direction N back through the injective lift
+    // `T`: solve `T C = N`, then restrict as `C' H_active C`. Treating a
+    // rectangular active Hessian as if it were raw curvature was the hidden
+    // identity-gauge assumption exposed by exact smoothing boundaries (#2623).
+    let active_null_basis = if let Some(geometry) = fit.geometry.as_ref() {
+        let gauge = &geometry.coefficient_gauge;
+        if gauge.raw_total() != p || gauge.reduced_total() != hessian_dim {
+            return Err(format!(
+                "null-space Hessian logdet gauge mismatch: design has {p} raw columns, gauge \
+                 maps {} raw from {} active coordinates, Hessian is {hessian_dim}x{hessian_dim}",
+                gauge.raw_total(),
+                gauge.reduced_total(),
+            ));
+        }
+        let t = &gauge.t_full;
+        let raw_gram = t.t().dot(t);
+        let gram = (&raw_gram + &raw_gram.t().to_owned()) * 0.5;
+        let chol = gram.cholesky(Side::Lower).map_err(|error| {
+            format!(
+                "null-space Hessian logdet coefficient gauge is not injective: {error}"
+            )
+        })?;
+        let coordinates = chol.solve_mat(&t.t().dot(&null_basis));
+        let residual = t.dot(&coordinates) - &null_basis;
+        let residual_max = residual
+            .iter()
+            .copied()
+            .map(f64::abs)
+            .fold(0.0_f64, f64::max);
+        let basis_max = null_basis
+            .iter()
+            .copied()
+            .map(f64::abs)
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+        let backward_error = residual_max / basis_max;
+        let roundoff_limit = f64::EPSILON.sqrt() * p.max(hessian_dim).max(1) as f64;
+        if !backward_error.is_finite() || backward_error > roundoff_limit {
+            return Err(format!(
+                "null-space Hessian logdet raw penalty null space is not contained in the \
+                 fitted active gauge: relative residual {backward_error:.6e}, numerical limit \
+                 {roundoff_limit:.6e}"
+            ));
+        }
+        coordinates
+    } else {
+        if hessian_dim != p {
+            return Err(format!(
+                "null-space Hessian logdet design/Hessian mismatch without a coefficient \
+                 gauge: design has {p} columns but Hessian is {hessian_dim}x{hessian_dim}"
+            ));
+        }
+        null_basis
+    };
+    let projected = hessian.dot(&active_null_basis);
+    let mut restricted = active_null_basis.t().dot(&projected);
     restricted = (&restricted + &restricted.t()) * 0.5;
     let chol = restricted
         .cholesky(Side::Lower)

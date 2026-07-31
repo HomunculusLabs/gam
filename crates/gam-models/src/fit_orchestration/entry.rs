@@ -616,24 +616,35 @@ fn deterministic_gaussian_standard_fit(
     }
 
     // Infinite-face penalties are hard constraints; zero-face penalties vanish.
-    // Arrays cannot store either exact endpoint (`∞·0` is NaN and log(0) is not
-    // finite), so represent the upper face at floating-point resolution and the
-    // lower face at the exact supported log-strength endpoint. Choose the upper
-    // precision from the ACTUAL joint infinite-face penalty spectrum:
-    // the weakest numerically non-null penalty direction must dominate the
-    // largest data-information scale by 1/sqrt(ε). Unlike the former `1e10`
-    // multiplier, this is invariant to rescaling either X'WX or S and contains
-    // no model-specific tuning knob.
+    // The exact quotient geometry below does not approximate either endpoint.
+    // `UnifiedFitResult` nevertheless has a finite smoothing-coordinate schema,
+    // so serialize the upper endpoint at floating-point resolution and the lower
+    // endpoint at the exact supported log-strength minimum. Derive the upper
+    // proxy from the ACTUAL joint infinite-face penalty spectrum: the weakest
+    // numerically non-null penalty direction must dominate the largest
+    // data-information scale by 1/sqrt(ε). Unlike the former `1e10` multiplier,
+    // this is invariant to rescaling either X'WX or S and contains no
+    // model-specific tuning knob.
     let has_infinite_face = penalty_faces
         .iter()
         .any(|face| *face == DeterministicPenaltyFace::Infinite);
-    let lambda_infinite = if !has_infinite_face {
-        0.0
+    let (
+        lambda_infinite,
+        infinite_range_basis,
+        infinite_null_basis,
+        range_eigenvalues,
+    ) = if !has_infinite_face {
+        (
+            0.0,
+            Array2::<f64>::zeros((p, 0)),
+            Array2::<f64>::eye(p),
+            Vec::new(),
+        )
     } else {
         use gam_linalg::faer_ndarray::FaerEigh;
         let symmetric_penalty =
             (&infinite_face_penalty + &infinite_face_penalty.t().to_owned()) * 0.5;
-        let (penalty_eigenvalues, _) =
+        let (penalty_eigenvalues, penalty_eigenvectors) =
             symmetric_penalty.eigh(faer::Side::Lower).map_err(|error| {
                 WorkflowError::IntegrationFailed {
                     reason: format!(
@@ -691,7 +702,23 @@ fn deterministic_gaussian_standard_fit(
                 ),
             });
         }
-        lambda
+        let range_indices: Vec<usize> = penalty_eigenvalues
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &value)| (value > rank_floor).then_some(index))
+            .collect();
+        let null_indices: Vec<usize> = penalty_eigenvalues
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &value)| (value <= rank_floor).then_some(index))
+            .collect();
+        let range_basis = penalty_eigenvectors.select(ndarray::Axis(1), &range_indices);
+        let null_basis = penalty_eigenvectors.select(ndarray::Axis(1), &null_indices);
+        let range_eigenvalues = range_indices
+            .iter()
+            .map(|&index| penalty_eigenvalues[index])
+            .collect();
+        (lambda, range_basis, null_basis, range_eigenvalues)
     };
     // Canonicalize λ through its log-strength coordinate BEFORE anything reads
     // it. `UnifiedFitResult` requires `lambdas[i]` to be BITWISE equal to
@@ -706,8 +733,9 @@ fn deterministic_gaussian_standard_fit(
     //
     // Deriving BOTH stored values from this one `ρ` — rather than round-tripping
     // and hoping it is idempotent — makes the pair consistent by construction,
-    // and doing it here rather than at the reporting site keeps the λ that
-    // enters the penalized Hessian identical to the λ the result reports.
+    // and doing it here rather than at the reporting site gives every serialized
+    // smoothing field one canonical value. The exact boundary geometry below
+    // does not substitute these finite proxies into its Hessian.
     let log_lambda_infinite = if has_infinite_face {
         lambda_infinite.ln()
     } else {
@@ -743,93 +771,82 @@ fn deterministic_gaussian_standard_fit(
         DeterministicPenaltyFace::Zero => lambda_zero,
     }));
 
-    let mut penalized_hessian = xtwx.clone();
-    let mut penalty_quadratic = 0.0_f64;
-    for ((block, &lambda), penalty_index) in design
-        .penalties
-        .iter()
-        .zip(lambdas.iter())
-        .zip(0..n_penalties)
-    {
-        let r = block.col_range.clone();
-        penalized_hessian
-            .slice_mut(ndarray::s![r.clone(), r.clone()])
-            .scaled_add(lambda, &block.local);
-        let beta_local = beta.slice(ndarray::s![r]);
-        let contribution = lambda * beta_local.dot(&block.local.dot(&beta_local));
-        if !contribution.is_finite() {
-            return Err(WorkflowError::IntegrationFailed {
-                reason: format!(
-                    "deterministic Gaussian penalty {penalty_index} produced non-finite \
-                     quadratic contribution {contribution}"
-                ),
-            });
-        }
-        penalty_quadratic += contribution;
-    }
-    // Symmetrize defensively against accumulated round-off before the Cholesky.
-    penalized_hessian = (&penalized_hessian + &penalized_hessian.t()) * 0.5;
-    // Effective degrees of freedom from the influence matrix `F = H⁻¹ XᵀWX`,
-    // decomposed per penalty by the SAME trace formula the standard REML path
-    // (`estimate.rs`) and the survival fast-path (`survival_transformation_edf`)
-    // use: `tr_k = λ·tr(H⁻¹ S_k)`, `edf_k = block_cols_k − tr_k`, and
-    // `edf_total = p − Σ_k tr_k = tr(F)`. Producing the WHOLE bundle here — not
-    // just the scalar total — is what makes the fit self-consistent: `edf_by_block`
-    // aligns 1:1 with `lambdas` (a length the constructor validates), the raw
-    // shrinkage traces feed per-term EDF, and `coefficient_influence = F` is the
-    // authoritative leverage matrix every downstream EDF consumer prefers. At the
-    // fully-smoothed λ each penalized direction is absorbed (`tr_k → rank(S_k)`),
-    // so every block collapses onto its own penalty null space — the honest
-    // complexity of a wiggle-free fit, and exactly the λ→∞ limit of the
-    // near-constant fit that already works.
-    let (edf_total, edf_by_block, penalty_block_trace, coefficient_influence) = {
+    // At the exact mixed face, beta lies in every infinite-face null space and
+    // every zero-face strength vanishes. Thus beta' S(lambda) beta is exactly
+    // zero. Multiplying finite endpoint proxies would turn certified
+    // annihilation round-off into an artificial positive objective term.
+    let penalty_quadratic = 0.0_f64;
+    // Effective degrees of freedom come from the exact constrained influence
+    // matrix `F = Z (Z'X'WX Z)⁻¹ Z'X'WX`, whose trace is `dim(Z)`. The joint
+    // pseudoinverse of the infinite-face penalty allocates its removed rank
+    // across overlapping penalty blocks: `tr_k = tr(S_infinite⁺ S_k)`. Producing
+    // the WHOLE bundle here — not just the scalar total — keeps `edf_by_block`,
+    // `penalty_block_trace`, and `coefficient_influence` descriptions of the same
+    // mathematical boundary.
+    let (
+        penalized_hessian,
+        coefficient_gauge,
+        edf_total,
+        edf_by_block,
+        penalty_block_trace,
+        coefficient_influence,
+    ) = {
         use gam_linalg::faer_ndarray::FaerCholesky;
-        // The infinite-precision face deliberately makes penalized directions
-        // much stiffer than the data-identified null space. Factoring that
-        // matrix in raw coefficient units can lose the latter curvature even
-        // though the mathematical sum is strictly positive definite. The
-        // former implicit ridge hid this scale failure by changing the model.
-        //
-        // Jacobi/Van-der-Sluis equilibration is a pure congruence:
-        // C = D^-1 H D^-1. It preserves inertia exactly and is within a factor
-        // p of the best diagonal conditioning. Solve H x = b as
-        // C y = D^-1 b, x = D^-1 y, so every reported influence/trace remains
-        // for the original declared H and no curvature is invented.
-        let (equilibrated_hessian, hessian_scale) =
-            gam_linalg::decision::equilibrate_gram(&penalized_hessian);
-        let chol = equilibrated_hessian
-            .cholesky(faer::Side::Lower)
-            .map_err(|error| WorkflowError::IntegrationFailed {
-                reason: format!(
-                    "equilibrated deterministic Gaussian boundary precision is not positive \
-                     definite: {error}"
-                ),
+        // A mixed zero/infinite face has no finite ambient Hessian: representing
+        // both endpoints at once creates an impossible condition number. Work
+        // on its exact tangent space Z = null(S_infinite) instead. Data identify
+        // A = Z' X'WX Z there; the orthogonal normal space is a hard constraint.
+        let z = &infinite_null_basis;
+        let u = &infinite_range_basis;
+        let free_dim = z.ncols();
+        let raw_free_information = z.t().dot(&xtwx.dot(z));
+        let free_information =
+            (&raw_free_information + &raw_free_information.t().to_owned()) * 0.5;
+        let influence = if free_dim == 0 {
+            Array2::<f64>::zeros((p, p))
+        } else {
+            let (equilibrated, scale) =
+                gam_linalg::decision::equilibrate_gram(&free_information);
+            let chol = equilibrated.cholesky(faer::Side::Lower).map_err(|error| {
+                WorkflowError::IntegrationFailed {
+                    reason: format!(
+                        "deterministic Gaussian boundary tangent precision is not positive \
+                         definite: {error}"
+                    ),
+                }
             })?;
-        let solve_original_hessian = |rhs: &Array2<f64>| {
-            let mut equilibrated_rhs = rhs.clone();
-            for row in 0..equilibrated_rhs.nrows() {
-                equilibrated_rhs
-                    .row_mut(row)
-                    .mapv_inplace(|value| value / hessian_scale[row]);
-            }
-            let mut solution = chol.solve_mat(&equilibrated_rhs);
-            for row in 0..solution.nrows() {
+            let solve_free = |rhs: &Array2<f64>| {
+                let mut scaled_rhs = rhs.clone();
+                for row in 0..scaled_rhs.nrows() {
+                    scaled_rhs
+                        .row_mut(row)
+                        .mapv_inplace(|value| value / scale[row]);
+                }
+                let mut solution = chol.solve_mat(&scaled_rhs);
+                for row in 0..solution.nrows() {
+                    solution
+                        .row_mut(row)
+                        .mapv_inplace(|value| value / scale[row]);
+                }
                 solution
-                    .row_mut(row)
-                    .mapv_inplace(|value| value / hessian_scale[row]);
-            }
-            solution
+            };
+            let tangent_score = z.t().dot(&xtwx);
+            z.dot(&solve_free(&tangent_score))
         };
+        let boundary_gauge = gam_problem::gauge::Gauge::from_block_transforms(&[z.clone()]);
+
         {
-            // F = H⁻¹ XᵀWX. Generally NOT symmetric (a product of two
-            // symmetric matrices); it must be stored as-is so `H·F = XᵀWX`
-            // and per-term `tr(F_jj)` stay exact (see estimate.rs / #1027).
-            let influence = solve_original_hessian(&xtwx);
             let mut raw_traces = vec![0.0_f64; n_penalties];
             let mut block_ranks = vec![0_usize; n_penalties];
+            let mut scaled_range = u.clone();
+            for (column, &eigenvalue) in range_eigenvalues.iter().enumerate() {
+                scaled_range
+                    .column_mut(column)
+                    .mapv_inplace(|value| value / eigenvalue);
+            }
+            let joint_penalty_pseudoinverse = scaled_range.dot(&u.t());
             for (kk, block) in design.penalties.iter().enumerate() {
                 let r = block.col_range.clone();
-                let block_cols = r.len();
                 // The per-block ceiling is `rank(S_k)`, NOT the block's column
                 // count: they differ by `nullity(S_k)`, a whole integer of
                 // reported complexity for every penalized block, and the rank is
@@ -839,43 +856,31 @@ fn deterministic_gaussian_standard_fit(
                 block_ranks[kk] = penalty_matrix_root(&block.local)
                     .map_err(|reason| WorkflowError::IntegrationFailed {
                         reason: format!(
-                            "deterministic Gaussian shortcut penalty {kk} rank factorization                              failed: {reason}"
+                            "deterministic Gaussian shortcut penalty {kk} rank factorization \
+                             failed: {reason}"
                         ),
                     })?
                     .nrows();
-                // tr(H⁻¹ S_k): solve `H Z = S_k` (embedded in the full p×block
-                // layout) and read the block diagonal of the solution.
-                let mut rhs = Array2::<f64>::zeros((p, block_cols));
-                for c in 0..block_cols {
-                    for rr in 0..block_cols {
-                        rhs[[r.start + rr, c]] = block.local[[rr, c]];
+                if penalty_faces[kk] == DeterministicPenaltyFace::Infinite {
+                    let pinv_block = joint_penalty_pseudoinverse.slice(ndarray::s![r.clone(), r]);
+                    let mut trace = gam_linalg::utils::KahanSum::default();
+                    for row in 0..block.local.nrows() {
+                        for column in 0..block.local.ncols() {
+                            trace.add(pinv_block[[row, column]] * block.local[[column, row]]);
+                        }
                     }
+                    raw_traces[kk] = trace.sum();
                 }
-                let sol = solve_original_hessian(&rhs);
-                let mut trace = 0.0_f64;
-                for j in 0..block_cols {
-                    trace += sol[[r.start + j, j]];
-                }
-                raw_traces[kk] = lambdas[kk] * trace;
             }
             // At the mixed boundary, only infinite-face penalties constrain a
             // coefficient direction. Zero-face blocks contribute no limiting
             // rank, even though their finite representation is the smallest
             // positive strength admitted by the solver's log domain.
-            let joint_penalty_rank = penalty_matrix_root(&infinite_face_penalty)
-                .map_err(|reason| WorkflowError::IntegrationFailed {
-                    reason: format!(
-                        "deterministic Gaussian shortcut infinite-face joint penalty rank factorization failed: {reason}"
-                    ),
-                })?
-                .nrows();
-            // The Hessian uses finite endpoints so it can be factorized, but
-            // inference describes the mathematical mixed boundary. Preserve the
-            // finite solve's relative trace allocation among overlapping
-            // infinite-face penalties, then normalize those shares to the exact
-            // rank of their joint PSD sum. Zero-face penalties contribute no
-            // limiting trace. This keeps all three EDF fields mutually coherent
-            // without reporting finite-precision leakage as model complexity.
+            let joint_penalty_rank = u.ncols();
+            // Pseudoinverse traces add to the rank of the joint PSD sum in exact
+            // arithmetic. Normalize their computed shares to that same spectral
+            // rank so eigensolver round-off cannot make the three EDF fields
+            // disagree. Zero-face penalties contribute no limiting trace.
             let mut measured_infinite_trace = gam_linalg::utils::KahanSum::default();
             for (&trace, face) in raw_traces.iter().zip(penalty_faces.iter()) {
                 if *face == DeterministicPenaltyFace::Infinite {
@@ -908,9 +913,11 @@ fn deterministic_gaussian_standard_fit(
                 &raw_traces,
                 &block_ranks,
                 p,
-                (p - joint_penalty_rank.min(p)) as f64,
+                free_dim as f64,
             );
             (
+                free_information,
+                boundary_gauge,
                 bundle.edf_total,
                 bundle.edf_by_block,
                 bundle.penalty_block_trace,
@@ -948,7 +955,7 @@ fn deterministic_gaussian_standard_fit(
         bias_correction_jacobian: None,
     };
     let geometry = Some(gam_solve::estimate::FitGeometry {
-        coefficient_gauge: gam_problem::gauge::Gauge::identity(&[beta.len()]),
+        coefficient_gauge,
         penalized_hessian: penalized_hessian_precision,
         constrained_posterior: None,
         working: Some(gam_solve::estimate::WorkingGeometry {
@@ -982,12 +989,10 @@ fn deterministic_gaussian_standard_fit(
             log_likelihood: 0.0,
             deviance: 0.0,
             reml_score: None,
-            // βᵀS(λ)β at the reported λ, measured rather than asserted. It is
-            // zero on both dispatch branches — the exact-parametric branch has
-            // no penalty at all, and the constant-response branch puts every
-            // coefficient in the intercept block, which no penalty covers — but
-            // the fit record should carry the value the fit has, not the value
-            // its dispatch conditions imply.
+            // βᵀS(λ)β at the exact boundary: every infinite-face penalty
+            // annihilates beta by certification and every zero-face penalty has
+            // exactly zero strength. This deliberately does not evaluate the
+            // finite smoothing-coordinate proxies stored for serialization.
             stable_penalty_term: penalty_quadratic,
             penalized_objective: None,
             used_device: false,
