@@ -748,8 +748,25 @@ fn assert_frozen_replay_matches_fit(
                         identifiability_transform,
                         operator_collocation_points,
                         radial_reparam,
+                        aniso_log_scales,
                         ..
                     } => vec![
+                        // The ONE replayed artifact the matrix sweep missed, and
+                        // the only one whose two paths take DIFFERENT BRANCHES:
+                        // the fit spec carries `aniso_log_scales: None` so
+                        // `auto_seed_aniso_contrasts(centers, None)` DERIVES them,
+                        // while `design_freezing` sets
+                        // `s.aniso_log_scales = meta_aniso.clone()` so the replay
+                        // USES the stored values. Bit-identical centers do not
+                        // imply a bit-identical seed. Rendered as a 1xN row so it
+                        // reuses the same comparison.
+                        (
+                            "aniso_log_scales",
+                            aniso_log_scales.as_ref().map(|v| {
+                                Array2::from_shape_vec((1, v.len()), v.clone())
+                                    .expect("1xN aniso row")
+                            }),
+                        ),
                         ("centers", Some(centers.clone())),
                         ("identifiability_transform", identifiability_transform.clone()),
                         ("operator_collocation_points", operator_collocation_points.clone()),
