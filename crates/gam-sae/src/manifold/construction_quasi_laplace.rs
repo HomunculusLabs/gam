@@ -1461,12 +1461,32 @@ impl SaeManifoldTerm {
                         }
                         None => (grad_norm, quotient_grad_norm),
                     };
+                    // gam#2080/#2627: this refusal has two regimes that need different
+                    // fixes, and the raw norms alone do not separate them. Measured over
+                    // the occurrences that print both: ~10/14 are "physical" (the gauge
+                    // projection removes <50% of ‖g‖, so the solve is genuinely far from
+                    // a KKT point) and ~4/14 are gauge-dominated (>50% removed, the
+                    // remainder within a few x of tolerance — close in the directions
+                    // that matter, held off by gauge content). Report the two ratios that
+                    // discriminate so any occurrence can be bucketed without parsing the
+                    // norms pairwise.
+                    let gauge_share = if grad_norm > 0.0 {
+                        1.0 - quotient_grad_norm / grad_norm
+                    } else {
+                        f64::NAN
+                    };
+                    let quotient_over_tol = if grad_tolerance > 0.0 {
+                        quotient_grad_norm / grad_tolerance
+                    } else {
+                        f64::INFINITY
+                    };
                     return Err(format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
                          neither the KKT gradient ‖g‖={grad_norm:.6e} nor the quotient KKT gradient \
                          ‖Π⊥gauge g‖={quotient_grad_norm:.6e} met tolerance {grad_tolerance:.6e} \
-                         after {total_inner_iter} inner iterations. Refusing to rank an \
-                         off-optimum Laplace criterion.",
+                         after {total_inner_iter} inner iterations \
+                         (gauge_share={gauge_share:.4}, quotient_over_tol={quotient_over_tol:.3e}). \
+                         Refusing to rank an off-optimum Laplace criterion.",
                         ProbeRefusalKind::inner_not_converged_marker()
                     ));
                 }
