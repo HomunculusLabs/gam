@@ -2506,8 +2506,16 @@
                 ("full-3pass", full_ratio),
                 ("full-combined", combined_ratio),
             ] {
+                // #932: release-only. Every entry here is a wall-clock ratio,
+                // and without optimization the one-pass schedule's advantage is
+                // not generated -- measured in the default test lane, K=5 VGH
+                // reports ratio=3.2125, i.e. three times SLOWER, which is the
+                // missing optimizer rather than a pessimization. The channel
+                // values themselves are checked for exactness by
+                // `latent_survival_one_pass_exact_tails_match_multidir_all_channels_932`,
+                // which is build-independent and unaffected by this gate.
                 assert!(
-                    ratio < 1.0,
+                    cfg!(debug_assertions) || ratio < 1.0,
                     "K={dimension} one-pass {channel} must beat the exact pre-cutover path: ratio={ratio}"
                 );
             }
