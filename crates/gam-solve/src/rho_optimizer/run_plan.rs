@@ -3097,6 +3097,14 @@ pub(crate) fn run_outer_with_plan(
 #[path = "run_plan_tests.rs"]
 mod run_plan_tests;
 
+// The #2568 caller-requirement tests live in their own file: `run_plan_tests.rs`
+// reached 10,063 lines and tripped the 10,000-line ban gate (#780), which aborts
+// the ROOT crate's build and with it every root-crate target. Same `#[path]`
+// form as its sibling, so `use super::*` resolves to this module either way.
+#[cfg(test)]
+#[path = "run_plan_caller_requirement_tests_2568.rs"]
+mod run_plan_caller_requirement_tests_2568;
+
 #[cfg(test)]
 #[path = "run_fixed_point_continuation_tests.rs"]
 mod run_fixed_point_continuation_tests;
