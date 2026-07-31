@@ -418,7 +418,11 @@ pub enum ScoreSearchError<E> {
     /// The traversal asked for more cell subdivisions than
     /// [`subdivision_budget`] allows for this domain and resolution. Reported
     /// with the cell that was being split when the budget ran out, so the
-    /// caller can see WHERE the criterion stopped being decomposable.
+    /// caller can see WHERE the criterion stopped being decomposable, and with
+    /// that cell's enclosure, so the caller can see WHETHER a larger budget
+    /// could ever have helped: once the certified evaluation error reaches the
+    /// requested resolution, no amount of subdivision separates stationary
+    /// structure at that tolerance (#2614).
     SubdivisionBudget {
         lo: f64,
         hi: f64,
@@ -428,6 +432,7 @@ pub enum ScoreSearchError<E> {
         subdivisions: usize,
         budget: usize,
         depth_bound: u32,
+        enclosure: DerivativeEnclosure,
     },
 }
 
@@ -582,14 +587,31 @@ impl<E: fmt::Display> fmt::Display for ScoreSearchError<E> {
                 subdivisions,
                 budget,
                 depth_bound,
-            } => write!(
-                f,
-                "score search: {subdivisions} cell subdivisions on [{lo}, {hi}] at requested \
-                 resolution {requested_resolution} exceed the budget {budget} derived from this \
-                 domain's subdivision depth bound {depth_bound}; the criterion is still \
-                 undecomposable at [{cell_lo}, {cell_hi}], so it neither excludes nor isolates \
-                 stationary structure over a region the search can only enumerate"
-            ),
+                enclosure,
+            } => {
+                // Which of these two numbers is larger decides whether a bigger
+                // budget is a fix or a distraction. Reporting the budget alone
+                // sends the reader to the wrong lever (#2614).
+                let evaluation_error = enclosure.score.evaluation_error;
+                let verdict = if evaluation_error >= *requested_resolution {
+                    "a LARGER BUDGET CANNOT HELP -- the certified evaluation error already reaches \
+                     the requested resolution, so no subdivision separates stationary structure at \
+                     this tolerance; the resolution asked for is finer than the evaluator delivers"
+                } else {
+                    "the evaluation error is below the requested resolution, so this cell was still \
+                     separable and a larger budget may resolve it"
+                };
+                write!(
+                    f,
+                    "score search: {subdivisions} cell subdivisions on [{lo}, {hi}] at requested \
+                     resolution {requested_resolution} exceed the budget {budget} derived from this \
+                     domain's subdivision depth bound {depth_bound}; the criterion is still \
+                     undecomposable at [{cell_lo}, {cell_hi}], so it neither excludes nor isolates \
+                     stationary structure over a region the search can only enumerate. Certified \
+                     evaluation error at this cell is {evaluation_error:e} against requested \
+                     resolution {requested_resolution:e}: {verdict}"
+                )
+            }
         }
     }
 }
@@ -1495,6 +1517,7 @@ where
                 subdivisions,
                 budget,
                 depth_bound,
+                enclosure,
             });
         }
         let middle = evaluate_sample(midpoint, &mut evaluate)?;
