@@ -2688,12 +2688,24 @@ fn certify_four_refuses_stationary_negative_curvature_2359() {
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
 
-    let error = problem
+    let message = problem
         .run(&mut obj, "certify-4 negative curvature")
-        .expect_err("negative terminal curvature must refuse the fit");
+        .expect_err("negative terminal curvature must refuse the fit")
+        .to_string();
     assert!(
-        error.to_string().contains("hessian_psd=NO"),
-        "refusal must name the failed fourth-order curvature audit: {error}"
+        message.contains("hessian_psd=NO")
+            && message.contains("curvature_source=terminal-analytic"),
+        "refusal must name the failed terminal analytic curvature audit: {message}"
+    );
+    assert!(
+        message.contains("plan=solver=Bfgs, search_hessian_source=BfgsApprox"),
+        "search provenance must label BfgsApprox as search geometry, not as the \
+         terminal certificate's curvature source (#2641): {message}"
+    );
+    assert!(
+        !message.contains("plan=solver=Bfgs, hessian_source=BfgsApprox"),
+        "the ambiguous legacy label falsely made an exact terminal Hessian verdict \
+         look like a BFGS-approximation verdict (#2641): {message}"
     );
     // Order four is spent once per TERMINAL CERTIFICATION, not once per
     // multistart candidate — that is the economics #2359 exists to protect, and
@@ -5621,15 +5633,17 @@ fn run_indefinite_analytic_seed_stays_on_arc() {
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
     // The seed is stationary (|g|=0) but sits on genuinely indefinite analytic
-    // curvature ([[-1.0]]) — a saddle/maximum, NOT an interior minimum. The
-    // second-order ARC plan must REFUSE it (a certified optimum cannot waive
-    // negative curvature; see `curvature_admissible`), returning typed
-    // non-convergence rather than minting. The refusal is itself the proof that
-    // the run STAYED on the analytic second-order plan and did not demote to
-    // BFGS: only the analytic-Hessian path can observe indefinite curvature and
-    // set `hessian_psd=NO` → "INDEFINITE CURVATURE AT INTERIOR OPTIMUM". A BFGS
-    // demote (BfgsApprox curvature) never inspects the analytic Hessian and
-    // would report `hessian_psd=n/a`, so it could not produce this verdict.
+    // curvature ([[-1.0]]) — a saddle/maximum, NOT an interior minimum. The ARC
+    // plan must REFUSE it (a certified optimum cannot waive negative curvature;
+    // see `curvature_not_refused`), returning typed non-convergence rather than
+    // minting.
+    //
+    // `hessian_psd=NO` identifies the TERMINAL analytic mint audit, not the
+    // search geometry: a BFGS search intentionally reserves exact curvature for
+    // this same audit under optimize-3/certify-4 (#2359). Plan provenance now
+    // calls its field `search_hessian_source` so those two phases cannot be
+    // conflated again (#2641). This fixture stays on ARC because the capability
+    // planner selects ARC/Analytic and its fallback ladder has no BFGS demotion.
     let err = problem
         .run(&mut obj, "indefinite seed geometry")
         .expect_err(

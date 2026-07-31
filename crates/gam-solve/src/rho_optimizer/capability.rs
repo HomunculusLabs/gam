@@ -358,6 +358,9 @@ pub use gam_model_api::OuterEvalOrder;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OuterPlan {
     pub solver: Solver,
+    /// Curvature used by the search algorithm, not by the mandatory terminal
+    /// certificate. A gradient-only BFGS search can still be audited by the
+    /// objective's exact analytic Hessian at mint time (#2359, #2641).
     pub hessian_source: HessianSource,
 }
 
@@ -417,7 +420,7 @@ impl std::fmt::Display for OuterPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "solver={:?}, hessian_source={:?}",
+            "solver={:?}, search_hessian_source={:?}",
             self.solver, self.hessian_source
         )
     }

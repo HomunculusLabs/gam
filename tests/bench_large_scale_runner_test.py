@@ -243,11 +243,11 @@ class LargeScaleRunnerTests(unittest.TestCase):
             stderr = (
                 "[HEARTBEAT] elapsed=1.2s cmd='gam ...' pid=42 cpu=10% mem=2%\n"
                 "[OUTER] reml outer: n_params=6, gradient=Analytic, hessian=Analytic"
-                " -> solver=Arc, hessian_source=Analytic"
+                " -> solver=Arc, search_hessian_source=Analytic"
                 " [solver=Arc;hessian=Analytic;matrix-free=true]\n"
                 "some unrelated stderr noise mentioning solver=Cheese\n"
                 "[OUTER] aux outer: n_params=2, gradient=Analytic, hessian=Unavailable"
-                " -> solver=Bfgs, hessian_source=BfgsApprox"
+                " -> solver=Bfgs, search_hessian_source=BfgsApprox"
                 " [solver=Bfgs;hessian=BfgsApprox;matrix-free=false] [no Hessian: BFGS approximation]\n"
             )
             _RUNNER._append_routing_lines(tmp, stderr)

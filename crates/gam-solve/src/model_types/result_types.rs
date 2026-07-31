@@ -1409,12 +1409,18 @@ impl OuterCriterionCertificate {
                     .join(", ")
             )
         };
+        let curvature_source = match self.curvature {
+            CurvatureEvidence::Measured { .. } => "terminal-analytic",
+            CurvatureEvidence::NotSpent => "screening-not-spent",
+            CurvatureEvidence::NotAvailable => "unavailable",
+            CurvatureEvidence::NoEstimand => "no-estimand",
+        };
         let verdict = match self.refusal() {
             None => "stationary".to_string(),
             Some(refusal) => refusal.to_string(),
         };
         format!(
-            "{stationarity} hessian_psd={} railed={} → {verdict}",
+            "{stationarity} hessian_psd={} curvature_source={curvature_source} railed={} → {verdict}",
             self.curvature, railed,
         )
     }
