@@ -2669,6 +2669,25 @@ fn try_exact_joint_spatial_length_scale_optimization(
     // bound — no second tolerance is introduced. It is two-sided because a route
     // disagreement is a disagreement in either direction, whereas the descent
     // contract is one-sided by construction.
+    //
+    // MEASURED (2026-07-31, while working #2644). This half fires on
+    // `misc::broad_sweep_batch_h::matern_low_n_does_not_crash` and the numbers
+    // say the disagreement is SYSTEMATIC, not noise:
+    //
+    //   run 30602192415  joint_seed=2.787395886872e0  baseline=2.787395850137e0
+    //   run 30619084852  joint_seed=2.787290435812e0  baseline=2.787290399076e0
+    //   local, 4e7fd2ae1 joint_seed=2.787290435812e0  baseline=2.787290399076e0
+    //
+    // `gap = 3.674e-8` on all three — bit-identical across two nightlies on
+    // different runners AND a local run, at two different `theta0`. A
+    // deterministic `1.318e-8` RELATIVE offset against a `1e-8` relative
+    // tolerance, i.e. this refusal misses by 1.32x and would miss by 1.32x every
+    // time. So it is NOT the `O(ε·κ)` criterion-conditioning family #2644 turned
+    // out to be (that one is scattered and moves run to run); the two routes are
+    // evaluating slightly different functions, and the difference is reproducible
+    // enough to bisect directly by differencing the two criteria term by term at
+    // `theta0`. It survived the #2644 root-scale log-determinant work unchanged,
+    // which rules that mechanism out rather than leaving it open.
     if !joint_seed_value.is_finite() {
         return Err(EstimationError::RemlOptimizationFailed(format!(
             "exact joint spatial optimization could not evaluate its own criterion at the \
