@@ -1176,6 +1176,8 @@ jobs:
             tests/bench_run_suite_optional_imports_test.py \
             tests/bench_fuzz_vs_mgcv_test.py \
             tests/bench_large_scale_runner_test.py \
+            tests/workflow_tasks_2623_test.py \
+            tests/test_benchmark_build_matrix.py \
             -v --tb=short --junitxml=python-reports/bench.xml
 
       - name: Guard against orphaned Python tests (#1512)
