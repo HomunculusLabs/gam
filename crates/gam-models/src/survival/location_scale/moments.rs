@@ -419,6 +419,29 @@ pub(crate) fn exact_survival_response_moments_row(
                 // out to thirty times the tolerance the upstream moments are
                 // converged to (`ORTHANT_MOMENT_RELATIVE_TOLERANCE = 1e-3`).
                 // See `artifacts/issue_2446_double_truncation_robustness.py`.
+                //
+                // #2679: this is the moment-matched NORMAL, and it is a known
+                // approximation rather than the law. The pushforward of a
+                // cone-truncated joint through `bᵀ` is not normal for `q > 1`,
+                // so matching its first two moments has an error FLOOR. The
+                // node mixture `gam_solve::constrained_posterior::
+                // constrained_projection_law` produces from the same cubature
+                // has an error RATE and puts no mass outside the cone; measured
+                // at the shipped 4096-node refinement on a `q = 2` face against
+                // a tensor-Simpson reference on the exact truncated density,
+                // node sum `2.688e-6` vs this normal's `6.135e-4`, with `0` vs
+                // `4.54e-2` infeasible mass.
+                //
+                // It is not cut over here because a node shifts the mean of the
+                // whole coefficient vector — `β = β_unc + t + G(u − E[u])` — so
+                // it moves `(h, threshold, log σ)` as well as `w`, the outer
+                // rule below cannot be shared across nodes, and the exact
+                // cutover costs `nodes × outer × inner` per row. #2679 carries
+                // the joint low-discrepancy rule that makes it affordable. The
+                // consumer that reads misplaced mass at FIRST order is a
+                // quantile, and that one already runs on these nodes
+                // (`constrained_projection_equal_tailed_interval`); `E[S]` and
+                // `E[S²]` are smooth and do not.
                 crate::quadrature::normal_expectation_nd_adaptive_result::<1, _, _, String>(
                     quadctx,
                     [x[0] + q0 + w_mean],
