@@ -2756,6 +2756,24 @@ impl SaeManifoldTerm {
         owner: &str,
     ) -> Result<Vec<Array1<f64>>, String> {
         let mut basis = Vec::<Array1<f64>>::new();
+        // #2653 — a BORDER-dimension disagreement is not a stale layout, it is a
+        // different chart. Hard TopK compaction drops inactive per-row coordinate
+        // BLOCKS and retains the decoder border unchanged, so a genuine
+        // full-to-compact map always agrees on the border; only the row widths
+        // move (the filed 132 -> 84 case). When the border itself differs, this
+        // operator is not a compaction of the joint chart at all and the
+        // closed-form chart gauges simply do not live in its space. That is the
+        // "no matching gauge" condition the caller already diagnoses as
+        // `NonIdentifiable` — reporting it as an internal invariant error instead
+        // converts a legitimate, more specific refusal into a bug report
+        // (regression: `outer_gradient_solver_rejects_near_singular_cache_without_matching_gauge`
+        // saw `arrow border dimension 1 != term border dimension 3`).
+        // Row-layout disagreement stays a typed invariant error below, because
+        // there the gauge IS mappable and silently skipping it would put an
+        // analytic chart null back into the physical spectrum.
+        if border_dim != self.factored_border_dim() {
+            return Ok(Vec::new());
+        }
         for dense in self.dense_step_gauge_vectors()? {
             let mut gauge = self.dense_joint_vector_in_arrow_layout(
                 dense.view(),
