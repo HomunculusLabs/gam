@@ -5612,6 +5612,95 @@ fn reactive_domain_entry_keeps_unrepairable_seed_as_typed_refusal() {
     );
 }
 
+/// #2080 — the continuation's COLD ENTRY leg is a constant of the problem, so
+/// the seed cascade must evaluate it ONCE, not once per seed.
+///
+/// `ContinuationPath::step` pins the entering leg at `s = 1`, and `s = 1` is
+/// bitwise the legal upper box for rho and the contract's literal entry state
+/// for the scalars (`literal_endpoint_bits_survive_without_affine_rounding`
+/// pins the rho half); the walk is opened with an empty warm start. None of the
+/// three depends on the seed, so if that leg refuses for one seed it refuses
+/// identically for every other one. Measured on the real fixture before this
+/// gate existed (#2599's K=2 determinism test): four attempts, 247 of 248 log
+/// lines byte-identical across the seed blocks, the sole difference being the
+/// seed index in the refusal message — 1577 s of wall spent replaying one
+/// evaluation.
+///
+/// `NeverOpens` never establishes finite evidence, so every walk dies on the
+/// entering leg and each walk installs exactly one scalar state: the entry one.
+/// Counting those installs therefore counts WALKS, which is the quantity this
+/// change is about. The test also pins what must NOT change — every seed is
+/// still attempted, still rejected, still individually reported — so a future
+/// edit cannot satisfy the count by shortening the cascade instead.
+#[test]
+fn cold_entry_leg_is_evaluated_once_across_the_whole_seed_cascade_2080() {
+    const SEED: f64 = 0.125;
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_initial_rho(array![SEED])
+        .with_seed_config(gam_problem::SeedConfig {
+            max_seeds: 4,
+            seed_budget: 4,
+            ..Default::default()
+        })
+        .with_max_iter(4);
+    let mut objective = ReactiveDomainObjective::new(SEED, ReactiveDomainMode::NeverOpens);
+    let error = problem
+        .run(&mut objective, "cold-entry replay fixture")
+        .expect_err("a path that never establishes finite evidence must still refuse");
+    let message = error.to_string();
+
+    // Read the seed count off the refusal rather than assuming the generator
+    // honoured `max_seeds`. If only one seed was ever attempted there is no
+    // cross-seed replay to observe and this test would be asserting nothing.
+    let generated = message
+        .split_once("generated=")
+        .and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse::<usize>().ok())
+        .unwrap_or_else(|| panic!("refusal must report a seed count; got: {message}"));
+    assert!(
+        generated >= 2,
+        "this fixture needs at least two generated seeds to test cross-seed replay, \
+         but the cascade generated {generated}; refusal: {message}"
+    );
+
+    let contract = ReactiveDomainObjective::scalar_contract();
+    let entry_installs = objective
+        .installed_scalar_states
+        .iter()
+        .filter(|state| state.bitwise_eq(contract.entry()))
+        .count();
+    assert_eq!(
+        entry_installs, 1,
+        "the cold entry waypoint is seed-independent, so {generated} seeds must share ONE \
+         evaluation of it; the cascade installed the entry scalar state {entry_installs} times"
+    );
+
+    // Coverage that must survive the deduplication: every seed is still
+    // attempted and still refused on its own line, and no seed reaches the
+    // solver on the strength of a replayed verdict.
+    assert_eq!(
+        objective.derivative_evals, 0,
+        "the outer solver must not start without finite exact-seed evidence"
+    );
+    let replays = message.matches("(replayed:").count();
+    assert_eq!(
+        replays,
+        generated - 1,
+        "every seed after the first must be answered by the recorded entry verdict; \
+         got {replays} replays for {generated} seeds. Refusal: {message}"
+    );
+    assert!(
+        message.contains("reactive domain entry refused"),
+        "the replayed verdict must still be the typed entry refusal: {message}"
+    );
+    assert!(
+        objective.checkpoint_domain_open.is_none(),
+        "typed refusal must not leak an active waypoint transaction"
+    );
+}
+
 /// #979: the generic gradient-residue floor and a caller's strict local-minimum
 /// requirement answer different questions. A floor-cleared raw negative Hessian
 /// may mint for a generic objective, but must not satisfy a mode selector that

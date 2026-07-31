@@ -909,6 +909,31 @@ pub(crate) fn run_outer_with_plan(
         usize,
         usize,
     )> = None;
+    // #2080 — the reactive continuation's COLD ENTRY leg is seed-independent, so
+    // its refusal is recorded once and replayed rather than re-derived per seed.
+    //
+    // `ContinuationPath::step` takes `entering = self.warm.is_none()` and pins
+    // that leg at `s_next = 1.0`; `continuation_path.rs`'s own
+    // `literal_endpoint_bits_survive_without_affine_rounding` pins
+    // `rho_target_at(1.0)` as BITWISE `rho_entry`, which is `bounds_template.1`.
+    // The scalar leg is `contract.at(1.0)`, likewise the contract's literal entry
+    // state, and the walk is opened with an EMPTY warm start
+    // (`cold_entry_beta = Array1::zeros(0)`). All three inputs are loop
+    // invariants: `bounds_template` and `reactive_domain_scalar_contract` are
+    // built above this cascade, and `obj.reset()` runs immediately before the
+    // path is constructed. So every seed submits the SAME problem to the same
+    // cold solver on that first leg, and a refusal there is a property of the
+    // FIXTURE, not of the seed. Only the seed's own `eval_cost` probe above and
+    // the LATER legs — which descend toward the seed's literal rho — are
+    // seed-dependent, and those are untouched.
+    //
+    // Measured (#2599's `test_sae_fit_is_deterministic_for_fixed_seed`, K=2,
+    // n=400/p=64, private TMPDIR, no timeout): four attempts, 247 of 248 log
+    // lines byte-identical across the seed blocks with the sole difference being
+    // the seed index in the refusal message, 1650 inner iterations reported
+    // identically in each. Re-deriving a constant of the problem once per seed
+    // buys nothing; `max_seeds` / `seed_budget` are inert against it.
+    let mut cold_entry_leg_refusal: Option<String> = None;
 
     'seed_attempts: for (seed_idx, seed) in seeds.iter().enumerate() {
         if !should_start_next_seed(started_seeds, seed_budget, best.is_some()) {
@@ -1130,6 +1155,9 @@ pub(crate) fn run_outer_with_plan(
         // activates the certified heavy-smoothing path; a hard evaluation error
         // remains a seed refusal and is never converted into a pseudo-value.
         let mut reactive_domain_entry_requested = false;
+        // Set when this seed's continuation walk is answered by the recorded
+        // cold-entry-leg verdict instead of being walked again (#2080).
+        let mut replayed_cold_entry_refusal: Option<String> = None;
         if reactive_domain_entry_available {
             match obj.eval_cost(seed) {
                 Ok(cost) if cost.is_finite() => {
@@ -1139,24 +1167,44 @@ pub(crate) fn run_outer_with_plan(
                     );
                 }
                 Ok(_) => {
-                    log::info!(
-                        "[OUTER] {context}: exact seed {seed_idx} has undefined criterion; \
-                         entering through certified heavy-smoothing continuation"
-                    );
-                    // The failed cold probe may have left objective-owned trial
-                    // state. Re-enter from the pristine baseline; successful
-                    // path evaluations establish a fresh exact-seed handoff.
-                    obj.reset();
-                    continuation_path = Some(
-                        crate::continuation_path::ContinuationPath::heavy_entry_for_rho(
-                            seed.clone(),
-                            bounds_template.1.clone(),
-                            reactive_domain_scalar_contract
-                                .clone()
-                                .expect("reactive scalar contract checked above"),
-                        )?,
-                    );
                     reactive_domain_entry_requested = true;
+                    if let Some(recorded) = cold_entry_leg_refusal.as_ref() {
+                        // The cold entry leg already refused on an earlier seed,
+                        // and that leg's `(rho, scalars, warm start)` do not
+                        // depend on the seed (see `cold_entry_leg_refusal`). The
+                        // walk cannot reach a later, seed-dependent leg without
+                        // clearing this one, so re-running it would reproduce the
+                        // recorded verdict digit for digit.
+                        log::info!(
+                            "[OUTER] {context}: exact seed {seed_idx} has undefined criterion, but \
+                             the seed-independent cold entry leg has already refused; replaying \
+                             that verdict instead of re-walking it"
+                        );
+                        replayed_cold_entry_refusal = Some(format!(
+                            "{recorded} (replayed: the continuation's cold entry leg is evaluated \
+                             at the legal upper box with the objective's entry scalars and an \
+                             empty warm start, none of which depend on the seed)"
+                        ));
+                    } else {
+                        log::info!(
+                            "[OUTER] {context}: exact seed {seed_idx} has undefined criterion; \
+                             entering through certified heavy-smoothing continuation"
+                        );
+                        // The failed cold probe may have left objective-owned
+                        // trial state. Re-enter from the pristine baseline;
+                        // successful path evaluations establish a fresh
+                        // exact-seed handoff.
+                        obj.reset();
+                        continuation_path = Some(
+                            crate::continuation_path::ContinuationPath::heavy_entry_for_rho(
+                                seed.clone(),
+                                bounds_template.1.clone(),
+                                reactive_domain_scalar_contract
+                                    .clone()
+                                    .expect("reactive scalar contract checked above"),
+                            )?,
+                        );
+                    }
                 }
                 Err(err) => {
                     log::warn!(
@@ -1184,8 +1232,9 @@ pub(crate) fn run_outer_with_plan(
         // The heavy-smoothing walk warms the cold inner solve after the literal
         // `eval_cost` demonstrated that its Laplace evidence is undefined (the
         // K>=2 routing-collapse failure Object 1 exists to repair).
-        let mut continuation_arrived = continuation_path.is_none();
-        let mut continuation_arrival_refusal: Option<String> = None;
+        let mut continuation_arrived =
+            continuation_path.is_none() && replayed_cold_entry_refusal.is_none();
+        let mut continuation_arrival_refusal: Option<String> = replayed_cold_entry_refusal.take();
         if continuation_path.is_some() {
             {
                 let path = continuation_path
@@ -1204,9 +1253,19 @@ pub(crate) fn run_outer_with_plan(
                     let step = match path.step(obj, &cold_entry_beta) {
                         Ok(step) => step,
                         Err(err) => {
-                            continuation_arrival_refusal = Some(format!(
+                            let msg = format!(
                                 "reactive domain entry refused before exact-target arrival: {err}"
-                            ));
+                            );
+                            if legs_descended == 0 {
+                                // Nothing has been accepted yet, so this is the
+                                // COLD ENTRY leg — the one evaluated at the legal
+                                // upper box with the contract's entry scalars and
+                                // an empty warm start. Record it so the remaining
+                                // seeds replay the verdict rather than recompute
+                                // a constant of the problem (#2080).
+                                cold_entry_leg_refusal = Some(msg.clone());
+                            }
+                            continuation_arrival_refusal = Some(msg);
                             break;
                         }
                     };

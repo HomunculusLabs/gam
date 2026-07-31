@@ -530,9 +530,18 @@ impl ContinuationPath {
                         ))
                     })?;
                 if entering {
+                    // #2080 — name the waypoint. This leg is always `s = 1`, and
+                    // `rho_target_at(1.0)` is bitwise the legal upper box (pinned
+                    // by `literal_endpoint_bits_survive_without_affine_rounding`),
+                    // so the refusal is a property of the fixture rather than of
+                    // whatever seed asked for the walk. Reporting `s` and the
+                    // evaluated rho saves the next reader deriving that from
+                    // source, which is how it had to be established the first
+                    // time: two seeds refusing to seven identical digits.
                     return Err(gam_problem::EstimationError::RemlOptimizationFailed(
                         format!(
-                            "reactive domain entry failed at the objective-owned scalar entry: {}",
+                            "reactive domain entry failed at the objective-owned scalar entry \
+                             (seed-independent waypoint s={s_next}, rho={rho_waypoint:?}): {}",
                             failure.message()
                         ),
                     ));
