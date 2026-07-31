@@ -3738,9 +3738,27 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     // residual already computed the exact triple at this β. Reuse.
                     Some((grad_phi.clone(), hphi.clone()))
                 } else if let Some(z_joint) = joint_jeffreys_subspace.as_ref() {
-                    let term = match custom_family_joint_jeffreys_term(
-                        family, &states, specs, &ranges, z_joint,
-                    )? {
+                    // The cycle workspace is the authoritative exact-β row cache
+                    // that supplied this very Hessian source. Ask it for the
+                    // Jeffreys triple before reconstructing the same information
+                    // matrix and all-axes derivatives through `family + states`.
+                    // A workspace without the optional batched derivative retains
+                    // the generic exact family assembly.
+                    let workspace_term = match hessian_workspace_for_cycle.as_ref() {
+                        Some(workspace) => custom_family_joint_jeffreys_term_from_workspace(
+                            workspace.as_ref(),
+                            total_p,
+                            z_joint,
+                        )?,
+                        None => None,
+                    };
+                    let exact_term = match workspace_term {
+                        Some(term) => Some(term),
+                        None => custom_family_joint_jeffreys_term(
+                            family, &states, specs, &ranges, z_joint,
+                        )?,
+                    };
+                    let term = match exact_term {
                         Some((_phi, grad_phi, hphi))
                             if grad_phi.len() == grad_joint.len()
                                 && hphi.nrows() == total_p
