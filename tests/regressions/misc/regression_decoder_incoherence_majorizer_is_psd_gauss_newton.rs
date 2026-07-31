@@ -32,51 +32,6 @@
 use gam::terms::analytic_penalties::{AnalyticPenalty, DecoderIncoherencePenalty, PsiSlice};
 use ndarray::{Array1, Array2};
 
-/// Closed-form residual term of the exact Hessian-vector product (the piece the
-/// Gauss-Newton surrogate omits), for the documented two-atom layout with a
-/// single penalized pair `(0, 1)` of unit pairwise weight:
-///   res_j[a,o] = Σ_b C[a,b]·V_k[b,o];   res_k[b,o] = Σ_a C[a,b]·V_j[a,o]
-/// with `C[a,b] = Σ_o B_j[a,o]·B_k[b,o]`.
-fn residual_term(
-    target: &Array1<f64>,
-    v: &Array1<f64>,
-    m_j: usize,
-    m_k: usize,
-    p_out: usize,
-) -> Array1<f64> {
-    let off_j = 0usize;
-    let off_k = m_j * p_out;
-    let mut c = Array2::<f64>::zeros((m_j, m_k));
-    for a in 0..m_j {
-        for b in 0..m_k {
-            let mut s = 0.0;
-            for o in 0..p_out {
-                s += target[off_j + a * p_out + o] * target[off_k + b * p_out + o];
-            }
-            c[[a, b]] = s;
-        }
-    }
-    let mut out = Array1::<f64>::zeros(target.len());
-    for a in 0..m_j {
-        for o in 0..p_out {
-            let mut s = 0.0;
-            for b in 0..m_k {
-                s += c[[a, b]] * v[off_k + b * p_out + o];
-            }
-            out[off_j + a * p_out + o] = s;
-        }
-    }
-    for b in 0..m_k {
-        for o in 0..p_out {
-            let mut s = 0.0;
-            for a in 0..m_j {
-                s += c[[a, b]] * v[off_j + a * p_out + o];
-            }
-            out[off_k + b * p_out + o] = s;
-        }
-    }
-    out
-}
 
 fn build_penalty(m_j: usize, m_k: usize, p_out: usize) -> (DecoderIncoherencePenalty, Array1<f64>) {
     let block_sizes = vec![m_j, m_k];
@@ -112,6 +67,25 @@ fn lcg_vec(len: usize, seed: u64) -> Array1<f64> {
 
 #[test]
 fn majorizer_equals_exact_hvp_minus_residual_term() {
+    // WAS: `hvp - psd_majorizer_hvp` compared against a hand-written closed form
+    // `W*sum C*V`. That formula is the PRE-#2343 unnormalized penalty. `hvp_impl`
+    // now implements the degree-0 normalized quotient `0.5*w*E/(N_j*N_k)` and
+    // DIFFERENTIATES the normalizer, so the exact operator is
+    //
+    //   (Hv)_j = kappa[ DG_j - (a+b)G_j - (DE/Nj)Bj + (E/Nj)(2a+b)Bj - (E/Nj)Vj ]
+    //
+    // with `kappa = w_pair/(N_j*N_k)`. The hand-written residual has neither the
+    // `kappa` factor nor four of those terms, which is the measured 9.909e-1 gap
+    // against a 1e-12 bar -- a stale test, not a defect in the operators.
+    //
+    // Rewritten to verify the property that closed form was a proxy for, WITHOUT
+    // a formula that goes stale the next time the penalty is renormalized: the
+    // exact `hvp` must be the true Hessian-vector product of the analytic
+    // gradient. Both original purposes survive --
+    //   * "drops the residual from hvp" -> hvp stops matching the FD Hessian
+    //   * "leaks it into the majorizer" -> asserted below, majorizer != hvp
+    // and it is strictly stronger on the first: it checks the whole operator
+    // rather than one term of a decomposition.
     let (m_j, m_k, p_out) = (2usize, 3usize, 2usize);
     let (penalty, rho) = build_penalty(m_j, m_k, p_out);
     let total = (m_j + m_k) * p_out;
@@ -120,17 +94,46 @@ fn majorizer_equals_exact_hvp_minus_residual_term() {
         let v = lcg_vec(total, 101 + seed);
         let exact = penalty.hvp(target.view(), rho.view(), v.view());
         let gn = penalty.psd_majorizer_hvp(target.view(), rho.view(), v.view());
-        let res = residual_term(&target, &v, m_j, m_k, p_out);
-        let max_diff = exact
-            .iter()
-            .zip(gn.iter())
-            .zip(res.iter())
-            .map(|((e, g), r)| ((e - g) - r).abs())
-            .fold(0.0_f64, f64::max);
+
+        // Central difference of the analytic gradient along `v`. The step is
+        // chosen so truncation (order h^2 times the third derivative) and
+        // round-off (order eps/h) both sit far below the tolerance; the fixture
+        // is O(1) by construction (`lcg_vec`, unit weight, 2x2 coactivation).
+        let h = 1.0e-6_f64;
+        let mut plus = target.clone();
+        let mut minus = target.clone();
+        for i in 0..total {
+            plus[i] += h * v[i];
+            minus[i] -= h * v[i];
+        }
+        let g_plus = penalty.grad_target(plus.view(), rho.view());
+        let g_minus = penalty.grad_target(minus.view(), rho.view());
+
+        let mut worst = 0.0_f64;
+        let mut scale = 1.0_f64;
+        for i in 0..total {
+            let fd = (g_plus[i] - g_minus[i]) / (2.0 * h);
+            worst = worst.max((exact[i] - fd).abs());
+            scale = scale.max(fd.abs()).max(exact[i].abs());
+        }
         assert!(
-            max_diff < 1e-12,
-            "hvp - psd_majorizer_hvp must equal the dropped residual term exactly; \
-             max|(hvp-majorizer) - residual| = {max_diff:.3e} (seed {seed})"
+            worst <= 1.0e-5 * scale,
+            "exact hvp must equal the central-difference Hessian-vector product of \
+             the analytic gradient; max|hvp - FD| = {worst:.3e} (scale {scale:.3e}, \
+             h = {h:.1e}, seed {seed})"
+        );
+
+        // The majorizer must still be a DIFFERENT operator: the residual is
+        // dropped, not silently retained. Both paths returning Gauss-Newton was
+        // the original #810 bug this file exists for.
+        let mut gap = 0.0_f64;
+        for i in 0..total {
+            gap = gap.max((exact[i] - gn[i]).abs());
+        }
+        assert!(
+            gap > 1.0e-9,
+            "psd_majorizer_hvp must drop the residual term, so it cannot equal \
+             the exact hvp; max|hvp - majorizer| = {gap:.3e} (seed {seed})"
         );
     }
 }
