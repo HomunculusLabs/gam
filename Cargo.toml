@@ -63,10 +63,10 @@ members = [
 resolver = "3"
 
 [workspace.dependencies]
-# 0.8.1 includes the projected-Wolfe bound-kink repair and exact PSD
-# trust-region subproblem used by GAM. The exact registry version keeps
-# repository and published builds on the same optimizer surface.
-opt = "=0.8.1"
+# This exact optimizer revision includes the projected-Wolfe bound-kink
+# repair, exact PSD trust-region subproblem, and true Armijo recovery used by
+# GAM. Pinning the source commit makes the line-search semantics reproducible.
+opt = { version = "=0.8.1", git = "https://github.com/SauersML/opt.git", rev = "706f0c4c23a21c2e4e205358229fe061717b6410" }
 cudarc = { version = "0.19.8", default-features = false, features = ["std", "driver", "runtime", "nvrtc", "cublas", "cublaslt", "cusparse", "cusolver", "cusolvermg", "curand", "nvtx", "cupti", "fallback-dynamic-loading", "cuda-12000"] }
 
 [lints.rust]
