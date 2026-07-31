@@ -992,12 +992,28 @@ def _repeat_survival_curve(curve: np.ndarray, n_rows: int) -> np.ndarray:
     return np.asarray(_rust().repeat_survival_curve(_f64_list(curve), int(n_rows)), dtype=float)
 
 
-def survival_concordance(event_times: np.ndarray, risk_score: np.ndarray, events: np.ndarray) -> float:
-    return float(_rust().survival_concordance(_f64_list(event_times), _f64_list(risk_score), _f64_list(events)))
+def survival_concordance(
+    event_times: np.ndarray,
+    risk_score: np.ndarray,
+    events: np.ndarray,
+) -> float | None:
+    value = _rust().survival_concordance(
+        _f64_list(event_times),
+        _f64_list(risk_score),
+        _f64_list(events),
+    )
+    return None if value is None else float(value)
 
 
 def _survival_null_curve(train_times: np.ndarray, train_events: np.ndarray, grid: np.ndarray) -> np.ndarray:
-    return _survival_calibration().kaplan_meier_curve(train_times, train_events, grid)
+    return np.asarray(
+        _rust().survival_null_curve_from_train(
+            _f64_list(train_times),
+            _f64_list(train_events),
+            _f64_list(grid),
+        ),
+        dtype=float,
+    )
 
 
 def calibrated_survival_matrix(

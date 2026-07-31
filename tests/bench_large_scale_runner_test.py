@@ -358,8 +358,12 @@ class LargeScaleRunnerTests(unittest.TestCase):
         snapshots: dict[str, typing.Any] = {}
         orig_load_bin = _RUNNER.load_or_build_rust_binary
         orig_run_cmd = _RUNNER.run_cmd_stream
+        orig_survival_calibration = _RUNNER._survival_calibration
         try:
             _RUNNER.load_or_build_rust_binary = lambda: Path("/tmp/fake-gam")
+            _RUNNER._survival_calibration = lambda: self.fail(
+                "native Rust survival scoring must not import external calibration"
+            )
 
             def _fake_run_cmd(cmd: typing.Any, cwd: typing.Any = None) -> typing.Any:
                 self.assertIsNotNone(cwd)
@@ -399,6 +403,7 @@ class LargeScaleRunnerTests(unittest.TestCase):
         finally:
             _RUNNER.load_or_build_rust_binary = orig_load_bin
             _RUNNER.run_cmd_stream = orig_run_cmd
+            _RUNNER._survival_calibration = orig_survival_calibration
 
         self.assertIn("Surv(__entry, time, event)", snapshots["fit_formula"])
         self.assertIn(
@@ -406,6 +411,10 @@ class LargeScaleRunnerTests(unittest.TestCase):
             snapshots["fit_formula"],
         )
         self.assertIn("survival-likelihood=location-scale", result["model_spec"])
+        self.assertIsNone(
+            result["metrics"]["c_index"],
+            "a one-row holdout has no comparable survival pair",
+        )
         fit_rows = snapshots["fit_rows"]
         self.assertTrue(all(float(row["__entry"]) == 0.0 for row in fit_rows))
         self.assertEqual([float(row["time"]) for row in fit_rows], [4.0, 10.0])
