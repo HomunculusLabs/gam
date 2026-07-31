@@ -1464,6 +1464,17 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 eval_id,
                 scope: crate::custom_family::EvalScope::OuterDerivative,
             });
+            let cycle_budget_evidence = || {
+                let load_cap = |cap: &Option<Arc<AtomicUsize>>| {
+                    cap.as_ref().map(|value| value.load(Ordering::Relaxed))
+                };
+                format!(
+                    "inner cycle budget inputs: base={}, screening_cap={:?}, outer_cap={:?}",
+                    outer_options.inner_max_cycles,
+                    load_cap(&outer_options.screening_max_inner_iterations),
+                    load_cap(&outer_options.outer_inner_max_iterations),
+                )
+            };
             let selection = if let Some(value_selection) = owned_value_mode {
                 let froze = exact_mode_branch.borrow_mut().prepare(effective_mode);
                 if froze {
@@ -1482,7 +1493,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                     hyper_layout,
                     value_selection,
                     effective_mode,
-                )?
+                )
+                .map_err(|error| format!("{error}; {}", cycle_budget_evidence()))?
             } else {
                 let (froze, candidates) = exact_mode_branch
                     .borrow_mut()
@@ -1500,7 +1512,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                     hyper_layout,
                     &candidates,
                     effective_mode,
-                )?
+                )
+                .map_err(|error| format!("{error}; {}", cycle_budget_evidence()))?
             };
             exact_mode_branch
                 .borrow_mut()
