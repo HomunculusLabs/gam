@@ -13,7 +13,7 @@ import gamfit
 
 def test_fit_array_documented_defaults_reach_likelihood_spec() -> None:
     rng = np.random.default_rng(0)
-    x = rng.normal(size=(30, 1))
+    x = rng.normal(size=(80, 1))
     # fit_array now takes `formula` as a required positional; a single-column X
     # is exposed to the formula DSL as `x0`, and the response as `y`. The
     # requested likelihood family is forwarded into the fitted model and is
@@ -25,7 +25,12 @@ def test_fit_array_documented_defaults_reach_likelihood_spec() -> None:
         "fit_array should forward the documented Tweedie family into the fitted model"
     )
 
-    negbin_y = np.clip(np.round(np.exp(0.3 + 0.2 * x[:, 0])), 0, None)
+    negbin_mu = np.exp(0.3 + 0.2 * x[:, 0])
+    negbin_theta = 2.0
+    negbin_y = rng.negative_binomial(
+        negbin_theta,
+        negbin_theta / (negbin_theta + negbin_mu),
+    ).astype(np.float64)
     negbin = gamfit.fit_array(x, negbin_y, "y ~ x0", family="negbin")
     assert negbin.summary().family_name == "Negative-Binomial Log", (
         "fit_array should forward the Negative-Binomial family into the fitted model"
