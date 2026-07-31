@@ -242,6 +242,50 @@ pub(crate) fn custom_family_joint_jeffreys_term<F: CustomFamily + Clone + Send +
     Ok(Some(term))
 }
 
+/// Evaluate the accepted-mode Jeffreys triple directly from the exact Newton
+/// workspace that was built at that same beta.
+///
+/// The generic family route reconstructs an information source and its
+/// all-axes derivatives from `(family, states)`. After an accepted fused trial,
+/// however, the retained workspace already owns the authoritative current-beta
+/// row cache and Hessian. Using it avoids a second cache/Hessian construction
+/// and lets row-kernel workspaces dispatch their build-once all-axes hook.
+/// `None` is a typed capability result: the caller may use the family route
+/// only when the concrete workspace does not expose a batched derivative.
+pub(crate) fn custom_family_joint_jeffreys_term_from_workspace(
+    workspace: &dyn ExactNewtonJointHessianWorkspace,
+    total_p: usize,
+    z_joint: &Array2<f64>,
+) -> Result<Option<(f64, Array1<f64>, Array2<f64>)>, String> {
+    if total_p == 0 || z_joint.ncols() == 0 {
+        return Ok(None);
+    }
+    let Some(h_joint) = workspace.hessian_dense_forced()? else {
+        return Ok(None);
+    };
+    if h_joint.dim() != (total_p, total_p) {
+        return Err(format!(
+            "accepted workspace Jeffreys Hessian shape {:?}, expected ({total_p}, {total_p})",
+            h_joint.dim(),
+        ));
+    }
+    let Some(directional_derivatives) = workspace.directional_derivative_all_axes()? else {
+        return Ok(None);
+    };
+    if directional_derivatives.len() != total_p {
+        return Err(format!(
+            "accepted workspace Jeffreys derivative count {}, expected {total_p}",
+            directional_derivatives.len(),
+        ));
+    }
+    gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_term_batched(
+        h_joint.view(),
+        z_joint.view(),
+        || Ok(Some(directional_derivatives)),
+    )
+    .map(Some)
+}
+
 pub(crate) const JEFFREYS_REDUCED_INFO_RELATIVE_FLOOR: f64 = 1e-10;
 
 pub(crate) const JEFFREYS_REDUCED_INFO_ABSOLUTE_FLOOR: f64 = 1e-12;
