@@ -23,7 +23,7 @@
 use super::tests::{deterministic_circle_noise, global_ev};
 use super::*;
 use crate::basis::{PeriodicHarmonicEvaluator, SaeBasisSecondJet};
-use gam_linalg::faer_ndarray::{FaerCholesky, fast_atb};
+use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh, fast_atb};
 use gam_solve::rho_optimizer::{OuterEval, OuterEvalOrder, OuterObjective, OuterProblem};
 use ndarray::{Array1, Array2, ArrayView2, array, s};
 use std::sync::Arc;
@@ -2299,6 +2299,377 @@ fn zz_measure_k2_wide_p_residual_block_split_2080() {
             beta_sq.sqrt(),
             share(beta_sq),
             sys.k,
+        );
+    }
+}
+
+
+/// PROBE (#2080 Class-B localizer, β-step annihilation). Does the arrow/Schur
+/// REDUCTION use the β curvature it is handed?
+///
+/// The block-split probe above localizes the plateau residual: at the 128-iterate
+/// plateau on the `96×96, K=2` wide-`p` rung, 99.89% of `‖g‖` sits in the β
+/// (decoder border) block, bit-stable across a 4× iteration increase, while the
+/// objective still descends and the solver's step is nearly orthogonal to `g`
+/// (`cos ≈ 2.4e-3`). At FROZEN `t` the decoder enters the objective
+/// QUADRATICALLY — least-squares reconstruction plus a quadratic smoothness
+/// penalty — so the exact β-block Newton step must zero `g_β` outright, and
+/// `H_ββ` (`effective_penalty_op`) has been verified to carry BOTH the data-fit
+/// Gauss-Newton term and the smoothness penalty. So the curvature is present;
+/// the open question is whether the step USES it.
+///
+/// This compares the β component of the SOLVER's actual Newton step `Δ_β`
+/// against `δ_block = −H_ββ⁻¹ g_β`, the step that solves the β subproblem alone
+/// at frozen `t`. The decisive number is `‖Δ_β‖ / ‖δ_block‖`, pre-registered:
+///
+/// * ratio `≈ 1` — the reduction transmits the β step at roughly full length, so
+///   the β block IS being solved and the live mechanism is (i): `H_ββ` is not the
+///   true β curvature (an analytic penalty writing gradient but no curvature),
+///   and the plateau is a curvature-content defect, not a reduction defect.
+/// * ratio `≈ 0` — the reduction ANNIHILATES the β step even though `H_ββ` is
+///   right: mechanism (ii), the arrow/Schur back-substitution or its β
+///   deflation/pinning is discarding the border increment. That would make the
+///   plateau structural in the reduction, not in the assembled curvature.
+/// * anything else (ratio `O(1)` but not `≈ 1`, or a ratio near 1 with `cos ≈ 0`)
+///   — a THIRD outcome: the reduction produces a β step of comparable size in a
+///   DIFFERENT direction, i.e. the coupling through `H_tβ` is redirecting the
+///   border increment rather than dropping it. The reported cosine separates
+///   this from the first two: only the first outcome should show both ratio and
+///   cosine near one.
+///
+/// One structural fact sharpens the first outcome, and it is worth stating
+/// because it costs nothing to have: this probe passes `analytic_penalties =
+/// None` to BOTH the warmup fit and the reassembly, exactly as the block-split
+/// probe above did when it measured the 99.89% share. So the system under
+/// measurement carries only the data-fit Gauss-Newton term and the quadratic
+/// smoothness/ARD priors — and for a LINEAR decoder at frozen `t` every one of
+/// those is exactly quadratic in β, which makes Gauss-Newton the exact Hessian
+/// rather than a majorizer. `H_ββ` here is therefore the true β curvature by
+/// construction, not by assumption. That EXCLUDES the whole
+/// gradient-written-but-curvature-skipped family (the `dense_beta_curvature`
+/// early returns, of which the isometry β pullback is the sharpest) as the
+/// mechanism for THIS fixture: none of those penalties is present to write a
+/// gradient. If the plateau still reproduces here — and the block split says it
+/// does — then outcome (i) is already refuted for this fixture and the reduction
+/// is where the remaining explanation has to live.
+///
+/// Diagnostic only. It asserts nothing about the ratio — only that the block
+/// solve is its own solution (`‖H_ββ·δ_block + g_β‖ / ‖g_β‖ ≈ 0`), so a bad
+/// linear solve cannot be misread as a finding. A non-PD `H_ββ` is REPORTED
+/// rather than panicked on and rather than silently ridged: a non-PD β block at
+/// the plateau would itself be the finding, and a ridge would fabricate the
+/// answer the probe exists to measure.
+#[test]
+fn zz_measure_k2_wide_p_beta_step_is_annihilated_2080() {
+    let z = two_circle_wide_target(96, 96, 0.03);
+    let (base, seed_dispersion) = two_circle_periodic_term(z.view(), 2, 2);
+    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+    let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 2])
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .expect("seed dispersion is finite and strictly positive");
+
+    for &warmup in &[32usize, 128] {
+        let mut term = base.clone();
+        let mut rho_fixed = rho.clone();
+        term.run_joint_fit_arrow_schur_for_quasi_laplace(
+            z.view(),
+            &mut rho_fixed,
+            None,
+            warmup,
+            0.04,
+            1.0e-6,
+            1.0e-6,
+        )
+        .expect("inner evidence fit must not hard-error on the K=2 wide-p rung");
+        let sys = term
+            .assemble_arrow_schur(z.view(), &rho_fixed, None)
+            .expect("reassemble at the warmed iterate");
+        if sys.k == 0 {
+            eprintln!("[2080-BSTEP] warmup={warmup:>4}: k=0, there is no β border to measure");
+            continue;
+        }
+
+        // The β curvature the SYSTEM carries, exactly as the reduction sees it:
+        // the installed penalty operator when there is one, the assembled `hbb`
+        // otherwise. `k` is 40 at the plateau, so densifying is free here.
+        let hbb = sys.effective_penalty_op().to_dense();
+        let g_beta_norm = sys.gb.iter().map(|&v| v * v).sum::<f64>().sqrt();
+
+        // `δ_block = −H_ββ⁻¹ g_β`. The Newton RHS convention is the system's own
+        // (`rhs_beta = −sys.gb`, arrow_schur/newton_step.rs), so this is the same
+        // sign the solver's β increment carries and the two are comparable
+        // without a flip. A refused factorization is a READING, not a panic.
+        let factor = match hbb.cholesky(faer::Side::Lower) {
+            Ok(factor) => factor,
+            Err(error) => {
+                eprintln!(
+                    "[2080-BSTEP] warmup={warmup:>4}: hbb is not positive definite at pivot i \
+                     (dense Cholesky refused: {error:?}); k={} ‖g_β‖={g_beta_norm:.6e} — a \
+                     non-PD β block at the plateau is itself the finding, so no ridge is applied \
+                     and no block step is reported",
+                    sys.k,
+                );
+                continue;
+            }
+        };
+        let delta_block = factor.solvevec(&sys.gb.mapv(|value| -value));
+
+        // The residual the block step leaves. This is the probe's own self-check:
+        // it must be ~0 or nothing below describes the β subproblem.
+        let block_residual = hbb.dot(&delta_block) + &sys.gb;
+        let block_residual_rel = block_residual.iter().map(|&v| v * v).sum::<f64>().sqrt()
+            / g_beta_norm.max(f64::MIN_POSITIVE);
+
+        // The SOLVER's step, through the SAME entry point and the SAME options
+        // the criterion's undamped evidence lane uses
+        // (construction_quasi_laplace.rs:339 / :974). The β increment is returned
+        // as its own array, so there is no layout slicing to get wrong.
+        let options = ArrowSolveOptions::direct()
+            .with_gpu_policy(term.gpu_policy)
+            .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
+            .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+        let (_delta_t, delta_beta, _cache) =
+            solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options)
+                .expect("the production inner step must solve at the warmed K=2 wide-p iterate");
+
+        let block_norm = delta_block.iter().map(|&v| v * v).sum::<f64>().sqrt();
+        let solver_norm = delta_beta.iter().map(|&v| v * v).sum::<f64>().sqrt();
+        let ratio = solver_norm / block_norm.max(f64::MIN_POSITIVE);
+        let cosine =
+            delta_beta.dot(&delta_block) / (solver_norm * block_norm).max(f64::MIN_POSITIVE);
+        // `−½ g_β·δ_block = ½ g_β' H_ββ⁻¹ g_β`: the decrease the β subproblem alone
+        // would buy at frozen `t`, which is what the plateau is failing to collect.
+        let predicted_decrease = -0.5 * sys.gb.dot(&delta_block);
+
+        assert!(
+            block_residual_rel <= 1.0e-6,
+            "[2080-BSTEP] warmup={warmup}: the β block solve does not solve its own system \
+             (‖H_ββ·δ_block + g_β‖/‖g_β‖ = {block_residual_rel:.3e}), so the ratio below would \
+             be measuring a bad solve rather than the reduction. The bar is 1e-6 rather than \
+             machine precision because a backward-stable Cholesky bounds the residual by \
+             `‖H‖‖δ‖·eps`, and `‖H‖‖δ‖ ≈ κ·‖g‖` — so this ratio scales as `κ·eps`, and the \
+             plateau's inner conditioning is already measured at `κ ≈ 7e4` (which predicts \
+             ~1e-11). Anything at 1e-6 is a broken solve, not conditioning; the value is \
+             printed on every reading either way so the scaling stays visible"
+        );
+        eprintln!(
+            "[2080-BSTEP] warmup={warmup:>4} k={} ‖g_β‖={g_beta_norm:.6e} | block \
+             ‖δ_block‖={block_norm:.6e} predicted_decrease={predicted_decrease:.6e} | solver \
+             ‖Δ_β‖={solver_norm:.6e} | ratio={ratio:.6e} cos={cosine:+.6e} | \
+             block_solve_rel_residual={block_residual_rel:.3e}",
+            sys.k,
+        );
+    }
+}
+
+/// PROBE (#2080 Class-B localizer, reduced-Schur PD floor). Is the plateau
+/// residual sitting in directions the solver has CLAMPED?
+///
+/// `solve_dense_reduced_system` (gam-solve `arrow_schur/reduced_solve.rs`) has an
+/// ill-conditioned-but-PD branch: when the reduced Schur's κ estimate exceeds
+/// `safe_spd_kappa_max`, it calls `spectral_pd_floored_schur(schur, 1e-8)`, which
+/// eigendecomposes `S` and clamps every eigenvalue UP to `floor = 1e-8·λ_max`
+/// before solving. Its stated justification is a claim about the DATA, made at a
+/// site that only sees the spectrum:
+///
+/// > on the dead subspace the correct Δβ IS ≈0 (those atoms have no signal), so
+/// > the only "inaccuracy" is in directions whose true step is zero
+///
+/// That holds for a genuinely dead over-complete atom (`β_k → 0`, no gradient
+/// either), which is the #1026 case it was written for. It does NOT hold for a
+/// direction with SMALL curvature and a REAL gradient — and this thread has
+/// already identified exactly such a direction: decoder redistribution leaves
+/// the reconstruction exactly invariant (so the data-fit Gauss-Newton term
+/// contributes no curvature) while the smoothness penalty is not invariant along
+/// it (so the objective genuinely descends there, slowly and forever). For such
+/// a direction the true Newton step is `g_i/λ_i`, which is LARGE, and clamping
+/// `λ_i` up to `floor` shortens it by `λ_i/floor` — after which the residual can
+/// never clear and is bit-stable, because the same clamp fires identically on
+/// every iteration.
+///
+/// This probe rebuilds `S = H_ββ − Σ_i H_tβ^(i)ᵀ (H_tt^(i))⁻¹ H_tβ^(i)` from the
+/// system's own public blocks (`ridge_β = 0`, matching the criterion lane's
+/// `solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, …)`), eigendecomposes
+/// it, and reports where `g_β` lives relative to the floor. Pre-registered:
+///
+/// * most of `‖g_β‖²` in sub-floor directions, with a large shortening factor —
+///   the PD floor IS the plateau. The solver declares those directions dead
+///   while the acceptance gate goes on measuring the residual in them, and that
+///   disagreement is the defect: a direction cannot be both too dead to solve
+///   and live enough to refuse on.
+/// * energy concentrated in healthy (`λ ≫ floor`) directions — the clamp is
+///   innocent, the reduction transmits the step it should, and the explanation
+///   has to move back to the assembled curvature or the `H_tβ` coupling.
+/// * NO eigenvalue below the floor at all — the floored branch never fires here,
+///   the hypothesis is refuted outright, and `κ(S)` is not the story. This third
+///   outcome is the one worth naming explicitly: the branch is κ-gated, so it is
+///   entirely possible this fixture never enters it, in which case every number
+///   below describes a code path the fixture does not take.
+///
+/// Diagnostic only. The assertions are self-checks — that the rebuilt `S` is
+/// symmetric and that its eigendecomposition reconstructs it — so a bad rebuild
+/// cannot be read as a finding. A non-PD `H_tt` row block or a zero-width
+/// `htbeta` slab (which would mean the dense cross-block is not populated on
+/// this route, and the rebuild is therefore not the solver's `S`) is REPORTED
+/// and the reading abandoned, never patched around.
+#[test]
+fn zz_measure_k2_wide_p_schur_floor_clamps_the_residual_2080() {
+    let z = two_circle_wide_target(96, 96, 0.03);
+    let (base, seed_dispersion) = two_circle_periodic_term(z.view(), 2, 2);
+    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+    let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 2])
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .expect("seed dispersion is finite and strictly positive");
+
+    for &warmup in &[32usize, 128] {
+        let mut term = base.clone();
+        let mut rho_fixed = rho.clone();
+        term.run_joint_fit_arrow_schur_for_quasi_laplace(
+            z.view(),
+            &mut rho_fixed,
+            None,
+            warmup,
+            0.04,
+            1.0e-6,
+            1.0e-6,
+        )
+        .expect("inner evidence fit must not hard-error on the K=2 wide-p rung");
+        let sys = term
+            .assemble_arrow_schur(z.view(), &rho_fixed, None)
+            .expect("reassemble at the warmed iterate");
+        let k = sys.k;
+        if k == 0 {
+            eprintln!("[2080-FLOOR] warmup={warmup:>4}: k=0, there is no β border to measure");
+            continue;
+        }
+
+        // `S = H_ββ − Σ_i H_tβ^(i)ᵀ (H_tt^(i))⁻¹ H_tβ^(i)`, rebuilt from the same
+        // blocks the reduction consumes. Anything that would make this NOT the
+        // solver's `S` is reported and abandons the reading.
+        let mut schur = sys.effective_penalty_op().to_dense();
+        let mut rebuild_refused: Option<String> = None;
+        for (row_idx, row) in sys.rows.iter().enumerate() {
+            if row.htbeta.ncols() != k {
+                rebuild_refused = Some(format!(
+                    "row {row_idx} carries a {}-column htbeta slab against a border of {k}; the \
+                     dense cross-block is not populated on this route, so a rebuild here would \
+                     not be the solver's S",
+                    row.htbeta.ncols(),
+                ));
+                break;
+            }
+            if row.htbeta.nrows() == 0 {
+                continue;
+            }
+            let factor = match row.htt.cholesky(faer::Side::Lower) {
+                Ok(factor) => factor,
+                Err(error) => {
+                    rebuild_refused = Some(format!(
+                        "row {row_idx} H_tt is not positive definite ({error:?}); a non-PD row \
+                         block at the plateau is itself the finding"
+                    ));
+                    break;
+                }
+            };
+            // `X = H_tt⁻¹ H_tβ`, then `S -= H_tβᵀ X`.
+            let mut solved = row.htbeta.clone();
+            factor.solve_mat_in_place(&mut solved);
+            let correction = fast_atb(&row.htbeta, &solved);
+            schur = schur - correction;
+        }
+        if let Some(reason) = rebuild_refused {
+            eprintln!("[2080-FLOOR] warmup={warmup:>4}: reduced-Schur rebuild abandoned: {reason}");
+            continue;
+        }
+
+        // Self-check 1: the rebuilt S must be symmetric, or the eigendecomposition
+        // below is describing a different operator than the reduction factors.
+        let mut asymmetry = 0.0_f64;
+        let mut magnitude = 0.0_f64;
+        for i in 0..k {
+            for j in 0..k {
+                asymmetry = asymmetry.max((schur[[i, j]] - schur[[j, i]]).abs());
+                magnitude = magnitude.max(schur[[i, j]].abs());
+            }
+        }
+        let asymmetry_rel = asymmetry / magnitude.max(f64::MIN_POSITIVE);
+        assert!(
+            asymmetry_rel <= 1.0e-9,
+            "[2080-FLOOR] warmup={warmup}: the rebuilt reduced Schur is not symmetric \
+             (max|S−Sᵀ|/max|S| = {asymmetry_rel:.3e}), so it is not the operator the reduction \
+             eigendecomposes and nothing below describes the solver"
+        );
+
+        let (evals, evecs) = schur
+            .eigh(faer::Side::Lower)
+            .expect("a symmetric finite reduced Schur must eigendecompose");
+        // Self-check 2: `V diag(λ) Vᵀ` must reconstruct `S`, so a mis-oriented
+        // eigenvector matrix cannot be read as a residual living in the wrong
+        // subspace — the entire finding is a projection onto these columns.
+        let mut scaled = evecs.clone();
+        for col in 0..k {
+            let lambda = evals[col];
+            for entry in scaled.column_mut(col) {
+                *entry *= lambda;
+            }
+        }
+        // `fast_atb(a, b) = aᵀb`, so passing `Vᵀ` and `(VΛ)ᵀ` yields `V (VΛ)ᵀ = V Λ Vᵀ`.
+        let evecs_t = evecs.t().to_owned();
+        let scaled_t = scaled.t().to_owned();
+        let reconstructed = fast_atb(&evecs_t, &scaled_t);
+        let mut reconstruction_gap = 0.0_f64;
+        for i in 0..k {
+            for j in 0..k {
+                let gap = (reconstructed[[i, j]] - schur[[i, j]]).abs();
+                reconstruction_gap = reconstruction_gap.max(gap);
+            }
+        }
+        let reconstruction_rel = reconstruction_gap / magnitude.max(f64::MIN_POSITIVE);
+        assert!(
+            reconstruction_rel <= 1.0e-9,
+            "[2080-FLOOR] warmup={warmup}: the eigendecomposition does not reconstruct the \
+             rebuilt Schur (max|VΛVᵀ − S|/max|S| = {reconstruction_rel:.3e}); the projection of \
+             g_β onto these columns would be meaningless"
+        );
+
+        // The floor the solver would apply, and where `g_β` actually lives.
+        let lambda_max = evals.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+        let lambda_min = evals.iter().fold(f64::INFINITY, |acc, &v| acc.min(v));
+        let floor = gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR * lambda_max;
+        let projected = evecs.t().dot(&sys.gb);
+        let total_energy = projected.iter().map(|&v| v * v).sum::<f64>();
+        let mut floored_count = 0usize;
+        let mut floored_energy = 0.0_f64;
+        // The worst shortening the clamp imposes on a direction that actually
+        // carries gradient: `|g_i|/λ_i` (true) against `|g_i|/floor` (clamped),
+        // i.e. `floor/λ_i`, weighted by whether `g_i` is there at all.
+        let mut worst_shortening = 1.0_f64;
+        let mut worst_shortening_energy_share = 0.0_f64;
+        for idx in 0..k {
+            let lambda = evals[idx];
+            if lambda.is_finite() && lambda >= floor {
+                continue;
+            }
+            floored_count += 1;
+            let energy = projected[idx] * projected[idx];
+            floored_energy += energy;
+            if lambda.is_finite() && lambda > 0.0 {
+                let shortening = floor / lambda;
+                if shortening > worst_shortening {
+                    worst_shortening = shortening;
+                    worst_shortening_energy_share = energy / total_energy.max(f64::MIN_POSITIVE);
+                }
+            }
+        }
+        let floored_share = 100.0 * floored_energy / total_energy.max(f64::MIN_POSITIVE);
+        eprintln!(
+            "[2080-FLOOR] warmup={warmup:>4} k={k} kappa={:.6e} | lambda_max={lambda_max:.6e} \
+             lambda_min={lambda_min:.6e} floor={floor:.6e} | floored={floored_count}/{k} \
+             carrying {floored_share:.2}% of ‖g_β‖² | worst_shortening={worst_shortening:.6e} \
+             (that direction holds {:.2}% of ‖g_β‖²) | sym_rel={asymmetry_rel:.3e} \
+             recon_rel={reconstruction_rel:.3e}",
+            lambda_max / lambda_min.abs().max(f64::MIN_POSITIVE),
+            100.0 * worst_shortening_energy_share,
         );
     }
 }

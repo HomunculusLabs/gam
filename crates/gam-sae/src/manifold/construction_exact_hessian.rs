@@ -3348,8 +3348,25 @@ impl SaeManifoldTerm {
         // must be A-based; `exact_a_logdet_route` suppressed the B-majorizer
         // producers above precisely so this is the only assembly that ran.
         // Explicit / occam / rank-charge-direct channels are majorizer-
-        // independent and were produced on both routes. The matrix-free / bundle
-        // route keeps ½log|B| until Phase-2b (streaming signed-LDLᵀ A-factor).
+        // independent and were produced on both routes.
+        //
+        // ⚠ THE MATRIX-FREE / BUNDLE ROUTE STILL DIFFERENTIATES ½log|B| HERE, BUT
+        // NOT FOR THE REASON THIS COMMENT USED TO GIVE. It said "until Phase-2b
+        // (streaming signed-LDLᵀ A-factor)", which now sends the reader looking
+        // for work that has already landed: #2509 Phase-2b (`5563a2a18`) moved
+        // BOTH branches of `streaming_exact_arrow_log_det_with_lane_and_system`
+        // onto the exact observed information, so every production VALUE route
+        // prices ½log|A| today — the same correction the route-coherence guard
+        // above carries for its own premise. What keeps these routes on `B` is
+        // that `exact_a_logdet_route` is false whenever a bundle or a
+        // matrix-free system is present, so the trace and θ-adjoint channels
+        // are still built from the majorizer while the value is not. That
+        // A-priced-value / B-differentiated-gradient cell is #2515's open half,
+        // measured on its fixture as `logdet_trace` gaps of `1.231477e-1`
+        // (smooth atom 0) and `5.052577e-2` (ARD). #2333 — routing this
+        // θ-adjoint through the Trace row-jet seam on A's selected inverse —
+        // is downstream of that, not of a missing Phase-2b.
+        //
         // Exactly one arm produces Γ, so the two majorizers cannot both be paid
         // for on one gradient.
         let (gamma, dense_stationarity_adjoint) = match majorizer_gamma {
