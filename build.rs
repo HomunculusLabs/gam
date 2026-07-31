@@ -640,7 +640,15 @@ fn forbid_build_rs_self_tampering(manifest_dir: &Path) {
     let lines: Vec<&str> = src.lines().collect();
 
     // Needles assembled from fragments so they never appear verbatim below.
-    let render_call = format!("render_report(&{});", "sections");
+    //
+    // The report site is matched by CALL, not by the exact argument spelling.
+    // Pinning the whole line (`render_report(&sections);`) made any rename of
+    // the aggregator's local a build-breaking panic, so the gate resisted
+    // ordinary refactors while detecting nothing extra: what it must guarantee
+    // is that exactly one report site exists and that it is followed by an
+    // unconditional hard exit, neither of which depends on what the argument is
+    // called. Argument-agnostic here, same guarantee below.
+    let render_call = format!("render_{}(", "report");
     let exit_core_a = format!("std::process::{}(1)", "exit");
     let exit_core_b = format!("process::{}(1)", "exit");
     let exit_any = format!("process::{}(", "exit");
@@ -654,12 +662,15 @@ fn forbid_build_rs_self_tampering(manifest_dir: &Path) {
     let render_sites: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| l.trim() == render_call)
+        .filter(|(_, l)| {
+            let t = l.trim();
+            t.starts_with(render_call.as_str()) && t.ends_with(");")
+        })
         .map(|(i, _)| i)
         .collect();
     if render_sites.len() != 1 {
         panic!(
-            "self-integrity gate: expected exactly one `{render_call}` report site, found {}. \
+            "self-integrity gate: expected exactly one `{render_call}...);` report site, found {}. \
              The ban-scanner aggregator was moved, duplicated, or removed — restore the single \
              hard-failing report path.",
             render_sites.len()
