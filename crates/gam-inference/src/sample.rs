@@ -40,10 +40,7 @@ use gam_models::survival::royston_parmar::{self, RoystonParmarInputs};
 use gam_models::survival::{
     PenaltyBlock, PenaltyBlocks, SurvivalMonotonicityPenalty, SurvivalSpec,
 };
-use gam_models::wiggle::{
-    append_selected_wiggle_function_penalties, buildwiggle_block_input_from_knots,
-    split_wiggle_penalty_orders,
-};
+use gam_models::wiggle::{buildwiggle_block_input_from_orders, split_wiggle_penalty_orders};
 use gam_problem::types::{LikelihoodSpec, ResponseFamily};
 use gam_runtime::resource::{MemoryGovernor, ResourcePolicy, rows_for_target_bytes};
 use gam_solve::estimate::validate_all_finite;
@@ -1383,18 +1380,19 @@ fn sample_survival(
         }
         let (primary_order, extra_orders) =
             split_wiggle_penalty_orders(2, &wiggle_cfg.penalty_orders)?;
-        let mut block = buildwiggle_block_input_from_knots(
+        let mut derivative_orders = Vec::with_capacity(1 + extra_orders.len());
+        derivative_orders.push(primary_order);
+        derivative_orders.extend(extra_orders);
+        // One assembly for the WHOLE order list (gam#2647): the gauge-closure
+        // coordinate is decided from what the assembled set collectively leaves
+        // unpenalized, so a primary-then-append reconstruction here would not
+        // reproduce the penalty topology the fit used.
+        let block = buildwiggle_block_input_from_orders(
             seed.view(),
             &wiggle_knots,
             wiggle_degree,
-            primary_order,
+            &derivative_orders,
             wiggle_cfg.double_penalty,
-        )?;
-        append_selected_wiggle_function_penalties(
-            &mut block,
-            &wiggle_knots,
-            wiggle_degree,
-            &extra_orders,
         )
         .map_err(|e| format!("baseline-timewiggle penalty reconstruction failed: {e}"))?;
         for (widx, s) in block.penalties.iter().enumerate() {

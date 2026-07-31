@@ -272,12 +272,21 @@ fn build_saved_cause_specific_survival_alo_input(
         let degree = model.baseline_timewiggle_degree.ok_or_else(|| {
             "saved survival ALO timewiggle coefficients are missing their degree".to_string()
         })?;
-        let entry =
-            buildwiggle_block_input_from_knots(eta_offset_entry.view(), &knots, degree, 2, false)?
-                .design;
-        let exit =
-            buildwiggle_block_input_from_knots(eta_offset_exit.view(), &knots, degree, 2, false)?
-                .design;
+        // Value basis only: the penalty set this used to assemble was discarded
+        // on the same line, and since gam#2647 it also costs a function Gram
+        // plus a generalized eigendecomposition.
+        let entry = DesignMatrix::from(monotone_wiggle_basis_with_derivative_order(
+            eta_offset_entry.view(),
+            &knots,
+            degree,
+            0,
+        )?);
+        let exit = DesignMatrix::from(monotone_wiggle_basis_with_derivative_order(
+            eta_offset_exit.view(),
+            &knots,
+            degree,
+            0,
+        )?);
         let derivative = DesignMatrix::from(build_survival_timewiggle_derivative_design(
             &eta_offset_exit,
             &derivative_offset_exit,

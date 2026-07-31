@@ -16,11 +16,7 @@ use crate::survival::location_scale::{
 };
 use crate::survival::lognormal_kernel::HazardLoading;
 use crate::survival::marginal_slope::DEFAULT_SURVIVAL_MARGINAL_SLOPE_DERIVATIVE_GUARD;
-use crate::wiggle::{
-    WiggleBlockConfig, append_selected_wiggle_function_penalties,
-    buildwiggle_block_input_from_seed, monotone_wiggle_basis_with_derivative_order,
-    split_wiggle_penalty_orders,
-};
+use crate::wiggle::{monotone_wiggle_basis_with_derivative_order, split_wiggle_penalty_orders};
 use gam_linalg::matrix::{
     DenseDesignMatrix, DesignMatrix, SparseDesignMatrix, symmetrize_in_place,
 };
@@ -3965,18 +3961,23 @@ pub fn build_survival_timewiggle_from_baseline(
     // function-space roughness so the fitted penalty system matches the public
     // formula exactly, including the slope (`order = 1`) case.
     let (primary_order, extra_orders) = split_wiggle_penalty_orders(2, &cfg.penalty_orders)?;
-    let wiggle_cfg = WiggleBlockConfig {
-        degree: cfg.degree,
-        num_internal_knots: cfg.num_internal_knots,
-        penalty_order: primary_order,
-        double_penalty: cfg.double_penalty,
-    };
-    let (mut combined_block, knots) = buildwiggle_block_input_from_seed(seed.view(), &wiggle_cfg)?;
-    append_selected_wiggle_function_penalties(
-        &mut combined_block,
+    let mut derivative_orders = Vec::with_capacity(1 + extra_orders.len());
+    derivative_orders.push(primary_order);
+    derivative_orders.extend(extra_orders);
+    let knots = crate::wiggle::initializewiggle_knots_from_seed(
+        seed.view(),
+        cfg.degree,
+        cfg.num_internal_knots,
+    )?;
+    // One assembly for the WHOLE order list (gam#2647). The gauge-closure
+    // coordinate is a property of the assembled set, so building the primary
+    // order and appending the rest would decide it on a partial set.
+    let combined_block = crate::wiggle::buildwiggle_block_input_from_orders(
+        seed.view(),
         &knots,
         cfg.degree,
-        &extra_orders,
+        &derivative_orders,
+        cfg.double_penalty,
     )?;
     let ncols = combined_block.design.ncols();
     Ok(SurvivalTimeWiggleBuild {

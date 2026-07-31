@@ -119,7 +119,7 @@ pub(crate) use gam::families::survival::{
     survival_likelihood_modename, survival_marginal_slope_offset_baseline_config,
 };
 
-pub(crate) use gam::families::wiggle::buildwiggle_block_input_from_knots;
+pub(crate) use gam::families::wiggle::monotone_wiggle_basis_with_derivative_order;
 
 pub(crate) use gam::families::survival::location_scale::{
     SurvivalCovariateTermBlockTemplate, SurvivalLocationScalePredictInput,

@@ -33,7 +33,7 @@ use crate::survival::construction::{
 use crate::survival::latent::fixed_latent_hazard_frailty;
 use crate::survival::lognormal_kernel::FrailtySpec;
 use crate::survival::{CompetingRisksCifResult, assemble_competing_risks_cif_from_endpoints};
-use crate::wiggle::buildwiggle_block_input_from_knots;
+use crate::wiggle::monotone_wiggle_basis_with_derivative_order;
 use gam_linalg::matrix::DesignMatrix;
 use gam_problem::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use gam_solve::mixture_link::inverse_link_jet_for_inverse_link;
@@ -3085,22 +3085,16 @@ fn evaluate_marginal_slope_row(
         let beta_w = beta_time.slice(s![p_time_base..]).to_owned();
         let eta_exit_row = Array1::from_elem(1, q_exit_base);
         let deriv_row = Array1::from_elem(1, qd_exit_base);
-        let exit_design = match buildwiggle_block_input_from_knots(
+        // Only the VALUE basis is wanted here. Going through
+        // `buildwiggle_block_input_from_knots` also assembled the penalty set —
+        // discarded one line later — which since gam#2647 additionally costs a
+        // function Gram and a generalized eigendecomposition per predicted row.
+        let exit_design = monotone_wiggle_basis_with_derivative_order(
             eta_exit_row.view(),
             &knots,
             runtime.degree,
-            2,
-            false,
-        )?
-        .design
-        {
-            DesignMatrix::Dense(m) => m.to_dense_arc().as_ref().clone(),
-            _ => {
-                return Err(SurvivalPredictError::IncompatibleSchema {
-                    reason: "saved baseline-timewiggle exit design must be dense".to_string(),
-                });
-            }
-        };
+            0,
+        )?;
         let derivative_design = build_survival_timewiggle_derivative_design(
             &eta_exit_row,
             &deriv_row,
@@ -3330,22 +3324,12 @@ fn evaluate_rp_row_with_beta(
         let beta_w = beta.slice(s![p_time..p_time + p_timewiggle]).to_owned();
         let eta_exit_row = Array1::from_elem(1, eta_time_offset_row);
         let derivative_exit_row = Array1::from_elem(1, derivative_time_offset_row);
-        let exit_design = match buildwiggle_block_input_from_knots(
+        let exit_design = monotone_wiggle_basis_with_derivative_order(
             eta_exit_row.view(),
             &knots,
             runtime.degree,
-            2,
-            false,
-        )?
-        .design
-        {
-            DesignMatrix::Dense(m) => m.to_dense_arc().as_ref().clone(),
-            _ => {
-                return Err(SurvivalPredictError::IncompatibleSchema {
-                    reason: "saved baseline-timewiggle exit design must be dense".to_string(),
-                });
-            }
-        };
+            0,
+        )?;
         if exit_design.ncols() != p_timewiggle {
             return Err(SurvivalPredictError::IncompatibleSchema {
                 reason: format!(
@@ -4505,38 +4489,10 @@ pub fn saved_baseline_timewiggle_components(
                 ..
             } = runtime;
             let knots = Array1::from_vec(knots);
-            let entry = match buildwiggle_block_input_from_knots(
-                eta_entry.view(),
-                &knots,
-                degree,
-                2,
-                false,
-            )?
-            .design
-            {
-                DesignMatrix::Dense(m) => m.to_dense_arc().as_ref().clone(),
-                _ => {
-                    return Err(SurvivalPredictError::IncompatibleSchema {
-                        reason: "saved baseline-timewiggle entry design must be dense".to_string(),
-                    });
-                }
-            };
-            let exit = match buildwiggle_block_input_from_knots(
-                eta_exit.view(),
-                &knots,
-                degree,
-                2,
-                false,
-            )?
-            .design
-            {
-                DesignMatrix::Dense(m) => m.to_dense_arc().as_ref().clone(),
-                _ => {
-                    return Err(SurvivalPredictError::IncompatibleSchema {
-                        reason: "saved baseline-timewiggle exit design must be dense".to_string(),
-                    });
-                }
-            };
+            let entry =
+                monotone_wiggle_basis_with_derivative_order(eta_entry.view(), &knots, degree, 0)?;
+            let exit =
+                monotone_wiggle_basis_with_derivative_order(eta_exit.view(), &knots, degree, 0)?;
             let betaw = beta;
             if entry.ncols() != betaw.len() || exit.ncols() != betaw.len() {
                 return Err(SurvivalPredictError::IncompatibleSchema {

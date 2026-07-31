@@ -336,3 +336,257 @@ fn probe_2647_joint_hessian_null_direction() {
         }
     }
 }
+
+/// Probe 4 — the scale gauge, demonstrated fit-free.
+///
+/// The model is `q = q0 + Σ_j β_w[j]·B_j(q0)` with `q0 = −η_t·exp(−η_ls)`. If the
+/// warp span contains the linear function `u ↦ u − left`, then for any `s > 0`
+///
+///     (β_t, β_w) ↦ (β_t / s, β_w + (s−1)·ℓ)      where  B·ℓ = (u − left)
+///
+/// reproduces the SAME `q` on every row whose `q0` stays inside the knot hull:
+/// `q0/s + (s−1)(q0/s − left) + w(q0/s) = q0 − (s−1)·left + w(q0/s)`. That is a
+/// one-parameter gauge orbit of the LIKELIHOOD. It is not a gauge orbit of the
+/// PENALTY: the threshold block is penalized, so `½βᵀSβ ∝ 1/s²` along it, while
+/// the warp's linear direction `ℓ` lies in the null space of the order-2
+/// roughness penalty (`double_penalty = false`) and costs nothing. So the
+/// penalized objective DECREASES monotonically along the orbit and its infimum
+/// sits at `s = ∞` — there is no minimiser, and no inner solve can converge.
+///
+/// This probe measures each link of that chain separately:
+///   1. is `u ↦ u − left` in the warp span (least-squares residual of `Bℓ`)?
+///   2. does `−ℓ(q)` stay flat along the orbit?
+///   3. does `½βᵀSβ` fall like `1/s²`?
+#[test]
+#[ignore]
+fn probe_2647_scale_gauge_orbit() {
+    use faer::Side;
+    use gam_linalg::faer_ndarray::FaerEigh;
+
+    let (data, y, weights, q_seed) = fixture_2647();
+    let n = y.len();
+    let thresholdspec = simple_matern_term_collection(&[0, 1], 0.45);
+    let threshold_collection =
+        build_term_collection_design(data.view(), &thresholdspec).expect("threshold design");
+    let threshold_design = threshold_collection.design.clone();
+    let x_t: Array2<f64> = threshold_design.to_dense();
+    let (wiggle_block, knots) =
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 4, 2, false)
+            .expect("wiggle block");
+    let p_t = x_t.ncols();
+    let p_w = wiggle_block.design.ncols();
+
+    // ---- link 1: is the linear function in the warp span? ----
+    let left = knots[2];
+    let right = knots[knots.len() - 3];
+    println!("[2647-gauge] knot hull = [{left:.6}, {right:.6}], p_threshold={p_t}, p_wiggle={p_w}");
+    let grid = Array1::linspace(left, right, 401);
+    let b_grid = crate::wiggle::monotone_wiggle_basis_from_knots(grid.view(), &knots, 2)
+        .expect("warp basis on the hull grid");
+    let target = grid.mapv(|u| u - left);
+    // Normal equations for min ‖B ℓ − (u − left)‖.
+    let gram = b_grid.t().dot(&b_grid);
+    let rhs = b_grid.t().dot(&target);
+    let (gevals, gevecs) = gram.eigh(Side::Lower).expect("warp Gram eigh");
+    let gmax = gevals.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let mut ell = Array1::<f64>::zeros(p_w);
+    for k in 0..gevals.len() {
+        if gevals[k] <= 1e-12 * gmax.max(1.0) {
+            continue;
+        }
+        let uk = gevecs.column(k);
+        let coeff = uk.dot(&rhs) / gevals[k];
+        for i in 0..p_w {
+            ell[i] += coeff * uk[i];
+        }
+    }
+    let fit = b_grid.dot(&ell);
+    let resid = fit
+        .iter()
+        .zip(target.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f64, f64::max);
+    let scale = target.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    println!(
+        "[2647-gauge] linear-in-hull residual: max|Bℓ − (u−left)| = {resid:.6e} against \
+         range {scale:.6e} (relative {:.3e}); ℓ = {:?}",
+        resid / scale.max(f64::MIN_POSITIVE),
+        ell.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>(),
+    );
+    println!(
+        "[2647-gauge] ℓ componentwise sign: all_nonneg={}",
+        ell.iter().all(|&v| v >= -1e-12)
+    );
+
+    // ---- links 2 and 3: walk the orbit ----
+    let family = BinomialLocationScaleWiggleFamily {
+        y: y.clone(),
+        weights: weights.clone(),
+        link_kind: InverseLink::Standard(StandardLink::Probit),
+        threshold_design: Some(threshold_design.clone()),
+        log_sigma_design: Some(DesignMatrix::Dense(
+            gam_linalg::matrix::DenseDesignMatrix::from(Array2::<f64>::zeros((n, 0))),
+        )),
+        wiggle_knots: knots.clone(),
+        wiggle_degree: 2,
+        policy: gam_runtime::resource::ResourcePolicy::default_library(),
+    };
+    // The real threshold penalty at ρ = 0 (λ = 1), i.e. the fixture's own seed.
+    let s_t: Array2<f64> = threshold_collection
+        .penalties_as_penalty_matrix()
+        .first()
+        .map(|p| p.to_dense())
+        .unwrap_or_else(|| Array2::zeros((p_t, p_t)));
+    let s_w: Array2<f64> = match wiggle_block.penalties.first() {
+        Some(gam_terms::penalty_spec::PenaltySpec::Dense(m)) => m.clone(),
+        Some(gam_terms::penalty_spec::PenaltySpec::DenseWithMean { matrix, .. }) => matrix.clone(),
+        _ => Array2::zeros((p_w, p_w)),
+    };
+    println!(
+        "[2647-gauge] ℓᵀ S_w ℓ = {:.6e}  (0 ⇒ the linear warp is free under the roughness penalty)",
+        ell.dot(&s_w.dot(&ell))
+    );
+
+    // A non-degenerate starting index: spread q0 across the hull.
+    let mut beta_t0 = Array1::<f64>::zeros(p_t);
+    {
+        // Least-squares β_t so that −X_t β_t ≈ q_seed (the index the knots were
+        // planned for). Anything that spreads q0 over the hull works; using the
+        // seed index makes the starting point the one the basis was built for.
+        let g = x_t.t().dot(&x_t);
+        let r = x_t.t().dot(&q_seed.mapv(|v| -v));
+        let (ev, evec) = g.eigh(Side::Lower).expect("X_t Gram eigh");
+        let emax = ev.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        for k in 0..ev.len() {
+            if ev[k] <= 1e-12 * emax.max(1.0) {
+                continue;
+            }
+            let uk = evec.column(k);
+            let c = uk.dot(&r) / ev[k];
+            for i in 0..p_t {
+                beta_t0[i] += c * uk[i];
+            }
+        }
+    }
+
+    // ---- link 2/3, MEASURED rather than guessed ----
+    //
+    // A first attempt walked the ANALYTIC orbit `(β_t/s, β_w + (s−1)ℓ)` and it
+    // was refuted: the warp's linear element is `a·(u − left)`, so it adds the
+    // constant `−a·left` that neither a centred Matérn threshold nor the
+    // log-σ block can absorb, and `−loglik` exploded (2.3e1 → 2.2e7 over
+    // s = 1 → 1024) instead of staying flat. The naive scale orbit is NOT the
+    // flat direction. So take the direction from the problem instead of from
+    // algebra: the smallest-curvature eigenvector of the exact joint penalized
+    // Hessian at a realistic state, and walk THAT.
+    let s_w_pad = {
+        let mut m = Array2::<f64>::zeros((p_t + p_w, p_t + p_w));
+        for i in 0..p_t {
+            for j in 0..p_t {
+                m[[i, j]] = s_t[[i, j]];
+            }
+        }
+        for i in 0..p_w {
+            for j in 0..p_w {
+                m[[p_t + i, p_t + j]] = s_w[[i, j]];
+            }
+        }
+        m
+    };
+    let specs = vec![
+        ParameterBlockSpec {
+            name: "threshold".to_string(),
+            design: threshold_design.clone(),
+            offset: Array1::zeros(n),
+            ..ParameterBlockSpec::defaults()
+        },
+        ParameterBlockSpec {
+            name: "log_sigma".to_string(),
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+                Array2::<f64>::zeros((n, 0)),
+            )),
+            offset: Array1::zeros(n),
+            ..ParameterBlockSpec::defaults()
+        },
+        ParameterBlockSpec {
+            name: "wiggle".to_string(),
+            design: wiggle_block.design.clone(),
+            offset: Array1::zeros(n),
+            ..ParameterBlockSpec::defaults()
+        },
+    ];
+    let states_at = |beta_t: &Array1<f64>, beta_w: &Array1<f64>| -> Vec<ParameterBlockState> {
+        let eta_t = x_t.dot(beta_t);
+        let q0 = eta_t.mapv(|v| -v);
+        let b_now = crate::wiggle::monotone_wiggle_basis_from_knots(q0.view(), &knots, 2)
+            .expect("warp basis at the state");
+        vec![
+            ParameterBlockState {
+                eta: eta_t,
+                beta: beta_t.clone(),
+            },
+            ParameterBlockState {
+                eta: Array1::zeros(n),
+                beta: Array1::zeros(0),
+            },
+            ParameterBlockState {
+                eta: b_now.dot(beta_w),
+                beta: beta_w.clone(),
+            },
+        ]
+    };
+
+    let beta_w0 = Array1::<f64>::zeros(p_w);
+    let base_states = states_at(&beta_t0, &beta_w0);
+    let h_l = family
+        .exact_newton_joint_hessian_with_specs(&base_states, &specs)
+        .expect("joint hessian")
+        .expect("joint hessian available");
+    let h_pen = &h_l + &s_w_pad;
+    let (hvals, hvecs) = h_pen.eigh(Side::Lower).expect("penalized joint hessian eigh");
+    let mut order: Vec<usize> = (0..hvals.len()).collect();
+    order.sort_by(|&a, &b| hvals[a].abs().partial_cmp(&hvals[b].abs()).unwrap());
+    let hmax = hvals.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    println!(
+        "[2647-gauge] eig(H_L + S) at the seed index: |λ|min={:.6e} |λ|max={hmax:.6e}",
+        hvals[order[0]].abs()
+    );
+    for &k in order.iter().take(3) {
+        let v = hvecs.column(k);
+        let mass_t: f64 = (0..p_t).map(|i| v[i] * v[i]).sum();
+        let mass_w: f64 = (p_t..p_t + p_w).map(|i| v[i] * v[i]).sum();
+        println!(
+            "[2647-gauge]   λ={:+.6e}  block mass threshold={mass_t:.4} wiggle={mass_w:.4}",
+            hvals[k]
+        );
+    }
+
+    let dir = hvecs.column(order[0]).to_owned();
+    println!("[2647-gauge]      t | -loglik        | 0.5 b'Sb      | |beta|inf  | q0 in hull");
+    for t in [0.0_f64, 1.0, 2.0, 4.0, 8.0, 16.0, 64.0, 256.0, 1024.0] {
+        let mut beta_t = beta_t0.clone();
+        let mut beta_w = beta_w0.clone();
+        for i in 0..p_t {
+            beta_t[i] += t * dir[i];
+        }
+        for i in 0..p_w {
+            beta_w[i] += t * dir[p_t + i];
+        }
+        let states = states_at(&beta_t, &beta_w);
+        let q0 = states[0].eta.mapv(|v| -v);
+        let inside = q0.iter().filter(|&&u| u >= left && u <= right).count();
+        let ll = family
+            .log_likelihood_only(&states)
+            .expect("orbit log-likelihood");
+        let pen = 0.5 * (beta_t.dot(&s_t.dot(&beta_t)) + beta_w.dot(&s_w.dot(&beta_w)));
+        let beta_inf = beta_t
+            .iter()
+            .chain(beta_w.iter())
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max);
+        println!(
+            "[2647-gauge] {t:>8.1} | {:.8e} | {pen:.6e} | {beta_inf:.4e} | {inside}/{n}",
+            -ll
+        );
+    }
+}

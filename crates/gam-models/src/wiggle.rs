@@ -86,6 +86,50 @@ pub(crate) fn monotone_wiggle_internal_degree(degree: usize) -> Result<usize, St
 /// null space is eligible for the separate double-penalty coordinate. Every
 /// matrix comes from the canonical `C^T S_B C` function Gram, never a
 /// coefficient difference or identity metric.
+///
+/// # The assembled set always has a trivial joint null space (gam#2647)
+///
+/// A monotone link warp is not an ordinary smooth. It is composed onto a free
+/// index — `q = q₀ + w(q₀)` with `q₀ = −η_t·e^{−η_ls}` (binomial location-scale)
+/// or `q = η + w(η)` (binomial mean) — and the index carries its own free
+/// scale. That makes the warp's LINEAR direction a gauge rather than a shape:
+/// for any `s > 0`,
+///
+/// ```text
+///   (β_index, β_w)  ↦  (β_index / s,  β_w + (s−1)·ℓ),      B·ℓ = (u − left)
+/// ```
+///
+/// reproduces the same `q` on every row inside the knot hull, because
+/// `q₀/s + (s−1)(q₀/s − left) + w(q₀/s)` is `q₀` up to the constant the warp can
+/// itself absorb. The likelihood is exactly invariant along that orbit. The
+/// PENALTY is not: the index block is penalized, so `½βᵀSβ` falls like `1/s²`
+/// there. If `ℓ` is unpenalized the penalized objective therefore decreases
+/// monotonically in `s` and has **no minimiser** — the inner solve walks the
+/// orbit forever, `‖β‖∞` diverging while `½βᵀSβ` falls exactly like `‖β‖⁻²`,
+/// which is the measured signature on gam#2647.
+///
+/// An order-`k` anchored I-spline roughness has structural nullity `k − 1`, so
+/// every set whose smallest order exceeds one leaves `ℓ` free unless something
+/// closes it. `double_penalty` is a user knob and cannot be the thing that
+/// decides whether the criterion is bounded below, so the closure below is
+/// unconditional: after assembling the requested roughness blocks, the JOINT
+/// null space of the set (at unit smoothing) is computed in the function metric
+/// and, when non-trivial, one shrinkage coordinate spanning it is appended.
+///
+/// This is the same treatment — and the same argument — the binomial
+/// location-scale log-σ block already receives unconditionally in
+/// `build_binomial_threshold_and_scale_blocks`, where `(β_t, β_ls) ↦ (c·β_t,
+/// β_ls + ln c)` is the exactly analogous index-scale gauge and an identity
+/// shrinkage penalty is appended that the caller never asked for and cannot
+/// switch off. The wiggle block simply never received it.
+///
+/// It is a **no-op on every already-well-posed configuration**: the shipped
+/// default (`orders = [1, 2, 3]`) contains the order-one roughness, which is
+/// full rank on the anchored basis, so the joint null space is already trivial
+/// and nothing is appended; likewise whenever `double_penalty` already closed a
+/// single-order set. Only configurations whose criterion is otherwise unbounded
+/// gain a coordinate, and that coordinate's strength is chosen by REML like any
+/// other.
 pub fn canonical_wiggle_function_penalties(
     knots: &Array1<f64>,
     degree: usize,
@@ -124,6 +168,56 @@ pub fn canonical_wiggle_function_penalties(
         if let Some(nullspace_shrinkage) = penalties.nullspace_shrinkage {
             blocks.push(WigglePenaltyBlockKind::NullspaceShrinkage { derivative_order });
             matrices.push(nullspace_shrinkage);
+            nullspace_dims.push(0);
+        }
+    }
+
+    // Gauge closure (gam#2647) — see the type-level note above. The joint null
+    // space is read off the SUM of the assembled blocks at unit smoothing, which
+    // is `null(Σ S_j) = ⋂_j null(S_j)` exactly because every `S_j` is PSD, so a
+    // direction survives only when NO requested block penalizes it. Reading the
+    // sum (rather than the primary alone) is what makes this both complete —
+    // a multi-order set is judged by what it collectively leaves free — and
+    // idempotent: when `double_penalty` already emitted a shrinkage coordinate,
+    // that coordinate is inside the sum, the intersection is empty, and nothing
+    // is appended. Tagged with the PRIMARY derivative order, so a single-order
+    // set with `double_penalty = true` and one with `double_penalty = false`
+    // produce the same topology, which is the point.
+    //
+    // Each block enters the sum divided by its OWN mean diagonal. Without that
+    // the test would not be "does any block penalize this direction" but "does
+    // any block penalize it comparably to the stiffest block present": an
+    // order-3 roughness has eigenvalues orders above an order-1 roughness on the
+    // same knots, so on the shipped default (`orders = [1, 2, 3]`) the order-1
+    // block — which is the one that closes the gauge — would sit inside the
+    // rank tolerance of the order-3 block and the sum would report a null space
+    // that does not exist, appending a coordinate to a configuration that never
+    // needed one. A per-block scale is the only thing that makes the
+    // intersection `⋂_j null(S_j)` the quantity actually computed, and it is
+    // derived from the matrices rather than chosen.
+    let primary_order = derivative_orders[0];
+    let joint_dim = matrices.first().map_or(0, |m| m.nrows());
+    if joint_dim > 0 {
+        let mut joint = Array2::<f64>::zeros((joint_dim, joint_dim));
+        for matrix in &matrices {
+            let mean_diagonal =
+                (0..joint_dim).map(|i| matrix[[i, i]].abs()).sum::<f64>() / joint_dim as f64;
+            if !(mean_diagonal > 0.0) || !mean_diagonal.is_finite() {
+                continue;
+            }
+            joint.scaled_add(1.0 / mean_diagonal, matrix);
+        }
+        let function_gram =
+            gam_terms::basis::ispline_function_gram(knots.view(), internal_degree)
+                .map_err(|error| error.to_string())?;
+        if let Some(gauge_shrinkage) =
+            gam_terms::basis::function_space_nullspace_shrinkage(&joint, &function_gram)
+                .map_err(|error| error.to_string())?
+        {
+            blocks.push(WigglePenaltyBlockKind::NullspaceShrinkage {
+                derivative_order: primary_order,
+            });
+            matrices.push(gauge_shrinkage);
             nullspace_dims.push(0);
         }
     }
@@ -188,8 +282,31 @@ pub fn buildwiggle_block_input_from_knots(
     penalty_order: usize,
     double_penalty: bool,
 ) -> Result<ParameterBlockInput, String> {
+    buildwiggle_block_input_from_orders(seed, knots, degree, &[penalty_order], double_penalty)
+}
+
+/// Build a monotone I-spline block carrying the COMPLETE requested penalty set.
+///
+/// Callers that want several derivative orders must come through here rather
+/// than building a primary-order block and appending the rest: the gauge closure
+/// in [`canonical_wiggle_function_penalties`] is a property of the assembled set
+/// (it asks what the set collectively leaves unpenalized), so it can only be
+/// decided once, on the final list. Assembling in two stages would judge the
+/// primary order alone and could both add a coordinate the later orders made
+/// unnecessary and miss one they left open.
+///
+/// The emitted order is unchanged from the previous two-stage assembly —
+/// primary roughness, its optional double-penalty coordinate, then the extra
+/// orders in the order given — so persisted penalty topologies are unaffected.
+pub fn buildwiggle_block_input_from_orders(
+    seed: ArrayView1<'_, f64>,
+    knots: &Array1<f64>,
+    degree: usize,
+    derivative_orders: &[usize],
+    double_penalty: bool,
+) -> Result<ParameterBlockInput, String> {
     let canonical =
-        canonical_wiggle_function_penalties(knots, degree, &[penalty_order], double_penalty)?;
+        canonical_wiggle_function_penalties(knots, degree, derivative_orders, double_penalty)?;
     buildwiggle_block_input_from_canonical_penalties(seed, knots, degree, &canonical)
 }
 
@@ -336,40 +453,6 @@ pub fn split_wiggle_penalty_orders(
     Ok((primary_order, extras))
 }
 
-/// Append exact function-derivative roughness penalties for the requested
-/// orders to an existing monotone I-spline block.
-pub fn append_selected_wiggle_function_penalties(
-    block: &mut ParameterBlockInput,
-    knots: &Array1<f64>,
-    degree: usize,
-    penalty_orders: &[usize],
-) -> Result<(), String> {
-    let p = block.design.ncols();
-    if p == 0 {
-        return Err("cannot append wiggle penalties to an empty basis".to_string());
-    }
-    let internal_degree = monotone_wiggle_internal_degree(degree)?;
-    for &order in penalty_orders {
-        let function_penalty =
-            ispline_function_penalties(knots.view(), internal_degree, order, false)
-                .map_err(|error| error.to_string())?;
-        if function_penalty.roughness.dim() != (p, p) {
-            return Err(format!(
-                "order-{order} I-spline function penalty is {}x{} but wiggle design has {p} columns",
-                function_penalty.roughness.nrows(),
-                function_penalty.roughness.ncols(),
-            ));
-        }
-        block.penalties.push(crate::model_types::PenaltySpec::Dense(
-            function_penalty.roughness,
-        ));
-        block
-            .nullspace_dims
-            .push(function_penalty.roughness_nullspace_dim);
-    }
-    Ok(())
-}
-
 pub(crate) fn select_wiggle_basis_from_seed(
     seed: ArrayView1<'_, f64>,
     cfg: &WiggleBlockConfig,
@@ -482,9 +565,14 @@ mod tests {
         let beta = block.initial_beta.as_ref().expect("initial_beta");
         assert_eq!(beta.len(), p);
         assert!(beta.iter().all(|&v| v == 0.0));
-        // Without double penalty there is exactly one penalty.
-        assert_eq!(block.penalties.len(), 1);
-        assert_eq!(block.nullspace_dims.len(), 1);
+        // One ROUGHNESS penalty, plus the unconditional gauge-closure
+        // coordinate (gam#2647): an order-two roughness leaves the linear warp
+        // free, and the linear warp is the index scale, not a shape. This
+        // assertion used to read `== 1`, which is exactly the shape of the
+        // defect — a warp block shipped with an unpenalized reparameterization
+        // direction, so the penalized criterion had no minimiser.
+        assert_eq!(block.penalties.len(), 2);
+        assert_eq!(block.nullspace_dims.len(), 2);
         // The exact function-derivative Gram is p x p and symmetric.
         let s = dense_penalty(&block.penalties[0]);
         assert_eq!(s.dim(), (p, p));
@@ -492,6 +580,160 @@ mod tests {
         // The anchored I-spline excludes the constant polynomial, so the
         // order-two derivative null space contains only the linear direction.
         assert_eq!(block.nullspace_dims[0], 1);
+        // The closure coordinate penalizes a null space of its own dimension 0.
+        assert_eq!(block.nullspace_dims[1], 0);
+    }
+
+    /// Smallest generalized eigenvalue of `Σ_j S_j` against the I-spline
+    /// function Gram, relative to the largest — i.e. how close the assembled
+    /// penalty set comes to leaving a whole function direction free.
+    fn relative_joint_nullity_margin(
+        knots: &Array1<f64>,
+        degree: usize,
+        orders: &[usize],
+        double_penalty: bool,
+    ) -> f64 {
+        use faer::Side;
+        use gam_linalg::faer_ndarray::FaerEigh;
+
+        let canonical = canonical_wiggle_function_penalties(knots, degree, orders, double_penalty)
+            .expect("canonical wiggle penalties");
+        let dim = canonical.matrices[0].nrows();
+        let mut joint = Array2::<f64>::zeros((dim, dim));
+        for matrix in &canonical.matrices {
+            joint += matrix;
+        }
+        let internal_degree = monotone_wiggle_internal_degree(degree).expect("internal degree");
+        let gram = gam_terms::basis::ispline_function_gram(knots.view(), internal_degree)
+            .expect("I-spline function Gram");
+        // Whiten by the function metric so the ratio is a statement about
+        // FUNCTIONS, not about the coefficient chart: `G^{-1/2} S G^{-1/2}`.
+        let (gvals, gvecs) = gram.eigh(Side::Lower).expect("Gram eigh");
+        let gmax = gvals.iter().copied().fold(0.0_f64, f64::max);
+        let mut g_inv_sqrt = Array2::<f64>::zeros((dim, dim));
+        for k in 0..dim {
+            let lam = gvals[k].max(1e-14 * gmax);
+            let scale = 1.0 / lam.sqrt();
+            let vk = gvecs.column(k);
+            for i in 0..dim {
+                for j in 0..dim {
+                    g_inv_sqrt[[i, j]] += scale * vk[i] * vk[j];
+                }
+            }
+        }
+        let whitened = g_inv_sqrt.dot(&joint).dot(&g_inv_sqrt);
+        let (svals, _) = whitened.eigh(Side::Lower).expect("whitened penalty eigh");
+        let hi = svals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lo = svals.iter().copied().fold(f64::INFINITY, f64::min);
+        lo / hi.max(f64::MIN_POSITIVE)
+    }
+
+    /// gam#2647, stated as the invariant rather than as one fixture.
+    ///
+    /// A monotone link warp is composed onto a free index, so any function
+    /// direction the assembled penalty set leaves unpenalized is a
+    /// reparameterization the index can absorb for free — the penalized
+    /// criterion then has no minimiser and the inner solve diverges along the
+    /// orbit. The invariant is therefore: **for every configuration this crate
+    /// can emit, the assembled set has a trivial joint null space.** Checked in
+    /// the function metric so the verdict cannot be manufactured by a coefficient
+    /// rescale.
+    ///
+    /// Before the fix, every `double_penalty = false` row here (and every
+    /// `[2]`/`[2,3]` row regardless) had a joint null space of dimension ≥ 1,
+    /// i.e. a margin at machine zero.
+    #[test]
+    fn wiggle_penalty_set_always_closes_its_own_null_space_2647() {
+        let seed = Array1::linspace(0.0, 1.0, 60);
+        for degree in [2usize, 3, 4] {
+            let knots = initializewiggle_knots_from_seed(seed.view(), degree, 5)
+                .expect("knot init for the invariant sweep");
+            let max_order = degree; // value degree = degree, so order <= degree is represented
+            let mut order_sets: Vec<Vec<usize>> = Vec::new();
+            for primary in 1..=max_order {
+                order_sets.push(vec![primary]);
+            }
+            if max_order >= 2 {
+                order_sets.push((1..=max_order).collect());
+                order_sets.push((2..=max_order).collect());
+            }
+            for orders in &order_sets {
+                for double_penalty in [false, true] {
+                    let margin =
+                        relative_joint_nullity_margin(&knots, degree, orders, double_penalty);
+                    assert!(
+                        margin > 1e-10,
+                        "degree {degree}, orders {orders:?}, double_penalty={double_penalty}: \
+                         the assembled wiggle penalty set leaves a function direction free \
+                         (smallest/largest whitened penalty eigenvalue = {margin:.6e}). That \
+                         direction is a reparameterization of the index the warp is composed \
+                         onto, so the penalized criterion is unbounded below along it (gam#2647)."
+                    );
+                }
+            }
+        }
+    }
+
+    /// The concrete gauge, named: an order-two roughness leaves the LINEAR warp
+    /// free, and the linear warp is exactly the index rescale
+    /// `(β_index, β_w) ↦ (β_index/s, β_w + (s−1)ℓ)`. The closure must charge for
+    /// it while the roughness alone does not.
+    #[test]
+    fn linear_warp_direction_is_free_under_roughness_and_charged_after_closure_2647() {
+        use faer::Side;
+        use gam_linalg::faer_ndarray::FaerEigh;
+
+        let seed = Array1::linspace(0.0, 1.0, 60);
+        let degree = 3usize;
+        let knots = initializewiggle_knots_from_seed(seed.view(), degree, 5).expect("knot init");
+        let canonical = canonical_wiggle_function_penalties(&knots, degree, &[2], false)
+            .expect("order-two canonical set");
+        assert_eq!(
+            canonical.matrices.len(),
+            2,
+            "order-two roughness must be accompanied by its gauge closure"
+        );
+        let roughness = &canonical.matrices[0];
+        let closure = &canonical.matrices[1];
+        let dim = roughness.nrows();
+
+        // ℓ: the coefficient vector of the linear warp, recovered as the
+        // roughness null direction (the anchored basis excludes constants, so
+        // the order-two null space is exactly the linear ramp).
+        let (rvals, rvecs) = roughness.eigh(Side::Lower).expect("roughness eigh");
+        let rmax = rvals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let mut k_min = 0usize;
+        for k in 0..dim {
+            if rvals[k] < rvals[k_min] {
+                k_min = k;
+            }
+        }
+        let ell = rvecs.column(k_min).to_owned();
+        let rough_energy = ell.dot(&roughness.dot(&ell));
+        let closure_energy = ell.dot(&closure.dot(&ell));
+        assert!(
+            rough_energy <= 1e-10 * rmax,
+            "the linear warp must be free under an order-two roughness: ℓᵀSℓ = {rough_energy:.6e} \
+             against λ_max = {rmax:.6e}"
+        );
+        assert!(
+            closure_energy > 1e-8 * rmax.max(1.0),
+            "the gauge closure must charge for the linear warp: ℓᵀRℓ = {closure_energy:.6e}"
+        );
+        // And it must charge ONLY for it: the closure is a second REML
+        // coordinate on the null space, never a re-penalization of curvature.
+        let range_energy = (0..dim)
+            .filter(|&k| rvals[k] > 1e-8 * rmax)
+            .map(|k| {
+                let v = rvecs.column(k);
+                v.dot(&closure.dot(&v)).abs()
+            })
+            .fold(0.0_f64, f64::max);
+        assert!(
+            range_energy <= 1e-8 * closure_energy,
+            "the closure leaked onto the roughness range: max range energy {range_energy:.6e} \
+             against null energy {closure_energy:.6e}"
+        );
     }
 
     #[test]
