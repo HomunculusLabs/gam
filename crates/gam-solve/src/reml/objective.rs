@@ -1015,7 +1015,15 @@ impl<'a> RemlState<'a> {
             pirls::PirlsCoordinateFrame::OriginalSparseNative => r_t,
             pirls::PirlsCoordinateFrame::TransformedQs => pirls_result.reparam_result.qs.dot(&r_t),
         };
-        Some(crate::model_types::ProjectedKktResidual::from_active_projected(r_o))
+        // The original-basis builders are reached only on the unconstrained QS
+        // frame (see this function's doc and `build_auto_assembly`'s routing),
+        // so no direction was removed and the free subspace is the whole
+        // coefficient space. Record that rather than leaving `free_rank = None`.
+        let free_rank = r_o.len();
+        Some(
+            crate::model_types::ProjectedKktResidual::from_active_projected(r_o)
+                .with_free_rank(free_rank),
+        )
     }
 
     /// Pack a `DerivativeContext` plus backend-specific pieces into an
@@ -1511,7 +1519,14 @@ impl<'a> RemlState<'a> {
                 pirls_result,
                 bundle.firth_dense_operator.is_some(),
             )
-            .map(crate::model_types::ProjectedKktResidual::from_active_projected)
+            // Guarded by `free_basis_opt.is_none()` directly above: this arm runs
+            // only with an empty active set, so the free subspace is the whole
+            // coefficient space.
+            .map(|r| {
+                let free_rank = r.len();
+                crate::model_types::ProjectedKktResidual::from_active_projected(r)
+                    .with_free_rank(free_rank)
+            })
         } else {
             None
         };

@@ -97,6 +97,25 @@ impl ProjectedKktResidual {
         self
     }
 
+    /// Attach the free-subspace rank alone, for producers that know which
+    /// subspace they projected onto but have no inner-solver tolerance to
+    /// report.
+    ///
+    /// `with_metadata` demands both numbers, and the standard REML assembly
+    /// builders have only one: the active set is empty by construction there
+    /// (see the guards at both call sites), so `free_rank` is exactly the
+    /// coefficient count, while the inner solve exposes no KKT tolerance at
+    /// that seam. Before this existed those producers passed neither, and a
+    /// residual that does not record its own projection cannot be audited --
+    /// `subspace=ActiveProjected free_rank=None` says "some directions were
+    /// removed" without saying which or how many. Supplying a made-up
+    /// tolerance just to reach `with_metadata` would be worse: a number where
+    /// a measurement belongs.
+    pub fn with_free_rank(mut self, free_rank: usize) -> Self {
+        self.free_rank = Some(free_rank);
+        self
+    }
+
     /// Borrow the underlying free-space residual for the H^-1*r solve and its
     /// rho-derivatives.
     pub fn as_array(&self) -> &Array1<f64> {
