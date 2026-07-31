@@ -1833,24 +1833,39 @@ fn bernoulli_batched_outer_gradient_matches_hypercoord_path_for_rho_and_psi() {
     )
     .expect("psi hyper coords");
     assert_eq!(psi_coords.len(), psi_dim);
+    // #2597: a psi coordinate's H-side trace is the ONLY quantity here assembled
+    // by SUMMING three separate spectral routes; a rho coordinate uses just
+    // `trace_logdet_block_local`, and `objective_theta` / `trace_s_pinv_sdot` are
+    // read straight off `psi_coords`. Measured, only the summed one disagrees
+    // (`psi[1] trace_h_inv_hdot rel=4.132e-3` against `tol=1e-10`, while the other
+    // two pass at 1e-11) — so record the three contributions separately and let
+    // the differing route name itself instead of being inferred from a total.
+    let mut psi_trace_parts: Vec<(usize, f64, f64, f64)> = Vec::new();
     for (psi_index, coord) in psi_coords.iter().enumerate() {
         let idx = rho.len() + psi_index;
         manual_objective_theta[idx] = coord.a;
         manual_trace_s_pinv_sdot[idx] = coord.ld_s;
+        let mut part_gradient = 0.0_f64;
+        let mut part_block_local = 0.0_f64;
+        let mut part_operator = 0.0_f64;
         if let Some(dense) = coord.drift.dense.as_ref() {
-            manual_trace_h_inv_hdot[idx] += spectral.trace_logdet_gradient(dense);
+            part_gradient = spectral.trace_logdet_gradient(dense);
+            manual_trace_h_inv_hdot[idx] += part_gradient;
         }
         if let Some(block_local) = coord.drift.block_local.as_ref() {
-            manual_trace_h_inv_hdot[idx] += spectral.trace_logdet_block_local(
+            part_block_local = spectral.trace_logdet_block_local(
                 &block_local.local,
                 1.0,
                 block_local.start,
                 block_local.end,
             );
+            manual_trace_h_inv_hdot[idx] += part_block_local;
         }
         if let Some(operator) = coord.drift.operator_ref() {
-            manual_trace_h_inv_hdot[idx] += spectral.trace_logdet_operator(operator);
+            part_operator = spectral.trace_logdet_operator(operator);
+            manual_trace_h_inv_hdot[idx] += part_operator;
         }
+        psi_trace_parts.push((idx, part_gradient, part_block_local, part_operator));
         let v = spectral.solve(&coord.g);
         directions.column_mut(idx).assign(&(-&v));
     }
@@ -1876,11 +1891,24 @@ fn bernoulli_batched_outer_gradient_matches_hypercoord_path_for_rho_and_psi() {
             1.0e-11,
             &format!("{label}[{idx}] objective_theta"),
         );
+        let parts_note = psi_trace_parts
+            .iter()
+            .find(|(part_idx, ..)| *part_idx == idx)
+            .map(|(_, gradient, block_local, operator)| {
+                format!(
+                    " [manual parts: trace_logdet_gradient={gradient:.17e}, \
+                     trace_logdet_block_local={block_local:.17e}, \
+                     trace_logdet_operator={operator:.17e}, \
+                     correction={:.17e}]",
+                    correction_traces[idx]
+                )
+            })
+            .unwrap_or_default();
         assert_scalar_close(
             batched.trace_h_inv_hdot[idx],
             manual_trace_h_inv_hdot[idx],
             1.0e-10,
-            &format!("{label}[{idx}] trace_h_inv_hdot"),
+            &format!("{label}[{idx}] trace_h_inv_hdot{parts_note}"),
         );
         assert_scalar_close(
             batched.trace_s_pinv_sdot[idx],
