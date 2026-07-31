@@ -7141,6 +7141,6 @@ impl Zz2155Problem {
 mod wiggle_ls;
 mod zz2155_mode_geography_tests;
 
-// gam#2647 measurement instruments (all `#[ignore]`d — run explicitly).
-#[path = "tests_2647_probe.rs"]
-mod probe_2647;
+// gam#2647: the joint penalized Hessian's non-singularity, asserted.
+#[path = "tests_2647_gauge.rs"]
+mod gauge_2647;
