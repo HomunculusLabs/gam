@@ -1794,8 +1794,8 @@ impl SurvivalMarginalSlopeRowKernel {
                         .as_slice_mut()
                         .expect("all-axes dense accumulator must be contiguous");
                     for row in start..end {
-                        let j_row = jacobians
-                            .row(row)
+                        let j_row_view = jacobians.row(row);
+                        let j_row = j_row_view
                             .as_slice()
                             .expect("J·I row must be contiguous");
                         let dir = std::array::from_fn(|primary| {
