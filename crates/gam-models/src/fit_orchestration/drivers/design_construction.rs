@@ -3011,7 +3011,7 @@ fn relax_smoothing_rho_prior(
     // apply was also not a coherent marginal-likelihood objective.
     let nullspace_degeneracy_prior = gam_spec::RhoPrior::Normal {
         mean: 0.0,
-        sd: NULLSPACE_WELLDET_DEGENERACY_RHO_SD,
+        sd: NULLSPACE_DEGENERACY_RHO_SD,
     };
     let per_coord = coords
         .iter()
