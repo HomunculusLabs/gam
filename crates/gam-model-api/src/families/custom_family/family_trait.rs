@@ -1346,6 +1346,46 @@ pub trait CustomFamily {
         false
     }
 
+    /// Multiplicative strength of the Jeffreys/Firth contribution.
+    ///
+    /// Production families normally use the default binary contract: zero when
+    /// [`Self::joint_jeffreys_term_required`] is false and one when it is true.
+    /// A family whose armed objective is reached by a canonical coefficient-mode
+    /// homotopy may override this with the homotopy coordinate in `[0, 1]`.
+    /// Every Jeffreys value, score, divided-difference curvature, exact
+    /// second-order completion, and moving-curvature derivative is multiplied by
+    /// this same number, so intermediate members remain derivatives of one
+    /// objective rather than a solver-only damping device.
+    fn joint_jeffreys_term_strength(&self) -> f64 {
+        if self.joint_jeffreys_term_required() {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Return the family member at `progress` on a canonical homotopy from a
+    /// uniquely selected coefficient objective (`progress = 0`) to `self`
+    /// (`progress = 1`).
+    ///
+    /// This is an internal mode-definition contract, not a user option. The
+    /// generic custom-family driver evaluates increasingly refined fixed-ρ
+    /// sweeps and accepts the resulting seed only after their endpoints agree
+    /// within the inner solver's own resolution. Families without a natural
+    /// objective homotopy return `None` and retain the canonical maximal-
+    /// smoothing continuation.
+    fn coefficient_mode_homotopy_member(&self, progress: f64) -> Result<Option<Self>, String>
+    where
+        Self: Clone + Sized,
+    {
+        if !progress.is_finite() || !(0.0..=1.0).contains(&progress) {
+            return Err(format!(
+                "coefficient-mode homotopy progress must lie in [0, 1], got {progress}"
+            ));
+        }
+        Ok(None)
+    }
+
     /// Full-span cross-block smoothing penalties, in **raw** (pre-canonicalisation)
     /// coordinates over the entire stacked parameter vector `Σ_b p_b_raw`.
     ///

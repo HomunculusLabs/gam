@@ -890,7 +890,7 @@ pub struct MultinomialFamily {
     /// direction `v` (`Sv = 0`) under softmax saturation has `(H + S_λ)v → 0`
     /// for EVERY ρ — only a proper prior on that quotient-null subspace can
     /// bound it, never a smoothing parameter.
-    use_joint_jeffreys_term: bool,
+    joint_jeffreys_term_strength: f64,
     /// Warm-start seed `log λ` for the reference-symmetric joint smoothing
     /// penalties (gam#1587). The formula REML driver overrides this from its
     /// `init_lambda` so the joint-penalty outer ρ starts at the same seed the
@@ -1036,7 +1036,7 @@ impl MultinomialFamily {
             penalties,
             likelihood,
             axis_derivative_cache: Arc::new(Mutex::new(None)),
-            use_joint_jeffreys_term: true,
+            joint_jeffreys_term_strength: 1.0,
             initial_log_lambda: 0.0,
             joint_initial_log_lambdas: None,
         })
@@ -1045,7 +1045,7 @@ impl MultinomialFamily {
     /// Select whether this multinomial adapter instance contributes the
     /// full-span Jeffreys/Firth correction.
     pub fn with_joint_jeffreys_term(mut self, enabled: bool) -> Self {
-        self.use_joint_jeffreys_term = enabled;
+        self.joint_jeffreys_term_strength = f64::from(enabled);
         self
     }
 
@@ -2418,7 +2418,25 @@ impl MultinomialFamily {
 
 impl CustomFamily for MultinomialFamily {
     fn joint_jeffreys_term_required(&self) -> bool {
-        self.use_joint_jeffreys_term
+        self.joint_jeffreys_term_strength > 0.0
+    }
+
+    fn joint_jeffreys_term_strength(&self) -> f64 {
+        self.joint_jeffreys_term_strength
+    }
+
+    fn coefficient_mode_homotopy_member(&self, progress: f64) -> Result<Option<Self>, String> {
+        if !progress.is_finite() || !(0.0..=1.0).contains(&progress) {
+            return Err(format!(
+                "multinomial Jeffreys homotopy progress must lie in [0, 1], got {progress}"
+            ));
+        }
+        if self.joint_jeffreys_term_strength == 0.0 {
+            return Ok(None);
+        }
+        let mut member = self.clone();
+        member.joint_jeffreys_term_strength = progress * self.joint_jeffreys_term_strength;
+        Ok(Some(member))
     }
 
     fn joint_penalty_specs(&self) -> Result<Vec<gam_problem::JointPenaltySpec>, String> {
@@ -2446,7 +2464,7 @@ impl CustomFamily for MultinomialFamily {
         // conditioning-gated Jeffreys log-determinant correction is not covered
         // by that convexity proof, so armed Firth fits retain the anchored
         // continuation while the unbiased separation probe bypasses it.
-        !self.use_joint_jeffreys_term
+        self.joint_jeffreys_term_strength == 0.0
     }
 
     fn pseudo_logdet_mode(&self) -> PseudoLogdetMode {
@@ -4559,6 +4577,25 @@ mod tests {
             !firth.inner_coefficient_objective_is_globally_convex(),
             "the conditioning-gated Jeffreys correction is outside the convexity proof"
         );
+        let anchor = firth
+            .coefficient_mode_homotopy_member(0.0)
+            .expect("Jeffreys homotopy anchor")
+            .expect("armed multinomial supplies a coefficient-mode homotopy");
+        let midpoint = firth
+            .coefficient_mode_homotopy_member(0.5)
+            .expect("Jeffreys homotopy midpoint")
+            .expect("armed multinomial supplies a coefficient-mode homotopy");
+        let endpoint = firth
+            .coefficient_mode_homotopy_member(1.0)
+            .expect("Jeffreys homotopy endpoint")
+            .expect("armed multinomial supplies a coefficient-mode homotopy");
+        assert_eq!(anchor.joint_jeffreys_term_strength(), 0.0);
+        assert!(
+            anchor.inner_coefficient_objective_is_globally_convex(),
+            "the homotopy anchor is exactly the unique unbiased softmax objective"
+        );
+        assert_eq!(midpoint.joint_jeffreys_term_strength(), 0.5);
+        assert_eq!(endpoint.joint_jeffreys_term_strength(), 1.0);
     }
 
     #[test]

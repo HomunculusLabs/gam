@@ -3982,7 +3982,9 @@ pub(crate) fn joint_jeffreys_information_defaults_delegate_to_observed_hessian()
 /// second-directional path returns wildly different values so the test
 /// detects which path the completion dispatched to.
 #[derive(Clone)]
-pub(crate) struct ContractedJeffreysSeamFamily;
+pub(crate) struct ContractedJeffreysSeamFamily {
+    strength: f64,
+}
 
 impl CustomFamily for ContractedJeffreysSeamFamily {
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
@@ -4026,6 +4028,14 @@ impl CustomFamily for ContractedJeffreysSeamFamily {
     fn joint_jeffreys_information_contracted_trace_hessian_available(&self) -> bool {
         true
     }
+
+    fn joint_jeffreys_term_required(&self) -> bool {
+        self.strength > 0.0
+    }
+
+    fn joint_jeffreys_term_strength(&self) -> f64 {
+        self.strength
+    }
 }
 
 /// gam#1020 acceptance: the second-order completion takes the contracted
@@ -4033,7 +4043,7 @@ impl CustomFamily for ContractedJeffreysSeamFamily {
 /// by `−½·gate`; the pairwise H2dot path is not consulted.
 #[test]
 pub(crate) fn jeffreys_second_order_completion_prefers_contracted_hook() {
-    let family = ContractedJeffreysSeamFamily;
+    let family = ContractedJeffreysSeamFamily { strength: 1.0 };
     let specs = vec![jeffreys_seam_spec(2)];
     let states = vec![jeffreys_seam_state(Array1::zeros(2))];
     // λ_min = 1e-4 is far below the absolute conditioning gate, so the
@@ -4061,6 +4071,24 @@ pub(crate) fn jeffreys_second_order_completion_prefers_contracted_hook() {
             );
         }
     }
+
+    let half_family = ContractedJeffreysSeamFamily { strength: 0.5 };
+    let half_completion = custom_family_joint_jeffreys_second_order_completion(
+        &half_family,
+        &states,
+        &specs,
+        &h_joint,
+        &z_joint,
+        JeffreysCompletionAssembly::Exact,
+    )
+    .expect("half-strength completion")
+    .expect("half-strength completion present");
+    assert_eq!(
+        half_completion,
+        0.5 * &completion,
+        "the exact completion must follow the same objective strength as the Jeffreys value, \
+         score, and divided-difference curvature"
+    );
 }
 
 /// gam#1020: for a family without a contracted hook, exact assembly dispatches

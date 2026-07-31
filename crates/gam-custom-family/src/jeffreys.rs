@@ -198,9 +198,22 @@ pub(crate) fn custom_family_joint_jeffreys_value<
         z_joint.view(),
         |_: &Array1<f64>| Ok(None),
     ) {
-        Ok((phi, _grad, _hphi)) => phi,
+        Ok((phi, _grad, _hphi)) => phi * family.joint_jeffreys_term_strength(),
         Err(_) => 0.0,
     }
+}
+
+fn scale_jeffreys_triple(
+    mut term: (f64, Array1<f64>, Array2<f64>),
+    strength: f64,
+) -> (f64, Array1<f64>, Array2<f64>) {
+    if strength == 1.0 {
+        return term;
+    }
+    term.0 *= strength;
+    term.1 *= strength;
+    term.2 *= strength;
+    term
 }
 
 /// Evaluate the family-general Jeffreys term `(Phi, grad, H_Phi)` at the current
@@ -252,7 +265,10 @@ fn custom_family_joint_jeffreys_term_from_information<
             )
         },
     )?;
-    Ok(term)
+    Ok(scale_jeffreys_triple(
+        term,
+        family.joint_jeffreys_term_strength(),
+    ))
 }
 
 /// Evaluate the accepted-mode Jeffreys triple directly from the exact Newton
@@ -269,6 +285,7 @@ pub(crate) fn custom_family_joint_jeffreys_term_from_workspace(
     workspace: &dyn ExactNewtonJointHessianWorkspace,
     total_p: usize,
     z_joint: &Array2<f64>,
+    strength: f64,
 ) -> Result<Option<(f64, Array1<f64>, Array2<f64>)>, String> {
     if total_p == 0 || z_joint.ncols() == 0 {
         return Ok(None);
@@ -296,7 +313,7 @@ pub(crate) fn custom_family_joint_jeffreys_term_from_workspace(
         z_joint.view(),
         || Ok(Some(directional_derivatives)),
     )
-    .map(Some)
+    .map(|term| Some(scale_jeffreys_triple(term, strength)))
 }
 
 /// Evaluate the Jeffreys term and the exact remainder of its coefficient
@@ -511,7 +528,7 @@ pub(crate) fn custom_family_joint_jeffreys_second_order_completion<
             Ok(None)
         };
     };
-    match family.joint_jeffreys_information_contracted_trace_hessian_with_specs(
+    let completion = match family.joint_jeffreys_information_contracted_trace_hessian_with_specs(
         states,
         specs,
         &trace_weight,
@@ -524,7 +541,7 @@ pub(crate) fn custom_family_joint_jeffreys_second_order_completion<
                 ));
             }
             contracted.mapv_inplace(|value| -0.5 * gate_weight * value);
-            Ok(Some(contracted))
+            Some(contracted)
         }
         None if assembly == JeffreysCompletionAssembly::Exact => {
             gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_second_order_completion(
@@ -535,10 +552,17 @@ pub(crate) fn custom_family_joint_jeffreys_second_order_completion<
                         states, specs, u, v,
                     )
                 },
-            )
+            )?
         }
-        None => Ok(None),
-    }
+        None => None,
+    };
+    Ok(completion.map(|mut matrix| {
+        let strength = family.joint_jeffreys_term_strength();
+        if strength != 1.0 {
+            matrix *= strength;
+        }
+        matrix
+    }))
 }
 
 /// Outer-REML full-span Jeffreys curvature `H_Φ` for the coupled joint Hessian.
@@ -697,6 +721,7 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
         return Ok(None);
     }
     let family_owned = family.clone();
+    let strength = family.joint_jeffreys_term_strength();
     let states_owned: Vec<ParameterBlockState> = states.to_vec();
     let specs_owned: Vec<ParameterBlockSpec> = specs.to_vec();
     let batch: JeffreysHphiDriftBatchFn = Arc::new(move |deltas: &[Array1<f64>]| {
@@ -765,7 +790,12 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                         delta,
                     )?;
                 base.perturbation_derivative_batched_axes(&pert_h, pert_axis_matrices)
-                    .map(Some)
+                    .map(|mut derivative| {
+                        if strength != 1.0 {
+                            derivative *= strength;
+                        }
+                        Some(derivative)
+                    })
             })
             .collect()
     });

@@ -3749,6 +3749,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                             workspace.as_ref(),
                             total_p,
                             z_joint,
+                            family.joint_jeffreys_term_strength(),
                         )?,
                         None => None,
                     };
@@ -6765,6 +6766,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                         workspace.as_ref(),
                         total_p,
                         z_joint,
+                        family.joint_jeffreys_term_strength(),
                     )?,
                     None => None,
                 };
