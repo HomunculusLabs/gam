@@ -58,15 +58,18 @@ impl SurvivalMarginalSlopeFamily {
     }
 
     /// Score pullback using actual Jacobians from q-geometry (timewiggle-correct).
-    pub(crate) fn accumulate_score_with_q_geometry(
+    pub(crate) fn accumulate_score_with_q_geometry<Storage>(
         &self,
         row: usize,
         qg: &SurvivalMarginalSlopeDynamicRow,
-        primary: &Array1<f64>,
+        primary: &ndarray::ArrayBase<Storage, ndarray::Ix1>,
         score_t: &mut Array1<f64>,
         score_m: &mut Array1<f64>,
         score_g: &mut Array1<f64>,
-    ) -> Result<(), String> {
+    ) -> Result<(), String>
+    where
+        Storage: ndarray::Data<Elem = f64>,
+    {
         let jt = [&qg.dq0_time, &qg.dq1_time, &qg.dqd1_time];
         let jm = [&qg.dq0_marginal, &qg.dq1_marginal, &qg.dqd1_marginal];
         for q in 0..3 {

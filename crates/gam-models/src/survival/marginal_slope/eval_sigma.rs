@@ -4,6 +4,163 @@
 
 use super::*;
 
+struct CompiledSigmaPrimaryTerms {
+    objective: f64,
+    grad: [f64; 4],
+    hess: [[f64; 4]; 4],
+}
+
+/// Direct compiler lowering of the canonical rigid feature program through the
+/// nonlinear observed-slope map
+///
+/// `b = scale * g`, `linear = z * b`, `variance = covariance * b²`.
+///
+/// The row macro owns every feature derivative. This function is only the
+/// universal chain rule from that five-feature compiler surface back to
+/// `(q0,q1,qd1,g,log_sigma)`: order two plus one contracted third supplies the
+/// first auxiliary bundle; the second adds the curvature direction and one
+/// contracted fourth. No jet carrier or likelihood algebra is reconstructed.
+#[inline]
+fn compiled_sigma_primary_terms(
+    primaries: [f64; 4],
+    scale: crate::survival::lognormal_kernel::ProbitFrailtyScaleJet,
+    inputs: &RigidRowInputs,
+    second: bool,
+) -> Result<CompiledSigmaPrimaryTerms, String> {
+    let [q0, q1, qd1, g] = primaries;
+    let b = scale.s * g;
+    let linear = inputs.z_sum * b;
+    let variance = inputs.covariance_ones * b * b;
+    let (_, feature_gradient, feature_hessian, witnesses) =
+        rigid_feature_program_order2(q0, q1, qd1, linear, variance, inputs.wi, inputs.di, 1.0);
+    validate_rigid_row_admission(qd1, inputs, witnesses[0], witnesses[1], witnesses[2])?;
+
+    let tangent = [
+        0.0,
+        0.0,
+        0.0,
+        inputs.z_sum,
+        2.0 * inputs.covariance_ones * b,
+    ];
+    let curvature = [0.0, 0.0, 0.0, 0.0, 2.0 * inputs.covariance_ones];
+    let third_tangent = rigid_feature_program_third_contracted(
+        q0, q1, qd1, linear, variance, inputs.wi, inputs.di, 1.0, &tangent,
+    );
+
+    let dot = |left: &[f64; 5], right: &[f64; 5]| {
+        left[0] * right[0]
+            + left[1] * right[1]
+            + left[2] * right[2]
+            + left[3] * right[3]
+            + left[4] * right[4]
+    };
+    let matrix_direction =
+        |matrix: &[[f64; 5]; 5], row: usize, direction: &[f64; 5]| dot(&matrix[row], direction);
+
+    let f_b = dot(&feature_gradient, &tangent);
+    let h_times_tangent: [f64; 5] =
+        std::array::from_fn(|axis| matrix_direction(&feature_hessian, axis, &tangent));
+    let f_bb = dot(&h_times_tangent, &tangent) + dot(&feature_gradient, &curvature);
+    let f_qb: [f64; 3] = std::array::from_fn(|axis| h_times_tangent[axis]);
+    let f_qqb: [[f64; 3]; 3] =
+        std::array::from_fn(|axis| std::array::from_fn(|other| third_tangent[axis][other]));
+    let f_qbb: [f64; 3] = std::array::from_fn(|axis| {
+        matrix_direction(&third_tangent, axis, &tangent)
+            + matrix_direction(&feature_hessian, axis, &curvature)
+    });
+    let f_bbb = dot(
+        &std::array::from_fn(|axis| matrix_direction(&third_tangent, axis, &tangent)),
+        &tangent,
+    ) + 3.0 * dot(&h_times_tangent, &curvature);
+
+    let bt = g * scale.ds;
+    if !second {
+        let objective = f_b * bt;
+        let grad = std::array::from_fn(|axis| {
+            if axis < 3 {
+                f_qb[axis] * bt
+            } else {
+                f_bb * scale.s * bt + f_b * scale.ds
+            }
+        });
+        let hess = std::array::from_fn(|axis| {
+            std::array::from_fn(|other| match (axis == 3, other == 3) {
+                (false, false) => f_qqb[axis][other] * bt,
+                (true, true) => f_bbb * scale.s * scale.s * bt + 2.0 * f_bb * scale.s * scale.ds,
+                _ => {
+                    let primary = if axis == 3 { other } else { axis };
+                    f_qbb[primary] * scale.s * bt + f_qb[primary] * scale.ds
+                }
+            })
+        });
+        return Ok(CompiledSigmaPrimaryTerms {
+            objective,
+            grad,
+            hess,
+        });
+    }
+
+    let third_curvature = rigid_feature_program_third_contracted(
+        q0, q1, qd1, linear, variance, inputs.wi, inputs.di, 1.0, &curvature,
+    );
+    let fourth_tangent = rigid_feature_program_fourth_contracted(
+        q0, q1, qd1, linear, variance, inputs.wi, inputs.di, 1.0, &tangent, &tangent,
+    );
+    let f_qqbb: [[f64; 3]; 3] = std::array::from_fn(|axis| {
+        std::array::from_fn(|other| fourth_tangent[axis][other] + third_curvature[axis][other])
+    });
+    let f_qbbb: [f64; 3] = std::array::from_fn(|axis| {
+        matrix_direction(&fourth_tangent, axis, &tangent)
+            + 3.0 * matrix_direction(&third_tangent, axis, &curvature)
+    });
+    let f_bbbb = dot(
+        &std::array::from_fn(|axis| matrix_direction(&fourth_tangent, axis, &tangent)),
+        &tangent,
+    ) + 6.0
+        * dot(
+            &std::array::from_fn(|axis| matrix_direction(&third_tangent, axis, &tangent)),
+            &curvature,
+        )
+        + 3.0
+            * dot(
+                &std::array::from_fn(|axis| matrix_direction(&feature_hessian, axis, &curvature)),
+                &curvature,
+            );
+
+    let btt = g * scale.d2s;
+    let objective = f_bb * bt * bt + f_b * btt;
+    let grad = std::array::from_fn(|axis| {
+        if axis < 3 {
+            f_qbb[axis] * bt * bt + f_qb[axis] * btt
+        } else {
+            f_bbb * bt * bt * scale.s
+                + f_bb * (btt * scale.s + 2.0 * bt * scale.ds)
+                + f_b * scale.d2s
+        }
+    });
+    let hess = std::array::from_fn(|axis| {
+        std::array::from_fn(|other| match (axis == 3, other == 3) {
+            (false, false) => f_qqbb[axis][other] * bt * bt + f_qqb[axis][other] * btt,
+            (true, true) => {
+                f_bbbb * bt * bt * scale.s * scale.s
+                    + f_bbb * (btt * scale.s * scale.s + 4.0 * bt * scale.s * scale.ds)
+                    + f_bb * (2.0 * scale.ds * scale.ds + 2.0 * scale.s * scale.d2s)
+            }
+            _ => {
+                let primary = if axis == 3 { other } else { axis };
+                f_qbbb[primary] * bt * bt * scale.s
+                    + f_qbb[primary] * (btt * scale.s + 2.0 * bt * scale.ds)
+                    + f_qb[primary] * scale.d2s
+            }
+        })
+    });
+    Ok(CompiledSigmaPrimaryTerms {
+        objective,
+        grad,
+        hess,
+    })
+}
+
 impl SurvivalMarginalSlopeFamily {
     /// Outer-aware variant of `log_likelihood_only`. When
     /// `options.outer_score_subsample` is `None` this iterates over all rows
@@ -128,30 +285,22 @@ impl SurvivalMarginalSlopeFamily {
         rigid_row_nll(&observed_primaries, &inputs)
     }
 
-    pub(crate) fn row_sigma_primary_terms(
+    fn row_sigma_primary_terms(
         &self,
         row: usize,
         block_states: &[ParameterBlockState],
         second_sigma: bool,
-    ) -> Result<(f64, Array1<f64>, Array2<f64>), String> {
+    ) -> Result<CompiledSigmaPrimaryTerms, String> {
         let primaries = rigid_row_kernel_primaries(self, block_states, row)?;
         let scale = self.sigma_scale_derivatives()?;
-        let terms = if second_sigma {
-            second_parameter_order2_terms(
-                primaries,
-                scale.s,
-                scale.ds,
-                scale.d2s,
-                |variables, parameter| {
-                    self.row_neglog_canonical_scale_jet(row, block_states, variables, parameter)
-                },
-            )?
-        } else {
-            first_parameter_order2_terms(primaries, scale.s, scale.ds, |variables, parameter| {
-                self.row_neglog_canonical_scale_jet(row, block_states, variables, parameter)
-            })?
-        };
-        Ok((terms.objective, terms.grad, terms.hess))
+        let mut inputs = rigid_row_inputs(
+            self,
+            block_states,
+            row,
+            "survival marginal-slope sigma compiled row program",
+        )?;
+        inputs.probit_scale = 1.0;
+        compiled_sigma_primary_terms(primaries, scale, &inputs, second_sigma)
     }
 
     pub(crate) fn sigma_exact_joint_psi_terms(
@@ -216,16 +365,21 @@ impl SurvivalMarginalSlopeFamily {
                     )
                 },
                 |row, a| -> Result<(), String> {
-                    let (mut obj, mut grad, mut hess) =
-                        self.row_sigma_primary_terms(row, block_states, false)?;
+                    let mut terms = self.row_sigma_primary_terms(row, block_states, false)?;
                     let w = row_weights[row];
                     if w != 1.0 {
-                        obj *= w;
-                        grad.mapv_inplace(|v| v * w);
-                        hess.mapv_inplace(|v| v * w);
+                        terms.objective *= w;
+                        for axis in 0..4 {
+                            terms.grad[axis] *= w;
+                            for other in 0..4 {
+                                terms.hess[axis][other] *= w;
+                            }
+                        }
                     }
-                    a.0 += obj;
+                    a.0 += terms.objective;
                     let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
+                    let grad = ndarray::ArrayView1::from(&terms.grad);
+                    let hess = ndarray::ArrayView2::from(&terms.hess);
                     self.accumulate_score_with_q_geometry(
                         row, &q_geom, &grad, &mut a.1, &mut a.2, &mut a.3,
                     )?;
@@ -314,16 +468,21 @@ impl SurvivalMarginalSlopeFamily {
                     )
                 },
                 |row, a| -> Result<(), String> {
-                    let (mut obj, mut grad, mut hess) =
-                        self.row_sigma_primary_terms(row, block_states, true)?;
+                    let mut terms = self.row_sigma_primary_terms(row, block_states, true)?;
                     let w = row_weights[row];
                     if w != 1.0 {
-                        obj *= w;
-                        grad.mapv_inplace(|v| v * w);
-                        hess.mapv_inplace(|v| v * w);
+                        terms.objective *= w;
+                        for axis in 0..4 {
+                            terms.grad[axis] *= w;
+                            for other in 0..4 {
+                                terms.hess[axis][other] *= w;
+                            }
+                        }
                     }
-                    a.0 += obj;
+                    a.0 += terms.objective;
                     let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
+                    let grad = ndarray::ArrayView1::from(&terms.grad);
+                    let hess = ndarray::ArrayView2::from(&terms.hess);
                     self.accumulate_score_with_q_geometry(
                         row, &q_geom, &grad, &mut a.1, &mut a.2, &mut a.3,
                     )?;
@@ -432,8 +591,8 @@ impl SurvivalMarginalSlopeFamily {
                 let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
                 let w = row_weights[row];
                 if w != 1.0 {
-                    grad.mapv_inplace(|v| v * w);
-                    hess.mapv_inplace(|v| v * w);
+                    grad.mapv_inplace(|value| value * w);
+                    hess.mapv_inplace(|value| value * w);
                 }
                 acc.add_pullback_with_q_geometry(self, row, &q_geom, &grad, &hess)?;
                 Ok(())
@@ -536,27 +695,263 @@ mod sigma_parameter_jet_release_tests {
         Ok(eval_scaled(&variables, &scale_jet, inputs)?.h)
     }
 
+    type HandBundle = (f64, [f64; 4], [[f64; 4]; 4]);
+
+    #[inline(always)]
+    fn inner_derivative(
+        q_axis: usize,
+        q: f64,
+        linear: f64,
+        correction: &[f64; 5],
+        axes: &[usize],
+    ) -> f64 {
+        let q_count = axes.iter().filter(|&&axis| axis == q_axis).count();
+        if axes.iter().any(|&axis| axis != q_axis && axis != 3) || q_count > 1 {
+            return 0.0;
+        }
+        let slope_count = axes.len() - q_count;
+        if q_count == 1 {
+            correction[slope_count]
+        } else {
+            q * correction[slope_count] + if slope_count == 1 { linear } else { 0.0 }
+        }
+    }
+
+    #[inline(always)]
+    fn composed_derivative(
+        outer: &[f64; 5],
+        inner: impl Fn(&[usize]) -> f64,
+        axes: &[usize],
+    ) -> f64 {
+        match axes {
+            [a] => outer[1] * inner(&[*a]),
+            [a, b] => outer[2] * inner(&[*a]) * inner(&[*b]) + outer[1] * inner(&[*a, *b]),
+            [a, b, c] => {
+                outer[3] * inner(&[*a]) * inner(&[*b]) * inner(&[*c])
+                    + outer[2]
+                        * (inner(&[*a, *b]) * inner(&[*c])
+                            + inner(&[*a, *c]) * inner(&[*b])
+                            + inner(&[*b, *c]) * inner(&[*a]))
+                    + outer[1] * inner(&[*a, *b, *c])
+            }
+            [a, b, c, d] => {
+                outer[4] * inner(&[*a]) * inner(&[*b]) * inner(&[*c]) * inner(&[*d])
+                    + outer[3]
+                        * (inner(&[*a, *b]) * inner(&[*c]) * inner(&[*d])
+                            + inner(&[*a, *c]) * inner(&[*b]) * inner(&[*d])
+                            + inner(&[*a, *d]) * inner(&[*b]) * inner(&[*c])
+                            + inner(&[*b, *c]) * inner(&[*a]) * inner(&[*d])
+                            + inner(&[*b, *d]) * inner(&[*a]) * inner(&[*c])
+                            + inner(&[*c, *d]) * inner(&[*a]) * inner(&[*b]))
+                    + outer[2]
+                        * (inner(&[*a, *b]) * inner(&[*c, *d])
+                            + inner(&[*a, *c]) * inner(&[*b, *d])
+                            + inner(&[*a, *d]) * inner(&[*b, *c])
+                            + inner(&[*a, *b, *c]) * inner(&[*d])
+                            + inner(&[*a, *b, *d]) * inner(&[*c])
+                            + inner(&[*a, *c, *d]) * inner(&[*b])
+                            + inner(&[*b, *c, *d]) * inner(&[*a]))
+                    + outer[1] * inner(&[*a, *b, *c, *d])
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Fully expanded, non-jet log-sigma chain for the complete primary
+    /// objective/gradient/Hessian bundle. It evaluates the three scalar outer
+    /// stacks once and applies the direct carrier-coordinate formulas.
+    #[inline(never)]
+    fn strongest_hand_sigma_bundle(
+        primaries: [f64; 4],
+        scale: ProbitFrailtyScaleJet,
+        inputs: &RigidRowInputs,
+        second: bool,
+    ) -> HandBundle {
+        let [q0, q1, qd1, g] = primaries;
+        let b = scale.s * g;
+        let covariance = inputs.covariance_ones;
+        let correction_value = (1.0 + covariance * b * b).sqrt();
+        let inverse = correction_value.recip();
+        let inverse2 = inverse * inverse;
+        let inverse3 = inverse2 * inverse;
+        let inverse5 = inverse3 * inverse2;
+        let inverse7 = inverse5 * inverse2;
+        let correction = [
+            correction_value,
+            covariance * b * inverse,
+            covariance * inverse3,
+            -3.0 * covariance * covariance * b * inverse5,
+            3.0 * covariance * covariance * (4.0 * covariance * b * b - 1.0) * inverse7,
+        ];
+        let eta0 = q0 * correction[0] + b * inputs.z_sum;
+        let eta1 = q1 * correction[0] + b * inputs.z_sum;
+        let adjusted = qd1 * correction[0];
+
+        let entry_raw = unary_derivatives_neglog_phi(-eta0, inputs.wi);
+        let exit_raw = unary_derivatives_neglog_phi(-eta1, inputs.wi * (1.0 - inputs.di));
+        let density_raw = unary_derivatives_log_normal_pdf(eta1);
+        let log_raw = unary_derivatives_log(adjusted);
+        let entry = std::array::from_fn(|order| {
+            -entry_raw[order] * if order % 2 == 0 { 1.0 } else { -1.0 }
+        });
+        let mut exit =
+            std::array::from_fn(|order| exit_raw[order] * if order % 2 == 0 { 1.0 } else { -1.0 });
+        let mut log_adjusted = [0.0; 5];
+        if inputs.di > 0.0 {
+            let event_scale = -inputs.wi * inputs.di;
+            for order in 0..5 {
+                exit[order] += event_scale * density_raw[order];
+                log_adjusted[order] = event_scale * log_raw[order];
+            }
+        }
+        let derivative = |axes: &[usize]| {
+            composed_derivative(
+                &entry,
+                |selected| inner_derivative(0, q0, inputs.z_sum, &correction, selected),
+                axes,
+            ) + composed_derivative(
+                &exit,
+                |selected| inner_derivative(1, q1, inputs.z_sum, &correction, selected),
+                axes,
+            ) + composed_derivative(
+                &log_adjusted,
+                |selected| inner_derivative(2, qd1, 0.0, &correction, selected),
+                axes,
+            )
+        };
+
+        let f_b = derivative(&[3]);
+        let f_bb = derivative(&[3, 3]);
+        let f_bbb = derivative(&[3, 3, 3]);
+        let f_qb: [f64; 3] = std::array::from_fn(|axis| derivative(&[axis, 3]));
+        let f_qbb: [f64; 3] = std::array::from_fn(|axis| derivative(&[axis, 3, 3]));
+        let mut f_qqb = [[0.0; 3]; 3];
+        for axis in 0..3 {
+            for other in axis..3 {
+                let value = derivative(&[axis, other, 3]);
+                f_qqb[axis][other] = value;
+                f_qqb[other][axis] = value;
+            }
+        }
+        let bt = g * scale.ds;
+        if !second {
+            let objective = f_b * bt;
+            let gradient = std::array::from_fn(|axis| {
+                if axis < 3 {
+                    f_qb[axis] * bt
+                } else {
+                    f_bb * scale.s * bt + f_b * scale.ds
+                }
+            });
+            let hessian = std::array::from_fn(|axis| {
+                std::array::from_fn(|other| match (axis == 3, other == 3) {
+                    (false, false) => f_qqb[axis][other] * bt,
+                    (true, true) => {
+                        f_bbb * scale.s * scale.s * bt + 2.0 * f_bb * scale.s * scale.ds
+                    }
+                    _ => {
+                        let primary = if axis == 3 { other } else { axis };
+                        f_qbb[primary] * scale.s * bt + f_qb[primary] * scale.ds
+                    }
+                })
+            });
+            return (objective, gradient, hessian);
+        }
+
+        let f_bbbb = derivative(&[3, 3, 3, 3]);
+        let f_qbbb: [f64; 3] = std::array::from_fn(|axis| derivative(&[axis, 3, 3, 3]));
+        let mut f_qqbb = [[0.0; 3]; 3];
+        for axis in 0..3 {
+            for other in axis..3 {
+                let value = derivative(&[axis, other, 3, 3]);
+                f_qqbb[axis][other] = value;
+                f_qqbb[other][axis] = value;
+            }
+        }
+        let btt = g * scale.d2s;
+        let objective = f_bb * bt * bt + f_b * btt;
+        let gradient = std::array::from_fn(|axis| {
+            if axis < 3 {
+                f_qbb[axis] * bt * bt + f_qb[axis] * btt
+            } else {
+                f_bbb * bt * bt * scale.s
+                    + f_bb * (btt * scale.s + 2.0 * bt * scale.ds)
+                    + f_b * scale.d2s
+            }
+        });
+        let hessian = std::array::from_fn(|axis| {
+            std::array::from_fn(|other| match (axis == 3, other == 3) {
+                (false, false) => f_qqbb[axis][other] * bt * bt + f_qqb[axis][other] * btt,
+                (true, true) => {
+                    f_bbbb * bt * bt * scale.s * scale.s
+                        + f_bbb * (btt * scale.s * scale.s + 4.0 * bt * scale.s * scale.ds)
+                        + f_bb * (2.0 * scale.ds * scale.ds + 2.0 * scale.s * scale.d2s)
+                }
+                _ => {
+                    let primary = if axis == 3 { other } else { axis };
+                    f_qbbb[primary] * bt * bt * scale.s
+                        + f_qbb[primary] * (btt * scale.s + 2.0 * bt * scale.ds)
+                        + f_qb[primary] * scale.d2s
+                }
+            })
+        });
+        (objective, gradient, hessian)
+    }
+
+    #[inline(never)]
+    fn production_sigma_bundle(
+        primaries: [f64; 4],
+        scale: ProbitFrailtyScaleJet,
+        inputs: &RigidRowInputs,
+        second: bool,
+    ) -> HandBundle {
+        let terms = compiled_sigma_primary_terms(primaries, scale, inputs, second)
+            .expect("valid synthetic sigma row");
+        (terms.objective, terms.grad, terms.hess)
+    }
+
     fn close(label: &str, actual: f64, expected: f64) {
         let tolerance = 2.0e-11 * actual.abs().max(expected.abs()).max(1.0);
         assert!(
             actual.is_finite() && expected.is_finite() && (actual - expected).abs() <= tolerance,
-            "{label}: production={actual:+.16e}, dense_tower={expected:+.16e}, tolerance={tolerance:.3e}",
+            "{label}: actual={actual:+.16e}, expected={expected:+.16e}, tolerance={tolerance:.3e}",
         );
     }
 
-    /// #932 release speed gate for the outer log-sigma hyperparameter jet path
-    /// behind [`SurvivalMarginalSlopeFamily::row_sigma_primary_terms`]. The
-    /// production seeded instantiations — `OneSeed<4>` for the first log-sigma
-    /// derivative ([`first_parameter_order2_terms`]) and `TwoSeed<4>` for the
-    /// second ([`second_parameter_order2_terms`]) — are timed against the naive
-    /// dense alternative that evaluates the same
-    /// `row_neglog_canonical_scale_jet` row expression through the generic
-    /// forward-mode jet tower (`Dual2<Tower3<4>>` / `Dual2<Tower4<4>>`, the
-    /// parameter direction folded into the dense primary tower). Each order is
-    /// parity-pinned to `2e-11` relative before timing, and emits one
-    /// accurately named `dense_tower_over_production` diagnostic (dense-tower time over
-    /// production time) per event branch; the MSI release harness fails closed
-    /// whenever any measured cell is `<= 1`.
+    fn close_bundle(label: &str, actual: HandBundle, expected: HandBundle) {
+        close(&format!("{label} objective"), actual.0, expected.0);
+        for axis in 0..4 {
+            close(
+                &format!("{label} grad[{axis}]"),
+                actual.1[axis],
+                expected.1[axis],
+            );
+            for other in 0..4 {
+                close(
+                    &format!("{label} hess[{axis},{other}]"),
+                    actual.2[axis][other],
+                    expected.2[axis][other],
+                );
+            }
+        }
+    }
+
+    /// #932 release speed gate for the outer log-sigma hyperparameter compiler
+    /// path behind [`SurvivalMarginalSlopeFamily::row_sigma_primary_terms`].
+    /// Production composes the macro-emitted order-two, contracted-third, and
+    /// contracted-fourth feature derivatives through the observed-slope
+    /// Jacobian/curvature. Its first and second log-sigma bundles are
+    /// parity-pinned to `2e-11` relative against both a dense generic
+    /// `Dual2<Tower3<4>>` / `Dual2<Tower4<4>>` oracle and an independently
+    /// expanded analytic schedule.
+    ///
+    /// The dense-tower ratio is diagnostic. The binding speed gate is the
+    /// optimized analytic schedule: it evaluates the scalar outer stacks once,
+    /// caches every distinct required mixed partial, reuses Hessian symmetry,
+    /// crosses the same outlined ABI, and returns the same complete 21-scalar
+    /// bundle. The contenders alternate sampling order and fold every result
+    /// channel into the feedback checksum. The MSI release harness fails closed
+    /// whenever median strongest-hand time over production time is `<= 1`.
     ///
     /// The feedback barrier (no `std::hint::black_box`) nudges the observed
     /// slope primary by a negligible `1e-18` multiple of the running checksum,
@@ -565,7 +960,7 @@ mod sigma_parameter_jet_release_tests {
     /// jet evaluations while keeping the perturbed primary bit-adjacent to the
     /// fixture regime.
     #[test]
-    fn release_measure_sigma_parameter_jets_vs_generic_tower_932() {
+    fn release_measure_sigma_parameter_jets_vs_strongest_hand_932() {
         // One ordinary interior row per event branch: censored (d=0) and event
         // (d=1) drive different live derivative stacks, so each is its own cell.
         let cases = [
@@ -578,9 +973,56 @@ mod sigma_parameter_jet_release_tests {
         ];
         let scale = ProbitFrailtyScaleJet::from_log_sigma((0.85_f64).ln());
 
+        fn unit(state: &mut u64) -> f64 {
+            *state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (*state >> 11) as f64 * (1.0 / ((1_u64 << 53) as f64))
+        }
+
+        let mut state = 0x932_C0DE_5EED_u64;
+        for case in 0..192 {
+            let primaries = [
+                -1.5 + 3.0 * unit(&mut state),
+                -1.5 + 3.0 * unit(&mut state),
+                0.2 + 1.8 * unit(&mut state),
+                -1.4 + 2.8 * unit(&mut state),
+            ];
+            let wi = 0.2 + 1.8 * unit(&mut state);
+            let di = (case % 2) as f64;
+            let z_sum = -2.0 + 4.0 * unit(&mut state);
+            let mut inputs = synthetic_inputs(wi, di, z_sum);
+            inputs.covariance_ones = 0.05 + 2.45 * unit(&mut state);
+            let sigma = 0.2 + 1.8 * unit(&mut state);
+            let scale_case = ProbitFrailtyScaleJet::from_log_sigma(sigma.ln());
+            for second in [false, true] {
+                let production = production_sigma_bundle(primaries, scale_case, &inputs, second);
+                let hand = strongest_hand_sigma_bundle(primaries, scale_case, &inputs, second);
+                close_bundle(
+                    &format!("random case={case} order={}", usize::from(second) + 1),
+                    production,
+                    hand,
+                );
+                let dense = if second {
+                    let channel = racer_second_channel(&primaries, &scale_case, &inputs)
+                        .expect("random second-parameter dense-tower racer");
+                    (channel.v, channel.g, channel.h)
+                } else {
+                    let channel = racer_first_channel(&primaries, &scale_case, &inputs)
+                        .expect("random first-parameter dense-tower racer");
+                    (channel.v, channel.g, channel.h)
+                };
+                close_bundle(
+                    &format!("random dense case={case} order={}", usize::from(second) + 1),
+                    production,
+                    dense,
+                );
+            }
+        }
+
         fn best_ns<F>(iterations: usize, base_g: f64, mut evaluate: F) -> f64
         where
-            F: FnMut(f64) -> (f64, Array1<f64>, Array2<f64>),
+            F: FnMut(f64) -> HandBundle,
         {
             let mut best = f64::INFINITY;
             for _ in 0..5 {
@@ -588,7 +1030,13 @@ mod sigma_parameter_jet_release_tests {
                 let started = Instant::now();
                 for _ in 0..iterations {
                     let (objective, grad, hess) = evaluate(base_g + checksum * 1e-18);
-                    checksum += objective + grad[0] + hess[[0, 0]];
+                    checksum += objective;
+                    for axis in 0..4 {
+                        checksum += grad[axis] * (axis + 1) as f64;
+                        for other in 0..4 {
+                            checksum += hess[axis][other] * (axis * 4 + other + 1) as f64;
+                        }
+                    }
                 }
                 assert!(
                     checksum.is_finite(),
@@ -599,17 +1047,42 @@ mod sigma_parameter_jet_release_tests {
             best * 1e9 / iterations as f64
         }
 
+        fn sample_bundle_ns<F>(iterations: usize, base_g: f64, mut evaluate: F) -> f64
+        where
+            F: FnMut(f64) -> HandBundle,
+        {
+            let mut checksum = 0.0_f64;
+            let started = Instant::now();
+            for _ in 0..iterations {
+                let (objective, grad, hess) = evaluate(base_g + checksum * 1e-18);
+                checksum += objective;
+                for axis in 0..4 {
+                    checksum += grad[axis] * (axis + 1) as f64;
+                    for other in 0..4 {
+                        checksum += hess[axis][other] * (axis * 4 + other + 1) as f64;
+                    }
+                }
+            }
+            assert!(
+                checksum.is_finite(),
+                "sigma-parameter strongest-hand checksum must stay finite"
+            );
+            started.elapsed().as_secs_f64() * 1e9 / iterations as f64
+        }
+
+        fn median(mut samples: [f64; 7]) -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[3]
+        }
+
         let iterations = 100_000usize;
         for &(q0, q1, qd1, g, wi, di, z_sum) in &cases {
             let inputs = synthetic_inputs(wi, di, z_sum);
             let primaries = [q0, q1, qd1, g];
 
-            // Parity: first log-sigma derivative — production `OneSeed<4>` vs
-            // dense `Dual2<Tower3<4>>` on objective/gradient/Hessian.
-            let production_first =
-                first_parameter_order2_terms(primaries, scale.s, scale.ds, |vars, param| {
-                    eval_scaled(vars, param, &inputs)
-                })
+            // Parity: first log-sigma derivative — direct compiler contractions
+            // vs dense `Dual2<Tower3<4>>` on objective/gradient/Hessian.
+            let production_first = compiled_sigma_primary_terms(primaries, scale, &inputs, false)
                 .expect("sigma first-parameter production terms");
             let racer_first = racer_first_channel(&primaries, &scale, &inputs)
                 .expect("sigma first-parameter dense-tower racer");
@@ -627,22 +1100,36 @@ mod sigma_parameter_jet_release_tests {
                 for b in 0..4 {
                     close(
                         &format!("event={di:.0} d/dlogsigma hess[{a},{b}]"),
-                        production_first.hess[[a, b]],
+                        production_first.hess[a][b],
                         racer_first.h[a][b],
                     );
                 }
             }
+            let hand_first = strongest_hand_sigma_bundle(primaries, scale, &inputs, false);
+            close(
+                &format!("event={di:.0} d/dlogsigma hand objective"),
+                production_first.objective,
+                hand_first.0,
+            );
+            for a in 0..4 {
+                close(
+                    &format!("event={di:.0} d/dlogsigma hand grad[{a}]"),
+                    production_first.grad[a],
+                    hand_first.1[a],
+                );
+                for b in 0..4 {
+                    close(
+                        &format!("event={di:.0} d/dlogsigma hand hess[{a},{b}]"),
+                        production_first.hess[a][b],
+                        hand_first.2[a][b],
+                    );
+                }
+            }
 
-            // Parity: second log-sigma derivative — production `TwoSeed<4>` vs
-            // dense `Dual2<Tower4<4>>` on objective/gradient/Hessian.
-            let production_second = second_parameter_order2_terms(
-                primaries,
-                scale.s,
-                scale.ds,
-                scale.d2s,
-                |vars, param| eval_scaled(vars, param, &inputs),
-            )
-            .expect("sigma second-parameter production terms");
+            // Parity: second log-sigma derivative — direct compiler contractions
+            // vs dense `Dual2<Tower4<4>>` on objective/gradient/Hessian.
+            let production_second = compiled_sigma_primary_terms(primaries, scale, &inputs, true)
+                .expect("sigma second-parameter production terms");
             let racer_second = racer_second_channel(&primaries, &scale, &inputs)
                 .expect("sigma second-parameter dense-tower racer");
             close(
@@ -659,30 +1146,41 @@ mod sigma_parameter_jet_release_tests {
                 for b in 0..4 {
                     close(
                         &format!("event={di:.0} d2/dlogsigma2 hess[{a},{b}]"),
-                        production_second.hess[[a, b]],
+                        production_second.hess[a][b],
                         racer_second.h[a][b],
                     );
                 }
             }
+            let hand_second = strongest_hand_sigma_bundle(primaries, scale, &inputs, true);
+            close(
+                &format!("event={di:.0} d2/dlogsigma2 hand objective"),
+                production_second.objective,
+                hand_second.0,
+            );
+            for a in 0..4 {
+                close(
+                    &format!("event={di:.0} d2/dlogsigma2 hand grad[{a}]"),
+                    production_second.grad[a],
+                    hand_second.1[a],
+                );
+                for b in 0..4 {
+                    close(
+                        &format!("event={di:.0} d2/dlogsigma2 hand hess[{a},{b}]"),
+                        production_second.hess[a][b],
+                        hand_second.2[a][b],
+                    );
+                }
+            }
 
-            // Time each order. Both paths package into the same `Array1`/`Array2`
-            // shape, so the ratio isolates the seeded-jet vs dense-tower cost.
+            // Time each order through the same fixed-size 21-scalar bundle.
             let production_first_ns = best_ns(iterations, g, |perturbed_g| {
-                let primaries = [q0, q1, qd1, perturbed_g];
-                let terms =
-                    first_parameter_order2_terms(primaries, scale.s, scale.ds, |vars, param| {
-                        eval_scaled(vars, param, &inputs)
-                    })
-                    .expect("sigma first-parameter production terms");
-                (terms.objective, terms.grad, terms.hess)
+                production_sigma_bundle([q0, q1, qd1, perturbed_g], scale, &inputs, false)
             });
             let racer_first_ns = best_ns(iterations, g, |perturbed_g| {
                 let primaries = [q0, q1, qd1, perturbed_g];
                 let channel = racer_first_channel(&primaries, &scale, &inputs)
                     .expect("sigma first-parameter dense-tower racer");
-                let grad = Array1::from_vec(channel.g.to_vec());
-                let hess = Array2::from_shape_fn((4, 4), |(i, j)| channel.h[i][j]);
-                (channel.v, grad, hess)
+                (channel.v, channel.g, channel.h)
             });
             eprintln!(
                 "SIGMA-PARAM-JET-932 order=1 event={di:.0} production={production_first_ns:.2} \
@@ -691,30 +1189,69 @@ mod sigma_parameter_jet_release_tests {
             );
 
             let production_second_ns = best_ns(iterations, g, |perturbed_g| {
-                let primaries = [q0, q1, qd1, perturbed_g];
-                let terms = second_parameter_order2_terms(
-                    primaries,
-                    scale.s,
-                    scale.ds,
-                    scale.d2s,
-                    |vars, param| eval_scaled(vars, param, &inputs),
-                )
-                .expect("sigma second-parameter production terms");
-                (terms.objective, terms.grad, terms.hess)
+                production_sigma_bundle([q0, q1, qd1, perturbed_g], scale, &inputs, true)
             });
             let racer_second_ns = best_ns(iterations, g, |perturbed_g| {
                 let primaries = [q0, q1, qd1, perturbed_g];
                 let channel = racer_second_channel(&primaries, &scale, &inputs)
                     .expect("sigma second-parameter dense-tower racer");
-                let grad = Array1::from_vec(channel.g.to_vec());
-                let hess = Array2::from_shape_fn((4, 4), |(i, j)| channel.h[i][j]);
-                (channel.v, grad, hess)
+                (channel.v, channel.g, channel.h)
             });
             eprintln!(
                 "SIGMA-PARAM-JET-932 order=2 event={di:.0} production={production_second_ns:.2} \
                  ns/row dense_tower={racer_second_ns:.2} ns/row dense_tower_over_production={:.6}",
                 racer_second_ns / production_second_ns,
             );
+
+            for second in [false, true] {
+                let mut production_samples = [0.0; 7];
+                let mut hand_samples = [0.0; 7];
+                for round in 0..7 {
+                    let measure_production = || {
+                        sample_bundle_ns(iterations, g, |perturbed_g| {
+                            production_sigma_bundle(
+                                [q0, q1, qd1, perturbed_g],
+                                scale,
+                                &inputs,
+                                second,
+                            )
+                        })
+                    };
+                    let measure_hand = || {
+                        sample_bundle_ns(iterations, g, |perturbed_g| {
+                            strongest_hand_sigma_bundle(
+                                [q0, q1, qd1, perturbed_g],
+                                scale,
+                                &inputs,
+                                second,
+                            )
+                        })
+                    };
+                    if round % 2 == 0 {
+                        production_samples[round] = measure_production();
+                        hand_samples[round] = measure_hand();
+                    } else {
+                        hand_samples[round] = measure_hand();
+                        production_samples[round] = measure_production();
+                    }
+                }
+                let production_ns = median(production_samples);
+                let hand_ns = median(hand_samples);
+                let ratio = hand_ns / production_ns;
+                eprintln!(
+                    "SIGMA-PARAM-HAND-932 order={} event={di:.0} production={production_ns:.2} \
+                     ns/row strongest_hand={hand_ns:.2} ns/row \
+                     strongest_hand_over_production={ratio:.6}",
+                    usize::from(second) + 1,
+                );
+                assert!(
+                    ratio > 1.0,
+                    "sigma-parameter compiler path must strictly beat strongest hand schedule: \
+                     order={} event={di:.0} production={production_ns:.2} ns/row \
+                     strongest_hand={hand_ns:.2} ns/row ratio={ratio:.6}",
+                    usize::from(second) + 1,
+                );
+            }
         }
     }
 }

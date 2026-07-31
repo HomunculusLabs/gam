@@ -880,14 +880,18 @@ impl std::ops::AddAssign<&BlockHessianAccumulator> for BlockHessianAccumulator {
 
 impl BlockHessianAccumulator {
     /// Lifted pullback: J^T H J + Σ_a f_a K_a using actual Jacobians
-    pub(crate) fn add_pullback_with_q_geometry(
+    pub(crate) fn add_pullback_with_q_geometry<GradientStorage, HessianStorage>(
         &mut self,
         family: &SurvivalMarginalSlopeFamily,
         row: usize,
         qg: &SurvivalMarginalSlopeDynamicRow,
-        fg: &Array1<f64>,
-        ph: &Array2<f64>,
-    ) -> Result<(), String> {
+        fg: &ndarray::ArrayBase<GradientStorage, ndarray::Ix1>,
+        ph: &ndarray::ArrayBase<HessianStorage, ndarray::Ix2>,
+    ) -> Result<(), String>
+    where
+        GradientStorage: ndarray::Data<Elem = f64>,
+        HessianStorage: ndarray::Data<Elem = f64>,
+    {
         let jt = [&qg.dq0_time, &qg.dq1_time, &qg.dqd1_time];
         let jm = [&qg.dq0_marginal, &qg.dq1_marginal, &qg.dqd1_marginal];
         let ktt = [&qg.d2q0_time_time, &qg.d2q1_time_time, &qg.d2qd1_time_time];
