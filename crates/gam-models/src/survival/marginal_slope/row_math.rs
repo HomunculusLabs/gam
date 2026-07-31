@@ -2751,7 +2751,7 @@ mod tests {
     /// correctness oracle. Production and strongest-hand both reuse derivative
     /// output and covariance scratch so timing includes row arithmetic only.
     #[test]
-    fn release_measure_packed_widths_k1_to_k8_vs_strongest_hand_932() {
+    fn release_measure_packed_widths_k1_to_k14_vs_strongest_hand_932() {
         use std::hint::black_box;
         use std::time::Instant;
 
@@ -2870,26 +2870,30 @@ mod tests {
                             black_box((&fixed_gradient, &fixed_hessian));
                             value
                         });
-                        let graph_ns = best_ns(5_000, || {
-                            let value = row_primary_closed_form_vector_graph_into::<$dim>(
-                                -0.28,
-                                0.53,
-                                1.18,
-                                &slopes,
-                                &scores,
-                                covariance,
-                                1.21,
-                                event,
-                                1.0e-8,
-                                0.87,
-                                &mut graph_workspace,
-                                &mut graph_gradient,
-                                &mut graph_hessian,
-                            )
-                            .expect("direct graph width");
-                            black_box((&graph_gradient, &graph_hessian));
-                            value
-                        });
+                        let graph_ns = if $dim <= 16 {
+                            best_ns(5_000, || {
+                                let value = row_primary_closed_form_vector_graph_into::<$dim>(
+                                    -0.28,
+                                    0.53,
+                                    1.18,
+                                    &slopes,
+                                    &scores,
+                                    covariance,
+                                    1.21,
+                                    event,
+                                    1.0e-8,
+                                    0.87,
+                                    &mut graph_workspace,
+                                    &mut graph_gradient,
+                                    &mut graph_hessian,
+                                )
+                                .expect("direct graph width");
+                                black_box((&graph_gradient, &graph_hessian));
+                                value
+                            })
+                        } else {
+                            f64::INFINITY
+                        };
                         let dynamic_ns = best_ns(5_000, || {
                             let value = row_primary_closed_form_vector_dynamic_into(
                                 -0.28,
