@@ -384,12 +384,50 @@ fn sae_k2_periodic_overlap_row() -> Vec<GradientChannel> {
     let mut logit_an = Vec::new();
     let mut logit_fd = Vec::new();
     for row in [0usize, 11, 28] {
-        logit_an.push(sys.rows[row].gt[0]);
-        let mut plus = term.clone();
-        plus.assignment.logits[[row, 0]] += FD_STEP;
-        let mut minus = term.clone();
-        minus.assignment.logits[[row, 0]] -= FD_STEP;
-        logit_fd.push((sae_value(&plus, &z, &rho) - sae_value(&minus, &z, &rho)) / (2.0 * FD_STEP));
+        let analytic = sys.rows[row].gt[0];
+        logit_an.push(analytic);
+        let central = |h: f64| {
+            let mut plus = term.clone();
+            plus.assignment.logits[[row, 0]] += h;
+            let mut minus = term.clone();
+            minus.assignment.logits[[row, 0]] -= h;
+            (sae_value(&plus, &z, &rho) - sae_value(&minus, &z, &rho)) / (2.0 * h)
+        };
+        let fd = central(FD_STEP);
+        logit_fd.push(fd);
+
+        // #2228 step sweep, emitted ONLY when this channel already misses the
+        // bar, so a passing run pays nothing. The three explanations for an
+        // analytic/FD gap scale differently in `h`, which is what makes this
+        // decisive rather than suggestive:
+        //
+        //   missing term      rel is FLAT in h
+        //   truncation        rel shrinks like h^2  (genuine FD error)
+        //   inner-solve noise rel grows like 1/h    (the probit row's regime)
+        //
+        // The last case is why `PROBIT_REML_FD_STEP` is 200x `FD_STEP`: a wider
+        // step divides a fixed noise floor by a bigger number. This row carries
+        // the TIGHT step and the TIGHT bar while its value comes from
+        // `penalized_quasi_laplace_criterion`, whose inner solve #2228 records
+        // as frequently non-convergent -- so which regime it is in decides
+        // whether the bar is miscalibrated or the gradient is wrong.
+        let rel = (analytic - fd).abs() / analytic.abs().max(fd.abs()).max(REL_FLOOR);
+        if rel >= REL_TOL {
+            let coarse = central(FD_STEP * 10.0);
+            let fine = central(FD_STEP / 10.0);
+            let rel_of = |v: f64| (analytic - v).abs() / analytic.abs().max(v.abs()).max(REL_FLOOR);
+            eprintln!(
+                "[FD-SWEEP #2228] sae/k2-periodic-overlap/logits row={row} \
+                 analytic={analytic:.12e} | h={:.1e} rel={:.3e} | h={:.1e} rel={:.3e} \
+                 | h={:.1e} rel={:.3e} -- flat=missing term, ~h^2=truncation, ~1/h=noise floor",
+                FD_STEP * 10.0,
+                rel_of(coarse),
+                FD_STEP,
+                rel,
+                FD_STEP / 10.0,
+                rel_of(fine),
+            );
+        }
     }
 
     let mut coord_an = Vec::new();
