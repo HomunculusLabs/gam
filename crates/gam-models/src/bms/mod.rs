@@ -2324,13 +2324,13 @@ mod test_support {
     use super::gradient_paths::rigid_standard_normal_row_nll_generic;
     use gam_math::jet_tower::Tower4;
 
-    struct RigidStandardNormalRow {
-        marginal: BernoulliMarginalLinkMap,
-        g: f64,
-        z: f64,
-        y: f64,
-        w: f64,
-        probit_scale: f64,
+    pub(super) struct RigidStandardNormalRow {
+        pub(super) marginal: BernoulliMarginalLinkMap,
+        pub(super) g: f64,
+        pub(super) z: f64,
+        pub(super) y: f64,
+        pub(super) w: f64,
+        pub(super) probit_scale: f64,
     }
 
     impl gam_math::jet_tower::RowProgram<2> for RigidStandardNormalRow {
