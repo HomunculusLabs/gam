@@ -5497,8 +5497,9 @@ pub(crate) fn owned_joint_penalty_geometry_uses_terminal_workspace_without_famil
         "joint-penalty terminal test Hessian materialization",
     )
     .expect("terminal Hessian materialization");
-    let bundle = gam_problem::JointPenaltyBundle::new(
-        Arc::new(layout.joint_specs.clone()),
+    let bundle = gam_problem::JointPenaltyBundle::from_validated_geometry(
+        Arc::clone(&layout.joint_specs),
+        Arc::clone(&layout.joint_roots),
         layout.joint_log_lambdas(&theta),
         2,
     )

@@ -1702,23 +1702,29 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
         let jeffreys_ranges = block_param_ranges(specs);
         if let Some(z_joint) =
             crate::jeffreys::build_joint_jeffreys_subspace(specs, &jeffreys_ranges)?
-            && let Some((_, gradient, hphi)) = crate::jeffreys::custom_family_joint_jeffreys_term(
-                family,
-                states,
-                specs,
-                &jeffreys_ranges,
-                &z_joint,
-            )?
+            && let Some((_, gradient, hphi, completion)) =
+                crate::jeffreys::custom_family_joint_jeffreys_term_with_exact_completion(
+                    family,
+                    states,
+                    specs,
+                    &jeffreys_ranges,
+                    &z_joint,
+                )?
         {
-            if gradient.len() != total || hphi.dim() != (total, total) {
+            if gradient.len() != total
+                || hphi.dim() != (total, total)
+                || completion.dim() != (total, total)
+            {
                 return Err(format!(
-                    "terminal Jeffreys geometry has gradient/Hessian shapes {}/{:?}, expected {total}/({total}, {total})",
+                    "terminal Jeffreys geometry has gradient/divided-difference/completion shapes {}/{:?}/{:?}, expected {total}/({total}, {total})/({total}, {total})",
                     gradient.len(),
                     hphi.dim(),
+                    completion.dim(),
                 ));
             }
             jeffreys_gradient = gradient;
             precision += &hphi;
+            precision += &completion;
             symmetrize_dense_in_place(&mut precision);
         }
     }
@@ -1770,7 +1776,7 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
                     spd_covariance_from_precision(
                         &precision,
                         p,
-                        "full posterior precision H + S_λ + H_Φ",
+                        "full posterior precision H + S_λ + H_Φ + H_completion",
                     )
                 })
                 .transpose()?;
@@ -1779,7 +1785,8 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
         Some(constraints) => {
             let constraints = constraints.to_dense()?;
             // #2442: this route reaches the truncated posterior only through
-            // `Σ = (H + S_λ + H_Φ)⁻¹`, so it needs a PROPER ambient Gaussian.
+            // `Σ = (H + S_λ + H_Φ + H_completion)⁻¹`, so it needs a PROPER
+            // ambient Gaussian.
             // A constrained mode is not obliged to supply one. Constrained
             // optimality requires `dᵀHd > 0` only along the FEASIBLE cone —
             // copositivity — and the Gaussian location-scale observed
@@ -1803,7 +1810,7 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
             let ambient = match spd_covariance_from_precision(
                 &precision,
                 p,
-                "ambient constrained-posterior precision H + S_λ + H_Φ",
+                "ambient constrained-posterior precision H + S_λ + H_Φ + H_completion",
             ) {
                 Ok(ambient) => ambient,
                 Err(reason) => {
@@ -2295,6 +2302,124 @@ mod required_covariance_tests {
                 blockworking_sets: vec![],
             })
         }
+    }
+
+    /// One-dimensional Jeffreys fixture whose information is locally
+    /// `I(beta) = 0.5 - 2 beta²` at `beta = 0`. Its first derivative vanishes,
+    /// so the divided-difference `H_Phi` is exactly zero, while the omitted
+    /// second-directional completion is
+    /// `-0.5 * I'' / I = 4`. This isolates the terminal-covariance seam: a
+    /// precision assembled from only `H + H_Phi` is 1, while the true
+    /// inner-objective precision is 5.
+    #[derive(Clone)]
+    struct CompletionOnlyJeffreysFamily;
+
+    impl CustomFamily for CompletionOnlyJeffreysFamily {
+        fn evaluate(&self, states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+            if states.len() != 1 {
+                return Err(format!(
+                    "CompletionOnlyJeffreysFamily is a single-block fixture; got {} blocks",
+                    states.len()
+                ));
+            }
+            Ok(FamilyEvaluation {
+                log_likelihood: -0.5 * states[0].beta[0].powi(2),
+                blockworking_sets: vec![BlockWorkingSet::ExactNewton {
+                    gradient: array![-states[0].beta[0]],
+                    hessian: SymmetricMatrix::Dense(array![[1.0]]),
+                }],
+            })
+        }
+
+        fn joint_jeffreys_term_required(&self) -> bool {
+            true
+        }
+
+        fn joint_jeffreys_information_with_specs(
+            &self,
+            states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+        ) -> Result<Option<Array2<f64>>, String> {
+            assert_eq!(states.len(), 1);
+            assert_eq!(specs.len(), 1);
+            Ok(Some(array![[0.5]]))
+        }
+
+        fn joint_jeffreys_information_directional_derivative_all_axes_with_specs(
+            &self,
+            states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+        ) -> Result<Option<Vec<Array2<f64>>>, String> {
+            assert_eq!(states.len(), 1);
+            assert_eq!(specs.len(), 1);
+            Ok(Some(vec![array![[0.0]]]))
+        }
+
+        fn joint_jeffreys_information_contracted_trace_hessian_with_specs(
+            &self,
+            states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+            weight: &Array2<f64>,
+        ) -> Result<Option<Array2<f64>>, String> {
+            assert_eq!(states.len(), 1);
+            assert_eq!(specs.len(), 1);
+            Ok(Some(array![[-4.0 * weight[[0, 0]]]]))
+        }
+
+        fn joint_jeffreys_information_contracted_trace_hessian_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn terminal_covariance_includes_exact_jeffreys_completion_2612() {
+        let spec = ParameterBlockSpec {
+            name: "completion-only-jeffreys".to_string(),
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+                Array2::zeros((1, 1)),
+            )),
+            offset: Array1::zeros(1),
+            penalties: vec![],
+            nullspace_dims: vec![],
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta: Some(array![0.0]),
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        };
+        let states = vec![ParameterBlockState {
+            beta: array![0.0],
+            eta: array![0.0],
+        }];
+        let posterior = compute_joint_posterior(
+            &CompletionOnlyJeffreysFamily,
+            &[spec],
+            &states,
+            &[Array1::zeros(0)],
+            &BlockwiseFitOptions {
+                compute_covariance: true,
+                ..BlockwiseFitOptions::default()
+            },
+            Some(&array![[1.0]]),
+            None,
+            None,
+            None,
+        )
+        .expect("completion-augmented posterior");
+        assert_eq!(
+            posterior.geometry.penalized_hessian.as_array(),
+            &array![[5.0]],
+            "terminal geometry must expose H + H_Phi + H_completion"
+        );
+        let covariance = posterior
+            .covariance_conditional
+            .expect("requested covariance");
+        assert!(
+            (covariance[[0, 0]] - 0.2).abs() <= 1.0e-12,
+            "inverse true precision should be 1/5, got {}",
+            covariance[[0, 0]]
+        );
     }
 
     #[derive(Clone)]

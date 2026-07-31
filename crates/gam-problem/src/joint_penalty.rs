@@ -212,8 +212,15 @@ impl JointPenaltySpec {
         beta.dot(&self.matrix.dot(&beta))
     }
 
-    /// Validate shape, finiteness, symmetry, and nullspace bookkeeping.
-    pub fn validate(&self) -> Result<(), JointPenaltyError> {
+    /// Validate shape, finiteness, symmetry, PSD, and nullspace bookkeeping,
+    /// returning the invariant thin root `R` such that `matrix = RᵀR`.
+    ///
+    /// Joint-penalty strengths vary throughout an outer optimization, but the
+    /// component matrices do not. Returning the root from the same
+    /// eigendecomposition that validates the component lets callers retain it
+    /// as penalty geometry instead of repeating one O(p³) decomposition per
+    /// component on every objective evaluation.
+    pub fn validated_root(&self) -> Result<Array2<f64>, JointPenaltyError> {
         let (nrows, ncols) = self.matrix.dim();
         if nrows != ncols {
             return Err(JointPenaltyError::NotSquare { nrows, ncols });
@@ -252,39 +259,57 @@ impl JointPenaltySpec {
         // drop that mode; a wrong declared nullity mis-ranks the REML
         // pseudo-logdet (the whole point of declaring it is to avoid runtime
         // thresholds, so it must agree with the spectrum at construction).
-        if nrows > 0 {
-            use gam_linalg::faer_ndarray::FaerEigh;
-            let (eigenvalues, _) =
-                FaerEigh::eigh(&self.matrix, faer::Side::Lower).map_err(|e| {
-                    JointPenaltyError::EigendecompositionFailed {
-                        reason: e.to_string(),
-                    }
-                })?;
-            let max_abs_eigenvalue = eigenvalues
-                .iter()
-                .fold(0.0_f64, |acc, &ev| acc.max(ev.abs()));
-            // Same relative classification as the REML pseudo-logdet kernel:
-            // the eigensolver noise floor is O(p·ε·‖S‖), never an absolute cut.
-            let tol = 100.0 * (nrows as f64) * f64::EPSILON * max_abs_eigenvalue;
-            if let Some(&min_eigenvalue) = eigenvalues
-                .iter()
-                .filter(|&&ev| ev < -tol)
-                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            {
-                return Err(JointPenaltyError::NotPositiveSemidefinite {
-                    min_eigenvalue,
-                    max_abs_eigenvalue,
-                });
-            }
-            let numerical = eigenvalues.iter().filter(|&&ev| ev <= tol).count();
-            if numerical != self.nullspace_dim {
-                return Err(JointPenaltyError::NullspaceMismatch {
-                    declared: self.nullspace_dim,
-                    numerical,
-                });
+        if nrows == 0 {
+            return Ok(Array2::zeros((0, 0)));
+        }
+        use gam_linalg::faer_ndarray::FaerEigh;
+        let (eigenvalues, eigenvectors) =
+            FaerEigh::eigh(&self.matrix, faer::Side::Lower).map_err(|e| {
+                JointPenaltyError::EigendecompositionFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+        let max_abs_eigenvalue = eigenvalues
+            .iter()
+            .fold(0.0_f64, |acc, &ev| acc.max(ev.abs()));
+        // Same relative classification as the REML pseudo-logdet kernel:
+        // the eigensolver noise floor is O(p·ε·‖S‖), never an absolute cut.
+        let tol = 100.0 * (nrows as f64) * f64::EPSILON * max_abs_eigenvalue;
+        if let Some(&min_eigenvalue) = eigenvalues
+            .iter()
+            .filter(|&&ev| ev < -tol)
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            return Err(JointPenaltyError::NotPositiveSemidefinite {
+                min_eigenvalue,
+                max_abs_eigenvalue,
+            });
+        }
+        let active: Vec<usize> = eigenvalues
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &value)| (value > tol).then_some(index))
+            .collect();
+        let numerical = nrows - active.len();
+        if numerical != self.nullspace_dim {
+            return Err(JointPenaltyError::NullspaceMismatch {
+                declared: self.nullspace_dim,
+                numerical,
+            });
+        }
+        let mut root = Array2::<f64>::zeros((active.len(), nrows));
+        for (root_row, &eigen_index) in active.iter().enumerate() {
+            let scale = eigenvalues[eigen_index].sqrt();
+            for column in 0..nrows {
+                root[[root_row, column]] = scale * eigenvectors[[column, eigen_index]];
             }
         }
-        Ok(())
+        Ok(root)
+    }
+
+    /// Validate this joint penalty without retaining its spectral root.
+    pub fn validate(&self) -> Result<(), JointPenaltyError> {
+        self.validated_root().map(|_| ())
     }
 }
 
@@ -299,6 +324,7 @@ impl JointPenaltySpec {
 #[derive(Clone, Debug)]
 pub struct JointPenaltyBundle {
     specs: std::sync::Arc<Vec<JointPenaltySpec>>,
+    roots: std::sync::Arc<Vec<Array2<f64>>>,
     log_lambdas: Vec<f64>,
     lambdas: Vec<f64>,
 }
@@ -311,6 +337,35 @@ impl JointPenaltyBundle {
         log_lambdas: Vec<f64>,
         total_compiled: usize,
     ) -> Result<Self, String> {
+        let roots = specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| {
+                spec.validated_root()
+                    .map_err(|error| format!("joint penalty {index}: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_validated_geometry(
+            specs,
+            std::sync::Arc::new(roots),
+            log_lambdas,
+            total_compiled,
+        )
+    }
+
+    /// Build a rho-specific bundle from already-validated invariant geometry.
+    ///
+    /// `specs` and `roots` are constructed together by the label-layout
+    /// compiler and retained across every outer evaluation. Only
+    /// `log_lambdas` changes here. Shape and finiteness are still checked at
+    /// this boundary; the expensive spectral identity was certified when the
+    /// roots were created.
+    pub fn from_validated_geometry(
+        specs: std::sync::Arc<Vec<JointPenaltySpec>>,
+        roots: std::sync::Arc<Vec<Array2<f64>>>,
+        log_lambdas: Vec<f64>,
+        total_compiled: usize,
+    ) -> Result<Self, String> {
         if specs.len() != log_lambdas.len() {
             return Err(format!(
                 "joint penalty bundle: {} specs vs {} log_lambdas",
@@ -318,13 +373,41 @@ impl JointPenaltyBundle {
                 log_lambdas.len(),
             ));
         }
+        if roots.len() != specs.len() {
+            return Err(format!(
+                "joint penalty bundle: {} specs vs {} cached roots",
+                specs.len(),
+                roots.len(),
+            ));
+        }
         let mut lambdas = Vec::with_capacity(log_lambdas.len());
-        for (i, (spec, &log_lambda)) in specs.iter().zip(log_lambdas.iter()).enumerate() {
+        for (i, ((spec, root), &log_lambda)) in specs
+            .iter()
+            .zip(roots.iter())
+            .zip(log_lambdas.iter())
+            .enumerate()
+        {
             if spec.dim() != total_compiled {
                 return Err(format!(
                     "joint penalty {i}: dim {} != total_compiled {}",
                     spec.dim(),
                     total_compiled,
+                ));
+            }
+            if root.dim() != (spec.pseudo_rank(), total_compiled) {
+                return Err(format!(
+                    "joint penalty {i}: cached root shape {}x{} != rank-by-dimension {}x{}",
+                    root.nrows(),
+                    root.ncols(),
+                    spec.pseudo_rank(),
+                    total_compiled,
+                ));
+            }
+            if let Some(((row, column), &value)) =
+                root.indexed_iter().find(|(_, value)| !value.is_finite())
+            {
+                return Err(format!(
+                    "joint penalty {i}: cached root has non-finite entry at ({row},{column}): {value}"
                 ));
             }
             lambdas.push(
@@ -334,6 +417,7 @@ impl JointPenaltyBundle {
         }
         Ok(Self {
             specs,
+            roots,
             log_lambdas,
             lambdas,
         })
@@ -352,6 +436,11 @@ impl JointPenaltyBundle {
     #[inline]
     pub fn specs(&self) -> &[JointPenaltySpec] {
         self.specs.as_slice()
+    }
+
+    #[inline]
+    pub fn roots(&self) -> &[Array2<f64>] {
+        self.roots.as_slice()
     }
 
     #[inline]

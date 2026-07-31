@@ -60,7 +60,8 @@ fn two_dir_term(rho_star: f64) -> (Vec<ParameterBlockSpec>, PenaltyLabelLayout) 
         physical_to_outer: vec![Some(0)],
         fixed_log_lambdas: vec![None],
         initial_rho: array![0.0],
-        joint_specs: Vec::new(),
+        joint_specs: std::sync::Arc::new(Vec::new()),
+        joint_roots: std::sync::Arc::new(Vec::new()),
         joint_to_outer: Vec::new(),
     };
     (vec![spec], layout)
@@ -309,7 +310,8 @@ fn one_dir_term(gamma: f64) -> (Vec<ParameterBlockSpec>, PenaltyLabelLayout) {
         physical_to_outer: vec![Some(0)],
         fixed_log_lambdas: vec![None],
         initial_rho: array![0.0],
-        joint_specs: Vec::new(),
+        joint_specs: std::sync::Arc::new(Vec::new()),
+        joint_roots: std::sync::Arc::new(Vec::new()),
         joint_to_outer: Vec::new(),
     };
     (vec![spec], layout)

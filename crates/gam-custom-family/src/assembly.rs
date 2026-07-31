@@ -46,7 +46,6 @@ pub(crate) fn build_custom_family_inner_assembly<'dp>(
     use gam_solve::estimate::reml::assembly::{
         InnerAssembly, PenaltyBlockDesc, penalty_coords_from_blocks,
     };
-    use gam_solve::estimate::reml::reml_outer_engine::penalty_matrix_root;
 
     // Collect dense penalty matrices so references stay valid for the assembler.
     let per_block_penalties_dense: Vec<Vec<Array2<f64>>> = {
@@ -96,9 +95,16 @@ pub(crate) fn build_custom_family_inner_assembly<'dp>(
     let joint_penalty_matrices: Vec<Array2<f64>> = joint_bundle
         .map(|b| b.specs().iter().map(|s| s.matrix.clone()).collect())
         .unwrap_or_default();
-    for matrix in &joint_penalty_matrices {
-        let root = penalty_matrix_root(matrix)?;
-        penalty_coords.push(PenaltyCoordinate::from_dense_root(root));
+    let joint_penalty_roots = joint_bundle.map(|bundle| bundle.roots()).unwrap_or(&[]);
+    if joint_penalty_roots.len() != joint_penalty_matrices.len() {
+        return Err(format!(
+            "joint penalty geometry mismatch: {} matrices vs {} cached roots",
+            joint_penalty_matrices.len(),
+            joint_penalty_roots.len(),
+        ));
+    }
+    for root in joint_penalty_roots {
+        penalty_coords.push(PenaltyCoordinate::from_dense_root(root.clone()));
     }
     // Hierarchical coefficient-group penalties are INDEPENDENT Gaussian prior
     // factors, not additive pieces of one smooth prior: their evidence

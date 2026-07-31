@@ -42,6 +42,30 @@ pub(crate) fn norm2_slice(a: &[f64]) -> f64 {
     a.iter().map(|x| x * x).sum::<f64>().sqrt()
 }
 
+/// Replace both triangles of a dense square matrix by their arithmetic mean.
+///
+/// Every caller supplies an owned `Array2` created by ndarray or a dense matrix
+/// product, hence standard contiguous row-major storage is part of the local
+/// contract. Working on that storage directly keeps the ubiquitous spectral
+/// symmetrization pass linear and lets the compiler eliminate per-entry
+/// dimension/stride checks.
+fn symmetrize_contiguous(matrix: &mut Array2<f64>) {
+    let (rows, columns) = matrix.dim();
+    assert_eq!(rows, columns, "spectral symmetrization requires a square matrix");
+    let values = matrix
+        .as_slice_mut()
+        .expect("owned dense spectral matrix is contiguous");
+    for row in 0..rows {
+        for column in (row + 1)..columns {
+            let upper = row * columns + column;
+            let lower = column * columns + row;
+            let average = 0.5 * (values[upper] + values[lower]);
+            values[upper] = average;
+            values[lower] = average;
+        }
+    }
+}
+
 /// Relative floor on a reduced-information eigenvalue, as a fraction of the
 /// dominant (identified) curvature `λ_max`. Negligible on data-identified
 /// directions (whose curvature is `O(n) · λ_max`-scale), positive on separating
@@ -314,13 +338,22 @@ pub(crate) fn floored_inverse_prime_floor_sensitivity(lam: f64, floor: f64) -> f
 pub(crate) fn floored_inverse_divided_differences(evals: &Array1<f64>, floor: f64) -> Array2<f64> {
     let m = evals.len();
     let mut psi = Array2::<f64>::zeros((m, m));
+    let eigenvalues = evals
+        .as_slice()
+        .expect("reduced-information eigenvalues are contiguous");
+    let values = psi
+        .as_slice_mut()
+        .expect("divided-difference matrix is contiguous");
     for i in 0..m {
+        let lambda_i = eigenvalues[i];
+        let inverse_i = floored_inverse(lambda_i, floor);
         for j in 0..m {
-            let denom = evals[i] - evals[j];
-            psi[[i, j]] = if denom.abs() <= REDUCED_INFO_ABSOLUTE_FLOOR {
-                floored_inverse_prime(evals[i], floor)
+            let lambda_j = eigenvalues[j];
+            let denom = lambda_i - lambda_j;
+            values[i * m + j] = if denom.abs() <= REDUCED_INFO_ABSOLUTE_FLOOR {
+                floored_inverse_prime(lambda_i, floor)
             } else {
-                (floored_inverse(evals[i], floor) - floored_inverse(evals[j], floor)) / denom
+                (inverse_i - floored_inverse(lambda_j, floor)) / denom
             };
         }
     }
@@ -885,12 +918,8 @@ pub fn jeffreys_term_skippable_dense(h: ArrayView2<'_, f64>) -> Result<bool, Str
     // Symmetrize defensively: the joint Hessian is symmetric up to round-off, and
     // `eigh` reads one triangle — averaging the two makes the spectrum independent
     // of which triangle is trusted.
-    let mut h_sym = Array2::<f64>::zeros((p, p));
-    for i in 0..p {
-        for j in 0..p {
-            h_sym[[i, j]] = 0.5 * (h[[i, j]] + h[[j, i]]);
-        }
-    }
+    let mut h_sym = h.to_owned();
+    symmetrize_contiguous(&mut h_sym);
     let (evals, _evecs) = h_sym.eigh(Side::Lower).map_err(|e| {
         format!("jeffreys_term_skippable_dense: reduced-information eigendecomposition failed: {e}")
     })?;
@@ -1096,13 +1125,8 @@ impl JointJeffreysPlan {
 
         // H_id = Z_J^T H Z_J (m x m reduced information on the Jeffreys span).
         let hz = h_joint.dot(&z_j);
-        let h_id = z_j.t().dot(&hz);
-        let mut h_id_sym = Array2::<f64>::zeros((m, m));
-        for i in 0..m {
-            for j in 0..m {
-                h_id_sym[[i, j]] = 0.5 * (h_id[[i, j]] + h_id[[j, i]]);
-            }
-        }
+        let mut h_id_sym = z_j.t().dot(&hz);
+        symmetrize_contiguous(&mut h_id_sym);
         let (evals, evecs) = h_id_sym.eigh(Side::Lower).map_err(|e| {
             format!("joint_jeffreys_term: reduced-information eigendecomposition failed: {e}")
         })?;
@@ -1142,21 +1166,22 @@ impl JointJeffreysPlan {
         self.reduced_dim != 0 && self.gate_weight != 0.0
     }
 
-    /// Exact gated Jeffreys log-volume represented by this authoritative
-    /// spectrum. Value-only callers must use this instead of invoking the full
-    /// term with an always-`None` derivative closure: that route needlessly
-    /// fans out every canonical coefficient axis before discarding them.
-    pub fn value(&self) -> f64 {
-        if !self.is_active() {
-            return 0.0;
-        }
+    /// Exact extreme eigenvalues of the reduced Fisher information used by the
+    /// conditioning gate.
+    ///
+    /// These are exposed together because a caller deciding whether a
+    /// certified mode is (quasi-)separated must report the same absolute and
+    /// relative evidence that drove [`Self::is_active`]. Recomputing a spectrum
+    /// outside this plan would create a second numerical authority for that
+    /// decision.
+    pub fn information_extrema(&self) -> (f64, f64) {
+        (self.lambda_min, self.lambda_max)
+    }
+
+    /// Smooth conditioning-gate weight in `[0, 1]` evaluated from
+    /// [`Self::information_extrema`].
+    pub fn conditioning_gate_weight(&self) -> f64 {
         self.gate_weight
-            * 0.5
-            * self
-                .evals
-                .iter()
-                .map(|&lambda| jeffreys_antiderivative(lambda, self.floor))
-                .sum::<f64>()
     }
 
     fn coefficient_dim(&self) -> usize {
@@ -1322,12 +1347,8 @@ impl JointJeffreysPlan {
         // removes irrelevant antisymmetric round-off before spectral calculus.
         let pz = explicit_information_derivative.dot(&self.z_j);
         let p_reduced_raw = self.z_j.t().dot(&pz);
-        let mut p_reduced = Array2::<f64>::zeros((m, m));
-        for i in 0..m {
-            for j in 0..m {
-                p_reduced[[i, j]] = 0.5 * (p_reduced_raw[[i, j]] + p_reduced_raw[[j, i]]);
-            }
-        }
+        let mut p_reduced = p_reduced_raw;
+        symmetrize_contiguous(&mut p_reduced);
         let p_eigen = self.evecs.t().dot(&p_reduced).dot(&self.evecs);
 
         let floor_rate = if self.floor_in_relative_regime {
@@ -1356,21 +1377,32 @@ impl JointJeffreysPlan {
         // `u = ∇_λ U` and `u_hessian = ∇²_λ U`, including the motion of
         // `floor = REL·λ_max` on the relative-floor branch.
         let mut u = d.mapv(|value| 0.5 * value);
-        u[self.idx_max] += 0.5 * floor_rate * floor_first_sum;
+        u.as_slice_mut()
+            .expect("Jeffreys eigenvalue gradient is contiguous")[self.idx_max] +=
+            0.5 * floor_rate * floor_first_sum;
         let mut u_hessian = Array2::<f64>::zeros((m, m));
+        let d_lambda_values = d_lambda
+            .as_slice()
+            .expect("inverse eigenvalue derivatives are contiguous");
+        let d_floor_values = d_floor
+            .as_slice()
+            .expect("inverse floor derivatives are contiguous");
+        let u_hessian_values = u_hessian
+            .as_slice_mut()
+            .expect("Jeffreys eigenvalue Hessian is contiguous");
         for i in 0..m {
             for j in 0..m {
-                let mut value = if i == j { d_lambda[i] } else { 0.0 };
+                let mut value = if i == j { d_lambda_values[i] } else { 0.0 };
                 if j == self.idx_max {
-                    value += floor_rate * d_floor[i];
+                    value += floor_rate * d_floor_values[i];
                 }
                 if i == self.idx_max {
-                    value += floor_rate * d_floor[j];
+                    value += floor_rate * d_floor_values[j];
                 }
                 if i == self.idx_max && j == self.idx_max {
                     value += floor_rate * floor_rate * floor_second_sum;
                 }
-                u_hessian[[i, j]] = 0.5 * value;
+                u_hessian_values[i * m + j] = 0.5 * value;
             }
         }
 
@@ -1379,25 +1411,55 @@ impl JointJeffreysPlan {
         let (gate_hess_min_min, gate_hess_min_max, gate_hess_max_max) =
             conditioning_gate_weight_hess(self.lambda_min, self.lambda_max);
         let mut gate_gradient = Array1::<f64>::zeros(m);
-        gate_gradient[self.idx_min] += gate_grad_min;
-        gate_gradient[self.idx_max] += gate_grad_max;
+        {
+            let gate_gradient_values = gate_gradient
+                .as_slice_mut()
+                .expect("gate gradient is contiguous");
+            gate_gradient_values[self.idx_min] += gate_grad_min;
+            gate_gradient_values[self.idx_max] += gate_grad_max;
+        }
         let mut gate_hessian = Array2::<f64>::zeros((m, m));
-        gate_hessian[[self.idx_min, self.idx_min]] += gate_hess_min_min;
-        gate_hessian[[self.idx_min, self.idx_max]] += gate_hess_min_max;
-        gate_hessian[[self.idx_max, self.idx_min]] += gate_hess_min_max;
-        gate_hessian[[self.idx_max, self.idx_max]] += gate_hess_max_max;
+        {
+            let gate_hessian_values = gate_hessian
+                .as_slice_mut()
+                .expect("gate Hessian is contiguous");
+            gate_hessian_values[self.idx_min * m + self.idx_min] += gate_hess_min_min;
+            gate_hessian_values[self.idx_min * m + self.idx_max] += gate_hess_min_max;
+            gate_hessian_values[self.idx_max * m + self.idx_min] += gate_hess_min_max;
+            gate_hessian_values[self.idx_max * m + self.idx_max] += gate_hess_max_max;
+        }
 
         // Eigenvalue gradient `b` and Hessian `L` of the complete scalar
         // `Φ = G·U`.
         let mut b = Array1::<f64>::zeros(m);
         let mut l = Array2::<f64>::zeros((m, m));
+        let u_values = u
+            .as_slice()
+            .expect("Jeffreys eigenvalue gradient is contiguous");
+        let u_hessian_values = u_hessian
+            .as_slice()
+            .expect("Jeffreys eigenvalue Hessian is contiguous");
+        let gate_gradient_values = gate_gradient
+            .as_slice()
+            .expect("gate gradient is contiguous");
+        let gate_hessian_values = gate_hessian
+            .as_slice()
+            .expect("gate Hessian is contiguous");
+        let b_values = b
+            .as_slice_mut()
+            .expect("gated Jeffreys eigenvalue gradient is contiguous");
+        let l_values = l
+            .as_slice_mut()
+            .expect("gated Jeffreys eigenvalue Hessian is contiguous");
         for i in 0..m {
-            b[i] = self.gate_weight * u[i] + value_ungated * gate_gradient[i];
+            b_values[i] =
+                self.gate_weight * u_values[i] + value_ungated * gate_gradient_values[i];
             for j in 0..m {
-                l[[i, j]] = self.gate_weight * u_hessian[[i, j]]
-                    + gate_gradient[i] * u[j]
-                    + u[i] * gate_gradient[j]
-                    + value_ungated * gate_hessian[[i, j]];
+                let index = i * m + j;
+                l_values[index] = self.gate_weight * u_hessian_values[index]
+                    + gate_gradient_values[i] * u_values[j]
+                    + u_values[i] * gate_gradient_values[j]
+                    + value_ungated * gate_hessian_values[index];
             }
         }
 
@@ -1407,29 +1469,36 @@ impl JointJeffreysPlan {
         // also carries eigenvector motion of the λ_max floor projector and the
         // min/max gate projectors.
         let mut a_eigen = Array2::<f64>::zeros((m, m));
+        let b_values = b
+            .as_slice()
+            .expect("gated Jeffreys eigenvalue gradient is contiguous");
+        let l_values = l
+            .as_slice()
+            .expect("gated Jeffreys eigenvalue Hessian is contiguous");
+        let p_eigen_values = p_eigen
+            .as_slice()
+            .expect("rotated explicit perturbation is contiguous");
+        let a_eigen_values = a_eigen
+            .as_slice_mut()
+            .expect("Jeffreys Fréchet derivative is contiguous");
         for i in 0..m {
-            a_eigen[[i, i]] = (0..m).map(|j| l[[i, j]] * p_eigen[[j, j]]).sum();
+            a_eigen_values[i * m + i] = (0..m)
+                .map(|j| l_values[i * m + j] * p_eigen_values[j * m + j])
+                .sum();
             for j in (i + 1)..m {
-                let ratio = (b[i] - b[j]) / (self.evals[i] - self.evals[j]);
-                let value = ratio * p_eigen[[i, j]];
-                a_eigen[[i, j]] = value;
-                a_eigen[[j, i]] = value;
+                let ratio =
+                    (b_values[i] - b_values[j]) / (self.evals[i] - self.evals[j]);
+                let value = ratio * p_eigen_values[i * m + j];
+                a_eigen_values[i * m + j] = value;
+                a_eigen_values[j * m + i] = value;
             }
         }
         let b_eigen = Array2::from_diag(&b);
         let ambient_basis = self.z_j.dot(&self.evecs);
         let mut beta_information = ambient_basis.dot(&a_eigen).dot(&ambient_basis.t());
         let mut mixed_information = ambient_basis.dot(&b_eigen).dot(&ambient_basis.t());
-        for i in 0..p {
-            for j in (i + 1)..p {
-                let beta_symmetric = 0.5 * (beta_information[[i, j]] + beta_information[[j, i]]);
-                beta_information[[i, j]] = beta_symmetric;
-                beta_information[[j, i]] = beta_symmetric;
-                let mixed_symmetric = 0.5 * (mixed_information[[i, j]] + mixed_information[[j, i]]);
-                mixed_information[[i, j]] = mixed_symmetric;
-                mixed_information[[j, i]] = mixed_symmetric;
-            }
-        }
+        symmetrize_contiguous(&mut beta_information);
+        symmetrize_contiguous(&mut mixed_information);
         if beta_information.iter().any(|value| !value.is_finite())
             || mixed_information.iter().any(|value| !value.is_finite())
         {
@@ -1498,15 +1567,6 @@ where
     })
 }
 
-/// Exact value-only joint Jeffreys evaluation from one prepared reduced
-/// spectrum. Performs no coefficient-direction allocation or Rayon fan-out.
-pub fn joint_jeffreys_value(
-    h_joint: ArrayView2<'_, f64>,
-    z_j: ArrayView2<'_, f64>,
-) -> Result<f64, String> {
-    JointJeffreysPlan::prepare(h_joint, z_j).map(|plan| plan.value())
-}
-
 /// Batched joint-Jeffreys evaluation with a lazy all-axes derivative provider.
 ///
 /// `hessian_axes` is invoked exactly once when the prepared conditioning gate is
@@ -1536,7 +1596,6 @@ where
     if !plan.is_active() {
         return Ok((0.0, Array1::zeros(p), Array2::zeros((p, p))));
     }
-    let phi = plan.value();
     let m = plan.reduced_dim;
     let z_j = plan.z_j;
     let evals = plan.evals;
@@ -1622,7 +1681,23 @@ where
     } else {
         None
     };
-    // The plan's value() is the single emission of this spectrum/floor/gate.
+    // SINGLE-EMISSION (gam#931). The Jeffreys value and first derivative are
+    // emitted by the atom below from one spectrum and one floor. The live call
+    // site supplies the same reduced drifts it already needs for curvature; the
+    // atom owns the scalar projection (`g`, `g'_λ`, and `g'_floor`) so no inline
+    // value/gradient branch can drift from it.
+    let value_atom = super::atoms::JeffreysLogdetAtom {
+        eigvals: evals.clone(),
+        floor,
+        gate_weight,
+        reduced_drift: HashMap::new(),
+        floor_drift: HashMap::new(),
+        stratum: super::atoms::StratumFingerprint {
+            kept_rank: m,
+            min_relative_eigengap: 0.0,
+        },
+    };
+    let phi = super::atoms::CriterionAtom::value(&value_atom);
     // Gradient: grad[k] = ½ tr(K · Z_Jᵀ Hdot[e_k] Z_J) = ½ Σ_i d_i (Ṽ_k)_ii with
     // Ṽ_k = Vᵀ D_k V the reduced derivative rotated into the eigenbasis. For the
     // inner-Newton dense path the Hessian is beta-dependent through the working
@@ -1794,12 +1869,8 @@ where
 
     let hz = h_joint.dot(&z_j);
     let h_id = z_j.t().dot(&hz);
-    let mut h_id_sym = Array2::<f64>::zeros((m, m));
-    for i in 0..m {
-        for j in 0..m {
-            h_id_sym[[i, j]] = 0.5 * (h_id[[i, j]] + h_id[[j, i]]);
-        }
-    }
+    let mut h_id_sym = h_id;
+    symmetrize_contiguous(&mut h_id_sym);
     let (evals, evecs) = h_id_sym.eigh(Side::Lower).map_err(|e| {
         format!("joint_jeffreys_second_order_completion: reduced-information eigendecomposition failed: {e}")
     })?;
@@ -1992,12 +2063,8 @@ pub fn joint_jeffreys_phi_explicit_param_derivative(
     // H_id = Z_Jᵀ H Z_J, symmetrized exactly as the value path.
     let hz = h_joint.dot(&z_j);
     let h_id = z_j.t().dot(&hz);
-    let mut h_id_sym = Array2::<f64>::zeros((m, m));
-    for i in 0..m {
-        for j in 0..m {
-            h_id_sym[[i, j]] = 0.5 * (h_id[[i, j]] + h_id[[j, i]]);
-        }
-    }
+    let mut h_id_sym = h_id;
+    symmetrize_contiguous(&mut h_id_sym);
     let (evals, evecs) = h_id_sym.eigh(Side::Lower).map_err(|e| {
         format!("joint_jeffreys_phi_explicit_param_derivative: eigendecomposition failed: {e}")
     })?;
@@ -2103,13 +2170,16 @@ pub fn joint_jeffreys_phi_explicit_param_second_derivative(
 /// collapses that to a single `p`-axis sweep; each direction then pays only its
 /// own genuinely-`δ`-dependent perturbation work (`Hdot[δ]` and the `p` second
 /// directional derivatives `H²dot[δ,e_a]`). The arithmetic per direction is
-/// byte-identical to [`joint_jeffreys_hphi_perturbation_derivative`].
+/// algebraically identical to [`joint_jeffreys_hphi_perturbation_derivative`].
 pub struct JeffreysHphiDriftBase {
     p: usize,
     m: usize,
-    z_j: Array2<f64>,
+    /// Ambient coefficient representation `U = Z_J V` of the reduced Fisher
+    /// eigenbasis. Every drift contraction needs `Vᵀ Z_Jᵀ A Z_J V`; retaining
+    /// `U` makes that one exact `Uᵀ A U` congruence instead of two consecutive
+    /// basis changes for every canonical axis.
+    ambient_eigenbasis: Array2<f64>,
     evals: Array1<f64>,
-    evecs: Array2<f64>,
     floor: f64,
     gate_weight: f64,
     psi: Array2<f64>,
@@ -2120,6 +2190,23 @@ pub struct JeffreysHphiDriftBase {
     a_rows: Array2<f64>,
     /// `vec(Ψ ∘ Ṽ_a)` (`p × m·m`).
     aw_rows: Array2<f64>,
+}
+
+/// Symmetric congruence `sym(Uᵀ A U)`.
+///
+/// Jeffreys information derivatives are mathematically symmetric, but their
+/// dense row reductions can differ by round-off across triangles. The previous
+/// implementation first formed `sym(Zᵀ A Z)` and then rotated it by `V`.
+/// Linearity and orthogonality give the identical object
+/// `sym((ZV)ᵀ A (ZV))`; fusing `U = ZV` once removes one pair of dense basis
+/// transforms from every canonical-axis reduction.
+fn symmetric_basis_contraction(
+    matrix: ArrayView2<'_, f64>,
+    basis: ArrayView2<'_, f64>,
+) -> Array2<f64> {
+    let mut reduced = basis.t().dot(&matrix.dot(&basis));
+    symmetrize_contiguous(&mut reduced);
+    reduced
 }
 
 impl JeffreysHphiDriftBase {
@@ -2257,15 +2344,15 @@ impl JeffreysHphiDriftBase {
         let idx_min = plan.idx_min;
         let idx_max = plan.idx_max;
         let psi = floored_inverse_divided_differences(&evals, floor);
+        let ambient_eigenbasis = z_owned.dot(&evecs);
         // The β-FIXED per-axis base: `Ṽ_a = Vᵀ D_a V` and `Ψ ∘ Ṽ_a`, formed from
         // the `p` supplied first directional derivatives `Hdot[e_a]`. The per-axis
-        // reduction (`Ṽ_a = Vᵀ (Z_Jᵀ Hdot[e_a] Z_J)_sym V` + row writes) is
+        // reduction (`Ṽ_a = sym((Z_J V)ᵀ Hdot[e_a] (Z_J V))` + row writes) is
         // INDEPENDENT across axes and writes into the DISJOINT row `a` of
-        // `a_rows`/`aw_rows`, so fanning it over rayon is bit-identical to the
-        // index-ordered serial sweep (no cross-axis reduction). The dominant cost
-        // is the two dense GEMMs per axis (`p×m·p×p·p×m`), so this collapses the
-        // serial O(p) Gram-reduction sweep that dominated the large-`p`
-        // marginal-slope path (#979).
+        // `a_rows`/`aw_rows`, so fanning it over rayon is deterministic (there is
+        // no cross-axis reduction). The fused ambient eigenbasis makes the
+        // dominant congruence two dense GEMMs per axis instead of separately
+        // reducing through `Z_J` and rotating through `V`.
         let mut a_rows = Array2::<f64>::zeros((p, m * m));
         let mut aw_rows = Array2::<f64>::zeros((p, m * m));
         {
@@ -2278,21 +2365,23 @@ impl JeffreysHphiDriftBase {
                 .zip(hdots.into_par_iter())
                 .for_each(|((mut a_row, mut aw_row), hdot_a)| {
                     gam_problem::with_nested_parallel(|| {
-                        let d_a_raw = z_owned.t().dot(&hdot_a.dot(&z_owned));
-                        let mut d_a = Array2::<f64>::zeros((m, m));
-                        for i in 0..m {
-                            for j in 0..m {
-                                d_a[[i, j]] = 0.5 * (d_a_raw[[i, j]] + d_a_raw[[j, i]]);
-                            }
-                        }
-                        let a_a = evecs.t().dot(&d_a).dot(&evecs);
-                        let mut col = 0usize;
-                        for i in 0..m {
-                            for j in 0..m {
-                                a_row[col] = a_a[[i, j]];
-                                aw_row[col] = psi[[i, j]] * a_a[[i, j]];
-                                col += 1;
-                            }
+                        let a_a = symmetric_basis_contraction(
+                            hdot_a.view(),
+                            ambient_eigenbasis.view(),
+                        );
+                        let a_values = a_a
+                            .as_slice()
+                            .expect("reduced axis derivative is contiguous");
+                        let psi_values =
+                            psi.as_slice().expect("Jeffreys kernel is contiguous");
+                        for (((a_out, aw_out), &a_value), &psi_value) in a_row
+                            .iter_mut()
+                            .zip(aw_row.iter_mut())
+                            .zip(a_values)
+                            .zip(psi_values)
+                        {
+                            *a_out = a_value;
+                            *aw_out = psi_value * a_value;
                         }
                     });
                 });
@@ -2300,9 +2389,8 @@ impl JeffreysHphiDriftBase {
         Ok(Some(JeffreysHphiDriftBase {
             p,
             m,
-            z_j: z_owned,
+            ambient_eigenbasis,
             evals,
-            evecs,
             floor,
             gate_weight,
             psi,
@@ -2403,9 +2491,8 @@ impl JeffreysHphiDriftBase {
             ));
         }
         let m = self.m;
-        let z_j = self.z_j.view();
+        let ambient_eigenbasis = self.ambient_eigenbasis.view();
         let evals = &self.evals;
-        let evecs = &self.evecs;
         let floor = self.floor;
         let gate_weight = self.gate_weight;
         let psi = &self.psi;
@@ -2414,14 +2501,9 @@ impl JeffreysHphiDriftBase {
         let idx_max = self.idx_max;
         let lambda_min = evals[idx_min];
         let lambda_max = evals[idx_max];
-        // Ḋ = Z_Jᵀ (∂H_joint) Z_J, the reduced perturbation of the reduced information.
-        let dbar_raw = z_j.t().dot(&pert_h.dot(&z_j)); // m x m
-        let mut dbar = Array2::<f64>::zeros((m, m));
-        for i in 0..m {
-            for j in 0..m {
-                dbar[[i, j]] = 0.5 * (dbar_raw[[i, j]] + dbar_raw[[j, i]]);
-            }
-        }
+        // Ḋ̃ = Vᵀ Z_Jᵀ (∂H_joint) Z_J V = Uᵀ (∂H_joint) U, the
+        // eigenbasis-reduced perturbation of the information.
+        let dbar_red = symmetric_basis_contraction(pert_h.view(), ambient_eigenbasis);
 
         // EXACT DERIVATIVE OF THE DIVIDED-DIFFERENCE CURVATURE (value↔drift
         // consistency, gam#979). The value path builds
@@ -2446,7 +2528,6 @@ impl JeffreysHphiDriftBase {
         // Then
         //   δH_Φ_raw[a,b] = −½ Σ_ij [δΨ_ij (Ṽ_a)_ij (Ṽ_b)_ij
         //                            + Ψ_ij ((δṼ_a)_ij (Ṽ_b)_ij + (Ṽ_a)_ij (δṼ_b)_ij)].
-        let dbar_red = evecs.t().dot(&dbar).dot(evecs); // Vᵀ Ḋ V (m × m)
         let dfloor = if floor_in_relative_regime {
             REDUCED_INFO_RELATIVE_FLOOR * dbar_red[[idx_max, idx_max]]
         } else {
@@ -2458,23 +2539,43 @@ impl JeffreysHphiDriftBase {
         let mut rotation = Array2::<f64>::zeros((m, m));
         // Kernel motion δΨ.
         let mut dpsi = Array2::<f64>::zeros((m, m));
+        let eigenvalues = evals
+            .as_slice()
+            .expect("reduced-information eigenvalues are contiguous");
+        let dbar_values = dbar_red
+            .as_slice()
+            .expect("rotated information perturbation is contiguous");
+        let psi_values = psi
+            .as_slice()
+            .expect("Jeffreys divided-difference kernel is contiguous");
+        let rotation_values = rotation
+            .as_slice_mut()
+            .expect("eigenvector rotation is contiguous");
+        let dpsi_values = dpsi
+            .as_slice_mut()
+            .expect("Jeffreys kernel drift is contiguous");
         for i in 0..m {
+            let lambda_i = eigenvalues[i];
+            let lambda_dot_i = dbar_values[i * m + i];
             for j in 0..m {
-                let denom = evals[j] - evals[i];
+                let index = i * m + j;
+                let lambda_j = eigenvalues[j];
+                let lambda_dot_j = dbar_values[j * m + j];
+                let denom = lambda_j - lambda_i;
                 if denom.abs() > REDUCED_INFO_ABSOLUTE_FLOOR {
-                    rotation[[i, j]] = dbar_red[[i, j]] / denom;
+                    rotation_values[index] = dbar_values[index] / denom;
                 }
-                let gap = evals[i] - evals[j];
+                let gap = lambda_i - lambda_j;
                 if gap.abs() > REDUCED_INFO_ABSOLUTE_FLOOR {
-                    let dp_i = floored_inverse_prime(evals[i], floor);
-                    let dp_j = floored_inverse_prime(evals[j], floor);
-                    let lam_dot_i = dbar_red[[i, i]];
-                    let lam_dot_j = dbar_red[[j, j]];
-                    dpsi[[i, j]] =
-                        ((dp_i - psi[[i, j]]) * lam_dot_i + (psi[[i, j]] - dp_j) * lam_dot_j) / gap;
+                    let dp_i = floored_inverse_prime(lambda_i, floor);
+                    let dp_j = floored_inverse_prime(lambda_j, floor);
+                    dpsi_values[index] = ((dp_i - psi_values[index]) * lambda_dot_i
+                        + (psi_values[index] - dp_j) * lambda_dot_j)
+                        / gap;
                     if dfloor != 0.0 {
-                        dpsi[[i, j]] += (floored_inverse_floor_sensitivity(evals[i], floor)
-                            - floored_inverse_floor_sensitivity(evals[j], floor))
+                        dpsi_values[index] +=
+                            (floored_inverse_floor_sensitivity(lambda_i, floor)
+                                - floored_inverse_floor_sensitivity(lambda_j, floor))
                             / gap
                             * dfloor;
                     }
@@ -2482,12 +2583,12 @@ impl JeffreysHphiDriftBase {
                     // Confluent/diagonal: Ψ = d'(λ), so δΨ = d''(λ)·λ̇ with the
                     // averaged eigenvalue motion of the (near-)tied pair, plus the
                     // floor motion of d' (nonzero only on the saturating branches).
-                    dpsi[[i, j]] = floored_inverse_second(evals[i], floor)
+                    dpsi_values[index] = floored_inverse_second(lambda_i, floor)
                         * 0.5
-                        * (dbar_red[[i, i]] + dbar_red[[j, j]]);
+                        * (lambda_dot_i + lambda_dot_j);
                     if dfloor != 0.0 {
-                        dpsi[[i, j]] +=
-                            floored_inverse_prime_floor_sensitivity(evals[i], floor) * dfloor;
+                        dpsi_values[index] +=
+                            floored_inverse_prime_floor_sensitivity(lambda_i, floor) * dfloor;
                     }
                 }
             }
@@ -2519,10 +2620,11 @@ impl JeffreysHphiDriftBase {
         // Per axis: reconstruct Ṽ_a (m × m) from the flattened base row, reduce the
         // δ-dependent second derivative `∂D_a = Z_Jᵀ (∂Hdot[e_a]) Z_J`, form δṼ_a,
         // and write rows `da_rows[a,:]`/`dw_rows[a,:]`. Each axis is INDEPENDENT and
-        // writes its OWN disjoint row (the shared `rotation`/`dpsi`/`psi`/`evecs`
-        // are read-only), so this is bit-identical to the serial index-ordered
-        // sweep. The two dense GEMMs per axis are the dominant cost, so the rayon
-        // fan-out collapses the per-direction O(p) reduction (#979/#1082).
+        // writes its OWN disjoint row (the shared
+        // `rotation`/`dpsi`/`psi`/`ambient_eigenbasis` are read-only), so this is
+        // deterministic under index-ordered collection. The two-GEMM fused
+        // congruence is the dominant per-axis cost, and rayon fans those
+        // independent reductions out across the pool (#979/#1082/#2612).
         {
             use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
             da_rows
@@ -2533,38 +2635,37 @@ impl JeffreysHphiDriftBase {
                 .zip(pert_hdots.into_par_iter())
                 .for_each(|(((mut da_row, mut dw_row), a_flat), pert_hdot_a)| {
                     gam_problem::with_nested_parallel(|| {
-                        let mut a_a = Array2::<f64>::zeros((m, m));
-                        {
-                            let mut col = 0usize;
-                            for i in 0..m {
-                                for j in 0..m {
-                                    a_a[[i, j]] = a_flat[col];
-                                    col += 1;
-                                }
-                            }
-                        }
-
-                        let d_a_pert_raw = z_j.t().dot(&pert_hdot_a.dot(&z_j)); // Z_Jᵀ (∂Hdot[e_a]) Z_J
-                        let mut d_a_pert = Array2::<f64>::zeros((m, m));
-                        for i in 0..m {
-                            for j in 0..m {
-                                d_a_pert[[i, j]] =
-                                    0.5 * (d_a_pert_raw[[i, j]] + d_a_pert_raw[[j, i]]);
-                            }
-                        }
+                        let a_values = a_flat
+                            .as_slice()
+                            .expect("prepared Jeffreys axis row is contiguous");
+                        let a_a = ArrayView2::from_shape((m, m), a_values)
+                            .expect("prepared Jeffreys axis row has m² entries");
+                        let d_a_pert = symmetric_basis_contraction(
+                            pert_hdot_a.view(),
+                            ambient_eigenbasis,
+                        );
 
                         // δṼ_a = Vᵀ (∂D_a) V + Ṽ_a C − C Ṽ_a.
-                        let da_a = evecs.t().dot(&d_a_pert).dot(evecs) + &a_a.dot(&rotation)
-                            - &rotation.dot(&a_a);
-
-                        let mut col = 0usize;
-                        for i in 0..m {
-                            for j in 0..m {
-                                da_row[col] = da_a[[i, j]];
-                                dw_row[col] =
-                                    dpsi[[i, j]] * a_a[[i, j]] + psi[[i, j]] * da_a[[i, j]];
-                                col += 1;
-                            }
+                        let da_a =
+                            d_a_pert + &a_a.dot(&rotation) - &rotation.dot(&a_a);
+                        let da_values = da_a
+                            .as_slice()
+                            .expect("perturbed Jeffreys axis is contiguous");
+                        let dpsi_values =
+                            dpsi.as_slice().expect("Jeffreys kernel drift is contiguous");
+                        let psi_values =
+                            psi.as_slice().expect("Jeffreys kernel is contiguous");
+                        for (((((da_out, dw_out), &a_value), &da_value), &dpsi_value), &psi_value) in
+                            da_row
+                                .iter_mut()
+                                .zip(dw_row.iter_mut())
+                                .zip(a_values)
+                                .zip(da_values)
+                                .zip(dpsi_values)
+                                .zip(psi_values)
+                        {
+                            *da_out = da_value;
+                            *dw_out = dpsi_value * a_value + psi_value * da_value;
                         }
                     });
                 });
@@ -2584,11 +2685,17 @@ impl JeffreysHphiDriftBase {
         // GEMM need not return a bit-symmetric product).
         let gram = dw_rows.dot(&a_rows.t()) + aw_rows.dot(&da_rows.t()); // p × p
         let mut out = Array2::<f64>::zeros((p, p));
+        let gram_values = gram
+            .as_slice()
+            .expect("Jeffreys drift Gram is contiguous");
+        let out_values = out
+            .as_slice_mut()
+            .expect("Jeffreys drift output is contiguous");
         for a in 0..p {
             for b in a..p {
-                let value = -0.5 * gram[[a, b]];
-                out[[a, b]] = value;
-                out[[b, a]] = value;
+                let value = -0.5 * gram_values[a * p + b];
+                out_values[a * p + b] = value;
+                out_values[b * p + a] = value;
             }
         }
 
@@ -2600,12 +2707,8 @@ impl JeffreysHphiDriftBase {
         let mut result = out * gate_weight;
         let (g_dlmin, g_dlmax) = conditioning_gate_weight_grad(lambda_min, lambda_max);
         if g_dlmin != 0.0 || g_dlmax != 0.0 {
-            let extreme_perturbation = |idx: usize| -> f64 {
-                let v = evecs.column(idx);
-                v.dot(&dbar.dot(&v))
-            };
-            let d_gate =
-                g_dlmin * extreme_perturbation(idx_min) + g_dlmax * extreme_perturbation(idx_max);
+            let d_gate = g_dlmin * dbar_red[[idx_min, idx_min]]
+                + g_dlmax * dbar_red[[idx_max, idx_max]];
             if d_gate != 0.0 {
                 // H_Φ_raw = −½ Σ_ij Ψ_ij (Ṽ_a)_ij (Ṽ_b)_ij, matching the value path.
                 let hphi_raw = aw_rows.dot(&a_rows.t()).mapv(|x| -0.5 * x);
@@ -2663,6 +2766,42 @@ where
 mod tests {
     use super::*;
     use ndarray::array;
+
+    #[test]
+    fn fused_ambient_eigenbasis_congruence_matches_two_stage_definition_2612() {
+        let matrix = array![
+            [2.0, -0.3, 0.7, 0.1],
+            [0.2, 1.4, -0.5, 0.9],
+            [0.6, -0.8, 3.1, -0.4],
+            [0.0, 1.1, -0.2, 2.7],
+        ];
+        let z = array![
+            [1.0, 0.0, 0.0],
+            [0.0, 0.8, -0.6],
+            [0.0, 0.6, 0.8],
+            [0.0, 0.0, 0.0],
+        ];
+        let v = array![
+            [0.8, -0.6, 0.0],
+            [0.6, 0.8, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+
+        let reduced_raw = z.t().dot(&matrix.dot(&z));
+        let sequential =
+            v.t().dot(&((&reduced_raw + &reduced_raw.t()).mapv(|value| 0.5 * value))).dot(&v);
+        let ambient_eigenbasis = z.dot(&v);
+        let fused =
+            symmetric_basis_contraction(matrix.view(), ambient_eigenbasis.view());
+
+        for (entry, (&actual, &expected)) in fused.iter().zip(sequential.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() <= 2.0e-14 * (1.0 + expected.abs()),
+                "fused congruence entry {entry}: {actual:.16e} != sequential \
+                 definition {expected:.16e}"
+            );
+        }
+    }
 
     #[test]
     fn inactive_reduced_gate_performs_zero_all_axis_builds() {

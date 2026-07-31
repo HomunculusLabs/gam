@@ -214,10 +214,20 @@ impl PenaltyPseudologdet {
     pub(crate) fn trace_dense_product(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
         let diag_len = a.nrows().min(b.ncols());
         let inner_len = a.ncols().min(b.nrows());
+        let a = a.as_standard_layout();
+        let b = b.as_standard_layout();
+        let a_values = a
+            .as_slice()
+            .expect("standard-layout dense trace left operand is contiguous");
+        let b_values = b
+            .as_slice()
+            .expect("standard-layout dense trace right operand is contiguous");
+        let a_cols = a.ncols();
+        let b_cols = b.ncols();
         let mut total = 0.0;
         for i in 0..diag_len {
             for k in 0..inner_len {
-                total += a[[i, k]] * b[[k, i]];
+                total += a_values[i * a_cols + k] * b_values[k * b_cols + i];
             }
         }
         total
@@ -1510,6 +1520,16 @@ impl PenaltyPseudologdet {
 mod tests {
     use super::*;
     use ndarray::array;
+
+    #[test]
+    fn dense_product_trace_accepts_nonstandard_owned_layouts() {
+        let a = array![[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]].reversed_axes();
+        let b = array![[7.0, 9.0, 11.0], [8.0, 10.0, 12.0]].reversed_axes();
+
+        assert_eq!(a.dim(), (2, 3));
+        assert_eq!(b.dim(), (3, 2));
+        assert_eq!(PenaltyPseudologdet::trace_dense_product(&a, &b), 212.0);
+    }
 
     /// Scalar S(ρ) = e^ρ. Then log|S|₊ = ρ, L' = 1, L'' = 0.
     #[test]

@@ -280,6 +280,28 @@ pub trait CustomFamily {
         self.exact_newton_outerobjective() != ExactNewtonOuterObjective::RidgedQuadraticReml
     }
 
+    /// Whether the complete inner coefficient objective is globally convex on
+    /// its feasible set for every admissible smoothing parameter.
+    ///
+    /// This capability is deliberately independent of
+    /// [`Self::exact_newton_joint_hessian_beta_dependent`]. A Hessian may vary
+    /// with β while remaining positive semidefinite everywhere: canonical
+    /// multinomial logit is the load-bearing example,
+    /// `H(β) = Xᵀ(diag(p(β)) - p(β)p(β)ᵀ)X ≽ 0`. β-dependence controls
+    /// derivative drift terms; convexity controls whether a profiled mode needs
+    /// a branch-selection continuation. Conflating them forces an exponentially
+    /// refined basin-tracking homotopy on an objective that has no competing
+    /// basins.
+    ///
+    /// Returning `true` certifies only convexity, not existence of a finite
+    /// minimizer. Separation and other failures to attain a mode remain typed
+    /// solver outcomes. The conservative default is `false`; a family must
+    /// prove the property for its complete objective, including any enabled
+    /// likelihood corrections.
+    fn inner_coefficient_objective_is_globally_convex(&self) -> bool {
+        false
+    }
+
     /// Whether the outer REML/LAML logdet term `½ log|H + Sλ|` and its analytic
     /// trace gradient `½ tr((H+Sλ)⁺ ∂Sλ)` are evaluated over the FULL
     /// identifiable subspace `range(H + Sλ)` (mgcv's generalized determinant,
@@ -1504,35 +1526,6 @@ pub trait CustomFamily {
             }
         }
         Ok(Some(axes))
-    }
-
-    /// BATCHED over BOTH the fixed directions and every canonical second
-    /// direction. Entry u is the axis batch
-    /// {H²dot[d_beta_us[u], e_a]} for a=0..p.
-    ///
-    /// The default preserves the exact singular-hook ordering by invoking
-    /// Self::joint_jeffreys_information_second_directional_all_axes_with_specs
-    /// once per fixed direction. Row-kernel families override this when all
-    /// fixed directions share an expensive beta-fixed per-row fourth-order
-    /// tower: build that tower once, then contract every direction from it.
-    fn joint_jeffreys_information_second_directional_all_axes_many_with_specs(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        d_beta_us: &[Array1<f64>],
-    ) -> Result<Option<Vec<Vec<Array2<f64>>>>, String> {
-        let mut batches = Vec::with_capacity(d_beta_us.len());
-        for d_beta_u in d_beta_us {
-            match self.joint_jeffreys_information_second_directional_all_axes_with_specs(
-                block_states,
-                specs,
-                d_beta_u,
-            )? {
-                Some(axes) => batches.push(axes),
-                None => return Ok(None),
-            }
-        }
-        Ok(Some(batches))
     }
 
     /// Optional contracted second beta-derivative of the observed joint

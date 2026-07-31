@@ -45,7 +45,7 @@
 //!   covariance and the spectral-regularization helpers.
 //! - [`dense_spectral`]: the dense spectral [`DenseSpectralOperator`] backend.
 //! - [`sparse_cholesky_backends`]: the [`SparseCholeskyOperator`] and the other
-//!   concrete [`HessianFactorization`] backends (dense-Cholesky value-only,
+//!   concrete [`HessianFactorization`] backends (dense exact Cholesky,
 //!   block-coupled, matrix-free SPD) plus the penalty-root helpers.
 //! - [`stochastic_trace`]: the Girard–Hutchinson / Hutch++ trace estimators and
 //!   their deterministic RNG.

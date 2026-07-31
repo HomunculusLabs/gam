@@ -88,7 +88,7 @@ fn floor_touching_spectrum() -> Vec<f64> {
 /// `build_dense_original_assembly` make on a value-only evaluation: try the
 /// LLT fast path, fall back to the spectral operator on any decline.
 fn value_lane_logdet(h: &Array2<f64>) -> f64 {
-    match DenseCholeskyValueOnlyOperator::from_spd(h) {
+    match DenseCholeskyOperator::from_spd_with_smooth_logdet_agreement(h) {
         Ok(operator) => operator.logdet(),
         Err(_) => derivative_lane_logdet(h),
     }
@@ -149,7 +149,7 @@ fn only_a_floor_touching_hessian_separates_the_two_logdets_2457() {
          (raw {benign_raw:.17e}, floored {benign_floored:.17e})"
     );
     assert!(
-        DenseCholeskyValueOnlyOperator::from_spd(&benign).is_ok(),
+        DenseCholeskyOperator::from_spd_with_smooth_logdet_agreement(&benign).is_ok(),
         "a well-conditioned Hessian must keep the LLT fast path — the #2457 guard is \
          one-sided and must not cost the speedup where the floor cannot bite"
     );
@@ -171,7 +171,7 @@ fn only_a_floor_touching_hessian_separates_the_two_logdets_2457() {
          (floored {hard_floored:.17e}, exact {hard_raw:.17e})"
     );
     assert!(
-        DenseCholeskyValueOnlyOperator::from_spd(&hard).is_err(),
+        DenseCholeskyOperator::from_spd_with_smooth_logdet_agreement(&hard).is_err(),
         "the fast path must DECLINE a Hessian whose floored and exact log-determinants \
          differ, rather than return a scalar no derivative lane agrees with"
     );

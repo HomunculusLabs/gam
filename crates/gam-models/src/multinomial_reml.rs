@@ -73,9 +73,10 @@ use gam_linalg::faer_ndarray::{fast_ab, fast_atb};
 use gam_linalg::matrix::{DenseDesignMatrix, DesignMatrix, SymmetricMatrix};
 use gam_math::jet_scalar::{JetScalar, OneSeed, Order2, TwoSeed};
 use gam_math::nested_dual::JetField;
-use gam_problem::HyperOperator;
+use gam_problem::{HyperOperator, PseudoLogdetMode};
 use gam_solve::pirls::dense_block_xtwx;
 use ndarray::{Array1, Array2, Array3, ArrayView2};
+use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
 #[inline]
@@ -1371,6 +1372,9 @@ impl MultinomialFamily {
         validate_block_count::<String>("MultinomialFamily", m, block_states.len())?;
         let n = self.weights.len();
         let mut eta = Array2::<f64>::zeros((n, m));
+        let eta_values = eta
+            .as_slice_mut()
+            .expect("fresh multinomial logits are contiguous");
         for (a, state) in block_states.iter().enumerate() {
             if state.eta.len() != n {
                 return Err(format!(
@@ -1378,8 +1382,12 @@ impl MultinomialFamily {
                     state.eta.len()
                 ));
             }
+            let state_eta = state.eta.as_standard_layout();
+            let state_values = state_eta
+                .as_slice()
+                .expect("standard-layout coefficient-block logits are contiguous");
             for row in 0..n {
-                eta[[row, a]] = state.eta[row];
+                eta_values[row * m + a] = state_values[row];
             }
         }
         Ok(eta)
@@ -1415,43 +1423,63 @@ impl MultinomialFamily {
         let n = self.weights.len();
         let p = self.design.ncols();
         let m = self.active_classes();
-        let design_view = self.design.view();
+        let design = self.design.as_standard_layout();
+        let design_values = design
+            .as_slice()
+            .expect("standard-layout multinomial design is contiguous");
+        let fisher = fisher.as_standard_layout();
+        let fisher_values = fisher
+            .as_slice()
+            .expect("standard-layout multinomial Fisher blocks are contiguous");
+        let grad_eta_logl = grad_eta_logl.as_standard_layout();
+        let grad_eta_values = grad_eta_logl
+            .as_slice()
+            .expect("standard-layout multinomial eta gradient is contiguous");
 
         let mut sets = Vec::with_capacity(m);
         for a in 0..m {
             // Gradient of −log L wrt β_a: −X^T (y − p)_a = X^T (p − y)_a.
             let mut grad = Array1::<f64>::zeros(p);
+            let grad_values = grad
+                .as_slice_mut()
+                .expect("fresh block gradient is contiguous");
             for i in 0..p {
                 let mut acc = 0.0_f64;
                 for row in 0..n {
-                    acc += design_view[[row, i]] * (-grad_eta_logl[[row, a]]);
+                    acc += design_values[row * p + i] * (-grad_eta_values[row * m + a]);
                 }
-                grad[i] = acc;
+                grad_values[i] = acc;
             }
             // Dense block-diagonal Hessian: X^T diag(W_aa) X.
             let mut hess = Array2::<f64>::zeros((p, p));
+            let hess_values = hess
+                .as_slice_mut()
+                .expect("fresh block Hessian is contiguous");
             for row in 0..n {
-                let w_aa = fisher[[row, a, a]];
+                let w_aa = fisher_values[(row * m + a) * m + a];
                 if w_aa == 0.0 {
                     continue;
                 }
+                let design_row = &design_values[row * p..(row + 1) * p];
                 for i in 0..p {
-                    let xi = design_view[[row, i]];
+                    let xi = design_row[i];
                     if xi == 0.0 {
                         continue;
                     }
                     let scaled = w_aa * xi;
                     for j in 0..p {
-                        hess[[i, j]] += scaled * design_view[[row, j]];
+                        hess_values[i * p + j] += scaled * design_row[j];
                     }
                 }
             }
             // Symmetrise to cancel any accumulator drift.
             for i in 0..p {
                 for j in (i + 1)..p {
-                    let avg = 0.5 * (hess[[i, j]] + hess[[j, i]]);
-                    hess[[i, j]] = avg;
-                    hess[[j, i]] = avg;
+                    let ij = i * p + j;
+                    let ji = j * p + i;
+                    let avg = 0.5 * (hess_values[ij] + hess_values[ji]);
+                    hess_values[ij] = avg;
+                    hess_values[ji] = avg;
                 }
             }
             sets.push(BlockWorkingSet::ExactNewton {
@@ -1477,15 +1505,25 @@ impl MultinomialFamily {
         let n = self.weights.len();
         let p = self.design.ncols();
         let m = self.active_classes();
-        let design_view = self.design.view();
+        let design = self.design.as_standard_layout();
+        let design_values = design
+            .as_slice()
+            .expect("standard-layout multinomial design is contiguous");
+        let grad_eta_logl = grad_eta_logl.as_standard_layout();
+        let grad_eta_values = grad_eta_logl
+            .as_slice()
+            .expect("standard-layout multinomial eta gradient is contiguous");
         let mut out = Array1::<f64>::zeros(m * p);
+        let out_values = out
+            .as_slice_mut()
+            .expect("fresh joint gradient is contiguous");
         for a in 0..m {
             for i in 0..p {
                 let mut acc = 0.0_f64;
                 for row in 0..n {
-                    acc += design_view[[row, i]] * grad_eta_logl[[row, a]];
+                    acc += design_values[row * p + i] * grad_eta_values[row * m + a];
                 }
-                out[a * p + i] = acc;
+                out_values[a * p + i] = acc;
             }
         }
         out
@@ -1512,9 +1550,24 @@ impl MultinomialFamily {
         let p = self.design.ncols();
         let m = self.active_classes();
         let k = self.total_classes;
-        let design_view = self.design.view();
         assert_eq!(eta.dim(), (n, m));
         assert_eq!(probs_full.dim(), (n, k));
+        let eta = eta.as_standard_layout();
+        let eta_values = eta
+            .as_slice()
+            .expect("standard-layout multinomial logits are contiguous");
+        let probs_full = probs_full.as_standard_layout();
+        let probability_values = probs_full
+            .as_slice()
+            .expect("standard-layout multinomial probabilities are contiguous");
+        let response = self.y_one_hot.as_standard_layout();
+        let response_values = response
+            .as_slice()
+            .expect("standard-layout multinomial response is contiguous");
+        let design = self.design.as_standard_layout();
+        let design_values = design
+            .as_slice()
+            .expect("standard-layout multinomial design is contiguous");
         let mut log_lik = 0.0_f64;
         let mut eta_row = vec![0.0_f64; m];
         let mut response_row = vec![0.0_f64; k];
@@ -1523,26 +1576,25 @@ impl MultinomialFamily {
             if w == 0.0 {
                 continue;
             }
-            for axis in 0..m {
-                eta_row[axis] = eta[[row, axis]];
-            }
-            for class in 0..k {
-                response_row[class] = self.y_one_hot[[row, class]];
-            }
+            eta_row.copy_from_slice(&eta_values[row * m..(row + 1) * m]);
+            response_row.copy_from_slice(&response_values[row * k..(row + 1) * k]);
             let program = MultinomialLogitRowProgram::new(&eta_row, &response_row, w)
                 .map_err(|error| format!("invalid frozen multinomial row {row}: {error}"))?;
             log_lik -= program.negative_log_likelihood();
         }
         let mut grad = Array1::<f64>::zeros(m * p);
+        let grad_values = grad
+            .as_slice_mut()
+            .expect("fresh joint gradient is contiguous");
         for a in 0..m {
             for i in 0..p {
                 let mut acc = 0.0_f64;
                 for row in 0..n {
-                    let resid =
-                        self.weights[row] * (self.y_one_hot[[row, a]] - probs_full[[row, a]]);
-                    acc += design_view[[row, i]] * resid;
+                    let resid = self.weights[row]
+                        * (response_values[row * k + a] - probability_values[row * k + a]);
+                    acc += design_values[row * p + i] * resid;
                 }
-                grad[a * p + i] = acc;
+                grad_values[a * p + i] = acc;
             }
         }
         Ok((log_lik, grad))
@@ -1562,15 +1614,25 @@ impl MultinomialFamily {
                 m * p
             ));
         }
+        let design = self.design.as_standard_layout();
+        let design_values = design
+            .as_slice()
+            .expect("standard-layout multinomial design is contiguous");
+        let d_beta = d_beta_flat.as_standard_layout();
+        let d_beta_values = d_beta
+            .as_slice()
+            .expect("standard-layout multinomial direction is contiguous");
         let mut d_eta = Array2::<f64>::zeros((n, m));
-        let design_view = self.design.view();
+        let d_eta_values = d_eta
+            .as_slice_mut()
+            .expect("fresh multinomial eta direction is contiguous");
         for a in 0..m {
             for row in 0..n {
                 let mut acc = 0.0_f64;
                 for i in 0..p {
-                    acc += design_view[[row, i]] * d_beta_flat[a * p + i];
+                    acc += design_values[row * p + i] * d_beta_values[a * p + i];
                 }
-                d_eta[[row, a]] = acc;
+                d_eta_values[row * m + a] = acc;
             }
         }
         Ok(d_eta)
@@ -1628,7 +1690,21 @@ impl MultinomialFamily {
             ));
         }
         out.fill(0.0);
-        let design = self.design.view();
+        let design = self.design.as_standard_layout();
+        let design_values = design
+            .as_slice()
+            .expect("standard-layout multinomial design is contiguous");
+        let probs_full = probs_full.as_standard_layout();
+        let probability_values = probs_full
+            .as_slice()
+            .expect("standard-layout multinomial probabilities are contiguous");
+        let v = v.as_standard_layout();
+        let v_values = v
+            .as_slice()
+            .expect("standard-layout Hessian direction is contiguous");
+        let out_values = out
+            .as_slice_mut()
+            .expect("standard-layout Hessian output is contiguous");
         let mut xv = vec![0.0_f64; m];
         for row in 0..n {
             let w = self.weights[row];
@@ -1641,20 +1717,20 @@ impl MultinomialFamily {
             for b in 0..m {
                 let mut acc = 0.0_f64;
                 for j in 0..p {
-                    acc += design[[row, j]] * v[b * p + j];
+                    acc += design_values[row * p + j] * v_values[b * p + j];
                 }
                 xv[b] = acc;
-                s += probs_full[[row, b]] * acc;
+                s += probability_values[row * self.total_classes + b] * acc;
             }
             // step 2b + 3: the row residual `r_{n,a}` scattered through Xᵀ.
             for a in 0..m {
-                let r = w * probs_full[[row, a]] * (xv[a] - s);
+                let r = w * probability_values[row * self.total_classes + a] * (xv[a] - s);
                 if r == 0.0 {
                     continue;
                 }
                 let base = a * p;
                 for i in 0..p {
-                    out[base + i] += design[[row, i]] * r;
+                    out_values[base + i] += design_values[row * p + i] * r;
                 }
             }
         }
@@ -1771,7 +1847,19 @@ impl MultinomialFamily {
         let n = self.weights.len();
         let p = self.design.ncols();
         let m = self.active_classes();
-        let design = self.design.view();
+        let design = self.design.as_standard_layout();
+        let design_values = design
+            .as_slice()
+            .expect("standard-layout multinomial design is contiguous");
+        let direction = direction.as_standard_layout();
+        let direction_values = direction
+            .as_slice()
+            .expect("owned coefficient direction is contiguous");
+        let probs = probs_full.as_standard_layout();
+        let probs_values = probs
+            .as_slice()
+            .expect("standard-layout multinomial probabilities are contiguous");
+        let probability_columns = probs.ncols();
         let mut out = Array3::<f64>::zeros((n, m, m));
         let mut d_eta = vec![0.0_f64; m];
         let mut normalized = vec![0.0; m];
@@ -1787,7 +1875,7 @@ impl MultinomialFamily {
                 let base = a * p;
                 let mut eta_dir = 0.0_f64;
                 for i in 0..p {
-                    eta_dir += design[[row, i]] * direction[base + i];
+                    eta_dir += design_values[row * p + i] * direction_values[base + i];
                 }
                 d_eta[a] = eta_dir;
             }
@@ -1795,7 +1883,7 @@ impl MultinomialFamily {
             softmax_fisher_perturbation::<OneSeed<0>>(
                 m,
                 w,
-                |a| probs_full[[row, a]],
+                |a| probs_values[row * probability_columns + a],
                 |a| d_eta[a],
                 |_| 0.0,
                 &mut normalized,
@@ -1820,7 +1908,23 @@ impl MultinomialFamily {
         let n = self.weights.len();
         let p = self.design.ncols();
         let m = self.active_classes();
-        let design = self.design.view();
+        let design = self.design.as_standard_layout();
+        let design_values = design
+            .as_slice()
+            .expect("standard-layout multinomial design is contiguous");
+        let u = u.as_standard_layout();
+        let u_values = u
+            .as_slice()
+            .expect("owned first coefficient direction is contiguous");
+        let v = v.as_standard_layout();
+        let v_values = v
+            .as_slice()
+            .expect("owned second coefficient direction is contiguous");
+        let probs = probs_full.as_standard_layout();
+        let probs_values = probs
+            .as_slice()
+            .expect("standard-layout multinomial probabilities are contiguous");
+        let probability_columns = probs.ncols();
         let mut out = Array3::<f64>::zeros((n, m, m));
         let mut d_eta_u = vec![0.0_f64; m];
         let mut d_eta_v = vec![0.0_f64; m];
@@ -1838,9 +1942,9 @@ impl MultinomialFamily {
                 let mut eta_u = 0.0_f64;
                 let mut eta_v = 0.0_f64;
                 for i in 0..p {
-                    let x = design[[row, i]];
-                    eta_u += x * u[base + i];
-                    eta_v += x * v[base + i];
+                    let x = design_values[row * p + i];
+                    eta_u += x * u_values[base + i];
+                    eta_v += x * v_values[base + i];
                 }
                 d_eta_u[a] = eta_u;
                 d_eta_v[a] = eta_v;
@@ -1849,7 +1953,7 @@ impl MultinomialFamily {
             softmax_fisher_perturbation::<TwoSeed<0>>(
                 m,
                 w,
-                |a| probs_full[[row, a]],
+                |a| probs_values[row * probability_columns + a],
                 |a| d_eta_u[a],
                 |a| d_eta_v[a],
                 &mut normalized,
@@ -1868,6 +1972,7 @@ impl MultinomialFamily {
         &self,
         probs_full: ArrayView2<'_, f64>,
         direction: &Array1<f64>,
+        projection_cache: Arc<gam_runtime::resource::RayonSafeOnce<MultinomialClassProjection>>,
     ) -> Result<MultinomialDirectionalHyperOperator, String> {
         let dim = self.beta_flat_dim();
         if direction.len() != dim {
@@ -1881,6 +1986,7 @@ impl MultinomialFamily {
             jet: self.directional_fisher_jet_rows(probs_full, direction),
             m: self.active_classes(),
             p: self.design.ncols(),
+            projection_cache,
         })
     }
 
@@ -1891,6 +1997,7 @@ impl MultinomialFamily {
         probs_full: ArrayView2<'_, f64>,
         u: &Array1<f64>,
         v: &Array1<f64>,
+        projection_cache: Arc<gam_runtime::resource::RayonSafeOnce<MultinomialClassProjection>>,
     ) -> Result<MultinomialDirectionalHyperOperator, String> {
         let dim = self.beta_flat_dim();
         if u.len() != dim || v.len() != dim {
@@ -1905,6 +2012,7 @@ impl MultinomialFamily {
             jet: self.second_directional_fisher_jet_rows(probs_full, u, v),
             m: self.active_classes(),
             p: self.design.ncols(),
+            projection_cache,
         })
     }
 
@@ -1943,6 +2051,211 @@ impl MultinomialFamily {
         Ok(self.second_directional_fisher_jet_rows(probs_full.view(), d_beta_u, d_beta_v))
     }
 
+    /// Exact one-pass assembly of
+    /// `∇²_β tr(A H_Fisher(β))` for a fixed coefficient-space trace weight
+    /// `A`.
+    ///
+    /// The generic Jeffreys completion asks for every pair
+    /// `tr(A H''[e_u,e_v])`, which is `p_joint(p_joint+1)/2` dense Fisher builds.
+    /// Softmax Fisher information has a row-factored representation that makes
+    /// the same contraction one design Gram:
+    ///
+    /// ```text
+    /// H_cd = Σ_r W_r[c,d] x_r x_rᵀ
+    /// C_r[c,d] = x_rᵀ A_cd x_r
+    /// tr(A H) = Σ_r <C_r, W_r>
+    /// ∇²_β tr(A H) = X_blockᵀ { ∇²_η <C_r,W_r> } X_block.
+    /// ```
+    ///
+    /// `softmax_fisher_perturbation::<TwoSeed>` is the authoritative second
+    /// directional derivative of each row Fisher block. Contracting its
+    /// `M×M` output with `C_r` for the `M(M+1)/2` eta-axis pairs produces one
+    /// `(N,M,M)` row kernel, which [`dense_block_xtwx`] scatters once. This is
+    /// algebraically identical to the defining pairwise contraction while
+    /// changing the penguins Firth completion from thousands of dense Gram
+    /// assemblies to one.
+    fn contracted_fisher_trace_hessian(
+        &self,
+        eta: ArrayView2<'_, f64>,
+        trace_weight: &Array2<f64>,
+    ) -> Result<Array2<f64>, String> {
+        let n = self.weights.len();
+        let p = self.design.ncols();
+        let m = self.active_classes();
+        let dim = m * p;
+        if trace_weight.dim() != (dim, dim) {
+            return Err(format!(
+                "multinomial contracted Fisher trace Hessian weight shape {:?} != ({dim}, {dim})",
+                trace_weight.dim()
+            ));
+        }
+        if trace_weight.iter().any(|value| !value.is_finite()) {
+            return Err(
+                "multinomial contracted Fisher trace Hessian weight is non-finite".to_string(),
+            );
+        }
+        let probabilities = self.row_probabilities(eta);
+        let design = self.design.view();
+        let mut eta_hessian = Array3::<f64>::zeros((n, m, m));
+        let mut coefficient_contraction = vec![0.0_f64; m * m];
+        let mut normalized = vec![[0.0; 3]; m];
+        let mut fisher_second = vec![0.0_f64; m * m];
+        for row in 0..n {
+            let row_weight = self.weights[row];
+            if row_weight == 0.0 {
+                continue;
+            }
+            coefficient_contraction.fill(0.0);
+            for c in 0..m {
+                let coefficient_row = c * p;
+                for d in 0..m {
+                    let coefficient_column = d * p;
+                    let mut contraction = 0.0_f64;
+                    for i in 0..p {
+                        let x_i = design[[row, i]];
+                        if x_i == 0.0 {
+                            continue;
+                        }
+                        for j in 0..p {
+                            contraction += x_i
+                                * trace_weight[[coefficient_row + i, coefficient_column + j]]
+                                * design[[row, j]];
+                        }
+                    }
+                    coefficient_contraction[c * m + d] = contraction;
+                }
+            }
+            for a in 0..m {
+                for b in a..m {
+                    normalized.fill([0.0; 3]);
+                    fisher_second.fill(0.0);
+                    softmax_fisher_perturbation::<TwoSeed<0>>(
+                        m,
+                        row_weight,
+                        |class| probabilities[[row, class]],
+                        |class| if class == a { 1.0 } else { 0.0 },
+                        |class| if class == b { 1.0 } else { 0.0 },
+                        &mut normalized,
+                        &mut fisher_second,
+                    );
+                    let value = coefficient_contraction
+                        .iter()
+                        .zip(fisher_second.iter())
+                        .map(|(&coefficient, &second)| coefficient * second)
+                        .sum::<f64>();
+                    eta_hessian[[row, a, b]] = value;
+                    eta_hessian[[row, b, a]] = value;
+                }
+            }
+        }
+        dense_block_xtwx(self.design.view(), eta_hessian.view(), None)
+            .map_err(|error| format!("multinomial contracted Fisher trace Hessian: {error}"))
+    }
+
+    /// Materialize every canonical-axis derivative from its row-local
+    /// `M × M` Fisher kernel using one third-moment GEMM per active class.
+    ///
+    /// For a fixed moving class `a`, every requested axis has the form
+    ///
+    /// ```text
+    /// D H[e_(a,k)]_(c,i),(d,j)
+    ///   = Σ_r J_a[r,c,d] X[r,k] X[r,i] X[r,j].
+    /// ```
+    ///
+    /// The previous axis-parallel implementation evaluated that scalar nest
+    /// literally, performing `M·P` bounds-checked `O(N·M²·P²)` sweeps. The
+    /// arithmetic is a single matrix product after forming the row quadratics:
+    ///
+    /// ```text
+    /// Q_a[r,(c,d,i,j)] = J_a[r,c,d] X[r,i] X[r,j]
+    /// T_a = Xᵀ Q_a.
+    /// ```
+    ///
+    /// `T_a[k,(c,d,i,j)]` is exactly the requested entry. This retains the full
+    /// derivative object—no approximation or contraction—but routes its
+    /// unavoidable third-moment work through the repository's SIMD/parallel
+    /// matrix kernel. Peak scratch is `N·M²·P²` doubles, reused across `a`;
+    /// the returned `M·P` matrices already require `M·P·(M·P)²` doubles.
+    fn assemble_all_axis_derivatives_from_row_kernel(
+        &self,
+        mut fill_row_kernel: impl FnMut(usize, usize, &mut [f64]),
+    ) -> Vec<Array2<f64>> {
+        let n = self.weights.len();
+        let p = self.design.ncols();
+        let m = self.active_classes();
+        let dim = m * p;
+        let p_squared = p * p;
+        let kernel_columns = m * m * p_squared;
+        let design = self
+            .design
+            .as_slice()
+            .expect("multinomial design is contiguous");
+        let mut row_quadratics = Array2::<f64>::zeros((n, kernel_columns));
+        let mut axes = Vec::with_capacity(dim);
+        let mut row_kernel = vec![0.0_f64; m * m];
+
+        for moving_class in 0..m {
+            row_quadratics.fill(0.0);
+            let quadratics = row_quadratics
+                .as_slice_mut()
+                .expect("row-quadratic workspace is contiguous");
+            for row in 0..n {
+                if self.weights[row] == 0.0 {
+                    continue;
+                }
+                fill_row_kernel(row, moving_class, &mut row_kernel);
+                let x = &design[row * p..(row + 1) * p];
+                let output = &mut quadratics[row * kernel_columns..(row + 1) * kernel_columns];
+                for (class_pair, &kernel) in row_kernel.iter().enumerate() {
+                    let block = &mut output[class_pair * p_squared..(class_pair + 1) * p_squared];
+                    for (i, &x_i) in x.iter().enumerate() {
+                        let block_row = &mut block[i * p..(i + 1) * p];
+                        let scale = kernel * x_i;
+                        for (entry, &x_j) in block_row.iter_mut().zip(x) {
+                            *entry = scale * x_j;
+                        }
+                    }
+                }
+            }
+
+            let moments = fast_atb(self.design.as_ref(), &row_quadratics);
+            let moments = moments
+                .as_slice()
+                .expect("third-moment GEMM output is contiguous");
+            for moving_column in 0..p {
+                let moment_row =
+                    &moments[moving_column * kernel_columns..(moving_column + 1) * kernel_columns];
+                let mut matrix = vec![0.0_f64; dim * dim];
+                for c in 0..m {
+                    for d in 0..m {
+                        let class_pair = c * m + d;
+                        let block =
+                            &moment_row[class_pair * p_squared..(class_pair + 1) * p_squared];
+                        for i in 0..p {
+                            let output_start = (c * p + i) * dim + d * p;
+                            matrix[output_start..output_start + p]
+                                .copy_from_slice(&block[i * p..(i + 1) * p]);
+                        }
+                    }
+                }
+                for i in 0..dim {
+                    for j in (i + 1)..dim {
+                        let upper = i * dim + j;
+                        let lower = j * dim + i;
+                        let average = 0.5 * (matrix[upper] + matrix[lower]);
+                        matrix[upper] = average;
+                        matrix[lower] = average;
+                    }
+                }
+                axes.push(
+                    Array2::<f64>::from_shape_vec((dim, dim), matrix)
+                        .expect("axis derivative buffer is dim·dim"),
+                );
+            }
+        }
+        axes
+    }
+
     /// Assemble the FULL set of canonical-axis joint-Hessian directional
     /// derivatives `{ Hdot[e_k] }` for every axis `k = a0·P + i0`, in a SINGLE
     /// shared softmax pass and one fused parallel row sweep — the exact value
@@ -1964,104 +2277,30 @@ impl MultinomialFamily {
     ///   Hdot[e_{(a0,i0)}][(c,i),(d,j)] = Σ_row Ĵ_{a0}[row,c,d] · X[row,i0] X[row,i] X[row,j].
     /// ```
     ///
-    /// This is BIT-FAITHFUL to the per-axis `directional_fisher_jet` →
-    /// `dense_block_xtwx` path it replaces up to the associativity of the row
-    /// sum, computed once for all `p` axes instead of `p` times with `p`
-    /// redundant softmax passes and `p` generic `(M·P)²` Gram allocations
-    /// (#715/#722/#753 Firth grind). The row sweep is fanned across the rayon
-    /// pool with per-thread accumulators reduced by addition, mirroring
-    /// `dense_block_xtwx`.
+    /// This is algebraically identical to the per-axis
+    /// `directional_fisher_jet → dense_block_xtwx` path it replaces, up to the
+    /// GEMM reduction order. [`Self::assemble_all_axis_derivatives_from_row_kernel`]
+    /// forms the shared row quadratics once per moving class and closes every
+    /// coefficient axis through one SIMD/parallel third-moment GEMM
+    /// (#715/#722/#753/#2612 Firth grind).
     fn assemble_all_axis_directional_derivatives(
         &self,
         eta: ArrayView2<'_, f64>,
     ) -> Vec<Array2<f64>> {
-        use rayon::iter::{IntoParallelIterator, ParallelIterator};
-        let n = self.weights.len();
-        let p = self.design.ncols();
         let m = self.active_classes();
-        let dim = m * p;
-        let n_axes = m * p;
         let probs_full = self.row_probabilities(eta);
-        let design = self.design.view();
-        // #1082: parallelise over OUTPUT AXES, not rows. The earlier row-fold
-        // allocated and zeroed a single flat `n_axes·dim·dim` accumulator PER
-        // rayon worker (e.g. ~370k f64 ≈ 3 MB each at the penguin K=3, k=10 fit)
-        // every call, then summed them all in a `reduce` — and this function is
-        // the per-inner-cycle hot path of the near-separable Jeffreys/Firth solve
-        // (gam#1082), so that `memset` + reduce dominated the wall clock. Each
-        // axis `(a0,i0)` writes only its own `dim·dim` block and is independent of
-        // every other axis, so mapping over axes drops the giant per-worker buffer
-        // (each task owns one `dim·dim` block ≈ 40 kB), removes the reduce, and
-        // load-balances across the `n_axes = m·p` outputs. The per-row arithmetic
-        // is unchanged; only the summation order differs (each block now sums rows
-        // in index order), which the parity tests admit to 1e-10.
-        (0..n_axes)
-            .into_par_iter()
-            .map(|axis| {
-                let a0 = axis / p;
-                let i0 = axis % p;
-                let mut mat = vec![0.0_f64; dim * dim];
-                let mut normalized = vec![0.0; m];
-                let mut jhat = vec![0.0_f64; m * m];
-                for row in 0..n {
-                    let w = self.weights[row];
-                    if w == 0.0 {
-                        continue;
-                    }
-                    let xi0 = design[[row, i0]];
-                    if xi0 == 0.0 {
-                        continue;
-                    }
-                    softmax_fisher_perturbation::<OneSeed<0>>(
-                        m,
-                        w,
-                        |c| probs_full[[row, c]],
-                        |c| if c == a0 { 1.0 } else { 0.0 },
-                        |_| 0.0,
-                        &mut normalized,
-                        &mut jhat,
-                    );
-                    // Scatter `X[row,i0] · Ĵ_{a0}[c,d] · X[row,i] X[row,j]` into
-                    // this axis's `(dim,dim)` block (output-major: block `(c,d)`
-                    // at rows `c·P..`, cols `d·P..`).
-                    for c in 0..m {
-                        let row_c = c * p;
-                        for d in 0..m {
-                            let jcd = jhat[c * m + d];
-                            if jcd == 0.0 {
-                                continue;
-                            }
-                            let wcd = xi0 * jcd;
-                            let col_d = d * p;
-                            for i in 0..p {
-                                let xi = design[[row, i]];
-                                if xi == 0.0 {
-                                    continue;
-                                }
-                                let scaled = wcd * xi;
-                                let out_row = (row_c + i) * dim;
-                                for j in 0..p {
-                                    mat[out_row + col_d + j] += scaled * design[[row, j]];
-                                }
-                            }
-                        }
-                    }
-                }
-                let mut mat = Array2::<f64>::from_shape_vec((dim, dim), mat)
-                    .expect("axis derivative buffer is dim·dim");
-                // Symmetrise to cancel accumulator drift (matching
-                // `dense_block_xtwx`'s final pass so the result is identical to
-                // the per-axis route).
-                for i in 0..dim {
-                    for j in (i + 1)..dim {
-                        let avg = 0.5 * (mat[[i, j]] + mat[[j, i]]);
-                        mat[[i, j]] = avg;
-                        mat[[j, i]] = avg;
-                    }
-                }
-                mat
-            })
-            .collect()
+        let mut normalized = vec![0.0; m];
+        self.assemble_all_axis_derivatives_from_row_kernel(|row, moving_class, row_kernel| {
+            softmax_fisher_perturbation::<OneSeed<0>>(
+                m,
+                self.weights[row],
+                |class| probs_full[[row, class]],
+                |class| if class == moving_class { 1.0 } else { 0.0 },
+                |_| 0.0,
+                &mut normalized,
+                row_kernel,
+            );
+        })
     }
 
     /// Assemble the FULL set of second-directional joint-Hessian derivatives
@@ -2091,96 +2330,33 @@ impl MultinomialFamily {
     /// ```text
     ///   H²dot[δ, e_{(a0,i0)}][(c,i),(d,j)] = Σ_row Ĵ²_{a0,δ}[row,c,d] · X[row,i0] X[row,i] X[row,j].
     /// ```
-    /// This is BIT-FAITHFUL to the per-axis `second_directional_fisher_jet` →
-    /// `dense_block_xtwx` path the trait default runs, up to row-sum
-    /// associativity, computed once for all `p = (M·P)` axes instead of `p` times
-    /// with `p` redundant softmax passes and `p` generic `(M·P)²` Gram
-    /// allocations — the #1082 / #979 outer-Jeffreys-drift Gram rebuild the
-    /// profile pins on `dense_block_xtwx` (≈half the smooth-by-factor wall-clock).
+    /// This is algebraically identical to the per-axis
+    /// `second_directional_fisher_jet → dense_block_xtwx` path the trait default
+    /// runs, up to the GEMM reduction order. The shared third-moment assembly
+    /// closes every `p = M·P` axis without the bounds-checked scalar scatter—the
+    /// #1082/#979/#2612 outer-Jeffreys hotspot measured directly in production.
     fn assemble_all_axis_second_directional_derivatives(
         &self,
         eta: ArrayView2<'_, f64>,
         d_beta_u: &Array1<f64>,
     ) -> Result<Vec<Array2<f64>>, String> {
-        use rayon::iter::{IntoParallelIterator, ParallelIterator};
-        let n = self.weights.len();
-        let p = self.design.ncols();
         let m = self.active_classes();
-        let dim = m * p;
-        let n_axes = m * p;
         let probs_full = self.row_probabilities(eta);
         let d_eta_u = self.d_eta_from_d_beta(d_beta_u)?;
-        let design = self.design.view();
-        // #1082: parallelise over OUTPUT AXES instead of rows, dropping the
-        // `n_axes·dim·dim` per-worker accumulator + `reduce` (see the matching
-        // note on `assemble_all_axis_directional_derivatives`). Each axis owns
-        // one `dim·dim` block and is independent. The per-row arithmetic is
-        // unchanged; only the row-summation order differs (admitted to 1e-10 by
-        // the batched/per-axis parity tests).
-        let out: Vec<Array2<f64>> = (0..n_axes)
-            .into_par_iter()
-            .map(|axis| {
-                let a0 = axis / p;
-                let i0 = axis % p;
-                let mut mat = vec![0.0_f64; dim * dim];
-                let mut normalized = vec![[0.0; 3]; m];
-                let mut jhat = vec![0.0_f64; m * m];
-                for row in 0..n {
-                    let w = self.weights[row];
-                    if w == 0.0 {
-                        continue;
-                    }
-                    let xi0 = design[[row, i0]];
-                    if xi0 == 0.0 {
-                        continue;
-                    }
-                    softmax_fisher_perturbation::<TwoSeed<0>>(
-                        m,
-                        w,
-                        |c| probs_full[[row, c]],
-                        |c| d_eta_u[[row, c]],
-                        |c| if c == a0 { 1.0 } else { 0.0 },
-                        &mut normalized,
-                        &mut jhat,
-                    );
-                    // Scatter `X[row,i0] · Ĵ²_{a0}[c,d] · X[row,i] X[row,j]` into
-                    // this axis's `(dim,dim)` block (output-major).
-                    for c in 0..m {
-                        let row_c = c * p;
-                        for d in 0..m {
-                            let jcd = jhat[c * m + d];
-                            if jcd == 0.0 {
-                                continue;
-                            }
-                            let wcd = xi0 * jcd;
-                            let col_d = d * p;
-                            for i in 0..p {
-                                let xi = design[[row, i]];
-                                if xi == 0.0 {
-                                    continue;
-                                }
-                                let scaled = wcd * xi;
-                                let out_row = (row_c + i) * dim;
-                                for j in 0..p {
-                                    mat[out_row + col_d + j] += scaled * design[[row, j]];
-                                }
-                            }
-                        }
-                    }
-                }
-                let mut mat = Array2::<f64>::from_shape_vec((dim, dim), mat)
-                    .expect("axis second-derivative buffer is dim·dim");
-                for i in 0..dim {
-                    for j in (i + 1)..dim {
-                        let avg = 0.5 * (mat[[i, j]] + mat[[j, i]]);
-                        mat[[i, j]] = avg;
-                        mat[[j, i]] = avg;
-                    }
-                }
-                mat
-            })
-            .collect();
-        Ok(out)
+        let mut normalized = vec![[0.0; 3]; m];
+        Ok(
+            self.assemble_all_axis_derivatives_from_row_kernel(|row, moving_class, row_kernel| {
+                softmax_fisher_perturbation::<TwoSeed<0>>(
+                    m,
+                    self.weights[row],
+                    |class| probs_full[[row, class]],
+                    |class| d_eta_u[[row, class]],
+                    |class| if class == moving_class { 1.0 } else { 0.0 },
+                    &mut normalized,
+                    row_kernel,
+                );
+            }),
+        )
     }
 
     /// Index of the single canonical axis `k` if `d_beta_flat` is the unit
@@ -2262,6 +2438,25 @@ impl CustomFamily for MultinomialFamily {
     fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {
         // H = X^T W(β) X with W depending on softmax probabilities of β.
         true
+    }
+
+    fn inner_coefficient_objective_is_globally_convex(&self) -> bool {
+        // The ordinary multinomial negative log-likelihood has Fisher Hessian
+        // Xᵀ(diag(p) - ppᵀ)X ≽ 0, and every smoothing penalty is PSD. The
+        // conditioning-gated Jeffreys log-determinant correction is not covered
+        // by that convexity proof, so armed Firth fits retain the anchored
+        // continuation while the unbiased separation probe bypasses it.
+        !self.use_joint_jeffreys_term
+    }
+
+    fn pseudo_logdet_mode(&self) -> PseudoLogdetMode {
+        // A Laplace approximation exists only at a strict local coefficient
+        // mode. The reference-coded softmax gauge is removed structurally and
+        // the inner KKT certificate is minted on that identifiable span, so its
+        // accepted penalized Hessian must be positive definite. Price the exact
+        // determinant there; never turn a singular mode or saddle into a
+        // different objective through pseudo-spectral flooring.
+        PseudoLogdetMode::PositiveDefinite
     }
 
     fn has_explicit_joint_hessian(&self) -> bool {
@@ -2387,6 +2582,7 @@ impl CustomFamily for MultinomialFamily {
             block_states: block_states.to_vec(),
             eta,
             probs,
+            projection_cache: Arc::new(gam_runtime::resource::RayonSafeOnce::new()),
         })))
     }
 
@@ -2432,31 +2628,24 @@ impl CustomFamily for MultinomialFamily {
         // separate times through the per-axis hook; each call takes the
         // axis-derivative cache Mutex and CLONES a full `dim×dim` matrix out
         // of the memo, and the default sweep runs SERIALLY. Multinomial
-        // already assembles the WHOLE axis set in ONE row-parallel softmax pass
-        // (`assemble_all_axis_directional_derivatives`, fanned over the n rows
-        // with a per-thread fold/reduce). Wire that directly here: a single
-        // parallel build, returned by move with no per-axis Mutex traffic or
-        // dim×dim clones. Bit-identical to the per-axis route by construction —
-        // it is the very function `cached_axis_directional_derivative` fills its
-        // memo from, so each returned axis matrix equals the cached clone the
-        // serial loop would have produced. The β-fixed `η` comes from
-        // `block_states` exactly as the per-axis
+        // already assembles the WHOLE axis set from shared row kernels and a
+        // third-moment GEMM. Wire that directly here: one batched build, returned
+        // by move with no per-axis Mutex traffic or `dim×dim` clones. The
+        // β-fixed `η` comes from `block_states` exactly as the per-axis
         // `exact_newton_joint_hessian_directional_derivative` does.
         let eta = self.collect_eta_matrix(block_states)?;
         let axes = self.assemble_all_axis_directional_derivatives(eta.view());
         // The caller indexes the returned Vec by canonical axis a ∈ 0..p, where
         // p = Σ spec.design.ncols() is the joint coefficient dimension across the
-        // coupled softmax blocks. Report (do NOT fail) if the batched assembly's
-        // axis count disagrees with the spec-derived p — a mismatch is a
-        // block-structure bug worth surfacing, but a non-fatal warning so a
-        // working fit is never broken on this dimension invariant.
+        // coupled softmax blocks. A mismatch means the derivative object is in a
+        // different coordinate space and must be refused rather than indexed.
         let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
         if axes.len() != p {
-            log::warn!(
+            return Err(format!(
                 "multinomial all-axes Jeffreys derivative produced {} axes but the block specs \
-                 describe p={p} joint coefficients (canonical-axis count mismatch)",
-                axes.len()
-            );
+                 describe p={p} joint coefficients",
+                axes.len(),
+            ));
         }
         Ok(Some(axes))
     }
@@ -2472,28 +2661,40 @@ impl CustomFamily for MultinomialFamily {
         // `H²dot[δ, e_a]` `p = (M·P)` separate times, each rebuilding the full
         // `O(n·M²·P²)` coupled Gram through `dense_block_xtwx` — the profile-pinned
         // outer hot spot (≈half the smooth-by-factor wall-clock; the drift batch
-        // calls this once per mode-response direction). Multinomial assembles the
-        // WHOLE second-axis set in ONE row-parallel softmax pass via the
-        // X[row,i0]-factored per-row second jet (see
-        // `assemble_all_axis_second_directional_derivatives`), bit-faithful to the
-        // per-axis `second_directional_fisher_jet → dense_block_xtwx` route up to
-        // row-sum associativity, for a single Gram-assembly cost instead of `p`.
+        // calls this once per mode-response direction). Multinomial forms the
+        // `X[row,i0]`-factored row quadratics once and closes the WHOLE
+        // second-axis set through the shared third-moment GEMM.
         let eta = self.collect_eta_matrix(block_states)?;
         let axes =
             self.assemble_all_axis_second_directional_derivatives(eta.view(), d_beta_u_flat)?;
         // Same canonical-axis contract as the first-directional batch: the caller
-        // indexes by a ∈ 0..p with p = Σ spec.design.ncols(). Report a mismatch
-        // non-fatally (a block-structure bug worth surfacing) rather than failing
-        // a working fit on this dimension invariant.
+        // indexes by a ∈ 0..p with p = Σ spec.design.ncols(). A mismatch is a
+        // coordinate-space defect, not a derivative batch the caller can use.
         let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
         if axes.len() != p {
-            log::warn!(
+            return Err(format!(
                 "multinomial all-axes second Jeffreys derivative produced {} axes but the block \
-                 specs describe p={p} joint coefficients (canonical-axis count mismatch)",
-                axes.len()
-            );
+                 specs describe p={p} joint coefficients",
+                axes.len(),
+            ));
         }
         Ok(Some(axes))
+    }
+
+    fn joint_jeffreys_information_contracted_trace_hessian_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        weight: &Array2<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        self.check_spec_coefficient_width(specs, "contracted Jeffreys-information trace Hessian")?;
+        let eta = self.collect_eta_matrix(block_states)?;
+        self.contracted_fisher_trace_hessian(eta.view(), weight)
+            .map(Some)
+    }
+
+    fn joint_jeffreys_information_contracted_trace_hessian_available(&self) -> bool {
+        true
     }
 
     fn exact_newton_joint_hessiansecond_directional_derivative(
@@ -2531,6 +2732,11 @@ struct MultinomialHessianWorkspace {
     /// a function of these alone, so the matrix-free `H·v` contraction reuses
     /// them across every PCG iteration (issue #347).
     probs: Array2<f64>,
+    /// One exact class-projected factor shared by every first- and
+    /// second-directional operator built from this frozen workspace. The outer
+    /// trace kernels query all directional operators with the same factor, so
+    /// `X·F_a` is workspace geometry, not direction-specific work.
+    projection_cache: Arc<gam_runtime::resource::RayonSafeOnce<MultinomialClassProjection>>,
 }
 
 impl ExactNewtonJointHessianWorkspace for MultinomialHessianWorkspace {
@@ -2621,10 +2827,14 @@ impl ExactNewtonJointHessianWorkspace for MultinomialHessianWorkspace {
         // `trace_projected_factor_all_axes_with_xf`.
         let probs = self.probs.view();
         d_beta_flats
-            .iter()
+            .par_iter()
             .map(|direction| {
                 self.family
-                    .directional_hyper_operator(probs, direction)
+                    .directional_hyper_operator(
+                        probs,
+                        direction,
+                        Arc::clone(&self.projection_cache),
+                    )
                     .map(|op| Some(Arc::new(op) as Arc<dyn HyperOperator>))
             })
             .collect()
@@ -2651,13 +2861,40 @@ impl ExactNewtonJointHessianWorkspace for MultinomialHessianWorkspace {
         // production path (see `directional_derivative_operators`).
         let probs = self.probs.view();
         d_beta_pairs
-            .iter()
+            .par_iter()
             .map(|(u, v)| {
                 self.family
-                    .second_directional_hyper_operator(probs, u, v)
+                    .second_directional_hyper_operator(
+                        probs,
+                        u,
+                        v,
+                        Arc::clone(&self.projection_cache),
+                    )
                     .map(|op| Some(Arc::new(op) as Arc<dyn HyperOperator>))
             })
             .collect()
+    }
+}
+
+/// Exact key and value for the workspace-wide `X·F_a` projection.
+///
+/// The factor itself is retained rather than represented by a hash: trace
+/// geometry is a numerical contract, so a cache hit must be collision-free.
+/// `projected` is separately reference-counted because every directional
+/// operator consumes it concurrently.
+struct MultinomialClassProjection {
+    factor: Array2<f64>,
+    projected: Arc<Array2<f64>>,
+}
+
+impl MultinomialClassProjection {
+    fn matches(&self, factor: &Array2<f64>) -> bool {
+        self.factor.dim() == factor.dim()
+            && self
+                .factor
+                .iter()
+                .zip(factor.iter())
+                .all(|(&cached, &requested)| cached.to_bits() == requested.to_bits())
     }
 }
 
@@ -2699,6 +2936,10 @@ struct MultinomialDirectionalHyperOperator {
     m: usize,
     /// Per-class feature count `P`.
     p: usize,
+    /// Shared workspace cache for the factor projection. `RayonSafeOnce`
+    /// computes outside its publication lock, so the nested BLAS/Rayon
+    /// projection cannot deadlock a parallel operator batch.
+    projection_cache: Arc<gam_runtime::resource::RayonSafeOnce<MultinomialClassProjection>>,
 }
 
 impl MultinomialDirectionalHyperOperator {
@@ -2708,7 +2949,7 @@ impl MultinomialDirectionalHyperOperator {
     /// Every projection surface uses this same contraction.  Keeping it in a
     /// dense matrix multiply avoids repeating `N*M*rank` scalar dot products
     /// through bounds-checked ndarray indexing in debug/quality builds.
-    fn projected_design_by_class(&self, factor: &Array2<f64>) -> Array2<f64> {
+    fn compute_projected_design_by_class(&self, factor: &Array2<f64>) -> Array2<f64> {
         let dim = self.m * self.p;
         assert_eq!(factor.nrows(), dim);
         let n = self.design.nrows();
@@ -2722,6 +2963,33 @@ impl MultinomialDirectionalHyperOperator {
                 .assign(&class_projection);
         }
         projected
+    }
+
+    /// Return the exact class-projected factor, sharing the workspace result
+    /// when the requested factor is bit-identical. A later distinct factor is
+    /// computed directly: a single frozen outer evaluation has one canonical
+    /// projection factor, while retaining exact behavior for diagnostic calls
+    /// that intentionally query several factors through the same workspace.
+    fn projected_design_by_class(&self, factor: &Array2<f64>) -> Arc<Array2<f64>> {
+        if let Some(cached) = self.projection_cache.get() {
+            return if cached.matches(factor) {
+                Arc::clone(&cached.projected)
+            } else {
+                Arc::new(self.compute_projected_design_by_class(factor))
+            };
+        }
+
+        let cached = self
+            .projection_cache
+            .get_or_compute(|| MultinomialClassProjection {
+                factor: factor.clone(),
+                projected: Arc::new(self.compute_projected_design_by_class(factor)),
+            });
+        if cached.matches(factor) {
+            Arc::clone(&cached.projected)
+        } else {
+            Arc::new(self.compute_projected_design_by_class(factor))
+        }
     }
 
     /// Apply each row's `M × M` Fisher jet to the class axis of stacked
@@ -2775,10 +3043,24 @@ impl HyperOperator for MultinomialDirectionalHyperOperator {
     fn mul_vec(&self, v: &Array1<f64>) -> Array1<f64> {
         let dim = self.m * self.p;
         assert_eq!(v.len(), dim);
-        let design = self.design.view();
-        let n = design.nrows();
+        let n = self.design.nrows();
         let (m, p) = (self.m, self.p);
+        let design = self.design.as_standard_layout();
+        let design_values = design
+            .as_slice()
+            .expect("standard-layout multinomial design is contiguous");
+        let jet = self.jet.as_standard_layout();
+        let jet_values = jet
+            .as_slice()
+            .expect("standard-layout directional Fisher jet is contiguous");
+        let v = v.as_standard_layout();
+        let v_values = v
+            .as_slice()
+            .expect("standard-layout directional-operator input is contiguous");
         let mut out = Array1::<f64>::zeros(dim);
+        let out_values = out
+            .as_slice_mut()
+            .expect("fresh directional-operator output is contiguous");
         let mut t = vec![0.0_f64; m];
         let mut u = vec![0.0_f64; m];
         for row in 0..n {
@@ -2787,7 +3069,7 @@ impl HyperOperator for MultinomialDirectionalHyperOperator {
                 let base = b * p;
                 let mut acc = 0.0_f64;
                 for i in 0..p {
-                    acc += design[[row, i]] * v[base + i];
+                    acc += design_values[row * p + i] * v_values[base + i];
                 }
                 t[b] = acc;
             }
@@ -2795,7 +3077,7 @@ impl HyperOperator for MultinomialDirectionalHyperOperator {
             for a in 0..m {
                 let mut acc = 0.0_f64;
                 for b in 0..m {
-                    acc += self.jet[[row, a, b]] * t[b];
+                    acc += jet_values[(row * m + a) * m + b] * t[b];
                 }
                 u[a] = acc;
             }
@@ -2807,7 +3089,7 @@ impl HyperOperator for MultinomialDirectionalHyperOperator {
                 }
                 let base = a * p;
                 for i in 0..p {
-                    out[base + i] += ua * design[[row, i]];
+                    out_values[base + i] += ua * design_values[row * p + i];
                 }
             }
         }
@@ -2826,8 +3108,8 @@ impl HyperOperator for MultinomialDirectionalHyperOperator {
         // bounds-checked indexing.  These two matrix products implement the
         // algebra stated in the operator's contract directly.
         let projected = self.projected_design_by_class(factor);
-        let weighted = self.apply_jet_to_projected_design(&projected);
-        fast_atb(&projected, &weighted)
+        let weighted = self.apply_jet_to_projected_design(projected.as_ref());
+        fast_atb(projected.as_ref(), &weighted)
     }
 
     fn trace_projected_factor(&self, factor: &Array2<f64>) -> f64 {
@@ -3838,6 +4120,27 @@ mod tests {
     }
 
     #[test]
+    fn convexity_certificate_tracks_the_complete_multinomial_objective() {
+        let unbiased = toy_family(8, 3, 4).with_joint_jeffreys_term(false);
+        assert!(unbiased.exact_newton_joint_hessian_beta_dependent());
+        assert!(
+            unbiased.inner_coefficient_objective_is_globally_convex(),
+            "softmax Fisher curvature varies with beta but remains PSD"
+        );
+        assert_eq!(
+            unbiased.pseudo_logdet_mode(),
+            PseudoLogdetMode::PositiveDefinite,
+            "reference coding removes the softmax gauge, so an accepted Laplace mode is SPD"
+        );
+
+        let firth = unbiased.with_joint_jeffreys_term(true);
+        assert!(
+            !firth.inner_coefficient_objective_is_globally_convex(),
+            "the conditioning-gated Jeffreys correction is outside the convexity proof"
+        );
+    }
+
+    #[test]
     fn block_specs_have_one_per_active_class_in_order() {
         let family = toy_family(8, 3, 4);
         let specs = family.build_block_specs();
@@ -4434,7 +4737,11 @@ mod tests {
                     matrix: dense_mats[idx].clone(),
                 };
                 let mf = family
-                    .directional_hyper_operator(probs.view(), direction)
+                    .directional_hyper_operator(
+                        probs.view(),
+                        direction,
+                        Arc::new(gam_runtime::resource::RayonSafeOnce::new()),
+                    )
                     .expect("matrix-free directional operator must build");
                 assert_oracle_parity(
                     &dense,
@@ -4465,7 +4772,12 @@ mod tests {
                     matrix: dense_pairs[idx].clone(),
                 };
                 let mf = family
-                    .second_directional_hyper_operator(probs.view(), u, v)
+                    .second_directional_hyper_operator(
+                        probs.view(),
+                        u,
+                        v,
+                        Arc::new(gam_runtime::resource::RayonSafeOnce::new()),
+                    )
                     .expect("matrix-free second-directional operator must build");
                 assert_oracle_parity(
                     &dense,

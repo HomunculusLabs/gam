@@ -220,8 +220,9 @@ pub(crate) fn outerobjectivegradienthessian_labeled<
     } else {
         let total_compiled: usize = specs.iter().map(|s| s.design.ncols()).sum();
         let joint_log_lambdas = layout.joint_log_lambdas(rho);
-        let bundle = gam_problem::JointPenaltyBundle::new(
-            std::sync::Arc::new(layout.joint_specs.clone()),
+        let bundle = gam_problem::JointPenaltyBundle::from_validated_geometry(
+            std::sync::Arc::clone(&layout.joint_specs),
+            std::sync::Arc::clone(&layout.joint_roots),
             joint_log_lambdas,
             total_compiled,
         )?;
@@ -276,8 +277,9 @@ pub(crate) fn custom_family_seed_screening_proxy_labeled<
     if !layout.joint_specs.is_empty() {
         let total_compiled: usize = specs.iter().map(|s| s.design.ncols()).sum();
         let joint_log_lambdas = layout.joint_log_lambdas(rho);
-        let bundle = gam_problem::JointPenaltyBundle::new(
-            std::sync::Arc::new(layout.joint_specs.clone()),
+        let bundle = gam_problem::JointPenaltyBundle::from_validated_geometry(
+            std::sync::Arc::clone(&layout.joint_specs),
+            std::sync::Arc::clone(&layout.joint_roots),
             joint_log_lambdas,
             total_compiled,
         )?;

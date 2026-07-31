@@ -89,18 +89,31 @@ pub fn dense_block_xtwx(
     }
     let p_out = shape[1];
     let dim = k * p_out;
+    // Normalize arbitrary ndarray views once at the API boundary. The Gram
+    // kernel below is inherently dense and touches every element many times;
+    // retaining strided views here would pay dynamic stride and bounds checks
+    // in the O(n · P² · K²) loop. `as_standard_layout` borrows already-standard
+    // callers and materializes only genuinely strided inputs.
+    let design_standard = design.as_standard_layout();
+    let fisher_standard = fisher_blocks.as_standard_layout();
+    let fisher_values = fisher_standard
+        .as_slice()
+        .expect("standard-layout Fisher blocks must be contiguous");
     // Coupled multi-output Gram `Σ_row (W_row ⊗ x_row x_rowᵀ)` of dimension
-    // `(M·k) × (M·k)`. For the multinomial softmax family this `X^T W X` is
-    // rebuilt at every inner Newton cycle of every outer smoothing-parameter
-    // trial, so its `O(n · M² · k²)` accumulation is the dominant inner cost
-    // (#722). The per-row contributions are an independent sum, so fan the row
-    // loop across the rayon pool over the deterministic length-only pairwise
-    // tree — the association is a pure function of `n`, so the result is
-    // bit-stable across thread counts and runs.
+    // `(M·k) × (M·k)`. Its `(a,b)` coefficient block is exactly the ordinary
+    // weighted Gram `Xᵀ diag(W[:,a,b]) X`. Decomposing by output pair routes
+    // every block through the shared streaming weighted-crossproduct kernel
+    // (tuned matmul, bounded workspace, deterministic chunk association)
+    // instead of interpreting the O(n·M²·k²) scalar loop in debug builds.
+    //
+    // Only the symmetric part of each Fisher block contributes to the Hessian:
+    // the old kernel accumulated both `(a,b)` and `(b,a)` and averaged the
+    // completed matrix. Computing the average row weight up front is the same
+    // linear operation and halves the off-diagonal Gram work.
     //
     // Finiteness is validated up front in a cheap `O(n · M²)` parallel scan so
-    // the hot accumulation stays branch-light and the error is reported with
-    // the offending `(row, a, b)` index, preserving the serial contract.
+    // the weighted-Gram kernels receive their documented finite-weight input
+    // and errors retain the offending `(row, a, b)` index.
     use rayon::iter::{IntoParallelIterator, ParallelIterator};
     let nonfinite = (0..n)
         .into_par_iter()
@@ -108,7 +121,8 @@ pub fn dense_block_xtwx(
             let rw = row_weights.as_ref().map(|w| w[row]).unwrap_or(1.0);
             for a in 0..p_out {
                 for b in 0..p_out {
-                    if !(rw * fisher_blocks[[row, a, b]]).is_finite() {
+                    let fisher_index = (row * p_out + a) * p_out + b;
+                    if !(rw * fisher_values[fisher_index]).is_finite() {
                         return Some((row, a, b));
                     }
                 }
@@ -119,50 +133,30 @@ pub fn dense_block_xtwx(
     if let Some((row, a, b)) = nonfinite {
         crate::bail_invalid_estim!("dense block Fisher entry ({row},{a},{b}) is not finite");
     }
-    // Deterministic parallel row reduction: length-only pairwise tree, so the
-    // accumulated float result is a pure function of the row order — never of
-    // thread count or rayon's demand-driven fold/reduce grouping (#2228
-    // determinism probe).
-    let mut out = gam_linalg::pairwise_reduce::par_deterministic_block_fold(
-        n,
-        |range: core::ops::Range<usize>| {
-            let mut acc = Array2::<f64>::zeros((dim, dim));
-            for row in range {
+
+    let mut out = Array2::<f64>::zeros((dim, dim));
+    let mut weights = Array1::<f64>::zeros(n);
+    for a in 0..p_out {
+        for b in a..p_out {
+            for row in 0..n {
                 let rw = row_weights.as_ref().map(|w| w[row]).unwrap_or(1.0);
-                for a in 0..p_out {
-                    for b in 0..p_out {
-                        let wab = rw * fisher_blocks[[row, a, b]];
-                        if wab == 0.0 {
-                            continue;
-                        }
-                        let row_a = a * k;
-                        let row_b = b * k;
-                        for i in 0..k {
-                            let xi = design[[row, i]];
-                            if xi == 0.0 {
-                                continue;
-                            }
-                            let scaled = wab * xi;
-                            for j in 0..k {
-                                acc[[row_a + i, row_b + j]] += scaled * design[[row, j]];
-                            }
-                        }
-                    }
+                let fisher_row_start = row * p_out * p_out;
+                let weight = if a == b {
+                    fisher_values[fisher_row_start + a * p_out + a]
+                } else {
+                    0.5 * (fisher_values[fisher_row_start + a * p_out + b]
+                        + fisher_values[fisher_row_start + b * p_out + a])
+                };
+                weights[row] = rw * weight;
+            }
+            let gram = gam_linalg::faer_ndarray::fast_xt_diag_x(&design_standard, &weights);
+            for i in 0..k {
+                for j in 0..k {
+                    let value = gram[[i, j]];
+                    out[[a * k + i, b * k + j]] = value;
+                    out[[b * k + j, a * k + i]] = value;
                 }
             }
-            acc
-        },
-        |mut a, b| {
-            a += &b;
-            a
-        },
-    )
-    .unwrap_or_else(|| Array2::<f64>::zeros((dim, dim)));
-    for i in 0..dim {
-        for j in (i + 1)..dim {
-            let avg = 0.5 * (out[[i, j]] + out[[j, i]]);
-            out[[i, j]] = avg;
-            out[[j, i]] = avg;
         }
     }
     Ok(out)
@@ -239,10 +233,10 @@ pub fn woodbury_gram_capacitance(
 mod low_rank_weight_pirls_tests {
     use super::{
         DesignMatrix, LowRankWeight, PirlsWorkspace, compute_xtwx_low_rank, compute_xtwy_low_rank,
-        woodbury_gram_capacitance,
+        dense_block_xtwx, woodbury_gram_capacitance,
     };
     use gam_linalg::matrix::{FiniteSignedWeightsView, LinearOperator};
-    use ndarray::{Array2, array};
+    use ndarray::{Array2, Array3, array, s};
 
     fn tiny_design() -> DesignMatrix {
         let x = array![
@@ -320,5 +314,49 @@ mod low_rank_weight_pirls_tests {
             .map(|(a, b)| (a - b).abs())
             .sum();
         assert!(diff < 1e-12);
+    }
+
+    #[test]
+    pub(crate) fn dense_block_xtwx_matches_scalar_definition_for_strided_views() {
+        let design_storage = array![
+            [1.0, 99.0, -0.5, 99.0],
+            [0.3, 99.0, 1.2, 99.0],
+            [-0.7, 99.0, 0.4, 99.0],
+        ];
+        let design = design_storage.slice(s![.., ..;2]);
+        let mut fisher_storage = Array3::<f64>::zeros((3, 2, 4));
+        let blocks = [
+            [[1.5, -0.2], [-0.2, 0.8]],
+            [[0.9, 0.1], [0.1, 1.1]],
+            [[1.3, -0.4], [-0.4, 0.7]],
+        ];
+        for row in 0..3 {
+            for a in 0..2 {
+                for b in 0..2 {
+                    fisher_storage[[row, a, 2 * b]] = blocks[row][a][b];
+                }
+            }
+        }
+        let fisher = fisher_storage.slice(s![.., .., ..;2]);
+        let got = dense_block_xtwx(design, fisher, None).unwrap();
+        let mut want = Array2::<f64>::zeros((4, 4));
+        for row in 0..3 {
+            for a in 0..2 {
+                for b in 0..2 {
+                    for i in 0..2 {
+                        for j in 0..2 {
+                            want[[2 * a + i, 2 * b + j]] +=
+                                blocks[row][a][b] * design[[row, i]] * design[[row, j]];
+                        }
+                    }
+                }
+            }
+        }
+        let error = got
+            .iter()
+            .zip(want.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(error <= 4.0 * f64::EPSILON, "maximum error {error:e}");
     }
 }

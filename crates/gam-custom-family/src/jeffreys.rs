@@ -193,11 +193,14 @@ pub(crate) fn custom_family_joint_jeffreys_value<
         Ok(Some(h)) if h.nrows() == total_p && h.ncols() == total_p => h,
         _ => return 0.0,
     };
-    gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_value(
+    match gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_term(
         h_joint.view(),
         z_joint.view(),
-    )
-    .unwrap_or(0.0)
+        |_: &Array1<f64>| Ok(None),
+    ) {
+        Ok((phi, _grad, _hphi)) => phi,
+        Err(_) => 0.0,
+    }
 }
 
 /// Evaluate the family-general Jeffreys term `(Phi, grad, H_Phi)` at the current
@@ -223,6 +226,19 @@ pub(crate) fn custom_family_joint_jeffreys_term<F: CustomFamily + Clone + Send +
     if h_joint.nrows() != total_p || h_joint.ncols() != total_p {
         return Ok(None);
     }
+    custom_family_joint_jeffreys_term_from_information(family, states, specs, &h_joint, z_joint)
+        .map(Some)
+}
+
+fn custom_family_joint_jeffreys_term_from_information<
+    F: CustomFamily + Clone + Send + Sync + 'static,
+>(
+    family: &F,
+    states: &[ParameterBlockState],
+    specs: &[ParameterBlockSpec],
+    h_joint: &Array2<f64>,
+    z_joint: &Array2<f64>,
+) -> Result<(f64, Array1<f64>, Array2<f64>), String> {
     // The reduced information and its conditioning gate are authoritative and
     // are prepared before this lazy provider can run.  A gated-off term therefore
     // performs ZERO all-axes builds.  When active, the provider is called once and
@@ -236,7 +252,7 @@ pub(crate) fn custom_family_joint_jeffreys_term<F: CustomFamily + Clone + Send +
             )
         },
     )?;
-    Ok(Some(term))
+    Ok(term)
 }
 
 /// Evaluate the accepted-mode Jeffreys triple directly from the exact Newton
@@ -281,6 +297,59 @@ pub(crate) fn custom_family_joint_jeffreys_term_from_workspace(
         || Ok(Some(directional_derivatives)),
     )
     .map(Some)
+}
+
+/// Evaluate the Jeffreys term and the exact remainder of its coefficient
+/// Hessian from one information-matrix snapshot.
+///
+/// The divided-difference matrix returned by
+/// [`custom_family_joint_jeffreys_term`] is only the first-derivative part of
+/// `-∇²Φ`. The true inner-objective precision also contains
+/// `-½ tr(K H''[e_a,e_b])`. Consumers that invert the coefficient objective
+/// (terminal covariance and returned-mode certification) must use both pieces;
+/// omitting the completion silently widens the posterior. Keeping this
+/// operation here ensures the term and completion share the same information
+/// matrix even for a stateful family.
+pub(crate) fn custom_family_joint_jeffreys_term_with_exact_completion<
+    F: CustomFamily + Clone + Send + Sync + 'static,
+>(
+    family: &F,
+    states: &[ParameterBlockState],
+    specs: &[ParameterBlockSpec],
+    ranges: &[(usize, usize)],
+    z_joint: &Array2<f64>,
+) -> Result<Option<(f64, Array1<f64>, Array2<f64>, Array2<f64>)>, String> {
+    let total_p = ranges.last().map(|(_, end)| *end).unwrap_or(0);
+    if total_p == 0 || z_joint.ncols() == 0 {
+        return Ok(None);
+    }
+    let Some(h_joint) = family.joint_jeffreys_information_with_specs(states, specs)? else {
+        return Ok(None);
+    };
+    if h_joint.dim() != (total_p, total_p) {
+        return Ok(None);
+    }
+    let (phi, gradient, hphi) = custom_family_joint_jeffreys_term_from_information(
+        family, states, specs, &h_joint, z_joint,
+    )?;
+    let completion = custom_family_joint_jeffreys_second_order_completion(
+        family,
+        states,
+        specs,
+        &h_joint,
+        z_joint,
+        JeffreysCompletionAssembly::Exact,
+    )?
+    .ok_or_else(|| {
+        "active Jeffreys term did not supply its exact second-order completion".to_string()
+    })?;
+    if completion.dim() != (total_p, total_p) || completion.iter().any(|value| !value.is_finite()) {
+        return Err(format!(
+            "exact Jeffreys completion is non-finite or has shape {:?}, expected ({total_p}, {total_p})",
+            completion.dim(),
+        ));
+    }
+    Ok(Some((phi, gradient, hphi, completion)))
 }
 
 pub(crate) const JEFFREYS_REDUCED_INFO_RELATIVE_FLOOR: f64 = 1e-10;
@@ -668,21 +737,11 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
             let zeros = vec![Some(Array2::<f64>::zeros((total_p, total_p))); deltas.len()];
             return Ok(zeros);
         };
-        // Every outer mode-response direction shares the same beta-fixed
-        // fourth-order row tower. Ask for the two-dimensional
-        // {direction × canonical-axis} batch once; rigid row-kernel families
-        // build that tower once, while the trait default preserves the singular
-        // direction ordering for other families.
-        let pert_axis_batches = family_owned
-            .joint_jeffreys_information_second_directional_all_axes_many_with_specs(
-                &states_owned,
-                &specs_owned,
-                deltas,
-            )?;
-        let apply_direction =
-            |delta: &Array1<f64>,
-             pert_axis_matrices: Option<Vec<Array2<f64>>>|
-             -> Result<Option<Array2<f64>>, String> {
+        // Per direction: the only δ-dependent work — `pert_h = Hdot[δ]` and the
+        // `p` second-directional derivatives `H²dot[δ,e_a]` — reusing the base.
+        deltas
+            .iter()
+            .map(|delta| {
                 let pert_h = match family_owned
                     .joint_jeffreys_information_directional_derivative_with_specs(
                         &states_owned,
@@ -690,41 +749,25 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                         delta,
                     )? {
                     Some(hd) => hd,
-                    // No exact first derivative means this drift is undefined;
-                    // retain the singular hook's safe-zero result.
+                    // No exact first derivative ⇒ drift undefined ⇒ safe zero
+                    // (matching `joint_jeffreys_hphi_directional_derivative`).
                     None => return Ok(Some(Array2::<f64>::zeros((total_p, total_p)))),
                 };
+                // Batched all-axes second-directional object `{H²dot[δ,e_a]}` in
+                // ONE pass (BLAS-3 for the rigid family; the defining per-axis
+                // implementation for the rest). This collapses the dominant
+                // `p` independent full-data second-directional sweeps the
+                // per-axis closure used to run.
+                let pert_axis_matrices = family_owned
+                    .joint_jeffreys_information_second_directional_all_axes_with_specs(
+                        &states_owned,
+                        &specs_owned,
+                        delta,
+                    )?;
                 base.perturbation_derivative_batched_axes(&pert_h, pert_axis_matrices)
                     .map(Some)
-            };
-        match pert_axis_batches {
-            Some(batches) => {
-                if batches.len() != deltas.len() {
-                    return Err(format!(
-                        "Jeffreys multi-direction second-derivative batch returned {} directions, expected {}",
-                        batches.len(),
-                        deltas.len(),
-                    ));
-                }
-                deltas
-                    .iter()
-                    .zip(batches.into_iter())
-                    .map(|(delta, axes)| apply_direction(delta, Some(axes)))
-                    .collect()
-            }
-            None => deltas
-                .iter()
-                .map(|delta| {
-                    let axes = family_owned
-                        .joint_jeffreys_information_second_directional_all_axes_with_specs(
-                            &states_owned,
-                            &specs_owned,
-                            delta,
-                        )?;
-                    apply_direction(delta, axes)
-                })
-                .collect(),
-        }
+            })
+            .collect()
     });
     Ok(Some(batch))
 }

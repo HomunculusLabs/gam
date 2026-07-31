@@ -64,7 +64,7 @@
 //! Fisher block instead.
 
 use crate::custom_family::{
-    BlockwiseFitOptions, ParameterBlockSpec, ParameterBlockState, PenaltyMatrix,
+    BlockwiseFitOptions, CustomFamily, ParameterBlockSpec, ParameterBlockState, PenaltyMatrix,
     fit_custom_family_with_rho_prior,
 };
 use crate::fit_orchestration::drivers::freeze_term_collection_from_design;
@@ -72,11 +72,11 @@ use crate::fit_orchestration::{
     FitConfig, build_termspec_with_geometry_and_overrides, resolved_resource_policy,
 };
 use crate::model_types::EstimationError;
-use crate::multinomial_reml::MultinomialFamily;
 use crate::multinomial_posterior::{
     MultinomialPosteriorIntegrationControl, integrate_multinomial_design_moments,
     softmax_with_reference,
 };
+use crate::multinomial_reml::MultinomialFamily;
 use crate::penalized_vector_glm::{
     PenalizedVectorGlmInputs, VectorGlmResume, VectorGlmSolve, fit_penalized_vector_glm,
 };
@@ -131,12 +131,13 @@ use std::sync::Arc;
 /// direction (complete/quasi-complete separation), no solver floor makes that
 /// direction's estimate finite. The formula REML path arms the full-span
 /// Jeffreys/Firth correction CONDITIONALLY — only on separation evidence (see
-/// [`multinomial_formula_separation_evidence`] and the two-attempt logic in
-/// [`fit_penalized_multinomial_formula`]) — so an interior, well-identified fit
-/// optimizes the unbiased penalized-REML criterion with no Firth shrinkage
-/// toward the uniform simplex, while a (quasi-)separated geometry gets the
-/// proper prior that is the only thing able to bound its penalty-null
-/// directions (#715 real-data arm). The bare fixed-λ inner driver
+/// [`multinomial_formula_fisher_separation_evidence`] and the two-attempt logic
+/// in [`fit_penalized_multinomial_formula`]) — so an interior, well-identified
+/// fit optimizes the unbiased penalized-REML criterion with no Firth shrinkage
+/// toward the uniform simplex, while a finite-but-Fisher-underidentified or
+/// non-finite geometry gets the proper prior that is the only thing able to
+/// bound its penalty-null directions (#715/#2612 real-data arm). The bare
+/// fixed-λ inner driver
 /// [`fit_penalized_multinomial`] (no outer REML, no Jeffreys term) surfaces the
 /// explicit `MultinomialSeparationDetected` diagnostic for the path that has no
 /// proper prior to lean on.
@@ -417,6 +418,61 @@ fn multinomial_formula_separation_evidence(block_states: &[ParameterBlockState])
         }
     }
     None
+}
+
+/// Certify (quasi-)separation at a converged multinomial mode from the exact
+/// Fisher information on the fit's certified identifiable tangent span.
+///
+/// Finiteness is not an identification certificate: a tiny smoothing floor can
+/// keep every logit finite while the likelihood contributes less than one
+/// observation-equivalent of curvature along a separating direction. The
+/// Jeffreys objective already owns the canonical absolute/relative conditioning
+/// gate for precisely that geometry. Preparing its plan here makes the
+/// conditional-refit decision use the same reduced spectrum, smooth gate, and
+/// coefficient gauge as the term that will bound the refit. Passing the fit's
+/// saved gauge is essential: an aliased raw column is not separation evidence,
+/// because it is absent from the active statistical model.
+fn multinomial_formula_fisher_separation_evidence(
+    family: &MultinomialFamily,
+    specs: &[ParameterBlockSpec],
+    block_states: &[ParameterBlockState],
+    identifiable_span: ArrayView2<'_, f64>,
+) -> Result<Option<String>, String> {
+    if let Some(evidence) = multinomial_formula_separation_evidence(block_states) {
+        return Ok(Some(evidence));
+    }
+    let information = family
+        .joint_jeffreys_information_with_specs(block_states, specs)?
+        .ok_or_else(|| {
+            "multinomial separation certificate requires exact joint Fisher information".to_string()
+        })?;
+    let coefficient_dim = information.nrows();
+    if information.ncols() != coefficient_dim {
+        return Err(format!(
+            "multinomial separation certificate received non-square Fisher information {}x{}",
+            information.nrows(),
+            information.ncols()
+        ));
+    }
+    let plan = gam_solve::estimate::reml::jeffreys_subspace::JointJeffreysPlan::prepare(
+        information.view(),
+        identifiable_span,
+    )?;
+    if !plan.is_active() {
+        return Ok(None);
+    }
+    let (lambda_min, lambda_max) = plan.information_extrema();
+    let relative = if lambda_max > 0.0 {
+        lambda_min / lambda_max
+    } else {
+        f64::NEG_INFINITY
+    };
+    Ok(Some(format!(
+        "identifiable-span Fisher information is under-identified at the certified mode: \
+         lambda_min={lambda_min:e}, lambda_max={lambda_max:e}, \
+         lambda_min/lambda_max={relative:e}, Jeffreys gate weight={:e}",
+        plan.conditioning_gate_weight()
+    )))
 }
 
 /// Extra evidence used only for a NON-CONVERGED capped unbiased probe.
@@ -2302,10 +2358,12 @@ fn resolve_multinomial_row_weights(
 ///
 /// The Jeffreys/Firth proper prior is engaged CONDITIONALLY: attempt 1 runs
 /// the unbiased penalized-REML criterion; only on separation evidence (a failed
-/// solve or a non-finite logit; see [`multinomial_formula_separation_evidence`])
-/// is the fit re-solved once with the full-span Firth prior armed, which bounds
-/// the penalty-null directions no smoothing parameter can (`S v = 0` ⇒
-/// `(H + S_λ) v = H v → 0` when the softmax likelihood has no finite mode).
+/// solve, a non-finite logit, or an exact full-span Fisher conditioning
+/// certificate; see [`multinomial_formula_fisher_separation_evidence`]) is the
+/// fit re-solved once with the full-span Firth prior armed, which bounds the
+/// penalty-null directions no smoothing parameter can (`S v = 0` ⇒
+/// `(H + S_λ) v = H v → 0` when the softmax likelihood has no identified finite
+/// mode).
 ///
 /// The categorical response column is recognised via the dataset schema
 /// (`ColumnKindTag::Categorical`); reference class = last level. Returns a
@@ -2726,11 +2784,47 @@ pub fn fit_penalized_multinomial_formula(
     // unchanged. Only the discarded unbiased separation probe above is capped.
     let firth_refit_options = &options;
 
-    let run_firth_refit = |evidence: String| {
-        let firth_family = family.clone().with_joint_jeffreys_term(true);
+    let run_firth_refit =
+        |evidence: String,
+         warm_start: Option<(&[ParameterBlockState], &Array1<f64>)>| {
+        let mut firth_family = family.clone().with_joint_jeffreys_term(true);
+        let mut firth_blocks = blocks.clone();
+        if let Some((states, log_lambdas)) = warm_start {
+            if states.len() != firth_blocks.len() {
+                return Err(EstimationError::InvalidInput(format!(
+                    "multinomial Firth warm start has {} coefficient blocks, expected {}",
+                    states.len(),
+                    firth_blocks.len()
+                )));
+            }
+            for (block, state) in firth_blocks.iter_mut().zip(states) {
+                if state.beta.len() != block.design.ncols() {
+                    return Err(EstimationError::InvalidInput(format!(
+                        "multinomial Firth warm-start block '{}' has {} coefficients, expected {}",
+                        block.name,
+                        state.beta.len(),
+                        block.design.ncols()
+                    )));
+                }
+                if state.beta.iter().any(|value| !value.is_finite()) {
+                    return Err(EstimationError::InvalidInput(format!(
+                        "multinomial Firth warm-start block '{}' contains non-finite coefficients",
+                        block.name
+                    )));
+                }
+                block.initial_beta = Some(state.beta.clone());
+            }
+            if log_lambdas.iter().any(|value| !value.is_finite()) {
+                return Err(EstimationError::InvalidInput(
+                    "multinomial Firth warm start contains non-finite log-lambdas".to_string(),
+                ));
+            }
+            firth_family =
+                firth_family.with_joint_initial_log_lambdas(log_lambdas.to_vec());
+        }
         fit_custom_family_with_rho_prior(
             &firth_family,
-            &blocks,
+            &firth_blocks,
             firth_refit_options,
             gam_problem::RhoPrior::Flat,
         )
@@ -2761,19 +2855,61 @@ pub fn fit_penalized_multinomial_formula(
     );
     let fit = match probe_attempt {
         Ok(probe_fit) => {
-            let separation = multinomial_formula_separation_evidence(&probe_fit.block_states);
+            let identifiable_span = probe_fit
+                .geometry
+                .as_ref()
+                .ok_or_else(|| {
+                    EstimationError::InvalidInput(
+                        "multinomial unbiased fit omitted its certified coefficient geometry"
+                            .to_string(),
+                    )
+                })?
+                .coefficient_gauge
+                .t_full
+                .view();
+            let separation = multinomial_formula_fisher_separation_evidence(
+                &family,
+                &blocks,
+                &probe_fit.block_states,
+                identifiable_span,
+            )
+            .map_err(|error| {
+                EstimationError::InvalidInput(format!(
+                    "multinomial REML separation certification failed: {error}"
+                ))
+            })?;
             if separation.is_none() {
                 // Fit existence proves both optimization layers certified; no
                 // post-hoc convergence flag is needed.
                 probe_fit
             } else {
                 // A certified unbiased optimum can still exhibit separation;
-                // use the already-computed evidence to select the Firth target.
+                // use the already-computed mode and rho as the exact Firth
+                // continuation seed. The objectives differ only by the smooth
+                // Jeffreys term, so restarting from zero would discard the
+                // strongest available local information and repeat the whole
+                // unbiased path.
                 let evidence = separation.expect("checked as present");
-                run_firth_refit(evidence)?
+                let joint_log_lambdas = probe_fit
+                    .artifacts
+                    .joint_log_lambdas
+                    .as_ref()
+                    .ok_or_else(|| {
+                        EstimationError::InvalidInput(
+                            "multinomial unbiased fit omitted its converged joint log-lambdas"
+                                .to_string(),
+                        )
+                    })?;
+                run_firth_refit(
+                    evidence,
+                    Some((&probe_fit.block_states, joint_log_lambdas)),
+                )?
             }
         }
-        Err(err) => run_firth_refit(format!("unbiased-criterion REML solve failed: {err}"))?,
+        Err(err) => run_firth_refit(
+            format!("unbiased-criterion REML solve failed: {err}"),
+            None,
+        )?,
     };
     if let Some(err) = multinomial_formula_separation_diagnostic(
         fit.inner_cycles,
@@ -4060,6 +4196,85 @@ mod fisher_override_tests {
         assert!(
             multinomial_formula_separation_evidence(&near).is_none(),
             "logits below the saturation threshold must not arm the Firth refit"
+        );
+    }
+
+    #[test]
+    fn fisher_certificate_distinguishes_finite_quasi_separation_2612() {
+        fn fixture(
+            rows: usize,
+            separated: bool,
+        ) -> (MultinomialFamily, Vec<ParameterBlockState>) {
+            let design = Arc::new(Array2::<f64>::from_shape_fn(
+                (rows, 2),
+                |(row, column)| {
+                    if column == 0 {
+                        1.0
+                    } else {
+                        let side = if row % 2 == 0 { -1.0 } else { 1.0 };
+                        side * (1.0 + row as f64 / rows as f64)
+                    }
+                },
+            ));
+            let mut response = Array2::<f64>::zeros((rows, 3));
+            for row in 0..rows {
+                response[[row, row % 3]] = 1.0;
+            }
+            let family = MultinomialFamily::new(
+                response,
+                Array1::ones(rows),
+                3,
+                Arc::clone(&design),
+                Arc::new(vec![PenaltyMatrix::Dense(Array2::eye(2))]),
+            )
+            .expect("finite three-class fixture");
+            let slopes = if separated { [30.0, -30.0] } else { [0.0, 0.0] };
+            let states = slopes
+                .into_iter()
+                .map(|slope| {
+                    let beta = Array1::from_vec(vec![0.0, slope]);
+                    let eta = design.dot(&beta);
+                    ParameterBlockState { beta, eta }
+                })
+                .collect();
+            (family, states)
+        }
+
+        let (separated_family, separated_states) = fixture(60, true);
+        assert!(
+            multinomial_formula_separation_evidence(&separated_states).is_none(),
+            "finite logits alone deliberately carry no separation evidence"
+        );
+        let separated_specs = separated_family.build_block_specs();
+        let separated_span = Array2::<f64>::eye(4);
+        let evidence = multinomial_formula_fisher_separation_evidence(
+            &separated_family,
+            &separated_specs,
+            &separated_states,
+            separated_span.view(),
+        )
+        .expect("exact Fisher certification")
+        .expect("finite quasi-separation must arm the Firth refit");
+        assert!(
+            evidence.contains("under-identified")
+                && evidence.contains("lambda_min")
+                && evidence.contains("Jeffreys gate weight"),
+            "the certificate must report its authoritative Fisher spectrum, got {evidence}"
+        );
+
+        let (identified_family, identified_states) = fixture(600, false);
+        let identified_specs = identified_family.build_block_specs();
+        let identified_span = Array2::<f64>::eye(4);
+        assert!(
+            multinomial_formula_fisher_separation_evidence(
+                &identified_family,
+                &identified_specs,
+                &identified_states,
+                identified_span.view(),
+            )
+            .expect("exact Fisher certification")
+            .is_none(),
+            "a finite, well-identified Fisher geometry must keep Firth disarmed"
         );
     }
 

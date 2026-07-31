@@ -27,8 +27,9 @@ pub struct StochasticTraceState {
 ///
 /// Implementors:
 /// - `DenseSpectralOperator`: eigendecomposition of dense H
+/// - `DenseCholeskyOperator`: exact LLT of dense positive-definite H
 /// - Sparse Cholesky operators (external implementations)
-/// - `BlockCoupledOperator`: eigendecomposition of joint multi-block H
+/// - `BlockCoupledOperator`: one LLT or spectral factorization of joint H
 /// Minimum operator dimension at which the Hutch++ stochastic trace estimator is
 /// preferred over materializing an implicit operator densely. Below this, the
 /// `2·m_s + m_h` Hutch++ matvecs do not beat `dim` dense H⁻¹ HVPs, so the dense

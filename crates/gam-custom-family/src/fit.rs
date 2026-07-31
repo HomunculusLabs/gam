@@ -1274,10 +1274,10 @@ fn effective_df_floor_bound(
 /// The outer criterion is profiled: `V(ρ) = ℓ_p(θ̂(ρ), ρ)` with
 /// `θ̂(ρ) ∈ argmin_θ ℓ_p(θ, ρ)`. `V` is a *function of ρ* only when that `argmin`
 /// is single-valued, or when a selection rule fixes which element is meant. For
-/// every family whose joint likelihood Hessian depends on β — link-wiggle (the
-/// warp basis is evaluated at the current index), transformation models with an
-/// `I`-spline cone, constrained PIRLS, locscale with a nonlinear warp —
-/// `ℓ_p(·, ρ)` is nonconvex and the `argmin` is a set. Without a selection rule,
+/// for a family whose complete coefficient objective is nonconvex — link-wiggle
+/// (the warp basis is evaluated at the current index), transformation models
+/// with an `I`-spline cone, constrained PIRLS, locscale with a nonlinear warp —
+/// `argmin ℓ_p(·, ρ)` can be a set of disconnected modes. Without a selection rule,
 /// `θ̂` is a functional of the solver's trajectory and of the persistent cache,
 /// so `V` is not a function, and three things follow that this codebase has been
 /// treating as separate defects:
@@ -2295,15 +2295,22 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // so the continuation still starts at the most-smoothed admissible point.
     let continuation_anchor = Array1::<f64>::from_elem(n_rho, rho_box.ceiling());
 
-    // #2366: for a family whose joint likelihood Hessian depends on β the inner
-    // problem is nonconvex, so `argmin_θ ℓ_p(θ, ρ)` is a set and the outer
-    // criterion is only a function of ρ once a selection rule is fixed. Seed the
-    // search with the mode the selection rule names — the endpoint of the
-    // continuation from the effective-df-floor anchor — instead of with whatever
-    // mode the caller's coefficients happen to reach. Where the family's inner
-    // problem is convex the mode is already unique and the continuation would be
-    // pure overhead, so it is not run. See [`anchored_continuation_seed`].
-    let initial_warm_cache = if family.exact_newton_joint_hessian_beta_dependent() {
+    // #2366: for a family whose complete coefficient objective is nonconvex,
+    // `argmin_θ ℓ_p(θ, ρ)` can contain disconnected modes and the outer
+    // criterion is only a function of ρ once a selection rule is fixed. Seed
+    // the search with the mode that rule names — the endpoint of the
+    // continuation from the maximal-smoothing anchor — instead of with whatever
+    // mode the caller's coefficients happen to reach.
+    //
+    // Hessian β-dependence remains necessary because a β-independent Hessian
+    // defines a quadratic objective, but it is not sufficient for nonconvexity:
+    // multinomial logit's `XᵀW(β)X` varies with β while remaining PSD. A family
+    // that certifies global convexity has no competing basins, so an
+    // exponentially refined branch-tracking continuation is both mathematically
+    // irrelevant and potentially much more expensive than the fit itself.
+    let initial_warm_cache = if family.exact_newton_joint_hessian_beta_dependent()
+        && !family.inner_coefficient_objective_is_globally_convex()
+    {
         match anchored_continuation_seed(
             family,
             specs,
@@ -3021,8 +3028,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     if !label_layout.joint_specs.is_empty() {
         let total_compiled: usize = specs.iter().map(|s| s.design.ncols()).sum();
         let joint_log_lambdas = label_layout.joint_log_lambdas(&rho_star);
-        let bundle = gam_problem::JointPenaltyBundle::new(
-            std::sync::Arc::new(label_layout.joint_specs.clone()),
+        let bundle = gam_problem::JointPenaltyBundle::from_validated_geometry(
+            std::sync::Arc::clone(&label_layout.joint_specs),
+            std::sync::Arc::clone(&label_layout.joint_roots),
             joint_log_lambdas,
             total_compiled,
         )

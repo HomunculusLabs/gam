@@ -10,7 +10,7 @@
 //! `use super::*` callers are unaffected.
 
 use super::*;
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 use std::collections::BTreeMap;
 
 /// Stable physical-penalty label used by every custom-family layout producer.
@@ -58,7 +58,10 @@ pub(crate) struct PenaltyLabelLayout {
     /// spec is tied to an outer ρ coordinate by its `label` (sharing the
     /// coordinate with any per-block penalty carrying the same label), recorded
     /// in `joint_to_outer` parallel to this vector.
-    pub(crate) joint_specs: Vec<gam_problem::JointPenaltySpec>,
+    pub(crate) joint_specs: std::sync::Arc<Vec<gam_problem::JointPenaltySpec>>,
+    /// Thin spectral roots parallel to `joint_specs`, validated once when the
+    /// label layout is compiled and reused by every rho-specific bundle.
+    pub(crate) joint_roots: std::sync::Arc<Vec<Array2<f64>>>,
     /// Outer ρ coordinate each joint spec maps to, parallel to `joint_specs`.
     pub(crate) joint_to_outer: Vec<usize>,
 }
@@ -168,8 +171,10 @@ pub(crate) fn penalty_label_layout_with_joint(
     // `multinomial_term_{t}` with — now empty — per-block slots, so one shared
     // λ_t smooths every class). A new label creates a fresh coordinate.
     let mut joint_to_outer = Vec::<usize>::with_capacity(joint_specs.len());
+    let mut joint_roots = Vec::<Array2<f64>>::with_capacity(joint_specs.len());
     for (joint_idx, spec) in joint_specs.iter().enumerate() {
-        spec.validate()
+        let root = spec
+            .validated_root()
             .map_err(|error| CustomFamilyError::ConstraintViolation {
                 reason: format!("joint penalty {joint_idx}: {error}"),
             })?;
@@ -196,6 +201,7 @@ pub(crate) fn penalty_label_layout_with_joint(
             outer
         };
         joint_to_outer.push(outer);
+        joint_roots.push(root);
     }
 
     Ok(PenaltyLabelLayout {
@@ -203,7 +209,8 @@ pub(crate) fn penalty_label_layout_with_joint(
         physical_to_outer,
         fixed_log_lambdas,
         initial_rho: Array1::from_vec(initial),
-        joint_specs,
+        joint_specs: std::sync::Arc::new(joint_specs),
+        joint_roots: std::sync::Arc::new(joint_roots),
         joint_to_outer,
     })
 }

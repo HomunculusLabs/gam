@@ -657,17 +657,20 @@ impl MultinomialLogitLikelihood {
         let m = self.active_classes;
         assert_eq!(eta.ncols(), m, "η must have K-1 columns");
         let k = self.total_classes();
+        let eta = eta.as_standard_layout();
+        let eta_values = eta
+            .as_slice()
+            .expect("standard-layout multinomial logits are contiguous");
         let mut probs = Array2::<f64>::zeros((n, k));
+        let probs_values = probs
+            .as_slice_mut()
+            .expect("fresh multinomial probabilities are contiguous");
         let mut eta_row = vec![0.0_f64; m];
         let mut probs_row = vec![0.0_f64; k];
         for row in 0..n {
-            for j in 0..m {
-                eta_row[j] = eta[[row, j]];
-            }
+            eta_row.copy_from_slice(&eta_values[row * m..(row + 1) * m]);
             Self::softmax_with_baseline(&eta_row, &mut probs_row);
-            for j in 0..k {
-                probs[[row, j]] = probs_row[j];
-            }
+            probs_values[row * k..(row + 1) * k].copy_from_slice(&probs_row);
         }
         probs
     }
@@ -707,8 +710,22 @@ impl MultinomialLogitLikelihood {
             y.slice(ndarray::s![.., ..m]),
             Some(m),
         )?;
+        let eta = eta.as_standard_layout();
+        let eta_values = eta
+            .as_slice()
+            .expect("standard-layout multinomial logits are contiguous");
+        let y = y.as_standard_layout();
+        let response_values = y
+            .as_slice()
+            .expect("standard-layout multinomial responses are contiguous");
         let mut gradient_log_likelihood = Array2::<f64>::zeros((n, m));
         let mut hessian = Array3::<f64>::zeros((n, m, m));
+        let gradient_values = gradient_log_likelihood
+            .as_slice_mut()
+            .expect("fresh multinomial gradient is contiguous");
+        let hessian_values = hessian
+            .as_slice_mut()
+            .expect("fresh multinomial Hessian is contiguous");
         let mut eta_row = vec![0.0_f64; m];
         let mut response_row = vec![0.0_f64; k];
         let mut probabilities = vec![0.0_f64; k];
@@ -716,12 +733,8 @@ impl MultinomialLogitLikelihood {
         let mut hessian_row = vec![0.0_f64; m * m];
         let mut negative_log_likelihood = 0.0_f64;
         for row in 0..n {
-            for axis in 0..m {
-                eta_row[axis] = eta[[row, axis]];
-            }
-            for class in 0..k {
-                response_row[class] = y[[row, class]];
-            }
+            eta_row.copy_from_slice(&eta_values[row * m..(row + 1) * m]);
+            response_row.copy_from_slice(&response_values[row * k..(row + 1) * k]);
             let program = self.row_program(row, &eta_row, &response_row)?;
             negative_log_likelihood += program.value_gradient_hessian_into(
                 &mut probabilities,
@@ -729,11 +742,9 @@ impl MultinomialLogitLikelihood {
                 &mut hessian_row,
             );
             for axis in 0..m {
-                gradient_log_likelihood[[row, axis]] = -gradient_nll[axis];
-                for other in 0..m {
-                    hessian[[row, axis, other]] = hessian_row[axis * m + other];
-                }
+                gradient_values[row * m + axis] = -gradient_nll[axis];
             }
+            hessian_values[row * m * m..(row + 1) * m * m].copy_from_slice(&hessian_row);
         }
         Ok((-negative_log_likelihood, gradient_log_likelihood, hessian))
     }
@@ -759,24 +770,31 @@ impl MultinomialLogitLikelihood {
             y.slice(ndarray::s![.., ..m]),
             Some(m),
         )?;
+        let eta = eta.as_standard_layout();
+        let eta_values = eta
+            .as_slice()
+            .expect("standard-layout multinomial logits are contiguous");
+        let y = y.as_standard_layout();
+        let response_values = y
+            .as_slice()
+            .expect("standard-layout multinomial responses are contiguous");
         let mut gradient_log_likelihood = Array2::<f64>::zeros((n, m));
+        let gradient_values = gradient_log_likelihood
+            .as_slice_mut()
+            .expect("fresh multinomial gradient is contiguous");
         let mut eta_row = vec![0.0_f64; m];
         let mut response_row = vec![0.0_f64; k];
         let mut probabilities = vec![0.0_f64; k];
         let mut gradient_nll = vec![0.0_f64; m];
         let mut negative_log_likelihood = 0.0_f64;
         for row in 0..n {
-            for axis in 0..m {
-                eta_row[axis] = eta[[row, axis]];
-            }
-            for class in 0..k {
-                response_row[class] = y[[row, class]];
-            }
+            eta_row.copy_from_slice(&eta_values[row * m..(row + 1) * m]);
+            response_row.copy_from_slice(&response_values[row * k..(row + 1) * k]);
             let program = self.row_program(row, &eta_row, &response_row)?;
             negative_log_likelihood +=
                 program.value_gradient_into(&mut probabilities, &mut gradient_nll);
             for axis in 0..m {
-                gradient_log_likelihood[[row, axis]] = -gradient_nll[axis];
+                gradient_values[row * m + axis] = -gradient_nll[axis];
             }
         }
         Ok((-negative_log_likelihood, gradient_log_likelihood))

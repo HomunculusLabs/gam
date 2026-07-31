@@ -6106,7 +6106,8 @@ fn effective_df_ceiling_never_emits_upper_below_true_rho_lower_wall_2370() {
         physical_to_outer: vec![Some(0)],
         fixed_log_lambdas: vec![None],
         initial_rho: array![0.0],
-        joint_specs: vec![],
+        joint_specs: std::sync::Arc::new(vec![]),
+        joint_roots: std::sync::Arc::new(vec![]),
         joint_to_outer: vec![],
     };
 

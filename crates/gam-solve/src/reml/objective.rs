@@ -1262,7 +1262,7 @@ impl<'a> RemlState<'a> {
         populate_inner_kkt: bool,
     ) -> Result<super::assembly::InnerAssembly<'static>, EstimationError> {
         use super::reml_outer_engine::{
-            DenseCholeskyValueOnlyOperator, DenseSpectralOperator, PseudoLogdetMode,
+            DenseCholeskyOperator, DenseSpectralOperator, PseudoLogdetMode,
         };
         use std::borrow::Cow;
 
@@ -1346,7 +1346,9 @@ impl<'a> RemlState<'a> {
             && !c_nontrivial
             && !force_spectral_logdet
         {
-            match DenseCholeskyValueOnlyOperator::from_spd(h_for_operator.as_ref()) {
+            match DenseCholeskyOperator::from_spd_with_smooth_logdet_agreement(
+                h_for_operator.as_ref(),
+            ) {
                 Ok(chol_op) => std::sync::Arc::new(chol_op),
                 Err(_) => std::sync::Arc::new(
                     DenseSpectralOperator::from_symmetric_with_mode(
@@ -1749,13 +1751,15 @@ impl<'a> RemlState<'a> {
         // active constraint free-basis, so the no-hard-constraints condition
         // is always satisfied here.
         let hessian_op: std::sync::Arc<dyn super::reml_outer_engine::HessianFactorization> = {
-            use super::reml_outer_engine::DenseCholeskyValueOnlyOperator;
+            use super::reml_outer_engine::DenseCholeskyOperator;
             if mode == super::reml_outer_engine::EvalMode::ValueOnly
                 && matches!(hessian_mode, PseudoLogdetMode::Smooth)
                 && !c_nontrivial
                 && !force_spectral_logdet
             {
-                match DenseCholeskyValueOnlyOperator::from_spd(&h_total_original) {
+                match DenseCholeskyOperator::from_spd_with_smooth_logdet_agreement(
+                    &h_total_original,
+                ) {
                     Ok(chol_op) => std::sync::Arc::new(chol_op),
                     Err(_) => std::sync::Arc::new(
                         DenseSpectralOperator::from_symmetric_with_mode(

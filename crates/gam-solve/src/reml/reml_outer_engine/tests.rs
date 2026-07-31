@@ -8263,13 +8263,13 @@ pub(crate) fn issue_200_rejects_non_positive_rho_curvature_scale() {
     );
 }
 
-/// `DenseCholeskyValueOnlyOperator` must agree with `DenseSpectralOperator`
-/// on `logdet`, `solve`, and `trace_hinv_product` for SPD inputs.
+/// The exact dense Cholesky backend must agree with positive-definite spectral
+/// algebra on every value, derivative, and solve primitive.
 ///
-/// This pins the acceptance criterion from issue #277: ValueOnly REML costs
-/// routed through Cholesky must match the eigendecomposition baseline.
+/// This pins the #2612 contract: replacing a full eigendecomposition by LLT is
+/// an implementation change, not an objective or derivative change.
 #[test]
-pub(crate) fn dense_cholesky_value_only_matches_spectral() {
+pub(crate) fn dense_cholesky_exact_algebra_matches_positive_definite_spectral() {
     use approx::assert_relative_eq;
 
     // 4×4 SPD matrix.
@@ -8280,8 +8280,10 @@ pub(crate) fn dense_cholesky_value_only_matches_spectral() {
         [0.5, 0.25, 0.75, 3.0],
     ];
 
-    let spectral = DenseSpectralOperator::from_symmetric(&h).unwrap();
-    let cholesky = DenseCholeskyValueOnlyOperator::from_spd(&h).unwrap();
+    let spectral =
+        DenseSpectralOperator::from_symmetric_with_mode(&h, PseudoLogdetMode::PositiveDefinite)
+            .unwrap();
+    let cholesky = DenseCholeskyOperator::from_positive_definite(&h).unwrap();
 
     // logdet must agree within floating-point tolerance.
     assert_relative_eq!(cholesky.logdet(), spectral.logdet(), epsilon = 1e-10);
@@ -8310,6 +8312,79 @@ pub(crate) fn dense_cholesky_value_only_matches_spectral() {
         spectral.trace_hinv_product(&a),
         epsilon = 1e-10
     );
+
+    let b = array![
+        [1.5, 0.0, 0.25, 0.0],
+        [0.0, 0.75, 0.0, 0.1],
+        [0.25, 0.0, 1.25, 0.2],
+        [0.0, 0.1, 0.2, 0.5],
+    ];
+    assert_relative_eq!(
+        cholesky.trace_hinv_product_cross(&a, &b),
+        spectral.trace_hinv_product_cross(&a, &b),
+        epsilon = 1e-10,
+        max_relative = 1e-10
+    );
+    let a_operator = DenseMatrixHyperOperator { matrix: a.clone() };
+    let b_operator = DenseMatrixHyperOperator { matrix: b.clone() };
+    assert_relative_eq!(
+        cholesky.trace_hinv_operator(&a_operator),
+        spectral.trace_hinv_operator(&a_operator),
+        epsilon = 1e-10,
+        max_relative = 1e-10
+    );
+    assert_relative_eq!(
+        cholesky.trace_hinv_operator_cross(&a_operator, &b_operator),
+        spectral.trace_hinv_operator_cross(&a_operator, &b_operator),
+        epsilon = 1e-10,
+        max_relative = 1e-10
+    );
+    assert_relative_eq!(
+        cholesky.trace_logdet_hessian_cross_operator(&a_operator, &b_operator),
+        spectral.trace_logdet_hessian_cross_operator(&a_operator, &b_operator),
+        epsilon = 1e-10,
+        max_relative = 1e-10
+    );
+
+    let block =
+        BlockCoupledOperator::from_joint_hessian_with_mode(&h, PseudoLogdetMode::PositiveDefinite)
+            .unwrap();
+    assert!(
+        block.as_dense_spectral().is_none(),
+        "positive-definite block systems must use their exact LLT backend"
+    );
+    assert!(block.logdet_traces_match_hinv_kernel());
+    assert_relative_eq!(block.logdet(), cholesky.logdet(), epsilon = 1e-12);
+    assert_relative_eq!(
+        block.trace_hinv_product_cross(&a, &b),
+        cholesky.trace_hinv_product_cross(&a, &b),
+        epsilon = 1e-12
+    );
+    assert_relative_eq!(
+        block.trace_hinv_operator_cross(&a_operator, &b_operator),
+        cholesky.trace_hinv_operator_cross(&a_operator, &b_operator),
+        epsilon = 1e-12
+    );
+    assert_relative_eq!(
+        block.trace_logdet_hessian_cross_operator(&a_operator, &b_operator),
+        cholesky.trace_logdet_hessian_cross_operator(&a_operator, &b_operator),
+        epsilon = 1e-12
+    );
+}
+
+#[test]
+pub(crate) fn dense_cholesky_rejects_asymmetric_and_non_positive_definite_inputs() {
+    let asymmetric = array![[2.0, 0.5], [0.1, 2.0]];
+    let asymmetric_error = DenseCholeskyOperator::from_positive_definite(&asymmetric)
+        .err()
+        .expect("material asymmetry must be refused");
+    assert!(asymmetric_error.contains("not symmetric"));
+
+    let saddle = array![[1.0, 0.0], [0.0, -1.0]];
+    let saddle_error = DenseCholeskyOperator::from_positive_definite(&saddle)
+        .err()
+        .expect("a saddle cannot define a positive-definite Laplace mode");
+    assert!(saddle_error.contains("LLT failed"));
 }
 
 /// FD gate for the BARRIER first-order curvature drift (previously untested —
