@@ -612,7 +612,6 @@ impl DenseCholeskyOperator {
     /// `tr(H⁻¹AH⁻¹B) = tr((FᵀAF)(FᵀBF))`.
     fn inverse_transpose_root(lower: &Array2<f64>) -> Array2<f64> {
         let n = lower.nrows();
-        debug_assert_eq!(n, lower.ncols());
         let lower_values = lower
             .as_slice()
             .expect("Cholesky lower triangle is standard-layout");
