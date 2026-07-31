@@ -702,14 +702,55 @@ fn assert_frozen_replay_matches_fit(
     let frozen =
         freeze_term_collection_from_design(spec, &fit_design).unwrap_or_else(|e| panic!("{} failed: {:?}", "freeze term collection", e));
     let replay_design = build_term_collection_design(data, &frozen).unwrap_or_else(|e| panic!("{} failed: {:?}", "replay design", e));
-    let max_abs = max_abs_diff_matrix(
-        &fit_design.design.to_dense(),
-        &replay_design.design.to_dense(),
-    );
-    assert!(
-        max_abs <= 1e-10,
-        "{label} frozen replay changed realized design: max_abs={max_abs}"
-    );
+    let fit_dense = fit_design.design.to_dense();
+    let replay_dense = replay_design.design.to_dense();
+    let max_abs = max_abs_diff_matrix(&fit_dense, &replay_dense);
+    if max_abs > 1e-10 {
+        // The `duchon` arm's difference is BIT-STABLE across runs (measured:
+        // five runs, one distinct value `4.738869852083383e-10`), so this is a
+        // specific term computed differently on the two paths, not arithmetic
+        // drift. A scalar `max_abs` cannot say WHICH term. Name the column, and
+        // the column names the basis function; the offending columns are then
+        // matched against what the frozen path replays that the fit path
+        // recomputes. Thin-plate and matern pass the same bar, so whatever this
+        // is lives in the Duchon-only artifacts.
+        assert_eq!(fit_dense.dim(), replay_dense.dim());
+        let (rows, cols) = fit_dense.dim();
+        let mut per_column: Vec<(usize, f64, usize)> = (0..cols)
+            .map(|c| {
+                let mut worst = 0.0_f64;
+                let mut worst_row = 0usize;
+                for r in 0..rows {
+                    let d = (fit_dense[[r, c]] - replay_dense[[r, c]]).abs();
+                    if d > worst {
+                        worst = d;
+                        worst_row = r;
+                    }
+                }
+                (c, worst, worst_row)
+            })
+            .filter(|(_, worst, _)| *worst > 1e-10)
+            .collect();
+        per_column.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let offenders: Vec<String> = per_column
+            .iter()
+            .take(8)
+            .map(|(c, worst, r)| {
+                format!(
+                    "col {c}: |Δ|={worst:.6e} at row {r} (fit={:.17e}, replay={:.17e})",
+                    fit_dense[[*r, *c]],
+                    replay_dense[[*r, *c]]
+                )
+            })
+            .collect();
+        panic!(
+            "{label} frozen replay changed realized design: max_abs={max_abs} \
+             over a {rows}x{cols} design; {} of {cols} columns exceed 1e-10. \
+             Worst columns: [{}]",
+            per_column.len(),
+            offenders.join("; ")
+        );
+    }
 }
 
 fn dense_kronecker_pseudo_logdet_reference(
