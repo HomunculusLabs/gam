@@ -5852,8 +5852,9 @@ fn build_and_assess_rail_coordinate(
 ///
 /// # Proof condition (evidence-gated; cannot launder a genuine λ→∞ / λ→0 optimum)
 ///
-/// Probe [`ASYMPTOTE_PROBE_COUNT`] e-folds inward and require a contiguous run of
-/// at least [`MIN_TAIL_SAMPLES`] probes that is, at once:
+/// Probe up to [`ASYMPTOTE_PROBE_COUNT`] e-folds inward and let the FIRST
+/// contiguous clean, drift-stable run of at least [`MIN_TAIL_SAMPLES`] decide
+/// the local rail:
 /// 1. above the gradient interior floor, `|g| > interior_grad_tol` (so a probe
 ///    whose gradient has decayed into finite-difference cancellation next to the
 ///    rail is excluded rather than read as a settled tail);
@@ -5861,15 +5862,15 @@ fn build_and_assess_rail_coordinate(
 ///    `ĉ = side.tail_constant(ρ, g)` uses the coordinate's ACTUAL rail side;
 /// 3. drift-band-clean in `ĉ` within `tail_drift_rel` (the same constant-pencil
 ///    band the genuine tail uses — `run_drift_within_band` keys on `|mean|`, so a
-///    uniformly-negative run is judged on its magnitude); AND
-/// 4. `ĉ` uniformly of the sign OPPOSITE a genuine tail — `ĉ < 0` — i.e. the
-///    descent direction points AWAY from the bound (`∂V/∂ρ > 0` at an upper rail,
-///    `∂V/∂ρ < 0` at a lower rail).
+///    uniformly-negative run is judged on its magnitude).
 ///
-/// A genuine rail (descent TOWARD the bound) has `ĉ > 0` across the clean run and
-/// never satisfies (4), so it is never pulled off its rail. This shares every
-/// tolerance with the genuine asymptote path ([`AsymptoteTolerances`]); the ONLY
-/// difference is the sign gate in (4).
+/// A first clean run with `ĉ < 0` proves descent AWAY from the bound and returns
+/// its deepest point. A first clean run with `ĉ > 0` proves descent TOWARD the
+/// bound and refuses the pull-back immediately. Deciding on the first clean run
+/// is load-bearing: the question is the LOCAL orientation of the objective at
+/// this rail. Continuing another fifteen expensive objective evaluations after
+/// that proof could discover a remote sign reversal in the interior, but must
+/// not use it to relabel a locally genuine bound as a wrong rail.
 fn detect_wrong_rail_pullback(
     obj: &mut dyn OuterObjective,
     rho: &Array1<f64>,
@@ -5885,9 +5886,10 @@ fn detect_wrong_rail_pullback(
         AsymptoteSide::Upper => -1.0,
         AsymptoteSide::Lower => 1.0,
     };
-    // rows[r] is probe j=r+1: r=0 is CLOSEST to the rail, increasing r steps
-    // further into the interior (larger |grad| on a clean run).
-    let mut rows: Vec<(f64, f64)> = Vec::new();
+    // The closest finite-difference-clean constant-pencil run is the local rail
+    // evidence. Noise rows reset the run; a sign change starts a new candidate.
+    let mut run_sign = 0_i8;
+    let mut run_constants: Vec<f64> = Vec::with_capacity(MIN_TAIL_SAMPLES);
     for j in 1..=ASYMPTOTE_PROBE_COUNT {
         let stepped = rho[coord] + sign * (j as f64) * PROBE_DELTA;
         if stepped <= domain.0 + PROBE_DOMAIN_MARGIN || stepped >= domain.1 - PROBE_DOMAIN_MARGIN {
@@ -5899,54 +5901,42 @@ fn detect_wrong_rail_pullback(
             Ok(eval) => eval,
             Err(_) => break,
         };
-        if !eval.cost.is_finite() || coord >= eval.gradient.len() || !eval.gradient[coord].is_finite()
+        if !eval.cost.is_finite()
+            || coord >= eval.gradient.len()
+            || !eval.gradient[coord].is_finite()
         {
             break;
         }
-        rows.push((stepped, eval.gradient[coord]));
-    }
-    if rows.len() < MIN_TAIL_SAMPLES {
-        return Ok(None);
-    }
-    let constants: Vec<f64> = rows
-        .iter()
-        .map(|(r, g)| side.tail_constant(*r, *g))
-        .collect();
-    // Wrong-rail element-clean: gradient above the interior floor, pencil
-    // constant above the noise floor IN MAGNITUDE, and of the descent-inward
-    // (negative) sign. Genuine tails have ĉ > 0 here and are excluded.
-    let element_clean: Vec<bool> = rows
-        .iter()
-        .zip(&constants)
-        .map(|((_, g), c)| {
-            c.is_finite() && *c < -tol.tail_noise_floor && g.abs() > tol.interior_grad_tol
-        })
-        .collect();
-    // Longest contiguous element-clean, drift-band-clean run; reseed the
-    // coordinate at the DEEPEST such probe (largest |g|, closest to the true
-    // interior optimum the descent points toward).
-    let mut best: Option<(usize, usize)> = None;
-    for a in 0..rows.len() {
-        if !element_clean[a] {
+        let gradient = eval.gradient[coord];
+        let constant = side.tail_constant(stepped, gradient);
+        let clean = constant.is_finite()
+            && constant.abs() > tol.tail_noise_floor
+            && gradient.abs() > tol.interior_grad_tol;
+        if !clean {
+            run_sign = 0;
+            run_constants.clear();
             continue;
         }
-        for b in a..rows.len() {
-            if !element_clean[b] {
-                break;
-            }
-            if b - a + 1 < MIN_TAIL_SAMPLES {
-                continue;
-            }
-            if !run_drift_within_band(&constants[a..=b], tol.tail_drift_rel) {
-                continue;
-            }
-            match best {
-                Some((ba, bb)) if bb - ba + 1 >= b - a + 1 => {}
-                _ => best = Some((a, b)),
-            }
+        let constant_sign = if constant < 0.0 { -1 } else { 1 };
+        if constant_sign != run_sign {
+            run_sign = constant_sign;
+            run_constants.clear();
+        }
+        run_constants.push(constant);
+        if run_constants.len() > MIN_TAIL_SAMPLES {
+            run_constants.remove(0);
+        }
+        if run_constants.len() >= MIN_TAIL_SAMPLES
+            && run_drift_within_band(&run_constants, tol.tail_drift_rel)
+        {
+            return if run_sign < 0 {
+                Ok(Some(stepped))
+            } else {
+                Ok(None)
+            };
         }
     }
-    Ok(best.map(|(_, b)| rows[b].0))
+    Ok(None)
 }
 
 /// Probe one coordinate's tail toward the interior (the shared probing engine
@@ -8218,11 +8208,14 @@ mod asymptote_rail_certify_tests {
         // V(ρ) = −c·e^{−ρ} ⇒ ∂V/∂ρ = +c·e^{−ρ} > 0: the descent runs ρ DOWN, away
         // from the upper rail, and ĉ_upper = −e^{ρ}·(c·e^{−ρ}) = −c < 0 uniformly.
         let c = 6723.0;
+        let evaluation_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_during_eval = std::sync::Arc::clone(&evaluation_count);
         let problem = OuterProblem::new(1).with_gradient(Derivative::Analytic);
         let mut obj = problem.build_objective(
             (),
             move |_: &mut (), rho: &Array1<f64>| Ok(-c * (-rho[0]).exp()),
             move |_: &mut (), rho: &Array1<f64>| {
+                count_during_eval.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(OuterEval {
                     cost: -c * (-rho[0]).exp(),
                     gradient: array![c * (-rho[0]).exp()],
@@ -8249,6 +8242,12 @@ mod asymptote_rail_certify_tests {
             target < rho[0] && target.is_finite(),
             "the reseed must move the coordinate INWARD (ρ down), got {target}",
         );
+        assert_eq!(
+            evaluation_count.load(std::sync::atomic::Ordering::Relaxed),
+            5,
+            "two near-rail rows are below the gradient floor; the next three \
+             clean rows are already a complete wrong-rail proof"
+        );
     }
 
     /// #2392 wrong-rail pull-back does NOT fire on a GENUINE upper-rail tail:
@@ -8256,7 +8255,25 @@ mod asymptote_rail_certify_tests {
     /// which must never be pulled off its rail.
     #[test]
     fn wrong_rail_pullback_refuses_a_genuine_upper_tail_2392() {
-        let mut obj = upper_tail_objective(6723.0, 1.0, 0.0);
+        let c = 6723.0;
+        let evaluation_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_during_eval = std::sync::Arc::clone(&evaluation_count);
+        let problem = OuterProblem::new(1).with_gradient(Derivative::Analytic);
+        let mut obj = problem.build_objective(
+            (),
+            move |_: &mut (), rho: &Array1<f64>| Ok(c * (-rho[0]).exp()),
+            move |_: &mut (), rho: &Array1<f64>| {
+                count_during_eval.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(OuterEval {
+                    cost: c * (-rho[0]).exp(),
+                    gradient: array![-c * (-rho[0]).exp()],
+                    hessian: HessianValue::Unavailable,
+                    inner_beta_hint: Some(array![(-rho[0]).exp()]),
+                })
+            },
+            None::<fn(&mut ())>,
+            None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+        );
         let rho = array![29.9];
         let tol = AsymptoteTolerances::exp4_rail_bands(1.0e-2);
         let verdict = detect_wrong_rail_pullback(
@@ -8271,6 +8288,12 @@ mod asymptote_rail_certify_tests {
         assert!(
             verdict.is_none(),
             "a genuine λ→∞ tail (ĉ>0) must not be pulled off its rail, got {verdict:?}",
+        );
+        assert_eq!(
+            evaluation_count.load(std::sync::atomic::Ordering::Relaxed),
+            5,
+            "the first three finite-difference-clean rows prove a genuine rail; \
+             probing thirteen more interior points cannot change that local fact"
         );
     }
 
