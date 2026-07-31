@@ -153,6 +153,29 @@ slow-timeout = { period = "600s", terminate-after = 4 }
 filter = 'test(/sae_resident::tests::outer_sequence_reuses_frame_and_matches_independent/)'
 slow-timeout = { period = "600s", terminate-after = 2 }
 
+# gam#2539: its sibling, now MEASURED rather than assumed.
+#
+# `moving_ridge_takes_no_host_rebuild_and_matches_independent_2539` PASSES in
+# 1695.698s standalone. It was left at the default cap when the exemption above
+# landed, because at that point it had never been observed to finish and three
+# attempts to raise its ceiling had all silently re-measured the 600s default
+# (the cap lives in this file, not in `NEXTEST_*` env vars). A run with an
+# actually-applied 3600s ceiling settled it: correct, and 4.26x slower than the
+# sibling above.
+#
+# The extra cost is consistent with what the test is built to detect. It seeds
+# `initial_ridge_t/beta = 1.0e-3` so that `ridge x lm_shrink` is a NEW positive
+# ridge on every accept — the key misses each iteration by construction, which is
+# precisely the host-rebuild path the assertion checks does not occur. So the
+# runtime is the fixture doing its job, not a stall.
+#
+# 3600s is ~2.1x the measured standalone runtime, which covers the parallel-load
+# case (under a full gam-solve run it was killed at 600s while alone it needs
+# ~1700s).
+[[profile.default.overrides]]
+filter = 'test(/sae_resident::tests::moving_ridge_takes_no_host_rebuild_and_matches_independent_2539/)'
+slow-timeout = { period = "600s", terminate-after = 6 }
+
 # Two survival integration probes carry a per-test wall-clock that exceeds the
 # default 600s SIGKILL by construction, so at the default budget nextest kills
 # them BEFORE their assertion runs — turning a designed verdict into an opaque
