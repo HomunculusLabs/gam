@@ -12,6 +12,10 @@
 use super::*;
 // Helpers exercised only by these tests; imported here (not at module scope)
 // so they are not flagged unused in a non-test `--lib` build.
+use super::binomial_q_coeffs::oracle_tests::{
+    directionalhessian_coeff_fromobjective_q_terms,
+    second_directionalhessian_coeff_fromobjective_q_terms,
+};
 use super::binomial_q_derivs::{
     binomial_neglog_q_derivatives_cloglog_closed_form,
     binomial_neglog_q_derivatives_logit_closed_form,
