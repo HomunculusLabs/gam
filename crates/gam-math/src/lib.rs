@@ -1,3 +1,4 @@
+pub mod fast_channel;
 pub mod jet_algebra;
 pub mod jet_partitions;
 pub mod jet_scalar;

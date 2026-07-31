@@ -487,14 +487,22 @@ impl BinomialMeanWiggleFamily {
             let q_u = a * xi[row] + phi[row];
             let a_u = b * xi[row] + basis1_u[row];
             let b_u = c * xi[row] + basis2_u[row];
-            coeff_eta[row] = directionalhessian_coeff_fromobjective_q_terms(
-                m1, m2, m3, q_u, a, a, b, a_u, a_u, b_u,
-            );
-            coeff_etaw_b[row] = m3 * q_u * a + m2 * a_u;
-            coeff_etaw_d1[row] = m2 * (a * xi[row] + q_u);
-            coeff_etaw_d2[row] = m1 * xi[row];
-            coeff_ww_bb[row] = m3 * q_u;
-            coeff_ww_db[row] = m2 * xi[row];
+            let [eta_eta, eta_w_b, eta_w_d1, eta_w_d2, ww_bb, ww_db] =
+                mean_wiggle_directional_coefficients(
+                    [m1, m2, m3],
+                    q_u,
+                    a,
+                    b,
+                    a_u,
+                    b_u,
+                    xi[row],
+                );
+            coeff_eta[row] = eta_eta;
+            coeff_etaw_b[row] = eta_w_b;
+            coeff_etaw_d1[row] = eta_w_d1;
+            coeff_etaw_d2[row] = eta_w_d2;
+            coeff_ww_bb[row] = ww_bb;
+            coeff_ww_db[row] = ww_db;
         }
         Ok(Some(Arc::new(RowCoeffOperator::from_directions(
             vec![p_eta, pw],
@@ -591,33 +599,41 @@ impl BinomialMeanWiggleFamily {
             let a_uv = c * xi_u[row] * xi_v[row] + b2u[row] * xi_v[row] + b2v[row] * xi_u[row];
             let b_uv = d * xi_u[row] * xi_v[row] + b3u[row] * xi_v[row] + b3v[row] * xi_u[row];
 
-            coeff_eta[row] = second_directionalhessian_coeff_fromobjective_q_terms(
-                m1, m2, m3, m4, q_u, q_v, q_uv, a, a, b, a_u, a_v, a_u, a_v, a_uv, a_uv, b_u, b_v,
+            let [
+                eta_eta,
+                eta_w_b,
+                eta_w_d1,
+                eta_w_d2,
+                eta_w_d3,
+                ww_bb,
+                ww_db,
+                ww_ddb,
+                ww_dd,
+            ] = mean_wiggle_second_directional_coefficients(
+                [m1, m2, m3, m4],
+                q_u,
+                q_v,
+                q_uv,
+                a,
+                b,
+                a_u,
+                a_v,
+                a_uv,
+                b_u,
+                b_v,
                 b_uv,
+                xi_u[row],
+                xi_v[row],
             );
-            let d2_c_b = m4 * q_u * q_v * a + m3 * (q_uv * a + q_u * a_v + q_v * a_u) + m2 * a_uv;
-            let dc_b_u = m3 * q_u * a + m2 * a_u;
-            let dc_b_v = m3 * q_v * a + m2 * a_v;
-            let c_b_static = m2 * a;
-            let d2_c_b1 = m3 * q_u * q_v + m2 * q_uv;
-            let dc_b1_u = m2 * q_u;
-            let dc_b1_v = m2 * q_v;
-
-            coeff_etaw_b[row] = d2_c_b;
-            coeff_etaw_d1[row] = dc_b_u * xi_v[row] + dc_b_v * xi_u[row] + d2_c_b1;
-            coeff_etaw_d2[row] =
-                c_b_static * xi_u[row] * xi_v[row] + dc_b1_u * xi_v[row] + dc_b1_v * xi_u[row];
-            coeff_etaw_d3[row] = m1 * xi_u[row] * xi_v[row];
-
-            let dw = m2;
-            let dw_u = m3 * q_u;
-            let dw_v = m3 * q_v;
-            let dw_uv = m4 * q_u * q_v + m3 * q_uv;
-            let xixj = xi_u[row] * xi_v[row];
-            coeff_ww_bb[row] = dw_uv;
-            coeff_ww_db[row] = dw_v * xi_u[row] + dw_u * xi_v[row];
-            coeff_ww_ddb[row] = dw * xixj;
-            coeff_ww_dd[row] = 2.0 * dw * xixj;
+            coeff_eta[row] = eta_eta;
+            coeff_etaw_b[row] = eta_w_b;
+            coeff_etaw_d1[row] = eta_w_d1;
+            coeff_etaw_d2[row] = eta_w_d2;
+            coeff_etaw_d3[row] = eta_w_d3;
+            coeff_ww_bb[row] = ww_bb;
+            coeff_ww_db[row] = ww_db;
+            coeff_ww_ddb[row] = ww_ddb;
+            coeff_ww_dd[row] = ww_dd;
         }
 
         Ok(Some(Arc::new(RowCoeffOperator::from_directions(
@@ -1139,14 +1155,22 @@ impl CustomFamily for BinomialMeanWiggleFamily {
             let q_u = a * xi[row] + phi[row];
             let a_u = b * xi[row] + basis1_u[row];
             let b_u = c * xi[row] + basis2_u[row];
-            coeff_eta[row] = directionalhessian_coeff_fromobjective_q_terms(
-                m1, m2, m3, q_u, a, a, b, a_u, a_u, b_u,
-            );
-            coeff_etaw_b[row] = m3 * q_u * a + m2 * a_u;
-            coeff_etaw_d1[row] = m2 * (a * xi[row] + q_u);
-            coeff_etaw_d2[row] = m1 * xi[row];
-            coeff_ww_bb[row] = m3 * q_u;
-            coeff_ww_db[row] = m2 * xi[row];
+            let [eta_eta, eta_w_b, eta_w_d1, eta_w_d2, ww_bb, ww_db] =
+                mean_wiggle_directional_coefficients(
+                    [m1, m2, m3],
+                    q_u,
+                    a,
+                    b,
+                    a_u,
+                    b_u,
+                    xi[row],
+                );
+            coeff_eta[row] = eta_eta;
+            coeff_etaw_b[row] = eta_w_b;
+            coeff_etaw_d1[row] = eta_w_d1;
+            coeff_etaw_d2[row] = eta_w_d2;
+            coeff_ww_bb[row] = ww_bb;
+            coeff_ww_db[row] = ww_db;
         }
 
         let d_h_eta_eta = xt_diag_x_dense(&x_eta, &coeff_eta)?;
@@ -1203,8 +1227,9 @@ impl CustomFamily for BinomialMeanWiggleFamily {
     ///   The Hessian element for eta indices (i,j) factors as
     ///     H(eta_i, eta_j) = [m2·a² + m1·b] · x_eta(i)·x_eta(j)
     ///   so D²H_eta_eta[u,v] = X_eta' diag(coeff_eta) X_eta
-    ///   where coeff_eta uses `second_directionalhessian_coeff_fromobjective_q_terms`
-    ///   with q_a=a, q_b=a, q_ab=b and their chain-rule perturbations.
+    ///   where `coeff_eta` is the eta-eta output of the shared order-four
+    ///   curve/wiggle channel bundle with q_a=a, q_b=a, q_ab=b and their
+    ///   chain-rule perturbations.
     ///
     /// **eta-w block** (X_eta' diag(...) [B, B', B'', B''']):
     ///   The static Hessian is:
@@ -1285,6 +1310,9 @@ impl CustomFamily for BinomialMeanWiggleFamily {
         let basis_v = scale_matrix_rows(&geom.basis_d1, &xi_v)?; // dB/dv = B'·xi_v
         let basis_uv = scale_matrix_rows(&geom.basis_d2, &(&xi_u * &xi_v))?; // d²B/dudv = B''·xi_u·xi_v
         // Per-row coefficient arrays for assembling the block-matrix products.
+        // All nine mathematical tiers below are projections of the same
+        // F(q(theta)) jet and are lowered together by the universal
+        // Faà-di-Bruno bundle in the row loop.
         let mut coeff_eta = Array1::<f64>::zeros(n);
 
         // Coefficients for the eta-w block: X_eta' diag(c_*) M where M ∈ {B, B', B'', B'''}
@@ -1379,42 +1407,28 @@ impl CustomFamily for BinomialMeanWiggleFamily {
             let a_uv = c * xi_u[row] * xi_v[row] + b2u[row] * xi_v[row] + b2v[row] * xi_u[row];
             let b_uv = d * xi_u[row] * xi_v[row] + b3u[row] * xi_v[row] + b3v[row] * xi_u[row];
 
-            // ── eta-eta block ──
-            // H(eta_i, eta_j) uses q_a = a, q_b = a, q_ab = b (absorbing x_eta
-            // into the matrix product).  The perturbations of these geometric
-            // quantities are: dq_a/du = a_u, dq_b/du = a_u (since q_a = q_b = a),
-            // dq_ab/du = b_u (since q_ab = b), and analogously for v.
-            coeff_eta[row] = second_directionalhessian_coeff_fromobjective_q_terms(
-                m1, m2, m3, m4, q_u, q_v, q_uv, a, a, b, // q_a, q_b, q_ab
-                a_u, a_v, // dq_a_u, dq_a_v
-                a_u, a_v, // dq_b_u, dq_b_v  (q_b = a so same perturbation)
-                a_uv, a_uv, // d2q_a_uv, d2q_b_uv
-                b_u, b_v,  // dq_ab_u, dq_ab_v  (q_ab = b)
-                b_uv, // d2q_ab_uv
-            );
-
-            // ── eta-w block coefficients ──
-            // See the derivation in the docstring above.  We group by which basis
-            // matrix tier (B, B', B'', B''') the coefficient multiplies.
-
-            // d²(m2·a)/dudv
-            let d2_c_b = m4 * q_u * q_v * a + m3 * (q_uv * a + q_u * a_v + q_v * a_u) + m2 * a_uv;
-            // d(m2·a)/du and d(m2·a)/dv
-            let dc_b_u = m3 * q_u * a + m2 * a_u;
-            let dc_b_v = m3 * q_v * a + m2 * a_v;
-            // m2·a (static coefficient for B in the cross block)
-            let c_b_static = m2 * a;
-            // d²(m1)/dudv
-            let d2_c_b1 = m3 * q_u * q_v + m2 * q_uv;
-            // d(m1)/du and d(m1)/dv
-            let dc_b1_u = m2 * q_u;
-            let dc_b1_v = m2 * q_v;
-
-            coeff_etaw_b[row] = d2_c_b;
-            coeff_etaw_d1[row] = dc_b_u * xi_v[row] + dc_b_v * xi_u[row] + d2_c_b1;
-            coeff_etaw_d2[row] =
-                c_b_static * xi_u[row] * xi_v[row] + dc_b1_u * xi_v[row] + dc_b1_v * xi_u[row];
-            coeff_etaw_d3[row] = m1 * xi_u[row] * xi_v[row];
+            let [eta_eta, eta_w_b, eta_w_d1, eta_w_d2, eta_w_d3, _, _, _, _] =
+                mean_wiggle_second_directional_coefficients(
+                    [m1, m2, m3, m4],
+                    q_u,
+                    q_v,
+                    q_uv,
+                    a,
+                    b,
+                    a_u,
+                    a_v,
+                    a_uv,
+                    b_u,
+                    b_v,
+                    b_uv,
+                    xi_u[row],
+                    xi_v[row],
+                );
+            coeff_eta[row] = eta_eta;
+            coeff_etaw_b[row] = eta_w_b;
+            coeff_etaw_d1[row] = eta_w_d1;
+            coeff_etaw_d2[row] = eta_w_d2;
+            coeff_etaw_d3[row] = eta_w_d3;
 
             // ── w-w block coefficients ──
             // The w-w static Hessian coefficient is m2 (for B'diag B).

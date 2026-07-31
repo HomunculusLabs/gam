@@ -1,11 +1,9 @@
 //! Pure scalar objective-derivative coefficient helpers for the binomial
 //! location-scale family.
 //!
-//! Self-contained seam extracted from the gamlss monolith (issue #780): the
-//! three closed-form arithmetic kernels that assemble the Hessian coefficient,
-//! its first directional derivative, and its mixed second directional
-//! derivative from the per-row objective derivative magnitudes
-//! `m_k = F^(k)(q)` and the scalar `q`-map derivative terms.
+//! Self-contained seam extracted from the gamlss monolith (issue #780). It
+//! lowers the needed Hessian channels from the per-row objective derivative
+//! magnitudes `m_k = F^(k)(q)` and the scalar `q`-map derivative terms.
 //!
 //! ## #932: the outer chain rule is single-sourced
 //!
@@ -19,23 +17,21 @@
 //!   kept as the hand-tuned closed form `m2·q_a q_b + m1·q_ab` — the cheapest
 //!   possible spelling, evaluated once per row per inner iterate. It is pinned
 //!   bit-for-bit against the `Tower2` composition in the oracle_tests test below.
-//! * `directionalhessian_coeff` (`D_u H_ab`, order 3) and
-//!   `second_directionalhessian_coeff` (`D²_{uv} H_ab`, order 4) are the
-//!   **outer-loop cross-block** chains — the exact #736/#947/#948 bug genus
-//!   (a dropped or double-counted product-rule term that is invisible until a
-//!   new consumer touches the full mixed block). They are now derived
-//!   MECHANICALLY: a `Tower4` jet seeded with the `q`-map partials in the four
-//!   distinct seed directions, composed with the `F`-derivative stack, and the
-//!   single mixed channel `t3[a,b,u]` / `t4[a,b,u,v]` read out. The
-//!   Leibniz/Faà-di-Bruno coefficients are produced by the shared partition
-//!   walker, not by hand, so no cross term can be silently dropped.
+//! * The order-3 and order-4 **outer-loop cross-block** chains are the exact
+//!   #736/#947/#948 bug genus: a dropped or double-counted product-rule term
+//!   invisible until a new consumer touches the full mixed block. Production
+//!   therefore requests every related curve/wiggle channel as one bundle. Each
+//!   output is a sparse projection of the same universal Faà-di-Bruno
+//!   partition rule; the joint lowering eliminates structural zeros and
+//!   schedules products shared across blocks.
 //!
-//! The pre-migration hand formulas are retained verbatim as the bit-identity
-//! oracle (`mod oracle_tests`) the new tower path is pinned against (the
-//! `verify_kernel_channels` discipline — the hand calculus is the witness, the
-//! tower is the single source of truth).
+//! The isolated scalar order-3/order-4 entry points are test-only witnesses for
+//! the pre-migration formulas and the dense tower oracle. They cannot become a
+//! second production calculus.
 
-use crate::fast_channel::{faa_top2, faa_top3, faa_top4};
+use gam_math::fast_channel::{curve_wiggle_bundle3, curve_wiggle_bundle4, faa_top2};
+#[cfg(test)]
+use gam_math::fast_channel::{faa_top3, faa_top4};
 
 #[inline]
 pub(crate) fn hessian_coeff_fromobjective_q_terms(
@@ -55,6 +51,7 @@ pub(crate) fn hessian_coeff_fromobjective_q_terms(
 }
 
 #[inline]
+#[cfg(test)]
 pub(crate) fn directionalhessian_coeff_fromobjective_q_terms(
     m1: f64,
     m2: f64,
@@ -83,6 +80,7 @@ pub(crate) fn directionalhessian_coeff_fromobjective_q_terms(
 }
 
 #[inline]
+#[cfg(test)]
 pub(crate) fn second_directionalhessian_coeff_fromobjective_q_terms(
     m1: f64,
     m2: f64,
@@ -123,15 +121,58 @@ pub(crate) fn second_directionalhessian_coeff_fromobjective_q_terms(
     faa_top4([m1, m2, m3, m4], &q)
 }
 
+/// All first-directional binomial mean-wiggle Hessian row coefficients.
+///
+/// Every output is a top channel of the same `F(q(theta))` composition. The
+/// sparse bitmask rows encode which derivative of the wiggle basis multiplies
+/// that output (`B`, `B'`, or `B''`); the Faà-di-Bruno partition rule supplies
+/// every product-rule coefficient mechanically.
+#[inline(always)]
+pub(crate) fn mean_wiggle_directional_coefficients(
+    m: [f64; 3],
+    q_u: f64,
+    a: f64,
+    b: f64,
+    a_u: f64,
+    b_u: f64,
+    xi: f64,
+) -> [f64; 6] {
+    curve_wiggle_bundle3(m, q_u, a, b, a_u, b_u, xi)
+}
+
+/// All mixed-second-directional binomial mean-wiggle Hessian row
+/// coefficients. The nine sparse inner jets correspond, in order, to the
+/// eta-eta, eta-w (`B` through `B'''`), and w-w (`BB`, `B'B`, `B''B`,
+/// `B'B'`) operator tiers.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mean_wiggle_second_directional_coefficients(
+    m: [f64; 4],
+    q_u: f64,
+    q_v: f64,
+    q_uv: f64,
+    a: f64,
+    b: f64,
+    a_u: f64,
+    a_v: f64,
+    a_uv: f64,
+    b_u: f64,
+    b_v: f64,
+    b_uv: f64,
+    xi_u: f64,
+    xi_v: f64,
+) -> [f64; 9] {
+    curve_wiggle_bundle4(
+        m, q_u, q_v, q_uv, a, b, a_u, a_v, a_uv, b_u, b_v, b_uv, xi_u, xi_v,
+    )
+}
+
 #[cfg(test)]
 mod oracle_tests {
-    //! #932 single-source oracles: the production coefficients carry the
-    //! hand-factored straight-line form (fast — the dense tower is ~19× the
-    //! instruction count to read one channel), and these tests pin them
-    //! BIT-FOR-BIT against the mechanical `Tower` composition that IS the
-    //! single source of truth. The jet is the truth; the hand spelling is the
-    //! compiled form. If the hand factorization ever drifts from the jet these
-    //! channels disagree.
+    //! #932 single-source oracles: these test-only scalar projections pin the
+    //! compiled top-channel partition sums against mechanical `Tower`
+    //! composition. Production consumes the joint bundles above, whose own
+    //! oracle and strongest-hand performance gates live in `gam_math`.
     use super::*;
     use gam_math::jet_tower::{Tower2, Tower4};
 
