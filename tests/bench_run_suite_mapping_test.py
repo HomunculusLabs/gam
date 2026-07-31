@@ -82,6 +82,7 @@ def _parse_args(scenario_path: Path, out_path: Path) -> typing.Any:
         scenario_names=None,
         gate=None,
         update_baseline=False,
+        cv_splits=None,
     )
 
 
@@ -648,8 +649,18 @@ class RunSuiteMappingTests(unittest.TestCase):
                     json.dumps({"fit_result": {"standard_deviation": 1.25}})
                 )
 
-            def predict(self, _data: typing.Any, **_kwargs: typing.Any) -> list[float]:
-                return [1.5, 1.5]
+            def summary(self) -> SimpleNamespace:
+                return SimpleNamespace(lambdas=[], edf_total=None)
+
+            def predict(self, data: typing.Any, **_kwargs: typing.Any) -> dict[str, list[float]]:
+                values = [1.5] * len(data)
+                return {"mean": values, "linear_predictor": values}
+
+            def design_matrix(self, data: typing.Any) -> SimpleNamespace:
+                return SimpleNamespace(
+                    matrix=_RUN_SUITE.np.ones((len(data), 1)),
+                    covariance_conditional=None,
+                )
 
         fake_gamfit = SimpleNamespace(fit=lambda *_args, **_kwargs: _FakeModel())
 
