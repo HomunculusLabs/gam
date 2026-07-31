@@ -176,6 +176,13 @@ fn royston_parmar_saved_predict_at_grid_top_does_not_fail() {
     );
 
     let mut zero_hazard_nodes = 0usize;
+    // Diagnostics for the precondition below: it demands `haz == 0.0` BIT-EXACTLY
+    // on a computed hazard, so a change that yields a tiny positive instead of a
+    // true zero silently withdraws this fixture's coverage. Record what the grid
+    // actually held so one run distinguishes the two.
+    let mut smallest_haz_over_positive_cum = f64::INFINITY;
+    let mut near_zero_haz_nodes = 0usize;
+    let mut nodes_with_positive_cum = 0usize;
     for r in 0..n {
         let surv: Vec<f64> = result.survival.row(r).to_vec();
         let haz: Vec<f64> = result.hazard.row(r).to_vec();
@@ -205,8 +212,17 @@ fn royston_parmar_saved_predict_at_grid_top_does_not_fail() {
         // atop a finite positive cumulative hazard. Each one is a node that the
         // pre-fix strict `> 0.0` guard would have rejected.
         for j in 0..grid.len() {
-            if haz[j] == 0.0 && cum[j] > 1e-9 {
-                zero_hazard_nodes += 1;
+            if cum[j] > 1e-9 {
+                nodes_with_positive_cum += 1;
+                if haz[j] < smallest_haz_over_positive_cum {
+                    smallest_haz_over_positive_cum = haz[j];
+                }
+                if haz[j] > 0.0 && haz[j] < 1e-12 {
+                    near_zero_haz_nodes += 1;
+                }
+                if haz[j] == 0.0 {
+                    zero_hazard_nodes += 1;
+                }
             }
         }
     }
@@ -214,6 +230,13 @@ fn royston_parmar_saved_predict_at_grid_top_does_not_fail() {
     assert!(
         zero_hazard_nodes > 0,
         "expected at least one exactly-zero-hazard grid node (the #1564 eta_t=0 \
-         boundary); without one this fixture would not guard the regression"
+         boundary); without one this fixture would not guard the regression. \
+         Measured over {nodes_with_positive_cum} node(s) with cum > 1e-9: \
+         smallest hazard = {smallest_haz_over_positive_cum:.6e}, \
+         nodes with 0 < haz < 1e-12 = {near_zero_haz_nodes}. A smallest hazard \
+         that is tiny-but-positive means the boundary is no longer reached \
+         bit-exactly and the fixture needs rebuilding, not that the guard \
+         regressed; a large smallest hazard means the grid no longer reaches \
+         the eta_t=0 boundary at all"
     );
 }
