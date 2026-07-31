@@ -2904,6 +2904,30 @@ fn certify_fixed_point_optimality(
             Some(sample)
         }
     };
+    // #2228: these two lanes run back-to-back on ONE `&mut obj` with no reset
+    // between them. Criteria that fit `(t, β)` in place therefore warm-start
+    // this certificate lane from wherever the value-only lane above stopped —
+    // the lanes are not two evaluations of one function, the second is a
+    // continuation of the first.
+    //
+    // That is the hazard `OuterObjective::owns_terminal_coefficient_mode`
+    // already documents and measures ("disagree by a whole basin (measured:
+    // 9.1931e2 vs 9.1671e2 on the cause-specific survival gate)"), but its
+    // `obj.reset()` remedy fires once BEFORE `finalize_outer_result`, not
+    // between the pair here.
+    //
+    // It matters because `outer_value_agreement_bound` — applied to exactly
+    // these two scalars below — is a sqrt(EPSILON) ROUNDOFF envelope, derived
+    // for "different kernels and reduction trees". A warm-start basin gap is
+    // not roundoff, and the audit's measured spread (1.5x to 1.1e7x the bound)
+    // has the shape of a divergence that usually lands in the same basin and
+    // occasionally does not, rather than of a missing term.
+    //
+    // Adding a reset here is NOT a safe drive-by: the same trait doc states
+    // that a `false` (default) objective "retains the very state its evaluation
+    // at result.rho depends on and must not be reset". Any fix has to reset
+    // before BOTH lanes, under the `owns_terminal_coefficient_mode` guard, so
+    // the pair shares one baseline instead of chaining.
     let evaluation = obj
         .eval_fixed_point_certificate(&result.rho)
         .map_err(|err| {
