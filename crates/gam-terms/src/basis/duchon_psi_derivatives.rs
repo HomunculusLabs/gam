@@ -1526,6 +1526,7 @@ pub(crate) fn build_duchon_basis_designwithworkspace(
     nullspace_order: DuchonNullspaceOrder,
     aniso_log_scales: Option<&[f64]>,
     radial_reparam: Option<&Array2<f64>>,
+    spectral_kernel_transform: Option<&Array2<f64>>,
     workspace: &mut BasisWorkspace,
 ) -> Result<DuchonBasisDesign, BasisError> {
     DUCHON_DESIGN_BUILD_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1600,7 +1601,24 @@ pub(crate) fn build_duchon_basis_designwithworkspace(
     // centered polynomial design columns above and is translation-stable; this is
     // the SAME `Z` the penalty path assembles, keeping design and penalty
     // consistent.
-    let z_raw = kernel_constraint_nullspace(centers, nullspace_order, &mut workspace.cache)?;
+    if radial_reparam.is_some() && spectral_kernel_transform.is_some() {
+        crate::bail_invalid_basis!(
+            "Duchon design cannot combine landmark radial reparameterization with a direct \
+             spectral kernel transform"
+        );
+    }
+    let z_raw = if let Some(spectral) = spectral_kernel_transform {
+        if spectral.nrows() != centers.nrows() {
+            crate::bail_dim_basis!(
+                "Duchon spectral kernel transform shape {:?} does not match {} centers",
+                spectral.dim(),
+                centers.nrows()
+            );
+        }
+        spectral.clone()
+    } else {
+        kernel_constraint_nullspace(centers, nullspace_order, &mut workspace.cache)?
+    };
     // #1355: fold the frozen data-metric radial reparameterization `V` into the
     // constrained kernel transform (`Z' = Z·V`) so the realized design columns
     // `K·Z·V` rotate into the `G_c`-orthonormal generalized eigenbasis. Applied

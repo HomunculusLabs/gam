@@ -15,6 +15,11 @@ use shape_constraints::{
 pub fn describe_thin_plate_center_request(strategy: &CenterStrategy) -> String {
     match strategy {
         CenterStrategy::Auto(inner) => describe_thin_plate_center_request(inner),
+        CenterStrategy::DuchonSpectral { knots, basis } => format!(
+            "{} with Duchon spectral rank {}",
+            describe_thin_plate_center_request(knots),
+            basis.rank()
+        ),
         CenterStrategy::UserProvided(centers) => format!("{} centers", centers.nrows()),
         CenterStrategy::EqualMass { num_centers }
         | CenterStrategy::EqualMassCovarRepresentative { num_centers }
@@ -1721,9 +1726,9 @@ impl TermCollectionSpec {
                         ))
                         .into());
                     }
-                    if !matches!(spec.center_strategy, CenterStrategy::UserProvided(_)) {
+                    if !crate::basis::duchon_center_strategy_is_frozen(&spec.center_strategy) {
                         return Err(SmoothError::invalid_config(format!(
-                            "{label} term '{}' is not frozen: Duchon centers must be UserProvided",
+                            "{label} term '{}' is not frozen: Duchon knots and spectral basis must be resolved",
                             st.name
                         ))
                         .into());
@@ -5274,6 +5279,7 @@ pub fn auto_initial_length_scale_for_low_rank_centers(
 fn center_strategy_requested_count(strategy: &CenterStrategy) -> Option<usize> {
     match strategy {
         CenterStrategy::Auto(inner) => center_strategy_requested_count(inner),
+        CenterStrategy::DuchonSpectral { knots, .. } => center_strategy_requested_count(knots),
         CenterStrategy::UserProvided(centers) => Some(centers.nrows()),
         CenterStrategy::EqualMass { num_centers }
         | CenterStrategy::EqualMassCovarRepresentative { num_centers }
@@ -5598,6 +5604,7 @@ pub fn freeze_raw_spatial_metadata(metadata: BasisMetadata, raw_cols: usize) -> 
             aniso_log_scales,
             operator_collocation_points,
             radial_reparam,
+            spectral_basis,
         } => BasisMetadata::Duchon {
             centers,
             length_scale,
@@ -5609,6 +5616,7 @@ pub fn freeze_raw_spatial_metadata(metadata: BasisMetadata, raw_cols: usize) -> 
             aniso_log_scales,
             operator_collocation_points,
             radial_reparam,
+            spectral_basis,
         },
         other => other,
     }
@@ -8914,17 +8922,18 @@ pub fn build_single_local_smooth_term(
                     );
                 }
             }
+            let mut spec_local = spec.clone();
             let frame = term.basis.scale_contract().normalize_euclidean_frame(
                 select_columns(data, feature_cols)?,
                 *input_scale,
                 Some(spec.length_scale),
+                &mut spec_local.center_strategy,
             )?;
             let x = frame.coordinates;
             let realized_input_scale = frame.input_scale;
             let length_scale_eff = frame
                 .length_scale
                 .expect("ThinPlate declares a required length-scale coordinate");
-            let mut spec_local = spec.clone();
             spec_local.length_scale = length_scale_eff.standardized_value();
             if matches!(
                 spec_local.identifiability,
@@ -9051,17 +9060,18 @@ pub fn build_single_local_smooth_term(
             // The typed scale contract owns the intentionally asymmetric
             // fresh/replay rule: fresh explicit ranges are in original units,
             // while a frozen MeasureJet range is already in its realized frame.
+            let mut spec_local = spec.clone();
             let frame = term.basis.scale_contract().normalize_euclidean_frame(
                 select_columns(data, feature_cols)?,
                 *input_scale,
                 Some(spec.length_scale),
+                &mut spec_local.center_strategy,
             )?;
             let x = frame.coordinates;
             let realized_input_scale = frame.input_scale;
             let length_scale_eff = frame
                 .length_scale
                 .expect("MeasureJet declares a required length-scale coordinate");
-            let mut spec_local = spec.clone();
             spec_local.length_scale = length_scale_eff.standardized_value();
             let mut result = build_measure_jet_basis(x.view(), &spec_local)?;
             if let BasisMetadata::MeasureJet {
@@ -9094,17 +9104,18 @@ pub fn build_single_local_smooth_term(
                     term.name
                 ))
             })?;
+            let mut spec_local = spec.clone();
             let frame = term.basis.scale_contract().normalize_euclidean_frame(
                 select_columns(data, feature_cols)?,
                 *input_scale,
                 Some(original_length_scale),
+                &mut spec_local.center_strategy,
             )?;
             let x = frame.coordinates;
             let realized_input_scale = frame.input_scale;
             let length_scale_eff = frame
                 .length_scale
                 .expect("Matérn declares a required length-scale coordinate");
-            let mut spec_local = spec.clone();
             spec_local
                 .length_scale
                 .set_resolved(length_scale_eff.standardized_value());
@@ -9135,15 +9146,16 @@ pub fn build_single_local_smooth_term(
                     );
                 }
             }
+            let mut spec_local = spec.clone();
             let frame = term.basis.scale_contract().normalize_euclidean_frame(
                 select_columns(data, feature_cols)?,
                 *input_scale,
                 spec.length_scale,
+                &mut spec_local.center_strategy,
             )?;
             let x = frame.coordinates;
             let realized_input_scale = frame.input_scale;
             let length_scale_eff = frame.length_scale;
-            let mut spec_local = spec.clone();
             spec_local.length_scale =
                 length_scale_eff.map(crate::StandardizedUnits::standardized_value);
             // The Duchon input axis is standardized in place above (`x → x/σ`,

@@ -372,6 +372,13 @@ impl Default for BSplineIdentifiability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CenterStrategy {
     Auto(Box<CenterStrategy>),
+    /// Select a potentially rich knot cloud, then retain an explicit
+    /// low-dimensional spectral subspace of its kernel. The knot strategy and
+    /// retained rank are independent by construction.
+    DuchonSpectral {
+        knots: Box<CenterStrategy>,
+        basis: DuchonSpectralBasis,
+    },
     UserProvided(Array2<f64>),
     /// Joint multidimensional equal-mass partitioning in the full smooth space.
     EqualMass {
@@ -403,6 +410,7 @@ impl CenterStrategy {
     pub fn planned_num_centers(&self, d: usize) -> usize {
         match self {
             Self::Auto(inner) => inner.planned_num_centers(d),
+            Self::DuchonSpectral { knots, .. } => knots.planned_num_centers(d),
             Self::UserProvided(centers) => centers.nrows(),
             Self::EqualMass { num_centers }
             | Self::EqualMassCovarRepresentative { num_centers }
@@ -747,19 +755,78 @@ pub fn auto_spatial_center_strategy(num_centers: usize, d: usize) -> CenterStrat
 }
 
 pub const fn center_strategy_is_auto(strategy: &CenterStrategy) -> bool {
-    matches!(strategy, CenterStrategy::Auto(_))
+    match strategy {
+        CenterStrategy::Auto(_) => true,
+        CenterStrategy::DuchonSpectral { knots, .. } => center_strategy_is_auto(knots),
+        _ => false,
+    }
 }
 
 pub(crate) fn realized_center_strategy(strategy: &CenterStrategy) -> &CenterStrategy {
     match strategy {
         CenterStrategy::Auto(inner) => inner.as_ref(),
+        CenterStrategy::DuchonSpectral { knots, .. } => realized_center_strategy(knots),
         other => other,
+    }
+}
+
+pub(crate) fn center_strategy_spectral_basis(
+    strategy: &CenterStrategy,
+) -> Option<&DuchonSpectralBasis> {
+    match strategy {
+        CenterStrategy::Auto(inner) => center_strategy_spectral_basis(inner),
+        CenterStrategy::DuchonSpectral { basis, .. } => Some(basis),
+        _ => None,
+    }
+}
+
+/// Whether a Duchon center plan is fully fit-time-resolved.
+///
+/// A spectral plan is frozen only when both pieces of fit-time state are
+/// explicit: the selected knots and the learned kernel-to-basis transform.
+/// Keeping this predicate beside the state types prevents model validation
+/// from accidentally treating the spectral wrapper itself as an unresolved
+/// center-selection strategy.
+pub(crate) fn duchon_center_strategy_is_frozen(strategy: &CenterStrategy) -> bool {
+    match strategy {
+        CenterStrategy::UserProvided(_) => true,
+        CenterStrategy::DuchonSpectral {
+            knots,
+            basis: DuchonSpectralBasis::Frozen { .. },
+        } => matches!(knots.as_ref(), CenterStrategy::UserProvided(_)),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod duchon_center_state_tests {
+    use super::*;
+
+    #[test]
+    fn spectral_state_is_frozen_only_when_knots_and_transform_are_resolved() {
+        let centers = Array2::zeros((3, 2));
+        let unresolved = CenterStrategy::DuchonSpectral {
+            knots: Box::new(CenterStrategy::UserProvided(centers.clone())),
+            basis: DuchonSpectralBasis::Fresh { rank: 2 },
+        };
+        assert!(!duchon_center_strategy_is_frozen(&unresolved));
+
+        let resolved = CenterStrategy::DuchonSpectral {
+            knots: Box::new(CenterStrategy::UserProvided(centers)),
+            basis: DuchonSpectralBasis::Frozen {
+                rank: 2,
+                kernel_transform: Array2::zeros((3, 1)),
+                bending_penalty: Array2::zeros((1, 1)),
+            },
+        };
+        assert!(duchon_center_strategy_is_frozen(&resolved));
     }
 }
 
 pub fn center_strategy_kind(strategy: &CenterStrategy) -> CenterStrategyKind {
     match strategy {
         CenterStrategy::Auto(inner) => center_strategy_kind(inner.as_ref()),
+        CenterStrategy::DuchonSpectral { knots, .. } => center_strategy_kind(knots),
         CenterStrategy::UserProvided(_) => CenterStrategyKind::UserProvided,
         CenterStrategy::EqualMass { .. } => CenterStrategyKind::EqualMass,
         CenterStrategy::EqualMassCovarRepresentative { .. } => {
@@ -774,6 +841,7 @@ pub fn center_strategy_kind(strategy: &CenterStrategy) -> CenterStrategyKind {
 pub fn center_strategy_num_centers(strategy: &CenterStrategy) -> Option<usize> {
     match strategy {
         CenterStrategy::Auto(inner) => center_strategy_num_centers(inner.as_ref()),
+        CenterStrategy::DuchonSpectral { knots, .. } => center_strategy_num_centers(knots),
         CenterStrategy::UserProvided(centers) => Some(centers.nrows()),
         CenterStrategy::EqualMass { num_centers }
         | CenterStrategy::EqualMassCovarRepresentative { num_centers }
@@ -796,6 +864,10 @@ pub fn center_strategy_with_num_centers(
     ) -> Result<CenterStrategy, BasisError> {
         match strategy {
             CenterStrategy::Auto(inner) => rebuild_inner(inner.as_ref(), num_centers, d),
+            CenterStrategy::DuchonSpectral { knots, basis } => Ok(CenterStrategy::DuchonSpectral {
+                knots: Box::new(rebuild_inner(knots, num_centers, d)?),
+                basis: basis.clone(),
+            }),
             CenterStrategy::EqualMass { .. } => Ok(CenterStrategy::EqualMass { num_centers }),
             CenterStrategy::EqualMassCovarRepresentative { .. } => {
                 Ok(CenterStrategy::EqualMassCovarRepresentative { num_centers })
@@ -1028,6 +1100,54 @@ pub enum DuchonNullspaceOrder {
     Zero,
     Linear,
     Degree(usize),
+}
+
+/// Explicit low-rank spectral construction for a Duchon kernel.
+///
+/// `rank` is the total retained spline dimension, including the polynomial
+/// null space. `Fresh` asks the basis builder to compute the dominant
+/// center-kernel eigenspace once. `Frozen` carries both the resulting direct
+/// center-to-radial transform and the reduced bending operator into prediction
+/// and derivative rebuilds. Keeping both pieces in the state is essential:
+/// recomputing `Vᵀ K V` after a residual-certified Ritz solve silently replaces
+/// the tiny tridiagonal's Galerkin operator by a numerically different one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DuchonSpectralBasis {
+    Fresh {
+        rank: usize,
+    },
+    Frozen {
+        rank: usize,
+        kernel_transform: Array2<f64>,
+        bending_penalty: Array2<f64>,
+    },
+}
+
+impl DuchonSpectralBasis {
+    pub fn rank(&self) -> usize {
+        match self {
+            Self::Fresh { rank } | Self::Frozen { rank, .. } => *rank,
+        }
+    }
+
+    pub fn kernel_transform(&self) -> Option<&Array2<f64>> {
+        match self {
+            Self::Fresh { .. } => None,
+            Self::Frozen {
+                kernel_transform, ..
+            } => Some(kernel_transform),
+        }
+    }
+
+    pub fn bending_penalty(&self) -> Option<&Array2<f64>> {
+        match self {
+            Self::Fresh { .. } => None,
+            Self::Frozen {
+                bending_penalty, ..
+            } => Some(bending_penalty),
+        }
+    }
 }
 
 /// Duchon-like basis configuration with explicit low-frequency null-space
@@ -1494,6 +1614,10 @@ pub enum BasisMetadata {
         /// κ-trial rebuilds replay the exact fit-time rotated radial basis.
         /// `None` on the lazy/streaming path (original constrained basis).
         radial_reparam: Option<Array2<f64>>,
+        /// Frozen direct center-to-radial transform for an explicitly spectral
+        /// basis. Unlike `radial_reparam`, this already includes the polynomial
+        /// side-condition projection and therefore has `centers.nrows()` rows.
+        spectral_basis: Option<DuchonSpectralBasis>,
     },
     Pca {
         feature_cols: Vec<usize>,

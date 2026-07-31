@@ -1,7 +1,166 @@
 use faer::Side;
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Axis};
 
 use crate::faer_ndarray::FaerEigh;
+
+// SAFETY: declarations only; the private wrappers below validate equal slice
+// lengths and pass unit-stride pointers covering exactly that many elements.
+unsafe extern "C" {
+    fn cblas_ddot(
+        n: i32,
+        left: *const f64,
+        left_stride: i32,
+        right: *const f64,
+        right_stride: i32,
+    ) -> f64;
+    fn cblas_daxpy(
+        n: i32,
+        alpha: f64,
+        vector: *const f64,
+        vector_stride: i32,
+        output: *mut f64,
+        output_stride: i32,
+    );
+    fn dstedc_(
+        compz: *const u8,
+        n: *const i32,
+        diagonal: *mut f64,
+        off_diagonal: *mut f64,
+        eigenvectors: *mut f64,
+        leading_dimension: *const i32,
+        work: *mut f64,
+        work_len: *const i32,
+        integer_work: *mut i32,
+        integer_work_len: *const i32,
+        info: *mut i32,
+    );
+}
+
+#[inline]
+fn blas_dot(a: &[f64], b: &[f64]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let n = i32::try_from(a.len()).expect("Lanczos vector length exceeds BLAS i32");
+    // SAFETY: both slices contain `n` readable elements at unit stride.
+    unsafe { cblas_ddot(n, a.as_ptr(), 1, b.as_ptr(), 1) }
+}
+
+#[inline]
+fn blas_axpy(alpha: f64, vector: &[f64], output: &mut [f64]) {
+    assert_eq!(vector.len(), output.len());
+    let n = i32::try_from(vector.len()).expect("Lanczos vector length exceeds BLAS i32");
+    // SAFETY: the input/output slices contain `n` elements at unit stride and
+    // the caller supplies distinct accumulated Krylov vectors and workspace.
+    unsafe { cblas_daxpy(n, alpha, vector.as_ptr(), 1, output.as_mut_ptr(), 1) };
+}
+
+fn lapack_tridiagonal_eigenpairs(
+    diagonal: &[f64],
+    off_diagonal: &[f64],
+) -> Result<(Array1<f64>, Array2<f64>), String> {
+    let dimension = diagonal.len();
+    if dimension == 0 || off_diagonal.len() + 1 != dimension {
+        return Err(format!(
+            "tridiagonal eigensystem shape mismatch: diagonal={}, off_diagonal={}",
+            dimension,
+            off_diagonal.len()
+        ));
+    }
+    let n = i32::try_from(dimension)
+        .map_err(|_| format!("tridiagonal dimension {dimension} exceeds LAPACK i32"))?;
+    let compz = b'I';
+    let mut values = diagonal.to_vec();
+    let mut off = vec![0.0_f64; dimension.max(1)];
+    off[..off_diagonal.len()].copy_from_slice(off_diagonal);
+    let mut vectors_column_major = vec![0.0_f64; dimension * dimension];
+    let mut work_query = [0.0_f64];
+    let mut integer_work_query = [0_i32];
+    let query = -1_i32;
+    let mut info = 0_i32;
+    // SAFETY: this workspace-query call supplies writable scalar query buffers,
+    // valid diagonal/off-diagonal storage, an n-by-n eigenvector buffer, and
+    // matching i32 dimensions. DSTEDC only reads COMPZ's first byte.
+    unsafe {
+        dstedc_(
+            &compz,
+            &n,
+            values.as_mut_ptr(),
+            off.as_mut_ptr(),
+            vectors_column_major.as_mut_ptr(),
+            &n,
+            work_query.as_mut_ptr(),
+            &query,
+            integer_work_query.as_mut_ptr(),
+            &query,
+            &mut info,
+        );
+    }
+    if info != 0 {
+        return Err(format!(
+            "LAPACK DSTEDC workspace query failed with info={info}"
+        ));
+    }
+    let work_len = i32::try_from(work_query[0].ceil() as i64)
+        .map_err(|_| "LAPACK DSTEDC floating workspace exceeds i32".to_string())?
+        .max(1);
+    let integer_work_len = integer_work_query[0].max(1);
+    let mut work = vec![0.0_f64; work_len as usize];
+    let mut integer_work = vec![0_i32; integer_work_len as usize];
+    values.copy_from_slice(diagonal);
+    off.fill(0.0);
+    off[..off_diagonal.len()].copy_from_slice(off_diagonal);
+    vectors_column_major.fill(0.0);
+    info = 0;
+    // SAFETY: queried workspace sizes are honored; every data buffer covers
+    // the exact n / n-by-n extent required by DSTEDC and remains exclusively
+    // borrowed for the duration of the call.
+    unsafe {
+        dstedc_(
+            &compz,
+            &n,
+            values.as_mut_ptr(),
+            off.as_mut_ptr(),
+            vectors_column_major.as_mut_ptr(),
+            &n,
+            work.as_mut_ptr(),
+            &work_len,
+            integer_work.as_mut_ptr(),
+            &integer_work_len,
+            &mut info,
+        );
+    }
+    if info != 0 {
+        return Err(format!("LAPACK DSTEDC failed with info={info}"));
+    }
+    let vectors = Array2::from_shape_fn((dimension, dimension), |(row, column)| {
+        vectors_column_major[row + column * dimension]
+    });
+    Ok((Array1::from_vec(values), vectors))
+}
+
+/// Partition a descending symmetric spectrum exactly as mgcv's
+/// `Rlanczos(..., lm=-1)` contract does: merge the positive and negative ends
+/// by absolute magnitude, then return all selected upper eigenpairs followed
+/// by the selected lower eigenpairs.  Keeping this column chart matters after
+/// the polynomial side-condition QR; an arbitrary magnitude sort represents
+/// the same exact subspace but takes a different finite-precision QR path.
+fn mgcv_largest_magnitude_indices(values_ascending: &Array1<f64>, rank: usize) -> Vec<usize> {
+    let n = values_ascending.len();
+    let mut upper = 0usize;
+    let mut lower = 0usize;
+    while upper + lower < rank {
+        let upper_index = n - 1 - upper;
+        let lower_index = lower;
+        if values_ascending[upper_index].abs() >= values_ascending[lower_index].abs() {
+            upper += 1;
+        } else {
+            lower += 1;
+        }
+    }
+    let mut indices = Vec::with_capacity(rank);
+    indices.extend((n - upper..n).rev());
+    indices.extend((0..lower).rev());
+    indices
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct SymmetricLanczosOptions {
@@ -227,6 +386,217 @@ pub fn symmetric_lanczos_eigenpairs(
     })
 }
 
+/// Configuration for an adaptive, certified extreme-eigenpair solve.
+#[derive(Debug, Clone, Copy)]
+pub struct SymmetricExtremeLanczosOptions {
+    /// Number of eigenpairs of largest absolute eigenvalue to return.
+    pub target_rank: usize,
+    /// Hard work bound. Failure to certify by this step is an error.
+    pub max_steps: usize,
+    /// Recompute the tiny tridiagonal eigensystem at this cadence.
+    pub check_every: usize,
+    /// Required `||A v - λ v||₂ / max(||Λ_selected||∞, 1)` for every returned
+    /// pair. Scaling every Ritz residual by the retained operator norm gives
+    /// one invariant certificate for the requested eigenspace, including
+    /// clustered eigenvalues.
+    pub relative_residual_tol: f64,
+    /// Norm below which the Krylov recurrence has exactly exhausted its space.
+    pub breakdown_tol: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SymmetricExtremeLanczosEigenpairs {
+    pub eigenvalues: Array1<f64>,
+    /// Original-coordinate Ritz vectors, one per column.
+    pub eigenvectors: Array2<f64>,
+    /// Sharp residual bounds `β_k |e_kᵀ y_i|`, one per returned pair.
+    pub residual_bounds: Array1<f64>,
+}
+
+/// Compute extreme-magnitude eigenpairs and stop at the first certified
+/// Lanczos checkpoint.
+///
+/// Full double reorthogonalization keeps the Krylov basis orthonormal, making
+/// `β_k |e_kᵀ y_i|` a sharp original-coordinate Ritz residual. The old
+/// fixed-step pattern paid for every guessed step before checking convergence;
+/// this solver checks the inexpensive tridiagonal problem periodically and
+/// performs no matrix-vector products after the requested eigenspace is
+/// certified.
+pub fn symmetric_extreme_lanczos_eigenpairs(
+    dim: usize,
+    start: &[f64],
+    options: SymmetricExtremeLanczosOptions,
+    mut apply: impl FnMut(&[f64], &mut [f64]) -> Result<(), String>,
+) -> Result<SymmetricExtremeLanczosEigenpairs, String> {
+    if dim == 0 {
+        return Err("extreme symmetric Lanczos requires positive dimension".to_string());
+    }
+    if start.len() != dim {
+        return Err(format!(
+            "extreme symmetric Lanczos start-vector dimension mismatch: got {}, expected {dim}",
+            start.len()
+        ));
+    }
+    if options.target_rank == 0 || options.target_rank > dim {
+        return Err(format!(
+            "extreme symmetric Lanczos target rank {} must lie in 1..={dim}",
+            options.target_rank
+        ));
+    }
+    if options.max_steps < options.target_rank {
+        return Err(format!(
+            "extreme symmetric Lanczos max_steps {} is smaller than target rank {}",
+            options.max_steps, options.target_rank
+        ));
+    }
+    if options.check_every == 0 {
+        return Err("extreme symmetric Lanczos requires check_every > 0".to_string());
+    }
+    if !options.relative_residual_tol.is_finite() || options.relative_residual_tol <= 0.0 {
+        return Err(format!(
+            "extreme symmetric Lanczos requires a positive finite relative residual tolerance, \
+             got {}",
+            options.relative_residual_tol
+        ));
+    }
+    if !options.breakdown_tol.is_finite() || options.breakdown_tol < 0.0 {
+        return Err(format!(
+            "extreme symmetric Lanczos requires a finite non-negative breakdown tolerance, got {}",
+            options.breakdown_tol
+        ));
+    }
+    if start.iter().any(|value| !value.is_finite()) {
+        return Err("extreme symmetric Lanczos start contains non-finite entries".to_string());
+    }
+
+    let mut q = start.to_vec();
+    let q_norm = norm2(&q);
+    if !q_norm.is_finite() || q_norm <= 0.0 {
+        return Err(
+            "extreme symmetric Lanczos start vector must have positive finite norm".to_string(),
+        );
+    }
+    for value in &mut q {
+        *value /= q_norm;
+    }
+
+    let steps = options.max_steps.min(dim);
+    let mut q_prev = vec![0.0_f64; dim];
+    let mut beta_prev = 0.0_f64;
+    let mut w = vec![0.0_f64; dim];
+    let mut basis = Vec::<Vec<f64>>::with_capacity(steps);
+    let mut alphas = Vec::<f64>::with_capacity(steps);
+    let mut betas = Vec::<f64>::with_capacity(steps.saturating_sub(1));
+    let mut last_worst_relative_residual = f64::INFINITY;
+
+    for step in 0..steps {
+        basis.push(q.clone());
+        w.fill(0.0);
+        apply(&q, &mut w)?;
+        if w.iter().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "extreme symmetric Lanczos operator produced non-finite values at step {}",
+                step + 1
+            ));
+        }
+        // Rlanczos deliberately computes alpha in a scalar left-to-right loop
+        // even though its reorthogonalization projections use BLAS DDOT.
+        // Substituting DDOT here changes the Krylov chart on clustered spectra.
+        let alpha = dot(&q, &w);
+        if !alpha.is_finite() {
+            return Err("extreme symmetric Lanczos produced non-finite alpha".to_string());
+        }
+        if step == 0 {
+            for i in 0..dim {
+                w[i] -= alpha * q[i];
+            }
+        } else {
+            for i in 0..dim {
+                w[i] -= alpha * q[i] + beta_prev * q_prev[i];
+            }
+        }
+        if step > 0 {
+            for _ in 0..2 {
+                for qi in &basis {
+                    let projection = -blas_dot(&w, qi);
+                    blas_axpy(projection, qi, &mut w);
+                }
+            }
+        }
+        let beta = norm2(&w);
+        if !beta.is_finite() {
+            return Err("extreme symmetric Lanczos produced non-finite beta".to_string());
+        }
+        alphas.push(alpha);
+
+        let k = alphas.len();
+        let exhausted = beta <= options.breakdown_tol;
+        let completed_index = k - 1;
+        let checkpoint = k >= options.target_rank
+            && (exhausted
+                || k == steps
+                || (completed_index >= options.target_rank
+                    && completed_index.is_multiple_of(options.check_every)));
+        if checkpoint {
+            let (values, vectors) = lapack_tridiagonal_eigenpairs(&alphas, &betas)?;
+            let selected_indices =
+                mgcv_largest_magnitude_indices(&values, options.target_rank);
+            let residual_scale = if exhausted { 0.0 } else { beta };
+            let selected_operator_scale = selected_indices
+                .iter()
+                .map(|&index| values[index].abs())
+                .fold(0.0_f64, f64::max)
+                .max(1.0);
+            let mut residual_bounds = Array1::<f64>::zeros(options.target_rank);
+            last_worst_relative_residual = 0.0;
+            for (out, &j) in selected_indices.iter().enumerate() {
+                let residual = residual_scale * vectors[[k - 1, j]].abs();
+                residual_bounds[out] = residual;
+                last_worst_relative_residual =
+                    last_worst_relative_residual.max(residual / selected_operator_scale);
+            }
+            if last_worst_relative_residual <= options.relative_residual_tol {
+                let mut selected_vectors = Array2::<f64>::zeros((dim, options.target_rank));
+                for (output_column, &small_column) in selected_indices.iter().enumerate() {
+                    for krylov_column in 0..k {
+                        let scale = vectors[[krylov_column, small_column]];
+                        for row in 0..dim {
+                            selected_vectors[[row, output_column]] +=
+                                basis[krylov_column][row] * scale;
+                        }
+                    }
+                }
+                return Ok(SymmetricExtremeLanczosEigenpairs {
+                    eigenvalues: values.select(Axis(0), &selected_indices),
+                    eigenvectors: selected_vectors,
+                    residual_bounds,
+                });
+            }
+            if exhausted {
+                return Err(format!(
+                    "extreme symmetric Lanczos exhausted its Krylov space after {k} steps before \
+                     certification (worst relative residual {last_worst_relative_residual:.3e})"
+                ));
+            }
+        }
+        if step + 1 == steps {
+            break;
+        }
+        betas.push(beta);
+        q_prev.clone_from(&q);
+        for i in 0..dim {
+            q[i] = w[i] / beta;
+        }
+        beta_prev = beta;
+    }
+
+    Err(format!(
+        "extreme symmetric Lanczos failed to certify rank {} after {} steps \
+         (worst relative residual {last_worst_relative_residual:.3e}, tolerance {:.3e})",
+        options.target_rank, steps, options.relative_residual_tol
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,5 +727,43 @@ mod tests {
         assert!((evs[0] - 1.0).abs() < 1e-10, "smallest: {}", evs[0]);
         assert!((evs[1] - 4.0).abs() < 1e-10, "largest: {}", evs[1]);
         assert_eq!(ep.residual_norm, 0.0);
+    }
+
+    #[test]
+    fn adaptive_extreme_lanczos_returns_certified_original_coordinate_eigenpairs() {
+        let diagonal = [9.0_f64, -7.0, 4.0, 2.0, 1.0, 0.5];
+        let start = [1.0_f64, -0.7, 0.5, 1.3, -0.2, 0.9];
+        let pairs = symmetric_extreme_lanczos_eigenpairs(
+            6,
+            &start,
+            SymmetricExtremeLanczosOptions {
+                target_rank: 2,
+                max_steps: 6,
+                check_every: 1,
+                relative_residual_tol: 1e-10,
+                breakdown_tol: 1e-14,
+            },
+            |q, out| {
+                for i in 0..6 {
+                    out[i] = diagonal[i] * q[i];
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(pairs.eigenvectors.dim(), (6, 2));
+        assert!((pairs.eigenvalues[0] - 9.0).abs() < 1e-10);
+        assert!((pairs.eigenvalues[1] + 7.0).abs() < 1e-10);
+        for j in 0..2 {
+            let lambda = pairs.eigenvalues[j];
+            let mut residual_squared = 0.0;
+            for i in 0..6 {
+                let residual =
+                    diagonal[i] * pairs.eigenvectors[[i, j]] - lambda * pairs.eigenvectors[[i, j]];
+                residual_squared += residual * residual;
+            }
+            assert!(residual_squared.sqrt() < 1e-10);
+            assert!(pairs.residual_bounds[j] < 1e-10);
+        }
     }
 }

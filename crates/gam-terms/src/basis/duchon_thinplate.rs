@@ -1,6 +1,7 @@
 use super::*;
 
 use super::invariant_tie_break::resolve_sorted_profile_tie;
+use gam_linalg::lanczos::{SymmetricExtremeLanczosOptions, symmetric_extreme_lanczos_eigenpairs};
 
 /// Cross-disease Duchon basis cache.
 ///
@@ -180,7 +181,10 @@ pub fn build_duchon_basis_spec_chart(
     // An explicitly frozen chart already makes the basis spec-determined, and
     // the periodic/cyclic builders never reach the data-metric branch at all,
     // so in both cases the ordinary path is already frame-independent.
-    if spec.radial_reparam.is_some() || spec.periodic.is_some() || spec.boundary.period().is_some()
+    if center_strategy_spectral_basis(&spec.center_strategy).is_some()
+        || spec.radial_reparam.is_some()
+        || spec.periodic.is_some()
+        || spec.boundary.period().is_some()
     {
         return build_duchon_basis(data, spec);
     }
@@ -215,6 +219,157 @@ pub fn build_duchon_basis_spec_chart(
     let mut spec_chart = spec.clone();
     spec_chart.radial_reparam = Some(v);
     build_duchon_basis(data, &spec_chart)
+}
+
+/// Dominant center-kernel eigenspace followed by the exact polynomial
+/// side-condition projection used by Duchon regression splines.
+///
+/// The center count controls Nyström resolution; `rank` independently controls
+/// the final spline width. This is the construction mgcv calls a low-rank
+/// Duchon spline: retain the `rank` eigenpairs of largest magnitude, then remove
+/// the polynomial component *inside that eigenspace*. Projecting the full
+/// center space first and truncating afterward is a different approximation.
+struct DuchonSpectralKernelChart {
+    kernel_transform: Array2<f64>,
+    bending_penalty: Array2<f64>,
+}
+
+fn duchon_spectral_kernel_chart(
+    centers: ArrayView2<'_, f64>,
+    length_scale: Option<f64>,
+    power: f64,
+    nullspace_order: DuchonNullspaceOrder,
+    aniso_log_scales: Option<&[f64]>,
+    rank: usize,
+) -> Result<DuchonSpectralKernelChart, BasisError> {
+    let (center_kernel, kernel_amp) = duchon_center_kernel_value_matrix(
+        centers,
+        length_scale,
+        power,
+        nullspace_order,
+        aniso_log_scales,
+    )?;
+    let dim = center_kernel.nrows();
+
+    // Match mgcv::slanczos' deliberately tiny deterministic LCG exactly. The
+    // start vector selects a finite-precision Krylov chart, so using merely
+    // another deterministic random sequence needlessly rotates the truncated
+    // approximation away from the reference even when knots and rank match.
+    let mut state = 1_u64;
+    let mut start = vec![0.0_f64; dim];
+    for value in &mut start {
+        state = (state * 106 + 1283) % 6075;
+        *value = state as f64 / 6075.0 - 0.5;
+    }
+    let check_every = (rank / 2).max(10).min((dim / 10).max(1));
+
+    let pairs = symmetric_extreme_lanczos_eigenpairs(
+        dim,
+        &start,
+        SymmetricExtremeLanczosOptions {
+            target_rank: rank,
+            max_steps: 128,
+            check_every,
+            relative_residual_tol: f64::EPSILON.sqrt(),
+            breakdown_tol: 1e-14,
+        },
+        |q, image| {
+            gam_linalg::faer_ndarray::blas_symmetric_upper_matvec_into(
+                &center_kernel,
+                q,
+                image,
+            )
+        },
+    )
+    .map_err(BasisError::InvalidInput)?;
+    let selected = pairs.eigenvectors;
+
+    let mut centers_centered = centers.to_owned();
+    for axis in 0..centers.ncols() {
+        let mean = centers.column(axis).sum() / centers.nrows() as f64;
+        centers_centered
+            .column_mut(axis)
+            .mapv_inplace(|value| value - mean);
+    }
+    let polynomial = polynomial_block_from_order(centers_centered.view(), nullspace_order);
+    let polynomial_in_eigenspace = fast_atb(&selected, &polynomial);
+    let spectral_constraint =
+        kernel_constraint_nullspace_from_matrix(polynomial_in_eigenspace.view())?;
+    let kernel_transform = fast_ab(&selected, &spectral_constraint);
+    let mut diagonal = Array2::<f64>::zeros((rank, rank));
+    for (index, &eigenvalue) in pairs.eigenvalues.iter().enumerate() {
+        diagonal[[index, index]] = eigenvalue;
+    }
+    let reduced = fast_ab(
+        &fast_atb(&spectral_constraint, &diagonal),
+        &spectral_constraint,
+    )
+    .mapv(|value| value * kernel_amp * kernel_amp);
+    Ok(DuchonSpectralKernelChart {
+        kernel_transform,
+        bending_penalty: symmetrize_penalty(&reduced),
+    })
+}
+
+#[cfg(test)]
+mod duchon_spectral_basis_tests {
+    use super::*;
+
+    fn asymmetric_centers() -> Array2<f64> {
+        Array2::from_shape_fn((24, 4), |(row, axis)| {
+            let x = (row + 1) as f64;
+            let a = (axis + 2) as f64;
+            (x * a.sqrt()).sin() + (x / (a + 0.5)).cos() + 0.01 * x * a
+        })
+    }
+
+    #[test]
+    fn spectral_transform_has_requested_rank_is_deterministic_and_obeys_side_condition() {
+        let centers = asymmetric_centers();
+        let rank = 6;
+        let chart = duchon_spectral_kernel_chart(
+            centers.view(),
+            None,
+            1.5,
+            DuchonNullspaceOrder::Zero,
+            None,
+            rank,
+        )
+        .expect("small asymmetric cloud has a certifiable spectral basis");
+        let replay = duchon_spectral_kernel_chart(
+            centers.view(),
+            None,
+            1.5,
+            DuchonNullspaceOrder::Zero,
+            None,
+            rank,
+        )
+        .expect("deterministic replay");
+
+        // rank includes the single constant null-space column.
+        assert_eq!(chart.kernel_transform.dim(), (centers.nrows(), rank - 1));
+        assert_eq!(chart.kernel_transform, replay.kernel_transform);
+        assert_eq!(chart.bending_penalty, replay.bending_penalty);
+
+        let gram = fast_atb(&chart.kernel_transform, &chart.kernel_transform);
+        for i in 0..gram.nrows() {
+            for j in 0..gram.ncols() {
+                let target = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (gram[[i, j]] - target).abs() <= 2e-10,
+                    "spectral transform is not orthonormal at ({i}, {j}): {}",
+                    gram[[i, j]]
+                );
+            }
+        }
+        for column in chart.kernel_transform.columns() {
+            assert!(
+                column.sum().abs() <= 2e-10,
+                "constant polynomial side condition was not removed: sum={}",
+                column.sum()
+            );
+        }
+    }
 }
 
 fn build_duchon_basis_uncached(
@@ -323,12 +478,85 @@ fn build_duchon_basis_uncached(
         spec.power
     };
     validate_duchon_kernel_orders(spec.length_scale, p_order, validation_power, data.ncols())?;
-    let mut kernel_transform = kernel_constraint_nullspace(
-        centers.view(),
-        effective_nullspace_order,
-        &mut workspace.cache,
-    )?;
     let poly_cols = polynomial_block_from_order(data, effective_nullspace_order).ncols();
+    let spectral_basis = center_strategy_spectral_basis(&spec.center_strategy);
+    if let Some(spectral) = spectral_basis {
+        let rank = spectral.rank();
+        if rank <= poly_cols || rank > centers.nrows() {
+            crate::bail_invalid_basis!(
+                "Duchon spectral rank must satisfy polynomial_columns < rank <= centers: \
+                 polynomial_columns={poly_cols}, rank={rank}, centers={}",
+                centers.nrows()
+            );
+        }
+        if spec.radial_reparam.is_some() {
+            crate::bail_invalid_basis!(
+                "Duchon spectral basis and landmark data-metric radial reparameterization \
+                 are mutually exclusive"
+            );
+        }
+        if spec.length_scale.is_some() {
+            crate::bail_invalid_basis!(
+                "Duchon spectral reduction currently requires the scale-free kernel; \
+                 a moving hybrid range would change the retained eigenspace"
+            );
+        }
+    }
+    let mut realized_spectral_basis = None;
+    let mut spectral_bending_penalty = None;
+    let mut kernel_transform = if let Some(spectral) = spectral_basis {
+        let rank = spectral.rank();
+        let chart = match (spectral.kernel_transform(), spectral.bending_penalty()) {
+            (Some(frozen), Some(frozen_penalty)) => {
+                if frozen.nrows() != centers.nrows()
+                    || frozen.ncols() != rank.saturating_sub(poly_cols)
+                {
+                    crate::bail_dim_basis!(
+                        "Duchon frozen spectral transform has shape {:?}; expected ({}, {})",
+                        frozen.dim(),
+                        centers.nrows(),
+                        rank.saturating_sub(poly_cols)
+                    );
+                }
+                if frozen_penalty.dim() != (frozen.ncols(), frozen.ncols()) {
+                    crate::bail_dim_basis!(
+                        "Duchon frozen spectral bending penalty has shape {:?}; expected ({}, {})",
+                        frozen_penalty.dim(),
+                        frozen.ncols(),
+                        frozen.ncols()
+                    );
+                }
+                DuchonSpectralKernelChart {
+                    kernel_transform: frozen.clone(),
+                    bending_penalty: frozen_penalty.clone(),
+                }
+            }
+            (None, None) => duchon_spectral_kernel_chart(
+                centers.view(),
+                spec.length_scale,
+                spec.power,
+                effective_nullspace_order,
+                aniso.as_deref(),
+                rank,
+            )?,
+            _ => crate::bail_invalid_basis!(
+                "Duchon frozen spectral state must contain both transform and bending penalty"
+            ),
+        };
+        spectral_bending_penalty = Some(chart.bending_penalty.clone());
+        realized_spectral_basis = Some(DuchonSpectralBasis::Frozen {
+            rank,
+            kernel_transform: chart.kernel_transform.clone(),
+            bending_penalty: chart.bending_penalty,
+        });
+        chart.kernel_transform
+    } else {
+        kernel_constraint_nullspace(
+            centers.view(),
+            effective_nullspace_order,
+            &mut workspace.cache,
+        )?
+    };
     let base_cols = kernel_transform.ncols() + poly_cols;
     let dense_bytes = dense_design_bytes(data.nrows(), base_cols);
     let use_lazy = should_use_lazy_spatial_design(data.nrows(), base_cols, workspace.policy());
@@ -454,7 +682,7 @@ fn build_duchon_basis_uncached(
         // operator-penalty configurations, then solve the same generalized
         // eigenproblem as the dense path.  This keeps VᵀG_cV=I and
         // VᵀΩ_cV=diag(μ) without ever allocating n×p.
-        if frozen_radial_reparam.is_none() {
+        if spectral_basis.is_none() && frozen_radial_reparam.is_none() {
             let raw_gauge = Arc::new(gam_problem::Gauge::from_block_transforms(&[
                 kernel_transform.clone(),
             ]));
@@ -549,7 +777,10 @@ fn build_duchon_basis_uncached(
         // the ψ-derivative context resolves the IDENTICAL frame from the same
         // `(data, spec)` instead of assuming the raw `Z` (#2638).
         let mut prebuilt_raw_basis: Option<Array2<f64>> = None;
-        if frozen_radial_reparam.is_none() && kernel_transform.ncols() > 0 {
+        if spectral_basis.is_none()
+            && frozen_radial_reparam.is_none()
+            && kernel_transform.ncols() > 0
+        {
             let resolved = duchon_resolve_radial_chart(
                 data,
                 centers.view(),
@@ -576,6 +807,9 @@ fn build_duchon_basis_uncached(
                 effective_nullspace_order,
                 aniso.as_deref(),
                 frozen_radial_reparam.as_ref(),
+                realized_spectral_basis
+                    .as_ref()
+                    .and_then(DuchonSpectralBasis::kernel_transform),
                 workspace,
             )?
             .basis
@@ -622,7 +856,7 @@ fn build_duchon_basis_uncached(
             None
         }
     };
-    let mut candidates = duchon_native_penalty_candidates(
+    let mut candidates = duchon_native_penalty_candidates_with_curvature(
         centers.view(),
         spec.length_scale,
         spec.power,
@@ -630,6 +864,7 @@ fn build_duchon_basis_uncached(
         aniso.as_deref(),
         &kernel_transform,
         identifiability_transform.as_ref(),
+        spectral_bending_penalty.as_ref(),
     )?;
     if let Some(points) = operator_collocation_points.as_ref() {
         candidates.extend(duchon_operator_penalty_candidates(
@@ -668,6 +903,7 @@ fn build_duchon_basis_uncached(
             aniso_log_scales: aniso,
             operator_collocation_points,
             radial_reparam: frozen_radial_reparam,
+            spectral_basis: realized_spectral_basis,
         },
         kronecker_factored: None,
     })
@@ -1384,6 +1620,7 @@ pub(crate) fn duchon_resolve_radial_chart(
         effective_nullspace_order,
         aniso,
         None,
+        None,
         workspace,
     )?;
     let kernel_cols = kernel_transform.ncols();
@@ -1530,6 +1767,7 @@ pub fn duchon_resolve_chart(
                 effective_nullspace_order,
                 aniso.as_deref(),
                 Some(v),
+                None,
                 workspace,
             )?
             .basis
@@ -1548,6 +1786,7 @@ pub fn duchon_resolve_chart(
                     spec.power,
                     effective_nullspace_order,
                     aniso.as_deref(),
+                    None,
                     None,
                     workspace,
                 )?

@@ -67,9 +67,10 @@ use gam_geometry::constant_curvature::{ConstantCurvature, distance_kappa_jet};
 
 use super::{
     ActivePenalty, BasisBuildResult, BasisError, BasisMetadata, BasisPsiDerivativeBundle,
-    BasisPsiDerivativeResult, BasisPsiSecondDerivativeResult, CenterStrategy,
-    ConstructiveQuadratic, PenaltyCandidate, PenaltySource, filter_penalty_candidates,
-    normalize_penalty, select_centers_by_strategy, weighted_coefficient_sum_to_zero_transform,
+    BasisPsiDerivativeResult, BasisPsiSecondDerivativeResult, CenterStrategy, CenterStrategyKind,
+    ConstructiveQuadratic, PenaltyCandidate, PenaltySource, center_strategy_kind,
+    filter_penalty_candidates, normalize_penalty, select_centers_by_strategy,
+    weighted_coefficient_sum_to_zero_transform,
 };
 
 /// Realized-design identifiability policy for the constant-curvature smooth.
@@ -799,6 +800,11 @@ fn select_constant_curvature_centers(
         CenterStrategy::UserProvided(_) => return Ok(centers),
         CenterStrategy::Auto(inner) => {
             if matches!(inner.as_ref(), CenterStrategy::UserProvided(_)) {
+                return Ok(centers);
+            }
+        }
+        CenterStrategy::DuchonSpectral { knots, .. } => {
+            if center_strategy_kind(knots) == CenterStrategyKind::UserProvided {
                 return Ok(centers);
             }
         }

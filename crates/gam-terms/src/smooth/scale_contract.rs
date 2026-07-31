@@ -251,6 +251,28 @@ pub(super) struct NormalizedEuclideanFrame {
     pub length_scale: Option<crate::StandardizedUnits>,
 }
 
+fn standardize_resolved_center_strategy(
+    strategy: &mut crate::basis::CenterStrategy,
+    input_scale: crate::IsotropicScale,
+) {
+    match strategy {
+        crate::basis::CenterStrategy::Auto(inner) => {
+            standardize_resolved_center_strategy(inner, input_scale);
+        }
+        crate::basis::CenterStrategy::DuchonSpectral { knots, .. } => {
+            standardize_resolved_center_strategy(knots, input_scale);
+        }
+        crate::basis::CenterStrategy::UserProvided(centers) => {
+            input_scale.standardize(centers);
+        }
+        crate::basis::CenterStrategy::EqualMass { .. }
+        | crate::basis::CenterStrategy::EqualMassCovarRepresentative { .. }
+        | crate::basis::CenterStrategy::FarthestPoint { .. }
+        | crate::basis::CenterStrategy::KMeans { .. }
+        | crate::basis::CenterStrategy::UniformGrid { .. } => {}
+    }
+}
+
 impl BasisScaleContract {
     fn leaf(
         family: BasisScaleFamily,
@@ -310,6 +332,7 @@ impl BasisScaleContract {
         mut coordinates: Array2<f64>,
         stored_scale: Option<crate::IsotropicScale>,
         spec_length_scale: Option<f64>,
+        center_strategy: &mut crate::basis::CenterStrategy,
     ) -> Result<NormalizedEuclideanFrame, BasisError> {
         let replay = stored_scale.is_some();
         let replay_range_is_already_realized = match self.input_frame {
@@ -331,6 +354,22 @@ impl BasisScaleContract {
         };
 
         input_scale.standardize(&mut coordinates);
+        // A center matrix is a coordinate-bearing part of the kernel, not a
+        // dimensionless tuning artifact. Fresh user-provided centers and
+        // centers resolved by model materialization are expressed in the same
+        // original input frame as `coordinates`, so the frame transition must
+        // pull back both together. Leaving the centers untouched evaluates
+        // K(x / sigma, c) instead of K(x / sigma, c / sigma): translation and
+        // scale invariance are then genuinely broken, even though the error can
+        // look like harmless roundoff when sigma is close to one (#2623).
+        //
+        // Frozen replay is deliberately different: its center matrix was
+        // emitted by the builder in the realized standardized frame. The saved
+        // `stored_scale` marks that state, so scaling it again would double
+        // divide fit-time geometry at prediction.
+        if !replay {
+            standardize_resolved_center_strategy(center_strategy, input_scale);
+        }
         let transformed_length = if replay_range_is_already_realized && replay {
             // The frozen spec already holds the realized range; re-applying
             // the conversion here is the double-divide the tag now forbids
@@ -1543,15 +1582,23 @@ mod tests {
             let basis = zoo_basis(family);
             let contract = basis.scale_contract();
             assert_eq!(contract.family, family);
+            let mut reference_centers = CenterStrategy::FarthestPoint { num_centers: 3 };
             let reference = contract
-                .normalize_euclidean_frame(coordinates.clone(), None, length_scale)
+                .normalize_euclidean_frame(
+                    coordinates.clone(),
+                    None,
+                    length_scale,
+                    &mut reference_centers,
+                )
                 .expect("reference scale frame");
             for factor in [1e-9_f64, 1.0, 1e9] {
+                let mut actual_centers = CenterStrategy::FarthestPoint { num_centers: 3 };
                 let actual = contract
                     .normalize_euclidean_frame(
                         coordinates.mapv(|value| factor * value),
                         None,
                         length_scale.map(|ell| factor * ell),
+                        &mut actual_centers,
                     )
                     .expect("rescaled frame");
                 assert_matrix_close(&actual.coordinates, &reference.coordinates, 3e-12);
@@ -1569,6 +1616,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn euclidean_frame_scales_nested_resolved_centers_once_2623() {
+        let coordinates = array![
+            [-1.2, 0.4],
+            [-0.3, 1.1],
+            [0.6, -0.8],
+            [1.7, 0.2]
+        ];
+        let original_centers = array![[-1.2, 0.4], [0.6, -0.8], [1.7, 0.2]];
+        let mut strategy = CenterStrategy::DuchonSpectral {
+            knots: Box::new(CenterStrategy::UserProvided(original_centers.clone())),
+            basis: crate::basis::DuchonSpectralBasis::Fresh { rank: 3 },
+        };
+        let contract = zoo_basis(BasisScaleFamily::PureDuchon).scale_contract();
+        let fresh = contract
+            .normalize_euclidean_frame(coordinates.clone(), None, None, &mut strategy)
+            .expect("fresh Euclidean frame");
+        let expected_centers =
+            original_centers.mapv(|value| value / fresh.input_scale.get());
+        let CenterStrategy::DuchonSpectral { knots, .. } = &strategy else {
+            panic!("Duchon spectral strategy changed shape");
+        };
+        let CenterStrategy::UserProvided(fresh_centers) = knots.as_ref() else {
+            panic!("Duchon spectral knot strategy changed shape");
+        };
+        assert_matrix_close(fresh_centers, &expected_centers, 0.0);
+
+        let frozen_centers = fresh_centers.clone();
+        let replay = contract
+            .normalize_euclidean_frame(
+                coordinates,
+                Some(fresh.input_scale),
+                None,
+                &mut strategy,
+            )
+            .expect("frozen Euclidean replay frame");
+        assert_matrix_close(&replay.coordinates, &fresh.coordinates, 0.0);
+        let CenterStrategy::DuchonSpectral { knots, .. } = &strategy else {
+            panic!("Duchon spectral strategy changed shape on replay");
+        };
+        let CenterStrategy::UserProvided(replay_centers) = knots.as_ref() else {
+            panic!("Duchon spectral knot strategy changed shape on replay");
+        };
+        assert_matrix_close(replay_centers, &frozen_centers, 0.0);
     }
 
     fn euclidean_basis(family: BasisScaleFamily, factor: f64) -> SmoothBasisSpec {

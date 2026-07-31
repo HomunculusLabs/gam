@@ -171,6 +171,7 @@ fn freeze_smooth_basis_from_metadata(
                 input_scale: metadata_scale,
                 aniso_log_scales: meta_aniso,
                 radial_reparam: meta_radial_reparam,
+                spectral_basis: meta_spectral_basis,
                 ..
             },
         ) => {
@@ -201,7 +202,15 @@ fn freeze_smooth_basis_from_metadata(
                 feature_cols: feature_cols.clone(),
                 spec: DuchonBasisSpec {
                     periodic: meta_periodic.clone(),
-                    center_strategy: crate::basis::CenterStrategy::UserProvided(centers.clone()),
+                    center_strategy: match meta_spectral_basis {
+                        Some(spectral) => crate::basis::CenterStrategy::DuchonSpectral {
+                            knots: Box::new(crate::basis::CenterStrategy::UserProvided(
+                                centers.clone(),
+                            )),
+                            basis: spectral.clone(),
+                        },
+                        None => crate::basis::CenterStrategy::UserProvided(centers.clone()),
+                    },
                     length_scale: length_scale.map(crate::OriginalUnits::original_value),
                     power: *power,
                     nullspace_order: *nullspace_order,
@@ -368,10 +377,17 @@ fn freeze_smooth_basis_from_metadata(
                 input_scale: metadata_scale,
                 aniso_log_scales: meta_aniso,
                 radial_reparam,
+                spectral_basis,
                 ..
             },
         ) => {
-            s.center_strategy = crate::basis::CenterStrategy::UserProvided(centers.clone());
+            s.center_strategy = match spectral_basis {
+                Some(spectral) => crate::basis::CenterStrategy::DuchonSpectral {
+                    knots: Box::new(crate::basis::CenterStrategy::UserProvided(centers.clone())),
+                    basis: spectral.clone(),
+                },
+                None => crate::basis::CenterStrategy::UserProvided(centers.clone()),
+            };
             s.length_scale = length_scale.map(crate::OriginalUnits::original_value);
             s.power = *power;
             s.nullspace_order = *nullspace_order;

@@ -11,7 +11,7 @@ rust-version = "1.97"
 warnings = "deny"
 
 [dependencies]
-faer = "0.24.4"
+faer = "0.24.0"
 gam-geometry = { path = "../gam-geometry", version = "=0.3.151" }
 gam-data = { path = "../gam-data", version = "=0.3.149" }
 gam-gpu = { path = "../gam-gpu", version = "=0.3.151" }

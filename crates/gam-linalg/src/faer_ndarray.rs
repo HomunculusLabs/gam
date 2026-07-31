@@ -12,6 +12,71 @@ use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use thiserror::Error;
 
+// SAFETY: declarations only; the safe wrapper below validates dimensions,
+// contiguity, strides, and non-aliasing before calling the process CBLAS.
+unsafe extern "C" {
+    fn cblas_dsymv(
+        layout: i32,
+        uplo: i32,
+        n: i32,
+        alpha: f64,
+        matrix: *const f64,
+        leading_dimension: i32,
+        vector: *const f64,
+        vector_stride: i32,
+        beta: f64,
+        output: *mut f64,
+        output_stride: i32,
+    );
+}
+
+/// Apply a symmetric, standard-layout matrix through the process BLAS.
+///
+/// `CblasColMajor + CblasUpper` is intentional. A standard-layout Rust matrix
+/// has the same byte sequence as its column-major transpose; symmetry makes
+/// that the same logical operator, while this exact BLAS traversal also keeps
+/// finite-precision Krylov charts compatible with reference implementations
+/// that hand the matrix to Fortran `dsymv("U", ...)`.
+pub fn blas_symmetric_upper_matvec_into(
+    matrix: &Array2<f64>,
+    vector: &[f64],
+    output: &mut [f64],
+) -> Result<(), String> {
+    let n = matrix.nrows();
+    if matrix.ncols() != n || vector.len() != n || output.len() != n {
+        return Err(format!(
+            "symmetric BLAS matvec shape mismatch: matrix={:?}, vector={}, output={}",
+            matrix.dim(),
+            vector.len(),
+            output.len()
+        ));
+    }
+    let n_i32 = i32::try_from(n)
+        .map_err(|_| format!("symmetric BLAS matvec dimension {n} exceeds i32"))?;
+    let storage = matrix
+        .as_slice()
+        .ok_or_else(|| "symmetric BLAS matvec requires standard-layout storage".to_string())?;
+    // SAFETY: every pointer covers `n` elements (or `n*n` for the matrix),
+    // strides and leading dimension are one/`n`, and the mutable output does
+    // not alias the immutable matrix/vector inputs.
+    unsafe {
+        cblas_dsymv(
+            102, // CblasColMajor
+            121, // CblasUpper
+            n_i32,
+            1.0,
+            storage.as_ptr(),
+            n_i32,
+            vector.as_ptr(),
+            1,
+            0.0,
+            output.as_mut_ptr(),
+            1,
+        );
+    }
+    Ok(())
+}
+
 const RRQR_RANK_ALPHA: f64 = 100.0;
 
 thread_local! {
@@ -561,9 +626,10 @@ const FMA_LANES: usize = 8;
 /// across the Rayon pool.
 const KERNEL_PAR_MIN_FLOP: usize = 1 << 18; // 262_144
 
-/// Rows per row-block in [`fast_av_rowmajor_into`]'s parallel fan-out; large
-/// enough to amortize Rayon task overhead over many short row dots.
-const AV_PAR_CHUNK_ROWS: usize = 1024;
+/// Maximum rows per row-block in the row-major matrix-vector kernels. The
+/// actual block shrinks for wide matrices so one cache-resident dense operator
+/// does not expose only one or two tasks to a larger Rayon pool.
+const AV_PAR_MAX_CHUNK_ROWS: usize = 1024;
 
 /// Rows per reduction block in [`fast_atv_rowmajor_into`]; each block sums its
 /// rows into a private length-p partial and the partials combine pairwise, so
@@ -576,6 +642,13 @@ fn kernel_should_parallelize(n: usize, p: usize) -> bool {
     !in_nested_parallel_region()
         && n.saturating_mul(p) >= KERNEL_PAR_MIN_FLOP
         && rayon::current_num_threads() > 1
+}
+
+#[inline]
+fn av_parallel_chunk_rows(p: usize) -> usize {
+    KERNEL_PAR_MIN_FLOP
+        .div_ceil(p.max(1))
+        .clamp(64, AV_PAR_MAX_CHUNK_ROWS)
 }
 
 /// Compensated dot product (the Ogita–Rump–Oishi *Dot2* error-free transform)
@@ -643,10 +716,11 @@ fn fast_av_rowmajor_into(x_all: &[f64], v: &[f64], n: usize, p: usize, out: &mut
     assert_eq!(out.len(), n, "fast_av_rowmajor_into: out length");
     if kernel_should_parallelize(n, p) {
         use rayon::prelude::*;
-        out.par_chunks_mut(AV_PAR_CHUNK_ROWS)
+        let chunk_rows = av_parallel_chunk_rows(p);
+        out.par_chunks_mut(chunk_rows)
             .enumerate()
             .for_each(|(c, chunk)| {
-                let base = c * AV_PAR_CHUNK_ROWS;
+                let base = c * chunk_rows;
                 for (k, o) in chunk.iter_mut().enumerate() {
                     let i = base + k;
                     *o = fma_dot(&x_all[i * p..i * p + p], v);
@@ -655,6 +729,67 @@ fn fast_av_rowmajor_into(x_all: &[f64], v: &[f64], n: usize, p: usize, out: &mut
     } else {
         for (i, o) in out.iter_mut().enumerate() {
             *o = fma_dot(&x_all[i * p..i * p + p], v);
+        }
+    }
+}
+
+/// Ordinary fused-multiply-add dot product with independent accumulator lanes.
+///
+/// This is the IEEE-754 workhorse for iterative operators whose caller owns an
+/// explicit residual certificate. It intentionally omits Dot2's error-free
+/// product/sum transforms: for a 2,000-term row the standard `O(p·ε)` error is
+/// still roughly four orders of magnitude below a `1e-8` Ritz contract, while
+/// the saved arithmetic matters when the same cache-resident matrix is applied
+/// hundreds of times.
+#[inline(always)]
+fn standard_fma_dot(a: &[f64], b: &[f64]) -> f64 {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "standard_fma_dot: operand length mismatch"
+    );
+    let mut sum = [0.0_f64; FMA_LANES];
+    let mut ca = a.chunks_exact(FMA_LANES);
+    let mut cb = b.chunks_exact(FMA_LANES);
+    for (xa, xb) in ca.by_ref().zip(cb.by_ref()) {
+        for lane in 0..FMA_LANES {
+            sum[lane] = xa[lane].mul_add(xb[lane], sum[lane]);
+        }
+    }
+    let mut remainder = 0.0;
+    for (&x, &y) in ca.remainder().iter().zip(cb.remainder().iter()) {
+        remainder = x.mul_add(y, remainder);
+    }
+    let pair01 = sum[0] + sum[1];
+    let pair23 = sum[2] + sum[3];
+    let pair45 = sum[4] + sum[5];
+    let pair67 = sum[6] + sum[7];
+    remainder + (pair01 + pair23) + (pair45 + pair67)
+}
+
+fn standard_av_rowmajor_into(x_all: &[f64], v: &[f64], n: usize, p: usize, out: &mut [f64]) {
+    assert_eq!(
+        x_all.len(),
+        n * p,
+        "standard_av_rowmajor_into: matrix length"
+    );
+    assert_eq!(v.len(), p, "standard_av_rowmajor_into: vector length");
+    assert_eq!(out.len(), n, "standard_av_rowmajor_into: output length");
+    if kernel_should_parallelize(n, p) {
+        use rayon::prelude::*;
+        let chunk_rows = av_parallel_chunk_rows(p);
+        out.par_chunks_mut(chunk_rows)
+            .enumerate()
+            .for_each(|(chunk_index, chunk)| {
+                let base = chunk_index * chunk_rows;
+                for (offset, output) in chunk.iter_mut().enumerate() {
+                    let row = base + offset;
+                    *output = standard_fma_dot(&x_all[row * p..row * p + p], v);
+                }
+            });
+    } else {
+        for (row, output) in out.iter_mut().enumerate() {
+            *output = standard_fma_dot(&x_all[row * p..row * p + p], v);
         }
     }
 }
@@ -841,6 +976,54 @@ pub fn fast_av_view_into<S1: Data<Elem = f64>, S2: Data<Elem = f64>>(
     out: ArrayViewMut1<'_, f64>,
 ) {
     fast_av_view_into_impl(a, v, out);
+}
+
+/// Compute `A·v` with the standard-FMA row kernel.
+///
+/// Prefer this over [`fast_av_view_into`] only when the surrounding iterative
+/// algorithm certifies its final residual explicitly. The ordinary kernel is
+/// materially faster for repeated cache-resident dense applications; callers
+/// that need Dot2's near-double-precision reduction should keep using
+/// [`fast_av_view_into`].
+pub fn fast_av_standard_view_into<S1: Data<Elem = f64>, S2: Data<Elem = f64>>(
+    a: &ArrayBase<S1, Ix2>,
+    v: &ArrayBase<S2, Ix1>,
+    mut out: ArrayViewMut1<'_, f64>,
+) {
+    use faer::Accum;
+    use faer::linalg::matmul::matmul;
+
+    let (n, p) = a.dim();
+    assert_eq!(v.len(), p, "vector length must match A cols");
+    assert_eq!(out.len(), n, "output length must match A rows");
+    if let (Some(x_all), Some(vs), Some(out_slice)) =
+        (a.as_slice(), v.as_slice(), out.as_slice_mut())
+        && n != 0
+        && p != 0
+    {
+        standard_av_rowmajor_into(x_all, vs, n, p, out_slice);
+        return;
+    }
+    if !should_use_faer_matmul(n, 1, p) {
+        out.assign(&a.dot(v));
+        return;
+    }
+
+    let len = out.len();
+    let stride = out.strides()[0];
+    // SAFETY: `out` is uniquely borrowed and `len` plus its signed stride
+    // describe every initialized element of the one-column destination.
+    let outview = unsafe { MatMut::from_raw_parts_mut(out.as_mut_ptr(), len, 1, stride, 0) };
+    let aview = FaerArrayView::new(a);
+    let vview = FaerColView::new(v);
+    matmul(
+        outview,
+        Accum::Replace,
+        aview.as_ref(),
+        vview.as_ref(),
+        1.0,
+        matmul_parallelism(n, 1, p),
+    );
 }
 
 #[inline]
@@ -3062,6 +3245,23 @@ mod tests {
         assert!(
             max_abs_diff_1d(&got, &want) < 1e-9,
             "fast_av large mismatch"
+        );
+    }
+
+    #[test]
+    fn standard_fma_av_matches_ndarray_dot() {
+        let n = 73usize;
+        let p = 257usize;
+        let a = Array2::from_shape_fn((n, p), |(i, j)| {
+            ((i + 3 * j + 1) as f64).sin() / (j + 1) as f64
+        });
+        let v = Array1::from_shape_fn(p, |j| ((2 * j + 1) as f64).cos());
+        let want = a.dot(&v);
+        let mut got = Array1::<f64>::zeros(n);
+        fast_av_standard_view_into(&a, &v, got.view_mut());
+        assert!(
+            max_abs_diff_1d(&got, &want) < 1e-12,
+            "standard-FMA matrix-vector product mismatch"
         );
     }
 

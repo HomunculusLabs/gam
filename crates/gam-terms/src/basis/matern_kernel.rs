@@ -21,6 +21,10 @@ fn thin_plate_augmented_center_strategy(
         CenterStrategy::Auto(inner) => CenterStrategy::Auto(Box::new(
             thin_plate_augmented_center_strategy(inner.as_ref(), poly_cols),
         )),
+        CenterStrategy::DuchonSpectral { knots, basis } => CenterStrategy::DuchonSpectral {
+            knots: Box::new(thin_plate_augmented_center_strategy(knots, poly_cols)),
+            basis: basis.clone(),
+        },
         CenterStrategy::EqualMass { num_centers } => CenterStrategy::EqualMass {
             num_centers: (*num_centers).max(poly_cols),
         },

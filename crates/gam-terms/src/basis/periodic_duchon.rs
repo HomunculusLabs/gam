@@ -1223,6 +1223,7 @@ pub(crate) fn build_periodic_duchon_basis_1d(
             aniso_log_scales: None,
             operator_collocation_points: None,
             radial_reparam: None,
+            spectral_basis: None,
         },
         kronecker_factored: None,
     })
@@ -1468,6 +1469,7 @@ pub(crate) fn build_duchon_basis_mixed_periodicity(
             aniso_log_scales: None,
             operator_collocation_points: None,
             radial_reparam: None,
+            spectral_basis: None,
         },
         kronecker_factored: None,
     })
@@ -1597,7 +1599,7 @@ pub(crate) fn duchon_constrained_bending_penalty(
 /// Exact center-pair kernel values and the chart amplification applied by the
 /// Duchon design. Keeping this assembly in one place guarantees that native
 /// roughness and function-metric penalties see precisely the same center chart.
-fn duchon_center_kernel_value_matrix(
+pub(crate) fn duchon_center_kernel_value_matrix(
     centers: ArrayView2<'_, f64>,
     length_scale: Option<f64>,
     power: f64,
@@ -1791,6 +1793,28 @@ pub(crate) fn duchon_native_penalty_candidates(
     kernel_transform: &Array2<f64>,
     outer_identifiability: Option<&Array2<f64>>,
 ) -> Result<Vec<PenaltyCandidate>, BasisError> {
+    duchon_native_penalty_candidates_with_curvature(
+        centers,
+        length_scale,
+        power,
+        nullspace_order,
+        aniso_log_scales,
+        kernel_transform,
+        outer_identifiability,
+        None,
+    )
+}
+
+pub(crate) fn duchon_native_penalty_candidates_with_curvature(
+    centers: ArrayView2<'_, f64>,
+    length_scale: Option<f64>,
+    power: f64,
+    nullspace_order: DuchonNullspaceOrder,
+    aniso_log_scales: Option<&[f64]>,
+    kernel_transform: &Array2<f64>,
+    outer_identifiability: Option<&Array2<f64>>,
+    reduced_curvature: Option<&Array2<f64>>,
+) -> Result<Vec<PenaltyCandidate>, BasisError> {
     let dim = centers.ncols();
     if dim == 0 {
         crate::bail_invalid_basis!(
@@ -1810,7 +1834,18 @@ pub(crate) fn duchon_native_penalty_candidates(
         nullspace_order,
         aniso_log_scales,
     )?;
-    let omega = duchon_constrained_bending_penalty_from_kernel(&center_kernel, kernel_amp, z)?;
+    let omega = match reduced_curvature {
+        Some(curvature) => {
+            if curvature.dim() != (n_kernel, n_kernel) {
+                crate::bail_dim_basis!(
+                    "Duchon reduced spectral curvature has shape {:?}; expected ({n_kernel}, {n_kernel})",
+                    curvature.dim()
+                );
+            }
+            reject_nonpsd_then_clamp_noise(&symmetrize_penalty(curvature))?
+        }
+        None => duchon_constrained_bending_penalty_from_kernel(&center_kernel, kernel_amp, z)?,
+    };
     let center_mean: Vec<f64> = (0..dim)
         .map(|axis| centers.column(axis).sum() / centers.nrows().max(1) as f64)
         .collect();

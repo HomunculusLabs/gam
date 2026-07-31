@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub struct CollocationOperatorMatrices {
@@ -32,6 +33,149 @@ pub(crate) fn validate_center_count(num_centers: usize) -> Result<(), BasisError
         crate::bail_invalid_basis!("center count must be positive");
     }
     Ok(())
+}
+
+/// R 4.2's Mersenne-Twister stream.
+///
+/// This deliberately implements the historical R initialization, rather than
+/// Rust's standard `Mt19937`: `set.seed()` first scrambles the seed with the
+/// 69069 LCG and stores 624 resulting words directly as the MT state.  Keeping
+/// this tiny private implementation lets the spectral Duchon landmark
+/// experiment reproduce mgcv's `set.seed(1); sample(...)` exactly without
+/// linking an R runtime into the model builder.
+struct R42MersenneTwister {
+    state: [u32; 624],
+    index: usize,
+}
+
+impl R42MersenneTwister {
+    fn seeded(seed: u32) -> Self {
+        let mut word = seed;
+        for _ in 0..50 {
+            word = word.wrapping_mul(69_069).wrapping_add(1);
+        }
+
+        // R allocates 625 seed words. Word zero is the cursor and is replaced
+        // with 624 by FixupSeeds; words 1..=624 are the MT state.
+        word = word.wrapping_mul(69_069).wrapping_add(1);
+        let mut state = [0_u32; 624];
+        for slot in &mut state {
+            word = word.wrapping_mul(69_069).wrapping_add(1);
+            *slot = word;
+        }
+        Self { state, index: 624 }
+    }
+
+    fn next_word(&mut self) -> u32 {
+        const M: usize = 397;
+        const MATRIX_A: u32 = 0x9908_b0df;
+        const UPPER_MASK: u32 = 0x8000_0000;
+        const LOWER_MASK: u32 = 0x7fff_ffff;
+
+        if self.index >= self.state.len() {
+            for k in 0..(self.state.len() - M) {
+                let y = (self.state[k] & UPPER_MASK) | (self.state[k + 1] & LOWER_MASK);
+                self.state[k] =
+                    self.state[k + M] ^ (y >> 1) ^ if y & 1 == 0 { 0 } else { MATRIX_A };
+            }
+            for k in (self.state.len() - M)..(self.state.len() - 1) {
+                let y = (self.state[k] & UPPER_MASK) | (self.state[k + 1] & LOWER_MASK);
+                self.state[k] = self.state[k + M - self.state.len()]
+                    ^ (y >> 1)
+                    ^ if y & 1 == 0 { 0 } else { MATRIX_A };
+            }
+            let last = self.state.len() - 1;
+            let y = (self.state[last] & UPPER_MASK) | (self.state[0] & LOWER_MASK);
+            self.state[last] = self.state[M - 1] ^ (y >> 1) ^ if y & 1 == 0 { 0 } else { MATRIX_A };
+            self.index = 0;
+        }
+
+        let mut y = self.state[self.index];
+        self.index += 1;
+        y ^= y >> 11;
+        y ^= (y << 7) & 0x9d2c_5680;
+        y ^= (y << 15) & 0xefc6_0000;
+        y ^= y >> 18;
+        y
+    }
+
+    /// R 3.6+'s rejection sampler for a uniform integer in `0..upper`.
+    fn uniform_index(&mut self, upper: usize) -> usize {
+        assert!(upper > 0, "uniform-index population must be positive");
+        let bits = usize::BITS as usize - (upper - 1).leading_zeros() as usize;
+        loop {
+            let mut value = 0_u128;
+            for _ in (0..bits).step_by(16) {
+                value = (value << 16) | u128::from(self.next_word() >> 16);
+            }
+            let mask = if bits == 0 { 0 } else { (1_u128 << bits) - 1 };
+            let candidate = (value & mask) as usize;
+            if candidate < upper {
+                return candidate;
+            }
+        }
+    }
+}
+
+/// Select the same fixed-seed uniform landmark experiment used by mgcv's
+/// Duchon smoother (`max.knots=2000`, `seed=1`).
+///
+/// Rows are first deduplicated in encounter order, matching `uniquecombs`.
+/// When the unique count exceeds the budget, sampling is without replacement
+/// and byte-for-byte compatible with R 4.2's
+/// `set.seed(seed); sample(seq_len(n), k, replace=FALSE)`.  Exact experimental
+/// parity matters here: a different deterministic space-filling design changes
+/// the finite-sample kernel eigenspace, so comparing two rank-k smooths would
+/// otherwise conflate the spectral method with a different knot experiment.
+pub(crate) fn select_r_uniform_subsample_centers(
+    data: ArrayView2<'_, f64>,
+    num_centers: usize,
+    seed: u32,
+) -> Result<Array2<f64>, BasisError> {
+    validate_center_count(num_centers)?;
+    if data.ncols() == 0 {
+        crate::bail_invalid_basis!("uniform subsampling requires at least one column");
+    }
+
+    let mut seen = HashSet::<Vec<u64>>::with_capacity(data.nrows());
+    let mut unique_rows = Vec::<usize>::with_capacity(data.nrows().min(num_centers));
+    for row in 0..data.nrows() {
+        let key = data
+            .row(row)
+            .iter()
+            .map(|&value| gam_data::canonical_level_bits(value))
+            .collect::<Vec<_>>();
+        if seen.insert(key) {
+            unique_rows.push(row);
+        }
+    }
+    if unique_rows.len() < num_centers {
+        crate::bail_invalid_basis!(
+            "uniform subsampling requested {num_centers} centers but data has only {} unique rows",
+            unique_rows.len()
+        );
+    }
+
+    let selected = if unique_rows.len() == num_centers {
+        unique_rows
+    } else {
+        let mut rng = R42MersenneTwister::seeded(seed);
+        let mut remaining = unique_rows.len();
+        let mut selected = Vec::with_capacity(num_centers);
+        for _ in 0..num_centers {
+            let choice = rng.uniform_index(remaining);
+            selected.push(unique_rows[choice]);
+            remaining -= 1;
+            unique_rows[choice] = unique_rows[remaining];
+        }
+        selected
+    };
+
+    let mut centers = Array2::<f64>::zeros((num_centers, data.ncols()));
+    for (center, row) in selected.into_iter().enumerate() {
+        centers.row_mut(center).assign(&data.row(row));
+    }
+    Ok(centers)
 }
 
 pub(crate) fn select_equal_mass_centers(
@@ -526,6 +670,47 @@ pub(crate) fn select_uniform_grid_centers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r_uniform_subsample_matches_r_4_2_sample_without_replacement() {
+        let data = Array2::from_shape_fn((4800, 1), |(row, _)| (row + 1) as f64);
+        let centers =
+            select_r_uniform_subsample_centers(data.view(), 20, 1).expect("sample centers");
+        assert_eq!(
+            centers.column(0).to_vec(),
+            vec![
+                1017.0, 4775.0, 2177.0, 1533.0, 4567.0, 2347.0, 270.0, 4050.0, 3379.0, 4065.0,
+                597.0, 1301.0, 330.0, 1799.0, 3913.0, 1749.0, 37.0, 1129.0, 729.0, 878.0,
+            ]
+        );
+    }
+
+    #[test]
+    fn r_uniform_subsample_matches_r_when_integer_sampling_needs_multiple_words() {
+        let data = Array2::from_shape_fn((70_000, 1), |(row, _)| (row + 1) as f64);
+        let centers =
+            select_r_uniform_subsample_centers(data.view(), 20, 1).expect("sample centers");
+        assert_eq!(
+            centers.column(0).to_vec(),
+            vec![
+                24_388.0, 59_521.0, 43_307.0, 69_586.0, 11_571.0, 25_173.0, 32_618.0, 13_903.0,
+                8_229.0, 25_305.0, 22_306.0, 12_204.0, 43_809.0, 36_244.0, 45_399.0, 6_519.0,
+                19_242.0, 21_875.0, 58_472.0, 62_956.0,
+            ]
+        );
+    }
+
+    #[test]
+    fn r_uniform_subsample_deduplicates_in_encounter_order() {
+        let data = Array2::from_shape_vec(
+            (5, 2),
+            vec![1.0, 2.0, 3.0, 4.0, 1.0, 2.0, -0.0, 5.0, 0.0, 5.0],
+        )
+        .expect("duplicate-row fixture");
+        let centers =
+            select_r_uniform_subsample_centers(data.view(), 3, 1).expect("unique centers");
+        assert_eq!(centers, data.select(Axis(0), &[0, 1, 3]));
+    }
 
     #[test]
     fn one_dimensional_uniform_grid_is_the_interval_minimax_mesh() {

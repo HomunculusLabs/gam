@@ -46,6 +46,7 @@ pub fn select_centers_by_strategy(
 ) -> Result<Array2<f64>, BasisError> {
     match strategy {
         CenterStrategy::Auto(inner) => select_centers_by_strategy(data, inner.as_ref()),
+        CenterStrategy::DuchonSpectral { knots, .. } => select_centers_by_strategy(data, knots),
         CenterStrategy::UserProvided(centers) => {
             if centers.ncols() != data.ncols() {
                 crate::bail_dim_basis!(

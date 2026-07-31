@@ -183,6 +183,7 @@ pub(crate) fn harmonic_degree_for_wahba_basis_width(
             CenterStrategy::UniformGrid { points_per_dim } => points_per_dim.saturating_pow(2),
             CenterStrategy::UserProvided(centers) => centers.nrows(),
             CenterStrategy::Auto(_) => default_num_centers(n_rows, 2),
+            CenterStrategy::DuchonSpectral { knots, .. } => knots.planned_num_centers(2),
         },
         CenterStrategy::FarthestPoint { num_centers } => *num_centers,
         CenterStrategy::EqualMass { num_centers } => *num_centers,
@@ -190,6 +191,7 @@ pub(crate) fn harmonic_degree_for_wahba_basis_width(
         CenterStrategy::KMeans { num_centers, .. } => *num_centers,
         CenterStrategy::UniformGrid { points_per_dim } => points_per_dim.saturating_pow(2),
         CenterStrategy::UserProvided(centers) => centers.nrows(),
+        CenterStrategy::DuchonSpectral { knots, .. } => knots.planned_num_centers(2),
     }
     .max(1);
     (1..=32)

@@ -13,12 +13,13 @@ use crate::basis::{
     BSplineBasisSpec, BSplineBoundaryConditions, BSplineEndpointBoundaryCondition,
     BSplineIdentifiability, BSplineKnotSpec, CenterCountRequest, CenterStrategy,
     ConstantCurvatureBasisSpec, ConstantCurvatureIdentifiability, DuchonBasisSpec,
-    DuchonNullspaceOrder, DuchonOperatorPenaltySpec, MaternBasisSpec, MaternIdentifiability,
-    MaternLengthScale, MaternNu, MeasureJetBasisSpec, MeasureJetIdentifiability,
-    OneDimensionalBoundary, SpatialIdentifiability, SphereMethod, SphereWahbaKernel,
-    SphericalSplineBasisSpec, SphericalSplineIdentifiability, ThinPlateBasisSpec,
-    auto_spatial_center_strategy, default_num_centers, default_spatial_center_strategy,
-    default_spherical_harmonic_degree, plan_spatial_basis, thin_plate_penalty_order,
+    DuchonNullspaceOrder, DuchonOperatorPenaltySpec, DuchonSpectralBasis, MaternBasisSpec,
+    MaternIdentifiability, MaternLengthScale, MaternNu, MeasureJetBasisSpec,
+    MeasureJetIdentifiability, OneDimensionalBoundary, SpatialIdentifiability, SphereMethod,
+    SphereWahbaKernel, SphericalSplineBasisSpec, SphericalSplineIdentifiability,
+    ThinPlateBasisSpec, auto_spatial_center_strategy, default_num_centers,
+    default_spatial_center_strategy, default_spherical_harmonic_degree, plan_spatial_basis,
+    select_r_uniform_subsample_centers, thin_plate_penalty_order,
 };
 use crate::inference::formula_dsl::{
     ParsedTerm, SmoothKind, option_bool, option_f64, option_f64_strict, option_usize,
@@ -3143,6 +3144,7 @@ pub fn build_smooth_basis(
                     "basis-dim",
                     "basisdim",
                     "knots",
+                    "rank",
                     "power",
                     "p",
                     "nullspace_order",
@@ -3268,11 +3270,14 @@ pub fn build_smooth_basis(
                 polynomial_cols,
                 univariate_floor,
             );
-            let requested_centers = parse_countwith_basis_alias(
-                options,
-                "centers",
-                cap_default_spatial_centers(options, default_centers),
-            )?;
+            let spectral_rank = option_usize(options, "rank");
+            let center_default = if spectral_rank.is_some() {
+                ds.values.nrows().min(2000)
+            } else {
+                cap_default_spatial_centers(options, default_centers)
+            };
+            let requested_centers =
+                parse_countwith_basis_alias(options, "centers", center_default)?;
             if requested_centers > ds.values.nrows() {
                 return Err(TermBuilderError::incompatible_config(format!(
                     "Duchon smooth '{}' requested {requested_centers} centers but only {} rows are available",
@@ -3289,6 +3294,16 @@ pub fn build_smooth_basis(
                     nullspace_order,
                     cols.len(),
                     polynomial_cols,
+                    polynomial_cols,
+                ))
+                .to_string());
+            }
+            if let Some(rank) = spectral_rank
+                && (rank <= polynomial_cols || rank > requested_centers)
+            {
+                return Err(TermBuilderError::incompatible_config(format!(
+                    "Duchon smooth '{}' spectral rank must satisfy {} < rank <= centers (got rank={rank}, centers={requested_centers})",
+                    vars.join(", "),
                     polynomial_cols,
                 ))
                 .to_string());
@@ -3340,7 +3355,32 @@ pub fn build_smooth_basis(
                 .as_ref()
                 .is_some_and(|axes| axes.iter().any(Option::is_some))
                 || matches!(boundary, OneDimensionalBoundary::Cyclic { .. });
-            let center_strategy = if is_periodic {
+            if spectral_rank.is_some() && is_periodic {
+                return Err(TermBuilderError::incompatible_config(
+                    "Duchon spectral rank is defined for the scale-free open-domain kernel, \
+                     not a periodic image expansion"
+                        .to_string(),
+                )
+                .to_string());
+            }
+            let center_strategy = if spectral_rank.is_some() {
+                // Freeze the exact fixed-seed uniform landmark experiment used
+                // by mgcv's Duchon constructor. Spectral rank parity requires
+                // the same kernel matrix, not merely the same retained column
+                // count: maximin/equal-mass landmarks define a different
+                // finite-sample eigenspace and confound accuracy comparisons.
+                // Materializing 2,000×d coordinates here is cheap, avoids an
+                // O(nk) maximin pass, and makes prediction replay explicit.
+                let mut coordinates = Array2::<f64>::zeros((ds.values.nrows(), cols.len()));
+                for (axis, &column) in cols.iter().enumerate() {
+                    coordinates
+                        .column_mut(axis)
+                        .assign(&ds.values.column(column));
+                }
+                let sampled = select_r_uniform_subsample_centers(coordinates.view(), centers, 1)
+                    .map_err(|error| error.to_string())?;
+                CenterStrategy::UserProvided(sampled)
+            } else if is_periodic {
                 if centers_explicit {
                     spatial_center_strategy_for_dimension(centers, cols.len())
                 } else {
@@ -3348,6 +3388,13 @@ pub fn build_smooth_basis(
                 }
             } else {
                 duchon_center_strategy(centers, cols.len(), !centers_explicit)
+            };
+            let center_strategy = match spectral_rank {
+                Some(rank) => CenterStrategy::DuchonSpectral {
+                    knots: Box::new(center_strategy),
+                    basis: DuchonSpectralBasis::Fresh { rank },
+                },
+                None => center_strategy,
             };
             Ok(SmoothBasisSpec::Duchon {
                 feature_cols: cols.to_vec(),
@@ -6495,6 +6542,47 @@ mod tests {
             inner.as_ref(),
             CenterStrategy::FarthestPoint { num_centers: 30 }
         ));
+    }
+
+    #[test]
+    fn spectral_duchon_reproduces_fixed_seed_uniform_landmarks() {
+        let ds = continuous_dataset(
+            &["y", "x1", "x2", "x3", "x4"],
+            (0..64)
+                .map(|i| {
+                    let x = i as f64 / 63.0;
+                    vec![
+                        x.sin(),
+                        x,
+                        (3.0 * x).sin(),
+                        (5.0 * x).cos(),
+                        (7.0 * x).sin(),
+                    ]
+                })
+                .collect(),
+        );
+        let parsed = parse_formula("y ~ duchon(x1, x2, x3, x4, rank=6, order=0)").expect("parse");
+        let col_map = ds.column_map();
+        let mut notes = Vec::new();
+        let terms = build_termspec(
+            &parsed.terms,
+            &ds,
+            &col_map,
+            &mut notes,
+            &gam_runtime::resource::ResourcePolicy::default_library(),
+        )
+        .expect("build spectral Duchon termspec");
+        let SmoothBasisSpec::Duchon { spec, .. } = &terms.smooth_terms[0].basis else {
+            panic!("expected Duchon term");
+        };
+        let CenterStrategy::DuchonSpectral { knots, basis } = &spec.center_strategy else {
+            panic!("expected spectral center strategy");
+        };
+        assert_eq!(basis.rank(), 6);
+        let CenterStrategy::UserProvided(centers) = knots.as_ref() else {
+            panic!("expected frozen sampled centers");
+        };
+        assert_eq!(centers.dim(), (64, 4));
     }
 
     #[test]

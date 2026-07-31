@@ -2111,6 +2111,7 @@ fn with_identifiability_transform(
             aniso_log_scales,
             operator_collocation_points,
             radial_reparam,
+            spectral_basis,
         } => Ok(BasisMetadata::Duchon {
             centers: centers.clone(),
             length_scale: *length_scale,
@@ -2121,6 +2122,7 @@ fn with_identifiability_transform(
             aniso_log_scales: aniso_log_scales.clone(),
             operator_collocation_points: operator_collocation_points.clone(),
             radial_reparam: radial_reparam.clone(),
+            spectral_basis: spectral_basis.clone(),
             identifiability_transform: compose_identifiability_transforms(
                 identifiability_transform.as_ref(),
                 transform,
