@@ -3088,10 +3088,24 @@ pub(crate) fn outerobjective_failure_context_is_preserved() {
         Ok(_) => panic!("fit should fail when family evaluate always errors"),
         Err(e) => e,
     };
+    // Assert the ROOT CAUSE survives, not which wrapper carries it. This fixture
+    // used to fail inside the outer objective loop, where `fit.rs` attaches
+    // " last objective error: {e}"; it now fails earlier, at outer startup
+    // validation, which reports every seed it rejected:
+    //
+    //   no candidate seeds passed outer startup validation (custom family):
+    //     generated=2, screened=2, exact_validated=2, solver_started=0
+    //     per-seed reasons:
+    //       seed 0 (validation): outer eval failed: ... synthetic outer
+    //         objective failure: block[0] evaluate()
+    //
+    // The context IS preserved -- through a different channel. Pinning the
+    // "last objective error: " prefix pinned the channel, so the test failed
+    // while the property it is named for held. The substring below is the
+    // family error itself, which no channel may drop.
     assert!(
-        err.to_string().contains(
-            "last objective error: synthetic outer objective failure: block[0] evaluate()"
-        ),
+        err.to_string()
+            .contains("synthetic outer objective failure: block[0] evaluate()"),
         "expected preserved root-cause context in error, got: {err}"
     );
 }
