@@ -6546,6 +6546,12 @@ pub(crate) fn exact_joint_multistart_outer_problem(
         // the mint still requires exact curvature, but reserve it for that one
         // terminal evaluation.
         .with_prefer_gradient_only(true)
+        // Exact joint spatial callers publish a selected coefficient mode as a
+        // certified local minimum. Declare that second-order requirement here,
+        // at the actual outer-problem construction boundary, so a raw-negative
+        // terminal Hessian enters saddle recovery instead of surviving the
+        // generic gradient-residue floor and failing later in fit assembly.
+        .with_require_measured_psd(true)
         .with_disable_fixed_point(disable_fixed_point)
         // Re-enable the automatic fallback ladder for exact joint spatial
         // problems. It was previously `Disabled` to suppress a geo-bench
