@@ -50,6 +50,43 @@ name: Rust CI
 # and the build.rs human-author gate (fetch-depth: 0 on every building job).
 
 on:
+  # #2666: until this line existed, this workflow had NO automatic trigger, so
+  # the ENTIRE Rust test surface — ~12,563 tests, every crate's unit tests, all
+  # 217 integration targets — ran only when a human remembered to dispatch it.
+  # The only automatic Rust signal on main was `cross-check.yml`, which is
+  # `cargo check --all-targets`: it compiles test targets and executes none of
+  # them. A regression could therefore land, be built successfully, and be
+  # invisible until somebody thought to ask.
+  #
+  # The evidence that this is not hypothetical is in-tree. Every other lane
+  # publishes into `bench/gha_results/`, and on 2026-07-31 the scheduled ones
+  # (`python-contracts`, `reference-quality`, `benchmark`, `fuzz`) had all
+  # refreshed that day while `rust-test-suite/MASTER_FAILURES.md` still carried
+  # the 07-30 dispatch. `python-contracts.yml`'s own header states the general
+  # form after it hit the same thing: "A surface nobody schedules is a surface
+  # that goes dark without anything turning red." Somebody fixed that for the
+  # Python half by adding a schedule and nobody did it for Rust.
+  #
+  # SCHEDULE, NOT PUSH, and deliberately so. This is a ten-shard suite behind a
+  # multi-hour archive build, and `cross-check.yml` records that the compile
+  # gate is "already starved for runners (#2582)" against a main that takes
+  # several commits an hour. Per-push would queue runs faster than they finish
+  # and starve the push gate that everyone actually reads.
+  #
+  # Twice daily, matching `python-contracts.yml`'s 12-hourly precedent for a
+  # full-suite lane rather than inventing a new policy: `build` is capped at 330
+  # minutes and `rust-test` at 360, so a 12-hour period cannot overlap itself
+  # even in the worst case, while 6-hourly could. 01:00/13:00 UTC are chosen to
+  # miss every other builder — `rust-archive` 02:00, `fuzz` 03:00, `benchmark`
+  # 04:00, `docs` 05:00, `wheel-nightly` every 4h from 00:00, `python-contracts`
+  # and `reference-quality` at 00:00/12:00 — so the two heaviest cargo lanes
+  # never contend for the same cache or the same runners.
+  #
+  # Nothing else needs to change for a scheduled run: `github.event.inputs.shards`
+  # evaluates to the empty string on a `schedule` event, and the `setup` job's
+  # planner already falls back to 10 when it is not a positive integer.
+  schedule:
+    - cron: "0 1,13 * * *"
   workflow_dispatch:
     inputs:
       shards:
