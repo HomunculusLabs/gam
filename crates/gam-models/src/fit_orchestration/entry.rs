@@ -9,8 +9,8 @@ use gam_solve::estimate::reml::reml_outer_engine::penalty_matrix_root;
 /// shape-constrained terms, the Firth / adaptive-regularization toggles read
 /// off the `FitConfig`). Every *policy* field of `FitOptions` — the ones that
 /// decide HOW the outer REML optimization behaves (`compute_inference`,
-/// `skip_rho_posterior_inference`, `tol`, the `max_iter` default, the penalty
-/// shrinkage floor) — is filled in by [`canonical_standard_fit_options`] and is
+/// `skip_rho_posterior_inference`, `tol`, and the `max_iter` default) — is
+/// filled in by [`canonical_standard_fit_options`] and is
 /// NOT settable here, so the CLI binary and the Python/PyO3 path cannot resolve
 /// a different optimization policy for the same model (#1196). Before this seam
 /// existed the CLI hand-built `FitOptions` with `tol: 1e-6` /
@@ -784,18 +784,47 @@ fn deterministic_gaussian_standard_fit(
     // near-constant fit that already works.
     let (edf_total, edf_by_block, penalty_block_trace, coefficient_influence) = {
         use gam_linalg::faer_ndarray::FaerCholesky;
-        let chol = penalized_hessian
+        // The infinite-precision face deliberately makes penalized directions
+        // much stiffer than the data-identified null space. Factoring that
+        // matrix in raw coefficient units can lose the latter curvature even
+        // though the mathematical sum is strictly positive definite. The
+        // former implicit ridge hid this scale failure by changing the model.
+        //
+        // Jacobi/Van-der-Sluis equilibration is a pure congruence:
+        // C = D^-1 H D^-1. It preserves inertia exactly and is within a factor
+        // p of the best diagonal conditioning. Solve H x = b as
+        // C y = D^-1 b, x = D^-1 y, so every reported influence/trace remains
+        // for the original declared H and no curvature is invented.
+        let (equilibrated_hessian, hessian_scale) =
+            gam_linalg::decision::equilibrate_gram(&penalized_hessian);
+        let chol = equilibrated_hessian
             .cholesky(faer::Side::Lower)
             .map_err(|error| WorkflowError::IntegrationFailed {
                 reason: format!(
-                    "deterministic Gaussian boundary precision is not positive definite: {error}"
+                    "equilibrated deterministic Gaussian boundary precision is not positive \
+                     definite: {error}"
                 ),
             })?;
+        let solve_original_hessian = |rhs: &Array2<f64>| {
+            let mut equilibrated_rhs = rhs.clone();
+            for row in 0..equilibrated_rhs.nrows() {
+                equilibrated_rhs
+                    .row_mut(row)
+                    .mapv_inplace(|value| value / hessian_scale[row]);
+            }
+            let mut solution = chol.solve_mat(&equilibrated_rhs);
+            for row in 0..solution.nrows() {
+                solution
+                    .row_mut(row)
+                    .mapv_inplace(|value| value / hessian_scale[row]);
+            }
+            solution
+        };
         {
             // F = H⁻¹ XᵀWX. Generally NOT symmetric (a product of two
             // symmetric matrices); it must be stored as-is so `H·F = XᵀWX`
             // and per-term `tr(F_jj)` stay exact (see estimate.rs / #1027).
-            let influence = chol.solve_mat(&xtwx);
+            let influence = solve_original_hessian(&xtwx);
             let mut raw_traces = vec![0.0_f64; n_penalties];
             let mut block_ranks = vec![0_usize; n_penalties];
             for (kk, block) in design.penalties.iter().enumerate() {
@@ -822,7 +851,7 @@ fn deterministic_gaussian_standard_fit(
                         rhs[[r.start + rr, c]] = block.local[[rr, c]];
                     }
                 }
-                let sol = chol.solve_mat(&rhs);
+                let sol = solve_original_hessian(&rhs);
                 let mut trace = 0.0_f64;
                 for j in 0..block_cols {
                     trace += sol[[r.start + j, j]];
