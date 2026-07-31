@@ -824,22 +824,20 @@ impl Graph {
     }
 
     fn normalize_ring(&mut self, id: usize) -> usize {
-        match self.nodes[id].clone() {
-            Node::Select(activity, when_true, when_false) => {
-                let when_true = self.normalize_ring(when_true);
-                let when_false = self.normalize_ring(when_false);
-                return self.select(activity, when_true, when_false);
-            }
-            Node::Neg(value) => {
-                if let Node::Select(activity, when_true, when_false) = self.nodes[value].clone() {
-                    let when_true = self.neg(when_true);
-                    let when_false = self.neg(when_false);
-                    let when_true = self.normalize_ring(when_true);
-                    let when_false = self.normalize_ring(when_false);
-                    return self.select(activity, when_true, when_false);
-                }
-            }
-            _ => {}
+        let node = self.nodes[id].clone();
+        if let Node::Select(activity, when_true, when_false) = node {
+            let when_true = self.normalize_ring(when_true);
+            let when_false = self.normalize_ring(when_false);
+            return self.select(activity, when_true, when_false);
+        }
+        if let Node::Neg(value) = node
+            && let Node::Select(activity, when_true, when_false) = self.nodes[value].clone()
+        {
+            let when_true = self.neg(when_true);
+            let when_false = self.neg(when_false);
+            let when_true = self.normalize_ring(when_true);
+            let when_false = self.normalize_ring(when_false);
+            return self.select(activity, when_true, when_false);
         }
         let polynomial = self.ring_polynomial(id, &mut HashMap::new());
         let mut sum = self.constant(0.0);
@@ -862,7 +860,7 @@ impl Graph {
     }
 
     fn positive_integer_power(&mut self, base: usize, exponent: usize) -> usize {
-        debug_assert!(exponent > 0);
+        assert!(exponent > 0, "ring powers require a positive exponent");
         if exponent == 1 {
             return base;
         }
