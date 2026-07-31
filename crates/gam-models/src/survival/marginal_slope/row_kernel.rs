@@ -1235,7 +1235,9 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
         let time_sparse = time_designs.map(DesignMatrix::is_sparse);
         let marginal_sparse = marginal_design.is_sparse();
         let logslope_sparse = logslope_design.is_sparse();
-        if time_sparse.into_iter().any(std::convert::identity)
+        if time_sparse[0]
+            || time_sparse[1]
+            || time_sparse[2]
             || marginal_sparse
             || logslope_sparse
         {
