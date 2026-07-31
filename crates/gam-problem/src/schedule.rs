@@ -123,26 +123,6 @@ impl GumbelTemperatureSchedule {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum SearchStrategy {
-    Fixed,
-    ExponentialSweep { values: Vec<f64> },
-}
-
-impl SearchStrategy {
-    #[must_use]
-    pub fn is_fixed(&self) -> bool {
-        matches!(self, Self::Fixed)
-    }
-
-    #[must_use]
-    pub fn sweep_values(&self) -> Option<&[f64]> {
-        match self {
-            Self::Fixed => None,
-            Self::ExponentialSweep { values } => Some(values),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -293,21 +273,4 @@ mod tests {
         assert_eq!(s.iter_count, 2);
     }
 
-    // ── SearchStrategy ────────────────────────────────────────────────────────
-
-    #[test]
-    fn fixed_is_fixed_and_has_no_sweep_values() {
-        let s = SearchStrategy::Fixed;
-        assert!(s.is_fixed());
-        assert!(s.sweep_values().is_none());
-    }
-
-    #[test]
-    fn exponential_sweep_is_not_fixed_and_returns_values() {
-        let s = SearchStrategy::ExponentialSweep {
-            values: vec![1.0, 2.0, 3.0],
-        };
-        assert!(!s.is_fixed());
-        assert_eq!(s.sweep_values().unwrap(), &[1.0, 2.0, 3.0]);
-    }
 }

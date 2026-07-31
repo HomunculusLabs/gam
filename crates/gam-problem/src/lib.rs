@@ -142,7 +142,7 @@ pub use psi_terms::{
 pub use row_metric::{
     FisherFactorKind, MetricProvenance, RowMetric, WeightField, pack_probe_factors,
 };
-pub use schedule::{GumbelTemperatureSchedule, ScheduleKind, SearchStrategy};
+pub use schedule::{GumbelTemperatureSchedule, ScheduleKind};
 pub use seeding::{OrderedRhoBounds, SeedConfig, SeedRiskProfile};
 pub use solver_contract::{
     DeclaredHessianForm, Derivative, EfsEval, FixedPointCertificateEval,
