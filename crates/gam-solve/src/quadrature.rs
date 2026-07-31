@@ -299,7 +299,7 @@ pub struct IntegratedMomentsJet {
 }
 
 const LOGIT_SIGMA_DEGENERATE: f64 = 1e-10;
-const LOGIT_SIGMA_TAYLOR_MAX: f64 = 2.5e-1;
+const LOGIT_ERFCX_SIGMA_MIN: f64 = 2.5e-1;
 const LOGIT_TAIL_LOG_MAX: f64 = -18.0;
 const LOGIT_ERFCX_MU_MAX: f64 = 40.0;
 const LOGIT_ERFCX_SIGMA_MAX: f64 = 6.0;
@@ -706,11 +706,12 @@ pub fn logit_posterior_meanwith_deriv(
     //
     // The backend ladder is:
     // - exact point-mass limit when sigma ~= 0
-    // - small-sigma Taylor / heat-kernel expansion
+    // - adaptive quadrature at small sigma, where the erfcx series is
+    //   cancellation-prone
     // - exact erfcx/Faddeeva series on the moderate domain
-    // - tail and large-sigma controlled asymptotics
-    // - GHQ only as the terminal numerical fallback if every analytic branch
-    //   reports a non-finite or non-converged result.
+    // - a certified extreme-tail asymptotic
+    // - adaptive quadrature wherever no analytic representation carries the
+    //   required accuracy certificate.
     let out = logit_posterior_meanwith_deriv_controlled(eta, se_eta)?;
     Ok((out.mean, out.dmean_dmu))
 }
@@ -767,7 +768,7 @@ fn logistic_normal_exact_eligible(mu: f64, sigma: f64) -> bool {
     mu.is_finite()
         && sigma.is_finite()
         && mu.abs() <= LOGIT_ERFCX_MU_MAX
-        && (LOGIT_SIGMA_TAYLOR_MAX..=LOGIT_ERFCX_SIGMA_MAX).contains(&sigma)
+        && (LOGIT_ERFCX_SIGMA_MIN..=LOGIT_ERFCX_SIGMA_MAX).contains(&sigma)
 }
 
 /// A-priori truncation index for the erfcx series of the logistic-normal mean
@@ -866,24 +867,6 @@ fn stable_sigmoidwith_derivative(x: f64) -> (f64, f64) {
 }
 
 #[inline]
-fn logit_small_sigma_taylor(mu: f64, sigma: f64) -> IntegratedMeanDerivative {
-    // Second-order heat-kernel expansion around the point-mass limit:
-    //
-    //   E[f(mu + sigma Z)] = f(mu) + (sigma^2 / 2) f''(mu) + O(sigma^4),
-    //
-    // with the derivative obtained by differentiating the same truncated
-    // series. This keeps the low-variance branch off the erfcx path where the
-    // exact series is most cancellation-prone.
-    let (mean0, d1, d2, d3) = component_point_jet(LinkComponent::Logit, mu);
-    let s2 = sigma * sigma;
-    IntegratedMeanDerivative {
-        mean: (mean0 + 0.5 * s2 * d2).clamp(0.0, 1.0),
-        dmean_dmu: (d1 + 0.5 * s2 * d3).max(0.0),
-        mode: IntegratedExpectationMode::ControlledAsymptotic,
-    }
-}
-
-#[inline]
 fn logit_tail_asymptotic(mu: f64, sigma: f64) -> Option<IntegratedMeanDerivative> {
     // When mu is far out in either logistic tail, sigmoid(eta) is
     // exponentially close to either exp(eta) or 1 - exp(-eta). Those Gaussian
@@ -944,7 +927,8 @@ pub(crate) fn logit_posterior_meanwith_deriv_exact(
     //
     // No single representation is numerically dominant everywhere:
     // - sigma ~= 0 is the exact point-mass limit,
-    // - small sigma prefers the Taylor / heat-kernel expansion,
+    // - small sigma uses adaptive quadrature because the erfcx series is
+    //   cancellation-prone and a finite heat-kernel truncation is not exact,
     // - moderate central cases prefer the exact erfcx/Faddeeva series,
     // - and extreme tails / very large sigma prefer controlled asymptotics.
     //
@@ -964,9 +948,6 @@ pub(crate) fn logit_posterior_meanwith_deriv_exact(
     }
     if let Some(out) = logit_tail_asymptotic(mu, sigma) {
         return Ok(out);
-    }
-    if sigma < LOGIT_SIGMA_TAYLOR_MAX {
-        return Ok(logit_small_sigma_taylor(mu, sigma));
     }
     if logistic_normal_exact_eligible(mu, sigma)
         && let Ok(out) = logit_posterior_meanwith_deriv_exact_erfcx(mu, sigma)
@@ -1100,11 +1081,11 @@ fn logit_posterior_meanwith_deriv_controlled(
     // `ExactSpecialFunction` candidate is accurate by construction; the
     // adaptive-Simpson reference confirms it and absorbs the residual
     // higher-order terms (e.g. near m ≈ s where the derivative coefficient
-    // vanishes). `ControlledAsymptotic` covers the small-σ Taylor and
-    // extreme-|μ| lognormal-collapse approximations, which are likewise
-    // confirmed against the reference. The exact point-mass and the
-    // erfcx-ineligible regimes route to GHQ directly (the `Err` arm above)
-    // rather than trusting an uncertified asymptotic (#571).
+    // vanishes). `ControlledAsymptotic` covers only the extreme-|μ|
+    // lognormal-collapse approximation, which is likewise confirmed against
+    // the reference. Small-σ, exact point-mass, and erfcx-ineligible regimes
+    // route to their mathematically appropriate implementations rather than
+    // returning a tolerance-accepted finite Taylor truncation (#571, #2623).
     match candidate.mode {
         IntegratedExpectationMode::ExactSpecialFunction
         | IntegratedExpectationMode::ControlledAsymptotic => {
@@ -5735,6 +5716,34 @@ mod tests {
     }
 
     #[test]
+    fn test_logit_small_sigma_returns_quadrature_truth_2623() {
+        // A second-order heat-kernel truncation has O(sigma^4) error. The old
+        // dispatcher computed this accurate reference but returned the
+        // truncation whenever it was merely within 1e-6, enough to reverse a
+        // near-tied posterior-probability pair in issue #2623. Small-sigma
+        // logistic-normal means now return the quadrature value itself.
+        for &(mu, sigma) in &[
+            (-3.0, 0.05),
+            (-0.5, 0.10),
+            (0.0, 0.20),
+            (0.5, 0.24),
+            (3.0, 0.15),
+        ] {
+            let out =
+                logit_posterior_meanwith_deriv_controlled(mu, sigma).expect("controlled logit");
+            let (ref_mean, ref_d1, _, _) = logit_reference_jet_highres_simpson(mu, sigma);
+            assert_eq!(out.mode, IntegratedExpectationMode::QuadratureFallback);
+            assert_relative_eq!(out.mean, ref_mean, epsilon = 1e-12, max_relative = 1e-11);
+            assert_relative_eq!(
+                out.dmean_dmu,
+                ref_d1,
+                epsilon = 1e-12,
+                max_relative = 1e-11
+            );
+        }
+    }
+
+    #[test]
     fn test_logit_exact_clamped_degenerate_branch_is_locally_flat() {
         let out = logit_posterior_meanwith_deriv_exact(-710.0, 0.0).expect("exact logit");
         let h = 1e-6;
@@ -6301,7 +6310,7 @@ mod tests {
         // seams) so the mean is locally smooth and a tight FD is meaningful:
         //   - quadrature-fallback band (erfcx-eligible but un-certifiable),
         //   - erfcx self-certified band (large |μ|),
-        //   - small-σ Taylor band,
+        //   - small-σ quadrature band,
         //   - large-σ (erfcx-ineligible) band.
         let ctx = QuadratureContext::new();
         let h = 1e-4;
@@ -6313,7 +6322,7 @@ mod tests {
             (8.0, 1.0),  // erfcx self-certified
             (10.0, 1.5), // erfcx self-certified
             (-9.0, 1.0), // erfcx self-certified, μ<0
-            (0.5, 0.05), // small-σ Taylor
+            (0.5, 0.05), // small-σ quadrature
             (0.5, 20.0), // large-σ, erfcx-ineligible → quadrature
         ];
         for &(mu, sigma) in &cases {
