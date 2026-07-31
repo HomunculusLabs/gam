@@ -117,24 +117,18 @@ pub fn curve_wiggle_bundle3(
 /// oracle, so this is a compiler lowering of the universal rule rather than a
 /// second family calculus.
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
 pub fn curve_wiggle_bundle4(
     m: [f64; 4],
-    q_u: f64,
-    q_v: f64,
-    q_uv: f64,
-    a: f64,
-    b: f64,
-    a_u: f64,
-    a_v: f64,
-    a_uv: f64,
-    b_u: f64,
-    b_v: f64,
-    b_uv: f64,
-    xi_u: f64,
-    xi_v: f64,
+    q: [f64; 3],
+    a_jet: [f64; 4],
+    b_jet: [f64; 4],
+    xi: [f64; 2],
 ) -> [f64; 9] {
     let [m1, m2, m3, m4] = m;
+    let [q_u, q_v, q_uv] = q;
+    let [a, a_u, a_v, a_uv] = a_jet;
+    let [b, b_u, b_v, b_uv] = b_jet;
+    let [xi_u, xi_v] = xi;
     let xi_uv = xi_u * xi_v;
     let ww_bb = m4 * q_u * q_v + m3 * q_uv;
     let ww_db = m3 * (xi_u * q_v + xi_v * q_u);
@@ -273,19 +267,10 @@ mod oracle_tests {
     fn compiled_bundle4(x: [f64; 17]) -> [f64; 9] {
         curve_wiggle_bundle4(
             [x[0], x[1], x[2], x[3]],
-            x[4],
-            x[5],
-            x[6],
-            x[7],
-            x[8],
-            x[9],
-            x[10],
-            x[11],
-            x[12],
-            x[13],
-            x[14],
-            x[15],
-            x[16],
+            [x[4], x[5], x[6]],
+            [x[7], x[9], x[10], x[11]],
+            [x[8], x[12], x[13], x[14]],
+            [x[15], x[16]],
         )
     }
 
