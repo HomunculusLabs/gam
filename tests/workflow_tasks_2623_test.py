@@ -18,6 +18,19 @@ _SPEC.loader.exec_module(_TASKS)
 
 
 class WorkflowTasks2623Tests(unittest.TestCase):
+    def test_binary_bootstrap_loads_the_extension_without_the_unstaged_facade(self) -> None:
+        workflow = _BENCHMARK_WORKFLOW_PATH.read_text()
+        build_step = workflow.split(
+            "      - name: Build compiled benchmark runtime", 1
+        )[1].split("      - name: Save compiled benchmark runtime", 1)[0]
+        self.assertIn("load_gamfit_rust_module", build_step)
+        self.assertNotIn(
+            "import gamfit",
+            build_step,
+            "the bootstrap interpreter does not own staged NumPy/Pandas; "
+            "the binary smoke check must use the direct extension loader",
+        )
+
     def test_aggregate_sparse_checkout_contains_its_repository_dependencies(self) -> None:
         workflow = _BENCHMARK_WORKFLOW_PATH.read_text()
         aggregate = workflow.split("  aggregate:", 1)[1]

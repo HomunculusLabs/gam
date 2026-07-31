@@ -303,7 +303,19 @@ jobs:
           chmod +x bench/runtime/gam
           cp target/release/libgam_pyffi.so bench/runtime/_rust.abi3.so
           cp bench/runtime/_rust.abi3.so gamfit/_rust.abi3.so
-          python3 -c 'import gamfit, gamfit._rust; print(gamfit._rust.__file__)'
+          # This step certifies the compiled artifact, not the Python facade.
+          # The staged third-party environment was certified independently
+          # above and is not installed into this bootstrap interpreter. Import
+          # the extension through the benchmark's authoritative direct loader,
+          # which deliberately avoids gamfit/__init__.py and its NumPy/Pandas
+          # imports. Shards later exercise the full facade with staged pydeps.
+          python3 - <<'PY'
+          from pathlib import Path
+          from bench._rust_loader import load_gamfit_rust_module
+
+          rust_module = load_gamfit_rust_module(Path.cwd())
+          print(rust_module.__file__)
+          PY
 
       - name: Save compiled benchmark runtime
         if: ${{ steps.binary-cache.outputs.cache-hit != 'true' }}
