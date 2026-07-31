@@ -26,7 +26,7 @@
 //! they are never hidden by retrying the tile on the CPU.
 
 use crate::row_jet_program::{
-    SaeRowPrimary, SaeScheduledRowJets, SaeSoftmaxRowProgramSource, execute_softmax_row_program,
+    SaeOrder2RowProgramSource, SaeRowPrimary, SaeScheduledRowJets, execute_softmax_row_program,
 };
 
 /// One primary in a complete SAE reconstruction row.
@@ -138,7 +138,7 @@ impl SaeSoftmaxRowJetInput {
     /// Snapshot the authoritative borrowed production row source into a bounded
     /// tile input. No gate or basis law is re-evaluated here: values and decoded
     /// derivatives come from the exact live source used by the CPU schedule.
-    pub(crate) fn from_source<S: SaeSoftmaxRowProgramSource>(
+    pub(crate) fn from_source<S: SaeOrder2RowProgramSource>(
         source: &S,
         sqrt_row_weight: f64,
         shared_beta_layout: Option<(std::sync::Arc<[usize]>, std::sync::Arc<[f64]>)>,
@@ -1401,7 +1401,7 @@ impl<'a> InputSource<'a> {
     }
 }
 
-impl SaeSoftmaxRowProgramSource for InputSource<'_> {
+impl SaeOrder2RowProgramSource for InputSource<'_> {
     fn n_atoms(&self) -> usize {
         self.input.n_atoms
     }

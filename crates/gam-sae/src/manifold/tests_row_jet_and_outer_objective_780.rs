@@ -247,7 +247,11 @@ pub(crate) fn sae_row_jet_program_matches_production_row_jets_on_converged_cache
                             })
                             .collect(),
                         decoder: (0..m)
-                            .map(|b| (0..p).map(|c| atom.decoder_coefficients()[[b, c]]).collect())
+                            .map(|b| {
+                                (0..p)
+                                    .map(|c| atom.decoder_coefficients()[[b, c]])
+                                    .collect()
+                            })
                             .collect(),
                         latent_dim: d,
                     }
@@ -368,9 +372,10 @@ pub(crate) fn sae_row_jet_program_matches_production_row_jets_on_converged_cache
 /// Every atom has a live periodic coordinate jet and one beta-border channel, so
 /// the timing covers reconstruction gradient/Hessian, coordinate and mixed blocks,
 /// and beta / beta_deriv / beta_l_deriv rather than the gate-logit-only GPU subset.
-fn softmax_schedule_perf_fixture(
+fn schedule_perf_fixture(
     k_atoms: usize,
     p: usize,
+    mode: AssignmentMode,
 ) -> (
     SaeManifoldTerm,
     Vec<SaeLocalRowVar>,
@@ -412,7 +417,7 @@ fn softmax_schedule_perf_fixture(
         logits,
         coord_blocks,
         vec![LatentManifold::Circle { period: 1.0 }; k_atoms],
-        AssignmentMode::softmax(0.9),
+        mode,
     )
     .unwrap();
     let term = SaeManifoldTerm::new(atoms, assignment).unwrap();
@@ -436,6 +441,36 @@ fn softmax_schedule_perf_fixture(
         .collect();
     let assignments = term.assignment.try_assignments_row(0).unwrap();
     (term, vars, second_jets, border, assignments)
+}
+
+fn softmax_schedule_perf_fixture(
+    k_atoms: usize,
+    p: usize,
+) -> (
+    SaeManifoldTerm,
+    Vec<SaeLocalRowVar>,
+    Vec<Array4<f64>>,
+    Vec<SaeBorderChannel>,
+    Array1<f64>,
+) {
+    schedule_perf_fixture(k_atoms, p, AssignmentMode::softmax(0.9))
+}
+
+fn independent_schedule_perf_fixture(
+    k_atoms: usize,
+    p: usize,
+) -> (
+    SaeManifoldTerm,
+    Vec<SaeLocalRowVar>,
+    Vec<Array4<f64>>,
+    Vec<SaeBorderChannel>,
+    Array1<f64>,
+) {
+    schedule_perf_fixture(
+        k_atoms,
+        p,
+        AssignmentMode::ordered_beta_bernoulli(0.9, 1.0, false),
+    )
 }
 
 /// Exact nested-buffer shape returned by the pre-#932 hand implementation. It
@@ -469,16 +504,12 @@ fn row_jets_for_logdet_hand_reference(
     let mut beta = vec![vec![0.0_f64; p]; border.len()];
     let mut beta_deriv = vec![vec![vec![0.0_f64; p]; border.len()]; q];
     let mut beta_l_deriv = vec![vec![vec![0.0_f64; p]; border.len()]; q];
-    let AssignmentMode::Softmax { temperature, .. } = term.assignment.mode else {
-        panic!("hand softmax reference requires softmax assignment")
-    };
-    term.fill_row_jets_hand_softmax_reference(
+    term.fill_row_jets_hand_reference(
         row,
         &vars,
         assignments,
         second_jets,
         border,
-        1.0 / temperature,
         sqrt_row_w,
         &mut first,
         &mut second,
@@ -546,13 +577,23 @@ fn row_jet_channel_error(actual: &SaeRowJets, expected: &LegacySaeRowJets) -> (f
     (max_abs, scale)
 }
 
-/// Full-output correctness + release timing gate against the exact historical
-/// production hand reference. The K sweep demonstrates the intended complexity
-/// change: hand `d2z` contraction O(L²KP) versus the compiled centered moment's
-/// output-optimal O(L²P), while all coordinate and beta channels remain present
-/// and are checked entry by entry.
-#[test]
-pub(crate) fn softmax_compiled_schedule_beats_hand_full_channels_932() {
+/// Full-output correctness, allocation, and release timing gate against the
+/// exact historical non-abstracted hand reference. `fixture` selects the gate
+/// graph; every reconstruction and beta-border channel is checked entry by
+/// entry before either path is timed.
+fn compiled_schedule_beats_hand_full_channels_932(
+    gate_label: &str,
+    fixture: fn(
+        usize,
+        usize,
+    ) -> (
+        SaeManifoldTerm,
+        Vec<SaeLocalRowVar>,
+        Vec<Array4<f64>>,
+        Vec<SaeBorderChannel>,
+        Array1<f64>,
+    ),
+) {
     use std::time::{Duration, Instant};
 
     fn compiled_checksum(jets: &SaeRowJets) -> f64 {
@@ -596,8 +637,7 @@ pub(crate) fn softmax_compiled_schedule_beats_hand_full_channels_932() {
 
     for &k_atoms in &[1usize, 2, 8, 16, 32, 64] {
         let p = 16usize;
-        let (term, vars, second_jets, border, assignments) =
-            softmax_schedule_perf_fixture(k_atoms, p);
+        let (term, vars, second_jets, border, assignments) = fixture(k_atoms, p);
         let compiled = term
             .row_jets_for_logdet(0, vars.clone(), assignments.view(), &second_jets, &border)
             .unwrap();
@@ -713,7 +753,7 @@ pub(crate) fn softmax_compiled_schedule_beats_hand_full_channels_932() {
         let compiled_ns = best_compiled.as_nanos() as f64 / repetitions as f64;
         let hand_ns = best_hand.as_nanos() as f64 / repetitions as f64;
         eprintln!(
-            "[SAE-SOFTMAX-932] K={k_atoms} P={p} hand={hand_ns:.1} ns/row \
+            "[SAE-{gate_label}-932] K={k_atoms} P={p} hand={hand_ns:.1} ns/row \
              compiled={compiled_ns:.1} ns/row ratio={:.4}x max_abs={max_abs:.3e} \
              allocs hand={hand_allocations}/{hand_bytes}B \
              compiled={compiled_allocations}/{compiled_bytes}B",
@@ -725,6 +765,24 @@ pub(crate) fn softmax_compiled_schedule_beats_hand_full_channels_932() {
             "K={k_atoms} compiled schedule {compiled_ns:.1} ns/row must beat hand {hand_ns:.1} ns/row"
         );
     }
+}
+
+/// The softmax hand path materializes and contracts `d2z[L,L,K]`; the compiled
+/// centered-moment schedule is output-optimal O(L²P).
+#[test]
+pub(crate) fn softmax_compiled_schedule_beats_hand_full_channels_932() {
+    compiled_schedule_beats_hand_full_channels_932("SOFTMAX", softmax_schedule_perf_fixture);
+}
+
+/// Independent gates have diagonal logit Hessians. The compiled schedule must
+/// exploit that structure directly and beat the historical hand assembly at
+/// every tested width; the generic runtime jet is correctness-only.
+#[test]
+pub(crate) fn independent_compiled_schedule_beats_hand_full_channels_932() {
+    compiled_schedule_beats_hand_full_channels_932(
+        "INDEPENDENT",
+        independent_schedule_perf_fixture,
+    );
 }
 
 #[test]

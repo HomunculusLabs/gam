@@ -14,7 +14,7 @@
 //! the per-row primary coordinates `p = (gate logits ℓ, latent coordinates t)`.
 //! Production derives the complete arrow-Schur `first`/`second` and decoder-
 //! border channels from this semantic program. Softmax rows use the borrowed
-//! [`SaeSoftmaxRowProgramSource`] and [`execute_softmax_row_program`] schedule;
+//! [`SaeOrder2RowProgramSource`] and the gate-specific structure-compiled schedules;
 //! its bounded batch seam evaluates the same centered-moment identities on CPU
 //! or CUDA. Other gate graphs use [`SaeReconstructionRowProgram`] over the
 //! runtime jet algebra. The #1006 third-order logdet adjoint
@@ -38,10 +38,7 @@
 //! lowerings with a historical explicit cross-term reference, so a dropped or
 //! sign-flipped block is named independently rather than shared silently.
 
-use gam_math::jet_scalar::{
-    DynamicJetArena, DynamicOrder1, DynamicOrder2, FixedRuntimeJet, Order1, Order2,
-    RuntimeJetScalar,
-};
+use gam_math::jet_scalar::{FixedRuntimeJet, Order1, Order2, RuntimeJetScalar};
 use gam_math::jet_tower::Tower4;
 
 /// `1/self` for any [`gam_math::jet_scalar::JetScalar`] via Faà di Bruno on `f(u) = 1/u`
@@ -372,21 +369,6 @@ impl SaeReconstructionRowProgram {
         }
     }
 
-    /// Arena-backed gate array for the runtime production scalars. Per-atom
-    /// assignment modes (the production users of dynamic jets) have independent
-    /// gates, so this evaluates the same [`Self::gate_tower`] expression once per
-    /// atom and stores the handles in the row workspace. Softmax uses the same
-    /// path only as a dynamic correctness oracle; production softmax uses the
-    /// structure-compiled centered-moment schedule.
-    fn all_gates_dynamic<'arena, S>(&self, arena: &'arena DynamicJetArena) -> &'arena [S]
-    where
-        S: RuntimeJetScalar<'arena, Workspace = DynamicJetArena>,
-    {
-        arena.alloc_slice_fill_with(self.gate_value.len(), |atom| {
-            self.gate_tower::<S>(atom, arena)
-        })
-    }
-
     /// The reconstruction output column `c` as a single jet:
     /// `ẑ_c(p) = Σ_k ζ_k(ℓ) · decoded_{k,c}(t_k)`. Its `.v` is the production
     /// reconstruction value, `.g[a]` is `∂ẑ_c/∂p_a`, `.h[a][b]` is
@@ -501,49 +483,6 @@ impl SaeReconstructionRowProgram {
             .into_iter()
             .map(FixedRuntimeJet::into_inner)
             .collect()
-    }
-
-    /// Runtime-sized packed order-2 production backend for one row.
-    #[must_use]
-    pub fn reconstruction_all_columns_dynamic<'arena>(
-        &self,
-        arena: &'arena DynamicJetArena,
-    ) -> &'arena [DynamicOrder2<'arena>] {
-        let dimension = self.n_primaries;
-        let gates = self.all_gates_dynamic::<DynamicOrder2<'arena>>(arena);
-        let total_basis: usize = self.atoms.iter().map(AtomRowBasisJet::n_basis).sum();
-        let mut atom_cursor = 0usize;
-        let mut basis_cursor = 0usize;
-        let bases = arena.alloc_slice_fill_with(total_basis, |_| {
-            while basis_cursor == self.atoms[atom_cursor].n_basis() {
-                atom_cursor += 1;
-                basis_cursor = 0;
-            }
-            let basis = self.atoms[atom_cursor].basis_tower::<DynamicOrder2<'arena>>(
-                basis_cursor,
-                &self.coord_slot[atom_cursor],
-                dimension,
-                arena,
-            );
-            basis_cursor += 1;
-            basis
-        });
-        arena.alloc_slice_fill_with(self.out_dim(), |out_col| {
-            let mut acc = DynamicOrder2::constant(0.0, dimension, arena);
-            let mut basis_offset = 0usize;
-            for (atom, atom_jet) in self.atoms.iter().enumerate() {
-                let mut decoded = DynamicOrder2::constant(0.0, dimension, arena);
-                for basis_col in 0..atom_jet.n_basis() {
-                    let coefficient = atom_jet.decoder[basis_col][out_col];
-                    if coefficient != 0.0 {
-                        decoded = decoded.add(&bases[basis_offset + basis_col].scale(coefficient));
-                    }
-                }
-                basis_offset += atom_jet.n_basis();
-                acc = acc.add(&gates[atom].mul(&decoded));
-            }
-            acc
-        })
     }
 
     /// The reconstruction output column as the full dense [`Tower4<K>`] carrying
@@ -694,27 +633,6 @@ impl SaeReconstructionRowProgram {
             .collect()
     }
 
-    /// Runtime-sized packed first-order β-border backend for one row.
-    #[must_use]
-    pub fn beta_border_order1_dynamic<'arena>(
-        &self,
-        channels: &[(usize, usize)],
-        arena: &'arena DynamicJetArena,
-    ) -> &'arena [DynamicOrder1<'arena>] {
-        let dimension = self.n_primaries;
-        let gates = self.all_gates_dynamic::<DynamicOrder1<'arena>>(arena);
-        arena.alloc_slice_fill_with(channels.len(), |channel| {
-            let (atom, basis_col) = channels[channel];
-            let phi = self.atoms[atom].basis_tower::<DynamicOrder1<'arena>>(
-                basis_col,
-                &self.coord_slot[atom],
-                dimension,
-                arena,
-            );
-            gates[atom].mul(&phi)
-        })
-    }
-
     /// The number of reconstruction output columns.
     #[must_use]
     pub fn out_dim(&self) -> usize {
@@ -746,7 +664,7 @@ pub(crate) enum SaeRowPrimary {
 /// does not clone its basis/decoder tensors.  The owned
 /// [`SaeReconstructionRowProgram`] implements it too, which lets the exact same
 /// executor run against the generic Taylor-tower oracle in tests.
-pub(crate) trait SaeSoftmaxRowProgramSource {
+pub(crate) trait SaeOrder2RowProgramSource {
     fn n_atoms(&self) -> usize;
     fn out_dim(&self) -> usize;
     fn n_primaries(&self) -> usize;
@@ -766,7 +684,7 @@ pub(crate) trait SaeSoftmaxRowProgramSource {
     fn beta_border_output(&self, border: usize) -> &[f64];
 }
 
-/// Complete order-≤2 channels emitted by [`execute_softmax_row_program`], in
+/// Complete order-≤2 channels emitted by a structure-compiled row schedule, in
 /// one packed allocation. Logical shapes are `first[q,p]`, `second[q,q,p]`,
 /// `beta[n_beta,p]`, and two mixed arrays `[q,n_beta,p]`.
 #[derive(Debug, Clone)]
@@ -782,7 +700,7 @@ thread_local! {
     /// returned channels own their single packed allocation; decoded components,
     /// their expectation, and derivative scratch never escape the call and are
     /// therefore reused across rows on the same worker.
-    static SAE_SOFTMAX_ROW_WORKSPACE: std::cell::RefCell<Vec<f64>> =
+    static SAE_ORDER2_ROW_WORKSPACE: std::cell::RefCell<Vec<f64>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -927,7 +845,7 @@ struct SoftmaxMoment<'a, S> {
     inv_tau: f64,
 }
 
-impl<S: SaeSoftmaxRowProgramSource> SoftmaxMoment<'_, S> {
+impl<S: SaeOrder2RowProgramSource> SoftmaxMoment<'_, S> {
     #[inline]
     fn expectation_first_coefficient(&self, atom_j: usize) -> f64 {
         self.inv_tau * self.source.gate_value(atom_j)
@@ -962,7 +880,7 @@ impl<S: SaeSoftmaxRowProgramSource> SoftmaxMoment<'_, S> {
 /// same-atom coordinate curvature, logit×coordinate blocks, and decoder-beta
 /// border value/mixed channels.  Cross-atom coordinate blocks are exact zeros by
 /// dependency, so they are allocated zero and never evaluated.
-pub(crate) fn execute_softmax_row_program<S: SaeSoftmaxRowProgramSource>(
+pub(crate) fn execute_softmax_row_program<S: SaeOrder2RowProgramSource>(
     source: &S,
     inv_tau: f64,
     sqrt_row_w: f64,
@@ -989,7 +907,7 @@ pub(crate) fn execute_softmax_row_program<S: SaeSoftmaxRowProgramSource>(
     let work_len = decoded_len
         .checked_add(tail_len)
         .expect("SAE row-program total workspace length overflow");
-    SAE_SOFTMAX_ROW_WORKSPACE.with(|workspace| {
+    SAE_ORDER2_ROW_WORKSPACE.with(|workspace| {
         let mut workspace = workspace.borrow_mut();
         if workspace.len() < work_len {
             workspace.resize(work_len, 0.0);
@@ -1169,11 +1087,184 @@ pub(crate) fn execute_softmax_row_program<S: SaeSoftmaxRowProgramSource>(
     out
 }
 
+/// Execute an independent-logistic reconstruction row as a sparse order-2
+/// program.
+///
+/// This is the structure-compiled lowering of
+///
+/// ```text
+/// Y_c = sum_k sigmoid(r * (logit_k - shift_k)) * D_{k,c}(t_k).
+/// ```
+///
+/// Each gate depends on exactly one logit. Therefore the gate Hessian is
+/// diagonal, cross-atom logit/coordinate blocks are structural zeros, and every
+/// live channel is a direct scalar multiple of one decoded value or derivative:
+///
+/// ```text
+/// z'_k  = r z_k (1-z_k)
+/// z''_k = r² z_k (1-z_k) (1-2z_k).
+/// ```
+///
+/// The generic jet remains the independent semantic oracle, but production
+/// never allocates or propagates its dense runtime Hessians. This is the
+/// independent-gate analogue of [`execute_softmax_row_program`]: one borrowed
+/// source, one packed result allocation, and only structurally live work.
+pub(crate) fn execute_independent_logistic_row_program<S: SaeOrder2RowProgramSource>(
+    source: &S,
+    inv_tau: f64,
+    sqrt_row_w: f64,
+) -> SaeScheduledRowJets {
+    let k = source.n_atoms();
+    let p = source.out_dim();
+    let q = source.n_primaries();
+    let n_beta = source.n_beta_borders();
+    let mut out = SaeScheduledRowJets::zeros(q, p, n_beta);
+    let decoded_len = k
+        .checked_mul(p)
+        .expect("SAE independent row-program decoded workspace length overflow");
+    let work_len = decoded_len
+        .checked_add(p)
+        .expect("SAE independent row-program workspace length overflow");
+
+    SAE_ORDER2_ROW_WORKSPACE.with(|workspace| {
+        let mut workspace = workspace.borrow_mut();
+        if workspace.len() < work_len {
+            workspace.resize(work_len, 0.0);
+        }
+        let work = &mut workspace[..work_len];
+        work.fill(0.0);
+        let (decoded, scratch) = work.split_at_mut(decoded_len);
+        for atom in 0..k {
+            if source.atom_is_active(atom) {
+                source.fill_decoded(atom, &mut decoded[atom * p..(atom + 1) * p]);
+            }
+        }
+
+        // Gate-only blocks. A fixed gate has no logit primary and consequently
+        // emits no derivative channel.
+        for slot_a in 0..q {
+            let SaeRowPrimary::Logit { atom } = source.primary(slot_a) else {
+                continue;
+            };
+            let z = source.gate_value(atom);
+            let dz = inv_tau * z * (1.0 - z);
+            let d2z = inv_tau * inv_tau * z * (1.0 - z) * (1.0 - 2.0 * z);
+            let component = &decoded[atom * p..(atom + 1) * p];
+            for (target, &value) in out.first_mut(slot_a).iter_mut().zip(component) {
+                *target = sqrt_row_w * dz * value;
+            }
+            for slot_b in 0..q {
+                if source.primary(slot_b) != (SaeRowPrimary::Logit { atom }) {
+                    continue;
+                }
+                for (target, &value) in out.second_mut(slot_a, slot_b).iter_mut().zip(component) {
+                    *target = sqrt_row_w * d2z * value;
+                }
+            }
+        }
+
+        // Coordinate and same-atom logit×coordinate blocks.
+        for coord_slot in 0..q {
+            let SaeRowPrimary::Coord { atom, axis } = source.primary(coord_slot) else {
+                continue;
+            };
+            if !source.atom_is_active(atom) {
+                continue;
+            }
+            let z = source.gate_value(atom);
+            source.fill_decoded_first(atom, axis, scratch);
+            for (target, &value) in out.first_mut(coord_slot).iter_mut().zip(&*scratch) {
+                *target = sqrt_row_w * z * value;
+            }
+            for logit_slot in 0..q {
+                if source.primary(logit_slot) != (SaeRowPrimary::Logit { atom }) {
+                    continue;
+                }
+                let dz = inv_tau * z * (1.0 - z);
+                for (target, &value) in out
+                    .second_mut(logit_slot, coord_slot)
+                    .iter_mut()
+                    .zip(&*scratch)
+                {
+                    *target = sqrt_row_w * dz * value;
+                }
+                for (target, &value) in out
+                    .second_mut(coord_slot, logit_slot)
+                    .iter_mut()
+                    .zip(&*scratch)
+                {
+                    *target = sqrt_row_w * dz * value;
+                }
+            }
+            for other_slot in 0..q {
+                let SaeRowPrimary::Coord {
+                    atom: other_atom,
+                    axis: other_axis,
+                } = source.primary(other_slot)
+                else {
+                    continue;
+                };
+                if other_atom != atom {
+                    continue;
+                }
+                source.fill_decoded_second(atom, axis, other_axis, scratch);
+                for (target, &value) in out
+                    .second_mut(coord_slot, other_slot)
+                    .iter_mut()
+                    .zip(&*scratch)
+                {
+                    *target = sqrt_row_w * z * value;
+                }
+            }
+        }
+
+        // Decoder-border value and mixed channels. The reconstruction is linear
+        // in beta, hence beta_deriv and beta_l_deriv are the same channel.
+        for border in 0..n_beta {
+            let atom = source.beta_border_atom(border);
+            if !source.atom_is_active(atom) {
+                continue;
+            }
+            let z = source.gate_value(atom);
+            let phi = source.beta_border_basis_value(border);
+            let output = source.beta_border_output(border);
+            let base = sqrt_row_w * z * phi;
+            for (target, &value) in out.beta_mut(border).iter_mut().zip(output) {
+                *target = base * value;
+            }
+            for slot in 0..q {
+                let scalar = match source.primary(slot) {
+                    SaeRowPrimary::Logit { atom: logit_atom } if logit_atom == atom => {
+                        sqrt_row_w * inv_tau * z * (1.0 - z) * phi
+                    }
+                    SaeRowPrimary::Coord {
+                        atom: coord_atom,
+                        axis,
+                    } if coord_atom == atom => {
+                        sqrt_row_w * z * source.beta_border_basis_first(border, axis)
+                    }
+                    _ => 0.0,
+                };
+                if scalar == 0.0 {
+                    continue;
+                }
+                for (target, &value) in out.beta_deriv_mut(slot, border).iter_mut().zip(output) {
+                    *target = scalar * value;
+                }
+                for (target, &value) in out.beta_l_deriv_mut(slot, border).iter_mut().zip(output) {
+                    *target = scalar * value;
+                }
+            }
+        }
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests_schedule_source {
     use super::*;
 
-    impl SaeSoftmaxRowProgramSource for SaeReconstructionRowProgram {
+    impl SaeOrder2RowProgramSource for SaeReconstructionRowProgram {
         fn n_atoms(&self) -> usize {
             self.atoms.len()
         }
@@ -1832,13 +1923,12 @@ mod tests {
         assert_eq!(comparisons, 576);
     }
 
-    /// The runtime production backend must remain exact beyond the former
-    /// 16-primary monomorphization ceiling. A nine-atom softmax row has 18
-    /// primaries (nine logits plus nine coordinates), so it could not enter the
-    /// old dispatch ladder. Compare its dynamic reconstruction and β-border
-    /// channels directly with independently instantiated fixed-size oracles.
+    /// The structure-compiled independent-gate backend has no static-width
+    /// dispatch ceiling. A nine-atom row has 18 primaries, beyond the former
+    /// monomorphization ladder; compare every emitted reconstruction channel
+    /// directly with a fixed-size generic-jet oracle.
     #[test]
-    fn runtime_row_jets_match_fixed_oracle_above_old_arity_ceiling_932() {
+    fn independent_compiled_schedule_matches_fixed_oracle_above_old_arity_ceiling_932() {
         const K: usize = 18;
         let mut program = softmax_fixture_k(9, 1, 3, 5, 1.3);
         program.gate = RowGate::PerAtomLogistic { inv_tau: 1.3 };
@@ -1848,49 +1938,32 @@ mod tests {
         }
         assert_eq!(program.n_primaries, K);
 
-        let arena = DynamicJetArena::new();
-        let dynamic_columns = program.reconstruction_all_columns_dynamic(&arena);
+        let compiled = execute_independent_logistic_row_program(&program, 1.3, 1.0);
         let fixed_columns = program.reconstruction_all_columns_packed::<K>();
-        assert_eq!(dynamic_columns.len(), fixed_columns.len());
-        for (column, (dynamic, fixed)) in dynamic_columns.iter().zip(&fixed_columns).enumerate() {
-            let close = |actual: f64, expected: f64, channel: &str| {
-                let tolerance = 1.0e-12 * (1.0 + actual.abs().max(expected.abs()));
-                assert!(
-                    (actual - expected).abs() <= tolerance,
-                    "column {column} {channel}: dynamic={actual:.16e}, fixed={expected:.16e}, \
-                     tolerance={tolerance:.3e}"
-                );
-            };
-            close(dynamic.value(), fixed.value(), "value");
+        for (column, fixed) in fixed_columns.iter().enumerate() {
             for a in 0..K {
-                close(dynamic.g()[a], fixed.g()[a], "gradient");
+                let tolerance =
+                    2.0e-12 * (1.0 + compiled.first(a)[column].abs().max(fixed.g()[a].abs()));
+                assert!(
+                    (compiled.first(a)[column] - fixed.g()[a]).abs() <= tolerance,
+                    "column {column} gradient[{a}]: compiled={} fixed={} tolerance={tolerance:e}",
+                    compiled.first(a)[column],
+                    fixed.g()[a]
+                );
                 for b in 0..K {
-                    close(dynamic.h_at(a, b), fixed.h()[a][b], "Hessian");
+                    let tolerance = 2.0e-12
+                        * (1.0
+                            + compiled.second(a, b)[column]
+                                .abs()
+                                .max(fixed.h()[a][b].abs()));
+                    assert!(
+                        (compiled.second(a, b)[column] - fixed.h()[a][b]).abs() <= tolerance,
+                        "column {column} Hessian[{a},{b}]: compiled={} fixed={} \
+                         tolerance={tolerance:e}",
+                        compiled.second(a, b)[column],
+                        fixed.h()[a][b]
+                    );
                 }
-            }
-        }
-
-        let channels: Vec<(usize, usize)> = program
-            .atoms
-            .iter()
-            .enumerate()
-            .flat_map(|(atom, jet)| (0..jet.n_basis()).map(move |basis| (atom, basis)))
-            .collect();
-        let dynamic_border = program.beta_border_order1_dynamic(&channels, &arena);
-        let fixed_border = program.beta_border_order1_packed::<K>(&channels);
-        assert_eq!(dynamic_border.len(), fixed_border.len());
-        for (channel, (dynamic, fixed)) in dynamic_border.iter().zip(&fixed_border).enumerate() {
-            let tolerance = 1.0e-12 * (1.0 + dynamic.value().abs().max(fixed.value().abs()));
-            assert!(
-                (dynamic.value() - fixed.value()).abs() <= tolerance,
-                "β-border channel {channel} value mismatch"
-            );
-            for a in 0..K {
-                let tolerance = 1.0e-12 * (1.0 + dynamic.g()[a].abs().max(fixed.g()[a].abs()));
-                assert!(
-                    (dynamic.g()[a] - fixed.g()[a]).abs() <= tolerance,
-                    "β-border channel {channel} gradient[{a}] mismatch"
-                );
             }
         }
     }

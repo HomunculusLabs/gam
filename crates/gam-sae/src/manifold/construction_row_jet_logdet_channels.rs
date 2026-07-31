@@ -9,18 +9,10 @@
 // from `construction.rs` so they keep the SAME module scope (`use super::*`),
 // the same `impl SaeManifoldTerm` surface, and full private-field access.
 
-thread_local! {
-    /// One reusable packed-jet arena per worker thread. Non-softmax row programs
-    /// copy their derivative channels into owned `SaeRowJets` before returning,
-    /// so the arena can be reset for the next row with no borrowed state escape.
-    static SAE_ROW_JET_ARENA: std::cell::RefCell<gam_math::jet_scalar::DynamicJetArena> =
-        std::cell::RefCell::new(gam_math::jet_scalar::DynamicJetArena::new());
-}
-
-/// Zero-copy production adapter for the structure-compiled softmax row program.
+/// Zero-copy production adapter for the structure-compiled SAE row programs.
 /// It borrows the term's live basis/decoder tensors and the cache-derived primary
 /// layout; no per-row `AtomRowBasisJet` clone is constructed.
-struct ProductionSoftmaxRowProgram<'a> {
+struct ProductionRowProgram<'a> {
     term: &'a SaeManifoldTerm,
     row: usize,
     vars: &'a [SaeLocalRowVar],
@@ -29,7 +21,7 @@ struct ProductionSoftmaxRowProgram<'a> {
     border: &'a [SaeBorderChannel],
 }
 
-impl ProductionSoftmaxRowProgram<'_> {
+impl ProductionRowProgram<'_> {
     #[inline]
     fn atom_is_active_inner(&self, atom: usize) -> bool {
         self.term
@@ -39,7 +31,7 @@ impl ProductionSoftmaxRowProgram<'_> {
     }
 }
 
-impl crate::row_jet_program::SaeSoftmaxRowProgramSource for ProductionSoftmaxRowProgram<'_> {
+impl crate::row_jet_program::SaeOrder2RowProgramSource for ProductionRowProgram<'_> {
     fn n_atoms(&self) -> usize {
         self.term.k_atoms()
     }
@@ -125,256 +117,194 @@ impl crate::row_jet_program::SaeSoftmaxRowProgramSource for ProductionSoftmaxRow
     }
 }
 
-impl SaeManifoldTerm {
-    pub(crate) fn reconstruction_row_program_for_logdet(
-        &self,
-        row: usize,
-        vars: &[SaeLocalRowVar],
-        assignments: ArrayView1<'_, f64>,
-        second_jets: &[Array4<f64>],
-    ) -> Result<crate::row_jet_program::SaeReconstructionRowProgram, String> {
-        use crate::row_jet_program::{
-            AtomRowBasisJet, RowGate, SAE_FIXED_COORD_SLOT, SaeReconstructionRowProgram,
-        };
+#[cfg(test)]
+mod tests_reconstruction_program_builder {
+    use super::*;
 
-        let p = self.output_dim();
-        let k_atoms = self.k_atoms();
-        if assignments.len() != k_atoms {
-            return Err(format!(
-                "reconstruction_row_program_for_logdet: assignments length {} != K={k_atoms}",
-                assignments.len()
-            ));
-        }
-        if second_jets.len() != k_atoms {
-            return Err(format!(
-                "reconstruction_row_program_for_logdet: second_jets length {} != K={k_atoms}",
-                second_jets.len()
-            ));
-        }
+    impl SaeManifoldTerm {
+        pub(crate) fn reconstruction_row_program_for_logdet(
+            &self,
+            row: usize,
+            vars: &[SaeLocalRowVar],
+            assignments: ArrayView1<'_, f64>,
+            second_jets: &[Array4<f64>],
+        ) -> Result<crate::row_jet_program::SaeReconstructionRowProgram, String> {
+            use crate::row_jet_program::{
+                AtomRowBasisJet, RowGate, SAE_FIXED_COORD_SLOT, SaeReconstructionRowProgram,
+            };
 
-        let mut logit_slot = vec![None; k_atoms];
-        let mut coord_slot: Vec<Vec<usize>> = self
-            .atoms
-            .iter()
-            .map(|atom| vec![SAE_FIXED_COORD_SLOT; atom.latent_dim()])
-            .collect();
-        for (slot, var) in vars.iter().enumerate() {
-            match *var {
-                SaeLocalRowVar::Logit { atom } => {
-                    if atom >= k_atoms {
-                        return Err(format!(
-                            "reconstruction_row_program_for_logdet: logit atom {atom} outside K={k_atoms}"
-                        ));
+            let p = self.output_dim();
+            let k_atoms = self.k_atoms();
+            if assignments.len() != k_atoms {
+                return Err(format!(
+                    "reconstruction_row_program_for_logdet: assignments length {} != K={k_atoms}",
+                    assignments.len()
+                ));
+            }
+            if second_jets.len() != k_atoms {
+                return Err(format!(
+                    "reconstruction_row_program_for_logdet: second_jets length {} != K={k_atoms}",
+                    second_jets.len()
+                ));
+            }
+
+            let mut logit_slot = vec![None; k_atoms];
+            let mut coord_slot: Vec<Vec<usize>> = self
+                .atoms
+                .iter()
+                .map(|atom| vec![SAE_FIXED_COORD_SLOT; atom.latent_dim()])
+                .collect();
+            for (slot, var) in vars.iter().enumerate() {
+                match *var {
+                    SaeLocalRowVar::Logit { atom } => {
+                        if atom >= k_atoms {
+                            return Err(format!(
+                                "reconstruction_row_program_for_logdet: logit atom {atom} outside K={k_atoms}"
+                            ));
+                        }
+                        logit_slot[atom] = Some(slot);
                     }
-                    logit_slot[atom] = Some(slot);
-                }
-                SaeLocalRowVar::Coord { atom, axis } => {
-                    if atom >= k_atoms || axis >= coord_slot[atom].len() {
-                        return Err(format!(
-                            "reconstruction_row_program_for_logdet: coord ({atom},{axis}) outside atom layout"
-                        ));
+                    SaeLocalRowVar::Coord { atom, axis } => {
+                        if atom >= k_atoms || axis >= coord_slot[atom].len() {
+                            return Err(format!(
+                                "reconstruction_row_program_for_logdet: coord ({atom},{axis}) outside atom layout"
+                            ));
+                        }
+                        coord_slot[atom][axis] = slot;
                     }
-                    coord_slot[atom][axis] = slot;
                 }
             }
-        }
 
-        let active_atoms = self
-            .last_row_layout
-            .as_ref()
-            .map(|layout| layout.active_atoms[row].as_slice());
-        let atom_is_active = |atom_idx: usize| {
-            active_atoms.is_none_or(|active| active.binary_search(&atom_idx).is_ok())
-        };
-        let atoms: Vec<AtomRowBasisJet> = self
-            .atoms
-            .iter()
-            .enumerate()
-            .map(|(atom_idx, atom)| {
-                let m = atom.basis_size();
-                let d = atom.latent_dim();
-                let second = &second_jets[atom_idx];
-                AtomRowBasisJet {
-                    phi: (0..m)
-                        .map(|basis_col| atom.basis_values[[row, basis_col]])
-                        .collect(),
-                    d_phi: (0..m)
-                        .map(|basis_col| {
-                            (0..d)
-                                .map(|axis| atom.basis_jacobian[[row, basis_col, axis]])
-                                .collect()
-                        })
-                        .collect(),
-                    d2_phi: (0..m)
-                        .map(|basis_col| {
-                            (0..d)
-                                .map(|axis_a| {
-                                    (0..d)
-                                        .map(|axis_b| second[[row, basis_col, axis_a, axis_b]])
-                                        .collect()
-                                })
-                                .collect()
-                        })
-                        .collect(),
-                    decoder: (0..m)
-                        .map(|basis_col| {
-                            (0..p)
-                                .map(|out_col| {
-                                    if atom_is_active(atom_idx) {
-                                        atom.decoder_coefficients()[[basis_col, out_col]]
-                                    } else {
-                                        0.0
-                                    }
-                                })
-                                .collect()
-                        })
-                        .collect(),
-                    latent_dim: d,
-                }
+            let active_atoms = self
+                .last_row_layout
+                .as_ref()
+                .map(|layout| layout.active_atoms[row].as_slice());
+            let atom_is_active = |atom_idx: usize| {
+                active_atoms.is_none_or(|active| active.binary_search(&atom_idx).is_ok())
+            };
+            let atoms: Vec<AtomRowBasisJet> = self
+                .atoms
+                .iter()
+                .enumerate()
+                .map(|(atom_idx, atom)| {
+                    let m = atom.basis_size();
+                    let d = atom.latent_dim();
+                    let second = &second_jets[atom_idx];
+                    AtomRowBasisJet {
+                        phi: (0..m)
+                            .map(|basis_col| atom.basis_values[[row, basis_col]])
+                            .collect(),
+                        d_phi: (0..m)
+                            .map(|basis_col| {
+                                (0..d)
+                                    .map(|axis| atom.basis_jacobian[[row, basis_col, axis]])
+                                    .collect()
+                            })
+                            .collect(),
+                        d2_phi: (0..m)
+                            .map(|basis_col| {
+                                (0..d)
+                                    .map(|axis_a| {
+                                        (0..d)
+                                            .map(|axis_b| second[[row, basis_col, axis_a, axis_b]])
+                                            .collect()
+                                    })
+                                    .collect()
+                            })
+                            .collect(),
+                        decoder: (0..m)
+                            .map(|basis_col| {
+                                (0..p)
+                                    .map(|out_col| {
+                                        if atom_is_active(atom_idx) {
+                                            atom.decoder_coefficients()[[basis_col, out_col]]
+                                        } else {
+                                            0.0
+                                        }
+                                    })
+                                    .collect()
+                            })
+                            .collect(),
+                        latent_dim: d,
+                    }
+                })
+                .collect();
+
+            // Read the ACTIVE routing logits (frozen/amortized when routing is
+            // frozen #1033, else the free `self.logits`) — the single source the gate
+            // value is derived from. Reading raw `self.assignment.logits` here would
+            // re-derive free-logit gates that disagree with the value the assembly
+            // used under frozen routing.
+            let logits = self.assignment.routing_logits_row(row).to_vec();
+            // #1026/#1033 — atoms whose logit is NOT a free Newton parameter (ungated
+            // or frozen routing) must gate through a CONSTANT equal to the active
+            // routing value (`assignments[k]`), with zero logit derivative, rather
+            // than re-derive a gate from a stale/pinned logit. `logit_is_fixed`
+            // covers both cases (the same mask the arrow-Schur assembly uses).
+            let fixed_gate_value: Vec<Option<f64>> = (0..k_atoms)
+                .map(|k| {
+                    if !atom_is_active(k) {
+                        // A compact reconstruction is the fixed-support map
+                        // sum_{k in A_i} a_ik g_k.  Dropped atoms are identically
+                        // zero functions (including all beta derivatives), even
+                        // though their full-softmax probabilities still enter the
+                        // normalization and therefore the active gates' logit jets.
+                        Some(0.0)
+                    } else if self.assignment.logit_is_fixed(k) {
+                        Some(assignments[k])
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let (gate, gate_shift) = match self.assignment.mode {
+                AssignmentMode::Softmax { temperature, .. } => (
+                    RowGate::Softmax {
+                        inv_tau: 1.0 / temperature,
+                    },
+                    vec![0.0; k_atoms],
+                ),
+                AssignmentMode::OrderedBetaBernoulli { temperature, .. } => (
+                    RowGate::PerAtomLogistic {
+                        inv_tau: 1.0 / temperature,
+                    },
+                    vec![0.0; k_atoms],
+                ),
+                AssignmentMode::ThresholdGate {
+                    temperature,
+                    threshold,
+                } => (
+                    RowGate::PerAtomLogistic {
+                        inv_tau: 1.0 / temperature,
+                    },
+                    vec![threshold; k_atoms],
+                ),
+                // TopK: every atom is `logit_is_fixed`, so `fixed_gate_value`
+                // (= the exact {0, 1} support gates) overrides the gate machinery
+                // for ALL atoms — these are never-evaluated placeholders.
+                AssignmentMode::TopK { .. } => (
+                    RowGate::PerAtomLogistic { inv_tau: 1.0 },
+                    vec![0.0; k_atoms],
+                ),
+            };
+
+            Ok(SaeReconstructionRowProgram {
+                atoms,
+                gate_value: assignments.to_vec(),
+                logits,
+                gate_shift,
+                gate,
+                logit_slot,
+                coord_slot,
+                fixed_gate_value,
+                n_primaries: vars.len(),
             })
-            .collect();
-
-        // Read the ACTIVE routing logits (frozen/amortized when routing is
-        // frozen #1033, else the free `self.logits`) — the single source the gate
-        // value is derived from. Reading raw `self.assignment.logits` here would
-        // re-derive free-logit gates that disagree with the value the assembly
-        // used under frozen routing.
-        let logits = self.assignment.routing_logits_row(row).to_vec();
-        // #1026/#1033 — atoms whose logit is NOT a free Newton parameter (ungated
-        // or frozen routing) must gate through a CONSTANT equal to the active
-        // routing value (`assignments[k]`), with zero logit derivative, rather
-        // than re-derive a gate from a stale/pinned logit. `logit_is_fixed`
-        // covers both cases (the same mask the arrow-Schur assembly uses).
-        let fixed_gate_value: Vec<Option<f64>> = (0..k_atoms)
-            .map(|k| {
-                if !atom_is_active(k) {
-                    // A compact reconstruction is the fixed-support map
-                    // sum_{k in A_i} a_ik g_k.  Dropped atoms are identically
-                    // zero functions (including all beta derivatives), even
-                    // though their full-softmax probabilities still enter the
-                    // normalization and therefore the active gates' logit jets.
-                    Some(0.0)
-                } else if self.assignment.logit_is_fixed(k) {
-                    Some(assignments[k])
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let (gate, gate_shift) = match self.assignment.mode {
-            AssignmentMode::Softmax { temperature, .. } => (
-                RowGate::Softmax {
-                    inv_tau: 1.0 / temperature,
-                },
-                vec![0.0; k_atoms],
-            ),
-            AssignmentMode::OrderedBetaBernoulli { temperature, .. } => (
-                RowGate::PerAtomLogistic {
-                    inv_tau: 1.0 / temperature,
-                },
-                vec![0.0; k_atoms],
-            ),
-            AssignmentMode::ThresholdGate {
-                temperature,
-                threshold,
-            } => (
-                RowGate::PerAtomLogistic {
-                    inv_tau: 1.0 / temperature,
-                },
-                vec![threshold; k_atoms],
-            ),
-            // TopK: every atom is `logit_is_fixed`, so `fixed_gate_value`
-            // (= the exact {0, 1} support gates) overrides the gate machinery
-            // for ALL atoms — these are never-evaluated placeholders.
-            AssignmentMode::TopK { .. } => (
-                RowGate::PerAtomLogistic { inv_tau: 1.0 },
-                vec![0.0; k_atoms],
-            ),
-        };
-
-        Ok(SaeReconstructionRowProgram {
-            atoms,
-            gate_value: assignments.to_vec(),
-            logits,
-            gate_shift,
-            gate,
-            logit_slot,
-            coord_slot,
-            fixed_gate_value,
-            n_primaries: vars.len(),
-        })
-    }
-
-    fn fill_reconstruction_channels_from_program_dynamic(
-        program: &crate::row_jet_program::SaeReconstructionRowProgram,
-        arena: &gam_math::jet_scalar::DynamicJetArena,
-        sqrt_row_w: f64,
-        channels: &mut crate::row_jet_program::SaeScheduledRowJets,
-    ) {
-        // Build every output column at once with the per-atom gate / basis jets
-        // hoisted out of the column loop (#932 perf): the softmax gate jet and
-        // the basis jets are column-independent, so this removes the `out_dim×`
-        // redundant recomputation the per-column path incurred (~9× faster at
-        // K=8, out_dim=16). Bit-identical to per-column `_packed` assembly.
-        let q = program.n_primaries;
-        let columns = program.reconstruction_all_columns_dynamic(arena);
-        for (out_col, tower) in columns.iter().enumerate() {
-            let g = tower.g();
-            let h = tower.h();
-            for a in 0..q {
-                channels.first_mut(a)[out_col] = sqrt_row_w * g[a];
-                for b in 0..q {
-                    channels.second_mut(a, b)[out_col] = sqrt_row_w * h[a * q + b];
-                }
-            }
-        }
-    }
-
-    fn fill_beta_border_channels_from_program_dynamic(
-        program: &crate::row_jet_program::SaeReconstructionRowProgram,
-        arena: &gam_math::jet_scalar::DynamicJetArena,
-        sqrt_row_w: f64,
-        border: &[SaeBorderChannel],
-        channels: &mut crate::row_jet_program::SaeScheduledRowJets,
-    ) {
-        let p = program.out_dim();
-        // s = ζ_k(ℓ)·Φ_b(t_k) over the local (logit/coord) primaries, built from
-        // the SAME gate_tower / basis_tower primitives as the reconstruction
-        // column. Build all channels at once with the per-atom gate jet hoisted
-        // (#932 perf): border channels sharing an atom reuse one gate jet instead
-        // of recomputing it. The reconstruction is LINEAR in β, so this consumer
-        // reads only the value (`beta`) and gradient (`beta_deriv` /
-        // `beta_l_deriv`) channels — never a Hessian — so the jets are built as
-        // first-order `Order1<K>` (value + grad), skipping the K×K Hessian the
-        // `Order2` path would compute and discard. `Order1`'s value/grad are
-        // bit-identical to `Order2`'s (#1591 order1 oracle).
-        let chans = arena.alloc_slice_fill_with(border.len(), |index| {
-            let channel = &border[index];
-            (channel.atom, channel.basis_col)
-        });
-        let q = program.n_primaries;
-        let sjets = program.beta_border_order1_dynamic(chans, arena);
-        for (beta_pos, channel) in border.iter().enumerate() {
-            let s = &sjets[beta_pos];
-            let s_v = s.v;
-            let s_g = s.g();
-            for out_col in 0..p {
-                let out_c = channel.output[out_col];
-                channels.beta_mut(beta_pos)[out_col] = sqrt_row_w * s_v * out_c;
-                for a in 0..q {
-                    // Reconstruction is linear in β, so beta_deriv and
-                    // beta_l_deriv are the identical mixed ∂²ẑ_c/∂β∂p_a channel.
-                    let mixed = sqrt_row_w * s_g[a] * out_c;
-                    channels.beta_deriv_mut(a, beta_pos)[out_col] = mixed;
-                    channels.beta_l_deriv_mut(a, beta_pos)[out_col] = mixed;
-                }
-            }
         }
     }
 }
 
 #[cfg(test)]
-mod tests_softmax_hand_reference {
+mod tests_hand_reference {
     use super::*;
 
     impl SaeManifoldTerm {
@@ -402,11 +332,12 @@ mod tests_softmax_hand_reference {
             }
         }
 
-        /// Historical hand reconstruction + β-border channels for the SOFTMAX
-        /// gate, recovered verbatim from 8404ff658^ (before the #932 Taylor-jet
-        /// cutover). It was the production path after the generic tower measured
-        /// 25–57× slower; it is now test-only as the strongest pre-schedule
-        /// performance and correctness baseline.
+        /// Historical hand reconstruction + β-border channels, recovered from
+        /// 8404ff658^ (before the #932 Taylor-jet cutover) and updated only for
+        /// the current independent-logistic assignment names. It was the
+        /// production path after the generic tower measured 25–57× slower; it
+        /// is now test-only as the strongest non-abstracted performance and
+        /// correctness baseline.
         ///
         /// The generic jet is retained as an independent oracle: the program
         /// tower (`SaeReconstructionRowProgram::reconstruction_column` /
@@ -418,17 +349,13 @@ mod tests_softmax_hand_reference {
         /// `row_jet_program` unit oracles (incl. the planted-cross-block-sign-flip
         /// #736 guard).
         ///
-        /// Softmax-only: the per-atom-logistic (ordered Beta--Bernoulli / ThresholdGate) modes keep the jet
-        /// path (their hand gate prior diverged from the live ordered-geometric
-        /// prior, so routing them through the jet is the value-preserving choice).
-        pub(crate) fn fill_row_jets_hand_softmax_reference(
+        pub(crate) fn fill_row_jets_hand_reference(
             &self,
             row: usize,
             vars: &[SaeLocalRowVar],
             assignments: ArrayView1<'_, f64>,
             second_jets: &[Array4<f64>],
             border: &[SaeBorderChannel],
-            inv_tau: f64,
             sqrt_row_w: f64,
             first: &mut [Vec<f64>],
             second: &mut [Vec<Vec<f64>>],
@@ -447,38 +374,54 @@ mod tests_softmax_hand_reference {
                 active_atoms.is_none_or(|active| active.binary_search(&atom_idx).is_ok())
             };
 
-            // Softmax gate derivatives (closed form; NO exps — the K softmax values
-            // `assignments` are precomputed upstream).
             let mut dz = vec![vec![0.0_f64; k_atoms]; q];
             let mut d2z = vec![vec![vec![0.0_f64; k_atoms]; q]; q];
-            for (a_idx, var_a) in vars.iter().enumerate() {
-                let SaeLocalRowVar::Logit { atom: j } = *var_a else {
-                    continue;
-                };
-                for k in 0..k_atoms {
-                    let indicator = if k == j { 1.0 } else { 0.0 };
-                    dz[a_idx][k] = assignments[k] * (indicator - assignments[j]) * inv_tau;
-                }
-            }
-            for (a_idx, var_a) in vars.iter().enumerate() {
-                let SaeLocalRowVar::Logit { atom: j } = *var_a else {
-                    continue;
-                };
-                for (b_idx, var_b) in vars.iter().enumerate() {
-                    let SaeLocalRowVar::Logit { atom: l } = *var_b else {
-                        continue;
-                    };
-                    for k in 0..k_atoms {
-                        let ikl = if k == l { 1.0 } else { 0.0 };
-                        let ikj = if k == j { 1.0 } else { 0.0 };
-                        let ijl = if j == l { 1.0 } else { 0.0 };
-                        d2z[a_idx][b_idx][k] = assignments[k]
-                            * ((ikl - assignments[l]) * (ikj - assignments[j])
-                                - assignments[j] * (ijl - assignments[l]))
-                            * inv_tau
-                            * inv_tau;
+            match self.assignment.mode {
+                AssignmentMode::Softmax { temperature, .. } => {
+                    let inv_tau = 1.0 / temperature;
+                    for (a_idx, var_a) in vars.iter().enumerate() {
+                        let SaeLocalRowVar::Logit { atom: j } = *var_a else {
+                            continue;
+                        };
+                        for k in 0..k_atoms {
+                            let indicator = if k == j { 1.0 } else { 0.0 };
+                            dz[a_idx][k] = assignments[k] * (indicator - assignments[j]) * inv_tau;
+                        }
+                    }
+                    for (a_idx, var_a) in vars.iter().enumerate() {
+                        let SaeLocalRowVar::Logit { atom: j } = *var_a else {
+                            continue;
+                        };
+                        for (b_idx, var_b) in vars.iter().enumerate() {
+                            let SaeLocalRowVar::Logit { atom: l } = *var_b else {
+                                continue;
+                            };
+                            for k in 0..k_atoms {
+                                let ikl = if k == l { 1.0 } else { 0.0 };
+                                let ikj = if k == j { 1.0 } else { 0.0 };
+                                let ijl = if j == l { 1.0 } else { 0.0 };
+                                d2z[a_idx][b_idx][k] = assignments[k]
+                                    * ((ikl - assignments[l]) * (ikj - assignments[j])
+                                        - assignments[j] * (ijl - assignments[l]))
+                                    * inv_tau
+                                    * inv_tau;
+                            }
+                        }
                     }
                 }
+                AssignmentMode::OrderedBetaBernoulli { temperature, .. }
+                | AssignmentMode::ThresholdGate { temperature, .. } => {
+                    let inv_tau = 1.0 / temperature;
+                    for (slot, var) in vars.iter().enumerate() {
+                        let SaeLocalRowVar::Logit { atom } = *var else {
+                            continue;
+                        };
+                        let z = assignments[atom];
+                        dz[slot][atom] = inv_tau * z * (1.0 - z);
+                        d2z[slot][slot][atom] = inv_tau * inv_tau * z * (1.0 - z) * (1.0 - 2.0 * z);
+                    }
+                }
+                AssignmentMode::TopK { .. } => {}
             }
 
             // decoded value / first / second derivatives per atom (from the SAME
@@ -675,8 +618,6 @@ impl SaeManifoldTerm {
         second_jets: &[Array4<f64>],
         border: &[SaeBorderChannel],
     ) -> Result<SaeRowJets, String> {
-        let p = self.output_dim();
-        let q = vars.len();
         let sqrt_row_w = self
             .row_loss_weights
             .as_deref()
@@ -690,7 +631,7 @@ impl SaeManifoldTerm {
                 // independent exact oracle; no copied basis/decoder program and
                 // no dense structural-zero jet are built on this hot path.
                 let inv_tau = 1.0 / temperature;
-                let source = ProductionSoftmaxRowProgram {
+                let source = ProductionRowProgram {
                     term: self,
                     row,
                     vars: &vars,
@@ -703,42 +644,37 @@ impl SaeManifoldTerm {
                 );
                 scheduled
             }
-            AssignmentMode::OrderedBetaBernoulli { .. }
-            | AssignmentMode::ThresholdGate { .. }
-            | AssignmentMode::TopK { .. } => {
-                // PER-ATOM modes keep the jet path: value-preserving (their hand
-                // gate prior diverged from the live ordered-geometric prior, and
-                // the structure-compiled softmax schedule does not apply to
-                // these gate graphs). TopK is the degenerate member: its gates
-                // are constants {0, 1} with NO logit variables in the row block
-                // (`assignment_coord_dim() == 0`), so the program simply carries
-                // no gate channels.
-                let program = self.reconstruction_row_program_for_logdet(
+            AssignmentMode::OrderedBetaBernoulli { temperature, .. }
+            | AssignmentMode::ThresholdGate { temperature, .. } => {
+                let source = ProductionRowProgram {
+                    term: self,
                     row,
-                    &vars,
+                    vars: &vars,
                     assignments,
                     second_jets,
-                )?;
-                let mut channels =
-                    crate::row_jet_program::SaeScheduledRowJets::zeros(q, p, border.len());
-                SAE_ROW_JET_ARENA.with(|cell| {
-                    let mut arena = cell.borrow_mut();
-                    arena.reset();
-                    Self::fill_reconstruction_channels_from_program_dynamic(
-                        &program,
-                        &arena,
-                        sqrt_row_w,
-                        &mut channels,
-                    );
-                    Self::fill_beta_border_channels_from_program_dynamic(
-                        &program,
-                        &arena,
-                        sqrt_row_w,
-                        border,
-                        &mut channels,
-                    );
-                });
-                channels
+                    border,
+                };
+                crate::row_jet_program::execute_independent_logistic_row_program(
+                    &source,
+                    1.0 / temperature,
+                    sqrt_row_w,
+                )
+            }
+            AssignmentMode::TopK { .. } => {
+                // TopK is the constant-gate degeneration of the independent
+                // schedule: the row has no logit primaries, so inv_tau is
+                // unobservable and every gate derivative is structurally zero.
+                let source = ProductionRowProgram {
+                    term: self,
+                    row,
+                    vars: &vars,
+                    assignments,
+                    second_jets,
+                    border,
+                };
+                crate::row_jet_program::execute_independent_logistic_row_program(
+                    &source, 1.0, sqrt_row_w,
+                )
             }
         };
 
@@ -814,7 +750,7 @@ impl SaeManifoldTerm {
                         "complete SAE row-jet assignment scratch is not contiguous".to_string()
                     })?,
                 )?;
-                let source = ProductionSoftmaxRowProgram {
+                let source = ProductionRowProgram {
                     term: self,
                     row,
                     vars: &vars,
@@ -925,7 +861,7 @@ impl SaeManifoldTerm {
                         "contracted SAE row-jet assignment scratch is not contiguous".to_string()
                     })?,
                 )?;
-                let source = ProductionSoftmaxRowProgram {
+                let source = ProductionRowProgram {
                     term: self,
                     row,
                     vars: &vars,
@@ -1051,7 +987,7 @@ impl SaeManifoldTerm {
                         "contracted SAE row-jet assignment scratch is not contiguous".to_string()
                     })?,
                 )?;
-                let source = ProductionSoftmaxRowProgram {
+                let source = ProductionRowProgram {
                     term: self,
                     row,
                     vars: &vars,
