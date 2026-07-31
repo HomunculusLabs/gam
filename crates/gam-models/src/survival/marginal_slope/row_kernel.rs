@@ -1232,10 +1232,30 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
         ];
         let marginal_design = &self.family.marginal_design;
         let logslope_design = self.family.logslope_layout.coefficient_design();
-        if time_designs.iter().any(|design| design.is_sparse())
-            || marginal_design.is_sparse()
-            || logslope_design.is_sparse()
+        let time_sparse = time_designs.map(DesignMatrix::is_sparse);
+        let marginal_sparse = marginal_design.is_sparse();
+        let logslope_sparse = logslope_design.is_sparse();
+        if time_sparse.into_iter().any(std::convert::identity)
+            || marginal_sparse
+            || logslope_sparse
         {
+            static SPARSE_HESSIAN_LOGGED: std::sync::Once = std::sync::Once::new();
+            SPARSE_HESSIAN_LOGGED.call_once(|| {
+                eprintln!(
+                    "[STAGE] survival marginal-slope dense Hessian BLAS-3 path NOT taken: \
+                     sparse=({},{},{},{},{}) dims=({},{},{},{},{})",
+                    time_sparse[0],
+                    time_sparse[1],
+                    time_sparse[2],
+                    marginal_sparse,
+                    logslope_sparse,
+                    time_designs[0].ncols(),
+                    time_designs[1].ncols(),
+                    time_designs[2].ncols(),
+                    marginal_design.ncols(),
+                    logslope_design.ncols(),
+                );
+            });
             return None;
         }
 
