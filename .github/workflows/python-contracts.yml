@@ -195,6 +195,35 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: python -m pytest "$GITHUB_WORKSPACE/tests/test_bug_hunt_poisson_zero_count_fit_unpredictable_mean.py" -v --tb=short
 
+      - name: Run bench-package Python tests (#1512 orphans)
+        if: ${{ !cancelled() }}
+        # `bench/` holds five pytest files — 26 test functions covering the
+        # manifold-zoo geometry contracts, the exact analytic handoff, the zoo
+        # figure records and the synthetic-SAE metrics — and they ran in NO CI
+        # job. `pyproject.toml` sets `testpaths = ["tests"]`, and BOTH
+        # directory-level steps pass an explicit `tests/` target, which
+        # overrides testpaths entirely; no step ever named `bench`. This is the
+        # #1512 defect one directory over, found by the widened guard in
+        # tests/test_ci_no_orphan_python_tests_1512.py.
+        #
+        # A DIRECTORY target, not a list of five filenames: naming files is what
+        # produced the orphans in the first place, and the guard now requires a
+        # step that covers the directory.
+        #
+        # `bench` is a namespace package (no __init__.py) imported as
+        # `bench.manifold_zoo_geometry`, so the repo root must be importable —
+        # but putting the repo root itself on sys.path would shadow the
+        # installed wheel with the source `./gamfit`, which has no compiled
+        # `_rust` (two of these modules import gamfit). A directory holding only
+        # a symlink to `bench/` gives the package without the shadow.
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          mkdir -p benchpath
+          ln -sfn "$GITHUB_WORKSPACE/bench" benchpath/bench
+          PYTHONPATH="$PWD/benchpath" python -m pytest "$GITHUB_WORKSPACE/bench" \
+            -p no:cacheprovider -v --tb=short
+
       - name: Install full-suite test runners (xdist + timeout)
         if: ${{ !cancelled() }}
         # The full tests/ triage below fits hundreds of real models; xdist

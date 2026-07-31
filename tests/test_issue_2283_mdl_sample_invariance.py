@@ -29,7 +29,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+# Lives in tests/ (#1512): it used to sit under experiments/1026_close/, which
+# is outside `testpaths` and named by no CI step, so its three assertions ran in
+# no job at all. `parents[1]` is the repo root from tests/.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 _FACADE_PATH = _REPO_ROOT / "gamfit" / "_description_length.py"
 
 
