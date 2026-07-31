@@ -164,7 +164,7 @@ fn an_exact_affine_smooth_uses_the_mixed_penalty_boundary() {
         assert!((edf - 2.0).abs() < 1.0e-5, "affine EDF was {edf}");
         let fitted = fit.design.design.apply(&fit.fit.beta);
         let data = dataset(0.0);
-        for (actual, expected) in fitted.iter().zip(data.matrix.column(1)) {
+        for (actual, expected) in fitted.iter().zip(data.values.column(1)) {
             assert!((actual - expected).abs() < 1.0e-9);
         }
     }
