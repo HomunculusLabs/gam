@@ -27,7 +27,7 @@ use gam_linalg::matrix::DesignMatrix;
 use gam_problem::{EvalMode, HyperOperator, ProjectedFactorCache, ProjectedFactorKey};
 use ndarray::{Array1, Array2, ArrayView2, s};
 use rayon::prelude::*;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Minimum row count that justifies periodic loop-progress logging from
 /// `build_row_kernel_cache`. Below this, the cache build finishes in
@@ -1926,6 +1926,11 @@ pub struct RowKernelHessianWorkspace<const K: usize, T: RowKernel<K>> {
     kern: Arc<T>,
     cache: RowKernelCache<K>,
     rows: RowSet,
+    /// One authoritative dense pullback for this workspace's fixed β and row
+    /// measure. Several consumers in one Newton cycle need the identical H
+    /// (solve source, Jeffreys value, accepted-mode certificate); rebuilding it
+    /// from the same immutable row cache is pure duplicate work.
+    dense_hessian: OnceLock<Result<Array2<f64>, String>>,
 }
 
 impl<const K: usize, T: RowKernel<K>> RowKernelHessianWorkspace<K, T> {
@@ -1963,7 +1968,12 @@ impl<const K: usize, T: RowKernel<K>> RowKernelHessianWorkspace<K, T> {
         // entry points instead call `warm_up_outer_caches_for_mode` on the
         // workspace trait once, at top-level rayon, before the ext-coord
         // `par_iter`.
-        Ok(Self { kern, cache, rows })
+        Ok(Self {
+            kern,
+            cache,
+            rows,
+            dense_hessian: OnceLock::new(),
+        })
     }
 }
 
@@ -2009,11 +2019,17 @@ impl<const K: usize, T: RowKernel<K> + 'static> ExactNewtonJointHessianWorkspace
         // every canonical basis vector: a `p * O(n*K^2)` redundant
         // re-stream of the row data. At large scale (n~320k, p~200) that
         // is hundreds of seconds of pure waste per outer-Hessian build.
-        Ok(Some(row_kernel_hessian_dense(
-            &*self.kern,
-            &self.cache,
-            &self.rows,
-        )?))
+        //
+        // The workspace is immutable and belongs to one exact β/row measure,
+        // so every dense consumer must see the same matrix. Cache both success
+        // and failure: a structural assembly error is equally deterministic and
+        // must not trigger repeated expensive retries inside one Newton cycle.
+        self.dense_hessian
+            .get_or_init(|| {
+                row_kernel_hessian_dense(&*self.kern, &self.cache, &self.rows)
+            })
+            .clone()
+            .map(Some)
     }
 
     fn hessian_source_preference_for_intent(
