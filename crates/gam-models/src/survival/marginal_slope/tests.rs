@@ -7932,12 +7932,10 @@ fn survival_jeffreys_contracted_trace_hook_beats_pairwise_979() {
 /// (`OneSeed<4>` behind `row_primary_third_contracted_tower`, `TwoSeed<4>`
 /// behind `row_primary_fourth_contracted_tower`) must beat the generic dense
 /// `Tower4<4>` program evaluation they specialize (full 256-entry `t4` build
-/// plus dense contraction). No hand-derived third/fourth tower ever existed
-/// for this family, so — exactly as in the multinomial and cause-specific
-/// release cells — the honest fail-closed baseline is the generic
-/// AD tower, and the emitted `hand_over_production` token carries
-/// `generic_tower_ns / production_ns` for the MSI release harness to fail
-/// closed on any cell `<= 1`.
+/// plus dense contraction). The emitted `generic_tower_over_production` diagnostic
+/// carries `generic_tower_ns / production_ns`; it validates specialization
+/// against the exact generic oracle but is deliberately not strongest-hand
+/// closure evidence.
 #[test]
 fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
     use super::row_kernel::{RigidRowInputs, rigid_row_nll};
@@ -8046,7 +8044,7 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
         });
         eprintln!(
             "RIGID-CONTRACTED-932 order=3 event={d:.0} production={third_production_ns:.2} ns/row \
-             generic_tower={third_generic_ns:.2} ns/row hand_over_production={:.6}",
+             generic_tower={third_generic_ns:.2} ns/row generic_tower_over_production={:.6}",
             third_generic_ns / third_production_ns,
         );
 
@@ -8068,7 +8066,7 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
         });
         eprintln!(
             "RIGID-CONTRACTED-932 order=4 event={d:.0} production={fourth_production_ns:.2} ns/row \
-             generic_tower={fourth_generic_ns:.2} ns/row hand_over_production={:.6}",
+             generic_tower={fourth_generic_ns:.2} ns/row generic_tower_over_production={:.6}",
             fourth_generic_ns / fourth_production_ns,
         );
     }

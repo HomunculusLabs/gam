@@ -6093,10 +6093,9 @@ mod patterned_order2_perf_tests {
     /// AMORTIZATION: `DynamicJetArena::reset` retains a single high-water chunk
     /// so equal-or-smaller later rows need zero allocator traffic, whereas a
     /// straightforward implementation allocates a fresh multi-chunk order-2 tape
-    /// every row. So the fail-closed racer is amortized reused-arena production
-    /// vs allocation-naive fresh-`DynamicJetArena::new()`-per-row, and the
-    /// emitted `hand_over_production = fresh_ns / reused_ns` (> 1 iff the
-    /// production amortization pays off; the MSI harness fails closed on `<= 1`).
+    /// every row. The `fresh_arena_over_reused = fresh_ns / reused_ns`
+    /// diagnostic isolates the value of arena reuse. It is deliberately not a
+    /// strongest-hand comparison or closure gate.
     ///
     /// The padded fixed-width tower is NOT discarded — it is the PARITY ORACLE.
     /// `FixedRuntimeJet<Order2/OneSeed/TwoSeed<KW>, KW>` instantiates the SAME
@@ -6265,7 +6264,7 @@ mod patterned_order2_perf_tests {
         });
         eprintln!(
             "SLS-WIGGLE-DYN-932 order=2 production={reused2_ns:.2} ns/row \
-             fresh_arena={fresh2_ns:.2} ns/row hand_over_production={:.6}",
+             fresh_arena={fresh2_ns:.2} ns/row fresh_arena_over_reused={:.6}",
             fresh2_ns / reused2_ns,
         );
 
@@ -6293,7 +6292,7 @@ mod patterned_order2_perf_tests {
         });
         eprintln!(
             "SLS-WIGGLE-DYN-932 order=3 production={reused3_ns:.2} ns/row \
-             fresh_arena={fresh3_ns:.2} ns/row hand_over_production={:.6}",
+             fresh_arena={fresh3_ns:.2} ns/row fresh_arena_over_reused={:.6}",
             fresh3_ns / reused3_ns,
         );
 
@@ -6321,7 +6320,7 @@ mod patterned_order2_perf_tests {
         });
         eprintln!(
             "SLS-WIGGLE-DYN-932 order=4 production={reused4_ns:.2} ns/row \
-             fresh_arena={fresh4_ns:.2} ns/row hand_over_production={:.6}",
+             fresh_arena={fresh4_ns:.2} ns/row fresh_arena_over_reused={:.6}",
             fresh4_ns / reused4_ns,
         );
     }

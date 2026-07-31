@@ -3392,10 +3392,11 @@ mod tests {
         /// the generic gam-math forward-mode jet tower
         /// ([`program_row_kernel`]) — the naive automatic-differentiation
         /// baseline the retained specialization must beat, since #932 removed
-        /// this family's `cfg(test)` hand restatement. Emits the
-        /// harness-parsed `hand_over_production` token (generic-tower time
-        /// over production time) per active-class width; the MSI release
-        /// harness fails closed whenever any measured cell is `<= 1`.
+        /// this family's `cfg(test)` hand restatement. Emits the diagnostic
+        /// `generic_tower_over_production` (generic-tower time over production
+        /// time) per active-class width. This validates the specialization
+        /// against its generic oracle, but is deliberately not strongest-hand
+        /// closure evidence.
         ///
         /// The batch of distinct rows supplies genuine per-row input variation, so
         /// the optimizer cannot hoist the pure row call out of the sweep, and the
@@ -3509,7 +3510,7 @@ mod tests {
                 let tower_ns = tower_secs * 1e9 / ROWS as f64;
                 eprintln!(
                     "MULTINOMIAL-RELEASE-932 M={M} rows={ROWS} production_ns={production_ns:.3} \
-                     generic_tower_ns={tower_ns:.3} hand_over_production={:.6}",
+                     generic_tower_ns={tower_ns:.3} generic_tower_over_production={:.6}",
                     tower_ns / production_ns,
                 );
             }
