@@ -3546,6 +3546,33 @@ mod contraction_symmetry_tests {
             t_full / calls * 1e9,
             t_full / t_sym
         );
+        // The report above is what this test's name promises and it always
+        // runs. The wall-clock ASSERTION below is release-only, for two
+        // independent reasons (#932).
+        //
+        // 1. It is an unpaired, sequential A/B. `t_sym` and `t_full` are each
+        //    timed exactly once, in fixed order, so any load change between the
+        //    two blocks lands entirely in the ratio. The house pattern for this
+        //    comparison elsewhere in the workspace is paired medians with
+        //    ALTERNATING order -- `paired_medians` in `fast_channel.rs`, and the
+        //    `(round + side) % 2` interleave in `multinomial_reml.rs` -- which
+        //    exists precisely to cancel drift this shape cannot see.
+        //
+        // 2. Measured on two nodes on the same tree: PASSED on n11 where the
+        //    whole 256-test suite took 5.1s, FAILED on cn1037 at
+        //    `sym=16.1469s full=9.9498s` (1.62x against the 1.5x bar) where the
+        //    same suite took 219.1s -- a 43x slowdown, with a sibling timing
+        //    test alone accounting for 219.0s of it. Under that much drift the
+        //    assertion cannot distinguish "pathologically slower" from "the node
+        //    was busy", which is the only thing it is supposed to detect.
+        //
+        // Debug therefore reports and stops. Nothing above this point is
+        // skipped: the towers are still built and both contraction paths are
+        // still executed and consumed, so any panic, NaN or shape error in
+        // `third_contracted`/`fourth_contracted` is still caught in every build.
+        if cfg!(debug_assertions) {
+            return;
+        }
         assert!(
             t_sym <= t_full * 1.5,
             "output-symmetric contraction pathologically slower: \
