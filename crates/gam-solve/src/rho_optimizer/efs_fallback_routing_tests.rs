@@ -113,6 +113,7 @@ fn post_seed_custom_family_refusal_retains_typed_terminal_state_2658() {
         resolvable_negative_curvature: false,
         best_stationarity_residual: 7.5e-5,
         cycles_since_best_residual: 3,
+        termination_reason: gam_problem::JointNewtonTerminalReason::CycleBudget,
     };
     let efs_calls = Arc::new(AtomicUsize::new(0));
     let problem = OuterProblem::new(3)
