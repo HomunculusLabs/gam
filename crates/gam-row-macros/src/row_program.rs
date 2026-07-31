@@ -2068,16 +2068,12 @@ fn dense_taylor_schedule(
         }
     }
     let mut result_preludes = Vec::new();
-    let (result, root_compose_stack) =
-        if specialize_root_compose && order == 3 && matches!(result, ProgramExpr::Compose { .. }) {
-            let ProgramExpr::Compose {
-                leaf,
-                value,
-                arguments,
-            } = result
-            else {
-                unreachable!("matched dense Taylor root compose")
-            };
+    let (result, root_compose_stack) = match result {
+        ProgramExpr::Compose {
+            leaf,
+            value,
+            arguments,
+        } if specialize_root_compose && order == 3 => {
             let input = bindings.get(&value.to_string()).cloned().ok_or_else(|| {
                 syn::Error::new_spanned(value, "dense root compose input is not defined")
             })?;
@@ -2093,7 +2089,8 @@ fn dense_taylor_schedule(
                 leaf_arguments.join(", ")
             ));
             (input, Some(stack))
-        } else {
+        }
+        _ => {
             let environment = DenseTaylorExpressionEnvironment {
                 leaves,
                 constants,
@@ -2111,7 +2108,8 @@ fn dense_taylor_schedule(
                 )?,
                 None,
             )
-        };
+        }
+    };
     Ok(DenseTaylorSchedule {
         statements: dense_statements,
         result,
