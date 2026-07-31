@@ -964,6 +964,19 @@ impl HessianFactorization for DenseSpectralOperator {
         h
     }
 
+    fn trace_logdet_block_root(
+        &self,
+        root: ndarray::ArrayView2<'_, f64>,
+        start: usize,
+        end: usize,
+    ) -> f64 {
+        // tr(G_ε RᵀR) = ‖R · G[start..end, :]‖_F². One Gram, no squared block:
+        // see the trait doc for why the squared form is `O(ε·κ(H))` here.
+        let g_block = self.g_factor.slice(ndarray::s![start..end, ..]);
+        let rg = root.dot(&g_block);
+        rg.iter().map(|&v| v * v).sum()
+    }
+
     fn trace_logdet_block_local(
         &self,
         block: &Array2<f64>,

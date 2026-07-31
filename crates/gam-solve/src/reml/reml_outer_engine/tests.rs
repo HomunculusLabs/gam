@@ -8881,3 +8881,110 @@ pub(crate) fn duchon_rotation_is_equivariant_before_outer_optimization_gh2319() 
         assert_relative_eq!(left, right, epsilon = 3.0e-9, max_relative = 3.0e-8);
     }
 }
+
+/// #2644, gradient channel (B). `tr(G_ε(H)·λ_kS_k)` must be priced from the
+/// penalty ROOT, not from the squared block.
+///
+/// The squared form evaluates `Σ_j g_jᵀ A g_j` with `g_j` scaled by
+/// `σ_j(H)^{-1/2}`, so `A`'s roundoff on directions where it vanishes is
+/// carried LINEARLY and divided by `σ_min(H)`: `O(ε·κ(H))` on a trace the
+/// theory bounds by `rank(S_k)`. The Gram form `‖R_k G‖_F²` squares that
+/// residual instead.
+///
+/// The fixture is the `s(pc1,k=5)+s(pc2,k=5)` Hessian spectrum this issue was
+/// filed against — `σ(H)` from `6.2e11` down to `0.16`, `κ = 3.8e12` — with a
+/// rank-3 penalty living on the STIFF directions, so `tr(H⁻¹λS) = 3` exactly
+/// while `‖A‖/σ_min(H) = 3.9e12`. A dense rotation is what makes the two forms
+/// differ: on an axis-aligned fixture the squared block is exact.
+#[test]
+fn trace_logdet_block_root_prices_channel_b_at_root_scale() {
+    let p = 6usize;
+    // Fixed Givens product — deterministic, no RNG, no axis-aligned column.
+    let mut q = Array2::<f64>::eye(p);
+    for i in 0..p {
+        for j in (i + 1)..p {
+            let theta = 0.41 + 0.13 * (i as f64) + 0.19 * (j as f64);
+            let (sin, cos) = theta.sin_cos();
+            for row in 0..p {
+                let a = q[[row, i]];
+                let b = q[[row, j]];
+                q[[row, i]] = cos * a - sin * b;
+                q[[row, j]] = sin * a + cos * b;
+            }
+        }
+    }
+    let rotate = |d: &[f64]| -> Array2<f64> {
+        let mut m = Array2::<f64>::zeros((p, p));
+        for (i, &di) in d.iter().enumerate() {
+            if di == 0.0 {
+                continue;
+            }
+            for r in 0..p {
+                for c in 0..p {
+                    m[[r, c]] += di * q[[r, i]] * q[[c, i]];
+                }
+            }
+        }
+        let mt = m.t().to_owned();
+        m += &mt;
+        m *= 0.5;
+        m
+    };
+
+    // The penalty's own (λ-free) spectrum: rank 3 on the first three axes.
+    let d_pen = [1.0, 0.7, 0.44, 0.0, 0.0, 0.0];
+    let lambda = 6.193e11_f64;
+    // H = λ·S + (data curvature on every direction). The stiff directions are
+    // λ·S's, the soft ones are the data's — exactly the observed spectrum.
+    let d_h = [
+        lambda * 1.0 + 105.0,
+        lambda * 0.7 + 15.5,
+        lambda * 0.44 + 8.1,
+        3.3,
+        1.03,
+        0.1627,
+    ];
+    let h = rotate(&d_h);
+    let op = DenseSpectralOperator::from_symmetric(&h).expect("SPD fixture");
+
+    // Exact: tr(H⁻¹ λS) = Σ_i λ d_pen[i] / d_h[i] over the penalized modes.
+    let exact: f64 = (0..3).map(|i| lambda * d_pen[i] / d_h[i]).sum();
+
+    let root = {
+        let mut r = Array2::<f64>::zeros((3, p));
+        for i in 0..3 {
+            let scale = (lambda * d_pen[i]).sqrt();
+            for c in 0..p {
+                r[[i, c]] = scale * q[[c, i]];
+            }
+        }
+        r
+    };
+    let from_root = op.trace_logdet_block_root(root.view(), 0, p);
+    let squared = rotate(&[
+        lambda * d_pen[0],
+        lambda * d_pen[1],
+        lambda * d_pen[2],
+        0.0,
+        0.0,
+        0.0,
+    ]);
+    let from_squared = op.trace_logdet_block_local(&squared, 1.0, 0, p);
+
+    // `1e-9` sits far below the squared form's `O(ε·κ(H)) ≈ 1e-3` and far above
+    // the achievable floor, so it is a verdict on the ROUTE, not a tuned
+    // constant. The assertion on the squared form is not a requirement that it
+    // be wrong — it records the gap this test exists to close, and would fail
+    // loudly if the two routes ever became the same arithmetic again.
+    assert!(
+        (from_root - exact).abs() <= 1.0e-9 * exact.abs().max(1.0),
+        "root-scale channel (B) trace: got {from_root}, exact {exact}, \
+         squared-block form {from_squared}"
+    );
+    assert!(
+        (from_squared - exact).abs() > 10.0 * (from_root - exact).abs(),
+        "the squared-block form is expected to be the LESS accurate route on \
+         this conditioning (root {from_root}, squared {from_squared}, exact {exact}); \
+         if it has become equally accurate this test no longer measures anything"
+    );
+}

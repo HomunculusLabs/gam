@@ -353,6 +353,33 @@ pub trait HessianFactorization: Send + Sync {
     /// penalties. The default implementation builds the full matrix and
     /// delegates to `trace_logdet_gradient`; spectral backends override
     /// this with O(p_block × active_rank) work.
+    /// `tr(G_ε(H) · A_block)` for a PSD `A_block = rootᵀroot` given by its
+    /// ROOT rather than by the squared block.
+    ///
+    /// Same quantity as [`Self::trace_logdet_block_local`] with
+    /// `block = rootᵀroot`, and NOT the same arithmetic. The squared form
+    /// evaluates `Σ_j g_jᵀ A g_j`, whose per-column error is `O(ε‖A‖‖g_j‖²)`;
+    /// the `g_j` are scaled by `σ_j(H)^{-1/2}`, so the sum carries
+    /// `O(ε·‖A‖/σ_min(H))` — `O(ε·κ(H))` on a trace bounded by `rank(A)`. On
+    /// the `s(pc1,k=5)+s(pc2,k=5)` witness of #2644 that is `2.2e-16 · 6.2e11 /
+    /// 0.16 ≈ 8.5e-4` per coordinate, against a stationarity bound of `3.0e-3`.
+    ///
+    /// The Gram form `‖root · G_block‖_F²` squares the residual instead
+    /// (`O(ε²‖A‖/σ_min)`) and cannot come out negative. See
+    /// `PenaltyCoordinate::scaled_block_root`.
+    ///
+    /// The default squares the root so every backend answers correctly;
+    /// spectral backends override it.
+    fn trace_logdet_block_root(
+        &self,
+        root: ndarray::ArrayView2<'_, f64>,
+        start: usize,
+        end: usize,
+    ) -> f64 {
+        let block = root.t().dot(&root);
+        self.trace_logdet_block_local(&block, 1.0, start, end)
+    }
+
     fn trace_logdet_block_local(
         &self,
         block: &Array2<f64>,

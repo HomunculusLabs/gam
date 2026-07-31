@@ -2,6 +2,37 @@ use super::*;
 use crate::estimate::reml::atoms::CriterionAtom;
 use crate::estimate::smooth_floor_dp;
 
+/// `tr(G_ε(H) · λ_k S_k)` from the coordinate's penalty ROOT, when it has one.
+///
+/// `S_k = R_kᵀR_k`, so this is `‖√λ_k R_k · G_block‖_F²`. The equivalent
+/// contraction against the SQUARED block is `O(ε·κ(H))` on a trace the theory
+/// bounds by `rank(S_k)` — see
+/// [`HessianFactorization::trace_logdet_block_root`] (#2644).
+///
+/// `None` only for `KroneckerMarginal`, which stores a marginal eigenvalue grid
+/// rather than a root.
+fn penalty_logdet_trace_from_root_opt(
+    hop: &dyn HessianFactorization,
+    coord: &gam_problem::PenaltyCoordinate,
+    lambda: f64,
+) -> Option<f64> {
+    let (root, start, end) = coord.scaled_block_root(lambda)?;
+    Some(hop.trace_logdet_block_root(root.view(), start, end))
+}
+
+/// [`penalty_logdet_trace_from_root_opt`] with the squared-block fallback for
+/// the one coordinate kind that exposes no root.
+fn penalty_logdet_trace_from_root(
+    hop: &dyn HessianFactorization,
+    coord: &gam_problem::PenaltyCoordinate,
+    lambda: f64,
+) -> f64 {
+    penalty_logdet_trace_from_root_opt(hop, coord, lambda).unwrap_or_else(|| {
+        let (block, start, end) = coord.scaled_block_local(1.0);
+        hop.trace_logdet_block_local(&block, lambda, start, end)
+    })
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  The single evaluator
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1328,15 +1359,25 @@ pub fn reml_laml_evaluate(
                     .as_ref()
                     .and_then(|traces| traces[idx])
                 {
-                    let penalty_trace = if coord.is_block_local() {
-                        let (block, start, end) = coord.scaled_block_local(1.0);
-                        hop.trace_logdet_block_local(&block, curvature_lambdas[idx], start, end)
-                    } else {
-                        penalty_total_drift_result(coord, curvature_lambdas[idx], None)
-                            .trace_logdet(hop)
-                    };
-                    penalty_trace + correction_trace
+                    // The PURE-PENALTY half of the drift trace, `tr(G_ε·λ_kS_k)`,
+                    // is taken from the coordinate's ROOT (#2644): the squared
+                    // block carries `S_k`'s roundoff linearly through a metric
+                    // scaled by `σ(H)^{-1}`, i.e. `O(ε·κ(H))` on a trace bounded
+                    // by `rank(S_k)`. The moving-curvature half `C[v_k]` is not
+                    // PSD and has no root, so it keeps its own path and is added
+                    // here unchanged.
+                    penalty_logdet_trace_from_root(hop, coord, curvature_lambdas[idx])
+                        + correction_trace
+                } else if rho_corrections[idx].is_none()
+                    && let Some(trace) =
+                        penalty_logdet_trace_from_root_opt(hop, coord, curvature_lambdas[idx])
+                {
+                    // No moving-curvature correction, so the whole drift IS the
+                    // penalty and the root form prices all of it (#2644).
+                    trace
                 } else if coord.is_block_local() && rho_corrections[idx].is_none() {
+                    // Reached only by `KroneckerMarginal`, the one coordinate
+                    // kind with no root to price from.
                     let (block, start, end) = coord.scaled_block_local(1.0);
                     hop.trace_logdet_block_local(&block, curvature_lambdas[idx], start, end)
                 } else {

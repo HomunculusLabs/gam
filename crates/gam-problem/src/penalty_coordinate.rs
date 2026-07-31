@@ -742,6 +742,37 @@ impl PenaltyCoordinate {
         )
     }
 
+    /// The block-local scaled penalty ROOT `√scale · R_k` (rank × p_block) with
+    /// its embedding range, so `scale · S_k = rootᵀroot` on that block.
+    ///
+    /// This is what [`Self::scaled_block_local`] squares before handing the
+    /// result to a consumer, and the squaring is not free: `S_k` is a sum of
+    /// squares, so contracting it against a metric scaled by `σ(H)^{-1}` (or
+    /// `σ(S_λ)^{-1}`) carries `R_k`'s roundoff LINEARLY and divides it by the
+    /// smallest eigenvalue, giving `O(ε·κ)` on traces the theory bounds by
+    /// `rank(S_k)`. A consumer that keeps the root and forms a Gram instead
+    /// squares that residual (#2644). Every root-bearing variant returns
+    /// `Some`; `KroneckerMarginal` returns `None` because its penalty is stored
+    /// as a marginal eigenvalue grid rather than a root.
+    pub fn scaled_block_root(&self, scale: f64) -> Option<(Array2<f64>, usize, usize)> {
+        if !(scale.is_finite() && scale >= 0.0) {
+            return None;
+        }
+        let sqrt_scale = scale.sqrt();
+        match self {
+            Self::DenseRoot(root) | Self::DenseRootCentered { root, .. } => {
+                Some((root * sqrt_scale, 0, root.ncols()))
+            }
+            Self::BlockRoot {
+                root, start, end, ..
+            }
+            | Self::BlockRootCentered {
+                root, start, end, ..
+            } => Some((root * sqrt_scale, *start, *end)),
+            Self::KroneckerMarginal { .. } => None,
+        }
+    }
+
     /// Apply λ_k S_k to a vector v without materializing the full matrix.
     /// For BlockRoot: extracts v[start..end], multiplies by local S_k, embeds result.
     pub fn scaled_matvec(&self, v: &Array1<f64>, scale: f64) -> Array1<f64> {
