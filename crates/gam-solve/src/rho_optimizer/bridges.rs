@@ -3474,6 +3474,14 @@ pub(crate) struct OuterFixedPointBridge<'a> {
     pub(crate) layout: OuterThetaLayout,
     pub(crate) barrier_config: Option<BarrierConfig>,
     pub(crate) fixed_point_tolerance: f64,
+    /// Exact coefficient state produced by the most recent finite EFS
+    /// evaluation, bound to the outer coordinate that produced it.
+    ///
+    /// The fixed-point driver owns this bridge while it runs.  Publishing the
+    /// pair through a shared slot lets the runner preserve the inner basin when
+    /// a later trial rho is refused and the analytic-gradient fallback resumes
+    /// from the last finite fixed-point incumbent.
+    pub(crate) evaluated_inner_seed: Arc<Mutex<Option<BoundInnerSeed>>>,
     /// Consecutive HybridEFS iterations whose ψ block was zeroed after
     /// exhausting backtracking. When this reaches
     /// [`MAX_CONSECUTIVE_PSI_STAGNATION`], the bridge surfaces the
@@ -3655,6 +3663,17 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
                 eval.cost,
             )));
         }
+        *self
+            .evaluated_inner_seed
+            .lock()
+            .expect("fixed-point inner-state publication lock poisoned") = eval
+            .beta
+            .as_ref()
+            .filter(|beta| beta.iter().all(|value| value.is_finite()))
+            .map(|beta| BoundInnerSeed {
+                theta: x.clone(),
+                beta: beta.clone(),
+            });
         if let Some(ref barrier_cfg) = self.barrier_config
             && let Some(ref beta) = eval.beta
         {

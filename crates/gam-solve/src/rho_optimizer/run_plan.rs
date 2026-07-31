@@ -2573,15 +2573,16 @@ pub(crate) fn run_outer_with_plan(
                         ));
                         continue 'seed_attempts;
                     }
-                    Err(FixedPointOuterRunError::IterationRejected(err)) => {
-                        started_seeds += 1;
+                    Err(FixedPointOuterRunError::IterationRejected(request)) => {
                         log::warn!(
-                            "[OUTER] {context}: rejecting seed {seed_idx} after EFS evaluation: {err}"
+                            "[OUTER] {context}: EFS trial refused after {} finite iteration(s) \
+                             at cost={:.6e}; continuing the exact incumbent with the \
+                             analytic-gradient fallback: {}",
+                            request.checkpoint.iterations,
+                            request.checkpoint.sample.value,
+                            request.refusal,
                         );
-                        seed_rejections.push(SeedRejection::from_objective_error(
-                            seed_idx, "solver", &err,
-                        ));
-                        continue 'seed_attempts;
+                        return Ok(PlanRunOutcome::FixedPointContinuationRequested(request));
                     }
                     Err(FixedPointOuterRunError::ImmediateFallback(request)) => {
                         return Ok(PlanRunOutcome::FirstOrderFallbackRequested(request));
@@ -2621,15 +2622,16 @@ pub(crate) fn run_outer_with_plan(
                         ));
                         continue 'seed_attempts;
                     }
-                    Err(FixedPointOuterRunError::IterationRejected(err)) => {
-                        started_seeds += 1;
+                    Err(FixedPointOuterRunError::IterationRejected(request)) => {
                         log::warn!(
-                            "[OUTER] {context}: rejecting seed {seed_idx} after HybridEFS evaluation: {err}"
+                            "[OUTER] {context}: HybridEFS trial refused after {} finite \
+                             iteration(s) at cost={:.6e}; continuing the exact incumbent \
+                             with the analytic-gradient fallback: {}",
+                            request.checkpoint.iterations,
+                            request.checkpoint.sample.value,
+                            request.refusal,
                         );
-                        seed_rejections.push(SeedRejection::from_objective_error(
-                            seed_idx, "solver", &err,
-                        ));
-                        continue 'seed_attempts;
+                        return Ok(PlanRunOutcome::FixedPointContinuationRequested(request));
                     }
                     Err(FixedPointOuterRunError::ImmediateFallback(request)) => {
                         return Ok(PlanRunOutcome::FirstOrderFallbackRequested(request));

@@ -1115,6 +1115,7 @@ pub(crate) enum PlanRunOutcome {
     Converged(OuterResult),
     Exhausted(OuterResult),
     FirstOrderFallbackRequested(FirstOrderFallbackRequest),
+    FixedPointContinuationRequested(FixedPointContinuationRequest),
 }
 
 /// Which certificate concluded a CONVERGED outer run (#2235/#2241).
@@ -7216,6 +7217,11 @@ pub(crate) fn run_outer_uncertified(
 
     let mut last_error: Option<EstimationError> = None;
     let mut best_checkpoint: Option<OuterResult> = None;
+    // A recoverable refusal at the point proposed by EFS says nothing against
+    // the finite incumbent that proposed it.  Carry that incumbent across the
+    // plan boundary exactly once; the analytic-gradient fallback must resume
+    // it before any unrelated seed is considered.
+    let mut fixed_point_continuation: Option<FixedPointContinuationCheckpoint> = None;
 
     'plan_attempts: for (attempt_idx, attempt_cap) in attempts.iter().enumerate() {
         let the_plan = plan(attempt_cap);
@@ -7225,6 +7231,44 @@ pub(crate) fn run_outer_uncertified(
         log_plan(context, attempt_cap, &the_plan);
 
         obj.reset();
+
+        let mut attempt_config = config.clone();
+        if let Some(checkpoint) = fixed_point_continuation.take() {
+            if !matches!(the_plan.solver, Solver::Bfgs) {
+                return Err(EstimationError::RemlOptimizationFailed(format!(
+                    "{context}: fixed-point continuation requires analytic-gradient BFGS, \
+                     but the next declared plan is {the_plan}"
+                )));
+            }
+            attempt_config.initial_rho = Some(checkpoint.point.clone());
+            attempt_config.initial_inner_seed = checkpoint.inner_seed.clone();
+            attempt_config.screen_initial_rho = false;
+            // This is a mid-run finite incumbent, not a terminal certificate
+            // imported from a prior fit.  Leaving the original config's cache
+            // provenance set could let the zero-iteration resume path accept
+            // the checkpoint without ever running the promised BFGS polish.
+            attempt_config.initial_rho_is_prior_terminal_certificate = false;
+            // A transferred Hessian is bound to the prior fit's terminal rho,
+            // not to this mid-run EFS incumbent.  BFGS must rebuild curvature
+            // from gradients at the continued point instead of combining two
+            // different checkpoints.
+            attempt_config.warm_start_outer_hessian = None;
+            attempt_config.seed_config.max_seeds = 1;
+            attempt_config.seed_config.seed_budget = 1;
+            log::info!(
+                "[OUTER] {context}: resuming {the_plan} exactly once from the last finite \
+                 {:?} incumbent after {} iteration(s): cost={:.6e}, |step|={:.3e}, \
+                 inner_beta={}",
+                checkpoint.plan_used.solver,
+                checkpoint.iterations,
+                checkpoint.sample.value,
+                checkpoint.sample.step.dot(&checkpoint.sample.step).sqrt(),
+                checkpoint
+                    .inner_seed
+                    .as_ref()
+                    .map_or(0, |seed| seed.beta.len()),
+            );
+        }
 
         // ARC budget-exhaustion retry: when an Arc attempt runs out of
         // outer iterations, reseed a fresh Arc run from the previous
@@ -7257,8 +7301,9 @@ pub(crate) fn run_outer_uncertified(
             // Bind the active config by cloning into a local owned value so
             // subsequent retry-config assignment does not collide with the
             // borrow used inside this iteration body.
-            let active_config_owned: OuterConfig =
-                retry_config.clone().unwrap_or_else(|| config.clone());
+            let active_config_owned: OuterConfig = retry_config
+                .clone()
+                .unwrap_or_else(|| attempt_config.clone());
             let active_config: &OuterConfig = &active_config_owned;
             match run_outer_with_plan(obj, active_config, context, attempt_cap, &the_plan, true) {
                 Ok(PlanRunOutcome::Converged(result)) => break Ok(result),
@@ -7272,6 +7317,29 @@ pub(crate) fn run_outer_uncertified(
                     last_error = Some(EstimationError::RemlOptimizationFailed(
                         request.reason().to_string(),
                     ));
+                    continue 'plan_attempts;
+                }
+                Ok(PlanRunOutcome::FixedPointContinuationRequested(request)) => {
+                    let has_bfgs_fallback = attempts
+                        .get(attempt_idx + 1)
+                        .is_some_and(|next| matches!(plan(next).solver, Solver::Bfgs));
+                    if !has_bfgs_fallback {
+                        return Err(EstimationError::RemlOptimizationFailed(format!(
+                            "{context}: {:?} refused a trial after {} finite iteration(s) \
+                             at rho={} (cost={:.6e}), but no analytic-gradient BFGS \
+                             continuation is declared: {}",
+                            request.checkpoint.plan_used.solver,
+                            request.checkpoint.iterations,
+                            request.checkpoint.point,
+                            request.checkpoint.sample.value,
+                            request.refusal,
+                        )));
+                    }
+                    last_error = Some(EstimationError::RemlOptimizationFailed(format!(
+                        "{:?} continuation requested after rho-local trial refusal: {}",
+                        request.checkpoint.plan_used.solver, request.refusal,
+                    )));
+                    fixed_point_continuation = Some(request.checkpoint);
                     continue 'plan_attempts;
                 }
                 Ok(PlanRunOutcome::Exhausted(result)) => {
@@ -7824,9 +7892,38 @@ pub(crate) fn bfgs_axis_step_caps(
 
 pub(crate) enum FixedPointOuterRunError {
     SeedRejected(ObjectiveEvalError),
-    IterationRejected(ObjectiveEvalError),
+    IterationRejected(FixedPointContinuationRequest),
     ImmediateFallback(FirstOrderFallbackRequest),
     Failed(EstimationError),
+}
+
+/// Last complete fixed-point incumbent preceding a refused trial point.
+///
+/// `opt::FixedPoint` currently returns only the refused evaluation's message;
+/// it does not return its still-finite incumbent on `ObjectiveFailed`.  This
+/// carrier preserves the exact optimizer state needed to continue with a
+/// different algorithm: outer point, criterion, proposed fixed-point step,
+/// fixed-point status, completed iteration count, plan, and the matching inner
+/// coefficient state when the EFS producer supplied one.
+#[derive(Clone, Debug)]
+pub(crate) struct FixedPointContinuationCheckpoint {
+    pub(crate) point: Array1<f64>,
+    pub(crate) sample: FixedPointSample,
+    pub(crate) iterations: usize,
+    pub(crate) plan_used: OuterPlan,
+    pub(crate) inner_seed: Option<BoundInnerSeed>,
+}
+
+/// Typed request to continue a fixed-point incumbent after one rho-local
+/// refusal.
+///
+/// The refusal remains an [`ObjectiveEvalError`] all the way through the plan
+/// boundary, so the fallback decision is based on the producer's recoverable
+/// verdict rather than on message text.
+#[derive(Clone, Debug)]
+pub(crate) struct FixedPointContinuationRequest {
+    pub(crate) checkpoint: FixedPointContinuationCheckpoint,
+    pub(crate) refusal: ObjectiveEvalError,
 }
 
 /// Carries a fixed-point objective's complete typed refusal across the lossy
@@ -7926,6 +8023,68 @@ where
     }
 }
 
+/// Retains every successful fixed-point sample as well as the typed error
+/// retained by [`RetainingObjective`].
+///
+/// A failed evaluation belongs to the proposed *next* point.  Therefore it
+/// must not overwrite `incumbent`: that slot remains the exact last finite
+/// point from which another solver can continue.
+pub(crate) struct RetainingFixedPointObjective<ObjFn> {
+    inner: RetainingObjective<ObjFn>,
+    incumbent: Arc<Mutex<FixedPointContinuationCheckpoint>>,
+    evaluated_inner_seed: Arc<Mutex<Option<BoundInnerSeed>>>,
+    successful_iterations: usize,
+    plan_used: OuterPlan,
+}
+
+impl<ObjFn> RetainingFixedPointObjective<ObjFn> {
+    pub(crate) fn new(
+        inner: ObjFn,
+        last_error: Arc<Mutex<Option<ObjectiveEvalError>>>,
+        incumbent: Arc<Mutex<FixedPointContinuationCheckpoint>>,
+        evaluated_inner_seed: Arc<Mutex<Option<BoundInnerSeed>>>,
+        plan_used: OuterPlan,
+    ) -> Self {
+        Self {
+            inner: RetainingObjective::new(inner, last_error),
+            incumbent,
+            evaluated_inner_seed,
+            successful_iterations: 0,
+            plan_used,
+        }
+    }
+}
+
+impl<ObjFn> FixedPointObjective for RetainingFixedPointObjective<ObjFn>
+where
+    ObjFn: FixedPointObjective,
+{
+    fn eval_step(&mut self, x: &Array1<f64>) -> Result<FixedPointSample, ObjectiveEvalError> {
+        let outcome = self.inner.eval_step(x);
+        if let Ok(sample) = &outcome {
+            self.successful_iterations = self.successful_iterations.saturating_add(1);
+            let inner_seed = self
+                .evaluated_inner_seed
+                .lock()
+                .expect("fixed-point inner-state publication lock poisoned")
+                .clone()
+                .filter(|seed| outer_theta_bitwise_eq(&seed.theta, x));
+            *self
+                .incumbent
+                .lock()
+                .expect("fixed-point incumbent publication lock poisoned") =
+                FixedPointContinuationCheckpoint {
+                    point: x.clone(),
+                    sample: sample.clone(),
+                    iterations: self.successful_iterations,
+                    plan_used: self.plan_used,
+                    inner_seed,
+                };
+        }
+        outcome
+    }
+}
+
 pub(crate) fn run_fixed_point_outer_solver(
     obj: &mut dyn OuterObjective,
     layout: OuterThetaLayout,
@@ -7942,11 +8101,13 @@ pub(crate) fn run_fixed_point_outer_solver(
     // count comes back through this cell and is stamped onto the returned
     // `OuterResult` below.
     let recurrent_incumbent_exit = Arc::new(Mutex::new(None));
+    let evaluated_inner_seed = Arc::new(Mutex::new(None));
     let mut objective = OuterFixedPointBridge {
         obj,
         layout,
         barrier_config,
         fixed_point_tolerance: config.tolerance,
+        evaluated_inner_seed: Arc::clone(&evaluated_inner_seed),
         consecutive_psi_zero_iters: 0,
         last_restored_incumbent_streak: None,
         recurrent_incumbent_exit: Arc::clone(&recurrent_incumbent_exit),
@@ -7980,7 +8141,25 @@ pub(crate) fn run_fixed_point_outer_solver(
     // `eval_step`. `opt::FixedPoint` returns only its message, so this is the
     // ownership channel for the typed source and routing request.
     let last_step_error: Arc<Mutex<Option<ObjectiveEvalError>>> = Arc::new(Mutex::new(None));
-    let objective = RetainingObjective::new(objective, Arc::clone(&last_step_error));
+    let seed_inner_state = evaluated_inner_seed
+        .lock()
+        .expect("fixed-point inner-state publication lock poisoned")
+        .clone()
+        .filter(|inner_seed| outer_theta_bitwise_eq(&inner_seed.theta, seed));
+    let incumbent = Arc::new(Mutex::new(FixedPointContinuationCheckpoint {
+        point: seed.clone(),
+        sample: seed_sample.clone(),
+        iterations: 0,
+        plan_used: the_plan,
+        inner_seed: seed_inner_state,
+    }));
+    let objective = RetainingFixedPointObjective::new(
+        objective,
+        Arc::clone(&last_step_error),
+        Arc::clone(&incumbent),
+        Arc::clone(&evaluated_inner_seed),
+        the_plan,
+    );
     let mut optimizer = FixedPoint::new(seed.clone(), objective)
         // Seed validation already paid the complete EFS inner solve. Reuse that
         // exact sample so iteration zero neither repeats the expensive solve nor
@@ -8022,11 +8201,17 @@ pub(crate) fn run_fixed_point_outer_solver(
                 .expect("fixed-point objective error publication lock poisoned")
                 .take()
                 .expect("FixedPoint::ObjectiveFailed must follow a failed classified eval_step");
-            if let Some(request) = first_order_fallback_request(&error) {
-                return Err(FixedPointOuterRunError::ImmediateFallback(request.clone()));
-            }
             if error.is_recoverable() {
-                return Err(FixedPointOuterRunError::IterationRejected(error));
+                let checkpoint = incumbent
+                    .lock()
+                    .expect("fixed-point incumbent publication lock poisoned")
+                    .clone();
+                return Err(FixedPointOuterRunError::IterationRejected(
+                    FixedPointContinuationRequest {
+                        checkpoint,
+                        refusal: error,
+                    },
+                ));
             }
             Err(FixedPointOuterRunError::Failed(
                 EstimationError::fatal_objective_evaluation(

@@ -179,8 +179,8 @@ fn post_seed_custom_family_refusal_retains_typed_terminal_state_2658() {
         Err(failure) => failure,
         Ok(_) => panic!("the synthetic second EFS evaluation must refuse"),
     };
-    let objective_error = match failure {
-        FixedPointOuterRunError::IterationRejected(error) => error,
+    let request = match failure {
+        FixedPointOuterRunError::IterationRejected(request) => request,
         FixedPointOuterRunError::SeedRejected(_) => {
             panic!("the first EFS evaluation succeeded; this is not a seed rejection")
         }
@@ -191,6 +191,7 @@ fn post_seed_custom_family_refusal_retains_typed_terminal_state_2658() {
             panic!("rho-local custom-family refusal was made fatal: {error}")
         }
     };
+    let objective_error = &request.refusal;
     assert!(objective_error.is_recoverable());
     let source = objective_error
         .downcast_ref::<EstimationError>()
@@ -207,7 +208,7 @@ fn post_seed_custom_family_refusal_retains_typed_terminal_state_2658() {
             psi_dim: 0,
         }) if *observed_terminal == terminal
     ));
-    let rejection = SeedRejection::from_objective_error(0, "solver", &objective_error);
+    let rejection = SeedRejection::from_objective_error(0, "solver", objective_error);
     assert!(matches!(
         rejection.failure,
         InnerFailure::InnerSolveNotConverged {
@@ -323,7 +324,7 @@ fn non_finite_post_seed_efs_cost_is_a_typed_iteration_rejection_2653() {
                 Ok(EfsEval {
                     cost,
                     steps: vec![-0.25; theta.len()],
-                    beta: None,
+                    beta: Some(Array1::from_elem(theta.len(), 42.0)),
                     psi_gradient: None,
                     psi_indices: None,
                     inner_hessian_scale: None,
@@ -338,7 +339,7 @@ fn non_finite_post_seed_efs_cost_is_a_typed_iteration_rejection_2653() {
     assert_eq!(the_plan.solver, Solver::Efs);
     let seed = Array1::from_elem(3, 1.0);
 
-    let error = match run_fixed_point_outer_solver(
+    let request = match run_fixed_point_outer_solver(
         &mut obj,
         capability.theta_layout(),
         capability.barrier_config.clone(),
@@ -349,7 +350,7 @@ fn non_finite_post_seed_efs_cost_is_a_typed_iteration_rejection_2653() {
         "EFS",
         "EFS failed",
     ) {
-        Err(FixedPointOuterRunError::IterationRejected(error)) => error,
+        Err(FixedPointOuterRunError::IterationRejected(request)) => request,
         Err(FixedPointOuterRunError::SeedRejected(_)) => {
             panic!("the finite seed evaluation succeeded; this is not a seed rejection")
         }
@@ -361,6 +362,7 @@ fn non_finite_post_seed_efs_cost_is_a_typed_iteration_rejection_2653() {
         }
         Ok(_) => panic!("the synthetic post-seed non-finite cost must be rejected"),
     };
+    let error = &request.refusal;
     assert!(error.is_recoverable());
     assert_eq!(
         error.message(),
@@ -370,6 +372,116 @@ fn non_finite_post_seed_efs_cost_is_a_typed_iteration_rejection_2653() {
         efs_calls.load(Ordering::Relaxed),
         2,
         "one finite seed evaluation and one rejected iteration must be observed"
+    );
+    assert_eq!(request.checkpoint.point, seed);
+    assert_eq!(
+        request.checkpoint.sample.value.to_bits(),
+        (1.5_f64).to_bits()
+    );
+    assert_eq!(request.checkpoint.sample.step, Array1::from_elem(3, -0.25));
+    assert_eq!(request.checkpoint.iterations, 0);
+    assert_eq!(request.checkpoint.plan_used.solver, Solver::Efs);
+    let inner_seed = request
+        .checkpoint
+        .inner_seed
+        .expect("the continuation must preserve beta from the exact finite rho");
+    assert_eq!(inner_seed.theta, seed);
+    assert_eq!(inner_seed.beta, Array1::from_elem(3, 42.0));
+}
+
+/// #2653 root cause: a rho-local refusal belongs to the proposed next point,
+/// not to the finite EFS incumbent that proposed it.  The automatic fallback
+/// must start BFGS exactly once at that incumbent; generating another EFS or
+/// BFGS seed destroys the basin evidence the completed iterations already
+/// established.
+#[test]
+fn rho_local_efs_refusal_resumes_bfgs_from_last_finite_incumbent_once_2653() {
+    let efs_calls = Arc::new(AtomicUsize::new(0));
+    let refusal_seen = Arc::new(AtomicBool::new(false));
+    let first_fallback_eval = Arc::new(Mutex::new(None::<Array1<f64>>));
+    let initial = Array1::from_elem(3, 2.0);
+    let expected_checkpoint = Array1::from_elem(3, 1.75);
+    let problem = OuterProblem::new(3)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_initial_rho(initial)
+        .with_max_iter(40);
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), theta: &Array1<f64>| Ok(0.5 * theta.dot(theta)),
+        {
+            let refusal_seen = Arc::clone(&refusal_seen);
+            let first_fallback_eval = Arc::clone(&first_fallback_eval);
+            move |_: &mut (), theta: &Array1<f64>| {
+                if refusal_seen.load(Ordering::Relaxed) {
+                    let mut slot = first_fallback_eval
+                        .lock()
+                        .expect("fallback-point observation lock poisoned");
+                    if slot.is_none() {
+                        *slot = Some(theta.clone());
+                    }
+                }
+                Ok(OuterEval {
+                    cost: 0.5 * theta.dot(theta),
+                    gradient: theta.clone(),
+                    hessian: HessianValue::Unavailable,
+                    inner_beta_hint: None,
+                })
+            }
+        },
+        None::<fn(&mut ())>,
+        {
+            let efs_calls = Arc::clone(&efs_calls);
+            let refusal_seen = Arc::clone(&refusal_seen);
+            Some(move |_: &mut (), theta: &Array1<f64>| {
+                let call = efs_calls.fetch_add(1, Ordering::Relaxed);
+                let (cost, step, beta) = match call {
+                    0 => (
+                        0.5 * theta.dot(theta),
+                        vec![-0.25; theta.len()],
+                        Some(Array1::from_elem(theta.len(), 7.0)),
+                    ),
+                    1 => (
+                        0.5 * theta.dot(theta),
+                        vec![-0.125; theta.len()],
+                        Some(Array1::from_elem(theta.len(), 9.0)),
+                    ),
+                    _ => {
+                        refusal_seen.store(true, Ordering::Relaxed);
+                        (f64::INFINITY, vec![0.0; theta.len()], None)
+                    }
+                };
+                Ok(EfsEval {
+                    cost,
+                    steps: step,
+                    beta,
+                    psi_gradient: None,
+                    psi_indices: None,
+                    inner_hessian_scale: None,
+                    logdet_enclosure_gap: None,
+                    consecutive_restored_incumbents: None,
+                })
+            })
+        },
+    );
+
+    let result = problem
+        .run(&mut obj, "rho-local EFS continuation #2653")
+        .expect("BFGS must continue and certify the finite EFS incumbent");
+    assert_eq!(result.plan_used.solver, Solver::Bfgs);
+    assert!(result.converged());
+    assert_eq!(
+        efs_calls.load(Ordering::Relaxed),
+        3,
+        "the refused EFS proposal must route immediately; no new EFS seed may start"
+    );
+    assert_eq!(
+        first_fallback_eval
+            .lock()
+            .expect("fallback-point observation lock poisoned")
+            .as_ref(),
+        Some(&expected_checkpoint),
+        "the first fallback evaluation must be the exact last finite EFS point"
     );
 }
 

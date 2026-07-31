@@ -2357,6 +2357,7 @@ fn hybrid_efs_backtracking_uses_half_step_after_first_rejection() {
         layout: cap.theta_layout(),
         barrier_config: None,
         fixed_point_tolerance: 1e-8,
+        evaluated_inner_seed: Arc::new(Mutex::new(None)),
         consecutive_psi_zero_iters: 0,
         last_restored_incumbent_streak: None,
         recurrent_incumbent_exit: Arc::new(Mutex::new(None)),
@@ -2434,6 +2435,7 @@ fn hybrid_efs_backtracking_propagates_fatal_cost_failure() {
         layout: cap.theta_layout(),
         barrier_config: None,
         fixed_point_tolerance: 1.0e-8,
+        evaluated_inner_seed: Arc::new(Mutex::new(None)),
         consecutive_psi_zero_iters: 0,
         last_restored_incumbent_streak: None,
         recurrent_incumbent_exit: Arc::new(Mutex::new(None)),
@@ -2511,6 +2513,7 @@ fn fixed_point_stops_on_second_consecutive_restored_incumbent_2241() {
         layout: cap.theta_layout(),
         barrier_config: None,
         fixed_point_tolerance: 1.0e-8,
+        evaluated_inner_seed: Arc::new(Mutex::new(None)),
         consecutive_psi_zero_iters: 0,
         last_restored_incumbent_streak: None,
         recurrent_incumbent_exit: Arc::new(Mutex::new(None)),
@@ -5299,6 +5302,12 @@ fn lower_model_rail_singleton_search_preserves_derivative_in_screening_and_mint_
                 request.reason()
             )
         }
+        PlanRunOutcome::FixedPointContinuationRequested(request) => {
+            panic!(
+                "ARC singleton unexpectedly requested fixed-point continuation: {}",
+                request.refusal
+            )
+        }
     };
     assert!(
         objective.state.calls.iter().any(|call| {
@@ -5398,6 +5407,12 @@ fn model_upper_rail_masks_derivative_in_screening_and_mint_2514() {
             panic!(
                 "ARC singleton unexpectedly requested first-order fallback: {}",
                 request.reason()
+            )
+        }
+        PlanRunOutcome::FixedPointContinuationRequested(request) => {
+            panic!(
+                "ARC singleton unexpectedly requested fixed-point continuation: {}",
+                request.refusal
             )
         }
     };
