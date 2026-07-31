@@ -1750,8 +1750,57 @@ impl<'a> RemlState<'a> {
         // `build_dense_original_assembly` is only called when there is no
         // active constraint free-basis, so the no-hard-constraints condition
         // is always satisfied here.
+        // #2644: the ingredients of `H = XᵀWX + Σ λ_k S_k + δI`, in the
+        // ORIGINAL basis that `h_total_original` and `self.canonical_penalties`
+        // both live in. `reml::laml_logdet` prices `log|H|` from a root of that
+        // sum instead of from the assembled matrix's spectrum, whose error is
+        // `O(ε·κ(H))` — the residual noise that stalls the outer line search
+        // once one λ has run away. It verifies for itself that the root
+        // reproduces the caller's `H`, and declines otherwise, so a Firth term,
+        // an active-constraint projection or a frame mismatch keeps the
+        // assembled value rather than silently getting the wrong one.
+        let root_lambdas: Vec<f64> =
+            gam_problem::checked_exp_log_strengths(rho.iter().copied()).unwrap_or_default();
+        let root_inputs = super::laml_logdet::HessianRootInputs {
+            design: self.x(),
+            weights: pirls_result.finalweights.view(),
+            penalties: self.canonical_penalties.as_slice(),
+            lambdas: &root_lambdas,
+            delta: ridge_passport.delta(),
+        };
         let hessian_op: std::sync::Arc<dyn super::reml_outer_engine::HessianFactorization> = {
-            use super::reml_outer_engine::DenseCholeskyOperator;
+            use super::reml_outer_engine::{DenseCholeskyOperator, HessianFactorization as _};
+            let build_spectral = || -> Result<DenseSpectralOperator, EstimationError> {
+                let mut op = DenseSpectralOperator::from_symmetric_with_mode(
+                    &h_total_original,
+                    hessian_mode,
+                )
+                .map_err(|e| {
+                    EstimationError::InvalidInput(format!(
+                        "DenseSpectralOperator from original-basis PIRLS Hessian: {e}"
+                    ))
+                })?;
+                if let Some(lift) = op.logdet_regularization_lift()
+                    && lift.abs() <= f64::EPSILON.sqrt() * (1.0 + op.logdet().abs())
+                    && let Some(exact) = *bundle.root_scale_hessian_logdet.get_or_init(|| {
+                        if super::laml_logdet::assembled_logdet_is_resolved(
+                            op.raw_spectrum(),
+                            op.logdet(),
+                        ) {
+                            return None;
+                        }
+                        super::laml_logdet::root_scale_hessian_logdet(
+                            &root_inputs,
+                            &h_total_original,
+                            op.raw_spectrum(),
+                            op.logdet(),
+                        )
+                    })
+                {
+                    op.install_root_scale_logdet(exact);
+                }
+                Ok(op)
+            };
             if mode == super::reml_outer_engine::EvalMode::ValueOnly
                 && matches!(hessian_mode, PseudoLogdetMode::Smooth)
                 && !c_nontrivial
@@ -1760,31 +1809,38 @@ impl<'a> RemlState<'a> {
                 match DenseCholeskyOperator::from_spd_with_smooth_logdet_agreement(
                     &h_total_original,
                 ) {
-                    Ok(chol_op) => std::sync::Arc::new(chol_op),
-                    Err(_) => std::sync::Arc::new(
-                        DenseSpectralOperator::from_symmetric_with_mode(
-                            &h_total_original,
-                            hessian_mode,
-                        )
-                        .map_err(|e| {
-                            EstimationError::InvalidInput(format!(
-                                "DenseSpectralOperator from original-basis PIRLS Hessian: {e}"
-                            ))
-                        })?,
-                    ),
+                    Ok(mut chol_op) => {
+                        // The Cholesky lane is the LINE SEARCH's lane, so it is
+                        // the one whose noise the optimizer actually walks on.
+                        // It gets the same upgrade, judged against the same
+                        // spectrum-derived budget — obtained here from one
+                        // eigenvalue pass over `h_total_original`, paid only on
+                        // the ill-conditioned branch that the resolution gate
+                        // below has already selected.
+                        let assembled = chol_op.logdet();
+                        if let Some(exact) = *bundle.root_scale_hessian_logdet.get_or_init(|| {
+                            let spectrum =
+                                super::laml_logdet::symmetric_spectrum(&h_total_original)?;
+                            if super::laml_logdet::assembled_logdet_is_resolved(
+                                &spectrum, assembled,
+                            ) {
+                                return None;
+                            }
+                            super::laml_logdet::root_scale_hessian_logdet(
+                                &root_inputs,
+                                &h_total_original,
+                                &spectrum,
+                                assembled,
+                            )
+                        }) {
+                            chol_op.install_root_scale_logdet(exact);
+                        }
+                        std::sync::Arc::new(chol_op)
+                    }
+                    Err(_) => std::sync::Arc::new(build_spectral()?),
                 }
             } else {
-                std::sync::Arc::new(
-                    DenseSpectralOperator::from_symmetric_with_mode(
-                        &h_total_original,
-                        hessian_mode,
-                    )
-                    .map_err(|e| {
-                        EstimationError::InvalidInput(format!(
-                            "DenseSpectralOperator from original-basis PIRLS Hessian: {e}"
-                        ))
-                    })?,
-                )
+                std::sync::Arc::new(build_spectral()?)
             }
         };
 

@@ -777,6 +777,51 @@ pub(crate) fn dense_spectral_stage_log(signature: &str, elapsed_s: f64) {
     });
 }
 
+impl DenseSpectralOperator {
+    /// The raw (unregularized) eigenvalues of the ASSEMBLED `H`, in eigenpair
+    /// order. Read by `reml::laml_logdet` to bound this route's own error.
+    pub(crate) fn raw_spectrum(&self) -> &[f64] {
+        &self.raw_eigenvalues
+    }
+
+    /// How far `cached_logdet` is from the plain `Σ log σ_i(H)`, i.e. how much
+    /// the smooth spectral floor `r_ε` is actually changing the object.
+    ///
+    /// `None` when the two are not comparable at all: an eigenpair is masked
+    /// out (`HardPseudo` prices a pseudo-determinant over a SUBSPACE, which a
+    /// full log-determinant is not), or the raw spectrum is not strictly
+    /// positive (then `Σ log σ` does not exist).
+    ///
+    /// `Smooth` mode always sets a nonzero `ε`, but `r_ε(σ) → σ` for `σ ≫ ε`,
+    /// so on a Hessian whose smallest eigenvalue sits well above the floor the
+    /// lift is zero to machine precision and `cached_logdet` IS `log|H|`.
+    /// Testing `ε == 0` would have declined every real fit; testing the lift
+    /// asks the question that matters (#2644).
+    pub(crate) fn logdet_regularization_lift(&self) -> Option<f64> {
+        if !self.active_mask.iter().all(|&a| a) {
+            return None;
+        }
+        let mut plain = 0.0_f64;
+        for &sigma in &self.raw_eigenvalues {
+            if !(sigma.is_finite() && sigma > 0.0) {
+                return None;
+            }
+            plain += sigma.ln();
+        }
+        Some(self.cached_logdet - plain)
+    }
+
+    /// Replace `cached_logdet` with a value computed at ROOT scale.
+    ///
+    /// Every other kernel on this operator (traces, solves, the logdet
+    /// Hessian) keeps the assembled eigensystem: those are `O(rank)` quantities
+    /// whose error does not scale with `κ(H)` the way a log-determinant's does,
+    /// and they need the eigenvectors anyway. Only the scalar moves.
+    pub(crate) fn install_root_scale_logdet(&mut self, value: f64) {
+        self.cached_logdet = value;
+    }
+}
+
 impl HessianFactorization for DenseSpectralOperator {
     fn logdet(&self) -> f64 {
         self.cached_logdet
