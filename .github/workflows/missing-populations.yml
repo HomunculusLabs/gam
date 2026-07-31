@@ -303,8 +303,8 @@ jobs:
     env:
       POPULATION_ID: ${{ matrix.population }}
       # Test-execution walls are permitted by SPEC.md. The slow population gets
-      # one bounded 40-minute serial session; torch gets 20 minutes. Compilation
-      # and environment preparation are outside these subject budgets.
+      # one bounded 40-minute work-conserving session; torch gets 20 minutes.
+      # Compilation and environment preparation are outside these subject budgets.
       PYTEST_BUDGET_SECONDS: ${{ matrix.population == 'slow' && '2400' || '1200' }}
     steps:
       - name: Require an immutable runtime (infrastructure — not a test result)
@@ -596,8 +596,12 @@ jobs:
           PY
           )
 
+          # JUnit includes skipped cases in its `tests` total. A skipped item was
+          # reported, but its subject never executed, so it cannot satisfy a
+          # reachability proof.
           complete=false
-          if [[ "$junit_tests" == "${{ steps.collect.outputs.count }}" ]]; then
+          if [[ "$junit_tests" == "${{ steps.collect.outputs.count }}" \
+             && "$junit_skipped" == "0" ]]; then
             complete=true
           fi
           timed_out=false
@@ -619,7 +623,7 @@ jobs:
             exit 1
           fi
           if [[ "$complete" != "true" ]]; then
-            echo "::error title=${POPULATION_ID} execution incomplete::JUnit recorded ${junit_tests} of ${{ steps.collect.outputs.count }} collected tests; refusing a partial verdict."
+            echo "::error title=${POPULATION_ID} execution incomplete::JUnit reported ${junit_tests} of ${{ steps.collect.outputs.count }} collected tests with ${junit_skipped} skipped; every collected item must execute."
             exit 1
           fi
           if [[ "$status" -ne 0 ]]; then
@@ -690,6 +694,8 @@ jobs:
             state="FAIL"
             if [[ "$RUN_TIMED_OUT" == "true" ]]; then
               reason="The fully collected population exceeded its execution budget."
+            elif [[ "$RUN_SKIPPED" =~ ^[1-9][0-9]*$ ]]; then
+              reason="The population reported ${RUN_SKIPPED} skipped test(s); skipped is not executed."
             elif [[ "$RUN_COMPLETE" != "true" ]]; then
               reason="The test process did not report every collected test."
             else
