@@ -107,9 +107,18 @@ static STDERR_LOGGER: StderrLogger = StderrLogger;
 /// backend; keeping the test at its owning crate avoids linking the unrelated
 /// root quality catalog.
 fn init_parallelism() {
-    if std::env::var_os("RUST_LOG").is_some() {
-        let _ = log::set_logger(&STDERR_LOGGER);
-        log::set_max_level(log::LevelFilter::Info);
+    // The `RUST_LOG` gate this used to carry is not expressible here: the ban
+    // scanner forbids `env::var`, `env::var_os`, `env::vars` and `env::vars_os`
+    // outright, so reading the environment to decide verbosity is out. Install
+    // the logger unconditionally instead and cap the level at `Warn`, which
+    // reproduces the behaviour of the unset-`RUST_LOG` path (this acceptance
+    // stays quiet) while leaving `STDERR_LOGGER` as the registered sink.
+    //
+    // `set_logger` returns a `Result` because the global backend may already be
+    // owned by another test in this binary; branch on it rather than discarding
+    // it with `let _ =`, which the scanner also rejects.
+    if log::set_logger(&STDERR_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
     }
     faer::set_global_parallelism(faer::Par::rayon(0));
 }
