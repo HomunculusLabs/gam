@@ -343,6 +343,29 @@ def _exact_sparse_support_summary(
     }
 
 
+def _install_solver_log(level: str) -> None:
+    """Set the NATIVE solver log level inside the process that will do the fit.
+
+    Each rung fits in a `spawn` child, so a level set in the parent never
+    reaches the solver: `gamfit._rust.set_log_level` is programmatic (RUST_LOG
+    is inert through the wheel) and the child re-imports `gamfit` at its quiet
+    `warn` default. Every profile of this example has therefore had to report
+    "still inside the native fit, no first event" rather than naming a phase —
+    the trace did not exist, not because the solver is silent but because the
+    process that could have asked for it is not the process that fits.
+
+    `warn` is the default and a deliberate no-op: that stream carries real
+    per-evaluation compute (eigendecompositions), so quieting it is a
+    measurement choice, not only a tidiness one. Raise it for diagnosis runs,
+    not for the run you are timing.
+    """
+    if level == "warn":
+        return
+    import gamfit
+
+    gamfit._rust.set_log_level(level)
+
+
 def _manifold_fit_worker(
     z_tr,
     z_te,
@@ -353,8 +376,10 @@ def _manifold_fit_worker(
     seed,
     manifold_iterations,
     separation_barrier_strength,
+    solver_log,
 ):
     """Fit one dense/curved manifold arm and run coherent OOS inference."""
+    _install_solver_log(solver_log)
     from gamfit import sae_manifold_fit
 
     topology = "circle" if arm == "curved" else "linear"
@@ -471,8 +496,10 @@ def _linear_sparse_fit_worker(
     active_support,
     linear_epochs,
     score_mode,
+    solver_log,
 ):
     """Fit the production sparse-linear lane and explicitly route both splits."""
+    _install_solver_log(solver_log)
     from gamfit import sparse_dictionary_fit
 
     fit_started = time.perf_counter()
@@ -567,6 +594,7 @@ def _fit_ev(
     active_support: int,
     linear_score_mode: str,
     separation_barrier_strength: float | None,
+    solver_log: str,
 ) -> dict:
     """Fit one dictionary through its admitted production engine.
 
@@ -590,6 +618,7 @@ def _fit_ev(
                 active_support,
                 linear_epochs,
                 linear_score_mode,
+                solver_log,
             )
         else:
             future = executor.submit(
@@ -603,6 +632,7 @@ def _fit_ev(
                 seed,
                 manifold_iterations,
                 separation_barrier_strength,
+                solver_log,
             )
         result = future.result()
     finally:
@@ -771,6 +801,18 @@ def main() -> None:
         default=OFFICIAL_QWEN_W32K_EV,
         help="held-out EV of the official Qwen W32K linear-SAE reference from figH",
     )
+    ap.add_argument(
+        "--solver-log",
+        choices=("off", "error", "warn", "info", "debug", "trace"),
+        default="warn",
+        help=(
+            "native solver log level INSIDE each fit child (default 'warn', the "
+            "library default and a no-op). 'info' emits the [SAE-REFINE] / "
+            "[SAE-NEWTON] / [OUTER] trace and the process-monitor stall report, "
+            "which is the only way to see inside a rung that is not returning; "
+            "it also costs real compute, so do not time a run that raises it"
+        ),
+    )
     ap.add_argument("--out", help="optional JSON file for the measured table")
     ap.add_argument(
         "--sep-mu",
@@ -866,6 +908,7 @@ def main() -> None:
             args.active_support,
             args.linear_score_mode,
             args.sep_mu,
+            args.solver_log,
         )
         linear = _fit_ev(
             z_tr,
@@ -878,6 +921,7 @@ def main() -> None:
             args.active_support,
             args.linear_score_mode,
             args.sep_mu,
+            args.solver_log,
         )
         ev_h_pca = hybrid["test_ev"]
         ev_l_pca = linear["test_ev"]

@@ -154,6 +154,7 @@ def test_2267_overcomplete_curved_worker_passes_exact_topk(monkeypatch):
         42,
         7,
         60.0,
+        "warn",
     )
 
     assert len(calls) == 1
@@ -219,7 +220,7 @@ def test_2267_overcomplete_linear_worker_uses_sparse_transform_then_decode(monke
 
     train = np.array([[1.0, 0.0], [0.0, 2.0], [-1.0, 1.0]], dtype=float)
     test = np.array([[2.0, 1.0], [-2.0, 3.0]], dtype=float)
-    result = driver._linear_sparse_fit_worker(train, test, 3, 2, 5, "off")
+    result = driver._linear_sparse_fit_worker(train, test, 3, 2, 5, "off", "warn")
 
     assert calls[0] == (
         "fit",
