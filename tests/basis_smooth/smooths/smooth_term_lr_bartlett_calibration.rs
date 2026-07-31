@@ -174,6 +174,13 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
     let mut sum_p_unc = 0.0;
     let mut sum_p_cor = 0.0;
     let mut ref_df = 0.0;
+    // The Bartlett factor itself. `c = E[W]/d` and `W* = W/c`, so if `c` were
+    // formed from the statistic's ACTUAL null mean, `mean_w*` would land on `d`
+    // by construction. Reporting `c` distinguishes "the correction is applied
+    // wrongly" from "the correction is applied faithfully to a second-order mean
+    // that disagrees with the empirical one" -- two different defects, and the
+    // means alone cannot tell them apart.
+    let mut sum_factor = 0.0;
     let mut count = 0usize;
     for rep in 0..REPS {
         let data = null_replicate(N, 1000 + rep as u64);
@@ -189,6 +196,7 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
             continue;
         }
         sum_w += r.statistic_lr;
+        sum_factor += r.bartlett_factor;
         sum_w_star += r.statistic_corrected;
         sum_p_unc += r.p_value_uncorrected;
         sum_p_cor += r.p_value_corrected;
@@ -205,6 +213,7 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
     let mean_p_unc = sum_p_unc / count as f64;
     let mean_p_cor = sum_p_cor / count as f64;
     let mean_d = ref_df / count as f64;
+    let mean_factor = sum_factor / count as f64;
 
     // The corrected statistic's mean must be closer to the χ²_d mean (= d) than
     // the uncorrected one — the defining property of the Bartlett correction.
@@ -232,7 +241,10 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
         err_cor < err_unc,
         "Bartlett correction must move the LR mean toward d: \
          |mean(W*)−d|={err_cor:.4} must be < |mean(W)−d|={err_unc:.4} \
-         (mean_w={mean_w:.3}, mean_w*={mean_w_star:.3}, d={mean_d:.3})"
+         (mean_w={mean_w:.3}, mean_w*={mean_w_star:.3}, d={mean_d:.3}, \
+          mean bartlett_factor c={mean_factor:.6}; c=E[W]/d and W*=W/c, so a c\
+          near 1 means the analytic second-order mean reported E[W]~d while the\
+          empirical mean is {mean_w:.3} -- the cumulant assembly, not the factor)"
     );
 
     // The corrected p-values must be closer to the Uniform(0,1) mean 0.5 than
