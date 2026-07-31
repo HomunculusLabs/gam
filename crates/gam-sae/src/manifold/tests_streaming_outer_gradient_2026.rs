@@ -404,6 +404,100 @@ fn production_objective_forced_streaming_value_gradient_matches_dense() {
     }
 }
 
+/// #2515 blocker 3 — WHICH assembly the stale-pair guard is comparing.
+///
+/// `production_objective_forced_streaming_value_gradient_matches_dense` dies on
+/// `matrix_free_arrow_operator_apply refuses a stale matrix-free system/cache
+/// pair`, with the MANIFOLD fingerprint equal and the ROW-HESSIAN fingerprint
+/// different. The pair is `converged_cache` — factored during
+/// `converge_inner_for_undamped_logdet` from an `assemble_arrow_schur` on the term
+/// itself — against the system `assemble_full_matrix_free_evidence_system`
+/// re-assembles afterwards through `materialize_chunk`. Two candidate causes, and
+/// they are separable at a FIXED state with no solve involved:
+///
+///  (a) the collapse-prevention gates. `converge_inner_for_undamped_logdet`
+///      freezes them, converges, then RESTORES the flag, so the later assembly
+///      re-refreshes all three from the moved state
+///      (`assemble_arrow_schur_scaled` is gated on `streaming_gates_frozen`).
+///  (b) the two assemblers are not the same code path. One goes through
+///      `materialize_chunk`, which re-materialises the row window and copies a
+///      SUBSET of the term's state; the other assembles from the term directly.
+///
+/// (a) is real — measured below, the gate state alone moves the row fingerprint.
+/// But it is not sufficient: holding the freeze across the whole criterion
+/// evaluation leaves `production_objective_..._matches_dense` failing with the
+/// identical refusal class. So this pins BOTH comparisons, at one frozen state, so
+/// the next reader does not have to re-derive which one is load-bearing.
+#[test]
+fn evidence_assembly_row_fingerprint_sources_2515() {
+    let target = planted_circle_embedded(32, 4, 0.02);
+    let mut term = planted_circle_seed_term(target.view(), PlantedCircleAssignmentMode::Softmax).0;
+    term.atoms[0].basis_second_jet = Some(Arc::new(
+        PeriodicHarmonicEvaluator::new(3).expect("periodic evaluator"),
+    ));
+    let rho = SaeManifoldRho::new(0.0, 0.05_f64.ln(), vec![Array1::<f64>::zeros(1)]);
+
+    // Freeze once, exactly as converge_inner_for_undamped_logdet does on entry.
+    term.refresh_decoder_repulsion_gate();
+    term.refresh_barrier_coactivation_gate();
+    term.refresh_amplitude_barrier_gate();
+    term.streaming_gates_frozen = true;
+
+    // (b) TWO ASSEMBLERS, ONE STATE, GATES HELD FROZEN THROUGHOUT. Nothing about
+    // the gates can differ here, so any fingerprint gap is the assembler itself.
+    let direct = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("direct arrow-Schur assembly");
+    let (chunked, _chunk_term) = term
+        .assemble_full_matrix_free_evidence_system(target.view(), &rho, None, None)
+        .expect("matrix-free evidence assembly");
+    let direct_fp = direct.current_row_hessian_fingerprint();
+    let chunked_fp = chunked.current_row_hessian_fingerprint();
+    println!(
+        "[#2515 B3-SOURCE] gates frozen throughout: direct_assembly_row_fp={direct_fp} \
+         chunked_evidence_row_fp={chunked_fp} equal={}",
+        direct_fp == chunked_fp
+    );
+
+    // (a) THE GATE STATE ALONE, at one state, same assembler both times.
+    let (frozen, _) = term
+        .assemble_full_matrix_free_evidence_system(target.view(), &rho, None, None)
+        .expect("frozen-gate evidence system");
+    term.streaming_gates_frozen = false;
+    let (refreshed, _) = term
+        .assemble_full_matrix_free_evidence_system(target.view(), &rho, None, None)
+        .expect("refreshed-gate evidence system");
+    println!(
+        "[#2515 B3-SOURCE] same assembler, gate state only: frozen_row_fp={} \
+         refreshed_row_fp={} equal={}",
+        frozen.row_hessian_fingerprint,
+        refreshed.row_hessian_fingerprint,
+        frozen.row_hessian_fingerprint == refreshed.row_hessian_fingerprint
+    );
+
+    // The MANIFOLD fingerprint is what makes the production refusal message
+    // diagnostic rather than ambiguous: it stays equal under every variation here,
+    // so a row-fingerprint mismatch can never be misread as the atoms changing.
+    // This is the invariant the guard's own message relies on, and it is stable
+    // across whatever repair lands.
+    assert_eq!(
+        direct.manifold_mode_fingerprint, chunked.manifold_mode_fingerprint,
+        "#2515: the two assemblers must agree on the MANIFOLD fingerprint — the \
+         stale-pair guard reports it alongside the row fingerprint precisely so a \
+         row mismatch can be read as an operator difference and not as a changed \
+         dictionary"
+    );
+    assert_eq!(
+        frozen.manifold_mode_fingerprint, refreshed.manifold_mode_fingerprint,
+        "#2515: the collapse-prevention gate state must not move the MANIFOLD \
+         fingerprint; it is a property of the atoms, not of the penalty gates"
+    );
+    // Non-vacuity: a fingerprint of 0 is the constructor sentinel, and comparing
+    // two sentinels would satisfy the assertions above while measuring nothing.
+    assert_ne!(direct_fp, 0, "#2515: the direct assembly must publish a real row fingerprint");
+    assert_ne!(chunked_fp, 0, "#2515: the chunked assembly must publish a real row fingerprint");
+}
+
 /// Hybrid-EFS must replace the former held-zero non-ordered Beta--Bernoulli assignment coordinate
 /// with the exact penalized quasi-Laplace derivative and expose that same root-equivalent update to
 /// the final fixed-point proof hook. This dense fixture exercises the exact dense
