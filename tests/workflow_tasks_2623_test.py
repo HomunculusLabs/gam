@@ -82,6 +82,7 @@ class WorkflowTasks2623Tests(unittest.TestCase):
         verdict = _TASKS.matched_benchmark_verdict(rows)
         comparison = verdict["comparisons"][0]
         self.assertTrue(comparison["passed"])
+        self.assertTrue(verdict["observed_scope_certified"])
         self.assertFalse(verdict["certified"], "one targeted scenario cannot certify the full suite")
 
         rows[0]["rmse"] = 0.4 + 0.5 * _TASKS.ACCURACY_NUMERICAL_EQUIVALENCE
@@ -98,6 +99,7 @@ class WorkflowTasks2623Tests(unittest.TestCase):
         failed = [m["measure"] for m in comparison["accuracy"] if not m["passed"]]
         self.assertEqual(failed, ["rmse"])
         self.assertFalse(comparison["passed"])
+        self.assertFalse(verdict["observed_scope_certified"])
 
         rows[0]["rmse"] = 0.4
         rows[0]["r2"] = 0.7999999

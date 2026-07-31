@@ -411,7 +411,8 @@ def matched_benchmark_verdict(rows, *, maximum_slowdown=1.2):
         else None
     )
     complete = not missing_scenarios and observed_scenarios == expected_scenarios
-    certified = complete and bool(comparisons) and all(c["passed"] for c in comparisons)
+    observed_scope_certified = bool(comparisons) and all(c["passed"] for c in comparisons)
+    certified = complete and observed_scope_certified
     return {
         "contract": {
             "maximum_slowdown": maximum_slowdown,
@@ -429,6 +430,7 @@ def matched_benchmark_verdict(rows, *, maximum_slowdown=1.2):
         "full_suite": complete,
         "comparisons": comparisons,
         "worst_performance_measure": worst_performance,
+        "observed_scope_certified": observed_scope_certified,
         "certified": certified,
     }
 
@@ -571,7 +573,10 @@ def format_results():
             "### Strict matched benchmark verdict",
             "",
             (
-                f"**{'CERTIFIED' if benchmark_verdict['certified'] else 'NOT CERTIFIED'}** — "
+                "**Observed scope "
+                f"{'PASSED' if benchmark_verdict['observed_scope_certified'] else 'FAILED'}; "
+                "full suite "
+                f"{'CERTIFIED' if benchmark_verdict['certified'] else 'NOT CERTIFIED'}** — "
                 f"{benchmark_verdict['observed_scenario_count']}/"
                 f"{benchmark_verdict['configured_scenario_count']} scenarios observed; "
                 f"{len(benchmark_verdict['comparisons'])} matched comparison(s)."
