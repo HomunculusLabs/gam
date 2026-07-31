@@ -808,10 +808,23 @@ fn deterministic_gaussian_standard_fit(
             let (equilibrated, scale) =
                 gam_linalg::decision::equilibrate_gram(&free_information);
             let chol = equilibrated.cholesky(faer::Side::Lower).map_err(|error| {
+                // `A = Z. X.WX Z` is PSD by construction and positive DEFINITE only
+                // when the data identify every free direction, i.e.
+                // `rank(X Z) = dim(Z)`. Since `rank(X Z) <= n`, a `free_dim > n`
+                // makes `A` singular BY CONSTRUCTION and no conditioning or
+                // equilibration can rescue it -- so report the two numbers that
+                // decide it. That case is reachable on purpose: a double-penalized
+                // smooth deliberately admits `p > n` (`bspline_basis_min_rows`),
+                // on the stated grounds that the n-vs-rank decision is "owned
+                // downstream by the inner pivoted factorization" -- and this
+                // Cholesky is not pivoted and owns no such decision.
+                let rows = x_dense.nrows();
                 WorkflowError::IntegrationFailed {
                     reason: format!(
                         "deterministic Gaussian boundary tangent precision is not positive \
-                         definite: {error}"
+                         definite: {error} (free_dim={free_dim}, n={rows}, p={p}; \
+                         free_dim > n means Z. X.WX Z is rank-deficient by construction, \
+                         since rank(X Z) <= n)"
                     ),
                 }
             })?;
