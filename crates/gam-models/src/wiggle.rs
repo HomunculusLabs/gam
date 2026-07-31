@@ -207,12 +207,27 @@ pub fn canonical_wiggle_function_penalties(
             }
             joint.scaled_add(1.0 / mean_diagonal, matrix);
         }
-        let function_gram =
-            gam_terms::basis::ispline_function_gram(knots.view(), internal_degree)
-                .map_err(|error| error.to_string())?;
+        // Failure here is propagated rather than swallowed. Skipping the closure
+        // on a set we cannot certify as closed would ship exactly the criterion
+        // this exists to prevent, and silently — a refusal naming the reason is
+        // the strictly more useful outcome.
+        let function_gram = gam_terms::basis::ispline_function_gram(knots.view(), internal_degree)
+            .map_err(|error| {
+                format!(
+                    "wiggle gauge closure needs the I-spline function Gram to decide whether the \
+                     assembled penalty set leaves a reparameterization of the index unpenalized, \
+                     and it could not be built: {error}"
+                )
+            })?;
         if let Some(gauge_shrinkage) =
-            gam_terms::basis::function_space_nullspace_shrinkage(&joint, &function_gram)
-                .map_err(|error| error.to_string())?
+            gam_terms::basis::function_space_nullspace_shrinkage(&joint, &function_gram).map_err(
+                |error| {
+                    format!(
+                        "wiggle gauge closure could not resolve the joint null space of the \
+                         assembled penalty set: {error}"
+                    )
+                },
+            )?
         {
             blocks.push(WigglePenaltyBlockKind::NullspaceShrinkage {
                 derivative_order: primary_order,
@@ -672,6 +687,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The gauge closure must be **invisible** to every configuration that was
+    /// already well posed — most of all the shipped default.
+    ///
+    /// `WigglePenaltyConfig::cubic_triple_operator_default` is `degree = 3`,
+    /// `orders = [1, 2, 3]`, `double_penalty = true`. Order one is full rank on
+    /// the anchored basis (`roughness_nullspace_dim = order − 1 = 0`), so that
+    /// set already leaves nothing free and the closure must append nothing: the
+    /// emitted topology has to stay exactly three roughness blocks, in order,
+    /// with no shrinkage coordinate anywhere. Asserted on the topology rather
+    /// than on a count so a coordinate appearing in the middle is caught too.
+    ///
+    /// This is the assertion that would fail if the joint-null test were done
+    /// on the RAW sum instead of on the per-block-normalized one: the order-3
+    /// roughness dominates the order-1 roughness by orders of magnitude on these
+    /// knots, and an unnormalized sum reports a null space the set does not have.
+    #[test]
+    fn shipped_default_wiggle_topology_is_untouched_by_the_gauge_closure_2647() {
+        let seed = Array1::linspace(0.0, 1.0, 60);
+        let cfg = gam_spec::WigglePenaltyConfig::cubic_triple_operator_default();
+        let knots = initializewiggle_knots_from_seed(seed.view(), cfg.degree, cfg.num_internal_knots)
+            .expect("knot init for the shipped default");
+        let canonical = canonical_wiggle_function_penalties(
+            &knots,
+            cfg.degree,
+            &cfg.penalty_orders,
+            cfg.double_penalty,
+        )
+        .expect("shipped-default canonical penalties");
+        assert_eq!(
+            canonical.metadata.blocks,
+            vec![
+                WigglePenaltyBlockKind::Roughness {
+                    derivative_order: 1
+                },
+                WigglePenaltyBlockKind::Roughness {
+                    derivative_order: 2
+                },
+                WigglePenaltyBlockKind::Roughness {
+                    derivative_order: 3
+                },
+            ],
+            "the gauge closure changed the shipped-default wiggle penalty topology"
+        );
+        assert_eq!(canonical.matrices.len(), 3);
+        assert_eq!(canonical.nullspace_dims, vec![0, 1, 2]);
     }
 
     /// The concrete gauge, named: an order-two roughness leaves the LINEAR warp
