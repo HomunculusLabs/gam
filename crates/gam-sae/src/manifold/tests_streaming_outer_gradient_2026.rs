@@ -485,10 +485,25 @@ fn fixed_point_certificate_covers_ordered_beta_bernoulli_complete_gradient() {
     // The assignment-strength block at `outer_objective.rs:3219` leaves it `None`
     // when the coordinate is structurally absent, which is what this assertion is
     // about. But `infeasible_evaluation` (`outer_objective.rs:3079`) ALSO returns
-    // `psi_gradient: None`, together with `cost = INFINITY`, after discarding the
-    // `reason` string that says why the evaluation was refused. Blaming the gradient
-    // block for an infeasible evaluation sends the reader to the wrong file, so
-    // separate the two on the observable that distinguishes them.
+    // `psi_gradient: None`, together with `cost = INFINITY`, when the evaluation was
+    // refused outright.
+    //
+    // The refusal reason is NOT lost where it is produced: `infeasible_evaluation`
+    // embeds it in every coordinate certificate as `fixed-point evidence
+    // unavailable: {reason}`, and `efs_step_with_certificate` returns those
+    // certificates alongside the eval. It is lost one caller later, at
+    // `outer_objective.rs:3033`:
+    //
+    //     self.efs_step_with_certificate(rho_flat)
+    //         .map(|(evaluation, _)| evaluation)
+    //
+    // The `_` is the certificate vector. `eval_efs` is built on `efs_step`, so this
+    // test can only ever see the reasonless `EfsEval`. Recovering the reason here
+    // does not need a new field on `EfsEval` (26 construction sites) — it needs a
+    // caller that keeps the certificates.
+    //
+    // Until then, separate the two producers on the observable that distinguishes
+    // them, so an infeasible evaluation is not reported as a missing gradient block.
     assert!(
         iteration.cost.is_finite(),
         "the evaluation was refused before any gradient block was reached \
