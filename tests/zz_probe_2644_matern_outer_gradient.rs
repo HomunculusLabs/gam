@@ -129,3 +129,61 @@ fn zz_probe_2644_matern_outer_gradient() {
         Err(e) => println!("[probe-2644] FIT ERR: {e}"),
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Witness C: `misc::mega_batch_k::te_with_disparate_scales`.
+//
+// `y ~ te(a,b,k=5)`, Gaussian, 300 rows, `a ∈ [0,1]` against `b ∈ [0,1000]`.
+// On run 30619084852 it refuses with
+//   |g| = |Pg| = 2.458e2  bound = 1.015e1  (rung=curvature-resolvability,
+//   derived_standard=true, hessian_psd=yes)
+// and on the PREVIOUS run (30602192415) the SAME test refused with the OTHER
+// shape — the cost-only/analytic-sample value disagreement. One second.
+// ─────────────────────────────────────────────────────────────────────────
+
+fn mk_2d(
+    n: usize,
+    f: impl Fn(f64, f64) -> f64,
+    ra: (f64, f64),
+    rb: (f64, f64),
+    sigma: f64,
+    seed: u64,
+) -> EncodedDataset {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let ua = Uniform::new(ra.0, ra.1).expect("finite a range");
+    let ub = Uniform::new(rb.0, rb.1).expect("finite b range");
+    let noise = Normal::new(0.0, sigma).expect("finite sigma");
+    let h = ["a", "b", "y"].into_iter().map(String::from).collect();
+    let mut rows = Vec::with_capacity(n);
+    for _ in 0..n {
+        let a = ua.sample(&mut rng);
+        let b = ub.sample(&mut rng);
+        let y = f(a, b) + noise.sample(&mut rng);
+        rows.push(StringRecord::from(vec![
+            a.to_string(),
+            b.to_string(),
+            y.to_string(),
+        ]));
+    }
+    encode_recordswith_inferred_schema(h, rows).expect("encode")
+}
+
+#[test]
+fn zz_probe_2644_te_disparate_scales() {
+    gam_solve::progress_log::init_logging_at(log::LevelFilter::Info);
+    let ds = mk_2d(300, |a, b| a + b, (0.0, 1.0), (0.0, 1000.0), 0.05, 7);
+    let cfg = FitConfig {
+        family: Some("gaussian".to_string()),
+        ..FitConfig::default()
+    };
+    let started = std::time::Instant::now();
+    let outcome = fit_from_formula("y~te(a,b,k=5)", &ds, &cfg);
+    println!(
+        "[probe-2644-te] elapsed={:.2}s",
+        started.elapsed().as_secs_f64()
+    );
+    match outcome {
+        Ok(_) => println!("[probe-2644-te] FIT OK"),
+        Err(e) => println!("[probe-2644-te] FIT ERR: {e}"),
+    }
+}
