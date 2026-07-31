@@ -2087,6 +2087,16 @@ impl<const K: usize, T: RowKernel<K> + 'static> ExactNewtonJointHessianWorkspace
         row_kernel_directional_derivative(&*self.kern, &self.rows, sl).map(Some)
     }
 
+    fn directional_derivative_all_axes(
+        &self,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        // The workspace already owns the row kernel and its current-beta cache.
+        // Dispatch through the kernel's batched hook so rigid survival/BMS can
+        // build direction-independent row towers once for the entire basis
+        // sweep instead of reconstructing family state per axis.
+        row_kernel_directional_derivative_all_axes(&*self.kern, &self.rows).map(Some)
+    }
+
     fn directional_derivative_operator(
         &self,
         d_beta_flat: &Array1<f64>,
