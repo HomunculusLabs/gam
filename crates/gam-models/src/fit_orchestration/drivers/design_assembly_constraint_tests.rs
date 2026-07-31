@@ -714,6 +714,49 @@ fn assert_frozen_replay_matches_fit(
         // matched against what the frozen path replays that the fit path
         // recomputes. Thin-plate and matern pass the same bar, so whatever this
         // is lives in the Duchon-only artifacts.
+        // The divergence is bit-stable and confined to ONE column, so a specific
+        // TERM differs rather than arithmetic drifting. The Duchon replay's only
+        // fit-derived artifact is the data-metric radial reparameterization `V`:
+        // `build_duchon_basis_spec_chart` COMPUTES it on the fit path
+        // (`radial_reparam: None`) and early-returns to consume the STORED one on
+        // replay (`radial_reparam: Some`). Thin-plate and matern pass this same
+        // bar and never run that chart.
+        //
+        // So report whether `V` itself survived the round trip. If `V` matches
+        // bit-for-bit the difference enters AFTER it (the
+        // `fast_ab(&kernel_transform, v)` fold, or the constrained-penalty
+        // assembly feeding it); if it does not, storage/retrieval of `V` is the
+        // defect and the design column is just where it shows first.
+        let reparam_note = {
+            let pick = |d: &TermCollectionDesign| match &d.smooth.terms[0].metadata {
+                BasisMetadata::Duchon { radial_reparam, .. } => radial_reparam.clone(),
+                BasisMetadata::ThinPlate { radial_reparam, .. } => radial_reparam.clone(),
+                _ => None,
+            };
+            match (pick(&fit_design), pick(&replay_design)) {
+                (Some(a), Some(b)) if a.dim() == b.dim() => {
+                    let worst = a
+                        .iter()
+                        .zip(b.iter())
+                        .map(|(&x, &y)| (x - y).abs())
+                        .fold(0.0_f64, f64::max);
+                    let bitwise = a
+                        .iter()
+                        .zip(b.iter())
+                        .all(|(&x, &y)| x.to_bits() == y.to_bits());
+                    format!(
+                        "; radial_reparam V {:?}: bit_identical={bitwise}, max|Δ|={worst:.6e}",
+                        a.dim()
+                    )
+                }
+                (Some(a), Some(b)) => {
+                    format!("; radial_reparam V SHAPE CHANGED {:?} -> {:?}", a.dim(), b.dim())
+                }
+                (Some(a), None) => format!("; radial_reparam V {:?} -> None on replay", a.dim()),
+                (None, Some(b)) => format!("; radial_reparam V None -> {:?} on replay", b.dim()),
+                (None, None) => "; radial_reparam V absent on both paths".to_string(),
+            }
+        };
         assert_eq!(fit_dense.dim(), replay_dense.dim());
         let (rows, cols) = fit_dense.dim();
         let mut per_column: Vec<(usize, f64, usize)> = (0..cols)
@@ -746,7 +789,7 @@ fn assert_frozen_replay_matches_fit(
         panic!(
             "{label} frozen replay changed realized design: max_abs={max_abs} \
              over a {rows}x{cols} design; {} of {cols} columns exceed 1e-10. \
-             Worst columns: [{}]",
+             Worst columns: [{}]{reparam_note}",
             per_column.len(),
             offenders.join("; ")
         );
