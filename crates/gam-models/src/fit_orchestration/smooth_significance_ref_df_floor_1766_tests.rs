@@ -15,8 +15,8 @@
 //!
 //! The fix floors `ref_df` at `max(edf, null_dim, 1)`, which binds only on the
 //! degenerate collapse. These guards assert the post-fix contract directly on
-//! the report: a planted-null flat smooth gets `ref_df >= 1` and a large
-//! (non-significant) p-value, while a genuinely wiggly smooth is still flagged
+//! the report: a planted-null flat smooth gets `ref_df >= 1` and a p-value that
+//! is not pathologically small, while a genuinely wiggly smooth is still flagged
 //! and the floor never inflates its reference d.f.
 
 //! Declared only as `#[cfg(test)] mod smooth_significance_ref_df_floor_1766_tests;`
@@ -79,10 +79,18 @@ fn flat_null_smooth_ref_df_floored_and_not_significant_1766() {
         let noise = Normal::new(0.0, 0.01).unwrap();
         let y: Vec<f64> = (0..n).map(|_| noise.sample(&mut rng)).collect();
         let (ref_df, w, p) = smooth_lr_report(&x, &y);
-        // ref_df must be at least 1 (the whole-term test spans >= its null-space
-        // dimension); a flat term with W ~ 1e-4 must read as the LEAST
-        // significant possible, not the most.
-        if ref_df < 1.0 - 1e-6 || !(p > 0.5) {
+        // ref_df must be at least 1 (the whole-term test spans >= its
+        // null-space dimension).
+        //
+        // The p-value bar is a COLLAPSE floor, not a largeness requirement.
+        // `y` here carries no x-signal at all, so a correctly calibrated test
+        // returns p ~ Uniform(0,1) on this fixture and ANY fixed "p must be
+        // large" bar fails on correct code at a rate the bar itself sets — the
+        // old `p > 0.5` was a coin flip per seed over eight seeds. #1766
+        // reported p ~ 4e-12 on every seed, so 1e-4 separates the defect from a
+        // calibrated null by eight orders of magnitude while a true uniform
+        // clears all eight seeds with probability ~99.9%.
+        if ref_df < 1.0 - 1e-6 || !(p > 1e-4) {
             offenders.push(format!(
                 "(seed={seed}, ref_df={ref_df:.3e}, W={w:.3e}, p={p:.3e})"
             ));
@@ -91,8 +99,9 @@ fn flat_null_smooth_ref_df_floored_and_not_significant_1766() {
     assert!(
         offenders.is_empty(),
         "flat-null smooth mis-scaled: a shrunk-to-flat s(x) reported a collapsed \
-         reference d.f. (< 1) or a (near-)significant p-value (<= 0.5) — the #1766 \
-         ref_df -> ~0 collapse is back. Offenders: {}",
+         reference d.f. (< 1) or a collapsed p-value (<= 1e-4) — the #1766 \
+         ref_df -> ~0 collapse is back. A p-value merely on the small side of \
+         uniform is NOT this defect and must not be read as one. Offenders: {}",
         offenders.join("; ")
     );
 }
