@@ -2206,6 +2206,40 @@ pub(super) fn rigid_standard_normal_third_full(
     Ok(rigid_standard_normal_tower(marginal, g, z, y, w, probit_scale)?.t3)
 }
 
+#[inline]
+pub(super) fn rigid_standard_normal_third_contracted_generated(
+    marginal: BernoulliMarginalLinkMap,
+    g: f64,
+    z: f64,
+    y: f64,
+    w: f64,
+    probit_scale: f64,
+    direction: &[f64; 2],
+) -> Result<[[f64; 2]; 2], String> {
+    let outcome_sign = 2.0 * y - 1.0;
+    let signed_margin =
+        outcome_sign * marginal_slope_standard_normal_scalar_eta(marginal.q, g, z, probit_scale);
+    if !(signed_margin.is_finite() || signed_margin == f64::INFINITY) {
+        return Err(format!(
+            "non-finite signed margin in rigid probit row NLL: {signed_margin}"
+        ));
+    }
+    Ok(rigid_standard_normal_program_third_contracted(
+        marginal.eta_value(),
+        g,
+        marginal.q,
+        marginal.q1,
+        marginal.q2,
+        marginal.q3,
+        marginal.q4,
+        probit_scale,
+        z,
+        outcome_sign,
+        w,
+        direction,
+    ))
+}
+
 /// Contract a symmetric 3-tensor on its third index with a primary-space
 /// direction `d = (d_eta, d_g)`, producing the symmetric 2×2 contracted
 /// matrix the outer-derivative pipeline consumes:

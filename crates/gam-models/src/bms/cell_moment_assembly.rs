@@ -1564,8 +1564,27 @@ impl BernoulliMarginalSlopeFamily {
         dir_q: f64,
         dir_g: f64,
     ) -> Result<[[f64; 2]; 2], String> {
-        let full = self.rigid_row_third_full(row, marginal, slope)?;
-        Ok(contract_third_full(&full, dir_q, dir_g))
+        match self.latent_measure.empirical_grid_for_training_row(row)? {
+            None => rigid_standard_normal_third_contracted_generated(
+                marginal,
+                slope,
+                self.z[row],
+                self.y[row],
+                self.weights[row],
+                self.probit_frailty_scale(),
+                &[dir_q, dir_g],
+            ),
+            Some(grid) => {
+                let full = self.empirical_rigid_third_full_closed_form(
+                    row,
+                    marginal,
+                    slope,
+                    &grid.nodes,
+                    &grid.weights,
+                )?;
+                Ok(contract_third_full(&full, dir_q, dir_g))
+            }
+        }
     }
 
     /// Content fingerprint of every input that determines the per-row
