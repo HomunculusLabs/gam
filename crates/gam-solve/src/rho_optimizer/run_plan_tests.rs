@@ -5874,6 +5874,30 @@ fn parsimonious_keep_best_breaks_laml_tie_toward_more_smoothing() {
     ));
 }
 
+/// #979: the seed budget is a recovery ceiling, not the number of certified
+/// basins that parsimony comparison must solve. Once flexible slot 0 and the
+/// promoted smoothed slot 1 have both certified, a larger recovery budget must
+/// not force an unrelated third outer optimization.
+#[test]
+fn parsimony_await_stops_after_the_promoted_second_seed() {
+    assert!(
+        should_await_promoted_parsimony_seed(4, 1, false),
+        "slot 0 must await the deliberately promoted slot 1"
+    );
+    assert!(
+        !should_await_promoted_parsimony_seed(4, 2, false),
+        "two certified comparison basins exhaust the parsimony contract, even with recovery budget left"
+    );
+    assert!(
+        !should_await_promoted_parsimony_seed(1, 1, false),
+        "a single-start request cannot promote a second seed"
+    );
+    assert!(
+        !should_await_promoted_parsimony_seed(4, 1, true),
+        "a proven-redundant promoted basin remains waivable"
+    );
+}
+
 /// #1575: the parsimony-await second-seed waiver fires ONLY for a slot-0 result
 /// that is curvature-pinned (score-relative |g| well inside the tie band) AND
 /// well-penalized (every leading smoothing λ ≥ 1). Only analytically certified
