@@ -93,7 +93,7 @@ pub(super) mod oracle_tests {
     use gam_math::jet_tower::{Tower2, Tower4};
 
     #[inline]
-    pub(super) fn directionalhessian_coeff_fromobjective_q_terms(
+    pub(in super::super) fn directionalhessian_coeff_fromobjective_q_terms(
         m1: f64,
         m2: f64,
         m3: f64,
@@ -121,7 +121,7 @@ pub(super) mod oracle_tests {
     }
 
     #[inline]
-    pub(super) fn second_directionalhessian_coeff_fromobjective_q_terms(
+    pub(in super::super) fn second_directionalhessian_coeff_fromobjective_q_terms(
         m1: f64,
         m2: f64,
         m3: f64,
