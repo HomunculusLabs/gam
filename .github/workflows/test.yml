@@ -635,7 +635,7 @@ jobs:
       contents: write
       actions: read
     name: Aggregate failures (MASTER_FAILURES.md)
-    needs: [setup, build, rust-test, pyffi-test, python-tests]
+    needs: [setup, build, rust-test, pyffi-test, python-tests, python-populations]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -673,6 +673,20 @@ jobs:
           name: python-logs
           path: agg/python
 
+      # Same directory as the step above, so the `agg/python/**/*.log` glob that
+      # builds the Python failure list picks both up with no change to the
+      # parser. A separate step rather than a `pattern:` on the one above: this
+      # cannot alter what the existing download resolves, and the two jobs write
+      # distinctly named logs (pytest.log vs populations.log) so nothing is
+      # overwritten on merge. `continue-on-error` because a job that died before
+      # uploading must not take the whole aggregate down (#2666).
+      - name: Download Python population logs
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: python-logs-populations
+          path: agg/python
+
       - name: Build MASTER_FAILURES.md
         id: master
         shell: bash
@@ -699,6 +713,8 @@ jobs:
           # is what a failed wheel build or a step that died before pytest wrote
           # a report looks like from here.
           PYTHON_TESTS_RESULT: ${{ needs.python-tests.result }}
+          # #2666: the slow + torch populations are a fourth, disjoint surface.
+          PYTHON_POPULATIONS_RESULT: ${{ needs.python-populations.result }}
         run: |
           set -uo pipefail
           python3 - <<'PY'
@@ -817,6 +833,7 @@ jobs:
           rust_test_result = os.environ.get('RUST_TEST_RESULT', '')
           pyffi_test_result = os.environ.get('PYFFI_TEST_RESULT', '')
           python_tests_result = os.environ.get('PYTHON_TESTS_RESULT', '')
+          python_populations_result = os.environ.get('PYTHON_POPULATIONS_RESULT', '')
           build_did_not_succeed = build_result not in ('', 'success')
           # 'skipped' is absence, but so is any other non-success: a cancelled or
           # failed matrix may have died mid-flight with partial logs, and a
@@ -931,6 +948,15 @@ jobs:
                               f'job `{pyffi_test_result or "?"}`'))
           out.append(coverage('Python API tests', not python_not_measured,
                               f'job `{python_tests_result or "?"}`'))
+          # Fourth surface (#2666): `-m slow` and tests/torch, which every other
+          # lane reaches and then filters out before anything runs. MEASURED
+          # means the job executed, not that it was green — that job carries its
+          # own assert step which fails when a population collects nothing or
+          # skips everything, so a red result there is either real failures or a
+          # named collection hole, never a silent zero.
+          out.append(coverage('Python populations (slow + torch)',
+                              python_populations_result not in ('', 'skipped', 'cancelled'),
+                              f'job `{python_populations_result or "?"}`'))
           if python_not_measured:
               out.append('')
               out.append('> NOTE: the Python surface was NOT measured — '
@@ -1319,6 +1345,254 @@ jobs:
           # presence of a shard log as evidence the Rust shard matrix ran, and
           # a Python log landing in that set would mask a skipped matrix.
           name: python-logs
+          path: python-logs/
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # The two Python populations the ordinary lanes structurally cannot measure
+  # (#2666). Both are reached by `pytest tests/` and then removed before
+  # anything runs, so neither ever produced a verdict:
+  #
+  #   * `-m slow` — both directory-level steps (here and in
+  #     python-contracts.yml) pass `-m "not slow"`, and no lane passes `-m slow`.
+  #     18 files, 46 test functions.
+  #   * `tests/torch/` — its conftest.py `collect_ignore_glob`s the whole
+  #     directory when torch is absent, and no job installed torch. 29 files.
+  #
+  # A SEPARATE JOB, not extra steps on `python-tests`. These are the expensive
+  # populations by construction: one SAE manifold fixture was measured at
+  # `[1h 31m]` inside a 300 s cap (the watchdog thread cannot preempt a Rust
+  # call that holds the GIL). Hanging them off the existing job would risk its
+  # 6-hour default cap and destroy the measurements that already work; here a
+  # wedged fixture costs only this job.
+  #
+  # It rebuilds the wheel rather than resolving a sealed artifact from another
+  # workflow. That indirection is what the previous attempt at this lane used,
+  # and all three of its population jobs failed on their last scheduled run
+  # before it was removed; ~25 min of runner time twice a day buys a lane with
+  # no cross-workflow dependency to go wrong.
+  # ---------------------------------------------------------------------------
+  python-populations:
+    name: Python populations (slow + torch)
+    runs-on: ubuntu-latest
+    # Below `python-tests`' 360-minute default on purpose: this job exists to
+    # produce a verdict, and a verdict at 300 minutes with the collection step
+    # still able to publish beats a job cancelled at the cap with nothing.
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # build.rs human-author gate, same reason as python-tests
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install maturin
+        run: python -m pip install --upgrade pip "maturin>=1.7,<2"
+
+      - name: Build and install gam extension (maturin build + wheel install)
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          maturin build --release -i python3 -o dist
+          python -m pip install --force-reinstall dist/*.whl
+          # Both populations run from the repo ROOT, not runner.temp: the torch
+          # suite imports `gamfit.torch`, which lives in the SOURCE package, and
+          # the source ./gamfit shadows the installed wheel from cwd. Copying the
+          # compiled extension into the source tree is what makes that shadowed
+          # import resolve — identical to the python-tests job above.
+          SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+          cp "$SITE"/gamfit/_rust*.so gamfit/ 2>/dev/null || true
+          ls -la gamfit/_rust*.so || { echo "::error::compiled gamfit._rust extension not found in $SITE/gamfit after wheel install"; exit 1; }
+
+      - name: Install Python test extras
+        run: |
+          python -m pip install \
+            'pytest>=8' 'pytest-xdist>=3' 'pytest-timeout>=2' \
+            'numpy>=1.26' 'pandas>=2.0' \
+            'pyarrow>=14' 'matplotlib>=3.8' 'scikit-learn>=1.4' \
+            'lifelines>=0.28'
+
+      - name: Install CPU torch wheel
+        run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      # THE POINT OF THIS STEP. tests/torch/conftest.py drops the entire
+      # directory when torch is missing, and the modules themselves sit behind
+      # `pytest.importorskip("torch")` / `importorskip("gamfit.torch")`. Both
+      # mechanisms are correct locally and catastrophic in CI: a failed torch
+      # install would produce a GREEN job over 29 unrun files, which is the exact
+      # "counted as passes" outcome this lane exists to prevent. Import both
+      # explicitly first, so an environment problem is an environment failure and
+      # never a silent pass.
+      - name: Prove the torch runtime is real (never let a skip read as a pass)
+        run: |
+          set -euo pipefail
+          python -c "import torch; print('torch', torch.__version__)"
+          python -c "import gamfit.torch; print('gamfit.torch imported from', gamfit.torch.__file__)"
+
+      # ── both measurements run, even after one above fails ────────────────
+      - name: Run the slow-marked population (-m slow)
+        if: ${{ !cancelled() }}
+        shell: bash
+        # `--timeout=1800`, not the 300 s the ordinary lane uses: these tests are
+        # marked slow precisely because they legitimately exceed it, and reusing
+        # 300 here would report the population as timeouts rather than measuring
+        # it. The bound still exists because an unbounded step can consume the
+        # whole job.
+        #
+        # The target is `tests/`, not the 18 files that carry the marker: naming
+        # files is the #1512 defect, and a slow test added tomorrow must land in
+        # this lane without anyone editing it. The cost is that `-m` filters
+        # AFTER collection, so this step imports every module under tests/ and a
+        # module that cannot import fails here too. That is the right direction —
+        # a collection error is the loudest failure available, not a skip.
+        run: |
+          set -uo pipefail
+          mkdir -p python-reports
+          # `|| status=$?`, not a bare call followed by `$?`: GitHub runs an
+          # explicit `shell: bash` step under `-e`, so a red pytest would abort
+          # the script before the exit code could be read and the exit-5 check
+          # below would never execute. `set -uo pipefail` does not clear -e.
+          status=0
+          python -m pytest tests/ \
+            -m "slow" \
+            -n auto --timeout=1800 --timeout-method=thread \
+            --max-worker-restart=200 \
+            -rs --tb=short -q --junitxml=python-reports/slow.xml || status=$?
+          echo "pytest (-m slow) exit status: $status"
+          # Exit 5 is pytest's "no tests collected". For a population lane that
+          # is the worst outcome available: it is indistinguishable from a green
+          # run at the job level while measuring nothing at all.
+          if [ "$status" -eq 5 ]; then
+            echo "::error::the slow marker collected NOTHING. The population this lane exists to measure is gone, or the marker was renamed (#2666)."
+            exit 1
+          fi
+          exit "$status"
+
+      - name: Run the torch population (tests/torch)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p python-reports
+          status=0
+          python -m pytest tests/torch \
+            --timeout=1800 --timeout-method=thread \
+            -rs --tb=short -q --junitxml=python-reports/torch.xml || status=$?
+          echo "pytest (tests/torch) exit status: $status"
+          if [ "$status" -eq 5 ]; then
+            echo "::error::tests/torch collected NOTHING despite torch importing (#2666)."
+            exit 1
+          fi
+          exit "$status"
+
+      # A count, not an exit code. A directory-level pytest step exiting 0 says
+      # nothing about whether anything was collected, and every prior version of
+      # these two populations "passed" by not existing. Fail if a report shows no
+      # executed test, so this lane can never join the set of channels that are
+      # wired and carry nothing.
+      - name: Assert both populations actually executed
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          python3 - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          bad = []
+          for name, path in (('slow', 'python-reports/slow.xml'),
+                             ('torch', 'python-reports/torch.xml')):
+              p = Path(path)
+              if not p.is_file():
+                  bad.append(f'{name}: no JUnit report at {path} — the step never produced one')
+                  continue
+              root = ET.parse(p).getroot()
+              suites = [root] if root.tag == 'testsuite' else list(root.iter('testsuite'))
+              total = sum(int(s.get('tests') or 0) for s in suites)
+              skipped = sum(int(s.get('skipped') or 0) for s in suites)
+              errors = sum(int(s.get('errors') or 0) for s in suites)
+              failures = sum(int(s.get('failures') or 0) for s in suites)
+              ran = total - skipped - errors
+              print(f'{name}: collected={total} skipped={skipped} errors={errors} '
+                    f'failures={failures} executed={ran}')
+              if total == 0:
+                  bad.append(f'{name}: collected 0 tests')
+              elif ran <= 0:
+                  # Every test skipped is the failure mode this lane was built to
+                  # remove: a green report over a population that did not run.
+                  bad.append(f'{name}: collected {total} but executed none '
+                             f'({skipped} skipped, {errors} errored)')
+          if bad:
+              for line in bad:
+                  print(f'::error::{line} (#2666)')
+              sys.exit(1)
+          print('both populations executed')
+          PY
+
+      # Same row grammar and the same channel as every other surface, so these
+      # failures become entries in MASTER_FAILURES.md rather than a job status
+      # nobody reads. `always()`: a job that died mid-population still publishes
+      # what it measured.
+      - name: Collect Python population failure identities
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p python-logs
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+
+          rows = []
+          for path in sorted(glob.glob('python-reports/*.xml')):
+              try:
+                  root = ET.parse(path).getroot()
+              except Exception:
+                  rows.append(f'        FAIL [   0.000s] python::{path} report-unreadable')
+                  continue
+              for case in root.iter('testcase'):
+                  bad = [c for c in case if c.tag in ('failure', 'error')]
+                  if not bad:
+                      continue
+                  binid = case.get('file') or (case.get('classname') or '?').replace('.', '/')
+                  name = case.get('name') or '?'
+                  status = 'FAIL' if bad[0].tag == 'failure' else 'ABORT'
+                  seconds = case.get('time') or '0'
+                  try:
+                      stamp = f'{float(seconds):8.3f}s'
+                  except ValueError:
+                      stamp = '   0.000s'
+                  rows.append(f'        {status} [{stamp}] python::{binid} {name}')
+
+          with open('python-logs/populations.log', 'w') as fh:
+              fh.write('\n'.join(rows) + ('\n' if rows else ''))
+          print(f'collected {len(rows)} Python population failure row(s)')
+          PY
+
+      - name: Upload Python population logs
+        uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          # `python-logs-populations`, not `python-logs`: artifact names are
+          # unique per run, and the aggregate downloads both into agg/python.
+          # Deliberately NOT `shard-logs-*`, for the reason given on the other
+          # Python upload — a Python log in that set would mask a skipped Rust
+          # matrix.
+          name: python-logs-populations
           path: python-logs/
           retention-days: 7
           if-no-files-found: warn
