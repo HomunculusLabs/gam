@@ -2612,17 +2612,30 @@ fn gaussian_location_scale_dataset() -> Dataset {
 }
 
 fn binomial_location_scale_dataset() -> Dataset {
-    // Balanced 0/1 response with a clear monotone gradient in x so the
-    // threshold/log-σ blocks are well posed.
-    let n = 60usize;
+    // Replicated Bernoulli observations from a nonlinear monotone probability
+    // curve. Repetition keeps every local empirical probability strictly inside
+    // (0, 1), while the cubic warp gives the link-wiggle arm real shape to
+    // estimate instead of placing its nonnegative coefficients on the cone
+    // vertex. The former alternating fixture was globally balanced but had no
+    // gradient in x at all; its population optimum was the zero-wiggle boundary,
+    // where the cone-truncated quadratic approximation is genuinely improper.
+    let support_points = 15usize;
+    let replicates = 8usize;
+    let n = support_points * replicates;
     let mut records: Vec<csv::StringRecord> = Vec::with_capacity(n);
-    for i in 0..n {
-        let x = -2.0 + 4.0 * (i as f64) / ((n - 1) as f64);
-        let y = if i % 2 == 0 { 1.0 } else { 0.0 };
-        records.push(csv::StringRecord::from(vec![
-            format!("{y:.17e}"),
-            format!("{x:.17e}"),
-        ]));
+    for group in 0..support_points {
+        let x = -2.0 + 4.0 * (group as f64) / ((support_points - 1) as f64);
+        let warped_logit = 0.75 * x + 0.16 * x.powi(3);
+        let probability = 1.0 / (1.0 + (-warped_logit).exp());
+        let successes = ((replicates as f64 * probability).round() as usize)
+            .clamp(1, replicates - 1);
+        for replicate in 0..replicates {
+            let y = if replicate < successes { 1.0 } else { 0.0 };
+            records.push(csv::StringRecord::from(vec![
+                format!("{y:.17e}"),
+                format!("{x:.17e}"),
+            ]));
+        }
     }
     gam_data::encode_recordswith_inferred_schema(vec!["y".to_string(), "x".to_string()], records)
         .expect("encode binomial location-scale dataset")
@@ -2632,7 +2645,10 @@ fn small_wiggle_cfg() -> LinkWiggleConfig {
     LinkWiggleConfig {
         degree: 3,
         num_internal_knots: 3,
-        penalty_orders: vec![2],
+        // Keep this orchestration-parity fixture on the full-rank anchored
+        // order-one function metric. An order-two penalty has an affine null
+        // space, making posterior propriety an unrelated fixture precondition.
+        penalty_orders: vec![1],
         double_penalty: false,
     }
 }
