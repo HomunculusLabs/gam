@@ -3412,6 +3412,12 @@ fn certify_outer_optimality_at_terminal_fidelity(
             )
         })?
         .cost;
+    // Sampled HERE, while the shared inner-progress snapshot still describes
+    // THIS lane. The guard further down reads it after the analytic lane has
+    // also run, so it can only speak for that one (#2228). Measured: this is the
+    // audit site that actually fires in practice, and it was reporting
+    // "value-lane=unsampled" because only the fixed-point route was wired.
+    let value_lane_inner_converged = inner_solve_converged(config.outer_inner_cap.as_ref());
     if !value_only.is_finite() {
         return Err(outer_nonconvergence_error(
             context,
@@ -3459,7 +3465,8 @@ fn certify_outer_optimality_at_terminal_fidelity(
         )
     })?;
 
-    if !inner_solve_converged(config.outer_inner_cap.as_ref()) {
+    let analytic_lane_inner_converged = inner_solve_converged(config.outer_inner_cap.as_ref());
+    if !analytic_lane_inner_converged {
         return Err(outer_nonconvergence_error(
             context,
             "terminal analytic evidence was evaluated at a non-converged inner state",
@@ -3659,9 +3666,10 @@ fn certify_outer_optimality_at_terminal_fidelity(
         result,
         Some(projected_grad_norm),
         StationarityBound::from_ladder(stationarity_bound, bound_source),
-        // This route does not sample either lane's inner-convergence flag; it
-        // reports "unsampled" rather than implying a measurement (#2228).
-        (None, None),
+        (
+            Some(value_lane_inner_converged),
+            Some(analytic_lane_inner_converged),
+        ),
     )?;
 
     // The optimizer's own recorded best-iterate evidence, captured before the
