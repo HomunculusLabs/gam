@@ -319,7 +319,17 @@ jobs:
         # locking, so simultaneous dumps interleave character-wise and need
         # picking apart by hand. Interleaved evidence still beats none.
         working-directory: ${{ runner.temp }}
+        # The faulthandler dumps described above are written to fd 2 and are the
+        # ONLY surviving record of why a killed worker was killed, so they are
+        # teed to a file rather than left to the step log: the summary step below
+        # is what turns them back into per-test evidence, and it needs them as a
+        # file it can parse in-job.
+        #
+        # The exit code is taken from PIPESTATUS, not from the pipeline. A
+        # pipeline reports `tee`'s status, and `tee` always succeeds — piping
+        # this step without that would turn every red suite green.
         run: |
+          set -uo pipefail
           python -m pytest "$GITHUB_WORKSPACE/tests/" \
             -m "not slow" \
             -p no:cacheprovider \
@@ -328,14 +338,48 @@ jobs:
             -o faulthandler_timeout=240 \
             -o addopts="--import-mode=importlib" \
             --junitxml="$RUNNER_TEMP/py1512_junit.xml" \
-            -q --tb=line
+            -q --tb=line 2>&1 | tee "$RUNNER_TEMP/py1512_output.log"
+          status=${PIPESTATUS[0]}
+          echo "pytest exit status: $status"
+          exit "$status"
+
+      - name: Recover the censored tests into py1512_summary.txt (#2599)
+        if: always()
+        # A per-test timeout kill erases the test from the inventory as a
+        # REASON: `--timeout-method=thread` terminates the worker, so the JUnit
+        # gets `worker 'gwN' crashed` with `time="0.000"` and no message. On run
+        # 30637393388 that was 34 of the 137 red tests — a quarter of the red
+        # population published as unexplained, indistinguishable from a crashed
+        # interpreter, and with the wall clock they consumed recorded as zero.
+        #
+        # The evidence already exists: `faulthandler_timeout=240` fires before
+        # the 300 s kill and every one of those 34 workers printed a full stack.
+        # It was simply five figures of build log that nothing read. This step
+        # joins the JUnit's list of censored tests to those stacks and writes the
+        # `py1512_summary.txt` that the publish step below has always named and
+        # that nothing has ever produced (missing files are skipped silently, so
+        # the gap never surfaced).
+        #
+        # Verified against this run's own artifacts before landing: 34/34
+        # censored tests matched to a stack, 0 unrecovered.
+        #
+        # `always()` and a tolerated failure: this step only ADDS evidence, and
+        # a summary that cannot be built must not change the suite's verdict.
+        continue-on-error: true
+        run: |
+          python "$GITHUB_WORKSPACE/.github/scripts/py1512_summary.py" \
+            "$RUNNER_TEMP/py1512_junit.xml" \
+            "$RUNNER_TEMP/py1512_output.log" \
+            "$RUNNER_TEMP/py1512_summary.txt" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload full-suite JUnit inventory (#1512)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: py1512-junit
-          path: ${{ runner.temp }}/py1512_junit.xml
+          path: |
+            ${{ runner.temp }}/py1512_junit.xml
+            ${{ runner.temp }}/py1512_summary.txt
           if-no-files-found: warn
 
 
