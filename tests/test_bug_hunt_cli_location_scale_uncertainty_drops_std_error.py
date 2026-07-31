@@ -16,6 +16,16 @@ from pathlib import Path
 _Z_975 = 1.959963984540054
 
 
+def test_python_contracts_builds_cli_before_full_suite() -> None:
+    """The wheel-only inventory must provision the binary this test exercises."""
+
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow = (repo_root / ".github" / "workflows" / "python-contracts.yml").read_text()
+    cli_build = workflow.index("cargo build --release -p gam-cli")
+    full_suite = workflow.index("Triage full Python suite on the fresh wheel")
+    assert cli_build < full_suite
+
+
 def _gam_binary() -> str:
     """Resolve the `gam` CLI the way every other CLI repro in tests/ does.
 

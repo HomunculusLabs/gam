@@ -256,6 +256,15 @@ jobs:
         # its machine, never on its own.
         run: python -m pip install 'pytest-xdist>=3' 'pytest-timeout>=2'
 
+      - name: Build gam release binary for CLI contracts
+        if: ${{ !cancelled() }}
+        # tests/ contains real CLI serialization and integration contracts. The
+        # maturin wheel supplies only gamfit._rust, so without this build those
+        # tests fail at capability discovery and never reach the boundary they
+        # guard. This mirrors test.yml's full-suite prerequisite and reuses the
+        # release artifacts already warmed by maturin above.
+        run: cargo build --release -p gam-cli
+
       - name: Triage full Python suite on the fresh wheel (#1512)
         if: ${{ !cancelled() }}
         # #1512 authoritative full-suite triage. test.yml already runs
