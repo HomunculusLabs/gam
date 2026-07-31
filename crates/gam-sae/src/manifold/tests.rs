@@ -4292,6 +4292,186 @@ fn exact_a_route_gap_is_two_coordinates_with_two_causes_2515() {
     );
 }
 
+/// #2673 — the measurement `SAE_EXACT_A_PD_FLOOR_REL`'s own doc block asks for and
+/// says has never been taken.
+///
+/// Two floors classify directions of the SAME operator `A = B + ΔC`, in two
+/// different metrics:
+///
+/// * `SAE_EXACT_A_PD_FLOOR_REL` (`1e-9 · max(λ_max(A), 1)`) on an ABSOLUTE
+///   eigenvalue of `A`. Inside the band the direction is the radial-gauge
+///   quotient null and is priced `log 1 = 0`; below `−floor` #2336's saddle
+///   escape triggers.
+/// * `sae_ift_min_curvature_fraction()` (`sqrt(EPSILON)`) on the GENERALIZED
+///   Rayleigh quotient `μ = xᵀAx / xᵀBx` of the IFT solution — a `B`-relative
+///   ratio, not an eigenvalue of anything.
+///
+/// The doc block states: "THE OVERLAP REGION IS REAL AND UNMEASURED ... the value
+/// calls the direction gauge, the gradient calls it a resolved negative-curvature
+/// direction and keeps its `A⁻¹` response", and "UNIFYING THEM IS A MEASUREMENT,
+/// NOT AN EDIT ... compare `λ` in the `B` metric (the pencil eigenvalues of
+/// `(A, B)`) at BOTH sites ... dump the `(A, B)` pencil spectrum beside the plain
+/// `A` spectrum and count the directions that change class".
+///
+/// This is that count, on the #2515 route-invariance fixture — chosen because its
+/// exact-`A` is decisively indefinite there (`α = 250` on a unit-period `Circle`
+/// puts `cos κt < 0` over roughly a third of the rows, and the arrow factorization
+/// refuses row 7 up to ridge `2.293873039077561e1`) while the dense global route
+/// still returns `Ok`, i.e. the negative directions ARE being classified rather
+/// than refused. That is precisely the population the overlap region is about.
+///
+/// It REPORTS the count rather than asserting it is zero: a nonzero count is the
+/// defect this pins, and an assertion of zero would be an assertion that the
+/// defect is absent. What it asserts is that the comparison is well posed — both
+/// spectra exist, are finite, and are taken on the same directions.
+#[test]
+fn two_floors_overlap_region_direction_count_2673() {
+    use gam_linalg::faer_ndarray::strict_symmetric_eigh;
+
+    let n = 24usize;
+    let coords = Array2::from_shape_fn((n, 1), |(row, _)| (row as f64 + 0.25) / n as f64);
+    let (phi, jet) = periodic_basis(&coords);
+    let decoder = array![[0.30, -0.10], [1.20, 0.20], [0.10, 1.10]];
+    let mut target = phi.dot(&decoder);
+    for row in 0..n {
+        target[[row, 0]] += 1.0e-3 * (0.37 * row as f64).sin();
+        target[[row, 1]] += 1.0e-3 * (0.29 * row as f64).cos();
+    }
+    let atom = SaeManifoldAtom::new_with_provided_function_gram(
+        "periodic",
+        SaeAtomBasisKind::Periodic,
+        1,
+        phi,
+        jet,
+        decoder,
+        Array2::<f64>::eye(3),
+    )
+    .unwrap()
+    .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::zeros((n, 1)),
+        vec![coords],
+        vec![LatentManifold::Circle { period: 1.0 }],
+        AssignmentMode::softmax(1.0),
+    )
+    .unwrap();
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![250.0_f64.ln()]]);
+    let sys = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .unwrap();
+    let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+    let (_dt, _db, cache) =
+        solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options).unwrap();
+
+    // Dense `A` (the operator BOTH floors classify) and dense `B` (the metric the
+    // second floor measures in), materialised column by column through the SAME
+    // appliers production uses, so neither is a re-derivation.
+    let a = term
+        .materialize_exact_hessian_dense(&rho, target.view(), &cache)
+        .expect("dense exact observed information");
+    let dim = a.nrows();
+    let total_t = cache.delta_t_len();
+    let mut b = Array2::<f64>::zeros((dim, dim));
+    for col in 0..dim {
+        let mut vt = Array1::<f64>::zeros(total_t);
+        let mut vb = Array1::<f64>::zeros(cache.k);
+        if col < total_t {
+            vt[col] = 1.0;
+        } else {
+            vb[col - total_t] = 1.0;
+        }
+        let (out_t, out_b) =
+            gam_solve::arrow_schur::matrix_free_arrow_operator_apply(&sys, &cache, vt.view(), vb.view())
+                .expect("majorizer apply");
+        for row in 0..total_t {
+            b[[row, col]] = out_t[row];
+        }
+        for row in 0..cache.k {
+            b[[total_t + row, col]] = out_b[row];
+        }
+    }
+    for i in 0..dim {
+        for j in (i + 1)..dim {
+            let avg = 0.5 * (b[[i, j]] + b[[j, i]]);
+            b[[i, j]] = avg;
+            b[[j, i]] = avg;
+        }
+    }
+
+    // Site 1: the plain `A` spectrum and its absolute floor.
+    let (a_eigs, a_vecs) = strict_symmetric_eigh(&a, Side::Lower).expect("A spectrum");
+    let max_eig = a_eigs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let floor = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
+
+    // Site 2: the same directions' generalized Rayleigh quotient `μ = vᵀAv / vᵀBv`.
+    // Evaluated on `A`'s OWN eigenvectors, so "the same direction" is literal and
+    // the two classifications cannot be comparing different bases.
+    let mu_floor = f64::EPSILON.sqrt();
+    let mut value_gauge_gradient_resolved = 0usize;
+    let mut value_priced_gradient_projected = 0usize;
+    let mut rows: Vec<String> = Vec::new();
+    for idx in 0..dim {
+        let v = a_vecs.column(idx);
+        let vav = a_eigs[idx];
+        let vbv = v.dot(&b.dot(&v));
+        let mu = if vbv.abs() > 0.0 { vav / vbv } else { f64::NAN };
+        let value_calls_gauge = vav.abs() <= floor;
+        let gradient_calls_resolved = mu.is_finite() && mu.abs() >= mu_floor;
+        if value_calls_gauge && gradient_calls_resolved {
+            value_gauge_gradient_resolved += 1;
+            rows.push(format!(
+                "  direction {idx}: VALUE=gauge (|λ|={:.6e} <= floor {floor:.6e}) but \
+                 GRADIENT=resolved (|μ|={:.6e} >= {mu_floor:.6e})",
+                vav.abs(),
+                mu.abs()
+            ));
+        }
+        if !value_calls_gauge && mu.is_finite() && mu.abs() < mu_floor {
+            value_priced_gradient_projected += 1;
+            rows.push(format!(
+                "  direction {idx}: VALUE=priced (|λ|={:.6e} > floor {floor:.6e}) but \
+                 GRADIENT=projected out (|μ|={:.6e} < {mu_floor:.6e})",
+                vav.abs(),
+                mu.abs()
+            ));
+        }
+    }
+    let min_eig = a_eigs.iter().cloned().fold(f64::INFINITY, f64::min);
+    println!(
+        "[#2673 PENCIL] dim={dim} λ_max={max_eig:.6e} λ_min={min_eig:.6e} \
+         floor={floor:.6e} μ_floor={mu_floor:.6e}\n\
+         [#2673 PENCIL] value=gauge & gradient=resolved : {value_gauge_gradient_resolved}\n\
+         [#2673 PENCIL] value=priced & gradient=projected: {value_priced_gradient_projected}\n\
+         [#2673 PENCIL] directions that change class TOTAL: {}",
+        value_gauge_gradient_resolved + value_priced_gradient_projected
+    );
+    for row in rows.iter().take(20) {
+        println!("[#2673 PENCIL]{row}");
+    }
+
+    // The comparison must be WELL POSED, which is what this test owns. The count
+    // itself is the measurement and is reported, not asserted: asserting zero
+    // would assert the defect absent.
+    assert_eq!(a_eigs.len(), dim, "#2673: the A spectrum must span every direction");
+    assert!(
+        a_eigs.iter().all(|v| v.is_finite()),
+        "#2673: every A eigenvalue must be finite, or the classification is undefined"
+    );
+    assert!(
+        floor > 0.0 && floor.is_finite(),
+        "#2673: the absolute floor must be a real positive band, got {floor}"
+    );
+    // Non-vacuity: this fixture must actually put directions on BOTH sides of the
+    // A floor, or it cannot exercise the overlap region at all.
+    assert!(
+        min_eig < -floor || a_eigs.iter().any(|v| v.abs() <= floor),
+        "#2673: the fixture must carry at least one non-positive-definite direction \
+         (λ_min={min_eig:.6e}, floor={floor:.6e}), or the two classifications trivially \
+         agree and the count is vacuous"
+    );
+}
+
 /// #2499 spin-off measurement. `analytic_outer_gradient_with_bundle_matches_dense_assembly`
 /// desyncs on `logdet-trace coordinate 1 (smooth atom 0)` by `1.23e-1`. The two
 /// smoothness-EDF routes it compares are NOT the same operator whenever a

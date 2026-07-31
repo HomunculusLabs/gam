@@ -1496,6 +1496,9 @@ impl SaeManifoldTerm {
             }
             self.last_row_layout = row_layout;
             self.last_frames_active = frames_engaged;
+            // Publish this assembly's row identity — see the note at the other
+            // return of this function.
+            sys.refresh_row_hessian_fingerprint();
             return Ok(sys);
         }
         // Apply Riemannian geometry to the per-row row blocks (htt, gt) and
@@ -2270,6 +2273,29 @@ impl SaeManifoldTerm {
         // Record whether `delta_beta` from this system is a factored ΔC (needs a
         // frame lift) or a full-`B` ΔB. Read by `apply_newton_step_impl`.
         self.last_frames_active = frames_engaged;
+        // EVERY assembly publishes its row identity, at the one chokepoint every
+        // assembly returns through.
+        //
+        // `ArrowSchurSystem::row_hessian_fingerprint` is a STORED field, initialised
+        // to the constructor sentinel `0`, while `solve_arrow_newton_step_with_options`
+        // stamps its cache with the RECOMPUTED `sys.current_row_hessian_fingerprint()`.
+        // `validate_matrix_free_arrow_pair` compares the two and has no sentinel
+        // case, so leaving the field at `0` made every pair from this path refuse —
+        // including a system and the cache factored from it one line later, which is
+        // the same operator by construction. MEASURED: `matrix_free_arrow_operator_apply
+        // refuses a stale matrix-free system/cache pair (row fingerprint 0 vs
+        // 7203131258887855930, manifold fingerprint 1100912964135955778 vs
+        // 1100912964135955778)` — the manifold identities agree because nothing about
+        // the dictionary differs; only the unpublished row identity does.
+        //
+        // `assemble_full_matrix_free_evidence_system` already refreshed here for
+        // exactly this reason, in a comment naming the sentinel. That fixed one caller
+        // rather than the source, so every other consumer of a directly-assembled
+        // system still met a guard that could only ever refuse. Refreshing at the
+        // chokepoint makes the guard DISCRIMINATING on this path instead of
+        // unconditional: two genuinely different operators still carry different
+        // fingerprints and are still refused.
+        sys.refresh_row_hessian_fingerprint();
         Ok(sys)
     }
 
