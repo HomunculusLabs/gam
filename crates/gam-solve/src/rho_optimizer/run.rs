@@ -4770,9 +4770,47 @@ fn certify_outer_optimality_at_terminal_fidelity(
         // certificate gate refused instead of failing silently.
         let mut summary = certificate.summary();
         if !curvature_requirement_met {
-            summary = format!(
-                "{summary}; this objective requires a measured positive-semidefinite                  analytic Hessian at the selected local minimum"
-            );
+            // This gate refuses on two OPPOSITE grounds and used to report both
+            // with one sentence, which reads as an optimizer failure in either
+            // case (#2641):
+            //
+            //   * `hessian_psd=no`  — curvature WAS measured and is indefinite.
+            //     A verdict about the point. Refusing is correct; #2665 is such
+            //     a case (λ_min = -1.6e3 against a 1e-5 floor).
+            //   * `hessian_psd=n/a` — curvature was never measured at all, so
+            //     there is no eigenvalue and no verdict. Nothing about the point
+            //     has been established either way.
+            //
+            // The second splits again, and one branch is a CONFIGURATION
+            // CONTRADICTION rather than anything the optimizer did: a caller can
+            // declare `DeclaredHessianForm::Unavailable` (e.g. a lane that
+            // deliberately avoids realizing an O(n) second-order slab) while the
+            // same outer problem sets `require_measured_psd`. That combination
+            // can never be satisfied by any amount of optimizer work, so say so
+            // at the refusal instead of sending the reader to the solver.
+            let detail = match certificate.hessian_psd() {
+                Some(false) => "this objective requires a positive-semidefinite analytic Hessian \
+                     at the selected local minimum, and the Hessian measured HERE is indefinite \
+                     (`hessian_psd=no`) — a curvature verdict about this point, not a missing \
+                     measurement"
+                    .to_string(),
+                _ if !capability.hessian.is_analytic() => format!(
+                    "this objective requires a MEASURED positive-semidefinite analytic Hessian at \
+                     the selected local minimum, but the problem declared \
+                     `{:?}`, so no Hessian was ever evaluated and `hessian_psd` is \
+                     unavailable. CONFIGURATION CONTRADICTION: the same outer problem both \
+                     suppressed the analytic Hessian and required a measured one. No optimizer \
+                     result can satisfy this — fix the construction (declare the Hessian, at \
+                     least for the terminal certification evaluation) rather than the search",
+                    capability.hessian
+                ),
+                _ => "this objective requires a MEASURED positive-semidefinite analytic Hessian \
+                     at the selected local minimum. The Hessian is declared available, yet none \
+                     was materialized at certification, so `hessian_psd` is unavailable and NO \
+                     curvature verdict has been reached about this point"
+                    .to_string(),
+            };
+            summary = format!("{summary}; {detail}");
         }
         // `summary()` prints `lambdas_railed`, which is the λ-block report. When
         // the face the certificate actually reasoned on is wider — a joint
