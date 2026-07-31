@@ -111,16 +111,17 @@ def test_stiefel_k2_response_geometry_is_fittable():
 def test_stiefel_k1_control_fits():
     """Control: St(n, 1) == sphere reduction fits fine, isolating the breakage
     to k >= 2 (so the bug is the missing Stiefel logarithm, not the response-
-    geometry machinery as a whole)."""
+    geometry machinery as a whole). The support is a tight spherical cap so
+    the implicit Fréchet base satisfies the global-uniqueness contract."""
     rng = np.random.default_rng(5)
     n = 400
     x = rng.uniform(-1.0, 1.0, n)
     z = rng.uniform(-1.0, 1.0, n)
     v = np.stack(
         [
-            np.cos(1.2 * x) * np.cos(0.8 * z),
-            np.sin(1.2 * x) * np.cos(0.8 * z),
-            np.sin(0.8 * z),
+            np.cos(0.25 * x) * np.cos(0.15 * z),
+            np.sin(0.25 * x) * np.cos(0.15 * z),
+            np.sin(0.15 * z),
         ],
         axis=1,
     )
