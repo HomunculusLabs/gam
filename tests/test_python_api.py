@@ -818,10 +818,33 @@ def test_bernoulli_marginal_slope_roundtrip_tracks_calibrated_score(
 ) -> None:
     """Stage 2a: Bernoulli marginal-slope on the calibrated score.
 
-    Fit Stage 1 to produce ``pgs_ctn_z`` (the anchored deviation), then fit
-    the disease model with a probit link and constant marginal slope.
-    Roundtrip the saved model and check predictions are valid probabilities
-    that track ``pgs_ctn_z`` monotonically.
+    Fit Stage 1 to produce the latent score, then fit the disease model with a
+    probit link and constant marginal slope. Roundtrip the saved model and
+    check predictions are valid probabilities that track the score
+    monotonically.
+
+    Two things this fixture gets wrong are worth naming, because both made it
+    red and each was invisible behind the other (gam#2432).
+
+    **The score is ``transformation_score``, not ``predict``.** A CTN model's
+    ``predict`` is the response-scale conditional mean ``E[Y|x]`` — a function
+    of the covariates alone, whose spread is only the *explained* variance. It
+    measured ``sd = 0.164`` here against a latent-``N(0,1)`` precondition the
+    engine checks and reports (``allowed_sd`` is ``4/sqrt(2(n-1))``). The
+    generated regressor a marginal-slope stage wants is
+    ``Phi^-1(F(y|x))``, which is what ``transformation_score`` returns and
+    which measures ``sd = 1.16`` on this frame. Consuming the conditional mean
+    as a score is the gam#979 semantic corruption.
+
+    **The baseline formula must not contain the score.** This previously read
+    ``disease ~ z``, and ``z`` is not a column of the frame — it is the
+    canonical alias the engine binds to ``z_column``. So the score entered the
+    marginal design, and with an intercept-only log-slope the effective
+    log-slope direction ``f = a*1 + s*z`` lies in the span of the effective
+    marginal design ``[1, z]`` row by row, for any data. The fit was degenerate
+    by construction and the engine refused it. The baseline is now ``pc1``,
+    which is the covariate the fixture actually gives the disease process
+    besides the score.
     """
     _require_extension()
     df = synthetic_large_scale_factory(seed=1, n=128)
@@ -832,11 +855,11 @@ def test_bernoulli_marginal_slope_roundtrip_tracks_calibrated_score(
         transformation_normal=True,
         scale_dimensions=True,
     )
-    df["pgs_ctn_z"] = np.asarray(calib.predict(df), dtype=float)
+    df["pgs_ctn_z"] = np.asarray(calib.transformation_score(df), dtype=float)
 
     model = gamfit.fit(
         df,
-        "disease ~ z",
+        "disease ~ pc1",
         family="bernoulli-marginal-slope",
         link="probit",
         scale_dimensions=True,
@@ -857,10 +880,32 @@ def test_bernoulli_marginal_slope_roundtrip_tracks_calibrated_score(
 
     # Compute Spearman via numpy rank correlation to avoid pulling scipy in
     # as a test dependency.
-    pgs_rank = pd.Series(df["pgs_ctn_z"].to_numpy()).rank().to_numpy()
-    prob_rank = pd.Series(probs).rank().to_numpy()
-    rho = float(np.corrcoef(pgs_rank, prob_rank)[0, 1])
+    def _spearman(a: np.ndarray, b: np.ndarray) -> float:
+        rank_a = pd.Series(a).rank().to_numpy()
+        rank_b = pd.Series(b).rank().to_numpy()
+        return float(np.corrcoef(rank_a, rank_b)[0, 1])
+
+    score = df["pgs_ctn_z"].to_numpy()
+    rho = _spearman(score, probs)
     assert rho > 0.3, f"spearman(pgs_ctn_z, p) = {rho:.3f} not monotone enough"
+
+    # The bar above has to be able to fail, and a baseline carrying the score
+    # would satisfy it for free: with an intercept-only baseline the
+    # probability is a monotone function of the score alone, so `rho` is
+    # exactly 1.0 whatever the fit did. Pair it with the same statistic on a
+    # permuted score, which destroys the pairing while preserving both
+    # marginals — that must land far below the bar, so a passing `rho` is
+    # evidence about this fit rather than about the shape of the assertion.
+    shuffled = np.random.default_rng(7).permutation(score)
+    rho_null = _spearman(shuffled, probs)
+    assert rho_null < 0.3, (
+        f"permuted-score control reached spearman = {rho_null:.3f}; the "
+        f"monotonicity bar cannot distinguish this fit from chance"
+    )
+    assert rho > rho_null + 0.4, (
+        f"spearman(pgs_ctn_z, p) = {rho:.3f} is not meaningfully above the "
+        f"permuted-score control {rho_null:.3f}"
+    )
 
 
 def test_survival_marginal_slope_weibull_n3000_returns_under_60s() -> None:

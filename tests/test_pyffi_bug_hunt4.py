@@ -27,7 +27,12 @@ def _weibull_frame(n: int = 240, seed: int = 7):
     rng = np.random.default_rng(seed)
     age = rng.uniform(40.0, 75.0, n)
     bmi = rng.uniform(18.0, 40.0, n)
-    eta = -2.1 + 0.05 * (age - 50.0) + 0.03 * (bmi - 26.0)
+    # A latent standard-normal score for the marginal-slope lane. Marginal
+    # slope reserves its `z_column` as the auxiliary score and refuses to see
+    # it in the main formula, so the score has to be its own column rather
+    # than a covariate the baseline also wants (gam#2432).
+    prs_z = rng.normal(0.0, 1.0, n)
+    eta = -2.1 + 0.05 * (age - 50.0) + 0.03 * (bmi - 26.0) + 0.30 * prs_z
     shape = 1.4
     u = rng.uniform(1e-9, 1.0, n)
     latent = np.exp(-eta / shape) * (-np.log(u)) ** (1.0 / shape)
@@ -36,16 +41,30 @@ def _weibull_frame(n: int = 240, seed: int = 7):
     censor = np.minimum(censor, 18.0)
     exit_t = np.minimum(latent, censor)
     event = (latent <= censor).astype(int)
-    return pd.DataFrame({"entry": np.zeros(n), "exit": exit_t, "event": event, "age": age, "bmi": bmi})
+    return pd.DataFrame(
+        {
+            "entry": np.zeros(n),
+            "exit": exit_t,
+            "event": event,
+            "age": age,
+            "bmi": bmi,
+            "prs_z": prs_z,
+        }
+    )
 
 
 def test_bug_custom_family_coefficient_group_labels_are_stably_routed() -> None:
     train = _weibull_frame(180)
+    # `z_column` used to name `age`, which the baseline formula also uses. That
+    # is the configuration marginal slope exists to reject — the score would be
+    # in both the marginal design and the score block — and the engine refused
+    # it at parse time, so this test never reached the block routing it exists
+    # to check (gam#2432). The score is now its own column.
     model = gamfit.fit(
         train,
         "Surv(entry, exit, event) ~ age + bmi",
         survival_likelihood="marginal-slope",
-        z_column="age",
+        z_column="prs_z",
         logslope_formula="bmi",
     )
     blocks = {b.name: (b.kind, b.start, b.end) for b in model.term_blocks}
