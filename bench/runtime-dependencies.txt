@@ -4,7 +4,7 @@
 # `.github/workflows/benchmark.yml`.  Orchestration-only workflow edits must not
 # invalidate an 811 MB dependency cache; dependency changes must update this
 # file and therefore produce a new exact cache key.
-python=3.11
+python=3.12
 r=4.4.3
 python-packages=numpy,pandas,pyarrow,scikit-learn,lifelines,scikit-survival,xgboost,matplotlib
 r-packages=mgcv,jsonlite,survival,glmnet,gamlss,gamlss.dist,gamboostLSS,mboost,bamlss,brms

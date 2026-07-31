@@ -9,6 +9,10 @@ inputs:
     description: "R version to install for benchmark jobs"
     required: false
     default: "4.4.3"
+  python-version:
+    description: "Python version to install for benchmark jobs"
+    required: false
+    default: "3.12"
 runs:
   using: composite
   steps:
@@ -25,7 +29,7 @@ runs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: "3.11"
+        python-version: ${{ inputs.python-version }}
 
     - name: Set up R
       uses: ./.github/actions/setup-bench-r

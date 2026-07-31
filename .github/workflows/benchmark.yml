@@ -27,6 +27,7 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_PYTHON_VERSION_WARNING: "1"
   R_LIBS_USER: ${{ github.workspace }}/.r-lib
+  BENCH_PYTHON_VERSION: "3.12"
   BENCH_R_VERSION: "4.4.3"
   BENCH_RUNTIME_CACHE_VERSION: v3
   BENCH_BINARY_CACHE_VERSION: v1
@@ -47,7 +48,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.BENCH_PYTHON_VERSION }}
 
       - name: Install Python deps for preflight
         # The two preflight steps below load bench/run_suite.py via
@@ -96,6 +97,11 @@ jobs:
         with:
           fetch-depth: 0 # #1458: full history so build.rs author gate resolves real last editor, not HEAD
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.BENCH_PYTHON_VERSION }}
+
       - name: Restore shared runtime cache
         id: runtime-cache
         uses: actions/cache/restore@v4
@@ -112,6 +118,7 @@ jobs:
         uses: ./.github/actions/bench-setup
         with:
           install-runtime-deps: "true"
+          python-version: ${{ env.BENCH_PYTHON_VERSION }}
           r-version: ${{ env.BENCH_R_VERSION }}
 
       # `Verify staged runtime is complete` below shells out to Rscript
@@ -202,7 +209,7 @@ jobs:
           # Every imported module must resolve inside the staged artifact.
           # Merely importing against the runner's system site-packages would
           # let an incomplete cache pass here and fail later in clean shards.
-          PYTHONNOUSERSITE=1 PYTHONPATH="${STAGED_PYDEPS}" python3 - <<'PY'
+          PYTHONNOUSERSITE=1 PYTHONPATH="${STAGED_PYDEPS}" python3 -S - <<'PY'
           import importlib
           import os
           from pathlib import Path
@@ -352,7 +359,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.BENCH_PYTHON_VERSION }}
 
       - name: Set up R
         uses: ./.github/actions/setup-bench-r
@@ -511,7 +518,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.BENCH_PYTHON_VERSION }}
 
       - name: Set up R
         uses: ./.github/actions/setup-bench-r
@@ -661,7 +668,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.BENCH_PYTHON_VERSION }}
 
       - name: Checkout for figure generation
         uses: actions/checkout@v5
