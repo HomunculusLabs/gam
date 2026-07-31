@@ -1746,19 +1746,87 @@ impl SurvivalMarginalSlopeRowKernel {
         // so build the order-≤3 `Tower3<4>` per row — bit-identical on the read
         // channels to the dense `Tower4<4>` but without the discarded `t4` tensor.
         let towers = self.build_row_third_towers()?;
+
+        // This is a genuinely batched dense consumer: materialize the complete
+        // row Jacobian J = J·I once through the kernel's structured BLAS-3
+        // projection. The former axis loop called `jacobian_action` and
+        // `add_pullback_hessian` for every (axis,row) pair, repeatedly decoding
+        // the same dense/operator/sparse design rows and allocating ndarray
+        // row-chunk views. A live #979 stack showed that representation work,
+        // rather than the four-primary tower contraction, dominating every
+        // worker. With J resident (n·4p scalars), each axis is the literal dense
+        // identity
+        //
+        //   Hdot[e_a] = Σ_i J_iᵀ T³_i[J_i[:,a]] J_i,
+        //
+        // evaluated with two small contractions and no design access. Memory is
+        // O(n·4p + p³), bounded here by the already-selected rigid dense path.
+        let identity = Array2::<f64>::eye(p);
+        let jacobians = self
+            .jacobian_action_matrix(identity.view())
+            .ok_or_else(|| {
+                "survival marginal-slope all-axes derivative requires a dense J·I projection"
+                    .to_string()
+            })?;
+        let n = gam_math::jet_tower::RowProgram::n_rows(self);
+        let expected = (n, 4 * p);
+        if jacobians.dim() != expected {
+            return Err(format!(
+                "survival marginal-slope all-axes J·I shape {:?}, expected {:?}",
+                jacobians.dim(),
+                expected,
+            ));
+        }
+
+        let chunk = crate::outer_subsample::ARROW_ROW_CHUNK;
+        let n_chunks = crate::outer_subsample::arrow_row_chunk_count(n);
         (0..p)
             .into_par_iter()
-            .map(|a| {
-                let mut axis = vec![0.0_f64; p];
-                axis[a] = 1.0;
-                gam_problem::with_nested_parallel(|| {
-                    self.chunked_pullback_reduce(p, |row, acc| {
-                        let dir = self.jacobian_action(row, &axis);
+            .map(|axis| {
+                let mut total = Array2::<f64>::zeros((p, p));
+                // Reused for every row of this axis: (T³[J·e_axis]) · J.
+                let mut third_j = vec![0.0_f64; 4 * p];
+                for chunk_idx in 0..n_chunks {
+                    let start = chunk_idx * chunk;
+                    let end = (start + chunk).min(n);
+                    let mut acc = Array2::<f64>::zeros((p, p));
+                    let acc_slice = acc
+                        .as_slice_mut()
+                        .expect("all-axes dense accumulator must be contiguous");
+                    for row in start..end {
+                        let j_row = jacobians
+                            .row(row)
+                            .as_slice()
+                            .expect("J·I row must be contiguous");
+                        let dir = std::array::from_fn(|primary| {
+                            j_row[primary * p + axis]
+                        });
                         let third = tower3_third_contracted(&towers[row].t3, &dir);
-                        self.add_pullback_hessian(row, &third, acc);
-                        Ok(())
-                    })
-                })
+
+                        for primary_out in 0..4 {
+                            for col in 0..p {
+                                let mut value = 0.0;
+                                for primary_in in 0..4 {
+                                    value += third[primary_out][primary_in]
+                                        * j_row[primary_in * p + col];
+                                }
+                                third_j[primary_out * p + col] = value;
+                            }
+                        }
+                        for row_coeff in 0..p {
+                            for col_coeff in 0..p {
+                                let mut value = 0.0;
+                                for primary in 0..4 {
+                                    value += j_row[primary * p + row_coeff]
+                                        * third_j[primary * p + col_coeff];
+                                }
+                                acc_slice[row_coeff * p + col_coeff] += value;
+                            }
+                        }
+                    }
+                    total += &acc;
+                }
+                Ok(total)
             })
             .collect()
     }
