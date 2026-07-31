@@ -1844,8 +1844,11 @@ pub(crate) fn certificate_hessian_is_psd_off_railed(
 pub(crate) fn certificate_meets_curvature_requirement(
     certificate: &OuterCriterionCertificate,
     require_measured_psd: bool,
+    fidelity: CertificationFidelity,
 ) -> bool {
-    !require_measured_psd || certificate.hessian_psd() == Some(true)
+    matches!(fidelity, CertificationFidelity::Screening)
+        || !require_measured_psd
+        || certificate.hessian_psd() == Some(true)
 }
 
 pub(crate) fn certificate_hessian_is_psd_off_railed_above_gradient_floor(
@@ -4454,8 +4457,8 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // second-order requirement belongs exclusively to the terminal mint; applying
     // it here would reject every first-order candidate as `NotSpent` and turn a
     // two-basin comparison into seed-budget exhaustion.
-    let curvature_requirement_met = matches!(fidelity, CertificationFidelity::Screening)
-        || certificate_meets_curvature_requirement(&certificate, config.require_measured_psd);
+    let curvature_requirement_met =
+        certificate_meets_curvature_requirement(&certificate, config.require_measured_psd, fidelity);
     if !certificate.certifies() || !curvature_requirement_met {
         // Mint the #2392 reseeds fresh for THIS refused point: clear any value a
         // prior (multistart / pre-polish) certification of a different ρ left on
