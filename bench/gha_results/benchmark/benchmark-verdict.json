@@ -6,7 +6,7 @@
     "full_suite_required": true
   },
   "configured_scenario_count": 110,
-  "observed_scenario_count": 0,
+  "observed_scenario_count": 1,
   "missing_scenarios": [
     "bone_gamair",
     "cirrhosis_survival",
@@ -75,7 +75,6 @@
     "geo_subpop16_duchon_k12",
     "geo_subpop16_duchon_k24",
     "geo_subpop16_duchon_k6",
-    "geo_subpop16_margslope_aniso_duchon16d_k50",
     "geo_subpop16_matern_k12",
     "geo_subpop16_matern_k24",
     "geo_subpop16_matern_k6",
