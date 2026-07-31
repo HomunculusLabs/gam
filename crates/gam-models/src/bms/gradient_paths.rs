@@ -1667,8 +1667,7 @@ row_program! {
             scale(observed_logslope, latent_score)
         );
         let signed_margin = scale(latent_index, outcome_sign);
-        let nll = compose(signed_probit, signed_margin, weight);
-        return nll;
+        return compose(signed_probit, signed_margin, weight);
     }
 }
 

@@ -58,7 +58,7 @@ row_program! {
         outcome_sign,
         weight
     )
-    emit [generic, order2];
+    emit [generic, order2, third, fourth];
     leaves {
         supplied_link => supplied_link_stack => supplied_link_stack_cuda,
         observed_scale => observed_scale_stack => observed_scale_stack_cuda,
@@ -82,8 +82,7 @@ row_program! {
             scale(observed_logslope, latent_score)
         );
         let signed_margin = scale(latent_index, outcome_sign);
-        let nll = compose(signed_probit, signed_margin, weight);
-        return nll;
+        return compose(signed_probit, signed_margin, weight);
     }
 }
 
@@ -98,6 +97,8 @@ struct Row {
     latent_score: f64,
     outcome_sign: f64,
     weight: f64,
+    direction_u: [f64; 2],
+    direction_v: [f64; 2],
 }
 
 #[inline(never)]
@@ -153,6 +154,158 @@ fn strongest_hand(row: Row) -> Channels {
     )
 }
 
+#[inline(always)]
+fn generated_third(row: Row) -> [[f64; 2]; 2] {
+    generated_rigid_bms_third_contracted(
+        row.marginal_eta,
+        row.logslope,
+        row.marginal[0],
+        row.marginal[1],
+        row.marginal[2],
+        row.marginal[3],
+        row.marginal[4],
+        row.probit_scale,
+        row.latent_score,
+        row.outcome_sign,
+        row.weight,
+        &row.direction_u,
+    )
+}
+
+#[inline(always)]
+fn generated_fourth(row: Row) -> [[f64; 2]; 2] {
+    generated_rigid_bms_fourth_contracted(
+        row.marginal_eta,
+        row.logslope,
+        row.marginal[0],
+        row.marginal[1],
+        row.marginal[2],
+        row.marginal[3],
+        row.marginal[4],
+        row.probit_scale,
+        row.latent_score,
+        row.outcome_sign,
+        row.weight,
+        &row.direction_u,
+        &row.direction_v,
+    )
+}
+
+#[inline(always)]
+fn margin_chain(row: Row) -> ([f64; 5], [f64; 2], [f64; 3], [f64; 4], [f64; 5]) {
+    let observed_slope = row.probit_scale * row.logslope;
+    let observed_stack = observed_scale_stack(observed_slope);
+    let mut scale_stack = [0.0; 5];
+    let mut scale_power = 1.0;
+    for order in 0..5 {
+        scale_stack[order] = observed_stack[order] * scale_power;
+        scale_power *= row.probit_scale;
+    }
+    let derivative = |order: usize, g_axes: usize| {
+        let eta_axes = order - g_axes;
+        let linear = if eta_axes == 0 && g_axes == 1 {
+            row.probit_scale * row.latent_score
+        } else {
+            0.0
+        };
+        row.outcome_sign * (row.marginal[eta_axes] * scale_stack[g_axes] + linear)
+    };
+    let signed_margin = row.outcome_sign
+        * (row.marginal[0] * observed_stack[0] + observed_slope * row.latent_score);
+    (
+        signed_probit_stack(signed_margin, row.weight),
+        std::array::from_fn(|g_axes| derivative(1, g_axes)),
+        std::array::from_fn(|g_axes| derivative(2, g_axes)),
+        std::array::from_fn(|g_axes| derivative(3, g_axes)),
+        std::array::from_fn(|g_axes| derivative(4, g_axes)),
+    )
+}
+
+#[inline(always)]
+fn dot2(left: [f64; 2], right: [f64; 2]) -> f64 {
+    left[0] * right[0] + left[1] * right[1]
+}
+
+#[inline(always)]
+fn contract2(derivative: &[f64; 3], left: [f64; 2], right: [f64; 2]) -> f64 {
+    derivative[0] * left[0] * right[0]
+        + derivative[1] * (left[0] * right[1] + left[1] * right[0])
+        + derivative[2] * left[1] * right[1]
+}
+
+#[inline(never)]
+fn strongest_hand_third(row: Row) -> [[f64; 2]; 2] {
+    let (outer, d1, d2, d3, _) = margin_chain(row);
+    let margin_u = dot2(d1, row.direction_u);
+    std::array::from_fn(|axis_a| {
+        std::array::from_fn(|axis_b| {
+            let margin_a = d1[axis_a];
+            let margin_b = d1[axis_b];
+            let margin_ab = d2[axis_a + axis_b];
+            let margin_au = d2[axis_a] * row.direction_u[0] + d2[axis_a + 1] * row.direction_u[1];
+            let margin_bu = d2[axis_b] * row.direction_u[0] + d2[axis_b + 1] * row.direction_u[1];
+            let margin_abu = d3[axis_a + axis_b] * row.direction_u[0]
+                + d3[axis_a + axis_b + 1] * row.direction_u[1];
+            outer[3] * margin_u * margin_a * margin_b
+                + outer[2] * (margin_au * margin_b + margin_a * margin_bu + margin_u * margin_ab)
+                + outer[1] * margin_abu
+        })
+    })
+}
+
+#[inline(never)]
+fn strongest_hand_fourth(row: Row) -> [[f64; 2]; 2] {
+    let (outer, d1, d2, d3, d4) = margin_chain(row);
+    let margin_u = dot2(d1, row.direction_u);
+    let margin_v = dot2(d1, row.direction_v);
+    let margin_uv = contract2(&d2, row.direction_u, row.direction_v);
+    std::array::from_fn(|axis_a| {
+        std::array::from_fn(|axis_b| {
+            let margin_a = d1[axis_a];
+            let margin_b = d1[axis_b];
+            let margin_ab = d2[axis_a + axis_b];
+            let margin_au = d2[axis_a] * row.direction_u[0] + d2[axis_a + 1] * row.direction_u[1];
+            let margin_av = d2[axis_a] * row.direction_v[0] + d2[axis_a + 1] * row.direction_v[1];
+            let margin_bu = d2[axis_b] * row.direction_u[0] + d2[axis_b + 1] * row.direction_u[1];
+            let margin_bv = d2[axis_b] * row.direction_v[0] + d2[axis_b + 1] * row.direction_v[1];
+            let margin_abu = d3[axis_a + axis_b] * row.direction_u[0]
+                + d3[axis_a + axis_b + 1] * row.direction_u[1];
+            let margin_abv = d3[axis_a + axis_b] * row.direction_v[0]
+                + d3[axis_a + axis_b + 1] * row.direction_v[1];
+            let margin_auv = d3[axis_a] * row.direction_u[0] * row.direction_v[0]
+                + d3[axis_a + 1]
+                    * (row.direction_u[0] * row.direction_v[1]
+                        + row.direction_u[1] * row.direction_v[0])
+                + d3[axis_a + 2] * row.direction_u[1] * row.direction_v[1];
+            let margin_buv = d3[axis_b] * row.direction_u[0] * row.direction_v[0]
+                + d3[axis_b + 1]
+                    * (row.direction_u[0] * row.direction_v[1]
+                        + row.direction_u[1] * row.direction_v[0])
+                + d3[axis_b + 2] * row.direction_u[1] * row.direction_v[1];
+            let margin_abuv = d4[axis_a + axis_b] * row.direction_u[0] * row.direction_v[0]
+                + d4[axis_a + axis_b + 1]
+                    * (row.direction_u[0] * row.direction_v[1]
+                        + row.direction_u[1] * row.direction_v[0])
+                + d4[axis_a + axis_b + 2] * row.direction_u[1] * row.direction_v[1];
+            let second_chain = margin_au * margin_b + margin_a * margin_bu + margin_u * margin_ab;
+            let second_chain_v = margin_auv * margin_b
+                + margin_au * margin_bv
+                + margin_av * margin_bu
+                + margin_a * margin_buv
+                + margin_uv * margin_ab
+                + margin_u * margin_abv;
+            outer[4] * margin_v * margin_u * margin_a * margin_b
+                + outer[3]
+                    * (margin_uv * margin_a * margin_b
+                        + margin_u * margin_av * margin_b
+                        + margin_u * margin_a * margin_bv
+                        + margin_v * second_chain)
+                + outer[2] * (second_chain_v + margin_v * margin_abu)
+                + outer[1] * margin_abuv
+        })
+    })
+}
+
 fn rows() -> Vec<Row> {
     (0..512)
         .map(|index| {
@@ -167,6 +320,8 @@ fn rows() -> Vec<Row> {
                 latent_score: 1.4 * (x * 0.13 + 0.2).sin(),
                 outcome_sign: if index % 2 == 0 { 1.0 } else { -1.0 },
                 weight: 0.55 + 0.45 * (x * 0.19 + 1.0).sin().abs(),
+                direction_u: [0.7 * (x * 0.23 + 0.4).cos(), -0.6 * (x * 0.29 + 0.1).sin()],
+                direction_v: [-0.5 * (x * 0.21 + 0.9).sin(), 0.8 * (x * 0.27 + 0.5).cos()],
             }
         })
         .collect()
@@ -190,7 +345,15 @@ fn assert_channels(got: Channels, want: Channels) {
     }
 }
 
-fn sample(rows: &[Row], evaluate: fn(Row) -> Channels) -> f64 {
+fn assert_matrix(got: [[f64; 2]; 2], want: [[f64; 2]; 2]) {
+    for axis in 0..2 {
+        for other in 0..2 {
+            close(got[axis][other], want[axis][other]);
+        }
+    }
+}
+
+fn sample(rows: &[Row], evaluate: impl Fn(Row) -> Channels) -> f64 {
     let started = Instant::now();
     let mut checksum = 0.0;
     for iteration in 0..4096 {
@@ -208,32 +371,78 @@ fn sample(rows: &[Row], evaluate: fn(Row) -> Channels) -> f64 {
     started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
 }
 
+fn sample_matrix(rows: &[Row], evaluate: impl Fn(Row) -> [[f64; 2]; 2]) -> f64 {
+    let started = Instant::now();
+    let mut checksum = 0.0;
+    for iteration in 0..4096 {
+        for row in rows {
+            let mut perturbed = *row;
+            perturbed.logslope += checksum * 1e-24;
+            let matrix = std::hint::black_box(evaluate(perturbed));
+            checksum += matrix.iter().flat_map(|line| line.iter()).sum::<f64>();
+        }
+        checksum *= 1e-3 + iteration as f64 * 1e-12;
+    }
+    assert!(checksum.is_finite());
+    started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
+}
+
+fn median(mut values: [f64; 7]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    values[values.len() / 2]
+}
+
 #[test]
 fn generated_rigid_bms_matches_strongest_hand_932() {
     let rows = rows();
     for row in &rows {
         assert_channels(generated(*row), strongest_hand(*row));
+        assert_matrix(generated_third(*row), strongest_hand_third(*row));
+        assert_matrix(generated_fourth(*row), strongest_hand_fourth(*row));
     }
 
-    let mut generated_ns = f64::INFINITY;
-    let mut hand_ns = f64::INFINITY;
+    let mut order2_samples = [(0.0, 0.0); 7];
+    let mut third_samples = [(0.0, 0.0); 7];
+    let mut fourth_samples = [(0.0, 0.0); 7];
     for round in 0..7 {
         if round % 2 == 0 {
-            generated_ns = generated_ns.min(sample(&rows, generated));
-            hand_ns = hand_ns.min(sample(&rows, strongest_hand));
+            order2_samples[round] = (sample(&rows, generated), sample(&rows, strongest_hand));
+            third_samples[round] = (
+                sample_matrix(&rows, generated_third),
+                sample_matrix(&rows, strongest_hand_third),
+            );
+            fourth_samples[round] = (
+                sample_matrix(&rows, generated_fourth),
+                sample_matrix(&rows, strongest_hand_fourth),
+            );
         } else {
-            hand_ns = hand_ns.min(sample(&rows, strongest_hand));
-            generated_ns = generated_ns.min(sample(&rows, generated));
+            let hand_ns = sample(&rows, strongest_hand);
+            let generated_ns = sample(&rows, generated);
+            order2_samples[round] = (generated_ns, hand_ns);
+            let hand_ns = sample_matrix(&rows, strongest_hand_third);
+            let generated_ns = sample_matrix(&rows, generated_third);
+            third_samples[round] = (generated_ns, hand_ns);
+            let hand_ns = sample_matrix(&rows, strongest_hand_fourth);
+            let generated_ns = sample_matrix(&rows, generated_fourth);
+            fourth_samples[round] = (generated_ns, hand_ns);
         }
     }
-    eprintln!(
-        "RIGID-BMS-HAND-932 generated={generated_ns:.3} ns/row \
-         strongest_hand={hand_ns:.3} ns/row hand_over_generated={:.6}",
-        hand_ns / generated_ns,
-    );
-    assert!(
-        generated_ns < hand_ns,
-        "generated rigid BMS must beat the strongest hand kernel: \
-         generated={generated_ns:.3} ns/row hand={hand_ns:.3} ns/row",
-    );
+    for (channel, samples) in [
+        ("order2", order2_samples),
+        ("third", third_samples),
+        ("fourth", fourth_samples),
+    ] {
+        let generated_ns = median(samples.map(|sample| sample.0));
+        let hand_ns = median(samples.map(|sample| sample.1));
+        let paired_ratio = median(samples.map(|sample| sample.1 / sample.0));
+        eprintln!(
+            "RIGID-BMS-HAND-932 channel={channel} generated={generated_ns:.3} ns/row \
+             strongest_hand={hand_ns:.3} ns/row paired_hand_over_generated={paired_ratio:.6}",
+        );
+        assert!(
+            paired_ratio > 1.0,
+            "generated {channel} must beat the strongest direct analytic schedule by paired median: \
+             generated={generated_ns:.3} ns/row hand={hand_ns:.3} ns/row ratio={paired_ratio:.6}",
+        );
+    }
 }

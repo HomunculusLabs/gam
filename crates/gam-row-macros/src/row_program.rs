@@ -1356,6 +1356,410 @@ struct DirectionalExpressionEnvironment<'a> {
     fourth: bool,
 }
 
+/// Exact normalized multivariate Taylor coefficients through degree four.
+///
+/// The directional lowering is asymptotically right for wide rows because it
+/// never materializes a dense high-order tensor. For one- and two-primary row
+/// programs, however, propagating four second-order directional jets performs
+/// more arithmetic than propagating the complete tiny Taylor polynomial once.
+/// This representation is a compile-time algebra only: emitted production code
+/// contains direct scalar formulas, not an automatic-differentiation runtime.
+#[derive(Clone)]
+struct DenseTaylorJet {
+    dimension: usize,
+    order: usize,
+    coefficients: Vec<Option<String>>,
+}
+
+fn dense_taylor_slot_count(dimension: usize) -> usize {
+    5usize.pow(dimension as u32)
+}
+
+fn dense_taylor_counts(mut index: usize, dimension: usize) -> Vec<usize> {
+    let mut counts = Vec::with_capacity(dimension);
+    for _ in 0..dimension {
+        counts.push(index % 5);
+        index /= 5;
+    }
+    counts
+}
+
+fn dense_taylor_index(counts: &[usize]) -> usize {
+    counts
+        .iter()
+        .rev()
+        .fold(0usize, |index, count| index * 5 + count)
+}
+
+fn dense_taylor_component(value: String, index: usize) -> Option<String> {
+    if index != 0 && symbolic_is_zero(&value) {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+impl DenseTaylorJet {
+    fn zero(dimension: usize, order: usize) -> Self {
+        let mut coefficients = vec![None; dense_taylor_slot_count(dimension)];
+        coefficients[0] = Some("0.0".to_string());
+        Self {
+            dimension,
+            order,
+            coefficients,
+        }
+    }
+
+    fn constant(value: String, dimension: usize, order: usize) -> Self {
+        let mut out = Self::zero(dimension, order);
+        out.coefficients[0] = Some(value);
+        out
+    }
+
+    fn primary(name: &str, axis: usize, dimension: usize, order: usize) -> Self {
+        let mut out = Self::constant(name.to_string(), dimension, order);
+        let mut counts = vec![0usize; dimension];
+        counts[axis] = 1;
+        out.coefficients[dense_taylor_index(&counts)] = Some("1.0".to_string());
+        out
+    }
+
+    fn support(&self) -> Vec<bool> {
+        self.coefficients.iter().map(Option::is_some).collect()
+    }
+
+    fn reference(name: &str, support: &[bool], dimension: usize, order: usize) -> Self {
+        let mut out = Self::zero(dimension, order);
+        for (index, present) in support.iter().copied().enumerate() {
+            if present {
+                out.coefficients[index] = Some(format!("{name}_c{index}"));
+            }
+        }
+        out
+    }
+}
+
+fn dense_taylor_add(left: DenseTaylorJet, right: DenseTaylorJet) -> DenseTaylorJet {
+    let mut out = DenseTaylorJet::zero(left.dimension, left.order);
+    for index in 0..out.coefficients.len() {
+        out.coefficients[index] =
+            symbolic_add_component(&left.coefficients[index], &right.coefficients[index])
+                .and_then(|value| dense_taylor_component(value, index));
+    }
+    out
+}
+
+fn dense_taylor_negate(value: DenseTaylorJet) -> DenseTaylorJet {
+    let mut out = DenseTaylorJet::zero(value.dimension, value.order);
+    for (index, component) in value.coefficients.iter().enumerate() {
+        out.coefficients[index] = component
+            .as_ref()
+            .map(|component| symbolic_negate(component))
+            .and_then(|component| dense_taylor_component(component, index));
+    }
+    out
+}
+
+fn dense_taylor_scale(value: DenseTaylorJet, scalar: &str) -> DenseTaylorJet {
+    let mut out = DenseTaylorJet::zero(value.dimension, value.order);
+    for (index, component) in value.coefficients.iter().enumerate() {
+        out.coefficients[index] = symbolic_scale_component(component, scalar)
+            .and_then(|component| dense_taylor_component(component, index));
+    }
+    out
+}
+
+fn dense_taylor_multiply(left: DenseTaylorJet, right: DenseTaylorJet) -> DenseTaylorJet {
+    let dimension = left.dimension;
+    let order = left.order;
+    let mut out = DenseTaylorJet::zero(dimension, order);
+    out.coefficients.fill(None);
+    for (left_index, left_component) in left.coefficients.iter().enumerate() {
+        let Some(left_component) = left_component else {
+            continue;
+        };
+        let left_counts = dense_taylor_counts(left_index, dimension);
+        for (right_index, right_component) in right.coefficients.iter().enumerate() {
+            let Some(right_component) = right_component else {
+                continue;
+            };
+            let right_counts = dense_taylor_counts(right_index, dimension);
+            let counts = left_counts
+                .iter()
+                .zip(right_counts)
+                .map(|(left, right)| left + right)
+                .collect::<Vec<_>>();
+            if counts.iter().sum::<usize>() > order {
+                continue;
+            }
+            let index = dense_taylor_index(&counts);
+            let product = symbolic_multiply(left_component, right_component);
+            out.coefficients[index] =
+                symbolic_add_component(&out.coefficients[index], &Some(product))
+                    .and_then(|value| dense_taylor_component(value, index));
+        }
+    }
+    if out.coefficients[0].is_none() {
+        out.coefficients[0] = Some("0.0".to_string());
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dense_taylor_composition_partitions(
+    candidates: &[(usize, String, Vec<usize>)],
+    start: usize,
+    remaining: usize,
+    order: usize,
+    counts: &mut [usize],
+    selected: &mut Vec<usize>,
+    product: Option<String>,
+    derivative: &str,
+    output: &mut DenseTaylorJet,
+) {
+    if remaining == 0 {
+        let index = dense_taylor_index(counts);
+        let mut multiplicity_factorial = 1usize;
+        let mut run = 1usize;
+        for pair in selected.windows(2) {
+            if pair[0] == pair[1] {
+                run += 1;
+            } else {
+                multiplicity_factorial *= match run {
+                    1 => 1,
+                    2 => 2,
+                    3 => 6,
+                    4 => 24,
+                    _ => unreachable!("dense Taylor order is at most four"),
+                };
+                run = 1;
+            }
+        }
+        multiplicity_factorial *= match run {
+            1 => 1,
+            2 => 2,
+            3 => 6,
+            4 => 24,
+            _ => unreachable!("dense Taylor order is at most four"),
+        };
+        let mut term = symbolic_multiply(
+            derivative,
+            product
+                .as_deref()
+                .expect("composition partition has at least one factor"),
+        );
+        if multiplicity_factorial != 1 {
+            term = symbolic_multiply(
+                &term,
+                &format!("{:.17}", 1.0 / multiplicity_factorial as f64),
+            );
+        }
+        output.coefficients[index] =
+            symbolic_add_component(&output.coefficients[index], &Some(term))
+                .and_then(|value| dense_taylor_component(value, index));
+        return;
+    }
+
+    for candidate_index in start..candidates.len() {
+        let (_, component, candidate_counts) = &candidates[candidate_index];
+        if counts
+            .iter()
+            .zip(candidate_counts)
+            .map(|(left, right)| left + right)
+            .sum::<usize>()
+            > order
+        {
+            continue;
+        }
+        for (count, added) in counts.iter_mut().zip(candidate_counts) {
+            *count += added;
+        }
+        selected.push(candidate_index);
+        dense_taylor_composition_partitions(
+            candidates,
+            candidate_index,
+            remaining - 1,
+            order,
+            counts,
+            selected,
+            Some(match &product {
+                Some(product) => symbolic_multiply(product, component),
+                None => component.clone(),
+            }),
+            derivative,
+            output,
+        );
+        selected.pop();
+        for (count, added) in counts.iter_mut().zip(candidate_counts) {
+            *count -= added;
+        }
+    }
+}
+
+fn dense_taylor_compose(input: DenseTaylorJet, stack: &str) -> DenseTaylorJet {
+    let dimension = input.dimension;
+    let order = input.order;
+    let candidates = input
+        .coefficients
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter_map(|(index, component)| {
+            component.as_ref().map(|component| {
+                (
+                    index,
+                    component.clone(),
+                    dense_taylor_counts(index, dimension),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut out = DenseTaylorJet::constant(format!("{stack}[0]"), dimension, order);
+    for derivative_order in 1..=order {
+        dense_taylor_composition_partitions(
+            &candidates,
+            0,
+            derivative_order,
+            order,
+            &mut vec![0usize; dimension],
+            &mut Vec::with_capacity(derivative_order),
+            None,
+            &format!("{stack}[{derivative_order}]"),
+            &mut out,
+        );
+    }
+    out
+}
+
+fn push_dense_taylor_declaration(
+    source: &mut String,
+    indentation: &str,
+    name: &str,
+    mutable: &str,
+    value: &DenseTaylorJet,
+    support: &[bool],
+) {
+    for (index, present) in support.iter().copied().enumerate() {
+        if present {
+            source.push_str(&format!(
+                "{indentation}let {mutable}{name}_c{index}: f64 = {};\n",
+                symbolic_component(&value.coefficients[index]),
+            ));
+        }
+    }
+}
+
+fn push_dense_taylor_assignment(
+    source: &mut String,
+    indentation: &str,
+    name: &str,
+    value: &DenseTaylorJet,
+    support: &[bool],
+) {
+    for (index, present) in support.iter().copied().enumerate() {
+        if present {
+            source.push_str(&format!(
+                "{indentation}{name}_c{index} = {};\n",
+                symbolic_component(&value.coefficients[index]),
+            ));
+        }
+    }
+}
+
+fn materialize_dense_taylor(
+    value: DenseTaylorJet,
+    owner: &str,
+    temporary_index: &mut usize,
+    preludes: &mut Vec<String>,
+) -> DenseTaylorJet {
+    let name = format!("__row_program_{owner}_dense_tmp{}", *temporary_index);
+    *temporary_index += 1;
+    let support = value.support();
+    let mut source = String::new();
+    push_dense_taylor_declaration(&mut source, "", &name, "", &value, &support);
+    preludes.push(source);
+    DenseTaylorJet::reference(&name, &support, value.dimension, value.order)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dense_taylor_expression(
+    expression: &ProgramExpr,
+    owner: &str,
+    leaves: &[Leaf],
+    constants: &HashSet<String>,
+    bindings: &HashMap<String, DenseTaylorJet>,
+    dimension: usize,
+    order: usize,
+    temporary_index: &mut usize,
+    preludes: &mut Vec<String>,
+) -> Result<DenseTaylorJet> {
+    let mut child = |expression: &ProgramExpr| {
+        dense_taylor_expression(
+            expression,
+            owner,
+            leaves,
+            constants,
+            bindings,
+            dimension,
+            order,
+            temporary_index,
+            preludes,
+        )
+    };
+    let value = match expression {
+        ProgramExpr::Path(ident) => {
+            return bindings.get(&ident.to_string()).cloned().ok_or_else(|| {
+                syn::Error::new_spanned(ident, "dense row_program binding is not defined")
+            });
+        }
+        ProgramExpr::Zero => DenseTaylorJet::zero(dimension, order),
+        ProgramExpr::Neg(value) => dense_taylor_negate(child(value)?),
+        ProgramExpr::Scale(value, scalar) => dense_taylor_scale(
+            child(value)?,
+            &symbolic_scalar(scalar, constants, SymbolicTarget::Rust)?,
+        ),
+        ProgramExpr::AddConstant(value, scalar) => {
+            let mut value = child(value)?;
+            value.coefficients[0] = Some(symbolic_add(
+                symbolic_component(&value.coefficients[0]),
+                &symbolic_scalar(scalar, constants, SymbolicTarget::Rust)?,
+            ));
+            value
+        }
+        ProgramExpr::Add(left, right) => dense_taylor_add(child(left)?, child(right)?),
+        ProgramExpr::Mul(left, right) => dense_taylor_multiply(child(left)?, child(right)?),
+        ProgramExpr::Compose {
+            leaf,
+            value,
+            arguments,
+        } => {
+            let input = bindings.get(&value.to_string()).cloned().ok_or_else(|| {
+                syn::Error::new_spanned(value, "dense compose input is not defined")
+            })?;
+            let suffix = *temporary_index;
+            *temporary_index += 1;
+            let stack = format!("__row_program_{owner}_dense_stack{suffix}");
+            let mut leaf_arguments = vec![symbolic_component(&input.coefficients[0]).to_string()];
+            for argument in arguments {
+                leaf_arguments.push(symbolic_scalar(argument, constants, SymbolicTarget::Rust)?);
+            }
+            let rust_leaf = &leaves[*leaf].rust;
+            let rust_leaf = quote!(#rust_leaf).to_string();
+            preludes.push(format!(
+                "let {stack} = {rust_leaf}({});",
+                leaf_arguments.join(", ")
+            ));
+            dense_taylor_compose(input, &stack)
+        }
+    };
+    Ok(materialize_dense_taylor(
+        value,
+        owner,
+        temporary_index,
+        preludes,
+    ))
+}
+
 fn directional_expression(
     expression: &ProgramExpr,
     owner: &str,
@@ -1528,6 +1932,193 @@ struct SymbolicSchedule {
     mutable_support: HashMap<String, SymbolicSupport>,
     assigned: HashSet<String>,
     witness_values: Vec<String>,
+}
+
+struct DenseTaylorLocal {
+    name: String,
+    mutable: bool,
+    value: DenseTaylorJet,
+    preludes: Vec<String>,
+}
+
+struct DenseTaylorAssignment {
+    target: String,
+    value: DenseTaylorJet,
+    preludes: Vec<String>,
+}
+
+enum DenseTaylorStatement {
+    Local(DenseTaylorLocal),
+    If {
+        condition: String,
+        assignments: Vec<DenseTaylorAssignment>,
+    },
+}
+
+struct DenseTaylorSchedule {
+    statements: Vec<DenseTaylorStatement>,
+    result: DenseTaylorJet,
+    root_compose_stack: Option<String>,
+    result_preludes: Vec<String>,
+    mutable_support: HashMap<String, Vec<bool>>,
+    assigned: HashSet<String>,
+}
+
+fn include_dense_taylor_support(support: &mut [bool], value: &DenseTaylorJet) {
+    for (present, component) in support.iter_mut().zip(&value.coefficients) {
+        *present |= component.is_some();
+    }
+}
+
+fn dense_taylor_schedule(
+    primaries: &[Ident],
+    constants: &HashSet<String>,
+    leaves: &[Leaf],
+    statements: &[Statement],
+    result: &ProgramExpr,
+    order: usize,
+) -> Result<DenseTaylorSchedule> {
+    let dimension = primaries.len();
+    let mut bindings = HashMap::<String, DenseTaylorJet>::new();
+    for (axis, primary) in primaries.iter().enumerate() {
+        bindings.insert(
+            primary.to_string(),
+            DenseTaylorJet::primary(&primary.to_string(), axis, dimension, order),
+        );
+    }
+    let mut mutable_support = HashMap::<String, Vec<bool>>::new();
+    let mut assigned = HashSet::new();
+    let mut dense_statements = Vec::new();
+    let mut temporary_index = 0;
+    for statement in statements {
+        match statement {
+            Statement::Local {
+                name,
+                mutable,
+                value,
+            } => {
+                let mut preludes = Vec::new();
+                let value = dense_taylor_expression(
+                    value,
+                    &name.to_string(),
+                    leaves,
+                    constants,
+                    &bindings,
+                    dimension,
+                    order,
+                    &mut temporary_index,
+                    &mut preludes,
+                )?;
+                let support = value.support();
+                if *mutable {
+                    mutable_support.insert(name.to_string(), support.clone());
+                }
+                bindings.insert(
+                    name.to_string(),
+                    DenseTaylorJet::reference(&name.to_string(), &support, dimension, order),
+                );
+                dense_statements.push(DenseTaylorStatement::Local(DenseTaylorLocal {
+                    name: name.to_string(),
+                    mutable: *mutable,
+                    value,
+                    preludes,
+                }));
+            }
+            Statement::If {
+                condition,
+                assignments,
+            } => {
+                let mut dense_assignments = Vec::new();
+                for (target_name, value) in assignments {
+                    assigned.insert(target_name.to_string());
+                    let mut preludes = Vec::new();
+                    let value = dense_taylor_expression(
+                        value,
+                        &target_name.to_string(),
+                        leaves,
+                        constants,
+                        &bindings,
+                        dimension,
+                        order,
+                        &mut temporary_index,
+                        &mut preludes,
+                    )?;
+                    let support = mutable_support
+                        .get_mut(&target_name.to_string())
+                        .expect("validated mutable dense Taylor target");
+                    include_dense_taylor_support(support, &value);
+                    bindings.insert(
+                        target_name.to_string(),
+                        DenseTaylorJet::reference(
+                            &target_name.to_string(),
+                            support,
+                            dimension,
+                            order,
+                        ),
+                    );
+                    dense_assignments.push(DenseTaylorAssignment {
+                        target: target_name.to_string(),
+                        value,
+                        preludes,
+                    });
+                }
+                dense_statements.push(DenseTaylorStatement::If {
+                    condition: symbolic_scalar(condition, constants, SymbolicTarget::Rust)?,
+                    assignments: dense_assignments,
+                });
+            }
+        }
+    }
+    let mut result_preludes = Vec::new();
+    let (result, root_compose_stack) =
+        if order == 3 && matches!(result, ProgramExpr::Compose { .. }) {
+            let ProgramExpr::Compose {
+                leaf,
+                value,
+                arguments,
+            } = result
+            else {
+                unreachable!("matched dense Taylor root compose")
+            };
+            let input = bindings.get(&value.to_string()).cloned().ok_or_else(|| {
+                syn::Error::new_spanned(value, "dense root compose input is not defined")
+            })?;
+            let stack = "__row_program_result_dense_root_stack".to_string();
+            let mut leaf_arguments = vec![symbolic_component(&input.coefficients[0]).to_string()];
+            for argument in arguments {
+                leaf_arguments.push(symbolic_scalar(argument, constants, SymbolicTarget::Rust)?);
+            }
+            let rust_leaf = &leaves[*leaf].rust;
+            let rust_leaf = quote!(#rust_leaf).to_string();
+            result_preludes.push(format!(
+                "let {stack} = {rust_leaf}({});",
+                leaf_arguments.join(", ")
+            ));
+            (input, Some(stack))
+        } else {
+            (
+                dense_taylor_expression(
+                    result,
+                    "result",
+                    leaves,
+                    constants,
+                    &bindings,
+                    dimension,
+                    order,
+                    &mut temporary_index,
+                    &mut result_preludes,
+                )?,
+                None,
+            )
+        };
+    Ok(DenseTaylorSchedule {
+        statements: dense_statements,
+        result,
+        root_compose_stack,
+        result_preludes,
+        mutable_support,
+        assigned,
+    })
 }
 
 fn push_preludes(source: &mut String, preludes: &[String], indentation: &str) {
@@ -1984,6 +2575,309 @@ fn push_directional_assignment(
             &support.uv,
         );
     }
+}
+
+fn dense_taylor_derivative(value: &DenseTaylorJet, axes: &[usize]) -> Option<String> {
+    let mut counts = vec![0usize; value.dimension];
+    for axis in axes {
+        counts[*axis] += 1;
+    }
+    let component = value.coefficients[dense_taylor_index(&counts)]
+        .as_ref()?
+        .clone();
+    let factorial = counts.iter().fold(1usize, |product, count| {
+        product
+            * match count {
+                0 | 1 => 1,
+                2 => 2,
+                3 => 6,
+                4 => 24,
+                _ => unreachable!("dense Taylor order is at most four"),
+            }
+    });
+    if factorial == 1 {
+        Some(component)
+    } else {
+        Some(symbolic_multiply(&component, &format!("{factorial}.0")))
+    }
+}
+
+fn dense_taylor_contracted_component(
+    value: &DenseTaylorJet,
+    axis: usize,
+    other: usize,
+    fourth: bool,
+) -> String {
+    let mut component = None;
+    for direction_axis in 0..value.dimension {
+        if fourth {
+            for other_direction_axis in 0..value.dimension {
+                let derivative = dense_taylor_derivative(
+                    value,
+                    &[axis, other, direction_axis, other_direction_axis],
+                );
+                let directed = derivative.map(|derivative| {
+                    symbolic_multiply(
+                        &symbolic_multiply(&derivative, &format!("direction_u[{direction_axis}]")),
+                        &format!("direction_v[{other_direction_axis}]"),
+                    )
+                });
+                component = symbolic_add_component(&component, &directed);
+            }
+        } else {
+            let derivative = dense_taylor_derivative(value, &[axis, other, direction_axis]);
+            let directed = derivative.map(|derivative| {
+                symbolic_multiply(&derivative, &format!("direction_u[{direction_axis}]"))
+            });
+            component = symbolic_add_component(&component, &directed);
+        }
+    }
+    symbolic_component(&component).to_string()
+}
+
+fn push_dense_taylor_derivative_array(
+    source: &mut String,
+    name: &str,
+    value: &DenseTaylorJet,
+    derivative_order: usize,
+) {
+    source.push_str(&format!("    let {name} = ["));
+    for ones in 0..=derivative_order {
+        if ones != 0 {
+            source.push_str(", ");
+        }
+        let mut axes = vec![0usize; derivative_order - ones];
+        axes.extend(std::iter::repeat_n(1usize, ones));
+        source.push_str(symbolic_component(&dense_taylor_derivative(value, &axes)));
+    }
+    source.push_str("];\n");
+}
+
+fn rust_dense_taylor_body(
+    primaries: &[Ident],
+    constants: &HashSet<String>,
+    leaves: &[Leaf],
+    statements: &[Statement],
+    result: &ProgramExpr,
+    fourth: bool,
+) -> Result<syn::Block> {
+    let dimension = primaries.len();
+    let order = if fourth { 4 } else { 3 };
+    let schedule = dense_taylor_schedule(primaries, constants, leaves, statements, result, order)?;
+    let mut source = "{\n".to_string();
+    for statement in &schedule.statements {
+        match statement {
+            DenseTaylorStatement::Local(local) => {
+                push_preludes(&mut source, &local.preludes, "    ");
+                let mutable = if schedule.assigned.contains(&local.name) {
+                    "mut "
+                } else {
+                    ""
+                };
+                let support = if local.mutable {
+                    schedule
+                        .mutable_support
+                        .get(&local.name)
+                        .expect("mutable dense Taylor support exists")
+                        .clone()
+                } else {
+                    local.value.support()
+                };
+                push_dense_taylor_declaration(
+                    &mut source,
+                    "    ",
+                    &local.name,
+                    mutable,
+                    &local.value,
+                    &support,
+                );
+            }
+            DenseTaylorStatement::If {
+                condition,
+                assignments,
+            } => {
+                source.push_str(&format!("    if {condition} {{\n"));
+                for assignment in assignments {
+                    push_preludes(&mut source, &assignment.preludes, "        ");
+                    let support = schedule
+                        .mutable_support
+                        .get(&assignment.target)
+                        .expect("mutable dense Taylor assignment support exists");
+                    push_dense_taylor_assignment(
+                        &mut source,
+                        "        ",
+                        &assignment.target,
+                        &assignment.value,
+                        support,
+                    );
+                }
+                source.push_str("    }\n");
+            }
+        }
+    }
+    push_preludes(&mut source, &schedule.result_preludes, "    ");
+    if dimension == 2 {
+        if let Some(root_stack) = &schedule.root_compose_stack {
+            push_dense_taylor_derivative_array(&mut source, "inner_first", &schedule.result, 1);
+            push_dense_taylor_derivative_array(&mut source, "inner_second", &schedule.result, 2);
+            push_dense_taylor_derivative_array(&mut source, "inner_third", &schedule.result, 3);
+            if fourth {
+                push_dense_taylor_derivative_array(
+                    &mut source,
+                    "inner_fourth",
+                    &schedule.result,
+                    4,
+                );
+                source.push_str(&format!(
+                    "    let inner_u = inner_first[0] * direction_u[0]\n\
+                     \x20       + inner_first[1] * direction_u[1];\n\
+                     \x20   let inner_v = inner_first[0] * direction_v[0]\n\
+                     \x20       + inner_first[1] * direction_v[1];\n\
+                     \x20   let inner_uv = inner_second[0] * direction_u[0] * direction_v[0]\n\
+                     \x20       + inner_second[1] * (direction_u[0] * direction_v[1]\n\
+                     \x20           + direction_u[1] * direction_v[0])\n\
+                     \x20       + inner_second[2] * direction_u[1] * direction_v[1];\n\
+                     \x20   std::array::from_fn(|axis| std::array::from_fn(|other| {{\n\
+                     \x20       let offset = axis + other;\n\
+                     \x20       let inner_a = inner_first[axis];\n\
+                     \x20       let inner_b = inner_first[other];\n\
+                     \x20       let inner_ab = inner_second[offset];\n\
+                     \x20       let inner_au = inner_second[axis] * direction_u[0]\n\
+                     \x20           + inner_second[axis + 1] * direction_u[1];\n\
+                     \x20       let inner_av = inner_second[axis] * direction_v[0]\n\
+                     \x20           + inner_second[axis + 1] * direction_v[1];\n\
+                     \x20       let inner_bu = inner_second[other] * direction_u[0]\n\
+                     \x20           + inner_second[other + 1] * direction_u[1];\n\
+                     \x20       let inner_bv = inner_second[other] * direction_v[0]\n\
+                     \x20           + inner_second[other + 1] * direction_v[1];\n\
+                     \x20       let inner_abu = inner_third[offset] * direction_u[0]\n\
+                     \x20           + inner_third[offset + 1] * direction_u[1];\n\
+                     \x20       let inner_abv = inner_third[offset] * direction_v[0]\n\
+                     \x20           + inner_third[offset + 1] * direction_v[1];\n\
+                     \x20       let inner_auv = inner_third[axis] * direction_u[0] * direction_v[0]\n\
+                     \x20           + inner_third[axis + 1] * (direction_u[0] * direction_v[1]\n\
+                     \x20               + direction_u[1] * direction_v[0])\n\
+                     \x20           + inner_third[axis + 2] * direction_u[1] * direction_v[1];\n\
+                     \x20       let inner_buv = inner_third[other] * direction_u[0] * direction_v[0]\n\
+                     \x20           + inner_third[other + 1] * (direction_u[0] * direction_v[1]\n\
+                     \x20               + direction_u[1] * direction_v[0])\n\
+                     \x20           + inner_third[other + 2] * direction_u[1] * direction_v[1];\n\
+                     \x20       let inner_abuv = inner_fourth[offset] * direction_u[0] * direction_v[0]\n\
+                     \x20           + inner_fourth[offset + 1] * (direction_u[0] * direction_v[1]\n\
+                     \x20               + direction_u[1] * direction_v[0])\n\
+                     \x20           + inner_fourth[offset + 2] * direction_u[1] * direction_v[1];\n\
+                     \x20       let second_chain = inner_au * inner_b + inner_a * inner_bu\n\
+                     \x20           + inner_u * inner_ab;\n\
+                     \x20       let second_chain_v = inner_auv * inner_b + inner_au * inner_bv\n\
+                     \x20           + inner_av * inner_bu + inner_a * inner_buv\n\
+                     \x20           + inner_uv * inner_ab + inner_u * inner_abv;\n\
+                     \x20       {root_stack}[4] * inner_v * inner_u * inner_a * inner_b\n\
+                     \x20           + {root_stack}[3] * (inner_uv * inner_a * inner_b\n\
+                     \x20               + inner_u * inner_av * inner_b + inner_u * inner_a * inner_bv\n\
+                     \x20               + inner_v * second_chain)\n\
+                     \x20           + {root_stack}[2] * (second_chain_v + inner_v * inner_abu)\n\
+                     \x20           + {root_stack}[1] * inner_abuv\n\
+                     \x20   }}))\n"
+                ));
+            } else {
+                source.push_str(&format!(
+                    "    let inner_u = inner_first[0] * direction_u[0]\n\
+                     \x20       + inner_first[1] * direction_u[1];\n\
+                     \x20   std::array::from_fn(|axis| std::array::from_fn(|other| {{\n\
+                     \x20       let offset = axis + other;\n\
+                     \x20       let inner_a = inner_first[axis];\n\
+                     \x20       let inner_b = inner_first[other];\n\
+                     \x20       let inner_ab = inner_second[offset];\n\
+                     \x20       let inner_au = inner_second[axis] * direction_u[0]\n\
+                     \x20           + inner_second[axis + 1] * direction_u[1];\n\
+                     \x20       let inner_bu = inner_second[other] * direction_u[0]\n\
+                     \x20           + inner_second[other + 1] * direction_u[1];\n\
+                     \x20       let inner_abu = inner_third[offset] * direction_u[0]\n\
+                     \x20           + inner_third[offset + 1] * direction_u[1];\n\
+                     \x20       {root_stack}[3] * inner_u * inner_a * inner_b\n\
+                     \x20           + {root_stack}[2] * (inner_au * inner_b + inner_a * inner_bu\n\
+                     \x20               + inner_u * inner_ab)\n\
+                     \x20           + {root_stack}[1] * inner_abu\n\
+                     \x20   }}))\n"
+                ));
+            }
+            source.push_str("}\n");
+            let order = if fourth { "fourth" } else { "third" };
+            return syn::parse_str(&source).map_err(|error| {
+                syn::Error::new(
+                    error.span(),
+                    format!(
+                        "failed to parse generated Rust dense root-compose {order}-order row program: {error}\n{source}"
+                    ),
+                )
+            });
+        }
+    }
+    if dimension == 2 {
+        source.push_str("    let dense_derivatives = [");
+        for ones in 0..=order {
+            if ones != 0 {
+                source.push_str(", ");
+            }
+            let mut axes = vec![0usize; order - ones];
+            axes.extend(std::iter::repeat_n(1usize, ones));
+            source.push_str(symbolic_component(&dense_taylor_derivative(
+                &schedule.result,
+                &axes,
+            )));
+        }
+        source.push_str("];\n");
+        if fourth {
+            source.push_str(
+                "    let direction_00 = direction_u[0] * direction_v[0];\n\
+                 \x20   let direction_01 = direction_u[0] * direction_v[1]\n\
+                 \x20       + direction_u[1] * direction_v[0];\n\
+                 \x20   let direction_11 = direction_u[1] * direction_v[1];\n\
+                 \x20   std::array::from_fn(|axis| std::array::from_fn(|other| {\n\
+                 \x20       let offset = axis + other;\n\
+                 \x20       dense_derivatives[offset] * direction_00\n\
+                 \x20           + dense_derivatives[offset + 1] * direction_01\n\
+                 \x20           + dense_derivatives[offset + 2] * direction_11\n\
+                 \x20   }))\n",
+            );
+        } else {
+            source.push_str(
+                "    std::array::from_fn(|axis| std::array::from_fn(|other| {\n\
+                 \x20       let offset = axis + other;\n\
+                 \x20       dense_derivatives[offset] * direction_u[0]\n\
+                 \x20           + dense_derivatives[offset + 1] * direction_u[1]\n\
+                 \x20   }))\n",
+            );
+        }
+    } else {
+        source.push_str("    [\n");
+        for axis in 0..dimension {
+            source.push_str("        [");
+            for other in 0..dimension {
+                if other != 0 {
+                    source.push_str(", ");
+                }
+                source.push_str(&dense_taylor_contracted_component(
+                    &schedule.result,
+                    axis,
+                    other,
+                    fourth,
+                ));
+            }
+            source.push_str("],\n");
+        }
+        source.push_str("    ]\n");
+    }
+    source.push_str("}\n");
+    let order = if fourth { "fourth" } else { "third" };
+    syn::parse_str(&source).map_err(|error| {
+        syn::Error::new(
+            error.span(),
+            format!(
+                "failed to parse generated Rust dense {order}-order row program: {error}\n{source}"
+            ),
+        )
+    })
 }
 
 fn rust_directional_body(
@@ -2604,14 +3498,25 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
 
     let third_function = if emissions.third {
         let third_name = format_ident!("{}_third_contracted", name);
-        let third_body = rust_directional_body(
-            &primaries,
-            &constant_names,
-            &leaves,
-            &statements,
-            &result,
-            false,
-        )?;
+        let third_body = if dimension <= 2 {
+            rust_dense_taylor_body(
+                &primaries,
+                &constant_names,
+                &leaves,
+                &statements,
+                &result,
+                false,
+            )?
+        } else {
+            rust_directional_body(
+                &primaries,
+                &constant_names,
+                &leaves,
+                &statements,
+                &result,
+                false,
+            )?
+        };
         quote! {
             #[inline(never)]
             #visibility fn #third_name(
@@ -2626,14 +3531,25 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
 
     let fourth_function = if emissions.fourth {
         let fourth_name = format_ident!("{}_fourth_contracted", name);
-        let fourth_body = rust_directional_body(
-            &primaries,
-            &constant_names,
-            &leaves,
-            &statements,
-            &result,
-            true,
-        )?;
+        let fourth_body = if dimension <= 2 {
+            rust_dense_taylor_body(
+                &primaries,
+                &constant_names,
+                &leaves,
+                &statements,
+                &result,
+                true,
+            )?
+        } else {
+            rust_directional_body(
+                &primaries,
+                &constant_names,
+                &leaves,
+                &statements,
+                &result,
+                true,
+            )?
+        };
         quote! {
             #[inline(never)]
             #visibility fn #fourth_name(
@@ -3022,9 +3938,11 @@ mod tests {
 
         for formula in [
             "fndirectional_third_contracted(x:f64,y:f64,take:f64,direction_u:&[f64;2usize],)",
-            "let__row_program_product_directional_tmp0_u_v:f64=((direction_u[0]*y)+(x*direction_u[1]));",
-            "letcurved_directional_stack1=curve_stack(__row_program_product_base_v);",
-            "curved_directional_stack1[3]",
+            "let__row_program_product_dense_tmp0_c6:f64=1.0;",
+            "let__row_program_curved_dense_stack1=curve_stack(product_c0);",
+            "__row_program_curved_dense_stack1[3]",
+            "letdense_derivatives=[",
+            "dense_derivatives[offset]*direction_u[0]",
             "if(take>0.0){",
         ] {
             assert!(
@@ -3034,9 +3952,9 @@ mod tests {
         }
         for formula in [
             "fndirectional_fourth_contracted(x:f64,y:f64,take:f64,direction_u:&[f64;2usize],direction_v:&[f64;2usize],)",
-            "curved_directional_stack1[4]",
-            "__row_program_product_directional_tmp0_uv_v",
-            "[",
+            "__row_program_curved_dense_stack1[4]",
+            "letdirection_01=direction_u[0]*direction_v[1]+direction_u[1]*direction_v[0];",
+            "dense_derivatives[offset+1]*direction_01",
         ] {
             assert!(
                 fourth.contains(formula),
@@ -3046,7 +3964,7 @@ mod tests {
         for rust in [&third, &fourth] {
             assert!(!rust.contains("JetScalar"));
             assert!(!rust.contains("SparseOrder2"));
-            assert!(!rust.contains("*0.0"));
+            assert!(!rust.contains("*0.0)"));
             assert!(!rust.contains("0.0*"));
         }
     }
