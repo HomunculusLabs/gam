@@ -305,10 +305,20 @@ fn gaussian_reml_optimize_latent<'py>(
                     .map(|value| value * value)
                     .sum::<f64>()
                     .sqrt();
-                let mut objective = LatentOuterObjective { problem: &problem };
-                let optimized = trust_region
-                    .minimize(manifold_ref, &mut objective, start.view())
-                    .map_err(|err| err.to_string())?;
+                // A zero iteration budget is an intentional checkpoint probe:
+                // evaluate the caller's start and let this FFI wrapper emit its
+                // typed, resumable convergence evidence below. Sending the
+                // probe through `RiemannianTrustRegion::minimize` loses that
+                // evidence because the generic optimizer can only return its
+                // unstructured "0 iterations" error.
+                let optimized = if max_iter == 0 {
+                    start
+                } else {
+                    let mut objective = LatentOuterObjective { problem: &problem };
+                    trust_region
+                        .minimize(manifold_ref, &mut objective, start.view())
+                        .map_err(|err| err.to_string())?
+                };
                 let (value, _) = problem.value_and_grad(optimized.view(), false);
                 let improved = best
                     .as_ref()
