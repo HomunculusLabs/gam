@@ -5971,8 +5971,9 @@ pub use gam_problem::laplace_sampler_contract::{
 /// Monolith (gam-inference-tier) implementor of the contract-downed
 /// [`LaplaceMarginalSampler`](gam_problem::laplace_sampler_contract::LaplaceMarginalSampler):
 /// wraps the `hmc_io` directional-cubic eigen diagnostic and the
-/// importance-sampled #784 block correction. Registered at process init via
-/// `gam_problem::laplace_sampler_contract::set_laplace_marginal_sampler`.
+/// importance-sampled #784 block correction. This is an explicit research
+/// primitive; the standard process does not inject it into deterministic
+/// REML/LAML fitting.
 pub struct HmcIoLaplaceMarginalSampler;
 
 impl gam_problem::laplace_sampler_contract::LaplaceMarginalSampler for HmcIoLaplaceMarginalSampler {

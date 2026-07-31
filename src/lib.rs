@@ -96,17 +96,13 @@ pub fn init_parallelism() {
         gam_linalg::gpu_hook::register_gpu_dispatch(Box::new(
             crate::gpu::linalg_dispatch::CudaGemmDispatch,
         ));
-        // #1521 trait-inversion injection: the gam-inference-tier samplers
-        // (`hmc_io` NUTS / importance sampling) implement the neutral
-        // `gam_problem` contracts; register the monolith impls DOWN into the
-        // process-level registries so gam-solve's REML/custom-family paths can
-        // call THROUGH them without a back-edge into the inference SCC. First
-        // writer wins; ignore the boxed-value `Err` of a redundant re-init.
-        drop(
-            gam_problem::laplace_sampler_contract::set_laplace_marginal_sampler(Box::new(
-                gam_inference::hmc_io::HmcIoLaplaceMarginalSampler,
-            )),
-        );
+        // Register the post-fit rho-posterior escalator into the neutral
+        // problem-tier contract. The block-local importance sampler remains an
+        // explicit inference primitive, but is deliberately not injected into
+        // REML/LAML fitting: its fixed draw lattice made one outer evaluation
+        // O(n * draws), even when its own uncertainty gate later discarded the
+        // correction. The fitted estimator is the deterministic analytic LAML
+        // criterion required by SPEC; sampling is an explicit posterior task.
         drop(gam_problem::rho_posterior::set_rho_posterior_escalator(
             Box::new(gam_inference::rho_posterior::HmcIoRhoPosteriorEscalator),
         ));

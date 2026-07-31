@@ -230,10 +230,11 @@ pub trait BlockExcessTarget {
 
 /// The gam-inference-tier sampler for the #784 block-local Laplace correction.
 ///
-/// Implemented UP in the monolith over `hmc_io`
+/// Implementable UP in an inference tier over
 /// (`laplace_directional_cubic_diagnostic` + `block_sampled_marginal_correction`)
-/// and injected DOWN via [`set_laplace_marginal_sampler`]. gam-solve calls
-/// through [`laplace_marginal_sampler`].
+/// and explicitly injected DOWN via [`set_laplace_marginal_sampler`] by an
+/// embedding that chooses sampled marginalization. The standard estimator does
+/// not install one: its fit criterion is deterministic analytic LAML.
 pub trait LaplaceMarginalSampler: Send + Sync {
     /// Per-direction standardized cubic skewness `γ_r` of the local posterior:
     /// returns `(max_r |γ_r|, γ)`. Pure eigen-diagnostic (no sampling), but kept
@@ -258,19 +259,18 @@ pub trait LaplaceMarginalSampler: Send + Sync {
 
 static LAPLACE_MARGINAL_SAMPLER: OnceLock<Box<dyn LaplaceMarginalSampler>> = OnceLock::new();
 
-/// Register the monolith's `hmc_io`-backed #784 Laplace-correction sampler.
-/// Called once at process init by the gam-inference tier. First writer wins;
-/// a later call is ignored (returns `Err` with the boxed value) so a re-init can
-/// never swap a live sampler mid-run.
+/// Explicitly register a #784 Laplace-correction sampler for an embedding that
+/// chooses sampled marginalization. First writer wins; a later call is ignored
+/// (returns `Err` with the boxed value) so a re-init can never swap a live
+/// sampler mid-run.
 pub fn set_laplace_marginal_sampler(
     sampler: Box<dyn LaplaceMarginalSampler>,
 ) -> Result<(), Box<dyn LaplaceMarginalSampler>> {
     LAPLACE_MARGINAL_SAMPLER.set(sampler)
 }
 
-/// The registered #784 Laplace-correction sampler, or `None` when the sampler
-/// tier is not linked / not yet initialized (gam-solve then declines the
-/// correction, returning the zero contribution — a safe no-op).
+/// The explicitly registered #784 Laplace-correction sampler, or `None` for the
+/// standard deterministic analytic-LAML estimator.
 pub fn laplace_marginal_sampler() -> Option<&'static dyn LaplaceMarginalSampler> {
     LAPLACE_MARGINAL_SAMPLER.get().map(|b| b.as_ref())
 }
