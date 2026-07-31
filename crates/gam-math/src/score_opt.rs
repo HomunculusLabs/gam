@@ -4384,7 +4384,7 @@ mod tests {
             lo,
             hi,
             resolution,
-            |_x| -> Result<_, String> {
+            |_| -> Result<_, String> {
                 Ok(ScoreJet {
                     value: 0.0,
                     derivative: 0.0,

@@ -2368,43 +2368,6 @@ fn zonotope_to_matrix(state: &Zonotope<COVARIANCE_D1_DIM>, order: usize) -> Ball
     out
 }
 
-/// Seed a covariance zonotope without throwing away exact symmetry.
-///
-/// The two off-diagonal storage locations denote one real covariance entry.
-/// A shared generator therefore encloses their common error while preserving
-/// that identity; two independent axis generators would immediately forget it
-/// and recreate the componentwise wrapping effect on the first congruence.
-#[cfg(test)]
-fn covariance_zonotope_from_symmetric_matrix(
-    matrix: &BallMat,
-    order: usize,
-) -> Zonotope<COVARIANCE_D1_DIM> {
-    let mut state = Zonotope::<COVARIANCE_D1_DIM>::zeroed(order * order);
-    for i in 0..order {
-        for j in i..order {
-            let value = matrix[i][j].value;
-            state.center[i * order + j] = value;
-            state.center[j * order + i] = value;
-            let radius = [
-                (value - matrix[i][j].lo).abs(),
-                (matrix[i][j].hi - value).abs(),
-                (value - matrix[j][i].lo).abs(),
-                (matrix[j][i].hi - value).abs(),
-            ]
-            .into_iter()
-            .fold(0.0_f64, f64::max);
-            if radius > 0.0 {
-                let mut generator = [0.0_f64; COVARIANCE_D1_DIM];
-                let radius = next_up_ball(radius);
-                generator[i * order + j] = radius;
-                generator[j * order + i] = radius;
-                state.generators.push(generator);
-            }
-        }
-    }
-    state
-}
-
 /// Apply one scalar-observation Riccati update to a covariance zonotope.
 ///
 /// Applying the Joseph map with an interval-valued gain is sound but useless:
@@ -5137,6 +5100,43 @@ impl SplineScanFit {
 
 #[cfg(test)]
 mod tests {
+    /// Seed a covariance zonotope without throwing away exact symmetry.
+    ///
+    /// The two off-diagonal storage locations denote one real covariance entry.
+    /// A shared generator therefore encloses their common error while preserving
+    /// that identity; two independent axis generators would immediately forget it
+    /// and recreate the componentwise wrapping effect on the first congruence.
+    fn covariance_zonotope_from_symmetric_matrix(
+        matrix: &BallMat,
+        order: usize,
+    ) -> Zonotope<COVARIANCE_D1_DIM> {
+        let mut state = Zonotope::<COVARIANCE_D1_DIM>::zeroed(order * order);
+        for i in 0..order {
+            for j in i..order {
+                let value = matrix[i][j].value;
+                state.center[i * order + j] = value;
+                state.center[j * order + i] = value;
+                let radius = [
+                    (value - matrix[i][j].lo).abs(),
+                    (matrix[i][j].hi - value).abs(),
+                    (value - matrix[j][i].lo).abs(),
+                    (matrix[j][i].hi - value).abs(),
+                ]
+                .into_iter()
+                .fold(0.0_f64, f64::max);
+                if radius > 0.0 {
+                    let mut generator = [0.0_f64; COVARIANCE_D1_DIM];
+                    let radius = next_up_ball(radius);
+                    generator[i * order + j] = radius;
+                    generator[j * order + i] = radius;
+                    state.generators.push(generator);
+                }
+            }
+        }
+        state
+    }
+
+
 
     /// Compaction must preserve the signed directions that make a contracting
     /// recursion contract.  Fresh roundoff enters as axis generators, so age
