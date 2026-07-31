@@ -503,6 +503,27 @@ pub enum ScoreSearchError<E> {
 /// A degenerate domain still gets a budget of at least one subdivision: the
 /// bound is a backstop against unbounded breadth, never a refusal of the first
 /// split.
+///
+/// # The request, not the budget, is what actually binds (#2614, measured 0731)
+///
+/// Callers pass `f64::EPSILON.sqrt()` (`1.4901161193847656e-8`) as the requested
+/// resolution — a MACHINE constant. The achievable certified evaluation error is
+/// a property of the problem and varies by more than forty times between callers:
+///
+/// | caller | `evaluation_error` | `requested_resolution` | terminal bracket |
+/// |---|---|---|---|
+/// | `gam-solve` spline_scan | `9.741e-7` | `1.490e-8` | — |
+/// | `gam-predict` weighted scan | `2.302e-8` | `1.490e-8` | `~4.8e-8` ≈ 2 × eval_err |
+///
+/// In both the error EXCEEDS the request, and `gam-predict` terminates at almost
+/// exactly twice its own evaluation error — the floor you would predict, since
+/// inside that width the endpoint enclosures overlap and no comparison is
+/// decidable. In both the derivative enclosure straddles zero, so even the sign
+/// of the slope is undecidable there.
+///
+/// A fixed `sqrt(EPSILON)` request cannot be right for both. The resolution
+/// should be derived from the evaluator's certified error at the working point
+/// rather than pinned to a machine constant.
 pub fn subdivision_budget(lo: f64, hi: f64, resolution: f64) -> (usize, u32) {
     let width = hi - lo;
     if !(width.is_finite() && width > 0.0 && resolution.is_finite() && resolution > 0.0) {
@@ -574,10 +595,26 @@ impl<E: fmt::Display> fmt::Display for ScoreSearchError<E> {
                 hi,
                 requested_resolution,
                 enclosure,
-            } => write!(
-                f,
-                "score search: stationary structure unresolved on [{lo}, {hi}] at requested resolution {requested_resolution}: {enclosure:?}"
-            ),
+            } => {
+                // The enclosure already carries both numbers, but a reader has
+                // to notice the comparison themselves. State it: when the
+                // certified evaluation error has reached the requested
+                // resolution, the request is the defect, not the search (#2614).
+                let evaluation_error = enclosure.score.evaluation_error;
+                let verdict = if evaluation_error >= *requested_resolution {
+                    " -- the REQUEST is unsatisfiable: the certified evaluation error at this cell \
+                     already reaches the requested resolution, so no bracket narrower than about \
+                     twice that error is decidable and no additional subdivision can close it"
+                } else {
+                    ""
+                };
+                write!(
+                    f,
+                    "score search: stationary structure unresolved on [{lo}, {hi}] at requested \
+                     resolution {requested_resolution} (certified evaluation error \
+                     {evaluation_error:e}){verdict}: {enclosure:?}"
+                )
+            }
             Self::SubdivisionBudget {
                 lo,
                 hi,
