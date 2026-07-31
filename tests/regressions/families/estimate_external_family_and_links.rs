@@ -217,9 +217,22 @@ fn heuristic_lambdas_are_used_as_initial_rho_for_reml() {
     )
     .expect("fit should succeed");
 
+    // The message carried no number, so a failure could not distinguish the two
+    // things it can mean. `heuristic_lambdas` reaches the outer search as a SEED
+    // (`seeding.rs`, `smoothing_heuristic_lambdas`), and `base_opts()` runs REML
+    // with `max_iter: 40` and nothing pinning lambda -- so the optimizer is free
+    // to move rho away from 2.5, and a final value far from the seed is what a
+    // working optimizer would produce, not evidence that the seed was ignored.
+    // Print the measured value so the next run says which it is: near 2.5 means
+    // the seed is honoured and this is a tolerance question; far from it means
+    // the assertion is checking the seed against a quantity the seed does not
+    // determine.
+    let realized = fit.log_lambdas[0];
     assert!(
-        (fit.log_lambdas[0] - 2.5).abs() < 1e-8,
-        "expected heuristic lambdas to be used as initial rho when provided"
+        (realized - 2.5).abs() < 1e-8,
+        "expected heuristic lambdas to be used as initial rho when provided; \
+         realized log_lambda[0] = {realized:.9e} (seed 2.5, |delta| = {:.3e})",
+        (realized - 2.5).abs()
     );
 }
 
