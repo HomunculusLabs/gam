@@ -8,6 +8,8 @@ use super::hessian_paths::*;
 
 use super::install_flex::validate_spec;
 
+use super::test_support::rigid_standard_normal_tower;
+
 use super::*;
 
 use super::exact_kernel::{
