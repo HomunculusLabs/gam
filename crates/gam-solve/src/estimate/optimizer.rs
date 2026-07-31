@@ -17,19 +17,6 @@ use gam_problem::{OrderedRhoBounds, SeedConfig, SeedRiskProfile};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
-/// Unscaled posterior covariance `H⁻¹` of the supplied Hessian.
-///
-/// This is deliberately neither an additive-ridge inverse nor a truncated
-/// pseudoinverse: both would change the covariance estimand.  A singular or
-/// numerically unrepresentable Hessian is a typed failure, while success has
-/// already passed the shared scale-aware residual certificate in `gam-linalg`.
-fn posterior_covariance_inverse(
-    h: &Array2<f64>,
-    label: &str,
-) -> Result<Array2<f64>, gam_linalg::utils::CertifiedSymmetricSolveError> {
-    certified_spd_inverse(h, label).map(gam_linalg::utils::CertifiedSpdInverse::into_inverse)
-}
-
 fn certify_factorized_inference_solve(
     hessian: &gam_linalg::matrix::SymmetricMatrix,
     rhs: &Array2<f64>,
@@ -2169,23 +2156,37 @@ where
         // (`root_orig = Qs · root_t`) and contract against the original-basis
         // inverse. Gated by the SAME resource-policy check as the dense
         // covariance bundle below, so this reconciliation and the influence
-        // matrix `F` are formed (and share one `posterior_covariance_inverse`)
-        // in exactly the same regime; beyond the policy budget both switch off
+        // matrix `F` are formed in exactly the same regime, from the same
+        // `map_hessian_to_original_basis(&pirls_res)` matrix, through the same
+        // strict-Cholesky solve route; beyond the policy budget both switch off
         // together and the trace-channel value stands.
         {
             let p_orig = pirls_res.reparam_result.qs.nrows();
             if dense_covariance_reservation.is_some() {
                 let h_orig = map_hessian_to_original_basis(&pirls_res)?;
-                // Sharing one certified SPD inverse makes the block traces and
-                // influence matrix read the identical `H⁻¹`. Failure is not a
-                // request to silently change rank or add a diagonal perturbation.
-                let h_inv = posterior_covariance_inverse(&h_orig, "edf reconciliation").map_err(
-                    |error| {
-                        EstimationError::RemlOptimizationFailed(format!(
-                            "EDF reconciliation requires an exact SPD Hessian inverse: {error}"
-                        ))
-                    },
-                )?;
+                // Solve against the strict Cholesky rather than contracting
+                // against a materialized `H⁻¹`. Both carry the same *backward*
+                // error certificate, but a product `H⁻¹·R` inherits a FORWARD
+                // error of order `cond(H)` times it, while `H·sol = R` does not
+                // (#2668 measured `cond(H) = 2.099e8` on an ordinary
+                // `y ~ s(x)` fit, which amplified the sibling influence matrix
+                // by 3.9%). Both consumers of `H⁻¹` — these block traces and
+                // the influence matrix below — now take the solve route, so
+                // neither is amplified and the two stay consistent. That
+                // consistency is what `influence_trace_matches_conditional_edf`
+                // pins: `edf_total` comes from THESE traces while `tr(F)` comes
+                // from the influence matrix, so moving only one would make them
+                // disagree. Failure is not a request to silently change rank or
+                // add a diagonal perturbation.
+                let h_factor = gam_linalg::utils::certified_spd_factorize(
+                    &h_orig,
+                    "edf reconciliation",
+                )
+                .map_err(|error| {
+                    EstimationError::RemlOptimizationFailed(format!(
+                        "EDF reconciliation requires an exact SPD Hessian factorization: {error}"
+                    ))
+                })?;
                 {
                     let qs = &pirls_res.reparam_result.qs;
                     let p_t = qs.ncols();
@@ -2209,7 +2210,12 @@ where
                         }
                         // S_kk = Rᵀ R; λ_kk·tr(H⁻¹ S_kk) = λ_kk·Σ_col (R_col)ᵀ H⁻¹ R_col.
                         let root_orig = qs.dot(&root_t); // p_orig × rank
-                        let sol = h_inv.dot(&root_orig); // H⁻¹ R
+                        let (sol, _certificate) =
+                            h_factor.solve_matrix(&root_orig).map_err(|error| {
+                                EstimationError::RemlOptimizationFailed(format!(
+                                    "EDF reconciliation block solve did not certify: {error}"
+                                ))
+                            })?; // H⁻¹ R
                         let mut frob = 0.0f64;
                         for col in 0..rank {
                             for row in 0..p_orig {
@@ -2588,22 +2594,50 @@ where
         // the factorised-Hessian path in PredictionCovarianceBackend::Factorized.
 
         // Attempt the full inverse when the bundle fits the policy budget.
-        let beta_covariance_unscaled: Option<Array2<f64>> =
-            if dense_covariance_reservation.is_some() {
-                Some(
-                posterior_covariance_inverse(&penalized_hessian, "posterior covariance").map_err(
-                    |error| {
+        //
+        // ONE strict Cholesky serves the whole bundle. `H⁻¹` itself is still
+        // materialized — it IS the posterior covariance `Vb = φ·H⁻¹`, an
+        // estimand rather than an intermediate — but every DERIVED quantity
+        // (`F`, `Ve`, the bias-correction Jacobian) is obtained by solving
+        // against this factor instead of by multiplying against `H⁻¹`. The
+        // certificate on `H⁻¹` is a *backward* error bound, so a product
+        // `H⁻¹·M` carries a forward error of order `cond(H)` times it; a solve
+        // `H·X = M` carries the backward error only. #2668 measured
+        // `cond(H) = 2.099e8` on an ordinary Gaussian `y ~ s(x)` fit, where
+        // that amplification put `H·F` a measured 3.9% away from the `X'WX`
+        // it is definitionally equal to.
+        let posterior_factor = if dense_covariance_reservation.is_some() {
+            Some(
+                gam_linalg::utils::certified_spd_factorize(
+                    &penalized_hessian,
+                    "posterior covariance",
+                )
+                .map_err(|error| {
+                    EstimationError::RemlOptimizationFailed(format!(
+                        "posterior covariance requires an exact SPD Hessian factorization: {error}"
+                    ))
+                })?,
+            )
+        } else {
+            None
+        };
+        let beta_covariance_unscaled: Option<Array2<f64>> = match posterior_factor.as_ref() {
+            Some(factor) => Some(
+                factor
+                    .inverse()
+                    .map(gam_linalg::utils::CertifiedSpdInverse::into_inverse)
+                    .map_err(|error| {
                         EstimationError::RemlOptimizationFailed(format!(
                             "posterior covariance requires an exact SPD Hessian inverse: {error}"
                         ))
-                    },
-                )?,
-            )
-            } else {
-                None
-            };
+                    })?,
+            ),
+            None => None,
+        };
 
-        if let Some(ref h_inv) = beta_covariance_unscaled {
+        if let (Some(h_inv), Some(posterior_factor)) =
+            (beta_covariance_unscaled.as_ref(), posterior_factor.as_ref())
+        {
             // Full inverse available: wrap as phi-scaled covariance, compute
             // frequentist quantities, and pass to smoothing-correction cubature.
             let mut posterior_covariance = scaled_covariance(h_inv.clone(), cov_scale);
@@ -2664,24 +2698,6 @@ where
             // debiased but the reported uncertainty remains for the shrunken
             // penalized mode β̂, producing severely over-narrow bands on heavily
             // smoothed large-scale Duchon fits (#1870).
-            let mut bc_jac = Array2::<f64>::eye(p_cov);
-            bc_jac += &h_inv.dot(&s_mat);
-            bias_correction_jacobian = Some(bc_jac);
-            // Influence matrix F = I − H⁻¹·S(λ) = H⁻¹·X'WX. This is a product
-            // of two symmetric matrices and is therefore generally NOT
-            // symmetric; it must not be symmetrized — `gam_linalg::matrix::symmetrize_in_place(F)`
-            // both breaks the H·F = X'WX consistency identity (so any
-            // downstream code that reconstructs X'WX from H·F lands on an
-            // asymmetric/indefinite matrix) AND corrupts the frequentist
-            // covariance `Ve = F·H⁻¹·φ` (since (F_sym)·H⁻¹ ≠ H⁻¹·X'WX·H⁻¹)
-            // AND distorts the Wood-corrected reference d.f.
-            // `tr(F_jj)² / tr(F_jj²)` consumed by `smooth_test::reference_df`
-            // (tr(F²) ≠ tr(F_sym²) in general). See issue #1027.
-            let mut f_mat = Array2::<f64>::eye(p_cov);
-            f_mat -= &h_inv.dot(&s_mat);
-            let mut ve = f_mat.dot(h_inv);
-            ve *= cov_scale;
-            gam_linalg::matrix::symmetrize_in_place(&mut ve);
             // X'WX = H − S(λ) in the original basis — the genuine PSD weighted
             // Gram, reconstructed from the same `penalized_hessian` and `s_mat`
             // that define `F = H⁻¹X'WX` (issue #1027). Stored directly so the
@@ -2719,6 +2735,73 @@ where
                 );
             }
             gam_linalg::matrix::symmetrize_in_place(&mut xwx);
+
+            // Influence matrix F = H⁻¹·X'WX, obtained by SOLVING `H·F = X'WX`
+            // against the factor above rather than by forming `I − H⁻¹·S`.
+            // The two are equal in real arithmetic; in floating point the solve
+            // makes `H·F = X'WX` hold to the factorization's backward error
+            // *by construction*, which is exactly the identity
+            // `penalized_hessian_times_influence_equals_weighted_gram` asserts
+            // and which the explicit-inverse form violated by 3.9% at
+            // `cond(H) = 2.099e8` (#2668). Note the right-hand side is the
+            // stored, symmetrized `xwx`, so the identity is asserted against
+            // the matrix that is actually persisted.
+            //
+            // `F` is a product of two symmetric matrices and is therefore
+            // generally NOT symmetric; it must not be symmetrized —
+            // `gam_linalg::matrix::symmetrize_in_place(F)` both breaks the
+            // H·F = X'WX consistency identity (so any downstream code that
+            // reconstructs X'WX from H·F lands on an asymmetric/indefinite
+            // matrix) AND corrupts the frequentist covariance `Ve = F·H⁻¹·φ`
+            // (since (F_sym)·H⁻¹ ≠ H⁻¹·X'WX·H⁻¹) AND distorts the
+            // Wood-corrected reference d.f. `tr(F_jj)² / tr(F_jj²)` consumed
+            // by `smooth_test::reference_df` (tr(F²) ≠ tr(F_sym²) in general).
+            // See issue #1027.
+            let (f_mat, _f_certificate) = posterior_factor.solve_matrix(&xwx).map_err(|error| {
+                EstimationError::RemlOptimizationFailed(format!(
+                    "influence matrix solve H·F = X'WX did not certify: {error}"
+                ))
+            })?;
+
+            // The frequentist bias-corrected coefficient used by prediction is
+            // β_BC = β̂ + b̂ with b̂ = H⁻¹S(β̂ - μ) at fixed smoothing
+            // parameters. Its fixed-ρ linearization with respect to β̂ is
+            // A = I + H⁻¹S. Credible bands centered at β_BC must use the
+            // covariance of that same estimator, A V Aᵀ; otherwise the center is
+            // debiased but the reported uncertainty remains for the shrunken
+            // penalized mode β̂, producing severely over-narrow bands on heavily
+            // smoothed large-scale Duchon fits (#1870).
+            //
+            // `A = I + H⁻¹S = 2I − F` exactly, since `F = I − H⁻¹S`. Deriving
+            // it from `F` rather than from a second product keeps the Jacobian
+            // and the influence matrix on the identical `H⁻¹S`, and inherits
+            // the solve's accuracy instead of the inverse's amplification.
+            let mut bc_jac = f_mat.clone();
+            bc_jac *= -1.0;
+            for diagonal in 0..p_cov {
+                bc_jac[[diagonal, diagonal]] += 2.0;
+            }
+            bias_correction_jacobian = Some(bc_jac);
+
+            // Frequentist covariance Ve = H⁻¹·X'WX·H⁻¹·φ = φ·H⁻¹·Fᵀ (the
+            // sandwich is symmetric, so `F·H⁻¹ = (H⁻¹·Fᵀ)`). Solving
+            // `H·Z = Fᵀ` instead of multiplying `F·H⁻¹` gives the companion
+            // identity `H·Ve·H = φ·X'WX` to backward error: `H·Z·H = Fᵀ·H =
+            // (H·F)ᵀ = X'WX`. The explicit-inverse form carried the same
+            // `cond(H)` amplification as `F` did, with no identity anywhere
+            // that looked at it.
+            let f_transpose = f_mat.t().to_owned();
+            let (mut ve, _ve_certificate) =
+                posterior_factor
+                    .solve_matrix(&f_transpose)
+                    .map_err(|error| {
+                        EstimationError::RemlOptimizationFailed(format!(
+                            "frequentist covariance solve H·Ve/φ = Fᵀ did not certify: {error}"
+                        ))
+                    })?;
+            ve *= cov_scale;
+            gam_linalg::matrix::symmetrize_in_place(&mut ve);
+
             weighted_gram = Some(xwx);
             coefficient_influence = Some(f_mat);
             beta_covariance_frequentist = Some(ve);

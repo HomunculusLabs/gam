@@ -212,16 +212,25 @@ fn penalized_hessian_times_influence_equals_weighted_gram() {
                     worst_h_asym = worst_h_asym.max((h[[i, j]] - h[[j, i]]).abs());
                 }
             }
-            // Round-off only: H·F = X'WX is exact in real arithmetic.
+            // Round-off only: H·F = X'WX is exact in real arithmetic, and
+            // `optimizer.rs` now obtains `F` by SOLVING `H·F = X'WX` against
+            // the strict Cholesky, so it holds to the factorization's backward
+            // error by construction rather than by luck (#2668). Both causes
+            // this message used to name are eliminated: `F` is never passed to
+            // `symmetrize_in_place`, and the raw-coordinate rescalings compose
+            // to `D⁻¹(H·F)D⁻¹`, preserving the identity. The historical 1.169e1
+            // gap was neither — it was `|(H·H⁻¹ − I)·S|`, the forward error of
+            // an explicit inverse at `cond(H) = 2.099e8`.
             assert!(
                 worst <= 1e-8 * scale,
                 "H·F must equal X'WX (the genuine PSD weighted Gram); max \
                  entrywise gap {worst:.3e} (scale {scale:.3e}, wiggle={wiggle}, \
                  seed={seed}); max|H-H^T|={worst_h_asym:.3e}. \
-                 A non-zero gap means F was either reassembled in \
-                 the wrong basis (#1027 root cause) or symmetrized after the \
-                 fact — `symmetrize_in_place(F)` makes \
-                 H·F_sym = (X'WX + H·X'WX·H⁻¹)/2 ≠ X'WX."
+                 `F` comes from solving H·F = X'WX, so a gap now means either \
+                 that solve stopped being certified, or that `F` and \
+                 `weighted_gram` were assembled from different `H`/`S(λ)` \
+                 (#1027 basis mismatch), or that something reintroduced an \
+                 explicit `H⁻¹` product on this path."
             );
         }
     }
