@@ -5048,7 +5048,7 @@ pub(crate) fn joint_trust_region_noise_floor_accepts_round_off_negative_actual()
     // the principled response is to accept (rho ≈ 1) rather than
     // declare failure on the sign of noise. Mirrors the noise-floor
     // branch in `src/solver/pirls.rs`.
-    let objective_scale = 1.66e5;
+    let objective_scale: f64 = 1.66e5;
     let noise_floor = objective_scale * 1e-14;
     let predicted = noise_floor * 0.1;
     let actual = -noise_floor * 0.5;
@@ -5073,7 +5073,7 @@ pub(crate) fn joint_trust_region_noise_floor_rejects_genuine_increase() {
     // Genuine objective increase clearly beyond the noise floor must
     // still be rejected even when predicted_reduction is sub-floor:
     // this is real model failure, not round-off.
-    let objective_scale = 1.66e5;
+    let objective_scale: f64 = 1.66e5;
     let noise_floor = objective_scale * 1e-14;
     let predicted = noise_floor * 0.1;
     let actual = -1.0;
