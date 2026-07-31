@@ -57,8 +57,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use gam_math::score_opt::{
-    ClosedInterval, DerivativeEnclosure, ScoreJet, ScoreSample, ScoreValueEnclosure,
-    ScoreOptimumLocation, maximize_score_1d,
+    ClosedInterval, DerivativeEnclosure, ScoreJet, ScoreOptimumLocation, ScoreSample,
+    ScoreSearchResult, ScoreValueEnclosure, maximize_score_1d,
 };
 
 /// One pooled (distinct-abscissa) observation node.
@@ -351,11 +351,6 @@ pub enum SplineScoreProofError {
     MissingEndpointCertificate {
         log_lambda: f64,
     },
-    OptimumResolutionFlat {
-        bracket: ClosedInterval,
-        max_score_gap: f64,
-        score_resolution: f64,
-    },
     GlobalValueOrderingUnresolved {
         maximum_excess: f64,
         comparison_resolution: f64,
@@ -394,7 +389,10 @@ impl std::fmt::Display for SplineScoreProofError {
                 "spline scan: profiled residual ball is not strictly positive: {enclosure:?}"
             ),
             Self::InvalidArithmetic { context } => {
-                write!(f, "spline scan: non-finite interval arithmetic in {context}")
+                write!(
+                    f,
+                    "spline scan: non-finite interval arithmetic in {context}"
+                )
             }
             Self::AccumulatorDiverged {
                 node,
@@ -426,15 +424,6 @@ impl std::fmt::Display for SplineScoreProofError {
                 f,
                 "spline scan: certified search requested an uncached endpoint {log_lambda}"
             ),
-            Self::OptimumResolutionFlat {
-                bracket,
-                max_score_gap,
-                score_resolution,
-            } => write!(
-                f,
-                "spline scan: REML optimum is value-resolved but not stationary on {bracket:?} \
-                 (maximum score gap {max_score_gap}, score resolution {score_resolution})"
-            ),
             Self::GlobalValueOrderingUnresolved {
                 maximum_excess,
                 comparison_resolution,
@@ -454,7 +443,9 @@ impl std::fmt::Display for SplineScoreProofError {
                 "spline scan: exact-real REML KKT condition is uncertified for {location:?} \
                  on {bracket:?} (derivative {derivative:?}, curvature {curvature:?})"
             ),
-            Self::Search(reason) => write!(f, "spline scan: REML stationary isolation failed: {reason}"),
+            Self::Search(reason) => {
+                write!(f, "spline scan: REML stationary isolation failed: {reason}")
+            }
             Self::Computation(reason) => f.write_str(reason),
         }
     }
@@ -868,7 +859,7 @@ fn ball_transition(delta: Ball, m: usize) -> BallMat {
 }
 
 #[inline]
-fn ball_process_noise(delta: Ball, q: Ball, m: usize) -> BallMat {
+fn ball_unit_process_noise(delta: Ball, m: usize) -> BallMat {
     let mut powers = [Ball::ONE; 2 * MAX_ORDER];
     for exponent in 1..powers.len() {
         powers[exponent] = powers[exponent - 1].mul(delta);
@@ -877,14 +868,87 @@ fn ball_process_noise(delta: Ball, q: Ball, m: usize) -> BallMat {
     for i in 0..m {
         for j in 0..m {
             let exponent = 2 * m - 1 - i - j;
-            let denominator =
-                factorial(m - 1 - i) * factorial(m - 1 - j) * exponent as f64;
-            out[i][j] = q
-                .mul(powers[exponent])
-                .div_positive(Ball::exact(denominator));
+            let denominator = factorial(m - 1 - i) * factorial(m - 1 - j) * exponent as f64;
+            out[i][j] = powers[exponent].div_positive(Ball::exact(denominator));
         }
     }
     out
+}
+
+/// Taylor-model decomposition of one process-noise injection.
+///
+/// At a fixed certified score evaluation, `q` is one exact real number in its
+/// ball, shared by every node. Write
+///
+/// ```text
+/// q = q₀ + r_q θ_q,       θ_q ∈ [-1, 1],
+/// Q_ij = c₀,ij + ε_ij,
+/// q Q_ij = q₀ c₀,ij + (r_q c₀,ij) θ_q + q ε_ij.
+/// ```
+///
+/// The first term is the zonotope centre, the second is one distinguished
+/// generator accumulated across the whole recursion, and only `q ε` plus the
+/// floating-point error in forming the first two coefficients is an
+/// independent remainder. Treating the full interval `qQ` as a fresh constant
+/// at every node discards the identity of `θ_q`; after enough Riccati steps its
+/// box hull is wider than the score resolution even though the signed
+/// recursion is contracting.
+struct ProcessNoiseTaylor {
+    /// Ordinary interval enclosure used by the independent componentwise path.
+    enclosure: BallMat,
+    /// Centre plus deterministic-arithmetic/nonlinear remainder, with the
+    /// first-order common-`q` uncertainty removed.
+    constant: [Ball; COVARIANCE_D1_DIM],
+    /// Coefficient added to the one common normalized `q` generator.
+    shared_q: [f64; COVARIANCE_D1_DIM],
+}
+
+#[inline]
+fn ball_process_noise_taylor(delta: Ball, q: Ball, m: usize) -> ProcessNoiseTaylor {
+    let unit = ball_unit_process_noise(delta, m);
+    let q_radius = ball_radius_about_value(q);
+    let mut enclosure = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    let mut constant = [Ball::ZERO; COVARIANCE_D1_DIM];
+    let mut shared_q = [0.0_f64; COVARIANCE_D1_DIM];
+
+    for i in 0..m {
+        for j in 0..m {
+            let index = i * m + j;
+            let coefficient = unit[i][j];
+            enclosure[i][j] = q.mul(coefficient);
+
+            let coefficient_center = Ball::exact(coefficient.value);
+            let center_product = Ball::exact(q.value).mul(coefficient_center);
+            let shared_product = Ball::exact(q_radius).mul(coefficient_center);
+
+            // `q·(c-c₀)` is the nonlinear/deterministic interval remainder.
+            // The other two terms charge rounding of the stored centre and
+            // shared-generator coefficients. The latter is multiplied by an
+            // unknown `θ_q`, so its signed error is symmetrized.
+            let coefficient_error = coefficient.sub(coefficient_center);
+            let center_error = center_product.sub(Ball::exact(center_product.value));
+            let shared_error = shared_product.sub(Ball::exact(shared_product.value));
+            let shared_error_radius = ball_radius_about_value(shared_error);
+            let shared_error_symmetric = Ball {
+                value: 0.0,
+                lo: -shared_error_radius,
+                hi: shared_error_radius,
+            };
+            let remainder = q
+                .mul(coefficient_error)
+                .add(center_error)
+                .add(shared_error_symmetric);
+
+            constant[index] = Ball::exact(center_product.value).add(remainder);
+            shared_q[index] = shared_product.value;
+        }
+    }
+
+    ProcessNoiseTaylor {
+        enclosure,
+        constant,
+        shared_q,
+    }
 }
 
 #[inline]
@@ -947,7 +1011,11 @@ fn ball_update_operator_derivative(gain_jet: &BallVec, order: usize) -> BallMat 
 /// `L · X · Rᵀ` for `Ball` matrices.
 #[inline]
 fn ball_congruence(l: &BallMat, x: &BallMat, r_side: &BallMat, order: usize) -> BallMat {
-    ball_mat_mul(&ball_mat_mul(l, x, order), &ball_mat_t(r_side, order), order)
+    ball_mat_mul(
+        &ball_mat_mul(l, x, order),
+        &ball_mat_t(r_side, order),
+        order,
+    )
 }
 
 /// Intersect the proper innovation variance with its exact lower bound `R_t`.
@@ -1035,7 +1103,6 @@ fn ball_cholesky(covariance: &BallMat, order: usize) -> Option<BallMat> {
     Some(factor)
 }
 
-
 /// How many accumulators the per-node divergence check scans.
 ///
 /// The second- and third-order accumulators are ordered last and left OUT of
@@ -1079,7 +1146,6 @@ fn ball_factor_update(factor: &BallMat, beta: Ball, order: usize) -> BallMat {
     }
     updated
 }
-
 
 /// `L Lᵀ` for a lower-triangular factor.
 fn ball_factor_gram(factor: &BallMat, order: usize) -> BallMat {
@@ -1548,10 +1614,9 @@ struct FilterPass {
     /// Σ over proper steps of `log F̃_t` (innovation variances at σ²=1).
     sum_log_f: f64,
     /// First three analytic derivatives of `sum_log_f` with respect to
-    /// `rho = log lambda` (`q = exp(-rho)`). The third order feeds the
-    /// cube-rate certified-search enclosure (#2300): anchoring the derivative
-    /// radius on endpoint `V‴` jets certifies λ→∞ tail cells at width
-    /// `(|V′|/L₄)^{1/3}` instead of `(|V′|/L₃)^{1/2}`.
+    /// `rho = log lambda` (`q = exp(-rho)`). Endpoint pairs linearly
+    /// interpolate the third order under a global `L5` bound, certifying the
+    /// λ→∞ tail at fourth-order width `(|V′|/L₅)^{1/4}` (#2300/#2614).
     sum_log_f_d1: f64,
     sum_log_f_d2: f64,
     sum_log_f_d3: f64,
@@ -1798,10 +1863,7 @@ fn run_filter<const RECORD_STEPS: bool>(
                     let s0 = mm * inv_f;
                     let s1 = (mm_d1 - s0 * f_star_d1) * inv_f;
                     let s2 = (mm_d2 - 2.0 * s1 * f_star_d1 - s0 * f_star_d2) * inv_f;
-                    let s3 = (mm_d3
-                        - 3.0 * s2 * f_star_d1
-                        - 3.0 * s1 * f_star_d2
-                        - s0 * f_star_d3)
+                    let s3 = (mm_d3 - 3.0 * s2 * f_star_d1 - 3.0 * s1 * f_star_d2 - s0 * f_star_d3)
                         * inv_f;
                     p_new_d1[i][j] -= s1;
                     p_new_d2[i][j] -= s2;
@@ -1832,8 +1894,7 @@ fn run_filter<const RECORD_STEPS: bool>(
             let t0 = vv * inv_f;
             let t1 = (vv_d1 - t0 * f_star_d1) * inv_f;
             let t2 = (vv_d2 - 2.0 * t1 * f_star_d1 - t0 * f_star_d2) * inv_f;
-            let t3 = (vv_d3 - 3.0 * t2 * f_star_d1 - 3.0 * t1 * f_star_d2 - t0 * f_star_d3)
-                * inv_f;
+            let t3 = (vv_d3 - 3.0 * t2 * f_star_d1 - 3.0 * t1 * f_star_d2 - t0 * f_star_d3) * inv_f;
             sum_v2_over_f += t0;
             sum_v2_over_f_d1 += t1;
             sum_v2_over_f_d2 += t2;
@@ -1940,14 +2001,15 @@ const MEAN_BLOCKS: usize = 2;
 const MEAN_DIM: usize = MEAN_BLOCKS * MAX_ORDER;
 /// Capacity of the `vec(dP/dρ)` state; the ACTIVE dimension is `order²`.
 const COVARIANCE_D1_DIM: usize = MAX_ORDER * MAX_ORDER;
-/// Generators retained before the OLDEST are folded into an axis-aligned set.
+/// Generators retained before the lowest-correlation directions are folded
+/// into an axis-aligned set.
 ///
-/// Folding is exact — a box IS the zonotope of its own axis generators, so the
-/// folded part keeps being transformed by the true map rather than by its
-/// absolute value, which is the whole point of carrying generators at all. The
-/// cap only bounds the work: `dim²·CAP` per node, `O(n)` overall. It is well
-/// above the ~35 nodes a generator needs to decay past `ε` at the measured
-/// contraction, so folding reaches nothing that is still carrying information.
+/// Folding is a sound outer reduction: the axis box contains the discarded
+/// generators and is itself a zonotope, so it keeps being transformed by the
+/// true map rather than by its absolute value. The cap only bounds the work:
+/// `dim²·CAP` per node, `O(n)` overall. Reduction chooses the generators for
+/// which a box loses the least signed correlation; it never assumes that age
+/// alone implies contraction.
 const ZONOTOPE_GENERATOR_CAP: usize = 240;
 /// `γ_{dim+2}` with room to spare: `2·(d+2)·u` with `u = ε/2` is `11ε` at
 /// `d = 9`, and this charges `32ε` for every floating-point dot product a
@@ -2024,6 +2086,13 @@ fn ball_radius_about_value(ball: Ball) -> f64 {
 #[derive(Clone, Debug)]
 struct Zonotope<const N: usize> {
     center: [f64; N],
+    /// Coefficient of the one normalized uncertainty variable shared by every
+    /// occurrence of the certified process-noise scale `q`.
+    ///
+    /// This generator is structural, not part of the disposable remainder
+    /// basis: compaction may fold independent roundoff generators, but it must
+    /// never turn one common scalar into independent per-node errors.
+    shared_q: [f64; N],
     generators: Vec<[f64; N]>,
     dim: usize,
 }
@@ -2035,12 +2104,10 @@ impl<const N: usize> Zonotope<N> {
         // `debug_assert!` compiles to nothing in the release profile the
         // scan actually ships in, which is precisely where the bound stops
         // being checked by anything else -- hence the workspace ban.
-        assert!(
-            dim <= N,
-            "zonotope dim {dim} exceeds its capacity {N}"
-        );
+        assert!(dim <= N, "zonotope dim {dim} exceeds its capacity {N}");
         Self {
             center: [0.0; N],
+            shared_q: [0.0; N],
             generators: Vec::new(),
             dim,
         }
@@ -2048,11 +2115,10 @@ impl<const N: usize> Zonotope<N> {
 
     /// One coordinate as an ordinary ball, for the consumers that need a scalar.
     fn coordinate(&self, index: usize) -> Ball {
-        let mut radius = 0.0f64;
+        let mut radius = self.shared_q[index].abs();
         for generator in &self.generators {
-            radius += generator[index].abs();
+            radius = next_up_ball(radius + generator[index].abs());
         }
-        let radius = next_up_ball(radius * (1.0 + 64.0 * f64::EPSILON));
         let value = self.center[index];
         Ball {
             value,
@@ -2069,31 +2135,65 @@ impl<const N: usize> Zonotope<N> {
     /// `ρ(|M|)` per node — reintroducing the exact defect this type exists to
     /// remove, on a quantity too small to notice until it is `1e11`.
     fn apply(&mut self, map: &[[Ball; N]; N], constant: &[Ball; N]) -> bool {
+        self.apply_with_shared_q(map, constant, &[0.0; N])
+    }
+
+    /// `x ← Mx + b + g_q θ_q`, where the SAME `θ_q ∈ [-1, 1]` is carried by
+    /// every process-noise injection in the complete filter pass.
+    ///
+    /// The interval part of `b` contains only nonlinear and floating-point
+    /// remainder. It therefore enters as fresh independent generators, while
+    /// `g_q` is accumulated onto the distinguished generator after that
+    /// generator has followed the signed map `M`.
+    fn apply_with_shared_q(
+        &mut self,
+        map: &[[Ball; N]; N],
+        constant: &[Ball; N],
+        shared_q_constant: &[f64; N],
+    ) -> bool {
         let dim = self.dim;
         let mut generator_column_sum = [0.0f64; N];
+        for (sum, &coordinate) in generator_column_sum
+            .iter_mut()
+            .zip(self.shared_q.iter())
+            .take(dim)
+        {
+            *sum = coordinate.abs();
+        }
         for generator in &self.generators {
             for j in 0..dim {
-                generator_column_sum[j] += generator[j].abs();
+                generator_column_sum[j] =
+                    next_up_ball(generator_column_sum[j] + generator[j].abs());
             }
         }
 
         let mut next_center = [0.0f64; N];
+        let mut next_shared_q = [0.0f64; N];
         let mut fresh_radius = [0.0f64; N];
         for i in 0..dim {
             let mut center = constant[i].value;
+            let mut shared_q = shared_q_constant[i];
             // Everything the roundoff of the dot products — the centre's and
             // every generator's — is charged against, summed once.
-            let mut magnitude = constant[i].value.abs();
+            let mut magnitude = constant[i].value.abs() + shared_q_constant[i].abs();
             let mut radius = ball_radius_about_value(constant[i]);
             for j in 0..dim {
                 let coefficient = map[i][j].value;
                 center += coefficient * self.center[j];
-                magnitude += (coefficient * self.center[j]).abs()
-                    + coefficient.abs() * generator_column_sum[j];
-                radius += ball_radius_about_value(map[i][j])
-                    * (self.center[j].abs() + generator_column_sum[j]);
+                shared_q += coefficient * self.shared_q[j];
+                magnitude = next_up_ball(
+                    magnitude
+                        + (coefficient * self.center[j]).abs()
+                        + coefficient.abs() * generator_column_sum[j],
+                );
+                radius = next_up_ball(
+                    radius
+                        + ball_radius_about_value(map[i][j])
+                            * (self.center[j].abs() + generator_column_sum[j]),
+                );
             }
             next_center[i] = center;
+            next_shared_q[i] = shared_q;
             fresh_radius[i] = next_up_ball(
                 (radius + ZONOTOPE_ROUNDOFF * magnitude) * (1.0 + 64.0 * f64::EPSILON),
             );
@@ -2111,6 +2211,7 @@ impl<const N: usize> Zonotope<N> {
         }
 
         self.center = next_center;
+        self.shared_q = next_shared_q;
         for i in 0..dim {
             if fresh_radius[i] > 0.0 {
                 let mut axis = [0.0f64; N];
@@ -2120,33 +2221,59 @@ impl<const N: usize> Zonotope<N> {
         }
         self.compact();
         self.center[..dim].iter().all(|value| value.is_finite())
+            && self.shared_q[..dim].iter().all(|value| value.is_finite())
             && self
                 .generators
                 .iter()
                 .all(|generator| generator[..dim].iter().all(|value| value.is_finite()))
     }
 
-    /// Fold the OLDEST generators into one axis-aligned set once the list is
-    /// over the cap. Sound because a box is a zonotope over its own axes, and
-    /// the folded generators are the ones that have contracted for the longest.
+    /// Reduce the lowest-correlation generators to one axis-aligned set once
+    /// the list is over the cap.
+    ///
+    /// Age is not a sound proxy for dispensability here.  The order-3 closed
+    /// loop contracts through a rotation of its dominant directions; after ten
+    /// nodes an old generator can still be large and strongly non-axis-aligned.
+    /// Folding it merely because it is old discards precisely that correlation
+    /// and sends its width through `|M|`, recreating the wrapping effect this
+    /// zonotope exists to avoid.
+    ///
+    /// The reduction score `||g||₁ - ||g||∞` is zero for an axis generator and
+    /// grows with the correlation that an axis box would discard.  Therefore
+    /// the lowest-scoring generators are the loss-minimizing ones to fold, and
+    /// the correlation-bearing generators remain explicit.  The folded box is
+    /// still an outer zonotope: each coordinate radius is the outward-rounded
+    /// sum of the folded generators' absolute coordinates.
     fn compact(&mut self) {
         if self.generators.len() <= ZONOTOPE_GENERATOR_CAP {
             return;
         }
         let dim = self.dim;
+        let reduction_score = |generator: &[f64; N]| {
+            let mut l1 = 0.0_f64;
+            let mut linf = 0.0_f64;
+            for &coordinate in generator.iter().take(dim) {
+                let magnitude = coordinate.abs();
+                l1 += magnitude;
+                linf = linf.max(magnitude);
+            }
+            (l1 - linf).max(0.0)
+        };
+        self.generators
+            .sort_by(|left, right| reduction_score(left).total_cmp(&reduction_score(right)));
         let fold = self.generators.len() - ZONOTOPE_GENERATOR_CAP / 2;
         let retained = self.generators.split_off(fold);
         let mut folded = [0.0f64; N];
         for generator in &self.generators {
             for i in 0..dim {
-                folded[i] += generator[i].abs();
+                folded[i] = next_up_ball(folded[i] + generator[i].abs());
             }
         }
         let mut next = Vec::with_capacity(retained.len() + dim);
         for i in 0..dim {
             if folded[i] > 0.0 {
                 let mut axis = [0.0f64; N];
-                axis[i] = next_up_ball(folded[i] * (1.0 + 64.0 * f64::EPSILON));
+                axis[i] = folded[i];
                 next.push(axis);
             }
         }
@@ -2204,11 +2331,34 @@ fn zonotope_congruence_map(
     map
 }
 
+/// Project a matrix-valued zonotope onto the exact symmetric subspace.
+///
+/// Covariances and every one of their parameter derivatives are symmetric
+/// exact-real matrices. If `x` is the witness point in the incoming zonotope,
+/// then `Sx = x` for the symmetrizer `S`; applying `S` to every generator
+/// therefore preserves that witness while deleting enclosure directions that
+/// violate a model identity.
+fn project_symmetric_zonotope(state: &mut Zonotope<COVARIANCE_D1_DIM>, order: usize) -> bool {
+    if order == 1 {
+        return true;
+    }
+    let mut projection = [[Ball::ZERO; COVARIANCE_D1_DIM]; COVARIANCE_D1_DIM];
+    for i in 0..order {
+        for j in 0..order {
+            let row = i * order + j;
+            if i == j {
+                projection[row][row] = Ball::ONE;
+            } else {
+                projection[row][i * order + j] = Ball::exact(0.5);
+                projection[row][j * order + i] = Ball::exact(0.5);
+            }
+        }
+    }
+    state.apply(&projection, &[Ball::ZERO; COVARIANCE_D1_DIM])
+}
+
 /// Read `vec(X)` back out as a matrix.
-fn zonotope_to_matrix(
-    state: &Zonotope<COVARIANCE_D1_DIM>,
-    order: usize,
-) -> BallMat {
+fn zonotope_to_matrix(state: &Zonotope<COVARIANCE_D1_DIM>, order: usize) -> BallMat {
     let mut out = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
     for i in 0..order {
         for j in 0..order {
@@ -2216,6 +2366,126 @@ fn zonotope_to_matrix(
         }
     }
     out
+}
+
+/// Seed a covariance zonotope without throwing away exact symmetry.
+///
+/// The two off-diagonal storage locations denote one real covariance entry.
+/// A shared generator therefore encloses their common error while preserving
+/// that identity; two independent axis generators would immediately forget it
+/// and recreate the componentwise wrapping effect on the first congruence.
+#[cfg(test)]
+fn covariance_zonotope_from_symmetric_matrix(
+    matrix: &BallMat,
+    order: usize,
+) -> Zonotope<COVARIANCE_D1_DIM> {
+    let mut state = Zonotope::<COVARIANCE_D1_DIM>::zeroed(order * order);
+    for i in 0..order {
+        for j in i..order {
+            let value = matrix[i][j].value;
+            state.center[i * order + j] = value;
+            state.center[j * order + i] = value;
+            let radius = [
+                (value - matrix[i][j].lo).abs(),
+                (matrix[i][j].hi - value).abs(),
+                (value - matrix[j][i].lo).abs(),
+                (matrix[j][i].hi - value).abs(),
+            ]
+            .into_iter()
+            .fold(0.0_f64, f64::max);
+            if radius > 0.0 {
+                let mut generator = [0.0_f64; COVARIANCE_D1_DIM];
+                let radius = next_up_ball(radius);
+                generator[i * order + j] = radius;
+                generator[j * order + i] = radius;
+                state.generators.push(generator);
+            }
+        }
+    }
+    state
+}
+
+/// Apply one scalar-observation Riccati update to a covariance zonotope.
+///
+/// Applying the Joseph map with an interval-valued gain is sound but useless:
+/// the gain is a function of the SAME covariance, while a generic interval
+/// matrix application ranges the two independently.  Its resulting first-order
+/// error is fed back into the next gain and recreates componentwise Riccati
+/// wrapping.
+///
+/// Instead linearize the Riccati map at the zonotope centre and enclose its
+/// exact, signed second-order remainder.  With centre column `c`, centre
+/// innovation `f`, `k = c/f`, covariance perturbation `E`, observation-variance
+/// perturbation `dr`, `d = E₀₀ + dr`, and
+///
+///     u = E e₀ - k d,
+///
+/// direct expansion gives the IDENTITY
+///
+///     U(C + E, r + dr)
+///       = A (C + E) Aᵀ + (r + dr) k kᵀ - u uᵀ / (f + d),
+///       A = I - k e₀ᵀ.
+///
+/// Thus every existing generator follows the contracting derivative map
+/// `E ↦ AEAᵀ`; only the genuinely quadratic remainder becomes fresh interval
+/// error.  This preserves the covariance/gain dependency rather than treating
+/// it as uncertainty.
+fn covariance_zonotope_measurement_update(
+    state: &mut Zonotope<COVARIANCE_D1_DIM>,
+    r: Ball,
+    order: usize,
+) -> bool {
+    let centre_r = Ball::exact(r.value);
+    let centre_f = Ball::exact(state.center[0]).add(centre_r);
+    if !(centre_f.is_finite() && centre_f.lo > 0.0) {
+        return false;
+    }
+
+    let mut centre_gain = [Ball::ZERO; MAX_ORDER];
+    let mut column_error = [Ball::ZERO; MAX_ORDER];
+    for i in 0..order {
+        centre_gain[i] = Ball::exact(state.center[i * order]).div_positive(centre_f);
+        let coordinate = state.coordinate(i * order);
+        let radius = ball_radius_about_value(coordinate);
+        column_error[i] = Ball {
+            value: 0.0,
+            lo: -radius,
+            hi: radius,
+        };
+    }
+    let r_error = Ball {
+        value: 0.0,
+        lo: next_down_ball(r.lo - r.value),
+        hi: next_up_ball(r.hi - r.value),
+    };
+    let denominator_error = column_error[0].add(r_error);
+    let denominator = centre_f.add(denominator_error);
+    if !(denominator.is_finite() && denominator.lo > 0.0) {
+        return false;
+    }
+
+    let mut remainder_vector = [Ball::ZERO; MAX_ORDER];
+    for i in 0..order {
+        remainder_vector[i] = column_error[i].sub(centre_gain[i].mul(denominator_error));
+    }
+    let operator = ball_update_operator(&centre_gain, centre_r.div_positive(centre_f), order);
+    let mut constant = [Ball::ZERO; COVARIANCE_D1_DIM];
+    for i in 0..order {
+        for j in 0..order {
+            let quadratic_remainder = remainder_vector[i]
+                .mul(remainder_vector[j])
+                .div_positive(denominator)
+                .neg();
+            constant[i * order + j] = r
+                .mul(centre_gain[i])
+                .mul(centre_gain[j])
+                .add(quadratic_remainder);
+        }
+    }
+    state.apply(
+        &zonotope_congruence_map(&operator, &operator, order),
+        &constant,
+    )
 }
 
 /// Diagonal names for the traced covariance jets, indexed by state coordinate.
@@ -2239,9 +2509,16 @@ fn run_filter_ball_traced(
     order: usize,
     mut trace: Option<&mut Vec<BallTraceRecord>>,
 ) -> Result<BallFilterPass, SplineScoreProofError> {
-    // `(a, a′)` together, and `vec(dP/dρ)`, each as a zonotope; see `Zonotope`
-    // for why a componentwise enclosure of either is impossible at any width.
+    // `(a, a′)` together, `vec(P)` once the covariance becomes proper, and
+    // `vec(dP/dρ)`, each as a zonotope; see `Zonotope` for why a componentwise
+    // enclosure of these contracting signed recursions is impossible at any
+    // width.
     let mut mean = Zonotope::<MEAN_DIM>::zeroed(MEAN_BLOCKS * order);
+    // Start at the exact zero proper covariance and carry it even while the
+    // diffuse rank is being consumed. Seeding only after the diffuse phase
+    // would already have boxed the first `order - 1` occurrences of the common
+    // process-noise scale, so their correlation could never be recovered.
+    let mut covariance = Zonotope::<COVARIANCE_D1_DIM>::zeroed(order * order);
     let mut covariance_d1 = Zonotope::<COVARIANCE_D1_DIM>::zeroed(order * order);
     let mut a_d2: BallVec = [Ball::ZERO; MAX_ORDER];
     let mut a_d3: BallVec = [Ball::ZERO; MAX_ORDER];
@@ -2278,8 +2555,11 @@ fn run_filter_ball_traced(
 
     for t in 0..nodes.len() {
         let r = Ball::ONE.div_positive(Ball::exact(nodes[t].w));
-        weighted_energy = weighted_energy
-            .add(Ball::exact(nodes[t].y).square().mul(Ball::exact(nodes[t].w)));
+        weighted_energy = weighted_energy.add(
+            Ball::exact(nodes[t].y)
+                .square()
+                .mul(Ball::exact(nodes[t].w)),
+        );
         let v = Ball::exact(nodes[t].y).sub(mean.coordinate(0));
         let v_d1 = mean.coordinate(order).neg();
         let v_d2 = a_d2[0].neg();
@@ -2376,6 +2656,39 @@ fn run_filter_ball_traced(
                             .add(inf_product.mul(f_star_d3).mul(inv_f_inf_sq));
                     }
                 }
+                // The diffuse covariance update is the fixed-gain Joseph map
+                //
+                //     P⁺ = A_inf P A_infᵀ + r K_inf K_infᵀ.
+                //
+                // It is affine in the proper covariance, so the value
+                // zonotope can and must follow it from the exact zero state.
+                // Waiting until diffuse rank reaches zero would box the first
+                // process-noise injections before the shared-q generator even
+                // existed.
+                let mut covariance_constant = [Ball::ZERO; COVARIANCE_D1_DIM];
+                for i in 0..order {
+                    for j in 0..order {
+                        covariance_constant[i * order + j] = r.mul(gain_inf[i]).mul(gain_inf[j]);
+                    }
+                }
+                if !covariance.apply(
+                    &zonotope_congruence_map(&a_inf, &a_inf, order),
+                    &covariance_constant,
+                ) || !project_symmetric_zonotope(&mut covariance, order)
+                {
+                    return Err(SplineScoreProofError::InvalidArithmetic {
+                        context: "diffuse covariance zonotope",
+                    });
+                }
+                let covariance_p_new = zonotope_to_matrix(&covariance, order);
+                for i in 0..order {
+                    for j in 0..order {
+                        intersect_with_independent_enclosure(
+                            &mut p_new[i][j],
+                            covariance_p_new[i][j],
+                        );
+                    }
+                }
                 // `D1+ = A_inf*D1*A_inf'` EXACTLY: expanding that congruence
                 // gives `D1[i][j] - c_j D1[i][0] - c_i D1[0][j] + c_i c_j D1[0][0]`
                 // with `c = M_inf/F_inf`, which is the diffuse update term for
@@ -2384,7 +2697,8 @@ fn run_filter_ball_traced(
                 if !covariance_d1.apply(
                     &zonotope_congruence_map(&a_inf, &a_inf, order),
                     &[Ball::ZERO; COVARIANCE_D1_DIM],
-                ) {
+                ) || !project_symmetric_zonotope(&mut covariance_d1, order)
+                {
                     return Err(SplineScoreProofError::InvalidArithmetic {
                         context: "diffuse covariance-derivative zonotope",
                     });
@@ -2397,8 +2711,7 @@ fn run_filter_ball_traced(
                 ball_symmetrize(&mut p_star_d3, order);
                 for i in 0..order {
                     for j in 0..order {
-                        p_inf[i][j] =
-                            p_inf[i][j].sub(m_inf[i].mul(m_inf[j]).mul(inv_f_inf));
+                        p_inf[i][j] = p_inf[i][j].sub(m_inf[i].mul(m_inf[j]).mul(inv_f_inf));
                     }
                 }
                 ball_symmetrize(&mut p_inf, order);
@@ -2452,10 +2765,27 @@ fn run_filter_ball_traced(
             // because the value covariance it multiplies by had already lost its
             // enclosure.
             let a_operator = ball_update_operator(&gain, r.mul(inv_f), order);
-            let mut p_new = ball_congruence(&a_operator, &p_star, &a_operator, order);
+            let mut component_p_new = ball_congruence(&a_operator, &p_star, &a_operator, order);
             for i in 0..order {
                 for j in 0..order {
-                    p_new[i][j] = p_new[i][j].add(gain[i].mul(gain[j]).mul(r));
+                    component_p_new[i][j] = component_p_new[i][j].add(gain[i].mul(gain[j]).mul(r));
+                }
+            }
+            // Carry the covariance through the Riccati map's exact centred
+            // Taylor form. Its linear part is the signed Joseph congruence and
+            // its remainder is quadratic in the covariance radius; see
+            // `covariance_zonotope_measurement_update`.
+            if !covariance_zonotope_measurement_update(&mut covariance, r, order)
+                || !project_symmetric_zonotope(&mut covariance, order)
+            {
+                return Err(SplineScoreProofError::InvalidArithmetic {
+                    context: "proper covariance zonotope update",
+                });
+            }
+            let mut p_new = zonotope_to_matrix(&covariance, order);
+            for i in 0..order {
+                for j in 0..order {
+                    intersect_with_independent_enclosure(&mut p_new[i][j], component_p_new[i][j]);
                 }
             }
             // ... and then tightened to the EXACT range of the map each entry
@@ -2643,7 +2973,8 @@ fn run_filter_ball_traced(
             if !covariance_d1.apply(
                 &zonotope_congruence_map(&a_operator, &a_operator, order),
                 &[Ball::ZERO; COVARIANCE_D1_DIM],
-            ) {
+            ) || !project_symmetric_zonotope(&mut covariance_d1, order)
+            {
                 return Err(SplineScoreProofError::InvalidArithmetic {
                     context: "covariance-derivative zonotope update",
                 });
@@ -2913,12 +3244,32 @@ fn run_filter_ball_traced(
             a_d2 = ball_mat_vec(&f_t, &a_d2, order);
             a_d3 = ball_mat_vec(&f_t, &a_d3, order);
             let f_t_t = ball_mat_t(&f_t, order);
-            let q_noise = ball_process_noise(delta, q, order);
-            let mut p_next = ball_mat_add(
+            let ProcessNoiseTaylor {
+                enclosure: q_noise,
+                constant: q_noise_constant,
+                shared_q: q_noise_shared_q,
+            } = ball_process_noise_taylor(delta, q, order);
+            let component_p_next = ball_mat_add(
                 &ball_mat_mul(&ball_mat_mul(&f_t, &p_star, order), &f_t_t, order),
                 &q_noise,
                 order,
             );
+            if !covariance.apply_with_shared_q(
+                &zonotope_congruence_map(&f_t, &f_t, order),
+                &q_noise_constant,
+                &q_noise_shared_q,
+            ) || !project_symmetric_zonotope(&mut covariance, order)
+            {
+                return Err(SplineScoreProofError::InvalidArithmetic {
+                    context: "proper covariance zonotope transition",
+                });
+            }
+            let mut p_next = zonotope_to_matrix(&covariance, order);
+            for i in 0..order {
+                for j in 0..order {
+                    intersect_with_independent_enclosure(&mut p_next[i][j], component_p_next[i][j]);
+                }
+            }
             let mut p_next_d2 = ball_mat_add(
                 &ball_mat_mul(&ball_mat_mul(&f_t, &p_star_d2, order), &f_t_t, order),
                 &q_noise,
@@ -2933,15 +3284,20 @@ fn run_filter_ball_traced(
             // EXACT constant, so the whole `dP` recursion is affine in `dP`
             // with coefficients built from the value covariance.
             let mut prediction_constant = [Ball::ZERO; COVARIANCE_D1_DIM];
+            let mut prediction_shared_q = [0.0_f64; COVARIANCE_D1_DIM];
             for i in 0..order {
                 for j in 0..order {
-                    prediction_constant[i * order + j] = q_noise[i][j].neg();
+                    let index = i * order + j;
+                    prediction_constant[index] = q_noise_constant[index].neg();
+                    prediction_shared_q[index] = -q_noise_shared_q[index];
                 }
             }
-            if !covariance_d1.apply(
+            if !covariance_d1.apply_with_shared_q(
                 &zonotope_congruence_map(&f_t, &f_t, order),
                 &prediction_constant,
-            ) {
+                &prediction_shared_q,
+            ) || !project_symmetric_zonotope(&mut covariance_d1, order)
+            {
                 return Err(SplineScoreProofError::InvalidArithmetic {
                     context: "covariance-derivative zonotope transition",
                 });
@@ -2969,8 +3325,7 @@ fn run_filter_ball_traced(
                 sink.push((t, "d3_next_00", p_star_d3[0][0]));
             }
             if diffuse_rank > 0 {
-                let mut pi_next =
-                    ball_mat_mul(&ball_mat_mul(&f_t, &p_inf, order), &f_t_t, order);
+                let mut pi_next = ball_mat_mul(&ball_mat_mul(&f_t, &p_inf, order), &f_t_t, order);
                 ball_symmetrize(&mut pi_next, order);
                 p_inf = pi_next;
             } else {
@@ -3155,8 +3510,8 @@ fn pool_nodes(
 /// derivatives with respect to `log λ` (σ² profiled). The derivatives are
 /// propagated through the same diffuse Kalman recursion as the value; no
 /// finite differencing or surrogate objective is involved. The third order
-/// exists solely to anchor the certified-search enclosure radius on endpoint
-/// jets (#2300 cube-rate tail).
+/// exists solely to anchor the certified-search enclosure on endpoint pairs
+/// (#2300/#2614 fourth-order tail).
 fn concentrated_criterion_jet(
     nodes: &[PooledNode],
     ssr_within: f64,
@@ -3239,26 +3594,21 @@ impl CertifiedCriterionJet {
 /// Which bound anchored a derivative at this endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BoundSource {
-    /// The exact endpoint `V‴` jet — the cube-rate tail of #2300.
+    /// The exact endpoint `V‴` jet — the fourth-order tail of #2300/#2614.
     EndpointJet,
     /// The closed-form global bound `½(r/4 + 6ν)`, taken because the endpoint
     /// jet's enclosure left the finite range. The search stays CERTIFIED and
     /// its tail cells are merely wider: `(|V′|/L₃)^{1/2}` in place of
-    /// `(|V′|/L₄)^{1/3}`. The third order exists SOLELY to anchor that radius,
-    /// so losing it costs cells, never soundness.
+    /// the endpoint-pair `(|V′|/L₅)^{1/4}` rate. The third order exists SOLELY
+    /// to anchor that radius, so losing it costs cells, never soundness.
     ///
     /// The measured boundary that makes this reachable, recorded where a reader
-    /// meets it rather than left to be rediscovered: at smoothing order 3 and
-    /// `ρ ≤ −6`, the third-derivative covariance jet's enclosure grows without
-    /// bound across nodes because the update's Leibniz cross terms multiply
-    /// jets by GAIN JETS, and no exact structural fact available to interval
-    /// arithmetic constrains that product. The positive-semidefinite structure
-    /// that bounds `P` and its FIRST derivative — which a carried Cholesky
-    /// factor exploits to keep both exact — does not extend to the second and
-    /// third, in either the `ρ` or the `q` parameterisation. Both were
-    /// implemented and measured (#2614); the `q` form left the divergence node
-    /// IDENTICAL at every `ρ`, because the growth is a product of jets and does
-    /// not care which parameter is differentiated.
+    /// meets it rather than left to be rediscovered: before #2614's centred
+    /// Riccati/shared-`q` repair, smoothing order 3 refused throughout
+    /// `-20 <= ρ <= -10` when the covariance-derivative zonotope overflowed.
+    /// The repaired representation reaches the exact endpoint jets throughout
+    /// that measured domain. This fallback remains the sound terminal bound for
+    /// other inputs whose endpoint jet genuinely carries less information.
     AnalyticGlobalBound,
 }
 
@@ -3273,29 +3623,32 @@ fn third_derivative_global_bound(proper_modes: f64, residual_dof: f64) -> f64 {
     0.5 * (0.25 * proper_modes + 6.0 * residual_dof)
 }
 
-/// `|V′| ≤ ½(r/4 + ν)`, the k=1 member of the same closed-form family.
+/// Conservative closed-form bound on the concentrated criterion's fifth
+/// derivative with respect to `rho = log(lambda)`.
 ///
-/// Derived exactly as its siblings, in the same place. The normalized
-/// determinant contribution's first derivative in `ρ` is `u(1-u)`, whose
-/// magnitude is at most `1/4` on `u ∈ [0,1]` — the same `r/4` term every order
-/// carries. For the residual part `(log R)′ = R′/R` is a convex average of the
-/// kernel ratios `t′/t`, each bounded by `1`, so Faa di Bruno's coefficient sum
-/// at k=1 is `1`, against `1+1 = 2` at k=2, `1+3+2 = 6` at k=3 and
-/// `1+4+3+12+6 = 26` at k=4.
+/// For a determinant mode `u in [0,1]`, the fifth derivative is
 ///
-/// UNLIKE its siblings this is deliberately NOT applied in
-/// [`certified_concentrated_criterion_jet`], and there is no `BoundSource` for
-/// it. The first derivative is the quantity the certified search is SOLVING
-/// FOR: its isolation gate asks whether the cell's derivative enclosure
-/// excludes zero, and a constant bound on `|V′|` says nothing about where
-/// `V′ = 0` is. Substituting it there would leave every bracket unresolved
-/// while looking like a tightening.
+/// `u(1-u)(1 - 14u + 36u² - 24u³)`,
 ///
-/// Its one legitimate consumer is the score-VALUE enclosure in
-/// [`concentrated_criterion_enclosure`], which integrates `V′` across the cell
-/// and therefore needs it only as a magnitude. See the comment at that use.
-fn first_derivative_global_bound(proper_modes: f64, residual_dof: f64) -> f64 {
-    0.5 * (0.25 * proper_modes + residual_dof)
+/// up to sign. Absolute coefficient summation and `u(1-u) <= 1/4` bound it by
+/// `(1+14+36+24)/4 = 18.75`. For one normalized residual kernel,
+///
+/// `t⁽⁵⁾/t = u(1 - 30u + 150u² - 240u³ + 120u⁴)`,
+///
+/// up to sign, hence `|t⁽⁵⁾/t| <= 541`; the ratios through order four are each
+/// bounded by one as documented on [`concentrated_criterion_enclosure`].
+/// Faa di Bruno for `(log R)⁽⁵⁾` adds absolute coefficients
+/// `5+10+20+30+60+24 = 149` from those lower ratios, for `541+149 = 690`.
+///
+/// These deliberately elementary coefficient bounds are wider than the exact
+/// polynomial ranges but need no spectral decomposition or data-dependent
+/// tail assumption. Their consumer integrates the bound four times, so the
+/// resulting remainder is still far below endpoint evaluator error.
+fn fifth_derivative_global_bound(proper_modes: Ball, residual_dof: Ball) -> Ball {
+    proper_modes
+        .scale(18.75)
+        .add(residual_dof.scale(690.0))
+        .scale(0.5)
 }
 
 /// Intersect a derivative enclosure with its closed-form global bound.
@@ -3345,12 +3698,9 @@ fn certified_concentrated_criterion_jet(
     log_lambda: f64,
     order: usize,
 ) -> Result<CertifiedCriterionJet, SplineScoreProofError> {
-    let q_value = gam_problem::checked_exp_log_strength(-log_lambda)
-        .map_err(|error| {
-            SplineScoreProofError::InvalidInput(format!(
-                "spline scan inverse log strength: {error}"
-            ))
-        })?;
+    let q_value = gam_problem::checked_exp_log_strength(-log_lambda).map_err(|error| {
+        SplineScoreProofError::InvalidInput(format!("spline scan inverse log strength: {error}"))
+    })?;
     let q_enclosure = gam_math::score_opt::certified_exp(-log_lambda).ok_or(
         SplineScoreProofError::InvalidArithmetic {
             context: "inverse log-strength exponential",
@@ -3387,9 +3737,7 @@ fn certified_concentrated_criterion_jet(
     // `[−2.51e4, 88.5]` when the model fixes it at `[−ν/2, r/2]`. The upper end
     // is already exactly `r/2 = 88.5`; only the quotient's lower end was loose.
     intersect_with_exact_range(&mut rss_log_d1, 0.0, 1.0);
-    let rss_log_d2 = rss_d2
-        .div_positive(rss)
-        .sub(rss_log_d1.square());
+    let rss_log_d2 = rss_d2.div_positive(rss).sub(rss_log_d1.square());
     let rss_log_d3 = rss_d3
         .div_positive(rss)
         .sub(rss_d2.div_positive(rss).mul(rss_log_d1).scale(3.0))
@@ -3398,18 +3746,9 @@ fn certified_concentrated_criterion_jet(
         .sum_log_f
         .add(dof.mul(sigma2.ln_positive()))
         .scale(-0.5);
-    let derivative = pass
-        .sum_log_f_d1
-        .add(dof.mul(rss_log_d1))
-        .scale(-0.5);
-    let curvature = pass
-        .sum_log_f_d2
-        .add(dof.mul(rss_log_d2))
-        .scale(-0.5);
-    let third = pass
-        .sum_log_f_d3
-        .add(dof.mul(rss_log_d3))
-        .scale(-0.5);
+    let derivative = pass.sum_log_f_d1.add(dof.mul(rss_log_d1)).scale(-0.5);
+    let curvature = pass.sum_log_f_d2.add(dof.mul(rss_log_d2)).scale(-0.5);
+    let third = pass.sum_log_f_d3.add(dof.mul(rss_log_d3)).scale(-0.5);
     if [value, derivative]
         .into_iter()
         .any(|ball| !ball.is_finite())
@@ -3418,9 +3757,9 @@ fn certified_concentrated_criterion_jet(
             context: "concentrated criterion",
         });
     }
-    // The third order is an OPTIMISATION, not a requirement: it exists solely
-    // to anchor the search radius on endpoint jets for the #2300 cube-rate
-    // tail. When its enclosure leaves the finite range, the closed-form global
+    // The third order is an OPTIMISATION, not a requirement: endpoint pairs
+    // linearly interpolate it so the #2300/#2614 tail remainder is fourth
+    // order. When its enclosure leaves the finite range, the closed-form global
     // bound keeps the certificate valid and costs only a wider tail cell.
     // Refusing the whole jet instead discards a value, slope and curvature that
     // are all finite, which is what the divergence refusal used to do at every
@@ -3459,7 +3798,8 @@ fn certified_concentrated_criterion_jet(
 /// average of the same kernels. Consequently
 ///
 /// `|L'| <= 1/2 (r/4 + nu)`, `|L''| <= 1/2 (r/4 + 2 nu)`,
-/// `|L'''| <= 1/2 (r/4 + 6 nu)`, and `|L''''| <= 1/2 (r/4 + 26 nu)`,
+/// `|L'''| <= 1/2 (r/4 + 6 nu)`, `|L''''| <= 1/2 (r/4 + 26 nu)`, and
+/// `|L'''''| <= 1/2 (18.75 r + 690 nu)`,
 ///
 /// where `r` is the number of proper innovation modes and `nu=n-order` is the
 /// residual d.f. For one normalized determinant contribution, the fourth
@@ -3473,11 +3813,51 @@ fn certified_concentrated_criterion_jet(
 /// Endpoint jets plus these analytic Lipschitz bounds therefore enclose the
 /// entire interval without a sampling lattice.
 ///
-/// The pad is built from the two endpoint BALLS and closed-form Lipschitz
-/// constants. The search caches the ball produced alongside each endpoint jet,
-/// so this function performs no filter pass of its own. Both the Taylor anchor
-/// and its reported numerical resolution therefore include the endpoint
-/// evaluator's directed-rounding error.
+/// The cell is the union of its two half-cells. Every point is within
+/// `h=(hi-lo)/2` of its nearest endpoint, so the left endpoint anchors signed
+/// displacements `[0,h]` and the right endpoint anchors `[-h,0]`. The two
+/// certified endpoint `V'''` balls define a linear interpolant. The standard
+/// interpolation error
+///
+/// `|V'''(x) - linear(V'''(lo), V'''(hi))| <= L5 (x-lo)(hi-x)/2`
+///
+/// integrates from either endpoint to give maximum half-cell remainders
+/// `L5*w^5/960`, `L5*w^4/128`, and `L5*w^3/24` for `V`, `V'`, and `V''`.
+/// Evaluating the resulting quartic polynomial over each signed half-cell and
+/// hulling the two results gives one theorem uniformly for all three channels.
+/// Independently, integrating over the full cell from EACH endpoint gives
+/// value remainders `L5*w^5/80`. Both full-cell Taylor ranges contain every
+/// score in the cell, so their intersection with the half-cell hull removes
+/// endpoint roundoff asymmetry without weakening the theorem.
+///
+/// Nearest-endpoint geometry first removes factors 16, 8, and 4 of false
+/// fourth-derivative uncertainty. Even then, a data-independent global `L4`
+/// dominates an exponentially saturated endpoint jet. Interpolating the
+/// endpoint third derivatives removes that constant floor without a fourth
+/// filter jet: only the globally bounded interpolation error remains, one
+/// asymptotic order smaller.
+///
+/// A second independent curvature theorem protects stationary isolation from
+/// a loose covariance second-derivative recurrence. The derivative endpoint
+/// balls give a secant `s=(V'(hi)-V'(lo))/w`; the mean-value theorem supplies
+/// `xi` in the cell with `V''(xi)=s`, and the global `|V'''|` bound then gives
+/// `V''(x) in s ± L3*w` everywhere in the cell. Intersecting this range with
+/// the endpoint-third range can only tighten a valid outer enclosure. It is
+/// especially decisive near a root, where endpoint `V'` remains sharp even
+/// when direct interval propagation has lost the sign of `V''`.
+///
+/// Once that whole-cell curvature range `C` is known, integrating it from both
+/// endpoints gives two further derivative theorems:
+/// `V'(x) in V'(lo)+C*[0,w]` and `V'(x) in V'(hi)+C*[-w,0]`. Their intersection
+/// with the endpoint-third derivative range preserves the same exact-real
+/// derivative while recovering local root information from tight endpoint
+/// balls. A disjoint intersection is an internal certificate contradiction,
+/// never a reason to widen or fall back.
+///
+/// All polynomial operations below use endpoint BALLS and outward interval
+/// arithmetic. The search caches those balls alongside each endpoint jet, so
+/// this function performs no filter pass of its own and includes the endpoint
+/// evaluator's directed-rounding error in every returned channel.
 fn concentrated_criterion_enclosure(
     n_nodes: usize,
     n_obs: usize,
@@ -3493,59 +3873,58 @@ fn concentrated_criterion_enclosure(
             "spline scan: invalid score-enclosure interval [{lo}, {hi}]"
         )));
     }
+    if lo == hi {
+        return Ok(DerivativeEnclosure {
+            score: ScoreValueEnclosure {
+                value: ClosedInterval::new(
+                    left_certificate.value.lo.min(right_certificate.value.lo),
+                    left_certificate.value.hi.max(right_certificate.value.hi),
+                ),
+                evaluation_error: left_certificate
+                    .value
+                    .forward_error()
+                    .max(right_certificate.value.forward_error()),
+            },
+            derivative: ClosedInterval::new(
+                left_certificate
+                    .derivative
+                    .lo
+                    .min(right_certificate.derivative.lo),
+                left_certificate
+                    .derivative
+                    .hi
+                    .max(right_certificate.derivative.hi),
+            ),
+            curvature: ClosedInterval::new(
+                left_certificate
+                    .curvature
+                    .lo
+                    .min(right_certificate.curvature.lo),
+                left_certificate
+                    .curvature
+                    .hi
+                    .max(right_certificate.curvature.hi),
+            ),
+        });
+    }
     let width = Ball::exact(hi).sub(Ball::exact(lo));
+    if !(width.lo > 0.0) {
+        return Err(SplineScoreProofError::InvalidArithmetic {
+            context: "positive score-enclosure width",
+        });
+    }
     let proper_modes = Ball::exact((n_nodes - order) as f64);
     let residual_dof = Ball::exact((n_obs - order) as f64);
-    let fourth_abs_bound = proper_modes
+    let fifth_abs_bound = fifth_derivative_global_bound(proper_modes, residual_dof);
+    let third_abs_bound = proper_modes
         .scale(0.25)
-        .add(residual_dof.scale(26.0))
+        .add(residual_dof.scale(6.0))
         .scale(0.5);
-    // Derivative enclosure from ENDPOINT JETS through third order, not a
-    // global constant. For any u in [lo, hi], Taylor with the L4-Lipschitz
-    // third derivative gives
-    //     |V'(u) − V'(e)| ≤ |V''(e)|·w + |V'''(e)|·w²/2 + L4·w³/6,
-    // so hull(V'(lo), V'(hi)) padded by that radius (with endpoint-max
-    // magnitudes) is a valid OUTER range. History of this radius (#2300):
-    // the original global bound (≈ n·w) made the λ→∞ saturation tail — where
-    // |V'| decays exponentially — grind through O(e^X) certify cells
-    // (>2·10⁶ evaluations, an effective hang); the endpoint-CURVATURE jet
-    // ((|V''(e)|+L3·w)·w) cut that to a half-rate e^{X/2} tail, still a
-    // node timeout at order 3 where L3 ≈ 1.8·10³ at n=600. Anchoring on the
-    // exact V''' endpoint jets makes the pad CUBIC in w on plateaus, so a
-    // tail cell certifies at width ~(|V'|/L4)^{1/3} and the walk costs
-    // e^{X/3} — each exact derivative order divides the exponent again.
-    let curvature_endpoint_abs = left_certificate
-        .curvature
-        .lo
-        .abs()
-        .max(left_certificate.curvature.hi.abs())
-        .max(right_certificate.curvature.lo.abs())
-        .max(right_certificate.curvature.hi.abs())
-        .min(curvature_global_bound(
-            (n_nodes - order) as f64,
-            (n_obs - order) as f64,
-        ));
-    // The radius needs the third derivative as a MAGNITUDE, never as a signed
-    // enclosure, so the closed-form bound documented above is a valid
-    // substitute, and the minimum of two valid upper bounds on one quantity is
-    // a valid upper bound. Taking it unconditionally also tightens the pad
-    // whenever an endpoint jet is wider than the analytic bound, and keeps this
-    // radius finite when the jet is not.
-    let third_bound =
-        third_derivative_global_bound((n_nodes - order) as f64, (n_obs - order) as f64);
-    let third_endpoint_abs = left_certificate
-        .third
-        .lo
-        .abs()
-        .max(left_certificate.third.hi.abs())
-        .max(right_certificate.third.lo.abs())
-        .max(right_certificate.third.hi.abs())
-        .min(third_bound);
     // Announce a weakened anchor at the point it anchors.
     //
-    // Both endpoints feed this radius, so either one falling back to a global
-    // constant is what widens the cell. Reported here rather than at
-    // construction so the message names the consequence and not just the fact.
+    // Both endpoints feed their nearest half-cell, so either one falling back
+    // to a global constant widens that half. Reported here rather than at
+    // construction so the message names the consequence, not just the fact.
     for (side, weakened) in [
         ("left", left_certificate.weakened_anchor()),
         ("right", right_certificate.weakened_anchor()),
@@ -3555,112 +3934,184 @@ fn concentrated_criterion_enclosure(
                 "spline scan enclosure: {side} endpoint curvature anchored by \
                  {curvature_source:?}, third order by {third_source:?}. A global-bound \
                  anchor keeps the search CERTIFIED and widens its tail cells -- half rate \
-                 in place of cube rate -- so it costs cells, never soundness."
+                 in place of fourth-order rate -- so it costs cells, never soundness."
             );
         }
     }
+    let half_width = width.scale(0.5);
     let width2 = width.square();
     let width3 = width2.mul(width);
-    let derivative_radius = Ball::exact(curvature_endpoint_abs)
-        .mul(width)
-        .add(Ball::exact(third_endpoint_abs).mul(width2).scale(0.5))
-        .add(fourth_abs_bound.mul(width3).div_positive(Ball::exact(6.0)))
+    let width4 = width2.square();
+    let width5 = width4.mul(width);
+    let value_remainder = fifth_abs_bound
+        .mul(width5)
+        .div_positive(Ball::exact(960.0))
         .hi;
-    // Curvature enclosure, endpoint-anchored the same way: V''' is
-    // L4-Lipschitz, so |V''(u) − V''(e)| ≤ |V'''(e)|·w + L4·w²/2.
-    let curvature_radius = Ball::exact(third_endpoint_abs)
-        .mul(width)
-        .add(fourth_abs_bound.mul(width2).scale(0.5))
+    let derivative_remainder = fifth_abs_bound
+        .mul(width4)
+        .div_positive(Ball::exact(128.0))
         .hi;
-    let derivative = ClosedInterval::new(
-        left_certificate
+    let curvature_remainder = fifth_abs_bound
+        .mul(width3)
+        .div_positive(Ball::exact(24.0))
+        .hi;
+    let third_slope = right_certificate
+        .third
+        .sub(left_certificate.third)
+        .div_positive(width);
+
+    // Integrate the endpoint-pair linear interpolant of V''' from either
+    // endpoint over a signed displacement. Keeping the sign of `d` is materially
+    // tighter than replacing every term by an absolute-value radius, while
+    // ordinary interval arithmetic still gives an outer range despite
+    // dependencies among powers of `d`.
+    let endpoint_enclosure = |certificate: CertifiedCriterionJet,
+                              displacement: ClosedInterval,
+                              value_remainder: f64,
+                              derivative_remainder: f64,
+                              curvature_remainder: f64| {
+        let d = Ball::certified(0.0, displacement);
+        let d2 = d.square();
+        let d3 = d2.mul(d);
+        let d4 = d2.square();
+        let value = certificate
+            .value
+            .add(certificate.derivative.mul(d))
+            .add(certificate.curvature.mul(d2).scale(0.5))
+            .add(certificate.third.mul(d3).div_positive(Ball::exact(6.0)))
+            .add(third_slope.mul(d4).div_positive(Ball::exact(24.0)))
+            .interval()
+            .add(ClosedInterval::new(-value_remainder, value_remainder));
+        let derivative = certificate
             .derivative
-            .lo
-            .min(right_certificate.derivative.lo),
-        left_certificate
-            .derivative
-            .hi
-            .max(right_certificate.derivative.hi),
-    )
-    .add(ClosedInterval::new(-derivative_radius, derivative_radius));
-    let curvature = ClosedInterval::new(
-        left_certificate
+            .add(certificate.curvature.mul(d))
+            .add(certificate.third.mul(d2).scale(0.5))
+            .add(third_slope.mul(d3).div_positive(Ball::exact(6.0)))
+            .interval()
+            .add(ClosedInterval::new(
+                -derivative_remainder,
+                derivative_remainder,
+            ));
+        let curvature = certificate
             .curvature
-            .lo
-            .min(right_certificate.curvature.lo),
-        left_certificate
-            .curvature
-            .hi
-            .max(right_certificate.curvature.hi),
-    )
-    .add(ClosedInterval::new(-curvature_radius, curvature_radius));
-    // VALUE CHANNEL ONLY: intersect the slope with its closed-form global
-    // bound before it is integrated across the cell.
-    //
-    // `from_left`/`from_right` below are the mean-value form
-    // `V(u) = V(e) + V′(ξ)(u - e)`, so they need only an ENCLOSURE of `V′` over
-    // this cell; `V′` enters as a magnitude multiplied by the width. Both
-    // `derivative` (the endpoint hull plus the Taylor pad) and `[-B, B]` with
-    // `B = 1/2 (r/4 + nu)` are valid outer enclosures of `V′` here, so their
-    // intersection is one as well. That is the same "minimum of two valid
-    // upper bounds on one quantity is a valid upper bound" rule
-    // `intersect_with_global_bound` already applies at the second and third
-    // orders — nothing is loosened and no bound is weakened.
-    //
-    // DO NOT "simplify" this by clamping `derivative` itself. The enclosure
-    // returned at the end of this function feeds the certified search's
-    // ISOLATION gate (`gam_math::score_opt`, `!enclosure.derivative
-    // .contains_zero()`), which is looking for where `V′ = 0`. A constant
-    // bound on `|V′|` cannot locate that root, which is precisely why the
-    // first derivative has no global-bound substitute at the jet level while
-    // the second and third do. The two channels consume `V′` for different
-    // purposes and must keep different enclosures of it.
-    //
-    // WHAT THIS FIXES AND WHAT IT DOES NOT — a PARTIAL repair, on purpose.
-    // Unclamped, a near-divergent `sum_v2_over_f_d1` ball made this product
-    // astronomical: score-value enclosures of order `[-1.9e59, 1.9e59]` on an
-    // 8.4e-9-wide cell, so `resolution_flat_region` could never accept and the
-    // search refused with `Unresolved` at the abscissa-resolution floor.
-    // Clamped, that gap is at most `B * w`, of order `1e-6` at `n = 600`.
-    // But the flatness test compares it against `2 * evaluation_error`, and
-    // `evaluation_error` has itself been observed at `14399` on the same
-    // fixtures — a SEPARATE degeneracy, in the value ball's forward error,
-    // that this change does not touch. Do not read a green cell here as
-    // evidence that the value channel is healthy until both sides of that
-    // comparison have been re-measured.
-    let first_derivative_bound =
-        first_derivative_global_bound((n_nodes - order) as f64, (n_obs - order) as f64);
-    let value_channel_derivative = ClosedInterval::new(
-        derivative.lo.max(-first_derivative_bound),
-        derivative.hi.min(first_derivative_bound),
+            .add(certificate.third.mul(d))
+            .add(third_slope.mul(d2).scale(0.5))
+            .interval()
+            .add(ClosedInterval::new(
+                -curvature_remainder,
+                curvature_remainder,
+            ));
+        (value, derivative, curvature)
+    };
+
+    let (left_value, left_derivative, left_curvature) = endpoint_enclosure(
+        left_certificate,
+        ClosedInterval::new(0.0, half_width.hi),
+        value_remainder,
+        derivative_remainder,
+        curvature_remainder,
     );
-    // An empty intersection means two independently valid outer bounds on the
-    // same `V′` are disjoint. That is a contradiction, not a tolerance: refuse
-    // instead of picking one, in the same shape as the score-value
-    // intersection check below. A valid endpoint certificate contains
-    // `V′(lo)`, whose magnitude the global bound covers, so this is
-    // unreachable unless something upstream is already wrong.
-    if !(value_channel_derivative.lo <= value_channel_derivative.hi) {
-        return Err(SplineScoreProofError::InvalidArithmetic {
-            context: "first-derivative global-bound intersection",
-        });
-    }
-    let derivative_ball = Ball::certified(0.0, value_channel_derivative);
-    let from_left = left_certificate.value.add(derivative_ball.mul(Ball::certified(
-        0.0,
+    let (right_value, right_derivative, right_curvature) = endpoint_enclosure(
+        right_certificate,
+        ClosedInterval::new(-half_width.hi, 0.0),
+        value_remainder,
+        derivative_remainder,
+        curvature_remainder,
+    );
+    let half_cell_score = ClosedInterval::new(
+        left_value.lo.min(right_value.lo),
+        left_value.hi.max(right_value.hi),
+    );
+    let full_value_remainder = fifth_abs_bound
+        .mul(width5)
+        .div_positive(Ball::exact(80.0))
+        .hi;
+    let full_derivative_remainder = fifth_abs_bound
+        .mul(width4)
+        .div_positive(Ball::exact(24.0))
+        .hi;
+    let full_curvature_remainder = fifth_abs_bound
+        .mul(width3)
+        .div_positive(Ball::exact(12.0))
+        .hi;
+    let (full_left_value, _, _) = endpoint_enclosure(
+        left_certificate,
         ClosedInterval::new(0.0, width.hi),
-    )));
-    let from_right = right_certificate.value.add(derivative_ball.mul(Ball::certified(
-        0.0,
+        full_value_remainder,
+        full_derivative_remainder,
+        full_curvature_remainder,
+    );
+    let (full_right_value, _, _) = endpoint_enclosure(
+        right_certificate,
         ClosedInterval::new(-width.hi, 0.0),
-    )));
+        full_value_remainder,
+        full_derivative_remainder,
+        full_curvature_remainder,
+    );
     let score_value = ClosedInterval::new(
-        from_left.lo.max(from_right.lo),
-        from_left.hi.min(from_right.hi),
+        half_cell_score
+            .lo
+            .max(full_left_value.lo)
+            .max(full_right_value.lo),
+        half_cell_score
+            .hi
+            .min(full_left_value.hi)
+            .min(full_right_value.hi),
     );
     if !(score_value.lo <= score_value.hi) {
         return Err(SplineScoreProofError::InvalidArithmetic {
-            context: "score-value enclosure intersection",
+            context: "endpoint score-enclosure intersection",
+        });
+    }
+    let endpoint_third_derivative = ClosedInterval::new(
+        left_derivative.lo.min(right_derivative.lo),
+        left_derivative.hi.max(right_derivative.hi),
+    );
+    let endpoint_third_curvature = ClosedInterval::new(
+        left_curvature.lo.min(right_curvature.lo),
+        left_curvature.hi.max(right_curvature.hi),
+    );
+    let derivative_secant = right_certificate
+        .derivative
+        .sub(left_certificate.derivative)
+        .div_positive(width);
+    let secant_radius = third_abs_bound.mul(width).hi;
+    let secant_curvature = derivative_secant
+        .interval()
+        .add(ClosedInterval::new(-secant_radius, secant_radius));
+    let curvature = ClosedInterval::new(
+        endpoint_third_curvature.lo.max(secant_curvature.lo),
+        endpoint_third_curvature.hi.min(secant_curvature.hi),
+    );
+    if !(curvature.lo <= curvature.hi) {
+        return Err(SplineScoreProofError::InvalidArithmetic {
+            context: "curvature secant intersection",
+        });
+    }
+    let curvature_ball = Ball::certified(0.0, curvature);
+    let derivative_from_left = left_certificate
+        .derivative
+        .add(curvature_ball.mul(Ball::certified(0.0, ClosedInterval::new(0.0, width.hi))))
+        .interval();
+    let derivative_from_right = right_certificate
+        .derivative
+        .add(curvature_ball.mul(Ball::certified(0.0, ClosedInterval::new(-width.hi, 0.0))))
+        .interval();
+    let derivative_from_curvature = ClosedInterval::new(
+        derivative_from_left.lo.max(derivative_from_right.lo),
+        derivative_from_left.hi.min(derivative_from_right.hi),
+    );
+    let derivative = ClosedInterval::new(
+        endpoint_third_derivative
+            .lo
+            .max(derivative_from_curvature.lo),
+        endpoint_third_derivative
+            .hi
+            .min(derivative_from_curvature.hi),
+    );
+    if !(derivative.lo <= derivative.hi) {
+        return Err(SplineScoreProofError::InvalidArithmetic {
+            context: "derivative curvature-integral intersection",
         });
     }
     let evaluation_error = left_certificate
@@ -3969,6 +4420,122 @@ pub fn fit_spline_scan_at(
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SplineKktKind {
+    LowerBoundary,
+    UpperBoundary,
+    Stationary { curvature: ClosedInterval },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SplineOptimumProof {
+    Kkt {
+        bracket: ClosedInterval,
+        kind: SplineKktKind,
+    },
+    /// The producer proved every exact score in this region indistinguishable
+    /// at the point evaluator's certified comparison resolution. This is a
+    /// successful typed optimum, not a failed stationary-point certificate.
+    ResolutionFlat {
+        bracket: ClosedInterval,
+        max_score_gap: f64,
+        score_resolution: f64,
+    },
+}
+
+/// Preserve the certified optimizer's proof category at the spline consumer
+/// seam.
+///
+/// Boundary and stationary selections require their exact-real KKT proof
+/// below. A [`ScoreOptimumLocation::ResolutionFlat`] selection instead carries
+/// the producer's successful value-resolution theorem. Requiring a stationary
+/// KKT certificate from that category contradicts its contract: its whole
+/// purpose is that unresolved stationary structure is immaterial because the
+/// cell's exact score diameter does not exceed comparison resolution.
+fn spline_optimum_proof(
+    search: &ScoreSearchResult,
+) -> Result<SplineOptimumProof, SplineScoreProofError> {
+    match search.location {
+        ScoreOptimumLocation::LowerBoundary => Ok(SplineOptimumProof::Kkt {
+            bracket: ClosedInterval::point(search.lower_boundary.x),
+            kind: SplineKktKind::LowerBoundary,
+        }),
+        ScoreOptimumLocation::UpperBoundary => Ok(SplineOptimumProof::Kkt {
+            bracket: ClosedInterval::point(search.upper_boundary.x),
+            kind: SplineKktKind::UpperBoundary,
+        }),
+        ScoreOptimumLocation::Stationary(index) => {
+            let stationary = search.stationary_points.get(index).ok_or_else(|| {
+                SplineScoreProofError::Search(
+                    "optimizer returned an invalid stationary-point index".to_string(),
+                )
+            })?;
+            Ok(SplineOptimumProof::Kkt {
+                bracket: stationary.bracket,
+                kind: SplineKktKind::Stationary {
+                    curvature: stationary.curvature,
+                },
+            })
+        }
+        ScoreOptimumLocation::ResolutionFlat(index) => {
+            let flat = search.resolution_flat_regions.get(index).ok_or_else(|| {
+                SplineScoreProofError::Search(
+                    "optimizer returned an invalid resolution-flat index".to_string(),
+                )
+            })?;
+            if !(flat.max_score_gap.is_finite()
+                && flat.max_score_gap >= 0.0
+                && flat.score_resolution.is_finite()
+                && flat.score_resolution >= 0.0
+                && flat.max_score_gap <= flat.score_resolution
+                && flat.bracket.contains(search.optimum.x)
+                && flat.sample.x.to_bits() == search.optimum.x.to_bits())
+            {
+                return Err(SplineScoreProofError::Search(format!(
+                    "optimizer returned an invalid resolution-flat certificate: selected {}, \
+                     representative {}, bracket {:?}, maximum score gap {}, score resolution {}",
+                    search.optimum.x,
+                    flat.sample.x,
+                    flat.bracket,
+                    flat.max_score_gap,
+                    flat.score_resolution
+                )));
+            }
+            Ok(SplineOptimumProof::ResolutionFlat {
+                bracket: flat.bracket,
+                max_score_gap: flat.max_score_gap,
+                score_resolution: flat.score_resolution,
+            })
+        }
+    }
+}
+
+fn spline_kkt_holds(
+    kind: SplineKktKind,
+    final_enclosure: DerivativeEnclosure,
+) -> (bool, ClosedInterval) {
+    match kind {
+        SplineKktKind::LowerBoundary => (
+            final_enclosure.derivative.hi <= 0.0,
+            final_enclosure.curvature,
+        ),
+        SplineKktKind::UpperBoundary => (
+            final_enclosure.derivative.lo >= 0.0,
+            final_enclosure.curvature,
+        ),
+        SplineKktKind::Stationary { curvature } => (
+            // Recompute the final bracket's derivative containment, which
+            // depends on its endpoint certificates. Preserve the producer's
+            // strict curvature enclosure: it proved this root unique on a
+            // parent cell and therefore remains valid on every contracted
+            // subset, even if a fresh tiny-cell formula loses the sign to
+            // cancellation.
+            final_enclosure.derivative.contains_zero() && curvature.hi < 0.0,
+            curvature,
+        ),
+    }
+}
+
 /// Fit with `log λ` selected by the concentrated diffuse REML criterion.
 /// Every stationary interval in the bounded, scale-equivariant log-λ domain
 /// is isolated using analytic derivatives and rigorous interval bounds; the
@@ -4031,8 +4598,7 @@ pub fn fit_spline_scan(
     let lo_anchor = LOG_LAMBDA_LO + scale_shift;
     let hi_anchor = LOG_LAMBDA_HI + scale_shift;
     let n_nodes = nodes.len();
-    let endpoint_certificates =
-        RefCell::new(HashMap::<u64, CertifiedCriterionJet>::new());
+    let endpoint_certificates = RefCell::new(HashMap::<u64, CertifiedCriterionJet>::new());
     let search = maximize_score_1d(
         lo_anchor,
         hi_anchor,
@@ -4047,11 +4613,10 @@ pub fn fit_spline_scan(
         },
         |left, right| {
             let certificates = endpoint_certificates.borrow();
-            let left_certificate = certificates.get(&left.x.to_bits()).copied().ok_or(
-                SplineScoreProofError::MissingEndpointCertificate {
-                    log_lambda: left.x,
-                },
-            )?;
+            let left_certificate = certificates
+                .get(&left.x.to_bits())
+                .copied()
+                .ok_or(SplineScoreProofError::MissingEndpointCertificate { log_lambda: left.x })?;
             let right_certificate = certificates.get(&right.x.to_bits()).copied().ok_or(
                 SplineScoreProofError::MissingEndpointCertificate {
                     log_lambda: right.x,
@@ -4073,98 +4638,68 @@ pub fn fit_spline_scan(
         | gam_math::score_opt::ScoreSearchError::EnclosureEvaluation { source, .. } => source,
         other => SplineScoreProofError::Search(other.to_string()),
     })?;
-    if search.value_certificate.maximum_excess
-        > search.value_certificate.comparison_resolution
-    {
+    if search.value_certificate.maximum_excess > search.value_certificate.comparison_resolution {
         return Err(SplineScoreProofError::GlobalValueOrderingUnresolved {
             maximum_excess: search.value_certificate.maximum_excess,
             comparison_resolution: search.value_certificate.comparison_resolution,
         });
     }
-    enum KktKind {
-        LowerBoundary,
-        UpperBoundary,
-        Stationary,
-    }
-    let (kkt_bracket, kkt_kind) = match search.location {
-        ScoreOptimumLocation::LowerBoundary => (
-            ClosedInterval::point(search.lower_boundary.x),
-            KktKind::LowerBoundary,
-        ),
-        ScoreOptimumLocation::UpperBoundary => (
-            ClosedInterval::point(search.upper_boundary.x),
-            KktKind::UpperBoundary,
-        ),
-        ScoreOptimumLocation::Stationary(index) => (
-            search
-                .stationary_points
-                .get(index)
-                .ok_or_else(|| {
-                    SplineScoreProofError::Search(
-                        "optimizer returned an invalid stationary-point index".to_string(),
-                    )
-                })?
-                .bracket,
-            KktKind::Stationary,
-        ),
-        ScoreOptimumLocation::ResolutionFlat(index) => {
-            let flat = search.resolution_flat_regions.get(index).ok_or_else(|| {
-                SplineScoreProofError::Search(
-                    "optimizer returned an invalid resolution-flat index".to_string(),
-                )
-            })?;
-            return Err(SplineScoreProofError::OptimumResolutionFlat {
-                bracket: flat.bracket,
-                max_score_gap: flat.max_score_gap,
-                score_resolution: flat.score_resolution,
-            });
-        }
-    };
-    let kkt_enclosure = {
-        let certificates = endpoint_certificates.borrow();
-        let left_certificate = certificates
-            .get(&kkt_bracket.lo.to_bits())
-            .copied()
-            .ok_or(SplineScoreProofError::MissingEndpointCertificate {
-                log_lambda: kkt_bracket.lo,
-            })?;
-        let right_certificate = certificates
-            .get(&kkt_bracket.hi.to_bits())
-            .copied()
-            .ok_or(SplineScoreProofError::MissingEndpointCertificate {
-                log_lambda: kkt_bracket.hi,
-            })?;
-        let sample = |log_lambda: f64, certificate: CertifiedCriterionJet| ScoreSample {
-            x: log_lambda,
-            value: certificate.jet.value,
-            derivative: certificate.jet.derivative,
-            curvature: certificate.jet.curvature,
-            third: certificate.jet.third,
-        };
-        concentrated_criterion_enclosure(
-            n_nodes,
-            n_obs,
-            sample(kkt_bracket.lo, left_certificate),
-            sample(kkt_bracket.hi, right_certificate),
-            left_certificate,
-            right_certificate,
-            order,
-        )?
-    };
-    let kkt_holds = match kkt_kind {
-        KktKind::LowerBoundary => kkt_enclosure.derivative.hi <= 0.0,
-        KktKind::UpperBoundary => kkt_enclosure.derivative.lo >= 0.0,
-        KktKind::Stationary => {
-            kkt_enclosure.derivative.contains_zero() && kkt_enclosure.curvature.hi < 0.0
-        }
-    };
-    if !kkt_holds {
-        return Err(SplineScoreProofError::OptimumKktUncertified {
-            location: search.location,
+    match spline_optimum_proof(&search)? {
+        SplineOptimumProof::Kkt {
             bracket: kkt_bracket,
-            derivative: kkt_enclosure.derivative,
-            curvature: kkt_enclosure.curvature,
-        });
+            kind: kkt_kind,
+        } => {
+            let kkt_enclosure = {
+                let certificates = endpoint_certificates.borrow();
+                let left_certificate = certificates.get(&kkt_bracket.lo.to_bits()).copied().ok_or(
+                    SplineScoreProofError::MissingEndpointCertificate {
+                        log_lambda: kkt_bracket.lo,
+                    },
+                )?;
+                let right_certificate = certificates
+                    .get(&kkt_bracket.hi.to_bits())
+                    .copied()
+                    .ok_or(SplineScoreProofError::MissingEndpointCertificate {
+                        log_lambda: kkt_bracket.hi,
+                    })?;
+                let sample = |log_lambda: f64, certificate: CertifiedCriterionJet| ScoreSample {
+                    x: log_lambda,
+                    value: certificate.jet.value,
+                    derivative: certificate.jet.derivative,
+                    curvature: certificate.jet.curvature,
+                    third: certificate.jet.third,
+                };
+                concentrated_criterion_enclosure(
+                    n_nodes,
+                    n_obs,
+                    sample(kkt_bracket.lo, left_certificate),
+                    sample(kkt_bracket.hi, right_certificate),
+                    left_certificate,
+                    right_certificate,
+                    order,
+                )?
+            };
+            let (kkt_holds, kkt_curvature) = spline_kkt_holds(kkt_kind, kkt_enclosure);
+            if !kkt_holds {
+                return Err(SplineScoreProofError::OptimumKktUncertified {
+                    location: search.location,
+                    bracket: kkt_bracket,
+                    derivative: kkt_enclosure.derivative,
+                    curvature: kkt_curvature,
+                });
+            }
+        }
+        SplineOptimumProof::ResolutionFlat {
+            bracket,
+            max_score_gap,
+            score_resolution,
+        } => {
+            log::debug!(
+                "spline scan: accepting certified resolution-flat REML optimum on \
+                 {bracket:?}; maximum score gap {max_score_gap:e} <= comparison \
+                 resolution {score_resolution:e}"
+            );
+        }
     }
     // The fixed-λ fitter below consumes the historical scalar recurrence.
     // Before crossing that seam, independently re-evaluate the selected point
@@ -4180,14 +4715,9 @@ pub fn fit_spline_scan(
                 search.optimum.x
             ))
         })?;
-    let independent = concentrated_criterion_jet(
-        &nodes,
-        ssr_within,
-        n_obs,
-        search.optimum.x,
-        order,
-    )
-    .map_err(SplineScoreProofError::Computation)?;
+    let independent =
+        concentrated_criterion_jet(&nodes, ssr_within, n_obs, search.optimum.x, order)
+            .map_err(SplineScoreProofError::Computation)?;
     for (name, ball, scalar) in [
         ("value", selected_certificate.value, independent.0),
         ("derivative", selected_certificate.derivative, independent.1),
@@ -4608,6 +5138,118 @@ impl SplineScanFit {
 #[cfg(test)]
 mod tests {
 
+    /// Compaction must preserve the signed directions that make a contracting
+    /// recursion contract.  Fresh roundoff enters as axis generators, so age
+    /// based reduction used to fold this old `[1, -1]` direction first and
+    /// replace it by the expanding box `[±1] × [±1]`.
+    #[test]
+    fn zonotope_compaction_retains_correlation_before_axis_roundoff() {
+        let mut state = Zonotope::<2>::zeroed(2);
+        state.generators.push([1.0, -1.0]);
+        for i in 0..ZONOTOPE_GENERATOR_CAP {
+            state
+                .generators
+                .push(if i % 2 == 0 { [0.25, 0.0] } else { [0.0, 0.25] });
+        }
+
+        state.compact();
+
+        assert!(state.generators.len() <= ZONOTOPE_GENERATOR_CAP);
+        assert!(
+            state
+                .generators
+                .iter()
+                .any(|generator| *generator == [1.0, -1.0]),
+            "compaction discarded the only signed correlation direction"
+        );
+    }
+
+    /// Two occurrences of `qQ` contain ONE uncertain `q`, not two independent
+    /// interval choices. The distinguished coefficient must therefore add
+    /// under the identity and cancel under an opposing signed map. Turning
+    /// each occurrence into a fresh axis generator leaves radius `2|g|` in the
+    /// cancellation arm and cannot prove the exact identity.
+    #[test]
+    fn shared_q_process_noise_injections_accumulate_and_cancel_as_one_generator() {
+        let q = Ball {
+            value: 10.0,
+            lo: 9.0,
+            hi: 11.0,
+        };
+        let noise = ball_process_noise_taylor(Ball::exact(2.0), q, 1);
+        let g = noise.shared_q[0];
+        assert!(g > 0.0);
+
+        let identity = zonotope_identity_map::<COVARIANCE_D1_DIM>(1);
+        let mut accumulated = Zonotope::<COVARIANCE_D1_DIM>::zeroed(1);
+        assert!(accumulated.apply_with_shared_q(&identity, &noise.constant, &noise.shared_q,));
+        assert!(accumulated.apply_with_shared_q(&identity, &noise.constant, &noise.shared_q,));
+        assert_eq!(accumulated.shared_q[0], 2.0 * g);
+
+        let mut negative_identity = [[Ball::ZERO; COVARIANCE_D1_DIM]; COVARIANCE_D1_DIM];
+        negative_identity[0][0] = Ball::exact(-1.0);
+        let mut cancelled = Zonotope::<COVARIANCE_D1_DIM>::zeroed(1);
+        assert!(cancelled.apply_with_shared_q(&identity, &noise.constant, &noise.shared_q,));
+        assert!(cancelled.apply_with_shared_q(
+            &negative_identity,
+            &noise.constant,
+            &noise.shared_q,
+        ));
+        assert_eq!(cancelled.shared_q[0], 0.0);
+
+        let old_independent_radius = 2.0 * g.abs();
+        assert!(
+            ball_radius_about_value(cancelled.coordinate(0)) < old_independent_radius * 1.0e-10,
+            "independent qQ axes would retain radius {old_independent_radius:e}, \
+             but the shared-q cancellation left {:?}",
+            cancelled.coordinate(0),
+        );
+    }
+
+    #[test]
+    fn centred_riccati_zonotope_contains_an_off_centre_covariance_and_noise() {
+        let centres = [[4.0, 1.0, 0.3], [1.0, 3.0, 0.2], [0.3, 0.2, 2.0]];
+        let radii = [[0.2, 0.1, 0.08], [0.1, 0.2, 0.07], [0.08, 0.07, 0.2]];
+        let mut enclosure = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+        for i in 0..MAX_ORDER {
+            for j in 0..MAX_ORDER {
+                enclosure[i][j] = Ball {
+                    value: centres[i][j],
+                    lo: centres[i][j] - radii[i][j],
+                    hi: centres[i][j] + radii[i][j],
+                };
+            }
+        }
+        let mut state = covariance_zonotope_from_symmetric_matrix(&enclosure, MAX_ORDER);
+        let observation_variance = Ball {
+            value: 1.2,
+            lo: 1.1,
+            hi: 1.3,
+        };
+        assert!(covariance_zonotope_measurement_update(
+            &mut state,
+            observation_variance,
+            MAX_ORDER,
+        ));
+
+        let actual = [[4.1, 0.95, 0.35], [0.95, 3.1, 0.15], [0.35, 0.15, 1.9]];
+        let actual_r = 1.25;
+        let innovation = actual[0][0] + actual_r;
+        for i in 0..MAX_ORDER {
+            for j in 0..MAX_ORDER {
+                let updated = actual[i][j] - actual[i][0] * actual[0][j] / innovation;
+                assert!(
+                    state
+                        .coordinate(i * MAX_ORDER + j)
+                        .interval()
+                        .contains(updated),
+                    "updated covariance ({i},{j})={updated} escaped {:?}",
+                    state.coordinate(i * MAX_ORDER + j).interval()
+                );
+            }
+        }
+    }
+
     /// Diagnostic reproduction of the #2300 weighted-scan non-termination:
     /// the exact acceptance DGP (n=180, step weights 1/9), with the SAME
     /// certified search `fit_spline_scan` runs — but through a counting
@@ -4625,78 +5267,87 @@ mod tests {
         // search has a deeper λ→∞ tail walk (scale shift (2m−1)·log L) and a
         // larger residual-d.f. Lipschitz constant, and was the remaining
         // effective hang after the order-2 fix (#2300 — the degree-5
-        // observation-interval node timed out at 1500s). The V‴ endpoint-jet
-        // enclosure certifies its tail at cube rate, so a uniform budget far
-        // below the pre-fix eval counts must hold at all orders.
-        for order in 1..=MAX_ORDER {
-            let (nodes, ssr_within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
-            let span = nodes.last().unwrap().x - nodes.first().unwrap().x;
-            let scale_shift = (2 * order - 1) as f64 * span.ln();
-            let lo = LOG_LAMBDA_LO + scale_shift;
-            let hi = LOG_LAMBDA_HI + scale_shift;
+        // observation-interval node timed out at 1500s). Endpoint-pair V‴
+        // interpolation certifies its tail at fourth-order rate, so a uniform
+        // budget far below the pre-fix eval counts must hold at all orders.
+        //
+        // The three orders are mathematically independent. Run them as three
+        // scoped, single-core lanes so this regression's wall time is the
+        // maximum order cost instead of their sum; three workers are negligible
+        // on the remote validation nodes and avoid turning a performance test
+        // into its own serial bottleneck.
+        std::thread::scope(|scope| {
+            for order in 1..=MAX_ORDER {
+                let (x, y, w) = (&x, &y, &w);
+                scope.spawn(move || {
+                    let (nodes, ssr_within, n_obs) = pool_nodes(x, y, w, order).expect("pool");
+                    let span = nodes.last().unwrap().x - nodes.first().unwrap().x;
+                    let scale_shift = (2 * order - 1) as f64 * span.ln();
+                    let lo = LOG_LAMBDA_LO + scale_shift;
+                    let hi = LOG_LAMBDA_HI + scale_shift;
 
-            let n_nodes = nodes.len();
-            let evals = std::cell::Cell::new(0u64);
-            let last_x = std::cell::Cell::new(f64::NAN);
-            let endpoint_certificates =
-                RefCell::new(HashMap::<u64, CertifiedCriterionJet>::new());
-            let budget = 2_000_000u64;
-            let result = gam_math::score_opt::maximize_score_1d(
-                lo,
-                hi,
-                f64::EPSILON.sqrt(),
-                |ll| {
-                    let count = evals.get() + 1;
-                    evals.set(count);
-                    last_x.set(ll);
-                    assert!(
-                        count <= budget,
-                        "order-{order} certified scan search exceeded {budget} criterion \
-                         evaluations (last log-lambda sample {ll:.9}; bracket \
-                         [{lo:.3}, {hi:.3}]) — non-terminating subdivision reproduced"
+                    let n_nodes = nodes.len();
+                    let evals = std::cell::Cell::new(0u64);
+                    let last_x = std::cell::Cell::new(f64::NAN);
+                    let endpoint_certificates =
+                        RefCell::new(HashMap::<u64, CertifiedCriterionJet>::new());
+                    let budget = 4_096u64;
+                    let result = gam_math::score_opt::maximize_score_1d(
+                        lo,
+                        hi,
+                        f64::EPSILON.sqrt(),
+                        |ll| {
+                            let count = evals.get() + 1;
+                            evals.set(count);
+                            last_x.set(ll);
+                            assert!(
+                                count <= budget,
+                                "order-{order} certified scan search exceeded {budget} criterion \
+                                 evaluations (last log-lambda sample {ll:.9}; bracket \
+                                 [{lo:.3}, {hi:.3}]) — non-terminating subdivision reproduced"
+                            );
+                            let certificate = certified_concentrated_criterion_jet(
+                                &nodes, ssr_within, n_obs, ll, order,
+                            )?;
+                            endpoint_certificates
+                                .borrow_mut()
+                                .insert(ll.to_bits(), certificate);
+                            Ok(certificate.jet)
+                        },
+                        |a, b| {
+                            let certificates = endpoint_certificates.borrow();
+                            let left = certificates.get(&a.x.to_bits()).copied().ok_or(
+                                SplineScoreProofError::MissingEndpointCertificate {
+                                    log_lambda: a.x,
+                                },
+                            )?;
+                            let right = certificates.get(&b.x.to_bits()).copied().ok_or(
+                                SplineScoreProofError::MissingEndpointCertificate {
+                                    log_lambda: b.x,
+                                },
+                            )?;
+                            concentrated_criterion_enclosure(
+                                n_nodes, n_obs, a, b, left, right, order,
+                            )
+                        },
                     );
-                    let certificate =
-                        certified_concentrated_criterion_jet(
-                            &nodes,
-                            ssr_within,
-                            n_obs,
-                            ll,
-                            order,
-                        )?;
-                    endpoint_certificates
-                        .borrow_mut()
-                        .insert(ll.to_bits(), certificate);
-                    Ok(certificate.jet)
-                },
-                |a, b| {
-                    let certificates = endpoint_certificates.borrow();
-                    let left = certificates.get(&a.x.to_bits()).copied().ok_or(
-                        SplineScoreProofError::MissingEndpointCertificate { log_lambda: a.x },
-                    )?;
-                    let right = certificates.get(&b.x.to_bits()).copied().ok_or(
-                        SplineScoreProofError::MissingEndpointCertificate { log_lambda: b.x },
-                    )?;
-                    concentrated_criterion_enclosure(
-                        n_nodes, n_obs, a, b, left, right, order,
-                    )
-                },
-            );
-            match result {
-                Ok(search) => {
-                    assert!(
-                        search.optimum.x.is_finite(),
-                        "order-{order} search must return a finite optimum"
-                    );
-                }
-                Err(error) => panic!(
-                    "order-{order} weighted scan search failed after {} evaluations \
-                     (last x {:.9}): {error:?}",
-                    evals.get(),
-                    last_x.get()
-                ),
+                    match result {
+                        Ok(search) => assert!(
+                            search.optimum.x.is_finite(),
+                            "order-{order} search must return a finite optimum"
+                        ),
+                        Err(error) => panic!(
+                            "order-{order} weighted scan search failed after {} evaluations \
+                             (last x {:.9}): {error:?}",
+                            evals.get(),
+                            last_x.get()
+                        ),
+                    }
+                });
             }
-        }
+        });
     }
+
     /// The #2300 weighted-scan DGP, as its own function so the certified-search
     /// test and the `d3` enclosure diagnostics below read the SAME data rather
     /// than two copies that can drift apart.
@@ -4725,34 +5376,18 @@ mod tests {
         (x, y, w)
     }
 
-    /// Where the certified derivative ladder stops, measured rather than assumed.
+    /// The certified derivative ladder reaches exact endpoint jets throughout
+    /// the search domain that exposed #2614.
     ///
-    /// This began as "the `d3` covariance enclosure survives every visited `ρ`",
-    /// which asserted a hope. What follows asserts the measurement instead: for
-    /// every smoothing order and every `ρ` the certified search visits, either a
-    /// certificate exists — and then which bound anchored its curvature and
-    /// third order — or the pass refuses, and then which accumulator left the
-    /// finite range and at which node. On the fixture as it stands nothing
-    /// refuses; the table records which anchor each cell got.
-    ///
-    /// This is not XFAIL. XFAIL asserts nothing and hides a defect; this pins
-    /// the exact frontier, in both directions. A cell that improves fails this
-    /// test just as loudly as one that regresses, and either way the next reader
-    /// inherits a measurement instead of re-deriving it.
-    ///
-    /// THE MECHANISM, one for every level of the ladder: the update's Leibniz
-    /// cross terms multiply jets by GAIN JETS, and the positive-semidefinite
-    /// structure that bounds `P` and its first derivative — which a carried
-    /// Cholesky factor exploits to keep both exact — does not extend to the jets
-    /// of the SCORE. Four strategies have been measured against it (#2614):
-    /// exact scalar identities (2–7× each, asymptotics unchanged); the carried
-    /// square-root factor (closed smoothing order 2 entirely, order 3
-    /// unchanged); the q-jet reparameterisation (INERT — divergence node
-    /// identical at every `ρ`, because a product of jets does not care which
-    /// parameter is differentiated); and global-bound substitution, which is
-    /// what the two `BoundSource` columns below record.
+    /// This fixture used to refuse at smoothing order 3 throughout
+    /// `-20 <= rho <= -10` when its covariance-derivative zonotope overflowed.
+    /// Merely accepting a global analytic fallback there would be sound but
+    /// would reintroduce the loose cells that exhausted the subdivision budget.
+    /// The repaired centred Riccati/shared-`q` representation must instead
+    /// preserve enough dependence for BOTH curvature and third derivative to
+    /// come from their endpoint jets at every measured point.
     #[test]
-    fn the_certified_ladder_frontier_is_the_measured_one() {
+    fn certified_ladder_reaches_endpoint_jets_across_the_search_domain() {
         let (x, y, w) = dgp_2300();
         let visited = [
             -24.0_f64,
@@ -4766,85 +5401,31 @@ mod tests {
             0.0,
             6.0,
         ];
-        let mut observed = String::new();
         for order in 1..=MAX_ORDER {
             let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
             for &log_lambda in &visited {
-                let outcome = match certified_concentrated_criterion_jet(
+                let certificate = certified_concentrated_criterion_jet(
                     &nodes, within, n_obs, log_lambda, order,
-                ) {
-                    Ok(certificate) => format!(
-                        "curvature {:?}, third {:?}",
-                        certificate.curvature_source, certificate.third_source
-                    ),
-                    Err(SplineScoreProofError::AccumulatorDiverged {
-                        node, accumulator, ..
-                    }) => format!("{accumulator} diverged at node {node}"),
-                    Err(other) => format!("refused {other:?}"),
-                };
-                observed.push_str(&format!("order {order} rho {log_lambda}: {outcome}\n"));
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "order {order}, rho {log_lambda}: repaired certified ladder refused: \
+                         {error:?}"
+                    )
+                });
+                assert_eq!(
+                    certificate.curvature_source,
+                    BoundSource::EndpointJet,
+                    "order {order}, rho {log_lambda}: curvature lost its exact endpoint anchor"
+                );
+                assert_eq!(
+                    certificate.third_source,
+                    BoundSource::EndpointJet,
+                    "order {order}, rho {log_lambda}: third derivative lost its exact endpoint anchor"
+                );
             }
         }
-        assert_eq!(
-            observed, MEASURED_LADDER_BOUNDARY,
-            "the certified ladder's frontier moved; re-measure it and update the \
-             constant, and the BoundSource documentation with it"
-        );
     }
-
-    /// The frontier as measured on this fixture, read out of the run and not
-    /// predicted. What it records now is a LADDER THAT NO LONGER STOPS: at every
-    /// smoothing order and every visited `rho` a certificate exists, and the only
-    /// thing that varies is which bound anchored its curvature and third order.
-    ///
-    /// It replaces a table in which smoothing order 3 refused across
-    /// `-20 <= rho <= -10` with `sum_v2_over_f_d1 diverged at node 72/75/81/99/137`.
-    /// Nothing about the recursion changed to remove those: the accumulator that
-    /// left the finite range is now intersected with the exact range the Gaussian
-    /// model gives it at every node (see
-    /// [`intersect_first_order_accumulator_exact_ranges`]), so it cannot leave a
-    /// range it was always inside. The same measurement moved four order-2 cells
-    /// from `third AnalyticGlobalBound` to `third EndpointJet`, and order 3 at
-    /// `rho = -6` from a global anchor to the exact jets, because the
-    /// derivative covariance is now pinned by `0 <= -dP/drho <= P` (see
-    /// [`intersect_derivative_covariance_below_its_own_covariance`]) instead of
-    /// widening without bound.
-    ///
-    /// What is left is the order-3 low-`rho` block, where the curvature and third
-    /// order still fall back to their closed-form global bounds. That costs cells
-    /// and never soundness, and its cause is measured and named: the VALUE
-    /// covariance's unobserved diagonals still widen about `1.7x` per node,
-    /// because the closed-loop map `Psi = A F` has `rho(Psi) < 1` while
-    /// `rho(|Psi|) > 1` -- the cancellation is between coordinates of one step,
-    /// which no componentwise interval evaluation in any diagonal basis can see.
-    const MEASURED_LADDER_BOUNDARY: &str = "\
-order 1 rho -24: curvature EndpointJet, third EndpointJet\n\
-order 1 rho -20: curvature EndpointJet, third EndpointJet\n\
-order 1 rho -18: curvature EndpointJet, third EndpointJet\n\
-order 1 rho -16.6135: curvature EndpointJet, third EndpointJet\n\
-order 1 rho -13.841116916640328: curvature EndpointJet, third EndpointJet\n\
-order 1 rho -10: curvature EndpointJet, third EndpointJet\n\
-order 1 rho -6: curvature EndpointJet, third EndpointJet\n\
-order 1 rho 0: curvature EndpointJet, third EndpointJet\n\
-order 1 rho 6: curvature EndpointJet, third EndpointJet\n\
-order 2 rho -24: curvature EndpointJet, third EndpointJet\n\
-order 2 rho -20: curvature EndpointJet, third EndpointJet\n\
-order 2 rho -18: curvature EndpointJet, third EndpointJet\n\
-order 2 rho -16.6135: curvature EndpointJet, third EndpointJet\n\
-order 2 rho -13.841116916640328: curvature EndpointJet, third EndpointJet\n\
-order 2 rho -10: curvature EndpointJet, third EndpointJet\n\
-order 2 rho -6: curvature EndpointJet, third EndpointJet\n\
-order 2 rho 0: curvature EndpointJet, third EndpointJet\n\
-order 2 rho 6: curvature EndpointJet, third EndpointJet\n\
-order 3 rho -24: curvature EndpointJet, third EndpointJet\n\
-order 3 rho -20: refused InvalidArithmetic { context: \"covariance-derivative zonotope update\" }\n\
-order 3 rho -18: refused InvalidArithmetic { context: \"covariance-derivative zonotope update\" }\n\
-order 3 rho -16.6135: refused InvalidArithmetic { context: \"covariance-derivative zonotope update\" }\n\
-order 3 rho -13.841116916640328: refused InvalidArithmetic { context: \"covariance-derivative zonotope update\" }\n\
-order 3 rho -10: refused InvalidArithmetic { context: \"covariance-derivative zonotope update\" }\n\
-order 3 rho -6: curvature EndpointJet, third EndpointJet\n\
-order 3 rho 0: curvature EndpointJet, third EndpointJet\n\
-order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
 
     /// The certified criterion jet stays inside the range the Gaussian model
     /// gives it, on the fixture where it did not (#2614).
@@ -4985,11 +5566,8 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
     fn the_closed_loop_map_contracts_while_its_absolute_value_explodes() {
         let (x, y, w) = dgp_2300();
         let order = 3;
-        // The band `-20 <= rho <= -10` now refuses inside the covariance-
-        // derivative zonotope update (see `MEASURED_LADDER_BOUNDARY`), so the
-        // map is measured at the low end of the same tail, where the pass
-        // completes and a certificate exists.
-        let log_lambda = -24.0_f64;
+        // This is the middle of the formerly refusing order-3 tail.
+        let log_lambda = -16.6135_f64;
         let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
         let q_value =
             gam_problem::checked_exp_log_strength(-log_lambda).expect("inverse log strength");
@@ -5160,18 +5738,17 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
         );
     }
 
-    /// The per-node WIDTH of the recursion that still widens, measured.
+    /// The centred Riccati representation keeps the filtered-mean enclosure
+    /// below the search resolution throughout the former order-3 failure band.
     ///
-    /// [`MEASURED_LADDER_BOUNDARY`] records which anchor each cell got; it cannot
-    /// say whether the quantity behind a weakened anchor is diverging in VALUE —
-    /// in which case there is nothing to enclose — or only in enclosure WIDTH,
-    /// which is dependency loss and has a fix. This walks the traced filter at
-    /// the middle of the order-3 block and prints both per node. Measured there:
-    /// the filtered mean `a₀` holds values in `[−1.2, +1.3]` across every node
-    /// while its enclosure width runs `3.6e−7` at node 8, `9.1e+1` at node 40,
-    /// `5.1e+74` at node 80 and `2.3e+254` at node 120.
+    /// Before #2614, `mean_a0` stayed O(1) while its enclosure width grew from
+    /// `3.6e-7` at node 8 to `2.3e254` at node 120. That was pure dependency
+    /// loss: the scalar filter remained stable. The repaired path must preserve
+    /// both facts directly — bounded values and a finite enclosure narrower
+    /// than the resolution the certified search asks it to support — and the
+    /// criterion consuming that pass must certify rather than refuse.
     #[test]
-    fn the_mean_enclosure_width_diverges_while_its_value_stays_bounded() {
+    fn centred_riccati_mean_enclosure_stays_below_search_resolution() {
         let (x, y, w) = dgp_2300();
         let order = 3;
         let log_lambda = -16.6135_f64;
@@ -5183,80 +5760,43 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
             gam_math::score_opt::certified_exp(-log_lambda).expect("certified exponential"),
         );
         let mut trace: Vec<BallTraceRecord> = Vec::new();
-        let outcome = run_filter_ball_traced(&nodes, q, order, Some(&mut trace));
-        for (node, name, ball) in &trace {
-            if matches!(
-                *name,
-                "mean_a0"
-                    | "mean_a0_d1"
-                    | "innovation_v_d1"
-                    | "term_t0"
-                    | "term_t1"
-                    | "acc_sum_v2"
-                    | "acc_sum_v2_d1"
-                    | "p_upd_00"
-                    | "p_upd_11"
-                    | "p_upd_22"
-                    | "d1_upd_00"
-                    | "f_star"
-                    | "inv_f"
-                    | "a_operator_00"
-                    | "gain_0"
-                    | "gain_d1_0"
-            ) {
-                eprintln!(
-                    "node {node} {name}: value {:+.6e} width {:.6e}",
-                    ball.value,
-                    ball.hi - ball.lo
-                );
-            }
-        }
-        // The subject, asserted in BOTH directions like
-        // [`MEASURED_LADDER_BOUNDARY`]: the VALUE of the filtered mean stays
-        // O(1) over every node the pass reaches, and its WIDTH does not. A
-        // repair that contracts the width fails this test as loudly as a
-        // regression that widens it, and either way the table above is the
-        // measurement the next reader inherits.
-        let mean: Vec<(usize, f64, f64)> = trace
+        run_filter_ball_traced(&nodes, q, order, Some(&mut trace))
+            .expect("the repaired filter must certify the former failure point");
+        let mean: Vec<(usize, Ball)> = trace
             .iter()
             .filter(|(_, name, _)| *name == "mean_a0")
-            .map(|(node, _, ball)| (*node, ball.value, ball.hi - ball.lo))
+            .map(|(node, _, ball)| (*node, *ball))
             .collect();
-        let (last_node, _, last_width) = *mean.last().expect("the pass reaches a proper node");
+        assert_eq!(
+            mean.len(),
+            nodes.len() - order,
+            "every proper filter node must expose a mean certificate"
+        );
+        let resolution = f64::EPSILON.sqrt();
         let widest_value = mean
             .iter()
-            .fold(0.0_f64, |widest, (_, value, _)| widest.max(value.abs()));
+            .fold(0.0_f64, |widest, (_, ball)| widest.max(ball.value.abs()));
         assert!(
             widest_value < 1.0e2,
             "the filtered mean's VALUE left O(1) at order {order}, rho {log_lambda}: \
-             {widest_value:e}. The subject of this test is width divergence on a stable \
-             value; a diverging value is a different defect"
+             {widest_value:e}"
         );
-        assert!(
-            last_width > 1.0e10,
-            "the filtered mean's enclosure width at node {last_node} contracted to \
-             {last_width:e} on a value of order one. If that is a repair, this test is \
-             the place to record the new width; the pass through
-             `certified_concentrated_criterion_jet` below is the surface that consumes it"
-        );
-        // Whatever the pass does, the certified jet must agree with it: either
-        // both produce a criterion or both refuse.
-        let certified =
-            certified_concentrated_criterion_jet(&nodes, within, n_obs, log_lambda, order);
-        assert_eq!(
-            outcome.is_err(),
-            certified.is_err(),
-            "the certified jet and the filter pass disagree about refusing"
-        );
-        if let Ok(certificate) = certified {
-            eprintln!(
-                "certified derivative {:?} width {:e}",
-                certificate.derivative,
-                certificate.derivative.hi - certificate.derivative.lo
+        for (node, ball) in mean {
+            assert!(
+                ball.is_finite(),
+                "mean enclosure is non-finite at node {node}"
+            );
+            let width = ball.hi - ball.lo;
+            let scaled_resolution = resolution * (1.0 + ball.value.abs());
+            assert!(
+                width <= scaled_resolution,
+                "mean enclosure at node {node} is {width:e} wide, exceeding the \
+                 scale-aware search resolution {scaled_resolution:e}"
             );
         }
+        certified_concentrated_criterion_jet(&nodes, within, n_obs, log_lambda, order)
+            .expect("the criterion consuming the repaired pass must certify");
     }
-
 
     /// Value-only diagnostic surface retained for the derivative oracle tests.
     fn concentrated_criterion(
@@ -5299,23 +5839,11 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
                 // balls enclose the central quotient, and the global third-
                 // derivative theorem bounds its O(h²) truncation remainder.
                 let left_ball =
-                    certified_concentrated_criterion_jet(
-                        &nodes,
-                        within,
-                        n_obs,
-                        rho - h,
-                        order,
-                    )
-                    .expect("left value ball");
+                    certified_concentrated_criterion_jet(&nodes, within, n_obs, rho - h, order)
+                        .expect("left value ball");
                 let right_ball =
-                    certified_concentrated_criterion_jet(
-                        &nodes,
-                        within,
-                        n_obs,
-                        rho + h,
-                        order,
-                    )
-                    .expect("right value ball");
+                    certified_concentrated_criterion_jet(&nodes, within, n_obs, rho + h, order)
+                        .expect("right value ball");
                 let finite_difference = right_ball
                     .value
                     .sub(left_ball.value)
@@ -5325,14 +5853,11 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
                 let third_bound = 0.5 * (0.25 * proper_modes + 6.0 * residual_dof);
                 let truncation = third_bound * h * h / 6.0;
                 let certified_center =
-                    certified_concentrated_criterion_jet(
-                        &nodes, within, n_obs, rho, order,
-                    )
-                    .expect("center derivative ball");
+                    certified_concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
+                        .expect("center derivative ball");
                 assert!(
                     certified_center.derivative.hi >= finite_difference.lo - truncation
-                        && certified_center.derivative.lo
-                            <= finite_difference.hi + truncation,
+                        && certified_center.derivative.lo <= finite_difference.hi + truncation,
                     "order={order} rho={rho}: analytic derivative ball {:?} is disjoint \
                      from independently value-differenced {:?} ± {truncation:e}",
                     certified_center.derivative,
@@ -5371,9 +5896,8 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
                 let certified =
                     certified_concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
                         .expect("directed score recurrence");
-                let scalar =
-                    concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
-                        .expect("independent scalar recurrence");
+                let scalar = concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
+                    .expect("independent scalar recurrence");
                 for (name, ball, reference) in [
                     ("value", certified.value, scalar.0),
                     ("derivative", certified.derivative, scalar.1),
@@ -5420,14 +5944,9 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
                 );
 
                 let rho_right = rho + 0.125;
-                let right = certified_concentrated_criterion_jet(
-                    &nodes,
-                    within,
-                    n_obs,
-                    rho_right,
-                    order,
-                )
-                .expect("right endpoint ball");
+                let right =
+                    certified_concentrated_criterion_jet(&nodes, within, n_obs, rho_right, order)
+                        .expect("right endpoint ball");
                 let enclosure = concentrated_criterion_enclosure(
                     nodes.len(),
                     n_obs,
@@ -5468,6 +5987,426 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
                     );
                 }
             }
+        }
+    }
+
+    /// Regression oracle for both #2614 saturated order-3 tail cells. The
+    /// production enclosure is a theorem, not a sampling scheme; these dense
+    /// scalar evaluations independently guard its implementation, while the
+    /// comparison with the old full-width L4 theorem proves that
+    /// nearest-endpoint endpoint-third interpolation actually removes (rather
+    /// than merely moves) the false Taylor uncertainty.
+    #[test]
+    fn nearest_endpoint_taylor_hull_contains_dense_cell_and_tightens_every_channel() {
+        let n = 60usize;
+        let mut x: Vec<f64> = (0..n).map(|i| i as f64 / (n as f64 - 1.0)).collect();
+        x[7] = x[6];
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| {
+                (6.0 * xi).sin() + 0.3 * (17.0 * xi).cos() + 0.05 * ((i * 37 % 11) as f64 - 5.0)
+            })
+            .collect();
+        let w: Vec<f64> = (0..n).map(|i| 1.0 + 0.5 * (i % 3) as f64).collect();
+        let order = 3usize;
+        let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pooled data");
+        let lo = 13.759_277_343_75;
+        let hi = 13.760_375_976_562_5;
+        let left = certified_concentrated_criterion_jet(&nodes, within, n_obs, lo, order)
+            .expect("left endpoint certificate");
+        let right = certified_concentrated_criterion_jet(&nodes, within, n_obs, hi, order)
+            .expect("right endpoint certificate");
+        let sample = |rho: f64, certificate: CertifiedCriterionJet| ScoreSample {
+            x: rho,
+            value: certificate.jet.value,
+            derivative: certificate.jet.derivative,
+            curvature: certificate.jet.curvature,
+            third: certificate.jet.third,
+        };
+        let nearest = concentrated_criterion_enclosure(
+            nodes.len(),
+            n_obs,
+            sample(lo, left),
+            sample(hi, right),
+            left,
+            right,
+            order,
+        )
+        .expect("nearest-endpoint enclosure");
+
+        for step in 0..=256 {
+            let rho = lo + (hi - lo) * step as f64 / 256.0;
+            let (value, derivative, curvature, _) =
+                concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
+                    .expect("independent scalar jet");
+            assert!(
+                nearest.score.value.contains(value),
+                "dense score sample at rho={rho:.17} escaped {:?}",
+                nearest.score.value
+            );
+            assert!(
+                nearest.derivative.contains(derivative),
+                "dense derivative sample at rho={rho:.17} escaped {:?}",
+                nearest.derivative
+            );
+            assert!(
+                nearest.curvature.contains(curvature),
+                "dense curvature sample at rho={rho:.17} escaped {:?}",
+                nearest.curvature
+            );
+        }
+
+        // Re-evaluate the identical certified Taylor theorem with each endpoint
+        // spanning the FULL cell. This is the pre-fix geometry, expressed
+        // directionally rather than weakened further into absolute-value
+        // radii, so beating it is the stronger comparison.
+        let width = Ball::exact(hi).sub(Ball::exact(lo));
+        let width2 = width.square();
+        let width3 = width2.mul(width);
+        let width4 = width2.square();
+        let fourth_abs_bound = Ball::exact((nodes.len() - order) as f64)
+            .scale(0.25)
+            .add(Ball::exact((n_obs - order) as f64).scale(26.0))
+            .scale(0.5);
+        let value_remainder = fourth_abs_bound
+            .mul(width4)
+            .div_positive(Ball::exact(24.0))
+            .hi;
+        let derivative_remainder = fourth_abs_bound
+            .mul(width3)
+            .div_positive(Ball::exact(6.0))
+            .hi;
+        let curvature_remainder = fourth_abs_bound.mul(width2).scale(0.5).hi;
+        let full_cell_from_endpoint =
+            |certificate: CertifiedCriterionJet, displacement: ClosedInterval| {
+                let d = Ball::certified(0.0, displacement);
+                let d2 = d.square();
+                let d3 = d2.mul(d);
+                let value = certificate
+                    .value
+                    .add(certificate.derivative.mul(d))
+                    .add(certificate.curvature.mul(d2).scale(0.5))
+                    .add(certificate.third.mul(d3).div_positive(Ball::exact(6.0)))
+                    .interval()
+                    .add(ClosedInterval::new(-value_remainder, value_remainder));
+                let derivative = certificate
+                    .derivative
+                    .add(certificate.curvature.mul(d))
+                    .add(certificate.third.mul(d2).scale(0.5))
+                    .interval()
+                    .add(ClosedInterval::new(
+                        -derivative_remainder,
+                        derivative_remainder,
+                    ));
+                let curvature = certificate
+                    .curvature
+                    .add(certificate.third.mul(d))
+                    .interval()
+                    .add(ClosedInterval::new(
+                        -curvature_remainder,
+                        curvature_remainder,
+                    ));
+                (value, derivative, curvature)
+            };
+        let old_left = full_cell_from_endpoint(left, ClosedInterval::new(0.0, width.hi));
+        let old_right = full_cell_from_endpoint(right, ClosedInterval::new(-width.hi, 0.0));
+        let old_value = ClosedInterval::new(
+            old_left.0.lo.min(old_right.0.lo),
+            old_left.0.hi.max(old_right.0.hi),
+        );
+        let old_derivative = ClosedInterval::new(
+            old_left.1.lo.min(old_right.1.lo),
+            old_left.1.hi.max(old_right.1.hi),
+        );
+        let old_curvature = ClosedInterval::new(
+            old_left.2.lo.min(old_right.2.lo),
+            old_left.2.hi.max(old_right.2.hi),
+        );
+        for (name, tightened, full_width) in [
+            ("score", nearest.score.value, old_value),
+            ("derivative", nearest.derivative, old_derivative),
+            ("curvature", nearest.curvature, old_curvature),
+        ] {
+            assert!(
+                tightened.hi - tightened.lo < full_width.hi - full_width.lo,
+                "nearest-endpoint {name} enclosure {tightened:?} was not strictly \
+                 narrower than full-width theorem {full_width:?}"
+            );
+        }
+        assert!(
+            nearest.derivative.hi < 0.0,
+            "the corrected theorem must certify the live #2614 cell's negative slope: {:?}",
+            nearest.derivative
+        );
+
+        // The half-cell L4 theorem above exposed the next saturated cell at
+        // rho≈16.127. It has the same dyadic width, but its endpoint slope is
+        // only 2.76e-9, so the old global L4 remainder is eight times larger
+        // than the signal even with correct nearest-endpoint geometry. The
+        // endpoint-third/L5 theorem must contain the whole cell AND recover its
+        // sign; otherwise it merely moves the same budget exhaustion again.
+        let shifted_lo = 16.126_831_054_687_5;
+        let shifted_hi = 16.127_929_687_5;
+        assert_eq!(
+            shifted_hi - shifted_lo,
+            hi - lo,
+            "the old-theorem comparison below shares the measured dyadic width"
+        );
+        let shifted_left =
+            certified_concentrated_criterion_jet(&nodes, within, n_obs, shifted_lo, order)
+                .expect("shifted left endpoint certificate");
+        let shifted_right =
+            certified_concentrated_criterion_jet(&nodes, within, n_obs, shifted_hi, order)
+                .expect("shifted right endpoint certificate");
+        let shifted = concentrated_criterion_enclosure(
+            nodes.len(),
+            n_obs,
+            sample(shifted_lo, shifted_left),
+            sample(shifted_hi, shifted_right),
+            shifted_left,
+            shifted_right,
+            order,
+        )
+        .expect("shifted endpoint-third enclosure");
+        for step in 0..=256 {
+            let rho = shifted_lo + (shifted_hi - shifted_lo) * step as f64 / 256.0;
+            let (value, derivative, curvature, _) =
+                concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
+                    .expect("shifted independent scalar jet");
+            assert!(
+                shifted.score.value.contains(value),
+                "shifted dense score at rho={rho:.17} escaped {:?}",
+                shifted.score.value
+            );
+            assert!(
+                shifted.derivative.contains(derivative),
+                "shifted dense derivative at rho={rho:.17} escaped {:?}",
+                shifted.derivative
+            );
+            assert!(
+                shifted.curvature.contains(curvature),
+                "shifted dense curvature at rho={rho:.17} escaped {:?}",
+                shifted.curvature
+            );
+        }
+        let shifted_old_left =
+            full_cell_from_endpoint(shifted_left, ClosedInterval::new(0.0, width.hi));
+        let shifted_old_right =
+            full_cell_from_endpoint(shifted_right, ClosedInterval::new(-width.hi, 0.0));
+        for (name, tightened, old_left, old_right) in [
+            (
+                "score",
+                shifted.score.value,
+                shifted_old_left.0,
+                shifted_old_right.0,
+            ),
+            (
+                "derivative",
+                shifted.derivative,
+                shifted_old_left.1,
+                shifted_old_right.1,
+            ),
+            (
+                "curvature",
+                shifted.curvature,
+                shifted_old_left.2,
+                shifted_old_right.2,
+            ),
+        ] {
+            let full_width =
+                ClosedInterval::new(old_left.lo.min(old_right.lo), old_left.hi.max(old_right.hi));
+            assert!(
+                tightened.hi - tightened.lo < full_width.hi - full_width.lo,
+                "endpoint-third {name} enclosure {tightened:?} was not strictly \
+                 narrower than the full-width L4 theorem {full_width:?}"
+            );
+        }
+        assert!(
+            shifted.derivative.hi < 0.0,
+            "the endpoint-third theorem must certify the shifted #2614 cell's \
+             negative slope: {:?}",
+            shifted.derivative
+        );
+    }
+
+    #[test]
+    fn spline_consumer_preserves_a_valid_resolution_flat_optimum_category() {
+        let optimum = ScoreSample {
+            x: -0.25,
+            value: 3.0,
+            derivative: 0.0,
+            curvature: 0.0,
+            third: 0.0,
+        };
+        let bracket = ClosedInterval::new(-0.5, 0.0);
+        let max_score_gap = 0.125;
+        let score_resolution = 0.25;
+        let search = ScoreSearchResult {
+            optimum,
+            location: ScoreOptimumLocation::ResolutionFlat(0),
+            lower_boundary: ScoreSample { x: -1.0, ..optimum },
+            upper_boundary: ScoreSample { x: 1.0, ..optimum },
+            stationary_points: Vec::new(),
+            resolution_flat_regions: vec![gam_math::score_opt::ResolutionFlatRegion {
+                sample: optimum,
+                bracket,
+                score: ClosedInterval::new(2.875, 3.0),
+                max_score_gap,
+                score_resolution,
+            }],
+            dominated_regions: Vec::new(),
+            value_certificate: gam_math::score_opt::GlobalScoreCertificate {
+                selected: ClosedInterval::point(3.0),
+                maximum: ClosedInterval::new(3.0, 3.125),
+                maximum_excess: max_score_gap,
+                comparison_resolution: score_resolution,
+            },
+        };
+        assert_eq!(
+            spline_optimum_proof(&search).expect("valid resolution-flat proof"),
+            SplineOptimumProof::ResolutionFlat {
+                bracket,
+                max_score_gap,
+                score_resolution,
+            },
+            "the spline consumer must preserve the producer's successful typed category"
+        );
+
+        let mut invalid = search;
+        invalid.resolution_flat_regions[0].max_score_gap =
+            invalid.resolution_flat_regions[0].score_resolution + f64::EPSILON;
+        assert!(
+            matches!(
+                spline_optimum_proof(&invalid),
+                Err(SplineScoreProofError::Search(_))
+            ),
+            "a malformed producer certificate must still fail instead of being accepted"
+        );
+    }
+
+    #[test]
+    fn spline_consumer_retains_the_producers_stationary_curvature_proof() {
+        let optimum = ScoreSample {
+            x: -9.084_292_923_99,
+            value: 3.0,
+            derivative: 0.0,
+            curvature: -1.0,
+            third: 0.0,
+        };
+        let bracket = ClosedInterval::new(-9.084_292_924_175_005, -9.084_292_923_812_374);
+        let producer_curvature = ClosedInterval::new(-6.4, -0.2);
+        let point_score = ScoreValueEnclosure {
+            value: ClosedInterval::new(2.999, 3.001),
+            evaluation_error: 0.001,
+        };
+        let search = ScoreSearchResult {
+            optimum,
+            location: ScoreOptimumLocation::Stationary(0),
+            lower_boundary: ScoreSample {
+                x: -10.0,
+                ..optimum
+            },
+            upper_boundary: ScoreSample { x: -8.0, ..optimum },
+            stationary_points: vec![gam_math::score_opt::StationaryPoint {
+                sample: optimum,
+                bracket,
+                score: point_score,
+                curvature: producer_curvature,
+            }],
+            resolution_flat_regions: Vec::new(),
+            dominated_regions: Vec::new(),
+            value_certificate: gam_math::score_opt::GlobalScoreCertificate {
+                selected: point_score.value,
+                maximum: point_score.value,
+                maximum_excess: 0.0,
+                comparison_resolution: 0.002,
+            },
+        };
+        let SplineOptimumProof::Kkt { bracket: got, kind } =
+            spline_optimum_proof(&search).expect("valid stationary proof")
+        else {
+            panic!("stationary producer category was not preserved");
+        };
+        assert_eq!(got, bracket);
+        assert_eq!(
+            kind,
+            SplineKktKind::Stationary {
+                curvature: producer_curvature,
+            }
+        );
+
+        let local_enclosure = DerivativeEnclosure {
+            score: point_score,
+            derivative: ClosedInterval::new(-1.2e-9, 1.2e-9),
+            // Mirrors the persistence failure: a fresh tiny-cell secant loses
+            // curvature sign even though the parent proof remains strict.
+            curvature: ClosedInterval::new(-6.39, 0.0064),
+        };
+        let (holds, consumed_curvature) = spline_kkt_holds(kind, local_enclosure);
+        assert!(holds, "the final derivative still contains the unique root");
+        assert_eq!(consumed_curvature, producer_curvature);
+    }
+
+    #[test]
+    fn derivative_secant_recovers_weighted_order3_root_curvature_sign() {
+        let (x, y, w) = dgp_2300();
+        let order = 3usize;
+        let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("weighted pool");
+        // Live cell at evaluation 1024 of the pre-secant #2300 traversal.
+        let lo = -2.337_075_252_506_015;
+        let hi = -2.337_040_920_230_624;
+        let left = certified_concentrated_criterion_jet(&nodes, within, n_obs, lo, order)
+            .expect("weighted left endpoint");
+        let right = certified_concentrated_criterion_jet(&nodes, within, n_obs, hi, order)
+            .expect("weighted right endpoint");
+        assert!(
+            left.curvature.interval().contains_zero() && right.curvature.interval().contains_zero(),
+            "the oracle must exercise the loose direct covariance-d2 path"
+        );
+        let sample = |rho: f64, certificate: CertifiedCriterionJet| ScoreSample {
+            x: rho,
+            value: certificate.jet.value,
+            derivative: certificate.jet.derivative,
+            curvature: certificate.jet.curvature,
+            third: certificate.jet.third,
+        };
+        let enclosure = concentrated_criterion_enclosure(
+            nodes.len(),
+            n_obs,
+            sample(lo, left),
+            sample(hi, right),
+            left,
+            right,
+            order,
+        )
+        .expect("secant curvature enclosure");
+        assert!(
+            enclosure.curvature.hi < 0.0,
+            "the derivative secant must recover strict concavity: {:?}",
+            enclosure.curvature
+        );
+        assert!(
+            enclosure.derivative.lo > 0.0,
+            "integrating the secant curvature from both endpoints must preserve \
+             the live cell's positive slope: {:?}",
+            enclosure.derivative
+        );
+        for step in 0..=256 {
+            let rho = lo + (hi - lo) * step as f64 / 256.0;
+            let (_, derivative, curvature, _) =
+                concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
+                    .expect("independent weighted scalar jet");
+            assert!(
+                enclosure.derivative.contains(derivative),
+                "weighted scalar derivative {derivative} at rho={rho:.17} escaped {:?}",
+                enclosure.derivative
+            );
+            assert!(
+                enclosure.curvature.contains(curvature),
+                "weighted scalar curvature {curvature} at rho={rho:.17} escaped {:?}",
+                enclosure.curvature
+            );
         }
     }
 
@@ -5545,10 +6484,7 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
         let state: SplineScanState = serde_json::from_str(&json).expect("deserialize state");
         let restored = SplineScanFit::from_state(&state).expect("restore fit");
 
-        assert_eq!(
-            fit.training_sample_size(),
-            restored.training_sample_size()
-        );
+        assert_eq!(fit.training_sample_size(), restored.training_sample_size());
         if order == 2 {
             let mut pre_change = serde_json::to_value(fit.to_state()).expect("serialize state");
             pre_change
@@ -5647,7 +6583,13 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
                 .collect(),
             // Diagonal-leading per knot so restored variances stay positive.
             cov: (0..tri * knot_count)
-                .map(|i| if i % tri == 0 { 0.5 + 0.01 * i as f64 } else { 0.02 })
+                .map(|i| {
+                    if i % tri == 0 {
+                        0.5 + 0.01 * i as f64
+                    } else {
+                        0.02
+                    }
+                })
                 .collect(),
             gain: (0..order * order * knot_count)
                 .map(|i| 0.03 * ((i % 5) as f64))
@@ -5683,11 +6625,9 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
     fn persistence_seam_round_trips_without_the_optimizer_2614() {
         for order in 1..=MAX_ORDER {
             let built = hand_built_state(order);
-            let fit =
-                SplineScanFit::from_state(&built).expect("hand-built state must restore");
+            let fit = SplineScanFit::from_state(&built).expect("hand-built state must restore");
             let json = serde_json::to_string(&fit.to_state()).expect("serialize state");
-            let parsed: SplineScanState =
-                serde_json::from_str(&json).expect("deserialize state");
+            let parsed: SplineScanState = serde_json::from_str(&json).expect("deserialize state");
             let restored = SplineScanFit::from_state(&parsed).expect("restore fit");
 
             assert_eq!(fit.order, restored.order, "order drifted (m={order})");
@@ -5696,10 +6636,7 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
             assert_eq!(fit.sigma2.to_bits(), restored.sigma2.to_bits());
             assert_eq!(fit.edf().to_bits(), restored.edf().to_bits());
             assert_eq!(fit.deviance().to_bits(), restored.deviance().to_bits());
-            assert_eq!(
-                fit.training_sample_size(),
-                restored.training_sample_size()
-            );
+            assert_eq!(fit.training_sample_size(), restored.training_sample_size());
 
             // Off-knot bridge, exact knot hits, and both extrapolation sides.
             for &xq in &[-0.3, 0.0, 0.13, 0.6, 1.0, 1.4, 1.9] {
@@ -5867,8 +6804,7 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
             fit.deviance()
         );
         // The old proxy is strictly larger: it includes penalty energy.
-        let reml_quadratic =
-            fit.sigma2 * (fit.training_sample_size() as f64 - fit.order as f64);
+        let reml_quadratic = fit.sigma2 * (fit.training_sample_size() as f64 - fit.order as f64);
         assert!(fit.deviance() < reml_quadratic);
     }
 }
