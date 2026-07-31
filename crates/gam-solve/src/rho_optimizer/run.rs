@@ -2829,6 +2829,10 @@ pub fn outer_value_agreement_bound(value_only: f64, derivative_sample: f64) -> f
     f64::EPSILON.sqrt() * value_only.abs().max(derivative_sample.abs()).max(1.0)
 }
 
+/// `lane_inner_convergence` is `(value_lane, derivative_lane)`, each captured
+/// IMMEDIATELY after its own evaluation — `inner_solve_converged` reads one
+/// shared snapshot, so a flag sampled after both lanes describes only the
+/// second (#2228). `None` means the caller did not sample that lane.
 fn audit_outer_value_agreement(
     context: &str,
     value_only: f64,
@@ -2836,12 +2840,26 @@ fn audit_outer_value_agreement(
     result: &mut OuterResult,
     projected_grad_norm: Option<f64>,
     stationarity_standard: impl Into<StationarityStandard>,
+    lane_inner_convergence: (Option<bool>, Option<bool>),
 ) -> Result<(), EstimationError> {
     let bound = outer_value_agreement_bound(value_only, derivative_sample);
     let disagreement = (value_only - derivative_sample).abs();
     if disagreement <= bound {
         return Ok(());
     }
+    // Which lane's inner solve converged decides whether this is roundoff
+    // between two reduction trees (the bound's premise) or a warm-start basin
+    // gap the bound was never derived for.
+    let lane_note = |flag: Option<bool>| match flag {
+        Some(true) => "converged",
+        Some(false) => "NOT-CONVERGED",
+        None => "unsampled",
+    };
+    let inner_evidence = format!(
+        ", inner solve: value-lane={}, derivative-lane={}",
+        lane_note(lane_inner_convergence.0),
+        lane_note(lane_inner_convergence.1),
+    );
 
     // The value-only lane is the scalar criterion authority. Preserve it on
     // the resumable checkpoint rather than the derivative lane's inconsistent
@@ -2852,7 +2870,7 @@ fn audit_outer_value_agreement(
         &format!(
             "cost-only value disagrees with analytic-sample value at the same outer point: \
              value-only={value_only:.16e}, analytic-sample={derivative_sample:.16e}, \
-             disagreement={disagreement:.3e}, roundoff bound={bound:.3e}"
+             disagreement={disagreement:.3e}, roundoff bound={bound:.3e}{inner_evidence}"
         ),
         result,
         projected_grad_norm,
@@ -2904,6 +2922,12 @@ fn certify_fixed_point_optimality(
             Some(sample)
         }
     };
+    // Sampled HERE, not after the certificate lane below: `inner_solve_converged`
+    // returns one shared snapshot describing the most recent inner solve, so a
+    // read taken after both lanes cannot speak for this one (#2228). Mirrors the
+    // capture-immediately discipline already used for `terminal_inner_converged`.
+    let value_lane_inner_converged =
+        value_only.map(|_| inner_solve_converged(config.outer_inner_cap.as_ref()));
     // #2228: these two lanes run back-to-back on ONE `&mut obj` with no reset
     // between them. Criteria that fit `(t, β)` in place therefore warm-start
     // this certificate lane from wherever the value-only lane above stopped —
@@ -2939,7 +2963,8 @@ fn certify_fixed_point_optimality(
                 StationarityStandard::NoComparison,
             )
         })?;
-    if !inner_solve_converged(config.outer_inner_cap.as_ref()) {
+    let certificate_lane_inner_converged = inner_solve_converged(config.outer_inner_cap.as_ref());
+    if !certificate_lane_inner_converged {
         return Err(outer_nonconvergence_error(
             context,
             "terminal fixed-point evidence was evaluated at a non-converged inner state",
@@ -2978,6 +3003,10 @@ fn certify_fixed_point_optimality(
             result,
             None,
             StationarityStandard::NoComparison,
+            (
+                value_lane_inner_converged,
+                Some(certificate_lane_inner_converged),
+            ),
         )?;
     }
 
@@ -3630,6 +3659,9 @@ fn certify_outer_optimality_at_terminal_fidelity(
         result,
         Some(projected_grad_norm),
         StationarityBound::from_ladder(stationarity_bound, bound_source),
+        // This route does not sample either lane's inner-convergence flag; it
+        // reports "unsampled" rather than implying a measurement (#2228).
+        (None, None),
     )?;
 
     // The optimizer's own recorded best-iterate evidence, captured before the
