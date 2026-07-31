@@ -453,6 +453,32 @@ pub enum ScoreSearchError<E> {
 /// every search that converges and is reached in under a second by one that
 /// does not.
 ///
+/// gam#2614 — that ~60x margin is NOT general, and the `2 D` cell allowance is
+/// the reason. The `D` factor is derived: no cell survives more than `D`
+/// halvings before it is narrower than `resolution`. The cell allowance is an
+/// assumption about how many cells a criterion's certified decomposition
+/// contains, which is exactly what the search cannot know in advance.
+///
+/// Read the calibration above again: spending about `D` subdivisions IN TOTAL,
+/// at `D` per certified cell, means that surface's decomposition was about ONE
+/// cell. The `2 D` allowance (64 cells at `D = 32`) was never exercised there,
+/// so the quoted margin is headroom over a single-cell case.
+///
+/// Measured since, at the same `D = 32`:
+/// `spline_scan::tests::order_one_scan_matches_dense_random_walk_posterior`
+/// exceeds 2048 subdivisions — its decomposition needs MORE than 64 cells — and
+/// it terminates and PASSES once the budget is `100 D²`. It is not going deeper
+/// than `D` per cell; the depth bound is a hard geometric fact. It is isolating
+/// structure over a wider decomposition than this constant anticipates, so
+/// against that surface the margin is negative.
+///
+/// A larger allowance does not repair every scan refusal.
+/// `weighted_scan_dgp_2300_search_terminates_in_bounded_evaluations` still fails
+/// with the budget raised 25x, because its endpoint certificates carry
+/// `eval_err ~ 1e-6` in one region of the domain while the search requests
+/// `resolution = 1.49e-8`. That is an evaluation-conditioning defect; no cell
+/// allowance reaches it.
+///
 /// A degenerate domain still gets a budget of at least one subdivision: the
 /// bound is a backstop against unbounded breadth, never a refusal of the first
 /// split.
