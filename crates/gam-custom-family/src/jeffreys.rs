@@ -668,11 +668,21 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
             let zeros = vec![Some(Array2::<f64>::zeros((total_p, total_p))); deltas.len()];
             return Ok(zeros);
         };
-        // Per direction: the only δ-dependent work — `pert_h = Hdot[δ]` and the
-        // `p` second-directional derivatives `H²dot[δ,e_a]` — reusing the base.
-        deltas
-            .iter()
-            .map(|delta| {
+        // Every outer mode-response direction shares the same beta-fixed
+        // fourth-order row tower. Ask for the two-dimensional
+        // {direction × canonical-axis} batch once; rigid row-kernel families
+        // build that tower once, while the trait default preserves the singular
+        // direction ordering for other families.
+        let pert_axis_batches = family_owned
+            .joint_jeffreys_information_second_directional_all_axes_many_with_specs(
+                &states_owned,
+                &specs_owned,
+                deltas,
+            )?;
+        let apply_direction =
+            |delta: &Array1<f64>,
+             pert_axis_matrices: Option<Vec<Array2<f64>>>|
+             -> Result<Option<Array2<f64>>, String> {
                 let pert_h = match family_owned
                     .joint_jeffreys_information_directional_derivative_with_specs(
                         &states_owned,
@@ -680,24 +690,41 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                         delta,
                     )? {
                     Some(hd) => hd,
-                    // No exact first derivative ⇒ drift undefined ⇒ safe zero
-                    // (matching `joint_jeffreys_hphi_directional_derivative`).
+                    // No exact first derivative means this drift is undefined;
+                    // retain the singular hook's safe-zero result.
                     None => return Ok(Some(Array2::<f64>::zeros((total_p, total_p)))),
                 };
-                // Batched all-axes second-directional object `{H²dot[δ,e_a]}` in
-                // ONE pass (BLAS-3 for the rigid family; per-axis fallback for the
-                // rest). This collapses the dominant `p` independent full-data
-                // second-directional sweeps the per-axis closure used to run.
-                let pert_axis_matrices = family_owned
-                    .joint_jeffreys_information_second_directional_all_axes_with_specs(
-                        &states_owned,
-                        &specs_owned,
-                        delta,
-                    )?;
                 base.perturbation_derivative_batched_axes(&pert_h, pert_axis_matrices)
                     .map(Some)
-            })
-            .collect()
+            };
+        match pert_axis_batches {
+            Some(batches) => {
+                if batches.len() != deltas.len() {
+                    return Err(format!(
+                        "Jeffreys multi-direction second-derivative batch returned {} directions, expected {}",
+                        batches.len(),
+                        deltas.len(),
+                    ));
+                }
+                deltas
+                    .iter()
+                    .zip(batches.into_iter())
+                    .map(|(delta, axes)| apply_direction(delta, Some(axes)))
+                    .collect()
+            }
+            None => deltas
+                .iter()
+                .map(|delta| {
+                    let axes = family_owned
+                        .joint_jeffreys_information_second_directional_all_axes_with_specs(
+                            &states_owned,
+                            &specs_owned,
+                            delta,
+                        )?;
+                    apply_direction(delta, axes)
+                })
+                .collect(),
+        }
     });
     Ok(Some(batch))
 }
