@@ -4052,7 +4052,16 @@ mod tests {
         let flat_error = 5.0e-4;
         let (budget, depth_bound) = subdivision_budget(lo, hi, resolution);
         assert_eq!(depth_bound, 31, "log2(32 / sqrt(eps)) rounds up to 31");
-        assert_eq!(budget, 2 * 31 * 31);
+        // Pins the shipped coefficient in `subdivision_budget`, whose doc
+        // explains why it is 8 and why raising it further only converts a
+        // budget refusal into a resolution refusal (#2614). This assertion is
+        // deliberately a change-detector: if the constant moves, update BOTH,
+        // and read that doc before deciding the move is a fix.
+        assert_eq!(
+            budget,
+            8 * 31 * 31,
+            "budget must track the 8 D^2 coefficient in subdivision_budget"
+        );
         let error = maximize_score_1d(
             lo,
             hi,
