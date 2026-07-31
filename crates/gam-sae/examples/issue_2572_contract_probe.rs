@@ -89,10 +89,26 @@ fn seeded_term(
     Ok((term, centered))
 }
 
-fn report(label: &str, run: impl FnOnce() -> Result<String, String>) {
+/// The probe reports whatever each kernel refuses with. Kernels on this lane
+/// return their own error types (some `String`, some typed like
+/// `SaeSupportStationarityError`), so the bound is `Display` rather than a
+/// single concrete error type — otherwise every typed-error migration in the
+/// library breaks this harness.
+fn report<E: std::fmt::Display>(label: &str, run: impl FnOnce() -> Result<String, E>) {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(Ok(text)) => println!("{label:<34} Ok({text})"),
-        Ok(Err(error)) => println!("{label:<34} Err({})", &error[..error.len().min(140)]),
+        Ok(Err(error)) => {
+            let rendered = error.to_string();
+            // Truncate on a char boundary: typed errors may render non-ASCII.
+            let end = rendered
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(rendered.len()))
+                .take_while(|index| *index <= 140)
+                .last()
+                .unwrap_or(0);
+            println!("{label:<34} Err({})", &rendered[..end]);
+        }
         Err(payload) => {
             let message = payload
                 .downcast_ref::<&str>()
