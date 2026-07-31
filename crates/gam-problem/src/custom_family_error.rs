@@ -299,6 +299,40 @@ impl CustomFamilyError {
             reason: reason.into(),
         }
     }
+
+    /// Grade an already-typed error rho-local WITHOUT re-wrapping one that
+    /// already says so.
+    ///
+    /// A boundary whose whole contract is "evaluate at this rho" answers the
+    /// trial-point question for everything that crosses it (see the
+    /// [`From<String>`] rationale below and gam#2590). Doing that with
+    /// [`Self::trial_point`] on a value that is *already* a
+    /// [`Self::TrialPointRefused`] renders the inner error to text and prefixes
+    /// it a second time, which is how
+    ///
+    /// ```text
+    /// inner solve refused this trial point: inner solve refused this trial
+    ///   point: synthetic outer objective failure: block[0] evaluate()
+    /// ```
+    ///
+    /// reached a user (gam#2667). The doubled prefix was cosmetic; the loss it
+    /// made visible is not, because rendering to `String` discards the variant
+    /// and only [`From<String>`]'s default put a classification back.
+    ///
+    /// So: keep the error untouched when it already answers the question
+    /// (`is_trial_point_infeasible()`), and only render one that does not --
+    /// which is the single case where the classification is genuinely being
+    /// *changed* rather than restated.
+    #[must_use]
+    pub fn into_trial_point(self) -> Self {
+        if self.is_trial_point_infeasible() {
+            self
+        } else {
+            Self::TrialPointRefused {
+                reason: self.to_string(),
+            }
+        }
+    }
 }
 
 impl From<String> for CustomFamilyError {
@@ -342,6 +376,50 @@ impl From<CustomFamilyError> for String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regrading_a_trial_point_refusal_does_not_prefix_it_twice_2667() {
+        let inner = CustomFamilyError::trial_point(
+            "synthetic outer objective failure: block[0] evaluate()",
+        );
+        // The historical route: render to `String` at an internal boundary,
+        // then let the boundary answer the trial-point question again.
+        let round_tripped = CustomFamilyError::trial_point(inner.to_string());
+        assert_eq!(
+            round_tripped
+                .to_string()
+                .matches("inner solve refused this trial point:")
+                .count(),
+            2,
+            "fixture must reproduce the doubling this test is about"
+        );
+
+        // The typed route says the same thing once.
+        let regraded = inner.clone().into_trial_point();
+        assert_eq!(
+            regraded
+                .to_string()
+                .matches("inner solve refused this trial point:")
+                .count(),
+            1,
+            "an error that already answers the question must not be re-wrapped: {regraded}"
+        );
+        assert_eq!(regraded.to_string(), inner.to_string());
+        assert!(regraded.is_trial_point_infeasible());
+
+        // An error that does NOT answer the question is genuinely reclassified,
+        // and keeps its own text as the reason.
+        let structural = CustomFamilyError::DimensionMismatch {
+            reason: "log-lambda length mismatch: got 3, expected 4".to_string(),
+        };
+        let structural_text = structural.to_string();
+        let regraded = structural.into_trial_point();
+        assert!(regraded.is_trial_point_infeasible());
+        assert!(
+            regraded.to_string().contains(&structural_text),
+            "reclassification must not drop the original text: {regraded}"
+        );
+    }
 
     #[test]
     fn two_absences_are_not_reported_as_a_comparison_2600() {

@@ -1871,7 +1871,7 @@ pub(crate) fn outerobjectivegradienthessian_internal<
     warm_start: Option<&ConstrainedWarmStart>,
     rho_prior: gam_problem::RhoPrior,
     eval_mode: EvalMode,
-) -> Result<OuterObjectiveEvalResult, String> {
+) -> Result<OuterObjectiveEvalResult, CustomFamilyError> {
     let hyper_layout = CustomFamilyHyperLayout::new(
         vec![Vec::<CustomFamilyBlockPsiDerivative>::new(); specs.len()],
         Vec::new(),
@@ -1888,7 +1888,6 @@ pub(crate) fn outerobjectivegradienthessian_internal<
         rho_prior,
         eval_mode,
     )
-    .map_err(String::from)
 }
 
 pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>(

@@ -3111,6 +3111,66 @@ pub(crate) fn outerobjective_failure_context_is_preserved() {
 }
 
 #[test]
+pub(crate) fn trial_point_refusal_is_not_prefixed_twice_2667() {
+    // Same fixture, different property, so a regression in either is reported
+    // as itself. The outer evaluator used to hand its failure back as a
+    // `String`; `fit.rs` then answered the trial-point question for it with
+    // `CustomFamilyError::trial_point`, which prefixed an error that had
+    // ALREADY been classified `TrialPointRefused` one boundary down:
+    //
+    //   Custom-family fit failed: inner solve refused this trial point:
+    //     inner solve refused this trial point: synthetic outer objective
+    //     failure: block[0] evaluate()
+    //
+    // The doubling is cosmetic; what it made visible is not. Rendering to
+    // `String` discards the variant, and the only reason the classification
+    // survived was `From<String>` guessing `TrialPointRefused` for
+    // EVERYTHING -- so a fatal error crossing the same boundary was silently
+    // regraded recoverable. The assertion below is the observable that the
+    // typed error, not its rendering, now crosses that boundary (gam#2667).
+    let spec = ParameterBlockSpec {
+        name: "err_block".to_string(),
+        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![
+            [1.0],
+            [1.0]
+        ])),
+        offset: array![0.0, 0.0],
+        penalties: vec![PenaltyMatrix::Dense(Array2::eye(1))],
+        nullspace_dims: vec![],
+        initial_log_lambdas: array![0.0],
+        initial_beta: Some(array![0.0]),
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    };
+    let options = BlockwiseFitOptions {
+        outer_max_iter: 3,
+        ..BlockwiseFitOptions::default()
+    };
+    let err = match fit_custom_family(&OneBlockAlwaysErrorFamily, &[spec], &options) {
+        Ok(_) => panic!("fit should fail when family evaluate always errors"),
+        Err(e) => e,
+    };
+    let rendered = err.to_string();
+    // Not a count of the prefix: this report lists one line PER REJECTED SEED,
+    // so several independent single-prefix refusals is the correct shape. What
+    // must not occur is the prefix applied to itself.
+    assert!(
+        !rendered.contains(
+            "inner solve refused this trial point: inner solve refused this trial point:"
+        ),
+        "the trial-point prefix must not be applied to an error that already carries it: \
+         {rendered}"
+    );
+    // The root cause still arrives, i.e. the prefix was dropped, not the text.
+    assert!(
+        rendered.contains("synthetic outer objective failure: block[0] evaluate()"),
+        "the root cause must survive the typed boundary: {rendered}"
+    );
+}
+
+#[test]
 pub(crate) fn fit_fails_when_requested_covariance_cannot_be_computed() {
     let spec = ParameterBlockSpec {
         name: "cov_block".to_string(),

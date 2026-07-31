@@ -206,7 +206,7 @@ pub(crate) fn outerobjectivegradienthessian_labeled<
     warm_start: Option<&ConstrainedWarmStart>,
     rho_prior: &gam_problem::RhoPrior,
     eval_mode: EvalMode,
-) -> Result<OuterObjectiveEvalResult, String> {
+) -> Result<OuterObjectiveEvalResult, CustomFamilyError> {
     let physical_rho = expand_labeled_log_lambdas(rho, layout)?;
     let physical_warm_start = physical_warm_start_for_labeled(warm_start, &physical_rho, layout);
     // gam#1587: build the per-eval joint penalty bundle from the current outer ρ
@@ -242,6 +242,7 @@ pub(crate) fn outerobjectivegradienthessian_labeled<
         eval_mode,
     )?;
     pullback_labeled_outer_eval(base, rho, layout, rho_prior, eval_mode)
+        .map_err(CustomFamilyError::from)
 }
 
 pub(crate) fn custom_family_seed_screening_proxy_labeled<

@@ -24,7 +24,8 @@ pub(crate) fn outerobjectivegradienthessian<F: CustomFamily + Clone + Send + Syn
         warm_start,
         gam_problem::RhoPrior::Flat,
         eval_mode,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     Ok((
         result.objective,
         result.gradient,

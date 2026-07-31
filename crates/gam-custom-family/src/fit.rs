@@ -2952,7 +2952,13 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     // perfectly fittable one rho away (#2553, #2590). The two
                     // costs are not comparable, so the boundary takes the safe
                     // one.
-                    let failure = CustomFamilyError::trial_point(e);
+                    //
+                    // `into_trial_point` and not `trial_point`: the evaluator
+                    // now hands back a typed `CustomFamilyError`, and one that
+                    // already answers this question must be passed through, not
+                    // re-wrapped -- re-wrapping rendered it to text and prefixed
+                    // it a second time (gam#2667).
+                    let failure = e.into_trial_point();
                     outer.last_error = Some(failure.clone());
                     Err(EstimationError::CustomFamily(failure))
                 }
@@ -3047,8 +3053,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             Err(e) => {
                 // A failure to evaluate the objective at this rho is a
                 // statement about this rho — see the value-only probe above for
-                // why the boundary owns that classification (#2590).
-                let failure = CustomFamilyError::trial_point(e);
+                // why the boundary owns that classification (#2590), and why a
+                // typed error that already says so is passed through (#2667).
+                let failure = e.into_trial_point();
                 outer.last_error = Some(failure.clone());
                 return Err(EstimationError::CustomFamily(failure));
             }
@@ -3178,8 +3185,10 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 }
                 Err(e) => {
                     // A failure to evaluate the cost at this rho is a
-                    // statement about this rho (#2590).
-                    let failure = CustomFamilyError::trial_point(e);
+                    // statement about this rho (#2590); a typed error that
+                    // already says so is passed through, not re-prefixed
+                    // (#2667).
+                    let failure = e.into_trial_point();
                     outer.last_error = Some(failure.clone());
                     Err(EstimationError::CustomFamily(failure))
                 }
@@ -4279,9 +4288,9 @@ pub fn evaluate_rho_outer_criterion_for_diagnostics<
         gam_problem::RhoPrior::Flat,
         eval_mode,
     )
-    .map_err(|reason| CustomFamilyError::Optimization {
+    .map_err(|error| CustomFamilyError::Optimization {
         context: "evaluate_rho_outer_criterion_for_diagnostics",
-        reason,
+        reason: error.to_string(),
     })?;
     materialize_outer_criterion_diagnostics(eval, "evaluate_rho_outer_criterion_for_diagnostics")
 }
@@ -4333,9 +4342,9 @@ pub fn evaluate_labeled_outer_criterion_for_diagnostics<
         &gam_problem::RhoPrior::Flat,
         eval_mode,
     )
-    .map_err(|reason| CustomFamilyError::Optimization {
+    .map_err(|error| CustomFamilyError::Optimization {
         context: "evaluate_labeled_outer_criterion_for_diagnostics",
-        reason,
+        reason: error.to_string(),
     })?;
     materialize_outer_criterion_diagnostics(
         eval,
