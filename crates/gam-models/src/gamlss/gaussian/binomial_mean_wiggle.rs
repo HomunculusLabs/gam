@@ -610,21 +610,12 @@ impl BinomialMeanWiggleFamily {
                 ww_ddb,
                 ww_dd,
             ] = mean_wiggle_second_directional_coefficients(
-                [m1, m2, m3, m4],
-                q_u,
-                q_v,
-                q_uv,
-                a,
-                b,
-                a_u,
-                a_v,
-                a_uv,
-                b_u,
-                b_v,
-                b_uv,
-                xi_u[row],
-                xi_v[row],
-            );
+                    [m1, m2, m3, m4],
+                    [q_u, q_v, q_uv],
+                    [a, a_u, a_v, a_uv],
+                    [b, b_u, b_v, b_uv],
+                    [xi_u[row], xi_v[row]],
+                );
             coeff_eta[row] = eta_eta;
             coeff_etaw_b[row] = eta_w_b;
             coeff_etaw_d1[row] = eta_w_d1;
@@ -1410,19 +1401,10 @@ impl CustomFamily for BinomialMeanWiggleFamily {
             let [eta_eta, eta_w_b, eta_w_d1, eta_w_d2, eta_w_d3, _, _, _, _] =
                 mean_wiggle_second_directional_coefficients(
                     [m1, m2, m3, m4],
-                    q_u,
-                    q_v,
-                    q_uv,
-                    a,
-                    b,
-                    a_u,
-                    a_v,
-                    a_uv,
-                    b_u,
-                    b_v,
-                    b_uv,
-                    xi_u[row],
-                    xi_v[row],
+                    [q_u, q_v, q_uv],
+                    [a, a_u, a_v, a_uv],
+                    [b, b_u, b_v, b_uv],
+                    [xi_u[row], xi_v[row]],
                 );
             coeff_eta[row] = eta_eta;
             coeff_etaw_b[row] = eta_w_b;
