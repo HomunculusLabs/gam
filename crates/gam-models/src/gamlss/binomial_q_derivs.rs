@@ -927,9 +927,9 @@ mod tests {
     /// the other release cells — production here IS the hand schedule and the
     /// jet is the generic fallback that only serves links with no closed form
     /// — so a red cell would mean the dispatch priority is wrong and the jet
-    /// should be production. Emits the harness-parsed `hand_over_production`
-    /// token (`generic_jet_ns / closed_form_ns`); the MSI release harness
-    /// fails closed on any cell `<= 1`.
+    /// should be production. Emits the accurately named diagnostic
+    /// `generic_jet_over_closed_form` (`generic_jet_ns / closed_form_ns`);
+    /// this is not evidence against an optimized hand-written opponent.
     #[test]
     fn release_measure_binomial_q_closed_forms_vs_generic_jet_932() {
         use std::time::Instant;
@@ -995,7 +995,7 @@ mod tests {
         });
         eprintln!(
             "BINOMIAL-Q-DISPATCH-932 link=logit production_closed={closed_ns:.2} ns/row \
-             generic_jet={jet_ns:.2} ns/row hand_over_production={:.6}",
+             generic_jet={jet_ns:.2} ns/row generic_jet_over_closed_form={:.6}",
             jet_ns / closed_ns,
         );
     }

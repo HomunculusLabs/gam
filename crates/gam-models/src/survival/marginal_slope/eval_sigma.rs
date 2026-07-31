@@ -554,7 +554,7 @@ mod sigma_parameter_jet_release_tests {
     /// forward-mode jet tower (`Dual2<Tower3<4>>` / `Dual2<Tower4<4>>`, the
     /// parameter direction folded into the dense primary tower). Each order is
     /// parity-pinned to `2e-11` relative before timing, and emits one
-    /// harness-parsed `hand_over_production` token (dense-tower time over
+    /// accurately named `dense_tower_over_production` diagnostic (dense-tower time over
     /// production time) per event branch; the MSI release harness fails closed
     /// whenever any measured cell is `<= 1`.
     ///
@@ -686,7 +686,7 @@ mod sigma_parameter_jet_release_tests {
             });
             eprintln!(
                 "SIGMA-PARAM-JET-932 order=1 event={di:.0} production={production_first_ns:.2} \
-                 ns/row dense_tower={racer_first_ns:.2} ns/row hand_over_production={:.6}",
+                 ns/row dense_tower={racer_first_ns:.2} ns/row dense_tower_over_production={:.6}",
                 racer_first_ns / production_first_ns,
             );
 
@@ -712,7 +712,7 @@ mod sigma_parameter_jet_release_tests {
             });
             eprintln!(
                 "SIGMA-PARAM-JET-932 order=2 event={di:.0} production={production_second_ns:.2} \
-                 ns/row dense_tower={racer_second_ns:.2} ns/row hand_over_production={:.6}",
+                 ns/row dense_tower={racer_second_ns:.2} ns/row dense_tower_over_production={:.6}",
                 racer_second_ns / production_second_ns,
             );
         }

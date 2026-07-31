@@ -464,7 +464,7 @@ fn empirical_flex_warmed_row_allocation_gate_link_dev_932() {
 //
 // SPEC (this module's header): NO wall-clock assertions. The asserted gate is
 // (a) fixed-vs-dynamic parity on the exact benchmarked inputs and (b) checksum
-// finiteness; the speed evidence is the emitted `hand_over_production` token
+// finiteness; the speed diagnostic is the emitted `dynamic_over_fixed` token
 // (`dynamic_ns / fixed_ns`, > 1 when the specialization wins), which the MSI
 // release harness parses and fails closed on `<= 1`.
 //
@@ -756,7 +756,7 @@ fn measure_third_fourth_branch<const K: usize>(is_score_warp: bool, runtime: Dev
     eprintln!(
         "BMS-FLEX-CONTRACTED-932 branch={label} width={K} grid={GRID_NODES} order=3 \
          production_fixed={third_fixed_ns:.2} ns/row dynamic={third_dynamic_ns:.2} ns/row \
-         hand_over_production={:.6}",
+         dynamic_over_fixed={:.6}",
         third_dynamic_ns / third_fixed_ns,
     );
 
@@ -785,7 +785,7 @@ fn measure_third_fourth_branch<const K: usize>(is_score_warp: bool, runtime: Dev
     eprintln!(
         "BMS-FLEX-CONTRACTED-932 branch={label} width={K} grid={GRID_NODES} order=4 \
          production_fixed={fourth_fixed_ns:.2} ns/row dynamic={fourth_dynamic_ns:.2} ns/row \
-         hand_over_production={:.6}",
+         dynamic_over_fixed={:.6}",
         fourth_dynamic_ns / fourth_fixed_ns,
     );
 }

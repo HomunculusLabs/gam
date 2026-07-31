@@ -6159,7 +6159,7 @@ mod compiled_order2_oracle_tests {
     /// substrate it specializes. The historical hand flex assembly was
     /// deleted by the cutover, so — as in the multinomial / cause-specific /
     /// contracted-tower release cells — the honest fail-closed baseline is
-    /// the generic jet plan, and the emitted `hand_over_production` token
+    /// the generic jet plan, and the emitted `generic_plan_over_production` diagnostic
     /// carries `generic_plan_ns / production_ns` for the MSI release harness
     /// to fail closed on any cell `<= 1`. One cell per event branch at a
     /// representative flex width.
@@ -6307,7 +6307,7 @@ mod compiled_order2_oracle_tests {
             });
             eprintln!(
                 "FLEX-ORDER2-932 p={p} event={di:.0} production={production_ns:.2} ns/row \
-                 generic_plan={generic_ns:.2} ns/row hand_over_production={:.6}",
+                 generic_plan={generic_ns:.2} ns/row generic_plan_over_production={:.6}",
                 generic_ns / production_ns,
             );
         }

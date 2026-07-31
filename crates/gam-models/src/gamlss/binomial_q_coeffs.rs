@@ -428,8 +428,8 @@ mod oracle_tests {
     /// entry. The single-channel kernel must beat the dense tower at every
     /// order — otherwise the production lowering carries no advantage over the
     /// witness and should BE the witness. Emits one harness-parsed
-    /// `hand_over_production` token per order (`generic_tower_ns / faa_top_ns`);
-    /// the MSI release harness fails closed on any cell `<= 1`.
+    /// accurately named `generic_tower_over_faatop` diagnostic per order
+    /// (`generic_tower_ns / faa_top_ns`); this is not a strongest-hand gate.
     #[test]
     fn release_measure_binomial_q_coeffs_faa_top_vs_generic_tower_932() {
         use std::time::Instant;
@@ -522,7 +522,7 @@ mod oracle_tests {
             });
             eprintln!(
                 "BINOMIAL-Q-COEFFS-932 order=3 production_faatop={production_ns:.2} ns/row \
-                 generic_tower={generic_ns:.2} ns/row hand_over_production={:.6}",
+                 generic_tower={generic_ns:.2} ns/row generic_tower_over_faatop={:.6}",
                 generic_ns / production_ns,
             );
         }
@@ -573,7 +573,7 @@ mod oracle_tests {
             });
             eprintln!(
                 "BINOMIAL-Q-COEFFS-932 order=4 production_faatop={production_ns:.2} ns/row \
-                 generic_tower={generic_ns:.2} ns/row hand_over_production={:.6}",
+                 generic_tower={generic_ns:.2} ns/row generic_tower_over_faatop={:.6}",
                 generic_ns / production_ns,
             );
         }

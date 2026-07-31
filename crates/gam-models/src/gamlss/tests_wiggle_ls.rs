@@ -2327,7 +2327,7 @@ pub(crate) fn gaussian_location_scale_joint_hessian_is_observed_and_psi_layers_m
 /// hand ladder was deleted by the #932 single-source migration). Both sides
 /// consume the same block states and build their own bases, so this is a
 /// system-level race of everything the joint-Hessian consumer needs. Emits
-/// the harness-parsed `hand_over_production` token
+/// the accurately named `per_column_tower_over_production` diagnostic
 /// (`per_column_tower_ns / production_ns`); the MSI release harness fails
 /// closed on any cell `<= 1`.
 #[test]
@@ -2444,7 +2444,7 @@ pub(crate) fn release_measure_bls_wiggle_order2_rows_vs_per_column_tower_932() {
     let generic_ns = best_ns(true);
     eprintln!(
         "BLS-WIGGLE-ORDER2-932 production={production_ns:.2} ns/batch \
-         per_column_tower={generic_ns:.2} ns/batch hand_over_production={:.6}",
+         per_column_tower={generic_ns:.2} ns/batch per_column_tower_over_production={:.6}",
         generic_ns / production_ns,
     );
 }

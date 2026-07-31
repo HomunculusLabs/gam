@@ -2595,7 +2595,7 @@ mod observed_single_source_oracle_tests {
         /// the naive automatic-differentiation baseline the retained
         /// specialization must beat; #932 keeps no separate `cfg(test)` hand
         /// restatement for this family. Emits one harness-parsed
-        /// `hand_over_production` token (generic-tower time over production
+        /// `generic_tower_over_production` diagnostic (generic-tower time over production
         /// time) per derivative channel; the MSI release harness fails closed
         /// whenever any measured cell is `<= 1`.
         ///
@@ -2779,7 +2779,7 @@ mod observed_single_source_oracle_tests {
                 eprintln!(
                     "GAUSSIAN-JOINT-RELEASE-932 channel={channel} rows={ROWS} \
                      production_ns={production_ns:.3} generic_tower_ns={tower_ns:.3} \
-                     hand_over_production={:.6}",
+                     generic_tower_over_production={:.6}",
                     tower_ns / production_ns,
                 );
             }
