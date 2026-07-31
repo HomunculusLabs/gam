@@ -2347,6 +2347,11 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         .with_gradient(cap_gradient)
         .with_hessian(hessian)
         .with_prefer_gradient_only(true)
+        // The mode-selection consumer below requires a certified local minimum,
+        // not merely a stationary point whose raw negative curvature was cleared
+        // by the generic gradient-residue floor. Declare that requirement before
+        // optimization so the mint can escape and re-optimize such a saddle.
+        .with_require_measured_psd(true)
         .with_disable_fixed_point(multi_block_beta_dependent)
         .with_tolerance(options.outer_tol)
         .with_rel_cost_tolerance(options.outer_rel_cost_tol)
