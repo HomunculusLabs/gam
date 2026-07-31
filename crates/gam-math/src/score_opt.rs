@@ -496,7 +496,7 @@ pub fn subdivision_budget(lo: f64, hi: f64, resolution: f64) -> (usize, u32) {
         1
     };
     let depth = depth_bound as usize;
-    (2 * depth * depth, depth_bound)
+    (8 * depth * depth, depth_bound)
 }
 
 impl<E: fmt::Display> fmt::Display for ScoreSearchError<E> {
