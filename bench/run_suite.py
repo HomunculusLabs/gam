@@ -735,6 +735,7 @@ def _init_plot_payload(ds: dict[str, typing.Any]) -> dict[str, typing.Any]:
                 "_diagnostic_eta_variance": [],
                 "_diagnostic_design_rows": [],
                 "_diagnostic_design_columns": None,
+                "_diagnostic_design_fold_sizes": [],
             }
         )
     return payload
@@ -792,6 +793,7 @@ def _append_supervised_plot_fold(
         payload["_diagnostic_design_rows"].extend(
             [[float(value) for value in row] for row in design]
         )
+        payload["_diagnostic_design_fold_sizes"].append(int(design.shape[0]))
     primary_feature = payload.get("primary_feature")
     if primary_feature:
         x = test_df[str(primary_feature)].to_numpy(dtype=float).reshape(-1)
@@ -846,8 +848,142 @@ def _finalize_plot_payload(payload: dict[str, typing.Any]) -> dict[str, typing.A
     return payload
 
 
+def _design_chart_diagnostic(
+    rust_design: np.ndarray,
+    mgcv_design: np.ndarray,
+) -> tuple[dict[str, typing.Any], np.ndarray] | None:
+    """Compare one fitted fold in the only chart where that comparison exists."""
+
+    if (
+        rust_design.ndim != 2
+        or mgcv_design.ndim != 2
+        or rust_design.shape[0] != mgcv_design.shape[0]
+        or rust_design.shape[0] == 0
+    ):
+        return None
+    rust_u, rust_s, _ = np.linalg.svd(rust_design, full_matrices=False)
+    mgcv_u, mgcv_s, _ = np.linalg.svd(mgcv_design, full_matrices=False)
+    rust_threshold = np.finfo(float).eps * max(rust_design.shape) * float(rust_s[0])
+    mgcv_threshold = np.finfo(float).eps * max(mgcv_design.shape) * float(mgcv_s[0])
+    rust_rank = int(np.count_nonzero(rust_s > rust_threshold))
+    mgcv_rank = int(np.count_nonzero(mgcv_s > mgcv_threshold))
+    common_rank = min(rust_rank, mgcv_rank)
+    if common_rank == 0:
+        return None
+    rust_q = rust_u[:, :common_rank]
+    mgcv_q = mgcv_u[:, :common_rank]
+    singular_values = np.linalg.svd(rust_q.T @ mgcv_q, compute_uv=False)
+    min_cosine = float(np.clip(np.min(singular_values), 0.0, 1.0))
+    chart, *_ = np.linalg.lstsq(rust_design, mgcv_design, rcond=None)
+    return (
+        {
+            "max_principal_sine": float(
+                np.sqrt(max(0.0, 1.0 - min_cosine * min_cosine))
+            ),
+            "numerical_ranks": {
+                "rust_gam": rust_rank,
+                "r_mgcv": mgcv_rank,
+            },
+            "condition_numbers": {
+                "rust_gam": float(rust_s[0] / rust_s[rust_rank - 1]),
+                "r_mgcv": float(mgcv_s[0] / mgcv_s[mgcv_rank - 1]),
+            },
+            "relative_projection_residuals": {
+                "rust_outside_mgcv": float(
+                    np.linalg.norm(rust_design - mgcv_q @ (mgcv_q.T @ rust_design))
+                    / max(np.linalg.norm(rust_design), np.finfo(float).tiny)
+                ),
+                "mgcv_outside_rust": float(
+                    np.linalg.norm(mgcv_design - rust_q @ (rust_q.T @ mgcv_design))
+                    / max(np.linalg.norm(mgcv_design), np.finfo(float).tiny)
+                ),
+            },
+        },
+        chart,
+    )
+
+
+def _single_mgcv_smooth_penalty(
+    fold_quality: dict[str, typing.Any],
+) -> np.ndarray | None:
+    matrices: list[typing.Any] = []
+    for smooth in fold_quality.get("smooth_penalty_matrices", []):
+        if isinstance(smooth, dict):
+            matrices.extend(smooth.values())
+        elif isinstance(smooth, list):
+            matrices.extend(smooth)
+    if len(matrices) != 1:
+        return None
+    matrix = np.asarray(matrices[0], dtype=float)
+    return matrix if matrix.ndim == 2 else None
+
+
+def _fold_penalty_congruence(
+    rust_design: np.ndarray,
+    mgcv_design: np.ndarray,
+    chart: np.ndarray,
+    rust_fold: dict[str, typing.Any],
+    mgcv_fold: dict[str, typing.Any],
+) -> dict[str, float] | None:
+    rust_matrices = rust_fold.get("duchon_fitted_primary_penalty_matrices", [])
+    mgcv_penalty = _single_mgcv_smooth_penalty(mgcv_fold)
+    if len(rust_matrices) != 1 or mgcv_penalty is None:
+        return None
+    rust_penalty = np.asarray(rust_matrices[0], dtype=float)
+    if (
+        rust_penalty.shape
+        != (rust_design.shape[1] - 1, rust_design.shape[1] - 1)
+        or mgcv_penalty.shape
+        != (mgcv_design.shape[1] - 1, mgcv_design.shape[1] - 1)
+    ):
+        return None
+    rust_full = np.zeros((rust_design.shape[1], rust_design.shape[1]), dtype=float)
+    rust_full[1:, 1:] = rust_penalty
+    mgcv_full = np.zeros((mgcv_design.shape[1], mgcv_design.shape[1]), dtype=float)
+    mgcv_full[1:, 1:] = mgcv_penalty
+    mapped = chart.T @ rust_full @ chart
+    denominator = float(np.sum(mapped * mapped))
+    if denominator <= 0.0:
+        return None
+    scale = float(np.sum(mapped * mgcv_full) / denominator)
+    residual = float(
+        np.linalg.norm(scale * mapped - mgcv_full)
+        / max(np.linalg.norm(mgcv_full), np.finfo(float).tiny)
+    )
+    diagnostic = {
+        "relative_residual_after_scalar": residual,
+        "mgcv_over_rust_penalty_scale": scale,
+    }
+    rust_parameters = rust_fold.get("smoothing_parameters", [])
+    mgcv_parameters = mgcv_fold.get("smoothing_parameters", [])
+    if len(rust_parameters) == len(mgcv_parameters) == 1:
+        rust_lambda = float(rust_parameters[0])
+        mgcv_lambda = float(mgcv_parameters[0])
+        mapped_mgcv_lambda = mgcv_lambda * scale
+        difference = rust_lambda - mapped_mgcv_lambda
+        diagnostic.update(
+            {
+                "rust_lambda": rust_lambda,
+                "mgcv_lambda": mgcv_lambda,
+                "mapped_mgcv_lambda": mapped_mgcv_lambda,
+                "lambda_difference": difference,
+                "lambda_relative_difference": difference
+                / max(abs(rust_lambda), abs(mapped_mgcv_lambda), np.finfo(float).tiny),
+            }
+        )
+    return diagnostic
+
+
 def _attach_design_subspace_diagnostics(results: list[dict[str, typing.Any]]) -> None:
-    """Compare fitted Rust/mgcv function spaces, then discard raw probe matrices."""
+    """Compare each fitted fold in its own chart, then discard raw matrices.
+
+    A CV fold owns its standardization, landmark set, spectral basis, and
+    identifiability transform. Vertically concatenating five such matrices
+    silently assigns the same column coordinates to five different charts and
+    manufactures a large subspace residual. Scalar predictions may be
+    concatenated; fitted design and penalty operators must be compared fold by
+    fold.
+    """
     by_scenario: dict[str, dict[str, dict[str, typing.Any]]] = {}
     for result in results:
         if result.get("status") != "ok":
@@ -867,7 +1003,15 @@ def _attach_design_subspace_diagnostics(results: list[dict[str, typing.Any]]) ->
             continue
         rust_rows = rust_payload.get("_diagnostic_design_rows")
         mgcv_rows = mgcv_payload.get("_diagnostic_design_rows")
-        if not isinstance(rust_rows, list) or not isinstance(mgcv_rows, list):
+        rust_fold_sizes = rust_payload.get("_diagnostic_design_fold_sizes")
+        mgcv_fold_sizes = mgcv_payload.get("_diagnostic_design_fold_sizes")
+        if (
+            not isinstance(rust_rows, list)
+            or not isinstance(mgcv_rows, list)
+            or not isinstance(rust_fold_sizes, list)
+            or rust_fold_sizes != mgcv_fold_sizes
+            or not rust_fold_sizes
+        ):
             continue
         rust_design = np.asarray(rust_rows, dtype=float)
         mgcv_design = np.asarray(mgcv_rows, dtype=float)
@@ -876,34 +1020,9 @@ def _attach_design_subspace_diagnostics(results: list[dict[str, typing.Any]]) ->
             or mgcv_design.ndim != 2
             or rust_design.shape[0] != mgcv_design.shape[0]
             or rust_design.shape[0] == 0
+            or sum(int(size) for size in rust_fold_sizes) != rust_design.shape[0]
         ):
             continue
-        rust_u, rust_s, _ = np.linalg.svd(rust_design, full_matrices=False)
-        mgcv_u, mgcv_s, _ = np.linalg.svd(mgcv_design, full_matrices=False)
-        rust_threshold = (
-            np.finfo(float).eps * max(rust_design.shape) * float(rust_s[0])
-        )
-        mgcv_threshold = (
-            np.finfo(float).eps * max(mgcv_design.shape) * float(mgcv_s[0])
-        )
-        rust_rank = int(np.count_nonzero(rust_s > rust_threshold))
-        mgcv_rank = int(np.count_nonzero(mgcv_s > mgcv_threshold))
-        common_rank = min(rust_rank, mgcv_rank)
-        if common_rank == 0:
-            continue
-        rust_q = rust_u[:, :common_rank]
-        mgcv_q = mgcv_u[:, :common_rank]
-        singular_values = np.linalg.svd(rust_q.T @ mgcv_q, compute_uv=False)
-        min_cosine = float(np.clip(np.min(singular_values), 0.0, 1.0))
-        max_principal_sine = float(np.sqrt(max(0.0, 1.0 - min_cosine * min_cosine)))
-        rust_outside_mgcv = float(
-            np.linalg.norm(rust_design - mgcv_q @ (mgcv_q.T @ rust_design))
-            / max(np.linalg.norm(rust_design), np.finfo(float).tiny)
-        )
-        mgcv_outside_rust = float(
-            np.linalg.norm(mgcv_design - rust_q @ (rust_q.T @ mgcv_design))
-            / max(np.linalg.norm(mgcv_design), np.finfo(float).tiny)
-        )
         rust_eta_variance = np.asarray(
             rust_payload.get("_diagnostic_eta_variance", []), dtype=float
         )
@@ -932,7 +1051,6 @@ def _attach_design_subspace_diagnostics(results: list[dict[str, typing.Any]]) ->
                 "rms": float(np.sqrt(np.mean(delta * delta))),
                 "max_abs": float(np.max(np.abs(delta))),
             }
-        penalty_congruence = None
         rust_quality = rust.get("fit_quality")
         mgcv_quality = mgcv.get("fit_quality")
         rust_folds = (
@@ -941,73 +1059,95 @@ def _attach_design_subspace_diagnostics(results: list[dict[str, typing.Any]]) ->
         mgcv_folds = (
             mgcv_quality.get("per_fold", []) if isinstance(mgcv_quality, dict) else []
         )
-        if len(rust_folds) == len(mgcv_folds) == 1:
-            rust_matrices = rust_folds[0].get(
-                "duchon_fitted_primary_penalty_matrices", []
-            )
-            mgcv_matrices_by_smooth = mgcv_folds[0].get(
-                "smooth_penalty_matrices", []
-            )
-            mgcv_matrices = []
-            for smooth in mgcv_matrices_by_smooth:
-                if isinstance(smooth, dict):
-                    mgcv_matrices.extend(smooth.values())
-                elif isinstance(smooth, list):
-                    mgcv_matrices.extend(smooth)
-            if len(rust_matrices) == len(mgcv_matrices) == 1:
-                rust_penalty = np.asarray(rust_matrices[0], dtype=float)
-                mgcv_penalty = np.asarray(mgcv_matrices[0], dtype=float)
-                if (
-                    rust_penalty.shape
-                    == (rust_design.shape[1] - 1, rust_design.shape[1] - 1)
-                    and mgcv_penalty.shape
-                    == (mgcv_design.shape[1] - 1, mgcv_design.shape[1] - 1)
-                ):
-                    chart, *_ = np.linalg.lstsq(
-                        rust_design, mgcv_design, rcond=None
-                    )
-                    rust_full = np.zeros(
-                        (rust_design.shape[1], rust_design.shape[1]), dtype=float
-                    )
-                    rust_full[1:, 1:] = rust_penalty
-                    mgcv_full = np.zeros(
-                        (mgcv_design.shape[1], mgcv_design.shape[1]), dtype=float
-                    )
-                    mgcv_full[1:, 1:] = mgcv_penalty
-                    mapped = chart.T @ rust_full @ chart
-                    denominator = float(np.sum(mapped * mapped))
-                    if denominator > 0.0:
-                        scale = float(np.sum(mapped * mgcv_full) / denominator)
-                        residual = float(
-                            np.linalg.norm(scale * mapped - mgcv_full)
-                            / max(np.linalg.norm(mgcv_full), np.finfo(float).tiny)
-                        )
-                        penalty_congruence = {
-                            "relative_residual_after_scalar": residual,
-                            "mgcv_over_rust_penalty_scale": scale,
-                        }
+        fold_diagnostics: list[dict[str, typing.Any]] = []
+        offset = 0
+        for fold_id, raw_size in enumerate(rust_fold_sizes):
+            size = int(raw_size)
+            rust_fold_design = rust_design[offset : offset + size]
+            mgcv_fold_design = mgcv_design[offset : offset + size]
+            offset += size
+            compared = _design_chart_diagnostic(rust_fold_design, mgcv_fold_design)
+            if compared is None:
+                continue
+            diagnostic, chart = compared
+            diagnostic["fold_id"] = fold_id
+            if fold_id < len(rust_folds) and fold_id < len(mgcv_folds):
+                congruence = _fold_penalty_congruence(
+                    rust_fold_design,
+                    mgcv_fold_design,
+                    chart,
+                    rust_folds[fold_id],
+                    mgcv_folds[fold_id],
+                )
+                if congruence is not None:
+                    diagnostic["duchon_penalty_congruence"] = congruence
+            fold_diagnostics.append(diagnostic)
+        if not fold_diagnostics:
+            continue
+        penalty_diagnostics = [
+            diagnostic["duchon_penalty_congruence"]
+            for diagnostic in fold_diagnostics
+            if isinstance(diagnostic.get("duchon_penalty_congruence"), dict)
+        ]
         for result in (rust, mgcv):
             quality = result.setdefault("fit_quality", {})
             if isinstance(quality, dict):
-                quality["design_subspace_max_principal_sine"] = max_principal_sine
+                quality["design_subspace_max_principal_sine"] = max(
+                    float(diagnostic["max_principal_sine"])
+                    for diagnostic in fold_diagnostics
+                )
                 quality["design_numerical_ranks"] = {
-                    "rust_gam": rust_rank,
-                    "r_mgcv": mgcv_rank,
+                    contender: [
+                        int(diagnostic["numerical_ranks"][contender])
+                        for diagnostic in fold_diagnostics
+                    ]
+                    for contender in ("rust_gam", "r_mgcv")
                 }
                 quality["design_condition_numbers"] = {
-                    "rust_gam": float(rust_s[0] / rust_s[rust_rank - 1]),
-                    "r_mgcv": float(mgcv_s[0] / mgcv_s[mgcv_rank - 1]),
+                    contender: max(
+                        float(diagnostic["condition_numbers"][contender])
+                        for diagnostic in fold_diagnostics
+                    )
+                    for contender in ("rust_gam", "r_mgcv")
                 }
                 quality["design_relative_projection_residuals"] = {
-                    "rust_outside_mgcv": rust_outside_mgcv,
-                    "mgcv_outside_rust": mgcv_outside_rust,
+                    direction: max(
+                        float(diagnostic["relative_projection_residuals"][direction])
+                        for diagnostic in fold_diagnostics
+                    )
+                    for direction in ("rust_outside_mgcv", "mgcv_outside_rust")
                 }
+                quality["design_per_fold"] = fold_diagnostics
                 if variance_difference is not None:
                     quality["eta_variance_difference"] = variance_difference
                 if eta_difference is not None:
                     quality["linear_predictor_difference"] = eta_difference
-                if penalty_congruence is not None:
-                    quality["duchon_penalty_congruence"] = penalty_congruence
+                if penalty_diagnostics:
+                    penalty_summary = {
+                        "max_relative_residual_after_scalar": max(
+                            float(item["relative_residual_after_scalar"])
+                            for item in penalty_diagnostics
+                        ),
+                    }
+                    lambda_differences = [
+                        abs(float(item["lambda_difference"]))
+                        for item in penalty_diagnostics
+                        if "lambda_difference" in item
+                    ]
+                    lambda_relative_differences = [
+                        abs(float(item["lambda_relative_difference"]))
+                        for item in penalty_diagnostics
+                        if "lambda_relative_difference" in item
+                    ]
+                    if lambda_differences:
+                        penalty_summary["max_abs_lambda_difference"] = max(
+                            lambda_differences
+                        )
+                    if lambda_relative_differences:
+                        penalty_summary["max_abs_lambda_relative_difference"] = max(
+                            lambda_relative_differences
+                        )
+                    quality["duchon_penalty_congruence"] = penalty_summary
 
     for result in results:
         quality = result.get("fit_quality")
@@ -1020,6 +1160,7 @@ def _attach_design_subspace_diagnostics(results: list[dict[str, typing.Any]]) ->
         if isinstance(payload, dict):
             payload.pop("_diagnostic_design_rows", None)
             payload.pop("_diagnostic_design_columns", None)
+            payload.pop("_diagnostic_design_fold_sizes", None)
             payload.pop("_diagnostic_eta_variance", None)
 
 

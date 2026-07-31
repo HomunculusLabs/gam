@@ -4,6 +4,8 @@ import typing
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 
 _RUN_SUITE_PATH = Path(__file__).resolve().parents[1] / "bench" / "run_suite.py"
 _SPEC = importlib.util.spec_from_file_location("issue_2623_run_suite", _RUN_SUITE_PATH)
@@ -72,6 +74,87 @@ class DuchonRankMappingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "changed its output"):
             _RUN_SUITE._time_stable_mean_prediction(changing_prediction)
+
+    def test_cv_design_and_penalty_diagnostics_stay_in_their_fold_charts(self) -> None:
+        rust_fold_0 = np.column_stack((np.ones(4), [-1.0, -0.2, 0.4, 1.1]))
+        rust_fold_1 = np.column_stack((np.ones(4), [-1.2, -0.4, 0.5, 1.3]))
+        mgcv_fold_0 = rust_fold_0 @ np.diag([1.0, 2.0])
+        mgcv_fold_1 = rust_fold_1 @ np.diag([1.0, 3.0])
+
+        def result(
+            contender: str,
+            designs: list[np.ndarray],
+            penalties: list[float],
+            smoothing_parameters: list[float],
+        ) -> dict[str, typing.Any]:
+            rows = np.vstack(designs)
+            per_fold = []
+            for penalty, smoothing_parameter in zip(
+                penalties, smoothing_parameters, strict=True
+            ):
+                quality: dict[str, typing.Any] = {
+                    "smoothing_parameters": [smoothing_parameter],
+                }
+                if contender == "rust_gam":
+                    quality["duchon_fitted_primary_penalty_matrices"] = [
+                        [[penalty]]
+                    ]
+                else:
+                    quality["smooth_penalty_matrices"] = [
+                        {"S": [[penalty]]}
+                    ]
+                per_fold.append(quality)
+            return {
+                "status": "ok",
+                "scenario_name": "fold_chart_regression",
+                "contender": contender,
+                "fit_quality": {"per_fold": per_fold},
+                "plot_payload": {
+                    "linear_predictor": [0.0] * rows.shape[0],
+                    "_diagnostic_eta_variance": [0.0] * rows.shape[0],
+                    "_diagnostic_design_rows": rows.tolist(),
+                    "_diagnostic_design_columns": rows.shape[1],
+                    "_diagnostic_design_fold_sizes": [len(design) for design in designs],
+                },
+            }
+
+        results = [
+            result("rust_gam", [rust_fold_0, rust_fold_1], [2.0, 2.0], [0.1, 0.1]),
+            # chart.T @ [[0,0],[0,2]] @ chart is 8 and 18 respectively;
+            # multiplying by 0.5 gives these reference penalties. Therefore
+            # 0.2 * 0.5 maps exactly to Rust lambda 0.1 on both folds.
+            result("r_mgcv", [mgcv_fold_0, mgcv_fold_1], [4.0, 9.0], [0.2, 0.2]),
+        ]
+        _RUN_SUITE._attach_design_subspace_diagnostics(results)
+
+        quality = results[0]["fit_quality"]
+        self.assertLess(
+            quality["design_relative_projection_residuals"]["rust_outside_mgcv"],
+            1e-12,
+        )
+        self.assertLess(
+            quality["design_relative_projection_residuals"]["mgcv_outside_rust"],
+            1e-12,
+        )
+        self.assertEqual(quality["design_numerical_ranks"]["rust_gam"], [2, 2])
+        self.assertEqual(len(quality["design_per_fold"]), 2)
+        self.assertLess(
+            quality["duchon_penalty_congruence"][
+                "max_relative_residual_after_scalar"
+            ],
+            1e-12,
+        )
+        self.assertLess(
+            quality["duchon_penalty_congruence"]["max_abs_lambda_difference"],
+            1e-12,
+        )
+        for entry in results:
+            self.assertNotIn(
+                "_diagnostic_design_fold_sizes", entry["plot_payload"]
+            )
+            for fold in entry["fit_quality"]["per_fold"]:
+                self.assertNotIn("duchon_fitted_primary_penalty_matrices", fold)
+                self.assertNotIn("smooth_penalty_matrices", fold)
 
 
 if __name__ == "__main__":
