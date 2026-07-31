@@ -1,6 +1,6 @@
 use gam::families::wiggle::{
-    WiggleBlockConfig, append_selected_wiggle_function_penalties,
-    buildwiggle_block_input_from_seed, split_wiggle_penalty_orders,
+    WiggleBlockConfig, buildwiggle_block_input_from_orders, buildwiggle_block_input_from_seed,
+    split_wiggle_penalty_orders,
 };
 use ndarray::array;
 
@@ -22,25 +22,38 @@ fn wiggle_penalty_orders_requested_by_spec_are_not_silently_dropped() {
     let mut effective_cfg = cfg.clone();
     effective_cfg.penalty_order = primary;
 
-    let (mut block, knots) = buildwiggle_block_input_from_seed(seed.view(), &effective_cfg)
+    let (primary_block, knots) = buildwiggle_block_input_from_seed(seed.view(), &effective_cfg)
         .expect("setup must build wiggle block");
 
-    let baseline_penalty_count = block.penalties.len();
-    append_selected_wiggle_function_penalties(&mut block, &knots, cfg.degree, &extras[..1])
-        .expect("the supported order-three function penalty must be appended");
+    let baseline_penalty_count = primary_block.penalties.len();
+    let supported_orders = [primary, extras[0]];
+    let supported_block = buildwiggle_block_input_from_orders(
+        seed.view(),
+        &knots,
+        cfg.degree,
+        &supported_orders,
+        cfg.double_penalty,
+    )
+    .expect("the supported order-three function penalty must be assembled");
     assert_eq!(
-        block.penalties.len(),
+        supported_block.penalties.len(),
         baseline_penalty_count + 1,
         "every supported requested derivative order must materialize exactly one penalty"
     );
 
-    let error =
-        append_selected_wiggle_function_penalties(&mut block, &knots, cfg.degree, &extras[1..])
-            .expect_err("an unavailable order-seven function derivative must be rejected");
+    let all_requested_orders = [primary, extras[0], extras[1]];
+    let error = buildwiggle_block_input_from_orders(
+        seed.view(),
+        &knots,
+        cfg.degree,
+        &all_requested_orders,
+        cfg.double_penalty,
+    )
+    .expect_err("an unavailable order-seven function derivative must be rejected");
     assert_eq!(
-        block.penalties.len(),
+        supported_block.penalties.len(),
         baseline_penalty_count + 1,
-        "a rejected derivative order must not mutate the penalty collection"
+        "a rejected one-shot assembly must leave the previously built block untouched"
     );
     assert!(
         error.contains("Penalty order (7)"),
