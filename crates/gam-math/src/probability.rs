@@ -469,16 +469,138 @@ pub fn log1mexp_positive(a: f64) -> f64 {
     }
 }
 
+// A finite binary64 is an integer multiple of 2^-1074. Its largest possible
+// significand occupies bits 2045..=2097 on that lattice. Thirty-three limbs
+// leave 14 carry bits, enough to sum at most 2^14-1 finite inputs exactly.
+const EXACT_BINARY64_SUM_WORDS: usize = 33;
+const EXACT_BINARY64_SUM_MAX_TERMS: usize = (1 << 14) - 1;
+const _: () = assert!(EXACT_BINARY64_SUM_WORDS * 64 == 2112);
+
+/// Why [`exact_binary64_sum_sign`] could not classify its finite exact sum.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExactBinary64SumSignError {
+    /// One input was not a finite binary64.
+    NonFiniteTerm { index: usize },
+    /// The fixed exact accumulator's structural term bound was exceeded.
+    TermCapacityExceeded { maximum: usize },
+}
+
+impl std::fmt::Display for ExactBinary64SumSignError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonFiniteTerm { index } => {
+                write!(formatter, "exact binary64 sum term {index} is not finite")
+            }
+            Self::TermCapacityExceeded { maximum } => write!(
+                formatter,
+                "exact binary64 sum exceeds its structural {maximum}-term capacity"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExactBinary64SumSignError {}
+
+/// Exact sign of a finite binary64 sum, independent of order and cancellation.
+///
+/// Every input is decoded as an integer significand on the common `2^-1074`
+/// lattice. Positive and negative magnitudes accumulate into separate fixed
+/// 2,112-bit unsigned integers; comparing those integers returns the sign of
+/// the exact real sum, with no floating-point reduction and no tolerance.
+///
+/// At most 16,383 terms are admitted, the largest count whose worst-case carry
+/// is structurally contained by the fixed accumulator.
+pub fn exact_binary64_sum_sign(
+    values: impl IntoIterator<Item = f64>,
+) -> Result<std::cmp::Ordering, ExactBinary64SumSignError> {
+    fn add_magnitude(
+        accumulator: &mut [u64; EXACT_BINARY64_SUM_WORDS],
+        value: f64,
+    ) -> Result<(), ExactBinary64SumSignError> {
+        let magnitude_bits = value.to_bits() & !(1_u64 << 63);
+        let exponent_bits = ((magnitude_bits >> 52) & 0x7ff) as usize;
+        let fraction = magnitude_bits & ((1_u64 << 52) - 1);
+        let (significand, shift) = if exponent_bits == 0 {
+            (fraction, 0usize)
+        } else {
+            ((1_u64 << 52) | fraction, exponent_bits - 1)
+        };
+        if significand == 0 {
+            return Ok(());
+        }
+
+        let mut word = shift / 64;
+        let offset = shift % 64;
+        let (low_sum, low_carry) =
+            accumulator[word].overflowing_add(significand << offset);
+        accumulator[word] = low_sum;
+        word += 1;
+
+        let high = if offset == 0 {
+            0
+        } else {
+            significand >> (64 - offset)
+        };
+        let (high_sum, high_carry) = accumulator[word].overflowing_add(high);
+        let (high_sum, carry_carry) = high_sum.overflowing_add(u64::from(low_carry));
+        accumulator[word] = high_sum;
+        let mut carry = high_carry || carry_carry;
+        word += 1;
+        while carry {
+            if word == EXACT_BINARY64_SUM_WORDS {
+                return Err(ExactBinary64SumSignError::TermCapacityExceeded {
+                    maximum: EXACT_BINARY64_SUM_MAX_TERMS,
+                });
+            }
+            let (sum, next_carry) = accumulator[word].overflowing_add(1);
+            accumulator[word] = sum;
+            carry = next_carry;
+            word += 1;
+        }
+        Ok(())
+    }
+
+    let mut positive = [0_u64; EXACT_BINARY64_SUM_WORDS];
+    let mut negative = [0_u64; EXACT_BINARY64_SUM_WORDS];
+    for (index, value) in values.into_iter().enumerate() {
+        if index == EXACT_BINARY64_SUM_MAX_TERMS {
+            return Err(ExactBinary64SumSignError::TermCapacityExceeded {
+                maximum: EXACT_BINARY64_SUM_MAX_TERMS,
+            });
+        }
+        if !value.is_finite() {
+            return Err(ExactBinary64SumSignError::NonFiniteTerm { index });
+        }
+        let target = if value.is_sign_negative() {
+            &mut negative
+        } else {
+            &mut positive
+        };
+        add_magnitude(target, value)?;
+    }
+    for index in (0..EXACT_BINARY64_SUM_WORDS).rev() {
+        match positive[index].cmp(&negative[index]) {
+            std::cmp::Ordering::Less => return Ok(std::cmp::Ordering::Less),
+            std::cmp::Ordering::Greater => return Ok(std::cmp::Ordering::Greater),
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    Ok(std::cmp::Ordering::Equal)
+}
+
 /// Numerically stable signed log-sum-exp.  Given pairs
 /// `(log|aⱼ|, sign(aⱼ))` (with `signs[j] ∈ {−1, 0, +1}`), returns
 /// `(log|S|, sign(S))` for `S = Σⱼ signs[j]·exp(log_mags[j])`.  Positive
-/// and negative magnitudes are reduced separately with the standard
-/// log-sum-exp trick (subtract the max, sum, log, add back); the two
-/// partial sums are then combined via `log(|p − n|) =
-/// max(log p, log n) + log1mexp(|log p − log n|)`, preserving accuracy
-/// even when `p ≈ n` (catastrophic cancellation regime).  When all
-/// signs are zero or all magnitudes are `−∞`, returns
-/// `(NEG_INFINITY, 0.0)`.
+/// and negative magnitudes are first reduced together, after one common
+/// log-space rescaling, with a twofold compensated sum. This avoids rounding
+/// each same-sign subtotal through `ln` and `exp` before subtracting them — an
+/// avoidable loss that is amplified in cancellation-conditioned derivative
+/// cumulants. If the compensated residual lies inside its forward-error bound,
+/// the function instead uses the two-subtotal log-domain difference
+/// `log(|p − n|) = max(log p, log n) +
+/// log1mexp(|log p − log n|)`. That branch retains differences between two input
+/// logs even when their exponentials round to the same `f64`. When all signs are
+/// zero or all magnitudes are `−∞`, returns `(NEG_INFINITY, 0.0)`.
 ///
 /// A `+∞` log-magnitude denotes an infinite-magnitude term (`exp(+∞) = +∞`)
 /// and dominates the sum: if it appears only with positive sign the result
@@ -521,18 +643,82 @@ pub fn signed_log_sum_exp(log_mags: &[f64], signs: &[f64]) -> (f64, f64) {
         }
     }
 
+    if pos_max == f64::NEG_INFINITY && neg_max == f64::NEG_INFINITY {
+        // Both partial sums are empty: no terms at all, all signs zero, or every
+        // magnitude `−∞` (each `exp(−∞) = 0`). The signed sum is exactly `0`.
+        return (f64::NEG_INFINITY, 0.0);
+    }
+
+    // First reduce the signed terms directly after one common scaling. `head`
+    // plus `tail` is a twofold sum: TwoSum recovers every addition's exact
+    // residual, so cancellation does not discard the low part of either
+    // same-sign subtotal before the final subtraction.
+    let common_max = pos_max.max(neg_max);
+    let mut signed_head = 0.0_f64;
+    let mut signed_tail = 0.0_f64;
+    let mut absolute_scaled_sum = 0.0_f64;
+    let mut finite_term_count = 0usize;
+    for (idx, &lm) in log_mags.iter().enumerate() {
+        if !lm.is_finite() || !(signs[idx] > 0.0 || signs[idx] < 0.0) {
+            continue;
+        }
+        let magnitude = (lm - common_max).exp();
+        let term = if signs[idx] > 0.0 {
+            magnitude
+        } else {
+            -magnitude
+        };
+        let combined = signed_head + term;
+        let shifted = combined - signed_head;
+        let residual = (signed_head - (combined - shifted)) + (term - shifted);
+        signed_head = combined;
+        signed_tail += residual;
+        absolute_scaled_sum += magnitude;
+        finite_term_count += 1;
+    }
+    let signed_scaled_sum = signed_head + signed_tail;
+
+    // Each scaled exponential and each accumulated residual contributes at most
+    // one working-precision rounding. This conservative Wilkinson-style bound
+    // decides from the operation count, rather than from a fitted threshold,
+    // whether the linear-domain residual has a trustworthy sign and magnitude.
+    // Below the bound, retain the input-log separation in the log-domain branch.
+    let direct_error_bound =
+        (finite_term_count as f64 + 2.0) * f64::EPSILON * absolute_scaled_sum;
+    if signed_scaled_sum.abs() > direct_error_bound {
+        return (
+            common_max + signed_scaled_sum.abs().ln(),
+            signed_scaled_sum.signum(),
+        );
+    }
+
+    // When exponentiation itself cannot resolve the signed residual, reduce
+    // positive and negative groups separately in log space. Their internal sums
+    // are still twofold-compensated before taking the logarithm.
     let mut pos_sum = 0.0_f64;
+    let mut pos_tail = 0.0_f64;
     let mut neg_sum = 0.0_f64;
+    let mut neg_tail = 0.0_f64;
     for (idx, &lm) in log_mags.iter().enumerate() {
         if !lm.is_finite() {
             continue;
         }
         if signs[idx] > 0.0 {
-            pos_sum += (lm - pos_max).exp();
+            let term = (lm - pos_max).exp();
+            let combined = pos_sum + term;
+            let shifted = combined - pos_sum;
+            pos_tail += (pos_sum - (combined - shifted)) + (term - shifted);
+            pos_sum = combined;
         } else if signs[idx] < 0.0 {
-            neg_sum += (lm - neg_max).exp();
+            let term = (lm - neg_max).exp();
+            let combined = neg_sum + term;
+            let shifted = combined - neg_sum;
+            neg_tail += (neg_sum - (combined - shifted)) + (term - shifted);
+            neg_sum = combined;
         }
     }
+    pos_sum += pos_tail;
+    neg_sum += neg_tail;
 
     let log_pos = if pos_sum > 0.0 {
         pos_max + pos_sum.ln()
@@ -545,14 +731,6 @@ pub fn signed_log_sum_exp(log_mags: &[f64], signs: &[f64]) -> (f64, f64) {
         f64::NEG_INFINITY
     };
 
-    if log_pos == f64::NEG_INFINITY && log_neg == f64::NEG_INFINITY {
-        // Both partial sums are empty: no terms at all, all signs zero, or every
-        // magnitude `−∞` (each `exp(−∞) = 0`). The signed sum is exactly `0`, so
-        // the contract requires `(−∞, 0.0)` — NOT the positive-sum convention,
-        // which would mislabel a zero as `+1` and corrupt any downstream cascade
-        // that reads back the sign.
-        return (f64::NEG_INFINITY, 0.0);
-    }
     if log_neg == f64::NEG_INFINITY {
         return (log_pos, 1.0);
     }
@@ -2098,6 +2276,105 @@ mod tests {
         let (lm, sg) = signed_log_sum_exp(&[ln2, ln2], &[1.0, -1.0]);
         assert_eq!(lm, f64::NEG_INFINITY);
         assert_eq!(sg, 0.0);
+    }
+
+    #[test]
+    fn slse_compensated_signed_reduction_preserves_conditioned_residual() {
+        // High-precision truth for these exact f64 log inputs is
+        // -7.141194316117315021451...e-13. Reducing the positive and negative
+        // groups through separate logarithms first returned
+        // -7.141196119493781e-13: two otherwise harmless log roundings were
+        // amplified by the nearly cancelling subtraction.
+        let log_magnitudes = [
+            -8.752777116220523,
+            -8.741767521635955,
+            -8.77021076826994,
+            -8.75153786858979,
+            -8.754172660745834,
+            -8.768217028174623,
+            -8.756625396724502,
+            -8.737312647396818,
+        ];
+        let signs = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0];
+        let (log_magnitude, sign) = signed_log_sum_exp(&log_magnitudes, &signs);
+        let got = sign * log_magnitude.exp();
+        let truth = -7.141194316117315e-13;
+        let legacy = -7.141196119493781e-13;
+        assert_eq!(sign, -1.0);
+        assert!(
+            (got - truth).abs() < (legacy - truth).abs(),
+            "compensated signed reduction did not improve the conditioned residual: \
+             got={got:.17e}, truth={truth:.17e}, legacy={legacy:.17e}"
+        );
+    }
+
+    #[test]
+    fn slse_log_domain_branch_retains_sub_ulp_two_term_gap() {
+        // exp(-gap) rounds to 1.0 at this gap, so a purely linear-domain signed
+        // reduction sees 1 - 1. The forward-error gate must route to the
+        // log-domain difference, where the distinct input logs retain the gap.
+        let gap = f64::EPSILON * 0.25;
+        let (log_magnitude, sign) = signed_log_sum_exp(&[0.0, -gap], &[1.0, -1.0]);
+        assert_eq!(sign, 1.0);
+        assert_eq!(log_magnitude, log1mexp_positive(gap));
+    }
+
+    #[test]
+    fn exact_binary64_sum_sign_resolves_midpoint_and_both_adjacent_sides() {
+        let half_upper_ulp_at_one = 2.0_f64.powi(-53);
+        let least_subnormal = f64::from_bits(1);
+        assert_eq!(
+            exact_binary64_sum_sign([
+                1.0,
+                half_upper_ulp_at_one,
+                -1.0,
+                -half_upper_ulp_at_one,
+            ]),
+            Ok(std::cmp::Ordering::Equal),
+            "an exact rounding midpoint must compare equal"
+        );
+        assert_eq!(
+            exact_binary64_sum_sign([
+                1.0,
+                half_upper_ulp_at_one,
+                least_subnormal,
+                -1.0,
+                -half_upper_ulp_at_one,
+            ]),
+            Ok(std::cmp::Ordering::Greater),
+            "one binary lattice quantum above the midpoint must compare positive"
+        );
+        assert_eq!(
+            exact_binary64_sum_sign([
+                1.0,
+                half_upper_ulp_at_one,
+                -least_subnormal,
+                -1.0,
+                -half_upper_ulp_at_one,
+            ]),
+            Ok(std::cmp::Ordering::Less),
+            "one binary lattice quantum below the midpoint must compare negative"
+        );
+    }
+
+    #[test]
+    fn exact_binary64_sum_sign_enforces_its_finite_structural_contract() {
+        assert_eq!(
+            exact_binary64_sum_sign([f64::MAX, -f64::MAX, f64::from_bits(1)]),
+            Ok(std::cmp::Ordering::Greater),
+        );
+        assert_eq!(
+            exact_binary64_sum_sign([0.0, f64::NAN]),
+            Err(ExactBinary64SumSignError::NonFiniteTerm { index: 1 }),
+        );
+        assert_eq!(
+            exact_binary64_sum_sign(
+                std::iter::repeat_n(1.0, EXACT_BINARY64_SUM_MAX_TERMS + 1)
+            ),
+            Err(ExactBinary64SumSignError::TermCapacityExceeded {
+                maximum: EXACT_BINARY64_SUM_MAX_TERMS,
+            }),
+        );
     }
 
     #[test]

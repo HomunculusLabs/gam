@@ -3660,7 +3660,7 @@ fn staged_exact_joint_outer_reoptimizes_and_certifies_the_full_row_measure() {
                 }
             };
             let gradient = theta.mapv(|value| value - center);
-            let cost = 0.5 * gradient.dot(&gradient);
+            let cost: f64 = 0.5 * gradient.dot(&gradient);
             let hessian = if matches!(
                 eval_mode,
                 gam_solve::estimate::reml::reml_outer_engine::EvalMode::ValueGradientHessian

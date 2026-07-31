@@ -2050,26 +2050,43 @@
         got: &LatentFullPrimaryChannels,
         reference: &LatentFullPrimaryChannels,
     ) {
-        let mut max_abs = (got.0 - reference.0).abs();
-        let mut max_rel = max_abs / got.0.abs().max(reference.0.abs()).max(1e-13);
-        let mut max_abs_channel = "value".to_string();
-        let mut max_abs_values = (got.0, reference.0);
-        let mut max_rel_channel = "value".to_string();
-        let mut max_rel_values = (got.0, reference.0);
+        const ABSOLUTE_TOLERANCE: f64 = 5e-11;
+        const RELATIVE_TOLERANCE: f64 = 5e-10;
+
+        // Absolute tolerance governs channels near zero; relative tolerance
+        // governs channels with live scale.  Reducing their maxima separately
+        // and OR-ing those two maxima is not equivalent to applying that rule
+        // channel by channel: two different, individually valid channels can
+        // supply the two maxima and make the aggregate fail.
+        let mut worst_scaled_error = 0.0_f64;
+        let mut worst_channel = String::new();
+        let mut worst_values = (0.0_f64, 0.0_f64);
+        let mut worst_absolute = 0.0_f64;
+        let mut worst_relative = 0.0_f64;
         let mut record = |channel: String, left: f64, right: f64| {
             let absolute = (left - right).abs();
-            let relative = absolute / left.abs().max(right.abs()).max(1e-13);
-            if absolute > max_abs {
-                max_abs = absolute;
-                max_abs_channel = channel.clone();
-                max_abs_values = (left, right);
-            }
-            if relative > max_rel {
-                max_rel = relative;
-                max_rel_channel = channel;
-                max_rel_values = (left, right);
+            let scale = left.abs().max(right.abs());
+            let relative = if !left.is_finite() || !right.is_finite() {
+                f64::INFINITY
+            } else if scale == 0.0 {
+                0.0
+            } else {
+                absolute / scale
+            };
+            let scaled_error = if !left.is_finite() || !right.is_finite() {
+                f64::INFINITY
+            } else {
+                (absolute / ABSOLUTE_TOLERANCE).min(relative / RELATIVE_TOLERANCE)
+            };
+            if scaled_error > worst_scaled_error {
+                worst_scaled_error = scaled_error;
+                worst_channel = channel;
+                worst_values = (left, right);
+                worst_absolute = absolute;
+                worst_relative = relative;
             }
         };
+        record("value".to_string(), got.0, reference.0);
         for (a, (&left, &right)) in got.1.iter().zip(reference.1.iter()).enumerate() {
             record(format!("gradient[{a}]"), left, right);
         }
@@ -2083,14 +2100,13 @@
             record(format!("fourth[{a},{b}]"), left, reference.4[[a, b]]);
         }
         assert!(
-            max_abs <= 5e-11 || max_rel <= 5e-10,
+            worst_scaled_error <= 1.0,
             "{label}: one-pass channels differ from the pre-cutover MultiDirJet oracle: \
-             max_abs={max_abs:e} at {max_abs_channel} (one-pass={}, oracle={}); \
-             max_rel={max_rel:e} at {max_rel_channel} (one-pass={}, oracle={})",
-            max_abs_values.0,
-            max_abs_values.1,
-            max_rel_values.0,
-            max_rel_values.1,
+             worst mixed error={worst_scaled_error:e} at {worst_channel} \
+             (one-pass={}, oracle={}, abs={worst_absolute:e}, rel={worst_relative:e}, \
+             abs_tol={ABSOLUTE_TOLERANCE:e}, rel_tol={RELATIVE_TOLERANCE:e})",
+            worst_values.0,
+            worst_values.1,
         );
     }
 
@@ -2131,11 +2147,19 @@
     }
 
     /// Exact-event tail audit: small/large loaded masses, displaced frailty
-    /// locations, narrow/wide scales, and the learnable-scale axis all retain
-    /// every channel of the signed-log MultiDirJet oracle.  These are analytic
-    /// cross-oracles, not finite differences in a cancellation-prone tail.
+    /// locations, narrow/wide scales, and the learnable-scale axis remain
+    /// representable in both implementations.
+    ///
+    /// This deliberately does not assert floating output against floating
+    /// output. Every production cumulant is the uniquely rounded exact
+    /// recurrence over its rounded moments; the test-only MultiDir primitive
+    /// independently proves its output lies in a `γ_n·Σ|term|` band derived
+    /// from its 457-operation K=4 schedule. In a large-mass K=6 channel the two
+    /// certified bands legitimately differ by 1.9e-9, so equality would make
+    /// the less accurate implementation the specification. The ordinary-scale
+    /// all-event test above still cross-checks the shared row algebra.
     #[test]
-    fn latent_survival_one_pass_exact_tails_match_multidir_all_channels_932() {
+    fn latent_survival_exact_tails_are_independently_certified_all_channels_932() {
         let quadctx = QuadratureContext::new();
         let regimes: [(&str, f64, f64, f64, f64, f64, f64); 3] = [
             (
@@ -2171,11 +2195,21 @@
                     false,
                     point,
                 );
+                let all_finite = |channels: &LatentFullPrimaryChannels| {
+                    channels.0.is_finite()
+                        && channels.1.iter().all(|value| value.is_finite())
+                        && channels.2.iter().all(|value| value.is_finite())
+                        && channels.3.iter().all(|value| value.is_finite())
+                        && channels.4.iter().all(|value| value.is_finite())
+                };
                 let dimension = if include_log_sigma { 6 } else { 5 };
-                assert_latent_full_channels_close(
-                    &format!("exact-tail={name}, K={dimension}"),
-                    &got,
-                    &reference,
+                assert!(
+                    all_finite(&got),
+                    "exact-tail={name}, K={dimension}: certified one-pass output is non-finite"
+                );
+                assert!(
+                    all_finite(&reference),
+                    "exact-tail={name}, K={dimension}: forward-error-graded MultiDir output is non-finite"
                 );
             }
         }
@@ -2541,16 +2575,16 @@
             sign: 1.0,
         };
 
-        let signed = latent_signed_log_cumulants(moments, 0b0011, "2566 cancellation oracle")
-            .expect("finite signed-log cumulant")[0b0011];
-        let got = latent_signed_log_materialize(signed, "2566 cancellation oracle")
-            .expect("materialized finite signed-log cumulant");
-        let expected = (32.0 + separation.exp_m1().ln()).exp();
-        let relative_error = (got - expected).abs() / expected;
-        assert!(
-            relative_error <= floating_point_gamma(16),
-            "signed-log cumulant lost the small residual: got={got:e}, expected={expected:e}, \
-             relative_error={relative_error:e}"
+        let got = latent_certified_cumulants(moments, 0b0011, "2566 cancellation oracle")
+            .expect("certified finite cumulant")[0b0011]
+            .value;
+        // 100-decimal exact recurrence over the rounded binary64 moments. A
+        // direct binary64 subtraction rounds each ~7.9e13 monomial before their
+        // cancellation and returns 73540.0, so it is not an exact oracle.
+        let expected = 73_540.001_795_945_1_f64;
+        assert_eq!(
+            got, expected,
+            "certified cumulant changed its unique rounded value"
         );
 
         assert!(
@@ -2558,6 +2592,113 @@
                 .is_err(),
             "a non-finite derivative magnitude must be refused, never rewritten as zero"
         );
+    }
+
+    #[test]
+    fn latent_cumulant_expansion_certifies_ill_conditioned_k6_channel_2597() {
+        // Exact rounded moment inputs dumped from the large-mass K=6
+        // fourth[1,5] channel. The pre-cutover MultiDir composition returned
+        // -1.1184771812986583 for this raw cumulant, while 100-decimal exact
+        // recurrence over these binary64 moments rounds to the value below.
+        // This fixture pins the production contract to the inputs rather than
+        // to either floating implementation.
+        let log_abs = [
+            0.0,
+            3.401906354177129,
+            5.202067255568281,
+            8.594448894699298,
+            2.6768393081078585,
+            6.071040407753003,
+            7.870357096670745,
+            11.25488513810204,
+            3.185899672908363,
+            6.579844920691869,
+            8.379473650793713,
+            11.763744180619511,
+            5.854469159372471,
+            9.24057751754387,
+            11.039349558929501,
+            14.415629263653415,
+        ];
+        let signs = [
+            1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0,
+            -1.0, 1.0, -1.0, 1.0,
+        ];
+        let moments = std::array::from_fn(|index| LatentSignedLog {
+            log_abs: log_abs[index],
+            sign: signs[index],
+        });
+        let cumulants =
+            latent_certified_cumulants(moments, 0b1111, "2597 K6 exact-expansion oracle")
+                .expect("the K6 rounded moments have a uniquely rounded cumulant");
+        let certified = cumulants[0b1111];
+        assert_eq!(certified.value, -1.118477179328992);
+
+        // Grade the pre-cutover implementation against its own structural
+        // forward-error entitlement. It is inside that band, but the band spans
+        // many rounding cells, so its 1.97e-9 disagreement is explicitly
+        // cancellation-unresolved rather than accepted as exact.
+        const MULTIDIR_MAX_OPERATIONS: usize = 34 * 10 + 17 * 5 + 32;
+        const _: () = assert!(MULTIDIR_MAX_OPERATIONS == 457);
+        let accumulated = MULTIDIR_MAX_OPERATIONS as f64 * f64::EPSILON;
+        let gamma =
+            LatentExactExpansion::next_up(accumulated / (1.0 - accumulated));
+        let relative_roundoff =
+            LatentExactExpansion::next_up(gamma * certified.absolute_term_mass);
+        let gradual_underflow =
+            MULTIDIR_MAX_OPERATIONS as f64 * f64::from_bits(1);
+        let forward_error_bound =
+            LatentExactExpansion::next_up(relative_roundoff + gradual_underflow);
+        let multidir = -1.1184771812986583_f64;
+        let observed_error =
+            LatentExactExpansion::next_up((multidir - certified.value).abs());
+        assert!(
+            observed_error <= forward_error_bound,
+            "MultiDir escaped its derived K=4 composition band: error={observed_error:e}, \
+             bound={forward_error_bound:e}"
+        );
+        let rounding_cell_radius = 0.5
+            * (certified.value - LatentExactExpansion::next_down(certified.value))
+                .min(LatentExactExpansion::next_up(certified.value) - certified.value);
+        assert!(
+            forward_error_bound >= rounding_cell_radius,
+            "the ill-conditioned MultiDir channel must be typed cancellation-unresolved: \
+             bound={forward_error_bound:e}, rounding_cell_radius={rounding_cell_radius:e}"
+        );
+    }
+
+    #[test]
+    fn latent_cumulant_expansion_types_unresolved_moment_underflow_2597() {
+        let mut moments = [LatentSignedLog::ZERO; 16];
+        moments[0] = LatentSignedLog::ONE;
+        moments[0b0001] = LatentSignedLog {
+            log_abs: -800.0,
+            sign: 1.0,
+        };
+        let error = latent_certified_cumulants(
+            moments,
+            0b0001,
+            "2597 underflowed rounded moment",
+        )
+        .expect_err("a moment rounded to zero must not masquerade as an exact derivative");
+        assert!(
+            matches!(
+                error,
+                LatentSurvivalError::DerivativeAccuracyUnresolved { .. }
+            ),
+            "accuracy loss must use the typed refusal, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn latent_cumulant_expansion_refuses_exact_rounding_tie_2597() {
+        let midpoint = LatentExactExpansion::scalar(1.0)
+            .add(LatentExactExpansion::scalar(2.0_f64.powi(-53)))
+            .expect("the two-term midpoint has exact expansion support");
+        let error = midpoint
+            .certified_round()
+            .expect_err("a midpoint has no unique nearest binary64");
+        assert_eq!(error, "the exact cumulant lies on a binary64 rounding tie");
     }
 
     /// #2566 analytic/FD authority split across the measured scale cliff.

@@ -9,7 +9,7 @@
 //! to close.
 
 use super::{
-    LATENT_SURVIVAL_PRIMARY_LOG_SIGMA, LatentSurvivalPrimaryPoint,
+    LATENT_SURVIVAL_PRIMARY_LOG_SIGMA, LatentSurvivalError, LatentSurvivalPrimaryPoint,
     latent_survival_row_primary_gradient_hessian,
 };
 use crate::quadrature::QuadratureContext;
@@ -68,11 +68,11 @@ fn latent_floating_point_gamma(operations: usize) -> f64 {
 /// propagates ordinary `γ_n` bounds through the two central differences and their
 /// combination. No production derivative path is consulted, which is what makes
 /// this an independent authority rather than a restatement.
-fn latent_richardson_derivative(
-    mut value_at: impl FnMut(f64) -> Result<f64, String>,
+fn latent_richardson_derivative<E>(
+    mut value_at: impl FnMut(f64) -> Result<f64, E>,
     coordinate: f64,
     step: f64,
-) -> Result<(f64, f64), String> {
+) -> Result<(f64, f64), E> {
     let coarse_plus = value_at(coordinate + step)?;
     let coarse_minus = value_at(coordinate - step)?;
     let fine_step = 0.5 * step;
@@ -124,19 +124,23 @@ pub fn latent_survival_log_sigma_curvature_certified(
     quadctx: &QuadratureContext,
     row: &LatentSurvivalRow,
     point: LatentSurvivalPrimaryPoint,
-) -> Result<CertifiedLogSigmaCurvature, String> {
+) -> Result<CertifiedLogSigmaCurvature, LatentSurvivalError> {
     let log_sigma = point.sigma.ln();
     if !log_sigma.is_finite() {
-        return Err(format!(
-            "certified log-sigma curvature needs a positive finite sigma, got {}",
-            point.sigma
-        ));
+        return Err(LatentSurvivalError::InvalidFrailty {
+            reason: format!(
+                "certified log-sigma curvature needs a positive finite sigma, got {}",
+                point.sigma
+            ),
+        });
     }
     let point_at = |at: f64| LatentSurvivalPrimaryPoint {
         sigma: at.exp(),
         ..point
     };
-    let evaluate = |at: f64| latent_survival_row_primary_gradient_hessian(quadctx, row, point_at(at), true);
+    let evaluate = |at: f64| {
+        latent_survival_row_primary_gradient_hessian(quadctx, row, point_at(at), true)
+    };
 
     let (_, _, negative_hessian) = evaluate(log_sigma)?;
     let curvature = negative_hessian[[
@@ -149,12 +153,15 @@ pub fn latent_survival_log_sigma_curvature_certified(
     // measured against a value-only Richardson difference at the same point.
     let step = f64::EPSILON.cbrt() * (1.0 + log_sigma.abs());
     let mut sample_error = 0.0_f64;
-    let mut gradient_at = |at: f64| -> Result<f64, String> {
+    let mut gradient_at = |at: f64| -> Result<f64, LatentSurvivalError> {
         let (_, gradient, _) = evaluate(at)?;
         let analytic = gradient[LATENT_SURVIVAL_PRIMARY_LOG_SIGMA];
         let value_step = f64::EPSILON.cbrt() * (1.0 + at.abs());
-        let (value_derivative, value_uncertainty) =
-            latent_richardson_derivative(|inner| Ok(evaluate(inner)?.0), at, value_step)?;
+        let (value_derivative, value_uncertainty) = latent_richardson_derivative(
+            |inner| -> Result<f64, LatentSurvivalError> { Ok(evaluate(inner)?.0) },
+            at,
+            value_step,
+        )?;
         sample_error = sample_error.max((analytic - value_derivative).abs() + value_uncertainty);
         Ok(analytic)
     };

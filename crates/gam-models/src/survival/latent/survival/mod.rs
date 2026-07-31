@@ -26,7 +26,9 @@ use crate::custom_family::{
 use crate::fit_orchestration::drivers::freeze_term_collection_from_design;
 use crate::gamlss::{FamilyMetadata, ParameterLink};
 use crate::model_types::UnifiedFitResult;
-use crate::probability::{log1mexp_positive, signed_log_sum_exp};
+use crate::probability::{
+    exact_binary64_sum_sign, log1mexp_positive, signed_log_sum_exp,
+};
 use crate::quadrature::{IntegratedExpectationMode, QuadratureContext};
 use crate::sigma_link::{exp_sigma_eta_for_sigma_scalar, exp_sigma_from_eta_scalar};
 use crate::survival::latent::interval::{
@@ -72,6 +74,9 @@ pub enum LatentSurvivalError {
     /// A runtime numerical value (sigma, baseline hazard derivative, kernel
     /// sum, event probability) became non-finite or out-of-domain.
     NumericalFailure { reason: String },
+    /// A derivative could not be certified as the unique binary64 rounding of
+    /// the exact cumulant over its rounded finite moment inputs.
+    DerivativeAccuracyUnresolved { reason: String },
     /// The requested combination of time-block structure or event type is
     /// not implemented (non-structural monotonicity, interval-censored rows
     /// on the dynamic-derivative path).
@@ -84,6 +89,7 @@ impl_reason_error_boilerplate! {
         InvalidDataset,
         BlockMismatch,
         NumericalFailure,
+        DerivativeAccuracyUnresolved,
         UnsupportedConfiguration,
     }
 }
@@ -1472,24 +1478,297 @@ impl LatentSignedLog {
         log_abs: 0.0,
         sign: 1.0,
     };
+}
 
-    #[inline]
-    fn product(self, other: Self) -> Self {
-        if self.sign == 0.0 || other.sign == 0.0 {
+// A pointed cumulant over `r` slots consists of one leading moment and every
+// proper pointed block of sizes `1..r-1`. Multiplication by the complementary
+// rounded moment can at most double an exact expansion's length:
+//
+// C₁ = 1
+// C₂ = 1 + 1·2C₁ = 3
+// C₃ = 1 + 1·2C₁ + 2·2C₂ = 15
+// C₄ = 1 + 1·2C₁ + 3·2C₂ + 3·2C₃ = 111.
+//
+// Certifying the final rounding subtracts one candidate binary64, requiring
+// exactly one additional component. These are structural support bounds, not
+// tunable numerical capacities.
+const LATENT_EXACT_EXPANSION_ORDER1: usize = 1;
+const LATENT_EXACT_EXPANSION_ORDER2: usize = 1 + 2 * LATENT_EXACT_EXPANSION_ORDER1;
+const LATENT_EXACT_EXPANSION_ORDER3: usize =
+    1 + 2 * LATENT_EXACT_EXPANSION_ORDER1 + 2 * 2 * LATENT_EXACT_EXPANSION_ORDER2;
+const LATENT_EXACT_EXPANSION_ORDER4: usize = 1
+    + 2 * LATENT_EXACT_EXPANSION_ORDER1
+    + 3 * 2 * LATENT_EXACT_EXPANSION_ORDER2
+    + 3 * 2 * LATENT_EXACT_EXPANSION_ORDER3;
+const LATENT_EXACT_EXPANSION_CAPACITY: usize = LATENT_EXACT_EXPANSION_ORDER4 + 1;
+const _: () = assert!(LATENT_EXACT_EXPANSION_ORDER1 == 1);
+const _: () = assert!(LATENT_EXACT_EXPANSION_ORDER2 == 3);
+const _: () = assert!(LATENT_EXACT_EXPANSION_ORDER3 == 15);
+const _: () = assert!(LATENT_EXACT_EXPANSION_ORDER4 == 111);
+const _: () = assert!(LATENT_EXACT_EXPANSION_CAPACITY == 112);
+
+/// Fixed, increasing-magnitude floating-point expansion.
+///
+/// Each component is an exact binary64 and their real sum is the represented
+/// value. `TwoSum` and FMA `TwoProduct` retain every arithmetic residual, so the
+/// pointed cumulant polynomial is evaluated exactly over its rounded binary64
+/// moments. The sole rounding occurs in [`Self::certified_round`].
+#[derive(Clone, Copy)]
+struct LatentExactExpansion {
+    components: [f64; LATENT_EXACT_EXPANSION_CAPACITY],
+    len: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LatentCertifiedCumulant {
+    /// Unique nearest binary64 rounding of the exact recurrence.
+    value: f64,
+    /// Outward upper bound on the sum of absolute expanded monomials.
+    ///
+    /// This is the numerator of the componentwise condition number and lets an
+    /// independent floating implementation derive its own forward-error band
+    /// without comparing against production or fitting a tolerance.
+    absolute_term_mass: f64,
+}
+
+impl LatentCertifiedCumulant {
+    const ZERO: Self = Self {
+        value: 0.0,
+        absolute_term_mass: 0.0,
+    };
+}
+
+impl LatentExactExpansion {
+    const ZERO: Self = Self {
+        components: [0.0; LATENT_EXACT_EXPANSION_CAPACITY],
+        len: 0,
+    };
+
+    fn scalar(value: f64) -> Self {
+        if value == 0.0 {
             Self::ZERO
         } else {
-            Self {
-                log_abs: self.log_abs + other.log_abs,
-                sign: self.sign * other.sign,
-            }
+            let mut out = Self::ZERO;
+            out.components[0] = value;
+            out.len = 1;
+            out
         }
     }
 
     #[inline]
-    fn negated(self) -> Self {
-        Self {
-            log_abs: self.log_abs,
-            sign: -self.sign,
+    fn component(&self, index: usize) -> f64 {
+        self.components[index]
+    }
+
+    fn push_nonzero(&mut self, value: f64) -> Result<(), &'static str> {
+        if value == 0.0 {
+            return Ok(());
+        }
+        if !value.is_finite() {
+            return Err("an exact-expansion component became non-finite");
+        }
+        if self.len == LATENT_EXACT_EXPANSION_CAPACITY {
+            return Err("the structurally bounded exact expansion exhausted its capacity");
+        }
+        self.components[self.len] = value;
+        self.len += 1;
+        Ok(())
+    }
+
+    /// Error-free `a + b = sum + error`.
+    #[inline]
+    fn two_sum(a: f64, b: f64) -> Result<(f64, f64), &'static str> {
+        let sum = a + b;
+        if !sum.is_finite() {
+            return Err("an exact-expansion addition overflowed");
+        }
+        let virtual_b = sum - a;
+        let virtual_a = sum - virtual_b;
+        let error = (a - virtual_a) + (b - virtual_b);
+        Ok((sum, error))
+    }
+
+    /// Error-free finite product through one fused residual.
+    #[inline]
+    fn two_product(a: f64, b: f64) -> Result<(f64, f64), &'static str> {
+        if a == 0.0 || b == 0.0 {
+            return Ok((0.0, 0.0));
+        }
+        let product = a * b;
+        if !product.is_finite() {
+            return Err("an exact-expansion product overflowed");
+        }
+        // An FMA product residual is exact provided neither the product nor its
+        // residual underflows. A product at least 2^-970 has an exact-product
+        // least-significant bit no smaller than 2^-1074 for binary64 operands.
+        // Below that proved range, refuse rather than silently call a rounded
+        // residual error-free.
+        if product.abs() < f64::MIN_POSITIVE / f64::EPSILON {
+            return Err("an exact-expansion product entered the unprovable underflow range");
+        }
+        let error = a.mul_add(b, -product);
+        if !error.is_finite() {
+            return Err("an exact-expansion product residual became non-finite");
+        }
+        Ok((product, error))
+    }
+
+    /// Error-free sum of two increasing-magnitude expansions.
+    fn add(self, other: Self) -> Result<Self, &'static str> {
+        if self.len == 0 {
+            return Ok(other);
+        }
+        if other.len == 0 {
+            return Ok(self);
+        }
+        if self.len + other.len > LATENT_EXACT_EXPANSION_CAPACITY {
+            return Err("an exact-expansion sum exceeded its structural support bound");
+        }
+
+        let mut left = 0usize;
+        let mut right = 0usize;
+        let take_left = |left_value: f64, right_value: f64| {
+            left_value.abs() <= right_value.abs()
+        };
+        let mut q = if take_left(self.component(left), other.component(right)) {
+            let value = self.component(left);
+            left += 1;
+            value
+        } else {
+            let value = other.component(right);
+            right += 1;
+            value
+        };
+        let mut out = Self::ZERO;
+
+        while left < self.len || right < other.len {
+            let next = if right == other.len
+                || (left < self.len
+                    && take_left(self.component(left), other.component(right)))
+            {
+                let value = self.component(left);
+                left += 1;
+                value
+            } else {
+                let value = other.component(right);
+                right += 1;
+                value
+            };
+            let (sum, error) = Self::two_sum(q, next)?;
+            out.push_nonzero(error)?;
+            q = sum;
+        }
+        out.push_nonzero(q)?;
+        Ok(out)
+    }
+
+    /// Exact multiplication by one rounded binary64 moment.
+    fn scale(self, scalar: f64) -> Result<Self, &'static str> {
+        if self.len == 0 || scalar == 0.0 {
+            return Ok(Self::ZERO);
+        }
+        if self.len * 2 > LATENT_EXACT_EXPANSION_CAPACITY {
+            return Err("a scaled exact expansion exceeded its structural support bound");
+        }
+
+        let (mut q, first_error) = Self::two_product(self.component(0), scalar)?;
+        let mut out = Self::ZERO;
+        out.push_nonzero(first_error)?;
+        for index in 1..self.len {
+            let (product, product_error) =
+                Self::two_product(self.component(index), scalar)?;
+            let (sum, sum_error) = Self::two_sum(q, product_error)?;
+            out.push_nonzero(sum_error)?;
+            // The exact scaling recurrence guarantees `|product| >= |sum|`;
+            // generic TwoSum keeps the identity valid without relying on that
+            // ordering as a runtime premise.
+            let (next_q, product_sum_error) = Self::two_sum(product, sum)?;
+            out.push_nonzero(product_sum_error)?;
+            q = next_q;
+        }
+        out.push_nonzero(q)?;
+        Ok(out)
+    }
+
+    #[inline]
+    fn next_up(value: f64) -> f64 {
+        if value.is_nan() || value == f64::INFINITY {
+            value
+        } else if value == 0.0 {
+            f64::from_bits(1)
+        } else if value > 0.0 {
+            f64::from_bits(value.to_bits() + 1)
+        } else {
+            f64::from_bits(value.to_bits() - 1)
+        }
+    }
+
+    #[inline]
+    fn next_down(value: f64) -> f64 {
+        -Self::next_up(-value)
+    }
+
+    /// Sign of the exact expansion after adding one binary64 scalar.
+    ///
+    /// Every finite binary64 is an integer multiple of 2^-1074. Accumulating
+    /// positive and negative significands into separate fixed unsigned integers
+    /// and comparing those integers is therefore an exact, order-independent
+    /// sign decision. It does not assume that a preceding error-free transform
+    /// happened to retain a particular nonoverlap strength.
+    fn exact_sign_after_adding_scalar(self, scalar: f64) -> Result<f64, &'static str> {
+        let ordering = exact_binary64_sum_sign(
+            self.components[..self.len]
+                .iter()
+                .copied()
+                .chain(std::iter::once(scalar)),
+        )
+        .map_err(|_| "the shared exact-sign accumulator rejected its structural finite input")?;
+        Ok(match ordering {
+            std::cmp::Ordering::Less => -1.0,
+            std::cmp::Ordering::Equal => 0.0,
+            std::cmp::Ordering::Greater => 1.0,
+        })
+    }
+
+    /// Unique nearest-even binary64 rounding, proved against both adjacent
+    /// midpoint boundaries.
+    fn certified_round(self) -> Result<f64, &'static str> {
+        if self.len == 0 {
+            return Ok(0.0);
+        }
+        let mut candidate = 0.0_f64;
+        for index in 0..self.len {
+            candidate += self.component(index);
+        }
+        if !candidate.is_finite() {
+            return Err("the exact cumulant is outside the finite binary64 range");
+        }
+
+        let residual = self.add(Self::scalar(-candidate))?;
+        if residual.len == 0 {
+            return Ok(candidate);
+        }
+        let residual_sign = residual.exact_sign_after_adding_scalar(0.0)?;
+        let adjacent = if residual_sign > 0.0 {
+            Self::next_up(candidate)
+        } else {
+            Self::next_down(candidate)
+        };
+        let midpoint_distance = 0.5 * (adjacent - candidate).abs();
+        if midpoint_distance == 0.0 {
+            return Err("the exact cumulant reached an unrepresentable subnormal midpoint");
+        }
+        let boundary_offset = -residual_sign * midpoint_distance;
+        match residual
+            .exact_sign_after_adding_scalar(boundary_offset)?
+            .partial_cmp(&0.0)
+        {
+            Some(std::cmp::Ordering::Less) if residual_sign > 0.0 => Ok(candidate),
+            Some(std::cmp::Ordering::Greater) if residual_sign < 0.0 => Ok(candidate),
+            Some(std::cmp::Ordering::Equal) => {
+                Err("the exact cumulant lies on a binary64 rounding tie")
+            }
+            _ => Err("the exact cumulant lies outside the candidate binary64 rounding cell"),
         }
     }
 }
@@ -2081,17 +2360,67 @@ mod tests_multidir_kernel {
         }
 
         let mut normalized = LatentMultiDirJet::constant(directions.len(), 1.0);
+        let mut signed_moments = [LatentSignedLog::ZERO; 16];
+        signed_moments[0] = LatentSignedLog::ONE;
         for mask in 1..term_lists.len() {
             let (log_abs, sign) = evaluate_terms(&term_lists[mask])?;
-            normalized.coeffs[mask] = if !log_abs.is_finite() || sign == 0.0 {
-                0.0
-            } else {
-                sign * (log_abs - base_log_sum).exp()
-            };
+            let moment =
+                latent_signed_log_normalized(log_abs, sign, base_log_sum, context)?;
+            signed_moments[mask] = moment;
+            normalized.coeffs[mask] = latent_signed_log_materialize(moment, context)?;
         }
 
         let mut out = normalized.compose_unary(latent_unary_derivatives_log_at_one());
         out.coeffs[0] += base_log_sum;
+        if term_lists.len() == 1 {
+            return Ok(out);
+        }
+
+        // Independently grade the pre-cutover floating oracle against the exact
+        // rounded-moment polynomial. `MultiDirJet::compose_unary` supports at
+        // most four live slots here. Its K=4 pointed schedule walks 34 Dot2
+        // terms (10 rounded operations each), writes 17 compensated power
+        // outputs (5 operations each), and combines four powers in at most 32
+        // operations: 457 total. Smaller orders are strict subsets, so this is
+        // a structural uniform bound rather than an empirical multiplier.
+        const MULTIDIR_DOT2_TERMS_K4: usize = 34;
+        const MULTIDIR_DOT2_OPERATIONS: usize = 10;
+        const MULTIDIR_POWER_OUTPUTS_K4: usize = 17;
+        const MULTIDIR_POWER_OUTPUT_OPERATIONS: usize = 5;
+        const MULTIDIR_COMBINE_OPERATIONS: usize = 32;
+        const MULTIDIR_MAX_OPERATIONS: usize =
+            MULTIDIR_DOT2_TERMS_K4 * MULTIDIR_DOT2_OPERATIONS
+                + MULTIDIR_POWER_OUTPUTS_K4 * MULTIDIR_POWER_OUTPUT_OPERATIONS
+                + MULTIDIR_COMBINE_OPERATIONS;
+        const _: () = assert!(MULTIDIR_MAX_OPERATIONS == 457);
+        let operation_roundoff = MULTIDIR_MAX_OPERATIONS as f64 * f64::EPSILON;
+        let gamma = LatentExactExpansion::next_up(
+            operation_roundoff / (1.0 - operation_roundoff),
+        );
+        let exact = latent_certified_cumulants(
+            signed_moments,
+            term_lists.len() - 1,
+            context,
+        )?;
+        for mask in 1..term_lists.len() {
+            let relative_roundoff =
+                LatentExactExpansion::next_up(gamma * exact[mask].absolute_term_mass);
+            let gradual_underflow =
+                MULTIDIR_MAX_OPERATIONS as f64 * f64::from_bits(1);
+            let arithmetic_bound =
+                LatentExactExpansion::next_up(relative_roundoff + gradual_underflow);
+            let error =
+                LatentExactExpansion::next_up((out.coeffs[mask] - exact[mask].value).abs());
+            assert!(
+                error <= arithmetic_bound,
+                "{context}: MultiDir mask {mask:#06b} escaped its derived forward-error \
+                 certificate: got={:.17e}, exact-rounded={:.17e}, error={error:.17e}, \
+                 bound={arithmetic_bound:.17e}, absolute-term-mass={:.17e}, operations={MULTIDIR_MAX_OPERATIONS}",
+                out.coeffs[mask],
+                exact[mask].value,
+                exact[mask].absolute_term_mass,
+            );
+        }
         Ok(out)
     }
 }
@@ -2157,7 +2486,7 @@ fn latent_signed_log_materialize(
     }
 }
 
-/// Convert normalized signed-log moments into derivatives of `log(S)`.
+/// Convert normalized signed-log moments into certified derivatives of `log(S)`.
 ///
 /// For a non-empty slot set `A`, normalized moments and log derivatives obey
 ///
@@ -2165,51 +2494,120 @@ fn latent_signed_log_materialize(
 ///
 /// where `m(A) = S_A / S`, `κ(A) = ∂_A log(S)`, and the distinguished pivot is
 /// the least-significant slot. Isolating `B = A` gives a pointed cumulant
-/// recurrence. Every product is multiplication in signed-log coordinates and
-/// every subtraction is one signed log-sum-exp, so no large normalized moment
-/// is rounded to value space before cancellation. The four-slot table covers
-/// the `(a,b,u,v)` layouts used by Order2, OneSeed, and TwoSeed.
-fn latent_signed_log_cumulants(
+/// recurrence.
+///
+/// The contract is deliberately about the inputs an actual binary64 consumer
+/// has: each finite signed-log moment is rounded once to binary64, then the
+/// exact-real cumulant polynomial over those rounded moments is evaluated by a
+/// fixed error-free expansion. Publication succeeds only when the expansion
+/// proves a unique nearest binary64 rounding. A moment lost to underflow,
+/// overflow, an unrepresentable intermediate product, or an ambiguous final
+/// rounding produces [`LatentSurvivalError::DerivativeAccuracyUnresolved`]
+/// instead of an approximate derivative.
+///
+/// The four-slot table covers the `(a,b,u,v)` layouts used by Order2, OneSeed,
+/// and TwoSeed.
+fn latent_certified_cumulants(
     moments: [LatentSignedLog; 16],
     target_mask: usize,
     context: &str,
-) -> Result<[LatentSignedLog; 16], LatentSurvivalError> {
+) -> Result<[LatentCertifiedCumulant; 16], LatentSurvivalError> {
     assert!(target_mask > 0 && target_mask < 16);
-    let mut cumulants = [LatentSignedLog::ZERO; 16];
+
+    let unresolved = |mask: usize, reason: &str| {
+        LatentSurvivalError::DerivativeAccuracyUnresolved {
+            reason: format!(
+                "{context} derivative mask {mask:#06b} has no certified binary64 value: {reason}"
+            ),
+        }
+    };
+    let mut rounded_moments = [0.0_f64; 16];
+    for mask in 0usize..16 {
+        if mask & !target_mask != 0 {
+            continue;
+        }
+        let moment = latent_signed_log_checked(
+            moments[mask].log_abs,
+            moments[mask].sign,
+            context,
+            "normalised cumulant moment",
+        )?;
+        if moment.sign == 0.0 {
+            continue;
+        }
+        let magnitude = moment.log_abs.exp();
+        if !magnitude.is_finite() {
+            return Err(unresolved(
+                mask,
+                "the rounded moment magnitude overflowed",
+            ));
+        }
+        if magnitude == 0.0 {
+            return Err(unresolved(
+                mask,
+                "the rounded moment magnitude underflowed to zero",
+            ));
+        }
+        rounded_moments[mask] = moment.sign * magnitude;
+    }
+
+    let mut exact_cumulants = [LatentExactExpansion::ZERO; 16];
+    let mut certificates = [LatentCertifiedCumulant::ZERO; 16];
     for mask in 1usize..16 {
         if mask & !target_mask != 0 {
             continue;
         }
         if mask.is_power_of_two() {
-            cumulants[mask] = moments[mask];
+            exact_cumulants[mask] = LatentExactExpansion::scalar(rounded_moments[mask]);
+            certificates[mask] = LatentCertifiedCumulant {
+                value: rounded_moments[mask],
+                absolute_term_mass: rounded_moments[mask].abs(),
+            };
             continue;
         }
         let pivot = 1usize << mask.trailing_zeros();
-        // One leading moment plus at most 2^(4 - 1) - 1 proper pointed
-        // submasks. Fixed scratch keeps this hot row primitive allocation-free.
-        let mut log_mags = [f64::NEG_INFINITY; 8];
-        let mut signs = [0.0_f64; 8];
-        let mut len = 1usize;
-        log_mags[0] = moments[mask].log_abs;
-        signs[0] = moments[mask].sign;
-
+        let mut cumulant = LatentExactExpansion::scalar(rounded_moments[mask]);
+        let mut absolute_term_mass = rounded_moments[mask].abs();
         let mut block = (mask - 1) & mask;
         while block != 0 {
             if block & pivot != 0 {
                 let complement = mask ^ block;
-                let subtract = cumulants[block].product(moments[complement]).negated();
-                log_mags[len] = subtract.log_abs;
-                signs[len] = subtract.sign;
-                len += 1;
+                let subtract = exact_cumulants[block]
+                    .scale(-rounded_moments[complement])
+                    .and_then(|term| cumulant.add(term))
+                    .map_err(|reason| unresolved(mask, reason))?;
+                cumulant = subtract;
+                let term_mass = LatentExactExpansion::next_up(
+                    certificates[block].absolute_term_mass
+                        * rounded_moments[complement].abs(),
+                );
+                if !term_mass.is_finite() {
+                    return Err(unresolved(
+                        mask,
+                        "the conditioning mass overflowed binary64",
+                    ));
+                }
+                absolute_term_mass =
+                    LatentExactExpansion::next_up(absolute_term_mass + term_mass);
+                if !absolute_term_mass.is_finite() {
+                    return Err(unresolved(
+                        mask,
+                        "the accumulated conditioning mass overflowed binary64",
+                    ));
+                }
             }
             block = (block - 1) & mask;
         }
-        let (log_abs, sign) = signed_log_sum_exp(&log_mags[..len], &signs[..len]);
-        let cumulant =
-            latent_signed_log_checked(log_abs, sign, context, "log-sum cumulant")?;
-        cumulants[mask] = cumulant;
+        let value = cumulant
+            .certified_round()
+            .map_err(|reason| unresolved(mask, reason))?;
+        exact_cumulants[mask] = cumulant;
+        certificates[mask] = LatentCertifiedCumulant {
+            value,
+            absolute_term_mass,
+        };
     }
-    Ok(cumulants)
+    Ok(certificates)
 }
 
 /// A one-pass analytic lift of a latent kernel sum into an order-specific jet.
@@ -2337,8 +2735,9 @@ fn latent_kernel_sum_order2_parts<const K: usize>(
 /// layout: the base carries `(1, S_a/S, S_ab/S)`, the one-seed parts carry
 /// `(S_u/S, S_au/S, S_abu/S)`, and the two-seed cross part carries `(S_uv/S,
 /// S_auv/S, S_abuv/S)`. For each requested output channel those moments become
-/// a four-slot `(a,b,u,v)` table for [`latent_signed_log_cumulants`]. The final
-/// log derivative is the first point at which the result enters value space.
+/// a four-slot `(a,b,u,v)` table for [`latent_certified_cumulants`]. Each
+/// derivative is published only after its exact expansion has certified the
+/// unique rounded result.
 fn latent_kernel_signed_log_parts<const K: usize>(
     base_log_sum: f64,
     normalized_parts: [LatentSignedLogOrder2<K>; 4],
@@ -2347,7 +2746,7 @@ fn latent_kernel_signed_log_parts<const K: usize>(
 ) -> Result<[Order2<K>; 4], LatentSurvivalError> {
     assert!(matches!(part_count, 1 | 2 | 4));
     let compose_log = |moments: [LatentSignedLog; 16], target_mask: usize| {
-        latent_signed_log_cumulants(moments, target_mask, context)
+        latent_certified_cumulants(moments, target_mask, context)
     };
     let moments_for = |a: usize, b: usize| {
         let base = &normalized_parts[0];
@@ -2382,7 +2781,7 @@ fn latent_kernel_signed_log_parts<const K: usize>(
     if part_count == 4 {
         out[2].0.v = latent_signed_log_materialize(normalized_parts[2].v, context)?;
         let composed = compose_log(moments_for(0, 0), 0b1100)?;
-        out[3].0.v = latent_signed_log_materialize(composed[0b1100], context)?;
+        out[3].0.v = composed[0b1100].value;
     }
 
     let (gradient_mask, hessian_mask) = match part_count {
@@ -2400,27 +2799,23 @@ fn latent_kernel_signed_log_parts<const K: usize>(
     };
     for a in 0..K {
         let composed = compose_log(moments_for(a, a), gradient_mask)?;
-        out[0].0.g[a] = latent_signed_log_materialize(composed[0b0001], context)?;
+        out[0].0.g[a] = composed[0b0001].value;
         if part_count >= 2 {
-            out[1].0.g[a] = latent_signed_log_materialize(composed[0b0101], context)?;
+            out[1].0.g[a] = composed[0b0101].value;
         }
         if part_count == 4 {
-            out[2].0.g[a] = latent_signed_log_materialize(composed[0b1001], context)?;
-            out[3].0.g[a] = latent_signed_log_materialize(composed[0b1101], context)?;
+            out[2].0.g[a] = composed[0b1001].value;
+            out[3].0.g[a] = composed[0b1101].value;
         }
         for b in a..K {
             let composed = compose_log(moments_for(a, b), hessian_mask)?;
-            out[0].0.h[a][b] =
-                latent_signed_log_materialize(composed[0b0011], context)?;
+            out[0].0.h[a][b] = composed[0b0011].value;
             if part_count >= 2 {
-                out[1].0.h[a][b] =
-                    latent_signed_log_materialize(composed[0b0111], context)?;
+                out[1].0.h[a][b] = composed[0b0111].value;
             }
             if part_count == 4 {
-                out[2].0.h[a][b] =
-                    latent_signed_log_materialize(composed[0b1011], context)?;
-                out[3].0.h[a][b] =
-                    latent_signed_log_materialize(composed[0b1111], context)?;
+                out[2].0.h[a][b] = composed[0b1011].value;
+                out[3].0.h[a][b] = composed[0b1111].value;
             }
             for part in 0..part_count {
                 out[part].0.h[b][a] = out[part].0.h[a][b];
@@ -2998,7 +3393,7 @@ fn latent_survival_row_primary_jet<const K: usize, B: LatentPrimaryJetBackend<K>
     quadctx: &QuadratureContext,
     row: &LatentSurvivalRow,
     point: LatentSurvivalPrimaryPoint,
-) -> Result<B::Jet, String> {
+) -> Result<B::Jet, LatentSurvivalError> {
     let LatentSurvivalPrimaryPoint {
         q_entry,
         q_exit,
@@ -3031,8 +3426,7 @@ fn latent_survival_row_primary_jet<const K: usize, B: LatentPrimaryJetBackend<K>
             entry_state,
             &entry_directions,
             "latent survival denominator",
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
 
     let numerator = match row.event_type {
         LatentSurvivalEventType::RightCensored => {
@@ -3062,8 +3456,7 @@ fn latent_survival_row_primary_jet<const K: usize, B: LatentPrimaryJetBackend<K>
                     exit_state,
                     &exit_directions,
                     "latent survival numerator",
-                )
-                .map_err(|error| error.to_string())?
+                )?
         }
         LatentSurvivalEventType::ExactEvent => {
             let exit_state = LatentKernelPrimaryState {
@@ -3104,8 +3497,7 @@ fn latent_survival_row_primary_jet<const K: usize, B: LatentPrimaryJetBackend<K>
                     exit_state,
                     &exit_directions,
                     "latent survival numerator",
-                )
-                .map_err(|error| error.to_string())?
+                )?
         }
         LatentSurvivalEventType::IntervalCensored => {
             latent_survival_interval_numerator_jet(backend, quadctx, row, point)?
@@ -3126,7 +3518,7 @@ fn latent_survival_interval_numerator_jet<const K: usize, B: LatentPrimaryJetBac
     quadctx: &QuadratureContext,
     row: &LatentSurvivalRow,
     point: LatentSurvivalPrimaryPoint,
-) -> Result<B::Jet, String> {
+) -> Result<B::Jet, LatentSurvivalError> {
     let LatentSurvivalPrimaryPoint {
         q_exit,
         q_right,
@@ -3169,8 +3561,7 @@ fn latent_survival_interval_numerator_jet<const K: usize, B: LatentPrimaryJetBac
             left_state,
             &left_directions,
             "latent survival interval left boundary",
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
     let log_right = backend
         .kernel_sum_log(
             quadctx,
@@ -3178,8 +3569,7 @@ fn latent_survival_interval_numerator_jet<const K: usize, B: LatentPrimaryJetBac
             right_state,
             &right_directions,
             "latent survival interval right boundary",
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
 
     latent_survival_positive_log_difference_jet(
         &log_left,
@@ -3190,7 +3580,6 @@ fn latent_survival_interval_numerator_jet<const K: usize, B: LatentPrimaryJetBac
         "latent survival interval numerator",
         |jet| backend.all_channels_finite(jet),
     )
-    .map_err(|error| error.to_string())
 }
 
 /// # Accuracy of the `log σ` curvature (#2566)
@@ -3234,7 +3623,7 @@ fn latent_survival_row_primary_gradient_hessian(
     row: &LatentSurvivalRow,
     point: LatentSurvivalPrimaryPoint,
     include_log_sigma: bool,
-) -> Result<(f64, Array1<f64>, Array2<f64>), String> {
+) -> Result<(f64, Array1<f64>, Array2<f64>), LatentSurvivalError> {
     if include_log_sigma {
         let out = latent_survival_row_primary_jet::<LATENT_SURVIVAL_PRIMARY_DIM, _>(
             &LatentOrder2Backend,
@@ -3291,7 +3680,7 @@ fn latent_survival_row_primary_one_seed_fixed_sigma(
     row: &LatentSurvivalRow,
     point: LatentSurvivalPrimaryPoint,
     direction: &Array1<f64>,
-) -> Result<OneSeed<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA>, String> {
+) -> Result<OneSeed<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA>, LatentSurvivalError> {
     let backend = LatentOneSeedBackend {
         direction: std::array::from_fn(|a| direction[a]),
     };
@@ -3306,7 +3695,7 @@ fn latent_survival_row_primary_two_seed_fixed_sigma(
     point: LatentSurvivalPrimaryPoint,
     direction_u: &Array1<f64>,
     direction_v: &Array1<f64>,
-) -> Result<TwoSeed<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA>, String> {
+) -> Result<TwoSeed<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA>, LatentSurvivalError> {
     let backend = LatentTwoSeedBackend {
         direction_u: std::array::from_fn(|a| direction_u[a]),
         direction_v: std::array::from_fn(|a| direction_v[a]),
@@ -3322,7 +3711,7 @@ fn latent_survival_row_primary_third_contracted(
     point: LatentSurvivalPrimaryPoint,
     direction: &Array1<f64>,
     include_log_sigma: bool,
-) -> Result<Array2<f64>, String> {
+) -> Result<Array2<f64>, LatentSurvivalError> {
     if include_log_sigma {
         let backend = LatentOneSeedBackend {
             direction: std::array::from_fn(|a| direction[a]),
@@ -3358,7 +3747,7 @@ fn latent_survival_row_primary_fourth_contracted(
     direction_u: &Array1<f64>,
     direction_v: &Array1<f64>,
     include_log_sigma: bool,
-) -> Result<Array2<f64>, String> {
+) -> Result<Array2<f64>, LatentSurvivalError> {
     if include_log_sigma {
         let backend = LatentTwoSeedBackend {
             direction_u: std::array::from_fn(|a| direction_u[a]),
@@ -4097,8 +4486,7 @@ impl LatentSurvivalFamily {
                 &row,
                 point,
                 include_log_sigma,
-            )
-            .map_err(|reason| LatentSurvivalError::NumericalFailure { reason })?;
+            )?;
             // ∂NLL/∂o_ch = −w · ∂(log-likelihood)/∂q_ch.
             entry[row_idx] = -checked_weighted_row_value(
                 wi,
@@ -5736,8 +6124,7 @@ impl LatentBinaryFamily {
                         sigma: self.latent_sd,
                     },
                     false,
-                )
-                .map_err(|reason| LatentSurvivalError::NumericalFailure { reason })?;
+                )?;
             let (_, grad_scale) = binary_from_log_survival_through_first(
                 row_log_survival,
                 self.event_target[row_idx],
