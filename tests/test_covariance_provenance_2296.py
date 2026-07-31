@@ -1,14 +1,15 @@
 """Public Python acceptance for honest uncertainty covariance provenance (#2296).
 
-The default interval request is a *required* smoothing-corrected request.  A
-successful prediction must therefore identify the resolved source as
-``"smoothing-corrected"`` and agree with the explicit smoothing request, never
-quietly reuse the conditional covariance.  Conversely, a valid fit that cannot
-form the smoothing correction must refuse the default request with a typed
-public error; conditional uncertainty remains available only when requested
-explicitly.
+The default interval policy chooses the best covariance definition the fitted
+model can actually supply, and the result must identify that resolved source.
+An explicit smoothing-corrected request must either produce that exact
+definition or return a typed refusal, never silently downgrade to conditional
+covariance.  A fit with no smoothing coordinates is an important exact case:
+its smoothing correction is the unique zero-dimensional zero matrix, so the
+corrected and conditional bands are numerically identical even though their
+result-owned definition labels remain distinct.
 
-Both tests fit and predict through the installed ``gamfit`` surface.  No FFI
+These tests fit and predict through the installed ``gamfit`` surface.  No FFI
 payload is mocked or edited.
 """
 
@@ -127,14 +128,13 @@ def _weibull_survival_frame(seed: int = 2296, n: int = 400):
     return {"time": observed, "event": event, "x": x}
 
 
-def test_single_cause_survival_interval_refuses_corrected_and_labels_conditional() -> None:
-    """#2296 close gate (survival): the single-cause survival interval honors
-    ``covariance_mode`` exactly. Location-scale fits persist no
-    smoothing-corrected covariance, so the DEFAULT (required-corrected)
-    interval request and the explicit ``"smoothing"`` request both refuse —
-    they must never quietly return the narrower conditional-``Vb`` band — and
-    the explicit conditional request succeeds with result-owned provenance in
-    the returned payload."""
+def test_single_cause_survival_interval_labels_exact_fixed_outer_covariance() -> None:
+    """#2296 close gate (survival): this parametric location-scale fit has no
+    smoothing coordinates, so ``J Var(rho) J.T`` is exactly the zero matrix and
+    smoothing-corrected covariance equals conditional covariance.  The default
+    and explicit smoothing requests must therefore succeed with corrected
+    provenance, while the explicit conditional request reports its own
+    definition; all three bands must be bit-identical."""
     df = _weibull_survival_frame()
     model = gamfit.fit(
         df,
@@ -144,28 +144,36 @@ def test_single_cause_survival_interval_refuses_corrected_and_labels_conditional
     new_data = {"time": np.array([2.0, 2.0]), "event": np.array([1.0, 1.0]),
                 "x": np.array([0.2, 0.8])}
 
-    with pytest.raises(gamfit.GamError) as default_refusal:
-        model.predict(new_data, interval=0.9, return_type="dict")
-    assert "smoothing-corrected" in str(default_refusal.value)
-
-    with pytest.raises(gamfit.GamError) as smoothing_refusal:
-        model.predict(
-            new_data,
-            interval=0.9,
-            covariance_mode="smoothing",
-            return_type="dict",
-        )
-    assert "smoothing-corrected" in str(smoothing_refusal.value)
+    default = model.predict(new_data, interval=0.9, return_type="dict")
+    smoothing = model.predict(
+        new_data,
+        interval=0.9,
+        covariance_mode="smoothing",
+        return_type="dict",
+    )
 
     conditional = model.predict(
         new_data,
         interval=0.9,
         covariance_mode="conditional",
+        return_type="dict",
     )
+
+    assert default.covariance_source == "smoothing-corrected"
+    assert smoothing.covariance_source == "smoothing-corrected"
     assert conditional.covariance_source == "conditional"
-    survival_se = np.asarray(conditional.survival_se, dtype=float)
-    assert survival_se.shape[0] == 2
-    assert np.all(np.isfinite(survival_se))
+
+    conditional_se = np.asarray(conditional.survival_se, dtype=float)
+    assert conditional_se.shape[0] == 2
+    assert np.all(np.isfinite(conditional_se))
+    np.testing.assert_array_equal(
+        np.asarray(default.survival_se, dtype=float),
+        conditional_se,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(smoothing.survival_se, dtype=float),
+        conditional_se,
+    )
 
     # A point-only survival prediction consults no coefficient covariance and
     # must not claim one.
