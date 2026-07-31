@@ -160,6 +160,37 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
     // is independent of this flag and stays folded.
     let jeffreys_info_depends_on_psi = family.joint_jeffreys_information_depends_on_psi();
 
+    // The explicit-ψ Jeffreys score and curvature use the SAME canonical
+    // coefficient-axis derivatives {Hdot[e_a]}. Previously each ψ axis rebuilt
+    // those p matrices once in the mixed-score loop and AGAIN while preparing
+    // ∂ψH_Φ: 2·K·p full row streams at one fixed β. Acquire the family's
+    // authoritative build-once all-axes batch exactly once and prepare the
+    // reduced Jeffreys base from that same batch. The original per-axis
+    // capability path remains below only for families without an all-axes
+    // provider; there is no approximate reuse.
+    let jeffreys_base_axis_derivatives: Option<Vec<Array2<f64>>> =
+        if jeffreys_hphi_ctx.is_some() && jeffreys_info_depends_on_psi {
+            family.joint_jeffreys_information_directional_derivative_all_axes_with_specs(
+                synced_states,
+                specs,
+            )?
+        } else {
+            None
+        };
+    let jeffreys_hphi_base = match (
+        jeffreys_hphi_ctx.as_ref(),
+        jeffreys_base_axis_derivatives.as_ref(),
+    ) {
+        (Some((z_j, h_joint)), Some(axis_derivatives)) => {
+            gam_solve::estimate::reml::jeffreys_subspace::JeffreysHphiDriftBase::prepare_with_axes(
+                h_joint.view(),
+                z_j.view(),
+                axis_derivatives.clone(),
+            )?
+        }
+        _ => None,
+    };
+
     for psi_global in 0..total_axes {
         let axis = hyper_layout
             .axis(psi_global)
@@ -271,37 +302,101 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
         // `∂_ψ∂_β_a H_info = ∂_ψHdot[e_a]` — the SAME family directional derivatives
         // the `∂_ψH_Φ` curvature term consumes. The helper returns `0.0` when the
         // conditioning gate skips the term, so a clean fit is byte-unchanged.
+        // Materialize the ψ-mixed canonical-axis batch once for this ψ axis.
+        // Both −∂β∂ψΦ below and ∂ψH_Φ below consume these exact matrices; the
+        // former code called the row-streaming provider independently in each
+        // location, doubling the genuinely ψ-dependent work as well as the base
+        // work. Keep canonical axis order so every contraction is unchanged.
+        let firth_pert_axis_derivatives: Option<Vec<Array2<f64>>> =
+            if jeffreys_hphi_ctx.is_some() && firth_pert_info.is_some() {
+                let mut axes = Vec::with_capacity(total);
+                let mut complete = true;
+                for a_idx in 0..total {
+                    let mut e_a = Array1::<f64>::zeros(total);
+                    e_a[a_idx] = 1.0;
+                    match materialize_authoritative_psi_hessian_directional_derivative(
+                        family,
+                        synced_states,
+                        specs,
+                        hyper_layout,
+                        psi_workspace.as_deref(),
+                        psi_global,
+                        &e_a,
+                        total,
+                    )? {
+                        Some(matrix) => axes.push(matrix),
+                        None => {
+                            complete = false;
+                            break;
+                        }
+                    }
+                }
+                complete.then_some(axes)
+            } else {
+                None
+            };
         if let (Some((z_j, h_joint)), Some(pert_info)) =
             (jeffreys_hphi_ctx.as_ref(), firth_pert_info.as_ref())
         {
-            for a_idx in 0..total {
-                let mut e_a = Array1::<f64>::zeros(total);
-                e_a[a_idx] = 1.0;
-                let hdot_a = family.joint_jeffreys_information_directional_derivative_with_specs(
-                    synced_states,
-                    specs,
-                    &e_a,
-                )?;
-                let psi_hdot_a = materialize_authoritative_psi_hessian_directional_derivative(
-                    family,
-                    synced_states,
-                    specs,
-                    hyper_layout,
-                    psi_workspace.as_deref(),
-                    psi_global,
-                    &e_a,
-                    total,
-                )?;
-                if let (Some(hdot_a), Some(psi_hdot_a)) = (hdot_a, psi_hdot_a) {
+            if let (Some(base_axes), Some(pert_axes)) = (
+                jeffreys_base_axis_derivatives.as_ref(),
+                firth_pert_axis_derivatives.as_ref(),
+            ) {
+                if base_axes.len() != total || pert_axes.len() != total {
+                    return Err(format!(
+                        "explicit-psi Jeffreys axis batch lengths ({}, {}) != coefficient dimension {total}",
+                        base_axes.len(),
+                        pert_axes.len(),
+                    ));
+                }
+                for (a_idx, (hdot_a, psi_hdot_a)) in
+                    base_axes.iter().zip(pert_axes.iter()).enumerate()
+                {
                     let phi_psi_beta_a =
                             gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_phi_explicit_param_second_derivative(
                                 h_joint.view(),
                                 z_j.view(),
                                 pert_info,
-                                &hdot_a,
-                                &psi_hdot_a,
+                                hdot_a,
+                                psi_hdot_a,
                             )?;
                     g[a_idx] -= phi_psi_beta_a;
+                }
+            } else {
+                // Typed capability path for families without a build-once
+                // canonical batch. Exact and intentionally isolated from the
+                // authoritative batched path above.
+                for a_idx in 0..total {
+                    let mut e_a = Array1::<f64>::zeros(total);
+                    e_a[a_idx] = 1.0;
+                    let hdot_a =
+                        family.joint_jeffreys_information_directional_derivative_with_specs(
+                            synced_states,
+                            specs,
+                            &e_a,
+                        )?;
+                    let psi_hdot_a =
+                        materialize_authoritative_psi_hessian_directional_derivative(
+                            family,
+                            synced_states,
+                            specs,
+                            hyper_layout,
+                            psi_workspace.as_deref(),
+                            psi_global,
+                            &e_a,
+                            total,
+                        )?;
+                    if let (Some(hdot_a), Some(psi_hdot_a)) = (hdot_a, psi_hdot_a) {
+                        let phi_psi_beta_a =
+                                gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_phi_explicit_param_second_derivative(
+                                    h_joint.view(),
+                                    z_j.view(),
+                                    pert_info,
+                                    &hdot_a,
+                                    &psi_hdot_a,
+                                )?;
+                        g[a_idx] -= phi_psi_beta_a;
+                    }
                 }
             }
         }
@@ -325,7 +420,12 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                 .filter(|_| jeffreys_info_depends_on_psi),
             firth_pert_info.as_ref(),
         ) {
-            Some(
+            match jeffreys_hphi_base.as_ref() {
+                Some(base) => Some(base.perturbation_derivative_batched_axes(
+                    pert_info,
+                    firth_pert_axis_derivatives,
+                )?),
+                None => Some(
                     gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_hphi_explicit_param_derivative(
                         h_joint.view(),
                         z_j.view(),
@@ -350,7 +450,8 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                             )
                         },
                     )?,
-                )
+                ),
+            }
         } else {
             None
         };
