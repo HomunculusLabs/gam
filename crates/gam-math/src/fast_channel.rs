@@ -441,6 +441,27 @@ mod oracle_tests {
             assert_close(compiled_bundle4(random4), strongest_hand_bundle4(random4));
         }
 
+        // Everything above is correctness parity (both orders, the canonical
+        // route, and 500 random argument pairs) and holds in any build.
+        //
+        // The timing gate below does NOT. Measured twice on the same tree, in a
+        // debug build, this assertion failed at a DIFFERENT order each time:
+        //
+        //   run 1: order-3  compiled=15.858 ns/row  hand=14.598 ns/row  (~9%)
+        //   run 2: order-4  compiled=18.728 ns/row  hand=18.192 ns/row  (~3%)
+        //
+        // A gate that picks a different loser on consecutive runs is sampling
+        // noise, not detecting a regression: without optimization the compiled
+        // lowering's whole advantage -- the thing this test exists to protect --
+        // is not generated. It also costs 1.5M timed iterations per run.
+        //
+        // So debug stops here, and the ratio is asserted only under `--release`,
+        // matching `release_measure_multinomial_fisher_vs_strongest_hand_932`
+        // (#932, `14395b5d7`), which reaches its timing assertion the same way.
+        if cfg!(debug_assertions) {
+            return;
+        }
+
         for (order, compiled_ns, hand_ns) in {
             let (c3, h3) =
                 paired_medians(order3, 1_000_000, compiled_bundle3, strongest_hand_bundle3);
