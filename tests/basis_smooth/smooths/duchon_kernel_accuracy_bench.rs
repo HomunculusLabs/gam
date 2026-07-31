@@ -43,13 +43,31 @@ fn rms(v: &[f64]) -> f64 {
     (v.iter().map(|t| t * t).sum::<f64>() / v.len() as f64).sqrt()
 }
 
-/// Print one comparison row and assert both gam variants genuinely beat the
-/// trivial (zero/mean) predictor, whose RMSE is `rms_truth`. A real
-/// reconstruction sits clearly below it; 70% of `rms_truth` is a generous
-/// "recovering, not blown up / collapsed" floor. The per-variant asserts here
-/// are the substance of each bench `#[test]`: the tests delegate their checks
-/// to this helper rather than duplicating the floor logic at every call site.
-fn report_and_check(
+/// Assert both gam variants genuinely beat the trivial (zero/mean) predictor,
+/// whose RMSE is `rms_truth`. A real reconstruction sits clearly below it; 70%
+/// of `rms_truth` is a generous "recovering, not blown up / collapsed" floor.
+///
+/// This floor is a statement about gam alone, so every call site evaluates it
+/// BEFORE spawning the reference interpreter. A host without R then withholds
+/// only the mgcv comparison it actually owns, instead of silently withdrawing
+/// gam's own recovery coverage along with it.
+fn check_gam_recovery_floor(label: &str, rmse_r3: f64, rmse_r2logr: f64, rms_truth: f64) {
+    let floor = 0.70 * rms_truth;
+    assert!(
+        rmse_r3 < floor,
+        "{label}: gam r³ did not recover (rmse {rmse_r3:.4} ≥ {floor:.4})"
+    );
+    assert!(
+        rmse_r2logr < floor,
+        "{label}: gam r²·log r did not recover (rmse {rmse_r2logr:.4} ≥ {floor:.4})"
+    );
+}
+
+/// Print one comparison row and, where a match factor is supplied, assert gam
+/// matches-or-beats mgcv's sharpness. The reference-free recovery floor is
+/// asserted separately by [`check_gam_recovery_floor`] ahead of the reference
+/// run; this helper owns only the checks that genuinely need mgcv.
+fn report_and_check_vs_mgcv(
     label: &str,
     rmse_r3: f64,
     rmse_r2logr: f64,
@@ -67,15 +85,6 @@ fn report_and_check(
     eprintln!(
         "{label:28} | gam r³={rmse_r3:.4} | gam r²·logr={rmse_r2logr:.4} | mgcv={rmse_mgcv:.4} \
          | rms_truth={rms_truth:.4} | best: {winner}"
-    );
-    let floor = 0.70 * rms_truth;
-    assert!(
-        rmse_r3 < floor,
-        "{label}: gam r³ did not recover (rmse {rmse_r3:.4} ≥ {floor:.4})"
-    );
-    assert!(
-        rmse_r2logr < floor,
-        "{label}: gam r²·log r did not recover (rmse {rmse_r2logr:.4} ≥ {floor:.4})"
     );
     if let Some(factor) = mgcv_match_factor {
         let limit = factor * rmse_mgcv;
@@ -134,6 +143,11 @@ fn bench_duchon_kernel_accuracy_1d() {
         let r3 = gam_grid_fit(&format!("y ~ duchon(x, k={k})"), &ds, &grid);
         let r2logr = gam_grid_fit(&format!("y ~ duchon(x, k={k}, power=0)"), &ds, &grid);
 
+        let rmse_r3 = rmse(&r3, &y_truth);
+        let rmse_r2logr = rmse(&r2logr, &y_truth);
+        let rms_truth = rms(&y_truth);
+        check_gam_recovery_floor(label, rmse_r3, rmse_r2logr, rms_truth);
+
         let mut x_all = x.clone();
         x_all.extend_from_slice(&x_test);
         let mut y_all = y.clone();
@@ -166,12 +180,12 @@ fn bench_duchon_kernel_accuracy_1d() {
         } else {
             None
         };
-        report_and_check(
+        report_and_check_vs_mgcv(
             label,
-            rmse(&r3, &y_truth),
-            rmse(&r2logr, &y_truth),
+            rmse_r3,
+            rmse_r2logr,
             rmse(mgcv, &y_truth),
-            rms(&y_truth),
+            rms_truth,
             mgcv_match_factor,
         );
     }
@@ -237,6 +251,11 @@ fn bench_duchon_kernel_accuracy_2d() {
         let r3 = gam_grid_fit(&format!("y ~ duchon(x, z, k={k})"), &ds, &grid);
         let r2logr = gam_grid_fit(&format!("y ~ duchon(x, z, k={k}, power=0)"), &ds, &grid);
 
+        let rmse_r3 = rmse(&r3, &y_truth);
+        let rmse_r2logr = rmse(&r2logr, &y_truth);
+        let rms_truth = rms(&y_truth);
+        check_gam_recovery_floor(label, rmse_r3, rmse_r2logr, rms_truth);
+
         let mut x_all = x.clone();
         x_all.extend_from_slice(&gx);
         let mut z_all = z.clone();
@@ -263,12 +282,12 @@ fn bench_duchon_kernel_accuracy_2d() {
         );
         let mgcv = r.vector("fitted");
 
-        report_and_check(
+        report_and_check_vs_mgcv(
             label,
-            rmse(&r3, &y_truth),
-            rmse(&r2logr, &y_truth),
+            rmse_r3,
+            rmse_r2logr,
             rmse(mgcv, &y_truth),
-            rms(&y_truth),
+            rms_truth,
             None,
         );
     }

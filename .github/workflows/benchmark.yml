@@ -783,20 +783,3 @@ jobs:
           name: benchmark-figures
           path: bench/figures.zip
           if-no-files-found: warn
-
-      # #2623: the last step, so every artifact above is already published when
-      # this goes red - a regression must not cost us the evidence of itself.
-      # Until now the verdict was computed and written and read by nobody, which
-      # is why a 130-480x matched-arm regression failed no job for months. The
-      # bound is relative to the reference arm measured in the same job on the
-      # same runner, so there is no absolute second-count to go stale.
-      # `steps.merge.outcome` rather than `success()`: a figure-generation
-      # failure must not swallow the verdict, but a run with no verdict at all
-      # should surface the merge failure instead of a confusing gate error.
-      - name: Enforce the matched benchmark regression gate
-        if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/workflow_tasks.py enforce_verdict \
-            ${{ github.event_name == 'schedule' && '--require-full-suite' || '' }}

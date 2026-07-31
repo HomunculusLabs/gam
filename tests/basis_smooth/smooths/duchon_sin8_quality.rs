@@ -271,17 +271,20 @@ fn duchon_sin8_max_error_within_budget() {
     );
     let c50_max = max_abs_err(&c50, &y_truth_test);
     let c50_rmse = rmse(&c50, &y_truth_test);
-    let mgcv_c50 = mgcv_duchon_predict(&data, &x_test, 50);
-    let mgcv_c50_rmse = rmse(&mgcv_c50, &y_truth_test);
     let c50_budget = 0.25_f64;
-    eprintln!(
-        "[duchon-sin8] duchon-centers50 max_err={c50_max:.4} truth_rmse={c50_rmse:.4}; \
-         mgcv-ds-k50 truth_rmse={mgcv_c50_rmse:.4}"
-    );
+    // The absolute max-error budget is a statement about gam alone, so it is
+    // taken BEFORE the mgcv call: on a host without R the missing interpreter
+    // then withholds only the comparison it owns, not this budget.
     assert!(
         c50_max <= c50_budget,
         "well-resolved centers=50 Duchon oversmooths sin8 at σ=0.10: \
          max_err {c50_max:.4} > {c50_budget:.2} (truth peak=2.0)"
+    );
+    let mgcv_c50 = mgcv_duchon_predict(&data, &x_test, 50);
+    let mgcv_c50_rmse = rmse(&mgcv_c50, &y_truth_test);
+    eprintln!(
+        "[duchon-sin8] duchon-centers50 max_err={c50_max:.4} truth_rmse={c50_rmse:.4}; \
+         mgcv-ds-k50 truth_rmse={mgcv_c50_rmse:.4}"
     );
     assert!(
         c50_rmse <= 1.10 * mgcv_c50_rmse,

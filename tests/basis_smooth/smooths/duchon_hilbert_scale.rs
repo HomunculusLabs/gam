@@ -205,6 +205,19 @@ fn deselection_recovers_truth() {
         "all-on default Duchon produced non-finite fitted values"
     );
 
+    // (a) Genuine recovery: a constant predictor scores RMS(sin)≈0.707; a real
+    // reconstruction of a single-period sine sits far below. 0.20 is a
+    // non-degeneracy floor a deselecting all-on default must clear. This is a
+    // statement about gam alone, so it is taken BEFORE the reference
+    // subprocess: a host without R then withholds only the mgcv comparison,
+    // not gam's own recovery coverage.
+    let gam_truth_rmse = rmse(&gam_fitted, &y_truth);
+    assert!(
+        gam_truth_rmse < 0.20,
+        "all-on default Duchon failed to recover sin(2πx): RMSE-vs-truth={gam_truth_rmse:.4} \
+         (REML must deselect the unhelpful blocks; trivial predictor ≈ 0.707)"
+    );
+
     // Same data fit by mgcv bs="ds", m=c(2,0): the mature Duchon baseline.
     let mut x_all = x.clone();
     x_all.extend_from_slice(&x_test);
@@ -229,20 +242,10 @@ fn deselection_recovers_truth() {
     let mgcv_fitted = r.vector("fitted");
     assert_eq!(mgcv_fitted.len(), m, "mgcv prediction length mismatch");
 
-    let gam_truth_rmse = rmse(&gam_fitted, &y_truth);
     let mgcv_truth_rmse = rmse(mgcv_fitted, &y_truth);
     eprintln!(
         "duchon-deselection-recovers-truth: n={n} grid={m} sigma=0.05 \
          gam_truth_rmse={gam_truth_rmse:.4} mgcv_truth_rmse={mgcv_truth_rmse:.4}"
-    );
-
-    // (a) Genuine recovery: a constant predictor scores RMS(sin)≈0.707; a real
-    // reconstruction of a single-period sine sits far below. 0.20 is a
-    // non-degeneracy floor a deselecting all-on default must clear.
-    assert!(
-        gam_truth_rmse < 0.20,
-        "all-on default Duchon failed to recover sin(2πx): RMSE-vs-truth={gam_truth_rmse:.4} \
-         (REML must deselect the unhelpful blocks; trivial predictor ≈ 0.707)"
     );
 
     // (b) Match-or-beat mgcv on truth recovery within a 10% accuracy margin. The

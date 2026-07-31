@@ -124,6 +124,39 @@ fn duchon_s0_thinplate_and_cubic_are_both_reachable_and_recover() {
         &gz,
     );
 
+    // ---- gam-only verdicts, taken BEFORE the reference subprocess ----------
+    // Assertions (1) and (2) below are statements about gam alone. Evaluating
+    // them here, ahead of `run_r`, keeps them measurable on a host that has no
+    // R: a missing interpreter then withholds only the comparison it actually
+    // owns, instead of silently withdrawing gam's own recovery and reachability
+    // coverage along with it.
+    let rmse_cubic = rmse(&gam_cubic, &y_truth);
+    let rmse_thinplate = rmse(&gam_thinplate, &y_truth);
+    // How different are the two gam fits from each other (reachability proof)?
+    let rel_cubic_vs_thinplate = relative_l2(&gam_cubic, &gam_thinplate);
+    let rms_truth = (y_truth.iter().map(|t| t * t).sum::<f64>() / y_truth.len() as f64).sqrt();
+
+    // (1) Both Duchon spectral powers recover the surface (non-degeneracy +
+    //     denoising; a constant predictor scores ≈ rms_truth ≈ 0.5).
+    assert!(
+        rmse_cubic < 0.15,
+        "gam cubic (r³) failed to recover the surface: rmse={rmse_cubic:.4}"
+    );
+    assert!(
+        rmse_thinplate < 0.15,
+        "gam thin-plate (r²·log r, power=0) failed to recover the surface: rmse={rmse_thinplate:.4}"
+    );
+
+    // (2) power=0 is genuinely REACHABLE: the s=0 fit is demonstrably different
+    //     from the r³ default. If power=0 were swallowed back to the cubic
+    //     default (the bug this guards), the two fits would be identical and
+    //     this relative difference would be ~0.
+    assert!(
+        rel_cubic_vs_thinplate > 1e-3,
+        "power=0 produced the SAME fit as the r³ default (rel_l2={rel_cubic_vs_thinplate:.2e}): \
+         the s=0 thin-plate Duchon kernel is not reachable — power=0 is being swallowed."
+    );
+
     // ---- mgcv Duchon bs="ds", m=c(2,0): the r²·log r reference -------------
     let mut x_all = x.clone();
     x_all.extend_from_slice(&gx);
@@ -152,12 +185,7 @@ fn duchon_s0_thinplate_and_cubic_are_both_reachable_and_recover() {
     assert_eq!(mgcv_fitted.len(), m, "mgcv prediction length mismatch");
 
     // ---- objective truth recovery -----------------------------------------
-    let rmse_cubic = rmse(&gam_cubic, &y_truth);
-    let rmse_thinplate = rmse(&gam_thinplate, &y_truth);
     let rmse_mgcv = rmse(mgcv_fitted, &y_truth);
-    // How different are the two gam fits from each other (reachability proof)?
-    let rel_cubic_vs_thinplate = relative_l2(&gam_cubic, &gam_thinplate);
-    let rms_truth = (y_truth.iter().map(|t| t * t).sum::<f64>() / y_truth.len() as f64).sqrt();
 
     eprintln!(
         "duchon-kernel-compare-2d: n={n} grid={m} sigma=0.10 rms_truth={rms_truth:.4}\n  \
@@ -165,27 +193,6 @@ fn duchon_s0_thinplate_and_cubic_are_both_reachable_and_recover() {
          gam r²·log r (s=0, power=0)   truth_rmse={rmse_thinplate:.4}\n  \
          mgcv bs=ds m=c(2,0) (r²·log r) truth_rmse={rmse_mgcv:.4}\n  \
          rel_l2(gam r³, gam r²·log r)  = {rel_cubic_vs_thinplate:.4}"
-    );
-
-    // (1) Both Duchon spectral powers recover the surface (non-degeneracy +
-    //     denoising; a constant predictor scores ≈ rms_truth ≈ 0.5).
-    assert!(
-        rmse_cubic < 0.15,
-        "gam cubic (r³) failed to recover the surface: rmse={rmse_cubic:.4}"
-    );
-    assert!(
-        rmse_thinplate < 0.15,
-        "gam thin-plate (r²·log r, power=0) failed to recover the surface: rmse={rmse_thinplate:.4}"
-    );
-
-    // (2) power=0 is genuinely REACHABLE: the s=0 fit is demonstrably different
-    //     from the r³ default. If power=0 were swallowed back to the cubic
-    //     default (the bug this guards), the two fits would be identical and
-    //     this relative difference would be ~0.
-    assert!(
-        rel_cubic_vs_thinplate > 1e-3,
-        "power=0 produced the SAME fit as the r³ default (rel_l2={rel_cubic_vs_thinplate:.2e}): \
-         the s=0 thin-plate Duchon kernel is not reachable — power=0 is being swallowed."
     );
 
     // (3) Match-or-beat mgcv on truth recovery, for BOTH spectral powers (mgcv
