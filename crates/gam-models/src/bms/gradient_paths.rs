@@ -2332,69 +2332,9 @@ mod jet_tower_oracle_tests {
 
     use super::*;
 
-    use gam_math::jet_tower::Tower4;
-
-    /// Single-row generic program used only by this independent derivative
-    /// oracle. Production consumes the generated row kernel directly.
-    struct RigidStandardNormalRow {
-        marginal: BernoulliMarginalLinkMap,
-        g: f64,
-        z: f64,
-        y: f64,
-        w: f64,
-        probit_scale: f64,
-    }
-
-    impl gam_math::jet_tower::RowProgram<2> for RigidStandardNormalRow {
-        fn n_rows(&self) -> usize {
-            1
-        }
-
-        fn primaries(&self, row: usize) -> Result<[f64; 2], String> {
-            if row != 0 {
-                return Err(format!("RigidStandardNormalRow: row {row} out of range"));
-            }
-            Ok([self.marginal.eta_value(), self.g])
-        }
-
-        fn eval<S: gam_math::jet_scalar::JetScalar<2>>(
-            &self,
-            row: usize,
-            p: &[S; 2],
-        ) -> Result<S, String> {
-            if row != 0 {
-                return Err(format!("RigidStandardNormalRow: row {row} out of range"));
-            }
-            rigid_standard_normal_row_nll_generic(
-                p,
-                self.marginal,
-                self.z,
-                self.y,
-                self.w,
-                self.probit_scale,
-            )
-        }
-    }
-
-    #[inline]
-    fn rigid_standard_normal_tower(
-        marginal: BernoulliMarginalLinkMap,
-        g: f64,
-        z: f64,
-        y: f64,
-        w: f64,
-        probit_scale: f64,
-    ) -> Result<Tower4<2>, String> {
-        let program = RigidStandardNormalRow {
-            marginal,
-            g,
-            z,
-            y,
-            w,
-            probit_scale,
-        };
-        gam_math::jet_tower::program_full_tower(&program, 0).map(|tower| *tower)
-    }
+    use crate::bms::test_support::{
+        RigidStandardNormalRow, rigid_standard_normal_tower,
+    };
 
     #[test]
     fn signed_probit_stack_preserves_extreme_tail_derivatives_and_weight_sign() {
