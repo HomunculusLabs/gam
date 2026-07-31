@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       scenarios:
-        description: "Comma-separated scenario names to benchmark"
-        required: true
+        description: "all, or a comma-separated scenario subset"
+        required: false
+        default: "all"
         type: string
       contenders:
         description: "Optional comma-separated contender names; empty runs the scenario defaults"

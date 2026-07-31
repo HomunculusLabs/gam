@@ -58,6 +58,34 @@ class WorkflowTasks2623Tests(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "Unknown benchmark scenario"):
                     _TASKS.build_matrix("does_not_exist")
 
+    def test_manual_all_matrix_matches_the_complete_scheduled_matrix(self) -> None:
+        def matrix_for(event_name: str, requested: str | None) -> dict[str, str]:
+            with tempfile.TemporaryDirectory() as td:
+                output = Path(td) / "output"
+                with patch.dict(
+                    os.environ,
+                    {"GITHUB_EVENT_NAME": event_name, "GITHUB_OUTPUT": str(output)},
+                    clear=False,
+                ):
+                    _TASKS.build_matrix(requested)
+                return dict(
+                    line.split("=", 1) for line in output.read_text().splitlines()
+                )
+
+        scheduled = matrix_for("schedule", None)
+        for requested in (None, "", "all", "ALL", "*"):
+            manual = matrix_for("workflow_dispatch", requested)
+            self.assertEqual(manual["parallel_matrix"], scheduled["parallel_matrix"])
+            self.assertEqual(manual["parallel_count"], scheduled["parallel_count"])
+            self.assertEqual(manual["serial_matrix"], scheduled["serial_matrix"])
+            self.assertEqual(manual["serial_count"], scheduled["serial_count"])
+
+        selected_count = int(scheduled["parallel_count"]) + int(
+            scheduled["serial_count"]
+        )
+        configured_count = len(_TASKS._load_scenario_config()["scenarios"])
+        self.assertEqual(selected_count, configured_count)
+
     def test_matched_verdict_checks_both_speed_measures_and_every_accuracy_direction(self) -> None:
         rows = [
             {

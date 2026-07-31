@@ -64,20 +64,20 @@ def build_matrix(requested_scenarios=None):
 
     event_name = os.environ.get("GITHUB_EVENT_NAME", "").strip().lower()
     is_nightly = event_name == "schedule"
+    requested = str(requested_scenarios or "").strip()
+    selects_all = not requested or requested.lower() == "all" or requested == "*"
 
     if is_nightly:
-        if requested_scenarios:
+        if not selects_all:
             raise SystemExit("Scheduled benchmark runs cannot select a scenario subset")
         selected = names
+    elif selects_all:
+        selected = names
     else:
-        if not requested_scenarios:
-            raise SystemExit(
-                "workflow_dispatch requires --scenarios with one or more comma-separated names"
-            )
         selected = list(
             dict.fromkeys(
                 name.strip()
-                for name in requested_scenarios.split(",")
+                for name in requested.split(",")
                 if name.strip()
             )
         )
