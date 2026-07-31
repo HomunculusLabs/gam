@@ -1191,22 +1191,22 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
             .add_pullback_primary_hessian(target, row, &self.slices, &h_arr);
     }
 
-    /// Dense-design BLAS-3 assembly of the rigid survival joint Hessian.
+    /// Dense-backed BLAS-3 assembly of the rigid survival joint Hessian.
     ///
     /// The generic row-kernel path scatters every row's 4×4 primary Hessian
-    /// through a sequence of coefficient-space row outer products.  That is the
-    /// right structural algorithm for sparse designs, but on dense designs it is
-    /// scalar BLAS-1 work proportional to n·p².  Here the same pullback is
-    /// regrouped into weighted design Grams,
+    /// through coefficient-space row outer products. That is the right
+    /// structural algorithm for sparse designs, but for dense and dense-backed
+    /// operator designs it is scalar BLAS-1 work proportional to n·p². Here the
+    /// identical pullback is regrouped into weighted design Grams,
     ///
-    ///     Σᵢ wᵢ xᵢ yᵢᵀ = Xᵀ diag(w) Y,
+    ///     Σᵢ wᵢ xᵢ yᵢᵀ = Xᵀ diag(w) Y.
     ///
-    /// one block at a time.  This is an algebraic change of execution only: the
-    /// four primary Jacobians and every primary-Hessian weight are identical to
-    /// `add_pullback_hessian`.  The override is deliberately total only for
-    /// `RowSet::All` with materialized dense designs.  Sparse and operator-only
-    /// designs have a different memory optimum and keep the generic
-    /// sparse-aware row scatter; a Horvitz–Thompson row set keeps its explicit
+    /// Operator-backed designs are materialized one bounded row chunk at a
+    /// time, never as a whole matrix. Materialized designs are borrowed as
+    /// zero-copy views of the same chunks. The byte-budgeted chunk height makes
+    /// the representation choice irrelevant to the algorithm without creating
+    /// a biobank-scale memory cliff. Sparse designs retain the generic
+    /// sparse-aware scatter, and Horvitz–Thompson row sets retain their explicit
     /// per-row weights.
     fn hessian_dense_override(
         &self,
@@ -1230,169 +1230,226 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
             &self.family.design_exit,
             &self.family.design_derivative_exit,
         ];
+        let marginal_design = &self.family.marginal_design;
+        let logslope_design = self.family.logslope_layout.coefficient_design();
         if time_designs.iter().any(|design| design.is_sparse())
-            || self.family.marginal_design.is_sparse()
-            || self
-                .family
-                .logslope_layout
-                .coefficient_design()
-                .is_sparse()
+            || marginal_design.is_sparse()
+            || logslope_design.is_sparse()
         {
             return None;
         }
-        let [Some(entry), Some(exit), Some(derivative)] =
-            time_designs.map(DesignMatrix::as_dense_ref)
-        else {
-            return None;
-        };
-        let Some(marginal) = self.family.marginal_design.as_dense_ref() else {
-            return None;
-        };
-        let Some(logslope) = self
-            .family
-            .logslope_layout
-            .coefficient_design()
-            .as_dense_ref()
-        else {
-            return None;
-        };
-        let time = [entry, exit, derivative];
-        let n = row_hessians.len();
-        if time.iter().any(|design| design.nrows() != n)
-            || marginal.nrows() != n
-            || logslope.nrows() != n
-        {
-            return Some(Err(format!(
-                "survival marginal-slope dense Hessian design rows disagree: \
-                 hessians={n}, time=({},{},{}), marginal={}, logslope={}",
-                time[0].nrows(),
-                time[1].nrows(),
-                time[2].nrows(),
-                marginal.nrows(),
-                logslope.nrows(),
-            )));
-        }
 
-        let weights: [[Array1<f64>; 4]; 4] = std::array::from_fn(|a| {
-            std::array::from_fn(|b| {
-                Array1::from_iter(row_hessians.iter().map(|hessian| hessian[a][b]))
-            })
-        });
-        let mut dense = Array2::<f64>::zeros((self.slices.total, self.slices.total));
+        Some((|| {
+            fn dense_chunk<'a>(
+                design: &'a DesignMatrix,
+                rows: std::ops::Range<usize>,
+                label: &str,
+            ) -> Result<ndarray::CowArray<'a, f64, ndarray::Ix2>, String> {
+                match design.as_dense_ref() {
+                    Some(full) => Ok(full.slice(s![rows, ..]).into()),
+                    None => design
+                        .try_row_chunk(rows.clone())
+                        .map(Into::into)
+                        .map_err(|error| {
+                            format!(
+                                "survival marginal-slope dense Hessian {label} \
+                                 try_row_chunk({}..{}): {error}",
+                                rows.start, rows.end,
+                            )
+                        }),
+                }
+            }
 
-        // The three time primaries share one coefficient block but have distinct
-        // entry/exit/derivative designs.
-        for a in 0..3 {
-            for b in 0..3 {
-                let gram = gam_linalg::faer_ndarray::fast_xt_diag_y(
-                    time[a],
-                    &weights[a][b],
-                    time[b],
+            let n = row_hessians.len();
+            for (label, design) in [
+                ("time-entry", time_designs[0]),
+                ("time-exit", time_designs[1]),
+                ("time-derivative", time_designs[2]),
+                ("marginal", marginal_design),
+                ("logslope", logslope_design),
+            ] {
+                if design.nrows() != n {
+                    return Err(format!(
+                        "survival marginal-slope dense Hessian {label} rows={} != hessians={n}",
+                        design.nrows(),
+                    ));
+                }
+            }
+
+            // Bound simultaneous operator materialization of all five design
+            // chunks. 64 MiB is large enough for efficient GEMM panels and
+            // small enough to remain negligible beside the output Hessian.
+            const DESIGN_CHUNK_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+            const MAX_CHUNK_ROWS: usize = 8_192;
+            let columns_per_row = time_designs
+                .iter()
+                .map(|design| design.ncols())
+                .sum::<usize>()
+                .saturating_add(marginal_design.ncols())
+                .saturating_add(logslope_design.ncols())
+                .max(1);
+            let bytes_per_row =
+                columns_per_row.saturating_mul(std::mem::size_of::<f64>());
+            let chunk_rows = (DESIGN_CHUNK_BUDGET_BYTES / bytes_per_row)
+                .max(1)
+                .min(MAX_CHUNK_ROWS);
+
+            let mut dense =
+                Array2::<f64>::zeros((self.slices.total, self.slices.total));
+            for start in (0..n).step_by(chunk_rows) {
+                let end = (start + chunk_rows).min(n);
+                let range = start..end;
+                let time = [
+                    dense_chunk(time_designs[0], range.clone(), "time-entry")?,
+                    dense_chunk(time_designs[1], range.clone(), "time-exit")?,
+                    dense_chunk(time_designs[2], range.clone(), "time-derivative")?,
+                ];
+                let marginal =
+                    dense_chunk(marginal_design, range.clone(), "marginal")?;
+                let logslope =
+                    dense_chunk(logslope_design, range.clone(), "logslope")?;
+                let local_hessians = &row_hessians[range];
+
+                let weights: [[Array1<f64>; 4]; 4] = std::array::from_fn(|a| {
+                    std::array::from_fn(|b| {
+                        Array1::from_iter(
+                            local_hessians.iter().map(|hessian| hessian[a][b]),
+                        )
+                    })
+                });
+
+                // The three time primaries share one coefficient block but
+                // have distinct entry/exit/derivative designs.
+                for a in 0..3 {
+                    for b in 0..3 {
+                        let gram = gam_linalg::faer_ndarray::fast_xt_diag_y(
+                            &time[a],
+                            &weights[a][b],
+                            &time[b],
+                        );
+                        dense
+                            .slice_mut(s![
+                                self.slices.time.clone(),
+                                self.slices.time.clone()
+                            ])
+                            .scaled_add(1.0, &gram);
+                    }
+                }
+
+                let mm_weight =
+                    &weights[0][0] + &weights[0][1] + &weights[1][0] + &weights[1][1];
+                let mm =
+                    gam_linalg::faer_ndarray::fast_xt_diag_x(&marginal, &mm_weight);
+                dense
+                    .slice_mut(s![
+                        self.slices.marginal.clone(),
+                        self.slices.marginal.clone()
+                    ])
+                    .scaled_add(1.0, &mm);
+
+                let gg =
+                    gam_linalg::faer_ndarray::fast_xt_diag_x(&logslope, &weights[3][3]);
+                dense
+                    .slice_mut(s![
+                        self.slices.logslope.clone(),
+                        self.slices.logslope.clone()
+                    ])
+                    .scaled_add(1.0, &gg);
+
+                let mg_weight = &weights[0][3] + &weights[1][3];
+                let mg = gam_linalg::faer_ndarray::fast_xt_diag_y(
+                    &marginal,
+                    &mg_weight,
+                    &logslope,
                 );
                 dense
-                    .slice_mut(s![self.slices.time.clone(), self.slices.time.clone()])
-                    .scaled_add(1.0, &gram);
+                    .slice_mut(s![
+                        self.slices.marginal.clone(),
+                        self.slices.logslope.clone()
+                    ])
+                    .scaled_add(1.0, &mg);
+
+                for a in 0..3 {
+                    let tg = gam_linalg::faer_ndarray::fast_xt_diag_y(
+                        &time[a],
+                        &weights[a][3],
+                        &logslope,
+                    );
+                    dense
+                        .slice_mut(s![
+                            self.slices.time.clone(),
+                            self.slices.logslope.clone()
+                        ])
+                        .scaled_add(1.0, &tg);
+
+                    let tm_weight = &weights[a][0] + &weights[a][1];
+                    let tm = gam_linalg::faer_ndarray::fast_xt_diag_y(
+                        &time[a],
+                        &tm_weight,
+                        &marginal,
+                    );
+                    dense
+                        .slice_mut(s![
+                            self.slices.time.clone(),
+                            self.slices.marginal.clone()
+                        ])
+                        .scaled_add(1.0, &tm);
+                }
             }
-        }
 
-        let mm_weight =
-            &weights[0][0] + &weights[0][1] + &weights[1][0] + &weights[1][1];
-        let mm = gam_linalg::faer_ndarray::fast_xt_diag_x(marginal, &mm_weight);
-        dense
-            .slice_mut(s![
-                self.slices.marginal.clone(),
-                self.slices.marginal.clone()
-            ])
-            .assign(&mm);
-
-        let gg =
-            gam_linalg::faer_ndarray::fast_xt_diag_x(logslope, &weights[3][3]);
-        dense
-            .slice_mut(s![
-                self.slices.logslope.clone(),
-                self.slices.logslope.clone()
-            ])
-            .assign(&gg);
-
-        // Match the existing rigid pullback's symmetry contract: the primary
-        // Hessian is symmetric, and each off-diagonal coefficient block is
-        // assembled once then mirrored exactly.
-        let mg_weight = &weights[0][3] + &weights[1][3];
-        let mg =
-            gam_linalg::faer_ndarray::fast_xt_diag_y(marginal, &mg_weight, logslope);
-        dense
-            .slice_mut(s![
-                self.slices.marginal.clone(),
-                self.slices.logslope.clone()
-            ])
-            .assign(&mg);
-        dense
-            .slice_mut(s![
-                self.slices.logslope.clone(),
-                self.slices.marginal.clone()
-            ])
-            .assign(&mg.t());
-
-        for a in 0..3 {
-            let tg = gam_linalg::faer_ndarray::fast_xt_diag_y(
-                time[a],
-                &weights[a][3],
-                logslope,
-            );
+            // Match the existing rigid pullback's symmetry contract: the
+            // primary Hessian is symmetric, and each off-diagonal coefficient
+            // block is assembled once then mirrored exactly.
+            let mg = dense
+                .slice(s![
+                    self.slices.marginal.clone(),
+                    self.slices.logslope.clone()
+                ])
+                .to_owned();
             dense
                 .slice_mut(s![
+                    self.slices.logslope.clone(),
+                    self.slices.marginal.clone()
+                ])
+                .assign(&mg.t());
+            let tg = dense
+                .slice(s![
                     self.slices.time.clone(),
                     self.slices.logslope.clone()
                 ])
-                .scaled_add(1.0, &tg);
-
-            let tm_weight = &weights[a][0] + &weights[a][1];
-            let tm =
-                gam_linalg::faer_ndarray::fast_xt_diag_y(time[a], &tm_weight, marginal);
+                .to_owned();
             dense
                 .slice_mut(s![
+                    self.slices.logslope.clone(),
+                    self.slices.time.clone()
+                ])
+                .assign(&tg.t());
+            let tm = dense
+                .slice(s![
                     self.slices.time.clone(),
                     self.slices.marginal.clone()
                 ])
-                .scaled_add(1.0, &tm);
-        }
-        let tg = dense
-            .slice(s![
-                self.slices.time.clone(),
-                self.slices.logslope.clone()
-            ])
-            .to_owned();
-        dense
-            .slice_mut(s![
-                self.slices.logslope.clone(),
-                self.slices.time.clone()
-            ])
-            .assign(&tg.t());
-        let tm = dense
-            .slice(s![
-                self.slices.time.clone(),
-                self.slices.marginal.clone()
-            ])
-            .to_owned();
-        dense
-            .slice_mut(s![
-                self.slices.marginal.clone(),
-                self.slices.time.clone()
-            ])
-            .assign(&tm.t());
+                .to_owned();
+            dense
+                .slice_mut(s![
+                    self.slices.marginal.clone(),
+                    self.slices.time.clone()
+                ])
+                .assign(&tm.t());
 
-        static DENSE_HESSIAN_LOGGED: std::sync::Once = std::sync::Once::new();
-        DENSE_HESSIAN_LOGGED.call_once(|| {
-            log::info!(
-                "[STAGE] survival marginal-slope dense Hessian BLAS-3 path: \
-                 n={n} p={} blocks=({},{},{})",
-                self.slices.total,
-                self.slices.time.len(),
-                self.slices.marginal.len(),
-                self.slices.logslope.len(),
-            );
-        });
-        Some(Ok(dense))
+            static DENSE_HESSIAN_LOGGED: std::sync::Once = std::sync::Once::new();
+            DENSE_HESSIAN_LOGGED.call_once(|| {
+                log::info!(
+                    "[STAGE] survival marginal-slope dense Hessian BLAS-3 path: \
+                     n={n} p={} blocks=({},{},{}) chunk_rows={chunk_rows}",
+                    self.slices.total,
+                    self.slices.time.len(),
+                    self.slices.marginal.len(),
+                    self.slices.logslope.len(),
+                );
+            });
+            Ok(dense)
+        })())
     }
 
     fn add_diagonal_quadratic(&self, row: usize, h: &[[f64; 4]; 4], diag: &mut [f64]) {
