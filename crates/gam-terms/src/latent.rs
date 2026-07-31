@@ -1190,7 +1190,19 @@ impl LatentCoordValues {
         if self.manifold.is_euclidean() {
             return;
         }
-        assert_eq!(self.manifold.ambient_dim(self.latent_dim), self.latent_dim);
+        // In-place row projection writes back into the same `latent_dim`-wide
+        // slice it read, so the manifold's ambient dimension must equal the
+        // latent dimension. A mismatch means the slice arithmetic below would
+        // read or write past a row boundary; say which two numbers disagreed
+        // rather than only that they did.
+        assert_eq!(
+            self.manifold.ambient_dim(self.latent_dim),
+            self.latent_dim,
+            "in-place manifold projection requires ambient_dim == latent_dim: manifold reports \
+             ambient {} for latent_dim {}",
+            self.manifold.ambient_dim(self.latent_dim),
+            self.latent_dim,
+        );
         for n in 0..self.n_obs {
             let start = n * self.latent_dim;
             let end = start + self.latent_dim;

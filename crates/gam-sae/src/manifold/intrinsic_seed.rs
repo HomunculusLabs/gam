@@ -697,7 +697,12 @@ mod tests {
             let kinds = vec![kind.clone(); k];
             let dims = vec![d; k];
             let seed = sae_intrinsic_seed_initial_coords(z.view(), &kinds, &dims).unwrap();
-            assert_eq!(seed.dim(), (k, n, d));
+            assert_eq!(
+                seed.dim(),
+                (k, n, d),
+                "{kind:?}: intrinsic seed must be shaped (k={k}, n={n}, d={d}); got {:?}",
+                seed.dim(),
+            );
             for v in seed.iter() {
                 assert!(
                     v.is_finite(),

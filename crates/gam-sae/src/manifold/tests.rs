@@ -3265,7 +3265,17 @@ pub(crate) fn refine_iteration_limit_probe_budget_never_extends() {
             0.5,
             false
         ),
-        accepted_progress
+        accepted_progress,
+        "accepted-point policy: a real residual drop (prev=Some(1.0), now=0.5) must extend the \
+         budget from base {accepted_base} to progress {accepted_progress}; got {}",
+        SaeManifoldTerm::refine_iteration_limit(
+            accepted_base,
+            accepted_base,
+            accepted_progress,
+            Some(1.0),
+            0.5,
+            false
+        ),
     );
     // …a stalled residual does not…
     assert_eq!(
