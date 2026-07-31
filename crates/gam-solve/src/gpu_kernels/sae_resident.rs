@@ -705,7 +705,13 @@ impl DeviceResidentArrowWorkspace {
                     // the slabs. Either failure becomes a Solve error so the
                     // LM-escalation arm below grows the ridge and retries,
                     // identical to a per-iterate solve failure.
-                    self.resident_step(&mut frames, &residual, ridge_t, ridge_beta)
+                    self.resident_step(
+                        &mut frames,
+                        &mut accounting,
+                        &residual,
+                        ridge_t,
+                        ridge_beta,
+                    )
                 }
                 InnerSolveMode::DeviceReupload => {
                     // #1017 residency baseline: re-upload D/B/g and re-factor on
@@ -1023,7 +1029,7 @@ impl DeviceResidentArrowWorkspace {
             let solve_start = std::time::Instant::now();
             let solution = match mode {
                 InnerSolveMode::DeviceResident => {
-                    self.resident_step(shared, &residual, ridge_t, ridge_beta)
+                    self.resident_step(shared, &mut accounting, &residual, ridge_t, ridge_beta)
                 }
                 InnerSolveMode::DeviceReupload => {
                     solve_arrow_newton_step(&residual, ridge_t, ridge_beta, None)
@@ -1512,9 +1518,18 @@ impl DeviceResidentArrowWorkspace {
     /// A numerical refusal (`RidgeBumpRequired` / `SchurFactorFailed`) is returned
     /// rather than retried on the other arm: the caller's LM arm grows the ridge
     /// and retries, which is what a failed frame build already did.
+    ///
+    /// `accounting` receives the FRAME-BUILD half of this call's cost separately
+    /// from the gradient solve. The issue's headline number is a split — "~277 of
+    /// 505 ms is frame build" — and no counter on the fit could express it, so the
+    /// only way to check the residency claim was an external profiler on a card
+    /// nobody could rerun. The three build regions timed here (base-block upload,
+    /// on-device re-factor, legacy host-rebuild) are exactly the work residency is
+    /// supposed to remove.
     fn resident_step(
         &self,
         frames: &mut SharedFrameState,
+        accounting: &mut ResidencyAccounting,
         residual: &ArrowSchurSystem,
         ridge_t: f64,
         ridge_beta: f64,
@@ -1534,13 +1549,16 @@ impl DeviceResidentArrowWorkspace {
 
         // Level 1: the resident base blocks. Built at most once per loop.
         if !frames.base_declined && frames.base.is_none() {
-            match crate::gpu_kernels::arrow_schur::ResidentBaseArrowFrameHandle::new(
-                residual, None,
-            ) {
+            let build_start = std::time::Instant::now();
+            let built =
+                crate::gpu_kernels::arrow_schur::ResidentBaseArrowFrameHandle::new(residual, None);
+            accounting.frame_build_seconds += build_start.elapsed().as_secs_f64();
+            match built {
                 Ok(base) => {
                     gam_gpu::profile::telemetry_record_handle_creation(self.context_id());
                     gam_gpu::profile::telemetry_record_h2d(self.frame_upload_bytes());
                     frames.base_builds += 1;
+                    accounting.base_builds += 1;
                     frames.base = Some(base);
                 }
                 Err(err) => {
@@ -1569,15 +1587,18 @@ impl DeviceResidentArrowWorkspace {
                 // ones so a failed factor cannot leave a key naming device state
                 // that no longer matches it.
                 frames.base_keyed = None;
-                let factors = base
-                    .factor_at(ridge_t, ridge_beta)
-                    .map_err(map_gpu_error)?;
+                let refactor_start = std::time::Instant::now();
+                let factored = base.factor_at(ridge_t, ridge_beta);
+                accounting.frame_build_seconds += refactor_start.elapsed().as_secs_f64();
+                let factors = factored.map_err(map_gpu_error)?;
                 frames.base_refactors += 1;
+                accounting.base_refactors += 1;
                 gam_gpu::profile::telemetry_record_factorization();
                 gam_gpu::profile::telemetry_record_h2d(n * d * d * std::mem::size_of::<f64>());
                 frames.base_keyed = Some(factors);
             } else {
                 frames.base_gradient_solves += 1;
+                accounting.base_gradient_solves += 1;
             }
             match frames.base_keyed.as_ref() {
                 Some(factors) => {
@@ -1621,11 +1642,15 @@ impl DeviceResidentArrowWorkspace {
             }
         }
         frames.keyed = None;
-        match crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle::new(
+        let rebuild_start = std::time::Instant::now();
+        let rebuilt = crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle::new(
             residual, ridge_t, ridge_beta, None,
-        ) {
+        );
+        accounting.frame_build_seconds += rebuild_start.elapsed().as_secs_f64();
+        match rebuilt {
             Ok(frame) => {
                 frames.frame_builds += 1;
+                accounting.frame_builds += 1;
                 gam_gpu::profile::telemetry_record_handle_creation(self.context_id());
                 gam_gpu::profile::telemetry_record_factorization();
                 gam_gpu::profile::telemetry_record_h2d(self.frame_upload_bytes());
@@ -1684,6 +1709,11 @@ struct ResidencyAccounting {
     operator_device_applies: usize,
     operator_seconds: f64,
     solve_seconds: f64,
+    frame_build_seconds: f64,
+    frame_builds: usize,
+    base_builds: usize,
+    base_refactors: usize,
+    base_gradient_solves: usize,
     host_to_device_bytes: usize,
     device_to_host_bytes: usize,
 }
@@ -1714,6 +1744,11 @@ impl ResidencyAccounting {
             operator_device_applies: self.operator_device_applies,
             operator_seconds: self.operator_seconds,
             solve_seconds: self.solve_seconds,
+            frame_build_seconds: self.frame_build_seconds,
+            frame_builds: self.frame_builds,
+            base_builds: self.base_builds,
+            base_refactors: self.base_refactors,
+            base_gradient_solves: self.base_gradient_solves,
             operator_host_to_device_bytes: self.host_to_device_bytes,
             operator_device_to_host_bytes: self.device_to_host_bytes,
         }
@@ -1734,8 +1769,27 @@ pub struct ResidencyReport {
     pub operator_device_applies: usize,
     /// Wall seconds inside the operator applies.
     pub operator_seconds: f64,
-    /// Wall seconds inside the per-iterate arrow factor/solve.
+    /// Wall seconds inside the per-iterate arrow factor/solve. Includes
+    /// [`Self::frame_build_seconds`]: the build happens inside the solve region,
+    /// and subtracting gives the gradient-only remainder.
     pub solve_seconds: f64,
+    /// Wall seconds of the above spent BUILDING frames rather than solving with
+    /// them (#2539) — base-block upload, on-device re-factor, and the legacy
+    /// host re-pack + full re-upload. Residency's whole claim is that this
+    /// shrinks to one base build per loop; without the split the claim is
+    /// checkable only from an external profiler on a card nobody can rerun.
+    pub frame_build_seconds: f64,
+    /// Host re-pack + full re-upload frame builds — the pre-#2539 path. `0` is
+    /// the residency contract on a CUDA host; a nonzero count means the base
+    /// frame was declined and every ridge change re-crossed the bus.
+    pub frame_builds: usize,
+    /// Base-block uploads. At most `1` per inner loop.
+    pub base_builds: usize,
+    /// On-device re-factors from the resident base blocks — one per ridge change.
+    pub base_refactors: usize,
+    /// Iterates served from already-built factors with no POTRF: gradient up,
+    /// step down, nothing else.
+    pub base_gradient_solves: usize,
     /// Host→device bytes the operator applies moved (the iterate only).
     pub operator_host_to_device_bytes: usize,
     /// Device→host bytes the operator applies moved (the products only).
@@ -3333,6 +3387,33 @@ mod tests {
             shared.base_refactors, shared.frame_builds
         );
 
+        // The sweep counters and the per-outer `ResidencyReport` must be the same
+        // measurement seen at two granularities. Asserting the identity is what
+        // keeps the per-fit split usable on its own: #2539's headline is
+        // "~277 of 505 ms is frame build", and a single `device_fit` reports only
+        // its own report — if that disagreed with the sweep the split would be
+        // unattributable exactly where the issue needs it.
+        let summed = |pick: fn(&ResidencyReport) -> usize| -> usize {
+            shared.outers.iter().map(|o| pick(&o.residency)).sum()
+        };
+        assert_eq!(summed(|r| r.base_builds), shared.base_builds);
+        assert_eq!(summed(|r| r.base_refactors), shared.base_refactors);
+        assert_eq!(
+            summed(|r| r.base_gradient_solves),
+            shared.base_gradient_solves
+        );
+        assert_eq!(summed(|r| r.frame_builds), shared.frame_builds);
+        for (idx, outer) in shared.outers.iter().enumerate() {
+            let r = &outer.residency;
+            assert!(
+                r.frame_build_seconds <= r.solve_seconds,
+                "outer {idx}: the frame build happens INSIDE the solve region, so it cannot \
+                 exceed it (build {:.6}s > solve {:.6}s)",
+                r.frame_build_seconds,
+                r.solve_seconds
+            );
+        }
+
         for (idx, (sh, ind)) in shared
             .outers
             .iter()
@@ -3370,6 +3451,22 @@ mod tests {
             shared.frame_builds,
             shared.base_refactors
         );
+        for (idx, outer) in shared.outers.iter().enumerate() {
+            let r = &outer.residency;
+            println!(
+                "[#2539 moving-ridge split] outer={idx} solve={:.1}ms build={:.1}ms \
+                 gradient_only={:.1}ms operator={:.1}ms base_builds={} base_refactors={} \
+                 base_gradient_solves={} frame_builds={}",
+                1e3 * r.solve_seconds,
+                1e3 * r.frame_build_seconds,
+                1e3 * (r.solve_seconds - r.frame_build_seconds),
+                1e3 * r.operator_seconds,
+                r.base_builds,
+                r.base_refactors,
+                r.base_gradient_solves,
+                r.frame_builds
+            );
+        }
     }
 
     /// #1017 residency-isolating per-solve bench. A full-fit wall-clock bench
