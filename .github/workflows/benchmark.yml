@@ -114,7 +114,7 @@ jobs:
           install-runtime-deps: "true"
           r-version: ${{ env.BENCH_R_VERSION }}
 
-      # `Verify staged R library is complete` below shells out to Rscript
+      # `Verify staged runtime is complete` below shells out to Rscript
       # unconditionally, but `bench-setup` (the only step that installs R)
       # is gated on a cache miss. On every cache hit we therefore have to
       # bring R up ourselves; without this the verify step fails with
@@ -160,9 +160,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p bench/runtime
+          mkdir -p bench/runtime/pydeps bench/runtime/r-lib
           if [ -z "${{ steps.runtime-cache.outputs.cache-matched-key }}" ]; then
-            mkdir -p bench/runtime/pydeps bench/runtime/r-lib
             if [ ! -d "${R_LIBS_USER}" ]; then
               echo "::error title=Missing R library::R_LIBS_USER=${R_LIBS_USER} does not exist after bench-setup; cannot stage R packages for shards."
               exit 1
@@ -173,6 +172,14 @@ jobs:
             # bench shards, where every scenario then died on
             # `library(gamboostLSS)`.
             cp -a "${R_LIBS_USER}/." bench/runtime/r-lib/
+          fi
+          # A restore-key hit is a useful seed for the expensive, unchanged R
+          # library, but it is not proof that the Python package set matches
+          # the current manifest. Rebuild pydeps from an empty target on every
+          # non-exact hit so additions and removals are both represented.
+          if [ "${{ steps.runtime-cache.outputs.cache-hit }}" != "true" ]; then
+            rm -rf "${GITHUB_WORKSPACE:?}/bench/runtime/pydeps"
+            mkdir -p bench/runtime/pydeps
             python3 -m pip install --upgrade pip setuptools wheel
             BENCH_PYTHON_PACKAGES="$(sed -n 's/^python-packages=//p' \
               bench/runtime-dependencies.txt)"
