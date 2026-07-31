@@ -1,10 +1,12 @@
 {
   "workflow": "Benchmark Suite",
-  "job_status": "failure",
-  "run_id": "30519203869",
-  "event": "schedule",
-  "sha": "c19567b5",
-  "completed_utc": "2026-07-30T00:00:00Z",
-  "run_url": "https://github.com/SauersML/gam/actions/runs/30519203869",
-  "seed_note": "Recovered from the latest pre-#2623-fix per-scenario GHA artifacts. The next aggregate run replaces this directory automatically."
+  "job_status": "success",
+  "run_id": "30614968756",
+  "run_number": "2429",
+  "run_attempt": "1",
+  "event": "workflow_dispatch",
+  "ref": "refs/heads/main",
+  "sha": "ee81d62fe36044b1d9fcfc5dce4dbb1832ac1979",
+  "completed_utc": "2026-07-31T08:18:00Z",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/30614968756"
 }
