@@ -35,11 +35,18 @@ def test_description_length_scores_one_dimensional_residual_covariance() -> None
 
     assert set(result) == {
         "support_bits",
+        "independent_support_bits",
         "achieved_block_l0",
+        "dictionary_bits",
+        "estimation_rows",
+        "amortization_horizon",
         "bits_at_r2_0.9",
         "code_bits_at_r2_0.9",
         "resid_bits_at_r2_0.9",
     }
+    assert result["dictionary_bits"] == 0.0
+    assert result["estimation_rows"] == test_x.shape[0]
+    assert result["amortization_horizon"] == 1000
     assert all(math.isfinite(float(value)) for value in result.values())
 
 
