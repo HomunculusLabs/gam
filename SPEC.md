@@ -20,3 +20,4 @@
 - A fit object must only ever come from a converged optimization. Non-convergence is an error. Work survives walls via checkpoint/resume.
 - Hard-coded knobs and magic constants, especially if arbitrary, should be avoided when possible in production code.
 - General outer optimizer work should be in opt crate, not here. Code specific to our applications or inner optimizer code can stay here.
+- Unnecessary choices and options should be deleted, not included.
