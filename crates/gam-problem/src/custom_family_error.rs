@@ -4,6 +4,50 @@ use thiserror::Error;
 
 use crate::{IdentifiabilityAudit, MapUniquenessError};
 
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum JointNewtonTerminalReason {
+    CycleBudget,
+    FullyRejectedExactFixedPoint {
+        consecutive_cycles: usize,
+        joint_trust_radius: f64,
+        rejection_counts: [usize; 4],
+    },
+    FullyRejectedAtTrustRegionFloor {
+        consecutive_cycles: usize,
+        joint_trust_radius: f64,
+        rejection_counts: [usize; 4],
+    },
+}
+
+impl std::fmt::Display for JointNewtonTerminalReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CycleBudget => write!(f, "cycle budget"),
+            Self::FullyRejectedExactFixedPoint {
+                consecutive_cycles,
+                joint_trust_radius,
+                rejection_counts,
+            } => write!(
+                f,
+                "complete rejected-cycle state repeated {consecutive_cycles} times at \
+                 trust radius {joint_trust_radius:.6e}; rejects \
+                 [model,likelihood,objective,feasibility]={rejection_counts:?}"
+            ),
+            Self::FullyRejectedAtTrustRegionFloor {
+                consecutive_cycles,
+                joint_trust_radius,
+                rejection_counts,
+            } => write!(
+                f,
+                "all attempts rejected for {consecutive_cycles} cycles at the absolute \
+                 trust-region floor {joint_trust_radius:.6e}; rejects \
+                 [model,likelihood,objective,feasibility]={rejection_counts:?}"
+            ),
+        }
+    }
+}
+
 /// The blockwise inner loop's terminal decision variables — the quantities its
 /// convergence verdict is actually taken on.
 ///
@@ -60,6 +104,7 @@ pub enum InnerConvergenceTerminalState {
         /// is a solve that drifted off a point it had essentially reached.
         best_stationarity_residual: f64,
         cycles_since_best_residual: usize,
+        termination_reason: JointNewtonTerminalReason,
     },
 }
 
@@ -90,6 +135,7 @@ impl std::fmt::Display for InnerConvergenceTerminalState {
                 resolvable_negative_curvature,
                 best_stationarity_residual,
                 cycles_since_best_residual,
+                termination_reason,
             } => write!(
                 f,
                 "joint-Newton terminal cycle {cycle}: \
@@ -97,7 +143,8 @@ impl std::fmt::Display for InnerConvergenceTerminalState {
                  step_inf={step_inf:.6e} (tol={step_tol:.6e}), \
                  resolvable_negative_curvature={resolvable_negative_curvature}, \
                  best_stationarity_residual={best_stationarity_residual:.6e} \
-                 (last improved {cycles_since_best_residual} cycle(s) before this one)"
+                 (last improved {cycles_since_best_residual} cycle(s) before this one), \
+                 termination={termination_reason}"
             ),
         }
     }
