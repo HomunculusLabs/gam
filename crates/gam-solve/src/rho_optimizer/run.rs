@@ -4583,6 +4583,43 @@ fn certify_outer_optimality_at_terminal_fidelity(
         // runs with it `false` — can never recurse.
         let strict_curvature_refused =
             config.require_measured_psd && certificate.hessian_psd() == Some(false);
+        // #2665: the escape below is the remedy for a point that is first-order
+        // stationary yet refused for curvature — exactly the SAS/mixture-link
+        // failures, where `|Pg|` lands 1-10x BELOW its bound and only the
+        // second-order conjunct refuses, on a MEASURED analytic Hessian with
+        // `lambda_min ~ -1.6e3` against a `~1e-5` gradient floor.
+        //
+        // But the guard is a FIVE-way conjunction, and three of its conjuncts
+        // can be false because something was never populated rather than
+        // because a decision was taken. When that happens the refusal message
+        // says only "indefinite curvature", and the fact that the remedy was
+        // never even attempted leaves no trace at all. Name the blocking
+        // conjunct at the moment of refusal so a saddle refusal can be
+        // attributed instead of guessed.
+        if certificate.is_stationary()
+            && (!certificate.curvature_not_refused() || strict_curvature_refused)
+        {
+            let escape_blocker = if !allow_tail_snap {
+                Some("allow_tail_snap=false (retry pass: the escape is one-shot and cannot recurse)")
+            } else if result.final_hessian.is_none() {
+                Some("final_hessian=None (no terminal Hessian retained on this route)")
+            } else if result.final_gradient.is_none() {
+                Some("final_gradient=None (no terminal gradient retained on this route)")
+            } else {
+                None
+            };
+            if let Some(reason) = escape_blocker {
+                log::warn!(
+                    "[CERTIFICATE] {context}: negative-curvature saddle escape NOT ATTEMPTED at a \
+                     first-order-stationary point that is being refused for curvature \
+                     (hessian_psd={:?}, require_measured_psd={}); blocked by {reason}. The \
+                     refusal that follows is therefore not evidence that no escape exists — \
+                     the remedy was never run (#2665).",
+                    certificate.hessian_psd(),
+                    config.require_measured_psd,
+                );
+            }
+        }
         if allow_tail_snap
             && certificate.is_stationary()
             && (!certificate.curvature_not_refused() || strict_curvature_refused)
