@@ -1988,6 +1988,21 @@ fn negative_curvature_escape_point(
 
     let n = hessian.nrows();
     if n == 0 || hessian.ncols() != n || hessian.iter().any(|v| !v.is_finite()) {
+        // #2665: every `None` in this function is a DIFFERENT reason the escape
+        // did not fire, and the caller records none of them -- the refusal that
+        // follows says only that the curvature floor did not clear. On the
+        // SAS/mixture cluster the escape is silently absent (measured: no mint
+        // line at all, and four resumes at a bitwise-identical rho), and the
+        // exits cannot be told apart from the run record. The sibling
+        // NOT ATTEMPTED warning above covers the case where this function is
+        // never called; these cover the case where it is called and declines.
+        log::info!(
+            "[CERTIFICATE] {context}: saddle escape declined -- the analytic Hessian is not a \
+             usable square finite matrix (rows={}, cols={}, all_finite={})",
+            n,
+            hessian.ncols(),
+            hessian.iter().all(|v| v.is_finite()),
+        );
         return None;
     }
     // The escape direction lives in the INTERIOR (un-railed) subspace — the exact
@@ -2006,6 +2021,10 @@ fn negative_curvature_escape_point(
     if interior.is_empty() {
         // Every coordinate is railed: there is no feasible interior direction and
         // the rail KKT signs are the whole certificate.
+        log::info!(
+            "[CERTIFICATE] {context}: saddle escape declined -- every one of the {n} outer \
+             coordinates is railed, so there is no feasible interior direction to descend"
+        );
         return None;
     }
     let m = interior.len();
@@ -2041,11 +2060,31 @@ fn negative_curvature_escape_point(
         }
     }
     if !(eigenvalues[min_idx] < -neg_margin) {
+        // The certificate refuses on the FLOOR (`H + diag(|g|)` not PSD); this
+        // gate admits on a sqrt(EPSILON)*||H|| ROUNDOFF margin. They are
+        // different numbers, so a point can be refused for curvature AND
+        // declined for escape, with no record of either bound. Print both so
+        // the gap is measurable rather than inferred (#2665).
+        log::info!(
+            "[CERTIFICATE] {context}: saddle escape declined -- the interior sub-block's most \
+             negative eigenvalue does not clear the roundoff margin: lambda_min={:.6e}, \
+             neg_margin={:.6e} (= sqrt(EPSILON) * max(1, max_k |H_kk|) with max_diag={:.6e}), \
+             interior_dim={}",
+            eigenvalues[min_idx],
+            neg_margin,
+            max_diag,
+            m,
+        );
         return None;
     }
     let v_sub = eigenvectors.column(min_idx);
     let dir_norm = v_sub.dot(&v_sub).sqrt();
     if !(dir_norm > 0.0) || !dir_norm.is_finite() {
+        log::info!(
+            "[CERTIFICATE] {context}: saddle escape declined -- the lambda_min={:.6e} \
+             eigenvector has an unusable norm {dir_norm:.6e}",
+            eigenvalues[min_idx],
+        );
         return None;
     }
     // Lift the interior eigenvector into the full ρ space, exactly zero on every
@@ -2072,6 +2111,16 @@ fn negative_curvature_escape_point(
     // that only matches the checkpoint to roundoff is not a real escape.
     let strict_floor = baseline_cost.abs().max(1.0) * (16.0 * f64::EPSILON);
     let mut best: Option<(f64, Array1<f64>)> = None;
+    // #2665 bookkeeping: "no descending trial", "every trial clamped back onto
+    // rho" and "every trial evaluated non-finite" are three different failures
+    // that all leave `best == None`. Count them so the declined exit below says
+    // which one happened, and carry the best cost actually SEEN so the
+    // shortfall against `baseline_cost - strict_floor` is a number.
+    let mut probed = 0usize;
+    let mut clamped_onto_rho = 0usize;
+    let mut eval_failed = 0usize;
+    let mut nonfinite = 0usize;
+    let mut best_seen_cost = f64::INFINITY;
     for sign in [primary_sign, -primary_sign] {
         for &alpha in ESCAPE_STEP_SCALES.iter() {
             let mut trial = rho.clone();
@@ -2081,19 +2130,41 @@ fn negative_curvature_escape_point(
             let trial = project_to_bounds(&trial, Some(bounds));
             // A fully box-clamped trial that lands back on ρ probes nothing.
             if outer_theta_bitwise_eq(&trial, rho) {
+                clamped_onto_rho += 1;
                 continue;
             }
-            if let Ok(cost) = obj.eval_cost(&trial)
-                && cost.is_finite()
-                && cost < baseline_cost - strict_floor
-                && best.as_ref().is_none_or(|(c, _)| cost < *c)
-            {
-                best = Some((cost, trial));
+            probed += 1;
+            match obj.eval_cost(&trial) {
+                Ok(cost) if cost.is_finite() => {
+                    best_seen_cost = best_seen_cost.min(cost);
+                    if cost < baseline_cost - strict_floor
+                        && best.as_ref().is_none_or(|(c, _)| cost < *c)
+                    {
+                        best = Some((cost, trial));
+                    }
+                }
+                Ok(_) => nonfinite += 1,
+                Err(_) => eval_failed += 1,
             }
         }
         if best.is_some() {
             break;
         }
+    }
+    if best.is_none() {
+        log::info!(
+            "[CERTIFICATE] {context}: saddle escape declined -- a certified strict saddle \
+             (lambda_min={:.6e}, neg_margin={:.6e}) produced NO strictly-descending feasible \
+             trial: probed={probed}, clamped_back_onto_rho={clamped_onto_rho}, \
+             eval_failed={eval_failed}, non_finite={nonfinite}; best cost seen={:.9e} against \
+             baseline={:.9e} (needs < {:.9e}, strict_floor={:.3e})",
+            eigenvalues[min_idx],
+            neg_margin,
+            best_seen_cost,
+            baseline_cost,
+            baseline_cost - strict_floor,
+            strict_floor,
+        );
     }
     // Restore the profiled inner state to the checkpoint ρ so the refusal path
     // that follows measures the checkpoint, not the last probe.
