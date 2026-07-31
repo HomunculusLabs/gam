@@ -60,6 +60,73 @@ use rayon::prelude::*;
 
 use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh, FaerSvd};
 
+/// Which object a spectrum handed to [`PenaltyPseudologdet::from_eigensystem`]
+/// was computed from — and therefore what accuracy `log|S_λ|₊` can have.
+///
+/// This is not a preference. `S_λ = Σ_k λ_k S_k` is a SUM OF SQUARES, so
+/// forming it squares the conditioning of the objects it is built from: a mode
+/// whose penalty ROOT sits a factor `t` below the dominant scale becomes an
+/// eigenvalue a factor `t²` down. Every backward-stable factorization of the
+/// assembled matrix therefore prices `log|S_λ|₊` to `O(ε·κ(S_λ))`, while the
+/// same quantity taken from the stacked scaled ROOTS costs `O(ε·√κ(S_λ))`.
+/// The outer smoothing search routinely drives `κ(S_λ)` past `1e14` (one λ at
+/// its ceiling beside a null-space shrinkage λ near zero is enough), where the
+/// two differ by twelve orders and the first is `±1e-2` — far coarser than the
+/// criterion's own cost floor.
+///
+/// Carrying the provenance in the type is what stops a future caller from
+/// silently handing an assembled spectrum to a value rule derived for a
+/// root-scale one, or vice versa (#2644).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpectrumScale {
+    /// `evals[i] = σ_i(A)²` for the stacked scaled roots
+    /// `A = [√λ₁C₁; …; √λ_K C_K; √r I]`, `S_λ + rI = AᵀA`
+    /// (see [`PenaltyPseudologdet::eigensystem_from_scaled_roots`]).
+    /// Absolute error on `Σ log σ²` is `O(ε·√κ(S_λ))`.
+    Root,
+    /// Eigenvalues of the ASSEMBLED `Σ_k λ_k S_k + rI`. Absolute error on
+    /// `Σ log σ` is `O(ε·κ(S_λ))` whichever factorization is used; reachable
+    /// only by callers that never held the per-component roots.
+    Assembled,
+}
+
+/// A root `R` of a symmetric PSD `S`, i.e. `RᵀR = S`, taken from `S`'s OWN
+/// eigensystem and truncated at `S`'s own relative noise floor.
+///
+/// `S` here is always a λ-FREE unit penalty component, so its spectrum is
+/// well-scaled and this eigendecomposition is a benign `O(ε)` operation — the
+/// dynamic range that makes the weighted sum hard lives in the λ's, not here.
+///
+/// Rows are `√σ_i · u_iᵀ` for the modes above the floor, so `R` is
+/// `rank × dim`. Reduced penalty projections built as `Rᵀ(RW)` instead of
+/// `WᵀSW` are Grams: they cannot go negative, and a direction `w` orthogonal to
+/// `range(S)` contributes `‖Rw‖² = O(ε²‖S‖)` rather than `wᵀSw = O(ε‖S‖)`.
+/// Squaring the residual instead of carrying it linearly is the whole point —
+/// see [`PenaltyPseudologdet::rho_derivatives`] (#2644).
+fn psd_component_root(s: ndarray::ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+    let dim = s.nrows();
+    if dim == 0 {
+        return Ok(Array2::zeros((0, 0)));
+    }
+    let (evals, evecs) = s
+        .eigh(Side::Lower)
+        .map_err(|e| format!("penalty component root eigendecomposition failed: {e}"))?;
+    let threshold = super::reml_outer_engine::positive_eigenvalue_threshold(
+        evals
+            .as_slice()
+            .expect("eigh returns a freshly allocated contiguous eigenvalue array"),
+    );
+    let kept: Vec<usize> = (0..dim).filter(|&i| evals[i] > threshold).collect();
+    let mut root = Array2::<f64>::zeros((kept.len(), dim));
+    for (r, &i) in kept.iter().enumerate() {
+        let scale = evals[i].sqrt();
+        for c in 0..dim {
+            root[[r, c]] = scale * evecs[[c, i]];
+        }
+    }
+    Ok(root)
+}
+
 /// Check whether penalty ranges decompose into independent exact blocks.
 ///
 /// Multiple smoothing components may share the same block (for example tensor
@@ -604,9 +671,23 @@ impl PenaltyPseudologdet {
         // custom-family/multinomial value (joint_newton) and gradient
         // (`rho_derivatives` via `compute_block_penalty_logdet_derivs`) paths —
         // both routed through `from_components` — agree by construction.
+        //
+        // The per-block factorization keeps the COMPONENTS, not just the
+        // block's assembled slice: `log|S_λ|₊` is summed over blocks, so a
+        // block priced off its assembled slice contributes that slice's
+        // `O(ε·κ)` error to the total (#2644, and see [`SpectrumScale`]). A
+        // single smooth's own {wiggliness, null-space shrinkage} pair inside
+        // ONE block is exactly where the λ ratio blows up, so this is not a
+        // cross-block concern that block-splitting would fix by itself.
         if let Some(blocks) = disjoint_diagonal_blocks(s_k_matrices) {
             if blocks.len() > 1 {
-                return Self::from_assembled_block_local(s_total, ridge_hint, &blocks);
+                return Self::from_component_blocks(
+                    &s_total,
+                    s_k_matrices,
+                    lambdas,
+                    ridge_hint,
+                    &blocks,
+                );
             }
         }
 
@@ -694,7 +775,14 @@ impl PenaltyPseudologdet {
         let (evals, evecs) = s_total
             .eigh(Side::Lower)
             .map_err(|e| format!("PenaltyPseudologdet eigendecomposition failed: {e}"))?;
-        Self::from_eigensystem(&s_total, evals, evecs, ridge, rank_hint)
+        Self::from_eigensystem(
+            &s_total,
+            evals,
+            evecs,
+            ridge,
+            rank_hint,
+            SpectrumScale::Assembled,
+        )
     }
 
     /// Eigensystem of `Σ_k λ_k S_k (+ ridge·I)` computed from the STACKED
@@ -835,23 +923,27 @@ impl PenaltyPseudologdet {
             });
         }
         let (evals, evecs) = Self::eigensystem_from_scaled_roots(components, ridge, p_dim)?;
-        Self::from_eigensystem(s_total, evals, evecs, ridge, rank_hint)
+        Self::from_eigensystem(s_total, evals, evecs, ridge, rank_hint, SpectrumScale::Root)
     }
 
     /// Assemble the pseudo-logdet from a precomputed eigensystem of
     /// `s_total` (ascending eigenvalues, matching eigenvector columns).
     ///
-    /// `s_total` itself is retained only for the full-rank Cholesky
-    /// log-determinant precision fast path; the positive/null split and the
-    /// W-factor come entirely from `(evals, evecs)`, so a caller with a
-    /// MORE accurate eigensystem than `eigh(s_total)` (see
+    /// `s_total` itself is retained only for the assembled-spectrum
+    /// log-determinant fallback; the positive/null split and the W-factor come
+    /// entirely from `(evals, evecs)`, so a caller with a MORE accurate
+    /// eigensystem than `eigh(s_total)` (see
     /// [`Self::from_scaled_components_with_rank_hint`]) plugs it in here.
+    ///
+    /// `scale` says which object the spectrum came from, and that decides how
+    /// `log|S|₊` may be priced — see [`SpectrumScale`].
     fn from_eigensystem(
         s_total: &Array2<f64>,
         evals: Array1<f64>,
         evecs: Array2<f64>,
         ridge: Option<f64>,
         rank_hint: Option<usize>,
+        scale: SpectrumScale,
     ) -> Result<Self, String> {
         let p_dim = s_total.nrows();
         // Compute the null-vs-active boundary purely from the spectrum.
@@ -907,35 +999,54 @@ impl PenaltyPseudologdet {
         let rank = positive_indices.len();
         let nullity = null_indices.len();
 
-        // Value: log|S|₊ = Σ log σ_i for positive eigenvalues.
+        // Value: log|S|₊ = Σ log σ_i over the positive eigenspace.
         //
-        // Full-rank (nullity == 0) SPD case: prefer the Cholesky
-        // log-determinant over Σ log(eigval). eigh introduces ~ε·max|e|
-        // absolute noise on each eigenvalue, which becomes O(ε·κ(S))
-        // relative noise on log(eigval) once a barely-positive mode sits
-        // near the ridge band. The Cholesky factorization is a direct
-        // backward-stable elimination, so 2·Σ log(diag(L)) carries
-        // ~ε absolute precision on log|S| even at high condition number.
-        // Central-difference FDs of value() in ρ then resolve the
-        // analytic gradient λ_k·σ_k/(λ_k·σ_k+ridge) at step sizes h that
-        // would otherwise drown in eigh noise on the barely-active mode
-        // (gam unit test `test_value_matches_rho_gradient_across_ridge_boundary`
-        // pins the ρ1=-20 deep-band regime).
+        // WHICH FACTORIZATION IS ALLOWED TO PRICE IT is decided by `scale`,
+        // because the two available objects do not carry the same accuracy and
+        // the difference is the whole of #2644.
         //
-        // Rank-deficient (nullity > 0): keep the eigh-based sum over
-        // positive_indices. Subtracting a Σ log(eigval_null) reconstruction
+        // `SpectrumScale::Root` — `evals` are `σ_i(A)²` for the stacked scaled
+        // roots `A = [√λ₁C₁; …; √λ_K C_K; √r I]` with `S_λ + rI = AᵀA`. The
+        // SVD's backward error is `O(ε·σ_max(A))` ABSOLUTE, so the RELATIVE
+        // error on the smallest retained `σ²` — and hence the absolute error
+        // on `Σ log σ²` — is `O(ε·√κ(S_λ))`. Sum the eigenvalues.
+        //
+        // `SpectrumScale::Assembled` — the caller only ever held
+        // `Σ λ_k S_k + rI`. Both routes off that matrix carry `O(ε·κ(S_λ))`:
+        // `eigh` perturbs each eigenvalue by `O(ε·‖S_λ‖)`, and the Cholesky
+        // log-determinant inherits `tr(S⁻¹ΔS) = O(ε·κ)` from its own backward
+        // error. Measured on the exact spectrum this issue was filed against
+        // (`κ = 1.4e14`, 150 draws of an `ε·|S|` symmetric perturbation):
+        //   Cholesky  std 1.40e-2  |bias| 7.5e-3
+        //   eigh sum  std 2.27e-2  |bias| 7.5e-3
+        //   roots     std 4.8e-15  |bias| 1.4e-14
+        // so Cholesky stays preferred HERE — it is ~1.6x tighter and nothing
+        // better is reachable from an assembled matrix — but it is twelve
+        // orders worse than the root-scale route and must never be used in its
+        // place. That substitution is what put ±1.2e-2 of noise on the outer
+        // REML criterion (≈340x the relative cost floor the line search is
+        // asked to resolve) and stalled the outer optimizer at |Pg| ≈ 1e-3.
+        //
+        // Rank-deficient assembled case (nullity > 0): keep the eigen-sum over
+        // `positive_indices`. Subtracting a `Σ log(eigval_null)` reconstruction
         // from the Cholesky log-det would push eigh noise on those null
         // eigenvalues (~ ε·max|e| / ridge in relative log terms) into
-        // value(), which is materially worse precision than direct
-        // log(eigval_positive) summation when the positive spectrum lies
-        // well above ridge (gam test_components_with_stale_nullity_*).
-        let value: f64 = if nullity == 0
-            && matches!(ridge, Some(r) if r > 0.0)
-            && let Ok(fac) = s_total.cholesky(Side::Lower)
-        {
-            2.0 * fac.diag().iter().map(|d| d.ln()).sum::<f64>()
-        } else {
-            positive_indices.iter().map(|&idx| evals[idx].ln()).sum()
+        // `value()`, which is materially worse than direct
+        // `log(eigval_positive)` summation when the positive spectrum lies well
+        // above the ridge (gam `test_components_with_stale_nullity_*`).
+        let eigen_sum = || -> f64 { positive_indices.iter().map(|&idx| evals[idx].ln()).sum() };
+        let value: f64 = match scale {
+            SpectrumScale::Root => eigen_sum(),
+            SpectrumScale::Assembled => {
+                if nullity == 0
+                    && matches!(ridge, Some(r) if r > 0.0)
+                    && let Ok(fac) = s_total.cholesky(Side::Lower)
+                {
+                    2.0 * fac.diag().iter().map(|d| d.ln()).sum::<f64>()
+                } else {
+                    eigen_sum()
+                }
+            }
         };
 
         // W factor: p × rank, W_{:,j} = u_j / √σ_j for positive eigenvalues.
@@ -974,24 +1085,38 @@ impl PenaltyPseudologdet {
         })
     }
 
-    /// Assemble the pseudo-logdet block-locally over disjoint diagonal blocks.
+    /// Assemble the pseudo-logdet block-locally over disjoint diagonal blocks,
+    /// factorizing each block from its own PENALTY COMPONENTS.
     ///
-    /// `s_total` is the fully assembled `Σ_k λ_k S_k (+ ridge·I)`; `blocks` are
-    /// the sorted, non-overlapping coordinate ranges from
-    /// [`disjoint_diagonal_blocks`]. Each block is eigendecomposed in isolation
-    /// via [`Self::from_assembled`], so the positive/null split uses that
-    /// block's OWN relative floor `100·b·ε·max_block|e|`. Within a block every
-    /// eigenvalue scales by that block's single λ, so the floor scales with it
-    /// and λ cancels: a near-separable term keeps its genuine range-space modes
-    /// (and their `−½ log(λ σ)` coercivity) instead of having them slide below a
-    /// global floor set by the other, moderately-penalized blocks (#1237).
+    /// `s_total` is the fully assembled `Σ_k λ_k S_k (+ ridge·I)` and is used
+    /// only to slice each block's assembled local; `blocks` are the sorted,
+    /// non-overlapping coordinate ranges from [`disjoint_diagonal_blocks`], and
+    /// `s_k_matrices`/`lambdas` are the same components `s_total` was summed
+    /// from. Each block is factorized in isolation via
+    /// [`Self::from_scaled_components_with_rank_hint`], so:
+    ///
+    /// * the positive/null split uses that block's OWN relative floor
+    ///   `100·b·ε·max_block|e|`. Within a block every eigenvalue scales by that
+    ///   block's single λ, so the floor scales with it and λ cancels: a
+    ///   near-separable term keeps its genuine range-space modes (and their
+    ///   `−½ log(λ σ)` coercivity) instead of having them slide below a global
+    ///   floor set by the other, moderately-penalized blocks (#1237);
+    /// * the block's `log|·|₊` is priced at ROOT scale, `O(ε·√κ)` rather than
+    ///   the `O(ε·κ)` an assembled block slice can reach — see
+    ///   [`SpectrumScale`] (#2644). The per-block values are SUMMED, so one
+    ///   block factorized off its assembled slice contributes that slice's
+    ///   error to the total; block-splitting alone does not bound `κ`, because
+    ///   the {wiggliness, null-space shrinkage} λ pair of a single smooth lives
+    ///   inside ONE block.
     ///
     /// The result is identical in shape to [`Self::from_assembled`] on `s_total`
     /// (a block-diagonal W-factor embedded in the full p×p space, the summed
     /// value, the stacked null basis) and carries `block_spans` for downstream
     /// per-block queries, exactly like [`Self::from_penalties_block_factored`].
-    fn from_assembled_block_local(
-        s_total: Array2<f64>,
+    fn from_component_blocks(
+        s_total: &Array2<f64>,
+        s_k_matrices: &[Array2<f64>],
+        lambdas: &[f64],
         ridge: Option<f64>,
         blocks: &[(usize, usize)],
     ) -> Result<Self, String> {
@@ -1018,8 +1143,42 @@ impl PenaltyPseudologdet {
 
         let mut block_results: Vec<BlockResult> = Vec::with_capacity(blocks.len());
         for &(start, end) in blocks {
+            let width = end - start;
             let local = s_total.slice(s![start..end, start..end]).to_owned();
-            let block_pld = Self::from_assembled(local, ridge)?;
+            // The components restricted to this block. `disjoint_diagonal_blocks`
+            // guarantees each `S_k`'s support lies inside exactly one block, so
+            // the restriction is lossless: a component supported elsewhere is
+            // identically zero here and is dropped.
+            let component_views: Vec<(f64, ndarray::ArrayView2<'_, f64>)> = s_k_matrices
+                .iter()
+                .enumerate()
+                .filter_map(|(k, s_k)| {
+                    let lambda = if k < lambdas.len() { lambdas[k] } else { 0.0 };
+                    if lambda <= 0.0 {
+                        return None;
+                    }
+                    let view = s_k.slice(s![start..end, start..end]);
+                    view.iter().any(|&v| v != 0.0).then_some((lambda, view))
+                })
+                .collect();
+            // Structural (λ-free) rank of this block's union support, the same
+            // hint `from_penalties_block_factored` forms from its own parts.
+            let mut structural_local = Array2::<f64>::zeros((width, width));
+            for (_, view) in &component_views {
+                structural_local.scaled_add(1.0, view);
+            }
+            let structural_rank = structural_rank_from_assembled(&structural_local)?;
+            let components: Vec<(f64, ndarray::ArrayView2<'_, f64>, std::ops::Range<usize>)> =
+                component_views
+                    .into_iter()
+                    .map(|(lambda, view)| (lambda, view, 0..width))
+                    .collect();
+            let block_pld = Self::from_scaled_components_with_rank_hint(
+                &local,
+                &components,
+                ridge,
+                Some(structural_rank),
+            )?;
             let nullity = block_pld.u_null.as_ref().map_or(0, Array2::ncols);
             block_results.push(BlockResult {
                 start,
@@ -1155,6 +1314,28 @@ impl PenaltyPseudologdet {
         wt_m.dot(&self.w_factor)
     }
 
+    /// The reduced penalty projection `Y = WᵀSW` for a PSD `S = RᵀR`, built as
+    /// the GRAM of `M = R·W` instead of by contracting `S`.
+    ///
+    /// Algebraically identical; numerically not. `WᵀSW` carries `S`'s roundoff
+    /// LINEARLY: a `W` column `w` on a direction where `S` vanishes still
+    /// returns `wᵀSw = O(ε‖S‖‖w‖²)`, and `W`'s columns are scaled by
+    /// `σ_i(S_λ)^{-1/2}`, so that residual is divided by the SMALLEST penalty
+    /// eigenvalue and then multiplied by `λ_k` in `∂_ρk L = λ_k tr(Y_k)` — an
+    /// `O(ε·κ(S_λ))` error on a quantity bounded by `rank(S_k)`.
+    ///
+    /// Measured on the dense two-component fixture at `λ` ratio `1.4e14`
+    /// (`rotated_extreme_lambda_ratio_rho_gradient_matches_central_difference`):
+    /// the contracted form gives `3.00758` where the exact value and the central
+    /// difference of `value()` both give `3.0000000000`. At the `κ ≈ 3.5e19` the
+    /// `te(a,b)` witness of #2644 reaches, the same error term is `O(1e3)`.
+    ///
+    /// The Gram form squares that residual instead: `‖Rw‖² = O(ε²‖S‖‖w‖²)`. It
+    /// is also PSD by construction, so `tr(Y)` can never come out negative.
+    fn reduced_from_root(m: &Array2<f64>) -> Array2<f64> {
+        m.t().dot(m)
+    }
+
     /// Compute the leakage matrix L = U₊^T M U₀ for the moving-nullspace correction.
     ///
     /// Returns `None` if the nullspace is empty (no correction needed).
@@ -1221,13 +1402,33 @@ impl PenaltyPseudologdet {
             return (Array1::zeros(k), Array2::zeros((k, k)));
         }
 
-        // Reduced representations: Y_k = W^T S_k W (unscaled).
+        // Reduced representations: Y_k = W^T S_k W (unscaled), formed as the
+        // GRAM of `M_k = R_k W` with `R_kᵀR_k = S_k` rather than by contracting
+        // `S_k` itself. See `reduced_from_root`.
         // These K projections are independent and dominate derivative time for
         // large bases, so evaluate them in parallel outside existing rayon jobs.
-        let y_k: Vec<Array2<f64>> = if rayon::current_thread_index().is_some() {
-            s_k_matrices.iter().map(|s| self.reduced(s)).collect()
+        let project = |s: &Array2<f64>| -> Result<Array2<f64>, String> {
+            let root = psd_component_root(s.view())?;
+            Ok(Self::reduced_from_root(&root.dot(&self.w_factor)))
+        };
+        let y_k: Result<Vec<Array2<f64>>, String> = if rayon::current_thread_index().is_some() {
+            s_k_matrices.iter().map(project).collect()
         } else {
-            s_k_matrices.par_iter().map(|s| self.reduced(s)).collect()
+            s_k_matrices.par_iter().map(project).collect()
+        };
+        // A unit penalty component whose own eigendecomposition fails is a
+        // malformed input, not a numerical regime: fall back to the direct
+        // contraction so this routine keeps its infallible signature and the
+        // failure surfaces where the component is built.
+        let y_k: Vec<Array2<f64>> = match y_k {
+            Ok(y) => y,
+            Err(reason) => {
+                log::warn!(
+                    "penalty ρ-derivative root factorization failed ({reason}); falling back to \
+                     the direct WᵀS_kW contraction, whose error grows like ε·κ(S_λ)"
+                );
+                s_k_matrices.iter().map(|s| self.reduced(s)).collect()
+            }
         };
 
         // First derivatives: ∂_ρk L = λ_k tr(Y_k).
@@ -1294,9 +1495,17 @@ impl PenaltyPseudologdet {
             pub(crate) y: Array2<f64>,
         }
 
+        // `CanonicalPenalty::root` IS the `rank_k × block_dim` factor with
+        // `S_k = rootᵀroot`, so the numerically stable Gram form of the reduced
+        // projection (`reduced_from_root`, #2644) costs nothing extra here — it
+        // replaces one `block × block` multiply with one `rank_k × block` one.
+        // A penalty whose cached root does not match its cached `local` shape is
+        // a malformed component; fall back to the direct contraction rather than
+        // panicking inside an infallible derivative routine.
         let project = |penalty: &gam_terms::construction::CanonicalPenalty| {
             let start = penalty.col_range.start;
             let end = penalty.col_range.end;
+            let root_matches = penalty.root.ncols() == end - start;
             if let Some((span_idx, span)) = self
                 .block_spans
                 .iter()
@@ -1305,16 +1514,15 @@ impl PenaltyPseudologdet {
             {
                 let local_start = start - span.start;
                 let local_end = local_start + (end - start);
+                assert_eq!(local_end - local_start, penalty.local.nrows());
                 let w_block = self
                     .w_factor
                     .slice(s![start..end, span.rank_start..span.rank_end]);
-                let local_w = penalty.local.dot(&w_block);
-                let y = self
-                    .w_factor
-                    .slice(s![start..end, span.rank_start..span.rank_end])
-                    .t()
-                    .dot(&local_w);
-                assert_eq!(local_end - local_start, penalty.local.nrows());
+                let y = if root_matches {
+                    Self::reduced_from_root(&penalty.root.dot(&w_block))
+                } else {
+                    w_block.t().dot(&penalty.local.dot(&w_block))
+                };
                 ReducedPenalty {
                     span: Some(span_idx),
                     y,
@@ -1322,10 +1530,14 @@ impl PenaltyPseudologdet {
             } else {
                 // Overlapping/global fallback: still avoid cloning the block view.
                 let w_block = self.w_factor.slice(s![start..end, ..]);
-                let local_w = penalty.local.dot(&w_block);
+                let y = if root_matches {
+                    Self::reduced_from_root(&penalty.root.dot(&w_block))
+                } else {
+                    w_block.t().dot(&penalty.local.dot(&w_block))
+                };
                 ReducedPenalty {
                     span: None,
-                    y: w_block.t().dot(&local_w),
+                    y,
                 }
             }
         };
@@ -2202,6 +2414,172 @@ mod tests {
                 "exact diagonal pseudologdet at λ ratio {:.1e}: got {}, expected {expected}",
                 l_bend / l_shrink,
                 pld.value(),
+            );
+        }
+    }
+    /// A fixed orthogonal `p × p` matrix with no axis-aligned column, built
+    /// deterministically from a product of Givens rotations so the test carries
+    /// no RNG. Every penalty built as `Q diag(d) Qᵀ` below is therefore DENSE:
+    /// that is the whole point (see
+    /// `rotated_extreme_lambda_ratio_prices_logdet_at_root_scale`).
+    fn dense_orthogonal(p: usize) -> Array2<f64> {
+        let mut q = Array2::<f64>::eye(p);
+        // Angles are irrational multiples of π so no entry lands on 0 or ±1.
+        for i in 0..p {
+            for j in (i + 1)..p {
+                let theta = 0.3 + 0.17 * (i as f64) + 0.11 * (j as f64);
+                let (sin, cos) = theta.sin_cos();
+                for row in 0..p {
+                    let a = q[[row, i]];
+                    let b = q[[row, j]];
+                    q[[row, i]] = cos * a - sin * b;
+                    q[[row, j]] = sin * a + cos * b;
+                }
+            }
+        }
+        q
+    }
+
+    /// `Q diag(d) Qᵀ`, symmetrized so the input is exactly symmetric.
+    fn rotated_penalty(q: &Array2<f64>, d: &[f64]) -> Array2<f64> {
+        let p = q.nrows();
+        let mut m = Array2::<f64>::zeros((p, p));
+        for (i, &di) in d.iter().enumerate() {
+            if di == 0.0 {
+                continue;
+            }
+            for r in 0..p {
+                for c in 0..p {
+                    m[[r, c]] += di * q[[r, i]] * q[[c, i]];
+                }
+            }
+        }
+        let mt = m.t().to_owned();
+        m += &mt;
+        m *= 0.5;
+        m
+    }
+
+    /// #2644 ROOT CAUSE. `log|S_λ|₊` must be priced at ROOT scale, not from any
+    /// factorization of the assembled `Σ λ_k S_k`.
+    ///
+    /// `S_λ` is a sum of squares, so assembling it SQUARES the conditioning of
+    /// the objects it is built from. Every backward-stable factorization of the
+    /// assembled matrix — `eigh` and Cholesky alike — therefore carries
+    /// `O(ε·κ(S_λ))` absolute error on `log|S_λ|₊`; the stacked scaled roots
+    /// carry `O(ε·√κ(S_λ))`. At the `κ ≈ 1.4e14` this fixture reproduces (one
+    /// smooth's wiggliness λ at its ceiling beside its own null-space shrinkage
+    /// λ near zero — the shape the outer search reaches on
+    /// `y ~ s(pc1,k=5) + s(pc2,k=5)`), that is `±1.2e-2` of noise on the outer
+    /// REML criterion against a relative cost floor of `~5.6e-8·(1+|V|)`, so the
+    /// line search cannot resolve a real decrease and the fit is refused for
+    /// non-stationarity at `|Pg| ≈ 1.8e-3`.
+    ///
+    /// The construction is DENSE — `Q diag Qᵀ` for a fixed rotation `Q` with no
+    /// axis-aligned column. `overlapping_extreme_lambda_ratio_keeps_structural_modes_exactly`
+    /// above pins the same λ ratios on a DIAGONAL example, where the assembled
+    /// matrix is exactly diagonal and its Cholesky is exact to one ulp — which
+    /// is exactly why that test cannot see this defect and this one can. The two
+    /// penalties commute here (same eigenbasis `Q`), so the expected value is
+    /// closed-form and the assertion is against arithmetic, not another route.
+    #[test]
+    fn rotated_extreme_lambda_ratio_prices_logdet_at_root_scale() {
+        let p = 6usize;
+        let q = dense_orthogonal(p);
+        // A rank-3 wiggliness penalty and the rank-3 null-space shrinkage on
+        // its complement, in one shared eigenbasis.
+        let d_wiggle = [1.0, 0.7, 0.44, 0.0, 0.0, 0.0];
+        let d_shrink = [0.0, 0.0, 0.0, 1.0, 0.9, 0.55];
+        let s_wiggle = rotated_penalty(&q, &d_wiggle);
+        let s_shrink = rotated_penalty(&q, &d_shrink);
+
+        for &(l_wiggle, l_shrink) in &[
+            (3.388e12_f64, 2.480e-2_f64),
+            (1.0e13, 1.0e-3),
+            (1.0e-4, 5.0e11),
+        ] {
+            let pld = PenaltyPseudologdet::from_components(
+                &[s_wiggle.clone(), s_shrink.clone()],
+                &[l_wiggle, l_shrink],
+                0.0,
+            )
+            .expect("dense rotated double penalty stays evaluable");
+            assert_eq!(pld.rank(), p, "every structural mode is retained");
+            let expected: f64 = d_wiggle
+                .iter()
+                .filter(|&&d| d > 0.0)
+                .map(|&d| (l_wiggle * d).ln())
+                .chain(
+                    d_shrink
+                        .iter()
+                        .filter(|&&d| d > 0.0)
+                        .map(|&d| (l_shrink * d).ln()),
+                )
+                .sum();
+            let error = (pld.value() - expected).abs();
+            // Root scale gives ~ε·√κ ≈ 1e-9 here; the assembled routes give
+            // ~ε·κ ≈ 1e-2, four thousand times the outer criterion's own cost
+            // floor. 1e-7 sits far below the defect and far above the achievable
+            // floor, so it is a verdict on the ROUTE, not a tuned constant.
+            assert!(
+                error <= 1.0e-7,
+                "log|S_λ|₊ at λ ratio {:.1e} must be priced at root scale: \
+                 got {}, expected {expected}, error {error:.3e}",
+                l_wiggle / l_shrink,
+                pld.value(),
+            );
+        }
+    }
+
+    /// #2644, second angle: the ρ-gradient the outer optimizer consumes must be
+    /// recoverable from CENTRAL DIFFERENCES of `value()` at the λ spreads the
+    /// search actually visits.
+    ///
+    /// This is the property the criterion's user needs and the one the defect
+    /// destroyed: with `±1.2e-2` of evaluation noise, a central difference at
+    /// any usable step is pure noise, so "the analytic gradient disagrees with
+    /// the function it claims to differentiate" — the shape #2644 reports as a
+    /// stationarity refusal at an interior PSD minimum. It fails for a reason
+    /// independent of the closed-form check above: that one compares a value to
+    /// arithmetic, this one compares two DERIVATIVES of the same object.
+    #[test]
+    fn rotated_extreme_lambda_ratio_rho_gradient_matches_central_difference() {
+        let p = 6usize;
+        let q = dense_orthogonal(p);
+        let d_wiggle = [1.0, 0.7, 0.44, 0.0, 0.0, 0.0];
+        let d_shrink = [0.0, 0.0, 0.0, 1.0, 0.9, 0.55];
+        let s_wiggle = rotated_penalty(&q, &d_wiggle);
+        let s_shrink = rotated_penalty(&q, &d_shrink);
+        let components = [s_wiggle, s_shrink];
+
+        let rho = [28.851_f64, -3.697];
+        let lambdas: Vec<f64> = rho.iter().map(|r| r.exp()).collect();
+        let pld = PenaltyPseudologdet::from_components(&components, &lambdas, 0.0)
+            .expect("dense rotated double penalty stays evaluable");
+        let (det1, _) = pld.rho_derivatives(&components, &lambdas);
+
+        let value_at = |rho: &[f64]| -> f64 {
+            let lambdas: Vec<f64> = rho.iter().map(|r| r.exp()).collect();
+            PenaltyPseudologdet::from_components(&components, &lambdas, 0.0)
+                .expect("dense rotated double penalty stays evaluable")
+                .value()
+        };
+        // `log|S_λ|₊` is a sum of `log λ_k` terms plus λ-free constants, so its
+        // ρ-curvature is O(1) and a 1e-4 central difference truncates at ~1e-9.
+        let h = 1.0e-4_f64;
+        for k in 0..2 {
+            let mut up = rho;
+            let mut down = rho;
+            up[k] += h;
+            down[k] -= h;
+            let fd = (value_at(&up) - value_at(&down)) / (2.0 * h);
+            assert!(
+                (det1[k] - fd).abs() <= 1.0e-6 * det1[k].abs().max(1.0),
+                "∂log|S_λ|₊/∂ρ_{k}: analytic {} vs central difference {fd} \
+                 (λ = {:.3e}, {:.3e})",
+                det1[k],
+                lambdas[0],
+                lambdas[1],
             );
         }
     }
