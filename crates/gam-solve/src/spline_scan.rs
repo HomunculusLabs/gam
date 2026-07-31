@@ -5631,6 +5631,105 @@ order 3 rho 6: curvature EndpointJet, third EndpointJet\n";
         round_trip_predict_bit_for_bit(3);
     }
 
+    /// A hand-built persisted state, valid by `from_state`'s own structural
+    /// rules: `state` is `order` per knot, `cov` the `order(order+1)/2` upper
+    /// triangle per knot, `gain` the full `order²` per knot, one weight per
+    /// knot, strictly increasing knots, `sigma2 > 0`, and an in-range
+    /// `log_lambda`. No fitting is involved.
+    fn hand_built_state(order: usize) -> SplineScanState {
+        let knots = vec![0.0, 0.25, 0.6, 1.0, 1.4];
+        let knot_count = knots.len();
+        let tri = order * (order + 1) / 2;
+        SplineScanState {
+            order,
+            state: (0..order * knot_count)
+                .map(|i| 0.1 + 0.07 * i as f64)
+                .collect(),
+            // Diagonal-leading per knot so restored variances stay positive.
+            cov: (0..tri * knot_count)
+                .map(|i| if i % tri == 0 { 0.5 + 0.01 * i as f64 } else { 0.02 })
+                .collect(),
+            gain: (0..order * order * knot_count)
+                .map(|i| 0.03 * ((i % 5) as f64))
+                .collect(),
+            node_weight: (0..knot_count).map(|i| 1.0 + 0.25 * i as f64).collect(),
+            knots,
+            log_lambda: 0.35,
+            sigma2: 1.75,
+            restricted_loglik: -12.5,
+            training_sample_size: std::num::NonZeroU64::new(64).expect("64 is nonzero"),
+            data_sse: 3.25,
+        }
+    }
+
+    /// #2614 decoupling: the #1034/#1044 persistence seam, verified WITHOUT the
+    /// optimizer.
+    ///
+    /// `round_trip_predict_bit_for_bit` opens with
+    /// `fit_spline_scan(...).expect("scan fit")`, so while the certified scan
+    /// refuses (#2614, measured: two of those three tests die there) every
+    /// assertion behind it is WITHDRAWN rather than failing — the bit-for-bit
+    /// posteriors, the off-knot bridge, both extrapolation sides, and the three
+    /// corrupt-payload rejections are all unprotected, and the red count reads
+    /// "some tests fail" when the truth is "a guarantee is untested".
+    ///
+    /// A serialization guarantee must not depend on an optimizer guarantee.
+    /// `SplineScanFit::from_state` reconstructs a fit from a plain
+    /// `SplineScanState`, so the whole seam can be driven from a hand-built
+    /// state and holds regardless of whether any fit converges. This does NOT
+    /// replace the fitted round-trip, which additionally proves the fitter's own
+    /// fields survive; it makes the seam itself independently covered.
+    #[test]
+    fn persistence_seam_round_trips_without_the_optimizer_2614() {
+        for order in 1..=MAX_ORDER {
+            let built = hand_built_state(order);
+            let fit =
+                SplineScanFit::from_state(&built).expect("hand-built state must restore");
+            let json = serde_json::to_string(&fit.to_state()).expect("serialize state");
+            let parsed: SplineScanState =
+                serde_json::from_str(&json).expect("deserialize state");
+            let restored = SplineScanFit::from_state(&parsed).expect("restore fit");
+
+            assert_eq!(fit.order, restored.order, "order drifted (m={order})");
+            assert_eq!(fit.knots, restored.knots, "knots drifted (m={order})");
+            assert_eq!(fit.log_lambda.to_bits(), restored.log_lambda.to_bits());
+            assert_eq!(fit.sigma2.to_bits(), restored.sigma2.to_bits());
+            assert_eq!(fit.edf().to_bits(), restored.edf().to_bits());
+            assert_eq!(fit.deviance().to_bits(), restored.deviance().to_bits());
+            assert_eq!(
+                fit.training_sample_size(),
+                restored.training_sample_size()
+            );
+
+            // Off-knot bridge, exact knot hits, and both extrapolation sides.
+            for &xq in &[-0.3, 0.0, 0.13, 0.6, 1.0, 1.4, 1.9] {
+                let (m0, v0) = fit.predict(xq).expect("predict original");
+                let (m1, v1) = restored.predict(xq).expect("predict restored");
+                assert_eq!(
+                    m0.to_bits(),
+                    m1.to_bits(),
+                    "mean drift at x={xq} (m={order})"
+                );
+                assert_eq!(
+                    v0.to_bits(),
+                    v1.to_bits(),
+                    "variance drift at x={xq} (m={order})"
+                );
+            }
+
+            // Corrupt payloads fail loudly, not inside a later predict.
+            let mut bad = fit.to_state();
+            bad.cov.truncate(bad.cov.len() - 1);
+            SplineScanFit::from_state(&bad).expect_err("length mismatch must error");
+            let mut bad = fit.to_state();
+            bad.sigma2 = -1.0;
+            SplineScanFit::from_state(&bad).expect_err("non-positive sigma2 must error");
+            let mut bad = fit.to_state();
+            bad.knots[2] = bad.knots[1];
+            SplineScanFit::from_state(&bad).expect_err("non-increasing knots must error");
+        }
+    }
+
     /// Dense order-1 (random-walk / linear smoothing spline) posterior of the
     /// SAME intrinsic prior the order-1 scan integrates: improper level on
     /// `f_0`, increments `f_{t+1}−f_t ~ N(0, q·δ_t)`, observations `y_t` with
