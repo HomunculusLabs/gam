@@ -1381,4 +1381,139 @@ mod tests {
             off_center[2]
         );
     }
+
+    /// #2458 — the second κ-derivatives shipped WITHOUT a reader.
+    ///
+    /// `build_constant_curvature_basis_kappa_derivatives` returns a
+    /// `BasisPsiDerivativeBundle` whose `.second` carries the κ-second
+    /// derivatives of the design and of each penalty block. Those are consumed
+    /// in production (`spatial_optimization.rs` destructures and rotates them
+    /// for the spatial ψ path), but nothing anywhere pinned their VALUES:
+    /// grepping for readers of `designsecond_derivative` /
+    /// `penaltiessecond_derivative` outside the destructuring sites returns
+    /// nothing. A second derivative that is shipped and consumed but never
+    /// checked is exactly the input #2458 proposes to build a stationarity
+    /// CERTIFICATE on, and a wrong certificate is worse than an honestly
+    /// missing one.
+    ///
+    /// This differences the ANALYTIC FIRST derivative, which the κ-gradient
+    /// path already exercises end to end, so a failure localizes to the
+    /// second-order construction rather than to the basis itself.
+    ///
+    /// The bound is the central-difference error budget, not a tuned number.
+    /// Truncation is order h^2 times the third derivative and roundoff is
+    /// order eps times the first derivative over h, so at h = 1e-4 on an
+    /// order-one chart both sit near 1e-8 relative. Asserting 1e-6 leaves two
+    /// orders of headroom while still failing a missing or mis-scaled term —
+    /// which is scale-invariant and would NOT shrink with h, hence the
+    /// h-halving arm below.
+    #[test]
+    fn kappa_second_derivatives_match_a_central_difference_of_the_first_2458() {
+        let data = ndarray::array![
+            [0.10, 0.05],
+            [-0.20, 0.15],
+            [0.30, -0.10],
+            [-0.05, -0.25],
+            [0.22, 0.20],
+            [-0.30, -0.05],
+            [0.05, 0.30],
+            [-0.15, 0.10],
+        ];
+        let spec = ConstantCurvatureBasisSpec {
+            center_strategy: CenterStrategy::FarthestPoint { num_centers: 6 },
+            ..Default::default()
+        };
+        let kappa0 = 0.35_f64;
+
+        let first_at = |kappa: f64| {
+            let mut probe = spec.clone();
+            probe.kappa = kappa;
+            let bundle = build_constant_curvature_basis_kappa_derivatives(data.view(), &probe)
+                .expect("fixture points lie inside the chart for every probed kappa");
+            (
+                bundle.first.design_derivative,
+                bundle.first.penalties_derivative,
+            )
+        };
+
+        let mut exact_spec = spec.clone();
+        exact_spec.kappa = kappa0;
+        let analytic = build_constant_curvature_basis_kappa_derivatives(data.view(), &exact_spec)
+            .expect("fixture points lie inside the chart at kappa0");
+        let design_second = analytic.second.designsecond_derivative;
+        let penalty_second = analytic.second.penaltiessecond_derivative;
+
+        let max_rel_error_at = |h: f64| -> (f64, f64) {
+            let (x_plus, s_plus) = first_at(kappa0 + h);
+            let (x_minus, s_minus) = first_at(kappa0 - h);
+
+            let mut design_error = 0.0_f64;
+            let mut design_scale = 0.0_f64;
+            for ((&plus, &minus), &exact) in
+                x_plus.iter().zip(x_minus.iter()).zip(design_second.iter())
+            {
+                let fd = (plus - minus) / (2.0 * h);
+                design_error = design_error.max((fd - exact).abs());
+                design_scale = design_scale.max(exact.abs()).max(fd.abs());
+            }
+
+            assert_eq!(
+                s_plus.len(),
+                penalty_second.len(),
+                "penalty block count must not depend on kappa"
+            );
+            let mut penalty_error = 0.0_f64;
+            let mut penalty_scale = 0.0_f64;
+            for ((block_plus, block_minus), block_exact) in
+                s_plus.iter().zip(s_minus.iter()).zip(penalty_second.iter())
+            {
+                for ((&plus, &minus), &exact) in block_plus
+                    .iter()
+                    .zip(block_minus.iter())
+                    .zip(block_exact.iter())
+                {
+                    let fd = (plus - minus) / (2.0 * h);
+                    penalty_error = penalty_error.max((fd - exact).abs());
+                    penalty_scale = penalty_scale.max(exact.abs()).max(fd.abs());
+                }
+            }
+            (
+                design_error / design_scale.max(1.0),
+                penalty_error / penalty_scale.max(1.0),
+            )
+        };
+
+        let h = 1.0e-4_f64;
+        let (design_rel, penalty_rel) = max_rel_error_at(h);
+        eprintln!(
+            "[2458-second-fd] h={h:.1e}: design rel={design_rel:.3e} penalty rel={penalty_rel:.3e}"
+        );
+        assert!(
+            design_rel < 1.0e-6,
+            "d2X/dkappa2 disagrees with a central difference of dX/dkappa: rel={design_rel:.6e}"
+        );
+        assert!(
+            penalty_rel < 1.0e-6,
+            "d2S/dkappa2 disagrees with a central difference of dS/dkappa: rel={penalty_rel:.6e}"
+        );
+
+        // A MISSING term is scale-invariant: it does not shrink when h does.
+        // Halving h must not inflate the disagreement, which it would if the
+        // residual were a genuine missing contribution rather than truncation.
+        let (design_rel_half, penalty_rel_half) = max_rel_error_at(0.5 * h);
+        eprintln!(
+            "[2458-second-fd] h={:.1e}: design rel={design_rel_half:.3e} penalty rel={penalty_rel_half:.3e}",
+            0.5 * h
+        );
+        assert!(
+            design_rel_half <= design_rel.max(1.0e-9) * 2.0,
+            "halving h must not inflate the design disagreement (missing-term signature): \
+             {design_rel:.6e} -> {design_rel_half:.6e}"
+        );
+        assert!(
+            penalty_rel_half <= penalty_rel.max(1.0e-9) * 2.0,
+            "halving h must not inflate the penalty disagreement (missing-term signature): \
+             {penalty_rel:.6e} -> {penalty_rel_half:.6e}"
+        );
+    }
 }
