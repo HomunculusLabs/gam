@@ -375,3 +375,96 @@ fn the_rank_one_relative_floor_is_a_logit_of_the_prior_to_data_odds_2615() {
         );
     }
 }
+
+/// `EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION` is NOT inert, and no single fixture
+/// can show that it is (#2612).
+///
+/// #2612 measured `Δ = 0.0016` nats of held-out log-loss between `f = 0.50` and
+/// `f = 0.90` on penguins and read it as "this constant is inert". The reading
+/// does not follow, and the same doc block says why: this floor manufactures an
+/// UPPER ρ bound, and on that split four of the eight live null-space λ sit
+/// exactly on the box's LOWER wall. REML is railed at the least-smoothed value
+/// the box allows and pushing further, so a ceiling above it cannot bind. A
+/// fixture where the bound provably cannot bind measures the FIXTURE, not the
+/// constant — the same shape as a null fixture being asked to carry a bar.
+///
+/// So measure the constant where it acts, through the production edf curve.
+/// For a rank-1 penalty `edf(ρ) = γ/(γ + e^ρ)` and the target is exactly `f`, so
+/// the wall sits at `ρ*(f) = ln γ + ln((1 − f)/f)` and
+///
+/// ```text
+///   ρ*(0.50) − ρ*(0.90) = ln(1/1) − ln(1/9) = ln 9 = 2.1972
+/// ```
+///
+/// INDEPENDENTLY OF γ. That is the part that matters: the effect is scale-free,
+/// so it cannot be made small by choosing a fixture, and a fixture that reports
+/// it as small has reported something about itself. At those two walls the data
+/// retains 50% versus 90% of the posterior precision along the linear direction
+/// of every smooth — a 0.40 difference in retained edf, asserted below against
+/// `unit_weight_term_edf`, the same function the bisection uses.
+///
+/// This test is also the gate the constant did not have. It reached its third
+/// value in one day, each read off a held-out curve that later turned out not to
+/// exist at the exact quadrature. Pinning the shipped value to its stated
+/// meaning — prior-to-data precision odds of 1:9 — means the next change has to
+/// arrive with a measurement that can actually discriminate, on a fixture whose
+/// optimum is not railed at the opposite wall.
+#[test]
+fn the_relative_floor_is_scale_free_so_no_single_fixture_can_call_it_inert_2612() {
+    let f_shipped = EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION;
+    let f_control: f64 = 0.50;
+
+    // The shipped value IS an odds statement; say which one, so a silent retune
+    // fails here rather than in a log-loss table six months later.
+    let odds = (1.0 - f_shipped) / f_shipped;
+    assert!(
+        (odds - 1.0 / 9.0).abs() <= 1e-12,
+        "EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION = {f_shipped} encodes prior-to-data \
+         precision odds of {odds:e}; the shipped meaning is 1:9. Changing it \
+         changes an estimand-bearing wall by ln((1-f)/f) and must arrive with a \
+         measurement on a fixture where an UPPER rho bound can bind — penguins \
+         cannot, it is railed on the lower wall (#2612)."
+    );
+
+    let mut walls = Vec::new();
+    for gamma in [1.0e-4_f64, 1.0e-2, 1.0, 1.0e2, 1.0e4] {
+        let gammas = [gamma];
+        let rho_shipped = gamma.ln() + ((1.0 - f_shipped) / f_shipped).ln();
+        let rho_control = gamma.ln() + ((1.0 - f_control) / f_control).ln();
+
+        // Production edf curve, not the closed form: this is what the bisection
+        // in `effective_df_floor_bound` actually reads.
+        let edf_shipped =
+            unit_weight_term_edf(&gammas, rho_shipped).expect("edf at the shipped wall");
+        let edf_control =
+            unit_weight_term_edf(&gammas, rho_control).expect("edf at the control wall");
+
+        assert!(
+            (edf_shipped - f_shipped).abs() <= 1e-9 && (edf_control - f_control).abs() <= 1e-9,
+            "the production edf curve must retain exactly f at the wall f selects: \
+             gamma={gamma:e}, edf(rho*(0.90))={edf_shipped}, edf(rho*(0.50))={edf_control}"
+        );
+
+        // The measurement that refutes "inert": 40% of the direction's posterior
+        // precision separates the two settings, at every scale tested.
+        assert!(
+            (edf_shipped - edf_control - 0.40).abs() <= 1e-9,
+            "retained-precision gap between f=0.90 and f=0.50 must be 0.40: \
+             gamma={gamma:e}, got {}",
+            edf_shipped - edf_control
+        );
+        walls.push(rho_control - rho_shipped);
+    }
+
+    // Scale-free: the wall movement is ln 9 for every gamma, so a fixture cannot
+    // shrink it. If this ever varies with gamma, the closed form above is wrong
+    // and the odds reading of `f` goes with it.
+    let ln9 = 9.0_f64.ln();
+    for (shift, gamma) in walls.iter().zip([1.0e-4_f64, 1.0e-2, 1.0, 1.0e2, 1.0e4]) {
+        assert!(
+            (shift - ln9).abs() <= 1e-12,
+            "rho*(0.50) - rho*(0.90) must equal ln 9 = {ln9} independently of gamma: \
+             gamma={gamma:e}, got {shift}"
+        );
+    }
+}
