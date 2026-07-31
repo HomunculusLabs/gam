@@ -3884,8 +3884,13 @@ mod tests {
         /// matrix. Every matrix channel enters a feedback-coupled checksum;
         /// seven samples alternate contender order and the paired medians must
         /// be strict production wins at every representative width.
+        /// Not `#[ignore]`d. The parity block below is build-independent and
+        /// was dead coverage for as long as this test was ignored; it now runs
+        /// in every build. The timing gate is reached only under `--release`,
+        /// matching `release_measure_multinomial_specialized_vs_generic_tower_932`
+        /// directly below, which is also a #932 release timing gate and is
+        /// likewise not ignored.
         #[test]
-        #[ignore = "release-only issue #932 strongest-hand performance gate"]
         fn release_measure_multinomial_fisher_vs_strongest_hand_932() {
             fn measure<const M: usize>(seed: u64, repetitions: usize) {
                 const ROWS: usize = 256;
@@ -3951,6 +3956,15 @@ mod tests {
                             &format!("M={M} second strongest-hand parity[{row},{index}]"),
                         );
                     }
+                }
+
+                // Everything above is a parity assertion and holds in any
+                // build. The sweeps below cost roughly four million row
+                // evaluations per width, and a hand-vs-compiled ratio measured
+                // without optimization would gate on noise, so debug stops
+                // here rather than asserting something it cannot observe.
+                if cfg!(debug_assertions) {
+                    return;
                 }
 
                 let compiled_first_sweep = |buffers: &mut FirstFisherBuffers| {
