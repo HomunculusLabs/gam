@@ -288,7 +288,13 @@ fn production_factored_large_border_routes_to_resident_inexact_pcg_1017() {
         .assemble_arrow_schur(target.view(), &rho, None)
         .expect("production large-border assembly");
 
-    assert_eq!(term.beta_dim(), K_ATOMS * M * P);
+    assert_eq!(
+        term.beta_dim(),
+        K_ATOMS * M * P,
+        "border width must be K_ATOMS*M*P = {K_ATOMS}*{M}*{P} = {}; got {}",
+        K_ATOMS * M * P,
+        term.beta_dim(),
+    );
     assert_eq!(sys.k, K_ATOMS * M * FRAME_RANK);
     assert_eq!(sys.k, 2_048, "fixture must clear DIRECT_SOLVE_MAX_K=2000");
     let device = sys

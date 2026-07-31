@@ -47,7 +47,15 @@ pub(crate) fn assert_eta_one_parity(
         .expect("eta evaluate");
     assert_matrix_same_bits(&eta.phi, &phi);
     assert_tensor3_same_bits(&eta.jet, &jet);
-    assert_eq!(eta.split.curved_cols.len(), expected_curved);
+    assert_eq!(
+        eta.split.curved_cols.len(),
+        expected_curved,
+        "phi_eta split must report the expected curved-column count: got {} curved of {} total \
+         (base {}), expected {expected_curved}",
+        eta.split.curved_cols.len(),
+        eta.phi.ncols(),
+        eta.split.base_cols.len(),
+    );
     for &col in &eta.split.base_cols {
         for row in 0..phi.nrows() {
             assert_eq!(eta.dphi_deta[[row, col]], 0.0);
