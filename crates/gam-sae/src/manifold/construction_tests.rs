@@ -2200,7 +2200,7 @@ mod shape_uncertainty_joint_recompute_tests {
 }
 
 #[cfg(test)]
-mod deflation_folded_e_tt_tests_2333 {
+mod deflation_folded_e_tt_2333_tests {
     use crate::manifold::SaeManifoldTerm;
     use gam_solve::arrow_schur::{RowDeflationSpectrum, RowSpectralConditioning};
     use ndarray::{Array1, Array2, array};

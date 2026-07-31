@@ -3103,7 +3103,7 @@ mod run_plan_tests;
 // form as its sibling, so `use super::*` resolves to this module either way.
 #[cfg(test)]
 #[path = "run_plan_caller_requirement_tests_2568.rs"]
-mod run_plan_caller_requirement_tests_2568;
+mod run_plan_caller_requirement_2568_tests;
 
 #[cfg(test)]
 #[path = "run_fixed_point_continuation_tests.rs"]
