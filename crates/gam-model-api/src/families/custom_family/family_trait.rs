@@ -1528,6 +1528,40 @@ pub trait CustomFamily {
         Ok(Some(axes))
     }
 
+    /// Batched form of
+    /// [`Self::joint_jeffreys_information_second_directional_all_axes_with_specs`]:
+    /// one all-axes block per outer direction in `d_beta_us`.
+    ///
+    /// The default simply iterates the single-direction form, so a family that
+    /// implements that one gets this for free and no existing implementor has to
+    /// change. Families able to amortise work ACROSS directions — reusing a
+    /// beta-fixed per-row factorisation rather than rebuilding it per direction —
+    /// override this with a batched path; `gam-models`' survival marginal-slope
+    /// family does exactly that.
+    ///
+    /// `None` short-circuits with the same meaning as the single-direction form:
+    /// if any direction cannot be priced, the whole batch is unavailable rather
+    /// than partially filled.
+    fn joint_jeffreys_information_second_directional_all_axes_many_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_us: &[Array1<f64>],
+    ) -> Result<Option<Vec<Vec<Array2<f64>>>>, String> {
+        let mut batched = Vec::with_capacity(d_beta_us.len());
+        for d_beta_u_flat in d_beta_us {
+            match self.joint_jeffreys_information_second_directional_all_axes_with_specs(
+                block_states,
+                specs,
+                d_beta_u_flat,
+            )? {
+                Some(axes) => batched.push(axes),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(batched))
+    }
+
     /// Optional contracted second beta-derivative of the observed joint
     /// Newton information:
     ///
