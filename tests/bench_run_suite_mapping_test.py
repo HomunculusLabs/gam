@@ -83,6 +83,7 @@ def _parse_args(scenario_path: Path, out_path: Path) -> typing.Any:
         gate=None,
         update_baseline=False,
         cv_splits=None,
+        contenders=None,
     )
 
 
@@ -970,6 +971,8 @@ class RunSuiteMappingTests(unittest.TestCase):
                     scenario_names=None,
                     gate=None,
                     update_baseline=False,
+                    cv_splits=None,
+                    contenders=None,
                 )
                 _RUN_SUITE.dataset_for_scenario = lambda _scenario: {
                     "rows": [{"y": 0.0, "pc1": 0.0}],
@@ -1082,6 +1085,8 @@ class RunSuiteMappingTests(unittest.TestCase):
                     scenario_names=None,
                     gate=None,
                     update_baseline=False,
+                    cv_splits=None,
+                    contenders=None,
                 )
                 _RUN_SUITE.dataset_for_scenario = lambda _scenario: {
                     "rows": [{"y": 0.0, "pc1": 0.0}],
