@@ -7587,6 +7587,43 @@ fn rigid_survival_all_axes_build_once_equals_per_axis_sweep_979() {
                  diverged from the per-axis sweep by {max_gap:e}"
             );
         }
+
+        // ---- MANY fixed directions: one shared tower vs singular batches ----
+        let directions = vec![
+            Array1::from_vec(d_u.clone()),
+            Array1::from_vec(vec![-0.2, 0.8, 0.1, -0.6, 0.35]),
+        ];
+        let many = kernel
+            .second_directional_derivative_all_axes_many_build_once(&directions)
+            .expect("one-tower multi-direction second derivative");
+        assert_eq!(many.len(), directions.len());
+        for (direction_idx, direction) in directions.iter().enumerate() {
+            let singular = row_kernel_second_directional_derivative_all_axes(
+                &kernel,
+                &RowSet::All,
+                direction
+                    .as_slice()
+                    .expect("fixture direction is contiguous"),
+            )
+            .expect("singular build-once all-axes second derivative");
+            assert_eq!(many[direction_idx].len(), singular.len());
+            let mut max_gap = 0.0_f64;
+            for axis in 0..p {
+                for r in 0..p {
+                    for c in 0..p {
+                        max_gap = max_gap.max(
+                            (many[direction_idx][axis][[r, c]]
+                                - singular[axis][[r, c]])
+                            .abs(),
+                        );
+                    }
+                }
+            }
+            assert!(
+                max_gap < 1e-9,
+                "frailty {frailty:?} direction {direction_idx}: shared-tower multi-direction                  batch diverged from singular build-once batches by {max_gap:e}"
+            );
+        }
     }
 }
 
