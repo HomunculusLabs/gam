@@ -43,19 +43,34 @@ impl SaeManifoldTerm {
     /// then forms the custom penalized quasi-Laplace cost
     ///
     /// ```text
-    /// V(ρ) = ℓ_pen(t̂, β̂; ρ) + ½ log|B(t̂, β̂; ρ)|
+    /// V(ρ) = ℓ_pen(t̂, β̂; ρ) + E_extra
+    ///        + ½ log|A| − ½ log|A_tt| + Σ_k ½ · dof_k · log(max(N_eff_k, 1))
     ///        − ½ · p · (Σ_k rank S_k) · log λ_smooth
     /// ```
     ///
     /// where `ℓ_pen = loss.total()` is the penalised objective at the inner
-    /// optimum and `½ log|B|` is the custom curvature charge. `B` is the PSD /
-    /// Gauss--Newton factor assembled by the arrow-Schur system, not the exact
-    /// stationarity Hessian; its `B_tt` block
-    /// carries `α = exp(log_ard)` on its diagonal, so as α grows `½ log|B|`
-    /// rises while the `−½·n·log α` already inside `loss.ard` falls — their
-    /// balance IS the effective-dof term that the deleted `α = n/‖t‖²` rule
-    /// dropped, which is why the criterion needs no clamp to stay finite on a
-    /// collapsing axis.
+    /// optimum and the middle line is the #2a occupancy-aware BIC/Laplace
+    /// complexity assembled by [`rank_adjusted_quasi_laplace_complexity`] from
+    /// the EXACT observed information: `log|A|` joint, `log|A_tt|` on the
+    /// coordinate block, plus the per-atom realised-DOF rank charge.
+    ///
+    /// #2a SUPERSEDED the majorizer form. This doc previously described the
+    /// charge as `½ log|B|` over the PSD / Gauss--Newton arrow-Schur factor, and
+    /// argued that because `B_tt` carries `α = exp(log_ard)` on its diagonal,
+    /// `½ log|B|` rises as α grows and balances the `−½·n·log α` already inside
+    /// `loss.ard` — concluding the criterion therefore needs no clamp to stay
+    /// finite on a collapsing axis. **That balance no longer exists**, because
+    /// `− ½ log|A_tt|` subtracts the coordinate block, which is the only place α
+    /// enters, and the rank charge `Σ ½·dof·log(max(N_eff,1))` is α-free.
+    ///
+    /// gam#2627 measured the consequence on a collapsed axis (`‖t₁‖² ≈ 4e-10`,
+    /// `n = 4`): `dV/d log α = −2.0000000000` to ~1e-12 with zero curvature,
+    /// i.e. exactly `−n/2` — the `loss.ard` term standing alone. Whether
+    /// `−½·n·log α` should have been dropped from `V` when #2a retired the
+    /// majorizer coordinate term, or whether #2a owes `V` a replacement
+    /// α-charge, is an open question on that issue. Until it is settled, do not
+    /// rely on the retired balance above as a reason this criterion is
+    /// clamp-free on a collapsing axis.
     ///
     /// The final `−½·p·rank(S)·log λ_smooth` term is the smoothing-penalty
     /// normaliser `−½ log|λ S|_+` restricted to its ρ-dependent part: `S_k` is
