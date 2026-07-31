@@ -1600,6 +1600,76 @@ pub(crate) fn remember_value_probe(
     });
 }
 
+/// Classify a failure produced while evaluating one BFGS line-search value
+/// probe.
+///
+/// [`EstimationError::HessianNotPositiveDefinite`] is deliberately fatal at
+/// the general objective boundary: the same type can describe a structural
+/// Hessian defect at a seed, accepted iterate, or final certificate. A value
+/// probe is narrower. The incumbent has already supplied a feasible
+/// cost/gradient sample, and this call asks only whether one different `rho`
+/// is in the criterion's domain. If the inner penalized Hessian cannot be
+/// factored there, the mathematically correct answer to the line search is
+/// "reject this trial and shorten the step", not "abort the whole fit".
+///
+/// Keep that context-dependent verdict here instead of globally adding the
+/// Hessian variant to `is_trial_point_infeasible`: gradient and terminal
+/// evaluations continue to expose the failure as fatal.
+fn into_line_search_value_probe_error(
+    context: &str,
+    err: EstimationError,
+) -> ObjectiveEvalError {
+    match err {
+        err @ EstimationError::HessianNotPositiveDefinite { .. } => {
+            ObjectiveEvalError::recoverable_from(err).with_context(context)
+        }
+        err => into_objective_error(context, err),
+    }
+}
+
+#[cfg(test)]
+mod line_search_value_probe_error_tests {
+    use super::*;
+
+    /// #2273: an indefinite inner Hessian at one value-only line-search trial
+    /// rejects that trial without weakening the type's general classification.
+    #[test]
+    fn trial_hessian_refusal_is_local_to_the_value_probe_boundary_2273() {
+        let trial_error = EstimationError::HessianNotPositiveDefinite {
+            min_eigenvalue: -3.055_337_809_473_694_1e-4,
+        };
+        assert!(
+            !trial_error.is_trial_point_infeasible(),
+            "the Hessian error remains fatal outside a proven line-search probe"
+        );
+
+        let objective_error =
+            into_line_search_value_probe_error("outer eval_cost failed", trial_error);
+        assert!(
+            objective_error.is_recoverable(),
+            "one infeasible line-search rho must shorten the step, not abort the fit"
+        );
+        assert!(matches!(
+            objective_error.downcast_ref::<EstimationError>(),
+            Some(EstimationError::HessianNotPositiveDefinite {
+                min_eigenvalue
+            }) if min_eigenvalue.to_bits()
+                == (-3.055_337_809_473_694_1e-4_f64).to_bits()
+        ));
+
+        let terminal_error = into_objective_error(
+            "terminal outer evaluation failed",
+            EstimationError::HessianNotPositiveDefinite {
+                min_eigenvalue: -3.055_337_809_473_694_1e-4,
+            },
+        );
+        assert!(
+            terminal_error.is_fatal(),
+            "seed, gradient, and terminal Hessian failures must stay fatal"
+        );
+    }
+}
+
 impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
     fn eval_cost(&mut self, x: &Array1<f64>) -> Result<f64, ObjectiveEvalError> {
         // Consume any accepted-step signal `opt` published since the previous
@@ -1669,7 +1739,9 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
         let result = self
             .obj
             .eval_with_order(x, OuterEvalOrder::Value)
-            .map_err(|err| into_objective_error("outer eval_cost failed", err))
+            .map_err(|err| {
+                into_line_search_value_probe_error("outer eval_cost failed", err)
+            })
             .and_then(|eval| finite_cost_or_error("outer eval_cost failed", eval.cost));
         let cached_outcome = cache_value_probe_result(&result);
         remember_value_probe(&mut self.value_probe_cache, x, cached_outcome);
