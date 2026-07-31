@@ -1871,15 +1871,17 @@ impl BlockEtaCheckpoint {
 /// so the slow convergence is NOT a TR-policy issue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum JointTrustRegionDecision {
-    /// `rho > 0.75` AND `step_norm >= 0.99 * old_radius` — model is good
-    /// AND the step is at the TR boundary, so doubling reflects a real
-    /// constraint that was just lifted.
+    /// `rho > 0.75`, `step_norm >= 0.99 * old_radius`, AND the model-predicted
+    /// decrease exceeds the objective tolerance — model is good, the step is
+    /// at the TR boundary, and the constrained decrease is resolvable, so
+    /// doubling reflects a real constraint that was just lifted.
     GrowAtBoundary,
-    /// `rho > 0.75` but the step is well inside the region; radius held
-    /// because no evidence the TR was constraining the step.  When the
-    /// inner is converging linearly and this branch fires every cycle,
-    /// the TR is NOT the bottleneck — Newton itself is finding short
-    /// steps for a reason unrelated to the trust radius.
+    /// `rho > 0.75`, but either the step is well inside the region or its
+    /// boundary-model decrease is below objective resolution; radius held
+    /// because there is no evidence the TR constrained useful progress. When
+    /// the inner is converging linearly and this branch fires every cycle, the
+    /// TR is NOT the bottleneck — Newton is finding short or unresolved steps
+    /// for a reason unrelated to the trust radius.
     HoldInside,
     /// `0.25 <= rho <= 0.75` (moderate model fidelity) — radius held.
     HoldModerate,
@@ -1951,6 +1953,7 @@ pub(crate) fn update_joint_trust_region_radius(
     actual_reduction: f64,
     predicted_reduction: f64,
     objective_scale: f64,
+    objective_tol: f64,
 ) -> JointTrustRegionUpdate {
     // Round-off-aware trust-region radius control, delegated to the shared
     // `opt::TrustRegionPolicy::noise_aware` controller. The
@@ -1959,13 +1962,17 @@ pub(crate) fn update_joint_trust_region_radius(
     // step rather than dividing two round-off-level quantities — the gam#797
     // last-mile / clustered-bernoulli pinning guard), the `rho > 0` accept
     // test above that floor, the `×0.25` shrink capped at `0.5·step_norm` on
-    // rejection, the `×2` grow at the boundary (`step_norm ≥ 0.99·old_radius`),
-    // the `[1e-12, 1e6]` clamp, and the `RejectFloor` promotion at the floor
-    // are all reproduced exactly by that controller — this is a behavior-
-    // preserving extraction, not a re-derivation. The gam#2637 override below
-    // is the one deliberate deviation, and it only ever converts a rejection
-    // the controller could not justify into an accept.
-    let hit_boundary = step_norm >= 0.99 * old_radius;
+    // rejection, the `×2` grow at a boundary that constrains a model-resolvable
+    // decrease, the `[1e-12, 1e6]` clamp, and the `RejectFloor` promotion at the
+    // floor are all reproduced by that controller. Geometry alone is not
+    // evidence for growth: when `predicted_reduction <= objective_tol`, the
+    // quadratic model says the entire constrained step is beneath the solver's
+    // own objective resolution. Treating that chord as a useful boundary hit
+    // doubled the next chord and made transformation-normal walk away from its
+    // best iterate (gam#2600). The gam#2637 override below is the other deliberate
+    // specialization, and it only ever converts a rejection the controller could
+    // not justify into an accept.
+    let hit_boundary = step_norm >= 0.99 * old_radius && predicted_reduction > objective_tol;
     let step = opt::TrustRegionPolicy::noise_aware(1.0e-12, 1.0e6, JOINT_TRUST_NOISE_FLOOR_REL)
         .update(
             old_radius,
@@ -2530,11 +2537,20 @@ pub(crate) fn joint_inner_kkt_converged(residual: f64, residual_tol: f64) -> boo
 /// model can resolve lowers the penalized objective by more than tolerance, so the
 /// iterate IS the optimum on the identifiable subspace.
 ///
-/// `decrement` is `½gᵀH⁻¹g` over the identified modes; `weakly_identified_decrement`
-/// re-measures the achievable improvement over the genuinely-curved band (above the
-/// conditioning-robust `numerical_floor` rather than `rank_tol·λ_max`), so a
-/// weakly-identified real direction blocks certification instead of being written
-/// off as gauge (gam#1449). Both must clear the tolerance.
+/// `decrement` is `½gᵀH⁻¹g` over the identified modes;
+/// `weakly_identified_decrement` re-measures the achievable improvement over the
+/// genuinely-curved band (above the conditioning-robust `numerical_floor` rather
+/// than `rank_tol·λ_max`), so a weakly-identified real direction blocks
+/// certification instead of being written off as gauge (gam#1449).
+///
+/// A machine-null Hessian direction needs a separate first-order condition.
+/// Curvature below numerical resolution makes `g²/(2γ)` undefined; it does
+/// **not** make a non-zero score disappear. Such a direction is a genuine gauge
+/// only when the objective is invariant along it, which implies zero projected
+/// score. `numerical_null_stationarity` is that score in the original
+/// coefficient coordinates and must satisfy the same stationarity tolerance as
+/// the full KKT residual. This closes the false certificate where a Jeffreys
+/// score was large in a direction omitted by an incomplete local Hessian.
 ///
 /// This lives here, as ONE predicate, because two sites in `inner_blockwise_fit`
 /// decide this same fact and used to answer it differently (#2485): the
@@ -2546,12 +2562,16 @@ pub(crate) fn joint_inner_kkt_converged(residual: f64, residual_tol: f64) -> boo
 pub(crate) fn joint_newton_decrement_certifies(
     decrement: f64,
     weakly_identified_decrement: f64,
+    numerical_null_stationarity: f64,
     objective_tol: f64,
+    residual_tol: f64,
 ) -> bool {
     decrement.is_finite()
         && decrement <= objective_tol
         && weakly_identified_decrement.is_finite()
         && weakly_identified_decrement <= objective_tol
+        && numerical_null_stationarity.is_finite()
+        && numerical_null_stationarity <= residual_tol
 }
 
 /// Per-iterate diagnostic snapshot assembled when the joint Newton inner solve
@@ -3073,6 +3093,30 @@ pub(crate) mod whitened_spectrum {
                 }
             }
             0.5 * acc
+        }
+
+        /// Infinity norm of the original-coordinate score carried by the
+        /// machine-null eigenspace (`|γ| <= numerical_floor`).
+        ///
+        /// `c = Vᵀ D^{-1/2} rhs`, so the null component in whitened coordinates
+        /// is `V_null c_null`; multiplying by `D^{1/2}` maps it back to the
+        /// coefficient-space stationarity vector. Unlike [`Self::null_residual_inf`],
+        /// this excludes the weak-but-resolvable band and has the same units as
+        /// the KKT tolerance consumed by the convergence certificate.
+        pub(crate) fn numerical_null_stationarity_inf(&self) -> f64 {
+            let p = self.gamma.len();
+            let mut maximum = 0.0_f64;
+            for i in 0..p {
+                let mut whitened_component = 0.0_f64;
+                for k in 0..p {
+                    if self.gamma[k].abs() <= self.numerical_floor {
+                        whitened_component += self.evecs[[i, k]] * self.c[k];
+                    }
+                }
+                let original_component = whitened_component / self.d_inv_sqrt[i];
+                maximum = maximum.max(original_component.abs());
+            }
+            maximum
         }
 
         /// Assemble the whitened step `η(λ) = Σ c_k/(γ_k+λ) v_k` over identified
@@ -3615,8 +3659,9 @@ mod trust_region_subproblem_tests {
         );
     }
 
-    /// Null space: a genuinely zero-curvature direction is dropped from the step
-    /// (Moore–Penrose range restriction) and reported via `null_rhs_inf`.
+    /// Null space: a zero-curvature direction is dropped from the step
+    /// (Moore–Penrose range restriction) and reported via `null_rhs_inf`, but a
+    /// non-zero score there must still block a convergence certificate.
     #[test]
     pub(crate) fn null_direction_is_dropped_and_reported() {
         // Second coordinate has zero curvature; rhs has mass there.
@@ -3634,6 +3679,38 @@ mod trust_region_subproblem_tests {
         // The identified direction takes its exact Newton component (1/2).
         assert!((step.delta[0] - 0.5).abs() < 1e-10);
         assert!(step.delta[1].abs() < 1e-10, "null coordinate left at 0");
+
+        let null_stationarity = spec.numerical_null_stationarity_inf();
+        assert!(
+            (null_stationarity - 0.5).abs() < 1e-10,
+            "the original-coordinate score on the numerical null must be retained; \
+             got {null_stationarity}"
+        );
+        assert!(
+            !super::joint_newton_decrement_certifies(
+                spec.newton_decrement(),
+                spec.weakly_identified_decrement(),
+                null_stationarity,
+                1.0,
+                1e-8,
+            ),
+            "a null Hessian direction with non-zero score is locally linear, not converged"
+        );
+
+        let gauge_rhs = array![1.0, 0.0];
+        let gauge_spec =
+            WhitenedHessianSpectrum::decompose(&h, &gauge_rhs, &d, KKT_REFUSAL_RANK_TOL).unwrap();
+        assert_eq!(gauge_spec.numerical_null_stationarity_inf(), 0.0);
+        assert!(
+            super::joint_newton_decrement_certifies(
+                gauge_spec.newton_decrement(),
+                gauge_spec.weakly_identified_decrement(),
+                gauge_spec.numerical_null_stationarity_inf(),
+                1.0,
+                1e-8,
+            ),
+            "a structurally invariant null direction has zero score and remains admissible"
+        );
     }
 
     /// gam#979/#1449 (completes #1082): a weakly-identified mode below the
