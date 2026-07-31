@@ -1967,6 +1967,111 @@ pub fn matrix_free_arrow_evidence_log_det_surrogate(
     slq_seed: u64,
     lane: Option<&mut SurrogateLaneState>,
 ) -> Result<(f64, f64), ArrowSchurError> {
+    let (log_det_tt, log_det_schur, _factors) = matrix_free_arrow_evidence_log_det_surrogate_core(
+        sys,
+        ridge_t,
+        ridge_beta,
+        options,
+        slq_num_probes,
+        slq_lanczos_steps,
+        slq_seed,
+        lane,
+    )?;
+    Ok((log_det_tt, log_det_schur))
+}
+
+/// One matrix-free evidence value together with the exact row geometry that
+/// produced it. The reduced-Schur derivative bundle emitted through
+/// [`SurrogateLaneState`] is only meaningful when lifted through these same row
+/// factors and cross blocks; retaining a different operator's factor cache
+/// silently differentiates a different log determinant.
+pub struct MatrixFreeArrowEvidenceEvaluation {
+    pub log_det_tt: f64,
+    pub log_det_schur: f64,
+    pub factor_cache: ArrowFactorCache,
+}
+
+impl MatrixFreeArrowEvidenceEvaluation {
+    #[must_use]
+    pub fn log_det(&self) -> f64 {
+        self.log_det_tt + self.log_det_schur
+    }
+}
+
+/// Gradient-bearing form of
+/// [`matrix_free_arrow_evidence_log_det_surrogate`]. Value, rational derivative,
+/// and row factors are emitted by one factorization; consumers therefore cannot
+/// pair the derivative of one reduced operator with another operator's row
+/// elimination geometry.
+pub fn matrix_free_arrow_evidence_evaluation(
+    sys: &ArrowSchurSystem,
+    ridge_t: f64,
+    ridge_beta: f64,
+    options: &ArrowSolveOptions,
+    slq_num_probes: usize,
+    slq_lanczos_steps: usize,
+    slq_seed: u64,
+    lane: &mut SurrogateLaneState,
+) -> Result<MatrixFreeArrowEvidenceEvaluation, ArrowSchurError> {
+    if ridge_t != 0.0 || ridge_beta != 0.0 {
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: format!(
+                "gradient-bearing evidence must be undamped, got ridge_t={ridge_t:e}, \
+                 ridge_beta={ridge_beta:e}"
+            ),
+        });
+    }
+    let (log_det_tt, log_det_schur, factorization) =
+        matrix_free_arrow_evidence_log_det_surrogate_core(
+            sys,
+            ridge_t,
+            ridge_beta,
+            options,
+            slq_num_probes,
+            slq_lanczos_steps,
+            slq_seed,
+            Some(lane),
+        )?;
+    let factor_cache = ArrowFactorCache {
+        htt_factors: factorization.factors,
+        htt_factors_undamped: ArrowUndampedFactors::SameAsDamped,
+        schur_factor: None,
+        schur_factor_is_undamped: true,
+        beta_schur_deflation: None,
+        joint_hessian_log_det: Some(log_det_tt + log_det_schur),
+        solver_mode: options.mode,
+        ridge_t,
+        ridge_beta,
+        htbeta: ArrowHtbetaCache::from_system(sys)?,
+        d: sys.d,
+        row_dims: Arc::clone(&sys.row_dims),
+        row_offsets: Arc::clone(&sys.row_offsets),
+        k: sys.k,
+        manifold_mode_fingerprint: sys.manifold_mode_fingerprint,
+        row_hessian_fingerprint: sys.current_row_hessian_fingerprint(),
+        pcg_diagnostics: ArrowPcgDiagnostics::default(),
+        gauge_deflated_directions: factorization.gauge_deflated_directions,
+        deflated_row_directions: factorization.deflated_row_directions.into(),
+        deflation_row_spectra: factorization.deflation_row_spectra.into(),
+        beta_gauge_quotient: sys.beta_gauge_quotient.clone(),
+    };
+    Ok(MatrixFreeArrowEvidenceEvaluation {
+        log_det_tt,
+        log_det_schur,
+        factor_cache,
+    })
+}
+
+fn matrix_free_arrow_evidence_log_det_surrogate_core(
+    sys: &ArrowSchurSystem,
+    ridge_t: f64,
+    ridge_beta: f64,
+    options: &ArrowSolveOptions,
+    slq_num_probes: usize,
+    slq_lanczos_steps: usize,
+    slq_seed: u64,
+    lane: Option<&mut SurrogateLaneState>,
+) -> Result<(f64, f64, ArrowBlockFactorization), ArrowSchurError> {
     let backend = CpuBatchedBlockSolver;
     let factorization = factor_blocks_for_system(
         sys,
@@ -1975,7 +2080,7 @@ pub fn matrix_free_arrow_evidence_log_det_surrogate(
         &backend,
         options.gpu_policy,
     )?;
-    let htt_factors = factorization.factors;
+    let htt_factors = factorization.factors.clone();
     let mut log_det_tt = 0.0_f64;
     for row in 0..htt_factors.len() {
         let factor = htt_factors.factor(row);
@@ -2156,7 +2261,7 @@ pub fn matrix_free_arrow_evidence_log_det_surrogate(
             estimate
         }
     };
-    Ok((log_det_tt, log_det_schur))
+    Ok((log_det_tt, log_det_schur, factorization))
 }
 
 /// Power-iteration estimate of the largest eigenvalue `λ_max` of the SPD reduced

@@ -5476,7 +5476,7 @@ fn matrix_free_arrow_evidence_surrogate_none_matches_slq_some_builds_and_reuses(
     let (n, d, k) = (40usize, 3usize, 80usize);
     let sys = dense_direct_system(n, d, k);
     let backend = CpuBatchedBlockSolver;
-    let ridge_beta = 1e-6;
+    let ridge_beta = 0.0;
     let seed = 0x2080_5A17_C0DE_u64;
     let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
 
@@ -5534,21 +5534,28 @@ fn matrix_free_arrow_evidence_surrogate_none_matches_slq_some_builds_and_reuses(
         state.plan().is_none(),
         "a fresh lane has no plan until first evaluated"
     );
-    let (tt_some, schur_some) = matrix_free_arrow_evidence_log_det_surrogate(
-        &sys,
-        0.0,
-        ridge_beta,
-        &options,
-        48,
-        60,
-        seed,
-        Some(&mut state),
+    let evaluated = matrix_free_arrow_evidence_evaluation(
+        &sys, 0.0, ridge_beta, &options, 48, 60, seed, &mut state,
     )
-    .expect("Some-lane surrogate entry must succeed");
+    .expect("gradient-bearing surrogate entry must succeed");
+    let tt_some = evaluated.log_det_tt;
+    let schur_some = evaluated.log_det_schur;
     assert_eq!(
         tt_some, tt_ref,
         "log_det_tt is factorization-only, independent of the log|S| lane"
     );
+    assert_eq!(
+        evaluated.factor_cache.arrow_log_det(),
+        Some(evaluated.log_det()),
+        "the retained row geometry must carry the value produced with it"
+    );
+    for row in 0..n {
+        assert_eq!(
+            evaluated.factor_cache.undamped_factor(row),
+            htt_factors.factor(row),
+            "retained evidence row factor {row} must be the value factor"
+        );
+    }
     assert!(
         state.plan().is_some(),
         "the first Some evaluation must build+freeze the plan"

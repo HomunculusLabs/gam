@@ -2258,6 +2258,42 @@ impl std::fmt::Debug for ArrowHtbetaCache {
 }
 
 impl ArrowHtbetaCache {
+    pub(crate) fn from_system(sys: &ArrowSchurSystem) -> Result<Self, ArrowSchurError> {
+        let estimated_bytes = sys
+            .rows
+            .len()
+            .checked_mul(sys.d)
+            .and_then(|value| value.checked_mul(sys.k))
+            .and_then(|value| value.checked_mul(std::mem::size_of::<f64>()))
+            .unwrap_or(usize::MAX);
+        if let Some(op) = sys.htbeta_matvec.as_ref() {
+            let transpose_op = sys.htbeta_transpose_matvec.as_ref().ok_or_else(|| {
+                ArrowSchurError::SchurFactorFailed {
+                    reason: "matrix-free H_tbeta factor cache requires the sparse transpose \
+                             installed by ArrowSchurSystem::set_row_htbeta_operator"
+                        .to_string(),
+                }
+            })?;
+            Ok(Self::Matvec {
+                op: Arc::clone(op),
+                transpose_op: Arc::clone(transpose_op),
+                estimated_bytes,
+            })
+        } else if estimated_bytes <= ARROW_FACTOR_CACHE_HTBETA_BUDGET_BYTES {
+            Ok(Self::Dense {
+                blocks: sys
+                    .rows
+                    .iter()
+                    .map(|row| row.htbeta.clone())
+                    .collect::<Vec<_>>()
+                    .into(),
+                estimated_bytes,
+            })
+        } else {
+            Ok(Self::Disabled { estimated_bytes })
+        }
+    }
+
     pub(crate) fn is_available(&self) -> bool {
         !matches!(self, Self::Disabled { .. })
     }
