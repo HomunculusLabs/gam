@@ -1,0 +1,1314 @@
+// Child module of `run_plan::run_plan_tests` (see the `#[path]` declaration
+// there): the seed cascade itself — keep-best / parsimony ranking, Gaussian
+// multistart, expensive-seed screening and its cap ladder, the effective seed
+// budget, and seed projection before the validation eval. Child modules see
+// the parent's entire scope (helpers AND imports) via `use super::*`, so the
+// split is purely physical.
+
+use super::*;
+use ndarray::array;
+
+/// Keep-best must rank CERTIFICATION above VALUE, the invariant `run_plan.rs`
+/// relies on when it routes the #1371/#1476 ARC box-corner substitution through
+/// keep-best "as a NON-converged candidate" so an earlier converged seed still
+/// wins. The costs below are that scenario's own numbers: a genuine interior
+/// optimum at ~133 and a degenerate stall caching a spuriously LOWER ~65.
+#[test]
+fn keep_best_ranks_convergence_above_value() {
+    let plan = OuterPlan {
+        solver: Solver::Bfgs,
+        hessian_source: HessianSource::BfgsApprox,
+    };
+    let converged = OuterResult::new(array![-1.0], 133.0, 12, true, plan);
+    let stalled_cheaper = OuterResult::new(array![8.0], 65.0, 58, false, plan);
+
+    assert!(
+        !candidate_improves_best(&stalled_cheaper, Some(&converged)),
+        "a non-converged candidate must not displace a converged best, however \
+         much lower its cached cost is — that cost is where the search stopped, \
+         not a claim about an optimum"
+    );
+    assert!(
+        candidate_improves_best(&converged, Some(&stalled_cheaper)),
+        "a converged candidate must displace a non-converged best even when its \
+         value is worse"
+    );
+
+    // With convergence equal on both sides, value decides exactly as before.
+    let cheaper_converged = OuterResult::new(array![-2.0], 132.0, 9, true, plan);
+    assert!(candidate_improves_best(&cheaper_converged, Some(&converged)));
+    assert!(!candidate_improves_best(&converged, Some(&cheaper_converged)));
+    let dearer_stall = OuterResult::new(array![9.0], 70.0, 4, false, plan);
+    assert!(candidate_improves_best(&stalled_cheaper, Some(&dearer_stall)));
+
+    // Nothing to beat: the first candidate is always adopted, converged or not,
+    // so a single-start fit still returns its result unchanged.
+    assert!(candidate_improves_best(&stalled_cheaper, None));
+}
+
+#[test]
+fn parsimonious_keep_best_breaks_laml_tie_toward_more_smoothing() {
+    let plan = OuterPlan {
+        solver: Solver::Bfgs,
+        hessian_source: HessianSource::BfgsApprox,
+    };
+    let rho_dim = 2usize;
+
+    // Two CONVERGED optima whose LAML values are a statistical tie (within the
+    // relative band): a flexible (low-Σρ) basin scoring epsilon BETTER, and a
+    // parsimonious (high-Σρ) basin. The parsimonious one must win the tie.
+    let flexible = OuterResult::new(array![-3.0, -3.0], 100.0, 1, true, plan);
+    let mut parsimonious = OuterResult::new(array![3.0, 3.0], 100.05, 1, true, plan);
+    parsimonious.final_grad_norm = Some(0.0);
+
+    // gap 0.05 <= 1e-3 * 100.05 (=0.10005) → tie band → prefer larger Σρ.
+    assert!(candidate_improves_best_parsimonious(
+        &parsimonious,
+        Some(&flexible),
+        rho_dim,
+    ));
+    // The flexible (lower-LAML) candidate must NOT displace the parsimonious
+    // incumbent on a tie — the tie-break is asymmetric toward more smoothing.
+    assert!(!candidate_improves_best_parsimonious(
+        &flexible,
+        Some(&parsimonious),
+        rho_dim,
+    ));
+
+    // A DECISIVE LAML advantage for the flexible basin (gap far outside the
+    // band) must still win: a fit that genuinely needs the flexibility is not
+    // sacrificed to parsimony.
+    let decisive_flexible = OuterResult::new(array![-3.0, -3.0], 90.0, 1, true, plan);
+    assert!(candidate_improves_best_parsimonious(
+        &decisive_flexible,
+        Some(&parsimonious),
+        rho_dim,
+    ));
+}
+
+/// #979: the seed budget is a recovery ceiling, not the number of certified
+/// basins that parsimony comparison must solve. Once flexible slot 0 and the
+/// promoted smoothed slot 1 have both certified, a larger recovery budget must
+/// not force an unrelated third outer optimization.
+#[test]
+fn parsimony_await_stops_after_the_promoted_second_seed() {
+    assert!(
+        should_await_promoted_parsimony_seed(4, 1, false),
+        "slot 0 must await the deliberately promoted slot 1"
+    );
+    assert!(
+        !should_await_promoted_parsimony_seed(4, 2, false),
+        "two certified comparison basins exhaust the parsimony contract, even with recovery budget left"
+    );
+    assert!(
+        !should_await_promoted_parsimony_seed(1, 1, false),
+        "a single-start request cannot promote a second seed"
+    );
+    assert!(
+        !should_await_promoted_parsimony_seed(4, 1, true),
+        "a proven-redundant promoted basin remains waivable"
+    );
+}
+
+/// #1575: the parsimony-await second-seed waiver fires ONLY for a slot-0 result
+/// that is curvature-pinned (score-relative |g| well inside the tie band) AND
+/// well-penalized (every leading smoothing λ ≥ 1). Only analytically certified
+/// candidates can reach this predicate.
+#[test]
+fn parsimony_second_seed_waived_only_for_sharp_well_penalized_optimum() {
+    let plan = OuterPlan {
+        solver: Solver::Arc,
+        hessian_source: HessianSource::Analytic,
+    };
+    let rho_dim = 2usize;
+    // `at_band(frac, score)` is the residual gradient sitting `frac`× the
+    // score-relative sharpness band: frac<1 is inside (sharp), frac>1 outside.
+    let at_band =
+        |frac: f64, score: f64| PARSIMONY_SHARP_GRAD_REL_BAND * (1.0 + score.abs()) * frac;
+
+    // The redundant case: converged, every smoothing ρ ≥ 0, residual gradient
+    // two orders inside the tie band. Slot 1 would only re-derive this — waive.
+    let mut redundant = OuterResult::new(array![3.0, 0.0], 1082.972, 6, true, plan);
+    redundant.final_grad_norm = Some(at_band(0.01, 1082.972)); // 0.01× the band → sharp
+    assert!(
+        parsimony_second_seed_is_redundant(&redundant, rho_dim),
+        "a converged, sharp, well-penalized slot-0 optimum makes the heavy seed redundant"
+    );
+    // Exactly on the band boundary still counts as sharp (≤, not <).
+    let mut on_band = redundant.clone();
+    on_band.final_grad_norm = Some(at_band(1.0, 1082.972));
+    assert!(
+        parsimony_second_seed_is_redundant(&on_band, rho_dim),
+        "the score-relative band is inclusive at its edge"
+    );
+
+    // #1373 under-penalized basin: a smoothing λ < 1 (ρ < 0) is exactly the
+    // overshoot the heavy seed guards against — never waive, even when sharp.
+    let mut under_penalized = redundant.clone();
+    under_penalized.rho = array![-0.5, 3.0];
+    assert!(
+        !parsimony_second_seed_is_redundant(&under_penalized, rho_dim),
+        "a single under-penalized (ρ<0) coordinate keeps the parsimony seed (#1373)"
+    );
+
+    // Flat-valley non-sharp optimum: converged at a residual ABOVE the band, so
+    // the parsimony tie-break could still slide ρ toward the heavier basin.
+    let mut flat_valley = redundant.clone();
+    flat_valley.final_grad_norm = Some(at_band(10.0, 1082.972)); // 10× the band → not sharp
+    assert!(
+        !parsimony_second_seed_is_redundant(&flat_valley, rho_dim),
+        "a converged-but-flat optimum above the tie band keeps the parsimony seed"
+    );
+
+    // No measured gradient cannot certify sharpness.
+    let mut no_grad = redundant.clone();
+    no_grad.final_grad_norm = None;
+    assert!(
+        !parsimony_second_seed_is_redundant(&no_grad, rho_dim),
+        "an unmeasured gradient cannot prove a curvature-pinned optimum"
+    );
+
+    // The score-relative band scales with |score|: a residual that is absolutely
+    // large is still sharp when the LAML magnitude is large enough.
+    let mut large_score = OuterResult::new(array![2.0, 2.0], 5.0e6, 6, true, plan);
+    large_score.final_grad_norm = Some(40.0); // ≤ 1e-5·(1+5e6) = 50.00001
+    assert!(
+        parsimony_second_seed_is_redundant(&large_score, rho_dim),
+        "sharpness is score-relative, not an absolute gradient threshold"
+    );
+
+    // Trailing auxiliary coordinates (e.g. a GAMLSS log-scale predictor) are not
+    // smoothing parameters and must not block the waiver: only the leading
+    // rho_dim coordinates are tested for λ ≥ 1.
+    let mut with_aux = OuterResult::new(array![3.0, -7.0], 100.0, 6, true, plan);
+    with_aux.final_grad_norm = Some(at_band(0.1, 100.0));
+    assert!(
+        parsimony_second_seed_is_redundant(&with_aux, 1),
+        "a negative trailing auxiliary coordinate (ρ_dim=1) must not block the waiver"
+    );
+
+    // With no smoothing dimension the parsimony tie-break is a no-op.
+    assert!(
+        !parsimony_second_seed_is_redundant(&redundant, 0),
+        "rho_dim=0 has no smoothing parameter for the parsimony seed to decide"
+    );
+}
+
+#[test]
+fn gaussian_multistart_compares_converged_seed_costs() {
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.seed_budget = 2;
+    seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_seed_config(seed_config)
+        .with_max_iter(4);
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), theta: &Array1<f64>| Ok(if theta[0] < -1.0 { 0.0 } else { 10.0 }),
+        {
+            let started = Arc::clone(&started);
+            move |_: &mut (), theta: &Array1<f64>| {
+                started.lock().unwrap().push(theta.clone());
+                Ok(OuterEval {
+                    cost: if theta[0] < -1.0 { 0.0 } else { 10.0 },
+                    gradient: array![0.0],
+                    hessian: HessianValue::Unavailable,
+                    inner_beta_hint: None,
+                })
+            }
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let result = problem
+        .run(&mut obj, "Gaussian quality multistart")
+        .expect("Gaussian multistart should compare both converged seeds");
+    let starts = started.lock().unwrap();
+    assert!(
+        starts.len() >= 2,
+        "Gaussian quality mode should not stop at the first converged seed"
+    );
+    assert!(
+        result.rho[0] < -1.0,
+        "lower-cost converged Gaussian seed should win"
+    );
+    assert_eq!(result.final_value, 0.0);
+}
+
+/// #1575 end-to-end wiring: drive the real multi-start loop with the
+/// parsimonious (GeneralizedLinear) risk profile and `seed_budget = 2`. A slot-0
+/// seed that CONVERGES to a sharp, well-penalized optimum (every smoothing
+/// λ ≥ 1) must BREAK the multi-start after a single seed — the heavy slot-1 seed
+/// is provably redundant. A slot-0 seed that converges to an UNDER-penalized
+/// (ρ < 0) optimum is the #1373 overshoot regime, so the heavy seed must STILL
+/// run. Counts genuine seed solves by intersecting the recorded solver evals
+/// with the generated seed candidates (a seed-startup eval lands exactly on a
+/// candidate; interior trial steps and the converged optimum do not).
+#[test]
+fn parsimony_multistart_breaks_after_sharp_well_penalized_first_seed() {
+    fn seeds_run(center: f64) -> (usize, OuterResult) {
+        let mut seed_config = gam_problem::SeedConfig::default();
+        seed_config.seed_budget = 2;
+        seed_config.risk_profile = gam_problem::SeedRiskProfile::GeneralizedLinear;
+        let candidates: Vec<Array1<f64>> =
+            crate::seeding::generate_rho_candidates(1, None, &seed_config).expect("ordered seed bounds");
+        // The optimum must not coincide with any generated seed, so only true
+        // seed-startup evals (which land exactly on a candidate) are counted.
+        assert!(
+            candidates.iter().all(|c| (c[0] - center).abs() > 1e-9),
+            "test premise: the optimum {center} must not equal a generated seed"
+        );
+        let started = Arc::new(Mutex::new(Vec::<Array1<f64>>::new()));
+        let problem = OuterProblem::new(1)
+            .with_gradient(Derivative::Analytic)
+            .with_hessian(DeclaredHessianForm::Either)
+            .with_seed_config(seed_config)
+            .with_max_iter(16);
+        let mut obj = problem.build_objective(
+            (),
+            move |_: &mut (), theta: &Array1<f64>| {
+                let d = theta[0] - center;
+                Ok(0.5 * d * d)
+            },
+            {
+                let started = Arc::clone(&started);
+                move |_: &mut (), theta: &Array1<f64>| {
+                    started.lock().unwrap().push(theta.clone());
+                    let d = theta[0] - center;
+                    Ok(OuterEval {
+                        cost: 0.5 * d * d,
+                        gradient: array![d],
+                        hessian: HessianValue::Dense(array![[1.0]]),
+                        inner_beta_hint: None,
+                    })
+                }
+            },
+            None::<fn(&mut ())>,
+            None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+        );
+        let result = problem
+            .run(&mut obj, "parsimony multistart wiring")
+            .expect("a strictly-convex quadratic outer objective converges");
+        let starts = started.lock().unwrap();
+        let mut origins: Vec<f64> = starts
+            .iter()
+            .filter(|t| candidates.iter().any(|c| (c[0] - t[0]).abs() < 1e-9))
+            .map(|t| t[0])
+            .collect();
+        origins.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        origins.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        (origins.len(), result)
+    }
+
+    // Well-penalized minimum (ρ = 2.7 ≥ 0): slot 0 is sharp and every λ ≥ 1, so
+    // the heavy seed is redundant — exactly ONE seed solves.
+    let (well_penalized_seeds, well_result) = seeds_run(2.7);
+    assert!(well_result.converged(), "well-penalized fit converges");
+    assert!(
+        (well_result.rho[0] - 2.7).abs() < 1e-4,
+        "publishes the slot-0 optimum, got {}",
+        well_result.rho[0]
+    );
+    assert_eq!(
+        well_penalized_seeds, 1,
+        "a sharp, well-penalized slot-0 optimum must break the multi-start after one seed (#1575)"
+    );
+
+    // Under-penalized minimum (ρ = -2.7 < 0): the #1373 overshoot regime — the
+    // heavy parsimony seed must still run.
+    let (under_penalized_seeds, under_result) = seeds_run(-2.7);
+    assert!(under_result.converged(), "under-penalized fit converges");
+    assert!(
+        (under_result.rho[0] + 2.7).abs() < 1e-4,
+        "publishes the slot-0 optimum, got {}",
+        under_result.rho[0]
+    );
+    assert_eq!(
+        under_penalized_seeds, 2,
+        "an under-penalized (ρ<0) slot-0 optimum must keep the parsimony second seed (#1373)"
+    );
+}
+
+#[test]
+fn run_starts_solver_with_direct_startup_eval() {
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.seed_budget = 1;
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Either)
+        .with_seed_config(seed_config)
+        .with_max_iter(1);
+    let mut obj = problem.build_objective(
+        (),
+        {
+            let calls = Arc::clone(&calls);
+            move |_: &mut (), theta: &Array1<f64>| {
+                calls.lock().unwrap().push("cost");
+                Ok(theta[0] * theta[0])
+            }
+        },
+        {
+            let calls = Arc::clone(&calls);
+            move |_: &mut (), theta: &Array1<f64>| {
+                calls.lock().unwrap().push("eval");
+                Ok(OuterEval {
+                    cost: theta[0] * theta[0],
+                    gradient: array![2.0 * theta[0]],
+                    hessian: HessianValue::Dense(array![[2.0]]),
+                    inner_beta_hint: None,
+                })
+            }
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    // This test pins the STARTUP eval ORDER, not convergence. The single-iter
+    // budget leaves a small residual gradient above the tight stationarity bound,
+    // so the run may legitimately refuse to certify — that outcome is orthogonal
+    // to what is asserted here. The `calls` trace records the startup sequence
+    // whether or not the run mints, so the run's Result is deliberately ignored.
+    drop(problem.run(&mut obj, "solver should start from a direct startup eval"));
+    let calls = calls.lock().unwrap();
+    let first_eval_idx = calls
+        .iter()
+        .position(|call| *call == "eval")
+        .expect("solver should eventually request a full eval");
+    assert!(
+        first_eval_idx == 0,
+        "startup should not perform a separate cost-screening pass first: {calls:?}"
+    );
+}
+
+#[test]
+fn run_screening_reorders_expensive_generated_seeds_before_full_startup_eval() {
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.max_seeds = 4;
+    seed_config.seed_budget = 2;
+    seed_config.risk_profile = gam_problem::SeedRiskProfile::GeneralizedLinear;
+    let screening_cap = Arc::new(AtomicUsize::new(0));
+    let valid_seed = crate::seeding::generate_rho_candidates(1, None, &seed_config).expect("ordered seed bounds")
+        .last()
+        .expect("seed generator should yield at least one candidate")
+        .clone();
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Either)
+        .with_seed_config(seed_config)
+        .with_screening_cap(Arc::clone(&screening_cap))
+        .with_max_iter(1);
+    let mut obj = problem.build_objective(
+        (),
+        {
+            let valid_seed = valid_seed.clone();
+            move |_: &mut (), theta: &Array1<f64>| {
+                if theta == valid_seed {
+                    Ok(0.0)
+                } else {
+                    Ok(1000.0)
+                }
+            }
+        },
+        {
+            let valid_seed = valid_seed.clone();
+            let started = Arc::clone(&started);
+            move |_: &mut (), theta: &Array1<f64>| {
+                started.lock().unwrap().push(theta.clone());
+                if theta == valid_seed {
+                    Ok(OuterEval {
+                        cost: 0.0,
+                        gradient: array![0.0],
+                        hessian: HessianValue::Dense(array![[1.0]]),
+                        inner_beta_hint: None,
+                    })
+                } else {
+                    Ok(OuterEval::infeasible(theta.len()))
+                }
+            }
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let result = problem
+        .run(&mut obj, "screening should reorder expensive seeds")
+        .expect("screened startup should reach the best generated seed");
+    assert_eq!(result.rho, valid_seed);
+    let started_snapshot: Vec<Array1<f64>> = started.lock().unwrap().clone();
+    // The interior-extreme promotion (#1074/#1373/#1426) reserves slot 0 for the
+    // most-flexible interior seed and slot 1 for the heaviest, so screening's
+    // cost rank resumes at slot 2. (This promotion runs INSIDE
+    // `rank_seeds_with_screening`, so its footprint at slots 0/1 — here the
+    // generator's `[0.0]` and `[12.0]`, NOT the raw generator-first `[1.0]` — is
+    // itself proof that screening ran.) The lowest-cost generated seed must lead
+    // that reorderable tail: screening moved it ahead of the other equal-or-
+    // higher-cost seeds it is allowed to reorder, exactly as the original "front"
+    // assertion intended before the promotion reserved the first two slots.
+    assert_eq!(
+        started_snapshot.get(2).cloned(),
+        Some(valid_seed),
+        "screening should rank the lowest-cost seed at the head of the reorderable \
+         tail (slots 0/1 are reserved for the promoted flexible/heaviest seeds); \
+         started order was {started_snapshot:?}",
+    );
+    assert_eq!(screening_cap.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn thrown_screening_error_is_fatal_across_multistart_and_solver_plans() {
+    const SENTINEL: &str = "fatal outer evaluation sentinel";
+
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.max_seeds = 4;
+    seed_config.seed_budget = 2;
+    seed_config.risk_profile = gam_problem::SeedRiskProfile::GeneralizedLinear;
+    let screening_cap = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Either)
+        .with_seed_config(seed_config)
+        .with_screening_cap(Arc::clone(&screening_cap))
+        .with_max_iter(1);
+    let mut obj = problem.build_objective(
+        (),
+        {
+            let calls = Arc::clone(&calls);
+            move |_: &mut (), _: &Array1<f64>| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Err(EstimationError::InvalidInput(SENTINEL.to_string()))
+            }
+        },
+        |_: &mut (), _: &Array1<f64>| -> Result<OuterEval, EstimationError> {
+            panic!("a fatal screening error must prevent full outer evaluation")
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+
+    let error = match problem.run(&mut obj, "fatal screening error") {
+        Err(error) => error,
+        Ok(_) => panic!("a fatal screening error unexpectedly minted an outer result"),
+    };
+    assert!(error.is_fatal_outer_evaluation(), "{error}");
+    assert!(error.to_string().contains(SENTINEL), "{error}");
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "a thrown evaluator error must not be replayed across seeds, cap stages, or solver plans"
+    );
+    assert_eq!(
+        screening_cap.load(Ordering::Relaxed),
+        0,
+        "fatal screening exit must restore the caller's inner-iteration cap"
+    );
+}
+
+#[test]
+fn initial_rho_with_single_seed_budget_skips_expensive_screening() {
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.max_seeds = 4;
+    seed_config.seed_budget = 1;
+    // This test asserts the `initial_rho + seed_budget==1` screening-skip
+    // (`explicit_initial_rho_owns_single_seed_budget`) fires. That skip keys off
+    // the EFFECTIVE budget, not the requested one. Pin the fixture to Gaussian,
+    // whose `effective_seed_budget` is 1, so the `seed_budget == 1` skip guard is
+    // true and the skip is genuinely exercised — the behaviour this test guards.
+    // (A profile whose effective budget were > 1 would make the guard false and
+    // let screening run instead; Arc Gaussian and GLM are both floored to 1.)
+    seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;
+    let screening_cap = Arc::new(AtomicUsize::new(0));
+    let screening_calls = Arc::new(AtomicUsize::new(0));
+    let initial_seed = array![9.0];
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Either)
+        .with_seed_config(seed_config)
+        .with_screening_cap(Arc::clone(&screening_cap))
+        .with_initial_rho(initial_seed.clone())
+        // Declare a problem size whose estimated PSIS work trips the terminal
+        // rho-uncertainty diagnostic cost gate, so its 32 `eval_cost` samples do
+        // NOT run here. This test isolates the SEED-SCREENING accounting (screening
+        // is skipped: `screening_cap == 0` and `screening_calls == 0`); the
+        // mandatory terminal value audit and post-certification uncertainty
+        // diagnostic are separate phases and must not be counted as screening.
+        .with_problem_size(1_000_000, 1)
+        .with_max_iter(1);
+    let mut obj = problem.build_objective(
+        (),
+        {
+            let screening_calls = Arc::clone(&screening_calls);
+            let screening_cap = Arc::clone(&screening_cap);
+            move |_: &mut (), _: &Array1<f64>| {
+                if screening_cap.load(Ordering::Relaxed) != 0 {
+                    screening_calls.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(0.0)
+            }
+        },
+        {
+            let started = Arc::clone(&started);
+            let initial_seed = initial_seed.clone();
+            move |_: &mut (), theta: &Array1<f64>| {
+                started.lock().unwrap().push(theta.clone());
+                if theta == initial_seed {
+                    Ok(OuterEval {
+                        cost: 0.0,
+                        gradient: array![0.0],
+                        hessian: HessianValue::Dense(array![[1.0]]),
+                        inner_beta_hint: None,
+                    })
+                } else {
+                    Ok(OuterEval::infeasible(theta.len()))
+                }
+            }
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let result = problem
+        .run(&mut obj, "initial rho should be authoritative")
+        .expect("initial-rho startup should not spend seed-screening solves");
+    assert_eq!(result.rho, initial_seed);
+    assert_eq!(
+        screening_calls.load(Ordering::Relaxed),
+        0,
+        "explicit initial rho plus seed_budget=1 should skip screening"
+    );
+    assert_eq!(
+        started.lock().unwrap().first().cloned(),
+        Some(initial_seed),
+        "solver should start from the explicit initial rho"
+    );
+    assert_eq!(screening_cap.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn run_screening_reorders_bfgs_seeds_before_full_startup_eval() {
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.seed_budget = 1;
+    seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;
+    let screening_cap = Arc::new(AtomicUsize::new(0));
+    let initial_seed = array![9.0];
+    let valid_seed = crate::seeding::generate_rho_candidates(1, None, &seed_config).expect("ordered seed bounds")
+        .first()
+        .expect("seed generator should yield at least one candidate")
+        .clone();
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let screening_calls = Arc::new(AtomicUsize::new(0));
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_seed_config(seed_config)
+        .with_screening_cap(Arc::clone(&screening_cap))
+        .with_initial_rho(initial_seed)
+        .with_screen_initial_rho(true)
+        .with_max_iter(1);
+    let mut obj = problem.build_objective(
+        (),
+        {
+            let valid_seed = valid_seed.clone();
+            let screening_calls = Arc::clone(&screening_calls);
+            move |_: &mut (), theta: &Array1<f64>| {
+                screening_calls.fetch_add(1, Ordering::Relaxed);
+                if theta == valid_seed {
+                    Ok(0.0)
+                } else {
+                    Ok(1000.0)
+                }
+            }
+        },
+        {
+            let valid_seed = valid_seed.clone();
+            let started = Arc::clone(&started);
+            move |_: &mut (), theta: &Array1<f64>| {
+                started.lock().unwrap().push(theta.clone());
+                if theta == valid_seed {
+                    Ok(OuterEval {
+                        cost: 0.0,
+                        gradient: array![0.0],
+                        hessian: HessianValue::Unavailable,
+                        inner_beta_hint: None,
+                    })
+                } else {
+                    Ok(OuterEval::infeasible(theta.len()))
+                }
+            }
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let result = problem
+        .run(&mut obj, "BFGS screening should reorder expensive seeds")
+        .expect("screened BFGS startup should reach the best generated seed");
+    assert_eq!(result.plan_used.solver, Solver::Bfgs);
+    assert_eq!(result.rho, valid_seed);
+    let started_snapshot: Vec<Array1<f64>> = started.lock().unwrap().clone();
+    // As in the analytic-gradient sibling test: the interior-extreme promotion
+    // (#1074/#1373/#1426) reserves slot 0 (most-flexible interior seed) and slot 1
+    // (heaviest interior seed — here the screened-in initial ρ=9.0), so screening's
+    // cost rank resumes at slot 2. The lowest-cost generated seed must lead that
+    // reorderable tail — screening moved it ahead of every other equal-or-higher-
+    // cost seed it is allowed to reorder.
+    assert_eq!(
+        started_snapshot.get(2).cloned(),
+        Some(valid_seed),
+        "BFGS screening should rank the lowest-cost seed at the head of the \
+         reorderable tail (slots 0/1 are reserved for the promoted flexible/heaviest \
+         seeds); started order was {started_snapshot:?}",
+    );
+    assert!(
+        screening_calls.load(Ordering::Relaxed) > 1,
+        "BFGS seed screening should rank candidates with cost-only probes first",
+    );
+    assert_eq!(screening_cap.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn screening_cap_survives_per_seed_reset_before_proxy_eval() {
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.max_seeds = 3;
+    seed_config.seed_budget = 1;
+    seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;
+    let screening_cap = Arc::new(AtomicUsize::new(0));
+    let proxy_saw_cap = Arc::new(AtomicBool::new(false));
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_seed_config(seed_config)
+        .with_screening_cap(Arc::clone(&screening_cap))
+        .with_max_iter(1);
+    let mut obj = problem.build_objective_with_screening_proxy(
+        (),
+        |_: &mut (), _: &Array1<f64>| Ok(0.0),
+        |_: &mut (), theta: &Array1<f64>| {
+            Ok(OuterEval {
+                cost: theta[0].abs(),
+                gradient: array![0.0],
+                hessian: HessianValue::Unavailable,
+                inner_beta_hint: None,
+            })
+        },
+        |_: &mut (), theta: &Array1<f64>, _: OuterEvalOrder| {
+            Ok(OuterEval {
+                cost: theta[0].abs(),
+                gradient: array![0.0],
+                hessian: HessianValue::Unavailable,
+                inner_beta_hint: None,
+            })
+        },
+        {
+            let screening_cap = Arc::clone(&screening_cap);
+            Some(move |_: &mut ()| {
+                screening_cap.store(0, Ordering::Relaxed);
+            })
+        },
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+        {
+            let screening_cap = Arc::clone(&screening_cap);
+            let proxy_saw_cap = Arc::clone(&proxy_saw_cap);
+            move |_: &mut (), theta: &Array1<f64>| {
+                let cap = screening_cap.load(Ordering::Relaxed);
+                if cap > 0 {
+                    proxy_saw_cap.store(true, Ordering::Relaxed);
+                    Ok(theta[0].abs())
+                } else {
+                    Err(EstimationError::RemlOptimizationFailed(
+                        "screening proxy ran without an active cap".to_string(),
+                    ))
+                }
+            }
+        },
+    );
+    problem
+        .run(&mut obj, "screening cap reset regression")
+        .expect("screening cap should be restored after each per-seed reset");
+    assert!(
+        proxy_saw_cap.load(Ordering::Relaxed),
+        "screening proxy should observe a nonzero cap"
+    );
+    assert_eq!(screening_cap.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn rank_seeds_cascade_escalates_when_initial_cap_collapses_all() {
+    // When every seed's cost is non-finite at the initial screening cap
+    // we must NOT jump straight to a fully uncapped re-evaluation on
+    // every seed (the original two-stage protocol). Instead the cap
+    // should escalate geometrically (initial → 4× → 16× → uncapped),
+    // exiting the moment any cap stage produces a finite cost. This
+    // test forces a cost function that returns non-finite for cap < 12
+    // and finite for cap ≥ 12, then asserts the cascade exits at the
+    // 4× stage with a meaningful ranking — never reaching the uncapped
+    // pass.
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.seed_budget = 1;
+    seed_config.screen_max_inner_iterations = 3;
+    let screening_cap = Arc::new(AtomicUsize::new(0));
+    let initial_seed = array![5.0];
+    let valid_seed = crate::seeding::generate_rho_candidates(1, None, &seed_config).expect("ordered seed bounds")
+        .first()
+        .expect("seed generator should yield at least one candidate")
+        .clone();
+    let max_cap_seen = Arc::new(AtomicUsize::new(0));
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Either)
+        .with_seed_config(seed_config)
+        .with_screening_cap(Arc::clone(&screening_cap))
+        .with_initial_rho(initial_seed.clone())
+        .with_screen_initial_rho(true)
+        .with_max_iter(1);
+    let mut obj = problem.build_objective(
+        (),
+        {
+            let screening_cap = Arc::clone(&screening_cap);
+            let max_cap_seen = Arc::clone(&max_cap_seen);
+            let valid_seed = valid_seed.clone();
+            move |_: &mut (), theta: &Array1<f64>| {
+                let cap = screening_cap.load(Ordering::Relaxed);
+                max_cap_seen.fetch_max(cap, Ordering::Relaxed);
+                // Mimic an inner solver that needs ≥ 12 iterations of
+                // budget to certify a finite cost; below that it returns
+                // a non-finite "could not converge" signal.
+                if cap > 0 && cap < 12 {
+                    return Ok(f64::NAN);
+                }
+                if theta == valid_seed {
+                    Ok(0.0)
+                } else {
+                    Ok(1000.0)
+                }
+            }
+        },
+        {
+            let valid_seed = valid_seed.clone();
+            move |_: &mut (), theta: &Array1<f64>| {
+                if theta == valid_seed {
+                    Ok(OuterEval {
+                        cost: 0.0,
+                        gradient: array![0.0],
+                        hessian: HessianValue::Dense(array![[1.0]]),
+                        inner_beta_hint: None,
+                    })
+                } else {
+                    Ok(OuterEval::infeasible(theta.len()))
+                }
+            }
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    problem
+        .run(&mut obj, "cascade should escalate")
+        .expect("cascade should reach a finite cost at the 4× cap stage");
+    // The cascade is [3, 12, 48, 0]; the 4× stage (cap=12) is the first
+    // stage that produces a finite cost, so the cascade must exit there
+    // and never escalate to 48 or to the uncapped (0) stage.
+    let max_cap = max_cap_seen.load(Ordering::Relaxed);
+    assert_eq!(
+        max_cap, 12,
+        "cascade should stop at the 4× cap stage; observed max cap = {max_cap}"
+    );
+    assert_eq!(
+        screening_cap.load(Ordering::Relaxed),
+        0,
+        "screening cap must be restored to its previous value after cascade"
+    );
+}
+
+#[test]
+fn run_efs_skips_global_cost_screening() {
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.max_seeds = 6;
+    seed_config.seed_budget = 1;
+    let value_only_calls = Arc::new(AtomicUsize::new(0));
+    let efs_calls = Arc::new(AtomicUsize::new(0));
+    let problem = OuterProblem::new(15)
+        .with_gradient(Derivative::Unavailable)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_seed_config(seed_config)
+        .with_max_iter(1);
+    let mut obj = problem.build_objective(
+        (),
+        {
+            let value_only_calls = Arc::clone(&value_only_calls);
+            move |_: &mut (), _: &Array1<f64>| {
+                value_only_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(0.0)
+            }
+        },
+        |_: &mut (), theta: &Array1<f64>| Ok(OuterEval::infeasible(theta.len())),
+        None::<fn(&mut ())>,
+        {
+            let efs_calls = Arc::clone(&efs_calls);
+            Some(move |_: &mut (), theta: &Array1<f64>| {
+                efs_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(EfsEval {
+                    cost: 0.0,
+                    steps: vec![0.0; theta.len()],
+                    beta: None,
+                    psi_gradient: None,
+                    psi_indices: None,
+                    inner_hessian_scale: None,
+                    logdet_enclosure_gap: None,
+                    consecutive_restored_incumbents: None,
+                })
+            })
+        },
+    )
+    // The EFS run path now requires an analytic fixed-point certificate to
+    // certify stationarity (#1095/#2228); a bare closure objective predates it
+    // and refuses. Supply a fully-covered zero-update certificate — the mock's
+    // EFS step is already the fixed point (all-zero steps) — so the run
+    // certifies through the cert layer WITHOUT any startup cost-screening or
+    // repeated EFS solve. Certification deliberately calls cost_fn exactly
+    // once for the same-rho value-agreement audit; that is terminal proof work,
+    // not seed screening.
+    .with_fixed_point_certificate(|_: &mut (), rho: &Array1<f64>| {
+        Ok(FixedPointCertificateEval {
+            cost: 0.0,
+            coordinates: (0..rho.len())
+                .map(|_| FixedPointCoordinateCertificate::covered(0.0, 1.0))
+                .collect(),
+        })
+    });
+    let result = problem
+        .run(
+            &mut obj,
+            "EFS should not use a separate global cost-screening pass",
+        )
+        .expect("first generated EFS seed should be sufficient");
+    assert_eq!(
+        value_only_calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "EFS must perform exactly the mandatory terminal value-agreement audit, \
+         with no startup cost-screening pass"
+    );
+    // The fixture's premise, measured: the mock's EFS step is identically zero,
+    // so `OuterFixedPointBridge::eval_step` takes its `fixed_point_step_converged`
+    // branch and publishes `FixedPointStatus::Stop` for the seed itself. The walk
+    // therefore returns out of iteration zero having applied no step at all.
+    // Pinning it is what makes the call count below decomposable rather than a
+    // golden number.
+    assert_eq!(
+        result.iterations, 0,
+        "an exactly-zero EFS step must stop the walk AT the seed, before any step is applied"
+    );
+    // Complete accounting of the EFS inner solve. Only three sites can drive
+    // `eval_efs` on this path, and none of them is a screening pass:
+    //
+    //   * ONE seed validation: `run_fixed_point_outer_solver` evaluates the seed
+    //     before constructing the walk and hands the resulting `FixedPointSample`
+    //     to `FixedPoint::with_initial_sample`.
+    //   * ZERO from the walk. `FixedPointCore::run` serves iteration zero from
+    //     that sample (its `approx_point(seed_x, x_k)` guard matches), reads the
+    //     Stop status, and returns with `func_evals = 0`. THIS is the term the
+    //     assertion is really about: drop the initial sample and iteration zero
+    //     re-runs the whole inner solve at the same rho, making the total four.
+    //   * TWO terminal state installations at the selected rho, both
+    //     `finalize_outer_result` — a fixed-point plan has no derivative order to
+    //     request, so it installs through `eval_efs`. One is plan-level, leaving
+    //     the winner installed for `run_outer`'s rho-uncertainty diagnostic; one
+    //     is mint-level, re-installing at full inner fidelity after that
+    //     diagnostic and immediately before the certificate.
+    //
+    // The screening half of this test's name is witnessed directly above: a
+    // global cost screen would price every generated candidate through `cost_fn`,
+    // and that count is one — the terminal value-agreement audit.
+    assert_eq!(
+        efs_calls.load(Ordering::Relaxed),
+        3,
+        "an EFS run must pay one seed solve that the walk REUSES (four would mean \
+         iteration zero re-solved it) plus the two terminal installations"
+    );
+}
+
+#[test]
+fn run_efs_skips_invalid_leading_seed_without_spending_budget() {
+    let generated =
+        crate::seeding::generate_rho_candidates(15, None, &gam_problem::SeedConfig::default())
+            .expect("ordered seed bounds");
+    let valid_seed = generated
+        .first()
+        .expect("seed generator should yield at least one candidate")
+        .clone();
+    let invalid_seed = Array1::from_elem(15, 9.0);
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.seed_budget = 1;
+    let problem = OuterProblem::new(15)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_seed_config(seed_config)
+        .with_initial_rho(invalid_seed)
+        .with_max_iter(1);
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), _: &Array1<f64>| Ok(0.0),
+        // The contract under test is the seed SKIP, carried by the EFS closure
+        // below; the outer eval only has to let the run reach a terminal point.
+        // It previously returned `infeasible` everywhere, which today's analytic
+        // terminal certification rejects ("final-point value or gradient is
+        // non-finite"), masking the seed-budget assertion behind an unrelated
+        // refusal. Return a finite stationary eval so the run certifies and the
+        // assertion below actually observes which seed was used.
+        |_: &mut (), theta: &Array1<f64>| {
+            Ok(OuterEval {
+                cost: 0.0,
+                gradient: Array1::zeros(theta.len()),
+                hessian: HessianValue::Unavailable,
+                inner_beta_hint: None,
+            })
+        },
+        None::<fn(&mut ())>,
+        {
+            let valid_seed = valid_seed.clone();
+            Some(move |_: &mut (), theta: &Array1<f64>| {
+                if theta == valid_seed {
+                    Ok(EfsEval {
+                        cost: 0.0,
+                        steps: vec![0.0; theta.len()],
+                        beta: None,
+                        psi_gradient: None,
+                        psi_indices: None,
+                        inner_hessian_scale: None,
+                        logdet_enclosure_gap: None,
+                        consecutive_restored_incumbents: None,
+                    })
+                } else {
+                    Err(EstimationError::RemlOptimizationFailed(
+                        "invalid EFS seed".to_string(),
+                    ))
+                }
+            })
+        },
+    )
+    // The EFS run path now requires an analytic fixed-point certificate to
+    // certify stationarity (#1095/#2228); a bare closure objective predates it
+    // and refuses at the terminal point (this mock's outer eval is infeasible
+    // everywhere, deliberately — only the EFS closure carries the contract
+    // under test). Supply a fully-covered zero-update certificate — the valid
+    // seed's EFS step is already the fixed point (all-zero steps) — mirroring
+    // `run_efs_skips_global_cost_screening`. The seed-skip contract this test
+    // pins is unchanged: the invalid startup seed must be rejected WITHOUT
+    // consuming the single-seed budget, so the generated seed still runs.
+    .with_fixed_point_certificate(|_: &mut (), rho: &Array1<f64>| {
+        Ok(FixedPointCertificateEval {
+            cost: 0.0,
+            coordinates: (0..rho.len())
+                .map(|_| FixedPointCoordinateCertificate::covered(0.0, 1.0))
+                .collect(),
+        })
+    });
+    let result = problem
+        .run(&mut obj, "efs generated seed should remain reachable")
+        .expect("invalid startup seeds should not consume the only EFS seed slot");
+    assert_eq!(result.rho, valid_seed);
+    assert_eq!(result.plan_used.solver, Solver::Efs);
+}
+
+#[test]
+fn run_typed_efs_runtime_fallback_degrades_to_bfgs_immediately() {
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.seed_budget = 2;
+    let efs_calls = Arc::new(AtomicUsize::new(0));
+    let problem = OuterProblem::new(12)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_seed_config(seed_config)
+        .with_initial_rho(Array1::zeros(12))
+        .with_max_iter(5);
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), theta: &Array1<f64>| Ok(0.5 * theta.dot(theta)),
+        |_: &mut (), theta: &Array1<f64>| {
+            Ok(OuterEval {
+                cost: 0.5 * theta.dot(theta),
+                gradient: theta.clone(),
+                hessian: HessianValue::Unavailable,
+                inner_beta_hint: None,
+            })
+        },
+        None::<fn(&mut ())>,
+        {
+            let efs_calls = Arc::clone(&efs_calls);
+            Some(move |_: &mut (), _: &Array1<f64>| {
+                efs_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // The EFS bridge translates typed gradient unavailability into
+                // a typed first-order fallback request; no message token
+                // participates in routing.
+                Err(EstimationError::GradientUnavailable {
+                    context: "synthetic EFS runtime escape hatch",
+                    mode: "efs runtime escape hatch",
+                })
+            })
+        },
+    );
+    let result = problem
+        .run(&mut obj, "EFS runtime fallback request")
+        .expect("runtime EFS escape hatch should degrade to BFGS");
+    assert_eq!(result.plan_used.solver, Solver::Bfgs);
+    assert_eq!(
+        efs_calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "runtime fallback request should abort the EFS attempt immediately"
+    );
+}
+
+#[test]
+fn run_rejects_invalid_theta_layout() {
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_psi_dim(2)
+        .with_initial_rho(Array1::zeros(1))
+        .with_max_iter(1);
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), _: &Array1<f64>| Ok(0.0),
+        |_: &mut (), _: &Array1<f64>| {
+            Ok(OuterEval {
+                cost: 0.0,
+                gradient: Array1::zeros(1),
+                hessian: HessianValue::Unavailable,
+                inner_beta_hint: None,
+            })
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let err = problem
+        .run(&mut obj, "test invalid layout")
+        .expect_err("invalid theta layout should fail cleanly");
+    assert!(
+        err.to_string().contains("invalid outer theta layout"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn effective_seed_budget_caps_expensive_solver_retries() {
+    assert_eq!(
+        effective_seed_budget(
+            4,
+            Solver::Efs,
+            gam_problem::SeedRiskProfile::GeneralizedLinear,
+        ),
+        1
+    );
+    assert_eq!(
+        effective_seed_budget(4, Solver::HybridEfs, gam_problem::SeedRiskProfile::Survival,),
+        1
+    );
+    // #2376: Arc + a parsimonious profile (GeneralizedLinear / Survival) keeps
+    // the REQUESTED budget, so the #1373/#1575 promoted heavy interior seed at
+    // slot 1 stays reachable. Flooring these to 1 (the former #1575/#1074/#1426
+    // "the initial.sp seed reaches the heavily-penalized GLM basin" assumption)
+    // made the multi-start await gate's `seed_budget > 1` unsatisfiable and
+    // silently disabled the under-penalized-overshoot guard. The single-seed
+    // speed win for the common well-penalized case is now reclaimed at RUNTIME
+    // by `parsimony_second_seed_is_redundant`, not by capping the budget here.
+    assert_eq!(
+        effective_seed_budget(
+            3,
+            Solver::Arc,
+            gam_problem::SeedRiskProfile::GeneralizedLinear,
+        ),
+        3
+    );
+    assert_eq!(
+        effective_seed_budget(3, Solver::Arc, gam_problem::SeedRiskProfile::Survival,),
+        3
+    );
+    // A caller that genuinely requests a single start still gets one: the
+    // parsimony second seed is only re-enabled when a budget ≥ 2 was asked for.
+    assert_eq!(
+        effective_seed_budget(
+            1,
+            Solver::Arc,
+            gam_problem::SeedRiskProfile::GeneralizedLinear,
+        ),
+        1
+    );
+    // #2623: exact curvature proves only local convergence. Gaussian therefore
+    // retains the requested analytic-candidate budget so distinct basins are
+    // compared by their converged REML values.
+    assert_eq!(
+        effective_seed_budget(3, Solver::Arc, gam_problem::SeedRiskProfile::Gaussian),
+        3
+    );
+    // GaussianLocationScale is NOT floored (it uses lowest-cost keep-best but
+    // its promoted-seed multi-start needs budget ≥ 2); it falls through to the
+    // requested budget, matching the behaviour before #2376.
+    assert_eq!(
+        effective_seed_budget(
+            3,
+            Solver::Arc,
+            gam_problem::SeedRiskProfile::GaussianLocationScale,
+        ),
+        3
+    );
+    assert_eq!(
+        effective_seed_budget(3, Solver::Bfgs, gam_problem::SeedRiskProfile::Survival,),
+        3
+    );
+
+    let bfgs_glm = gam_problem::SeedConfig {
+        seed_budget: 3,
+        risk_profile: gam_problem::SeedRiskProfile::GeneralizedLinear,
+        num_auxiliary_trailing: 0,
+        ..Default::default()
+    };
+    assert_eq!(
+        effective_seed_budget_for_config(&bfgs_glm, Solver::Bfgs),
+        1,
+        "gradient-only GLM BFGS owns one neutral start (#2519)",
+    );
+
+    let bfgs_glm_with_aux = gam_problem::SeedConfig {
+        num_auxiliary_trailing: 1,
+        ..bfgs_glm
+    };
+    assert_eq!(
+        effective_seed_budget_for_config(&bfgs_glm_with_aux, Solver::Bfgs),
+        3,
+        "a trailing auxiliary coordinate preserves the caller's multistart policy",
+    );
+}
+
+#[test]
+fn bfgs_glm_single_start_prioritizes_the_neutral_seed_2519() {
+    let config = gam_problem::SeedConfig {
+        seed_budget: 2,
+        risk_profile: gam_problem::SeedRiskProfile::GeneralizedLinear,
+        num_auxiliary_trailing: 0,
+        ..Default::default()
+    };
+    let mut seeds = vec![array![-2.0, -2.0, -2.0], array![0.0, 0.0, 0.0]];
+    prioritize_neutral_bfgs_glm_seed(&mut seeds, &config, Solver::Bfgs, 1);
+    assert_eq!(seeds[0], array![0.0, 0.0, 0.0]);
+
+    let unchanged = seeds.clone();
+    prioritize_neutral_bfgs_glm_seed(&mut seeds, &config, Solver::Arc, 1);
+    assert_eq!(
+        seeds, unchanged,
+        "ARC retains its flexible/heavy basin policy",
+    );
+}
+
+#[test]
+fn rejected_budgeted_starts_license_bounded_replacement_seeds_2519() {
+    assert!(should_start_next_seed(0, 1, false));
+    assert!(
+        should_start_next_seed(1, 1, false),
+        "a rejected nominal start must not end the search without a certified candidate",
+    );
+    assert!(
+        !should_start_next_seed(1, 1, true),
+        "the first certified candidate exhausts the single-start policy",
+    );
+    assert!(
+        should_start_next_seed(2, 1, false),
+        "the finite generated seed list, not a failed-start count, bounds replacements",
+    );
+}
+
+#[test]
+fn run_arc_projects_seed_before_seed_validation_eval() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.max_seeds = 1;
+    seed_config.seed_budget = 1;
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Either)
+        .with_bounds(array![0.0], array![1.0])
+        .with_initial_rho(array![2.0])
+        .with_seed_config(seed_config)
+        // The subject is WHICH point the first evaluation sees, and that is
+        // settled before the optimizer takes any step — `seen.first()` proves
+        // the ordering on its own. The iteration budget is incidental here, and
+        // at `1` it was actively harmful: one ARC step from the projected seed
+        // `1.0` toward the optimum `0.25` lands at `0.2504` with
+        // `|Pg| = 8.541e-4` against a `6.325e-4` stationarity bound — 1.35×
+        // short — so the run refused ("claimed_converged=false after 1 outer
+        // iteration(s)") and the `expect` below fired on a convergence budget
+        // that has nothing to do with seed projection. Give the quadratic room
+        // to certify, so projection is the only thing that can fail here.
+        .with_max_iter(16);
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), theta: &Array1<f64>| Ok((theta[0] - 0.25).powi(2)),
+        {
+            let seen = Arc::clone(&seen);
+            move |_: &mut (), theta: &Array1<f64>| {
+                seen.lock().unwrap().push(theta.clone());
+                Ok(OuterEval {
+                    cost: (theta[0] - 0.25).powi(2),
+                    gradient: array![2.0 * (theta[0] - 0.25)],
+                    hessian: HessianValue::Dense(array![[2.0]]),
+                    inner_beta_hint: None,
+                })
+            }
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    problem
+        .run(&mut obj, "arc seed projection")
+        .expect("arc should evaluate the projected seed");
+    assert_eq!(
+        seen.lock().unwrap().first().cloned(),
+        Some(array![1.0]),
+        "Arc must project the seed before validating the initial sample",
+    );
+}
+
+#[test]
+fn run_bfgs_projects_seed_before_seed_validation_eval() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.max_seeds = 1;
+    seed_config.seed_budget = 1;
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_bounds(array![0.0], array![1.0])
+        .with_initial_rho(array![2.0])
+        .with_seed_config(seed_config)
+        .with_max_iter(1);
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), theta: &Array1<f64>| Ok((theta[0] - 0.25).powi(2)),
+        {
+            let seen = Arc::clone(&seen);
+            move |_: &mut (), theta: &Array1<f64>| {
+                seen.lock().unwrap().push(theta.clone());
+                Ok(OuterEval {
+                    cost: (theta[0] - 0.25).powi(2),
+                    gradient: array![2.0 * (theta[0] - 0.25)],
+                    hessian: HessianValue::Unavailable,
+                    inner_beta_hint: None,
+                })
+            }
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    // This test pins seed PROJECTION (the initial ρ=[2.0] is clamped to the box
+    // upper bound [1.0] before the first sample eval), not convergence. The
+    // single-iter budget from the projected seed need not reach the [0.25]
+    // optimum, so the run may legitimately refuse to certify — orthogonal to the
+    // projection assertion. The `seen` trace records the first evaluated point
+    // whether or not the run mints, so the run's Result is deliberately ignored.
+    drop(problem.run(&mut obj, "bfgs seed projection"));
+    assert_eq!(
+        seen.lock().unwrap().first().cloned(),
+        Some(array![1.0]),
+        "BFGS must project the seed before validating the initial sample",
+    );
+}
