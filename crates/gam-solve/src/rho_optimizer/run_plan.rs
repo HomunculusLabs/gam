@@ -9,6 +9,28 @@ fn should_start_next_seed(
     started_seeds < seed_budget || !has_certified_candidate
 }
 
+/// Evaluate the literal outer seed against the true profiled objective.
+///
+/// Adaptive inner caps are search accelerators. A capped, nonconverged inner
+/// iterate is not a value or derivative of the profiled objective and therefore
+/// cannot reject a seed or initialize an optimizer. Lift the shared cap only for
+/// this sample, preserving any continuation/pilot warm state, then restore the
+/// scheduler before search begins.
+fn eval_seed_at_full_inner_fidelity(
+    obj: &mut dyn OuterObjective,
+    config: &OuterConfig,
+    seed: &Array1<f64>,
+    order: OuterEvalOrder,
+) -> Result<OuterEval, EstimationError> {
+    let full_fidelity_guard = config
+        .outer_inner_cap
+        .as_ref()
+        .map(FullFidelityInnerCapGuard::lift);
+    let result = obj.eval_with_order(seed, order);
+    drop(full_fidelity_guard);
+    result
+}
+
 /// Require a continuation arrival to certify the literal outer seed itself.
 ///
 /// Only a state whose rho is bit-identical to the bounded literal seed and
@@ -182,11 +204,20 @@ fn capture_outer_gradient_fd_at_seed(
             upper.len()
         )));
     }
+    let full_fidelity_guard = config
+        .outer_inner_cap
+        .as_ref()
+        .map(FullFidelityInnerCapGuard::lift);
     obj.reset();
     install_matching_initial_inner_seed(obj, config, seed, context)?;
     crate::estimate::outer_eval_capture::begin_outer_gradient_component_capture();
     crate::estimate::outer_eval_capture::begin_outer_criterion_component_capture();
-    let analytic = obj.eval_with_order(seed, OuterEvalOrder::ValueAndGradient)?;
+    let analytic = eval_seed_at_full_inner_fidelity(
+                            obj,
+                            config,
+                            seed,
+                            OuterEvalOrder::ValueAndGradient,
+                        )?;
     if analytic.gradient.len() != seed.len() || !analytic.cost.is_finite() {
         return Err(EstimationError::InvalidInput(format!(
             "outer-gradient FD capture received invalid analytic evidence: \
@@ -617,6 +648,7 @@ fn capture_outer_gradient_fd_at_seed(
             },
         },
     );
+    drop(full_fidelity_guard);
     Ok(())
 }
 
@@ -1274,8 +1306,12 @@ pub(crate) fn run_outer_with_plan(
         let seed_slot;
         let result: Result<OuterResult, EstimationError> = match the_plan.solver {
             Solver::Arc => {
-                let seed_eval = obj
-                    .eval_with_order(seed, OuterEvalOrder::ValueGradientHessian)
+                let seed_eval = eval_seed_at_full_inner_fidelity(
+                    obj,
+                    config,
+                    seed,
+                    OuterEvalOrder::ValueGradientHessian,
+                )
                     .map_err(|err| into_objective_error("outer eval failed", err));
                 let seed_eval = match seed_eval {
                     Ok(seed_eval) => seed_eval,
@@ -1884,8 +1920,12 @@ pub(crate) fn run_outer_with_plan(
                     // only need the wrapper for its bail-on-invalid behaviour.
                     outer_max_iterations(config.max_iter)?;
                     let axis_caps_dev = bfgs_axis_step_caps(config, layout);
-                    let seed_eval_dev = match obj
-                        .eval_with_order(seed, OuterEvalOrder::ValueAndGradient)
+                    let seed_eval_dev = match eval_seed_at_full_inner_fidelity(
+                            obj,
+                            config,
+                            seed,
+                            OuterEvalOrder::ValueAndGradient,
+                        )
                         .map_err(|err| into_objective_error("outer eval failed", err))
                     {
                         Ok(e) => e,
@@ -1981,8 +2021,12 @@ pub(crate) fn run_outer_with_plan(
                             // re-running the seed evaluation; the
                             // existing branch will re-validate it and
                             // proceed.
-                            let seed_eval = obj
-                                .eval_with_order(seed, OuterEvalOrder::ValueAndGradient)
+                            let seed_eval = eval_seed_at_full_inner_fidelity(
+                            obj,
+                            config,
+                            seed,
+                            OuterEvalOrder::ValueAndGradient,
+                        )
                                 .map_err(|err| into_objective_error("outer eval failed", err));
                             let seed_eval = match seed_eval {
                                 Ok(eval) => eval,
@@ -2025,8 +2069,12 @@ pub(crate) fn run_outer_with_plan(
                         }
                     }
                 } else {
-                    let seed_eval = obj
-                        .eval_with_order(seed, OuterEvalOrder::ValueAndGradient)
+                    let seed_eval = eval_seed_at_full_inner_fidelity(
+                            obj,
+                            config,
+                            seed,
+                            OuterEvalOrder::ValueAndGradient,
+                        )
                         .map_err(|err| into_objective_error("outer eval failed", err));
                     let seed_eval = match seed_eval {
                         Ok(seed_eval) => seed_eval,
@@ -2809,7 +2857,7 @@ pub(crate) fn run_outer_with_plan(
         let finalize_cap_guard = config
             .outer_inner_cap
             .as_ref()
-            .map(TerminalInnerCapGuard::lift);
+            .map(FullFidelityInnerCapGuard::lift);
         if finalize_cap_guard.is_some() {
             // Certification may have happened before later multistart trials.
             // Clear every search-state cache before installing the selected
@@ -2977,8 +3025,12 @@ fn certified_resume_is_already_stationary(
     if config.initial_rho.as_ref() != Some(seed) {
         return None;
     }
-    let eval = obj
-        .eval_with_order(seed, OuterEvalOrder::ValueAndGradient)
+    let eval = eval_seed_at_full_inner_fidelity(
+                            obj,
+                            config,
+                            seed,
+                            OuterEvalOrder::ValueAndGradient,
+                        )
         .ok()?;
     if !eval.cost.is_finite() || eval.gradient.iter().any(|value| !value.is_finite()) {
         return None;
