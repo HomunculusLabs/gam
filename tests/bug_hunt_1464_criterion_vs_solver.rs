@@ -5,14 +5,15 @@
 //! datasets. This scan records whether independently pinned complete fits have
 //! the same preference. It does not settle the current curvature estimand's
 //! optimizer-versus-objective question, because that point estimate and its
-//! inference are driven by the distinct curvature-fair profile.
+//! inference are driven by the distinct continuously differentiable curvature
+//! likelihood profile.
 //!
 //! `constant_curvature_profiled_reml_scores` calls
 //! `fixed_kappa_profiled_reml_score` on the data/spec/family/options materialised
 //! exactly like the full fit. Each diagnostic score is therefore an independently
 //! pinned complete production fit, not a basis-local re-derivation. Curvature
-//! point estimation and inference use the distinct curvature-fair
-//! response-minus-reference profile, so this experiment diagnoses the raw
+//! point estimation and inference use the distinct curvature likelihood
+//! profile, so this experiment diagnoses the raw
 //! production-fit surface rather than claiming to reproduce that estimand.
 //!
 //! Diagnostic only (plain `eprintln!`, no `{:?}`). It asserts nothing about which
@@ -120,7 +121,7 @@ fn print_scores(label: &str, kappa_star: f64, seed: u64) -> f64 {
 fn curv_raw_fixed_fit_surface_is_finite_for_both_mirror_datasets() {
     init_parallelism();
     // Diagnostic only: the raw pinned-fit surface is distinct from the
-    // curvature-fair estimand, so its argmin is payload rather than a sign gate.
+    // curvature likelihood estimand, so its argmin is payload rather than a sign gate.
     let hyp_k = print_scores("HYPERBOLIC", -2.0, 0x5151_0003);
     let sph_k = print_scores("SPHERICAL", 2.0, 0x5151_0001);
     assert!(

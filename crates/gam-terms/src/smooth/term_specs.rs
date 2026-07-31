@@ -3193,7 +3193,7 @@ impl SpatialLogKappaCoords {
     /// #1464: overwrite the single ψ value of a scalar (1-D) logical term by its
     /// position `slot` in this coords vector (the same ordering as the
     /// `term_indices` slice the constructors were built from). Used to install
-    /// the continuously selected curvature-fair optimum into a
+    /// the continuously selected curvature-likelihood optimum into a
     /// constant-curvature term's raw-κ slot before the nuisance joint solve.
     /// No-op (returns `false`) when the slot is not scalar.
     pub fn set_scalar_slot(&mut self, slot: usize, value: f64) -> bool {

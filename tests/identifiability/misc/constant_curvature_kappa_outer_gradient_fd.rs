@@ -122,8 +122,8 @@ fn constant_curvature_kappa_outer_gradient_matches_fd() {
         audit.psi_dim >= 1,
         "constant-curvature smooth must enroll kappa as a psi coordinate"
     );
-    // κ here is selected by `constant_curvature_kappa_fair_optimum`, which
-    // computes the curvature-fair evidence and its derivative in closed form
+    // κ here is selected by `constant_curvature_kappa_profile_optimum`, which
+    // computes the Gaussian REML profile and its derivative in closed form
     // and never enters a REML assembly — so it publishes no atoms, and the
     // audit says so by name instead of failing (#2460). Surfaced rather than
     // asserted: what this gate grades is the hand-derived derivative below, and

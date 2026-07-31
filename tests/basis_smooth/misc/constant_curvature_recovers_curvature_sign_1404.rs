@@ -4,7 +4,7 @@
 //! data, instead of railing to the positive chart bound for every dataset.
 //!
 //! This drives the production free-curvature fit, whose continuous
-//! response-minus-reference fair profile selects κ before the baseline fit. It
+//! Gaussian REML likelihood profile selects κ before the baseline fit. It
 //! therefore guards the user-visible estimand without substituting either the
 //! deleted plain-RSS profiler or the raw fixed-fit diagnostic.
 //!
@@ -79,7 +79,7 @@ fn fitted_kappa(data: &Array2<f64>, ell_ref: f64, kappa_true: f64) -> f64 {
                 feature_cols: vec![0, 1],
                 spec: ConstantCurvatureBasisSpec {
                     // A modest farthest-point center set keeps each analytic
-                    // fair-profile evaluation cheap while resolving the signal.
+                    // likelihood-profile evaluation cheap while resolving the signal.
                     center_strategy: CenterStrategy::FarthestPoint { num_centers: 12 },
                     kappa: 0.0,
                     kappa_fixed: false,

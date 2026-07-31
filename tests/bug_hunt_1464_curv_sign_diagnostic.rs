@@ -3,12 +3,12 @@
 //! spatial solve is directly observable. This is a DIAGNOSTIC (plain `eprintln!`,
 //! no `{:?}`), not a pass/fail contract — the contract lives in
 //! `bug_hunt_1464_curv_sign_identifiable.rs`. It exists so a maintainer can see,
-//! per dataset, the final κ̂ selected by the continuous curvature-fair profile
+//! per dataset, the final κ̂ selected by the continuous curvature likelihood profile
 //! and then held fixed through the nuisance fit, and whether the two mirror
 //! datasets are separated.
 //!
 //! The selected value is emitted by the production
-//! `log::info!("[spatial-kappa] continuous fair-profile optimum …")`; run with
+//! `log::info!("[spatial-kappa] continuous likelihood-profile optimum …")`; run with
 //! `RUST_LOG=info` to see it alongside this κ̂ output.
 
 use gam::geometry::constant_curvature::ConstantCurvature;

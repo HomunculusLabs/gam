@@ -94,10 +94,9 @@ fn fit_kappa_hat(kappa_star: f64, seed: u64) -> f64 {
 
 // #1464 production route: before the baseline fit, each free
 // constant-curvature coordinate is selected once by the continuously optimized,
-// analytically differentiated curvature-fair profile
-// `V_p(κ; y) - V_p(κ; radial_reference)`. The subsequent nuisance-ρ/spatial
+// analytically differentiated Gaussian REML profile `V_p(κ; y)`. The subsequent nuisance-ρ/spatial
 // solve holds that selected κ fixed, and curvature inference evaluates the same
-// fair profile for its interval and flatness statistic. This contract therefore
+// likelihood profile for its interval and flatness statistic. This contract therefore
 // guards the actual user-visible estimand route rather than a deleted
 // basis-local RSS profiler or the raw pinned-fit diagnostic.
 //

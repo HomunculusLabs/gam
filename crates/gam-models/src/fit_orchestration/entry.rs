@@ -2169,8 +2169,8 @@ pub fn fit_spline_scan_from_formula(
 ///
 /// This is a raw pinned-fit diagnostic, not the curvature estimand objective.
 /// Curvature point estimation, confidence intervals, and flatness inference use
-/// the separate continuously differentiable curvature-fair
-/// response-minus-reference profile. Here κ-optimisation is disabled and each
+/// the separate continuously differentiable Gaussian REML curvature profile.
+/// Here κ-optimisation is disabled and each
 /// complete fit profiles only its smoothing parameters, so every returned score
 /// is the canonical negative log evidence of that independently pinned model.
 pub fn constant_curvature_profiled_reml_scores(

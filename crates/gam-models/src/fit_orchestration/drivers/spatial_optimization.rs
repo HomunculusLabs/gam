@@ -2025,10 +2025,10 @@ impl SingleBlockLatentCoordDesignCache {
 /// persisted rotations, adaptive semantics, priors, and all [`FitOptions`] must
 /// be realized by the same production path as an independently pinned model.
 ///
-/// Curvature point estimation and inference use the separate continuously
-/// differentiable curvature-fair response-minus-reference profile. This raw
-/// pinned-fit score is a diagnostic for comparing fixed production fits; it is
-/// not the point-estimation, confidence-interval, or flatness-test objective.
+/// Curvature point estimation and inference use a separate continuously
+/// differentiable Gaussian REML curvature profile. This raw pinned-fit score is
+/// a diagnostic for comparing complete fixed production fits; it is not the
+/// point-estimation, confidence-interval, or flatness-test objective.
 ///
 /// `pub` so diagnostics can compare complete production fits at selected κ and
 /// routing regressions can prove that this helper remains identical to an
@@ -2161,64 +2161,24 @@ fn profiled_gaussian_reml_value_kappa_gradient(
     Ok((fit.reml_score, derivative))
 }
 
-/// Curvature-neutral radial reference used by the fair profile. Equal-width
-/// Euclidean-radius bins use Sturges' data-size rule, so the reference resolution
-/// is determined by the sample rather than a hand-picked bin count.
-fn constant_curvature_radial_reference(
-    data: ArrayView2<'_, f64>,
-    y: ArrayView1<'_, f64>,
-) -> Result<Array1<f64>, EstimationError> {
-    if y.len() != data.nrows() || y.is_empty() {
-        crate::bail_invalid_estim!(
-            "constant-curvature radial reference needs one non-empty response per row"
-        );
-    }
-    let radii: Array1<f64> = data.outer_iter().map(|row| row.dot(&row).sqrt()).collect();
-    let r_max = radii.iter().copied().fold(0.0_f64, f64::max);
-    if r_max <= f64::MIN_POSITIVE {
-        let mean = y.sum() / y.len() as f64;
-        return Ok(Array1::from_elem(y.len(), mean));
-    }
-
-    let bin_count = (data.nrows() as f64).log2().ceil() as usize + 1;
-    let bin_of = |radius: f64| -> usize {
-        ((radius / r_max * bin_count as f64) as usize).min(bin_count - 1)
-    };
-    let mut sums = vec![0.0; bin_count];
-    let mut counts = vec![0usize; bin_count];
-    for (row, &radius) in radii.iter().enumerate() {
-        let bin = bin_of(radius);
-        sums[bin] += y[row];
-        counts[bin] += 1;
-    }
-    let means: Vec<f64> = sums
-        .into_iter()
-        .zip(counts)
-        .map(
-            |(sum, count)| {
-                if count == 0 { 0.0 } else { sum / count as f64 }
-            },
-        )
-        .collect();
-    Ok(radii.mapv(|radius| means[bin_of(radius)]))
-}
-
 /// Value and exact first derivative of the continuously smoothing-profiled
-/// curvature-fair negative log evidence. Both the observed response and its
-/// curvature-neutral reference are profiled independently, then differenced on
-/// the scale consumed by likelihood-ratio inference.
-fn constant_curvature_kappa_fair_profile_value_gradient(
+/// Gaussian REML negative log evidence used for curvature inference.
+///
+/// The likelihood-ratio statistic must compare values of this one likelihood.
+/// Subtracting a second REML fit to a response-dependent radial smoother would
+/// produce neither a likelihood nor a calibrated likelihood ratio: the
+/// subtraction can manufacture curvature signal even when the response is
+/// constant plus noise.
+fn constant_curvature_kappa_profile_value_gradient(
     data: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
-    y_ref: ArrayView1<'_, f64>,
     spec: &gam_terms::basis::ConstantCurvatureBasisSpec,
 ) -> Result<(f64, f64), EstimationError> {
-    if y.len() != data.nrows() || y_ref.len() != data.nrows() {
+    if y.len() != data.nrows() || y.is_empty() {
         crate::bail_invalid_estim!(
-            "constant-curvature fair profile row mismatch: data={}, response={}, reference={}",
+            "constant-curvature profile needs one non-empty response per row: data={}, response={}",
             data.nrows(),
             y.len(),
-            y_ref.len(),
         );
     }
 
@@ -2231,7 +2191,7 @@ fn constant_curvature_kappa_fair_profile_value_gradient(
             .map_err(EstimationError::from)?;
     if basis.active_penalties.len() != 1 || derivatives.first.penalties_derivative.len() != 1 {
         crate::bail_invalid_estim!(
-            "constant-curvature fair profile expected one primary penalty; value blocks={}, derivative blocks={}",
+            "constant-curvature profile expected one primary penalty; value blocks={}, derivative blocks={}",
             basis.active_penalties.len(),
             derivatives.first.penalties_derivative.len(),
         );
@@ -2265,35 +2225,52 @@ fn constant_curvature_kappa_fair_profile_value_gradient(
         .slice_mut(s![1.., 1..])
         .assign(smooth_penalty_kappa);
 
-    let (value_y, derivative_y) = profiled_gaussian_reml_value_kappa_gradient(
-        &design,
-        &design_kappa,
-        &penalty,
-        &penalty_kappa,
-        y,
-    )?;
-    let (value_ref, derivative_ref) = profiled_gaussian_reml_value_kappa_gradient(
-        &design,
-        &design_kappa,
-        &penalty,
-        &penalty_kappa,
-        y_ref,
-    )?;
-    Ok((value_y - value_ref, derivative_y - derivative_ref))
+    profiled_gaussian_reml_value_kappa_gradient(&design, &design_kappa, &penalty, &penalty_kappa, y)
 }
 
-struct ConstantCurvatureFairProfile<'a> {
+struct ConstantCurvatureProfile<'a> {
     data: ArrayView2<'a, f64>,
     response: ArrayView1<'a, f64>,
-    radial_reference: Array1<f64>,
     spec: gam_terms::basis::ConstantCurvatureBasisSpec,
     cache: std::cell::RefCell<std::collections::HashMap<u64, (f64, f64)>>,
 }
 
-impl ConstantCurvatureFairProfile<'_> {
+impl<'a> ConstantCurvatureProfile<'a> {
+    /// Construct the curvature-estimation profile in its fit-time constraint
+    /// frame.
+    ///
+    /// A frozen transform is a predict-time replay artifact: it is the global
+    /// identifiability frame realized at one particular fitted κ. Reusing that
+    /// fixed frame while this profile varies κ changes the objective and omits
+    /// the frame's κ derivative. Inference must instead use the same local
+    /// center-sum-to-zero quotient that produced the point estimate. Realized
+    /// centers and length scale remain valid frozen representations of their
+    /// deterministic fit-time choices, so only the κ-anchored transform is
+    /// removed.
+    fn new(
+        data: ArrayView2<'a, f64>,
+        response: ArrayView1<'a, f64>,
+        mut spec: gam_terms::basis::ConstantCurvatureBasisSpec,
+    ) -> Result<Self, EstimationError> {
+        if response.len() != data.nrows() || response.is_empty() {
+            crate::bail_invalid_estim!(
+                "constant-curvature profile needs one non-empty response per row: data={}, response={}",
+                data.nrows(),
+                response.len(),
+            );
+        }
+        spec.identifiability = gam_terms::basis::ConstantCurvatureIdentifiability::CenterSumToZero;
+        Ok(Self {
+            data,
+            response,
+            spec,
+            cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+        })
+    }
+
     fn evaluate(&self, kappa: f64) -> Result<(f64, f64), EstimationError> {
         if !kappa.is_finite() {
-            crate::bail_invalid_estim!("constant-curvature fair profile probed a non-finite kappa");
+            crate::bail_invalid_estim!("constant-curvature profile probed a non-finite kappa");
         }
         let key = kappa.to_bits();
         if let Some(&cached) = self.cache.borrow().get(&key) {
@@ -2301,18 +2278,14 @@ impl ConstantCurvatureFairProfile<'_> {
         }
         let mut probe_spec = self.spec.clone();
         probe_spec.kappa = kappa;
-        let sample = constant_curvature_kappa_fair_profile_value_gradient(
-            self.data,
-            self.response,
-            self.radial_reference.view(),
-            &probe_spec,
-        )?;
+        let sample =
+            constant_curvature_kappa_profile_value_gradient(self.data, self.response, &probe_spec)?;
         self.cache.borrow_mut().insert(key, sample);
         Ok(sample)
     }
 }
 
-fn validate_constant_curvature_fair_profile_inputs(
+fn validate_constant_curvature_profile_inputs(
     weights: ArrayView1<'_, f64>,
     offset: ArrayView1<'_, f64>,
     family: &LikelihoodSpec,
@@ -2335,13 +2308,13 @@ fn validate_constant_curvature_fair_profile_inputs(
     Ok(())
 }
 
-/// Minimize the continuously smoothing-profiled curvature-fair evidence on the
+/// Minimize the continuously smoothing-profiled Gaussian REML evidence on the
 /// chart-valid interval with the shared bounded analytic outer solver. The
 /// curvature coordinate is the sole auxiliary coordinate, so every accepted
 /// result has passed the solver's final box-KKT projected-gradient certificate.
 /// No sampled point is ever returned as the estimate: samples are only line-
 /// search probes for the continuous BFGS solve.
-fn constant_curvature_kappa_fair_optimum(
+fn constant_curvature_kappa_profile_optimum(
     data: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
     resolvedspec: &TermCollectionSpec,
@@ -2369,14 +2342,7 @@ fn constant_curvature_kappa_fair_optimum(
         }
     };
     let x_term = select_columns(data, feature_cols).map_err(EstimationError::from)?;
-    let y_ref = constant_curvature_radial_reference(x_term.view(), y)?;
-    let profile = ConstantCurvatureFairProfile {
-        data: x_term.view(),
-        response: y,
-        radial_reference: y_ref,
-        spec: base_spec,
-        cache: std::cell::RefCell::new(std::collections::HashMap::new()),
-    };
+    let profile = ConstantCurvatureProfile::new(x_term.view(), y, base_spec)?;
     let mut seed_config = gam_problem::SeedConfig::default();
     seed_config.bounds = (kappa_min, kappa_max);
     seed_config.max_seeds = 1;
@@ -2402,10 +2368,10 @@ fn constant_curvature_kappa_fair_optimum(
         .with_seed_config(seed_config);
     let mut objective = problem.build_objective(
         profile,
-        |profile: &mut ConstantCurvatureFairProfile<'_>, theta: &Array1<f64>| {
+        |profile: &mut ConstantCurvatureProfile<'_>, theta: &Array1<f64>| {
             profile.evaluate(theta[0]).map(|(value, _)| value)
         },
-        |profile: &mut ConstantCurvatureFairProfile<'_>, theta: &Array1<f64>| {
+        |profile: &mut ConstantCurvatureProfile<'_>, theta: &Array1<f64>| {
             let (cost, derivative) = profile.evaluate(theta[0])?;
             Ok(gam_problem::OuterEval {
                 cost,
@@ -2414,21 +2380,21 @@ fn constant_curvature_kappa_fair_optimum(
                 inner_beta_hint: None,
             })
         },
-        None::<fn(&mut ConstantCurvatureFairProfile<'_>)>,
+        None::<fn(&mut ConstantCurvatureProfile<'_>)>,
         None::<
             fn(
-                &mut ConstantCurvatureFairProfile<'_>,
+                &mut ConstantCurvatureProfile<'_>,
                 &Array1<f64>,
             ) -> Result<gam_problem::EfsEval, EstimationError>,
         >,
     );
     let result = problem.run(
         &mut objective,
-        &format!("constant-curvature fair profile term {term_idx}"),
+        &format!("constant-curvature likelihood profile term {term_idx}"),
     )?;
     if !result.converged() {
         crate::bail_invalid_estim!(
-            "constant-curvature fair-profile κ optimization did not converge for term {} after {} iterations (negative_log_evidence={:.6e}, final_grad_norm={})",
+            "constant-curvature likelihood-profile κ optimization did not converge for term {} after {} iterations (negative_log_evidence={:.6e}, final_grad_norm={})",
             term_idx,
             result.iterations,
             result.final_value,
@@ -2437,7 +2403,7 @@ fn constant_curvature_kappa_fair_optimum(
     }
     let kappa_hat = result.rho[0];
     log::info!(
-        "[spatial-kappa] continuous fair-profile optimum kappa_hat={:.6} \
+        "[spatial-kappa] continuous likelihood-profile optimum kappa_hat={:.6} \
          (negative_log_evidence={:.6e}, projected_gradient={}) for term {term_idx}",
         kappa_hat,
         result.final_value,
@@ -4509,7 +4475,7 @@ pub fn get_constant_curvature_kappa(spec: &TermCollectionSpec, term_idx: usize) 
 /// `true` when `term_idx` is a `curv(...)` smooth whose user PINNED the
 /// sectional curvature with an explicit `kappa=` (the mgcv-`sp=` convention,
 /// gam#2152). A pinned κ is a fixed geometry: the outer loop must hold it
-/// constant and never run the continuous curvature-fair profile optimizer on
+/// constant and never run the continuous curvature profile optimizer on
 /// that term. Non-CC terms and CC terms whose `kappa=` was omitted (κ free,
 /// #944/#1464 estimation) return `false`.
 pub fn constant_curvature_kappa_is_fixed(spec: &TermCollectionSpec, term_idx: usize) -> bool {
@@ -6586,7 +6552,7 @@ pub(crate) fn exact_joint_multistart_outer_problem(
                 // adopts the low-Occam collapsed null regardless of the true κ sign
                 // — the bit-identical κ̂ → +chart-bound rail for both ±κ datasets
                 // (the headline #1464 sign-blindness). Curvature is instead chosen
-                // once by the sign-correct continuous fair-profile solve before
+                // once by the sign-correct continuous likelihood-profile solve before
                 // this joint nuisance optimization, and its coordinate is pinned
                 // here. The widened ρ ceiling is retained: legitimate
                 // over-smoothing remains reachable by the analytic gradient solve
@@ -8114,17 +8080,20 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
     apply_response_aware_anisotropy_seed(data, y.view(), &mut resolvedspec, &spatial_terms);
 
     // Select every free constant-curvature coordinate once from its continuous,
-    // analytically differentiated fair profile before fitting the baseline. The
-    // subsequent joint solve profiles rho at this certified curvature.
+    // analytically differentiated likelihood profile before fitting the baseline.
+    // That profile is the sole owner of the curvature estimand: the ordinary
+    // fixed-geometry fit below already profiles rho at the certified curvature,
+    // so a later joint REML solve must not enroll the same κ against a different
+    // objective.
     let free_curvature_terms: Vec<usize> = constant_curvature_term_indices(&resolvedspec)
         .into_iter()
         .filter(|&term_idx| !constant_curvature_kappa_is_fixed(&resolvedspec, term_idx))
         .collect();
     if !free_curvature_terms.is_empty() {
-        validate_constant_curvature_fair_profile_inputs(weights.view(), offset.view(), &family)?;
+        validate_constant_curvature_profile_inputs(weights.view(), offset.view(), &family)?;
     }
     for term_idx in free_curvature_terms {
-        let kappa_hat = constant_curvature_kappa_fair_optimum(
+        let kappa_hat = constant_curvature_kappa_profile_optimum(
             data,
             y.view(),
             &resolvedspec,
@@ -8160,7 +8129,18 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
     // length-scale parameter to optimize, and the downstream kappa solver
     // (which assumes hybrid Duchon for log-κ derivatives) errors out. Refresh
     // the index list so it reflects the post-freeze spec.
-    let spatial_terms = spatial_length_scale_term_indices(&resolvedspec);
+    // Constant curvature is no longer a joint-REML coordinate at this point.
+    // A free κ was just certified by the curvature profile; a user-pinned
+    // κ is fixed geometry. In both cases `best` has already profiled rho at that
+    // exact κ. Keeping the term in the generic spatial list would manufacture a
+    // degenerate ψ axis (`lower == upper`) and re-profile rho through a second
+    // evaluator, despite there being no spatial coordinate left to optimize.
+    // Besides doing dead work, that gave κ two objective owners and made the
+    // scalar and joint routes disagree at the identical seed on flat data.
+    let spatial_terms: Vec<usize> = spatial_length_scale_term_indices(&resolvedspec)
+        .into_iter()
+        .filter(|&term_idx| constant_curvature_term_spec(&resolvedspec, term_idx).is_none())
+        .collect();
     let (next_spec, best) = select_isotropic_matern_range_basin(
         data,
         y.view(),
@@ -8241,7 +8221,7 @@ pub struct CurvatureInference {
     /// Smooth-term index of the `curv(...)` term this report is about.
     pub term_idx: usize,
     /// The fitted signed sectional curvature κ̂ (the bounded analytic
-    /// curvature-fair profile optimum).
+    /// curvature profile optimum).
     pub kappa_hat: f64,
     /// Profile-likelihood CI for κ and the geometry verdict from its sign.
     pub ci: gam_geometry::curvature_estimand::KappaProfileCi,
@@ -8256,7 +8236,7 @@ pub struct CurvatureInference {
 /// fit inputs used to produce it.
 ///
 /// The point estimate and inference share the same continuously smoothing-
-/// profiled curvature-fair evidence and its analytic profile score. Each CI
+/// profiled Gaussian REML evidence and its analytic profile score. Each CI
 /// endpoint solves the Wilks likelihood-ratio equation directly inside the
 /// chart-bound bracket with safeguarded Newton steps; bisection is the
 /// guaranteed-progress fallback. A bound is reported as open only when the
@@ -8471,7 +8451,7 @@ pub fn curvature_inference_forspec(
             offset.len(),
         );
     }
-    validate_constant_curvature_fair_profile_inputs(weights, offset, &family)?;
+    validate_constant_curvature_profile_inputs(weights, offset, &family)?;
     let (kappa_min, kappa_max) = constant_curvature_kappa_bounds(data, resolvedspec, term_idx);
     let (feature_cols, base_spec) = match resolvedspec
         .smooth_terms
@@ -8489,14 +8469,7 @@ pub fn curvature_inference_forspec(
         }
     };
     let x_term = select_columns(data, feature_cols).map_err(EstimationError::from)?;
-    let radial_reference = constant_curvature_radial_reference(x_term.view(), y)?;
-    let fair_profile = ConstantCurvatureFairProfile {
-        data: x_term.view(),
-        response: y,
-        radial_reference,
-        spec: base_spec,
-        cache: std::cell::RefCell::new(std::collections::HashMap::new()),
-    };
+    let profile = ConstantCurvatureProfile::new(x_term.view(), y, base_spec)?;
 
     // CI and flatness revisit κ̂ and κ=0. The shared profile caches each joint
     // value/analytic-score pair so every statistic consumes the same evaluation.
@@ -8504,7 +8477,7 @@ pub fn curvature_inference_forspec(
         if !kappa.is_finite() {
             return Err(format!("V_p probed a non-finite κ = {kappa}"));
         }
-        let sample = fair_profile.evaluate(kappa).map_err(|error| {
+        let sample = profile.evaluate(kappa).map_err(|error| {
             format!("analytic curvature profile at kappa={kappa} failed: {error}")
         })?;
         Ok(sample)
