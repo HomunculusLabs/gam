@@ -1,12 +1,12 @@
 {
   "workflow": "Reference Quality Suite",
   "job_status": "failure",
-  "run_id": "30638634718",
-  "run_number": "418",
+  "run_id": "30660293973",
+  "run_number": "419",
   "run_attempt": "1",
   "event": "schedule",
   "ref": "refs/heads/main",
-  "sha": "9faee5f22ade02dc84614414a4bc692ae17644b9",
-  "completed_utc": "2026-07-31T16:43:18Z",
-  "run_url": "https://github.com/SauersML/gam/actions/runs/30638634718"
+  "sha": "a6126d7525e0cb16c107a042fd4c76aca0b086c4",
+  "completed_utc": "2026-07-31T21:31:07Z",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/30660293973"
 }
