@@ -230,6 +230,17 @@ pub trait ExactNewtonJointHessianWorkspace: Send + Sync {
         d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String>;
 
+    /// Exact first directional derivative of the coefficient Hessian for
+    /// every canonical coefficient axis, produced as one batch. Workspaces
+    /// owning a shared row/derivative cache override this so consumers such as
+    /// the accepted-mode Jeffreys certificate do not reconstruct the family
+    /// state or rebuild direction-independent row towers once per axis.
+    fn directional_derivative_all_axes(
+        &self,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        Ok(None)
+    }
+
     fn directional_derivative_operator(
         &self,
         d_beta_flat: &Array1<f64>,
