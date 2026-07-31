@@ -1036,7 +1036,10 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // cache loader. A poisoned all-boundary checkpoint is not a usable seed:
     // skipping the pilot for such an entry leaves the subsequent cold seed
     // validation without coefficient hints, which is exactly the failure mode
-    // this pilot exists to prevent.
+    // this pilot exists to prevent. Sample size is not a substitute for this
+    // evidence: the coupled objective remains non-concave at small n, and the
+    // n=800 outer-gradient audit demonstrates that its one-step operating-point
+    // hint can still lie outside every startup seed's basin.
     let outer_cache_seed_available = options
         .cache_session
         .as_ref()
@@ -1044,15 +1047,9 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         .is_some_and(|loaded| {
             gam_solve::rho_optimizer::cache_entry_would_help_outer(&loaded, setup.rho_dim())
         });
-    if outer_cache_seed_available || n < 1_000 {
-        let reason = if outer_cache_seed_available {
-            "outer-cache-seed-present"
-        } else {
-            "tiny-fit"
-        };
+    if outer_cache_seed_available {
         log::info!(
-            "[survival-marginal-slope/pilot] skip reason={} n={} rho_dim={}",
-            reason,
+            "[survival-marginal-slope/pilot] skip reason=outer-cache-seed-present n={} rho_dim={}",
             n,
             setup.rho_dim(),
         );
