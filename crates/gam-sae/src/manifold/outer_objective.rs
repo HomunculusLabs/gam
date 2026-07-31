@@ -3028,6 +3028,24 @@ impl SaeManifoldOuterObjective {
     ///   gated L1, ordered Beta--Bernoulli) are non-quadratic, so no Gaussian-logdet FS fixed
     ///   point exists; it stays cost-driven (the cascade still moves it via
     ///   the cost path when EFS is not the active lane for that coord).
+    /// #2330 — the `_` below discards the ONLY copy of the refusal diagnosis.
+    ///
+    /// When an evaluation is refused, `infeasible_evaluation` records why in every
+    /// coordinate certificate (`fixed-point evidence unavailable: {reason}`) and
+    /// [`Self::efs_step_with_certificate`] returns those certificates next to the
+    /// eval. They are dropped here, so callers see only `cost = INFINITY` with
+    /// `psi_gradient: None` and cannot tell a refusal from a structurally absent
+    /// coordinate. That ambiguity has already produced one misattributed test
+    /// failure (`tests_streaming_outer_gradient_2026.rs`).
+    ///
+    /// This is not a partially-used channel: `efs_step_with_certificate` has no
+    /// other caller, and `eval_fixed_point_certificate` builds its own certificates
+    /// from `eval` instead. So every certificate this path constructs — one
+    /// formatted string per coordinate, per EFS step — is built and thrown away.
+    ///
+    /// The repair is a caller that keeps them, NOT a new field on `EfsEval`, which
+    /// has 26 construction sites and would duplicate information this function
+    /// already computes.
     pub(crate) fn efs_step(&mut self, rho_flat: ArrayView1<'_, f64>) -> Result<EfsEval, String> {
         self.efs_step_with_certificate(rho_flat)
             .map(|(evaluation, _)| evaluation)
