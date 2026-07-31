@@ -2561,6 +2561,16 @@ pub(crate) fn joint_newton_decrement_certifies(
 /// detectable from logs), and classifies the refusal so downstream tooling
 /// can act without re-deriving the cert math.
 #[derive(Clone, Debug)]
+pub(crate) struct KktNullDirectionDiagnostic {
+    pub(crate) projected_gradient_component_inf: f64,
+    pub(crate) vector_block_inf: Vec<f64>,
+    pub(crate) carrying_block: Option<usize>,
+    pub(crate) penalized_curvature: f64,
+    pub(crate) likelihood_curvature: f64,
+    pub(crate) likelihood_max_abs_eigenvalue: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct KktRefusalReport {
     pub(crate) block_names: Vec<String>,
     pub(crate) block_widths: Vec<usize>,
@@ -2574,22 +2584,10 @@ pub(crate) struct KktRefusalReport {
     pub(crate) hpen_condition_number: f64,
     pub(crate) hpen_nullity_at_rank_tol: usize,
     pub(crate) hpen_rank_tol: f64,
-    pub(crate) hpen_null_gradient_inf: f64,
-    pub(crate) hpen_null_vector_block_inf: Vec<f64>,
-    pub(crate) hpen_null_vector_carrying_block: Option<usize>,
-    /// Likelihood-only |λ|_max of the joint Hessian BEFORE the penalty is added.
-    /// Decides whether the conditioning that inflated the relative rank cutoff
-    /// (`KKT_REFUSAL_RANK_TOL·λ_max`) — the reason a genuinely curved direction is
-    /// flagged "null" — comes from the likelihood or the penalty. `NaN` when the
-    /// spectrum is unavailable.
-    pub(crate) hlik_max_abs_eigenvalue: f64,
-    /// Total penalized curvature `uᵀH_pen u` along the flagged near-null direction
-    /// `u`, and its likelihood-only part `uᵀH_lik u`. A genuine gauge/unidentified
-    /// direction has BOTH ≈ 0; a merely ill-conditioned (relatively-small-but-real)
-    /// direction has a nonzero total; the likelihood part separates a penalty-only
-    /// identification from a likelihood one. `NaN` when unavailable.
-    pub(crate) hpen_null_curvature: f64,
-    pub(crate) hpen_null_likelihood_curvature: f64,
+    /// Most score-carrying near-null eigenvector, when the spectrum and
+    /// projected residual are both available. Absence is data, not a numeric
+    /// value: formatting `None` must never manufacture NaN pseudo-measurements.
+    pub(crate) hpen_null_direction: Option<KktNullDirectionDiagnostic>,
 
     pub(crate) active_set_rows_total: usize,
     pub(crate) accepted_step_inf: f64,
@@ -4076,12 +4074,8 @@ pub(crate) fn compute_kkt_refusal_report(
     let mut hpen_eigenvalues_sorted_desc: Vec<f64> = Vec::new();
     let mut hpen_condition_number = f64::NAN;
     let mut hpen_nullity_at_rank_tol = 0usize;
-    let mut hpen_null_gradient_inf = f64::NAN;
-    let mut hpen_null_vector_block_inf = Vec::new();
-    let mut hpen_null_vector_carrying_block = None;
-    let mut hlik_max_abs_eigenvalue = f64::NAN;
-    let mut hpen_null_curvature = f64::NAN;
-    let mut hpen_null_likelihood_curvature = f64::NAN;
+    let mut hpen_null_direction = None;
+    let mut hlik_max_abs_eigenvalue = None;
     let mut hpen_spectrum_unavailable = false;
     if total_p > 0
         && let Some(source) = joint_hessian_source
@@ -4096,10 +4090,12 @@ pub(crate) fn compute_kkt_refusal_report(
         let mut h_likelihood = h_joint.clone();
         symmetrize_dense_in_place(&mut h_likelihood);
         if let Ok((lik_evals, _)) = FaerEigh::eigh(&h_likelihood, Side::Lower) {
-            hlik_max_abs_eigenvalue = lik_evals
-                .iter()
-                .map(|x: &f64| x.abs())
-                .fold(0.0_f64, f64::max);
+            hlik_max_abs_eigenvalue = Some(
+                lik_evals
+                    .iter()
+                    .map(|x: &f64| x.abs())
+                    .fold(0.0_f64, f64::max),
+            );
         }
         let model_diagonal_ridge = if ridge_policy.accounts_for_objective() && ridge > 0.0 {
             ridge
@@ -4136,7 +4132,7 @@ pub(crate) fn compute_kkt_refusal_report(
                             continue;
                         }
                         let component = evecs.column(k).dot(residual).abs();
-                        if component > best_component {
+                        if best_k.is_none() || component > best_component {
                             best_component = component;
                             best_k = Some(k);
                             best_block_inf.clear();
@@ -4149,22 +4145,30 @@ pub(crate) fn compute_kkt_refusal_report(
                             }));
                         }
                     }
-                    hpen_null_gradient_inf = best_component;
-                    hpen_null_vector_block_inf = best_block_inf;
-                    hpen_null_vector_carrying_block = hpen_null_vector_block_inf
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, v)| v.is_finite())
-                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                        .map(|(i, _)| i);
                     // Split the flagged direction's curvature into its total
                     // penalized value and its likelihood-only part. Gauge/null ⇒
                     // both ≈ 0; ill-conditioned-but-identified ⇒ nonzero total; a
                     // penalty-only identification ⇒ likelihood part ≈ 0.
                     if let Some(k) = best_k {
                         let u = evecs.column(k);
-                        hpen_null_curvature = evals[k];
-                        hpen_null_likelihood_curvature = u.dot(&h_likelihood.dot(&u));
+                        let carrying_block = best_block_inf
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, value)| value.is_finite())
+                            .max_by(|left, right| {
+                                left.1
+                                    .partial_cmp(right.1)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                            .map(|(index, _)| index);
+                        hpen_null_direction = Some(KktNullDirectionDiagnostic {
+                            projected_gradient_component_inf: best_component,
+                            vector_block_inf: best_block_inf,
+                            carrying_block,
+                            penalized_curvature: evals[k],
+                            likelihood_curvature: u.dot(&h_likelihood.dot(&u)),
+                            likelihood_max_abs_eigenvalue: hlik_max_abs_eigenvalue,
+                        });
                     }
                 }
                 hpen_eigenvalues_sorted_desc = sorted;
@@ -4209,12 +4213,7 @@ pub(crate) fn compute_kkt_refusal_report(
         hpen_condition_number,
         hpen_nullity_at_rank_tol,
         hpen_rank_tol: KKT_REFUSAL_RANK_TOL,
-        hpen_null_gradient_inf,
-        hpen_null_vector_block_inf,
-        hpen_null_vector_carrying_block,
-        hlik_max_abs_eigenvalue,
-        hpen_null_curvature,
-        hpen_null_likelihood_curvature,
+        hpen_null_direction,
         active_set_rows_total,
         accepted_step_inf,
         proposal_step_inf,
@@ -4263,6 +4262,9 @@ impl KktRefusalReport {
     }
 
     pub(crate) fn null_direction_label(&self) -> String {
+        let Some(diagnostic) = self.hpen_null_direction.as_ref() else {
+            return "none".to_string();
+        };
         // Curvature split for the flagged direction: total penalized curvature
         // uᵀH_pen u, its likelihood-only part uᵀH_lik u, and the likelihood-only
         // λ_max. Reads: both curvatures ≈ 0 ⇒ genuine gauge/null; nonzero total ⇒
@@ -4270,27 +4272,31 @@ impl KktRefusalReport {
         // compare λ_max(H_lik) to λ_max(H_pen) to see whether the inflation is
         // likelihood- or penalty-sourced); likelihood part ≈ 0 with nonzero total
         // ⇒ penalty-only identification.
+        let likelihood_spectrum = diagnostic
+            .likelihood_max_abs_eigenvalue
+            .map(|value| format!("{value:.3e}"))
+            .unwrap_or_else(|| "unavailable".to_string());
         let curvature_split = format!(
-            "curv(uᵀH_pen u)={:.3e}, curv_lik(uᵀH_lik u)={:.3e}, λ_max(H_lik)={:.3e}",
-            self.hpen_null_curvature,
-            self.hpen_null_likelihood_curvature,
-            self.hlik_max_abs_eigenvalue,
+            "curv(uᵀH_pen u)={:.3e}, curv_lik(uᵀH_lik u)={:.3e}, \
+             λ_max(H_lik)={likelihood_spectrum}",
+            diagnostic.penalized_curvature, diagnostic.likelihood_curvature,
         );
-        match self.hpen_null_vector_carrying_block {
+        match diagnostic.carrying_block {
             Some(idx) => format!(
-                "{} (idx={}, |u_block|∞={:.3e}, |uᵀg_proj|={:.3e}, {})",
+                "{} (idx={}, |u_block|∞={}, |uᵀg_proj|={:.3e}, {})",
                 self.block_names.get(idx).map(String::as_str).unwrap_or("?"),
                 idx,
-                self.hpen_null_vector_block_inf
+                diagnostic
+                    .vector_block_inf
                     .get(idx)
-                    .copied()
-                    .unwrap_or(f64::NAN),
-                self.hpen_null_gradient_inf,
+                    .map(|value| format!("{value:.3e}"))
+                    .unwrap_or_else(|| "unavailable".to_string()),
+                diagnostic.projected_gradient_component_inf,
                 curvature_split,
             ),
             None => format!(
-                "none (|uᵀg_proj|={:.3e}, {})",
-                self.hpen_null_gradient_inf, curvature_split,
+                "unassigned (|uᵀg_proj|={:.3e}, {})",
+                diagnostic.projected_gradient_component_inf, curvature_split,
             ),
         }
     }
@@ -4435,12 +4441,14 @@ mod kkt_refusal_spectrum_format_tests {
             hpen_condition_number: max_abs / min_abs,
             hpen_nullity_at_rank_tol: nullity,
             hpen_rank_tol: KKT_REFUSAL_RANK_TOL,
-            hpen_null_gradient_inf: 0.0,
-            hpen_null_vector_block_inf: vec![0.0],
-            hpen_null_vector_carrying_block: None,
-            hlik_max_abs_eigenvalue: 5.0,
-            hpen_null_curvature: 1.0e-12,
-            hpen_null_likelihood_curvature: 1.0e-12,
+            hpen_null_direction: Some(KktNullDirectionDiagnostic {
+                projected_gradient_component_inf: 0.0,
+                vector_block_inf: vec![0.0],
+                carrying_block: Some(0),
+                penalized_curvature: 1.0e-12,
+                likelihood_curvature: 1.0e-12,
+                likelihood_max_abs_eigenvalue: Some(5.0),
+            }),
             active_set_rows_total: 0,
             accepted_step_inf: 0.0,
             proposal_step_inf: 0.0,
@@ -4455,8 +4463,7 @@ mod kkt_refusal_spectrum_format_tests {
             projected_residual_inf: 1.0,
             diagnosis: KktRefusalDiagnosis::RankDeficientHPen,
         };
-        let expected =
-            "λ_max=5.000e0, λ_min=-9.000e0, cond=9.000e12, nullity@1e-10=1 \
+        let expected = "λ_max=5.000e0, λ_min=-9.000e0, cond=9.000e12, nullity@1e-10=1 \
              (of 3 eigenvalues)";
 
         assert_eq!(max_abs, 9.0);
@@ -4464,6 +4471,16 @@ mod kkt_refusal_spectrum_format_tests {
         assert_eq!(report.format_hpen_spectrum(), expected);
         assert!(report.format_structured_log(4.0e-8).contains(expected));
         assert!(report.format_bubbled_error().contains(expected));
+
+        let mut unavailable = report.clone();
+        unavailable.hpen_null_direction = None;
+        assert_eq!(unavailable.null_direction_label(), "none");
+        assert!(
+            !unavailable
+                .format_structured_log(4.0e-8)
+                .contains("free-null diagnostic: none ("),
+            "an absent null direction must not grow numeric sentinel fields"
+        );
     }
 }
 
