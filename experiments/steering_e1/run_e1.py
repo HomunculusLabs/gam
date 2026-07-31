@@ -561,6 +561,13 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--seed", type=int, default=20260709)
     ap.add_argument("--pca-dim", type=int, default=64,
                     help="fit-chart PCA dimension (0 disables; deltas are lifted back exactly)")
+    ap.add_argument("--per-template-center", action="store_true",
+                    help="remove each prompt template's mean before charting. The cloud's leading "
+                         "variance is TEMPLATE identity, not the calendar phase (measured "
+                         "2026-07-31 on Qwen3.5-4B-Base L16: a raw PCA-64 chart of 70 rows gave "
+                         "fit EV 0.015 and weekday circular R2 0.0000 — the circle was buried "
+                         "under the template axes). This is a chart-construction nuisance removal "
+                         "only: the steering delta is still added to the RAW activation.")
     ap.add_argument("--out-dir", default="experiments/steering_e1/out")
     return ap.parse_args()
 
@@ -590,6 +597,23 @@ def main() -> int:
         np.stack([ex.activation.numpy().astype(np.float64) for ex in base_examples]))
     fit_day_indices = np.asarray([ex.day_index for ex in fit_examples])
     log(f"fit X shape {X_fit_ambient.shape}; held-out X shape {X_base_ambient.shape}")
+
+    # Chart nuisance removal (opt-in). Each template contributes a large constant
+    # offset that dominates the singular spectrum; centering per template leaves
+    # the weekday phase as the leading structure. Applied to the CHART inputs
+    # only — the intervention below still edits the raw activation.
+    X_fit_chart, X_base_chart = X_fit_ambient, X_base_ambient
+    if args.per_template_center:
+        X_fit_chart = X_fit_ambient.copy()
+        for ti in {ex.template_index for ex in fit_examples}:
+            rows = [i for i, ex in enumerate(fit_examples) if ex.template_index == ti]
+            X_fit_chart[rows] -= X_fit_chart[rows].mean(0, keepdims=True)
+        X_base_chart = X_base_ambient.copy()
+        for ti in {ex.template_index for ex in base_examples}:
+            rows = [i for i, ex in enumerate(base_examples) if ex.template_index == ti]
+            X_base_chart[rows] -= X_base_chart[rows].mean(0, keepdims=True)
+        log("per-template centering applied to the chart inputs")
+    X_fit_ambient, X_base_ambient = X_fit_chart, X_base_chart
 
     # Wide-p treatment (same methodology as the committed OLMo fixtures): fit in
     # a per-layer PCA chart. The steering DELTAS are lifted back to ambient
