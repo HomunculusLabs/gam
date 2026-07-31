@@ -4220,6 +4220,23 @@ impl SaeManifoldTerm {
         let total_t = cache.delta_t_len();
         let k = cache.k;
         let dim = total_t + k;
+        // #2267 — the same reason the Krylov sibling logs `[SAE-DEFLATE]`: this
+        // route is silent for as long as it takes, and on #2267 that silence has
+        // been read as a hang, as a hardware ceiling, and as an example
+        // misconfiguration across five months of comments. It is none of those.
+        // The route is DENSE: `dim` Hessian-vector applies to build the operator,
+        // then a symmetric eigendecomposition of it — `O(dim^2)` memory and
+        // `O(dim^3)` time. `dim` is the JOINT dimension, so it grows with
+        // `rows x atoms`, not with the atom count: a 160-row K=1 chart is a few
+        // hundred and finishes in ~1.6 s, while a 508-row K=8 dense-softmax rung
+        // is ~5.3e3 and one step measured >=25 min at 4.7 GiB peak RSS. One line,
+        // once per materialization, states the size of the bill before it is paid.
+        log::info!(
+            "[SAE-EXACT-DENSE] materializing the exact stationarity Hessian: dim={dim} \
+             (coords={total_t} + border={k}), {:.1} MiB per dim x dim f64 block, \
+             O(dim^3) symmetric eigendecomposition to follow",
+            (dim as f64) * (dim as f64) * 8.0 / (1024.0 * 1024.0),
+        );
         let mut a = Array2::<f64>::zeros((dim, dim));
         let mut unit = SaeArrowVector {
             t: Array1::<f64>::zeros(total_t),
