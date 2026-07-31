@@ -899,50 +899,51 @@ fn refresh_frames(
     n_blocks: usize,
     b: usize,
     ridge: f64,
-) -> usize {
+) -> Result<usize, String> {
     let p = x.ncols();
-    // Cross-moments M_g (P×b), one per block.
-    let mut cm: Vec<Array2<f64>> = (0..n_blocks)
-        .map(|_| Array2::<f64>::zeros((p, b)))
-        .collect();
-    let mut touched = vec![false; n_blocks];
-
-    for (i, code) in codes.iter().enumerate() {
-        let xi = x.row(i);
-        // Full reconstruction x̂_i under the current frames/γ.
-        if code.gates.iter().all(|&gate| gate == 0.0) {
-            continue;
-        }
-        let recon = reconstruct_stored_code_row(code, decoder.view(), b);
-        for (j, &g) in code.blocks.iter().enumerate() {
-            if code.gates[j] == 0.0 {
+    // A frame update is a block-coordinate minimizer only against the CURRENT
+    // reconstruction. Accumulating every cross-moment against one stale decode
+    // makes a Jacobi best response: co-routed blocks counter-rotate and can
+    // increase the very fixed-code objective this sweep claims to minimize.
+    // Keep one N×P f64 reconstruction and install each block immediately, i.e.
+    // the exact deterministic Gauss--Seidel order. No N×K workspace exists.
+    let mut reconstruction = Array2::<f64>::zeros((x.nrows(), p));
+    let mut members = vec![Vec::<(usize, usize)>::new(); n_blocks];
+    for (row, code) in codes.iter().enumerate() {
+        for (slot, &block) in code.blocks.iter().enumerate() {
+            if code.gates[slot] == 0.0 {
                 continue;
             }
-            let gg = g as usize;
-            // z_{ig}: the stored signed within-block code.
-            let z = &code.codes[j * b..j * b + b];
-            // Block g's own contribution decode_g = Σ_r z[r] D_g[r].
-            // r_{ig} = x_i − (x̂_i − decode_g) = x_i − x̂_i + decode_g.
-            // Accumulate M_g += r_{ig} zᵀ (outer, P×b).
-            let mg = &mut cm[gg];
+            let block = block as usize;
+            members[block].push((row, slot));
+            let z = &code.codes[slot * b..slot * b + b];
             for c in 0..p {
-                let mut decode_g_c = 0.0f32;
                 for r in 0..b {
-                    decode_g_c += z[r] * decoder[[gg * b + r, c]];
-                }
-                let resid_c = (xi[c] - recon[c] + decode_g_c) as f64;
-                for r in 0..b {
-                    mg[[c, r]] += resid_c * z[r] as f64;
+                    reconstruction[[row, c]] +=
+                        z[r] as f64 * decoder[[block * b + r, c]] as f64;
                 }
             }
-            touched[gg] = true;
         }
     }
 
     let mut polar_failures = 0usize;
     for g in 0..n_blocks {
-        if !touched[g] {
+        if members[g].is_empty() {
             continue;
+        }
+        let mut cross_moment = Array2::<f64>::zeros((p, b));
+        for &(row, slot) in &members[g] {
+            let z = &codes[row].codes[slot * b..slot * b + b];
+            for c in 0..p {
+                let old_contribution = (0..b)
+                    .map(|r| z[r] as f64 * decoder[[g * b + r, c]] as f64)
+                    .sum::<f64>();
+                let attributed_residual =
+                    x[[row, c]] as f64 - reconstruction[[row, c]] + old_contribution;
+                for r in 0..b {
+                    cross_moment[[c, r]] += attributed_residual * z[r] as f64;
+                }
+            }
         }
         // Ridge the cross-moment's Gram lightly by shrinking toward the current
         // frame: add ridge·D_gᵀ (P×b of the current orthonormal rows). This keeps
@@ -951,11 +952,11 @@ fn refresh_frames(
         if ridge > 0.0 {
             for r in 0..b {
                 for c in 0..p {
-                    cm[g][[c, r]] += ridge * decoder[[g * b + r, c]] as f64;
+                    cross_moment[[c, r]] += ridge * decoder[[g * b + r, c]] as f64;
                 }
             }
         }
-        match GrassmannFrame::polar_update(cm[g].view()) {
+        match GrassmannFrame::polar_update(cross_moment.view()) {
             Ok(frame) => {
                 let u = frame.frame(); // P×b column-orthonormal
                 let sv = frame.gauge_singular_values();
@@ -967,11 +968,71 @@ fn refresh_frames(
                         .iter()
                         .all(|&s| s.is_finite() && s > numerical_rank_floor);
                 if full_rank && u.ncols() == b {
+                    // `GrassmannFrame` canonicalizes signs for span-valued use.
+                    // Fixed signed codes require the unique Procrustes
+                    // orientation instead. For Q=polar(M), QᵀM is PSD, hence
+                    // every full-rank diagonal entry is positive; use that
+                    // invariant to undo any canonical sign flip.
+                    let mut proposed = Array2::<f32>::zeros((b, p));
                     for r in 0..b {
+                        let alignment = (0..p)
+                            .map(|c| u[[c, r]] * cross_moment[[c, r]])
+                            .sum::<f64>();
+                        if !(alignment.is_finite() && alignment != 0.0) {
+                            return Err(format!(
+                                "frame refresh block {g} has unresolved Procrustes orientation \
+                                 at column {r}: alignment={alignment}"
+                            ));
+                        }
+                        let sign = alignment.signum();
                         for c in 0..p {
-                            decoder[[g * b + r, c]] = u[[c, r]] as f32;
+                            proposed[[r, c]] = (sign * u[[c, r]]) as f32;
                         }
                     }
+
+                    // Certify descent in the exact arithmetic actually stored:
+                    // proposed is already quantized to f32, while both RSS
+                    // values and reconstruction updates are accumulated in f64.
+                    // A quantized polar step that increases fixed-code loss is
+                    // refused, never silently installed.
+                    let mut before_rss = 0.0_f64;
+                    let mut after_rss = 0.0_f64;
+                    for &(row, slot) in &members[g] {
+                        let z = &codes[row].codes[slot * b..slot * b + b];
+                        for c in 0..p {
+                            let old_contribution = (0..b)
+                                .map(|r| z[r] as f64 * decoder[[g * b + r, c]] as f64)
+                                .sum::<f64>();
+                            let new_contribution = (0..b)
+                                .map(|r| z[r] as f64 * proposed[[r, c]] as f64)
+                                .sum::<f64>();
+                            let before_residual = x[[row, c]] as f64 - reconstruction[[row, c]];
+                            let after_reconstruction =
+                                reconstruction[[row, c]] - old_contribution + new_contribution;
+                            let after_residual = x[[row, c]] as f64 - after_reconstruction;
+                            before_rss += before_residual * before_residual;
+                            after_rss += after_residual * after_residual;
+                        }
+                    }
+                    if after_rss > before_rss {
+                        return Err(format!(
+                            "frame refresh block {g} failed its fixed-code descent certificate: \
+                             RSS {before_rss:.17e} -> {after_rss:.17e}"
+                        ));
+                    }
+                    for &(row, slot) in &members[g] {
+                        let z = &codes[row].codes[slot * b..slot * b + b];
+                        for c in 0..p {
+                            for r in 0..b {
+                                reconstruction[[row, c]] += z[r] as f64
+                                    * (proposed[[r, c]] as f64
+                                        - decoder[[g * b + r, c]] as f64);
+                            }
+                        }
+                    }
+                    decoder
+                        .slice_mut(ndarray::s![g * b..g * b + b, ..])
+                        .assign(&proposed);
                 } else {
                     polar_failures += 1;
                 }
@@ -982,7 +1043,7 @@ fn refresh_frames(
         // (already orthonormal) frame in place; birth arbitration handles a truly
         // dead block.
     }
-    polar_failures
+    Ok(polar_failures)
 }
 
 /// AuxK-style dead-block birth proposals (seed from residual ROWS, never PCs).
@@ -2016,7 +2077,7 @@ fn advance_block_sparse_state(
         config.n_blocks,
         b,
         config.frame_ridge,
-    );
+    )?;
     let proposals = dead_block_birth_proposals(
         x,
         &codes_for_refresh,

@@ -1031,6 +1031,12 @@ mod fit_tests {
         config.tier1.block_topk = 4;
         config.tier1.aux_k = 4; // revival ON: spurious frames churn -> cannot certify
         config.tier1.max_epochs = 40;
+        // Tier-2 is only a witness that best-effort Tier-1 still reaches the
+        // curved lane. Use the smallest overcomplete dictionary instead of the
+        // production default; K=P+4 preserves K>P without importing unrelated
+        // support conditioning into this trichotomy test.
+        config.tier2.n_atoms = p + 4;
+        config.tier2.support_k = 1;
 
         // The objective plateaus, so the tiered fit RETURNS instead of erroring — that
         // IS the #2275 acceptance criterion.
@@ -1136,58 +1142,52 @@ mod fit_tests {
         );
     }
 
-    /// Planted 6-circle + linear-bulk mixture (#2023 acceptance): the tiered fit
-    /// (Tier-1 linear bulk + Tier-2 curved support-sparse refinement on the
-    /// residual) must not regress the pure-linear Tier-1 EV, its Tier-2 must return
-    /// a certified support-sparse fit, and the migration ledger must record the
+    /// Small deterministic two-circle corpus shared by the Tier-2 path tests.
+    /// P=4 is the smallest output that contains two independent curved planes;
+    /// keeping N=96 supplies several rotations at both frequencies without making
+    /// path/provenance tests pay for a large support-operator benchmark.
+    fn two_circle_fixture_2634() -> Array2<f64> {
+        let n = 96usize;
+        let mut z = Array2::<f64>::zeros((n, 4));
+        for i in 0..n {
+            let phase = i as f64 * 0.19;
+            z[[i, 0]] = phase.cos();
+            z[[i, 1]] = phase.sin();
+            z[[i, 2]] = (1.7 * phase).cos();
+            z[[i, 3]] = (1.7 * phase).sin();
+        }
+        z
+    }
+
+    /// Planted two-circle acceptance witness (#2023): the tiered fit (Tier-1
+    /// linear bulk + Tier-2 curved support-sparse refinement on the residual)
+    /// must not regress the pure-linear Tier-1 EV, its Tier-2 must return a
+    /// certified support-sparse fit, and the migration ledger must record the
     /// retained curved atoms as promotions off the linear residual.
     #[test]
     fn tiered_curved_refinement_is_certified_and_records_promotions() {
-        // P = 16: six circles in disjoint 2-D subspaces (cols 0..12) + a linear
-        // bulk direction (cols 12,13); cols 14,15 carry light noise.
-        let n = 240usize;
-        let p = 16usize;
-        let n_circles = 6usize;
-        let mut z = Array2::<f64>::zeros((n, p));
-        for i in 0..n {
-            let ph = (i as f64) * 0.261_799; // ~15° step, decorrelates the phases
-            for c in 0..n_circles {
-                let theta = ph * (1.0 + c as f64 * 0.37) + c as f64;
-                z[[i, 2 * c]] = theta.cos();
-                z[[i, 2 * c + 1]] = theta.sin();
-            }
-            // Linear bulk: a straight ramp direction the linear tier explains fully.
-            let t = i as f64 / n as f64;
-            z[[i, 12]] = 2.0 * t - 1.0;
-            z[[i, 13]] = 1.0 - 2.0 * t;
-            // Light deterministic wobble so cols 14,15 are not exactly zero.
-            z[[i, 14]] = 0.01 * (ph * 2.0).sin();
-            z[[i, 15]] = 0.01 * (ph * 3.0).cos();
-        }
+        let z = two_circle_fixture_2634();
+        let p = z.ncols();
 
-        // Tier-1 only (linear bulk baseline): 8 blocks of size 2, budget covers
-        // all six circles plus the bulk.
-        let mut lin = TieredFitConfig::linear_bulk(8, 2);
-        lin.tier1.block_topk = 7;
-        // 8 blocks over 7 planes (6 circles + bulk) leaves a spare block; AuxK
-        // revival + enough epochs let the frame fixed point certify so fit_tiered
-        // returns rather than erroring on non-convergence.
-        lin.tier1.aux_k = 3;
+        // Two rank-1/top-1 blocks are the smallest identified linear bulk that
+        // leaves curvature for Tier-2 instead of selecting all P directions.
+        let mut lin = TieredFitConfig::linear_bulk(2, 1);
+        lin.tier1.block_topk = 1;
+        lin.tier1.aux_k = 2;
         lin.tier1.max_epochs = 200;
         let lin_report = fit_tiered(z.view(), &lin).expect("linear-bulk fit runs");
         let ev_lin = lin_report.explained_variance;
 
         // Tiered (Tier-1 + Tier-2 curved support-sparse refinement): same Tier-1.
-        // The curved dictionary is overcomplete (K = 24 > P = 16), the K>P
-        // support-sparse lane the front door admits.
-        let mut tiered = TieredFitConfig::tiered(8, 2);
-        tiered.tier1.block_topk = 7;
-        tiered.tier1.aux_k = 3;
+        // K=P+1 is the smallest overcomplete support-sparse dictionary.
+        let mut tiered = TieredFitConfig::tiered(2, 1);
+        tiered.tier1.block_topk = 1;
+        tiered.tier1.aux_k = 2;
         tiered.tier1.max_epochs = 200;
-        tiered.tier2.n_atoms = 24;
-        tiered.tier2.support_k = 2;
-        tiered.tier2.max_outer_iter = 24;
-        tiered.tier2.max_inner_iter = 128;
+        tiered.tier2.n_atoms = p + 1;
+        tiered.tier2.support_k = 1;
+        tiered.tier2.max_outer_iter = 32;
+        tiered.tier2.max_inner_iter = 256;
         let report = fit_tiered(z.view(), &tiered).expect("tiered fit runs");
 
         let tier2 = report.tier2.as_ref().expect("Tier-2 curved refinement ran");
@@ -1265,35 +1265,17 @@ mod fit_tests {
     /// engine), so the test stays fast while still driving every stage.
     #[test]
     fn coordinate_seed_carries_a_full_tiered_fit() {
-        let n = 240usize;
-        let p = 16usize;
-        let n_circles = 6usize;
-        let mut z = Array2::<f64>::zeros((n, p));
-        for i in 0..n {
-            let ph = (i as f64) * 0.261_799;
-            for c in 0..n_circles {
-                let theta = ph * (1.0 + c as f64 * 0.37) + c as f64;
-                z[[i, 2 * c]] = theta.cos();
-                z[[i, 2 * c + 1]] = theta.sin();
-            }
-            let t = i as f64 / n as f64;
-            z[[i, 12]] = 2.0 * t - 1.0;
-            z[[i, 13]] = 1.0 - 2.0 * t;
-            z[[i, 14]] = 0.01 * (ph * 2.0).sin();
-            z[[i, 15]] = 0.01 * (ph * 3.0).cos();
-        }
+        let z = two_circle_fixture_2634();
+        let p = z.ncols();
 
-        let mut config = TieredFitConfig::tiered(8, 2);
+        let mut config = TieredFitConfig::tiered(2, 1);
         config.tier1_seed = TieredSeedPolicy::CoordinatePartition;
-        config.tier1.block_topk = 7;
-        // The coordinate seed is a colder start than farthest-point, so give the
-        // frame fixed point AuxK revival + enough epochs to certify (Tier-1 must
-        // return Ok for the Tier-2 refinement to run).
-        config.tier1.aux_k = 3;
+        config.tier1.block_topk = 1;
+        config.tier1.aux_k = 2;
         config.tier1.max_epochs = 200;
-        // Overcomplete curved dictionary (K = 24 > P = 16) for the support-sparse lane.
-        config.tier2.n_atoms = 24;
-        config.tier2.support_k = 2;
+        // Smallest overcomplete curved dictionary for this seed-path witness.
+        config.tier2.n_atoms = p + 1;
+        config.tier2.support_k = 1;
         config.tier2.max_outer_iter = 24;
         config.tier2.max_inner_iter = 128;
         let report =
@@ -1328,27 +1310,26 @@ mod fit_tests {
         // P = 4: two disjoint planted circles (cols 0,1 and 2,3) at different
         // frequencies. Tier-1 charts each plane linearly; the residual it leaves
         // (the circles' curvature) is exactly what the curved Tier-2 refines.
-        let n = 96usize;
-        let p = 4usize;
-        let mut z = Array2::<f64>::zeros((n, p));
-        for i in 0..n {
-            let ph = (i as f64) * 0.19;
-            z[[i, 0]] = ph.cos();
-            z[[i, 1]] = ph.sin();
-            z[[i, 2]] = (1.7 * ph).cos();
-            z[[i, 3]] = (1.7 * ph).sin();
-        }
+        let z = two_circle_fixture_2634();
+        let p = z.ncols();
 
-        let mut config = TieredFitConfig::tiered(2, 2);
-        config.tier1.block_topk = 2;
+        // Two b=2 blocks with topk=2 select all K=P directions on every row:
+        // the reconstruction is the identity and the partition is
+        // nonidentified, so there is neither compression nor a curved residual
+        // for Tier-2 to refine. Two rank-1 blocks with topk=1 are the minimal
+        // identified two-circle witness.
+        let mut config = TieredFitConfig::tiered(2, 1);
+        config.tier1.block_topk = 1;
         config.tier1.aux_k = 2;
         config.tier1.max_epochs = 200;
-        // Overcomplete curved dictionary (K = 8 > P = 4): the K>P support-sparse
-        // lane, the only representation the front door admits for it.
+        // The smallest overcomplete curved dictionary: K=P+1 is enough to pin
+        // the support-sparse lane, which is the only representation the front
+        // door admits for K>P, without making this routing/provenance witness a
+        // quadrature-scale benchmark.
         config.tier2.atom_basis = "periodic".to_string();
         config.tier2.atom_dim = 1;
-        config.tier2.n_atoms = 8;
-        config.tier2.support_k = 2;
+        config.tier2.n_atoms = p + 1;
+        config.tier2.support_k = 1;
         config.tier2.max_outer_iter = 32;
         config.tier2.max_inner_iter = 256;
 

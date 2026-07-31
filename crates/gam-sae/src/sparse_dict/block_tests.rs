@@ -81,6 +81,41 @@ fn make_decoder(n_blocks: usize, b: usize, p: usize, seed: u64) -> Array2<f32> {
     d
 }
 
+/// #2634 — two blocks selected on every row are the minimal witness that a
+/// stale, all-at-once (Jacobi) frame refresh is not alternating minimization.
+/// The production sweep is Gauss--Seidel and certifies the fixed-code RSS after
+/// every immediately installed Procrustes block.
+#[test]
+fn co_routed_frame_sweep_is_fixed_code_descent_2634() {
+    let (rows, p, b, n_blocks) = (128usize, 4usize, 2usize, 2usize);
+    let mut x = Array2::<f32>::zeros((rows, p));
+    let mut codes = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let theta = row as f32 * 0.19;
+        let z0 = [theta.cos(), theta.sin()];
+        let z1 = [(1.7 * theta).cos(), (1.7 * theta).sin()];
+        x[[row, 0]] = z0[0] + 0.35 * z1[0];
+        x[[row, 1]] = z0[1] + 0.35 * z1[1];
+        x[[row, 2]] = 0.65 * z1[0] - 0.20 * z0[1];
+        x[[row, 3]] = 0.65 * z1[1] + 0.20 * z0[0];
+        codes.push(RowBlockCode {
+            blocks: vec![0, 1],
+            gates: vec![1.0, 1.0],
+            codes: vec![z0[0], z0[1], z1[0], z1[1]],
+        });
+    }
+    let mut decoder = make_decoder(n_blocks, b, p, 2634);
+    let before = reconstruction_rss(x.view(), &codes, decoder.view(), b);
+    let failures = refresh_frames(x.view(), &codes, &mut decoder, n_blocks, b, 0.0)
+        .expect("the fixed-code frame sweep is certified descent");
+    let after = reconstruction_rss(x.view(), &codes, decoder.view(), b);
+    assert_eq!(failures, 0);
+    assert!(
+        after <= before,
+        "one production frame sweep must not increase fixed-code RSS: {before:.17e} -> {after:.17e}"
+    );
+}
+
 #[test]
 fn selected_no_improvement_birth_restores_complete_one_shot_state_2023() {
     // Block 1 already reconstructs every row exactly. A duplicate frame in the

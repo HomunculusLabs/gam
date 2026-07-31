@@ -9,17 +9,18 @@
 //!
 //! ## The criterion is ONE functional (#2576)
 //!
-//! `2·cost(ρ) = log|H| − log|S_ρ|₊ + df·(1 + ln(τ·D_p/df))`, and the only part
-//! of it that is not closed-form at the inner optimum is the Laplace normalizer
-//! `log|H| = Σ_i log|H_tt^(i)| + log|S|` on the bordered arrow Hessian.
+//! `2·cost(ρ) = log|S| − log|S_ρ|₊ + df·(1 + ln(τ·D_p/df))`, where
+//! `S = H_ββ − Σ_i H_βt^(i) H_tt^(ⁱ)⁻¹ H_tβ^(ⁱ)` is the reduced
+//! decoder Schur complement. This is the same coordinate-profiled Laplace
+//! complexity as the dense SAE criterion: the row-coordinate normalizer
+//! `Σ_i log|H_tt^(ⁱ)|` is removed rather than charging a decoder-scale-
+//! dependent quantity for nuisance coordinates.
 //!
-//! Both halves of that normalizer come from the SAME place: the #2080 frozen
-//! rational surrogate ([`SurrogateLaneState`]), which the dense manifold
-//! criterion also runs. The value is its estimate; the smoothing gradient is its
-//! `directional_derivative` contracted against `∂S/∂ρ_g`, which is exactly the
-//! group-restricted penalty apply because `H_ββ` is the only block carrying a
-//! smoothing coordinate. So `tr(H⁻¹ ∂H/∂ρ_g) = ∂log|S|/∂ρ_g` and value and
-//! gradient are one function of ρ by construction.
+//! The normalizer comes from the #2080 frozen rational surrogate
+//! ([`SurrogateLaneState`]), which the dense manifold criterion also runs. Its
+//! value and fixed-state directional derivative share probes and quadrature;
+//! the profiled derivative additionally carries the exact implicit response of
+//! the converged inner state.
 //!
 //! This lane previously took its factor cache from a Newton STEP it discarded
 //! and estimated that trace with a SECOND, independent Hutchinson family — its
@@ -33,7 +34,8 @@ use std::collections::BTreeMap;
 
 use gam_problem::{DeclaredHessianForm, Derivative, EstimationError, HessianValue, OuterEval};
 use gam_solve::rho_optimizer::{
-    OuterCapability, OuterCriterionCertificate, OuterObjective, OuterProblem, SeedOutcome,
+    OuterCapability, OuterCriterionCertificate, OuterEvalOrder, OuterObjective, OuterProblem,
+    SeedOutcome,
 };
 use ndarray::{Array1, Array2, ArrayView1};
 
@@ -293,11 +295,44 @@ struct PenaltySpectrum {
     total_rank: usize,
 }
 
+#[derive(Clone)]
 struct SupportOuterEvaluation {
     cost: f64,
     gradient: Array1<f64>,
     lambda_smooth: Vec<f64>,
     fixed_point: SaeSupportFixedPointReport,
+}
+
+#[derive(Clone)]
+struct CachedSupportOuterEvaluation {
+    rho: Array1<f64>,
+    state_revision: u64,
+    available_order: OuterEvalOrder,
+    evaluation: SupportOuterEvaluation,
+}
+
+impl CachedSupportOuterEvaluation {
+    fn matches(
+        &self,
+        rho: &Array1<f64>,
+        state_revision: u64,
+        requested_order: OuterEvalOrder,
+    ) -> bool {
+        self.state_revision == state_revision
+            && self.rho.len() == rho.len()
+            && self
+                .rho
+                .iter()
+                .zip(rho.iter())
+                .all(|(cached, requested)| cached.to_bits() == requested.to_bits())
+            && match self.available_order {
+                OuterEvalOrder::Value => requested_order == OuterEvalOrder::Value,
+                OuterEvalOrder::ValueAndGradient => {
+                    requested_order != OuterEvalOrder::ValueGradientHessian
+                }
+                OuterEvalOrder::ValueGradientHessian => true,
+            }
+    }
 }
 
 struct SaeSupportOuterObjective {
@@ -311,7 +346,13 @@ struct SaeSupportOuterObjective {
     inner_tolerance: f64,
     trust_radius: f64,
     random_state: u64,
-    last_evaluation: Option<SupportOuterEvaluation>,
+    last_evaluation: Option<CachedSupportOuterEvaluation>,
+    /// Identity of the mutable fitted term underlying `last_evaluation`.
+    /// Every uncached solve and reset advances it before touching the state, so
+    /// a cache entry can never survive a failed or intervening evaluation.
+    state_revision: u64,
+    #[cfg(test)]
+    uncached_evaluations: usize,
     /// The FROZEN reduced-Schur log-determinant surrogate for this outer solve
     /// — the same #2080 lane the dense manifold criterion runs on.
     ///
@@ -396,12 +437,12 @@ impl SaeSupportOuterObjective {
     /// ∂S/∂ρ_g = ∂H_ββ/∂ρ_g = Σ_{k ∈ g} λ_k (S_k ⊗ I_P) = the group-g penalty apply.
     /// ```
     ///
-    /// Two consequences. First, `log|H| = Σ_i log|H_tt^(i)| + log|S|` has a
-    /// ρ-independent row half, so the whole smoothing gradient of the Laplace
-    /// normalizer is `∂log|S|/∂ρ_g` — exactly what the Hutchinson trace
-    /// `tr(H⁻¹ ∂H/∂ρ_g)` was estimating with its own separate probe family and
-    /// its own 48 unshifted `S⁻¹` solves. Second, the derivative operator is
-    /// already implemented as the group-restricted penalty apply below.
+    /// This is the EXPLICIT, frozen-inner-state derivative. The coordinates and
+    /// decoder fitted at the inner optimum also move with ρ, so the complete
+    /// profiled derivative adds the implicit-function response assembled in
+    /// [`SaeSupportSparseTerm::support_reduced_logdet_profile_adjoint`]. Keeping
+    /// this operator restricted to the explicit penalty direction makes that
+    /// split auditable: no state-response term can be counted twice.
     fn schur_derivative_matvec(
         &self,
         group: usize,
@@ -433,8 +474,9 @@ impl SaeSupportOuterObjective {
         out
     }
 
-    /// The joint Hessian's Laplace normalizer `log|H|`, and the bundle whose
-    /// contraction against any `∂S` is that value's EXACT ρ-derivative.
+    /// The coordinate-profiled Laplace normalizer `log|S|`, and the bundle whose
+    /// contraction against any `∂S` is that value's exact fixed-state
+    /// directional derivative.
     ///
     /// This lane used to obtain its factor cache from
     /// `solve_arrow_newton_step_with_options`, which solves a Newton step it
@@ -455,8 +497,9 @@ impl SaeSupportOuterObjective {
     /// [`SurrogateLaneState`]). It never forms a dense border, it runs on CPU
     /// and device alike, and its value and gradient are one functional by
     /// construction. The support lane joins it rather than growing a second
-    /// evidence policy beside it; see [`Self::schur_derivative_matvec`] for why
-    /// that one derivative is the whole smoothing gradient of the normalizer.
+    /// evidence policy beside it; [`Self::schur_derivative_matvec`] supplies the
+    /// explicit-ρ half and the support-term adjoint supplies the fitted-state
+    /// half.
     fn evidence_log_det(
         &mut self,
         system: &ArrowSchurSystem,
@@ -545,10 +588,64 @@ impl SaeSupportOuterObjective {
             schur_log_det,
             timer.elapsed().as_secs_f64(),
         );
-        Ok((row_log_det + schur_log_det, bundle))
+        // Coordinates are nuisance parameters profiled by the inner solve. As
+        // in `rank_adjusted_quasi_laplace_complexity`, their row-block
+        // determinant is removed from the criterion; retaining it here would
+        // charge arbitrary decoder scaling and, worse, would pair a moving row
+        // value with a derivative that differentiates only the reduced Schur
+        // operator.
+        Ok((schur_log_det, bundle))
+    }
+
+    fn evaluate_for_order(
+        &mut self,
+        rho: &Array1<f64>,
+        requested_order: OuterEvalOrder,
+    ) -> Result<SupportOuterEvaluation, EstimationError> {
+        if let Some(cached) = &self.last_evaluation
+            && cached.matches(rho, self.state_revision, requested_order)
+        {
+            return Ok(cached.evaluation.clone());
+        }
+
+        // Invalidate before the inner solve mutates `term`: a refused
+        // evaluation must never leave the previous point reusable against a
+        // different fitted state. Wrapping is safe because the sole cache entry
+        // is gone before the revision advances.
+        self.last_evaluation = None;
+        self.state_revision = self.state_revision.wrapping_add(1);
+        #[cfg(test)]
+        {
+            self.uncached_evaluations += 1;
+        }
+        let evaluation = self.evaluate_uncached(rho)?;
+        // The implementation always computes the analytic gradient alongside
+        // the value. A value request therefore populates a gradient-capable
+        // entry; a declared VGH request additionally establishes that the
+        // unavailable-Hessian result is the requested maximum capability.
+        let available_order = match requested_order {
+            OuterEvalOrder::ValueGradientHessian => OuterEvalOrder::ValueGradientHessian,
+            OuterEvalOrder::Value | OuterEvalOrder::ValueAndGradient => {
+                OuterEvalOrder::ValueAndGradient
+            }
+        };
+        self.last_evaluation = Some(CachedSupportOuterEvaluation {
+            rho: rho.clone(),
+            state_revision: self.state_revision,
+            available_order,
+            evaluation: evaluation.clone(),
+        });
+        Ok(evaluation)
     }
 
     fn evaluate(&mut self, rho: &Array1<f64>) -> Result<SupportOuterEvaluation, EstimationError> {
+        self.evaluate_for_order(rho, OuterEvalOrder::ValueAndGradient)
+    }
+
+    fn evaluate_uncached(
+        &mut self,
+        rho: &Array1<f64>,
+    ) -> Result<SupportOuterEvaluation, EstimationError> {
         let lambda_smooth = self.layout.expand(rho).map_err(outer_error)?;
         let fixed_point = self
             .term
@@ -565,7 +662,7 @@ impl SaeSupportOuterObjective {
             .term
             .assemble_arrow_schur(self.target.view(), &lambda_smooth, &self.ard_precisions)
             .map_err(outer_error)?;
-        let (joint_logdet, logdet_derivative) = self.evidence_log_det(&system)?;
+        let (reduced_logdet, logdet_derivative) = self.evidence_log_det(&system)?;
         // Gaussian dispersion argument = the PENALIZED deviance
         //   D_p(ρ) = ‖y − ŷ‖² + β̂ᵀ S_ρ β̂ + (every other penalty the inner solve descends),
         // NOT the raw residual sum of squares. This mirrors the canonical dense
@@ -610,18 +707,30 @@ impl SaeSupportOuterObjective {
                 + self.spectrum.rank_by_group[group] as f64 * rho[group];
         }
         let cost = 0.5
-            * (joint_logdet - penalty_logdet
+            * (reduced_logdet - penalty_logdet
                 + residual_df * (1.0 + (std::f64::consts::TAU * deviance / residual_df).ln()));
-        // `tr(H⁻¹ ∂H/∂ρ_g) = ∂log|S|/∂ρ_g`, and the surrogate's directional
-        // derivative is the EXACT derivative of the very `log|S|` that entered
-        // `cost` above — same probes, same quadrature nodes, same frozen
-        // deflation basis, same shifted-solve bundle. Value and gradient are
-        // therefore one functional by construction, not by tolerance tuning.
+        // The surrogate's directional derivative is the exact FIXED-STATE
+        // derivative of the very `log|S|` that entered `cost` above — same
+        // probes, quadrature nodes, frozen deflation basis and shifted solves.
+        // A profiled criterion needs one more term: S also moves because the
+        // converged decoder/coordinates move with rho. The support term forms
+        // `Gamma = d log|S|/d theta` from this same bundle and solves the exact
+        // inner stationarity adjoint once; omitting that IFT response is the
+        // value/gradient split that made every descent direction point uphill.
         // The lane used to estimate this trace with a SECOND, independent
         // Hutchinson family (its own 16 probes, its own unshifted `S⁻¹` solves,
         // one per group), which both cost the whole evaluation's wall-clock and
         // left the value and gradient free to describe different functions.
         let energy = self.penalty_energy_by_group(&lambda_smooth);
+        let profile_adjoint = self
+            .term
+            .support_reduced_logdet_profile_adjoint(
+                self.target.view(),
+                &self.ard_precisions,
+                &system,
+                &logdet_derivative.vectors,
+            )
+            .map_err(outer_error)?;
         let mut gradient = Array1::<f64>::zeros(self.layout.group_keys.len());
         for group in 0..gradient.len() {
             let derivative_matvec = |vector: ArrayView1<f64>| -> Array1<f64> {
@@ -642,9 +751,35 @@ impl SaeSupportOuterObjective {
                         self.layout.group_keys[group]
                     ))
                 })?;
+            // `g_rho = d(∇_theta L)/d rho` lives only in the decoder
+            // block and equals the group penalty applied to beta. With
+            // `a = A^+ Gamma`, the implicit logdet response is
+            // `-1/2 <a, g_rho>` (one adjoint, then one cheap contraction per
+            // smoothing group).
+            let mut profile_response = 0.0_f64;
+            for atom in 0..self.term.k_atoms() {
+                if self.layout.atom_group[atom] != group {
+                    continue;
+                }
+                let m = self.term.atoms[atom].basis_size();
+                let offset = beta_offsets[atom];
+                let lambda = lambda_smooth[atom];
+                let sb = self.term.atoms[atom]
+                    .smooth_penalty()
+                    .dot(self.term.atoms[atom].decoder_coefficients());
+                for basis in 0..m {
+                    for output in 0..self.term.output_dim() {
+                        profile_response += profile_adjoint.beta
+                            [offset + basis * self.term.output_dim() + output]
+                            * lambda
+                            * sb[[basis, output]];
+                    }
+                }
+            }
             gradient[group] = 0.5
                 * (logdet_group_derivative - self.spectrum.rank_by_group[group] as f64
-                    + residual_df * energy[group] / deviance);
+                    + residual_df * energy[group] / deviance
+                    - profile_response);
         }
         if !cost.is_finite() || gradient.iter().any(|value| !value.is_finite()) {
             return Err(outer_error(
@@ -675,24 +810,43 @@ impl OuterObjective for SaeSupportOuterObjective {
     }
 
     fn eval_cost(&mut self, rho: &Array1<f64>) -> Result<f64, EstimationError> {
-        self.evaluate(rho).map(|evaluation| evaluation.cost)
+        self.evaluate_for_order(rho, OuterEvalOrder::Value)
+            .map(|evaluation| evaluation.cost)
     }
 
     fn eval(&mut self, rho: &Array1<f64>) -> Result<OuterEval, EstimationError> {
-        let evaluation = self.evaluate(rho)?;
-        let out = OuterEval {
+        let evaluation = self.evaluate_for_order(rho, OuterEvalOrder::ValueAndGradient)?;
+        Ok(OuterEval {
             cost: evaluation.cost,
-            gradient: evaluation.gradient.clone(),
+            gradient: evaluation.gradient,
             hessian: HessianValue::Unavailable,
             inner_beta_hint: None,
-        };
-        self.last_evaluation = Some(evaluation);
-        Ok(out)
+        })
+    }
+
+    fn eval_with_order(
+        &mut self,
+        rho: &Array1<f64>,
+        order: OuterEvalOrder,
+    ) -> Result<OuterEval, EstimationError> {
+        let evaluation = self.evaluate_for_order(rho, order)?;
+        match order {
+            OuterEvalOrder::Value => Ok(OuterEval::value_only(evaluation.cost, rho.len(), None)),
+            OuterEvalOrder::ValueAndGradient | OuterEvalOrder::ValueGradientHessian => {
+                Ok(OuterEval {
+                    cost: evaluation.cost,
+                    gradient: evaluation.gradient,
+                    hessian: HessianValue::Unavailable,
+                    inner_beta_hint: None,
+                })
+            }
+        }
     }
 
     fn reset(&mut self) {
         self.term = self.initial_term.clone();
         self.last_evaluation = None;
+        self.state_revision = self.state_revision.wrapping_add(1);
     }
 
     fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
@@ -724,6 +878,16 @@ pub fn run_sae_support_outer(
         ));
     }
     let spectrum = penalty_spectrum(&request.term, &layout).map_err(outer_error)?;
+    // This Gaussian LAML criterion is a sum over response cells, not a
+    // unit-scale scalar.  Declare that natural scale to the shared outer
+    // engine so its projected-gradient stopping band has the same units as
+    // the score.  Without it BFGS used the bare absolute 1e-5 default even
+    // when the score-relative certificate at the same point was already
+    // decisive; on the small overcomplete Tier-2 witness that drove Strong
+    // Wolfe into sub-1e-8 rho probes whose predicted score change was below
+    // floating-point cancellation, with each probe paying for a full inner
+    // fixed point and rational evidence evaluation.
+    let objective_scale = request.target.len() as f64;
     let initial_term = request.term.clone();
     let mut objective = SaeSupportOuterObjective {
         term: request.term,
@@ -737,6 +901,9 @@ pub fn run_sae_support_outer(
         trust_radius: request.trust_radius,
         random_state: request.random_state,
         last_evaluation: None,
+        state_revision: 0,
+        #[cfg(test)]
+        uncached_evaluations: 0,
         logdet_surrogate: None,
     };
     let initial_rho = Array1::from_elem(layout.group_keys.len(), request.initial_smoothness.ln());
@@ -745,6 +912,7 @@ pub fn run_sae_support_outer(
         .with_hessian(DeclaredHessianForm::Unavailable)
         .with_prefer_gradient_only(true)
         .with_disable_fixed_point(true)
+        .with_objective_scale(Some(objective_scale))
         .with_initial_rho(initial_rho)
         .with_max_iter(request.max_outer_iter.max(1));
     let outer = problem.run(&mut objective, SUPPORT_LAML_CONTEXT)?;
@@ -886,7 +1054,98 @@ mod tests {
             trust_radius: 1.0,
             random_state: 0xC0FF_EE00_D15E_A5E5,
             last_evaluation: None,
+            state_revision: 0,
+            uncached_evaluations: 0,
             logdet_surrogate: None,
+        }
+    }
+
+    /// #2634 — the first-order bridge asks for a value during line search and
+    /// then for value+gradient at the accepted point. This objective computes
+    /// both in one evidence pass, so an exact repeated rho must consume that
+    /// pass once. A one-bit-different rho is the negative control: the cache is
+    /// exact, never a tolerance-based warm-start shortcut.
+    #[test]
+    fn identical_value_then_gradient_evaluates_support_laml_once_2634() {
+        let mut objective = build_objective();
+        let rho = array![0.0, 0.0];
+        let value = objective
+            .eval_with_order(&rho, OuterEvalOrder::Value)
+            .expect("value evaluation");
+        assert_eq!(objective.uncached_evaluations, 1);
+
+        let value_and_gradient = objective
+            .eval_with_order(&rho, OuterEvalOrder::ValueAndGradient)
+            .expect("the full evaluation reuses the value pass");
+        assert_eq!(
+            objective.uncached_evaluations, 1,
+            "an identical rho must not repeat the inner solve and evidence pass"
+        );
+        assert_eq!(value.cost.to_bits(), value_and_gradient.cost.to_bits());
+        assert!(
+            value_and_gradient.gradient.iter().all(|value| value.is_finite()),
+            "the reused full evaluation must retain its analytic gradient"
+        );
+
+        let mut adjacent = rho.clone();
+        adjacent[0] = f64::from_bits(rho[0].to_bits() + 1);
+        objective
+            .eval_with_order(&adjacent, OuterEvalOrder::Value)
+            .expect("one-bit-adjacent rho evaluation");
+        assert_eq!(
+            objective.uncached_evaluations, 2,
+            "a one-bit rho change must invalidate the exact cache"
+        );
+    }
+
+    /// #2634 root gate: a smoothing gradient is the derivative of the fully
+    /// profiled production criterion, not the partial derivative obtained by
+    /// freezing the coordinates and decoder at the centre point. The latter
+    /// dropped the `Gamma^T theta_hat_rho` Laplace response and, together with
+    /// the spurious row-coordinate determinant, reported an uphill direction
+    /// as descent on the filed Tier-2 route.
+    #[test]
+    fn profiled_support_outer_gradient_matches_refitted_value_fd_2634() {
+        let mut objective = build_objective();
+        let base = array![0.4_f64.ln(), 2.2_f64.ln()];
+        let analytic = objective
+            .evaluate(&base)
+            .expect("profiled centre evaluation")
+            .gradient;
+        let h = 2.0e-4;
+        for group in 0..base.len() {
+            let mut plus = base.clone();
+            let mut minus = base.clone();
+            plus[group] += h;
+            minus[group] -= h;
+
+            // Both legs start from the same pristine inner state. The frozen
+            // rational plan intentionally survives reset so centre and legs
+            // are values of one deterministic surrogate.
+            objective.reset();
+            let value_plus = objective
+                .evaluate(&plus)
+                .expect("profiled plus evaluation")
+                .cost;
+            objective.reset();
+            let value_minus = objective
+                .evaluate(&minus)
+                .expect("profiled minus evaluation")
+                .cost;
+            let finite_difference = (value_plus - value_minus) / (2.0 * h);
+            let gap = (analytic[group] - finite_difference).abs();
+            let scale = 1.0 + analytic[group].abs().max(finite_difference.abs());
+            eprintln!(
+                "#2634 profiled FD group {group} ({}): analytic={:.12e}, central_fd={finite_difference:.12e}, gap={gap:.3e}",
+                objective.layout.group_keys[group],
+                analytic[group],
+            );
+            assert!(
+                gap <= 5.0e-4 * scale,
+                "group {group} ({}): profiled analytic gradient {:.9e} != refitted production-value FD {finite_difference:.9e} (gap {gap:.3e}, scale {scale:.3e})",
+                objective.layout.group_keys[group],
+                analytic[group],
+            );
         }
     }
 
@@ -946,6 +1205,8 @@ mod tests {
             trust_radius: 1.0,
             random_state: 0x2629,
             last_evaluation: None,
+            state_revision: 0,
+            uncached_evaluations: 0,
             logdet_surrogate: None,
         }
     }
@@ -1528,18 +1789,16 @@ mod tests {
     /// It contracts the log-determinant surrogate's own derivative bundle
     /// against `∂S/∂ρ_g`, on the claim that
     ///
-    ///   (a) only `H_ββ` carries a smoothing coordinate, so
-    ///       `∂S/∂ρ_g = Σ_{k∈g} λ_k (S_k ⊗ I_P)` — `schur_derivative_matvec`; and
-    ///   (b) `log|H| = Σ_i log|H_tt^(i)| + log|S|` has a ρ-INDEPENDENT row half,
-    ///       so `tr(H⁻¹ ∂H/∂ρ_g) = ∂log|S|/∂ρ_g`.
+    /// Only `H_ββ` carries an explicit smoothing coordinate, so at fixed
+    /// inner state `∂S/∂ρ_g = Σ_{k∈g} λ_k (S_k ⊗ I_P)` —
+    /// `schur_derivative_matvec`.
     ///
     /// Both claims are tested at once by central-differencing the production
-    /// `evidence_log_det` — the FULL `log|H|`, row half included — through λ
-    /// alone at a FROZEN inner state, against the analytic contraction. A wrong
+    /// `evidence_log_det` — the coordinate-profiled `log|S|` — through λ alone
+    /// at a FROZEN inner state, against the analytic contraction. A wrong
     /// `∂S/∂ρ_g` (missing the `⊗ I_P`, wrong group mask, `λ` instead of
-    /// `∂λ/∂ρ = λ`) fails; a row half that secretly moved with ρ fails; a plan
-    /// rebuilt between the FD legs fails, because then the two legs would be
-    /// values of two different functions.
+    /// `∂λ/∂ρ = λ`) fails; a plan rebuilt between the FD legs fails,
+    /// because then the two legs would be values of two different functions.
     #[test]
     fn support_outer_logdet_gradient_matches_fd_of_its_own_surrogate() {
         let mut objective = build_objective();
@@ -1619,7 +1878,7 @@ mod tests {
             let gap = (analytic[group] - fd).abs();
             assert!(
                 gap <= 1.0e-5 * (1.0 + fd.abs()),
-                "group {group} ({}): analytic ∂log|H|/∂ρ = {:.9e} disagrees with the \
+                "group {group} ({}): analytic ∂log|S|/∂ρ = {:.9e} disagrees with the \
                  central difference of the SAME frozen surrogate {fd:.9e} (gap {gap:.3e})",
                 objective.layout.group_keys[group],
                 analytic[group],
@@ -1629,7 +1888,7 @@ mod tests {
             // the failure this catches independently of the FD magnitude.
             assert!(
                 analytic[group] > 0.0,
-                "group {group}: an SPD ∂S/∂ρ must raise log|H|, got {:.9e}",
+                "group {group}: an SPD ∂S/∂ρ must raise log|S|, got {:.9e}",
                 analytic[group]
             );
         }
