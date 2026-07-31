@@ -7021,8 +7021,27 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 .map(|n| format!("{n:.3e}"))
                 .collect::<Vec<_>>()
                 .join(",");
+            // gam#2647 discriminator: the per-block ‖β‖∞ beside the per-block
+            // residual. The aggregate `beta_inf` says a coefficient is growing;
+            // it cannot say WHICH block is growing, and that is the whole
+            // question when two blocks share a gauge direction. On the binomial
+            // location-scale-wiggle arm the aggregate climbs monotonically while
+            // ½βᵀSβ FALLS like ‖β‖⁻², which is only readable as "the growth is
+            // in a penalty-null direction of one specific block" once the split
+            // is visible. Same cost as the residual split beside it: the block
+            // states are already in hand.
+            let block_beta_sig = states
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{:.3e}",
+                        s.beta.iter().map(|x: &f64| x.abs()).fold(0.0_f64, f64::max)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
             log::info!(
-                "[PIRLS/joint-Newton convergence] cycle {:>3} | step_inf={:.3e} (tol={:.3e}) | accepted_step_inf={:.3e} | residual={:.3e} (tol={:.3e}) | per_block_resid=[{}] | obj_change={:.3e} (tol={:.3e}) | beta_inf={:.3e}",
+                "[PIRLS/joint-Newton convergence] cycle {:>3} | step_inf={:.3e} (tol={:.3e}) | accepted_step_inf={:.3e} | residual={:.3e} (tol={:.3e}) | per_block_resid=[{}] | obj_change={:.3e} (tol={:.3e}) | beta_inf={:.3e} | per_block_beta_inf=[{}]",
                 cycle,
                 step_inf,
                 step_tol,
@@ -7033,6 +7052,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 objective_change,
                 objective_tol,
                 beta_inf,
+                block_beta_sig,
             );
 
             // gam#1082 perf: a tightly-gated `#1040 inner-conditioning probe`
