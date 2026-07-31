@@ -433,6 +433,26 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         !self.per_z_logslope_active() && parameter_block_specs_match_rows(specs, self.n)
     }
 
+    fn inner_joint_workspace_gradient_available(&self, specs: &[ParameterBlockSpec]) -> bool {
+        // Both survival workspaces publish the gradient from the same row
+        // cache/pass that built the Hessian: rigid uses
+        // RowKernelHessianWorkspace::joint_gradient_evaluation, while flex /
+        // timewiggle stores joint_gradient in its typed workspace. Advertising
+        // this capability lets an accepted trial carry that workspace into the
+        // reload instead of streaming every row again at identical beta.
+        !self.per_z_logslope_active() && parameter_block_specs_match_rows(specs, self.n)
+    }
+
+    fn inner_joint_workspace_log_likelihood_available(
+        &self,
+        specs: &[ParameterBlockSpec],
+    ) -> bool {
+        // Exact twin of the gradient capability above. The first trust attempt
+        // may read the workspace's cached scalar likelihood for its acceptance
+        // test and retain the same workspace for the post-accept gradient.
+        !self.per_z_logslope_active() && parameter_block_specs_match_rows(specs, self.n)
+    }
+
     fn outer_hyper_hessian_hvp_available(&self, specs: &[ParameterBlockSpec]) -> bool {
         // The exact outer Hessian over θ=(ρ,ψ[,log σ]) can be applied without
         // pairwise θθ materialization: coefficient-Hessian drift terms use the
