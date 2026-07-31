@@ -1,12 +1,12 @@
 {
   "workflow": "Python Contracts",
   "job_status": "failure",
-  "run_id": "30556604063",
-  "run_number": "199",
+  "run_id": "30600186060",
+  "run_number": "200",
   "run_attempt": "1",
-  "event": "workflow_dispatch",
+  "event": "schedule",
   "ref": "refs/heads/main",
-  "sha": "dad51929c70199e10a01201d2c6c3e96322f0f7c",
-  "completed_utc": "2026-07-30T16:58:54Z",
-  "run_url": "https://github.com/SauersML/gam/actions/runs/30556604063"
+  "sha": "c4d092192280df4ca2cd8a496a9d75a094c7a5bc",
+  "completed_utc": "2026-07-31T04:21:38Z",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/30600186060"
 }
