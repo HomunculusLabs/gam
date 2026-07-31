@@ -481,6 +481,21 @@ fn fixed_point_certificate_covers_ordered_beta_bernoulli_complete_gradient() {
     let iteration = iteration_objective
         .eval_efs(&rho)
         .expect("ordered Beta--Bernoulli EFS startup evaluation");
+    // #2330: `psi_gradient: None` has TWO producers, and they mean opposite things.
+    // The assignment-strength block at `outer_objective.rs:3219` leaves it `None`
+    // when the coordinate is structurally absent, which is what this assertion is
+    // about. But `infeasible_evaluation` (`outer_objective.rs:3079`) ALSO returns
+    // `psi_gradient: None`, together with `cost = INFINITY`, after discarding the
+    // `reason` string that says why the evaluation was refused. Blaming the gradient
+    // block for an infeasible evaluation sends the reader to the wrong file, so
+    // separate the two on the observable that distinguishes them.
+    assert!(
+        iteration.cost.is_finite(),
+        "the evaluation was refused before any gradient block was reached \
+         (cost={}); this is an infeasibility whose reason string was dropped by \
+         `infeasible_evaluation`, NOT a missing learnable-concentration gradient",
+        iteration.cost,
+    );
     let gradient = iteration
         .psi_gradient
         .as_ref()
