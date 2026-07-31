@@ -1274,11 +1274,16 @@ impl SaeManifoldTerm {
         // this assembly rather than needing a channel of its own. Every trace,
         // the penalty energy and the rank-aware log-determinant term are then
         // derived by the same machinery that already consumes this map.
-        for a in 0..rho.kappa.len().min(self.atoms.len()) {
-            let Some(flat) = rho.kappa_flat_index(a) else {
-                continue;
-            };
-            let atom = &self.atoms[a];
+        for &a in &rho.kappa_atoms {
+            let flat = rho.kappa_flat_index(a).ok_or_else(|| {
+                format!("curvature atom {a} has no flat outer coordinate")
+            })?;
+            let atom = self.atoms.get(a).ok_or_else(|| {
+                format!(
+                    "curvature coordinate names atom {a}, outside term K={}",
+                    self.atoms.len()
+                )
+            })?;
             let Some(ds) = atom.smooth_penalty_kappa_derivative() else {
                 // An atom whose roughness is not curvature-parameterised has no
                 // κ to move; leaving the coordinate un-assembled is what makes

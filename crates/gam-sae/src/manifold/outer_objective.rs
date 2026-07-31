@@ -934,6 +934,85 @@ pub(crate) fn sae_surrogate_lane_config() -> SurrogateLaneConfig {
 }
 
 impl SaeManifoldOuterObjective {
+    fn curvature_seed(term: &SaeManifoldTerm) -> Vec<(usize, f64)> {
+        term.atoms
+            .iter()
+            .enumerate()
+            .filter_map(|(atom, value)| {
+                value
+                    .geometry_plan()
+                    .and_then(SaeAtomGeometryPlan::constant_curvature)
+                    .map(|kappa| (atom, kappa))
+            })
+            .collect()
+    }
+
+    /// Install every curvature-dependent reference Gram for this outer point.
+    /// All fallible geometry work completes before the first atom is changed,
+    /// so an invalid trial curvature is a clean domain refusal rather than a
+    /// partially-mutated dictionary.
+    fn apply_curvature_state(&mut self, rho: &SaeManifoldRho) -> Result<(), String> {
+        let mut prepared = Vec::with_capacity(rho.kappa.len());
+        for (&atom_index, &kappa) in rho.kappa_atoms.iter().zip(rho.kappa.iter()) {
+            let atom = self.term.atoms.get(atom_index).ok_or_else(|| {
+                format!(
+                    "curvature coordinate names atom {atom_index}, outside K={}",
+                    self.term.atoms.len()
+                )
+            })?;
+            let already_installed = atom
+                .geometry_plan()
+                .and_then(SaeAtomGeometryPlan::constant_curvature)
+                .is_some_and(|current| current.to_bits() == kappa.to_bits())
+                && atom.smooth_penalty_kappa_derivative().is_some();
+            if !already_installed {
+                prepared.push((atom_index, atom.prepare_constant_curvature(kappa)?));
+            }
+        }
+        for (atom_index, state) in prepared {
+            self.term.atoms[atom_index].commit_prepared_constant_curvature(state);
+        }
+        Ok(())
+    }
+
+    /// Flat indices and scale-equivariant raw-curvature rails, derived from the
+    /// same typed geometry plans that build `S(kappa)` and `dS/dkappa`.
+    fn curvature_domain_bounds(&self) -> Result<Vec<(usize, f64, f64)>, EstimationError> {
+        let mut out = Vec::with_capacity(self.baseline_rho.kappa.len());
+        for &atom_index in &self.baseline_rho.kappa_atoms {
+            let flat = self
+                .baseline_rho
+                .kappa_flat_index(atom_index)
+                .ok_or_else(|| {
+                    EstimationError::InvalidInput(format!(
+                        "curvature atom {atom_index} has no flat outer coordinate"
+                    ))
+                })?;
+            let atom = self.baseline_term.atoms.get(atom_index).ok_or_else(|| {
+                EstimationError::InvalidInput(format!(
+                    "curvature coordinate names atom {atom_index}, outside K={}",
+                    self.baseline_term.atoms.len()
+                ))
+            })?;
+            let (lower, upper) = atom
+                .geometry_plan()
+                .ok_or_else(|| {
+                    EstimationError::InvalidInput(format!(
+                        "curvature atom {atom_index} has no typed geometry plan"
+                    ))
+                })?
+                .constant_curvature_domain()
+                .map_err(EstimationError::InvalidInput)?
+                .ok_or_else(|| {
+                    EstimationError::InvalidInput(format!(
+                        "atom {atom_index} owns a curvature coordinate but its metric is not constant-curvature"
+                    ))
+                })?;
+            out.push((flat, lower, upper));
+        }
+        Ok(out)
+    }
+
     pub(crate) fn current_rho_flat(&self) -> Array1<f64> {
         self.current_rho.to_flat()
     }
@@ -1010,7 +1089,9 @@ impl SaeManifoldOuterObjective {
         // The objective owns the typed flat layout. Bind assignment-strength
         // presence to the actual term so K=1 Softmax and hard TopK cannot enter
         // as held/frozen rho coordinates through a manually constructed seed.
-        let init_rho = init_rho.for_assignment(term.assignment.mode);
+        let init_rho = init_rho
+            .for_assignment(term.assignment.mode)
+            .with_curvature(Self::curvature_seed(&term));
         term.expected_criterion_gauge_deflated_directions = None;
         term.criterion_gauge_deflation_reanchors = 0;
         term.criterion_gauge_deflation_last_delta_sign = 0;
@@ -1281,6 +1362,7 @@ impl SaeManifoldOuterObjective {
     /// `&mut self` eval lane so no inner solve ever reads a stale-scaled target.
     fn apply_block_scaling(&mut self, rho: &SaeManifoldRho) -> Result<(), String> {
         self.term.assignment.validate_rho_domain(rho)?;
+        self.apply_curvature_state(rho)?;
         // Disjoint field borrows: the pricing state and the target are rewritten
         // together, so destructure `self` rather than route through a `self`
         // method that would alias both.
@@ -3258,7 +3340,7 @@ impl SaeManifoldOuterObjective {
         // exact gradient component comes from the complete all-coordinate
         // assembler; single-adjoint form makes this the same one solve the old
         // coordinate-specialized forward response paid.
-        let complete_gradient = if rho.sparse_flat_index().is_some() {
+        let complete_gradient = if rho.sparse_flat_index().is_some() || !rho.kappa.is_empty() {
             Some(
                 self.analytic_gradient_for_outer_evaluation(&rho, &evaluation)
                     .map_err(|error| error.to_string())?,
@@ -3293,8 +3375,8 @@ impl SaeManifoldOuterObjective {
                 ))
             })
             .collect::<Vec<_>>();
-        let mut assignment_psi_gradient: Option<Array1<f64>> = None;
-        let mut assignment_psi_indices: Option<Vec<usize>> = None;
+        let mut psi_gradient = Vec::new();
+        let mut psi_indices = Vec::new();
 
         // Assignment strength (when present): use the COMPLETE analytic
         // derivative of the same penalized quasi-Laplace scalar returned as `cost`.
@@ -3319,8 +3401,30 @@ impl SaeManifoldOuterObjective {
             steps[sparse_index] = step;
             fixed_point_coordinates[sparse_index] =
                 FixedPointCoordinateCertificate::covered(step, 1.0);
-            assignment_psi_gradient = Some(Array1::from_vec(vec![gradient]));
-            assignment_psi_indices = Some(vec![sparse_index]);
+            psi_gradient.push(gradient);
+            psi_indices.push(sparse_index);
+        }
+
+        // Raw sectional curvature has no multiplicative EFS equation. Move it
+        // by the complete analytic derivative of the same criterion, exactly as
+        // the assignment-strength psi coordinate. These are the only atoms in
+        // `kappa_atoms`; flat atoms emit no dummy zero-gradient coordinates.
+        for &atom in &rho.kappa_atoms {
+            let coordinate = rho.kappa_flat_index(atom).ok_or_else(|| {
+                format!(
+                    "SaeManifoldOuterObjective::efs_step: atom {atom} has curvature state but no flat coordinate"
+                )
+            })?;
+            let gradient = complete_gradient
+                .as_ref()
+                .expect("curvature coordinate requested its complete analytic gradient")
+                [coordinate];
+            let step = -gradient / gradient.abs().max(1.0);
+            steps[coordinate] = step;
+            fixed_point_coordinates[coordinate] =
+                FixedPointCoordinateCertificate::covered(step, 1.0);
+            psi_gradient.push(gradient);
+            psi_indices.push(coordinate);
         }
 
         // λ_smooth (layout-derived K-coordinate block): per-atom Wood-Fasiolo EFS multiplicative
@@ -3559,7 +3663,7 @@ impl SaeManifoldOuterObjective {
                 .crosscoder_blocks
                 .as_ref()
                 .expect("block_scaled_rss returned Some ⇒ crosscoder pricing is installed");
-            let tail = n_params - blocks.block_dims.len();
+            let tail = n_params - rho.kappa.len() - blocks.block_dims.len();
             for (l, (&p_l, &r_tilde)) in blocks.block_dims.iter().zip(scaled_rss.iter()).enumerate()
             {
                 let coordinate = tail + l;
@@ -3598,8 +3702,8 @@ impl SaeManifoldOuterObjective {
                 cost,
                 steps,
                 beta: Some(beta_hat),
-                psi_gradient: assignment_psi_gradient,
-                psi_indices: assignment_psi_indices,
+                psi_gradient: (!psi_gradient.is_empty()).then(|| Array1::from_vec(psi_gradient)),
+                psi_indices: (!psi_indices.is_empty()).then_some(psi_indices),
                 inner_hessian_scale: None,
                 logdet_enclosure_gap: None,
                 consecutive_restored_incumbents,
@@ -3966,8 +4070,9 @@ impl OuterObjective for SaeManifoldOuterObjective {
         // terminal KKT root. Matrix-free SAE currently lacks that proof surface
         // and must refuse rather than mint a surrogate fixed point (#2253).
         let exact_gradient_certificate = matches!(gradient, Derivative::Analytic);
-        let assignment_gradient_dim =
-            usize::from(assignment_strength_gradient_coordinate(&self.baseline_rho).is_some());
+        let psi_gradient_dim =
+            usize::from(assignment_strength_gradient_coordinate(&self.baseline_rho).is_some())
+                + self.baseline_rho.kappa.len();
         OuterCapability {
             // The planner always has an analytic outer update. Two regimes:
             //  * Dense-admitted: the exact analytic outer gradient is assembled
@@ -3993,7 +4098,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
             // moves by its exact penalized quasi-Laplace gradient. Small dense fits still select the
             // ordinary full-gradient BFGS plan at the existing crossover.
             psi_dim: if exact_gradient_certificate {
-                assignment_gradient_dim
+                psi_gradient_dim
             } else {
                 0
             },
@@ -4492,7 +4597,13 @@ impl OuterObjective for SaeManifoldOuterObjective {
         {
             bounds[index] = bounds[index].min(alpha_upper);
         }
+        let curvature_bounds = self.curvature_domain_bounds()?;
         let Some(contract) = self.reactive_domain_scalar_contract()? else {
+            if let Some(bounds) = log_strength_upper.as_mut() {
+                for &(index, _, upper) in &curvature_bounds {
+                    bounds[index] = upper;
+                }
+            }
             return Ok(log_strength_upper);
         };
         // The reactive entry replaces the invalid common cold dictionary with a
@@ -4526,6 +4637,12 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 reactive_upper[index] = reactive_upper[index].min(log_strength_upper[index]);
             }
         }
+        // Reactive-domain construction knows only log-strength coordinates.
+        // Curvature is a raw, scale-dependent coordinate, so its typed geometry
+        // rail replaces (rather than intersects) that generic placeholder.
+        for &(index, _, upper) in &curvature_bounds {
+            reactive_upper[index] = upper;
+        }
         Ok(Some(reactive_upper))
     }
 
@@ -4544,6 +4661,11 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 (lower.as_mut(), self.baseline_rho.sparse_flat_index())
         {
             bounds[index] = bounds[index].max(alpha_lower);
+        }
+        if let Some(bounds) = lower.as_mut() {
+            for (index, curvature_lower, _) in self.curvature_domain_bounds()? {
+                bounds[index] = curvature_lower;
+            }
         }
         Ok(lower)
     }

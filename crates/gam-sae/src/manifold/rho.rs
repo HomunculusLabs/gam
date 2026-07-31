@@ -239,6 +239,15 @@ pub struct SaeManifoldRho {
     /// coordinate and does not depend on `kappa` — so the whole channel is
     /// `gam_geometry::constant_curvature_dirichlet_penalty_kappa_derivative`.
     pub kappa: Vec<f64>,
+    /// Atom index owned by each entry of [`Self::kappa`], in the same order.
+    ///
+    /// This mapping is structural, not another outer coordinate. A mixed
+    /// dictionary must not emit dummy curvature coordinates for flat/periodic
+    /// atoms: those coordinates have identically-zero gradients and make the
+    /// outer Hessian singular. Keeping only the atoms whose reference metric is
+    /// actually curvature-parameterised gives the flat layout exactly one raw
+    /// `kappa` coordinate per estimand.
+    pub kappa_atoms: Vec<usize>,
 }
 
 impl SaeManifoldRho {
@@ -258,6 +267,7 @@ impl SaeManifoldRho {
             ard_sharing: ArdSharing::PerAtom,
             log_lambda_block: Vec::new(),
             kappa: Vec::new(),
+            kappa_atoms: Vec::new(),
         }
     }
 
@@ -278,6 +288,7 @@ impl SaeManifoldRho {
             ard_sharing: ArdSharing::PerAtom,
             log_lambda_block: Vec::new(),
             kappa: Vec::new(),
+            kappa_atoms: Vec::new(),
         }
     }
 
@@ -300,6 +311,7 @@ impl SaeManifoldRho {
             ard_sharing: ArdSharing::Shared,
             log_lambda_block: Vec::new(),
             kappa: Vec::new(),
+            kappa_atoms: Vec::new(),
         }
     }
 
@@ -314,13 +326,76 @@ impl SaeManifoldRho {
         self
     }
 
-    /// Attach per-atom sectional curvatures (atom order). Empty restores the
-    /// curvature-free layout, which is what every dictionary without a
-    /// constant-curvature atom carries.
+    /// Attach sectional curvatures as `(atom_index, kappa)` pairs. Empty
+    /// restores the curvature-free layout. Atom indices must be strictly
+    /// increasing so the mapping is canonical and flat-index lookup is exact.
     #[must_use]
-    pub fn with_curvature(mut self, kappa: Vec<f64>) -> Self {
-        self.kappa = kappa;
+    pub fn with_curvature(mut self, curvature: Vec<(usize, f64)>) -> Self {
+        self.kappa_atoms = curvature.iter().map(|(atom, _)| *atom).collect();
+        self.kappa = curvature.into_iter().map(|(_, value)| value).collect();
         self
+    }
+
+    /// Append the curvature state of a newly appended atom. Structural growth
+    /// always adds atom `K-1`, so this preserves the canonical increasing map.
+    pub(crate) fn append_curvature_atom(
+        &mut self,
+        atom: usize,
+        kappa: Option<f64>,
+    ) -> Result<(), String> {
+        let Some(kappa) = kappa else {
+            return Ok(());
+        };
+        if atom >= self.k_atoms() {
+            return Err(format!(
+                "cannot append curvature for atom {atom}: rho has K={}",
+                self.k_atoms()
+            ));
+        }
+        if self.kappa_atoms.last().is_some_and(|&previous| previous >= atom) {
+            return Err(format!(
+                "cannot append curvature atom {atom} after {:?}",
+                self.kappa_atoms.last()
+            ));
+        }
+        if !kappa.is_finite() {
+            return Err(format!("curvature for appended atom {atom} is not finite"));
+        }
+        self.kappa_atoms.push(atom);
+        self.kappa.push(kappa);
+        Ok(())
+    }
+
+    /// Apply an atom keep/remap permutation to the sparse curvature layout.
+    /// Values follow their owning atoms; removed atoms lose their coordinate.
+    pub(crate) fn remap_curvature_atoms(
+        &mut self,
+        old_to_new: &[Option<usize>],
+    ) -> Result<(), String> {
+        if self.kappa.len() != self.kappa_atoms.len() {
+            return Err(format!(
+                "cannot remap curvature: {} values but {} atom indices",
+                self.kappa.len(),
+                self.kappa_atoms.len()
+            ));
+        }
+        let mut atoms = Vec::with_capacity(self.kappa_atoms.len());
+        let mut values = Vec::with_capacity(self.kappa.len());
+        for (&old_atom, &value) in self.kappa_atoms.iter().zip(self.kappa.iter()) {
+            let mapped = old_to_new.get(old_atom).ok_or_else(|| {
+                format!(
+                    "cannot remap curvature atom {old_atom}: permutation has length {}",
+                    old_to_new.len()
+                )
+            })?;
+            if let Some(new_atom) = mapped {
+                atoms.push(*new_atom);
+                values.push(value);
+            }
+        }
+        self.kappa_atoms = atoms;
+        self.kappa = values;
+        Ok(())
     }
 
     /// Bind the flat assignment-strength layout to the term's assignment
@@ -424,16 +499,24 @@ impl SaeManifoldRho {
     /// mistake — so it is derived forwards from the same prefix arithmetic
     /// `ard_flat_index` uses.
     pub fn kappa_flat_index(&self, atom: usize) -> Option<usize> {
-        if atom >= self.kappa.len() {
-            return None;
-        }
+        let curvature_index = self.kappa_atoms.binary_search(&atom).ok()?;
         let k = self.log_lambda_smooth.len();
         let prefix = self.smooth_flat_start();
         let ard_len = match self.ard_sharing {
             ArdSharing::PerAtom => self.log_ard.iter().map(|a| a.len()).sum::<usize>(),
             ArdSharing::Shared => self.max_ard_axes(),
         };
-        Some(prefix + k + ard_len + self.log_lambda_block.len() + atom)
+        Some(prefix + k + ard_len + self.log_lambda_block.len() + curvature_index)
+    }
+
+    /// Raw sectional curvature attached to `atom`, when that atom owns a
+    /// curvature coordinate.
+    #[must_use]
+    pub fn kappa_for_atom(&self, atom: usize) -> Option<f64> {
+        self.kappa_atoms
+            .binary_search(&atom)
+            .ok()
+            .map(|index| self.kappa[index])
     }
 
     pub fn ard_flat_index(&self, atom: usize, axis: usize) -> usize {
@@ -685,11 +768,44 @@ impl SaeManifoldRho {
                 ));
             }
         }
+        if self.kappa.len() != self.kappa_atoms.len() {
+            return Err(format!(
+                "curvature values length {} != curvature atom mapping length {}",
+                self.kappa.len(),
+                self.kappa_atoms.len()
+            ));
+        }
+        let mut previous_atom = None;
+        for (coordinate, (&atom, &value)) in self
+            .kappa_atoms
+            .iter()
+            .zip(self.kappa.iter())
+            .enumerate()
+        {
+            if atom >= self.k_atoms() {
+                return Err(format!(
+                    "curvature coordinate {coordinate} names atom {atom}, outside K={}",
+                    self.k_atoms()
+                ));
+            }
+            if previous_atom.is_some_and(|previous| atom <= previous) {
+                return Err(format!(
+                    "curvature atom mapping must be strictly increasing; entry {coordinate} is {atom} after {previous_atom:?}"
+                ));
+            }
+            if !value.is_finite() {
+                return Err(format!(
+                    "raw curvature at atom {atom} must be finite; got {value}"
+                ));
+            }
+            previous_atom = Some(atom);
+        }
         Ok(())
     }
 
-    /// Objective-domain lower face in flat-rho layout. Every emitted coordinate
-    /// is a log strength, so all coordinates share the same exact endpoint.
+    /// Generic objective-domain lower face in flat-rho layout. Log strengths
+    /// share this exact endpoint; the owning SAE objective replaces raw `kappa`
+    /// placeholders with scale-derived geometry rails.
     pub(crate) fn flat_domain_lower_bound(&self) -> Option<Array1<f64>> {
         let len = self.to_flat().len();
         if len == 0 {
@@ -867,6 +983,7 @@ impl SaeManifoldRho {
                     ard_sharing: ArdSharing::PerAtom,
                     log_lambda_block,
                     kappa,
+                    kappa_atoms: self.kappa_atoms.clone(),
                 }
             }
             ArdSharing::Shared => {
@@ -914,6 +1031,7 @@ impl SaeManifoldRho {
                     ard_sharing: ArdSharing::Shared,
                     log_lambda_block,
                     kappa,
+                    kappa_atoms: self.kappa_atoms.clone(),
                 }
             }
         };
@@ -942,7 +1060,9 @@ mod curvature_coordinate_tests {
         let base = SaeManifoldRho::new(-1.0, -2.0, vec![Array1::zeros(2), Array1::zeros(2)]);
         let without = base.to_flat();
 
-        let with_kappa = base.clone().with_curvature(vec![0.75, -1.25]);
+        let with_kappa = base
+            .clone()
+            .with_curvature(vec![(0, 0.75), (1, -1.25)]);
         let flat = with_kappa.to_flat();
         assert_eq!(
             flat.len(),
@@ -960,13 +1080,17 @@ mod curvature_coordinate_tests {
 
         let rebuilt = with_kappa.from_flat(flat.view()).unwrap();
         assert_eq!(rebuilt.kappa, vec![0.75, -1.25]);
+        assert_eq!(rebuilt.kappa_atoms, vec![0, 1]);
 
         // Raw, not log: zero curvature is representable and round-trips, which is
         // the whole reason flat space is an interior point of the coordinate.
-        let flat_zero = base.clone().with_curvature(vec![0.0, 0.0]).to_flat();
+        let flat_zero = base
+            .clone()
+            .with_curvature(vec![(0, 0.0), (1, 0.0)])
+            .to_flat();
         let zero_rebuilt = base
             .clone()
-            .with_curvature(vec![0.0, 0.0])
+            .with_curvature(vec![(0, 0.0), (1, 0.0)])
             .from_flat(flat_zero.view())
             .unwrap();
         assert_eq!(zero_rebuilt.kappa, vec![0.0, 0.0]);

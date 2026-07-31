@@ -2375,6 +2375,12 @@ fn append_fitted_atom(
     let mut child_rho = rho.clone();
     child_rho.log_ard.push(ard);
     child_rho.log_lambda_smooth.push(log_lambda_smooth);
+    child_rho.append_curvature_atom(
+        k,
+        child.atoms[k]
+            .geometry_plan()
+            .and_then(SaeAtomGeometryPlan::constant_curvature),
+    )?;
     Ok((child, child_rho))
 }
 

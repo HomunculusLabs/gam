@@ -643,6 +643,15 @@ pub(crate) struct SaeManifoldAtomPreparedMutableState {
     reduced_column_map: Option<Array2<f64>>,
 }
 
+/// Detached curvature-dependent fields for one atom. Building this value is
+/// fallible; committing it is not, so a term can prepare every curvature atom
+/// before changing any of them.
+pub(crate) struct SaeManifoldAtomPreparedCurvature {
+    smooth_penalty: Array2<f64>,
+    smooth_penalty_kappa_derivative: Array2<f64>,
+    geometry_plan: SaeAtomGeometryPlan,
+}
+
 impl SaeManifoldAtom {
     pub fn basis_kind(&self) -> &SaeAtomBasisKind {
         &self.basis_kind
@@ -671,6 +680,82 @@ impl SaeManifoldAtom {
 
     pub fn geometry_plan(&self) -> Option<&SaeAtomGeometryPlan> {
         self.geometry_plan.as_ref()
+    }
+
+    /// Materialize this atom's declared constant-curvature penalty at `kappa`.
+    ///
+    /// The operation is transactional: the replacement plan, Gram and analytic
+    /// derivative are all built and validated before any live field changes.
+    /// The monomial tangent basis is curvature-independent, so coordinates,
+    /// basis values/jets and decoder coefficients remain untouched.
+    pub(crate) fn prepare_constant_curvature(
+        &self,
+        kappa: f64,
+    ) -> Result<SaeManifoldAtomPreparedCurvature, String> {
+        let current_plan = self.geometry_plan.as_ref().ok_or_else(|| {
+            format!(
+                "atom '{}' has a curvature coordinate but no analytic geometry plan",
+                self.name
+            )
+        })?;
+        let replacement_plan = current_plan.at_constant_curvature(kappa)?;
+        let full_m = self.full_basis_size();
+        let full_penalty = Self::validate_reference_function_gram(
+            replacement_plan.build_reference_penalty()?,
+            full_m,
+            true,
+        )?;
+        let full_derivative = replacement_plan
+            .build_reference_penalty_kappa_derivative()?
+            .ok_or_else(|| {
+                format!(
+                    "atom '{}' curvature plan did not produce dS/dkappa",
+                    self.name
+                )
+            })?;
+        if full_derivative.dim() != (full_m, full_m)
+            || full_derivative.iter().any(|value| !value.is_finite())
+        {
+            return Err(format!(
+                "atom '{}' curvature derivative must be a finite ({full_m}, {full_m}) matrix; got {:?}",
+                self.name,
+                full_derivative.dim()
+            ));
+        }
+        let (penalty, derivative) = match self.reduced_column_map.as_ref() {
+            Some(column_map) => (
+                column_map.t().dot(&full_penalty).dot(column_map),
+                column_map.t().dot(&full_derivative).dot(column_map),
+            ),
+            None => (full_penalty, full_derivative),
+        };
+        let current_m = self.basis_size();
+        let penalty = Self::validate_reference_function_gram(penalty, current_m, true)?;
+        if derivative.dim() != (current_m, current_m)
+            || derivative.iter().any(|value| !value.is_finite())
+        {
+            return Err(format!(
+                "atom '{}' reduced curvature derivative must be a finite ({current_m}, {current_m}) matrix; got {:?}",
+                self.name,
+                derivative.dim()
+            ));
+        }
+        Ok(SaeManifoldAtomPreparedCurvature {
+            smooth_penalty: penalty,
+            smooth_penalty_kappa_derivative: derivative,
+            geometry_plan: replacement_plan,
+        })
+    }
+
+    pub(crate) fn commit_prepared_constant_curvature(
+        &mut self,
+        prepared: SaeManifoldAtomPreparedCurvature,
+    ) {
+        self.smooth_penalty = prepared.smooth_penalty;
+        self.smooth_penalty_kappa_derivative =
+            Some(prepared.smooth_penalty_kappa_derivative);
+        self.reference_roughness_kind = SaeReferenceRoughnessKind::ConstantCurvatureDirichlet;
+        self.geometry_plan = Some(prepared.geometry_plan);
     }
 
     /// Prepare the complete mutable topology represented by `snapshot` without
@@ -1084,6 +1169,13 @@ impl SaeManifoldAtom {
                 "SaeManifoldAtom::with_geometry_plan: installed reference Gram differs from plan by {max_difference}, tolerance {tolerance}"
             ));
         }
+        // Geometry attachment is the point at which the typed plan becomes the
+        // atom's authority. Install its analytic curvature movement at the same
+        // time as the value Gram: relabelling a constant-curvature Gram without
+        // `dS/dkappa` would advertise a live estimand whose outer derivative is
+        // silently absent until some later mutation happens to rebuild it.
+        self.smooth_penalty_kappa_derivative =
+            plan.build_reference_penalty_kappa_derivative()?;
         self.reference_roughness_kind = plan.reference_roughness_kind();
         self.geometry_plan = Some(plan);
         Ok(self)
@@ -1179,6 +1271,10 @@ impl SaeManifoldAtom {
         // re-estimated.
         let s_ref_red = q.t().dot(&self.smooth_penalty).dot(q);
         let s_ref_red = Self::validate_reference_function_gram(s_ref_red, r, false)?;
+        let derivative_red = self
+            .smooth_penalty_kappa_derivative
+            .as_ref()
+            .map(|derivative| q.t().dot(derivative).dot(q));
         let reduced_eval = SubspaceReducedEvaluator::new(inner, q.clone())?;
         let reduced_arc: Arc<dyn SaeBasisSecondJet> = Arc::new(reduced_eval);
         let base: Arc<dyn SaeBasisEvaluator> = reduced_arc.clone();
@@ -1187,6 +1283,7 @@ impl SaeManifoldAtom {
         self.basis_jacobian = jac_red;
         self.decoder_coefficients = dec_red;
         self.smooth_penalty = s_ref_red;
+        self.smooth_penalty_kappa_derivative = derivative_red;
         self.basis_evaluator = Some(base);
         self.basis_second_jet = Some(reduced_arc);
         // The decoder frame is a profiled representation of the *previous* M×p

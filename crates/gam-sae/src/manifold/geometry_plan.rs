@@ -366,6 +366,84 @@ impl SaeAtomGeometryPlan {
         &self.reference_metric
     }
 
+    /// Sectional curvature carried by a constant-curvature reference metric.
+    #[must_use]
+    pub fn constant_curvature(&self) -> Option<f64> {
+        match &self.reference_metric {
+            SaeReferenceMetricPlan::ConstantCurvatureChart { kappa, .. } => Some(*kappa),
+            _ => None,
+        }
+    }
+
+    /// Return this geometry plan at a new raw sectional curvature.
+    ///
+    /// The basis and tangent reference rows are unchanged; only the declared
+    /// Dirichlet metric moves. Re-running [`Self::new`] keeps the geometry
+    /// contract as the single validator rather than mutating a private enum arm
+    /// in place.
+    pub(crate) fn at_constant_curvature(&self, kappa: f64) -> Result<Self, String> {
+        let reference_metric = match &self.reference_metric {
+            SaeReferenceMetricPlan::ConstantCurvatureChart {
+                reference_coords, ..
+            } => SaeReferenceMetricPlan::ConstantCurvatureChart {
+                kappa,
+                reference_coords: reference_coords.clone(),
+            },
+            _ => {
+                return Err(format!(
+                    "geometry {:?} has no constant-curvature reference metric",
+                    self.kind
+                ));
+            }
+        };
+        Self::new(
+            self.kind.clone(),
+            self.latent_dim,
+            self.resolution.clone(),
+            reference_metric,
+        )
+    }
+
+    /// Numerically resolved raw-curvature search interval for this plan.
+    ///
+    /// The scale is set only by the farthest reference tangent row. On the
+    /// spherical side, `sqrt(kappa) r < pi/2` keeps every row strictly before
+    /// the first pole of the generalized tangent used by the exponential map.
+    /// On the hyperbolic side, the image approaches the open stereographic-ball
+    /// boundary as `tanh(sqrt(-kappa) r) -> 1`; stop when the remaining radial
+    /// fraction reaches square-root machine resolution. Thus neither endpoint
+    /// is a tuning constant, and rescaling the tangent chart by `c` rescales
+    /// both curvature rails by exactly `1/c^2`.
+    pub(crate) fn constant_curvature_domain(&self) -> Result<Option<(f64, f64)>, String> {
+        let SaeReferenceMetricPlan::ConstantCurvatureChart {
+            reference_coords, ..
+        } = &self.reference_metric
+        else {
+            return Ok(None);
+        };
+        let max_radius_squared = reference_coords
+            .outer_iter()
+            .map(|row| row.dot(&row))
+            .fold(0.0_f64, f64::max);
+        if !(max_radius_squared.is_finite() && max_radius_squared > 0.0) {
+            return Err(
+                "constant-curvature reference rows have zero spread, so kappa is not identifiable"
+                    .to_string(),
+            );
+        }
+        let resolution = f64::EPSILON.sqrt();
+        let open = 1.0 - resolution;
+        let radius = max_radius_squared.sqrt();
+        let spherical_edge = open * std::f64::consts::FRAC_PI_2 / radius;
+        // atanh(1-resolution), written without a subtractive cancellation in
+        // the numerator: 0.5 ln((2-resolution)/resolution).
+        let hyperbolic_edge = 0.5 * ((2.0 - resolution) / resolution).ln() / radius;
+        Ok(Some((
+            -(hyperbolic_edge * hyperbolic_edge),
+            spherical_edge * spherical_edge,
+        )))
+    }
+
     pub(crate) fn reference_roughness_kind(&self) -> SaeReferenceRoughnessKind {
         match &self.reference_metric {
             SaeReferenceMetricPlan::ConstantCurvatureChart { .. } => {
@@ -481,6 +559,34 @@ impl SaeAtomGeometryPlan {
     pub(crate) fn build_reference_penalty(&self) -> Result<Array2<f64>, String> {
         let evaluator = self.build_evaluator()?;
         self.reference_penalty(evaluator.as_ref())
+    }
+
+    /// `dS/dkappa` for this plan's constant-curvature Dirichlet Gram.
+    /// Returns `None` for geometry families whose reference metric has no raw
+    /// curvature estimand.
+    pub(crate) fn build_reference_penalty_kappa_derivative(
+        &self,
+    ) -> Result<Option<Array2<f64>>, String> {
+        let SaeReferenceMetricPlan::ConstantCurvatureChart {
+            kappa,
+            reference_coords,
+        } = &self.reference_metric
+        else {
+            return Ok(None);
+        };
+        let evaluator = self.build_evaluator()?;
+        let (_, reference_jacobian) = evaluator.evaluate(reference_coords.view())?;
+        gam_geometry::constant_curvature_dirichlet_penalty_kappa_derivative(
+            reference_coords.view(),
+            reference_jacobian.view(),
+            *kappa,
+        )
+        .map(Some)
+        .map_err(|error| {
+            format!(
+                "SaeAtomGeometryPlan::build_reference_penalty_kappa_derivative: {error}"
+            )
+        })
     }
 
     /// Evaluate the plan's analytic basis and materialize the one declared

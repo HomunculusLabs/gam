@@ -2426,6 +2426,7 @@ pub(crate) fn remove_atoms(
         old_to_new[old] = Some(new);
     }
     term.remap_chart_atlases(&old_to_new)?;
+    rho.remap_curvature_atoms(&old_to_new)?;
     // Rebuild the atom list, coord blocks, ungated flags, and ρ blocks keeping
     // only the surviving indices (descending removal on the Vecs would also work,
     // but the keep-mask keeps atoms/coords/logits/ρ provably in lock-step).
@@ -2777,6 +2778,12 @@ fn duplicate_atom(
         .copied()
         .unwrap_or(0.0);
     child_rho.log_lambda_smooth.push(inherited_smooth);
+    child_rho.append_curvature_atom(
+        k,
+        child.atoms[k]
+            .geometry_plan()
+            .and_then(SaeAtomGeometryPlan::constant_curvature),
+    )?;
     Ok((child, child_rho))
 }
 
@@ -3174,9 +3181,148 @@ fn fit_topology_candidate(
 ) -> Result<TopologyAutoFitEvidence<TopologyRaceFit>, String> {
     if spec.geometry.kind() == &SaeAtomBasisKind::Torus {
         fit_torus_metric_candidate(spec, target, weights)
+    } else if spec.kind == AutoTopologyKind::ConstantCurvature {
+        fit_constant_curvature_metric_candidate(spec, target, weights)
     } else {
         fit_topology_candidate_at_fixed_metric(spec, target, weights)
     }
+}
+
+fn evaluate_constant_curvature_profile(
+    spec: &TopologyCandidateSpec,
+    phi: ArrayView2<'_, f64>,
+    target: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+    kappa: f64,
+) -> Result<FirstOrderSample, ObjectiveEvalError> {
+    let geometry = spec
+        .geometry
+        .at_constant_curvature(kappa)
+        .map_err(ObjectiveEvalError::fatal)?;
+    let penalty = geometry
+        .build_reference_penalty()
+        .map_err(ObjectiveEvalError::fatal)?;
+    let penalty_derivative = geometry
+        .build_reference_penalty_kappa_derivative()
+        .map_err(ObjectiveEvalError::fatal)?
+        .ok_or_else(|| {
+            ObjectiveEvalError::fatal(
+                "constant-curvature profile did not materialize dS/dkappa",
+            )
+        })?;
+    let fit = gaussian_reml_multi_shared_dispersion_closed_form(
+        phi,
+        target,
+        penalty.view(),
+        Some(weights),
+        None,
+    )
+    .map_err(|error| ObjectiveEvalError::fatal(format!("curvature REML: {error}")))?;
+    let penalty_gradient = gaussian_reml_multi_shared_dispersion_penalty_gradient_from_fit(
+        phi,
+        target,
+        penalty.view(),
+        Some(weights),
+        &fit,
+    )
+    .map_err(|error| ObjectiveEvalError::fatal(format!("curvature REML gradient: {error}")))?;
+    let gradient = penalty_gradient
+        .iter()
+        .zip(penalty_derivative.iter())
+        .map(|(left, right)| left * right)
+        .sum::<f64>();
+    if !(fit.reml_score.is_finite() && gradient.is_finite()) {
+        return Err(ObjectiveEvalError::fatal(
+            "constant-curvature REML profile is non-finite",
+        ));
+    }
+    Ok(FirstOrderSample {
+        value: fit.reml_score,
+        gradient: Array1::from_vec(vec![gradient]),
+    })
+}
+
+/// Constrained one-dimensional KKT solve for the raw curvature carried by the
+/// candidate's reference metric. The bracket comes from the typed geometry plan
+/// (chart scale and floating-point resolution), and the derivative is the exact
+/// REML penalty contraction `dV/dS : dS/dkappa`.
+fn fit_constant_curvature_metric_candidate(
+    spec: &TopologyCandidateSpec,
+    target: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+) -> Result<TopologyAutoFitEvidence<TopologyRaceFit>, String> {
+    let (lower, upper) = spec
+        .geometry
+        .constant_curvature_domain()?
+        .ok_or_else(|| "constant-curvature candidate has no curvature metric".to_string())?;
+    let evaluator = spec.geometry.build_evaluator()?;
+    let (phi, _) = evaluator.evaluate(spec.coords.view())?;
+    let evaluate = |kappa: f64| {
+        evaluate_constant_curvature_profile(spec, phi.view(), target, weights, kappa)
+    };
+    let lower_sample = evaluate(lower)
+        .map_err(|error| format!("constant-curvature lower-endpoint profile: {error}"))?;
+    let upper_sample = evaluate(upper)
+        .map_err(|error| format!("constant-curvature upper-endpoint profile: {error}"))?;
+    let lower_gradient = lower_sample.gradient[0];
+    let upper_gradient = upper_sample.gradient[0];
+    let span = upper - lower;
+    let position_tolerance = f64::EPSILON.sqrt() * span;
+    let gradient_scale = lower_gradient.abs().max(upper_gradient.abs()).max(1.0);
+    let gradient_tolerance = f64::EPSILON.sqrt() * gradient_scale;
+    let lower_is_kkt = lower_gradient >= -gradient_tolerance;
+    let upper_is_kkt = upper_gradient <= gradient_tolerance;
+    let kappa = match (lower_is_kkt, upper_is_kkt) {
+        (true, false) => lower,
+        (false, true) => upper,
+        (true, true) => {
+            if lower_sample.value <= upper_sample.value {
+                lower
+            } else {
+                upper
+            }
+        }
+        (false, false) => {
+            let config = BracketedRootConfig::new(
+                position_tolerance,
+                gradient_tolerance,
+                f64::MANTISSA_DIGITS as usize,
+            );
+            find_root_bracketed(
+                |candidate| {
+                    if candidate == lower {
+                        Ok(lower_gradient)
+                    } else if candidate == upper {
+                        Ok(upper_gradient)
+                    } else {
+                        evaluate(candidate).map(|sample| sample.gradient[0])
+                    }
+                },
+                lower,
+                upper,
+                &config,
+            )
+            .map_err(|error| {
+                format!(
+                    "constant-curvature stationary solve did not converge: {error}; endpoint profile=[({lower}, value={}, gradient={lower_gradient}), ({upper}, value={}, gradient={upper_gradient})]",
+                    lower_sample.value, upper_sample.value
+                )
+            })?
+            .root
+        }
+    };
+    if !(kappa.is_finite() && kappa >= lower && kappa <= upper) {
+        return Err(format!(
+            "constant-curvature optimizer returned {kappa} outside [{lower}, {upper}]"
+        ));
+    }
+    let fitted_spec = TopologyCandidateSpec::new(
+        AutoTopologyKind::ConstantCurvature,
+        spec.geometry.at_constant_curvature(kappa)?,
+        spec.manifold.clone(),
+        spec.coords.clone(),
+    )?;
+    fit_topology_candidate_at_fixed_metric(&fitted_spec, target, weights)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -5591,6 +5737,12 @@ fn born_atom(
     // strength (atom 0), matching the `log_ard` inheritance just above.
     let inherited_smooth = child_rho.log_lambda_smooth.first().copied().unwrap_or(0.0);
     child_rho.log_lambda_smooth.push(inherited_smooth);
+    child_rho.append_curvature_atom(
+        k,
+        child.atoms[k]
+            .geometry_plan()
+            .and_then(SaeAtomGeometryPlan::constant_curvature),
+    )?;
     Ok((child, child_rho))
 }
 
@@ -7464,4 +7616,3 @@ mod tests_torus_metric_residual_scale_2554 {
         );
     }
 }
-

@@ -2963,7 +2963,7 @@ fn every_registered_d2_topology_fits_at_least_once_2604() {
     let mut fitted: Vec<String> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
     for spec in &specs {
-        let kind = format!("{:?}", spec.geometry.kind());
+        let kind = spec.kind.display_name().to_string();
         match fit_topology_candidate(spec, target.view(), weights.view()) {
             Ok(evidence) => {
                 assert!(
@@ -2976,6 +2976,89 @@ fn every_registered_d2_topology_fits_at_least_once_2604() {
                     "[2604-fit] {kind:<24} raw_reml={:>14.4} edf={:>8.3}",
                     evidence.raw_reml, evidence.effective_dim
                 );
+                if spec.kind == AutoTopologyKind::ConstantCurvature {
+                    let fitted_kappa = evidence
+                        .fit_handle
+                        .geometry
+                        .constant_curvature()
+                        .expect("constant-curvature fit retains its metric");
+                    let (lower, upper) = spec
+                        .geometry
+                        .constant_curvature_domain()
+                        .expect("curvature domain")
+                        .expect("constant-curvature domain exists");
+                    let movement_resolution = f64::EPSILON.sqrt() * (upper - lower);
+                    println!(
+                        "[2604-fit] {kind:<24} fitted_kappa={fitted_kappa:>14.6e} seed=0 domain=[{lower:.6e}, {upper:.6e}]"
+                    );
+                    assert!(
+                        fitted_kappa.abs() > movement_resolution,
+                        "ConstantCurvature claimed an estimable kappa but its fitted metric stayed at the zero seed: fitted {fitted_kappa}, movement resolution {movement_resolution}"
+                    );
+
+                    // Cross the discovery/outer boundary with the exact fitted
+                    // handle. Geometry attachment must carry dS/dkappa, and the
+                    // production objective must append exactly one raw curvature
+                    // coordinate whose seed is the fitted metric—not silently
+                    // revert to the caller's curvature-free rho layout.
+                    let fit = evidence.fit_handle.clone();
+                    let atom = SaeManifoldAtom::new_with_provided_function_gram(
+                        "constant_curvature_gate",
+                        fit.geometry.kind().clone(),
+                        fit.geometry.latent_dim(),
+                        fit.phi.clone(),
+                        fit.jet.clone(),
+                        fit.decoder.clone(),
+                        fit.penalty.clone(),
+                    )
+                    .expect("fitted curvature atom")
+                    .with_basis_second_jet(fit.evaluator.clone())
+                    .with_geometry_plan(fit.geometry.clone())
+                    .expect("attach fitted curvature geometry");
+                    assert!(
+                        atom.smooth_penalty_kappa_derivative().is_some(),
+                        "geometry attachment must install dS/dkappa with S(kappa)"
+                    );
+                    let assignment = SaeAssignment::with_mode(
+                        Array2::<f64>::zeros((n, 1)),
+                        vec![gam_terms::latent::LatentCoordValues::from_matrix_with_manifold(
+                            fit.coords.view(),
+                            gam_terms::latent::LatentIdMode::None,
+                            fit.manifold.clone(),
+                        )],
+                        AssignmentMode::softmax(1.0),
+                    )
+                    .expect("single curvature assignment");
+                    let term = SaeManifoldTerm::new(vec![atom], assignment)
+                        .expect("single curvature term");
+                    let curvature_free_rho = SaeManifoldRho::new(
+                        0.0,
+                        0.0,
+                        vec![Array1::<f64>::zeros(fit.geometry.latent_dim())],
+                    );
+                    let old_len = curvature_free_rho
+                        .clone()
+                        .for_assignment(AssignmentMode::softmax(1.0))
+                        .to_flat()
+                        .len();
+                    let outer = crate::manifold::SaeManifoldOuterObjective::new(
+                        term,
+                        target.to_owned(),
+                        None,
+                        curvature_free_rho,
+                        1,
+                        1.0,
+                        f64::EPSILON.sqrt(),
+                        f64::EPSILON.sqrt(),
+                    );
+                    let outer_rho = outer.current_rho_flat();
+                    assert_eq!(outer_rho.len(), old_len + 1);
+                    assert_eq!(
+                        outer_rho[old_len].to_bits(),
+                        fitted_kappa.to_bits(),
+                        "outer curvature coordinate must seed from the fitted geometry"
+                    );
+                }
                 fitted.push(kind);
             }
             Err(message) => {
