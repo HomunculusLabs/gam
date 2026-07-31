@@ -5597,6 +5597,65 @@ fn reactive_domain_entry_keeps_unrepairable_seed_as_typed_refusal() {
     );
 }
 
+/// #979: the generic gradient-residue floor and a caller's strict local-minimum
+/// requirement answer different questions. A floor-cleared raw negative Hessian
+/// may mint for a generic objective, but must not satisfy a mode selector that
+/// explicitly requires measured PSD curvature.
+#[test]
+fn strict_curvature_requirement_does_not_reinterpret_floor_clearance_as_psd() {
+    let stationary = OuterStationarityCertificate::AnalyticGradient {
+        grad_norm: 0.1,
+        projected_grad_norm: 0.1,
+        bound: 0.25,
+        rung: CertifiedRung {
+            label: "solver-band".to_string(),
+            derived_standard: false,
+        },
+    };
+    let floor_cleared = OuterCriterionCertificate {
+        stationarity: stationary.clone(),
+        curvature: CurvatureEvidence::Measured { psd: false },
+        lambdas_railed: Vec::new(),
+        railed_facts: Vec::new(),
+        curvature_floor: Some(CurvatureFloorClearance {
+            interior_min_eigenvalue: -0.05,
+            gradient_floor: 0.1,
+            cleared: true,
+        }),
+    };
+    assert!(
+        floor_cleared.certifies(),
+        "control: the generic certificate deliberately admits unresolved negative curvature"
+    );
+    assert!(
+        !certificate_meets_curvature_requirement(&floor_cleared, true),
+        "a declared local-minimum consumer requires the raw measured PSD fact"
+    );
+    assert!(
+        certificate_meets_curvature_requirement(&floor_cleared, false),
+        "generic objectives retain the gradient-floor admissibility contract"
+    );
+
+    let measured_psd = OuterCriterionCertificate {
+        curvature: CurvatureEvidence::Measured { psd: true },
+        curvature_floor: None,
+        ..floor_cleared
+    };
+    assert!(certificate_meets_curvature_requirement(&measured_psd, true));
+
+    let unmeasured = OuterCriterionCertificate {
+        stationarity: stationary,
+        curvature: CurvatureEvidence::NotAvailable,
+        lambdas_railed: Vec::new(),
+        railed_facts: Vec::new(),
+        curvature_floor: None,
+    };
+    assert!(
+        !certificate_meets_curvature_requirement(&unmeasured, true),
+        "absence of a measurement is not a measured local-minimum certificate"
+    );
+}
+
 #[test]
 fn run_indefinite_analytic_seed_stays_on_arc() {
     let mut seed_config = gam_problem::SeedConfig::default();
