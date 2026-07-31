@@ -46,7 +46,16 @@ def test_penalty_specs_sampling_survival_and_diagnostics_regressions():
     with pytest.raises((TypeError, ValueError), match="ARDPenalty"):
         ARDPenalty(target={"not": "a target descriptor"})
 
-    rows = [{"x": float(v), "y": 1.0 + 2.0 * float(v)} for v in np.linspace(-1.0, 1.0, 16)]
+    # This arm compares two routes into the posterior sampler, so its fitted
+    # Gaussian must have a non-degenerate posterior.  An exactly affine
+    # response gives the unpenalized ``y ~ x`` fit zero residual variance and
+    # therefore no probability distribution to sample.  Keep the fixture
+    # deterministic while adding genuine residual variation that the linear
+    # model cannot absorb.
+    rows = [
+        {"x": float(v), "y": float(1.0 + 2.0 * v + 0.15 * v * v)}
+        for v in np.linspace(-1.0, 1.0, 16)
+    ]
     model = fit(rows, "y ~ x")
     cfg = dict(samples=20, warmup=10, chains=1, target_accept=0.8, seed=123)
     py_draws = model.sample(rows, **cfg)
