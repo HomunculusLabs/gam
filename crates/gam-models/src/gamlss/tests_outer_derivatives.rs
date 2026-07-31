@@ -97,7 +97,12 @@ pub(crate) fn binomial_location_scale_wiggle_outer_fixture(
             })
             .collect(),
         nullspace_dims: wiggle_block.nullspace_dims.clone(),
-        initial_log_lambdas: array![0.1],
+        // Derived from the block, never hand-counted: the assembled warp
+        // penalty set gained a gauge-closure coordinate in gam#2647, and a
+        // literal `array![0.1]` here turned that into
+        // "block 2 initial_log_lambdas length 1 does not match penalties 2"
+        // rather than into a test that exercises the new topology.
+        initial_log_lambdas: Array1::from_elem(wiggle_block.penalties.len(), 0.1),
         initial_beta: Some(Array1::from_elem(wiggle_block.design.ncols(), 0.03)),
         gauge_priority: 100,
         jacobian_callback: None,
@@ -116,8 +121,14 @@ pub(crate) fn binomial_location_scale_wiggle_outer_fixture(
     };
     BinomialLocationScaleWiggleOuterFixture {
         family,
+        rho: {
+            // threshold, log-sigma, then one coordinate per assembled warp
+            // penalty (see the note on `initial_log_lambdas` above).
+            let mut rho = vec![0.05, -0.15];
+            rho.extend(std::iter::repeat_n(0.1, wigglespec.penalties.len()));
+            Array1::from_vec(rho)
+        },
         specs: vec![base.threshold_spec, base.log_sigma_spec, wigglespec],
-        rho: array![0.05, -0.15, 0.1],
         options: BlockwiseFitOptions {
             use_remlobjective: true,
             ridge_floor: 1e-10,
