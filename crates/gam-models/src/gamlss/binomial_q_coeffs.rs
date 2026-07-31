@@ -83,7 +83,7 @@ pub(crate) fn mean_wiggle_second_directional_coefficients(
 }
 
 #[cfg(test)]
-pub(super) mod oracle_tests {
+mod oracle_tests {
     //! #932 single-source oracles: these test-only scalar projections pin the
     //! compiled top-channel partition sums against mechanical `Tower`
     //! composition. Production consumes the joint bundles above, whose own
@@ -93,7 +93,7 @@ pub(super) mod oracle_tests {
     use gam_math::jet_tower::{Tower2, Tower4};
 
     #[inline]
-    pub(in super::super) fn directionalhessian_coeff_fromobjective_q_terms(
+    fn directionalhessian_coeff_fromobjective_q_terms(
         m1: f64,
         m2: f64,
         m3: f64,
@@ -121,7 +121,7 @@ pub(super) mod oracle_tests {
     }
 
     #[inline]
-    pub(in super::super) fn second_directionalhessian_coeff_fromobjective_q_terms(
+    fn second_directionalhessian_coeff_fromobjective_q_terms(
         m1: f64,
         m2: f64,
         m3: f64,
