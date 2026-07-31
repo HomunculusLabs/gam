@@ -1,59 +1,9 @@
 use faer::Side;
 use ndarray::{Array1, Array2, Axis};
 
-use crate::faer_ndarray::FaerEigh;
+use crate::faer_ndarray::{FaerEigh, strict_symmetric_eigh};
 
-// SAFETY: declarations only; the private wrappers below validate equal slice
-// lengths and pass unit-stride pointers covering exactly that many elements.
-unsafe extern "C" {
-    fn cblas_ddot(
-        n: i32,
-        left: *const f64,
-        left_stride: i32,
-        right: *const f64,
-        right_stride: i32,
-    ) -> f64;
-    fn cblas_daxpy(
-        n: i32,
-        alpha: f64,
-        vector: *const f64,
-        vector_stride: i32,
-        output: *mut f64,
-        output_stride: i32,
-    );
-    fn dstedc_(
-        compz: *const u8,
-        n: *const i32,
-        diagonal: *mut f64,
-        off_diagonal: *mut f64,
-        eigenvectors: *mut f64,
-        leading_dimension: *const i32,
-        work: *mut f64,
-        work_len: *const i32,
-        integer_work: *mut i32,
-        integer_work_len: *const i32,
-        info: *mut i32,
-    );
-}
-
-#[inline]
-fn blas_dot(a: &[f64], b: &[f64]) -> f64 {
-    assert_eq!(a.len(), b.len());
-    let n = i32::try_from(a.len()).expect("Lanczos vector length exceeds BLAS i32");
-    // SAFETY: both slices contain `n` readable elements at unit stride.
-    unsafe { cblas_ddot(n, a.as_ptr(), 1, b.as_ptr(), 1) }
-}
-
-#[inline]
-fn blas_axpy(alpha: f64, vector: &[f64], output: &mut [f64]) {
-    assert_eq!(vector.len(), output.len());
-    let n = i32::try_from(vector.len()).expect("Lanczos vector length exceeds BLAS i32");
-    // SAFETY: the input/output slices contain `n` elements at unit stride and
-    // the caller supplies distinct accumulated Krylov vectors and workspace.
-    unsafe { cblas_daxpy(n, alpha, vector.as_ptr(), 1, output.as_mut_ptr(), 1) };
-}
-
-fn lapack_tridiagonal_eigenpairs(
+fn tridiagonal_eigenpairs(
     diagonal: &[f64],
     off_diagonal: &[f64],
 ) -> Result<(Array1<f64>, Array2<f64>), String> {
@@ -65,76 +15,9 @@ fn lapack_tridiagonal_eigenpairs(
             off_diagonal.len()
         ));
     }
-    let n = i32::try_from(dimension)
-        .map_err(|_| format!("tridiagonal dimension {dimension} exceeds LAPACK i32"))?;
-    let compz = b'I';
-    let mut values = diagonal.to_vec();
-    let mut off = vec![0.0_f64; dimension.max(1)];
-    off[..off_diagonal.len()].copy_from_slice(off_diagonal);
-    let mut vectors_column_major = vec![0.0_f64; dimension * dimension];
-    let mut work_query = [0.0_f64];
-    let mut integer_work_query = [0_i32];
-    let query = -1_i32;
-    let mut info = 0_i32;
-    // SAFETY: this workspace-query call supplies writable scalar query buffers,
-    // valid diagonal/off-diagonal storage, an n-by-n eigenvector buffer, and
-    // matching i32 dimensions. DSTEDC only reads COMPZ's first byte.
-    unsafe {
-        dstedc_(
-            &compz,
-            &n,
-            values.as_mut_ptr(),
-            off.as_mut_ptr(),
-            vectors_column_major.as_mut_ptr(),
-            &n,
-            work_query.as_mut_ptr(),
-            &query,
-            integer_work_query.as_mut_ptr(),
-            &query,
-            &mut info,
-        );
-    }
-    if info != 0 {
-        return Err(format!(
-            "LAPACK DSTEDC workspace query failed with info={info}"
-        ));
-    }
-    let work_len = i32::try_from(work_query[0].ceil() as i64)
-        .map_err(|_| "LAPACK DSTEDC floating workspace exceeds i32".to_string())?
-        .max(1);
-    let integer_work_len = integer_work_query[0].max(1);
-    let mut work = vec![0.0_f64; work_len as usize];
-    let mut integer_work = vec![0_i32; integer_work_len as usize];
-    values.copy_from_slice(diagonal);
-    off.fill(0.0);
-    off[..off_diagonal.len()].copy_from_slice(off_diagonal);
-    vectors_column_major.fill(0.0);
-    info = 0;
-    // SAFETY: queried workspace sizes are honored; every data buffer covers
-    // the exact n / n-by-n extent required by DSTEDC and remains exclusively
-    // borrowed for the duration of the call.
-    unsafe {
-        dstedc_(
-            &compz,
-            &n,
-            values.as_mut_ptr(),
-            off.as_mut_ptr(),
-            vectors_column_major.as_mut_ptr(),
-            &n,
-            work.as_mut_ptr(),
-            &work_len,
-            integer_work.as_mut_ptr(),
-            &integer_work_len,
-            &mut info,
-        );
-    }
-    if info != 0 {
-        return Err(format!("LAPACK DSTEDC failed with info={info}"));
-    }
-    let vectors = Array2::from_shape_fn((dimension, dimension), |(row, column)| {
-        vectors_column_major[row + column * dimension]
-    });
-    Ok((Array1::from_vec(values), vectors))
+    let matrix = tridiagonal_from_coefficients(diagonal, off_diagonal);
+    strict_symmetric_eigh(&matrix, Side::Lower)
+        .map_err(|error| format!("tridiagonal eigendecomposition failed: {error:?}"))
 }
 
 /// Partition a descending symmetric spectrum exactly as mgcv's
@@ -518,8 +401,10 @@ pub fn symmetric_extreme_lanczos_eigenpairs(
         if step > 0 {
             for _ in 0..2 {
                 for qi in &basis {
-                    let projection = -blas_dot(&w, qi);
-                    blas_axpy(projection, qi, &mut w);
+                    let projection = -dot(&w, qi);
+                    for (output, &basis_value) in w.iter_mut().zip(qi) {
+                        *output = projection.mul_add(basis_value, *output);
+                    }
                 }
             }
         }
@@ -538,7 +423,7 @@ pub fn symmetric_extreme_lanczos_eigenpairs(
                 || (completed_index >= options.target_rank
                     && completed_index.is_multiple_of(options.check_every)));
         if checkpoint {
-            let (values, vectors) = lapack_tridiagonal_eigenpairs(&alphas, &betas)?;
+            let (values, vectors) = tridiagonal_eigenpairs(&alphas, &betas)?;
             let selected_indices =
                 mgcv_largest_magnitude_indices(&values, options.target_rank);
             let residual_scale = if exhausted { 0.0 } else { beta };

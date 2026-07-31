@@ -7,37 +7,19 @@ pub use faer::linalg::solvers::{
 use faer::linalg::svd::{self, ComputeSvdVectors};
 use faer::prelude::ReborrowMut;
 use faer::{Conj, Mat, MatMut, MatRef, Par, Side, Unbind, get_global_parallelism};
-use ndarray::{Array1, Array2, ArrayBase, ArrayViewMut1, Data, Ix1, Ix2};
+use ndarray::{Array1, Array2, ArrayBase, ArrayView1, ArrayViewMut1, Data, Ix1, Ix2};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use thiserror::Error;
 
-// SAFETY: declarations only; the safe wrapper below validates dimensions,
-// contiguity, strides, and non-aliasing before calling the process CBLAS.
-unsafe extern "C" {
-    fn cblas_dsymv(
-        layout: i32,
-        uplo: i32,
-        n: i32,
-        alpha: f64,
-        matrix: *const f64,
-        leading_dimension: i32,
-        vector: *const f64,
-        vector_stride: i32,
-        beta: f64,
-        output: *mut f64,
-        output_stride: i32,
-    );
-}
-
-/// Apply a symmetric, standard-layout matrix through the process BLAS.
+/// Apply a symmetric matrix through the crate-owned SIMD/FMA GEMV kernel.
 ///
-/// `CblasColMajor + CblasUpper` is intentional. A standard-layout Rust matrix
-/// has the same byte sequence as its column-major transpose; symmetry makes
-/// that the same logical operator, while this exact BLAS traversal also keeps
-/// finite-precision Krylov charts compatible with reference implementations
-/// that hand the matrix to Fortran `dsymv("U", ...)`.
-pub fn blas_symmetric_upper_matvec_into(
+/// Lanczos certifies the resulting Ritz residuals, so this uses the ordinary
+/// FMA kernel rather than the substantially more expensive Dot2 reduction.
+/// Keeping the implementation inside `gam-linalg` makes the library complete:
+/// callers do not acquire an undeclared process-global BLAS dependency merely
+/// by linking a Duchon basis.
+pub fn symmetric_matvec_into(
     matrix: &Array2<f64>,
     vector: &[f64],
     output: &mut [f64],
@@ -45,35 +27,17 @@ pub fn blas_symmetric_upper_matvec_into(
     let n = matrix.nrows();
     if matrix.ncols() != n || vector.len() != n || output.len() != n {
         return Err(format!(
-            "symmetric BLAS matvec shape mismatch: matrix={:?}, vector={}, output={}",
+            "symmetric matvec shape mismatch: matrix={:?}, vector={}, output={}",
             matrix.dim(),
             vector.len(),
             output.len()
         ));
     }
-    let n_i32 = i32::try_from(n)
-        .map_err(|_| format!("symmetric BLAS matvec dimension {n} exceeds i32"))?;
-    let storage = matrix
-        .as_slice()
-        .ok_or_else(|| "symmetric BLAS matvec requires standard-layout storage".to_string())?;
-    // SAFETY: every pointer covers `n` elements (or `n*n` for the matrix),
-    // strides and leading dimension are one/`n`, and the mutable output does
-    // not alias the immutable matrix/vector inputs.
-    unsafe {
-        cblas_dsymv(
-            102, // CblasColMajor
-            121, // CblasUpper
-            n_i32,
-            1.0,
-            storage.as_ptr(),
-            n_i32,
-            vector.as_ptr(),
-            1,
-            0.0,
-            output.as_mut_ptr(),
-            1,
-        );
-    }
+    fast_av_standard_view_into(
+        matrix,
+        &ArrayView1::from(vector),
+        ArrayViewMut1::from(output),
+    );
     Ok(())
 }
 

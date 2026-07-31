@@ -273,13 +273,7 @@ fn duchon_spectral_kernel_chart(
             relative_residual_tol: f64::EPSILON.sqrt(),
             breakdown_tol: 1e-14,
         },
-        |q, image| {
-            gam_linalg::faer_ndarray::blas_symmetric_upper_matvec_into(
-                &center_kernel,
-                q,
-                image,
-            )
-        },
+        |q, image| gam_linalg::faer_ndarray::symmetric_matvec_into(&center_kernel, q, image),
     )
     .map_err(BasisError::InvalidInput)?;
     let selected = pairs.eigenvectors;
