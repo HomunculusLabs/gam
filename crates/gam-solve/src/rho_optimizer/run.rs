@@ -2944,9 +2944,33 @@ fn certify_fixed_point_optimality(
     // It matters because `outer_value_agreement_bound` — applied to exactly
     // these two scalars below — is a sqrt(EPSILON) ROUNDOFF envelope, derived
     // for "different kernels and reduction trees". A warm-start basin gap is
-    // not roundoff, and the audit's measured spread (1.5x to 1.1e7x the bound)
-    // has the shape of a divergence that usually lands in the same basin and
-    // occasionally does not, rather than of a missing term.
+    // not roundoff.
+    //
+    // MEASURED CORRECTION (2026-07-31). I originally wrote here that the
+    // audit's 1.5x..1.1e7x spread "has the shape of a divergence that usually
+    // lands in the same basin and occasionally does not". A direct test of the
+    // mild end refutes that for at least that end. On
+    // `pure_duchon_aniso_fit_optimizes_without_introducing_hybrid_scale`:
+    //
+    //   value-only=-3.6708914555093685e1  analytic-sample=-3.6708920839323071e1
+    //   disagreement=6.284e-6  bound=5.470e-7
+    //   inner solve: value-lane=converged, derivative-lane=converged
+    //
+    // BOTH lanes converged. If the certificate lane warm-starts from the value
+    // lane's converged point and itself converges, it should stay there and the
+    // scalars should agree — so chaining does not explain this one, and the
+    // spread is probably NOT a single mechanism. At |value| ~ 36.7 the bound is
+    // sqrt(EPSILON)*36.7 = 5.47e-7 and the gap is ~11.5x it, i.e. the two cost
+    // routes differ by ~1.7e-7 RELATIVE: an order above roundoff, many orders
+    // below a basin gap.
+    //
+    // The live question for this end is therefore not state chaining but
+    // whether sqrt(EPSILON) can cover two lanes that evaluate at different
+    // ORDERS (`Value` vs `ValueAndGradient`/`VGH`) and hence through different
+    // kernels — the same "machine constant standing in for a measured quantity"
+    // shape as #2614's requested resolution. To test the OTHER end, capture the
+    // same flags on a high-end (1.1e7x) firing; the instrumentation is on both
+    // audit sites now, so it costs one run.
     //
     // Adding a reset here is NOT a safe drive-by: the same trait doc states
     // that a `false` (default) objective "retains the very state its evaluation
