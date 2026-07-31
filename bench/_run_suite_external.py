@@ -508,6 +508,76 @@ patch_mgcv_gam_fit5_matrix_drop <- function() {
 
 patch_mgcv_gam_fit5_matrix_drop()
 
+# mgcv's `type="response"` is the inverse link at the coefficient mode.
+# gam's required default for curved links is instead the conditional
+# coefficient-posterior mean E[g^{-1}(X beta) | rho_hat].  Compare the same
+# estimand: `fit$Vp` is mgcv's conditional Bayesian coefficient covariance, so
+# every test-row linear predictor is univariate Gaussian with the variance
+# below.  The Golub-Welsch rule is generated rather than tabled, and the order
+# doubles until successive logistic-normal integrals meet the stated numerical
+# accuracy contract. Failure to converge is an error, never a plug-in fallback.
+gauss_hermite_rule <- function(n) {
+  if (n < 2L) stop("Gauss-Hermite order must be at least two")
+  jacobi <- matrix(0.0, nrow=n, ncol=n)
+  off_diag <- sqrt((seq_len(n - 1L)) / 2.0)
+  jacobi[cbind(seq_len(n - 1L), 2L:n)] <- off_diag
+  jacobi[cbind(2L:n, seq_len(n - 1L))] <- off_diag
+  eig <- eigen(jacobi, symmetric=TRUE)
+  ord <- order(eig$values)
+  list(
+    nodes=as.numeric(eig$values[ord]),
+    weights=as.numeric(sqrt(pi) * eig$vectors[1L, ord]^2)
+  )
+}
+
+logistic_normal_posterior_mean <- function(location, variance) {
+  if (length(location) != length(variance)) {
+    stop("logistic-normal location/variance length mismatch")
+  }
+  if (any(!is.finite(location)) || any(!is.finite(variance)) || any(variance < 0.0)) {
+    stop("logistic-normal inputs must be finite with non-negative variance")
+  }
+  target_abs_error <- 1e-12
+  max_order <- 256L
+  order <- 8L
+  previous <- NULL
+  repeat {
+    rule <- gauss_hermite_rule(order)
+    eta <- outer(sqrt(2.0 * variance), rule$nodes, "*")
+    eta <- sweep(eta, 1L, location, "+")
+    current <- as.numeric(plogis(eta) %*% rule$weights / sqrt(pi))
+    if (!is.null(previous) && max(abs(current - previous)) <= target_abs_error) {
+      return(current)
+    }
+    if (order >= max_order) {
+      stop(sprintf(
+        "logistic-normal Gauss-Hermite quadrature did not converge by order %d",
+        max_order
+      ))
+    }
+    previous <- current
+    order <- order * 2L
+  }
+}
+
+conditional_posterior_mean_predict <- function(fit, newdata) {
+  if (identical(as.character(fit$family$link), "identity")) {
+    return(as.numeric(predict(fit, newdata=newdata, type="response")))
+  }
+  if (!identical(as.character(fit$family$family), "binomial") ||
+      !identical(as.character(fit$family$link), "logit")) {
+    stop(sprintf(
+      "conditional posterior-mean reference is not implemented for %s/%s",
+      as.character(fit$family$family),
+      as.character(fit$family$link)
+    ))
+  }
+  design <- predict(fit, newdata=newdata, type="lpmatrix")
+  location <- as.numeric(design %*% coef(fit))
+  variance <- rowSums((design %*% fit$Vp) * design)
+  logistic_normal_posterior_mean(location, pmax(variance, 0.0))
+}
+
 payload <- fromJSON(data_path, simplifyVector = TRUE)
 df <- as.data.frame(payload$dataset$rows)
 target_name <- as.character(payload$dataset$target)
@@ -622,7 +692,7 @@ if (inherits(fit, "error")) {
 
 pred_t0 <- proc.time()[["elapsed"]]
 p <- tryCatch(
-  as.numeric(predict(fit, newdata=test_df, type="response")),
+  conditional_posterior_mean_predict(fit, test_df),
   error = function(e) e
 )
 pred_sec <- proc.time()[["elapsed"]] - pred_t0
@@ -674,7 +744,7 @@ if (family_name == "binomial") {
     rmse=NULL,
     mae=NULL,
     r2=NULL,
-    model_spec=ftxt
+    model_spec=paste0(ftxt, " [conditional posterior mean]")
   )
 } else {
   sigma_hat <- NA_real_
@@ -683,7 +753,7 @@ if (family_name == "binomial") {
     sigma_hat <- sqrt(fit_scale)
   } else {
     p_train <- tryCatch(
-      as.numeric(predict(fit, newdata=train_df, type="response")),
+      conditional_posterior_mean_predict(fit, train_df),
       error = function(e) e
     )
     if (inherits(p_train, "error")) {
@@ -717,7 +787,7 @@ if (family_name == "binomial") {
     rmse=rmse,
     mae=mae,
     r2=r2,
-    model_spec=ftxt
+    model_spec=paste0(ftxt, " [conditional posterior mean]")
   )
 }
 
@@ -3007,5 +3077,3 @@ def run_external_xgboost_aft_cv(scenario: typing.Any, *, ds: dict[str, typing.An
         plot_payload=plot_payload,
         model_spec=f"{cv_rows[0]['model_spec']} {_evaluation_suffix(folds)}",
     )
-
-
