@@ -1,0 +1,147 @@
+# python-contracts full-suite triage (#1512) — recovered summary
+
+collected            1453
+passed               1253
+skipped              79
+failed (diagnosed)   92
+errored (diagnosed)  0
+CENSORED             29   (worker killed at the per-test bound;
+                          the JUnit records no reason and time=0.000)
+
+faulthandler dumps in the step log: 7
+
+## The 29 censored tests, with the frame each was stuck in
+
+Recovered from the faulthandler dumps, which fire before the kill and
+write straight to fd 2. A test listed here is NOT a crashed interpreter:
+it is a call that had not returned when the bound expired.
+
+[4] tests.test_multinomial_inference_completeness_1101_test
+      test_confidence_interval_returns_sane_bounds
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+      test_posterior_predict_draws_sane_labels
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+      test_smooth_significance_table_is_populated
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+      test_std_error_alias_matches_interval
+          stuck in gamfit/_api.py:1254 in fit
+
+[2] tests.test_bug_hunt_2026_tweedie_estimated_power_conditional_coverage
+      test_bare_tweedie_low_mean_coverage_is_near_nominal_on_p_neq_1p5_data
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+      test_estimated_power_strictly_beats_pinned_1p5_in_low_mean_stratum
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[2] tests.test_sae_manifold_converged_latents_issue_357
+      test_converged_latents_exposes_t_star_and_a_star
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+      test_standalone_per_atom_projection
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[2] tests.test_sae_manifold_determinism
+      test_sae_fit_is_deterministic_for_fixed_seed
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+      test_sae_fit_random_state_changes_output
+          stuck in gamfit/_sae_manifold.py:220 in sae_manifold_fit
+
+[2] tests.test_sae_manifold_oos_reencode_issue_2132
+      test_oos_reencode_of_training_rows_matches_native_reconstruction
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+      test_selected_rho_survives_save_load_roundtrip
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[2] tests.test_sae_manifold_top_k_issue
+      test_topk_fit_uses_exact_fixed_support[1]
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+      test_topk_fit_uses_exact_fixed_support[2]
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[2] tests.test_structure_certificate_1058
+      test_certificate_round_trips_through_native_payload
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+      test_structure_certificate_matches_independent_e_bh
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[1] tests.bug_hunt_competing_risks_transformation_fit_refused_by_identifiability_audit_test
+      test_competing_risks_transformation_fit_succeeds_and_is_consistent
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[1] tests.bug_hunt_double_penalty_inflates_edf_instead_of_shrinking_test
+      test_bspline_double_penalty_does_not_inflate_linear_edf
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[1] tests.bug_hunt_flexible_link_engages_and_predicts_test
+      test_flexible_link_engages_predicts_and_is_monotone_on_probit_data
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[1] tests.bug_hunt_flexible_link_silent_noop_on_binomial_parametric_test
+      test_flexible_logit_not_silent_logit_noop_on_cloglog_data
+          stuck in gamfit/_api.py:1277 in fit
+
+[1] tests.bug_hunt_gamma_dispersion_location_scale_unpredictable_test
+      test_negbin_dispersion_location_scale_is_predictable
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[1] tests.bug_hunt_multinomial_summary_raises_on_smooth_terms_test
+      test_summary_renders_every_lambda_no_truncation
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[1] tests.bug_hunt_sae_manifold_fit_tiny_ordered_beta_bernoulli_circle_process_kill_2089_test
+      test_tiny_ordered_beta_bernoulli_circle_fit_does_not_kill_the_process
+          stuck in (no gamfit frame)
+
+[1] tests.bug_hunt_thinplate_single_penalty_overfits_linear_data_test
+      test_pspline_single_penalty_linear_data_control
+          stuck in gamfit/_api.py:1277 in fit
+
+[1] tests.test_bug_hunt_tweedie_observation_interval_equal_tailed
+      test_tweedie_observation_upper_edge_is_above_the_symmetric_band
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[1] tests.test_python_api
+      test_survival_marginal_slope_weibull_n3000_returns_under_60s
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[1] tests.test_sae_manifold_k_multi_heterogeneous_atoms
+      test_heterogeneous_mixed_topology_atoms_reconstruct
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[1] tests.test_sae_manifold_speed
+      test_periodic_atom_fit_recovers_one_harmonic_within_iteration_cap
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+[1] tests.test_survival_api_regressions
+      test_joint_competing_risks_survival_is_reachable_from_fit
+          stuck in (no dump recovered — dump may have interleaved with a concurrent worker)
+
+## Entry-point census over the censored population
+
+    24  (no dump recovered)
+     2  gamfit/_api.py:1277 in fit
+     1  (no gamfit frame)
+     1  gamfit/_api.py:1254 in fit
+     1  gamfit/_sae_manifold.py:220 in sae_manifold_fit
+
+## 20 slowest tests that DID report a duration
+
+      285.5s  tests.test_structure_certificate_1058::test_stricter_alpha_never_grows_confirmed_set
+      273.2s  tests.test_sae_manifold_top_k_issue::test_topk_payload_is_one_unprojected_model
+      242.6s  tests.test_sae_manifold_certify_external_2266::test_certify_external_requires_matching_per_atom_metadata_lengths
+      230.8s  tests.test_structure_certificate_1058::test_contested_entries_are_the_unconfirmed_complement
+      134.7s  tests.test_bug_hunt_dispersion_location_scale_observation_interval_symmetric::test_location_scale_band_matches_standard_path_skew_on_identical_data
+      132.9s  tests.test_sae_manifold_converged_latents_issue_357::test_warm_start_accepted_and_refines
+      130.2s  tests.test_bug_hunt_dispersion_location_scale_observation_interval_symmetric::test_dispersion_location_scale_observation_band_is_skewed_not_symmetric
+      125.4s  tests.test_sae_manifold_certify_external_2266::test_certify_external_returns_typed_nonfit_for_perturbed_state
+      100.5s  tests.test_sae_manifold_shape_uncertainty::test_band_sd_matches_analytic_phi_cov_phi_propagation
+       90.0s  tests.test_survival_marginal_slope_clustered_pc_808::test_survival_marginal_slope_clustered_pc_converges_808
+       60.1s  tests.test_survival_save_load_roundtrip::test_survival_marginal_slope_save_load_predict_roundtrips
+       52.3s  tests.test_python_api::test_transformation_normal_predicts_without_raw_pgs
+       52.1s  tests.bug_hunt_2299_affine_design_link_wiggle_test::test_link_wiggle_affine_design_offset_separation_red_gate
+       45.1s  tests.test_survival_api_regressions::test_survival_marginal_slope_fit_returns
+       42.5s  tests.bug_hunt_2299_affine_design_link_wiggle_test::test_link_wiggle_affine_design_flex_link_joint_newton_blowup_red_gate
+       42.0s  tests.test_sae_manifold_shape_band_save_load::test_reconstruction_and_band_are_physical_under_heterogeneous_column_scale
+       40.6s  tests.bug_hunt_gamma_dispersion_location_scale_unpredictable_test::test_gamma_dispersion_location_scale_is_predictable
+       39.4s  tests.test_sae_manifold_converged_latents_issue_357::test_oos_solve_returns_converged_latents_not_post_solve_reseed
+       36.0s  tests.test_python_api::test_transformation_normal_pgs_conditional_mean_tracks_response
+       32.7s  tests.test_fit_model_spec_kwargs_match_config::test_rust_flexible_link_fit_kwarg_matches_config
+
