@@ -5,7 +5,88 @@ use gam::terms::sae::manifold::{
     AssignmentMode, GumbelTemperatureSchedule, SaeAssignment, SaeManifoldAtom,
     SaeManifoldOuterObjective, SaeManifoldRho, SaeManifoldTerm, ScheduleKind,
 };
-use ndarray::{Array2, Array3, array};
+use ndarray::{Array2, Array3, Array4, Array5, ArrayView2, array};
+use std::sync::Arc;
+
+/// A precomputed basis that is AFFINE in the latent coordinates: its Jacobian is
+/// the same at every observation, so all higher jets vanish identically.
+///
+/// #2330 — the fixtures below supply `basis_values` and `basis_jacobian` directly
+/// through a `Precomputed` basis kind, which attaches no evaluator. The
+/// quasi-Laplace criterion needs a SECOND jet, and `atom_second_jets` refuses when
+/// an atom has neither a second-jet source nor an evaluator, so the criterion
+/// failed with `atom 'a' has no basis evaluator for second jets`.
+///
+/// The refusal is right in general — a precomputed table carries no derivative
+/// information, so a second jet cannot be inferred from a supplied Jacobian. It is
+/// wrong for the two fixtures below, whose Jacobians do not vary across
+/// observations taken at DISTINCT coordinates (one is the identity everywhere, the
+/// other is zero everywhere). A Jacobian constant across distinct coordinates
+/// forces the map to be affine, so both the second and third jets are exactly zero
+/// rather than unknown. Supply those zeros explicitly instead of asking the product
+/// to guess them.
+#[derive(Debug)]
+struct PrecomputedAffineBasis {
+    phi: Array2<f64>,
+    jacobian: Array3<f64>,
+}
+
+impl PrecomputedAffineBasis {
+    fn n_basis(&self) -> usize {
+        self.phi.ncols()
+    }
+
+    fn latent_dim(&self) -> usize {
+        self.jacobian.dim().2
+    }
+}
+
+impl gam::terms::sae::basis::SaeBasisEvaluator for PrecomputedAffineBasis {
+    fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
+        // The stored tensors were built for the fixture's own coordinate block, so
+        // a caller evaluating at a different number of rows would silently receive
+        // the wrong shape. Check rather than discard the argument.
+        if coords.nrows() != self.phi.nrows() {
+            return Err(format!(
+                "PrecomputedAffineBasis: evaluated at {} rows, tabulated for {}",
+                coords.nrows(),
+                self.phi.nrows()
+            ));
+        }
+        Ok((self.phi.clone(), self.jacobian.clone()))
+    }
+
+    fn second_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Option<Result<Array4<f64>, String>> {
+        Some(<Self as gam::terms::sae::basis::SaeBasisSecondJet>::second_jet(self, coords))
+    }
+
+    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
+        // Affine in the coordinates, so the third jet is exactly zero as well.
+        let d = self.latent_dim();
+        Some(Ok(Array5::<f64>::zeros((
+            coords.nrows(),
+            self.n_basis(),
+            d,
+            d,
+            d,
+        ))))
+    }
+}
+
+impl gam::terms::sae::basis::SaeBasisSecondJet for PrecomputedAffineBasis {
+    fn second_jet(&self, coords: ArrayView2<'_, f64>) -> Result<Array4<f64>, String> {
+        let d = self.latent_dim();
+        Ok(Array4::<f64>::zeros((
+            coords.nrows(),
+            self.n_basis(),
+            d,
+            d,
+        )))
+    }
+}
 
 #[test]
 fn latent_coord_assignment_decode_roundtrip_matches_dictionary_atom() {
@@ -120,11 +201,33 @@ fn sae_assignment_modes_follow_documented_behavior() {
 fn gated_sae_decoder_reconstructs_dictionary_atom_at_zero_residual() {
     let decoder =
         GatedSAEDecoder::new(Array2::eye(3), Array2::eye(3)).expect("decoder should build");
+    // #2330 — the previous expectation here was `y == x`, which the canonical
+    // Gated-SAE gate cannot satisfy for this input and which therefore indicted
+    // the decoder for behaving as specified.
+    //
+    // `decode_row` documents the Heaviside gate: `gate_i = 1` iff `(W_gate x)_i > 0`,
+    // and 0 otherwise, INCLUDING any negative logit. With `W_gate = W_amp = I` the
+    // gating logit of coordinate `i` is just `x[i]`, so the negative middle
+    // coordinate is gated OFF by construction:
+    //
+    //     x       = [ 1.2, -0.8, 0.4]
+    //     logits  = [ 1.2, -0.8, 0.4]   (= I·x)
+    //     gated   = [ 1.2,  0.0, 0.4]   (coordinate 1 fails `logit > 0`)
+    //     W_amp·gated = [1.2, 0.0, 0.4]
+    //
+    // An identity dictionary reproduces its input only where the gate is open.
+    // Asserting the gated result keeps the negative coordinate in the fixture, so
+    // this still covers BOTH the suppression and the passthrough — a fixture with
+    // an all-positive `x` would satisfy `y == x` while testing the gate not at all.
     let x = array![1.2, -0.8, 0.4];
     let y = decoder.decode_row(x.view()).expect("decode must succeed");
+    let expected = array![1.2, 0.0, 0.4];
     assert!(
-        (y[0] - x[0]).abs() < 1e-12 && (y[1] - x[1]).abs() < 1e-12 && (y[2] - x[2]).abs() < 1e-12,
-        "With zero training residual and identity dictionary, gate activation plus linear decode should reproduce the original dictionary atom exactly."
+        (y[0] - expected[0]).abs() < 1e-12
+            && (y[1] - expected[1]).abs() < 1e-12
+            && (y[2] - expected[2]).abs() < 1e-12,
+        "identity dictionary must pass through every gate-open coordinate and zero every \
+         gate-closed one: expected {expected:?}, got {y:?}"
     );
 }
 
@@ -163,12 +266,16 @@ fn build_collapse_probe_term(coords: Array2<f64>) -> SaeManifoldTerm {
         "a",
         gam::terms::sae::manifold::SaeAtomBasisKind::Precomputed("dict".into()),
         d,
-        basis_values,
-        basis_jacobian,
+        basis_values.clone(),
+        basis_jacobian.clone(),
         Array2::<f64>::eye(d),
         Array2::<f64>::zeros((d, d)),
     )
-    .expect("atom should build");
+    .expect("atom should build")
+    .with_basis_second_jet(Arc::new(PrecomputedAffineBasis {
+        phi: basis_values,
+        jacobian: basis_jacobian,
+    }));
     SaeManifoldTerm::new(vec![atom], assignment).expect("term should build")
 }
 
@@ -248,12 +355,16 @@ fn penalized_quasi_laplace_criterion_has_interior_minimum_in_log_lambda_smooth()
         "a",
         gam::terms::sae::manifold::SaeAtomBasisKind::Precomputed("dict".into()),
         1,
-        phi,
+        phi.clone(),
         Array3::zeros((n, 2, 1)),
         array![[0.5], [0.5]],
         array![[1.0, -1.0], [-1.0, 1.0]],
     )
-    .expect("atom should build");
+    .expect("atom should build")
+    .with_basis_second_jet(Arc::new(PrecomputedAffineBasis {
+        phi,
+        jacobian: Array3::zeros((n, 2, 1)),
+    }));
     let base_term = SaeManifoldTerm::new(vec![atom], assignment).expect("term should build");
     // Signal target = 10·(1 − coord) (β0=+10, β1=−10). The rank-1 penalty
     // S=[[1,-1],[-1,1]] penalises (β0−β1)², so over-smoothing (large λ → β0≈β1)
