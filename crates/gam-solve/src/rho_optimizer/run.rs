@@ -4450,8 +4450,12 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // status.
     result.final_hessian = analytic_hessian;
     result.criterion_certificate = Some(certificate.clone());
-    let curvature_requirement_met =
-        certificate_meets_curvature_requirement(&certificate, config.require_measured_psd);
+    // Screening deliberately spends no curvature. The caller's strict
+    // second-order requirement belongs exclusively to the terminal mint; applying
+    // it here would reject every first-order candidate as `NotSpent` and turn a
+    // two-basin comparison into seed-budget exhaustion.
+    let curvature_requirement_met = matches!(fidelity, CertificationFidelity::Screening)
+        || certificate_meets_curvature_requirement(&certificate, config.require_measured_psd);
     if !certificate.certifies() || !curvature_requirement_met {
         // Mint the #2392 reseeds fresh for THIS refused point: clear any value a
         // prior (multistart / pre-polish) certification of a different ρ left on
