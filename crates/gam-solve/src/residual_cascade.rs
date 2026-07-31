@@ -107,8 +107,11 @@
 //! discretization certificate. The cascade refines (adds the level, refits,
 //! re-selects λ) until that bound drops below `REFINE_TOL` of the penalized
 //! residual, the net stops producing new centers (every point is a center),
-//! or the level/center caps are reached: certified-or-typed-refusal, the same
-//! discipline as the radial-profile GL ladder.
+//! or the next level reaches a structural boundary: data identifiability,
+//! certified-spectrum memory, level count, or center count. A boundary above
+//! tolerance is `Underresolved` with the retained checkpoint and the finite gain
+//! evidence; it is never sent downstream to a rank-flat score search and never
+//! converted into a fit.
 //!
 //! Posterior. Coefficient covariance is `σ²(X'WX+λD)^{−1}`; pointwise
 //! prediction variance routes the basis row through one (certified) solve.
@@ -581,9 +584,9 @@ pub struct RefinementCertificate {
     pub tolerance: f64,
 }
 
-/// A structural limit that prevented the cascade from assessing or adding the
-/// next resolution level. These are never convergence certificates: if the
-/// requested gain tolerance has not passed, they produce
+/// A structural limit that prevented the cascade from adding the next
+/// resolution level with certified automatic REML. These are never convergence
+/// certificates: if the requested gain tolerance has not passed, they produce
 /// [`ResidualCascadeError::Underresolved`] instead of a fit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefinementObstruction {
@@ -596,6 +599,21 @@ pub enum RefinementObstruction {
     CenterCapacity {
         centers: usize,
         maximum_centers: usize,
+    },
+    /// The complete next net would carry more penalized directions than the
+    /// training sample can identify after the polynomial null space is removed.
+    /// Crossing this boundary makes automatic REML flat by rank deficiency; it
+    /// is therefore reported at refinement, before score search.
+    IdentifiabilityCapacity {
+        candidate_columns: usize,
+        candidate_penalized_modes: usize,
+        identifiable_directions: usize,
+    },
+    /// The next net remains data-identified but its λ-independent Schur
+    /// eigenspectrum would exceed the certified automatic-REML memory budget.
+    CertifiedSpectrumCapacity {
+        candidate_columns: usize,
+        certified_spectrum_max: usize,
     },
 }
 
@@ -616,6 +634,24 @@ impl std::fmt::Display for RefinementObstruction {
                 f,
                 "center capacity exceeded ({centers} centers for capacity {maximum_centers})"
             ),
+            Self::IdentifiabilityCapacity {
+                candidate_columns,
+                candidate_penalized_modes,
+                identifiable_directions,
+            } => write!(
+                f,
+                "next-level identifiability exhausted ({candidate_penalized_modes} penalized \
+                 modes from {candidate_columns} columns against {identifiable_directions} \
+                 identifiable directions)"
+            ),
+            Self::CertifiedSpectrumCapacity {
+                candidate_columns,
+                certified_spectrum_max,
+            } => write!(
+                f,
+                "next-level certified-spectrum capacity exceeded ({candidate_columns} columns \
+                 for capacity {certified_spectrum_max})"
+            ),
         }
     }
 }
@@ -629,9 +665,10 @@ pub enum NextLevelAssessment {
     EmptyNet,
     /// The complete candidate level was assessed and has this gain bound.
     GainBound(f64),
-    /// A representation limit was reached. `gain_bound` is the computed bound
-    /// when the candidate could be assessed (level capacity), and positive
-    /// infinity when center capacity prevented a complete assessment.
+    /// A structural limit was reached. `gain_bound` is the computed bound when
+    /// the complete candidate could be assessed (identifiability, spectrum, or
+    /// level capacity), and positive infinity only when center capacity
+    /// prevented a complete assessment.
     CapacityExceeded {
         obstruction: RefinementObstruction,
         gain_bound: f64,
@@ -3364,6 +3401,45 @@ impl ResidualCascadeDesign {
         sobolev_s: f64,
         levels: usize,
     ) -> Result<Self, String> {
+        if levels == 0 || levels > MAX_LEVELS {
+            return Err(format!(
+                "residual cascade: levels must be in 1..={MAX_LEVELS}, got {levels}"
+            ));
+        }
+        let level_exponents: Vec<f64> = (0..levels).map(|level| level as f64).collect();
+        Self::build_at_exponents(xs, y, w, metric, sobolev_s, &level_exponents)
+    }
+
+    /// Shared constructor for the dyadic ladder. An exponent `e` means
+    /// `h = h₀·2⁻ᵉ`; [`Self::build`] supplies the one production ladder,
+    /// `0, 1, …, levels−1`. The causal rank-boundary regression also evaluates
+    /// fractional exponents through this same constructor, so its sub-level
+    /// counterfactual cannot drift from the production basis construction.
+    fn build_at_exponents(
+        xs: &[&[f64]],
+        y: &[f64],
+        w: &[f64],
+        metric: &[f64],
+        sobolev_s: f64,
+        level_exponents: &[f64],
+    ) -> Result<Self, String> {
+        let levels = level_exponents.len();
+        if levels == 0 || levels > MAX_LEVELS {
+            return Err(format!(
+                "residual cascade: levels must be in 1..={MAX_LEVELS}, got {levels}"
+            ));
+        }
+        if level_exponents[0] != 0.0
+            || level_exponents
+                .iter()
+                .any(|exponent| !exponent.is_finite() || *exponent < 0.0)
+            || level_exponents.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(format!(
+                "residual cascade: resolution exponents must start at zero and increase \
+                 strictly, got {level_exponents:?}"
+            ));
+        }
         let dim = xs.len();
         if !(dim == 2 || dim == 3) {
             return Err(format!(
@@ -3396,11 +3472,6 @@ impl ResidualCascadeDesign {
                  Wendland-(3,1) bump, got {sobolev_s}",
                 dim as f64 / 2.0,
                 (dim as f64 + 3.0) / 2.0
-            ));
-        }
-        if levels == 0 || levels > MAX_LEVELS {
-            return Err(format!(
-                "residual cascade: levels must be in 1..={MAX_LEVELS}, got {levels}"
             ));
         }
         for i in 0..n {
@@ -3454,15 +3525,15 @@ impl ResidualCascadeDesign {
         let mut level_specs = Vec::with_capacity(levels);
         let mut col = dim + 1;
         let mut pen_logdet_const = 0.0;
-        for l in 0..levels {
-            let h = h0 * 0.5_f64.powi(l as i32);
+        for (l, &exponent) in level_exponents.iter().enumerate() {
+            let h = h0 * 0.5_f64.powf(exponent);
             let new_centers = extend_net(&mut net, &z, dim, h, &z_range);
             if net.len() > MAX_CENTERS {
                 return Err(format!(
                     "residual cascade: center cap {MAX_CENTERS} exceeded at level {l}"
                 ));
             }
-            let weight = level_weight(l, sobolev_s, dim);
+            let weight = level_weight(exponent, sobolev_s, dim);
             pen_logdet_const += new_centers.len() as f64 * weight.ln();
             let delta = OVERLAP * h;
             let mut grid = HashGrid::new(delta, dim);
@@ -3979,19 +4050,37 @@ impl ResidualCascadeDesign {
     /// Assess the candidate level L+1 at this fit's λ. A complete candidate
     /// reports the exact upper bound `‖X₂'W r̂‖² / (λ·d_{L+1})` on its
     /// penalized-objective decrease (see the module header for the Schur-
-    /// complement argument). Empty-net exhaustion and representation capacity
-    /// are different typed outcomes because only an empty net certifies zero
-    /// remaining gain.
+    /// complement argument). Empty-net exhaustion and structural capacity are
+    /// different typed outcomes because only an empty net certifies zero
+    /// remaining gain. A complete candidate that outruns data identifiability
+    /// or the certified-spectrum budget still carries its finite bound, so the
+    /// automatic route can return one honest `Underresolved` result before
+    /// invoking either downstream failure mode.
     pub fn assess_next_level(
         &self,
         fit: &ResidualCascadeFit,
+    ) -> Result<NextLevelAssessment, String> {
+        self.assess_level_at_exponent(fit, self.core.levels.len() as f64)
+    }
+
+    fn assess_level_at_exponent(
+        &self,
+        fit: &ResidualCascadeFit,
+        exponent: f64,
     ) -> Result<NextLevelAssessment, String> {
         let core = &self.core;
         if !Arc::ptr_eq(core, &fit.core) {
             return Err("residual cascade: fit does not belong to this design".into());
         }
         let next_l = core.levels.len();
-        let h = core.levels[next_l - 1].h * 0.5;
+        let h = core.levels[0].h * 0.5_f64.powf(exponent);
+        if !(exponent.is_finite() && h > 0.0 && h < core.levels[next_l - 1].h) {
+            return Err(format!(
+                "residual cascade: next resolution exponent {exponent} does not refine the \
+                 current radius {}",
+                core.levels[next_l - 1].h
+            ));
+        }
         let mut net = core.net.clone();
         let candidates = extend_net(&mut net, &core.z, core.dim, h, &core.z_range);
         if candidates.is_empty() {
@@ -4025,10 +4114,32 @@ impl ResidualCascadeDesign {
             });
         }
         let g2: f64 = g.iter().map(|v| v * v).sum();
-        let d_next = level_weight(next_l, core.sobolev_s, core.dim);
+        let d_next = level_weight(exponent, core.sobolev_s, core.dim);
         let lambda = gam_problem::checked_exp_log_strength(fit.log_lambda)
             .map_err(|error| format!("residual cascade refinement: {error}"))?;
         let gain_bound = g2 / (lambda * d_next);
+        let candidate_penalized_modes = net.len();
+        let candidate_columns = core.nullity() + candidate_penalized_modes;
+        let identifiable_directions = core.y.len().saturating_sub(core.nullity());
+        if candidate_penalized_modes > identifiable_directions {
+            return Ok(NextLevelAssessment::CapacityExceeded {
+                obstruction: RefinementObstruction::IdentifiabilityCapacity {
+                    candidate_columns,
+                    candidate_penalized_modes,
+                    identifiable_directions,
+                },
+                gain_bound,
+            });
+        }
+        if candidate_columns > CERTIFIED_SPECTRUM_MAX {
+            return Ok(NextLevelAssessment::CapacityExceeded {
+                obstruction: RefinementObstruction::CertifiedSpectrumCapacity {
+                    candidate_columns,
+                    certified_spectrum_max: CERTIFIED_SPECTRUM_MAX,
+                },
+                gain_bound,
+            });
+        }
         if next_l >= MAX_LEVELS {
             Ok(NextLevelAssessment::CapacityExceeded {
                 obstruction: RefinementObstruction::LevelCapacity {
@@ -4043,9 +4154,10 @@ impl ResidualCascadeDesign {
     }
 }
 
-/// Prior precision weight of level `l`: `4^{l(s−d/2)}`.
-fn level_weight(l: usize, sobolev_s: f64, dim: usize) -> f64 {
-    (4.0_f64).powf(l as f64 * (sobolev_s - dim as f64 / 2.0))
+/// Prior precision at resolution `h = h₀·2⁻ᵉ`:
+/// `(h₀/h)^(2s−d) = 4^{e(s−d/2)}`.
+fn level_weight(exponent: f64, sobolev_s: f64, dim: usize) -> f64 {
+    (4.0_f64).powf(exponent * (sobolev_s - dim as f64 / 2.0))
 }
 
 /// Lightweight view used during assembly, before the Core exists: shares the
@@ -4508,7 +4620,7 @@ fn decide_refinement(
 /// and refine (add a level, refit, re-select λ) until the exact next-level
 /// gain bound certifies that one more level cannot move the penalized
 /// objective by more than [`REFINE_TOL`] of the penalized residual. A genuinely
-/// empty next-level net certifies zero remaining gain; a level/center capacity
+/// empty next-level net certifies zero remaining gain; a structural capacity
 /// reached before the tolerance passes is a typed
 /// [`ResidualCascadeError::Underresolved`] carrying the retained work and its
 /// evidence, never a fit.
@@ -4675,6 +4787,300 @@ mod refinement_decision_tests {
             }
         }
         (x1, x2, y)
+    }
+
+    #[test]
+    fn rank_boundary_is_not_an_empty_column_loose_bound_or_dyadic_artifact_2628() {
+        struct TestRng(u64);
+        impl TestRng {
+            fn uniform(&mut self) -> f64 {
+                self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = self.0;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                ((z ^ (z >> 31)) >> 11) as f64 / (1_u64 << 53) as f64
+            }
+
+            fn normal(&mut self) -> f64 {
+                let u1 = (self.uniform() + f64::EPSILON).min(1.0 - f64::EPSILON);
+                let u2 = self.uniform();
+                (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+            }
+        }
+
+        let mut rng = TestRng(0x1032_0008);
+        let mut random_x1 = Vec::with_capacity(240);
+        let mut random_x2 = Vec::with_capacity(240);
+        let mut random_y = Vec::with_capacity(240);
+        let mut random_w = Vec::with_capacity(240);
+        for row in 0..240 {
+            let x1 = rng.uniform();
+            let x2 = rng.uniform();
+            random_x1.push(x1);
+            random_x2.push(x2);
+            random_y.push(
+                (2.0 * std::f64::consts::PI * x1).sin() * (2.0 * std::f64::consts::PI * x2).sin()
+                    + 0.05 * rng.normal(),
+            );
+            random_w.push(if row % 7 == 0 { 0.5 } else { 1.0 });
+        }
+
+        let golden = 0.618_033_988_749_894_9_f64;
+        let sqrt2 = std::f64::consts::SQRT_2.fract();
+        let mut low_discrepancy_x1 = Vec::with_capacity(2_000);
+        let mut low_discrepancy_x2 = Vec::with_capacity(2_000);
+        let mut low_discrepancy_y = Vec::with_capacity(2_000);
+        for row in 0..2_000 {
+            let x1 = ((row + 1) as f64 * golden).fract();
+            let x2 = ((row + 1) as f64 * sqrt2).fract();
+            low_discrepancy_x1.push(x1);
+            low_discrepancy_x2.push(x2);
+            low_discrepancy_y.push(
+                (2.0 * std::f64::consts::PI * x1).sin() * (2.0 * std::f64::consts::PI * x2).sin()
+                    + (((row + 3) as f64 * golden).fract() - 0.5) * 0.1,
+            );
+        }
+        let low_discrepancy_w = vec![1.0; 2_000];
+
+        for (name, x1, x2, y, w) in [
+            (
+                "wendland-240",
+                random_x1.as_slice(),
+                random_x2.as_slice(),
+                random_y.as_slice(),
+                random_w.as_slice(),
+            ),
+            (
+                "duchon-2000",
+                low_discrepancy_x1.as_slice(),
+                low_discrepancy_x2.as_slice(),
+                low_discrepancy_y.as_slice(),
+                low_discrepancy_w.as_slice(),
+            ),
+        ] {
+            for levels in 3..=7 {
+                let axes: [&[f64]; 2] = [x1, x2];
+                let Ok(design) =
+                    ResidualCascadeDesign::build(&axes, y, w, &[1.0, 1.0], 2.5, levels)
+                else {
+                    break;
+                };
+                let q = design.core.nullity();
+                let empty = design.core.gram_diag[q..]
+                    .iter()
+                    .filter(|&&diagonal| diagonal == 0.0)
+                    .count();
+                println!(
+                    "#2628 {name} levels={levels} rows={} columns={} penalized={} \
+                     structurally_empty={empty} score_columns={}",
+                    y.len(),
+                    design.core.m,
+                    design.core.m - q,
+                    design.core.m - empty,
+                );
+            }
+
+            let (current_levels, next_levels) = if name == "wendland-240" {
+                (4, 5)
+            } else {
+                (6, 7)
+            };
+            let axes: [&[f64]; 2] = [x1, x2];
+            let current =
+                ResidualCascadeDesign::build(&axes, y, w, &[1.0, 1.0], 2.5, current_levels)
+                    .expect("current 2628 design");
+            let selected = current.fit_reml().expect("current 2628 REML fit");
+            let lambda = gam_problem::checked_exp_log_strength(selected.log_lambda)
+                .expect("selected lambda");
+            let exact_rss = |design: &ResidualCascadeDesign, lambda: f64| {
+                if design.core.dense_gram.is_some() {
+                    let (coeff, _, _) = design
+                        .core
+                        .solve_coeff(lambda, &design.core.rhs, None)
+                        .expect("dense exact coefficient solve");
+                    return (design.core.rss_pen(&coeff), "dense", 0);
+                }
+                let factor = design
+                    .core
+                    .sparse_exact_factor(lambda)
+                    .expect("sparse-factor pricing");
+                if let Some(factor) = factor {
+                    let coeff = solve_sparse_spd(&factor, &Array1::from(design.core.rhs.clone()))
+                        .expect("sparse exact coefficient solve")
+                        .to_vec();
+                    (design.core.rss_pen(&coeff), "sparse", 0)
+                } else {
+                    let (coeff, relative_residual, iterations) = design
+                        .core
+                        .solve_coeff(lambda, &design.core.rhs, None)
+                        .expect("certified iterative coefficient solve");
+                    assert!(
+                        relative_residual <= CG_RTOL,
+                        "iterative coefficient solve did not certify"
+                    );
+                    (design.core.rss_pen(&coeff), "pcg", iterations)
+                }
+            };
+            let (current_rss, current_route, current_iterations) = exact_rss(&current, lambda);
+            let next = ResidualCascadeDesign::build(&axes, y, w, &[1.0, 1.0], 2.5, next_levels)
+                .expect("next 2628 design");
+            let started = std::time::Instant::now();
+            let (next_rss, next_route, next_iterations) = exact_rss(&next, lambda);
+            let elapsed = started.elapsed();
+            let gain = current_rss - next_rss;
+            let tolerance = REFINE_TOL * current_rss;
+            let crude = match current
+                .assess_next_level(&selected)
+                .expect("crude next-level assessment")
+            {
+                NextLevelAssessment::GainBound(bound)
+                | NextLevelAssessment::CapacityExceeded {
+                    gain_bound: bound, ..
+                } => bound,
+                other => panic!("complete 2628 fixture returned {other:?}"),
+            };
+            assert!(
+                gain > tolerance,
+                "the exact whole-rung gain must remain material: {gain} vs {tolerance}"
+            );
+            println!(
+                "#2628-CONDITIONAL {name} current_levels={current_levels} \
+                 next_levels={next_levels} current_rss={current_rss:.12e} \
+                 next_rss={next_rss:.12e} exact_gain={gain:.12e} \
+                 tolerance={tolerance:.12e} crude_bound={crude:.12e} \
+                 current_route={current_route} current_iterations={current_iterations} \
+                 next_route={next_route} next_iterations={next_iterations} \
+                 next_solve_seconds={:.6}",
+                elapsed.as_secs_f64(),
+            );
+
+            // Give sub-level refinement its strongest possible identified rung:
+            // bisect the dyadic interval and take the finest nested net whose
+            // total column count does not exceed the sample rank. Then measure
+            // the remaining whole-interval gain exactly. If that gain is still
+            // above tolerance, no width cap or looser upper bound can turn this
+            // fixture into a certified fit; it is a measured identifiability
+            // boundary.
+            let mut base_exponents: Vec<f64> =
+                (0..current_levels).map(|level| level as f64).collect();
+            let endpoint = current_levels as f64;
+            let mut lo = endpoint - 1.0;
+            let mut hi = endpoint;
+            let mut best_exponent = lo;
+            let mut best_columns = current.num_coeffs();
+            for _ in 0..40 {
+                let midpoint = 0.5 * (lo + hi);
+                let mut exponents = base_exponents.clone();
+                exponents.push(midpoint);
+                let design = ResidualCascadeDesign::build_at_exponents(
+                    &axes,
+                    y,
+                    w,
+                    &[1.0, 1.0],
+                    2.5,
+                    &exponents,
+                )
+                .expect("sub-level 2628 design");
+                if design.num_coeffs() <= y.len() {
+                    lo = midpoint;
+                    best_exponent = midpoint;
+                    best_columns = design.num_coeffs();
+                } else {
+                    hi = midpoint;
+                }
+            }
+            base_exponents.push(best_exponent);
+            let sublevel = ResidualCascadeDesign::build_at_exponents(
+                &axes,
+                y,
+                w,
+                &[1.0, 1.0],
+                2.5,
+                &base_exponents,
+            )
+            .expect("maximal identified sub-level design");
+            assert_eq!(sublevel.num_coeffs(), best_columns);
+            let sublevel_fit = sublevel
+                .fit_reml()
+                .expect("identified sub-level must admit certified REML");
+            let sublevel_lambda = gam_problem::checked_exp_log_strength(sublevel_fit.log_lambda)
+                .expect("sub-level selected lambda");
+            let (sublevel_rss, sublevel_route, sublevel_iterations) =
+                exact_rss(&sublevel, sublevel_lambda);
+            let remaining_bound = match sublevel
+                .assess_level_at_exponent(&sublevel_fit, endpoint)
+                .expect("remaining dyadic-level assessment")
+            {
+                NextLevelAssessment::GainBound(bound)
+                | NextLevelAssessment::CapacityExceeded {
+                    gain_bound: bound, ..
+                } => bound,
+                other => panic!("complete remaining 2628 level returned {other:?}"),
+            };
+            let mut completed_exponents = base_exponents.clone();
+            completed_exponents.push(endpoint);
+            let completed = ResidualCascadeDesign::build_at_exponents(
+                &axes,
+                y,
+                w,
+                &[1.0, 1.0],
+                2.5,
+                &completed_exponents,
+            )
+            .expect("completed dyadic 2628 design");
+            let (completed_rss, completed_route, completed_iterations) =
+                exact_rss(&completed, sublevel_lambda);
+            let remaining_exact_gain = sublevel_rss - completed_rss;
+            let remaining_fraction = endpoint - best_exponent;
+            let scaled_tolerance = REFINE_TOL * sublevel_rss * remaining_fraction;
+            assert!(
+                remaining_exact_gain > scaled_tolerance,
+                "even the rank-maximal sub-level must leave material endpoint gain: \
+                 {remaining_exact_gain} vs {scaled_tolerance}"
+            );
+            println!(
+                "#2628-SUBLEVEL {name} exponent={best_exponent:.12} \
+                 columns={best_columns} rows={} endpoint={endpoint:.1} \
+                 endpoint_columns={} sublevel_rss={sublevel_rss:.12e} \
+                 completed_rss={completed_rss:.12e} \
+                 remaining_exact_gain={remaining_exact_gain:.12e} \
+                 remaining_bound={remaining_bound:.12e} \
+                 scaled_tolerance={scaled_tolerance:.12e} \
+                 sublevel_route={sublevel_route} sublevel_iterations={sublevel_iterations} \
+                 endpoint_route={completed_route} endpoint_iterations={completed_iterations}",
+                y.len(),
+                completed.num_coeffs(),
+            );
+
+            match fit_residual_cascade(&axes, y, w, &[1.0, 1.0], 2.5) {
+                Err(ResidualCascadeError::Underresolved {
+                    checkpoint,
+                    gain_bound,
+                    requested_tolerance,
+                    obstruction:
+                        RefinementObstruction::IdentifiabilityCapacity {
+                            candidate_columns,
+                            candidate_penalized_modes,
+                            identifiable_directions,
+                        },
+                }) => {
+                    assert_eq!(checkpoint.num_levels(), current_levels);
+                    assert_eq!(candidate_columns, next.num_coeffs());
+                    assert_eq!(
+                        candidate_penalized_modes,
+                        next.num_coeffs() - next.core.nullity()
+                    );
+                    assert_eq!(identifiable_directions, y.len() - next.core.nullity());
+                    assert!(
+                        gain_bound > requested_tolerance,
+                        "the automatic boundary must retain an above-tolerance gain: \
+                         {gain_bound} vs {requested_tolerance}"
+                    );
+                }
+                Err(other) => panic!("automatic 2628 route returned the wrong boundary: {other}"),
+                Ok(_) => panic!("an above-tolerance identifiability boundary must not mint a fit"),
+            }
+        }
     }
 
     /// Column count of a `dense_fixture(side)` cascade at each level count, so

@@ -12,14 +12,16 @@
 //!
 //! This file owns two distinct gates: the cascade estimator must deliver the
 //! quality of the dense estimator at a tractable end-to-end size, and a
-//! cliff-scale formula route must propagate the typed automatic-REML proof
-//! refusal once refinement crosses onto the iterative coefficient route. The
-//! latter must never be hidden by silently switching to a different estimator.
+//! cliff-scale formula route must propagate the typed refinement-capacity
+//! refusal before automatic REML enters an uncertifiable design. The latter
+//! must never be hidden by silently switching to a different estimator.
 
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
-use gam::solver::residual_cascade::fit_residual_cascade;
+use gam::solver::residual_cascade::{
+    RefinementObstruction, ResidualCascadeDesign, ResidualCascadeError, fit_residual_cascade,
+};
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
@@ -155,13 +157,13 @@ fn rmse(yhat: &[f64], probes: &[Vec<f64>]) -> f64 {
 /// Arm 1 — match-or-beat the dense estimator on truth recovery.
 ///
 /// At a tractable `n` (where the dense reduced-rank radial path is still cheap)
-/// the cascade ESTIMATOR — invoked directly via [`fit_residual_cascade`], the
-/// same estimator the auto-route dispatches past the cliff, since the
-/// formula-level entry refuses to materialize the cascade below the cliff —
-/// must recover the same known smooth truth at least as well as the dense
+/// the cascade ESTIMATOR — fitted at this fixture's last data-identified
+/// resolution, using the same design and REML machinery the automatic route
+/// owns — must recover the same known smooth truth at least as well as the dense
 /// `fit_from_formula` duchon fit on the SAME data. The cascade is a different
 /// posterior, so this is the no-regression bar that earns it the right to stand
-/// in past the cliff.
+/// in past the cliff. The adjacent test independently checks the automatic
+/// route's typed boundary.
 #[test]
 fn cascade_matches_or_beats_dense_duchon_on_truth_recovery() {
     init_parallelism();
@@ -180,8 +182,13 @@ fn cascade_matches_or_beats_dense_duchon_on_truth_recovery() {
     // isotropic metric matches the auto-route's `ResidualCascadeInputs`.
     let (axes, y, w) = coords_y(2, n);
     let xs: Vec<&[f64]> = axes.iter().map(|a| a.as_slice()).collect();
-    let cascade = fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.5)
-        .expect("cascade must fit an eligible scattered 2-D sample");
+    // Six levels are the last data-identified design on this fixture. This arm
+    // measures estimator quality at that certified finite resolution; the
+    // automatic refinement boundary is asserted separately below.
+    let cascade = ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.5, 6)
+        .expect("identified cascade design")
+        .fit_reml()
+        .expect("identified cascade REML");
     let cascade_yhat: Vec<f64> = probes
         .iter()
         .map(|p| cascade.predict(p).expect("cascade predict").0)
@@ -210,25 +217,62 @@ fn cascade_matches_or_beats_dense_duchon_on_truth_recovery() {
     );
 }
 
-/// Arm 2 — the formula auto-route must propagate automatic-REML proof refusal
-/// past the width where the certified Schur spectrum can no longer be formed.
+/// The quality fixture's automatic route must report that its materially useful
+/// seventh level outruns the data's rank. This is an underresolution result,
+/// never a finite-resolution fit and never a downstream score-search failure.
+#[test]
+fn cascade_quality_fixture_reports_the_measured_identifiability_boundary() {
+    init_parallelism();
+    let n = 2_000;
+    let (axes, y, w) = coords_y(2, n);
+    let xs: Vec<&[f64]> = axes.iter().map(|axis| axis.as_slice()).collect();
+    match fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.5) {
+        Err(ResidualCascadeError::Underresolved {
+            checkpoint,
+            gain_bound,
+            requested_tolerance,
+            obstruction:
+                RefinementObstruction::IdentifiabilityCapacity {
+                    candidate_columns,
+                    candidate_penalized_modes,
+                    identifiable_directions,
+                },
+        }) => {
+            assert_eq!(checkpoint.num_levels(), 6);
+            assert_eq!(checkpoint.num_centers(), 1_759);
+            assert_eq!(candidate_columns, 6_971);
+            assert_eq!(candidate_penalized_modes, 6_968);
+            assert_eq!(identifiable_directions, 1_997);
+            assert!(
+                gain_bound > requested_tolerance,
+                "the next level may be refused only while its honest gain bound is above \
+                 tolerance: {gain_bound} vs {requested_tolerance}"
+            );
+        }
+        Err(other) => panic!("wrong cascade refinement boundary: {other}"),
+        Ok(_) => panic!("an above-tolerance identifiability boundary must not mint a fit"),
+    }
+}
+
+/// Arm 2 — the formula auto-route must report the refinement capacity before
+/// entering a width whose certified Schur spectrum cannot be formed.
 ///
 /// This is intentionally a `fit_from_formula` route test, not just a direct
-/// estimator check. Once the cascade estimator is structurally selected, its
-/// refinement can exceed `CERTIFIED_SPECTRUM_MAX`. Past that width there is no
-/// λ-independent spectrum, so the score has no interval extension and no outer
-/// derivative enclosure — a pointwise value, however exactly it is computed,
-/// cannot certify a score sign or a KKT root — and automatic λ selection must
-/// stop with the proof-unavailable error. Falling through to the dense radial
-/// posterior would erase both that certificate boundary and the estimator the
-/// route selected.
+/// estimator check. Once the cascade estimator is structurally selected, a
+/// candidate refinement can exceed `CERTIFIED_SPECTRUM_MAX`. Past that width
+/// there is no λ-independent spectrum, so the score has no interval extension
+/// and no outer derivative enclosure — a pointwise value, however exactly it is
+/// computed, cannot certify a score sign or a KKT root. The automatic route
+/// therefore stops at refinement with the retained checkpoint and gain
+/// evidence. Falling through to the dense radial posterior would erase both
+/// that certificate boundary and the estimator the route selected.
 ///
 /// The refusal used to fire at the dense GRAM cap (1536 columns), which is a
 /// cache budget rather than a proof boundary; #2546 moved it to the budget the
 /// proof actually costs, so this test now asserts against the eigendecomposition
 /// wording rather than the iterative-route wording.
 #[test]
-fn past_cliff_fit_from_formula_propagates_iterative_reml_proof_refusal() {
+fn past_cliff_fit_from_formula_propagates_refinement_proof_capacity() {
     init_parallelism();
     let n = 525_000;
     assert!(
@@ -238,14 +282,13 @@ fn past_cliff_fit_from_formula_propagates_iterative_reml_proof_refusal() {
     let data = sample(3, n);
     let cfg = gaussian_config();
     let error = match fit_from_formula("y ~ duchon(x1, x2, x3)", &data, &cfg) {
-        Ok(_) => panic!("iterative automatic REML must propagate its proof refusal"),
+        Ok(_) => panic!("automatic refinement must propagate its proof capacity"),
         Err(error) => error,
     };
     let message = error.to_string();
     assert!(
-        message.contains(
-            "automatic REML proof unavailable because the certified Schur eigendecomposition"
-        ) && message.contains("use an explicitly fixed log lambda"),
+        message.contains("residual cascade underresolved")
+            && message.contains("next-level certified-spectrum capacity exceeded"),
         "the selected cascade route returned the wrong refusal: {message}"
     );
 }

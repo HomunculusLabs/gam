@@ -842,8 +842,15 @@ fn cascade_matches_dense_wendland_kernel_solve() {
     }
     let (_, kernel_coeff) = best.expect("kernel REML grid found no PD point");
 
-    // Cascade at the native smoothness for an apples-to-apples norm.
-    let fit = fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.5).expect("cascade fit");
+    // The estimator-quality oracle is deliberately finite-resolution: four
+    // levels are the last data-identified design on this 240-row fixture.
+    // Automatic refinement has a separate boundary test below; conflating that
+    // certificate with this norm-equivalence comparison used to send the
+    // quality oracle into a rank-deficient fifth-level score search.
+    let fit = ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.5, 4)
+        .expect("identified cascade design")
+        .fit_reml()
+        .expect("identified cascade REML");
 
     let grid = 30;
     let mut sse_kernel = 0.0;
@@ -883,7 +890,7 @@ fn cascade_matches_dense_wendland_kernel_solve() {
 }
 
 /// The same fixture as `cascade_matches_dense_wendland_kernel_solve`, gated on
-/// the one property that fixture did not have: **a verdict exists**.
+/// the automatic route's honest refinement boundary.
 ///
 /// Measured before the bound (#2546, instrumented): the cascade refines
 /// 3 → 4 → 5 on these 240 rows, and the certified 1-D score search at level 5
@@ -896,48 +903,44 @@ fn cascade_matches_dense_wendland_kernel_solve() {
 /// stationary point is subdivided at every cell the traversal reaches — a cost
 /// exponential in the domain's subdivision depth.
 ///
-/// This gate deliberately accepts EITHER outcome. It is not a claim that the
-/// refusal is the right answer for this surface — whether the refinement loop
-/// should stop before it outruns the data's rank is the open capability
-/// question — only that the search returns instead of enumerating. A verdict
-/// that does not exist cannot be read at any test budget.
+/// The fifth-level gain is materially above tolerance, while its 504 penalized
+/// modes exceed the data's 237 identifiable directions. The automatic route
+/// must therefore retain the four-level checkpoint and return `Underresolved`
+/// at refinement. Entering the fifth-level score search would merely translate
+/// this one mathematical boundary into an exponential search-budget refusal.
 #[test]
-fn wendland_fixture_cascade_returns_a_verdict_instead_of_enumerating_lambda() {
+fn wendland_fixture_names_underresolution_before_rank_deficient_score_search() {
     let n = 240;
     let (axes, y, w) = sample(2, n, 0.05, 0x1032_0008);
     let xs = axis_refs(&axes);
     match fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.5) {
-        Ok(fit) => {
-            assert!(
-                fit.num_levels() >= 3,
-                "a fit must carry at least the initial refinement depth"
-            );
-        }
-        Err(ResidualCascadeError::RemlScoreSearchUndecomposable {
-            columns,
-            rank,
-            identifiable,
-            subdivisions,
-            budget,
-            ..
+        Err(ResidualCascadeError::Underresolved {
+            checkpoint,
+            gain_bound,
+            requested_tolerance,
+            obstruction:
+                gam::solver::residual_cascade::RefinementObstruction::IdentifiabilityCapacity {
+                    candidate_columns,
+                    candidate_penalized_modes,
+                    identifiable_directions,
+                },
         }) => {
+            assert_eq!(checkpoint.num_levels(), 4);
+            assert_eq!(checkpoint.num_centers(), 147);
+            assert_eq!(candidate_columns, 507);
+            assert_eq!(candidate_penalized_modes, 504);
+            assert_eq!(identifiable_directions, 237);
             assert!(
-                subdivisions > budget,
-                "the refusal must report the budget it exceeded, not a smaller count \
-                 ({subdivisions} vs {budget})"
-            );
-            assert!(
-                rank > identifiable,
-                "on this fixture the flat criterion is rank deficiency: {rank} penalized \
-                 modes from {columns} columns against {identifiable} identifiable \
-                 directions. A budget hit at rank <= identifiable would be a DIFFERENT \
-                 cause wearing this refusal, and must be diagnosed rather than accepted"
+                gain_bound > requested_tolerance,
+                "capacity may refuse only while the honest gain bound remains above tolerance: \
+                 {gain_bound} vs {requested_tolerance}"
             );
         }
         Err(other) => panic!(
-            "the cascade must either fit or name why the certified search cannot \
-             decompose the domain; got {other}"
+            "the cascade must name the refinement/identifiability boundary before score search; \
+             got {other}"
         ),
+        Ok(_) => panic!("an above-tolerance capacity boundary must not mint a fit"),
     }
 }
 
