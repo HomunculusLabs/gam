@@ -33,7 +33,12 @@ def test_all_zero_count_response_is_rejected_before_fit(formula: str, family: st
 def test_count_response_with_positive_event_is_not_rejected_as_degenerate(family: str) -> None:
     x = np.linspace(0.0, 1.0, 200)
     y = np.zeros(200)
-    y[::20] = 1.0
+    # Keep this positive-count control estimable for both families. Sparse
+    # binary counts are underdispersed, so an NB2 dispersion fit correctly
+    # reaches the Poisson boundary instead of having a finite interior root.
+    # Sparse counts of five retain the intended zero-heavy edge case while
+    # providing genuine overdispersion (variance 1.1875 > mean 0.25).
+    y[::20] = 5.0
     model = gamfit.fit({"x": x, "y": y}, "y ~ 1", family=family)
     prediction = np.asarray(model.predict({"x": x, "y": y}), dtype=float).ravel()
     assert prediction.shape == y.shape
