@@ -117,6 +117,39 @@ impl R42MersenneTwister {
     }
 }
 
+/// Canonical dedup key for one coordinate row, shared by the knot BUDGET and
+/// by the sampler that has to satisfy it.
+///
+/// It exists so the two cannot drift: a budget derived from a different notion
+/// of "distinct row" than `select_r_uniform_subsample_centers` uses is a budget
+/// that function may be unable to fill.
+fn coordinate_row_key<'a>(values: impl Iterator<Item = &'a f64>) -> Vec<u64> {
+    values
+        .map(|&value| gam_data::canonical_level_bits(value))
+        .collect()
+}
+
+/// Number of distinct coordinate rows over `cols`, keyed exactly as
+/// [`select_r_uniform_subsample_centers`] keys them.
+///
+/// This is mgcv's `uniquecombs` count. Its Duchon constructor deduplicates
+/// FIRST and only then caps at `max.knots`, so the reference budget is
+/// `min(n_unique, max.knots)`. A budget taken from the raw row count instead
+/// can exceed what the sampler can supply on any data carrying a repeated
+/// coordinate row — which is a hard refusal, not a degraded fit (#2623:
+/// `prostate_gamair` asked for 523 centers from 522 unique rows and the whole
+/// scenario failed).
+pub(crate) fn count_unique_coordinate_rows(values: ArrayView2<'_, f64>, cols: &[usize]) -> usize {
+    let mut seen = HashSet::<Vec<u64>>::with_capacity(values.nrows());
+    let mut unique = 0usize;
+    for row in 0..values.nrows() {
+        if seen.insert(coordinate_row_key(cols.iter().map(|&col| &values[[row, col]]))) {
+            unique += 1;
+        }
+    }
+    unique
+}
+
 /// Select the same fixed-seed uniform landmark experiment used by mgcv's
 /// Duchon smoother (`max.knots=2000`, `seed=1`).
 ///
@@ -140,12 +173,7 @@ pub(crate) fn select_r_uniform_subsample_centers(
     let mut seen = HashSet::<Vec<u64>>::with_capacity(data.nrows());
     let mut unique_rows = Vec::<usize>::with_capacity(data.nrows().min(num_centers));
     for row in 0..data.nrows() {
-        let key = data
-            .row(row)
-            .iter()
-            .map(|&value| gam_data::canonical_level_bits(value))
-            .collect::<Vec<_>>();
-        if seen.insert(key) {
+        if seen.insert(coordinate_row_key(data.row(row).iter())) {
             unique_rows.push(row);
         }
     }
@@ -670,6 +698,50 @@ pub(crate) fn select_uniform_grid_centers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2623: the spectral-Duchon knot budget was `min(n_rows, 2000)` while the
+    /// sampler that fills it deduplicates first, so a single repeated
+    /// coordinate row made the budget unsatisfiable and the fit hard-refused
+    /// (`prostate_gamair`: "requested 523 centers but data has only 522 unique
+    /// rows"). This pins the invariant the fix rests on — a budget taken from
+    /// `count_unique_coordinate_rows` is always fillable, and one row more
+    /// never is — so the two notions of "distinct row" cannot drift apart
+    /// again without failing here.
+    #[test]
+    fn unique_row_count_is_exactly_the_budget_the_sampler_can_fill_2623() {
+        // 523 rows, 522 distinct: row 0 is repeated at the end, which is the
+        // shape that killed the scenario. Duplicates are placed at both ends so
+        // an off-by-one in either direction of the scan is caught.
+        let rows = 523usize;
+        let mut data = Array2::<f64>::zeros((rows, 2));
+        for row in 0..rows - 1 {
+            data[[row, 0]] = row as f64;
+            data[[row, 1]] = (row * 2) as f64;
+        }
+        data[[rows - 1, 0]] = 0.0;
+        data[[rows - 1, 1]] = 0.0;
+
+        let cols = [0usize, 1usize];
+        let unique = count_unique_coordinate_rows(data.view(), &cols);
+        assert_eq!(
+            unique,
+            rows - 1,
+            "one repeated coordinate row must reduce the distinct count by exactly one"
+        );
+
+        // The budget the fix installs is satisfiable...
+        select_r_uniform_subsample_centers(data.view(), unique, 1)
+            .expect("a budget equal to the distinct-row count must always be fillable");
+
+        // ...and the budget the defect installed is not. This is the exact
+        // failure the benchmark hit, reproduced in milliseconds.
+        let err = select_r_uniform_subsample_centers(data.view(), rows, 1)
+            .expect_err("asking for more centers than distinct rows must still refuse");
+        assert!(
+            format!("{err}").contains("522 unique rows"),
+            "the refusal must name the distinct-row count it measured, got: {err}"
+        );
+    }
 
     #[test]
     fn r_uniform_subsample_matches_r_4_2_sample_without_replacement() {

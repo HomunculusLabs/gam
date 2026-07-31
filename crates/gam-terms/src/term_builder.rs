@@ -19,7 +19,7 @@ use crate::basis::{
     SphereWahbaKernel, SphericalSplineBasisSpec, SphericalSplineIdentifiability,
     ThinPlateBasisSpec, auto_spatial_center_strategy, default_num_centers,
     default_spatial_center_strategy, default_spherical_harmonic_degree, plan_spatial_basis,
-    select_r_uniform_subsample_centers, thin_plate_penalty_order,
+    count_unique_coordinate_rows, select_r_uniform_subsample_centers, thin_plate_penalty_order,
 };
 use crate::inference::formula_dsl::{
     ParsedTerm, SmoothKind, option_bool, option_f64, option_f64_strict, option_usize,
@@ -3272,7 +3272,18 @@ pub fn build_smooth_basis(
             );
             let spectral_rank = option_usize(options, "rank");
             let center_default = if spectral_rank.is_some() {
-                ds.values.nrows().min(2000)
+                // mgcv's Duchon constructor runs `uniquecombs` FIRST and caps
+                // at `max.knots` afterwards, so its knot budget is
+                // `min(n_unique, 2000)`. This took the RAW row count and let
+                // `select_r_uniform_subsample_centers` deduplicate later — so
+                // on any data carrying a repeated coordinate row with fewer
+                // than 2000 rows, the budget exceeded what the sampler could
+                // supply and the fit hard-refused rather than degrading
+                // (#2623: `prostate_gamair`, 523 requested vs 522 unique).
+                // Counting distinct rows here makes the budget satisfiable by
+                // construction, and leaves the retained spectral `rank` — a
+                // separate option — untouched.
+                count_unique_coordinate_rows(ds.values.view(), &cols).min(2000)
             } else {
                 cap_default_spatial_centers(options, default_centers)
             };
