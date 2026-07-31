@@ -1,5 +1,6 @@
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import pathlib
@@ -7,38 +8,47 @@ import shutil
 import subprocess
 import sys
 import zipfile
-import importlib.util
+
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+_RUN_SUITE_PATH = _REPO_ROOT / "bench" / "run_suite.py"
+_SCENARIOS_PATH = _REPO_ROOT / "bench" / "scenarios.json"
+
+
+def _load_scenario_config():
+    return json.loads(_SCENARIOS_PATH.read_text())
+
 
 def validate_schemas():
-    mod_path = pathlib.Path("bench/run_suite.py").resolve()
-    spec = importlib.util.spec_from_file_location("run_suite_mod", mod_path)
+    spec = importlib.util.spec_from_file_location("run_suite_mod", _RUN_SUITE_PATH)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    cfg = json.loads(pathlib.Path("bench/scenarios.json").read_text())
+    cfg = _load_scenario_config()
     scenarios = cfg.get("scenarios", [])
     if not scenarios:
-        raise SystemExit("No benchmark scenarios found in bench/scenarios.json")
+        raise SystemExit(f"No benchmark scenarios found in {_SCENARIOS_PATH}")
 
     for s in scenarios:
         mod.validate_scenario_schema(s)
     print(f"validated {len(scenarios)} scenario dataset schemas")
 
+
 def validate_geo_subpop():
-    mod_path = pathlib.Path("bench/run_suite.py").resolve()
-    spec = importlib.util.spec_from_file_location("run_suite_mod", mod_path)
+    spec = importlib.util.spec_from_file_location("run_suite_mod", _RUN_SUITE_PATH)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    cfg = json.loads(pathlib.Path("bench/scenarios.json").read_text())
+    cfg = _load_scenario_config()
     scenarios = cfg.get("scenarios", [])
     geo_subpop = [s for s in scenarios if str(s.get("name", "")).startswith("geo_subpop16_")]
     if not geo_subpop:
-        raise SystemExit("No geo_subpop16 scenarios found in bench/scenarios.json")
+        raise SystemExit(f"No geo_subpop16 scenarios found in {_SCENARIOS_PATH}")
 
     for s in geo_subpop:
         mod.validate_scenario_schema(s)
     print(f"validated geo_subpop16 simulation for {len(geo_subpop)} scenarios")
+
 
 def build_matrix(requested_scenarios=None):
     SERIAL_SCENARIOS = {
@@ -46,11 +56,11 @@ def build_matrix(requested_scenarios=None):
         "cirrhosis_survival",
     }
 
-    cfg = json.loads(pathlib.Path("bench/scenarios.json").read_text())
+    cfg = _load_scenario_config()
     scenarios = cfg.get("scenarios", [])
     names = [s["name"] for s in scenarios if "name" in s]
     if not names:
-        raise SystemExit("No benchmark scenarios found in bench/scenarios.json")
+        raise SystemExit(f"No benchmark scenarios found in {_SCENARIOS_PATH}")
 
     event_name = os.environ.get("GITHUB_EVENT_NAME", "").strip().lower()
     is_nightly = event_name == "schedule"
@@ -169,8 +179,7 @@ def download_artifacts(target_name, out_dir_arg):
 
 def check_python_deps():
     scenario_name = os.environ.get("SCENARIO_NAME", "unknown")
-    mod_path = pathlib.Path("bench/run_suite.py").resolve()
-    spec = importlib.util.spec_from_file_location("run_suite_mod", mod_path)
+    spec = importlib.util.spec_from_file_location("run_suite_mod", _RUN_SUITE_PATH)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     import numpy, pandas, lifelines, sksurv, xgboost
@@ -281,7 +290,7 @@ def matched_benchmark_verdict(rows, *, maximum_slowdown=1.2):
             observed_scenarios.add(scenario)
         by_scenario_contender[(scenario, contender)] = row
 
-    configured = json.loads(pathlib.Path("bench/scenarios.json").read_text()).get("scenarios", [])
+    configured = _load_scenario_config().get("scenarios", [])
     expected_scenarios = {str(s["name"]) for s in configured if s.get("name")}
     missing_scenarios = sorted(expected_scenarios - observed_scenarios)
     comparisons = []

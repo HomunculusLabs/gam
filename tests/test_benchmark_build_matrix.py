@@ -41,9 +41,11 @@ def _run_build_matrix(monkeypatch, tmp_path, event_name):
     out.write_text("")
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))
     monkeypatch.setenv("GITHUB_EVENT_NAME", event_name)
-    # build_matrix() reads bench/scenarios.json relative to cwd.
-    monkeypatch.chdir(REPO_ROOT)
-    mod.build_matrix()
+    # Imported workflow helpers must resolve checked-in inputs from their own
+    # location, not from whichever directory happens to invoke them.
+    monkeypatch.chdir(tmp_path)
+    requested = None if event_name == "schedule" else "wine_temp_vs_year"
+    mod.build_matrix(requested)
     parsed = {}
     for line in out.read_text().splitlines():
         if not line or "=" not in line:
