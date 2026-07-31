@@ -54,16 +54,14 @@ def test_bug_custom_family_coefficient_group_labels_are_stably_routed() -> None:
     assert blocks["bmi"] == ("linear", 2, 3)
 
 
-def test_bug_transformation_normal_time_basis_dimension_matches_response_basis() -> None:
+def test_bug_transformation_survival_time_basis_dimension_matches_response_basis() -> None:
     train = _weibull_frame(260)
     model = gamfit.fit(
         train,
         "Surv(entry, exit, event) ~ age",
         survival_likelihood="transformation",
-        transformation_normal=True,
     )
-    saved = model.save_bytes()
-    loaded = gamfit.load_bytes(saved)
+    loaded = gamfit.loads(model.dumps())
     pred = loaded.predict(train.iloc[:8].copy())
     assert pred.linear_predictor.shape[0] == 8
 
@@ -84,10 +82,13 @@ def test_bug_latent_survival_frailty_hazard_loading_requires_hazard_multiplier()
 
 
 def test_bug_latent_glm_family_synonyms_route_to_distinct_likelihood_specs() -> None:
+    rng = np.random.default_rng(71)
+    x = np.linspace(-2.0, 2.0, 120)
+    probability = 1.0 / (1.0 + np.exp(-(0.25 + 0.8 * x)))
     train = pd.DataFrame(
         {
-            "x": np.linspace(-1.0, 1.0, 60),
-            "y": (np.linspace(-1.0, 1.0, 60) > 0).astype(int),
+            "x": x,
+            "y": rng.binomial(1, probability),
         }
     )
     m1 = gamfit.fit(train, "y ~ x", family="binomial_logit")
