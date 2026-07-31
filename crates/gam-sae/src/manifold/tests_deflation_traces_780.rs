@@ -19,6 +19,19 @@ use super::*;
 /// difference of `log|H|` w.r.t. `log_ard[atom][axis]`, with deflation active.
 #[test]
 pub(crate) fn ard_log_precision_trace_matches_dense_fd_pd_region_deflation() {
+    // The `gauge_deflated_directions > 0` assertion below is all-or-nothing: the
+    // gate is `|g'Hg| <= 1e-8 * max_diag * |g|^2`, so the count collapses to 0 the
+    // moment every orbit direction clears the bar and a bare `got 0` cannot say
+    // whether the bar is marginally too tight, something now stiffens H_tt along
+    // the orbit, or this fixture no longer has a near-null orbit at all — three
+    // causes with three different fixes (#2228/#2500).
+    //
+    // `factor_gauge_deflated_evidence_row` reports the closest disqualified
+    // direction, in units of the bar, on exactly that branch — but at `debug`,
+    // and NO gam-sae test installs a logger, so without this line the diagnostic
+    // is present and silent. Install it at `Debug` so the number reaches the
+    // failure output.
+    gam_solve::progress_log::init_logging_at(log::LevelFilter::Debug);
     let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
     rho.log_lambda_sparse = 0.5;
