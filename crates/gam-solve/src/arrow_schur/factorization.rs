@@ -323,6 +323,10 @@ pub(crate) fn factor_gauge_deflated_evidence_row(
         return None;
     }
     let mut basis: Vec<Array1<f64>> = Vec::new();
+    // Closest miss, in units of the qualification bar itself: 1.0 means a
+    // direction sat exactly on the threshold, 1e6 means it was six orders away.
+    let mut closest_disqualified_ratio = f64::INFINITY;
+    let mut closest_disqualified_curvature = f64::NAN;
     for gauge in gauges {
         if gauge.len() != d {
             continue;
@@ -340,7 +344,22 @@ pub(crate) fn factor_gauge_deflated_evidence_row(
         // |g^T H g| <= eps * scale * |g|^2 qualifies (the absolute value is what
         // makes this two-sided: a large-magnitude curvature of EITHER sign is
         // disqualified, so only a genuine near-null orbit is deflated).
-        if curvature.abs() > GAUGE_RAYLEIGH_EPS * max_diag * norm_sq {
+        let qualification_bar = GAUGE_RAYLEIGH_EPS * max_diag * norm_sq;
+        if curvature.abs() > qualification_bar {
+            // #2228/#2500: record how far the CLOSEST disqualified direction was.
+            // This gate is all-or-nothing — `gauge_deflated_directions` does not
+            // degrade, it collapses to 0 the moment every orbit direction clears
+            // the bar — so six fixtures that need a deflated stratum fail together
+            // with `got 0`, and a scalar zero cannot distinguish "the bar is
+            // slightly too tight" from "this fixture has no near-null orbit at
+            // all". Those two readings imply opposite fixes.
+            if qualification_bar > 0.0 {
+                let ratio = curvature.abs() / qualification_bar;
+                if ratio < closest_disqualified_ratio {
+                    closest_disqualified_ratio = ratio;
+                    closest_disqualified_curvature = curvature;
+                }
+            }
             continue;
         }
         let mut direction = gauge.clone();
@@ -361,6 +380,18 @@ pub(crate) fn factor_gauge_deflated_evidence_row(
         basis.push(direction);
     }
     if basis.is_empty() {
+        // Costs nothing when deflation succeeds; emitted only on the branch that
+        // is currently indistinguishable from "no gauge was supplied".
+        log::debug!(
+            "[GAUGE-DEFLATION] no direction qualified: closest |g'Hg| was {:.6e}x the bar \
+             (curvature={:.6e}, bar=eps*max_diag*|g|^2, eps={:.1e}, max_diag={:.6e}, \
+             gauges={})",
+            closest_disqualified_ratio,
+            closest_disqualified_curvature,
+            GAUGE_RAYLEIGH_EPS,
+            max_diag,
+            gauges.len(),
+        );
         return None;
     }
 
