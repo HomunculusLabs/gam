@@ -1224,13 +1224,11 @@ impl<'a> RemlState<'a> {
             penalty_logdet,
             dispersion: ctx.dispersion,
             rho_curvature_scale: 1.0,
-            // The InnerSolution-carried prior must be the *effective* prior
-            // (firth-general PC default substituted for unset coordinates), so
-            // the unified EFS/LAML evaluation in `super::reml_outer_engine` shapes the λ
-            // update with the same hyperprior the outer cost/gradient use. Using
-            // the raw `self.rho_prior` here would leave the firth-general PC
-            // default out of the inner update entirely.
-            rho_prior: self.effective_rho_prior().into_owned(),
+            // EFS must see the prior the deterministic criterion actually
+            // evaluates. In particular, an unset `Flat` coordinate stays flat;
+            // the proper PC prior derived for posterior sampling must never
+            // leak into a fitting update.
+            rho_prior: self.rho_prior.clone(),
             hessian_logdet_correction,
             penalty_subspace_trace,
             deriv_provider: Some(ctx.deriv_provider),
@@ -3108,35 +3106,12 @@ mod tk_math_tests {
     use num_dual::{Dual3_64, Dual64, DualNum, third_derivative};
 
     #[test]
-    pub(crate) fn firth_default_pc_prior_fills_flat_holes() {
-        let pc = firth_default_pc_prior();
-        let configured = RhoPrior::Normal { mean: 0.1, sd: 2.0 };
-        let flat_gamma = RhoPrior::GammaPrecision {
-            shape: 1.0,
-            rate: 0.0,
-        };
-        // A whole `Flat` prior becomes the weak PC default.
-        assert_eq!(*resolve_effective_rho_prior(&RhoPrior::Flat), pc);
-        // Gamma(1, 0) is the same flat MAP-in-λ prior and follows the same path.
-        assert_eq!(*resolve_effective_rho_prior(&flat_gamma), pc);
-        // An explicitly-configured prior is honored unchanged (no override).
-        assert_eq!(*resolve_effective_rho_prior(&configured), configured);
-        // Only flat coordinates of an Independent prior inherit the PC.
-        let indep =
-            RhoPrior::Independent(vec![RhoPrior::Flat, configured.clone(), flat_gamma.clone()]);
+    pub(crate) fn rho_distribution_default_mask_marks_only_flat_coordinates() {
+        // Whole-Flat → every coordinate needs a distribution default.
         assert_eq!(
-            *resolve_effective_rho_prior(&indep),
-            RhoPrior::Independent(vec![pc.clone(), configured.clone(), pc.clone()])
+            rho_distribution_default_coord_mask(&RhoPrior::Flat, 3),
+            vec![true; 3]
         );
-        // An Independent prior with no Flat holes is left untouched.
-        let no_holes = RhoPrior::Independent(vec![configured.clone(), configured.clone()]);
-        assert_eq!(*resolve_effective_rho_prior(&no_holes), no_holes);
-    }
-
-    #[test]
-    pub(crate) fn firth_default_coord_mask_marks_only_flat_coordinates() {
-        // Whole-Flat → every coordinate is a firth default.
-        assert_eq!(firth_default_coord_mask(&RhoPrior::Flat, 3), vec![true; 3]);
         // Independent → only mathematically flat holes are defaults.
         let indep = RhoPrior::Independent(vec![
             RhoPrior::Flat,
@@ -3146,93 +3121,98 @@ mod tk_math_tests {
                 rate: 0.0,
             },
         ]);
-        assert_eq!(firth_default_coord_mask(&indep, 3), vec![true, false, true]);
+        assert_eq!(
+            rho_distribution_default_coord_mask(&indep, 3),
+            vec![true, false, true]
+        );
         // An explicitly-configured scalar prior defaults nothing.
         assert_eq!(
-            firth_default_coord_mask(&RhoPrior::Normal { mean: 0.0, sd: 1.0 }, 2),
+            rho_distribution_default_coord_mask(&RhoPrior::Normal { mean: 0.0, sd: 1.0 }, 2,),
             vec![false; 2]
         );
     }
 
     #[test]
-    pub(crate) fn firth_default_barrier_is_byte_zero_on_identified_side() {
-        use crate::rho_prior_eval::{firth_default_barrier_terms, pc_prior_rate};
-        let upper = FIRTH_DEFAULT_PC_UPPER;
-        let theta = pc_prior_rate(upper, FIRTH_DEFAULT_PC_TAIL_PROB);
-        let rho_gate = -2.0 * upper.ln();
-
-        // Identified side (ρ ≥ ρ_gate, distance d = e^{-ρ/2} ≤ upper): the barrier
-        // contributes EXACTLY zero — strict zero-downside, no Occam pull. This is
-        // the whole point of FIX B: the plain PC gradient would be ≈ +1/2 here.
-        for &r in &[rho_gate, rho_gate + 1e-9, 0.0, 5.0, 50.0] {
-            let (c, g, h) = firth_default_barrier_terms(theta, upper, r);
-            assert_eq!((c, g, h), (0.0, 0.0, 0.0), "must be byte-zero at ρ={r}");
-        }
-
-        // Degenerate side (ρ < ρ_gate, λ → 0): a convex wall that pushes ρ UP
-        // (negative gradient) with positive curvature, and is C⁰ at the gate.
-        for &r in &[rho_gate - 1.0, rho_gate - 5.0, -20.0] {
-            let (c, g, h) = firth_default_barrier_terms(theta, upper, r);
-            assert!(c > 0.0, "cost must be positive below the gate at ρ={r}");
-            assert!(g < 0.0, "gradient must push ρ up (away from λ→0) at ρ={r}");
-            assert!(h > 0.0, "curvature must be positive at ρ={r}");
-        }
-
-        // C⁰ continuity at the gate: cost → 0 as ρ ↑ ρ_gate.
-        let (c_below, _, _) = firth_default_barrier_terms(theta, upper, rho_gate - 1e-6);
-        assert!(
-            c_below.abs() < 1e-9,
-            "cost continuous at the gate, got {c_below}"
-        );
-
-        // Finite-difference check of grad and (diagonal) Hessian below the gate.
-        let r = rho_gate - 2.0;
-        let cost_at = |dr: f64| firth_default_barrier_terms(theta, upper, r + dr).0;
-        let grad_at = |dr: f64| firth_default_barrier_terms(theta, upper, r + dr).1;
-        let (_, g, h) = firth_default_barrier_terms(theta, upper, r);
-        let fd_g = (cost_at(1e-6) - cost_at(-1e-6)) / 2e-6;
-        let fd_h = (grad_at(1e-5) - grad_at(-1e-5)) / 2e-5;
-        assert!((fd_g - g).abs() < 1e-6, "grad FD {fd_g} vs {g}");
-        assert!((fd_h - h).abs() < 1e-5, "hess FD {fd_h} vs {h}");
+    pub(crate) fn flat_deterministic_criterion_is_zero_for_every_rho_2623() {
+        use crate::rho_prior_eval::{InvalidPriorPolicy, evaluate};
+        let rho = array![-30.0, -20.0, -4.7, 0.0, 30.0];
+        let eval = evaluate(&RhoPrior::Flat, &rho, InvalidPriorPolicy::HardError)
+            .expect("Flat is valid at every finite rho");
+        assert_eq!(eval.cost, 0.0);
+        assert_eq!(eval.gradient, Array1::<f64>::zeros(rho.len()));
+        assert_eq!(eval.hessian, None);
     }
 
-    /// Issue #2450. The ρ-posterior samplers target `exp(−criterion(ρ))`, so they
-    /// need a criterion that is a log-DENSITY. The one the optimizer minimizes is
-    /// deliberately not: on the identified side the firth default contributes
-    /// byte-zero, which is what keeps a clean fit identical to plain REML and what
-    /// leaves the `λ = ∞` face gradient vanishing so the rail certificates hold.
+    #[test]
+    pub(crate) fn reml_state_does_not_rewrite_flat_before_prior_evaluation_2623() {
+        let y = array![0.0, 1.0, 0.0];
+        let x = array![[1.0, -1.0], [1.0, 0.0], [1.0, 1.0]];
+        let weights = Array1::ones(y.len());
+        let offset = Array1::zeros(y.len());
+        let penalty = array![[0.0, 0.0], [0.0, 1.0]];
+        let canonical = gam_terms::construction::canonicalize_penalty_specs(
+            &[PenaltySpec::Dense(penalty)],
+            &[1],
+            x.ncols(),
+            "flat-prior regression",
+        )
+        .map(|(canonical, _)| canonical)
+        .expect("canonicalize penalty");
+        let config = RemlConfig::external(
+            GlmLikelihoodSpec::canonical(LikelihoodSpec::new(
+                ResponseFamily::Binomial,
+                InverseLink::Standard(StandardLink::Logit),
+            )),
+            1e-12,
+            false,
+        );
+        let mut state = RemlState::newwith_offset(
+            y.view(),
+            x,
+            weights.view(),
+            offset.view(),
+            canonical,
+            2,
+            &config,
+            Some(vec![1]),
+            None,
+            None,
+        )
+        .expect("build RemlState");
+        state.set_rho_prior(RhoPrior::Flat);
+
+        // −4.7 lies below the former hidden barrier gate
+        // `−2 ln(10) ≈ −4.605`. The configured criterion must still be exactly
+        // flat here: no response-dependent threshold is part of REML/LAML.
+        let eval = state.evaluate_configured_rho_prior(&array![-4.7]);
+        assert_eq!(eval.cost, 0.0);
+        assert_eq!(eval.gradient, array![0.0]);
+        assert_eq!(eval.hessian, None);
+    }
+
+    /// Issues #2450/#2623. The ρ-posterior samplers target
+    /// `exp(−criterion(ρ))`, so they need a proper density. The deterministic
+    /// criterion remains pure REML/LAML: an unset prior contributes exactly zero
+    /// at every finite ρ, with no response-dependent hidden gate.
     ///
     /// Both halves have to stay true at once, and this pins them together: the
-    /// criterion's contribution is unchanged (still byte-zero, still an exactly
-    /// vanishing upper-tail gradient), while the correction a sampler adds is the
-    /// whole PC prior there — including the `+1/2` upper-tail gradient that makes
-    /// the sampled density decay like `e^{−ρ/2}` instead of running flat.
+    /// The correction a sampler adds is therefore the whole PC prior, including
+    /// the `+1/2` upper-tail gradient that makes the sampled density decay like
+    /// `e^{−ρ/2}` instead of running flat.
     #[test]
     pub(crate) fn sampler_prior_correction_restores_the_density_the_criterion_must_not_have_2450() {
         use crate::rho_prior_eval::{
-            firth_default_barrier_terms, firth_default_distribution_correction, pc_prior_rate,
-            pc_prior_terms,
+            pc_prior_rate, pc_prior_terms, rho_distribution_default_terms,
         };
-        let upper = FIRTH_DEFAULT_PC_UPPER;
-        let theta = pc_prior_rate(upper, FIRTH_DEFAULT_PC_TAIL_PROB);
-        let rho_gate = -2.0 * upper.ln();
+        let upper = RHO_DISTRIBUTION_PC_UPPER;
+        let theta = pc_prior_rate(upper, RHO_DISTRIBUTION_PC_TAIL_PROB);
 
-        for &r in &[rho_gate, rho_gate + 1e-9, 0.0, 5.0, 30.0] {
-            // THE CRITERION HALF, unchanged: byte-zero on the identified side, so
-            // `upper_tail_gradient_vanishes` and every rail path see exactly what
-            // they saw before a sampler correction existed.
-            assert_eq!(
-                firth_default_barrier_terms(theta, upper, r),
-                (0.0, 0.0, 0.0),
-                "the criterion's firth default must stay byte-zero at ρ={r}"
-            );
-            // THE SAMPLER HALF: where the criterion has nothing, the correction is
-            // the entire PC prior — bitwise, since it is `pc − 0`.
+        for &r in &[-30.0, -20.0, -4.7, 0.0, 5.0, 30.0] {
             let (pc_cost, pc_grad, _) = pc_prior_terms(theta, r);
             assert_eq!(
-                firth_default_distribution_correction(theta, upper, r),
+                rho_distribution_default_terms(theta, r),
                 (pc_cost, pc_grad),
-                "above the gate the sampler correction IS the PC prior at ρ={r}"
+                "the sampler correction is the PC prior at ρ={r}"
             );
         }
 
@@ -3240,7 +3220,7 @@ mod tk_math_tests {
         // `+1/2`, so the sampled density decays like `e^{−ρ/2}`. The shortfall is
         // exactly `(θ/2)·e^{−ρ/2}`, which is below 1e-7 by ρ = 30 — the ρ box bound,
         // i.e. the far edge of the region a sampler can reach.
-        let (_, tail_grad) = firth_default_distribution_correction(theta, upper, 30.0);
+        let (_, tail_grad) = rho_distribution_default_terms(theta, 30.0);
         let shortfall = 0.5 * theta * (-0.5 * 30.0f64).exp();
         assert!(
             (0.5 - tail_grad - shortfall).abs() < 1e-15,
@@ -3252,18 +3232,6 @@ mod tk_math_tests {
             "the restored upper-tail gradient must have reached +1/2 by the box bound, \
              shortfall {shortfall}"
         );
-
-        // Below the gate the criterion DOES carry a wall, so the correction is the
-        // difference and nothing more.
-        for &r in &[rho_gate - 1e-3, rho_gate - 1.0, rho_gate - 5.0, -20.0] {
-            let (pc_cost, pc_grad, _) = pc_prior_terms(theta, r);
-            let (barrier_cost, barrier_grad, _) = firth_default_barrier_terms(theta, upper, r);
-            assert_eq!(
-                firth_default_distribution_correction(theta, upper, r),
-                (pc_cost - barrier_cost, pc_grad - barrier_grad),
-                "below the gate the correction is exactly pc − barrier at ρ={r}"
-            );
-        }
     }
 
     #[test]

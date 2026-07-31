@@ -765,21 +765,17 @@ impl<'a> RemlState<'a> {
                 // The tiers below sample `π(ρ|y) ∝ exp(−criterion(ρ))`, so the
                 // criterion they are handed has to BE a log-density. The one the
                 // optimizer minimizes is not: `evaluate_configured_rho_prior`
-                // replaces every firth-default coordinate's PC term with the
-                // self-gated barrier, which is byte-identically flat on the
-                // identified side — deliberately, because that is what keeps a
-                // clean fit identical to plain REML and what lets the λ=∞ rail
-                // certificates hold. Handing that to a sampler leaves it with no
-                // prior at all over the identified region: measured on the
+                // evaluates every unset coordinate directly as `Flat`, hence
+                // exact zero for every finite ρ. That is the declared pure
+                // REML/LAML criterion, but handing it to a sampler leaves no
+                // proper prior over ρ: measured on the
                 // n=600 anisotropic-Duchon fit in
                 // `margslope_duchon_slowdown`, the NUTS tier doubles to maximum
                 // depth and the fit does not return in 2136 s, against 1.28 s
                 // once ρ carries a proper prior.
                 //
-                // `resolve_effective_rho_prior` already produces the PC-filled
-                // proper prior for exactly this reason, and
-                // `rho_prior_distribution_correction` is the difference between
-                // it and what the criterion applied. Adding it HERE, at the
+                // `rho_prior_distribution_correction` provides the proper PC
+                // contribution missing from the flat criterion. Adding it HERE, at the
                 // sampler's own call site, is what keeps the two apart: no
                 // criterion site is touched, so certification, the rail
                 // certificates and every fit's λ̂ are byte-unchanged by

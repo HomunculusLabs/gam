@@ -490,10 +490,8 @@ impl RhoPrior {
     /// True exactly for the families whose ρ-gradient is identically zero on
     /// the identified upper tail:
     ///
-    /// * `Flat` — the REML runtime evaluates unset coordinates through the
-    ///   SELF-GATED, one-sided firth-default barrier, which is byte-identically
-    ///   flat above `ρ = −2 ln(upper)`. The wall it does carry is on the
-    ///   *other* side, against the `λ → 0` under-smoothing degeneracy.
+    /// * `Flat` — the deterministic REML/LAML criterion evaluates it directly:
+    ///   cost, gradient, and Hessian are identically zero for every finite `ρ`.
     /// * `GammaPrecision { shape: 1, rate: 0 }` — exactly flat under the
     ///   MAP-in-λ convention (cost, gradient and Hessian all vanish); the same
     ///   "unset" coordinate as `Flat`, spelled differently.
@@ -577,14 +575,13 @@ impl RhoPrior {
 /// an IMPROPER joint posterior — as `ρ → ∞` the REML criterion tends to the
 /// finite λ=∞ face value, so `exp(−V)` does not decay and `∫dρ` diverges — and
 /// that is precisely why joint HMC needs a proper one. The runtime already
-/// separates the two: `resolve_effective_rho_prior` fills unset (`Flat`)
-/// coordinates with the weakly-informative penalized-complexity default for
-/// consumers that need a *distribution* (serialization, joint-HMC refinement),
-/// while the REML/LAML objective evaluates those same coordinates through the
-/// self-gated one-sided barrier, which is byte-identically flat on the
-/// identified side. One default cannot serve both questions; `Flat` is the
-/// answer to "what criterion am I minimizing", and the sampler's answer is
-/// derived from it rather than shared with it.
+/// separates the two: `rho_prior_distribution_correction` adds the
+/// weakly-informative penalized-complexity default at the boundary for consumers
+/// that need a *distribution* (such as joint-HMC refinement), while
+/// the REML/LAML objective evaluates those same configured coordinates directly
+/// as exact zero. One default cannot serve both questions; `Flat` is the answer
+/// to "what criterion am I minimizing", and the sampler's answer is derived at
+/// the sampling boundary rather than shared with fitting.
 impl Default for RhoPrior {
     fn default() -> Self {
         Self::Flat

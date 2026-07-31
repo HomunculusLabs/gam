@@ -1372,38 +1372,14 @@ pub(crate) fn reml_robust_jeffreys_link(config: &RemlConfig) -> Option<InverseLi
     reml_jeffreys_supported_link(&config.likelihood)
 }
 
-/// `upper`/`tail_prob` calibrating the firth-general default barrier on an unset
-/// smoothing coordinate. The tail statement `P(d > upper) = tail_prob` on the
+/// `upper`/`tail_prob` calibrating the proper distribution prior derived for an
+/// unset smoothing coordinate. The tail statement `P(d > upper) = tail_prob` on the
 /// marginal-SD distance scale `d = exp(−ρ/2)` calibrates the exponential rate
 /// `θ = −ln(tail_prob)/upper`. We use `upper = 10`, `tail_prob = 0.01`
 /// ⇒ `θ = −ln(0.01)/10 ≈ 0.4605`.
-pub(crate) const FIRTH_DEFAULT_PC_UPPER: f64 = 10.0;
+pub(crate) const RHO_DISTRIBUTION_PC_UPPER: f64 = 10.0;
 
-pub(crate) const FIRTH_DEFAULT_PC_TAIL_PROB: f64 = 0.01;
-
-/// Weakly-informative DEFAULT outer ρ prior used by the firth-general policy on
-/// any smoothing coordinate the caller left unset (`RhoPrior::Flat`).
-///
-/// The *value* returned here is a [`RhoPrior::PenalizedComplexity`] so that
-/// downstream consumers that round-trip the resolved prior (serialization, the
-/// joint-HMC refinement at `effective_rho_prior().into_owned()`) see a
-/// well-defined prior family. Its *outer-objective contribution*, however, is NOT
-/// the plain PC term: the REML/LAML runtime evaluates firth-default coordinates
-/// through the SELF-GATED, one-sided barrier
-/// [`crate::rho_prior_eval::firth_default_barrier_terms`], which is byte-identically
-/// flat (cost/grad/hess = 0) on the identified side `ρ ≥ −2 ln(upper)` and only a
-/// convex wall against the `λ → 0` / `ρ → −∞` under-smoothing degeneracy below
-/// it. This restores STRICT zero-downside (a clean / well-conditioned fit is
-/// byte-identical to plain REML, mirroring the Jeffreys conditioning gate)
-/// instead of the plain PC term's persistent `+1/2` Occam pull, which would
-/// shift every identified `λ` by an `O(1/n)` amount on every fit.
-#[inline]
-pub(crate) fn firth_default_pc_prior() -> RhoPrior {
-    RhoPrior::PenalizedComplexity {
-        upper: FIRTH_DEFAULT_PC_UPPER,
-        tail_prob: FIRTH_DEFAULT_PC_TAIL_PROB,
-    }
-}
+pub(crate) const RHO_DISTRIBUTION_PC_TAIL_PROB: f64 = 0.01;
 
 /// A Gamma prior on the physical precision `λ` with shape `1` and rate `0` has
 /// density proportional to a constant in `λ`. Under the deterministic
@@ -1425,14 +1401,13 @@ pub(crate) fn is_unset_flat_rho_prior(prior: &RhoPrior) -> bool {
     }
 }
 
-/// Per-coordinate `true` where the firth-general default barrier (rather than an
-/// explicitly-configured prior) governs that smoothing coordinate. A coordinate
-/// is a firth default exactly when the caller left it mathematically flat:
+/// Per-coordinate `true` where a distributional consumer must derive the proper
+/// default rather than use an explicitly configured prior. A coordinate needs
+/// that default exactly when the caller left it mathematically flat:
 /// `Flat`, or the equivalent `GammaPrecision { shape: 1, rate: 0 }`, either as a
 /// whole prior or as holes in an `Independent` prior. Returned per-`ρ`-coordinate
-/// so the runtime can override just those coordinates' objective contribution
-/// with the self-gated barrier.
-pub(crate) fn firth_default_coord_mask(configured: &RhoPrior, len: usize) -> Vec<bool> {
+/// so the sampling boundary can add a proper density without changing fitting.
+pub(crate) fn rho_distribution_default_coord_mask(configured: &RhoPrior, len: usize) -> Vec<bool> {
     match configured {
         RhoPrior::Flat => vec![true; len],
         RhoPrior::Independent(priors) if priors.len() == len => {
@@ -1442,39 +1417,6 @@ pub(crate) fn firth_default_coord_mask(configured: &RhoPrior, len: usize) -> Vec
     }
 }
 
-/// Resolve the *effective* outer ρ prior under the (unconditional) firth-general
-/// default policy.
-///
-/// An *unset* prior (the `Flat` sentinel or equivalent Gamma(1, 0) flat prior —
-/// whole-prior, or any such coordinate of an `Independent`) is filled with the weakly-informative
-/// [`firth_default_pc_prior`]; any explicitly-configured prior is honored
-/// unchanged. Pulled out as a free function so the decision is unit-testable
-/// without constructing a full `RemlState`.
-pub(crate) fn resolve_effective_rho_prior(configured: &RhoPrior) -> std::borrow::Cow<'_, RhoPrior> {
-    match configured {
-        // Whole prior unset → fill every coordinate with the weak PC default.
-        RhoPrior::Flat => std::borrow::Cow::Owned(firth_default_pc_prior()),
-        // Gamma(1, 0) is exactly flat in the deterministic MAP-in-λ convention,
-        // so route it through the same unset path as `Flat`.
-        RhoPrior::GammaPrecision { shape, rate } if *shape == 1.0 && *rate == 0.0 => {
-            std::borrow::Cow::Owned(firth_default_pc_prior())
-        }
-        // Per-coordinate priors: only the `Flat` (unset) coordinates inherit the
-        // PC default; explicitly configured coordinates are preserved.
-        RhoPrior::Independent(priors) if priors.iter().any(is_unset_flat_rho_prior) => {
-            let filled = priors
-                .iter()
-                .map(|p| match p {
-                    p if is_unset_flat_rho_prior(p) => firth_default_pc_prior(),
-                    other => other.clone(),
-                })
-                .collect();
-            std::borrow::Cow::Owned(RhoPrior::Independent(filled))
-        }
-        // Any explicitly configured prior is honored as-is.
-        other => std::borrow::Cow::Borrowed(other),
-    }
-}
 
 #[inline]
 pub(crate) fn reml_fixed_glm_dispersion(

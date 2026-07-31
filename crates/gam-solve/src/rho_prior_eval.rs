@@ -56,80 +56,17 @@ pub(crate) fn pc_prior_terms(theta: f64, r: f64) -> (f64, f64, f64) {
     (0.5 * r + theta * e, 0.5 - 0.5 * theta * e, 0.25 * theta * e)
 }
 
-/// Self-gated, *one-sided* penalized-complexity barrier used as the firth-general
-/// DEFAULT outer ρ prior on smoothing coordinates the caller left unset. It walls
-/// off the `λ → 0` / `ρ → −∞` under-smoothing degeneracy WITHOUT perturbing a
-/// well-identified `λ` — restoring the strict zero-downside guarantee (a clean
-/// fit stays byte-identical to plain REML), exactly the way the Jeffreys
-/// conditioning gate returns a byte-identical-zero contribution on a clean fit.
+/// Proper prior contribution added at the sampling boundary for one smoothing
+/// coordinate whose deterministic criterion prior is unset.
 ///
-/// MOTIVATION. The plain PC prior contributes `cost = ρ/2 + θ e^{-ρ/2}` whose
-/// gradient `1/2 − (θ/2) e^{-ρ/2}` tends to the CONSTANT `+1/2` as `ρ → +∞`. That
-/// residual `O(1)` Occam pull shifts the REML optimum of EVERY identified `λ` by
-/// `Δρ ≈ (1/2)/H_reml = O(1/n)` — small, but never byte-zero, so it is a
-/// (tiny) downside on every fit including well-conditioned ones. The firth
-/// default exists only to remove the `λ → 0` degeneracy, not to bias an
-/// identified `λ`, so the default should be EXACTLY flat on the identified side.
-///
-/// SHAPE. Work on the distance scale `b(ρ) = e^{-ρ/2}` (the marginal-SD scale of
-/// the penalized component; `b → ∞` is the under-smoothing degeneracy). Gate at
-/// `ρ_gate` with `b_gate = e^{-ρ_gate/2}`:
-///   * `ρ ≥ ρ_gate` (identified side, distance `b ≤ b_gate`): cost = grad = hess
-///     = 0, BYTE-IDENTICALLY (a clean fit pays nothing — strict zero-downside).
-///   * `ρ < ρ_gate` (degenerate side, distance `b > b_gate`): a convex barrier
-///     that is C¹ at the gate,
-///       cost = θ [ b(ρ) − b_gate − (1/2) b_gate (ρ_gate − ρ) ],
-///       grad = θ [ −(1/2) b(ρ) + (1/2) b_gate ]   (= 0 at the gate, < 0 below),
-///       hess = (θ/4) b(ρ)  (> 0, always usable curvature).
-///     The gradient is negative below the gate (pushing `ρ` UP, away from the
-///     `λ → 0` wall) and decays continuously to zero AT the gate, so there is no
-///     persistent pull on the identified side.
-///
-/// GATE CHOICE. `ρ_gate = −2 ln(upper)`, i.e. the barrier engages only once the
-/// marginal-SD distance `b = e^{-ρ/2}` exceeds the SAME interpretable `upper`
-/// bound that calibrates `θ` (`P(b > upper) = tail_prob`). Any `λ` whose
-/// distance scale is within the plausible identified range `b ≤ upper` is left
-/// exactly untouched; the wall only asserts itself in the genuinely
-/// under-smoothed tail the prior was introduced to bound.
-pub(crate) fn firth_default_barrier_terms(theta: f64, upper: f64, r: f64) -> (f64, f64, f64) {
-    let rho_gate = -2.0 * upper.ln();
-    if r >= rho_gate {
-        // Identified side: byte-identically flat (strict zero-downside).
-        return (0.0, 0.0, 0.0);
-    }
-    let b = (-0.5 * r).exp();
-    let b_gate = (-0.5 * rho_gate).exp(); // == upper, but kept symbolic for clarity.
-    let cost = theta * (b - b_gate - 0.5 * b_gate * (rho_gate - r));
-    let grad = theta * (-0.5 * b + 0.5 * b_gate);
-    let hess = 0.25 * theta * b;
-    (cost, grad, hess)
-}
-
-/// How much a consumer that needs a ρ *distribution* must add to the criterion's
-/// prior contribution on ONE firth-default coordinate (#2450): `pc − barrier`.
-///
-/// [`firth_default_barrier_terms`] is byte-identically flat on the identified
-/// side, which is exactly right for the criterion — it is what keeps a clean fit
-/// identical to plain REML, and what leaves the `λ = ∞` face gradient vanishing
-/// so the rail certificates can hold. It is exactly wrong for anything that has
-/// to be a density: a prior contributing nothing over the identified region
-/// leaves the ρ-posterior with no prior there at all, and the ρ-posterior
-/// samplers target `exp(−criterion(ρ))` directly.
-///
-/// `resolve_effective_rho_prior` already fills unset coordinates with the weak PC
-/// default for precisely this purpose, so the correction is the difference
-/// between that PC term and the barrier the criterion applied instead. Above the
-/// gate the barrier is zero and this is the whole PC term — which is the point:
-/// it restores the `+1/2` upper-tail gradient, so the sampled density decays like
-/// `e^{−ρ/2}` instead of running flat to the box edge.
-///
-/// Curvature is not returned. Consumers of this correction sample a log-density
-/// and its gradient; none of them needs its second derivative, and the criterion
-/// — which does — must never receive it.
-pub(crate) fn firth_default_distribution_correction(theta: f64, upper: f64, r: f64) -> (f64, f64) {
-    let (pc_cost, pc_grad, _) = pc_prior_terms(theta, r);
-    let (barrier_cost, barrier_grad, _) = firth_default_barrier_terms(theta, upper, r);
-    (pc_cost - barrier_cost, pc_grad - barrier_grad)
+/// The fit evaluates `Flat` directly, hence contributes exact zero for every
+/// finite `r`. A sampler over `r` instead needs a proper density, so it adds the
+/// weak PC prior derived by the distribution policy. Keeping this boundary
+/// explicit prevents a future fitting path from mistaking the sampler's derived
+/// prior for part of REML/LAML.
+pub(crate) fn rho_distribution_default_terms(theta: f64, r: f64) -> (f64, f64) {
+    let (cost, gradient, _) = pc_prior_terms(theta, r);
+    (cost, gradient)
 }
 
 /// What a caller wants done when the configured prior is malformed (e.g. a

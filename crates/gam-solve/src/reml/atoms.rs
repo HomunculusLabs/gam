@@ -917,11 +917,11 @@ impl CriterionAtom for JeffreysLogdetAtom {
 /// This is a θ-only atom: it has no dependence on the inner mode `β̂`, so its
 /// β-channel is `None` and it declares no smoothness stratum. Its internal state
 /// is the single [`RhoPriorEval`](crate::rho_prior_eval::RhoPriorEval) emitted by
-/// the shared prior evaluator after all REML/LAML policies have been applied
-/// (weight anchoring, Saturate invalid-prior handling, and the Firth-default
-/// self-gated barrier). The objective assembly reads value, first derivative,
-/// and diagonal Hessian from this same object, so configured-prior cost and
-/// gradient can no longer come from separate wrapper calls.
+/// the shared prior evaluator after weight anchoring and Saturate invalid-prior
+/// handling. The configured prior itself is not rewritten: in particular,
+/// `Flat` remains exact zero. The objective assembly reads value, first
+/// derivative, and diagonal Hessian from this same object, so configured-prior
+/// cost and gradient can no longer come from separate wrapper calls.
 pub struct ConfiguredRhoPriorAtom {
     // #1521: `RhoPriorEval` is `pub(crate)`; keep this field `pub(crate)` so the
     // now-`pub` `atoms` module does not expose a private-in-public type
@@ -1345,8 +1345,8 @@ impl CriterionAtom for ThetaOnlyCorrectionAtom {
 //
 // LANDED (pass 4b, configured-prior atom): `ConfiguredRhoPriorAtom` wraps the
 // shared `RhoPriorEval` after the REML/LAML policies are applied (configured
-// prior, Firth-default barrier replacement, invalid-prior saturation, and
-// weight anchoring). The live `RemlState::build_prior` path now constructs
+// prior, invalid-prior saturation, and weight anchoring). The live
+// `RemlState::build_prior` path now constructs
 // this atom once per prior assembly and projects configured-prior cost,
 // gradient, and diagonal Hessian from that one emission; the old
 // `compute_configured_rho_prior_{cost,grad,hess}` wrappers and the generic

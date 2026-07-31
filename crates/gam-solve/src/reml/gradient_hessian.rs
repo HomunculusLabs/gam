@@ -3950,7 +3950,6 @@ impl<'a> RemlState<'a> {
         &self,
         rho: &Array1<f64>,
     ) -> crate::rho_prior_eval::RhoPriorEval {
-        let effective = self.effective_rho_prior();
         // Evaluate the prior at the weight-anchored coordinate `ρ̃ = ρ − log g(w)`
         // (see [`rho_weight_anchor`](Self::rho_weight_anchor)) so the selected λ̂
         // is exactly invariant to a global weight rescale `w → c·w` (issue #877).
@@ -3960,76 +3959,28 @@ impl<'a> RemlState<'a> {
         let anchor = self.rho_weight_anchor();
         let rho_anchored = (anchor != 0.0).then(|| rho.mapv(|r| r - anchor));
         let rho_eff: &Array1<f64> = rho_anchored.as_ref().unwrap_or(rho);
-        let mut eval = crate::rho_prior_eval::evaluate(
-            effective.as_ref(),
+        crate::rho_prior_eval::evaluate(
+            &self.rho_prior,
             rho_eff,
             crate::rho_prior_eval::InvalidPriorPolicy::Saturate,
         )
-        .expect("Saturate policy never errors");
-        // FIRTH-DEFAULT SELF-GATE (strict zero-downside). The shared engine
-        // evaluated every firth-default-filled coordinate as a plain PC term,
-        // whose gradient carries the persistent `+1/2` Occam pull that perturbs
-        // even a well-identified λ by O(1/n). Replace those coordinates'
-        // contribution with the SELF-GATED one-sided barrier
-        // `firth_default_barrier_terms`, which is byte-identically flat on the
-        // identified side (ρ ≥ −2 ln upper) and only a convex wall against the
-        // λ → 0 degeneracy below it — so a clean/well-conditioned fit stays
-        // byte-identical to plain REML. Explicitly-configured priors (including a
-        // user-supplied PenalizedComplexity) are left exactly as the engine
-        // produced them. If the saturating policy already flagged a malformed
-        // prior (non-finite cost), leave it untouched so the repulsion stands.
-        if eval.cost.is_finite() {
-            let mask = firth_default_coord_mask(&self.rho_prior, rho.len());
-            if mask.iter().any(|&d| d) {
-                let theta = crate::rho_prior_eval::pc_prior_rate(
-                    FIRTH_DEFAULT_PC_UPPER,
-                    FIRTH_DEFAULT_PC_TAIL_PROB,
-                );
-                let mut hess = eval
-                    .hessian
-                    .take()
-                    .unwrap_or_else(|| Array2::<f64>::zeros((rho.len(), rho.len())));
-                for (idx, &is_default) in mask.iter().enumerate() {
-                    if !is_default {
-                        continue;
-                    }
-                    let r = rho_eff[idx];
-                    // Remove the plain PC contribution the engine added for this
-                    // defaulted coordinate, then add the self-gated barrier.
-                    let (pc_c, pc_g, pc_h) = crate::rho_prior_eval::pc_prior_terms(theta, r);
-                    let (b_c, b_g, b_h) = crate::rho_prior_eval::firth_default_barrier_terms(
-                        theta,
-                        FIRTH_DEFAULT_PC_UPPER,
-                        r,
-                    );
-                    eval.cost += b_c - pc_c;
-                    eval.gradient[idx] += b_g - pc_g;
-                    hess[[idx, idx]] += b_h - pc_h;
-                }
-                eval.hessian = hess.iter().any(|&v| v != 0.0).then_some(hess);
-            }
-        }
-        eval
+        .expect("Saturate policy never errors")
     }
 
     /// The amount by which a consumer needing a ρ *distribution* must correct
     /// the criterion's ρ-prior contribution (#2450).
     ///
     /// [`evaluate_configured_rho_prior`](Self::evaluate_configured_rho_prior)
-    /// deliberately replaces every firth-default coordinate's plain PC term with
-    /// the SELF-GATED barrier, which is byte-identically flat on the identified
-    /// side. That is right for the criterion — it is what keeps a clean fit
-    /// byte-identical to plain REML, and what lets the λ=∞ rail certificates
-    /// hold — and wrong for anything that has to be a density: a prior that
-    /// contributes exactly nothing over the identified region leaves the
-    /// ρ-posterior with no prior at all there.
+    /// evaluates an unset coordinate as exactly flat. That is right for the
+    /// deterministic REML/LAML criterion and wrong for anything that has to be
+    /// a density: a flat ρ posterior is improper on a finite λ=∞ face.
     ///
-    /// `resolve_effective_rho_prior` already fills unset coordinates with the
-    /// weak PC default for exactly this purpose. This returns
-    /// `(proper − as-applied)`, i.e. `Σ_k (pc − barrier)` over the defaulted
-    /// coordinates and zero elsewhere, so a sampler can add it to the criterion
-    /// it is handed and recover the distribution WITHOUT any criterion site
-    /// changing. Nothing on the certification path calls this.
+    /// `RHO_DISTRIBUTION_PC_UPPER` and `RHO_DISTRIBUTION_PC_TAIL_PROB` calibrate
+    /// the weak PC default for exactly this purpose. This returns the weak PC
+    /// contribution on defaulted coordinates and zero elsewhere, so a sampler
+    /// can add it to the criterion it is handed and recover a proper
+    /// distribution WITHOUT changing the criterion itself. Nothing on the
+    /// certification path calls this.
     ///
     /// Returned as `(cost, gradient)` only: the ρ-posterior samplers consume a
     /// log-density and its gradient, and no consumer of this correction needs
@@ -4038,7 +3989,7 @@ impl<'a> RemlState<'a> {
         &self,
         rho: &Array1<f64>,
     ) -> (f64, Array1<f64>) {
-        let mask = firth_default_coord_mask(&self.rho_prior, rho.len());
+        let mask = rho_distribution_default_coord_mask(&self.rho_prior, rho.len());
         let mut cost = 0.0;
         let mut gradient = Array1::<f64>::zeros(rho.len());
         if !mask.iter().any(|&d| d) {
@@ -4049,19 +4000,15 @@ impl<'a> RemlState<'a> {
         // corrects were evaluated at.
         let anchor = self.rho_weight_anchor();
         let theta = crate::rho_prior_eval::pc_prior_rate(
-            FIRTH_DEFAULT_PC_UPPER,
-            FIRTH_DEFAULT_PC_TAIL_PROB,
+            RHO_DISTRIBUTION_PC_UPPER,
+            RHO_DISTRIBUTION_PC_TAIL_PROB,
         );
         for (idx, &is_default) in mask.iter().enumerate() {
             if !is_default {
                 continue;
             }
             let (coord_cost, coord_grad) =
-                crate::rho_prior_eval::firth_default_distribution_correction(
-                    theta,
-                    FIRTH_DEFAULT_PC_UPPER,
-                    rho[idx] - anchor,
-                );
+                crate::rho_prior_eval::rho_distribution_default_terms(theta, rho[idx] - anchor);
             cost += coord_cost;
             gradient[idx] += coord_grad;
         }
@@ -4078,29 +4025,6 @@ impl<'a> RemlState<'a> {
         super::atoms::ConfiguredRhoPriorAtom {
             eval: self.evaluate_configured_rho_prior(rho),
         }
-    }
-
-    /// Resolve the *effective* outer prior on the log-precision ρ, applying the
-    /// (unconditional) firth-general default-hyperprior policy.
-    ///
-    /// An *unset* prior (the `Flat` sentinel, i.e. the caller did not configure a
-    /// hyperprior on a coordinate) is replaced by the weakly-informative
-    /// penalized-complexity
-    /// (PC) prior [`firth_default_pc_prior`], turning the outer REML point into a
-    /// proper marginal posterior over λ. A PC prior is reparameterization-
-    /// invariant and shrinks only toward the simpler (more-smoothing) base model,
-    /// so it removes the λ→0 degeneracy without ever walling off complexity the
-    /// data actually buys. Any explicitly configured prior (Normal, Gamma, an
-    /// already-PC coordinate, ...) is respected unchanged — the default only
-    /// fills `Flat` holes.
-    ///
-    /// The default is *weakly* informative by construction: its calibrated rate
-    /// `θ = −ln(tail_prob)/upper` is small, so its O(1) cost/gradient is
-    /// dominated by the O(n) REML curvature wherever λ is well identified,
-    /// leaving clean λ-selection unbiased (the zero-downside / information-limit
-    /// reduction to plain REML).
-    pub(crate) fn effective_rho_prior(&self) -> std::borrow::Cow<'_, RhoPrior> {
-        resolve_effective_rho_prior(&self.rho_prior)
     }
 
     /// ½·Σᵢ log(wᵢ) over the positive-weight rows — the per-observation

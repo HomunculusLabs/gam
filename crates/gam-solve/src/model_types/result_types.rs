@@ -2065,7 +2065,7 @@ mod shipped_criterion_identity_tests {
                  criterion is then REML + a rho-prior (MAP in rho), which SPEC forbids, and no \
                  lambda = infinity face exists for any rail certificate to prove. A caller that \
                  wants a prior passes one explicitly; joint HMC gets a proper prior from \
-                 resolve_effective_rho_prior, which fills unset coordinates without touching the \
+                 rho_prior_distribution_correction, which fills unset coordinates without touching the \
                  criterion."
             );
         }

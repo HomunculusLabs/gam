@@ -2894,13 +2894,12 @@ fn relax_smoothing_rho_prior(
     //
     // * WELL-DETERMINED (`n ≥ 2·p`): the unregularised REML problem is well
     //   posed on its own, so the relaxable coordinates are freed to `Flat`,
-    //   which the runtime resolves to the firth one-sided barrier — byte-flat
-    //   on the identified side (pure REML, exactly mgcv) and only a convex wall
-    //   against the `λ → 0` degeneracy. This is the #1266/#1271 behaviour.
+    //   which the runtime evaluates directly as exact zero (pure REML/LAML).
+    //   This is the #1266/#1271 behaviour.
     //
     // * UNDER-DETERMINED (`n < 2·p`): the design does NOT over-determine the
-    //   model (the n≈26 five-`ps` wine fit has p > n), so the firth barrier's
-    //   zero curvature on the identified side leaves the outer REML criterion
+    //   model (the n≈26 five-`ps` wine fit has p > n), so a flat prior's zero
+    //   curvature leaves the outer REML criterion
     //   flat/degenerate in ρ-space and the loop hits `max_iter` at whatever
     //   (under-smoothed) λ it last held — EDF rails up to ≈n, the smooths
     //   interpolate the training rows, and held-out prediction explodes
@@ -2929,9 +2928,8 @@ fn relax_smoothing_rho_prior(
     // tensor-B-spline (`te`/`ti`) smooths — single- AND double-penalty (#1266 is
     // the double-penalty case, #1271 the single-penalty `tp`/`ps`). EVERY penalty
     // coordinate such a term owns (bending wiggliness AND any null-space
-    // shrinkage) is freed to `Flat`, which the runtime resolves to the
-    // firth-default one-sided barrier: no high-λ cap, but still a convex wall
-    // against the `λ → 0` under-smoothing degeneracy.
+    // shrinkage) is freed to `Flat`, which the runtime evaluates directly as
+    // pure REML/LAML with no hidden smoothing-parameter term.
     let relaxable_terms: std::collections::HashSet<&str> = design
         .smooth
         .terms
@@ -2988,8 +2986,8 @@ fn relax_smoothing_rho_prior(
         return base.clone();
     }
     // Relaxed prior for a relaxable smooth coordinate, chosen by regime (see the
-    // block above): the firth one-sided barrier (`Flat`) when the fit is
-    // well-determined, a wide-but-curved symmetric Gaussian when it is
+    // block above): pure REML/LAML (`Flat`) when the fit is well-determined,
+    // a wide-but-curved symmetric Gaussian when it is
     // under-determined and the loop still needs termination curvature.
     let relaxed_prior = if underdetermined {
         gam_spec::RhoPrior::Normal {
