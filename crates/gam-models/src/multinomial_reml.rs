@@ -3667,6 +3667,413 @@ mod tests {
             }
         }
 
+        struct FirstFisherBuffers {
+            normalized: Vec<f64>,
+            derivative: Vec<f64>,
+            fisher: Vec<f64>,
+        }
+
+        impl FirstFisherBuffers {
+            fn new(m: usize) -> Self {
+                Self {
+                    normalized: vec![0.0; m],
+                    derivative: vec![0.0; m],
+                    fisher: vec![0.0; m * m],
+                }
+            }
+        }
+
+        struct SecondFisherBuffers {
+            normalized: Vec<[f64; 3]>,
+            derivative_u: Vec<f64>,
+            derivative_v: Vec<f64>,
+            mixed_derivative: Vec<f64>,
+            fisher: Vec<f64>,
+        }
+
+        impl SecondFisherBuffers {
+            fn new(m: usize) -> Self {
+                Self {
+                    normalized: vec![[0.0; 3]; m],
+                    derivative_u: vec![0.0; m],
+                    derivative_v: vec![0.0; m],
+                    mixed_derivative: vec![0.0; m],
+                    fisher: vec![0.0; m * m],
+                }
+            }
+        }
+
+        #[inline(never)]
+        fn compiled_first_fisher<const M: usize>(
+            probability: &[f64; M],
+            direction: &[f64; M],
+            weight: f64,
+            buffers: &mut FirstFisherBuffers,
+        ) {
+            softmax_fisher_perturbation::<OneSeed<0>>(
+                M,
+                weight,
+                |axis| probability[axis],
+                |axis| direction[axis],
+                |_| 0.0,
+                &mut buffers.normalized,
+                &mut buffers.fisher,
+            );
+        }
+
+        /// Direct, non-abstracted first directional derivative of
+        /// `weight * (diag(p) - p p')`. The observation weight is folded into
+        /// the probability derivative before matrix assembly, and the output
+        /// loop uses the same ISA-optimal triangular/full-row choice available
+        /// to a manually tuned implementation.
+        #[inline(never)]
+        fn strongest_hand_first_fisher<const M: usize>(
+            probability: &[f64; M],
+            direction: &[f64; M],
+            weight: f64,
+            buffers: &mut FirstFisherBuffers,
+        ) {
+            let mut mean = 0.0;
+            for axis in 0..M {
+                mean += probability[axis] * direction[axis];
+            }
+            for axis in 0..M {
+                buffers.derivative[axis] = weight * probability[axis] * (direction[axis] - mean);
+            }
+            if fisher_output_schedule::<OneSeed<0>>(M) == FisherOutputSchedule::ContiguousFull {
+                for row in 0..M {
+                    let probability_row = probability[row];
+                    let derivative_row = buffers.derivative[row];
+                    for column in 0..M {
+                        buffers.fisher[row * M + column] = -(derivative_row * probability[column]
+                            + probability_row * buffers.derivative[column]);
+                    }
+                    buffers.fisher[row * M + row] += derivative_row;
+                }
+                return;
+            }
+            for row in 0..M {
+                let probability_row = probability[row];
+                let derivative_row = buffers.derivative[row];
+                buffers.fisher[row * M + row] =
+                    derivative_row - 2.0 * derivative_row * probability_row;
+                for column in (row + 1)..M {
+                    let coefficient = -(derivative_row * probability[column]
+                        + probability_row * buffers.derivative[column]);
+                    buffers.fisher[row * M + column] = coefficient;
+                    buffers.fisher[column * M + row] = coefficient;
+                }
+            }
+        }
+
+        #[inline(never)]
+        fn compiled_second_fisher<const M: usize>(
+            probability: &[f64; M],
+            direction_u: &[f64; M],
+            direction_v: &[f64; M],
+            weight: f64,
+            buffers: &mut SecondFisherBuffers,
+        ) {
+            softmax_fisher_perturbation::<TwoSeed<0>>(
+                M,
+                weight,
+                |axis| probability[axis],
+                |axis| direction_u[axis],
+                |axis| direction_v[axis],
+                &mut buffers.normalized,
+                &mut buffers.fisher,
+            );
+        }
+
+        /// Direct, non-abstracted mixed second directional derivative of
+        /// `weight * (diag(p) - p p')`. Every probability derivative is
+        /// materialized exactly once, and symmetry halves the matrix work.
+        #[inline(never)]
+        fn strongest_hand_second_fisher<const M: usize>(
+            probability: &[f64; M],
+            direction_u: &[f64; M],
+            direction_v: &[f64; M],
+            weight: f64,
+            buffers: &mut SecondFisherBuffers,
+        ) {
+            let mut mean_u = 0.0;
+            let mut mean_v = 0.0;
+            for axis in 0..M {
+                mean_u += probability[axis] * direction_u[axis];
+                mean_v += probability[axis] * direction_v[axis];
+            }
+            for axis in 0..M {
+                buffers.derivative_u[axis] = probability[axis] * (direction_u[axis] - mean_u);
+                buffers.derivative_v[axis] = probability[axis] * (direction_v[axis] - mean_v);
+            }
+            let mut mixed_mean = 0.0;
+            for axis in 0..M {
+                mixed_mean += buffers.derivative_v[axis] * direction_u[axis];
+            }
+            for axis in 0..M {
+                buffers.mixed_derivative[axis] = buffers.derivative_v[axis]
+                    * (direction_u[axis] - mean_u)
+                    - probability[axis] * mixed_mean;
+            }
+            for row in 0..M {
+                let probability_row = probability[row];
+                let derivative_u_row = buffers.derivative_u[row];
+                let derivative_v_row = buffers.derivative_v[row];
+                let mixed_row = buffers.mixed_derivative[row];
+                buffers.fisher[row * M + row] = weight
+                    * (mixed_row
+                        - 2.0 * mixed_row * probability_row
+                        - 2.0 * derivative_u_row * derivative_v_row);
+                for column in (row + 1)..M {
+                    let coefficient = weight
+                        * (-(mixed_row * probability[column]
+                            + derivative_u_row * buffers.derivative_v[column]
+                            + derivative_v_row * buffers.derivative_u[column]
+                            + probability_row * buffers.mixed_derivative[column]));
+                    buffers.fisher[row * M + column] = coefficient;
+                    buffers.fisher[column * M + row] = coefficient;
+                }
+            }
+        }
+
+        fn fisher_checksum(values: &[f64]) -> f64 {
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| value * (1 + index % 17) as f64)
+                .sum()
+        }
+
+        fn timed_fisher_sample(
+            repetitions: usize,
+            rows: usize,
+            mut sweep: impl FnMut() -> f64,
+        ) -> f64 {
+            use std::time::Instant;
+
+            let started = Instant::now();
+            let mut checksum = 0.0;
+            for _ in 0..repetitions {
+                checksum += sweep();
+            }
+            assert!(
+                checksum.is_finite(),
+                "multinomial strongest-hand timing checksum must be finite"
+            );
+            started.elapsed().as_secs_f64() * 1.0e9 / (repetitions * rows) as f64
+        }
+
+        fn median(mut samples: [f64; 7]) -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[3]
+        }
+
+        /// Binding #932 release gate for multinomial higher-order production.
+        ///
+        /// `softmax_fisher_perturbation` differentiates one canonical
+        /// normalized-mass/Fisher expression and demand-prunes it to either the
+        /// first or mixed-second directional coefficient. The opponents below
+        /// are independent direct analytic schedules with no jet, scalar-field,
+        /// or compiler abstraction. They cache every probability derivative
+        /// once, exploit matrix symmetry where profitable, and select the same
+        /// ISA-shaped full-row schedule as production for large first-order
+        /// blocks.
+        ///
+        /// Both sides cross the same outlined ABI, receive the same 256 varied
+        /// rows, reuse caller-owned scratch, and return the complete `M*M`
+        /// matrix. Every matrix channel enters a feedback-coupled checksum;
+        /// seven samples alternate contender order and the paired medians must
+        /// be strict production wins at every representative width.
+        #[test]
+        #[ignore = "release-only issue #932 strongest-hand performance gate"]
+        fn release_measure_multinomial_fisher_vs_strongest_hand_932() {
+            fn measure<const M: usize>(seed: u64, repetitions: usize) {
+                const ROWS: usize = 256;
+                let mut rng = Lcg(seed);
+                let probability: Vec<[f64; M]> = (0..ROWS)
+                    .map(|_| {
+                        let raw: [f64; M] = std::array::from_fn(|_| rng.uniform(0.1, 1.0));
+                        let scale = rng.uniform(0.35, 0.95) / raw.iter().sum::<f64>();
+                        raw.map(|mass| mass * scale)
+                    })
+                    .collect();
+                let direction_u: Vec<[f64; M]> = (0..ROWS)
+                    .map(|_| std::array::from_fn(|_| rng.uniform(-0.8, 0.8)))
+                    .collect();
+                let direction_v: Vec<[f64; M]> = (0..ROWS)
+                    .map(|_| std::array::from_fn(|_| rng.uniform(-0.8, 0.8)))
+                    .collect();
+                let weights: Vec<f64> = (0..ROWS).map(|_| rng.uniform(0.25, 2.5)).collect();
+
+                let mut compiled_first = FirstFisherBuffers::new(M);
+                let mut hand_first = FirstFisherBuffers::new(M);
+                let mut compiled_second = SecondFisherBuffers::new(M);
+                let mut hand_second = SecondFisherBuffers::new(M);
+
+                for row in 0..ROWS {
+                    compiled_first_fisher(
+                        &probability[row],
+                        &direction_u[row],
+                        weights[row],
+                        &mut compiled_first,
+                    );
+                    strongest_hand_first_fisher(
+                        &probability[row],
+                        &direction_u[row],
+                        weights[row],
+                        &mut hand_first,
+                    );
+                    compiled_second_fisher(
+                        &probability[row],
+                        &direction_u[row],
+                        &direction_v[row],
+                        weights[row],
+                        &mut compiled_second,
+                    );
+                    strongest_hand_second_fisher(
+                        &probability[row],
+                        &direction_u[row],
+                        &direction_v[row],
+                        weights[row],
+                        &mut hand_second,
+                    );
+                    for index in 0..M * M {
+                        close(
+                            compiled_first.fisher[index],
+                            hand_first.fisher[index],
+                            3.0e-15,
+                            &format!("M={M} first strongest-hand parity[{row},{index}]"),
+                        );
+                        close(
+                            compiled_second.fisher[index],
+                            hand_second.fisher[index],
+                            5.0e-15,
+                            &format!("M={M} second strongest-hand parity[{row},{index}]"),
+                        );
+                    }
+                }
+
+                let compiled_first_sweep = |buffers: &mut FirstFisherBuffers| {
+                    let mut checksum = 0.0;
+                    for row in 0..ROWS {
+                        compiled_first_fisher(
+                            &probability[row],
+                            &direction_u[row],
+                            weights[row] + checksum * 1.0e-18,
+                            buffers,
+                        );
+                        checksum += fisher_checksum(&buffers.fisher);
+                    }
+                    checksum
+                };
+                let hand_first_sweep = |buffers: &mut FirstFisherBuffers| {
+                    let mut checksum = 0.0;
+                    for row in 0..ROWS {
+                        strongest_hand_first_fisher(
+                            &probability[row],
+                            &direction_u[row],
+                            weights[row] + checksum * 1.0e-18,
+                            buffers,
+                        );
+                        checksum += fisher_checksum(&buffers.fisher);
+                    }
+                    checksum
+                };
+                let compiled_second_sweep = |buffers: &mut SecondFisherBuffers| {
+                    let mut checksum = 0.0;
+                    for row in 0..ROWS {
+                        compiled_second_fisher(
+                            &probability[row],
+                            &direction_u[row],
+                            &direction_v[row],
+                            weights[row] + checksum * 1.0e-18,
+                            buffers,
+                        );
+                        checksum += fisher_checksum(&buffers.fisher);
+                    }
+                    checksum
+                };
+                let hand_second_sweep = |buffers: &mut SecondFisherBuffers| {
+                    let mut checksum = 0.0;
+                    for row in 0..ROWS {
+                        strongest_hand_second_fisher(
+                            &probability[row],
+                            &direction_u[row],
+                            &direction_v[row],
+                            weights[row] + checksum * 1.0e-18,
+                            buffers,
+                        );
+                        checksum += fisher_checksum(&buffers.fisher);
+                    }
+                    checksum
+                };
+
+                let mut compiled_first_samples = [0.0; 7];
+                let mut hand_first_samples = [0.0; 7];
+                let mut compiled_second_samples = [0.0; 7];
+                let mut hand_second_samples = [0.0; 7];
+                for round in 0..7 {
+                    for side in 0..2 {
+                        let run_compiled = (round + side) % 2 == 0;
+                        if run_compiled {
+                            compiled_first_samples[round] =
+                                timed_fisher_sample(repetitions, ROWS, || {
+                                    compiled_first_sweep(&mut compiled_first)
+                                });
+                        } else {
+                            hand_first_samples[round] =
+                                timed_fisher_sample(repetitions, ROWS, || {
+                                    hand_first_sweep(&mut hand_first)
+                                });
+                        }
+                    }
+                    for side in 0..2 {
+                        let run_compiled = (round + side) % 2 == 0;
+                        if run_compiled {
+                            compiled_second_samples[round] =
+                                timed_fisher_sample(repetitions, ROWS, || {
+                                    compiled_second_sweep(&mut compiled_second)
+                                });
+                        } else {
+                            hand_second_samples[round] =
+                                timed_fisher_sample(repetitions, ROWS, || {
+                                    hand_second_sweep(&mut hand_second)
+                                });
+                        }
+                    }
+                }
+
+                let compiled_first_ns = median(compiled_first_samples);
+                let hand_first_ns = median(hand_first_samples);
+                let compiled_second_ns = median(compiled_second_samples);
+                let hand_second_ns = median(hand_second_samples);
+                eprintln!(
+                    "MULTINOMIAL-HAND-932 M={M} first_compiled={compiled_first_ns:.3} ns/row \
+                     first_hand={hand_first_ns:.3} ns/row first_hand_over_compiled={:.6} \
+                     second_compiled={compiled_second_ns:.3} ns/row \
+                     second_hand={hand_second_ns:.3} ns/row second_hand_over_compiled={:.6}",
+                    hand_first_ns / compiled_first_ns,
+                    hand_second_ns / compiled_second_ns,
+                );
+                assert!(
+                    hand_first_ns > compiled_first_ns,
+                    "M={M} first canonical lowering must beat strongest hand: \
+                     compiled={compiled_first_ns:.3} ns hand={hand_first_ns:.3} ns"
+                );
+                assert!(
+                    hand_second_ns > compiled_second_ns,
+                    "M={M} second canonical lowering must beat strongest hand: \
+                     compiled={compiled_second_ns:.3} ns hand={hand_second_ns:.3} ns"
+                );
+            }
+
+            measure::<2>(0x9322_0002_face_cafe, 2_000);
+            measure::<3>(0x9323_0003_face_cafe, 2_000);
+            measure::<8>(0x9328_0008_face_cafe, 600);
+            measure::<32>(0x9332_0032_face_cafe, 80);
+            measure::<64>(0x9364_0064_face_cafe, 24);
+        }
+
         /// #932 release speed gate for the multinomial-logit row. Production
         /// is the structure-compiled softmax lowering
         /// ([`MultinomialLogitRowProgram::value_gradient_hessian_into`], with
