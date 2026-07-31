@@ -152,12 +152,6 @@ use binomial_q_coeffs::{
     hessian_coeff_fromobjective_q_terms, mean_wiggle_directional_coefficients,
     mean_wiggle_second_directional_coefficients,
 };
-#[cfg(test)]
-use binomial_q_coeffs::{
-    directionalhessian_coeff_fromobjective_q_terms,
-    second_directionalhessian_coeff_fromobjective_q_terms,
-};
-
 mod validation;
 use validation::{
     minimum_monotone_wiggle_knot_count, validate_binomial_location_scale_termspec,
