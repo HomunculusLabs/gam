@@ -464,20 +464,36 @@ pub enum ScoreSearchError<E> {
 /// cell. The `2 D` allowance (64 cells at `D = 32`) was never exercised there,
 /// so the quoted margin is headroom over a single-cell case.
 ///
-/// Measured since, at the same `D = 32`:
-/// `spline_scan::tests::order_one_scan_matches_dense_random_walk_posterior`
-/// exceeds 2048 subdivisions — its decomposition needs MORE than 64 cells — and
-/// it terminates and PASSES once the budget is `100 D²`. It is not going deeper
-/// than `D` per cell; the depth bound is a hard geometric fact. It is isolating
-/// structure over a wider decomposition than this constant anticipates, so
-/// against that surface the margin is negative.
+/// Measured since, at the same `D = 32`, which is why the multiplier below is 8
+/// and not 2. Bisected across the FULL `spline_scan` set:
 ///
-/// A larger allowance does not repair every scan refusal.
-/// `weighted_scan_dgp_2300_search_terminates_in_bounded_evaluations` still fails
-/// with the budget raised 25x, because its endpoint certificates carry
-/// `eval_err ~ 1e-6` in one region of the domain while the search requests
-/// `resolution = 1.49e-8`. That is an evaluation-conditioning defect; no cell
-/// allowance reaches it.
+/// ```text
+///   2 D² (  64 cells)  order_one_scan_matches_dense_random_walk_posterior refused
+///   4 D² ( 128 cells)  passes
+///   8 D² ( 256 cells)  passes          <- shipped
+/// 128 D² (4096 cells)  passes, and NO further test passes
+/// ```
+///
+/// That search is not going deeper than `D` per cell — the depth bound is a hard
+/// geometric fact. It isolates structure over a decomposition of 65–128 cells,
+/// wider than the `2 D` allowance anticipated, so against that surface the older
+/// "~60x margin" was negative. Nothing above `8 D²` buys another passing test.
+///
+/// A larger allowance does NOT repair the other scan refusals, and raising it
+/// past this point actively HIDES their cause. At `128 D²` the budget message
+/// disappears entirely and
+/// `state_snapshot_round_trips_predict_and_training_sample_size_bit_for_bit` —
+/// which exhausted the budget at both 2048 and 8192 — instead reports
+/// `OptimumResolutionFlat` on a bracket `2.15e-6` wide, about twice the endpoint
+/// `eval_err` of `~9.6e-7`. The budget was masking a score-RESOLUTION floor.
+/// Likewise `weighted_scan_dgp_2300_search_terminates_in_bounded_evaluations`
+/// fails identically at every multiplier tested, because its certificates carry
+/// `eval_err ~1e-6` while the search requests `resolution = 1.49e-8`.
+///
+/// So: three of the four `spline_scan` failures are evaluation-conditioning, not
+/// cell shortage, and no allowance reaches them. Do not raise this constant
+/// further expecting it to fix them — it converts a budget refusal into a
+/// resolution refusal and gains no coverage.
 ///
 /// A degenerate domain still gets a budget of at least one subdivision: the
 /// bound is a backstop against unbounded breadth, never a refusal of the first
