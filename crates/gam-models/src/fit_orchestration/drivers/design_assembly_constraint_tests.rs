@@ -2273,11 +2273,31 @@ fn spatial_frozen_transform_rebuild_is_exact_on_trainingrows() {
     };
     let fit_design = build_term_collection_design(data.view(), &fitspec).unwrap();
     let term_meta = &fit_design.smooth.terms[0].metadata;
-    let (centers, length_scale, z) = match term_meta {
+    // `input_scale` is not optional here, and omitting it was this test's own
+    // bug (#2636 family). `BasisMetadata::ThinPlate` declares that `centers`
+    // live in the STANDARDIZED frame while `length_scale` is in ORIGINAL units,
+    // and `scale_contract.rs` keys the difference off exactly this field:
+    //
+    //     let replay = stored_scale.is_some();
+    //     ...
+    //     if !replay { standardize_resolved_center_strategy(center_strategy, input_scale); }
+    //
+    // with the comment "its center matrix was emitted by the builder in the
+    // realized standardized frame ... so scaling it again would double divide
+    // fit-time geometry at prediction". Rebuilding with `input_scale: None`
+    // makes `replay` false, so the already-standardized centers are divided a
+    // second time — which is what this test was measuring as
+    // `max_abs=1.4952067936546536`, not a defect in the frozen path.
+    //
+    // The production freezing path never does this: `design_freezing.rs` sets
+    // `*input_scale = Some(*metadata_scale)` on exactly this rebuild. Carrying
+    // the stored scale here makes the test replay what production replays.
+    let (centers, length_scale, z, input_scale) = match term_meta {
         BasisMetadata::ThinPlate {
             centers,
             length_scale,
             identifiability_transform,
+            input_scale,
             ..
         } => (
             centers.clone(),
@@ -2285,6 +2305,7 @@ fn spatial_frozen_transform_rebuild_is_exact_on_trainingrows() {
             identifiability_transform
                 .clone()
                 .expect("fit-time Option 5 should store transform"),
+            *input_scale,
         ),
         other => panic!("unexpected metadata variant: {other:?}"),
     };
@@ -2304,7 +2325,7 @@ fn spatial_frozen_transform_rebuild_is_exact_on_trainingrows() {
                     identifiability: SpatialIdentifiability::FrozenTransform { transform: z },
                     radial_reparam: None,
                 },
-                input_scale: None,
+                input_scale: Some(input_scale),
             },
             shape: ShapeConstraint::None,
             joint_null_rotation: None,
