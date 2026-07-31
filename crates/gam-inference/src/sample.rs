@@ -1045,7 +1045,7 @@ fn sample_standard_truncated(
             .to_string()
     })?;
     let mode = constrained.mode.clone();
-    let center = constrained.unconstrained_center.clone();
+    let center = constrained.unconstrained_center()?.clone();
     let p = mode.len();
     if p == 0 {
         return Err(

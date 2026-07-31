@@ -2430,14 +2430,12 @@ where
                         .to_string(),
                 )
             })?;
-            Some(
-                crate::constrained_posterior::ConstrainedPosteriorGeometry {
-                    constraints: constraints_internal.clone(),
-                    mode: beta_orig_internal.clone(),
-                    unconstrained_center: qs.dot(&center_t),
-                    correction,
-                },
-            )
+            Some(crate::constrained_posterior::ConstrainedPosteriorGeometry::with_moments(
+                constraints_internal.clone(),
+                beta_orig_internal.clone(),
+                qs.dot(&center_t),
+                correction,
+            ))
         }
         None if needs_constrained_posterior => {
             return Err(EstimationError::RemlOptimizationFailed(
@@ -2447,12 +2445,14 @@ where
         }
         None => None,
     };
-    let reported_beta_orig_internal = constrained_posterior
-        .as_ref()
-        .map(
-            crate::constrained_posterior::ConstrainedPosteriorGeometry::posterior_mean,
-        )
-        .unwrap_or_else(|| beta_orig_internal.clone());
+    let reported_beta_orig_internal = match constrained_posterior.as_ref() {
+        Some(posterior) => posterior.posterior_mean().map_err(|reason| {
+            EstimationError::RemlOptimizationFailed(format!(
+                "constrained posterior mean is unavailable: {reason}"
+            ))
+        })?,
+        None => beta_orig_internal.clone(),
+    };
 
     // Re-install the exact rho point and inner state that will be shipped, and
     // verify it IS the certified optimum. Seeds and nuisance refinements may
@@ -2590,10 +2590,17 @@ where
             // Full inverse available: wrap as phi-scaled covariance, compute
             // frequentist quantities, and pass to smoothing-correction cubature.
             let mut posterior_covariance = scaled_covariance(h_inv.clone(), cov_scale);
-            if let Some(correction) = constrained_posterior
+            let constrained_correction = constrained_posterior
                 .as_ref()
-                .and_then(|posterior| posterior.correction.as_ref())
-            {
+                .map(crate::constrained_posterior::ConstrainedPosteriorGeometry::correction)
+                .transpose()
+                .map_err(|reason| {
+                    EstimationError::RemlOptimizationFailed(format!(
+                        "constrained posterior covariance correction is unavailable: {reason}"
+                    ))
+                })?
+                .flatten();
+            if let Some(correction) = constrained_correction {
                 correction.apply_to_covariance_in_place(&mut posterior_covariance);
             }
             beta_covariance = Some(gam_problem::dispersion_cov::PhiScaledCovariance::wrap(
@@ -2880,7 +2887,14 @@ where
             }
             let removed_variance = constrained_posterior
                 .as_ref()
-                .and_then(|posterior| posterior.correction.as_ref())
+                .map(crate::constrained_posterior::ConstrainedPosteriorGeometry::correction)
+                .transpose()
+                .map_err(|reason| {
+                    EstimationError::RemlOptimizationFailed(format!(
+                        "constrained posterior variance correction is unavailable: {reason}"
+                    ))
+                })?
+                .flatten()
                 .map(|correction| correction.removed_variance_diagonal())
                 .unwrap_or_else(|| Array1::<f64>::zeros(p_cov));
             let mut se = Array1::<f64>::zeros(p_cov);
@@ -3715,7 +3729,10 @@ mod constrained_posterior_transport_tests {
             .expect("persisted inequality posterior");
         assert!(posterior.mode[0].abs() <= 1e-9, "mode={}", posterior.mode[0]);
         assert!(
-            posterior.unconstrained_center[0] < 0.0,
+            posterior
+                .unconstrained_center()
+                .expect("available constrained posterior centre")[0]
+                < 0.0,
             "ambient centre must remain outside the feasible half-line"
         );
         assert!(

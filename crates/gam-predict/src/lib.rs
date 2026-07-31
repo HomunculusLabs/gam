@@ -237,6 +237,7 @@ fn conditional_prediction_backend<'a>(
     expected_dim: usize,
     label: &str,
 ) -> Result<Option<PredictionCovarianceBackend<'a>>, EstimationError> {
+    fit.require_posterior_mean(label)?;
     // The canonical conditional covariance is whatever the fitter exposes via
     // `beta_covariance` (which is `Cov(β̂ | λ̂)` after any final reparameter
     // alignment the fitter performed). The penalized Hessian is the precision
@@ -273,11 +274,16 @@ fn conditional_prediction_backend<'a>(
         // and shrink every SE by `√φ̂` (#679). For `φ ≡ 1` families
         // (Binomial / Poisson) this collapses to the original behavior.
         let scale = fit.coefficient_covariance_scale()?;
-        let constrained_correction = fit
+        let constrained_correction = match fit
             .geometry
             .as_ref()
             .and_then(|geometry| geometry.constrained_posterior.as_ref())
-            .and_then(|posterior| posterior.correction.as_ref());
+        {
+            Some(posterior) => posterior
+                .correction()
+                .map_err(EstimationError::InvalidInput)?,
+            None => None,
+        };
         match PredictionCovarianceBackend::from_factorized_hessian_scaled_with_correction(
             SymmetricMatrix::Dense(hessian.clone()),
             scale,
@@ -708,6 +714,7 @@ fn require_posterior_mean_backend<'a>(
     expected_dim: usize,
     label: &str,
 ) -> Result<PredictionCovarianceBackend<'a>, EstimationError> {
+    fit.require_posterior_mean(label)?;
     let mut rejected: Vec<String> = Vec::new();
     for (source, covariance) in [
         ("fit result", fit.beta_covariance()),
@@ -1918,6 +1925,7 @@ fn constrained_ambient_covariance(
     fit: &UnifiedFitResult,
     geometry: &FitGeometry,
 ) -> Result<Array2<f64>, EstimationError> {
+    fit.require_posterior_mean("constrained prediction uncertainty")?;
     geometry
         .coefficient_gauge
         .validate()
@@ -3719,12 +3727,12 @@ mod tests {
             coefficient_gauge: gam_problem::gauge::Gauge::identity(&[1]),
             penalized_hessian: array![[1.0]].into(),
             constrained_posterior: Some(
-                gam_solve::constrained_posterior::ConstrainedPosteriorGeometry {
+                gam_solve::constrained_posterior::ConstrainedPosteriorGeometry::with_moments(
                     constraints,
-                    mode: array![0.0],
-                    unconstrained_center: array![0.0],
-                    correction: Some(correction),
-                },
+                    array![0.0],
+                    array![0.0],
+                    Some(correction),
+                ),
             ),
             working: None,
         });

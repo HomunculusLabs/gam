@@ -941,6 +941,10 @@ pub fn assemble_location_scale_payload(
     response: LocationScaleResponse<'_>,
     source: SavedModelSourceMetadata,
 ) -> Result<FittedModelPayload, String> {
+    inputs
+        .fit_result
+        .require_posterior_mean("location-scale saved-model assembly")
+        .map_err(|error| error.to_string())?;
     let (family_tag, likelihood, base_link, link, response_scale, noise_transform) = match response
     {
         LocationScaleResponse::Gaussian {

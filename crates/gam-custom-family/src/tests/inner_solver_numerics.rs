@@ -2553,13 +2553,20 @@ pub(crate) fn exact_newton_block_enforces_linear_constraints() {
         constrained.mode[0],
     );
     assert!(
-        constrained.unconstrained_center[0].abs() < 1e-8,
+        constrained
+            .unconstrained_center()
+            .expect("available constrained posterior centre")[0]
+            .abs() < 1e-8,
         "the unconstrained centre is the target 0.0, got {}",
-        constrained.unconstrained_center[0],
+        constrained
+            .unconstrained_center()
+            .expect("available constrained posterior centre")[0],
     );
     assert_eq!(
         fit.block_states[0].beta,
-        constrained.posterior_mean(),
+        constrained
+            .posterior_mean()
+            .expect("available constrained posterior mean"),
         "the reported coefficient and the persisted posterior identity must agree",
     );
     assert!(

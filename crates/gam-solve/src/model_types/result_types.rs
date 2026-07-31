@@ -3502,6 +3502,30 @@ impl UnifiedFitResult {
         })
     }
 
+    /// Typed reason the saved coefficient vector is a constrained optimizer
+    /// mode rather than the posterior mean required by the public estimand.
+    pub fn posterior_moment_decline(
+        &self,
+    ) -> Option<&crate::constrained_posterior::ConePosteriorMomentDecline> {
+        self.geometry
+            .as_ref()
+            .and_then(|geometry| geometry.constrained_posterior.as_ref())
+            .and_then(crate::constrained_posterior::ConstrainedPosteriorGeometry::decline)
+    }
+
+    /// Refuse any operation that would label a constrained mode as a posterior
+    /// mean. Keeping the converged low-level fit is valid; building a predictive
+    /// model from an estimand whose moments were declined is not.
+    pub fn require_posterior_mean(&self, operation: &str) -> Result<(), EstimationError> {
+        if let Some(decline) = self.posterior_moment_decline() {
+            return Err(EstimationError::InvalidInput(format!(
+                "{operation} requires posterior-mean coefficients, but this converged constrained fit stores its optimizer mode under a typed posterior-moment decline: {}",
+                decline.summary(),
+            )));
+        }
+        Ok(())
+    }
+
     pub fn try_from_parts(parts: UnifiedFitResultParts) -> Result<Self, EstimationError> {
         let convergence = FitConvergenceEvidence::try_from_parts(&parts)?;
         let UnifiedFitResultParts {

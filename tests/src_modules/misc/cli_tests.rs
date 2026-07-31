@@ -2694,12 +2694,12 @@ fn hessian_only_saved_model_reports_the_truncated_covariance_on_an_active_face()
         geometry: Some(FitGeometry {
             coefficient_gauge: Gauge::identity(&[1]),
             penalized_hessian: array![[2.0]].into(),
-            constrained_posterior: Some(ConstrainedPosteriorGeometry {
+            constrained_posterior: Some(ConstrainedPosteriorGeometry::with_moments(
                 constraints,
-                mode: array![0.25],
-                unconstrained_center: center,
-                correction: Some(correction),
-            }),
+                array![0.25],
+                center,
+                Some(correction),
+            )),
             working: None,
         }),
         block_states: Vec::new(),

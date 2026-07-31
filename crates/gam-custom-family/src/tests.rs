@@ -4386,7 +4386,12 @@ pub(crate) fn fixed_constrained_fit_reports_truncated_mean_and_retains_boundary_
         .and_then(|geometry| geometry.constrained_posterior.as_ref())
         .expect("saved exact constrained-posterior geometry");
     assert_eq!(constrained.mode, array![0.0]);
-    assert_eq!(constrained.unconstrained_center, array![-1.0]);
+    assert_eq!(
+        constrained
+            .unconstrained_center()
+            .expect("available constrained posterior centre"),
+        array![-1.0]
+    );
     assert!(
         fit.blocks[0].beta[0] > 0.0,
         "reported coefficient must be the interior posterior mean, got {}",
@@ -4394,7 +4399,9 @@ pub(crate) fn fixed_constrained_fit_reports_truncated_mean_and_retains_boundary_
     );
     assert_eq!(
         fit.blocks[0].beta,
-        constrained.posterior_mean(),
+        constrained
+            .posterior_mean()
+            .expect("available constrained posterior mean"),
         "the saved coefficient and persisted posterior identity must agree",
     );
     let variance = fit

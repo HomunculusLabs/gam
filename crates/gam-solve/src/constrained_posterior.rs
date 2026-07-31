@@ -222,41 +222,219 @@ impl ConstrainedPosteriorCorrection {
     }
 }
 
+/// Live properness evidence carried by a declined cone-posterior moment route.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ConePropernessEvidence {
+    Certificate(crate::cone_reduction::ConeProperness),
+    CertificationFailed { reason: String },
+}
+
+impl ConePropernessEvidence {
+    pub fn is_proper(&self) -> Option<bool> {
+        match self {
+            Self::Certificate(certificate) => certificate.is_proper(),
+            Self::CertificationFailed { .. } => None,
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Certificate(certificate) => certificate.summary(),
+            Self::CertificationFailed { reason } => format!(
+                "cone-truncated posterior properness could not be certified: {reason}"
+            ),
+        }
+    }
+
+    fn validate(&self, ambient_dimension: usize, constraint_count: usize) -> Result<(), String> {
+        match self {
+            Self::CertificationFailed { reason } => {
+                if reason.trim().is_empty() {
+                    return Err(
+                        "cone properness certification failure has an empty reason".to_string(),
+                    );
+                }
+            }
+            Self::Certificate(certificate) => {
+                if certificate.reduced.dim() != (constraint_count, constraint_count) {
+                    return Err(format!(
+                        "cone properness reduced precision has shape {:?}, expected ({constraint_count}, {constraint_count})",
+                        certificate.reduced.dim(),
+                    ));
+                }
+                if certificate.reduced.iter().any(|value| !value.is_finite())
+                    || certificate
+                        .copositive_minimum
+                        .is_some_and(|value| !value.is_finite())
+                {
+                    return Err(
+                        "cone properness certificate contains a non-finite value".to_string(),
+                    );
+                }
+                let total = |inertia: crate::cone_reduction::Inertia| {
+                    inertia.positive + inertia.zero + inertia.negative
+                };
+                if total(certificate.ambient_inertia) != ambient_dimension
+                    || total(certificate.reduced_inertia) != constraint_count
+                    || total(certificate.lineality_inertia)
+                        != ambient_dimension.saturating_sub(constraint_count)
+                {
+                    return Err(format!(
+                        "cone properness inertia dimensions disagree with ambient p={ambient_dimension} and face q={constraint_count}"
+                    ));
+                }
+                if certificate.ambient_inertia.positive
+                    != certificate.reduced_inertia.positive
+                        + certificate.lineality_inertia.positive
+                    || certificate.ambient_inertia.zero
+                        != certificate.reduced_inertia.zero
+                            + certificate.lineality_inertia.zero
+                    || certificate.ambient_inertia.negative
+                        != certificate.reduced_inertia.negative
+                            + certificate.lineality_inertia.negative
+                {
+                    return Err(
+                        "cone properness certificate violates Haynsworth inertia additivity"
+                            .to_string(),
+                    );
+                }
+                if certificate.is_proper() == Some(false) {
+                    return Err(
+                        "a proved-improper cone posterior cannot be stored as a moment decline"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Why a converged constrained fit has no reportable posterior moments.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConePosteriorMomentDecline {
+    pub ambient_precision_failure: String,
+    pub properness: ConePropernessEvidence,
+}
+
+impl ConePosteriorMomentDecline {
+    pub fn summary(&self) -> String {
+        format!(
+            "ambient covariance route declined ({}); {}",
+            self.ambient_precision_failure,
+            self.properness.summary(),
+        )
+    }
+}
+
+/// Required wire discriminator for the formerly-overloaded `None` state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ConstrainedPosteriorMomentStatus {
+    Available,
+    Declined(ConePosteriorMomentDecline),
+}
+
 /// Persisted identity of an inequality-truncated Laplace posterior.
 ///
-/// These three objects must remain distinct:
-///
-/// * `mode` is the feasible optimizer solution and the reflective sampler's
-///   valid starting point;
-/// * `unconstrained_center` is the centre of the ambient Gaussian before
-///   truncation and therefore the reflective sampler's target centre;
-/// * the user-facing coefficient vector is the ambient centre plus the
-///   retained correction's normal-coordinate mean shift (or exactly the
-///   ambient centre when truncation is invisible at f64 resolution).
-///
-/// Keeping the two locations next to the factored moment correction prevents a
-/// saved model from re-deriving either location from row evidence or from
-/// treating the reported posterior mean as though it were the optimizer mode.
+/// `mode` is always the feasible optimizer solution. When moments are
+/// available, the ambient centre and correction define the posterior-mean
+/// estimand. When they are declined, the cone, mode, and properness evidence
+/// survive without fabricating either unavailable moment.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConstrainedPosteriorGeometry {
     /// Exact inequality system `Aβ ≥ b` in the same coefficient frame as the
     /// locations, correction lift, and ambient precision.
     pub constraints: LinearInequalityConstraints,
+    /// Feasible optimizer solution; never a substitute for a declined posterior mean.
     pub mode: Array1<f64>,
-    pub unconstrained_center: Array1<f64>,
-    /// Moment correction when at least one inequality changes the answer at
-    /// f64 resolution. `None` still records that an inequality system was
-    /// fitted; it means the ambient centre is far enough inside every row that
-    /// truncation is numerically invisible.
-    pub correction: Option<ConstrainedPosteriorCorrection>,
+    unconstrained_center: Option<Array1<f64>>,
+    /// Present only when `moment_status` is `Available`; `None` then means the
+    /// constraint is invisible at f64 resolution.
+    correction: Option<ConstrainedPosteriorCorrection>,
+    /// Whether reportable moments exist, with typed evidence when they do not.
+    pub moment_status: ConstrainedPosteriorMomentStatus,
 }
 
 impl ConstrainedPosteriorGeometry {
-    pub fn posterior_mean(&self) -> Array1<f64> {
-        self.correction
-            .as_ref()
-            .map(|correction| correction.posterior_mean(&self.unconstrained_center))
-            .unwrap_or_else(|| self.unconstrained_center.clone())
+    pub fn with_moments(
+        constraints: LinearInequalityConstraints,
+        mode: Array1<f64>,
+        unconstrained_center: Array1<f64>,
+        correction: Option<ConstrainedPosteriorCorrection>,
+    ) -> Self {
+        Self {
+            constraints,
+            mode,
+            unconstrained_center: Some(unconstrained_center),
+            correction,
+            moment_status: ConstrainedPosteriorMomentStatus::Available,
+        }
+    }
+
+    pub fn with_decline(
+        constraints: LinearInequalityConstraints,
+        mode: Array1<f64>,
+        decline: ConePosteriorMomentDecline,
+    ) -> Self {
+        Self {
+            constraints,
+            mode,
+            unconstrained_center: None,
+            correction: None,
+            moment_status: ConstrainedPosteriorMomentStatus::Declined(decline),
+        }
+    }
+
+    pub fn decline(&self) -> Option<&ConePosteriorMomentDecline> {
+        match &self.moment_status {
+            ConstrainedPosteriorMomentStatus::Available => None,
+            ConstrainedPosteriorMomentStatus::Declined(decline) => Some(decline),
+        }
+    }
+
+    pub fn unconstrained_center(&self) -> Result<&Array1<f64>, String> {
+        match &self.moment_status {
+            ConstrainedPosteriorMomentStatus::Available => self
+                .unconstrained_center
+                .as_ref()
+                .ok_or_else(|| {
+                    "available constrained posterior is missing its ambient centre".to_string()
+                }),
+            ConstrainedPosteriorMomentStatus::Declined(decline) => Err(format!(
+                "constrained posterior has no ambient centre because its moments were declined: {}",
+                decline.summary(),
+            )),
+        }
+    }
+
+    pub fn correction(&self) -> Result<Option<&ConstrainedPosteriorCorrection>, String> {
+        match &self.moment_status {
+            ConstrainedPosteriorMomentStatus::Available => Ok(self.correction.as_ref()),
+            ConstrainedPosteriorMomentStatus::Declined(decline) => Err(format!(
+                "constrained posterior has no moment correction because its moments were declined: {}",
+                decline.summary(),
+            )),
+        }
+    }
+
+    pub fn available_parts_mut(
+        &mut self,
+    ) -> Option<(&mut Array1<f64>, Option<&mut ConstrainedPosteriorCorrection>)> {
+        match &self.moment_status {
+            ConstrainedPosteriorMomentStatus::Available => Some((
+                self.unconstrained_center.as_mut()?,
+                self.correction.as_mut(),
+            )),
+            ConstrainedPosteriorMomentStatus::Declined(_) => None,
+        }
+    }
+
+    pub fn posterior_mean(&self) -> Result<Array1<f64>, String> {
+        let center = self.unconstrained_center()?;
+        Ok(self
+            .correction()?
+            .map(|correction| correction.posterior_mean(center))
+            .unwrap_or_else(|| center.clone()))
     }
 
     pub fn validate_for_dimension(&self, dimension: usize) -> Result<(), String> {
@@ -270,22 +448,50 @@ impl ConstrainedPosteriorGeometry {
                 self.constraints.b.len()
             ));
         }
-        if self.mode.len() != dimension || self.unconstrained_center.len() != dimension {
+        if self.mode.len() != dimension {
             return Err(format!(
-                "constrained posterior locations have lengths mode={} and center={}, expected {dimension}",
+                "constrained posterior mode has length {}, expected {dimension}",
                 self.mode.len(),
-                self.unconstrained_center.len()
             ));
         }
         if self
             .mode
             .iter()
-            .chain(self.unconstrained_center.iter())
+            .chain(self.unconstrained_center.iter().flat_map(|center| center.iter()))
             .chain(self.constraints.a.iter())
             .chain(self.constraints.b.iter())
             .any(|value| !value.is_finite())
         {
             return Err("constrained posterior geometry contains a non-finite value".to_string());
+        }
+        match &self.moment_status {
+            ConstrainedPosteriorMomentStatus::Available => {
+                if self
+                    .unconstrained_center
+                    .as_ref()
+                    .is_none_or(|center| center.len() != dimension)
+                {
+                    return Err(format!(
+                        "available constrained posterior centre has length {:?}, expected {dimension}",
+                        self.unconstrained_center.as_ref().map(Array1::len),
+                    ));
+                }
+            }
+            ConstrainedPosteriorMomentStatus::Declined(decline) => {
+                if self.unconstrained_center.is_some() || self.correction.is_some() {
+                    return Err(
+                        "declined constrained posterior must not carry fabricated ambient moments"
+                            .to_string(),
+                    );
+                }
+                if decline.ambient_precision_failure.trim().is_empty() {
+                    return Err(
+                        "constrained posterior moment decline has an empty ambient-precision reason"
+                            .to_string(),
+                    );
+                }
+                decline.properness.validate(dimension, self.constraints.a.nrows())?;
+            }
         }
         if let Some(correction) = self.correction.as_ref() {
             let q = correction.lift.ncols();
@@ -425,7 +631,7 @@ fn decompose_projection(
         );
     }
 
-    let ambient_mean = contrast.dot(&geometry.unconstrained_center);
+    let ambient_mean = contrast.dot(geometry.unconstrained_center()?);
     let sigma_c = ambient_covariance.dot(contrast);
     let ambient_variance = contrast.dot(&sigma_c);
     let covariance_scale = ambient_covariance
@@ -442,7 +648,7 @@ fn decompose_projection(
     }
     let ambient_variance = ambient_variance.max(0.0);
 
-    let Some(correction) = geometry.correction.as_ref() else {
+    let Some(correction) = geometry.correction()? else {
         return Ok(ProjectionDecomposition {
             ambient_mean,
             ambient_variance,
@@ -457,7 +663,7 @@ fn decompose_projection(
     for (position, &row) in correction.rows.iter().enumerate() {
         let a = geometry.constraints.a.row(row);
         normal_center[position] =
-            a.dot(&geometry.unconstrained_center) - geometry.constraints.b[row];
+            a.dot(geometry.unconstrained_center()?) - geometry.constraints.b[row];
         sigma_a
             .column_mut(position)
             .assign(&ambient_covariance.dot(&a));
@@ -2421,8 +2627,9 @@ mod tests {
         let geometry = ConstrainedPosteriorGeometry {
             constraints,
             mode: array![0.0],
-            unconstrained_center: center,
+            unconstrained_center: Some(center),
             correction: Some(correction),
+            moment_status: ConstrainedPosteriorMomentStatus::Available,
         };
         let (lower, upper) = constrained_projection_equal_tailed_interval(
             &covariance,
@@ -2475,8 +2682,9 @@ mod tests {
             let geometry = ConstrainedPosteriorGeometry {
                 constraints: constraints.clone(),
                 mode: array![center_value.max(0.0)],
-                unconstrained_center: center,
+                unconstrained_center: Some(center),
                 correction: Some(correction),
+                moment_status: ConstrainedPosteriorMomentStatus::Available,
             };
             let (lower, upper) = constrained_projection_equal_tailed_interval(
                 &covariance,
@@ -3461,8 +3669,9 @@ mod tests {
         let geometry = ConstrainedPosteriorGeometry {
             constraints,
             mode: array![0.6, 0.0],
-            unconstrained_center: centre,
+            unconstrained_center: Some(centre),
             correction: Some(correction),
+            moment_status: ConstrainedPosteriorMomentStatus::Available,
         };
         let (low, high) = constrained_projection_equal_tailed_interval(
             &covariance,
@@ -4596,8 +4805,9 @@ mod projection_law_2446_tests {
         let geometry = ConstrainedPosteriorGeometry {
             constraints,
             mode: array![0.0, 0.0],
-            unconstrained_center: center.clone(),
+            unconstrained_center: Some(center.clone()),
             correction: Some(correction.clone()),
+            moment_status: ConstrainedPosteriorMomentStatus::Available,
         };
 
         // (e) the node mixture, from the SHIPPED cubature.

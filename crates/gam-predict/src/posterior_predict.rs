@@ -1123,15 +1123,15 @@ mod tests {
                 array![0.5, -1.0, 3.0],
             ),
             penalized_hessian: Array2::<f64>::eye(2).into(),
-            constrained_posterior: Some(ConstrainedPosteriorGeometry {
-                constraints: LinearInequalityConstraints {
+            constrained_posterior: Some(ConstrainedPosteriorGeometry::with_moments(
+                LinearInequalityConstraints {
                     a: Array2::<f64>::eye(2),
                     b: Array1::<f64>::zeros(2),
                 },
-                mode: array![0.0, 0.0],
-                unconstrained_center: array![-1.0, -1.0],
-                correction: None,
-            }),
+                array![0.0, 0.0],
+                array![-1.0, -1.0],
+                None,
+            )),
             working: None,
         }
     }

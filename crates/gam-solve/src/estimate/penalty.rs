@@ -389,10 +389,13 @@ impl ParametricColumnConditioning {
                 posterior.constraints.a =
                     self.right_multiply_by_m_inv(&posterior.constraints.a);
                 posterior.mode = self.backtransform_beta(&posterior.mode);
-                posterior.unconstrained_center =
-                    self.backtransform_beta(&posterior.unconstrained_center);
-                if let Some(correction) = posterior.correction.as_mut() {
-                    correction.lift = self.left_multiply_by_m(&correction.lift);
+                if let Some((unconstrained_center, correction)) =
+                    posterior.available_parts_mut()
+                {
+                    *unconstrained_center = self.backtransform_beta(unconstrained_center);
+                    if let Some(correction) = correction {
+                        correction.lift = self.left_multiply_by_m(&correction.lift);
+                    }
                 }
             }
         }

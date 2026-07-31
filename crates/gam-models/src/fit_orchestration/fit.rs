@@ -1107,6 +1107,29 @@ trait LocationScaleWorkflowAdapter {
     ) -> Self::Result;
 }
 
+/// A location-scale solve without covariance is acceptable only when the
+/// constrained-posterior layer retained an explicit moment decline. That is a
+/// converged diagnostic fit, not a predictive model: saved-model assembly and
+/// every fit-aware posterior-mean prediction path reject the same typed state.
+fn require_location_scale_covariance_or_decline(
+    fit: &UnifiedFitResult,
+    context: &str,
+) -> Result<(), String> {
+    if fit.beta_covariance().is_some() {
+        return Ok(());
+    }
+    if let Some(decline) = fit.posterior_moment_decline() {
+        log::warn!(
+            "[{context}] preserving converged constrained fit with unavailable posterior moments: {}",
+            decline.summary(),
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{context} reached assembly without its joint posterior covariance or a typed constrained-posterior moment decline; no model was minted"
+    ))
+}
+
 /// Shared wiggle-pilot workflow for Gaussian and binomial location-scale models
 /// (#430). The single source of truth for the policy; families differ only via
 /// their [`LocationScaleWorkflowAdapter`].
@@ -1132,12 +1155,10 @@ fn fit_location_scale_with_optional_wiggle<A: LocationScaleWorkflowAdapter>(
         let mut fit_options = options.clone();
         fit_options.compute_covariance = true;
         let fit = A::fit_plain(data, spec, &fit_options, &kappa_options)?;
-        if fit.fit.beta_covariance().is_none() {
-            return Err(
-                "plain location-scale fit reached assembly without its joint posterior covariance; no model was minted"
-                    .to_string(),
-            );
-        }
+        require_location_scale_covariance_or_decline(
+            &fit.fit,
+            "plain location-scale fit",
+        )?;
         return Ok(A::assemble_plain(fit));
     };
 
@@ -1160,12 +1181,10 @@ fn fit_location_scale_with_optional_wiggle<A: LocationScaleWorkflowAdapter>(
     // (after the mean/threshold and log-σ blocks), so its coefficients live in
     // block 2 of the refit.
     let fit = solved.fit.fit;
-    if fit.beta_covariance().is_none() {
-        return Err(
-            "location-scale link-wiggle fit reached assembly without its joint posterior covariance; no model was minted"
-                .to_string(),
-        );
-    }
+    require_location_scale_covariance_or_decline(
+        &fit,
+        "location-scale link-wiggle fit",
+    )?;
     let beta_link_wiggle = fit.block_states.get(2).map(|b| b.beta.to_vec());
     let assembled_fit = BlockwiseTermFitResult::try_from_parts(BlockwiseTermFitResultParts {
         fit,

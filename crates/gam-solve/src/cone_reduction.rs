@@ -46,9 +46,10 @@
 //! become the quadrature's error floor.
 
 use ndarray::{Array1, Array2, ArrayView2};
+use serde::{Deserialize, Serialize};
 
 /// Inertia `(positive, zero, negative)` of a symmetric matrix.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inertia {
     pub positive: usize,
     pub zero: usize,
@@ -158,7 +159,7 @@ pub fn symmetric_inertia(matrix: ArrayView2<'_, f64>, tolerance: f64) -> Result<
 ///
 /// Every field is a measured quantity rather than a summary, because the point
 /// of this type is that a decline can name what it declined on.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConeProperness {
     /// The reduced precision `M` on the recession cone's normal coordinates
     /// `w = Ad`: `wᵀMw` is the STATIONARY value of `dᵀHd` on `{d : Ad = w}`, which

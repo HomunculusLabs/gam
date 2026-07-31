@@ -373,6 +373,9 @@ pub(crate) fn build_model_summary(
 /// scale and is now refused here, exactly as the library path already refuses
 /// it, instead of silently returning an unscaled `H⁻¹` labelled `Vb`.
 fn factorized_covariance_fallback(fit: &UnifiedFitResult) -> Option<Result<PredictionCovarianceBackend<'_>, String>> {
+    if let Err(error) = fit.require_posterior_mean("coefficient covariance summary") {
+        return Some(Err(error.to_string()));
+    }
     let hessian = fit.penalized_hessian()?;
     let scale = match fit.coefficient_covariance_scale() {
         Ok(scale) => scale,
@@ -384,11 +387,17 @@ fn factorized_covariance_fallback(fit: &UnifiedFitResult) -> Option<Result<Predi
             )));
         }
     };
-    let constrained_correction = fit
+    let constrained_correction = match fit
         .geometry
         .as_ref()
         .and_then(|geometry| geometry.constrained_posterior.as_ref())
-        .and_then(|posterior| posterior.correction.as_ref());
+    {
+        Some(posterior) => match posterior.correction() {
+            Ok(correction) => correction,
+            Err(reason) => return Some(Err(reason)),
+        },
+        None => None,
+    };
     Some(
         PredictionCovarianceBackend::from_factorized_hessian_scaled_with_correction(
             SymmetricMatrix::Dense(hessian.clone()),
@@ -407,6 +416,8 @@ pub(crate) fn covariance_from_model(
         .fit_result
         .as_ref()
         .ok_or_else(|| "model is missing canonical fit_result payload; refit".to_string())?;
+    fit.require_posterior_mean("saved-model covariance summary")
+        .map_err(|error| error.to_string())?;
     if mode == InferenceCovarianceMode::SmoothingCorrected {
         if let Some(cov) = fit.beta_covariance_corrected() {
             return Ok(cov.clone());

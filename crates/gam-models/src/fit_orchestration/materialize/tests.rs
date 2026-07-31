@@ -3098,6 +3098,35 @@ fn gaussian_location_scale_engine_matches_reference_flow() {
         engine_wiggle.beta_link_wiggle.is_some(),
         "a wiggle refit must populate beta_link_wiggle (block 2 present)"
     );
+
+    // #2635: the ambient Hessian is indefinite, but the fitted cone excludes
+    // its negative direction and the exact certificate proves the truncated
+    // posterior proper. Preserve that converged diagnostic fit and its cone,
+    // while refusing to relabel its optimizer mode as a posterior mean.
+    assert!(
+        engine_wiggle.fit.fit.beta_covariance().is_none(),
+        "the indefinite ambient precision has no Gaussian covariance to report"
+    );
+    let decline = engine_wiggle
+        .fit
+        .fit
+        .posterior_moment_decline()
+        .expect("the proper-cone fit must retain a typed moment decline");
+    assert_eq!(
+        decline.properness.is_proper(),
+        Some(true),
+        "the exact cone certificate must survive assembly"
+    );
+    let refusal = engine_wiggle
+        .fit
+        .fit
+        .require_posterior_mean("Gaussian location-scale prediction")
+        .expect_err("prediction must not substitute the mode for the posterior mean")
+        .to_string();
+    assert!(
+        refusal.contains("posterior-mean") && refusal.contains("PROPER"),
+        "the refusal must name the missing estimand and certified law: {refusal}"
+    );
 }
 
 #[test]

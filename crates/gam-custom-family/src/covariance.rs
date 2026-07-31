@@ -1824,26 +1824,24 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
                     // an UNREACHABLE proper posterior (this route's limitation,
                     // #2529's quadrature) and an IMPROPER one (no posterior to
                     // report, whatever the route).
-                    let certificate = gam_solve::cone_reduction::cone_properness_certificate(
+                    let properness = match gam_solve::cone_reduction::cone_properness_certificate(
                         precision.view(),
                         constraints.a.view(),
                         f64::EPSILON.sqrt(),
-                    );
-                    let cone_verdict = match &certificate {
-                        Ok(certificate) => certificate.summary(),
-                        Err(error) => format!(
-                            "cone-truncated posterior properness could not be certified: {error}"
-                        ),
+                    ) {
+                        Ok(certificate) => {
+                            gam_solve::constrained_posterior::ConePropernessEvidence::Certificate(
+                                certificate,
+                            )
+                        }
+                        Err(error) => {
+                            gam_solve::constrained_posterior::ConePropernessEvidence::CertificationFailed {
+                                reason: error,
+                            }
+                        }
                     };
-                    if let Ok(certificate) = &certificate
-                        && certificate.is_proper() == Some(false)
-                    {
-                        // Proved improper, so this is not a route limitation.
-                        // There is no proper posterior on the feasible cone at
-                        // all, and no covariance — reachable or not — would
-                        // describe one. Declining the channel here would report
-                        // a fit whose uncertainty is unbounded inside its own
-                        // feasible set.
+                    let cone_verdict = properness.summary();
+                    if properness.is_proper() == Some(false) {
                         return Err(format!(
                             "constrained fit converged at a point whose cone-truncated posterior \
                              is provably IMPROPER, so no posterior covariance exists to report: \
@@ -1852,31 +1850,33 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
                     }
                     log::warn!(
                         "[custom-family covariance] constrained fit converged, but its \
-                             ambient posterior precision is not positive definite, so the \
-                             inequality-truncated covariance is unreachable by this route \
-                             ({reason}); the cone itself was certified separately and \
-                             {cone_verdict}; reporting the fit WITHOUT a posterior covariance \
-                             rather than refusing the fit or substituting the zero-variance \
-                             active-face answer (#2442)"
+                         ambient posterior precision is not positive definite, so the \
+                         inequality-truncated covariance is unreachable by this route \
+                         ({reason}); the cone itself was certified separately and \
+                         {cone_verdict}; retaining the converged constrained MODE under a \
+                         typed posterior-moment decline (#2635)"
                     );
-                    // KNOWN GAP (#2442): a consumer cannot tell this state
-                    // apart from an unconstrained fit — both carry
-                    // `constrained_posterior: None` — and here the caller
-                    // keeps the constrained MODE as its coefficient vector
-                    // because the posterior mean is a function of the same
-                    // unreachable covariance. That is the mode/mean
-                    // conflation `FitGeometry` warns about, reachable only
-                    // on this decline. Distinguishing it properly needs a
-                    // typed decline on the wire schema rather than a third
-                    // meaning for `None`; recorded rather than papered over.
+                    let constrained =
+                        gam_solve::constrained_posterior::ConstrainedPosteriorGeometry::with_decline(
+                            constraints,
+                            mode,
+                            gam_solve::constrained_posterior::ConePosteriorMomentDecline {
+                                ambient_precision_failure: reason,
+                                properness,
+                            },
+                        );
+                    constrained.validate_for_dimension(p)?;
                     return Ok(JointPosteriorAssembly {
                         covariance_conditional: None,
                         geometry: FitGeometry {
                             coefficient_gauge: gam_problem::gauge::Gauge::identity(&block_widths),
                             penalized_hessian: precision.into(),
-                            constrained_posterior: None,
+                            constrained_posterior: Some(constrained),
                             working,
                         },
+                        // The only available coefficient location is the mode.
+                        // Its typed decline prevents every posterior-mean model
+                        // assembler and predictor from consuming it as a mean.
                         reported_beta: None,
                     });
                 }
@@ -1896,19 +1896,19 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
                     &unconstrained_center,
                     &constraints,
                 )?;
-            let constrained = gam_solve::constrained_posterior::ConstrainedPosteriorGeometry {
-                constraints,
-                mode,
-                unconstrained_center,
-                correction,
-            };
+            let constrained =
+                gam_solve::constrained_posterior::ConstrainedPosteriorGeometry::with_moments(
+                    constraints,
+                    mode,
+                    unconstrained_center,
+                    correction,
+                );
             constrained.validate_for_dimension(p)?;
-            let reported = constrained.posterior_mean();
+            let reported = constrained.posterior_mean()?;
             let covariance = if options.compute_covariance {
                 Some(
                     constrained
-                        .correction
-                        .as_ref()
+                        .correction()?
                         .map(|value| value.apply_to_covariance(&ambient))
                         .unwrap_or(ambient),
                 )
@@ -2637,9 +2637,23 @@ mod required_covariance_tests {
              got {:?}",
             assembly.covariance_conditional,
         );
-        assert!(
-            assembly.geometry.constrained_posterior.is_none(),
-            "no truncated law was computed, so none may be persisted as though it had been",
+        let constrained = assembly
+            .geometry
+            .constrained_posterior
+            .as_ref()
+            .expect("the fitted cone identity must survive the moment decline");
+        let decline = constrained
+            .decline()
+            .expect("an ambient-indefinite proper cone must carry a typed moment decline");
+        assert_eq!(
+            decline.properness.is_proper(),
+            Some(true),
+            "the decline must preserve the live proof that the cone posterior exists",
+        );
+        assert_eq!(
+            constrained.constraints.a,
+            Array2::<f64>::eye(2),
+            "the declaration that makes the indefinite posterior proper must not be erased",
         );
         assert!(
             assembly.reported_beta.is_none(),
@@ -2928,7 +2942,12 @@ mod required_covariance_tests {
             .as_ref()
             .expect("exact inequality geometry");
         assert_eq!(constrained.mode, array![0.0]);
-        assert_eq!(constrained.unconstrained_center, array![-1.0]);
+        assert_eq!(
+            constrained
+                .unconstrained_center()
+                .expect("available constrained posterior centre"),
+            array![-1.0]
+        );
         let reported = posterior.reported_beta.expect("posterior mean");
         assert!(
             reported[0] > 0.0,
@@ -3022,14 +3041,16 @@ mod required_covariance_tests {
             .constrained_posterior
             .as_ref()
             .expect("exact inequality geometry")
-            .unconstrained_center
+            .unconstrained_center()
+            .expect("available constrained posterior centre")
             .clone();
         let center_score = from_score
             .geometry
             .constrained_posterior
             .as_ref()
             .expect("exact inequality geometry")
-            .unconstrained_center
+            .unconstrained_center()
+            .expect("available constrained posterior centre")
             .clone();
         assert_eq!(
             center_ws, center_score,
