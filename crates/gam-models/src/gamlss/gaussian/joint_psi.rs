@@ -17,10 +17,10 @@ row_atom! {
     fn gaussian_normalized_row [generic, order2_at_zero, third_at_zero, fourth_at_zero](
         delta_mu,
         delta_eta;
-        obs_weight,
-        standardized_residual,
-        inv_sigma,
-        kappa
+        obs_weight: f64,
+        standardized_residual: f64,
+        inv_sigma: f64,
+        kappa: f64
     ) {
         obs_weight * ln((1.0 - kappa) + kappa * exp(delta_eta))
             + 0.5

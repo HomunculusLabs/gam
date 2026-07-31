@@ -43,6 +43,8 @@ struct RowAtomInput {
     lowerings: HashSet<Lowering>,
     primaries: Vec<Ident>,
     constants: Vec<Ident>,
+    activity_constants: HashSet<usize>,
+    scale_constants: HashSet<usize>,
     expression: Expr,
 }
 
@@ -90,10 +92,31 @@ impl Parse for RowAtomInput {
             }
         }
         let mut constants = Vec::new();
+        let mut activity_constants = HashSet::new();
+        let mut scale_constants = HashSet::new();
         if arguments.peek(Token![;]) {
             arguments.parse::<Token![;]>()?;
             while !arguments.is_empty() {
-                constants.push(arguments.parse::<Ident>()?);
+                let constant = arguments.parse::<Ident>()?;
+                arguments.parse::<Token![:]>()?;
+                let kind = arguments.parse::<Ident>()?;
+                let index = constants.len();
+                match kind.to_string().as_str() {
+                    "f64" => {}
+                    "scale" => {
+                        scale_constants.insert(index);
+                    }
+                    "bool" => {
+                        activity_constants.insert(index);
+                    }
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            kind,
+                            "row_atom constants must be explicitly typed `f64`, `scale`, or `bool`",
+                        ));
+                    }
+                }
+                constants.push(constant);
                 if arguments.peek(Token![,]) {
                     arguments.parse::<Token![,]>()?;
                 } else {
@@ -128,6 +151,8 @@ impl Parse for RowAtomInput {
             lowerings,
             primaries,
             constants,
+            activity_constants,
+            scale_constants,
             expression,
         })
     }
@@ -146,6 +171,8 @@ enum Node {
     Exp(usize),
     Ln(usize),
     Sqrt(usize),
+    Recip(usize),
+    Select(usize, usize, usize),
 }
 
 struct Graph {
@@ -155,6 +182,13 @@ struct Graph {
 }
 
 type Polynomial = BTreeMap<Vec<usize>, f64>;
+type RingPolynomial = BTreeMap<Vec<usize>, f64>;
+
+#[derive(Clone, Copy)]
+enum ScaleDistribution {
+    Value,
+    Derivative,
+}
 
 impl Graph {
     fn new() -> Self {
@@ -201,6 +235,10 @@ impl Graph {
         if self.is_zero(right) {
             return left;
         }
+        if left == right {
+            let two = self.constant(2.0);
+            return self.mul(two, left);
+        }
         if let (Some(left), Some(right)) = (self.constant_value(left), self.constant_value(right)) {
             return self.constant(left + right);
         }
@@ -220,6 +258,9 @@ impl Graph {
     fn sub(&mut self, left: usize, right: usize) -> usize {
         if self.is_zero(right) {
             return left;
+        }
+        if self.is_zero(left) {
+            return self.neg(right);
         }
         if left == right {
             return self.constant(0.0);
@@ -243,6 +284,19 @@ impl Graph {
         if let (Some(left), Some(right)) = (self.constant_value(left), self.constant_value(right)) {
             return self.constant(left * right);
         }
+        if let Node::Neg(inner) = self.nodes[left] {
+            let product = self.mul(inner, right);
+            return self.neg(product);
+        }
+        if let Node::Neg(inner) = self.nodes[right] {
+            let product = self.mul(left, inner);
+            return self.neg(product);
+        }
+        let (left, right) = if left <= right {
+            (left, right)
+        } else {
+            (right, left)
+        };
         self.intern(Node::Mul(left, right))
     }
 
@@ -293,6 +347,223 @@ impl Graph {
         self.intern(Node::Sqrt(value))
     }
 
+    fn recip(&mut self, value: usize) -> usize {
+        if let Some(value) = self.constant_value(value) {
+            return self.constant(value.recip());
+        }
+        if let Node::Recip(inner) = self.nodes[value] {
+            return inner;
+        }
+        self.intern(Node::Recip(value))
+    }
+
+    fn select(&mut self, activity: usize, when_true: usize, when_false: usize) -> usize {
+        if when_true == when_false {
+            return when_true;
+        }
+        if self.is_zero(when_true) && self.is_zero(when_false) {
+            return self.constant(0.0);
+        }
+        self.intern(Node::Select(activity, when_true, when_false))
+    }
+
+    fn guard_activities(
+        &mut self,
+        id: usize,
+        activity_constants: &HashSet<usize>,
+        memo: &mut HashMap<usize, usize>,
+    ) -> usize {
+        if let Some(&guarded) = memo.get(&id) {
+            return guarded;
+        }
+        let node = self.nodes[id].clone();
+        let guarded = match node {
+            Node::Constant(_) | Node::Variable(_) | Node::Parameter(_) => id,
+            Node::Add(left, right) => {
+                let left = self.guard_activities(left, activity_constants, memo);
+                let right = self.guard_activities(right, activity_constants, memo);
+                self.add(left, right)
+            }
+            Node::Sub(left, right) => {
+                let left = self.guard_activities(left, activity_constants, memo);
+                let right = self.guard_activities(right, activity_constants, memo);
+                self.sub(left, right)
+            }
+            Node::Mul(left, right) => {
+                let left = self.guard_activities(left, activity_constants, memo);
+                let right = self.guard_activities(right, activity_constants, memo);
+                let activity_side = match (self.nodes[left].clone(), self.nodes[right].clone()) {
+                    (Node::Parameter(index), _) if activity_constants.contains(&index) => {
+                        Some((index, right))
+                    }
+                    (_, Node::Parameter(index)) if activity_constants.contains(&index) => {
+                        Some((index, left))
+                    }
+                    _ => None,
+                };
+                if let Some((activity, value)) = activity_side {
+                    let zero = self.constant(0.0);
+                    self.select(activity, value, zero)
+                } else {
+                    self.mul(left, right)
+                }
+            }
+            Node::Div(left, right) => {
+                let left = self.guard_activities(left, activity_constants, memo);
+                let right = self.guard_activities(right, activity_constants, memo);
+                self.div(left, right)
+            }
+            Node::Neg(value) => {
+                let value = self.guard_activities(value, activity_constants, memo);
+                self.neg(value)
+            }
+            Node::Exp(value) => {
+                let value = self.guard_activities(value, activity_constants, memo);
+                self.exp(value)
+            }
+            Node::Ln(value) => {
+                let value = self.guard_activities(value, activity_constants, memo);
+                self.ln(value)
+            }
+            Node::Sqrt(value) => {
+                let value = self.guard_activities(value, activity_constants, memo);
+                self.sqrt(value)
+            }
+            Node::Recip(value) => {
+                let value = self.guard_activities(value, activity_constants, memo);
+                self.recip(value)
+            }
+            Node::Select(activity, when_true, when_false) => {
+                let when_true = self.guard_activities(when_true, activity_constants, memo);
+                let when_false = self.guard_activities(when_false, activity_constants, memo);
+                self.select(activity, when_true, when_false)
+            }
+        };
+        memo.insert(id, guarded);
+        guarded
+    }
+
+    fn push_scale(&mut self, scale: usize, value: usize, distribution: ScaleDistribution) -> usize {
+        match self.nodes[value].clone() {
+            Node::Add(left, right) => {
+                let left = self.push_scale(scale, left, distribution);
+                let right = self.push_scale(scale, right, distribution);
+                self.add(left, right)
+            }
+            Node::Sub(left, right) => {
+                let left = self.push_scale(scale, left, distribution);
+                let right = self.push_scale(scale, right, distribution);
+                self.sub(left, right)
+            }
+            Node::Neg(value) => {
+                let value = self.push_scale(scale, value, distribution);
+                self.neg(value)
+            }
+            Node::Select(activity, when_true, when_false) => {
+                let (when_true, when_false) = match distribution {
+                    ScaleDistribution::Value => {
+                        (self.mul(scale, when_true), self.mul(scale, when_false))
+                    }
+                    ScaleDistribution::Derivative => (
+                        self.push_scale(scale, when_true, distribution),
+                        self.push_scale(scale, when_false, distribution),
+                    ),
+                };
+                self.select(activity, when_true, when_false)
+            }
+            Node::Mul(left, right) => {
+                let (coefficient, remainder) = if matches!(self.nodes[left], Node::Parameter(_)) {
+                    (left, right)
+                } else if matches!(self.nodes[right], Node::Parameter(_)) {
+                    (right, left)
+                } else {
+                    (left, right)
+                };
+                let scaled_coefficient = self.mul(scale, coefficient);
+                self.mul(scaled_coefficient, remainder)
+            }
+            _ => self.mul(scale, value),
+        }
+    }
+
+    fn distribute_scales(
+        &mut self,
+        id: usize,
+        scale_constants: &HashSet<usize>,
+        distribution: ScaleDistribution,
+        memo: &mut HashMap<usize, usize>,
+    ) -> usize {
+        if let Some(&normalized) = memo.get(&id) {
+            return normalized;
+        }
+        let node = self.nodes[id].clone();
+        let normalized = match node {
+            Node::Constant(_) | Node::Variable(_) | Node::Parameter(_) => id,
+            Node::Add(left, right) => {
+                let left = self.distribute_scales(left, scale_constants, distribution, memo);
+                let right = self.distribute_scales(right, scale_constants, distribution, memo);
+                self.add(left, right)
+            }
+            Node::Sub(left, right) => {
+                let left = self.distribute_scales(left, scale_constants, distribution, memo);
+                let right = self.distribute_scales(right, scale_constants, distribution, memo);
+                self.sub(left, right)
+            }
+            Node::Mul(left, right) => {
+                let left = self.distribute_scales(left, scale_constants, distribution, memo);
+                let right = self.distribute_scales(right, scale_constants, distribution, memo);
+                let scale_side = match (self.nodes[left].clone(), self.nodes[right].clone()) {
+                    (Node::Parameter(index), _) if scale_constants.contains(&index) => {
+                        Some((left, right))
+                    }
+                    (_, Node::Parameter(index)) if scale_constants.contains(&index) => {
+                        Some((right, left))
+                    }
+                    _ => None,
+                };
+                if let Some((scale, value)) = scale_side {
+                    self.push_scale(scale, value, distribution)
+                } else {
+                    self.mul(left, right)
+                }
+            }
+            Node::Div(left, right) => {
+                let left = self.distribute_scales(left, scale_constants, distribution, memo);
+                let right = self.distribute_scales(right, scale_constants, distribution, memo);
+                self.div(left, right)
+            }
+            Node::Neg(value) => {
+                let value = self.distribute_scales(value, scale_constants, distribution, memo);
+                self.neg(value)
+            }
+            Node::Exp(value) => {
+                let value = self.distribute_scales(value, scale_constants, distribution, memo);
+                self.exp(value)
+            }
+            Node::Ln(value) => {
+                let value = self.distribute_scales(value, scale_constants, distribution, memo);
+                self.ln(value)
+            }
+            Node::Sqrt(value) => {
+                let value = self.distribute_scales(value, scale_constants, distribution, memo);
+                self.sqrt(value)
+            }
+            Node::Recip(value) => {
+                let value = self.distribute_scales(value, scale_constants, distribution, memo);
+                self.recip(value)
+            }
+            Node::Select(activity, when_true, when_false) => {
+                let when_true =
+                    self.distribute_scales(when_true, scale_constants, distribution, memo);
+                let when_false =
+                    self.distribute_scales(when_false, scale_constants, distribution, memo);
+                self.select(activity, when_true, when_false)
+            }
+        };
+        memo.insert(id, normalized);
+        normalized
+    }
+
     fn substitute_zero_primaries(&mut self, id: usize, memo: &mut HashMap<usize, usize>) -> usize {
         if let Some(&specialized) = memo.get(&id) {
             return specialized;
@@ -337,6 +608,15 @@ impl Graph {
                 let value = self.substitute_zero_primaries(value, memo);
                 self.sqrt(value)
             }
+            Node::Recip(value) => {
+                let value = self.substitute_zero_primaries(value, memo);
+                self.recip(value)
+            }
+            Node::Select(activity, when_true, when_false) => {
+                let when_true = self.substitute_zero_primaries(when_true, memo);
+                let when_false = self.substitute_zero_primaries(when_false, memo);
+                self.select(activity, when_true, when_false)
+            }
         };
         memo.insert(id, specialized);
         specialized
@@ -366,7 +646,12 @@ impl Graph {
                 exponents[parameter] = 1;
                 Some([(exponents, 1.0)].into_iter().collect())
             }
-            Node::Variable(_) | Node::Exp(_) | Node::Ln(_) | Node::Sqrt(_) => None,
+            Node::Variable(_)
+            | Node::Exp(_)
+            | Node::Ln(_)
+            | Node::Sqrt(_)
+            | Node::Recip(_)
+            | Node::Select(_, _, _) => None,
             Node::Neg(value) => self
                 .polynomial(value, parameter_count, memo)
                 .map(|mut value| {
@@ -470,6 +755,127 @@ impl Graph {
         self.polynomial_horner(&polynomial, &(0..parameter_count).collect::<Vec<_>>())
     }
 
+    fn ring_polynomial(
+        &self,
+        id: usize,
+        memo: &mut HashMap<usize, RingPolynomial>,
+    ) -> RingPolynomial {
+        if let Some(polynomial) = memo.get(&id) {
+            return polynomial.clone();
+        }
+        let polynomial = match self.nodes[id].clone() {
+            Node::Constant(bits) => {
+                let value = f64::from_bits(bits);
+                if value == 0.0 {
+                    RingPolynomial::new()
+                } else {
+                    [(Vec::new(), value)].into_iter().collect()
+                }
+            }
+            Node::Neg(value) => self
+                .ring_polynomial(value, memo)
+                .into_iter()
+                .map(|(monomial, coefficient)| (monomial, -coefficient))
+                .collect(),
+            Node::Add(left, right) | Node::Sub(left, right) => {
+                let mut polynomial = self.ring_polynomial(left, memo);
+                let sign = if matches!(self.nodes[id], Node::Add(_, _)) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                for (monomial, coefficient) in self.ring_polynomial(right, memo) {
+                    *polynomial.entry(monomial).or_default() += sign * coefficient;
+                }
+                polynomial.retain(|_, coefficient| *coefficient != 0.0);
+                polynomial
+            }
+            Node::Mul(left, right) => {
+                let left = self.ring_polynomial(left, memo);
+                let right = self.ring_polynomial(right, memo);
+                let mut product = RingPolynomial::new();
+                for (left_factors, left_coefficient) in &left {
+                    for (right_factors, right_coefficient) in &right {
+                        let mut factors =
+                            Vec::with_capacity(left_factors.len() + right_factors.len());
+                        factors.extend_from_slice(left_factors);
+                        factors.extend_from_slice(right_factors);
+                        factors.sort_unstable();
+                        *product.entry(factors).or_default() +=
+                            left_coefficient * right_coefficient;
+                    }
+                }
+                product.retain(|_, coefficient| *coefficient != 0.0);
+                product
+            }
+            Node::Select(_, _, _) => {
+                return [(vec![id], 1.0)].into_iter().collect();
+            }
+            Node::Variable(_)
+            | Node::Parameter(_)
+            | Node::Div(_, _)
+            | Node::Exp(_)
+            | Node::Ln(_)
+            | Node::Sqrt(_)
+            | Node::Recip(_) => [(vec![id], 1.0)].into_iter().collect(),
+        };
+        memo.insert(id, polynomial.clone());
+        polynomial
+    }
+
+    fn normalize_ring(&mut self, id: usize) -> usize {
+        match self.nodes[id].clone() {
+            Node::Select(activity, when_true, when_false) => {
+                let when_true = self.normalize_ring(when_true);
+                let when_false = self.normalize_ring(when_false);
+                return self.select(activity, when_true, when_false);
+            }
+            Node::Neg(value) => {
+                if let Node::Select(activity, when_true, when_false) = self.nodes[value].clone() {
+                    let when_true = self.neg(when_true);
+                    let when_false = self.neg(when_false);
+                    let when_true = self.normalize_ring(when_true);
+                    let when_false = self.normalize_ring(when_false);
+                    return self.select(activity, when_true, when_false);
+                }
+            }
+            _ => {}
+        }
+        let polynomial = self.ring_polynomial(id, &mut HashMap::new());
+        let mut sum = self.constant(0.0);
+        for (factors, coefficient) in polynomial {
+            let mut term = self.constant(coefficient);
+            let mut cursor = 0;
+            while cursor < factors.len() {
+                let factor = factors[cursor];
+                let mut end = cursor + 1;
+                while end < factors.len() && factors[end] == factor {
+                    end += 1;
+                }
+                let power = self.positive_integer_power(factor, end - cursor);
+                term = self.mul(term, power);
+                cursor = end;
+            }
+            sum = self.add(sum, term);
+        }
+        sum
+    }
+
+    fn positive_integer_power(&mut self, base: usize, exponent: usize) -> usize {
+        debug_assert!(exponent > 0);
+        if exponent == 1 {
+            return base;
+        }
+
+        let half = self.positive_integer_power(base, exponent / 2);
+        let square = self.mul(half, half);
+        if exponent % 2 == 0 {
+            square
+        } else {
+            self.mul(square, base)
+        }
+    }
+
     fn derivative(&mut self, id: usize, variable: usize) -> usize {
         if let Some(&derivative) = self.derivatives.get(&(id, variable)) {
             return derivative;
@@ -515,7 +921,8 @@ impl Graph {
             }
             Node::Ln(value) => {
                 let derivative = self.derivative(value, variable);
-                self.div(derivative, value)
+                let reciprocal = self.recip(value);
+                self.mul(derivative, reciprocal)
             }
             Node::Sqrt(value) => {
                 let derivative = self.derivative(value, variable);
@@ -523,6 +930,18 @@ impl Graph {
                 let sqrt = self.intern(Node::Sqrt(value));
                 let denominator = self.mul(two, sqrt);
                 self.div(derivative, denominator)
+            }
+            Node::Recip(value) => {
+                let derivative = self.derivative(value, variable);
+                let reciprocal = self.intern(Node::Recip(value));
+                let reciprocal_squared = self.mul(reciprocal, reciprocal);
+                let product = self.mul(derivative, reciprocal_squared);
+                self.neg(product)
+            }
+            Node::Select(activity, when_true, when_false) => {
+                let when_true = self.derivative(when_true, variable);
+                let when_false = self.derivative(when_false, variable);
+                self.select(activity, when_true, when_false)
             }
         };
         self.derivatives.insert((id, variable), derivative);
@@ -630,10 +1049,7 @@ fn graph_expression(
                 "exp" => graph.exp(argument),
                 "ln" => graph.ln(argument),
                 "sqrt" => graph.sqrt(argument),
-                "recip" => {
-                    let one = graph.constant(1.0);
-                    graph.div(one, argument)
-                }
+                "recip" => graph.recip(argument),
                 name => {
                     return Err(syn::Error::new_spanned(
                         call,
@@ -737,9 +1153,14 @@ fn topological_order(id: usize, graph: &Graph, seen: &mut HashSet<usize>, order:
     }
     match graph.nodes[id] {
         Node::Constant(_) | Node::Variable(_) | Node::Parameter(_) => {}
-        Node::Neg(value) | Node::Exp(value) | Node::Ln(value) | Node::Sqrt(value) => {
+        Node::Neg(value)
+        | Node::Exp(value)
+        | Node::Ln(value)
+        | Node::Sqrt(value)
+        | Node::Recip(value) => {
             topological_order(value, graph, seen, order);
         }
+        Node::Select(_, _, _) => {}
         Node::Add(left, right)
         | Node::Sub(left, right)
         | Node::Mul(left, right)
@@ -822,6 +1243,28 @@ fn node_definition(
             let value = reference(value);
             Ok(quote!(#value.sqrt()))
         }
+        Node::Recip(value) => {
+            let value = reference(value);
+            Ok(quote!(#value.recip()))
+        }
+        Node::Select(activity, when_true, when_false) => {
+            let activity = &constants[activity];
+            let when_true_definitions =
+                schedule_definitions(std::iter::once(when_true), graph, primaries, constants)?;
+            let when_false_definitions =
+                schedule_definitions(std::iter::once(when_false), graph, primaries, constants)?;
+            let when_true = reference(when_true);
+            let when_false = reference(when_false);
+            Ok(quote! {
+                if #activity {
+                    #(#when_true_definitions)*
+                    #when_true
+                } else {
+                    #(#when_false_definitions)*
+                    #when_false
+                }
+            })
+        }
         Node::Constant(_) | Node::Variable(_) | Node::Parameter(_) => Err(syn::Error::new(
             Span::call_site(),
             "row_atom internal schedule error: a leaf node has no temporary definition",
@@ -837,7 +1280,8 @@ fn schedule_definitions(
 ) -> Result<Vec<TokenStream2>> {
     let mut seen = HashSet::new();
     let mut order = Vec::new();
-    for root in roots {
+    let roots = roots.into_iter().collect::<Vec<_>>();
+    for root in roots.into_iter().rev() {
         topological_order(root, graph, &mut seen, &mut order);
     }
     order
@@ -850,6 +1294,23 @@ fn schedule_definitions(
         .collect()
 }
 
+fn constant_parameters(
+    constants: &[Ident],
+    activity_constants: &HashSet<usize>,
+) -> Vec<TokenStream2> {
+    constants
+        .iter()
+        .enumerate()
+        .map(|(index, constant)| {
+            if activity_constants.contains(&index) {
+                quote!(#constant: bool)
+            } else {
+                quote!(#constant: f64)
+            }
+        })
+        .collect()
+}
+
 fn expand(input: RowAtomInput) -> Result<TokenStream2> {
     let RowAtomInput {
         visibility,
@@ -857,14 +1318,39 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         lowerings,
         primaries,
         constants,
+        activity_constants,
+        scale_constants,
         expression,
     } = input;
     let mut graph = Graph::new();
-    let value = graph_expression(&expression, &primaries, &constants, &mut graph)?;
+    let mut value = graph_expression(&expression, &primaries, &constants, &mut graph)?;
+    if !activity_constants.is_empty() {
+        value = graph.guard_activities(value, &activity_constants, &mut HashMap::new());
+    }
+    let differentiated_value = if scale_constants.is_empty() {
+        value
+    } else {
+        graph.distribute_scales(
+            value,
+            &scale_constants,
+            ScaleDistribution::Derivative,
+            &mut HashMap::new(),
+        )
+    };
+    value = if scale_constants.is_empty() {
+        value
+    } else {
+        graph.distribute_scales(
+            value,
+            &scale_constants,
+            ScaleDistribution::Value,
+            &mut HashMap::new(),
+        )
+    };
     let dimension = primaries.len();
     let mut gradient = Vec::with_capacity(dimension);
     for axis in 0..dimension {
-        gradient.push(graph.derivative(value, axis));
+        gradient.push(graph.derivative(differentiated_value, axis));
     }
     let mut hessian = vec![vec![0usize; dimension]; dimension];
     for row in 0..dimension {
@@ -873,6 +1359,13 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         }
     }
     let mut output = Vec::new();
+    let constant_parameters = constant_parameters(&constants, &activity_constants);
+    let generic_activity_bindings = constants
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| activity_constants.contains(index))
+        .map(|(_, activity)| quote!(let #activity: f64 = f64::from(#activity);))
+        .collect::<Vec<_>>();
 
     if lowerings.contains(&Lowering::Generic) {
         let generic_expression = jet_expression(&expression, &primaries, &constants)?;
@@ -880,8 +1373,9 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
             #[inline(always)]
             #visibility fn #name<const K: usize, S: ::gam_math::jet_scalar::JetScalar<K>>(
                 #(#primaries: &S,)*
-                #(#constants: f64),*
+                #(#constant_parameters),*
             ) -> S {
+                #(#generic_activity_bindings)*
                 #generic_expression
             }
         });
@@ -925,21 +1419,6 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         for (row, channels) in hessian.iter().enumerate() {
             packed_hessian.extend_from_slice(&channels[row..]);
         }
-        let definitions = schedule_definitions(
-            std::iter::once(value)
-                .chain(gradient.iter().copied())
-                .chain(packed_hessian.iter().copied()),
-            &graph,
-            &primaries,
-            &constants,
-        )?;
-        let value_ref = node_reference(value, &graph, &primaries, &constants);
-        let gradient_refs = gradient
-            .iter()
-            .map(|&id| node_reference(id, &graph, &primaries, &constants));
-        let hessian_refs = packed_hessian
-            .iter()
-            .map(|&id| node_reference(id, &graph, &primaries, &constants));
         let packed = dimension * (dimension + 1) / 2;
         let gradient_bits = gradient
             .iter()
@@ -960,23 +1439,41 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         } else {
             quote!(#(#primaries: f64,)*)
         };
+        let definitions = schedule_definitions(
+            std::iter::once(value)
+                .chain(gradient.iter().copied())
+                .chain(packed_hessian.iter().copied()),
+            &graph,
+            &primaries,
+            &constants,
+        )?;
+        let value_ref = node_reference(value, &graph, &primaries, &constants);
+        let gradient_refs = gradient
+            .iter()
+            .map(|&id| node_reference(id, &graph, &primaries, &constants));
+        let hessian_refs = packed_hessian
+            .iter()
+            .map(|&id| node_reference(id, &graph, &primaries, &constants));
+        let body = quote! {
+            #(#definitions)*
+            ::gam_math::jet_scalar::StaticOrder2Atom::new(
+                #value_ref,
+                [#(#gradient_refs),*],
+                [#(#hessian_refs),*],
+            )
+        };
         output.push(quote! {
             #[inline(always)]
             #visibility fn #order2_name(
                 #primary_parameters
-                #(#constants: f64),*
+                #(#constant_parameters),*
             ) -> ::gam_math::jet_scalar::StaticOrder2Atom<
                 #dimension,
                 #packed,
                 #gradient_bits,
                 #hessian_bits,
             > {
-                #(#definitions)*
-                ::gam_math::jet_scalar::StaticOrder2Atom::new(
-                    #value_ref,
-                    [#(#gradient_refs),*],
-                    [#(#hessian_refs),*],
-                )
+                #body
             }
         });
     }
@@ -989,13 +1486,15 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
             continue;
         }
         let third_name = format_ident!("{name}_{suffix}");
-        let mut roots = Vec::new();
-        let mut assignments = Vec::new();
+        let mut channels = vec![vec![Vec::new(); dimension]; dimension];
         let mut memo = HashMap::new();
         for row in 0..dimension {
             for column in row..dimension {
                 let mut derivatives = (0..dimension)
-                    .map(|axis| graph.derivative(hessian[row][column], axis))
+                    .map(|axis| {
+                        let derivative = graph.derivative(hessian[row][column], axis);
+                        graph.normalize_ring(derivative)
+                    })
                     .collect::<Vec<_>>();
                 if at_zero {
                     for derivative in &mut derivatives {
@@ -1003,6 +1502,13 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                         *derivative = graph.normalize_polynomial(*derivative, constants.len());
                     }
                 }
+                channels[row][column] = derivatives;
+            }
+        }
+        let mut roots = Vec::new();
+        let mut assignments = Vec::new();
+        for (row, columns) in channels.iter().enumerate() {
+            for (column, derivatives) in columns.iter().enumerate().skip(row) {
                 roots.extend(derivatives.iter().copied());
                 let terms = derivatives
                     .iter()
@@ -1011,16 +1517,21 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                     .map(|(axis, &id)| {
                         let derivative = node_reference(id, &graph, &primaries, &constants);
                         quote!(#derivative * direction[#axis])
-                    });
+                    })
+                    .collect::<Vec<_>>();
+                let sum = match terms.split_first() {
+                    None => continue,
+                    Some((first, rest)) => quote!(#first #(+ #rest)*),
+                };
                 let temporary = format_ident!("__row_atom_third_{row}_{column}");
                 assignments.push(if row == column {
                     quote! {
-                        let #temporary = 0.0 #(+ #terms)*;
+                        let #temporary = #sum;
                         out[#row][#column] = #temporary;
                     }
                 } else {
                     quote! {
-                        let #temporary = 0.0 #(+ #terms)*;
+                        let #temporary = #sum;
                         out[#row][#column] = #temporary;
                         out[#column][#row] = #temporary;
                     }
@@ -1033,17 +1544,20 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         } else {
             quote!(#(#primaries: f64,)*)
         };
+        let body = quote! {
+            #(#definitions)*
+            let mut out = [[0.0; #dimension]; #dimension];
+            #(#assignments)*
+            out
+        };
         output.push(quote! {
             #[inline(always)]
             #visibility fn #third_name(
                 #primary_parameters
-                #(#constants: f64,)*
+                #(#constant_parameters,)*
                 direction: &[f64; #dimension],
             ) -> [[f64; #dimension]; #dimension] {
-                #(#definitions)*
-                let mut out = [[0.0; #dimension]; #dimension];
-                #(#assignments)*
-                out
+                #body
             }
         });
     }
@@ -1056,19 +1570,24 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
             continue;
         }
         let fourth_name = format_ident!("{name}_{suffix}");
-        let mut roots = Vec::new();
-        let mut assignments = Vec::new();
+        let mut channels = vec![vec![Vec::<Vec<usize>>::new(); dimension]; dimension];
         let mut memo = HashMap::new();
         for row in 0..dimension {
             for column in row..dimension {
                 let third = (0..dimension)
-                    .map(|axis| graph.derivative(hessian[row][column], axis))
+                    .map(|axis| {
+                        let derivative = graph.derivative(hessian[row][column], axis);
+                        graph.normalize_ring(derivative)
+                    })
                     .collect::<Vec<_>>();
                 let mut fourth = third
                     .iter()
                     .map(|&id| {
                         (0..dimension)
-                            .map(|axis| graph.derivative(id, axis))
+                            .map(|axis| {
+                                let derivative = graph.derivative(id, axis);
+                                graph.normalize_ring(derivative)
+                            })
                             .collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>();
@@ -1078,27 +1597,42 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                         *derivative = graph.normalize_polynomial(*derivative, constants.len());
                     }
                 }
-                roots.extend(fourth.iter().flatten().copied());
-                let terms = fourth.iter().enumerate().flat_map(|(axis_u, derivatives)| {
-                    derivatives
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, id)| !graph.is_zero(**id))
-                        .map(|(axis_v, &id)| {
-                            let derivative = node_reference(id, &graph, &primaries, &constants);
-                            quote!(#derivative * direction_u[#axis_u] * direction_v[#axis_v])
-                        })
-                        .collect::<Vec<_>>()
-                });
+                channels[row][column] = fourth;
+            }
+        }
+        let mut roots = Vec::new();
+        let mut assignments = Vec::new();
+        for (row, columns) in channels.iter().enumerate() {
+            for (column, derivatives) in columns.iter().enumerate().skip(row) {
+                roots.extend(derivatives.iter().flatten().copied());
+                let terms = derivatives
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(axis_u, derivatives)| {
+                        derivatives
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, id)| !graph.is_zero(**id))
+                            .map(|(axis_v, &id)| {
+                                let derivative = node_reference(id, &graph, &primaries, &constants);
+                                quote!(#derivative * direction_u[#axis_u] * direction_v[#axis_v])
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let sum = match terms.split_first() {
+                    None => continue,
+                    Some((first, rest)) => quote!(#first #(+ #rest)*),
+                };
                 let temporary = format_ident!("__row_atom_fourth_{row}_{column}");
                 assignments.push(if row == column {
                     quote! {
-                        let #temporary = 0.0 #(+ #terms)*;
+                        let #temporary = #sum;
                         out[#row][#column] = #temporary;
                     }
                 } else {
                     quote! {
-                        let #temporary = 0.0 #(+ #terms)*;
+                        let #temporary = #sum;
                         out[#row][#column] = #temporary;
                         out[#column][#row] = #temporary;
                     }
@@ -1111,18 +1645,21 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         } else {
             quote!(#(#primaries: f64,)*)
         };
+        let body = quote! {
+            #(#definitions)*
+            let mut out = [[0.0; #dimension]; #dimension];
+            #(#assignments)*
+            out
+        };
         output.push(quote! {
             #[inline(always)]
             #visibility fn #fourth_name(
                 #primary_parameters
-                #(#constants: f64,)*
+                #(#constant_parameters,)*
                 direction_u: &[f64; #dimension],
                 direction_v: &[f64; #dimension],
             ) -> [[f64; #dimension]; #dimension] {
-                #(#definitions)*
-                let mut out = [[0.0; #dimension]; #dimension];
-                #(#assignments)*
-                out
+                #body
             }
         });
     }
@@ -1136,7 +1673,7 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
 /// row_atom! {
 ///     pub(crate) fn row [generic, order2, third, fourth](
 ///         eta, deriv;
-///         weight, event
+///         weight: scale, event: bool
 ///     ) {
 ///         weight * (exp(eta) - event * (eta + ln(deriv)))
 ///     }
@@ -1166,5 +1703,41 @@ pub fn row_program(input: TokenStream) -> TokenStream {
     match row_program::expand(parse_macro_input!(input as row_program::Input)) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.into_compile_error().into(),
+    }
+}
+
+#[cfg(test)]
+mod row_atom_tests {
+    use super::RowAtomInput;
+
+    #[test]
+    fn constant_roles_are_explicit_and_structural() {
+        let input = syn::parse_str::<RowAtomInput>(
+            "fn atom [order2](x; ordinary: f64, weight: scale, active: bool) {
+                weight * (x + ordinary) * active
+            }",
+        )
+        .expect("typed row atom");
+        assert_eq!(input.constants.len(), 3);
+        assert_eq!(input.scale_constants, [1].into_iter().collect());
+        assert_eq!(input.activity_constants, [2].into_iter().collect());
+    }
+
+    #[test]
+    fn untyped_or_unknown_constant_roles_are_rejected() {
+        assert!(
+            syn::parse_str::<RowAtomInput>("fn atom [order2](x; weight) { weight * x }",).is_err()
+        );
+        let error = match syn::parse_str::<RowAtomInput>(
+            "fn atom [order2](x; weight: coefficient) { weight * x }",
+        ) {
+            Ok(_) => panic!("unknown role must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("explicitly typed `f64`, `scale`, or `bool`")
+        );
     }
 }

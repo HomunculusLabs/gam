@@ -352,9 +352,9 @@ row_atom! {
         eta_exit,
         eta_entry,
         derivative;
-        weight,
-        entry_active,
-        event
+        weight: scale,
+        entry_active: bool,
+        event: bool
     ) {
         weight
             * (exp(eta_exit)
@@ -442,8 +442,8 @@ pub fn cause_specific_survival_alo_row_geometry(
         eta_entry,
         derivative_exit,
         input.prior_weight,
-        f64::from(input.entry_active),
-        f64::from(input.event),
+        input.entry_active,
+        input.event,
     );
     let gradient = atom.gradient();
     let observed_hessian =
@@ -471,8 +471,8 @@ pub fn cause_specific_survival_alo_row_geometry(
 struct CauseSpecificAtomInput {
     primary: [f64; 3],
     weight: f64,
-    entry_active: f64,
-    event: f64,
+    entry_active: bool,
+    event: bool,
 }
 
 /// Production [`gam_math::jet_tower::RowProgram`] for one cause-specific
@@ -485,8 +485,8 @@ struct CauseSpecificAtomInput {
 pub struct CauseSpecificRowProgram {
     primary: [f64; 3],
     weight: f64,
-    entry_active: f64,
-    event: f64,
+    entry_active: bool,
+    event: bool,
 }
 
 impl CauseSpecificRowProgram {
@@ -495,8 +495,8 @@ impl CauseSpecificRowProgram {
         Self {
             primary,
             weight,
-            entry_active: f64::from(entry_active),
-            event: f64::from(event),
+            entry_active,
+            event,
         }
     }
 
@@ -580,8 +580,8 @@ fn cause_specific_atom_input(
     Ok(Some(CauseSpecificAtomInput {
         primary: [eta_exit, eta_entry, derivative],
         weight,
-        entry_active: f64::from(entry_active),
-        event: f64::from(event),
+        entry_active,
+        event,
     }))
 }
 
@@ -966,8 +966,8 @@ fn cause_specific_hessian_directional_derivative(
         };
         let direction = [
             d_eta_exit[i],
-            d_eta_entry[i] * input.entry_active,
-            d_derivative[i] * input.event,
+            d_eta_entry[i] * f64::from(input.entry_active),
+            d_derivative[i] * f64::from(input.event),
         ];
         let matrix = cause_specific_row_third_contracted(
             input.primary[0],
@@ -1020,13 +1020,13 @@ fn cause_specific_hessian_second_directional_derivative(
         };
         let direction_u = [
             u_eta_exit[i],
-            u_eta_entry[i] * input.entry_active,
-            u_derivative[i] * input.event,
+            u_eta_entry[i] * f64::from(input.entry_active),
+            u_derivative[i] * f64::from(input.event),
         ];
         let direction_v = [
             v_eta_exit[i],
-            v_eta_entry[i] * input.entry_active,
-            v_derivative[i] * input.event,
+            v_eta_entry[i] * f64::from(input.entry_active),
+            v_derivative[i] * f64::from(input.event),
         ];
         let matrix = cause_specific_row_fourth_contracted(
             input.primary[0],
@@ -3857,28 +3857,29 @@ mod tests {
             }
         }
 
-        /// #932 release speed gate for the cause-specific Royston-Parmar row. The
+        /// Diagnostic throughput comparison for the cause-specific
+        /// Royston-Parmar row. The
         /// production structure-compiled order-2/third/fourth lowerings
         /// ([`cause_specific_row_order2`] / [`cause_specific_row_third_contracted`]
         /// / [`cause_specific_row_fourth_contracted`], all emitted from the one
         /// [`cause_specific_row`] declaration) are timed against the generic
         /// gam-math forward-mode jet tower ([`program_row_kernel`] /
         /// [`program_third_contracted`] / [`program_fourth_contracted`]) — the
-        /// naive automatic-differentiation baseline the retained specialization
-        /// must beat, since #932 keeps no separate `cfg(test)` hand restatement.
+        /// generic automatic-differentiation implementation. This is not the
+        /// #932 strongest-hand acceptance gate; that independent, semantically
+        /// identical comparison lives in `cause_specific_codegen_perf`.
         /// The third/fourth contracted directional channels feed the live
         /// exact-Newton HVP (`exact_newton_hessian_*directional_derivative`), so
         /// timing only order-2 left the higher-order production jets unmeasured.
-        /// Emits one harness-parsed `hand_over_production` token (generic-tower
-        /// time over production time) per derivative channel; the MSI release
-        /// harness fails closed whenever any measured cell is `<= 1`.
+        /// Emits the generic-tower time over production time per derivative
+        /// channel.
         ///
         /// The batch mixes all four (entry × event) activity corners with distinct
         /// per-row predictors, so the optimizer cannot hoist the pure row call out
         /// of the sweep, and the finite checksum over every returned channel keeps
         /// the whole sweep live without `std::hint::black_box`.
         #[test]
-        fn release_measure_cause_specific_specialized_vs_generic_tower_932() {
+        fn release_measure_cause_specific_vs_generic_tower_diagnostic() {
             use std::time::Instant;
 
             const ROWS: usize = 512;
@@ -3942,8 +3943,8 @@ mod tests {
                     primary[1],
                     primary[2],
                     weight,
-                    f64::from(entry_active),
-                    f64::from(event),
+                    entry_active,
+                    event,
                 );
                 let (tower_value, tower_gradient, tower_hessian) =
                     program_row_kernel(program, 0).expect("tower warm kernel");
@@ -3975,8 +3976,8 @@ mod tests {
                     primary[1],
                     primary[2],
                     weight,
-                    f64::from(entry_active),
-                    f64::from(event),
+                    entry_active,
+                    event,
                     &dir_u[idx],
                 );
                 let tower_third =
@@ -3986,8 +3987,8 @@ mod tests {
                     primary[1],
                     primary[2],
                     weight,
-                    f64::from(entry_active),
-                    f64::from(event),
+                    entry_active,
+                    event,
                     &dir_u[idx],
                     &dir_v[idx],
                 );
@@ -4033,8 +4034,8 @@ mod tests {
                         primary[1],
                         primary[2],
                         weight,
-                        f64::from(entry_active),
-                        f64::from(event),
+                        entry_active,
+                        event,
                     );
                     checksum += atom.value() + atom.gradient()[0] + atom.hessian_at(0, 0);
                 }
@@ -4061,8 +4062,8 @@ mod tests {
                         primary[1],
                         primary[2],
                         weight,
-                        f64::from(entry_active),
-                        f64::from(event),
+                        entry_active,
+                        event,
                         &dir_u[idx],
                     );
                     checksum += third[0][0] + third[0][1] + third[1][1];
@@ -4089,8 +4090,8 @@ mod tests {
                         primary[1],
                         primary[2],
                         weight,
-                        f64::from(entry_active),
-                        f64::from(event),
+                        entry_active,
+                        event,
                         &dir_u[idx],
                         &dir_v[idx],
                     );
@@ -4120,7 +4121,7 @@ mod tests {
                 eprintln!(
                     "CAUSE-SPECIFIC-RELEASE-932 channel={channel} rows={ROWS} \
                      production_ns={production_ns:.3} generic_tower_ns={tower_ns:.3} \
-                     hand_over_production={:.6}",
+                     generic_over_production={:.6}",
                     tower_ns / production_ns,
                 );
             }
