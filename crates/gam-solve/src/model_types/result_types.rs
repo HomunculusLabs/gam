@@ -906,7 +906,7 @@ impl OuterStationarityCertificate {
 ///
 /// Collapsing them into one flag would leave every consumer asking the first
 /// question and silently receiving an answer to the second.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CurvatureFloorClearance {
     /// Smallest eigenvalue of the interior (un-railed) sub-block, as assembled.
     pub interior_min_eigenvalue: f64,
@@ -1282,7 +1282,10 @@ impl OuterCriterionCertificate {
             });
         }
         if let CurvatureAdmissibility::Inadmissible { floor_consulted } = self.curvature_verdict() {
-            return Some(CertificationRefusal::InadmissibleCurvature { floor_consulted });
+            return Some(CertificationRefusal::InadmissibleCurvature {
+                floor_consulted,
+                floor: self.curvature_floor,
+            });
         }
         None
     }
@@ -1455,7 +1458,13 @@ pub enum CertificationRefusal {
     NotStationary { projected: f64, bound: f64 },
     /// Measured indefinite curvature that no floor clearance excused. **The
     /// only variant permitted to speak about curvature.**
-    InadmissibleCurvature { floor_consulted: bool },
+    InadmissibleCurvature {
+        floor_consulted: bool,
+        /// The clearance actually consulted, so the refusal can say by how much
+        /// the floor missed rather than only that it did. `None` when no floor
+        /// was consulted at all.
+        floor: Option<CurvatureFloorClearance>,
+    },
 }
 
 /// Which of a rail's certified facts its route refused.
@@ -1506,13 +1515,28 @@ impl std::fmt::Display for CertificationRefusal {
             ),
             // The historical wording, kept verbatim: downstream refusal text is
             // asserted on it, and this is now the ONLY branch that can emit it.
-            Self::InadmissibleCurvature { floor_consulted } => {
+            Self::InadmissibleCurvature {
+                floor_consulted,
+                floor,
+            } => {
                 f.write_str("INDEFINITE CURVATURE AT INTERIOR OPTIMUM")?;
                 if *floor_consulted {
-                    f.write_str(" (curvature floor did not clear)")
-                } else {
-                    Ok(())
+                    f.write_str(" (curvature floor did not clear)")?;
                 }
+                // Both measured quantities, appended AFTER the historical
+                // wording so the substrings downstream asserts on are
+                // untouched. Without these a reader cannot tell a genuine
+                // saddle from a negative eigenvalue at the noise floor of a
+                // nearly-flat direction, which is the whole question at large
+                // rho -- and the two call for opposite responses.
+                if let Some(clearance) = floor {
+                    write!(
+                        f,
+                        " [interior lambda_min={:.3e}, gradient_floor={:.3e}]",
+                        clearance.interior_min_eigenvalue, clearance.gradient_floor
+                    )?;
+                }
+                Ok(())
             }
         }
     }
