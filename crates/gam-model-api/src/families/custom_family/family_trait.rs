@@ -1506,6 +1506,35 @@ pub trait CustomFamily {
         Ok(Some(axes))
     }
 
+    /// BATCHED over BOTH the fixed directions and every canonical second
+    /// direction. Entry u is the axis batch
+    /// {H²dot[d_beta_us[u], e_a]} for a=0..p.
+    ///
+    /// The default preserves the exact singular-hook ordering by invoking
+    /// Self::joint_jeffreys_information_second_directional_all_axes_with_specs
+    /// once per fixed direction. Row-kernel families override this when all
+    /// fixed directions share an expensive beta-fixed per-row fourth-order
+    /// tower: build that tower once, then contract every direction from it.
+    fn joint_jeffreys_information_second_directional_all_axes_many_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_us: &[Array1<f64>],
+    ) -> Result<Option<Vec<Vec<Array2<f64>>>>, String> {
+        let mut batches = Vec::with_capacity(d_beta_us.len());
+        for d_beta_u in d_beta_us {
+            match self.joint_jeffreys_information_second_directional_all_axes_with_specs(
+                block_states,
+                specs,
+                d_beta_u,
+            )? {
+                Some(axes) => batches.push(axes),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(batches))
+    }
+
     /// Optional contracted second beta-derivative of the observed joint
     /// Newton information:
     ///
