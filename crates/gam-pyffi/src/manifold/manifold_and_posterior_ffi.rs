@@ -1336,17 +1336,20 @@ fn summary_smooth_terms(
     };
     let whitening_gram_full: Option<&Array2<f64>> =
         fit.weighted_gram().or(reconstructed_gram.as_ref());
-    let family = model.likelihood();
-    let scale_is_estimated = matches!(
-        family.response,
-        ResponseFamily::Gaussian | ResponseFamily::Gamma
-    );
-    // The fit owns both the training row count and this calculation. The
-    // representative design above exists only to replay frozen basis geometry;
-    // optional working evidence exists only for row-wise diagnostics. Neither
-    // is a sample-size source.
+    // The fit's scale METADATA owns this, not the family name — one definition
+    // for this persisted-model summary and the in-process CLI one (#2470). The
+    // family name cannot answer it: `FixedGammaShape` and `EstimatedGammaShape`
+    // are both `ResponseFamily::Gamma`, and this surface's old
+    // `matches!(family.response, Gaussian | Gamma)` therefore handed a
+    // user-pinned Gamma shape an `F` reference while the CLI, reading the same
+    // saved fit, handed it a `χ²` one.
+    //
+    // The fit owns both the training row count and the denominator calculation.
+    // The representative design above exists only to replay frozen basis
+    // geometry; optional working evidence exists only for row-wise diagnostics.
+    // Neither is a sample-size source.
     let residual_df = fit.wald_residual_degrees_of_freedom();
-    let scale = if scale_is_estimated {
+    let scale = if fit.likelihood_scale.wald_scale_is_estimated() {
         SmoothTestScale::Estimated
     } else {
         SmoothTestScale::Known

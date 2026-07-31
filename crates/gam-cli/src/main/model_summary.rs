@@ -53,11 +53,14 @@ pub(crate) fn build_model_summary(
         None
     };
     let whitening_gram_full: Option<&Array2<f64>> = fit.weighted_gram().or(design_gram.as_ref());
-    let scale_is_estimated = matches!(
-        fit.likelihood_scale,
-        LikelihoodScaleMetadata::ProfiledGaussian
-            | LikelihoodScaleMetadata::EstimatedGammaShape { .. }
-    );
+    // One metadata-owned definition serves this live-data summary and the
+    // persisted-model summary the Python API reads, exactly as
+    // `wald_residual_degrees_of_freedom` below does for the denominator. Each
+    // surface used to spell the predicate out itself, and they had drifted:
+    // this one read the scale metadata, the Python one read the family NAME, so
+    // a Gamma fit with a pinned shape got two different reference distributions
+    // for one fitted model (#2470).
+    let scale_is_estimated = fit.likelihood_scale.wald_scale_is_estimated();
     // One fit-owned definition serves this live-data summary and the loaded
     // model summary. The response view is retained for null deviance only; its
     // length is checked above, never used as a second Wald authority.

@@ -2130,6 +2130,62 @@ impl LikelihoodScaleMetadata {
     pub const fn gamma_shape_is_estimated(self) -> bool {
         matches!(self, Self::EstimatedGammaShape { .. })
     }
+
+    /// Whether the dispersion `φ` that multiplies the coefficient covariance
+    /// `Vb = φ·H⁻¹` was estimated from THIS fit's own residuals.
+    ///
+    /// This is the predicate that selects a Wald/parametric reference
+    /// distribution: an estimated `φ̂` carries its own sampling variability, so
+    /// the reference must spend `n − edf` denominator degrees of freedom on it
+    /// (Student-`t` for a parametric coefficient, `F_{ref_df, residual_df}` for
+    /// the Wood smooth test). A `φ` the user supplied carries none, and the
+    /// reference is the known-scale normal / `χ²`. Getting this backwards is
+    /// anti-conservative in one direction and needlessly wide in the other.
+    ///
+    /// It is stated here, on the metadata, and matched EXHAUSTIVELY on purpose.
+    /// The two summary surfaces each wrote their own `matches!` and they had
+    /// drifted apart (issue #2470): the in-process CLI summary keyed on this
+    /// metadata, while the persisted-model summary the Python `summary()` reads
+    /// keyed on the *family name* (`ResponseFamily::{Gaussian, Gamma}`) — so a
+    /// Gamma fit with a user-pinned shape got a `χ²` reference from one surface
+    /// and an `F` reference from the other for the same fitted model. A family
+    /// name cannot answer this question, because `FixedGammaShape` and
+    /// `EstimatedGammaShape` are the same family. Only the scale metadata can.
+    ///
+    /// The exhaustive `match` (no wildcard arm) is the durable half of the fix:
+    /// a new scale variant cannot be added without an author deciding whether
+    /// its `φ` is estimated, which is exactly the decision both call sites were
+    /// silently making by omission.
+    #[inline]
+    pub const fn wald_scale_is_estimated(self) -> bool {
+        match self {
+            // `σ̂²` is profiled out of the Gaussian likelihood against this
+            // fit's residuals — the canonical estimated scale.
+            Self::ProfiledGaussian => true,
+            // `φ = 1/k̂` with `k̂` fit jointly with the mean model.
+            Self::EstimatedGammaShape { .. } => true,
+            // `φ̂` refreshed from the working residuals after each mean fit
+            // (Beta, #567) / by the Pearson moment estimator at the converged
+            // `η` (Tweedie, #771). Both multiply the reported covariance, so
+            // both carry their own sampling variability.
+            Self::EstimatedBetaPhi { .. } | Self::EstimatedTweediePhi { .. } => true,
+            // Supplied by the caller, or held fixed for the duration of the λ
+            // search: no estimation variance to spend degrees of freedom on.
+            Self::FixedDispersion { .. }
+            | Self::FixedGammaShape { .. }
+            | Self::FixedBetaPhi { .. } => false,
+            // Negative-Binomial's dispersion scale is `φ ≡ 1` by construction —
+            // the overdispersion lives in the variance function as `θ`, not as a
+            // multiply on `Vb` (see `fixed_phi`, which returns `Some(1.0)` for
+            // both NB variants). Estimating `θ` therefore does NOT make the
+            // covariance's scale estimated, and this stays `false` for the
+            // estimated variant too.
+            Self::EstimatedNegBinTheta { .. } | Self::FixedNegBinTheta { .. } => false,
+            // No scalar GLM scale exists by model definition, so there is no
+            // estimated dispersion for a reference distribution to account for.
+            Self::Unspecified => false,
+        }
+    }
 }
 
 /// Positive finite likelihood-scale scalar with its stable log coordinate.
@@ -2973,6 +3029,64 @@ impl GlmLikelihoodSpec {
 mod tests {
     use super::*;
     use ndarray::arr1;
+
+    #[test]
+    fn the_same_gamma_family_answers_the_wald_scale_question_by_its_shape_ownership() {
+        // The divergence this predicate exists to remove (#2470). Both fits are
+        // `ResponseFamily::Gamma` with the SAME shape, so a family-name test
+        // cannot separate them — yet one estimated that shape from the data and
+        // the other was handed it. Only the scale metadata knows.
+        assert!(
+            LikelihoodScaleMetadata::EstimatedGammaShape { shape: 2.5 }
+                .wald_scale_is_estimated()
+        );
+        assert!(
+            !LikelihoodScaleMetadata::FixedGammaShape { shape: 2.5 }.wald_scale_is_estimated()
+        );
+    }
+
+    #[test]
+    fn an_estimated_dispersion_is_the_one_that_multiplies_the_covariance() {
+        // `φ̂` is refreshed from this fit's own residuals and multiplies `Vb`.
+        for scale in [
+            LikelihoodScaleMetadata::ProfiledGaussian,
+            LikelihoodScaleMetadata::EstimatedGammaShape { shape: 3.0 },
+            LikelihoodScaleMetadata::EstimatedBetaPhi { phi: 4.0 },
+            LikelihoodScaleMetadata::EstimatedTweediePhi { phi: 0.75 },
+        ] {
+            assert!(
+                scale.wald_scale_is_estimated(),
+                "{scale:?} carries a dispersion estimated from the fit's residuals"
+            );
+        }
+        // Caller-supplied, or frozen for the λ search: no estimation variance.
+        for scale in [
+            LikelihoodScaleMetadata::FixedDispersion { phi: 1.5 },
+            LikelihoodScaleMetadata::FixedGammaShape { shape: 3.0 },
+            LikelihoodScaleMetadata::FixedBetaPhi { phi: 4.0 },
+            LikelihoodScaleMetadata::Unspecified,
+        ] {
+            assert!(
+                !scale.wald_scale_is_estimated(),
+                "{scale:?} carries no dispersion estimated from the fit's residuals"
+            );
+        }
+    }
+
+    #[test]
+    fn estimating_negative_binomial_theta_does_not_make_the_covariance_scale_estimated() {
+        // `θ` is a variance-FUNCTION parameter, not a scale multiply: NB's
+        // dispersion is `φ ≡ 1`, which `fixed_phi` already states. Reading
+        // "Estimated…" in the variant name as "the scale was estimated" would
+        // spend denominator degrees of freedom on a `φ` that was never fit.
+        for scale in [
+            LikelihoodScaleMetadata::EstimatedNegBinTheta { theta: 2.0 },
+            LikelihoodScaleMetadata::FixedNegBinTheta { theta: 2.0 },
+        ] {
+            assert_eq!(scale.fixed_phi(), Some(1.0));
+            assert!(!scale.wald_scale_is_estimated(), "{scale:?}");
+        }
+    }
 
     #[test]
     fn resolved_likelihood_scale_rejects_missing_and_mismatched_ownership() {
