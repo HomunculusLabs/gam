@@ -152,11 +152,9 @@ impl Certificate for CertificateInputs {
         put_finite(&mut e, "peak_activity_floor", self.peak_activity_floor);
         put_finite(&mut e, "snr_proxy", self.snr_proxy);
         put_finite(&mut e, "dispersion", self.dispersion);
-        put_finite(
-            &mut e,
-            "global_optimality_margin",
-            self.global_optimality.margin(),
-        );
+        if let Some(margin) = self.global_optimality.margin() {
+            put_finite(&mut e, "global_optimality_margin", margin);
+        }
         e.insert(
             "global_optimality",
             if self.global_optimality.is_certified() {
@@ -222,20 +220,20 @@ impl<'a> Certificate for CoordinateFidelityCertificate<'a> {
                 degenerate += 1;
                 worst = atom.verdict.label();
             }
-            if atom.arclength_defect.is_finite() {
-                max_arclength = max_arclength.max(atom.arclength_defect);
+            if let Some(value) = atom.arclength_defect {
+                max_arclength = max_arclength.max(value);
             }
-            if atom.raw_arclength_defect_rms.is_finite() {
-                max_raw_rms = max_raw_rms.max(atom.raw_arclength_defect_rms);
+            if let Some(value) = atom.raw_arclength_defect_rms {
+                max_raw_rms = max_raw_rms.max(value);
             }
-            if atom.raw_arclength_defect_max.is_finite() {
-                max_raw_max = max_raw_max.max(atom.raw_arclength_defect_max);
+            if let Some(value) = atom.raw_arclength_defect_max {
+                max_raw_max = max_raw_max.max(value);
             }
-            if atom.uniformity_statistic.is_finite() {
-                max_uniformity = max_uniformity.max(atom.uniformity_statistic);
+            if let Some(value) = atom.uniformity_statistic {
+                max_uniformity = max_uniformity.max(value);
             }
-            if atom.uniformity_p_value.is_finite() {
-                min_p = min_p.min(atom.uniformity_p_value);
+            if let Some(value) = atom.uniformity_p_value {
+                min_p = min_p.min(value);
             }
             support_masses.push(atom.support_mass);
             effective_ns.push(atom.effective_n);

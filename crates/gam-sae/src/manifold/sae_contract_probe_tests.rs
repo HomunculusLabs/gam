@@ -1798,8 +1798,9 @@ pub(crate) fn gauge_fixed_krylov_operator_matches_deflated_preconditioner_2253()
     let cache = diagonal_latent_cache(&[2.0_f64, 1.0e-14]);
     let gauge = array![0.0_f64, 1.0];
     let stiffness = 2.0;
-    let solver = DeflatedArrowSolver::from_orthonormal_gauges(&cache, vec![gauge], stiffness)
-        .expect("deflated solver");
+    let solver =
+        DeflatedArrowSolver::from_orthonormal_gauges(&cache, vec![gauge.clone()], stiffness)
+            .expect("deflated solver");
     let rhs = SaeArrowVector {
         t: array![4.0_f64, 1.0],
         beta: Array1::zeros(0),
@@ -1809,6 +1810,12 @@ pub(crate) fn gauge_fixed_krylov_operator_matches_deflated_preconditioner_2253()
             t: array![2.0 * v.t[0], 0.0],
             beta: Array1::zeros(0),
         })
+    };
+    let add_gauge_stiffness = |v: &SaeArrowVector, applied: &mut SaeArrowVector| {
+        let coefficient = stiffness * gauge.dot(&v.t);
+        for index in 0..gauge.len() {
+            applied.t[index] += coefficient * gauge[index];
+        }
     };
 
     // Raw A has the exact null q=e1 while rhs has q-mass, so A x = rhs is
@@ -1830,7 +1837,7 @@ pub(crate) fn gauge_fixed_krylov_operator_matches_deflated_preconditioner_2253()
         &rhs,
         |v| {
             let mut out = raw_a(v)?;
-            solver.add_gauge_stiffness(v, &mut out)?;
+            add_gauge_stiffness(v, &mut out);
             Ok(out)
         },
         |vector| solver.solve(vector.t.view(), vector.beta.view()),
@@ -1840,9 +1847,7 @@ pub(crate) fn gauge_fixed_krylov_operator_matches_deflated_preconditioner_2253()
     assert_abs_diff_eq!(solved.t[1], 0.5, epsilon = 1.0e-12);
 
     let mut applied = raw_a(&solved).expect("raw A apply");
-    solver
-        .add_gauge_stiffness(&solved, &mut applied)
-        .expect("gauge stiffness apply");
+    add_gauge_stiffness(&solved, &mut applied);
     let residual = SaeArrowVector {
         t: &applied.t - &rhs.t,
         beta: &applied.beta - &rhs.beta,

@@ -80,7 +80,7 @@ fn gpu_probe_first_handle_wide_border_solve_and_device_fit_converge_1017() {
     let sys = build_wide_border(180, 2, 5120);
     let cpu =
         solve_arrow_newton_step_dense_reference(&sys, 0.0, 0.0).expect("CPU dense reference solve");
-    let gpu = solve_arrow_newton_step(&sys, 0.0, 0.0)
+    let gpu = solve_arrow_newton_step(&sys, 0.0, 0.0, None)
         .expect("GPU arrow-Schur solve must run on device (not decline)");
     let dt = max_abs_diff(
         gpu.delta_t.as_slice().expect("delta_t slice"),

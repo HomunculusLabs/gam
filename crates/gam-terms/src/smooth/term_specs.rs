@@ -2207,7 +2207,7 @@ impl KroneckerPenaltySystem {
     pub fn logdet_and_derivatives(
         &self,
         lambdas: &[f64],
-        ridge: f64,
+        objective_ridge: f64,
     ) -> (f64, Array1<f64>, Array2<f64>) {
         let n_pen = self.num_penalties();
         assert_eq!(lambdas.len(), n_pen, "lambda count mismatch");
@@ -2221,14 +2221,14 @@ impl KroneckerPenaltySystem {
             &self.marginal_dims,
             lambdas,
             self.has_double_penalty,
-            ridge,
+            objective_ridge,
         )
     }
 
     pub fn logdet_rank_and_derivatives(
         &self,
         lambdas: &[f64],
-        ridge: f64,
+        objective_ridge: f64,
     ) -> (f64, usize, Array1<f64>, Array2<f64>) {
         let n_pen = self.num_penalties();
         assert_eq!(lambdas.len(), n_pen, "lambda count mismatch");
@@ -2241,9 +2241,8 @@ impl KroneckerPenaltySystem {
         // is treated as an unpenalized (null-space) direction and excluded from
         // both the rank count and the pseudo-log-determinant.
         const EIGENVALUE_POSITIVITY_FLOOR: f64 = 1e-12;
-        // Floor on the *structural* eigenvalue sum (λ-independent) used to decide
-        // whether a mode lives in the penalty range space and so should receive
-        // the stabilizing ridge; a structurally-null mode gets no ridge.
+        // Floor on the *structural* eigenvalue sum (λ-independent) used to
+        // classify the joint null space.
         const STRUCTURAL_ZERO_FLOOR: f64 = 1e-12;
         let mut multi_idx = vec![0usize; d];
         loop {
@@ -2259,7 +2258,7 @@ impl KroneckerPenaltySystem {
                 sigma += lambdas[d];
             }
             if structural_sigma > STRUCTURAL_ZERO_FLOOR {
-                sigma += ridge;
+                sigma += objective_ridge;
             }
 
             if sigma > EIGENVALUE_POSITIVITY_FLOOR {

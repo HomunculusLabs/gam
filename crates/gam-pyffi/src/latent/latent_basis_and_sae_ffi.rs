@@ -2803,7 +2803,8 @@ fn sae_curvature_report_dict<'py>(
     d.set_item(
         "note",
         "SAE per-atom kappa_hat is the fitted empirical second-fundamental-form \
-         sup-norm bound (a descriptive plug-in geometry summary). It is not an \
+         sup-norm bound (a descriptive plug-in geometry summary); null means the \
+         bound is unbounded because the fitted tangent frame is unresolved. It is not an \
          estimand with a confidence interval: a curvature bound has no profiled \
          criterion, so no SE/CI is reported.",
     )?;
@@ -2834,7 +2835,9 @@ fn sae_coordinate_fidelity_dict<'py>(
         "SAE per-atom coordinate-fidelity certificate (#2081). `uniformity_statistic` \
          is Watson's U² of the fitted d=1 coordinate against the atom's uniform \
          invariant measure (rotation/reflection invariant); `uniformity_p_value` is its \
-         closed-form asymptotic null p-value (small => coordinates flagged non-uniform). \
+         closed-form asymptotic null p-value for circles (small => coordinates flagged \
+         non-uniform), and null for intervals whose endpoints were estimated from the \
+         same sample. Undefined measurements are represented by null, never NaN. \
          `arclength_defect` is the speed coefficient-of-variation of the decoded curve on \
          a uniform latent grid (0 => arc-length / unit-speed chart; positive => the \
          parameterization squishes arc length, which reconstruction EV cannot see). \
@@ -2897,10 +2900,11 @@ fn sae_incoherence_report_dict<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("mu_hat", report.mu_hat)?;
-    d.set_item(
-        "per_atom_kappa_hat",
-        Array1::from_vec(report.per_atom_kappa_hat.clone()).into_pyarray(py),
-    )?;
+    let per_atom_kappa_hat = PyList::empty(py);
+    for &kappa_hat in &report.per_atom_kappa_hat {
+        per_atom_kappa_hat.append(kappa_hat)?;
+    }
+    d.set_item("per_atom_kappa_hat", per_atom_kappa_hat)?;
     d.set_item(
         "per_atom_mean_activity",
         Array1::from_vec(report.per_atom_mean_activity.clone()).into_pyarray(py),
@@ -2913,11 +2917,12 @@ fn sae_incoherence_report_dict<'py>(
     d.set_item("peak_activity_floor", report.peak_activity_floor)?;
     d.set_item("snr_proxy", report.snr_proxy)?;
     d.set_item("dispersion", report.dispersion)?;
-    // The #1008 global-optimality verdict: a string label + signed margin so a
-    // consumer can read both the decision and how far it is from the threshold.
+    // The #1008 global-optimality verdict: a string label plus the signed margin
+    // when its sufficient inequality is defined. A failed precondition makes
+    // the margin null rather than smuggling an infinity through the JSON report.
     let (verdict_label, margin) = match report.global_optimality {
         gam::terms::sae::manifold::GlobalOptimalityVerdict::CertifiedGlobal { margin } => {
-            ("certified_global", margin)
+            ("certified_global", Some(margin))
         }
         gam::terms::sae::manifold::GlobalOptimalityVerdict::Uncertified { margin } => {
             ("uncertified", margin)

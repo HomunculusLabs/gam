@@ -175,7 +175,7 @@ fn arrow_schur_gpu_matches_dense_reference_baseline() {
     let ridge_beta = 0.0;
     let expected = solve_arrow_newton_step_dense_reference(&sys, ridge_t, ridge_beta)
         .expect("dense reference Cholesky must succeed on PD fixture");
-    let got = match solve_arrow_newton_step(&sys, ridge_t, ridge_beta) {
+    let got = match solve_arrow_newton_step(&sys, ridge_t, ridge_beta, None) {
         Ok(sol) => sol,
         // `skip_without_cuda!` above already returned on CPU-only hosts, so by
         // the time we reach here a CUDA runtime is present. The fixture is sized
@@ -222,7 +222,7 @@ fn arrow_schur_gpu_multi_size_groups_match_reference() {
         let ridge_beta = 0.0;
         let expected = solve_arrow_newton_step_dense_reference(&sys, ridge_t, ridge_beta)
             .expect("dense reference Cholesky must succeed on PD fixture");
-        let got = match solve_arrow_newton_step(&sys, ridge_t, ridge_beta) {
+        let got = match solve_arrow_newton_step(&sys, ridge_t, ridge_beta, None) {
             Ok(sol) => sol,
             // Runtime present (gate above) + floor-clearing fixture ⇒ a decline
             // is a real device fault. Fail loud (device-PCG class, eee12f6b2).
@@ -257,7 +257,7 @@ fn arrow_schur_gpu_ridge_escalation_matches_reference() {
     for (rt, rb) in ridges_t.into_iter().zip(ridges_beta) {
         let expected = solve_arrow_newton_step_dense_reference(&sys, rt, rb)
             .expect("dense reference Cholesky must succeed on PD + ridge fixture");
-        let got = match solve_arrow_newton_step(&sys, rt, rb) {
+        let got = match solve_arrow_newton_step(&sys, rt, rb, None) {
             Ok(sol) => sol,
             // Runtime present + floor-clearing fixture ⇒ decline is a real fault.
             Err(ArrowSchurGpuFailure::Unavailable) => panic!(
@@ -296,7 +296,7 @@ fn arrow_schur_gpu_log_det_matches_dense_full_chol() {
         let ridge_beta = 1e-8;
         let expected = solve_arrow_newton_step_dense_reference(&sys, ridge_t, ridge_beta)
             .expect("dense reference Cholesky must succeed on PD fixture");
-        let got = match solve_arrow_newton_step(&sys, ridge_t, ridge_beta) {
+        let got = match solve_arrow_newton_step(&sys, ridge_t, ridge_beta, None) {
             Ok(sol) => sol,
             // Runtime present + floor-clearing fixture ⇒ decline is a real fault.
             Err(ArrowSchurGpuFailure::Unavailable) => panic!(
@@ -392,7 +392,7 @@ fn arrow_schur_gpu_ridge_bump_required_on_non_pd_row_recovers_after_bump() {
     }
     let ridge_t = 0.0;
     let ridge_beta = 0.0;
-    let bump = match solve_arrow_newton_step(&sys, ridge_t, ridge_beta) {
+    let bump = match solve_arrow_newton_step(&sys, ridge_t, ridge_beta, None) {
         Err(ArrowSchurGpuFailure::RidgeBumpRequired { row, bump }) => {
             assert_eq!(
                 row, 2,
@@ -443,7 +443,7 @@ fn arrow_schur_gpu_ridge_bump_required_on_non_pd_row_recovers_after_bump() {
     // genuinely rank-deficient.
     let mut ridge = bump;
     for attempt in 0..10 {
-        let device = solve_arrow_newton_step(&sys, ridge, ridge_beta);
+        let device = solve_arrow_newton_step(&sys, ridge, ridge_beta, None);
         // Parity oracle: the dense CPU reference must agree with the device on
         // BOTH success and failure at this ridge. If the device declined, the
         // reference must also decline (otherwise the device dropped a step the
@@ -566,7 +566,7 @@ fn arrow_schur_gpu_v100_hill_climb_speedup_over_cpu_host_loop() {
     let abc_secs = time_op(
         "layer_abc",
         Box::new(
-            || match solve_arrow_newton_step(&sys, ridge_t, ridge_beta) {
+            || match solve_arrow_newton_step(&sys, ridge_t, ridge_beta, None) {
                 Ok(_) => Ok(()),
                 // Runtime present (gate above) + a 5000-row fixture far above the
                 // dispatch floor ⇒ Unavailable is a real device decline, not an
@@ -584,7 +584,7 @@ fn arrow_schur_gpu_v100_hill_climb_speedup_over_cpu_host_loop() {
     let fused_secs = time_op(
         "layer_d_fused",
         Box::new(
-            || match solve_arrow_newton_step_fused_force(&sys, ridge_t, ridge_beta) {
+            || match solve_arrow_newton_step_fused_force(&sys, ridge_t, ridge_beta, None) {
                 Ok(_) => Ok(()),
                 Err(ArrowSchurGpuFailure::Unavailable) => panic!(
                     "[arrow_schur_gpu_v100/hill_climb] Layer D (fused-force) returned \
@@ -652,7 +652,7 @@ fn arrow_schur_gpu_fused_layer_d_matches_layer_a_b_c() {
         let sys = build_fixture(n, d, k, seed);
         let ridge_t = 1e-9;
         let ridge_beta = 1e-9;
-        let abc = match solve_arrow_newton_step(&sys, ridge_t, ridge_beta) {
+        let abc = match solve_arrow_newton_step(&sys, ridge_t, ridge_beta, None) {
             Ok(sol) => sol,
             // Runtime present + floor-clearing fixture ⇒ decline is a real fault.
             Err(ArrowSchurGpuFailure::Unavailable) => panic!(
@@ -665,7 +665,7 @@ fn arrow_schur_gpu_fused_layer_d_matches_layer_a_b_c() {
                  Layer A+B+C failed: {other:?}"
             ),
         };
-        let fused = match solve_arrow_newton_step_fused_force(&sys, ridge_t, ridge_beta) {
+        let fused = match solve_arrow_newton_step_fused_force(&sys, ridge_t, ridge_beta, None) {
             Ok(sol) => sol,
             // The fused-force path admits any n ≥ 1 with p ≤ 32, so with a CUDA
             // runtime present an Unavailable is a real Layer D fault, not a skip.

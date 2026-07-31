@@ -131,7 +131,7 @@ mod harness {
             Ok(())
         });
         let abc = time_path("layer_abc", ITERS, || {
-            match solve_arrow_newton_step(&sys, RIDGE_T, RIDGE_BETA) {
+            match solve_arrow_newton_step(&sys, RIDGE_T, RIDGE_BETA, None) {
                 Ok(_) => Ok(()),
                 Err(ArrowSchurGpuFailure::Unavailable) => Err("Unavailable".to_string()),
                 Err(other) => Err(format!("{other:?}")),
@@ -140,7 +140,7 @@ mod harness {
         let fused = time_path(
             "layer_d_fused",
             ITERS,
-            || match solve_arrow_newton_step_fused_force(&sys, RIDGE_T, RIDGE_BETA) {
+            || match solve_arrow_newton_step_fused_force(&sys, RIDGE_T, RIDGE_BETA, None) {
                 Ok(_) => Ok(()),
                 Err(ArrowSchurGpuFailure::Unavailable) => Err("Unavailable".to_string()),
                 Err(other) => Err(format!("{other:?}")),

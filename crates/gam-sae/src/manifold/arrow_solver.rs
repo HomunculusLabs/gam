@@ -89,54 +89,6 @@ impl<'a> DeflatedArrowSolver<'a> {
         })
     }
 
-    /// Add the closed-form gauge-fixing action `κ Q Qᵀ v` to an already
-    /// assembled operator product.
-    ///
-    /// [`Self::solve`] is the Woodbury inverse of `B + κ Q Qᵀ`, not of the raw
-    /// arrow operator `B`. Any operator preconditioned by this solver must carry
-    /// the same gauge stiffness. In particular, the exact-stationarity solve
-    /// uses `A + κ Q Qᵀ`: applying raw `A` while preconditioning with the
-    /// gauge-fixed `B` leaves the known gauge null in the Krylov operator and can
-    /// make a perfectly valid quotient solve fail its original-residual check
-    /// (#2253). Plain solvers have an empty basis and remain bit-identical.
-    pub(crate) fn add_gauge_stiffness(
-        &self,
-        vector: &SaeArrowVector,
-        applied: &mut SaeArrowVector,
-    ) -> Result<(), String> {
-        if self.gauge_basis.is_empty() {
-            return Ok(());
-        }
-        let t_len = self.cache.delta_t_len();
-        let beta_len = self.cache.k;
-        if vector.t.len() != t_len
-            || vector.beta.len() != beta_len
-            || applied.t.len() != t_len
-            || applied.beta.len() != beta_len
-        {
-            return Err(format!(
-                "DeflatedArrowSolver: gauge-stiffness operator shapes vector=({}, {}), \
-                 applied=({}, {}) != cache=({t_len}, {beta_len})",
-                vector.t.len(),
-                vector.beta.len(),
-                applied.t.len(),
-                applied.beta.len(),
-            ));
-        }
-        for gauge in &self.gauge_basis {
-            let coefficient = self.gauge_stiffness
-                * (gauge.slice(s![..t_len]).dot(&vector.t)
-                    + gauge.slice(s![t_len..]).dot(&vector.beta));
-            for i in 0..t_len {
-                applied.t[i] += coefficient * gauge[i];
-            }
-            for i in 0..beta_len {
-                applied.beta[i] += coefficient * gauge[t_len + i];
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn solve(
         &self,
         rhs_t: ArrayView1<'_, f64>,
@@ -754,6 +706,95 @@ fn admitted_gmres_restart(dim: usize) -> Result<usize, String> {
         .map_err(|reason| format!("{reason} (available {available})"))
 }
 
+/// Orthogonalize one Arnoldi column with two modified Gram--Schmidt passes.
+///
+/// A single pass can leave a component parallel to the existing basis when
+/// `A z_j` is nearly in the Krylov span. Normalizing that small remainder then
+/// magnifies the component, so the Hessenberg/Givens residual is no longer the
+/// physical residual. The second pass removes that round-off component while
+/// its correction is accumulated into the same Hessenberg column, preserving
+/// the Arnoldi decomposition (#2653).
+fn reorthogonalize_arnoldi_column(
+    basis: &[Array1<f64>],
+    w: &mut Array1<f64>,
+    h: &mut Array2<f64>,
+    column: usize,
+) {
+    for _ in 0..2 {
+        for i in 0..=column {
+            let correction = basis[i].dot(w);
+            h[[i, column]] += correction;
+            for slot in 0..w.len() {
+                w[slot] -= correction * basis[i][slot];
+            }
+        }
+    }
+}
+
+/// Minimize the physical cycle residual over the stored flexible-GMRES images.
+///
+/// The Arnoldi Hessenberg problem is a cheap residual predictor, but in finite
+/// precision it can become optimistic when the Krylov map is ill-conditioned.
+/// Solving `min_y ||r - [A z_0 ... A z_j] y||` by rank-revealing SVD uses the
+/// operator images that define the physical equation itself. The resulting
+/// update is therefore the minimum-residual member of the generated flexible
+/// Krylov space even when the Hessenberg proxy has developed a residual gap
+/// (#2653).
+fn physical_krylov_least_squares(
+    residual: &Array1<f64>,
+    operator_images: &[Array1<f64>],
+) -> Result<Array1<f64>, String> {
+    if operator_images.is_empty() {
+        return Err("solve_b_preconditioned_gmres: empty Krylov image space".to_string());
+    }
+    let dim = residual.len();
+    let directions = operator_images.len();
+    let mut design = Array2::<f64>::zeros((dim, directions));
+    for (column, image) in operator_images.iter().enumerate() {
+        if image.len() != dim || image.iter().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "solve_b_preconditioned_gmres: invalid physical operator image {column}"
+            ));
+        }
+        design.column_mut(column).assign(image);
+    }
+    let (u_opt, singular_values, vt_opt) = design
+        .svd(true, true)
+        .map_err(|error| format!("solve_b_preconditioned_gmres: physical SVD failed: {error}"))?;
+    let u = u_opt.ok_or_else(|| {
+        "solve_b_preconditioned_gmres: physical SVD omitted left vectors".to_string()
+    })?;
+    let vt = vt_opt.ok_or_else(|| {
+        "solve_b_preconditioned_gmres: physical SVD omitted right vectors".to_string()
+    })?;
+    let largest = singular_values
+        .iter()
+        .fold(0.0_f64, |current, &value| current.max(value));
+    if !(largest.is_finite() && largest > 0.0) {
+        return Err(
+            "solve_b_preconditioned_gmres: physical Krylov image has zero numerical rank"
+                .to_string(),
+        );
+    }
+    let rank_floor =
+        largest * f64::EPSILON * (design.nrows().max(design.ncols()) as f64);
+    let projected = u.t().dot(residual);
+    let mut scaled = Array1::<f64>::zeros(singular_values.len());
+    for index in 0..singular_values.len() {
+        if singular_values[index] > rank_floor {
+            scaled[index] = projected[index] / singular_values[index];
+        }
+    }
+    let coefficients = vt.t().dot(&scaled);
+    if coefficients.iter().any(|value| !value.is_finite()) {
+        return Err(
+            "solve_b_preconditioned_gmres: physical Krylov coefficients are non-finite"
+                .to_string(),
+        );
+    }
+    Ok(coefficients)
+}
+
 #[cfg(test)]
 mod gmres_restart_budget_tests {
     use super::admitted_gmres_restart_with_budget;
@@ -950,11 +991,13 @@ where
             return Err("solve_b_preconditioned_gmres: non-finite original residual".to_string());
         }
 
+        let cycle_residual = residual.clone();
         residual.mapv_inplace(|value| value / residual_norm);
         let cycle = restart;
         let mut basis: Vec<Array1<f64>> = Vec::with_capacity(cycle + 1);
         basis.push(residual);
         let mut preconditioned_basis: Vec<Array1<f64>> = Vec::with_capacity(cycle);
+        let mut operator_images: Vec<Array1<f64>> = Vec::with_capacity(cycle);
         let mut h = Array2::<f64>::zeros((cycle + 1, cycle));
         let mut cosines = vec![0.0_f64; cycle];
         let mut sines = vec![0.0_f64; cycle];
@@ -975,18 +1018,13 @@ where
                 ));
             }
             let mut w = apply_operator(&preconditioned_direction)?;
+            operator_images.push(w.clone());
             preconditioned_basis.push(preconditioned_direction);
-            // Modified Gram-Schmidt Arnoldi.
-            for i in 0..=j {
-                let hij = basis[i].dot(&w);
-                h[[i, j]] = hij;
-                for slot in 0..dim {
-                    w[slot] -= hij * basis[i][slot];
-                }
-            }
+            reorthogonalize_arnoldi_column(&basis, &mut w, &mut h, j);
             let next_norm = w.dot(&w).sqrt();
+            let arnoldi_space_closed = next_norm <= f64::EPSILON;
             h[[j + 1, j]] = next_norm;
-            if next_norm > f64::EPSILON {
+            if !arnoldi_space_closed {
                 w.mapv_inplace(|value| value / next_norm);
                 basis.push(w);
             } else {
@@ -1034,30 +1072,26 @@ where
                     started.elapsed().as_secs_f64(),
                 );
             }
-            if g[j + 1].abs() <= relative_floor * b_norm {
+            // The recursive Hessenberg residual is only a predictor. A false
+            // convergence signal was the residual-gap defect in #2653, so it
+            // cannot truncate a still-growing physical Krylov space. Continue
+            // to the shape/memory-derived restart and let the stored `A z_j`
+            // least-squares decide the cycle, stopping early only when Arnoldi
+            // proves the generated space itself is closed.
+            if arnoldi_space_closed {
                 break;
             }
         }
 
-        let mut y = Array1::<f64>::zeros(used);
-        for i in (0..used).rev() {
-            let mut value = g[i];
-            for j in i + 1..used {
-                value -= h[[i, j]] * y[j];
-            }
-            let diagonal = h[[i, i]];
-            if !(diagonal.is_finite() && diagonal.abs() > f64::EPSILON) {
-                return Err(format!(
-                    "solve_b_preconditioned_gmres: singular Hessenberg diagonal at {i}"
-                ));
-            }
-            y[i] = value / diagonal;
-        }
+        let y = physical_krylov_least_squares(&cycle_residual, &operator_images[..used])?;
+        let mut represented_residual = cycle_residual;
         for i in 0..used {
             for slot in 0..dim {
                 solution[slot] += y[i] * preconditioned_basis[i][slot];
+                represented_residual[slot] -= y[i] * operator_images[i][slot];
             }
         }
+        let represented_norm = represented_residual.dot(&represented_residual).sqrt();
 
         let candidate = as_arrow(&solution);
         let ax = apply_a(&candidate)?;
@@ -1089,8 +1123,9 @@ where
             return Err(format!(
                 "solve_b_preconditioned_gmres: no representable residual reduction after \
                  {iterations} iterations (restart {restart}, dimension {dim}); original \
-                 residual {residual_norm:.3e} -> {next_norm:.3e}, relative residual \
-                 {:.3e}, round-off certification floor {:.3e}",
+                residual {residual_norm:.3e} -> {next_norm:.3e}, relative residual \
+                 {:.3e}, stored-operator residual {represented_norm:.3e}, round-off \
+                 certification floor {:.3e}",
                 original_norm / rhs_norm,
                 roundoff_floor / rhs_norm,
             ));
@@ -1153,6 +1188,47 @@ where
 mod right_preconditioned_gmres_tests {
     use super::*;
     use ndarray::array;
+
+    #[test]
+    fn reorthogonalizes_nearly_dependent_arnoldi_column_before_residual_projection_2653() {
+        // A Krylov image that is almost in the existing span is exactly the
+        // regime in which one-pass MGS lost enough orthogonality for the
+        // Hessenberg residual to disagree with the recomputed physical one in
+        // #2653. The symmetric direction is analytically orthogonal to `q`;
+        // its tiny magnitude makes the one-pass round-off component observable
+        // after normalization without relying on a large or random fixture.
+        let dim = 7usize;
+        let q = Array1::from_elem(dim, (dim as f64).sqrt().recip());
+        let mut transverse = Array1::from_iter((-3..=3).map(f64::from));
+        let transverse_norm = transverse.dot(&transverse).sqrt();
+        transverse.mapv_inplace(|value| value / transverse_norm);
+        let original = &q + &(1.0e-12 * &transverse);
+
+        let mut once = original.clone();
+        let once_projection = q.dot(&once);
+        for slot in 0..dim {
+            once[slot] -= once_projection * q[slot];
+        }
+        let once_norm = once.dot(&once).sqrt();
+        once.mapv_inplace(|value| value / once_norm);
+        let one_pass_overlap = q.dot(&once).abs();
+        assert!(
+            one_pass_overlap > 1.0e-5,
+            "fixture must expose the one-pass Arnoldi residual gap, overlap={one_pass_overlap:.3e}"
+        );
+
+        let basis = vec![q];
+        let mut twice = original;
+        let mut h = Array2::<f64>::zeros((2, 1));
+        reorthogonalize_arnoldi_column(&basis, &mut twice, &mut h, 0);
+        let twice_norm = twice.dot(&twice).sqrt();
+        twice.mapv_inplace(|value| value / twice_norm);
+        let two_pass_overlap = basis[0].dot(&twice).abs();
+        assert!(
+            two_pass_overlap <= 64.0 * f64::EPSILON,
+            "reorthogonalized Arnoldi residual must remain physical, overlap={two_pass_overlap:.3e}"
+        );
+    }
 
     #[test]
     fn exact_physical_warm_start_returns_without_an_arnoldi_step_2515() {

@@ -1279,6 +1279,38 @@ pub(crate) fn outer_gradient_internal_invariant_is_typed_1436() {
     );
 }
 
+/// #2653 — an exact implicit-gradient solve can be undefined at one otherwise
+/// finite line-search rho while remaining well-defined at the incumbent. Keep
+/// conditioning/non-identifiability rho-local so BFGS contracts the trial;
+/// invariant violations still invalidate the whole optimization.
+#[test]
+pub(crate) fn outer_gradient_failure_preserves_rho_locality_2653() {
+    for error in [
+        OuterGradientError::IllConditioned {
+            reason: "finite projected solve lost residual reduction".to_string(),
+        },
+        OuterGradientError::NonIdentifiable {
+            reason: "gauge-deflated operator remains singular".to_string(),
+        },
+    ] {
+        let error = EstimationError::from(error);
+        assert!(
+            matches!(error, EstimationError::TrialPointRefused { .. })
+                && error.is_trial_point_infeasible(),
+            "conditioning at one rho must reject only that trial: {error}"
+        );
+    }
+
+    let invariant = EstimationError::from(OuterGradientError::InternalInvariant {
+        reason: "gradient length differs from rho layout".to_string(),
+    });
+    assert!(
+        matches!(invariant, EstimationError::RemlOptimizationFailed(_))
+            && !invariant.is_trial_point_infeasible(),
+        "an invariant violation must remain fatal: {invariant}"
+    );
+}
+
 /// An empty β means that cache or typed reactive entry has no coefficient
 /// state to install. The hook must preserve the objective-owned state and
 /// report `NoSlot`, rather than interpreting zero length as a decoder mismatch.

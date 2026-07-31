@@ -35,7 +35,6 @@ use gam_problem::topology_certificates::CertificateLedger;
 use gam_problem::{EstimationError, MetricProvenance};
 use gam_solve::inference::residual_factor::{ResidualFactorInput, StructuredResidualModel};
 use gam_solve::rho_optimizer::{OuterProblem, OuterResult, audit_stationary_point};
-use gam_solve::seeding::SeedConfig;
 use gam_solve::structure_search::{MoveBudget, StructureMove};
 use gam_terms::analytic_penalties::AnalyticPenaltyRegistry;
 use gam_terms::inference::structure_evidence::StructureLedger;
@@ -676,13 +675,8 @@ fn fit_outer_stage_to_boundary(
                 Some(banked) => ndarray::Array1::from(banked),
                 None => rho_flat,
             };
-            let problem = OuterProblem::new(search_init_rho.len())
-                .with_initial_rho(search_init_rho)
-                .with_seed_config(SeedConfig {
-                    max_seeds: 1,
-                    seed_budget: 1,
-                    ..Default::default()
-                });
+            let problem =
+                OuterProblem::new(search_init_rho.len()).with_initial_rho(search_init_rho);
             match problem.run(&mut objective, "SAE manifold") {
                 Ok(result) if result.converged() => {
                     return certify_outer_stage(objective, stage, Ok(result))

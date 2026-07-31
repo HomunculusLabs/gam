@@ -160,9 +160,10 @@ fn priced_ard_direct_gradient_matches_fixed_state_value_2434() {
         "#2434 gate is invalid: the fixture contains no clamp-attributable switched direction"
     );
 
-    let (analytic, _theta_adjoint) = term
+    let analytic = term
         .dense_exact_a_logdet_channels(target.view(), &rho, &loss, &cache)
-        .expect("complete priced exact-A derivative");
+        .expect("complete priced exact-A derivative")
+        .logdet_trace;
     let fixed_state_priced_logdet =
         |mut candidate: SaeManifoldTerm, at_rho: &SaeManifoldRho| -> f64 {
             let (_criterion, _loss, at_cache) = candidate

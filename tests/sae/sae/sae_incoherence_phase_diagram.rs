@@ -87,7 +87,7 @@ fn no_certified_cell_violates_a_precondition() {
                 cell.snr
             );
             assert!(
-                verdict(&cell).margin() > 0.0,
+                verdict(&cell).margin().is_some_and(|margin| margin > 0.0),
                 "a certified cell must carry a strictly positive margin"
             );
         }
@@ -207,7 +207,7 @@ fn benign_corner_certifies_and_hard_corner_does_not() {
     // vacuously-always-certified nor vacuously-never.
     let benign = curved_dictionary_global_optimality_verdict(0.0, 0.0, A_FLOOR, 100.0, K_ATOMS);
     assert!(
-        benign.is_certified() && benign.margin() > 0.0,
+        benign.is_certified() && benign.margin().is_some_and(|margin| margin > 0.0),
         "the benign corner (μ=0, κ=0, SNR=100) must certify globally"
     );
     let hard = curved_dictionary_global_optimality_verdict(0.8, 0.95, A_FLOOR, 1.2, K_ATOMS);

@@ -474,7 +474,7 @@ fn phase3_step_readback_matches_independent_dense_solve() {
 #[test]
 fn phase3_resident_frame_declines_on_device_absent_host() {
     let sys = dense_direct_system(6, 2, 4);
-    let frame = ResidentArrowFrameHandle::new(&sys, 1e-3, 2e-3);
+    let frame = ResidentArrowFrameHandle::new(&sys, 1e-3, 2e-3, None);
     if !gpu_available_or_fail() {
         assert!(
             frame.is_err(),

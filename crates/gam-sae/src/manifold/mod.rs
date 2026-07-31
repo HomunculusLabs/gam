@@ -240,6 +240,7 @@ mod seed_routing;
 mod shape_uncertainty;
 mod stagewise;
 mod stagewise_seed;
+mod stall_polish_progress;
 mod steering;
 mod stratum_births;
 mod streaming_plan;

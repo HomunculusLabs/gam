@@ -383,7 +383,7 @@ impl DeviceResidentArrowWorkspace {
         }
         let sys = self.to_arrow_system();
         let frame = crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle::new(
-            &sys, ridge_t, ridge_beta,
+            &sys, ridge_t, ridge_beta, None,
         )
         .map_err(map_gpu_error)?;
         let g_t: Vec<f64> = sys
@@ -720,7 +720,8 @@ impl DeviceResidentArrowWorkspace {
                     gam_gpu::profile::telemetry_record_d2h(
                         (n * d + p) * std::mem::size_of::<f64>(),
                     );
-                    solve_arrow_newton_step(&residual, ridge_t, ridge_beta).map_err(map_gpu_error)
+                    solve_arrow_newton_step(&residual, ridge_t, ridge_beta, None)
+                        .map_err(map_gpu_error)
                 }
                 InnerSolveMode::CpuReference => {
                     solve_arrow_newton_step_dense_reference(&residual, ridge_t, ridge_beta)
@@ -1025,7 +1026,8 @@ impl DeviceResidentArrowWorkspace {
                     self.resident_step(shared, &residual, ridge_t, ridge_beta)
                 }
                 InnerSolveMode::DeviceReupload => {
-                    solve_arrow_newton_step(&residual, ridge_t, ridge_beta).map_err(map_gpu_error)
+                    solve_arrow_newton_step(&residual, ridge_t, ridge_beta, None)
+                        .map_err(map_gpu_error)
                 }
                 InnerSolveMode::CpuReference => {
                     solve_arrow_newton_step_dense_reference(&residual, ridge_t, ridge_beta)
@@ -1532,7 +1534,9 @@ impl DeviceResidentArrowWorkspace {
 
         // Level 1: the resident base blocks. Built at most once per loop.
         if !frames.base_declined && frames.base.is_none() {
-            match crate::gpu_kernels::arrow_schur::ResidentBaseArrowFrameHandle::new(residual) {
+            match crate::gpu_kernels::arrow_schur::ResidentBaseArrowFrameHandle::new(
+                residual, None,
+            ) {
                 Ok(base) => {
                     gam_gpu::profile::telemetry_record_handle_creation(self.context_id());
                     gam_gpu::profile::telemetry_record_h2d(self.frame_upload_bytes());
@@ -1618,7 +1622,7 @@ impl DeviceResidentArrowWorkspace {
         }
         frames.keyed = None;
         match crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle::new(
-            residual, ridge_t, ridge_beta,
+            residual, ridge_t, ridge_beta, None,
         ) {
             Ok(frame) => {
                 frames.frame_builds += 1;
@@ -2934,6 +2938,7 @@ mod tests {
                 &base,
                 opts.initial_ridge_t,
                 opts.initial_ridge_beta,
+                None,
             ) {
                 Err(err) => panic!("resident frame must build on CUDA host: {err:?}"),
                 Ok(frame) => {
@@ -3028,6 +3033,7 @@ mod tests {
                 &base,
                 opts.initial_ridge_t,
                 opts.initial_ridge_beta,
+                None,
             );
             assert!(
                 frame.is_err(),
@@ -3430,7 +3436,9 @@ mod tests {
             // `let … .expect()` binding marks everything after it unreachable
             // under `-D warnings`, so the bench body consumes the frame inside
             // the `Ok` arm — the same pattern as the production consumers.
-            match crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle::new(&base, 0.0, 0.0) {
+            match crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle::new(
+                &base, 0.0, 0.0, None,
+            ) {
                 Err(err) => panic!("resident frame must build on CUDA host: {err:?}"),
                 Ok(frame) => {
                     let frame_build_ms = t_build.elapsed().as_secs_f64() * 1e3;
@@ -3455,8 +3463,10 @@ mod tests {
                             *gb = gradients[0].1[j];
                         }
                         sys.refresh_row_hessian_fingerprint();
-                        crate::gpu_kernels::arrow_schur::solve_arrow_newton_step(&sys, 0.0, 0.0)
-                            .expect("reupload warm-up solve");
+                        crate::gpu_kernels::arrow_schur::solve_arrow_newton_step(
+                            &sys, 0.0, 0.0, None,
+                        )
+                        .expect("reupload warm-up solve");
                     }
 
                     // RESIDENT: reuse the (already-built, already-warmed) frame for N
@@ -3490,7 +3500,7 @@ mod tests {
                         sys.refresh_row_hessian_fingerprint();
                         reupload_steps.push(
                             crate::gpu_kernels::arrow_schur::solve_arrow_newton_step(
-                                &sys, 0.0, 0.0,
+                                &sys, 0.0, 0.0, None,
                             )
                             .expect("reupload solve_arrow_newton_step"),
                         );

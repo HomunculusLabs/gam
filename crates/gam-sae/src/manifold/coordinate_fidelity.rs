@@ -131,12 +131,12 @@ pub fn angle_fidelity_verdict(reading: Option<&ChartArcLengthReading>) -> AngleF
 pub struct WatsonUniformity {
     /// Watson `U²` for a circle, or two-sided KS distance for an interval.
     pub statistic: f64,
-    /// Closed-form Watson upper-tail p-value for circles. `NaN` for intervals:
+    /// Closed-form Watson upper-tail p-value for circles. `None` for intervals:
     /// the interval endpoints are estimated from this same sample, so a
     /// known-boundary KS p-value would not be calibrated. The interval statistic
     /// remains a descriptive occupancy diagnostic until endpoint uncertainty is
     /// carried by the chart schema.
-    pub p_value: f64,
+    pub p_value: Option<f64>,
     /// Number of coordinates the statistic was computed from.
     pub n: usize,
 }
@@ -174,7 +174,7 @@ fn interval_uniformity(
     }
     Some(WatsonUniformity {
         statistic: d,
-        p_value: f64::NAN,
+        p_value: None,
         n: pairs.len(),
     })
 }
@@ -221,7 +221,7 @@ pub fn watson_u2_uniform(u: &[f64]) -> WatsonUniformity {
     if n < 2 {
         return WatsonUniformity {
             statistic: 0.0,
-            p_value: 1.0,
+            p_value: Some(1.0),
             n,
         };
     }
@@ -249,7 +249,7 @@ pub fn watson_u2_uniform(u: &[f64]) -> WatsonUniformity {
     let p_value = watson_u2_pvalue(u2);
     WatsonUniformity {
         statistic: u2,
-        p_value,
+        p_value: Some(p_value),
         n,
     }
 }
@@ -370,7 +370,7 @@ pub fn watson_u2_uniform_weighted(
     let u2 = ess * cvm_core + 1.0 / (12.0 * ess) - ess * (mean - 0.5) * (mean - 0.5);
     Some(WatsonUniformity {
         statistic: u2,
-        p_value: watson_u2_pvalue(u2),
+        p_value: Some(watson_u2_pvalue(u2)),
         n: pairs.len(),
     })
 }
@@ -942,16 +942,16 @@ pub struct AtomCoordinateFidelity {
     pub topology: &'static str,
     /// Watson's `U²` of the fitted coordinates against the uniform invariant
     /// measure (larger ⟺ less uniform). Rotation/reflection invariant.
-    pub uniformity_statistic: f64,
-    /// Closed-form asymptotic p-value of the circle Watson statistic. `NaN` for
+    pub uniformity_statistic: Option<f64>,
+    /// Closed-form asymptotic p-value of the circle Watson statistic. `None` for
     /// interval charts whose endpoints were fitted from these same coordinates.
-    pub uniformity_p_value: f64,
+    pub uniformity_p_value: Option<f64>,
     /// Arc-length (unit-speed) defect of the chart parameterization
     /// ([`crate::chart_canonicalization::chart_unit_speed_defect`]): speed
     /// coefficient of variation on a uniform latent grid, `0` ⟺ exactly
-    /// arc-length. `NaN` when the chart-speed evaluation honest-skipped
+    /// arc-length. `None` when the chart-speed evaluation honest-skipped
     /// (degenerate chart).
-    pub arclength_defect: f64,
+    pub arclength_defect: Option<f64>,
     /// Number of fitted coordinates the uniformity statistic was computed from.
     pub n_coords: usize,
     /// Soft occupancy mass `Σ_i w_i` from the shared atom support measure.
@@ -981,19 +981,19 @@ pub struct AtomCoordinateFidelity {
     /// best rotation/reflection alignment of the residual `O(2)` gauge. `0` ⟺ the
     /// raw coordinate already IS the arc-length coordinate up to gauge; large ⟺
     /// the raw chart squishes arc length AT THE DATA ROWS (the #2081 pathology,
-    /// measured on data rather than a grid). `NaN` when `u_arc` is unavailable.
-    pub raw_arclength_defect_rms: f64,
+    /// measured on data rather than a grid). `None` when `u_arc` is unavailable.
+    pub raw_arclength_defect_rms: Option<f64>,
     /// Max over the fitted rows of the same aligned raw-vs-`u_arc` distance.
-    pub raw_arclength_defect_max: f64,
+    pub raw_arclength_defect_max: Option<f64>,
     /// `min ‖γ'‖ / mean ‖γ'‖` of the decoder curve on a uniform grid. Below the
     /// [`SAE_FLOW_DIFFEO_MIN_DET`] collapse floor drives the `Degenerate`
-    /// verdict. `NaN` when the chart is degenerate.
-    pub min_speed_over_mean: f64,
-    /// `max ‖γ'‖ / mean ‖γ'‖` on the grid. `NaN` when degenerate.
-    pub max_speed_over_mean: f64,
+    /// verdict. `None` when the chart-speed reading is unavailable.
+    pub min_speed_over_mean: Option<f64>,
+    /// `max ‖γ'‖ / mean ‖γ'‖` on the grid. `None` when unavailable.
+    pub max_speed_over_mean: Option<f64>,
     /// RMS of `log(‖γ'‖/mean)` on the grid — scale-invariant log-speed spread.
-    /// `NaN` when degenerate.
-    pub log_speed_rms: f64,
+    /// `None` when unavailable.
+    pub log_speed_rms: Option<f64>,
     /// **Chart-honesty half of the certificate (F2):** `true` iff the chart
     /// itself faithfully carries a coordinate — a well-conditioned, non-collapsed
     /// parameterization (`verdict != Degenerate`). This is a property of the
@@ -1113,11 +1113,11 @@ pub fn atom_coordinate_fidelity(
             (
                 verdict,
                 Some(r.coords_u_arc),
-                rms,
-                max,
-                r.min_speed_over_mean,
-                r.max_speed_over_mean,
-                r.log_speed_rms,
+                Some(rms),
+                Some(max),
+                Some(r.min_speed_over_mean),
+                Some(r.max_speed_over_mean),
+                Some(r.log_speed_rms),
             )
         }
         // Collapsed chart (speed vanishes somewhere) or arc length ill-defined:
@@ -1125,28 +1125,28 @@ pub fn atom_coordinate_fidelity(
         Some(r) => (
             AngleFidelityVerdict::Degenerate,
             None,
-            f64::NAN,
-            f64::NAN,
-            r.min_speed_over_mean,
-            r.max_speed_over_mean,
-            r.log_speed_rms,
+            None,
+            None,
+            Some(r.min_speed_over_mean),
+            Some(r.max_speed_over_mean),
+            Some(r.log_speed_rms),
         ),
         None => (
             AngleFidelityVerdict::Degenerate,
             None,
-            f64::NAN,
-            f64::NAN,
-            f64::NAN,
-            f64::NAN,
-            f64::NAN,
+            None,
+            None,
+            None,
+            None,
+            None,
         ),
     };
 
     Ok(Some(AtomCoordinateFidelity {
         topology: topology_label,
-        uniformity_statistic: uniformity.as_ref().map(|u| u.statistic).unwrap_or(f64::NAN),
-        uniformity_p_value: uniformity.as_ref().map(|u| u.p_value).unwrap_or(f64::NAN),
-        arclength_defect: defect.unwrap_or(f64::NAN),
+        uniformity_statistic: uniformity.as_ref().map(|u| u.statistic),
+        uniformity_p_value: uniformity.as_ref().and_then(|u| u.p_value),
+        arclength_defect: defect,
         n_coords: uniformity.as_ref().map(|u| u.n).unwrap_or(row_coords.len()),
         support_mass: support.mass(),
         effective_n: support.fisher_n(),
@@ -1642,7 +1642,7 @@ mod coordinate_fidelity_tests {
         let unweighted = coordinate_uniformity(coords.view(), &circle()).unwrap();
         let weighted = coordinate_uniformity_weighted(coords.view(), &support, &circle()).unwrap();
         assert!((weighted.statistic - unweighted.statistic).abs() < 1e-12);
-        assert!((weighted.p_value - unweighted.p_value).abs() < 1e-12);
+        assert_eq!(weighted.p_value, unweighted.p_value);
         assert_eq!(weighted.n, unweighted.n);
     }
 
@@ -1651,7 +1651,7 @@ mod coordinate_fidelity_tests {
         let coords = Array1::from_vec(vec![0.0, 0.5, 1.0]);
         let result = coordinate_uniformity(coords.view(), &interval()).unwrap();
         assert!((result.statistic - 1.0 / 3.0).abs() < 1e-12);
-        assert!(result.p_value.is_nan());
+        assert_eq!(result.p_value, None);
     }
 
     #[test]
@@ -1687,9 +1687,9 @@ mod coordinate_fidelity_tests {
             uu.statistic
         );
         assert!(
-            uu.p_value > 0.10,
+            uu.p_value.is_some_and(|p| p > 0.10),
             "uniform angles must not be flagged, p={}",
-            uu.p_value
+            uu.p_value.expect("circle Watson p-value")
         );
         // Bunched: every angle compressed into a 5% arc — the #2081 pathology.
         let bunched: Vec<f64> = (0..n).map(|i| 0.05 * (i as f64 / n as f64)).collect();
@@ -1700,9 +1700,9 @@ mod coordinate_fidelity_tests {
             bu.statistic
         );
         assert!(
-            bu.p_value < 0.01,
+            bu.p_value.is_some_and(|p| p < 0.01),
             "bunched angles must be flagged, p={}",
-            bu.p_value
+            bu.p_value.expect("circle Watson p-value")
         );
         // The bunched chart reads a MORE non-uniform coordinate than the honest one.
         assert!(bu.statistic > uu.statistic);

@@ -141,6 +141,140 @@ impl SaeRowLayout {
             }
         }
     }
+
+    /// Restrict one dense joint `(n * q_full, beta)` vector to this layout's
+    /// exact hard-TopK arrow chart.  The decoder border is copied unchanged;
+    /// only inactive per-row coordinate blocks are removed.
+    ///
+    /// This is the single full-to-compact coordinate authority used for joint
+    /// chart gauges.  A gauge is generated naturally in the dense product
+    /// chart because its decoder compensation is global, while the TopK arrow
+    /// operator contains only active coordinate blocks.  Treating a length
+    /// mismatch as "no gauge" silently puts an analytic chart null back into
+    /// the physical spectrum.  Every shape relation is therefore checked here
+    /// and a malformed/stale layout is a typed error, never a skipped vector.
+    pub(crate) fn restrict_dense_joint_vector(
+        &self,
+        dense: ArrayView1<'_, f64>,
+        dense_row_width: usize,
+        compact_row_offsets: &[usize],
+        border_dim: usize,
+        owner: &str,
+    ) -> Result<Array1<f64>, String> {
+        let n = self.active_atoms.len();
+        if self.coord_starts.len() != n {
+            return Err(format!(
+                "{owner}: compact layout has {} active-atom rows but {} coordinate-start rows",
+                n,
+                self.coord_starts.len()
+            ));
+        }
+        if compact_row_offsets.len() != n + 1 || compact_row_offsets.first() != Some(&0) {
+            return Err(format!(
+                "{owner}: compact row offsets must have length {} and start at zero, got {:?}",
+                n + 1,
+                compact_row_offsets
+            ));
+        }
+        if self.coord_offsets_full.len() != self.coord_dims.len() {
+            return Err(format!(
+                "{owner}: full coordinate offsets ({}) and dimensions ({}) disagree",
+                self.coord_offsets_full.len(),
+                self.coord_dims.len()
+            ));
+        }
+        let full_width = self
+            .coord_offsets_full
+            .iter()
+            .zip(self.coord_dims.iter())
+            .try_fold(0usize, |width, (&offset, &dimension)| {
+                offset
+                    .checked_add(dimension)
+                    .map(|end| width.max(end))
+                    .ok_or_else(|| format!("{owner}: full coordinate width overflows usize"))
+            })?;
+        if full_width != dense_row_width {
+            return Err(format!(
+                "{owner}: layout covers full row width {full_width}, but the dense joint chart has width {dense_row_width}"
+            ));
+        }
+        let dense_t_len = n
+            .checked_mul(dense_row_width)
+            .ok_or_else(|| format!("{owner}: dense coordinate length overflows usize"))?;
+        let expected_dense_len = dense_t_len
+            .checked_add(border_dim)
+            .ok_or_else(|| format!("{owner}: dense joint length overflows usize"))?;
+        if dense.len() != expected_dense_len {
+            return Err(format!(
+                "{owner}: dense joint vector has length {}, expected {expected_dense_len} ({dense_t_len} coordinates + {border_dim} border)",
+                dense.len()
+            ));
+        }
+
+        for row in 0..n {
+            let active = &self.active_atoms[row];
+            let starts = &self.coord_starts[row];
+            if active.len() != starts.len() {
+                return Err(format!(
+                    "{owner}: compact row {row} has {} active atoms but {} coordinate starts",
+                    active.len(),
+                    starts.len()
+                ));
+            }
+            if active.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(format!(
+                    "{owner}: compact row {row} active atoms are not strictly increasing"
+                ));
+            }
+            let mut expected_start = 0usize;
+            for (&atom, &start) in active.iter().zip(starts.iter()) {
+                let Some(&dimension) = self.coord_dims.get(atom) else {
+                    return Err(format!(
+                        "{owner}: compact row {row} names atom {atom}, outside {} coordinate blocks",
+                        self.coord_dims.len()
+                    ));
+                };
+                if start != expected_start {
+                    return Err(format!(
+                        "{owner}: compact row {row}, atom {atom} starts at {start}, expected contiguous offset {expected_start}"
+                    ));
+                }
+                expected_start = expected_start.checked_add(dimension).ok_or_else(|| {
+                    format!("{owner}: compact row {row} width overflows usize")
+                })?;
+            }
+            let row_span = compact_row_offsets[row + 1]
+                .checked_sub(compact_row_offsets[row])
+                .ok_or_else(|| format!("{owner}: compact row offsets decrease at row {row}"))?;
+            if row_span != expected_start {
+                return Err(format!(
+                    "{owner}: compact row {row} offset span is {row_span}, but its active coordinate width is {expected_start}"
+                ));
+            }
+        }
+
+        let compact_t_len = compact_row_offsets[n];
+        let compact_len = compact_t_len
+            .checked_add(border_dim)
+            .ok_or_else(|| format!("{owner}: compact joint length overflows usize"))?;
+        let mut compact = Array1::<f64>::zeros(compact_len);
+        for row in 0..n {
+            let dense_row = row * dense_row_width;
+            let compact_row = compact_row_offsets[row];
+            for (position, &atom) in self.active_atoms[row].iter().enumerate() {
+                let dimension = self.coord_dims[atom];
+                let dense_start = dense_row + self.coord_offsets_full[atom];
+                let compact_start = compact_row + self.coord_starts[row][position];
+                compact
+                    .slice_mut(s![compact_start..compact_start + dimension])
+                    .assign(&dense.slice(s![dense_start..dense_start + dimension]));
+            }
+        }
+        compact
+            .slice_mut(s![compact_t_len..])
+            .assign(&dense.slice(s![dense_t_len..]));
+        Ok(compact)
+    }
 }
 
 #[cfg(test)]

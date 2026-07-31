@@ -57,7 +57,7 @@ fn main() {
     let n_solves = 24usize; // representative count of same-ridge LM-accepted iterates
 
     // Build the resident frame ONCE (the amortized factor work).
-    let frame = match ResidentArrowFrameHandle::new(&sys, ridge_t, ridge_beta) {
+    let frame = match ResidentArrowFrameHandle::new(&sys, ridge_t, ridge_beta, None) {
         Ok(f) => f,
         Err(err) => {
             println!(
@@ -70,7 +70,7 @@ fn main() {
 
     // ---- parity: one resident solve vs one re-upload solve on the SAME frame ----
     let resident_sol = frame.solve_gradient(&g_t, &g_beta).expect("resident solve");
-    let reupload_sol = solve_arrow_newton_step(&sys, ridge_t, ridge_beta).expect("reupload solve");
+    let reupload_sol = solve_arrow_newton_step(&sys, ridge_t, ridge_beta, None).expect("reupload solve");
     let mut max_diff = 0.0_f64;
     for (a, b) in resident_sol.delta_t.iter().zip(reupload_sol.delta_t.iter()) {
         max_diff = max_diff.max((a - b).abs());
@@ -106,12 +106,12 @@ fn main() {
         std::hint::black_box(s.delta_beta.len());
     }
 
-    solve_arrow_newton_step(&sys, ridge_t, ridge_beta)
+    solve_arrow_newton_step(&sys, ridge_t, ridge_beta, None)
         .expect("warm-up reupload solve: the timed loop below requires the same solve to succeed");
     let mut reupload_total = Duration::ZERO;
     for _ in 0..n_solves {
         let start = Instant::now();
-        let s = solve_arrow_newton_step(&sys, ridge_t, ridge_beta).expect("reupload solve");
+        let s = solve_arrow_newton_step(&sys, ridge_t, ridge_beta, None).expect("reupload solve");
         reupload_total += start.elapsed();
         std::hint::black_box(s.delta_beta.len());
     }

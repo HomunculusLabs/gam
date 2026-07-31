@@ -80,6 +80,14 @@ pub(crate) fn channel_cov_factors(cov: ArrayView2<'_, f64>, m_basis: i64) -> Opt
 /// replace a failed diagnostic with JSON `null`, and `serde_json::Value` cannot
 /// represent NaN or infinity in any case.
 pub(crate) fn py_any_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+    py_any_to_json_value_at(obj, "$")
+}
+
+/// Recursive implementation that retains the exact report path in conversion
+/// failures. A strict artifact boundary is only actionable when it identifies
+/// the producer field that violated it; the former path-free non-finite error
+/// forced a full fit replay for every candidate diagnostic (#2653).
+fn py_any_to_json_value_at(obj: &Bound<'_, PyAny>, path: &str) -> PyResult<Value> {
     if obj.is_none() {
         return Ok(Value::Null);
     }
@@ -92,7 +100,7 @@ pub(crate) fn py_any_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     // those correctly become native Python scalars and recurse once.
     if obj.hasattr("tolist")? {
         let listed = obj.call_method0("tolist")?;
-        return py_any_to_json_value(&listed);
+        return py_any_to_json_value_at(&listed, path);
     }
     if let Ok(i) = obj.extract::<i64>() {
         return Ok(Value::Number(i.into()));
@@ -100,7 +108,7 @@ pub(crate) fn py_any_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     if let Ok(f) = obj.extract::<f64>() {
         let number = serde_json::Number::from_f64(f).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
-                "SAE fit report contains a non-finite floating-point value",
+                format!("SAE fit report contains a non-finite floating-point value at {path}"),
             )
         })?;
         return Ok(Value::Number(number));
@@ -116,26 +124,33 @@ pub(crate) fn py_any_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
                 Ok(key) => key,
                 Err(_) => k.str()?.extract::<String>()?,
             };
-            map.insert(key, py_any_to_json_value(&v)?);
+            let child_path = format!("{path}.{key}");
+            map.insert(key, py_any_to_json_value_at(&v, &child_path)?);
         }
         return Ok(Value::Object(map));
     }
     if let Ok(seq) = obj.cast::<PyList>() {
         let mut arr = Vec::with_capacity(seq.len());
-        for item in seq.iter() {
-            arr.push(py_any_to_json_value(&item)?);
+        for (index, item) in seq.iter().enumerate() {
+            arr.push(py_any_to_json_value_at(
+                &item,
+                &format!("{path}[{index}]"),
+            )?);
         }
         return Ok(Value::Array(arr));
     }
     if let Ok(seq) = obj.cast::<PyTuple>() {
         let mut arr = Vec::with_capacity(seq.len());
-        for item in seq.iter() {
-            arr.push(py_any_to_json_value(&item)?);
+        for (index, item) in seq.iter().enumerate() {
+            arr.push(py_any_to_json_value_at(
+                &item,
+                &format!("{path}[{index}]"),
+            )?);
         }
         return Ok(Value::Array(arr));
     }
     Err(pyo3::exceptions::PyValueError::new_err(format!(
-        "py_any_to_json_value: cannot convert Python object of type {} to JSON",
+        "py_any_to_json_value: cannot convert Python object of type {} to JSON at {path}",
         obj.get_type().name()?,
     )))
 }

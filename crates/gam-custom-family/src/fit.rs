@@ -1401,6 +1401,17 @@ pub(crate) enum AnchoredContinuationRefusal {
         steps: usize,
         refined_steps: usize,
     },
+    HomotopyMemberConstructionFailed {
+        steps: usize,
+        waypoint_index: usize,
+        progress: f64,
+        reason: String,
+    },
+    HomotopyMemberUnavailable {
+        steps: usize,
+        waypoint_index: usize,
+        progress: f64,
+    },
 }
 
 impl std::fmt::Display for AnchoredContinuationRefusal {
@@ -1499,7 +1510,26 @@ impl std::fmt::Display for AnchoredContinuationRefusal {
             } => write!(
                 f,
                 "endpoint still moves at {steps} steps, but {refined_steps} steps are below the \
-                 rho path's floating-point resolution"
+                 continuation path's floating-point resolution"
+            ),
+            Self::HomotopyMemberConstructionFailed {
+                steps,
+                waypoint_index,
+                progress,
+                reason,
+            } => write!(
+                f,
+                "{steps}-step coefficient-objective homotopy failed to construct waypoint \
+                 {waypoint_index} at progress {progress:.17}: {reason}"
+            ),
+            Self::HomotopyMemberUnavailable {
+                steps,
+                waypoint_index,
+                progress,
+            } => write!(
+                f,
+                "{steps}-step coefficient-objective homotopy omitted waypoint {waypoint_index} \
+                 at progress {progress:.17} after declaring an anchor"
             ),
         }
     }
@@ -1596,18 +1626,58 @@ pub(crate) fn anchored_continuation_seed<F: CustomFamily + Clone + Send + Sync +
         rho_anchor,
         rho_target,
     };
+    certify_refined_continuation(&path, options.inner_tol, false)
+}
+
+trait RefinedContinuationPath {
+    fn sweep(&self, steps: usize) -> Result<ConstrainedWarmStart, AnchoredContinuationRefusal>;
+    fn resolves_steps(&self, refined_steps: usize) -> bool;
+    fn endpoint_discrepancy(
+        &self,
+        steps: usize,
+        coarser: &ConstrainedWarmStart,
+        finer: &ConstrainedWarmStart,
+    ) -> Result<f64, AnchoredContinuationRefusal>;
+}
+
+fn certify_refined_continuation<P: RefinedContinuationPath>(
+    path: &P,
+    inner_tolerance: f64,
+    refine_uncertified_waypoints: bool,
+) -> Result<CertifiedAnchoredContinuationSeed, AnchoredContinuationRefusal> {
     let mut coarser: Option<ConstrainedWarmStart> = None;
     let mut previous_discrepancy: Option<f64> = None;
     let mut steps = 1usize;
     loop {
-        let endpoint = path.sweep(steps)?;
+        let endpoint = match path.sweep(steps) {
+            Ok(endpoint) => endpoint,
+            Err(
+                refusal @ AnchoredContinuationRefusal::WaypointNotCertified {
+                    waypoint_index, ..
+                },
+            ) if refine_uncertified_waypoints && waypoint_index > 0 => {
+                let refined = steps
+                    .checked_mul(2)
+                    .ok_or(AnchoredContinuationRefusal::StepCountOverflow { steps })?;
+                if !path.resolves_steps(refined) {
+                    return Err(refusal);
+                }
+                log::info!(
+                    "[OUTER] coefficient-objective continuation refining {steps}→{refined} \
+                     steps after waypoint {waypoint_index} did not certify"
+                );
+                steps = refined;
+                continue;
+            }
+            Err(refusal) => return Err(refusal),
+        };
         if let Some(previous) = coarser.as_ref() {
-            let discrepancy = continuation_endpoint_discrepancy(steps, previous, &endpoint)?;
+            let discrepancy = path.endpoint_discrepancy(steps, previous, &endpoint)?;
             match continuation_refinement_decision(
                 steps,
                 previous_discrepancy,
                 discrepancy,
-                options.inner_tol,
+                inner_tolerance,
             )? {
                 ContinuationRefinement::Certified(certificate) => {
                     return Ok(CertifiedAnchoredContinuationSeed {
@@ -1622,7 +1692,7 @@ pub(crate) fn anchored_continuation_seed<F: CustomFamily + Clone + Send + Sync +
         let refined = steps
             .checked_mul(2)
             .ok_or(AnchoredContinuationRefusal::StepCountOverflow { steps })?;
-        if !continuation_path_resolves_steps(rho_anchor, rho_target, refined) {
+        if !path.resolves_steps(refined) {
             return Err(AnchoredContinuationRefusal::PathResolutionExhausted {
                 steps,
                 refined_steps: refined,
@@ -1658,7 +1728,9 @@ struct ContinuationPath<'a, F> {
     rho_target: &'a Array1<f64>,
 }
 
-impl<F: CustomFamily + Clone + Send + Sync + 'static> ContinuationPath<'_, F> {
+impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
+    for ContinuationPath<'_, F>
+{
     /// One continuation sweep at a fixed discretization: solve the inner problem
     /// at each waypoint, carrying the previous mode forward as the predictor.
     ///
@@ -1716,6 +1788,221 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> ContinuationPath<'_, F> {
         }
         carried.ok_or(AnchoredContinuationRefusal::EmptySweep { steps })
     }
+
+    fn resolves_steps(&self, refined_steps: usize) -> bool {
+        continuation_path_resolves_steps(self.rho_anchor, self.rho_target, refined_steps)
+    }
+
+    fn endpoint_discrepancy(
+        &self,
+        steps: usize,
+        coarser: &ConstrainedWarmStart,
+        finer: &ConstrainedWarmStart,
+    ) -> Result<f64, AnchoredContinuationRefusal> {
+        continuation_endpoint_discrepancy(steps, coarser, finer)
+    }
+}
+
+/// Follow a family-declared coefficient-objective homotopy at one fixed `ρ`.
+///
+/// The zero member must have a uniquely selected coefficient mode; each
+/// waypoint is then corrected exactly and carried into the next member. The
+/// target waypoint always uses `family` itself, so the seed is bitwise attached
+/// to the production objective rather than to a reconstructed approximation at
+/// progress one.
+pub(crate) fn coefficient_objective_homotopy_seed<
+    F: CustomFamily + Clone + Send + Sync + 'static,
+>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+    layout: &PenaltyLabelLayout,
+    rho_prior: &gam_problem::RhoPrior,
+    rho: &Array1<f64>,
+) -> Result<Option<CertifiedAnchoredContinuationSeed>, AnchoredContinuationRefusal> {
+    match family.coefficient_mode_homotopy_member(0.0) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Ok(None),
+        Err(reason) => {
+            return Err(
+                AnchoredContinuationRefusal::HomotopyMemberConstructionFailed {
+                    steps: 0,
+                    waypoint_index: 0,
+                    progress: 0.0,
+                    reason,
+                },
+            );
+        }
+    }
+    let path = CoefficientObjectiveHomotopyPath {
+        family,
+        specs,
+        options,
+        layout,
+        rho_prior,
+        rho,
+    };
+    certify_refined_continuation(&path, options.inner_tol, true).map(Some)
+}
+
+struct CoefficientObjectiveHomotopyPath<'a, F> {
+    family: &'a F,
+    specs: &'a [ParameterBlockSpec],
+    options: &'a BlockwiseFitOptions,
+    layout: &'a PenaltyLabelLayout,
+    rho_prior: &'a gam_problem::RhoPrior,
+    rho: &'a Array1<f64>,
+}
+
+impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
+    for CoefficientObjectiveHomotopyPath<'_, F>
+{
+    fn sweep(&self, steps: usize) -> Result<ConstrainedWarmStart, AnchoredContinuationRefusal> {
+        let mut carried: Option<ConstrainedWarmStart> = None;
+        for step in 0..=steps {
+            let progress = step as f64 / steps as f64;
+            let member = if step == steps {
+                self.family.clone()
+            } else {
+                self.family
+                    .coefficient_mode_homotopy_member(progress)
+                    .map_err(|reason| {
+                        AnchoredContinuationRefusal::HomotopyMemberConstructionFailed {
+                            steps,
+                            waypoint_index: step,
+                            progress,
+                            reason,
+                        }
+                    })?
+                    .ok_or(AnchoredContinuationRefusal::HomotopyMemberUnavailable {
+                        steps,
+                        waypoint_index: step,
+                        progress,
+                    })?
+            };
+            let eval = outerobjectivegradienthessian_labeled(
+                &member,
+                self.specs,
+                self.options,
+                self.layout,
+                self.rho,
+                carried.as_ref(),
+                self.rho_prior,
+                EvalMode::ValueOnly,
+            )
+            .map_err(|error| {
+                AnchoredContinuationRefusal::WaypointEvaluationFailed {
+                    steps,
+                    waypoint_index: step,
+                    reason: error.to_string(),
+                }
+            })?;
+            if !eval.inner_converged || !eval.objective.is_finite() {
+                return Err(AnchoredContinuationRefusal::WaypointNotCertified {
+                    steps,
+                    waypoint_index: step,
+                    inner_converged: eval.inner_converged,
+                    objective: eval.objective,
+                });
+            }
+            carried = Some(eval.warm_start);
+        }
+        carried.ok_or(AnchoredContinuationRefusal::EmptySweep { steps })
+    }
+
+    fn resolves_steps(&self, refined_steps: usize) -> bool {
+        1.0 / refined_steps as f64 > f64::EPSILON
+    }
+
+    fn endpoint_discrepancy(
+        &self,
+        steps: usize,
+        coarser: &ConstrainedWarmStart,
+        finer: &ConstrainedWarmStart,
+    ) -> Result<f64, AnchoredContinuationRefusal> {
+        coefficient_objective_endpoint_discrepancy(steps, self.specs, coarser, finer)
+    }
+}
+
+/// Compare two coefficient modes in the coordinates the model objective can
+/// observe: fitted linear predictors plus the cached likelihood and penalty
+/// values at the common target family/rho.
+///
+/// Raw coefficient distance is not invariant to basis scaling and treats drift
+/// along a design-null or nearly-null direction as a different mode even when
+/// the family and penalty see the same fitted function. That is exactly the
+/// quasi-separated multinomial geometry for which the Jeffreys homotopy is
+/// needed. The solver design (including stacked multi-channel designs) is the
+/// authoritative map from coefficients to family state, while the cached
+/// likelihood/penalty pair catches any objective-relevant penalty motion not
+/// visible in eta.
+fn coefficient_objective_endpoint_discrepancy(
+    steps: usize,
+    specs: &[ParameterBlockSpec],
+    coarser: &ConstrainedWarmStart,
+    finer: &ConstrainedWarmStart,
+) -> Result<f64, AnchoredContinuationRefusal> {
+    if coarser.block_beta.len() != finer.block_beta.len() {
+        return Err(AnchoredContinuationRefusal::EndpointBlockCountMismatch {
+            steps,
+            coarser_blocks: coarser.block_beta.len(),
+            finer_blocks: finer.block_beta.len(),
+        });
+    }
+    if coarser.block_beta.len() != specs.len() {
+        return Err(AnchoredContinuationRefusal::EndpointBlockCountMismatch {
+            steps,
+            coarser_blocks: coarser.block_beta.len(),
+            finer_blocks: specs.len(),
+        });
+    }
+    let mut worst = 0.0_f64;
+    for (block_index, ((a, b), spec)) in coarser
+        .block_beta
+        .iter()
+        .zip(finer.block_beta.iter())
+        .zip(specs.iter())
+        .enumerate()
+    {
+        if a.len() != b.len() {
+            return Err(AnchoredContinuationRefusal::EndpointBlockWidthMismatch {
+                steps,
+                block_index,
+                coarser_width: a.len(),
+                finer_width: b.len(),
+            });
+        }
+        let eta_a = spec.solver_design().matrixvectormultiply(a) + spec.solver_offset();
+        let eta_b = spec.solver_design().matrixvectormultiply(b) + spec.solver_offset();
+        for (coordinate_index, (x, y)) in eta_a.iter().zip(eta_b.iter()).enumerate() {
+            if !x.is_finite() || !y.is_finite() {
+                return Err(AnchoredContinuationRefusal::EndpointCoordinateNotFinite {
+                    steps,
+                    block_index,
+                    coordinate_index,
+                    coarser: *x,
+                    finer: *y,
+                });
+            }
+            worst = worst.max((x - y).abs() / (1.0 + x.abs().max(y.abs())));
+        }
+    }
+    if let (Some(a), Some(b)) = (&coarser.cached_inner, &finer.cached_inner) {
+        for (x, y) in [
+            (a.log_likelihood, b.log_likelihood),
+            (a.penalty_value, b.penalty_value),
+        ] {
+            if !x.is_finite() || !y.is_finite() {
+                return Err(AnchoredContinuationRefusal::InvalidEndpointDiscrepancy {
+                    steps,
+                    role: "objective-state",
+                    discrepancy: f64::NAN,
+                });
+            }
+            worst = worst.max((x - y).abs() / (1.0 + x.abs().max(y.abs())));
+        }
+    }
+    Ok(worst)
 }
 
 /// How far apart two continuation endpoints are, relative to each coefficient's
@@ -2308,7 +2595,36 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // that certifies global convexity has no competing basins, so an
     // exponentially refined branch-tracking continuation is both mathematically
     // irrelevant and potentially much more expensive than the fit itself.
-    let initial_warm_cache = if family.exact_newton_joint_hessian_beta_dependent()
+    // A family-owned objective homotopy is the strongest mode definition: its
+    // zero member supplies a unique coefficient mode at the caller's actual
+    // rho, and the path changes only the family augmentation being armed. In
+    // particular, a conditional Firth refit must follow Jeffreys strength
+    // 0→1 from the already-certified unbiased mode; walking rho from maximal
+    // smoothing solves a different selection problem and can discard that
+    // authoritative mode before the Firth objective is even reached.
+    let objective_homotopy_seed = coefficient_objective_homotopy_seed(
+        family,
+        specs,
+        &outer_options,
+        &label_layout,
+        &rho_prior,
+        &rho0,
+    )
+    .map_err(|refusal| CustomFamilyError::Optimization {
+        context: "fit_custom_family coefficient-objective continuation",
+        reason: refusal.to_string(),
+    })?;
+    let initial_warm_cache = if let Some(certified) = objective_homotopy_seed {
+        log::info!(
+            "[OUTER] coefficient-objective continuation certified at {} steps: endpoint \
+             discrepancy {:.3e} <= inner tolerance {:.3e}; observed contraction factor {:?}",
+            certified.certificate.steps,
+            certified.certificate.endpoint_discrepancy,
+            certified.certificate.inner_tolerance,
+            certified.certificate.observed_contraction_factor,
+        );
+        Some(certified.warm_start)
+    } else if family.exact_newton_joint_hessian_beta_dependent()
         && !family.inner_coefficient_objective_is_globally_convex()
     {
         match anchored_continuation_seed(

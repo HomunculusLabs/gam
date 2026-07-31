@@ -792,26 +792,17 @@ impl SaeManifoldTerm {
         // +inf, so nothing is silently accepted.
         let mut polish_escalations = 0usize;
         const POLISH_ESCALATION_ANTI_RUNAWAY_CAP: usize = 2;
-        // The STALL-branch polish window had no anti-runaway bound at all. It
-        // shares `terminal_newton_polish_armed` with the window above but not
-        // that window's counter, so it neither read nor wrote
-        // `polish_escalations` — and because material descent re-arms the flag
-        // (#2132, the `else` arm at the bottom of this loop), a fit that
-        // alternates descend / stall / descend / stall can enter it once per
-        // plateau without limit. Each entry costs a refine round at an inner
-        // budget of 64, and unlike the window above it does not extend
-        // `budget_escalation_extra`, so the failure mode is unbounded COST
-        // rather than a hang.
-        //
-        // It gets its OWN counter rather than sharing the cap-2 one. Reusing
-        // that constant would silently redefine the #2132 contract: the whole
-        // point of re-arming on material descent is that a NEW plateau earns a
-        // fresh polish, and a cap of 2 would retire the mechanism after the
-        // second plateau of the fit. This bound exists only to stop a
-        // pathological alternation, so it is set well above any legitimate
-        // plateau count, matching the certificate-escalation bound below.
-        let mut stall_polish_escalations = 0usize;
-        const STALL_POLISH_ANTI_RUNAWAY_CAP: usize = 8;
+        // #2653 — repeated STALL-branch polish is governed by what the former
+        // ordinal cap was trying to approximate: contraction of either
+        // accepted KKT currency. A raw count of eight retired the production
+        // K=1 circle tail while both raw and quotient residuals were still
+        // falling. The certificate advances only when one Pareto frontier
+        // moves beyond floating-point resolution, so it admits every useful
+        // ninth-or-later rescue while a repeated plateau still terminates.
+        let mut stall_polish_progress =
+            super::stall_polish_progress::StallPolishProgressCertificate::new(
+                f64::EPSILON.sqrt(),
+            );
         const CERTIFICATE_ESCALATION_PROGRESS: f64 = 0.7;
         const CERTIFICATE_ESCALATION_ANTI_RUNAWAY_CAP: usize = 8;
         // #1051 — objective-stagnation convergence. On an ill-conditioned
@@ -1579,6 +1570,7 @@ impl SaeManifoldTerm {
                 && refine_rounds >= SAE_MANIFOLD_INNER_OBJECTIVE_STALL_MIN_ROUNDS
                 && *criterion_fixed_point
             {
+                let mut stall_polish_permitted = false;
                 let mut stationary_sys = self
                     .assemble_arrow_schur(target, rho_fixed, registry)
                     .map_err(|err| {
@@ -1699,6 +1691,15 @@ impl SaeManifoldTerm {
                     if predicted_relative_decrease <= SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL {
                         return Ok(stationary_cache);
                     }
+                    let progress_verdict = stall_polish_progress.observe(
+                        stationary_grad_norm,
+                        stationary_quotient_grad_norm,
+                        grad_tolerance,
+                    );
+                    stall_polish_permitted = progress_verdict.permits_continuation();
+                    log::debug!(
+                        "SAE inner stall-polish continuation certificate: {progress_verdict:?}"
+                    );
                     // Otherwise: a flat objective round is only a convergence
                     // shortcut when a certificate is stationary. Keep using the
                     // deterministic refinement budget: either later rounds reach
@@ -1720,25 +1721,8 @@ impl SaeManifoldTerm {
                 // and the idempotence certificate (the state moved, so
                 // `criterion_fixed_point` is cleared and one evidence re-entry
                 // must recur exactly before acceptance, same as any hook move).
-                if terminal_newton_polish_armed
-                    && stall_polish_escalations < STALL_POLISH_ANTI_RUNAWAY_CAP
-                {
+                if terminal_newton_polish_armed && stall_polish_permitted {
                     terminal_newton_polish_armed = false;
-                    // The cap counts ENTRIES, not successes. Incrementing inside
-                    // the `true` arm left every polish that bails WITHOUT
-                    // committing a step invisible to it — the first step's
-                    // backtracks all rejected, or the no-contraction bail — while
-                    // that invocation still paid one assemble + one deflated
-                    // factorization + one full exact-pencil GMRES + up to eight
-                    // backtracks, each of which re-assembles AND re-factors the
-                    // whole arrow-Schur system. Re-entry is gated by
-                    // `terminal_newton_polish_armed` alone, and any materially
-                    // descending round re-arms it (#2132), so the uncounted lane
-                    // was re-enterable once per plateau for the whole refine
-                    // budget: precisely the unbounded-COST shape this counter
-                    // exists to close. Counting at entry prices the invocation,
-                    // not its verdict.
-                    stall_polish_escalations += 1;
                     if self.terminal_exact_newton_polish(
                         target,
                         rho_fixed,
@@ -2193,31 +2177,6 @@ impl SaeManifoldTerm {
             prev_grad_norm = grad_norm.min(prev_grad_norm);
             prev_decrement_sq = decrement_sq.min(prev_decrement_sq);
             let cache = factor.cache;
-            let solver = match self.outer_gradient_arrow_solver(&cache, lambda_smooth) {
-                Ok(solver) => solver,
-                Err(err) => {
-                    // The quotient solver applies the OUTER-GRADIENT refusal
-                    // standard: a near-singular joint Hessian whose flatness it
-                    // cannot attribute to the gauge orbit is typed
-                    // `NonIdentifiable`, because the ρ-derivative genuinely
-                    // requires that attribution. The polish has a strictly
-                    // weaker requirement — the solver is only the
-                    // PRECONDITIONER for the exact-pencil GMRES, and step
-                    // acceptance is guarded downstream by the gradient-norm
-                    // contraction + objective-band test. Refusing the whole
-                    // terminal Newton phase because the preconditioner refused
-                    // is what parked stalled fits 1.3× above the KKT tolerance
-                    // (tier-0: ‖g‖ 8.0e-5 vs tol 6.1e-5, refused at budget).
-                    // Fall back to the plain undeflated factor: a weaker
-                    // preconditioner can only slow GMRES, never corrupt an
-                    // accepted step.
-                    log::debug!(
-                        "terminal Newton: quotient solver refused at ‖g‖={grad_norm:.6e} \
-                         ({err:?}); falling back to the plain factor preconditioner"
-                    );
-                    DeflatedArrowSolver::plain(&cache)
-                }
-            };
             // Newton step on the exact Hessian: A Δ = −g on the gauge quotient.
             let mut rhs_t = Array1::<f64>::zeros(cache.delta_t_len());
             let mut offset = 0usize;
@@ -2231,12 +2190,12 @@ impl SaeManifoldTerm {
                 t: rhs_t,
                 beta: sys.gb.mapv(|v| -v),
             };
-            let newton =
-                match self.solve_exact_stationarity(rho_fixed, target, &cache, &solver, &rhs) {
+            let newton = match self.solve_exact_stationarity(rho_fixed, target, &cache, &rhs) {
                     Ok(newton) => newton,
                     Err(err) => {
                         log::debug!(
-                            "terminal Newton bail: exact-pencil GMRES at ‖g‖={grad_norm:.6e}: {err}"
+                            "terminal Newton bail: dense exact-stationarity pseudoinverse at \
+                             ‖g‖={grad_norm:.6e}: {err}"
                         );
                         break;
                     }
@@ -2398,20 +2357,13 @@ impl SaeManifoldTerm {
         };
 
         let full_len = cache.delta_t_len() + cache.k;
-        let mut raw_gauges = Vec::new();
-        for gauge in self
-            .dense_step_gauge_vectors()
-            .map_err(OuterGradientError::internal)?
-        {
-            if gauge.len() != full_len {
-                continue;
-            }
-            let norm_sq = gauge.iter().map(|v| v * v).sum::<f64>();
-            if !(norm_sq.is_finite() && norm_sq > 1.0e-24) {
-                continue;
-            }
-            raw_gauges.push(gauge);
-        }
+        let mut raw_gauges = self
+            .joint_chart_gauge_basis_for_arrow_layout(
+                &cache.row_offsets,
+                cache.k,
+                "outer_gradient_arrow_solver chart gauges",
+            )
+            .map_err(OuterGradientError::internal)?;
         // #2253: everything pushed above comes from `dense_step_gauge_vectors`
         // — the closed-form CHART gauge orbit (circle/torus phase, and the
         // translation/scale orbits of the linear/euclidean/duchon/poincaré
@@ -2442,9 +2394,15 @@ impl SaeManifoldTerm {
             .joint_decoder_beta_null_directions(penalized_gram_scale)
             .map_err(OuterGradientError::internal)?
         {
-            if dir.len() == full_len {
-                raw_gauges.push(dir);
-            }
+            let mapped = self
+                .dense_joint_vector_in_arrow_layout(
+                    dir.view(),
+                    &cache.row_offsets,
+                    cache.k,
+                    "outer_gradient_arrow_solver decoder-beta null",
+                )
+                .map_err(OuterGradientError::internal)?;
+            raw_gauges.push(mapped);
         }
         // #1051/#1273: also admit the decoder COLUMN-SPAN null (an unrealised
         // ambient output channel of a rank-deficient decoder), which the
@@ -2459,9 +2417,15 @@ impl SaeManifoldTerm {
             .decoder_channel_null_directions()
             .map_err(OuterGradientError::internal)?
         {
-            if dir.len() == full_len {
-                raw_gauges.push(dir);
-            }
+            let mapped = self
+                .dense_joint_vector_in_arrow_layout(
+                    dir.view(),
+                    &cache.row_offsets,
+                    cache.k,
+                    "outer_gradient_arrow_solver decoder-channel null",
+                )
+                .map_err(OuterGradientError::internal)?;
+            raw_gauges.push(mapped);
         }
         if raw_gauges.is_empty() {
             return Err(non_identifiable_err);

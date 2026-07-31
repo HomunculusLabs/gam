@@ -412,9 +412,10 @@ fn threshold_gate_dense_exact_a_sparse_logdet_trace_matches_finite_difference_25
         let (term, target, rho) = threshold_gate_tiny_fixture(straddle);
         let (loss, cache) = frozen_cache(&term, &target, &rho);
         let sparse = rho.sparse_flat_index().expect("sparse coordinate");
-        let (trace, _gamma) = term
+        let trace = term
             .dense_exact_a_logdet_channels(target.view(), &rho, &loss, &cache)
-            .expect("#2500: the dense exact-A logdet channels must assemble");
+            .expect("#2500: the dense exact-A logdet channels must assemble")
+            .logdet_trace;
         assert!(
             trace[sparse].abs() > 1.0e-3,
             "#2500: the sparse logdet trace must be materially live on this fixture, else \
@@ -740,9 +741,10 @@ fn threshold_gate_outer_gradient_uses_the_modelled_logdet_channels_2500() {
             .expect("B-route sparse coordinate trace");
         joint - coord
     };
-    let (exact_a_trace, _gamma) = term
+    let exact_a_trace = term
         .dense_exact_a_logdet_channels(target.view(), &rho, &loss, &cache)
-        .expect("exact-A channels still assemble when asked directly");
+        .expect("exact-A channels still assemble when asked directly")
+        .logdet_trace;
 
     // Non-vacuity: the two routes must genuinely differ on this fixture, else the
     // assertion below cannot distinguish them.

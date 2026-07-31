@@ -84,9 +84,37 @@ impl std::fmt::Display for OuterGradientError {
     }
 }
 
+/// Preserve the producer's rho-locality verdict at the generic outer-objective
+/// boundary.
+///
+/// Conditioning and identifiability belong to the evaluated inner state at one
+/// particular rho: a neighbouring rho can have a perfectly regular implicit
+/// derivative, so a line search must reject this trial and contract. An
+/// internal invariant is independent of rho and remains fatal. Converting every
+/// variant to `RemlOptimizationFailed(String)` erased that distinction and made
+/// a legitimate non-identifiable BFGS trial abort the whole fit (#2653).
+impl From<OuterGradientError> for EstimationError {
+    fn from(error: OuterGradientError) -> Self {
+        let reason = error.to_string();
+        match error {
+            OuterGradientError::IllConditioned { .. }
+            | OuterGradientError::NonIdentifiable { .. } => {
+                EstimationError::TrialPointRefused { reason }
+            }
+            OuterGradientError::InternalInvariant { .. } => {
+                EstimationError::RemlOptimizationFailed(reason)
+            }
+        }
+    }
+}
+
+/// String-returning reconstruction diagnostics inside the manifold also
+/// consume the typed solver failure with `?`. They do not cross the
+/// outer-optimizer boundary, so rendering there does not erase a recoverability
+/// decision.
 impl From<OuterGradientError> for String {
-    fn from(e: OuterGradientError) -> String {
-        e.to_string()
+    fn from(error: OuterGradientError) -> Self {
+        error.to_string()
     }
 }
 

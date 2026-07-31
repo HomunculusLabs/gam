@@ -43,18 +43,19 @@ pub enum GlobalOptimalityVerdict {
     /// (positive) slack `budget − μ̂` by which the condition is met.
     CertifiedGlobal { margin: f64 },
     /// The condition is not met (or a precondition — graph-validity / SNR > 1 —
-    /// fails). `margin` is the (non-positive) slack, or `f64::NEG_INFINITY` when
-    /// a precondition rules certification out entirely. Multistart / homotopy is
-    /// genuinely needed here.
-    Uncertified { margin: f64 },
+    /// fails). `margin` is the non-positive slack when the inequality is
+    /// defined, and `None` when a precondition rules the inequality itself out.
+    /// Multistart / homotopy is genuinely needed here.
+    Uncertified { margin: Option<f64> },
 }
 
 impl GlobalOptimalityVerdict {
-    /// The signed margin `budget − μ̂` (positive ⇒ certified). A precondition
-    /// failure reports `f64::NEG_INFINITY`.
-    pub fn margin(&self) -> f64 {
+    /// The signed margin `budget − μ̂` (positive ⇒ certified), or `None` when a
+    /// failed precondition leaves that inequality undefined.
+    pub fn margin(&self) -> Option<f64> {
         match self {
-            Self::CertifiedGlobal { margin } | Self::Uncertified { margin } => *margin,
+            Self::CertifiedGlobal { margin } => Some(*margin),
+            Self::Uncertified { margin } => *margin,
         }
     }
 
@@ -182,7 +183,7 @@ pub fn curved_dictionary_global_optimality_verdict(
         // robust even for direct callers (the in-tree report path already floors
         // dispersion > 0, so this only hardens the public entry point).
         return GlobalOptimalityVerdict::Uncertified {
-            margin: f64::NEG_INFINITY,
+            margin: None,
         };
     }
     let curvature_factor = 1.0 - SAE_CERT_CURVATURE_CONSTANT * kappa_max.max(0.0);
@@ -191,17 +192,25 @@ pub fn curved_dictionary_global_optimality_verdict(
         // Tangent-graph perturbation void, or signal not above noise: the
         // linear-case argument does not apply, so certification is impossible.
         return GlobalOptimalityVerdict::Uncertified {
-            margin: f64::NEG_INFINITY,
+            margin: None,
         };
     }
     let a = activity_floor.max(0.0);
     let budget =
         SAE_CERT_INCOHERENCE_BUDGET * a * a * snr_factor * curvature_factor / k_atoms as f64;
     let margin = budget - mu_hat;
+    if !margin.is_finite() {
+        // Finite inputs can still overflow while squaring an adversarially
+        // large activity floor. An infinite slack is not evidence: the
+        // sufficient inequality is numerically undefined at that scale.
+        return GlobalOptimalityVerdict::Uncertified { margin: None };
+    }
     if margin > 0.0 {
         GlobalOptimalityVerdict::CertifiedGlobal { margin }
     } else {
-        GlobalOptimalityVerdict::Uncertified { margin }
+        GlobalOptimalityVerdict::Uncertified {
+            margin: Some(margin),
+        }
     }
 }
 
@@ -212,8 +221,9 @@ pub struct CertificateInputs {
     /// `max_{j != k} sigma_max(U_j^T U_k)` over decoder output subspaces.
     pub mu_hat: f64,
     /// Per-atom maximum empirical second-fundamental-form norm on the fitted
-    /// coordinate grid.
-    pub per_atom_kappa_hat: Vec<f64>,
+    /// coordinate grid. `None` means the bound is unbounded because a nonzero
+    /// normal second derivative was observed at an unresolved tangent frame.
+    pub per_atom_kappa_hat: Vec<Option<f64>>,
     /// Mean fitted gate/assignment mass per atom.
     pub per_atom_mean_activity: Vec<f64>,
     /// Largest fitted gate/assignment mass per atom.
@@ -409,25 +419,46 @@ pub fn dictionary_incoherence_report_with_dispersion(
     // second-fundamental-form norm (the worst graph-approximation error across
     // the dictionary). The support activity floor `min_k max_i a_ik` is the
     // honest "how reliably does the weakest atom fire" statistic.
-    let kappa_max = per_atom_kappa_hat.iter().copied().fold(0.0_f64, f64::max);
-    let global_optimality = curved_dictionary_global_optimality_verdict(
-        mu_hat,
-        kappa_max,
-        peak_activity_floor,
-        snr_proxy,
-        k_atoms,
+    let kappa_max = per_atom_kappa_hat
+        .iter()
+        .copied()
+        .try_fold(0.0_f64, |largest, value| {
+            value.map(|value| largest.max(value))
+        });
+    let global_optimality = kappa_max.map_or(
+        GlobalOptimalityVerdict::Uncertified { margin: None },
+        |kappa_max| {
+            curved_dictionary_global_optimality_verdict(
+                mu_hat,
+                kappa_max,
+                peak_activity_floor,
+                snr_proxy,
+                k_atoms,
+            )
+        },
     );
+    let kappa_summary = kappa_max
+        .map(|value| format!("{value:.3e}"))
+        .unwrap_or_else(|| "unbounded (unresolved tangent frame)".to_string());
     let note = match global_optimality {
         GlobalOptimalityVerdict::CertifiedGlobal { margin } => format!(
             "global optimality CERTIFIED up to the residual gauge group \
-             (margin {margin:.3e}); μ̂={mu_hat:.3e}, κ̂_max={kappa_max:.3e}, \
+             (margin {margin:.3e}); μ̂={mu_hat:.3e}, κ̂_max={kappa_summary}, \
              a_floor={peak_activity_floor:.3e}, SNR={snr_proxy:.3e}"
         ),
-        GlobalOptimalityVerdict::Uncertified { margin } => format!(
+        GlobalOptimalityVerdict::Uncertified {
+            margin: Some(margin),
+        } => format!(
             "global optimality UNCERTIFIED (margin {margin:.3e}; cannot decide — \
              multistart/homotopy genuinely needed); μ̂={mu_hat:.3e}, \
-             κ̂_max={kappa_max:.3e}, a_floor={peak_activity_floor:.3e}, \
+             κ̂_max={kappa_summary}, a_floor={peak_activity_floor:.3e}, \
              SNR={snr_proxy:.3e}"
+        ),
+        GlobalOptimalityVerdict::Uncertified { margin: None } => format!(
+            "global optimality UNCERTIFIED (margin unavailable because a certificate \
+             precondition failed; cannot decide — multistart/homotopy genuinely needed); \
+             μ̂={mu_hat:.3e}, κ̂_max={kappa_summary}, \
+             a_floor={peak_activity_floor:.3e}, SNR={snr_proxy:.3e}"
         ),
     };
     Ok(CertificateInputs {
@@ -497,7 +528,10 @@ pub(crate) fn certificate_output_frame(
     Ok(frame)
 }
 
-pub(crate) fn atom_curvature_bound(term: &SaeManifoldTerm, atom_idx: usize) -> Result<f64, String> {
+pub(crate) fn atom_curvature_bound(
+    term: &SaeManifoldTerm,
+    atom_idx: usize,
+) -> Result<Option<f64>, String> {
     let atom = &term.atoms[atom_idx];
     let coords = term.assignment.coords[atom_idx].as_matrix();
     let second = atom
@@ -537,15 +571,15 @@ pub(crate) fn atom_curvature_bound(term: &SaeManifoldTerm, atom_idx: usize) -> R
 /// flatness-disease framing); a bounded-away-from-zero one is the curvature
 /// budget that lets [`curved_dictionary_global_optimality_verdict`] certify.
 /// The `max` over rows and axis pairs makes `κ̂` a sup-norm (worst-case, hence
-/// conservative) bound, and an unresolved tangent frame with nonzero perp
-/// second derivative reports `f64::INFINITY` rather than a misleadingly finite
-/// number.
+/// conservative) bound. An unresolved tangent frame with a nonzero perpendicular
+/// second derivative returns `None`: the bound is unbounded, but absence is kept
+/// typed rather than smuggled through report serialization as infinity.
 pub(crate) fn atom_curvature_bound_with_decoder(
     atom: &SaeManifoldAtom,
     atom_idx: usize,
     second: ArrayView4<'_, f64>,
     decoder: ArrayView2<'_, f64>,
-) -> Result<f64, String> {
+) -> Result<Option<f64>, String> {
     let n = atom.n_obs();
     let m = atom.basis_size();
     let d = atom.latent_dim();
@@ -562,6 +596,16 @@ pub(crate) fn atom_curvature_bound_with_decoder(
             decoder.dim()
         ));
     }
+    if second.iter().any(|value| !value.is_finite()) {
+        return Err(format!(
+            "atom_curvature_bound: atom {atom_idx} second jet contains a non-finite value"
+        ));
+    }
+    if decoder.iter().any(|value| !value.is_finite()) {
+        return Err(format!(
+            "atom_curvature_bound: atom {atom_idx} decoder contains a non-finite value"
+        ));
+    }
     let mut max_kappa = 0.0_f64;
     let mut tangent = Array2::<f64>::zeros((p, d));
     let mut second_vec = vec![0.0_f64; p];
@@ -571,6 +615,11 @@ pub(crate) fn atom_curvature_bound_with_decoder(
         for basis_col in 0..m {
             for axis in 0..d {
                 let dphi = atom.basis_jacobian[[row, basis_col, axis]];
+                if !dphi.is_finite() {
+                    return Err(format!(
+                        "atom_curvature_bound: atom {atom_idx} basis Jacobian contains a non-finite value at row {row}, basis {basis_col}, axis {axis}"
+                    ));
+                }
                 if dphi == 0.0 {
                     continue;
                 }
@@ -578,6 +627,9 @@ pub(crate) fn atom_curvature_bound_with_decoder(
                     tangent[[out, axis]] += dphi * decoder[[basis_col, out]];
                 }
             }
+        }
+        if tangent.iter().any(|value| !value.is_finite()) {
+            return Ok(None);
         }
         let tangent_rank = tangent_frame_rank(tangent.view())?;
         let tangent_scale = tangent_rank.0;
@@ -594,16 +646,26 @@ pub(crate) fn atom_curvature_bound_with_decoder(
                         second_vec[out] += h * decoder[[basis_col, out]];
                     }
                 }
+                if second_vec.iter().any(|value| !value.is_finite()) {
+                    return Ok(None);
+                }
                 let perp_norm = projected_perp_norm(&second_vec, q.view());
+                if !perp_norm.is_finite() {
+                    return Ok(None);
+                }
                 if tangent_scale > 0.0 {
-                    max_kappa = max_kappa.max(perp_norm / tangent_scale);
+                    let curvature = perp_norm / tangent_scale;
+                    if !curvature.is_finite() {
+                        return Ok(None);
+                    }
+                    max_kappa = max_kappa.max(curvature);
                 } else if perp_norm > 0.0 {
-                    return Ok(f64::INFINITY);
+                    return Ok(None);
                 }
             }
         }
     }
-    Ok(max_kappa)
+    Ok(Some(max_kappa))
 }
 
 pub(crate) fn tangent_frame_rank(
@@ -701,14 +763,46 @@ mod certificate_verdict_tests {
                 Array2::<f64>::eye(2),
             )
             .unwrap();
-            let kappa =
-                atom_curvature_bound_with_decoder(&atom, 0, second.view(), decoder.view()).unwrap();
+            let kappa = atom_curvature_bound_with_decoder(
+                &atom,
+                0,
+                second.view(),
+                decoder.view(),
+            )
+            .unwrap()
+            .expect("a regular circle has a finite curvature bound");
             let expected = 1.0 / r;
             assert!(
                 (kappa - expected).abs() < 1.0e-9,
                 "circle radius {r}: κ̂ must be 1/r = {expected}, got {kappa}"
             );
         }
+    }
+
+    #[test]
+    fn unresolved_tangent_curvature_is_typed_unbounded() {
+        use ndarray::{Array2, Array3, Array4};
+
+        let phi = Array2::from_shape_vec((1, 2), vec![1.0, 0.0]).unwrap();
+        let jac = Array3::from_shape_vec((1, 2, 1), vec![0.0, 1.0]).unwrap();
+        let second = Array4::from_shape_vec((1, 2, 1, 1), vec![-1.0, 0.0]).unwrap();
+        let decoder = Array2::from_shape_vec((2, 1), vec![1.0, 0.0]).unwrap();
+        let atom = SaeManifoldAtom::new_with_provided_function_gram(
+            "degenerate-point",
+            SaeAtomBasisKind::Periodic,
+            1,
+            phi,
+            jac,
+            decoder.clone(),
+            Array2::<f64>::eye(2),
+        )
+        .unwrap();
+
+        assert_eq!(
+            atom_curvature_bound_with_decoder(&atom, 0, second.view(), decoder.view()).unwrap(),
+            None,
+            "nonzero normal curvature with no resolved tangent has an unbounded, not infinite-sentinel, bound"
+        );
     }
 
     /// A negative `snr_proxy` must NEVER certify. The bare `snr_factor =
@@ -722,8 +816,18 @@ mod certificate_verdict_tests {
         assert!(!v.is_certified(), "negative snr_proxy must not certify");
         assert_eq!(
             v.margin(),
-            f64::NEG_INFINITY,
-            "precondition failure yields −inf margin"
+            None,
+            "precondition failure leaves the margin undefined"
+        );
+    }
+
+    #[test]
+    fn overflowing_certificate_budget_has_no_margin() {
+        let v = curved_dictionary_global_optimality_verdict(0.0, 0.0, f64::MAX, 100.0, 1);
+        assert_eq!(
+            v,
+            GlobalOptimalityVerdict::Uncertified { margin: None },
+            "overflow cannot manufacture an infinite global-optimality certificate"
         );
     }
 
@@ -744,6 +848,9 @@ mod certificate_verdict_tests {
     fn healthy_regime_certifies_with_positive_margin() {
         let v = curved_dictionary_global_optimality_verdict(1e-9, 0.0, 0.9, 100.0, 4);
         assert!(v.is_certified(), "healthy regime must certify");
-        assert!(v.margin() > 0.0, "certified margin must be positive");
+        assert!(
+            v.margin().is_some_and(|margin| margin > 0.0),
+            "certified margin must be positive"
+        );
     }
 }

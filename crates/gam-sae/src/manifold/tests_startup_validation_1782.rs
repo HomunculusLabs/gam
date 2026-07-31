@@ -787,16 +787,32 @@ fn d2_portfolio_loses_at_measured_parameter_parity_2502() {
 #[test]
 fn seed_infeasibility_channel_is_named_2609() {
     let z = planted_circle_embedded(48, 6, 0.03);
-    let modes: [(&str, AssignmentMode); 3] = [
+    let cases: [(&str, Topo, AssignmentMode); 5] = [
         (
-            "ordered_beta_bernoulli",
+            "circle/ordered_beta_bernoulli",
+            Topo::Circle,
             AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
         ),
-        ("softmax", AssignmentMode::softmax(1.0)),
-        ("threshold_gate", AssignmentMode::threshold_gate(1.0, 0.0)),
+        ("circle/softmax", Topo::Circle, AssignmentMode::softmax(1.0)),
+        (
+            "circle/threshold_gate",
+            Topo::Circle,
+            AssignmentMode::threshold_gate(1.0, 0.0),
+        ),
+        (
+            "euclidean/ordered_beta_bernoulli",
+            Topo::Euclidean,
+            AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
+        ),
+        (
+            "linear/ordered_beta_bernoulli",
+            Topo::Linear,
+            AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
+        ),
     ];
-    for (label, mode) in modes {
-        let (mut term, seed_dispersion) = build_term(z.view(), 4, Topo::Circle, mode);
+    let mut fatal_channels = Vec::new();
+    for (label, topo, mode) in cases {
+        let (mut term, seed_dispersion) = build_term(z.view(), 4, topo, mode);
         let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 4])
             .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
             .unwrap();
@@ -825,41 +841,19 @@ fn seed_infeasibility_channel_is_named_2609() {
                 format!("NUMERICAL(fatal, never mapped to +inf) {message}")
             }
         };
-        println!("[2609-channel] circle/{label}: {channel}  warm_start={warm:?}");
+        println!("[2609-channel] {label}: {channel}  warm_start={warm:?}");
+        if matches!(&outcome, Err(SaeCriterionError::Numerical(_))) {
+            fatal_channels.push((label, outcome.err()));
+        }
     }
     // The invariant this run must not violate: the criterion is being asked at a
     // seed the production planner would hand it, so a `Numerical` refusal here
     // would be a defect that never reaches the `+inf` convention at all. Every
     // other outcome is a legitimate verdict and is reported above.
-    let (mut term, seed_dispersion) = build_term(
-        z.view(),
-        4,
-        Topo::Circle,
-        AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
-    );
-    let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 4])
-        .seed_scaled_by_dispersion_for_assignment(
-            seed_dispersion,
-            AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
-        )
-        .unwrap();
-    let outcome = term.penalized_quasi_laplace_criterion_with_refine_policy_and_lane(
-        z.view(),
-        &rho,
-        None,
-        8,
-        0.04,
-        1.0e-6,
-        1.0e-6,
-        true,
-        None,
-    );
-    let fatal = matches!(&outcome, Err(SaeCriterionError::Numerical(_)));
     assert!(
-        !fatal,
-        "the seed criterion returned a fatal Numerical refusal, which the +inf \
-         infeasible convention does not cover: {:?}",
-        outcome.err()
+        fatal_channels.is_empty(),
+        "seed criteria returned fatal Numerical refusals, which the +inf infeasible \
+         convention does not cover: {fatal_channels:?}"
     );
 }
 

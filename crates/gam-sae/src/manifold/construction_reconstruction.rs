@@ -818,7 +818,6 @@ impl SaeManifoldTerm {
         let beta_dim = cache.k;
         let second_jets = self.atom_second_jets()?;
         let border = self.border_channels_for_cache(cache)?;
-        let b_solver = self.outer_gradient_arrow_solver(cache, &rho.lambda_smooth_vec()?)?;
         let fitted_full = self.try_fitted_with_rho(Some(rho), false)?;
         let whitens = self
             .row_metric
@@ -883,7 +882,7 @@ impl SaeManifoldTerm {
                 t: rhs_t.clone(),
                 beta: rhs_beta.clone(),
             };
-            let influence = self.solve_exact_stationarity(rho, target, cache, &b_solver, &rhs)?;
+            let influence = self.solve_exact_stationarity(rho, target, cache, &rhs)?;
             for a in 0..beta_dim {
                 let ua = influence.beta[a];
                 for b in 0..beta_dim {

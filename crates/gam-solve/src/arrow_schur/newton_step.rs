@@ -472,7 +472,12 @@ pub(crate) fn try_device_arrow_direct(
     if !admitted {
         return None;
     }
-    match crate::gpu_kernels::arrow_schur::solve_arrow_newton_step(sys, ridge_t, ridge_beta) {
+    match crate::gpu_kernels::arrow_schur::solve_arrow_newton_step(
+        sys,
+        ridge_t,
+        ridge_beta,
+        options.newton_schur_tikhonov_rel_floor,
+    ) {
         Ok(solution) => {
             let final_relative_residual = match arrow_quotient_backward_error_certificate(
                 sys,
@@ -572,7 +577,10 @@ fn build_resident_base_frame_if_admitted(
     {
         return Ok(None);
     }
-    crate::gpu_kernels::arrow_schur::ResidentBaseArrowFrameHandle::new(sys)
+    crate::gpu_kernels::arrow_schur::ResidentBaseArrowFrameHandle::new(
+        sys,
+        options.newton_schur_tikhonov_rel_floor,
+    )
         .map(Some)
         .map_err(|failure| device_failure_as_arrow_error("resident base-frame build", failure))
 }
@@ -1702,7 +1710,11 @@ pub(crate) fn arrow_quotient_backward_error_certificate(
     delta_t: ArrayView1<'_, f64>,
     delta_beta: ArrayView1<'_, f64>,
 ) -> Result<f64, ArrowSchurError> {
-    if delta_t.iter().chain(delta_beta.iter()).any(|value| !value.is_finite()) {
+    if delta_t
+        .iter()
+        .chain(delta_beta.iter())
+        .any(|value| !value.is_finite())
+    {
         return Err(ArrowSchurError::SchurFactorFailed {
             reason: "device Direct solve returned a non-finite step".to_string(),
         });

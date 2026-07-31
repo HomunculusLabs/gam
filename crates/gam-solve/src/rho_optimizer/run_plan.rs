@@ -3038,6 +3038,10 @@ pub(crate) fn run_outer_with_plan(
 #[path = "run_plan_tests.rs"]
 mod run_plan_tests;
 
+#[cfg(test)]
+#[path = "run_fixed_point_continuation_tests.rs"]
+mod run_fixed_point_continuation_tests;
+
 /// Is `seed` a prior fit's terminal certificate that is STILL stationary here?
 ///
 /// `Some(cost)` only when all of: the seed is the resumed rho itself; a first

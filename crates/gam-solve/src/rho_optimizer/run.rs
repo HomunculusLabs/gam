@@ -7263,6 +7263,13 @@ pub(crate) fn run_outer_uncertified(
     // plan boundary exactly once; the analytic-gradient fallback must resume
     // it before any unrelated seed is considered.
     let mut fixed_point_continuation: Option<FixedPointContinuationCheckpoint> = None;
+    // A fixed-point walk can stop normally while its mandatory analytic
+    // screening certificate disproves the proposed root.  `run_outer_with_plan`
+    // returns that state as `Exhausted`, not `Converged`; retain its best finite
+    // checkpoint so the already-declared analytic-gradient fallback starts
+    // there instead of replaying the same refuted fixed-point walk or throwing
+    // away useful work.
+    let mut refuted_fixed_point_continuation: Option<OuterResult> = None;
 
     'plan_attempts: for (attempt_idx, attempt_cap) in attempts.iter().enumerate() {
         let the_plan = plan(attempt_cap);
@@ -7294,12 +7301,19 @@ pub(crate) fn run_outer_uncertified(
             // from gradients at the continued point instead of combining two
             // different checkpoints.
             attempt_config.warm_start_outer_hessian = None;
-            attempt_config.seed_config.max_seeds = 1;
+            // The finite incumbent owns the nominal slot: try it first, without
+            // screening or neutral-seed promotion. Preserve the caller's
+            // absolute lattice, though. If this continuation certifies, the
+            // ordinary seed loop stops immediately and no other start runs; if
+            // it is refused or remains nonstationary, `should_start_next_seed`
+            // may advance through the remaining bounded lattice until a fit
+            // certifies. Setting `max_seeds = 1` here used to erase that recovery
+            // authority exactly when the incumbent lay outside the criterion's
+            // finite observed-information domain (#2653).
             attempt_config.seed_config.seed_budget = 1;
             log::info!(
-                "[OUTER] {context}: resuming {the_plan} exactly once from the last finite \
-                 {:?} incumbent after {} iteration(s): cost={:.6e}, |step|={:.3e}, \
-                 inner_beta={}",
+                "[OUTER] {context}: resuming {the_plan} first from the last finite {:?} \
+                 incumbent after {} iteration(s): cost={:.6e}, |step|={:.3e}, inner_beta={}",
                 checkpoint.plan_used.solver,
                 checkpoint.iterations,
                 checkpoint.sample.value,
@@ -7308,6 +7322,32 @@ pub(crate) fn run_outer_uncertified(
                     .inner_seed
                     .as_ref()
                     .map_or(0, |seed| seed.beta.len()),
+            );
+        }
+        if let Some(checkpoint) = refuted_fixed_point_continuation.take() {
+            if !matches!(the_plan.solver, Solver::Bfgs) {
+                return Err(EstimationError::RemlOptimizationFailed(format!(
+                    "{context}: an analytically refuted fixed point requires \
+                     analytic-gradient BFGS, but the next declared plan is {the_plan}"
+                )));
+            }
+            attempt_config.initial_rho = Some(checkpoint.rho.clone());
+            attempt_config.initial_inner_seed = None;
+            attempt_config.screen_initial_rho = false;
+            attempt_config.initial_rho_is_prior_terminal_certificate = false;
+            attempt_config.warm_start_outer_hessian = None;
+            // The checkpoint owns the first nominal slot.  Preserve the
+            // caller's absolute recovery lattice: if this continuation still
+            // refuses, `should_start_next_seed` may advance until a candidate
+            // certifies, exactly as for a rho-local EFS trial refusal.
+            attempt_config.seed_config.seed_budget = 1;
+            log::info!(
+                "[OUTER] {context}: analytic screening refuted the {:?} fixed point; \
+                 resuming {the_plan} first from its best finite checkpoint after {} \
+                 iteration(s): cost={:.6e}",
+                checkpoint.plan_used.solver,
+                checkpoint.iterations,
+                checkpoint.final_value,
             );
         }
 
@@ -7384,6 +7424,34 @@ pub(crate) fn run_outer_uncertified(
                     continue 'plan_attempts;
                 }
                 Ok(PlanRunOutcome::Exhausted(result)) => {
+                    // `Exhausted` is a proof-bearing outcome: every solver
+                    // claim in this plan failed the mandatory analytic
+                    // screening certificate.  A fixed-point solver may still
+                    // leave `solver_claimed_convergence == true` on the retained
+                    // checkpoint because its heuristic update was zero.  Do
+                    // not collapse that checkpoint back into success below;
+                    // continue it with the analytic-gradient fallback that the
+                    // capability ladder already declared.
+                    let has_bfgs_fallback = attempts
+                        .get(attempt_idx + 1)
+                        .is_some_and(|next| matches!(plan(next).solver, Solver::Bfgs));
+                    if result.solver_claimed_convergence()
+                        && matches!(the_plan.solver, Solver::Efs | Solver::HybridEfs)
+                        && has_bfgs_fallback
+                    {
+                        log::info!(
+                            "[OUTER] {context}: {:?} stopped at a fixed point, but no \
+                             candidate passed analytic screening; continuing the best finite \
+                             checkpoint with analytic-gradient BFGS",
+                            the_plan.solver,
+                        );
+                        last_error = Some(EstimationError::RemlOptimizationFailed(format!(
+                            "{:?} fixed point was refuted by analytic screening",
+                            the_plan.solver,
+                        )));
+                        refuted_fixed_point_continuation = Some(result);
+                        continue 'plan_attempts;
+                    }
                     if arc_retries_left == 0
                         || matches!(
                             result.operator_stop_reason,

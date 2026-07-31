@@ -2764,10 +2764,25 @@ pub(crate) fn jeffreys_psi_mixed_geometry_preserves_workspace_authority() {
     assert_eq!(coords.len(), 1);
     assert!(coords[0].g[0].is_finite());
     assert_eq!(direct_mixed_calls.load(Ordering::Relaxed), 0);
+    // ONE call, not two, since `a20af61da` ("Batch explicit psi Jeffreys
+    // coefficient axes", 2026-07-30) materializes the psi-mixed canonical-axis
+    // batch once per psi axis and has BOTH consumers -- the `-d_beta(d_psi Phi)`
+    // Firth coupling and the `d_psi H_Phi` curvature term -- read those same
+    // matrices. Before it, each consumer called the row-streaming provider
+    // independently, which is the 2 this test was written against on 2026-07-26
+    // (`f158a1740`, #2564). The batching is deliberate: calling twice doubled the
+    // psi-dependent work for an identical result.
+    //
+    // What #2564 exists to protect is unchanged and is asserted above: the
+    // WORKSPACE is the exclusive provider, so `direct_mixed_calls == 0`. The call
+    // count is an implementation detail of who consumes the batch; the authority
+    // is not. Pinned exactly rather than `>= 1` so a future change that
+    // re-splits the two consumers has to say so here.
     assert_eq!(
         workspace_mixed_calls.load(Ordering::Relaxed),
-        2,
-        "both -d_beta(d_psi Phi) and d_psi H_Phi must use the workspace row measure",
+        1,
+        "both -d_beta(d_psi Phi) and d_psi H_Phi must read the ONE workspace-provided \
+         psi-mixed batch (batched in a20af61da); the workspace stays the row-measure authority",
     );
 }
 
@@ -4098,6 +4113,20 @@ pub(crate) fn jeffreys_second_order_completion_prefers_contracted_hook() {
 struct PairwiseJeffreysSeamFamily;
 
 impl CustomFamily for PairwiseJeffreysSeamFamily {
+    // Without this the family never opts into the Jeffreys term, so
+    // `joint_jeffreys_term_strength()` returns 0.0 (its default is
+    // `if joint_jeffreys_term_required() { 1.0 } else { 0.0 }`) and
+    // `custom_family_joint_jeffreys_second_order_completion` multiplies the
+    // assembled completion by zero on the way out. The test then compared
+    // `0 x pairwise` = -0.0 against the UNSCALED direct pairwise route
+    // (-10001.5 on the diagonal) and additionally demanded the completion be
+    // nonzero -- two assertions that no family with strength 0 can satisfy.
+    // Every other Jeffreys fixture in this file overrides this; this one was
+    // the omission.
+    fn joint_jeffreys_term_required(&self) -> bool {
+        true
+    }
+
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
         let n = block_states
             .first()

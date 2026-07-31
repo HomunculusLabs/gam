@@ -26,7 +26,7 @@ pub fn solve_arrow_newton_step_gpu(
     ridge_t: f64,
     ridge_beta: f64,
 ) -> Result<(Array1<f64>, Array1<f64>), ArrowSchurError> {
-    match solve_arrow_newton_step(sys, ridge_t, ridge_beta) {
+    match solve_arrow_newton_step(sys, ridge_t, ridge_beta, None) {
         Ok(solution) => Ok((solution.delta_t, solution.delta_beta)),
         Err(ArrowSchurGpuFailure::Unavailable) => {
             // Mirror the CPU path's failure variant so the outer loop falls

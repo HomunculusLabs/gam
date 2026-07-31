@@ -69,51 +69,169 @@ pub(crate) struct ExactHessianDeltaRow {
     pub(crate) tbeta: Array2<f64>,
 }
 
-/// Apply a raw arrow operator on the closed-form gauge quotient represented by
-/// `solver`: `M_Q v = M v + κ Q Qᵀ v`.
-fn apply_gauge_fixed_arrow_operator<F>(
-    solver: &DeflatedArrowSolver<'_>,
-    v: &SaeArrowVector,
-    apply_raw: &F,
-) -> Result<SaeArrowVector, String>
-where
-    F: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
-{
-    let mut out = apply_raw(v)?;
-    solver.add_gauge_stiffness(v, &mut out)?;
-    Ok(out)
+/// Rank-revealing spectral representation of one dense exact-stationarity
+/// block.  The materialized operator and its eigensystem remain together so a
+/// pseudo-inverse response can be certified against the physical operator that
+/// produced it, rather than against a projected Krylov surrogate.
+struct ExactHessianSpectralBlock {
+    operator: Array2<f64>,
+    eigenvalues: Array1<f64>,
+    /// Ambient eigenvectors spanning the physical complement.  This is
+    /// rectangular when analytic chart gauges have been quotiented out.
+    eigenvectors: Array2<f64>,
+    /// Orthonormal analytic gauge basis removed before diagonalization.
+    gauge_basis: Vec<Array1<f64>>,
+    rank_floor: f64,
 }
 
-/// Exact-stationarity Krylov and numerical-null refinement on one coherent
-/// gauge-fixed pencil `(A_Q, B_Q)`, where both raw operators receive the same
-/// `κ Q Qᵀ` action installed in `solver`.
-///
-/// Keeping this seam operator-generic makes the quotient invariant directly
-/// testable with deterministic matrices while production supplies the real
-/// matrix-free exact Hessian `A` and cached majorizer `B`. The helper owns every
-/// Krylov, Rayleigh, normalization, and inverse-power apply so none can
-/// accidentally regress to a raw operator while using the gauge-fixed inverse.
-fn solve_exact_stationarity_on_gauge_quotient<A, B>(
-    solver: &DeflatedArrowSolver<'_>,
-    rhs: &SaeArrowVector,
-    apply_raw_a: &A,
-    apply_raw_b: &B,
-) -> Result<SaeArrowVector, String>
-where
-    A: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
-    B: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
-{
-    let apply_a_q = |v: &SaeArrowVector| apply_gauge_fixed_arrow_operator(solver, v, apply_raw_a);
-    let apply_b_q = |v: &SaeArrowVector| apply_gauge_fixed_arrow_operator(solver, v, apply_raw_b);
-    solve_exact_stationarity_preconditioned(rhs, &apply_a_q, &apply_b_q, |vector| {
-        solver.solve(vector.t.view(), vector.beta.view())
-    })
+impl ExactHessianSpectralBlock {
+    /// Apply the symmetric Moore--Penrose inverse on the declared quotient.
+    /// Resolved positive and negative modes are both retained; only the
+    /// spectral null band is removed.  Three independent certificates guard
+    /// the result: physical backward residual on the retained range,
+    /// least-squares stationarity for the original RHS, and minimum-norm
+    /// membership in the retained quotient.
+    fn solve_stationarity(&self, rhs: &SaeArrowVector) -> Result<SaeArrowVector, String> {
+        let total_t = rhs.t.len();
+        let dim = total_t + rhs.beta.len();
+        let spectral_dim = self.eigenvalues.len();
+        if self.operator.dim() != (dim, dim)
+            || self.eigenvectors.dim() != (dim, spectral_dim)
+            || spectral_dim + self.gauge_basis.len() != dim
+            || self.gauge_basis.iter().any(|gauge| gauge.len() != dim)
+        {
+            return Err(format!(
+                "dense exact-stationarity pseudoinverse: geometry dimension {:?}, spectrum {}, \
+                 eigenvectors {:?}, gauge rank {}, but RHS dimension is {dim}",
+                self.operator.dim(),
+                spectral_dim,
+                self.eigenvectors.dim(),
+                self.gauge_basis.len(),
+            ));
+        }
+        let mut flat_rhs = Array1::<f64>::zeros(dim);
+        flat_rhs.slice_mut(s![..total_t]).assign(&rhs.t);
+        flat_rhs.slice_mut(s![total_t..]).assign(&rhs.beta);
+        if !flat_rhs.iter().all(|value| value.is_finite()) {
+            return Err(
+                "dense exact-stationarity pseudoinverse: RHS contains a non-finite value"
+                    .to_string(),
+            );
+        }
+
+        let coefficients = self.eigenvectors.t().dot(&flat_rhs);
+        let mut projected_coefficients = coefficients.clone();
+        let mut inverse_coefficients = Array1::<f64>::zeros(spectral_dim);
+        let mut retained_rank = 0usize;
+        for index in 0..spectral_dim {
+            let lambda = self.eigenvalues[index];
+            if lambda.abs() > self.rank_floor {
+                inverse_coefficients[index] = coefficients[index] / lambda;
+                retained_rank += 1;
+            } else {
+                projected_coefficients[index] = 0.0;
+            }
+        }
+        let solution = self.eigenvectors.dot(&inverse_coefficients);
+        let projected_rhs = self.eigenvectors.dot(&projected_coefficients);
+        let applied = self.operator.dot(&solution);
+        // Quotient stationarity is P A P x = P rhs.  The raw materialized A can
+        // carry roundoff-sized components along an analytic gauge; those are
+        // outside the physical cotangent space and must not contaminate either
+        // the backward or least-squares certificate.
+        let applied_coefficients = self.eigenvectors.t().dot(&applied);
+        let projected_applied = self.eigenvectors.dot(&applied_coefficients);
+        let physical_residual = &projected_applied - &projected_rhs;
+        let residual_coefficients = &applied_coefficients - &coefficients;
+        let normal_coefficients = &self.eigenvalues * &residual_coefficients;
+        let normal_residual = self.eigenvectors.dot(&normal_coefficients);
+
+        let norm = |vector: &Array1<f64>| vector.dot(vector).max(0.0).sqrt();
+        let operator_norm = self
+            .eigenvalues
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+        let solution_norm = norm(&solution);
+        let projected_rhs_norm = norm(&projected_rhs);
+        let physical_norm = norm(&physical_residual);
+        let normal_norm = norm(&normal_residual);
+        let physical_scale = operator_norm * solution_norm + projected_rhs_norm;
+        let normal_scale =
+            operator_norm * (operator_norm * solution_norm + projected_rhs_norm);
+
+        // A Moore--Penrose solution must be orthogonal to the declared null
+        // space. Reproject the computed physical vector (not the coefficients
+        // used to construct it) so this gate also detects loss of orthogonality.
+        let solved_coefficients = self.eigenvectors.t().dot(&solution);
+        let spectral_null_solution_norm_sq = solved_coefficients
+            .iter()
+            .zip(self.eigenvalues.iter())
+            .filter_map(|(coefficient, lambda)| {
+                (lambda.abs() <= self.rank_floor).then_some(coefficient * coefficient)
+            })
+            .sum::<f64>();
+        let gauge_solution_norm_sq = self
+            .gauge_basis
+            .iter()
+            .map(|gauge| gauge.dot(&solution).powi(2))
+            .sum::<f64>();
+        let discarded_solution_norm = (spectral_null_solution_norm_sq
+            + gauge_solution_norm_sq)
+            .max(0.0)
+            .sqrt();
+        let tolerance = f64::EPSILON.sqrt();
+        let within = |residual: f64, scale: f64| {
+            residual == 0.0 || (scale > 0.0 && residual <= tolerance * scale)
+        };
+        if !solution.iter().all(|value| value.is_finite())
+            || !within(physical_norm, physical_scale)
+            || !within(normal_norm, normal_scale)
+            || !within(discarded_solution_norm, solution_norm)
+        {
+            return Err(format!(
+                "dense exact-stationarity pseudoinverse failed certification: \
+                 physical residual {physical_norm:.6e} / backward scale {physical_scale:.6e}, \
+                 normal-equation stationarity {normal_norm:.6e} / scale {normal_scale:.6e}, \
+                 null-space solution mass {discarded_solution_norm:.6e} / solution norm \
+                 {solution_norm:.6e}, tolerance {tolerance:.6e}, rank {retained_rank}/{spectral_dim} \
+                 on physical dimension {spectral_dim} (analytic gauge rank {}), \
+                 floor {:.6e}",
+                self.gauge_basis.len(),
+                self.rank_floor,
+            ));
+        }
+
+        Ok(SaeArrowVector {
+            t: solution.slice(s![..total_t]).to_owned(),
+            beta: solution.slice(s![total_t..]).to_owned(),
+        })
+    }
 }
 
-/// Shared exact-stationarity solve on an already identified operator. Dense
-/// evidence supplies a gauge-fixed direct inverse; matrix-free evidence supplies
-/// a quotient-aware reduced-Schur inverse. Both paths run the identical GMRES,
-/// generalized-Rayleigh, and numerical-null certificate below.
+/// One coherent dense exact-A quotient geometry.  The joint eigensystem owns
+/// the stationarity pseudoinverse; the priced joint/coordinate inverses own the
+/// exact-A log-determinant derivative.  They are deliberately derived from the
+/// same materialized blocks and classification floors.
+struct ExactHessianQuotientGeometry {
+    joint: ExactHessianSpectralBlock,
+    coordinate: ExactHessianSpectralBlock,
+    priced_joint_inverse: Array2<f64>,
+    priced_coordinate_inverse: Array2<f64>,
+}
+
+/// Complete dense exact-A derivative cluster.  The stationarity adjoint is
+/// solved before the geometry is discarded, making this the sole owner of the
+/// dense exact-A inverse action.
+pub(crate) struct DenseExactALogdetChannels {
+    pub(crate) logdet_trace: Array1<f64>,
+    pub(crate) theta_adjoint: SaeArrowVector,
+    pub(crate) stationarity_adjoint: SaeArrowVector,
+}
+
+/// Certified exact-stationarity solve for a genuinely matrix-free operator.
+/// Dense operators bypass this Krylov path and use the rank-revealing spectral
+/// pseudoinverse owned by [`ExactHessianSpectralBlock`].
 fn solve_exact_stationarity_preconditioned<A, B, P>(
     rhs: &SaeArrowVector,
     apply_a: &A,
@@ -470,6 +588,117 @@ enum SparseLogitCurvature {
 }
 
 impl SaeManifoldTerm {
+    /// Orthonormal basis of the closed-form joint chart-gauge orbit in the
+    /// exact-Hessian arrow layout. These are analytic symmetries (phase and
+    /// patch translation/scale with their decoder compensation), not empirical
+    /// least-curvature guesses.
+    fn exact_joint_chart_gauge_basis(
+        &self,
+        cache: &ArrowFactorCache,
+    ) -> Result<Vec<Array1<f64>>, String> {
+        self.joint_chart_gauge_basis_for_arrow_layout(
+            &cache.row_offsets,
+            cache.k,
+            "exact_joint_chart_gauge_basis",
+        )
+    }
+
+    /// Deterministic orthonormal complement of an already-orthonormal analytic
+    /// gauge basis.  Diagonalizing `Zᵀ A Z` (then lifting through `Z`) removes
+    /// the declared chart orbit structurally; it does not ask a spectral floor
+    /// to rediscover that orbit from a nearly-zero eigenvalue.
+    fn exact_hessian_physical_complement(
+        dimension: usize,
+        gauges: &[Array1<f64>],
+    ) -> Result<Array2<f64>, String> {
+        if gauges.len() > dimension {
+            return Err(format!(
+                "exact_hessian_physical_complement: gauge rank {} exceeds dimension {dimension}",
+                gauges.len()
+            ));
+        }
+        let orthogonality_tolerance = f64::EPSILON.sqrt();
+        for (column, gauge) in gauges.iter().enumerate() {
+            if gauge.len() != dimension || !gauge.iter().all(|value| value.is_finite()) {
+                return Err(format!(
+                    "exact_hessian_physical_complement: gauge {column} has length {} (expected {dimension}) or a non-finite value",
+                    gauge.len()
+                ));
+            }
+            for (prior, other) in gauges[..=column].iter().enumerate() {
+                let expected = if prior == column { 1.0 } else { 0.0 };
+                let error = (gauge.dot(other) - expected).abs();
+                if error > orthogonality_tolerance {
+                    return Err(format!(
+                        "exact_hessian_physical_complement: gauge Gram entry ({column},{prior}) differs from {expected} by {error:.6e}"
+                    ));
+                }
+            }
+        }
+
+        let physical_dimension = dimension - gauges.len();
+        let mut complement = Vec::<Array1<f64>>::with_capacity(physical_dimension);
+        for axis in 0..dimension {
+            let mut candidate = Array1::<f64>::zeros(dimension);
+            candidate[axis] = 1.0;
+            for _ in 0..2 {
+                for gauge in gauges {
+                    let coefficient = candidate.dot(gauge);
+                    candidate.scaled_add(-coefficient, gauge);
+                }
+                for kept in &complement {
+                    let coefficient = candidate.dot(kept);
+                    candidate.scaled_add(-coefficient, kept);
+                }
+            }
+            let norm = candidate.dot(&candidate).max(0.0).sqrt();
+            if norm > orthogonality_tolerance {
+                candidate.mapv_inplace(|value| value / norm);
+                complement.push(candidate);
+            }
+        }
+        if complement.len() != physical_dimension {
+            return Err(format!(
+                "exact_hessian_physical_complement: constructed rank {}, expected {physical_dimension} from ambient dimension {dimension} and gauge rank {}",
+                complement.len(),
+                gauges.len()
+            ));
+        }
+        let mut z = Array2::<f64>::zeros((dimension, physical_dimension));
+        for (column, vector) in complement.iter().enumerate() {
+            z.column_mut(column).assign(vector);
+        }
+        Ok(z)
+    }
+
+    fn project_arrow_vector_away_from_chart_gauges(
+        vector: &SaeArrowVector,
+        gauges: &[Array1<f64>],
+    ) -> Result<SaeArrowVector, String> {
+        if gauges.is_empty() {
+            return Ok(vector.clone());
+        }
+        let total_t = vector.t.len();
+        let dimension = total_t + vector.beta.len();
+        let mut flat = Array1::<f64>::zeros(dimension);
+        flat.slice_mut(s![..total_t]).assign(&vector.t);
+        flat.slice_mut(s![total_t..]).assign(&vector.beta);
+        for (index, gauge) in gauges.iter().enumerate() {
+            if gauge.len() != dimension {
+                return Err(format!(
+                    "project_arrow_vector_away_from_chart_gauges: gauge {index} has length {}, expected {dimension}",
+                    gauge.len()
+                ));
+            }
+            let coefficient = flat.dot(gauge);
+            flat.scaled_add(-coefficient, gauge);
+        }
+        Ok(SaeArrowVector {
+            t: flat.slice(s![..total_t]).to_owned(),
+            beta: flat.slice(s![total_t..]).to_owned(),
+        })
+    }
+
     /// #2500 — the ONE authority for `∂H_tt/∂ρ_sparse` on the free-logit slots.
     /// See [`SparseLogitCurvature`] for why this exists and what each outcome
     /// obliges a consumer to do.
@@ -1142,27 +1371,26 @@ impl SaeManifoldTerm {
         })
     }
 
-    /// #1418: solve `A x = rhs` for the EXACT stationarity Jacobian `A = ∇²_θθ L`
-    /// on the closed-form gauge quotient via right-`B_Q`-preconditioned GMRES
-    /// ([`solve_b_preconditioned_gmres`]) with the matrix-free
-    /// `A_Q v = B v + ΔC v + κ Q Qᵀv` apply owned by
-    /// [`solve_exact_stationarity_on_gauge_quotient`]. The
-    /// IFT step `θ̂_ρ = −A⁻¹ g_ρ` (the code contracts `−½·⟨Γ, A⁻¹ g_ρ⟩` with rhs `= +∂g/∂ρ`, i.e. `+½·Γᵀθ̂_ρ` of the response — the sign lives in the −0.5 factor) must invert the EXACT `A`, not the surrogate `B`;
-    /// GMRES does not require the exact stationarity Jacobian to be SPD; it
-    /// refuses non-convergence instead of returning a negative-curvature CG
-    /// iterate as though it were an inverse solve.
+    /// #1418/#2653: solve `A x = rhs` for the materializable EXACT stationarity
+    /// Jacobian `A = ∇²_θθ L` with its symmetric rank-revealing
+    /// pseudoinverse.  The same materialized and symmetrized `A` used by the
+    /// exact observed-information route declares the quotient null band; both
+    /// resolved positive and negative modes are inverted.  This avoids the
+    /// ill-conditioned Krylov-basis coefficient cancellation that can satisfy a
+    /// projected residual while failing `A x = P_range rhs` on reapplication.
+    /// The IFT step `θ̂_ρ = −A⁺ g_ρ` (the sign lives in the caller's
+    /// `-0.5` contraction) therefore has one dense owner.  GMRES remains only in
+    /// [`Self::solve_exact_stationarity_matrix_free`], where `A` cannot be
+    /// materialized.
     pub(crate) fn solve_exact_stationarity(
         &self,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
-        solver: &DeflatedArrowSolver<'_>,
         rhs: &SaeArrowVector,
     ) -> Result<SaeArrowVector, String> {
-        let apply_raw_a = |v: &SaeArrowVector| self.apply_exact_hessian(rho, target, cache, v);
-        let apply_raw_b =
-            |v: &SaeArrowVector| apply_cached_arrow_hessian(cache, v.t.view(), v.beta.view());
-        solve_exact_stationarity_on_gauge_quotient(solver, rhs, &apply_raw_a, &apply_raw_b)
+        self.materialize_exact_stationarity_geometry(rho, target, cache)?
+            .solve_stationarity(rhs)
     }
 
     /// Matrix-free exact-stationarity sibling used by the wide-border penalized quasi-Laplace
@@ -1184,7 +1412,8 @@ impl SaeManifoldTerm {
         system: &ArrowSchurSystem,
         rhs: &SaeArrowVector,
     ) -> Result<SaeArrowVector, String> {
-        let apply_b = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
+        let chart_gauges = self.exact_joint_chart_gauge_basis(cache)?;
+        let raw_apply_b = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
             let (t, beta) = matrix_free_arrow_operator_apply(
                 system,
                 cache,
@@ -1194,13 +1423,33 @@ impl SaeManifoldTerm {
             .map_err(|error| format!("matrix-free evidence operator: {error}"))?;
             Ok(SaeArrowVector { t, beta })
         };
-        let apply_a = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
-            let base = apply_b(vector)?;
+        let raw_apply_a = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
+            let base = raw_apply_b(vector)?;
             let correction = self.apply_exact_hessian_minus_b(rho, target, cache, vector)?;
             Ok(SaeArrowVector {
                 t: &base.t + &correction.t,
                 beta: &base.beta + &correction.beta,
             })
+        };
+        // The Krylov sequence lives entirely in the same analytic physical
+        // complement as the dense `Zᵀ A Z` route.  Project both the input and
+        // output of A/B: this is the matrix-free action of P A P / P B P and
+        // prevents roundoff gauge components from re-entering the sequence.
+        let apply_b = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
+            let physical = Self::project_arrow_vector_away_from_chart_gauges(
+                vector,
+                &chart_gauges,
+            )?;
+            let applied = raw_apply_b(&physical)?;
+            Self::project_arrow_vector_away_from_chart_gauges(&applied, &chart_gauges)
+        };
+        let apply_a = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
+            let physical = Self::project_arrow_vector_away_from_chart_gauges(
+                vector,
+                &chart_gauges,
+            )?;
+            let applied = raw_apply_a(&physical)?;
+            Self::project_arrow_vector_away_from_chart_gauges(&applied, &chart_gauges)
         };
         let precondition = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
             // The outer exact-stationarity residual is certified to 1e-10 in
@@ -1216,18 +1465,33 @@ impl SaeManifoldTerm {
             // costs iterations here, never correctness — unlike the trace/
             // criterion consumers, where a truncation silently biases the
             // estimate (#2576).
+            let physical = Self::project_arrow_vector_away_from_chart_gauges(
+                vector,
+                &chart_gauges,
+            )?;
             let (t, beta, _cg) = matrix_free_arrow_inverse_apply(
                 system,
                 cache,
-                vector.t.view(),
-                vector.beta.view(),
+                physical.t.view(),
+                physical.beta.view(),
                 1.0e-10,
                 cache.k.max(1),
             )
             .map_err(|error| format!("matrix-free evidence inverse: {error}"))?;
-            Ok(SaeArrowVector { t, beta })
+            Self::project_arrow_vector_away_from_chart_gauges(
+                &SaeArrowVector { t, beta },
+                &chart_gauges,
+            )
         };
-        solve_exact_stationarity_preconditioned(rhs, &apply_a, &apply_b, precondition)
+        let physical_rhs =
+            Self::project_arrow_vector_away_from_chart_gauges(rhs, &chart_gauges)?;
+        let solved = solve_exact_stationarity_preconditioned(
+            &physical_rhs,
+            &apply_a,
+            &apply_b,
+            precondition,
+        )?;
+        Self::project_arrow_vector_away_from_chart_gauges(&solved, &chart_gauges)
     }
 
     /// PATH C (#2253) — the per-flat-coordinate penalty curvature operators
@@ -2537,8 +2801,11 @@ impl SaeManifoldTerm {
         gamma_eff.t.scaled_add(2.0, &rank_charge.theta.t);
         gamma_eff.beta.scaled_add(2.0, &rank_charge.theta.beta);
 
-        // Adjoints: a = A⁺Γ_eff (once) and b_j = A⁺ g_ρ,j (per coordinate).
-        let a_vec = self.solve_exact_stationarity(rho, target, cache, &solver, &gamma_eff)?;
+        // Adjoints: factor the materialized exact A once, then apply its
+        // rank-revealing pseudoinverse to Γ_eff and every g_ρ,j RHS.
+        let stationarity_geometry =
+            self.materialize_exact_stationarity_geometry(rho, target, cache)?;
+        let a_vec = stationarity_geometry.solve_stationarity(&gamma_eff)?;
         let a_flat = flatten(&a_vec);
         let flats: Vec<usize> = operators.keys().copied().collect();
         let mut b_flat: std::collections::BTreeMap<usize, Array1<f64>> =
@@ -2547,7 +2814,7 @@ impl SaeManifoldTerm {
             std::collections::BTreeMap::new();
         for &j in &flats {
             let g_rho = self.outer_rho_gradient_ift_rhs(rho, j, cache)?;
-            let b_j = self.solve_exact_stationarity(rho, target, cache, &solver, &g_rho)?;
+            let b_j = stationarity_geometry.solve_stationarity(&g_rho)?;
             g_rho_flat.insert(j, flatten(&g_rho));
             b_flat.insert(j, flatten(&b_j));
         }
@@ -3062,25 +3329,38 @@ impl SaeManifoldTerm {
         // route keeps ½log|B| until Phase-2b (streaming signed-LDLᵀ A-factor).
         // Exactly one arm produces Γ, so the two majorizers cannot both be paid
         // for on one gradient.
-        let gamma = match majorizer_gamma {
-            Some(gamma) => gamma,
+        let (gamma, dense_stationarity_adjoint) = match majorizer_gamma {
+            Some(gamma) => (gamma, None),
             None => {
-                let (exact_logdet_trace, exact_gamma) = self
+                let DenseExactALogdetChannels {
+                    logdet_trace: exact_logdet_trace,
+                    theta_adjoint: exact_gamma,
+                    stationarity_adjoint,
+                } = self
                     .dense_exact_a_logdet_channels(target, rho, loss, cache)
                     .map_err(OuterGradientError::internal)?;
                 logdet_trace = exact_logdet_trace;
-                exact_gamma
+                (exact_gamma, Some(stationarity_adjoint))
             }
         };
 
-        // massive K (`matrix_free_system = Some`) it rides the reduced-Schur CG on
-        // the reassembled undamped operator; otherwise the dense deflated arrow
-        // solver. Both realize the same self-adjoint `A⁺` action.
-        let adjoint = match matrix_free_system {
-            Some(system) => {
+        // At massive K (`matrix_free_system = Some`) the materialized operator is
+        // unavailable, so the adjoint rides the certified reduced-Schur/GMRES
+        // route. Every dense arm is owned by the rank-revealing spectral
+        // pseudoinverse. On the exact-A logdet arm it reuses the eigensystem that
+        // produced Γ; on a B-majorizer arm it materializes that same physical A
+        // once here. There is deliberately no dense-to-GMRES fallback.
+        let adjoint = match (matrix_free_system, dense_stationarity_adjoint) {
+            (Some(system), None) => {
                 self.solve_exact_stationarity_matrix_free(rho, target, cache, system, &gamma)
             }
-            None => self.solve_exact_stationarity(rho, target, cache, solver, &gamma),
+            (None, Some(adjoint)) => Ok(adjoint),
+            (None, None) => self.solve_exact_stationarity(rho, target, cache, &gamma),
+            (Some(_), Some(_)) => Err(
+                "analytic_outer_rho_gradient_components: dense exact-A adjoint was assembled \
+                 for a matrix-free operator route"
+                    .to_string(),
+            ),
         }
         .map_err(|err| {
             OuterGradientError::classify_arrow_solver_error(
@@ -3603,15 +3883,27 @@ impl SaeManifoldTerm {
         let e_diag = self
             .materialize_ard_concave_clamp_diagonal(rho, cache)
             .map_err(SaeCriterionError::Numerical)?;
-        let quotient_log_det =
-            |m: &Array2<f64>, block: &'static str| -> Result<f64, SaeCriterionError> {
-                let (eigs, vecs) = Self::cluster_stable_eigh(m, &e_diag, total_t).map_err(|e| {
-                    SaeCriterionError::Numerical(format!(
-                        "exact_observed_information_log_dets: {block}: {e}"
-                    ))
-                })?;
+        let joint_chart_gauges = self
+            .exact_joint_chart_gauge_basis(cache)
+            .map_err(SaeCriterionError::Numerical)?;
+        let joint = Self::exact_hessian_spectral_block(
+            a.clone(),
+            &e_diag,
+            total_t,
+            joint_chart_gauges,
+        )
+        .map_err(SaeCriterionError::Numerical)?;
+        let a_tt = a.slice(s![..total_t, ..total_t]).to_owned();
+        let coordinate =
+            Self::exact_hessian_spectral_block(a_tt, &e_diag, total_t, Vec::new())
+                .map_err(SaeCriterionError::Numerical)?;
+        let quotient_log_det = |spectral: &ExactHessianSpectralBlock,
+                                block: &'static str|
+         -> Result<f64, SaeCriterionError> {
+                let eigs = &spectral.eigenvalues;
+                let vecs = &spectral.eigenvectors;
+                let floor = spectral.rank_floor;
                 let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                let floor = Self::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
                 let mut log_det = 0.0_f64;
                 for (idx, &lambda) in eigs.iter().enumerate() {
                     let priced = if lambda < -floor {
@@ -3664,11 +3956,54 @@ impl SaeManifoldTerm {
                             // refusal that is about to abort the fit, so it
                             // cannot become chatter.
                             let t_mass: f64 = (0..limit).map(|j| v[j] * v[j]).sum();
+                            let v_av = v.dot(&spectral.operator.dot(&v));
+                            let chart_gauge_mass = spectral
+                                .gauge_basis
+                                .iter()
+                                .map(|gauge| gauge.dot(&v).powi(2))
+                                .sum::<f64>();
+                            let mut row_gauge_mass = 0.0_f64;
+                            if v.len() == a.nrows() {
+                                for (row, directions) in
+                                    cache.deflated_row_directions.iter().enumerate()
+                                {
+                                    let base = cache.row_offsets[row];
+                                    for direction in directions {
+                                        let coefficient = direction
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(slot, value)| value * v[base + slot])
+                                            .sum::<f64>();
+                                        let norm_sq = direction.dot(direction);
+                                        if norm_sq > 0.0 {
+                                            row_gauge_mass +=
+                                                coefficient * coefficient / norm_sq;
+                                        }
+                                    }
+                                }
+                            }
+                            let b_rayleigh = if v.len() == a.nrows() {
+                                let b_v = apply_cached_arrow_hessian(
+                                    cache,
+                                    v.slice(s![..total_t]),
+                                    v.slice(s![total_t..]),
+                                )
+                                .map_err(SaeCriterionError::Numerical)?;
+                                Some(
+                                    v.slice(s![..total_t]).dot(&b_v.t)
+                                        + v.slice(s![total_t..]).dot(&b_v.beta),
+                                )
+                            } else {
+                                None
+                            };
                             log::warn!(
                                 "SAE exact-A saddle refusal: block={block} idx={idx} \
-                                 lambda={lambda:.6e} clamp v'Ev={e_v:.6e} \
+                                 lambda={lambda:.6e} v'Av={v_av:.6e} clamp v'Ev={e_v:.6e} \
                                  basin={basin:.6e} floor={floor:.6e} \
-                                 max_eig={max_eig:.6e} coordinate-block mass={t_mass:.6e}"
+                                 max_eig={max_eig:.6e} coordinate-block mass={t_mass:.6e} \
+                                 chart-gauge projection={chart_gauge_mass:.6e} \
+                                 row-gauge projection={row_gauge_mass:.6e} \
+                                 v'Bv={b_rayleigh:?}"
                             );
                             return Err(SaeCriterionError::IndefiniteObservedInformation { block });
                         }
@@ -3683,26 +4018,131 @@ impl SaeManifoldTerm {
                 }
                 Ok(log_det)
             };
-        let log_a = quotient_log_det(&a, "joint")?;
-        let a_tt = a.slice(s![..total_t, ..total_t]).to_owned();
-        let log_a_tt = quotient_log_det(&a_tt, "coordinate")?;
+        let log_a = quotient_log_det(&joint, "joint")?;
+        let log_a_tt = quotient_log_det(&coordinate, "coordinate")?;
         Ok((log_a, log_a_tt))
     }
 
-    /// #2330 Phase-2 — the quotient pseudo-inverses `(A⁺, A_tt⁺)` used by the
-    /// exact-A outer-ρ gradient, from the SAME spectral classification the value
-    /// uses: `A⁺ = Σ_{λ>floor} (1/λ) uᵀu`, dropping the `|λ|≤floor` gauge null.
-    /// Both are returned as dense `dim×dim` operators (`A_tt⁺` has a zero β
-    /// border) so they can feed `logdet_theta_adjoint_dense`'s border indexing
-    /// exactly as `materialize_block_diag_t_inverse` does. A clamp-attributable
-    /// negative direction uses its priced basin curvature; a genuine saddle still
-    /// refuses, so the gradient is never assembled outside the value's domain.
-    pub(crate) fn materialize_exact_hessian_quotient_inverse(
+    /// Build a cluster-stable eigensystem and the shared absolute quotient floor
+    /// for one already-materialized exact-Hessian block.
+    fn exact_hessian_spectral_block(
+        operator: Array2<f64>,
+        e_diag: &Array1<f64>,
+        total_t: usize,
+        gauge_basis: Vec<Array1<f64>>,
+    ) -> Result<ExactHessianSpectralBlock, String> {
+        let dimension = operator.nrows();
+        if operator.ncols() != dimension || total_t > dimension || e_diag.len() < total_t {
+            return Err(format!(
+                "exact_hessian_spectral_block: operator {:?}, t dimension {total_t}, E diagonal length {}",
+                operator.dim(),
+                e_diag.len()
+            ));
+        }
+        let (eigenvalues, eigenvectors) = if gauge_basis.is_empty() {
+            Self::cluster_stable_eigh(&operator, e_diag, total_t)?
+        } else {
+            let complement =
+                Self::exact_hessian_physical_complement(dimension, &gauge_basis)?;
+            let reduced_operator = complement.t().dot(&operator).dot(&complement);
+            let mut e_times_complement = Array2::<f64>::zeros(complement.dim());
+            for row in 0..total_t {
+                for column in 0..complement.ncols() {
+                    e_times_complement[[row, column]] = e_diag[row] * complement[[row, column]];
+                }
+            }
+            let reduced_e = complement.t().dot(&e_times_complement);
+            let (reduced_eigenvalues, reduced_eigenvectors) =
+                Self::cluster_stable_eigh_operator(&reduced_operator, &reduced_e)?;
+            (
+                reduced_eigenvalues,
+                complement.dot(&reduced_eigenvectors),
+            )
+        };
+        let max_eigenvalue = eigenvalues
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let rank_floor = Self::SAE_EXACT_A_PD_FLOOR_REL * max_eigenvalue.max(1.0);
+        Ok(ExactHessianSpectralBlock {
+            operator,
+            eigenvalues,
+            eigenvectors,
+            gauge_basis,
+            rank_floor,
+        })
+    }
+
+    /// The priced log-determinant inverse of one spectral block.  This is not
+    /// the stationarity inverse: a clamp-attributable negative direction is
+    /// priced at its basin curvature here, while the physical stationarity
+    /// pseudoinverse retains the raw signed eigenvalue.
+    fn priced_exact_hessian_inverse(
+        block: &ExactHessianSpectralBlock,
+        e_diag: &Array1<f64>,
+        total_t: usize,
+    ) -> Result<Array2<f64>, String> {
+        let mut weights = Array1::<f64>::zeros(block.eigenvalues.len());
+        for (index, &lambda) in block.eigenvalues.iter().enumerate() {
+            let priced = if lambda < -block.rank_floor {
+                let eigenvector = block.eigenvectors.column(index);
+                let limit = total_t.min(eigenvector.len());
+                let e_v = (0..limit)
+                    .map(|row| e_diag[row] * eigenvector[row] * eigenvector[row])
+                    .sum::<f64>();
+                let basin = lambda + e_v;
+                if basin < -block.rank_floor {
+                    return Err(format!(
+                        "priced_exact_hessian_inverse: indefinite A \
+                         (λ={lambda:.3e}, λ+e_v={basin:.3e}); genuine saddle, the outer \
+                         gradient must not be assembled here"
+                    ));
+                }
+                basin
+            } else {
+                lambda
+            };
+            weights[index] = if priced > block.rank_floor {
+                1.0 / priced
+            } else {
+                0.0
+            };
+        }
+        Ok(block
+            .eigenvectors
+            .dot(&Array2::from_diag(&weights))
+            .dot(&block.eigenvectors.t()))
+    }
+
+    /// Materialize only the joint spectral geometry required by a dense
+    /// exact-stationarity solve.  No log-determinant pricing or coordinate-block
+    /// decomposition is paid on routes that rank the B majorizer.
+    fn materialize_exact_stationarity_geometry(
         &self,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
-    ) -> Result<(Array2<f64>, Array2<f64>), String> {
+    ) -> Result<ExactHessianSpectralBlock, String> {
+        let total_t = cache.delta_t_len();
+        let a = self.materialize_exact_hessian_dense(rho, target, cache)?;
+        let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
+        let gauges = self.exact_joint_chart_gauge_basis(cache)?;
+        Self::exact_hessian_spectral_block(a, &e_diag, total_t, gauges)
+    }
+
+    /// #2330 Phase-2/#2653 — one coherent quotient geometry for the exact-A
+    /// outer-ρ derivative.  The priced pseudo-inverses `(A⁺, A_tt⁺)` and the
+    /// raw signed stationarity pseudoinverse are derived from the SAME joint
+    /// eigensystem and floor. `A_tt⁺` is embedded with a zero β border for
+    /// `logdet_theta_adjoint_dense` indexing.  A genuine saddle still refuses
+    /// the log-determinant derivative; resolved negative directions remain live
+    /// in the stationarity solve when the value's clamp pricing admits them.
+    fn materialize_exact_hessian_quotient_geometry(
+        &self,
+        rho: &SaeManifoldRho,
+        target: ArrayView2<'_, f64>,
+        cache: &ArrowFactorCache,
+    ) -> Result<ExactHessianQuotientGeometry, String> {
         let total_t = cache.delta_t_len();
         let dim = total_t + cache.k;
         let a = self.materialize_exact_hessian_dense(rho, target, cache)?;
@@ -3717,43 +4157,27 @@ impl SaeManifoldTerm {
         // The split is an implementation detail; callers consume the complete
         // derivative of the value above.
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        let pinv = |m: &Array2<f64>| -> Result<Array2<f64>, String> {
-            let (eigs, vecs) = Self::cluster_stable_eigh(m, &e_diag, total_t)?;
-            let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let floor = Self::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
-            let mut w = Array1::<f64>::zeros(eigs.len());
-            for (idx, &lambda) in eigs.iter().enumerate() {
-                let priced = if lambda < -floor {
-                    let v = vecs.column(idx);
-                    let limit = total_t.min(v.len());
-                    let mut e_v = 0.0_f64;
-                    for j in 0..limit {
-                        e_v += e_diag[j] * v[j] * v[j];
-                    }
-                    let basin = lambda + e_v;
-                    if basin < -floor {
-                        return Err(format!(
-                            "materialize_exact_hessian_quotient_inverse: indefinite A \
-                             (λ={lambda:.3e}, λ+e_v={basin:.3e}); genuine saddle, the outer \
-                             gradient must not be assembled here"
-                        ));
-                    }
-                    basin
-                } else {
-                    lambda
-                };
-                w[idx] = if priced > floor { 1.0 / priced } else { 0.0 };
-            }
-            Ok(vecs.dot(&Array2::from_diag(&w)).dot(&vecs.t()))
-        };
-        let a_pinv = pinv(&a)?;
         let a_tt_block = a.slice(s![..total_t, ..total_t]).to_owned();
-        let a_tt_pinv_small = pinv(&a_tt_block)?;
-        let mut a_tt_pinv = Array2::<f64>::zeros((dim, dim));
-        a_tt_pinv
+        let gauges = self.exact_joint_chart_gauge_basis(cache)?;
+        let joint = Self::exact_hessian_spectral_block(a, &e_diag, total_t, gauges)?;
+        let priced_joint_inverse =
+            Self::priced_exact_hessian_inverse(&joint, &e_diag, total_t)?;
+        // The joint chart gauge requires decoder compensation.  With beta held
+        // fixed it is not a coordinate-block null, so A_tt remains unprojected.
+        let coordinate =
+            Self::exact_hessian_spectral_block(a_tt_block, &e_diag, total_t, Vec::new())?;
+        let priced_coordinate_inverse_small =
+            Self::priced_exact_hessian_inverse(&coordinate, &e_diag, total_t)?;
+        let mut priced_coordinate_inverse = Array2::<f64>::zeros((dim, dim));
+        priced_coordinate_inverse
             .slice_mut(s![..total_t, ..total_t])
-            .assign(&a_tt_pinv_small);
-        Ok((a_pinv, a_tt_pinv))
+            .assign(&priced_coordinate_inverse_small);
+        Ok(ExactHessianQuotientGeometry {
+            joint,
+            coordinate,
+            priced_joint_inverse,
+            priced_coordinate_inverse,
+        })
     }
 
     /// PATH C / #2330 — dense symmetric materialization of the EXACT stationarity
@@ -3842,13 +4266,42 @@ impl SaeManifoldTerm {
         e_diag: &Array1<f64>,
         total_t: usize,
     ) -> Result<(Array1<f64>, Array2<f64>), String> {
+        if m.nrows() != m.ncols() || total_t > m.nrows() || e_diag.len() < total_t {
+            return Err(format!(
+                "cluster_stable_eigh: operator {:?}, t dimension {total_t}, E diagonal length {}",
+                m.dim(),
+                e_diag.len()
+            ));
+        }
+        let mut e_operator = Array2::<f64>::zeros(m.dim());
+        for row in 0..total_t {
+            e_operator[[row, row]] = e_diag[row];
+        }
+        Self::cluster_stable_eigh_operator(m, &e_operator)
+    }
+
+    /// Matrix-valued sibling of [`Self::cluster_stable_eigh`].  Quotienting an
+    /// ambient diagonal `E` through a physical complement `Z` produces the
+    /// generally dense reduced operator `Zᵀ E Z`; cluster stabilization must
+    /// rotate against that exact restriction rather than pretending its
+    /// diagonal alone survived the coordinate change.
+    fn cluster_stable_eigh_operator(
+        m: &Array2<f64>,
+        e_operator: &Array2<f64>,
+    ) -> Result<(Array1<f64>, Array2<f64>), String> {
+        if m.nrows() != m.ncols() || e_operator.dim() != m.dim() {
+            return Err(format!(
+                "cluster_stable_eigh_operator: Hessian {:?} and E operator {:?} must be equally-sized square matrices",
+                m.dim(),
+                e_operator.dim()
+            ));
+        }
         let (eigs, mut vecs) = m
             .eigh(Side::Lower)
-            .map_err(|e| format!("cluster_stable_eigh: eigh failed: {e:?}"))?;
+            .map_err(|e| format!("cluster_stable_eigh_operator: eigh failed: {e:?}"))?;
         let dim = eigs.len();
         let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let floor = Self::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
-        let t_lim = total_t.min(dim);
         let mut i = 0usize;
         while i < dim {
             let mut j = i + 1;
@@ -3861,8 +4314,15 @@ impl SaeManifoldTerm {
                 for a in 0..width {
                     for b in a..width {
                         let mut acc = 0.0_f64;
-                        for r in 0..t_lim {
-                            acc += vecs[[r, i + a]] * e_diag[r] * vecs[[r, i + b]];
+                        for r in 0..dim {
+                            for c in 0..dim {
+                                let e_rc = e_operator[[r, c]];
+                                if e_rc != 0.0 {
+                                    acc += vecs[[r, i + a]]
+                                        * e_rc
+                                        * vecs[[c, i + b]];
+                                }
+                            }
                         }
                         ec[[a, b]] = acc;
                         ec[[b, a]] = acc;
@@ -3870,7 +4330,9 @@ impl SaeManifoldTerm {
                 }
                 let (_ec_eigs, rot) = ec
                     .eigh(Side::Lower)
-                    .map_err(|e| format!("cluster_stable_eigh: cluster eigh failed: {e:?}"))?;
+                    .map_err(|e| {
+                        format!("cluster_stable_eigh_operator: cluster eigh failed: {e:?}")
+                    })?;
                 let cluster = vecs.slice(s![.., i..j]).to_owned();
                 let rotated = cluster.dot(&rot);
                 vecs.slice_mut(s![.., i..j]).assign(&rotated);
@@ -3972,16 +4434,15 @@ impl SaeManifoldTerm {
     ///   (III-θ) `∂E/∂t` diagonal into the θ-adjoint: `½ Σ_p (1/μ_i)·(∂E_rr/∂t_r)v_i[r]²`.
     /// Each block contributes with the sign of the `½[log|A| − log|A_tt|]` split
     /// (joint `+`, tt `−`), matching the caller's `gamma.t -= gamma_tt.t`.
-    pub(crate) fn priced_ard_adjoint_extras(
+    fn priced_ard_adjoint_extras(
         &self,
         rho: &SaeManifoldRho,
-        target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
+        geometry: &ExactHessianQuotientGeometry,
     ) -> Result<(Array1<f64>, Array1<f64>, Array2<f64>, Array2<f64>), String> {
         let total_t = cache.delta_t_len();
         let dim = total_t + cache.k;
         let n_params = rho.to_flat().len();
-        let a = self.materialize_exact_hessian_dense(rho, target, cache)?;
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
         let de_dt = self.ard_concave_clamp_dt_diagonal(rho, cache)?;
         let coord_axis = self.coord_axis_map_for_cache(cache)?;
@@ -3991,20 +4452,27 @@ impl SaeManifoldTerm {
         let mut k_joint = Array2::<f64>::zeros((dim, dim));
         let mut k_tt = Array2::<f64>::zeros((dim, dim));
 
-        // One block's contribution. `block_dim` is the eigenvector length
+        // One block's contribution. `ambient_dim` is the eigenvector length
         // (`dim` for the joint A, `total_t` for A_tt); `sign` is +1 (joint) or
         // −1 (tt). `k_out` receives this block's K (embedded in the dim×dim frame).
-        let mut accumulate = |m: &Array2<f64>,
-                              block_dim: usize,
+        let mut accumulate = |block: &ExactHessianSpectralBlock,
                               sign: f64,
                               k_out: &mut Array2<f64>|
          -> Result<(), String> {
-            let (eigs, vecs) = Self::cluster_stable_eigh(m, &e_diag, total_t)?;
-            let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let floor = Self::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
-            let t_lim = total_t.min(block_dim);
+            let eigs = &block.eigenvalues;
+            let vecs = &block.eigenvectors;
+            let floor = block.rank_floor;
+            let spectral_dim = eigs.len();
+            let ambient_dim = vecs.nrows();
+            if vecs.ncols() != spectral_dim || ambient_dim > dim {
+                return Err(format!(
+                    "priced_ard_adjoint_extras: eigenvectors {:?}, spectrum {spectral_dim}, ambient limit {dim}",
+                    vecs.dim()
+                ));
+            }
+            let t_lim = total_t.min(ambient_dim);
             // E·v_i on the t-block for every column (E diagonal = e_diag on t rows).
-            for i in 0..block_dim {
+            for i in 0..spectral_dim {
                 if eigs[i] >= -floor {
                     continue; // not a negative direction
                 }
@@ -4041,8 +4509,8 @@ impl SaeManifoldTerm {
                 }
                 // (II): K = Σ_p (1/μ_i)(v_i w_iᵀ + w_i v_iᵀ),
                 //   w_i = Σ_{j≠i} [(v_iᵀE v_j)/(λ_i−λ_j)] v_j.
-                let mut w = Array1::<f64>::zeros(block_dim);
-                for j in 0..block_dim {
+                let mut w = Array1::<f64>::zeros(ambient_dim);
+                for j in 0..spectral_dim {
                     if j == i {
                         continue;
                     }
@@ -4057,16 +4525,16 @@ impl SaeManifoldTerm {
                     }
                     let coeff = vi_e_vj / denom;
                     if coeff != 0.0 {
-                        for r in 0..block_dim {
+                        for r in 0..ambient_dim {
                             w[r] += coeff * vj[r];
                         }
                     }
                 }
-                for r in 0..block_dim {
+                for r in 0..ambient_dim {
                     if w[r] == 0.0 && vi[r] == 0.0 {
                         continue;
                     }
-                    for c in 0..block_dim {
+                    for c in 0..ambient_dim {
                         k_out[[r, c]] += inv_mu * (vi[r] * w[c] + w[r] * vi[c]);
                     }
                 }
@@ -4074,9 +4542,8 @@ impl SaeManifoldTerm {
             Ok(())
         };
 
-        accumulate(&a, dim, 1.0, &mut k_joint)?;
-        let a_tt = a.slice(s![..total_t, ..total_t]).to_owned();
-        accumulate(&a_tt, total_t, -1.0, &mut k_tt)?;
+        accumulate(&geometry.joint, 1.0, &mut k_joint)?;
+        accumulate(&geometry.coordinate, -1.0, &mut k_tt)?;
         Ok((delta_trace, delta_gamma_t, k_joint, k_tt))
     }
 
@@ -4130,10 +4597,9 @@ impl SaeManifoldTerm {
         rho: &SaeManifoldRho,
         loss: &SaeManifoldLoss,
         cache: &ArrowFactorCache,
-    ) -> Result<(Array1<f64>, SaeArrowVector), String> {
+    ) -> Result<DenseExactALogdetChannels, String> {
         let n_params = rho.to_flat().len();
-        let (a_pinv, a_tt_pinv) =
-            self.materialize_exact_hessian_quotient_inverse(rho, target, cache)?;
+        let geometry = self.materialize_exact_hessian_quotient_geometry(rho, target, cache)?;
         // #2336 — the value-side E-attributability pricing's ρ-derivative increment.
         // (II) folds into the pseudo-inverses as K so every dA/dρ and dA/dθ channel
         // below emits `tr((A_priced⁺+K)·d…)` = the (I)+(II) legs at once; (III-direct)
@@ -4141,9 +4607,9 @@ impl SaeManifoldTerm {
         // priced directions all four are exactly zero, so the exact-A path is
         // unchanged.
         let (priced_delta_trace, priced_delta_gamma_t, priced_k_joint, priced_k_tt) =
-            self.priced_ard_adjoint_extras(rho, target, cache)?;
-        let a_pinv = &a_pinv + &priced_k_joint;
-        let a_tt_pinv = &a_tt_pinv + &priced_k_tt;
+            self.priced_ard_adjoint_extras(rho, cache, &geometry)?;
+        let a_pinv = &geometry.priced_joint_inverse + &priced_k_joint;
+        let a_tt_pinv = &geometry.priced_coordinate_inverse + &priced_k_tt;
         let m = self.penalty_curvature_operators_by_flat(rho, cache)?;
         let d = self.exact_stationarity_penalty_derivative_delta_by_flat(rho, cache)?;
         let frob = |x: &Array2<f64>, y: &Array2<f64>| -> f64 { (x * y).sum() };
@@ -4196,7 +4662,12 @@ impl SaeManifoldTerm {
         let rank_charge = self.production_rank_charge_derivative(target, rho, loss, cache)?;
         gamma.t.scaled_add(2.0, &rank_charge.theta.t);
         gamma.beta.scaled_add(2.0, &rank_charge.theta.beta);
-        Ok((logdet_trace, gamma))
+        let stationarity_adjoint = geometry.joint.solve_stationarity(&gamma)?;
+        Ok(DenseExactALogdetChannels {
+            logdet_trace,
+            theta_adjoint: gamma,
+            stationarity_adjoint,
+        })
     }
 
     /// #2330 — the ordered-Beta–Bernoulli (non-softmax) sparse-coordinate ½log|A|
@@ -4714,12 +5185,12 @@ mod test_support {
             target: ndarray::ArrayView2<'_, f64>,
             cache: &ArrowFactorCache,
         ) -> Result<SaeArrowVector, String> {
-            let (a_pinv, _a_tt_pinv) =
-                self.materialize_exact_hessian_quotient_inverse(rho, target, cache)?;
+            let geometry =
+                self.materialize_exact_hessian_quotient_geometry(rho, target, cache)?;
             self.logdet_theta_adjoint_dense(
                 rho,
                 cache,
-                &a_pinv,
+                &geometry.priced_joint_inverse,
                 ThetaAdjointDhChannel::All,
                 true,
                 true,
@@ -4747,6 +5218,8 @@ mod test_support {
             let operators = self.penalty_curvature_operators_by_flat(rho, cache)?;
             // Mirror production: the twist inverse rides the EXACT ∂A/∂ρ = M_c + Δ.
             let exact_deltas = self.exact_stationarity_penalty_derivative_delta_by_flat(rho, cache)?;
+            let stationarity_geometry =
+                self.materialize_exact_stationarity_geometry(rho, target, cache)?;
             let total_t = cache.delta_t_len();
             let dim = total_t + cache.k;
             let flatten = |v: &SaeArrowVector| -> Array1<f64> {
@@ -4793,10 +5266,7 @@ mod test_support {
             };
             let b = |c: usize| -> Result<Array1<f64>, String> {
                 let g_rho = self.outer_rho_gradient_ift_rhs(rho, c, cache)?;
-                let solver = DeflatedArrowSolver::plain(cache);
-                Ok(flatten(&self.solve_exact_stationarity(
-                    rho, target, cache, &solver, &g_rho,
-                )?))
+                Ok(flatten(&stationarity_geometry.solve_stationarity(&g_rho)?))
             };
             let bi = b(i)?;
             let bj = b(j)?;

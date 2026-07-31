@@ -2683,6 +2683,111 @@ impl SaeManifoldTerm {
         Ok(out)
     }
 
+    /// Put a dense-product-chart joint vector into the exact variable-stride
+    /// arrow layout used by one assembled system/cache.
+    ///
+    /// Hard TopK removes inactive coordinate blocks row by row but retains the
+    /// global decoder border.  All joint gauge/null producers naturally emit
+    /// the full `n * q + beta` chart, so every consumer must cross this one seam
+    /// before applying an arrow operator.  A stale layout or any shape mismatch
+    /// is an invariant error; silently dropping the direction changes the
+    /// quotient and can turn a chart null into a reported physical saddle.
+    pub(crate) fn dense_joint_vector_in_arrow_layout(
+        &self,
+        dense: ArrayView1<'_, f64>,
+        row_offsets: &[usize],
+        border_dim: usize,
+        owner: &str,
+    ) -> Result<Array1<f64>, String> {
+        let n = self.n_obs();
+        let q = self.assignment.row_block_dim();
+        let declared_border = self.factored_border_dim();
+        if border_dim != declared_border {
+            return Err(format!(
+                "{owner}: arrow border dimension {border_dim} != term border dimension {declared_border}"
+            ));
+        }
+        if row_offsets.len() != n + 1 || row_offsets.first() != Some(&0) {
+            return Err(format!(
+                "{owner}: arrow row offsets must have length {} and start at zero, got {:?}",
+                n + 1,
+                row_offsets
+            ));
+        }
+        if let Some(layout) = self.last_row_layout.as_ref() {
+            return layout.restrict_dense_joint_vector(
+                dense,
+                q,
+                row_offsets,
+                border_dim,
+                owner,
+            );
+        }
+
+        for row in 0..n {
+            let span = row_offsets[row + 1]
+                .checked_sub(row_offsets[row])
+                .ok_or_else(|| format!("{owner}: arrow row offsets decrease at row {row}"))?;
+            if span != q {
+                return Err(format!(
+                    "{owner}: dense arrow row {row} has width {span}, expected full chart width {q}"
+                ));
+            }
+        }
+        let expected = row_offsets[n]
+            .checked_add(border_dim)
+            .ok_or_else(|| format!("{owner}: arrow joint length overflows usize"))?;
+        if dense.len() != expected {
+            return Err(format!(
+                "{owner}: dense joint vector has length {}, but the dense arrow layout has length {expected}",
+                dense.len()
+            ));
+        }
+        Ok(dense.to_owned())
+    }
+
+    /// Orthonormal analytic chart-gauge basis in one assembled arrow layout.
+    /// Both dense exact-A quotient geometry and matrix-free arrow consumers use
+    /// this basis, so the physical subspace cannot depend on representation.
+    pub(crate) fn joint_chart_gauge_basis_for_arrow_layout(
+        &self,
+        row_offsets: &[usize],
+        border_dim: usize,
+        owner: &str,
+    ) -> Result<Vec<Array1<f64>>, String> {
+        let mut basis = Vec::<Array1<f64>>::new();
+        for dense in self.dense_step_gauge_vectors()? {
+            let mut gauge = self.dense_joint_vector_in_arrow_layout(
+                dense.view(),
+                row_offsets,
+                border_dim,
+                owner,
+            )?;
+            let original_norm = gauge.dot(&gauge).max(0.0).sqrt();
+            if !(original_norm.is_finite() && original_norm > 0.0) {
+                continue;
+            }
+            // Two-pass MGS gives the same stable quotient basis to the dense and
+            // matrix-free paths.  The numerical-rank decision is relative to
+            // the candidate's own norm and derived from machine precision.
+            for _ in 0..2 {
+                for kept in &basis {
+                    let coefficient = gauge.dot(kept);
+                    gauge.scaled_add(-coefficient, kept);
+                }
+            }
+            let residual_norm = gauge.dot(&gauge).max(0.0).sqrt();
+            if !(residual_norm.is_finite()
+                && residual_norm > f64::EPSILON.sqrt() * original_norm)
+            {
+                continue;
+            }
+            gauge.mapv_inplace(|value| value / residual_norm);
+            basis.push(gauge);
+        }
+        Ok(basis)
+    }
+
     /// Closed-form chart-gauge directions restricted to the reduced β border.
     ///
     /// Each returned vector is the β (decoder-border) component of a

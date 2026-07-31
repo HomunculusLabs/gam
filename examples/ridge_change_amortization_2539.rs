@@ -69,7 +69,7 @@ mod harness {
 
         // Arm B's frame is built ONCE from the host system; every ridge after that
         // is on-device. If it declines, so would arm A, so probe it first.
-        let base = match ResidentBaseArrowFrameHandle::new(&sys) {
+        let base = match ResidentBaseArrowFrameHandle::new(&sys, None) {
             Ok(f) => f,
             Err(err) => {
                 println!("RIDGE_2539 NO_GPU_RUNTIME — base frame declined ({err:?})");
@@ -86,7 +86,7 @@ mod harness {
                 return;
             }
         };
-        let rebuilt = match ResidentArrowFrameHandle::new(&sys, rt, rb) {
+        let rebuilt = match ResidentArrowFrameHandle::new(&sys, rt, rb, None) {
             Ok(f) => f,
             Err(err) => {
                 println!("RIDGE_2539 REBUILD_FAILED: {err:?}");
@@ -121,13 +121,13 @@ mod harness {
         );
 
         // ---- arm A: what the curved tier does today on every rejected step ----
-        ResidentArrowFrameHandle::new(&sys, ridge_ladder(0).0, ridge_ladder(0).1)
+        ResidentArrowFrameHandle::new(&sys, ridge_ladder(0).0, ridge_ladder(0).1, None)
             .expect("warm-up host rebuild at the first ladder rung");
         let mut rebuild_total = Duration::ZERO;
         for k in 0..n_changes {
             let (rt, rb) = ridge_ladder(k);
             let start = Instant::now();
-            let frame = ResidentArrowFrameHandle::new(&sys, rt, rb).expect("host rebuild");
+            let frame = ResidentArrowFrameHandle::new(&sys, rt, rb, None).expect("host rebuild");
             let s = frame
                 .solve_gradient(&g_t, &g_beta)
                 .expect("rebuilt frame solve");

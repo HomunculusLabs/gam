@@ -38,7 +38,7 @@ fn absent_dense_beta_block_declines_not_fatal() {
     );
     assert!(sys.hbb_matvec.is_none() && sys.htbeta_matvec.is_none());
 
-    match solve_arrow_newton_step(&sys, 1e-6, 1e-6) {
+    match solve_arrow_newton_step(&sys, 1e-6, 1e-6, None) {
         Err(ArrowSchurGpuFailure::GpuRequiresDenseSystem {
             had_hbb_matvec,
             had_htbeta_matvec,
@@ -78,7 +78,7 @@ fn present_dense_beta_block_is_not_declined_as_absent() {
     // Only the `Err` variants are `Debug`; match rather than format the whole
     // `Result` (the `Ok` solution type is intentionally not `Debug`).
     if let Err(ArrowSchurGpuFailure::GpuRequiresDenseSystem { .. }) =
-        solve_arrow_newton_step(&sys, 1e-6, 1e-6)
+        solve_arrow_newton_step(&sys, 1e-6, 1e-6, None)
     {
         panic!(
             "a system WITH a dense (k,k) H_ββ must not be declined as \
@@ -114,7 +114,7 @@ fn present_but_stale_hbb_with_penalty_op_declines_not_wrong_step() {
         "fixture must install penalty_op ALONE (no matvec shadow) to isolate the guard"
     );
 
-    match solve_arrow_newton_step(&sys, 1e-6, 1e-6) {
+    match solve_arrow_newton_step(&sys, 1e-6, 1e-6, None) {
         Err(ArrowSchurGpuFailure::GpuRequiresDenseSystem {
             had_hbb_matvec,
             had_htbeta_matvec,

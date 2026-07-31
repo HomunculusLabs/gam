@@ -391,7 +391,6 @@ fn k1_softmax_active_rho_gradient_matches_directional_fd_2253() {
             &rho_state,
             frozen_target.view(),
             &audit_cache,
-            &audit_solver,
             &directional_rhs,
         )
         .expect("accepted-state exact stationarity response");

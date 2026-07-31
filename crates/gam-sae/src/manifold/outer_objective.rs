@@ -1806,6 +1806,14 @@ impl SaeManifoldOuterObjective {
         self
     }
 
+    /// Record criterion work performed by an outer search, never by the
+    /// zero-step installed-state audit. Every objective order funnels through
+    /// this gate so value-only agreement checks cannot silently increment the
+    /// optimization ledger while derivative orders do not (#2653).
+    fn record_search_criterion(&mut self, cost: f64, gradient_norm: Option<f64>) -> bool {
+        !self.audit_installed_state && self.termination.record(cost, gradient_norm)
+    }
+
     /// Stamp a caller-installed state only after the shared exact-point outer
     /// certificate has passed. No search ran, so its provenance is distinct from
     /// [`Self::certify_outer_result`].
@@ -4150,7 +4158,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
                     return Ok(f64::INFINITY);
                 }
                 if self.reactive_waypoint_checkpoint.is_none()
-                    && self.termination.record(cost, None)
+                    && self.record_search_criterion(cost, None)
                 {
                     self.bank_checkpoint(rho);
                 }
@@ -4224,7 +4232,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
             if !cost.is_finite() {
                 return Ok(OuterEval::infeasible(rho.len()));
             }
-            if self.termination.record(cost, None) {
+            if self.record_search_criterion(cost, None) {
                 self.bank_checkpoint(rho);
             }
             return Ok(OuterEval {
@@ -4327,7 +4335,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
         }
         let gradient = self
             .analytic_gradient_for_outer_evaluation(&rho_state, &evaluation)
-            .map_err(|err| EstimationError::RemlOptimizationFailed(err.to_string()))?;
+            .map_err(EstimationError::from)?;
         let beta_hat = self.term.flatten_beta();
         // PATH C (#2253) — assemble the exact fixed-stratum outer Hessian from the
         // landed analytic channels. The assembler currently REFUSES (only the
@@ -4371,11 +4379,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
         // differenced value path.
         self.current_rho = rho_state;
         self.last_loss = Some(evaluation.loss);
-        if !self.audit_installed_state
-            && self
-                .termination
-                .record(cost, Some(gradient.dot(&gradient).sqrt()))
-        {
+        if self.record_search_criterion(cost, Some(gradient.dot(&gradient).sqrt())) {
             self.bank_checkpoint(rho);
         }
         Ok(OuterEval {
@@ -4464,7 +4468,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
                     return Ok(OuterEval::infeasible(rho.len()));
                 }
                 if self.reactive_waypoint_checkpoint.is_none()
-                    && self.termination.record(cost, None)
+                    && self.record_search_criterion(cost, None)
                 {
                     self.bank_checkpoint(rho);
                 }
@@ -4497,7 +4501,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
             .from_flat(rho.view())
             .map_err(EstimationError::InvalidInput)?;
         eval.cost += self.block_jacobian(&rho_state);
-        if self.termination.record(eval.cost, None) {
+        if self.record_search_criterion(eval.cost, None) {
             self.bank_checkpoint(rho);
         }
         Ok(eval)

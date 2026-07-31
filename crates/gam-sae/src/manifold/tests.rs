@@ -454,7 +454,7 @@ pub(crate) fn dictionary_incoherence_report_orthogonal_frames_has_zero_mu_hat() 
     match report.global_optimality {
         GlobalOptimalityVerdict::CertifiedGlobal { margin } => assert!(margin > 0.0),
         GlobalOptimalityVerdict::Uncertified { margin } => panic!(
-            "orthogonal frames with κ̂=0.25 and SNR>1 must certify; margin={margin}, note={}",
+            "orthogonal frames with κ̂=0.25 and SNR>1 must certify; margin={margin:?}, note={}",
             report.note
         ),
     }
@@ -473,11 +473,14 @@ pub(crate) fn dictionary_incoherence_report_circle_kappa_matches_inverse_radius(
     let mut term = circle_certificate_fixture(radius, &[(0, 1)]);
     term.set_certificate_dispersion(0.25).unwrap();
     let report = dictionary_incoherence_report(&term).unwrap();
-    assert_abs_diff_eq!(
-        report.per_atom_kappa_hat[0],
-        1.0 / radius,
-        epsilon = 1.0e-10
-    );
+    // `per_atom_kappa_hat` is now `Vec<Option<f64>>`: `None` states that the
+    // curvature bound is undefined for that atom. A circle of finite radius has
+    // a defined one, so requiring `Some` here is part of the assertion, not a
+    // formality -- a `None` would silently satisfy any comparison written to
+    // tolerate it.
+    let kappa_hat = report.per_atom_kappa_hat[0]
+        .expect("a circle fixture of finite radius has a defined per-atom curvature");
+    assert_abs_diff_eq!(kappa_hat, 1.0 / radius, epsilon = 1.0e-10);
     assert!(report.snr_proxy.is_finite() && report.snr_proxy > 0.0);
     assert_abs_diff_eq!(report.mean_activity_floor, 1.0, epsilon = 1.0e-12);
     assert_abs_diff_eq!(report.peak_activity_floor, 1.0, epsilon = 1.0e-12);
@@ -1328,6 +1331,95 @@ pub(crate) fn compact_layout_riemannian_geometry_matches_dense_on_full_support()
         any_curvature,
         "assembled compact htt is all-zero — the test data did not exercise curvature"
     );
+}
+
+/// #2653 — the filed 48-row two-circle TopK(1) fit has a 132-variable dense
+/// product chart (`48 * 2 + 36`) and an 84-variable compact arrow chart
+/// (`48 * 1 + 36`).  The analytic phase gauges must cross that boundary through
+/// the authoritative active-row map and remain a rank-two orthonormal basis.
+#[test]
+pub(crate) fn topk_joint_chart_gauges_restrict_132_to_84_with_rank_two_2653() {
+    let n = 48usize;
+    let p = 6usize;
+    let coords0 = Array2::<f64>::from_shape_fn((n, 1), |(row, _)| {
+        ((row as f64 + 0.25) / n as f64).rem_euclid(1.0)
+    });
+    let coords1 = Array2::<f64>::from_shape_fn((n, 1), |(row, _)| {
+        ((row as f64 + 0.75) / n as f64).rem_euclid(1.0)
+    });
+    let (phi0, jet0) = periodic_basis(&coords0);
+    let (phi1, jet1) = periodic_basis(&coords1);
+    let mut decoder0 = Array2::<f64>::zeros((3, p));
+    decoder0[[1, 0]] = 1.0;
+    decoder0[[2, 1]] = 0.8;
+    let mut decoder1 = Array2::<f64>::zeros((3, p));
+    decoder1[[1, 3]] = 0.9;
+    decoder1[[2, 5]] = 1.05;
+    let atom0 = SaeManifoldAtom::new_with_provided_function_gram(
+        "circle0",
+        SaeAtomBasisKind::Periodic,
+        1,
+        phi0,
+        jet0,
+        decoder0,
+        Array2::<f64>::eye(3),
+    )
+    .unwrap()
+    .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
+    let atom1 = SaeManifoldAtom::new_with_provided_function_gram(
+        "circle1",
+        SaeAtomBasisKind::Periodic,
+        1,
+        phi1,
+        jet1,
+        decoder1,
+        Array2::<f64>::eye(3),
+    )
+    .unwrap()
+    .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
+    let logits = Array2::<f64>::from_shape_fn((n, 2), |(row, atom)| {
+        if row % 2 == atom { 1.0 } else { -1.0 }
+    });
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        logits,
+        vec![coords0, coords1],
+        vec![
+            LatentManifold::Circle { period: 1.0 },
+            LatentManifold::Circle { period: 1.0 },
+        ],
+        AssignmentMode::top_k_support(1),
+    )
+    .unwrap();
+    let mut term = SaeManifoldTerm::new(vec![atom0, atom1], assignment).unwrap();
+    let target = Array2::<f64>::zeros((n, p));
+    let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::zeros(1), Array1::zeros(1)]);
+    let system = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("TopK circle system assembles");
+
+    let dense = term.dense_step_gauge_vectors().expect("dense phase gauges");
+    assert_eq!(dense.len(), 2, "one phase gauge per circle");
+    assert!(
+        dense.iter().all(|gauge| gauge.len() == 132),
+        "dense chart must be 48*2 coordinates plus 2*3*6 decoder variables"
+    );
+    assert_eq!(*system.row_offsets.last().unwrap(), 48);
+    assert_eq!(system.gb.len(), 36);
+    let compact = term
+        .joint_chart_gauge_basis_for_arrow_layout(
+            &system.row_offsets,
+            system.gb.len(),
+            "topk_joint_chart_gauges_restrict_132_to_84_with_rank_two_2653",
+        )
+        .expect("dense chart gauges map into the exact compact arrow chart");
+    assert_eq!(compact.len(), 2, "the mapped gauge span must retain rank two");
+    assert!(compact.iter().all(|gauge| gauge.len() == 84));
+    for i in 0..compact.len() {
+        for j in 0..compact.len() {
+            let expected = if i == j { 1.0 } else { 0.0 };
+            assert_abs_diff_eq!(compact[i].dot(&compact[j]), expected, epsilon = 1.0e-12);
+        }
+    }
 }
 
 /// #2295 — a compact mixed-dimensional row must preserve every ambient axis.
@@ -4258,21 +4350,32 @@ fn solve_exact_stationarity_is_self_adjoint_2080() {
     let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
     let (_delta_t, _delta_beta, cache) =
         solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options).unwrap();
-    let solver = DeflatedArrowSolver::plain(&cache);
-
     let n_params = rho.to_flat().len();
     assert!(n_params >= 2, "fixture must expose ≥2 outer coordinates");
     // Two production IFT right-hand sides (the sparse coordinate and the smooth
     // coordinate), so the test exercises A⁺ on genuine, distinct arrow vectors.
-    let u = term.outer_rho_gradient_ift_rhs(&rho, 0, &cache).unwrap();
-    let v = term
+    let mut u = term.outer_rho_gradient_ift_rhs(&rho, 0, &cache).unwrap();
+    let mut v = term
         .outer_rho_gradient_ift_rhs(&rho, n_params - 1, &cache)
         .unwrap();
+    // Add deterministic physical probes to the two production RHS values.  A
+    // structural outer channel can lie entirely in the declared chart/null
+    // quotient at one fixture state; self-adjointness is an operator identity,
+    // so the test must not become vacuous merely because that particular RHS
+    // projects to zero.
+    for index in 0..u.t.len() {
+        u.t[index] += ((index as f64 + 1.0) * 0.37).sin();
+        v.t[index] += ((index as f64 + 2.0) * 0.29).cos();
+    }
+    for index in 0..u.beta.len() {
+        u.beta[index] += ((index as f64 + 3.0) * 0.23).cos();
+        v.beta[index] += ((index as f64 + 4.0) * 0.31).sin();
+    }
     let a_u = term
-        .solve_exact_stationarity(&rho, target.view(), &cache, &solver, &u)
+        .solve_exact_stationarity(&rho, target.view(), &cache, &u)
         .unwrap();
     let a_v = term
-        .solve_exact_stationarity(&rho, target.view(), &cache, &solver, &v)
+        .solve_exact_stationarity(&rho, target.view(), &cache, &v)
         .unwrap();
     // ⟨A⁺u, v⟩ vs ⟨u, A⁺v⟩ (pub arrow-vector fields; no type import needed).
     let lhs = a_u
@@ -4303,10 +4406,15 @@ fn solve_exact_stationarity_is_self_adjoint_2080() {
         "solve_exact_stationarity must be self-adjoint (the #2080(A) single-adjoint \
          IFT identity): ⟨A⁺u,v⟩={lhs} vs ⟨u,A⁺v⟩={rhs}"
     );
-    // Non-vacuity: the cross term must be a genuine, resolvable, finite contribution.
+    // Non-vacuity: at least one projected response must be genuinely resolved.
+    let response_norm_sq = a_u.t.dot(&a_u.t)
+        + a_u.beta.dot(&a_u.beta)
+        + a_v.t.dot(&a_v.t)
+        + a_v.beta.dot(&a_v.beta);
     assert!(
-        scale > 1.0 && lhs.is_finite() && rhs.is_finite(),
-        "self-adjoint pin must be non-trivial and finite: lhs={lhs} rhs={rhs}"
+        response_norm_sq.is_finite() && response_norm_sq.sqrt() > f64::EPSILON.sqrt(),
+        "self-adjoint pin must have a non-trivial finite quotient response: \
+         lhs={lhs} rhs={rhs} response_norm_sq={response_norm_sq}"
     );
 }
 

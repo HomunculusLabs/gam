@@ -1,5 +1,3 @@
-use crate::manifold::tests::gamma_fd_tiny_fixture;
-
 #[cfg(test)]
 mod exact_hessian_fixture_tests {
     use super::*;
@@ -974,7 +972,7 @@ mod amortized_encoder_tests {
                 }
             };
             let a = t
-                .solve_exact_stationarity(&r, target.view(), &cache, &solver, &gamma)
+                .solve_exact_stationarity(&r, target.view(), &cache, &gamma)
                 .unwrap();
             let g_rho = t.outer_rho_gradient_ift_rhs(&r, j, &cache).unwrap();
             let dot: f64 = a.t.dot(&g_rho.t) + a.beta.dot(&g_rho.beta);
@@ -1015,7 +1013,7 @@ mod amortized_encoder_tests {
     #[test]
     fn third_order_ift_deflation_residual_2330() {
         use crate::manifold::arrow_solver::{
-            DeflatedArrowSolver, SaeArrowVector, apply_cached_arrow_hessian,
+            SaeArrowVector, apply_cached_arrow_hessian,
         };
         use ndarray::array;
         let (mut term, target, rho, _stationary_cache) =
@@ -1045,7 +1043,6 @@ mod amortized_encoder_tests {
                 .any(|dirs| !dirs.is_empty()),
             "IFT residual arbiter requires per-row deflation to be present"
         );
-        let solver = DeflatedArrowSolver::plain(&cache);
         let norm = |v: &SaeArrowVector| (v.t.dot(&v.t) + v.beta.dot(&v.beta)).sqrt();
         let smooth0 = rho.smooth_flat_index(0);
         let ard0 = rho.ard_flat_index(0, 0);
@@ -1054,7 +1051,7 @@ mod amortized_encoder_tests {
                 .outer_rho_gradient_ift_rhs(&rho, j, &cache)
                 .expect("ift rhs");
             let x = term
-                .solve_exact_stationarity(&rho, target.view(), &cache, &solver, &g_rho)
+                .solve_exact_stationarity(&rho, target.view(), &cache, &g_rho)
                 .expect("A+ g_rho");
             let hx = apply_cached_arrow_hessian(&cache, x.t.view(), x.beta.view()).expect("H x");
             let dc = term
@@ -1157,7 +1154,7 @@ mod amortized_encoder_tests {
             gamma_eff.beta.scaled_add(2.0, &rc.theta.beta);
         }
         let a = term
-            .solve_exact_stationarity(&rho, target.view(), &cache, &solver, &gamma_eff)
+            .solve_exact_stationarity(&rho, target.view(), &cache, &gamma_eff)
             .expect("a = A+ Gamma");
         let a_flat = flatten(&a);
         let m_ops = term
@@ -1182,7 +1179,7 @@ mod amortized_encoder_tests {
                 .outer_rho_gradient_ift_rhs(&rho, i, &cache)
                 .expect("ift rhs");
             let b = term
-                .solve_exact_stationarity(&rho, target.view(), &cache, &solver, &g_rho)
+                .solve_exact_stationarity(&rho, target.view(), &cache, &g_rho)
                 .expect("b_j");
             b_flat.push(flatten(&b));
             let mut da = m_ops[&i].dot(&a_flat);
@@ -1839,7 +1836,6 @@ mod softmax_majorizer_active_entry_1410_tests {
 #[cfg(test)]
 mod exact_stationarity_solve_1418_tests {
     use super::*;
-    use crate::manifold::tests::diagonal_latent_cache;
     use approx::assert_abs_diff_eq;
     use ndarray::Array1;
 
@@ -1860,7 +1856,41 @@ mod exact_stationarity_solve_1418_tests {
             t: &ax.t - &rhs.t,
             beta: &ax.beta - &rhs.beta,
         };
-        sae_norm(&resid)
+        let gauges = term
+            .exact_joint_chart_gauge_basis(cache)
+            .expect("analytic chart-gauge basis");
+        let physical = SaeManifoldTerm::project_arrow_vector_away_from_chart_gauges(
+            &resid,
+            &gauges,
+        )
+        .expect("quotient residual projection");
+        sae_norm(&physical)
+    }
+
+    /// #2653: the dense owner is a signed Moore--Penrose solve, not an SPD
+    /// inverse and not a projected-residual proxy. A resolved negative mode is
+    /// retained, the declared quotient null is removed, and the physical
+    /// operator certifies the resulting response.
+    #[test]
+    fn dense_exact_stationarity_pseudoinverse_keeps_signed_range_and_drops_null_2653() {
+        let eigenvalues = Array1::from_vec(vec![4.0_f64, 1.0e-12, -2.0]);
+        let geometry = ExactHessianSpectralBlock {
+            operator: Array2::from_diag(&eigenvalues),
+            eigenvalues,
+            eigenvectors: Array2::from_diag(&Array1::ones(3)),
+            gauge_basis: Vec::new(),
+            rank_floor: 1.0e-9,
+        };
+        let rhs = SaeArrowVector {
+            t: Array1::from_vec(vec![8.0, 3.0]),
+            beta: Array1::from_vec(vec![6.0]),
+        };
+        let solved = geometry
+            .solve_stationarity(&rhs)
+            .expect("rank-revealing dense exact-stationarity solve");
+        assert_abs_diff_eq!(solved.t[0], 2.0, epsilon = 1.0e-14);
+        assert_abs_diff_eq!(solved.t[1], 0.0, epsilon = 1.0e-14);
+        assert_abs_diff_eq!(solved.beta[0], -3.0, epsilon = 1.0e-14);
     }
 
     /// `solve_exact_stationarity` returns the EXACT solve of `A x = rhs` (small
@@ -1886,7 +1916,7 @@ mod exact_stationarity_solve_1418_tests {
 
         // Exact A-solve via the #1418 path.
         let x = term
-            .solve_exact_stationarity(&rho, target.view(), &cache, &solver, &rhs)
+            .solve_exact_stationarity(&rho, target.view(), &cache, &rhs)
             .expect("exact stationarity solve");
         let exact_resid = a_residual_norm(&term, &rho, target.view(), &cache, &x, &rhs);
 
@@ -1896,7 +1926,9 @@ mod exact_stationarity_solve_1418_tests {
             .expect("B inverse");
         let surrogate_resid = a_residual_norm(&term, &rho, target.view(), &cache, &x_b, &rhs);
 
-        // 1) The exact solve drives the A-residual to ~0.
+        // 1) The exact solve drives the PHYSICAL quotient residual
+        //    `P(Ax-rhs)` to ~0.  The raw residual may retain the analytically
+        //    declared chart-gauge component of an arbitrary test RHS.
         assert!(
             exact_resid <= 1.0e-6 * rhs_norm,
             "solve_exact_stationarity must invert the EXACT A: ‖A x − rhs‖/‖rhs‖ = {:.3e} \
@@ -1922,205 +1954,6 @@ mod exact_stationarity_solve_1418_tests {
         );
     }
 
-    /// #2253 production-wiring regression: the operator-generic core used by
-    /// `solve_exact_stationarity` must install the solver's closed-form gauge
-    /// stiffness on BOTH raw operators and invert `A_Q = A + κQQᵀ`, not raw
-    /// `A`. Deterministic diagonal `A` and `B` isolate that production seam from
-    /// stochastic inner fitting and its unrelated dictionary-collapse guards.
-    #[test]
-    fn solve_exact_stationarity_uses_solver_gauge_fix_2253() {
-        // B=diag(2,5), A=diag(3,7), q=e0, κ=5. The raw pencil is healthy, and
-        // the quotient pencil is A_Q=diag(8,7), B_Q=diag(7,5). A gauge-bearing
-        // rhs makes the solution of A_Q observably different from raw A⁻¹rhs.
-        let cache = diagonal_latent_cache(&[2.0_f64, 5.0]);
-        let gauge = Array1::from_vec(vec![1.0_f64, 0.0]);
-        let stiffness = 5.0;
-        let solver = DeflatedArrowSolver::from_orthonormal_gauges(&cache, vec![gauge], stiffness)
-            .expect("gauge-fixed exact-stationarity preconditioner");
-        let rhs = SaeArrowVector {
-            t: Array1::from_vec(vec![4.0_f64, 6.0]),
-            beta: Array1::zeros(0),
-        };
-        let apply_raw_a = |v: &SaeArrowVector| -> Result<SaeArrowVector, String> {
-            Ok(SaeArrowVector {
-                t: Array1::from_vec(vec![3.0 * v.t[0], 7.0 * v.t[1]]),
-                beta: Array1::zeros(0),
-            })
-        };
-        let apply_raw_b = |v: &SaeArrowVector| -> Result<SaeArrowVector, String> {
-            Ok(SaeArrowVector {
-                t: Array1::from_vec(vec![2.0 * v.t[0], 5.0 * v.t[1]]),
-                beta: Array1::zeros(0),
-            })
-        };
-
-        let solved =
-            solve_exact_stationarity_on_gauge_quotient(&solver, &rhs, &apply_raw_a, &apply_raw_b)
-                .expect("gauge-fixed exact stationarity solve");
-        let raw_ax = apply_raw_a(&solved).expect("raw A apply");
-        let raw_residual = SaeArrowVector {
-            t: &raw_ax.t - &rhs.t,
-            beta: &raw_ax.beta - &rhs.beta,
-        };
-        let mut gauge_fixed_ax = raw_ax;
-        solver
-            .add_gauge_stiffness(&solved, &mut gauge_fixed_ax)
-            .expect("κQQᵀ action");
-        let gauge_fixed_residual = SaeArrowVector {
-            t: &gauge_fixed_ax.t - &rhs.t,
-            beta: &gauge_fixed_ax.beta - &rhs.beta,
-        };
-        let rhs_norm = sae_norm(&rhs).max(1.0);
-        let fixed_norm = sae_norm(&gauge_fixed_residual);
-        let raw_norm = sae_norm(&raw_residual);
-        assert!(
-            fixed_norm <= 1.0e-6 * rhs_norm,
-            "solve_exact_stationarity must solve the gauge-fixed A_Q system: \
-             ‖A_Qx-rhs‖/‖rhs‖={:.3e}",
-            fixed_norm / rhs_norm
-        );
-        assert!(
-            raw_norm >= 1.0e-3 * rhs_norm,
-            "test must distinguish A_Q from raw A: raw residual was only {:.3e}",
-            raw_norm / rhs_norm
-        );
-    }
-
-    /// #2253: a near-zero Rayleigh quotient of the complete response is not by
-    /// itself a numerical null. Resolved positive and negative pencil components
-    /// can cancel exactly. The inverse-power discriminator must recognize the
-    /// resolved negative direction and keep the full finite response.
-    #[test]
-    fn ift_solve_keeps_resolved_indefinite_rayleigh_cancellation_2253() {
-        // B=I, A=diag(-1/2, 2), x=(2,1), rhs=A x=(-1,2). Although
-        // x^T A x = 0 exactly, both pencil eigenvalues are far above the
-        // sqrt(epsilon) identifiability floor in magnitude.
-        let cache = diagonal_latent_cache(&[1.0_f64, 1.0]);
-        let solver = DeflatedArrowSolver::plain(&cache);
-        let rhs = SaeArrowVector {
-            t: Array1::from_vec(vec![-1.0_f64, 2.0]),
-            beta: Array1::zeros(0),
-        };
-        let apply_raw_a = |v: &SaeArrowVector| -> Result<SaeArrowVector, String> {
-            Ok(SaeArrowVector {
-                t: Array1::from_vec(vec![-0.5 * v.t[0], 2.0 * v.t[1]]),
-                beta: Array1::zeros(0),
-            })
-        };
-        let apply_raw_b = |v: &SaeArrowVector| -> Result<SaeArrowVector, String> { Ok(v.clone()) };
-
-        let solved =
-            solve_exact_stationarity_on_gauge_quotient(&solver, &rhs, &apply_raw_a, &apply_raw_b)
-                .expect("resolved indefinite response");
-        assert_abs_diff_eq!(solved.t[0], 2.0, epsilon = 1.0e-10);
-        assert_abs_diff_eq!(solved.t[1], 1.0, epsilon = 1.0e-10);
-    }
-
-    /// #2080 defect 4 — with a SATURATED gate logit, the exact stationarity
-    /// Jacobian `A` develops a near-null pencil direction (data curvature
-    /// `∝ σ'(ℓ)² ≈ 0` against an O(1) majorizer entry in `B`), and the raw
-    /// GMRES solve of `A x = rhs` amplifies any rhs mass there by `1/μ` —
-    /// the objective↔gradient desync class (#931) that flipped the analytic
-    /// λ-gradient's sign. `solve_exact_stationarity` must DEFLATE it: the
-    /// returned solution's generalized Rayleigh quotient `xᵀAx/xᵀBx` must sit
-    /// at or above the identifiability floor. Non-vacuity is asserted first:
-    /// the UNDEFLATED solve must actually collapse below the floor on this
-    /// fixture, so the test can only pass through genuine deflation.
-    #[test]
-    fn ift_solve_deflates_saturated_gate_near_null_direction_2080() {
-        let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
-        term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, false);
-        // Saturate atom 1's gate logits hard OFF: σ'(−40)² ≈ 1e-35 kills the
-        // data curvature along those logit coordinates while the assembled
-        // majorizer keeps an O(1) diagonal there.
-        for row in 0..term.n_obs() {
-            term.assignment.logits[[row, 1]] = -40.0;
-        }
-        rho.log_lambda_sparse = -1.0;
-        let (_value, _loss, cache) = term
-            .penalized_quasi_laplace_criterion_with_cache(
-                target.view(),
-                &rho,
-                None,
-                40,
-                0.4,
-                1.0e-6,
-                1.0e-6,
-            )
-            .expect("converged saturated-gate ordered Beta--Bernoulli cache");
-        let solver = DeflatedArrowSolver::plain(&cache);
-
-        // Deterministic rhs with mass on every coordinate (including the
-        // saturated logit slots).
-        let total_t = cache.delta_t_len();
-        let rhs = SaeArrowVector {
-            t: Array1::from_shape_fn(total_t, |i| 0.3 + 0.1 * ((i % 5) as f64) - 0.02 * i as f64),
-            beta: Array1::from_shape_fn(cache.k, |j| 0.2 - 0.05 * ((j % 3) as f64)),
-        };
-
-        let pencil_mu = |x: &SaeArrowVector| -> f64 {
-            let ax = term
-                .apply_exact_hessian(&rho, target.view(), &cache, x)
-                .expect("A matvec");
-            let bx =
-                apply_cached_arrow_hessian(&cache, x.t.view(), x.beta.view()).expect("B matvec");
-            sae_inner(x, &ax) / sae_inner(x, &bx)
-        };
-
-        // Non-vacuity: the raw (undeflated) exact solve is dominated by the
-        // saturated near-null direction.
-        let raw = solve_b_preconditioned_gmres_with(
-            &rhs,
-            |v| term.apply_exact_hessian(&rho, target.view(), &cache, v),
-            |vector| solver.solve(vector.t.view(), vector.beta.view()),
-        )
-        .expect("raw exact solve");
-        let raw_mu = pencil_mu(&raw);
-        assert!(
-            raw_mu > 0.0,
-            "fixture must be a stable near-null minimum, not a negative-curvature \
-             stationary point: raw pencil Rayleigh {raw_mu:.3e}"
-        );
-        assert!(
-            raw_mu < sae_ift_min_curvature_fraction(),
-            "fixture must exercise the defect: raw solve pencil Rayleigh {raw_mu:.3e} \
-             should collapse below the {:.1e} floor \
-             (saturated gate produced no near-null direction — strengthen the fixture)",
-            sae_ift_min_curvature_fraction()
-        );
-
-        // The production solve deflates: identifiable-curvature fraction is
-        // restored at or above the floor, and the solution is finite.
-        let deflated = term
-            .solve_exact_stationarity(&rho, target.view(), &cache, &solver, &rhs)
-            .expect("deflated exact stationarity solve");
-        assert!(
-            deflated
-                .t
-                .iter()
-                .chain(deflated.beta.iter())
-                .all(|v| v.is_finite()),
-            "deflated IFT solution must be finite"
-        );
-        let deflated_mu = pencil_mu(&deflated);
-        assert!(
-            deflated_mu >= sae_ift_min_curvature_fraction(),
-            "deflated solve must remove the unidentifiable component: pencil Rayleigh \
-             {deflated_mu:.3e} still below the {:.1e} floor",
-            sae_ift_min_curvature_fraction()
-        );
-        // Deflation only removes, never adds: the deflated solution is no
-        // larger than the raw one in the B-metric.
-        let b_norm = |x: &SaeArrowVector| -> f64 {
-            let bx =
-                apply_cached_arrow_hessian(&cache, x.t.view(), x.beta.view()).expect("B matvec");
-            sae_inner(x, &bx).max(0.0).sqrt()
-        };
-        assert!(
-            b_norm(&deflated) <= b_norm(&raw) * (1.0 + 1.0e-8),
-            "deflation must be a projection (B-norm non-increasing)"
-        );
-    }
 }
 
 /// Validates the matrix-free Hutchinson stochastic-trace estimator that replaces
