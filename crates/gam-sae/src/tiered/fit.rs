@@ -60,6 +60,9 @@ use crate::sparse_dict::{
     fit_block_sparse_dictionary_with_seed, reconstruct_block_sparse_rows,
 };
 use crate::tiered::Tier0Mean;
+use crate::tiered::code_space::{
+    CodeSpacePromotionReport, harvest_code_space_promotions, linear_distortion_floor,
+};
 
 /// Serial farthest-point block seed budget in element-ops (`N·P·G·b`). Above this
 /// the `O(N·P·K)` corpus pass dominates the whole Tier-1 fit (measured to be the
@@ -502,6 +505,12 @@ pub struct TieredFitReport {
     /// Tier-2 curved support-sparse refinement on the Tier-1 residual (`None`
     /// when Tier-2 disabled).
     pub tier2: Option<Tier2SupportFit>,
+    /// The code-space curvature census: every Tier-1 block adjudicated as a
+    /// linear community for curved replacement, in bits, on its CODE cloud —
+    /// the substrate where in-span curvature is visible after the linear tier
+    /// reconstructs it exactly (the residual substrate is blind to that move by
+    /// construction; see [`crate::tiered::code_space`]).
+    pub code_space: CodeSpacePromotionReport,
     /// Unified migration ledger of the adjudicated births / deaths / refusals.
     pub ledger: SaeMigrationLedger,
     /// Final composed explained variance (`1 − RSS/TSS` vs the Tier-0 mean).
@@ -559,6 +568,42 @@ pub fn fit_tiered(
         );
     }
 
+    // Code-space curvature census: adjudicate every Tier-1 block's CODE cloud
+    // for curved replacement, in bits, BEFORE the residual tier runs. In-span
+    // curvature (a ring two linear atoms reconstruct exactly) leaves the
+    // residual identically zero, so this pass is the only tier substrate with
+    // power against it; the distortion floor and L0 are measured off the fit.
+    let tolerance = linear_distortion_floor(peel.residual.view(), peel.baseline_energy)?;
+    let code_space = harvest_code_space_promotions(&peel.tier1, z.nrows(), tolerance)?;
+    let census_proposals = code_space.proposals.iter().chain(
+        code_space
+            .pair_proposals
+            .iter()
+            .map(|(_a, _b, proposal)| proposal),
+    );
+    for proposal in census_proposals {
+        let evidence = MoveEvidence::from_dl_bits(proposal.dl_old - proposal.dl_new);
+        if proposal.accept {
+            ledger.birth(
+                MoveStage::Curved,
+                BirthSeed::LinearAtom,
+                1,
+                None,
+                evidence,
+                proposal.dl_new,
+            );
+        } else {
+            ledger.refuse(
+                MoveStage::Curved,
+                MoveReason::EvidenceInsufficient,
+                1,
+                None,
+                evidence,
+                proposal.dl_new,
+            );
+        }
+    }
+
     // Tier 2: curved support-sparse refinement on the Tier-1 residual, or the
     // linear-bulk baseline.
     let (tier2, explained_variance) = if config.tier2_enabled {
@@ -574,6 +619,7 @@ pub fn fit_tiered(
         tier0: peel.tier0,
         tier1: peel.tier1,
         tier2,
+        code_space,
         ledger,
         explained_variance,
     })
@@ -1223,6 +1269,70 @@ mod fit_tests {
             report.explained_variance,
             ev_lin
         );
+    }
+
+    /// The census the residual substrate cannot run: a planted circle that ONE
+    /// Tier-1 block (`b=2`) reconstructs EXACTLY leaves a zero block residual,
+    /// so no residual-mining tier can ever see it — yet the code-space census
+    /// discovers the ring in the block's code cloud. At this fixture's width the
+    /// dictionary is NOT overcomplete (`G = L0`), so the support dividend that
+    /// funds a circle's promotion is zero and the prescreen must DEFER: the
+    /// honest end-to-end behavior is recognition + a recorded refusal, never a
+    /// birth bought with no compression to pay for it (the acceptance arm lives
+    /// in the overcomplete hand-minted census tests). This is the #2502 in-span
+    /// curvature move wired end to end from `fit_tiered`.
+    #[test]
+    fn code_space_census_recognizes_and_defers_a_zero_residual_planted_ring() {
+        use std::f64::consts::TAU;
+        // A pure circle in cols 0,1 of P=4; evenly spaced phases for full
+        // ring coverage. Cols 2,3 carry nothing, so one b=2 block spans the
+        // corpus exactly and the post-Tier-1 residual is numerically zero.
+        let n = 96usize;
+        let mut z = Array2::<f64>::zeros((n, 4));
+        for i in 0..n {
+            let theta = TAU * (i as f64) / (n as f64);
+            z[[i, 0]] = theta.cos();
+            z[[i, 1]] = theta.sin();
+        }
+        let mut config = TieredFitConfig::linear_bulk(1, 2);
+        config.tier1.block_topk = 1;
+        config.tier1.max_epochs = 200;
+        let report = fit_tiered(z.view(), &config).expect("single-block tiered fit runs");
+
+        let census = &report.code_space;
+        assert_eq!(census.n_blocks_scanned, 1);
+        assert_eq!(
+            census.n_communities, 1,
+            "the fired 2-atom block must reach the adjudicator"
+        );
+        let proposal = &census.proposals[0];
+        // Recognition: the ring geometry is seen (span ≈ 2, ring screens pass)
+        // and the ATOMIC ledger genuinely prefers the curved chart …
+        assert!(
+            proposal.verdict.recommend_curl,
+            "the census must recognize the planted ring geometrically: {proposal:?}"
+        );
+        assert!(
+            proposal.dl_new < proposal.dl_old,
+            "the atomic ledger must prefer the circle (dl_new={}, dl_old={})",
+            proposal.dl_new,
+            proposal.dl_old
+        );
+        // … but at G = L0 the support dividend is zero, so the conservative
+        // prescreen defers rather than buys the wider harmonic decoder.
+        assert!(
+            proposal.crossover_prescreen_bits <= 0.0,
+            "with no overcompleteness the prescreen cannot pay: {}",
+            proposal.crossover_prescreen_bits
+        );
+        assert_eq!(census.n_accepted, 0, "deferred, not bought");
+        // Ledger provenance: the deferral is a recorded Curved REFUSAL; no birth.
+        assert_eq!(report.ledger.n_births, 0);
+        assert!(
+            report.ledger.n_refusals >= 1,
+            "the ledger must record the deferred promotion"
+        );
+        assert_eq!(report.ledger.pc_reseed_events, 0);
     }
 
     /// `TieredSeedPolicy::Auto` keeps the data-aware farthest-point seed at small

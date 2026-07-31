@@ -56,7 +56,12 @@
 //! scale-out (one K=1 curved chart per orthonormal Tier-1 block) consumes the
 //! block frames on the block-sparse fit directly; see `sparse_dict::block`.
 
+mod code_space;
 mod fit;
+pub use code_space::{
+    CodeSpacePromotionReport, harvest_code_space_pair_promotions, harvest_code_space_promotions,
+    linear_distortion_floor,
+};
 pub use fit::{
     LinearPeel, LinearPeelConfig, LinearPeelState, TieredFitConfig, TieredFitReport,
     TieredSeedPolicy, fit_tiered,
