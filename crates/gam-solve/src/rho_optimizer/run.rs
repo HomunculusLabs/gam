@@ -73,20 +73,20 @@ pub(crate) fn install_matching_initial_inner_seed(
     Ok(())
 }
 
-/// Hold terminal evidence at full inner-solve fidelity.
+/// Temporarily require a complete inner solve.
 ///
-/// Search-time REML evaluations may deliberately cap P-IRLS.  A terminal
-/// certificate or final state installation is a different operation: it must
-/// run with the cap lifted, then restore the scheduler's value after the
-/// operation completes.  The objective reset performed by the callers clears
-/// any evaluation/P-IRLS entries created under the search state before the
-/// full-fidelity request is made.
-pub(crate) struct TerminalInnerCapGuard<'a> {
+/// Search-time REML evaluations may deliberately cap P-IRLS, but a sample
+/// used as mathematical evidence about the true profiled objective cannot.
+/// Seed samples, terminal certificates, and final state installation therefore
+/// lift the cap for the duration of their evaluation and restore the scheduler's
+/// value afterward. Callers that may hold capped cached state reset the
+/// objective before making the full-fidelity request.
+pub(crate) struct FullFidelityInnerCapGuard<'a> {
     cap: &'a AtomicUsize,
     previous: usize,
 }
 
-impl<'a> TerminalInnerCapGuard<'a> {
+impl<'a> FullFidelityInnerCapGuard<'a> {
     pub(crate) fn lift(feedback: &'a InnerProgressFeedback) -> Self {
         let cap = feedback.cap.as_ref();
         let previous = cap.swap(0, Ordering::Relaxed);
@@ -94,7 +94,7 @@ impl<'a> TerminalInnerCapGuard<'a> {
     }
 }
 
-impl Drop for TerminalInnerCapGuard<'_> {
+impl Drop for FullFidelityInnerCapGuard<'_> {
     fn drop(&mut self) {
         self.cap.store(self.previous, Ordering::Relaxed);
     }
@@ -3144,7 +3144,7 @@ pub(crate) fn certify_outer_optimality_with_fidelity(
     let terminal_cap_guard = config
         .outer_inner_cap
         .as_ref()
-        .map(TerminalInnerCapGuard::lift);
+        .map(FullFidelityInnerCapGuard::lift);
     if terminal_cap_guard.is_some() || obj.owns_terminal_coefficient_mode() {
         // `reset` is deliberately conditional on the presence of the cap
         // contract.  Those are the REML/mixture objectives whose search cache
@@ -6308,7 +6308,7 @@ pub(crate) fn compute_rho_uncertainty_diagnostic(
     let terminal_cap_guard = config
         .outer_inner_cap
         .as_ref()
-        .map(TerminalInnerCapGuard::lift);
+        .map(FullFidelityInnerCapGuard::lift);
     // Do not reset here. The diagnostic intentionally runs before terminal
     // installation and certification; the certificate must remain the final
     // owner of objective state. Holding cap=0 ensures proposal evaluations use
@@ -6650,7 +6650,7 @@ pub(crate) fn run_outer(
         let terminal_cap_guard = config
             .outer_inner_cap
             .as_ref()
-            .map(TerminalInnerCapGuard::lift);
+            .map(FullFidelityInnerCapGuard::lift);
         // Reset is conditional on the cap contract, mirroring
         // `certify_outer_optimality`'s own doctrine: REML/mixture
         // objectives with a cap can hold a coarse search cache that must
