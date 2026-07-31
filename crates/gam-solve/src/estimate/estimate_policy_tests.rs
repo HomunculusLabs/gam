@@ -1829,6 +1829,48 @@ fn beta_precision_anchor_fixture() -> (Array1<f64>, Array1<f64>, Array2<f64>, Re
 }
 
 #[test]
+fn cubature_pirls_uses_lambda_search_frozen_beta_precision_2632() {
+    // Sigma-point fits are evaluations of the same profiled criterion as the
+    // production lambda search. They must therefore inherit its frozen
+    // likelihood nuisance parameter instead of silently re-profiling phi from
+    // each off-trajectory point's seed eta.
+    let (y, w, x, cfg) = beta_precision_anchor_fixture();
+    let state = beta_precision_anchor_state(&y, &w, &x, &cfg);
+    let frozen_phi = 11.0_f64;
+    state
+        .frozen_beta_phi
+        .store(frozen_phi.to_bits(), Ordering::Relaxed);
+
+    let result = state
+        .execute_pirls_stateless_for_cubature(&array![0.0], None)
+        .expect("the Beta cubature sigma-point fit must converge");
+    let (realized_phi, estimated) = match result
+        .likelihood
+        .resolved_scale()
+        .expect("the cubature result must retain valid Beta scale metadata")
+    {
+        gam_problem::ResolvedLikelihoodScale::BetaPrecision {
+            precision,
+            estimated,
+        } => (precision, estimated),
+        other => panic!("expected Beta precision after cubature PIRLS, got {other:?}"),
+    };
+
+    assert!(
+        !estimated,
+        "cubature PIRLS re-enabled Beta-precision estimation instead of using \
+         the lambda-search freeze (#2632)"
+    );
+    assert_eq!(
+        realized_phi.value().to_bits(),
+        frozen_phi.to_bits(),
+        "cubature PIRLS changed the lambda-search-frozen Beta precision: \
+         expected {frozen_phi:.17e}, got {:.17e}",
+        realized_phi.value()
+    );
+}
+
+#[test]
 fn lambda_search_nuisance_freeze_is_a_function_of_data_and_spec_alone_2363() {
     // #2363. The λ-search holds the estimated nuisance ψ fixed so that
     // `F(ρ) = REML(ρ, ψ)` is stationary in ρ (#1074 / #1477 / #2369). Which

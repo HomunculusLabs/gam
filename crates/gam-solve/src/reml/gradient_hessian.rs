@@ -8351,6 +8351,23 @@ impl<'a> RemlState<'a> {
             "frozen Gamma shape",
             |likelihood, value| likelihood.with_gamma_shape_frozen_for_search(value),
         )?;
+        // Beta precision is part of the same λ-search-frozen likelihood scale
+        // contract as NB, Tweedie, and Gamma (#2369). Cubature evaluates that
+        // same profiled criterion off-trajectory, so it must not re-profile φ
+        // independently at every sigma point (#2632).
+        apply_frozen_search_scale(
+            &mut pirls_config.likelihood,
+            matches!(
+                resolved_likelihood_scale,
+                gam_problem::ResolvedLikelihoodScale::BetaPrecision {
+                    estimated: true,
+                    ..
+                }
+            ),
+            self.frozen_beta_phi.load(Ordering::Relaxed),
+            "frozen Beta precision",
+            |likelihood, value| likelihood.with_beta_phi_frozen_for_search(value),
+        )?;
 
         // Gaussian + Identity outer REML reuses a precomputed XᵀWX and
         // XᵀW(y − offset) across every inner solve; for other families /
