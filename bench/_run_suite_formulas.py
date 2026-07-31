@@ -395,7 +395,7 @@ def _emit_joint_pc_term(
             # `bs="ds"` reference is the scale-free Duchon estimator, so a
             # matched benchmark must leave that hybrid parameter absent.
             return (
-                f"duchon({cols}, centers={knot_count}"
+                f"duchon({cols}, rank={knot_count}"
                 f"{_rust_duchon_options_for_dimension(len(pc_cols))})"
             )
         if pc_basis == "matern":
@@ -458,7 +458,7 @@ def _rust_joint_spatial_term(basis: str, smooth_cols: list[str], knot_count: int
     if basis in {"thinplate", "tps"}:
         return f"thinplate({cols}, centers={knot_count}{dp_opt})"
     if basis == "duchon":
-        return f"duchon({cols}, centers={knot_count}{_rust_duchon_options_for_dimension(len(smooth_cols))})"
+        return f"duchon({cols}, rank={knot_count}{_rust_duchon_options_for_dimension(len(smooth_cols))})"
     if basis == "matern":
         return f"matern({cols}, centers={knot_count}{dp_opt})"
     raise RuntimeError(f"Unsupported joint Rust spatial basis '{basis}'")

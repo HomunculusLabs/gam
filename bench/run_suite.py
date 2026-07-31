@@ -108,6 +108,9 @@ else:
 ROOT = Path(__file__).resolve().parent.parent
 BENCH_DIR = ROOT / "bench"
 DEFAULT_SCENARIOS = BENCH_DIR / "scenarios.json"
+PREDICTION_TIMING_MIN_REPETITIONS = 3
+PREDICTION_TIMING_MAX_REPETITIONS = 9
+PREDICTION_TIMING_TARGET_SECONDS = 1.0
 DATASET_DIR = BENCH_DIR / "datasets"
 
 
@@ -184,19 +187,181 @@ def _sigma_float_list(values: typing.Any) -> list[float]:
     return arr.reshape(-1).tolist()
 
 
+def _prediction_column_array(prediction: typing.Any, column: str) -> np.ndarray:
+    """Extract one numeric column from any public gamfit prediction container."""
+
+    if isinstance(prediction, dict):
+        if column not in prediction:
+            raise RuntimeError(f"gamfit prediction mapping has no {column!r} column")
+        return np.asarray(prediction[column], dtype=float).reshape(-1)
+    columns = getattr(prediction, "columns", None)
+    if columns is not None:
+        if column not in columns:
+            raise RuntimeError(f"gamfit prediction table has no {column!r} column")
+        return np.asarray(prediction[column], dtype=float).reshape(-1)
+    if column != "mean":
+        raise RuntimeError(
+            f"array-like gamfit prediction cannot expose diagnostic column {column!r}"
+        )
+    return np.asarray(prediction, dtype=float).reshape(-1)
+
+
 def _prediction_mean_array(prediction: typing.Any) -> np.ndarray:
     """Extract the response mean from any public gamfit prediction container."""
 
-    if isinstance(prediction, dict):
-        if "mean" not in prediction:
-            raise RuntimeError("gamfit prediction mapping has no 'mean' column")
-        return np.asarray(prediction["mean"], dtype=float).reshape(-1)
-    columns = getattr(prediction, "columns", None)
-    if columns is not None:
-        if "mean" not in columns:
-            raise RuntimeError("gamfit prediction table has no 'mean' column")
-        return np.asarray(prediction["mean"], dtype=float).reshape(-1)
-    return np.asarray(prediction, dtype=float).reshape(-1)
+    return _prediction_column_array(prediction, "mean")
+
+
+def _nested_payload_values(value: typing.Any, key: str) -> list[typing.Any]:
+    """Collect values for one key from a JSON model payload."""
+
+    found: list[typing.Any] = []
+    if isinstance(value, dict):
+        if key in value:
+            found.append(value[key])
+        for child in value.values():
+            found.extend(_nested_payload_values(child, key))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(_nested_payload_values(child, key))
+    return found
+
+
+def _serialized_matrix(value: typing.Any) -> np.ndarray | None:
+    """Decode ndarray's serde representation or an ordinary nested list."""
+
+    if isinstance(value, dict):
+        dimensions = value.get("dim")
+        data = value.get("data")
+        if (
+            isinstance(dimensions, list)
+            and len(dimensions) == 2
+            and isinstance(data, list)
+        ):
+            rows, columns = (int(dimensions[0]), int(dimensions[1]))
+            array = np.asarray(data, dtype=float)
+            if array.size == rows * columns:
+                return array.reshape(rows, columns)
+        return None
+    array = np.asarray(value, dtype=float)
+    return array if array.ndim == 2 else None
+
+
+def _duchon_spectral_penalty_eigenvalues(
+    model_payload: dict[str, typing.Any],
+) -> list[list[float]]:
+    """Expose frozen reduced Duchon spectra for cross-backend diagnostics."""
+
+    spectra: list[list[float]] = []
+    for value in _nested_payload_values(model_payload, "bending_penalty"):
+        matrix = _serialized_matrix(value)
+        if matrix is None or matrix.shape[0] != matrix.shape[1] or matrix.size == 0:
+            continue
+        eigenvalues = np.linalg.eigvalsh(0.5 * (matrix + matrix.T))
+        spectra.append([float(item) for item in eigenvalues])
+    return spectra
+
+
+def _duchon_fitted_primary_penalty_matrices(
+    model_payload: dict[str, typing.Any],
+) -> list[list[list[float]]]:
+    """Reconstruct fitted-chart Duchon Primary penalties from frozen geometry.
+
+    ``DuchonSpectralBasis.bending_penalty`` is only the radial block before the
+    polynomial columns and the composed fit-time identifiability chart.  The
+    optimizer never sees that matrix directly: the basis builder embeds it,
+    adds its machine-scale affine conditioning ridge, restricts it by the
+    frozen transform, and Frobenius-normalizes the result.  Cross-backend
+    congruence must compare that fitted operator, not the upstream radial block.
+    """
+
+    matrices: list[list[list[float]]] = []
+    transforms = [
+        matrix
+        for value in _nested_payload_values(model_payload, "transform")
+        if (matrix := _serialized_matrix(value)) is not None
+    ]
+    for value in _nested_payload_values(model_payload, "bending_penalty"):
+        curvature = _serialized_matrix(value)
+        if (
+            curvature is None
+            or curvature.shape[0] != curvature.shape[1]
+            or curvature.size == 0
+        ):
+            continue
+        candidates: list[np.ndarray] = []
+        for transform in transforms:
+            if (
+                transform.ndim != 2
+                or transform.shape[0] <= curvature.shape[0]
+                or transform.shape[1] == 0
+            ):
+                continue
+            if not any(
+                transform.shape == prior.shape
+                and np.array_equal(transform, prior)
+                for prior in candidates
+            ):
+                candidates.append(transform)
+        if len(candidates) != 1:
+            continue
+        transform = candidates[0]
+        eigenvalues, eigenvectors = np.linalg.eigh(
+            0.5 * (curvature + curvature.T)
+        )
+        maximum = float(np.max(np.abs(eigenvalues)))
+        floor = 100.0 * max(transform.shape[0], curvature.shape[0]) * 1e-10 * maximum
+        eigenvalues = np.maximum(eigenvalues, floor)
+        curvature = (eigenvectors * eigenvalues) @ eigenvectors.T
+        primary = np.zeros((transform.shape[0], transform.shape[0]), dtype=float)
+        radial_columns = curvature.shape[0]
+        primary[:radial_columns, :radial_columns] = curvature
+        polynomial_columns = transform.shape[0] - radial_columns
+        if polynomial_columns > 1:
+            affine_ridge = (
+                1.490_116_119_384_765_6e-8
+                * float(np.trace(curvature))
+                / radial_columns
+            )
+            for column in range(radial_columns + 1, transform.shape[0]):
+                primary[column, column] = affine_ridge
+        fitted = transform.T @ primary @ transform
+        fitted = 0.5 * (fitted + fitted.T)
+        norm = float(np.linalg.norm(fitted))
+        if norm > 0.0:
+            fitted /= norm
+        matrices.append(fitted.tolist())
+    return matrices
+
+
+def _time_stable_mean_prediction(
+    predict: typing.Callable[[], typing.Any],
+) -> tuple[np.ndarray, float]:
+    """Return a warmed prediction and a scheduler-robust per-call runtime.
+
+    A single sub-second call on a shared runner measures scheduler placement as
+    much as prediction. Warm the implementation once, then take the median of
+    at least three exact-output repetitions and continue only until their
+    aggregate timed work reaches one second (bounded at nine calls). The
+    equality check makes repetition a measurement device, never an accidental
+    change in the estimator being scored.
+    """
+
+    expected = _prediction_mean_array(predict())
+    durations: list[float] = []
+    while (
+        len(durations) < PREDICTION_TIMING_MIN_REPETITIONS
+        or (
+            sum(durations) < PREDICTION_TIMING_TARGET_SECONDS
+            and len(durations) < PREDICTION_TIMING_MAX_REPETITIONS
+        )
+    ):
+        started = perf_counter()
+        current = _prediction_mean_array(predict())
+        durations.append(perf_counter() - started)
+        if not np.array_equal(current, expected, equal_nan=True):
+            raise RuntimeError("repeated gamfit prediction changed its output")
+    return expected, float(np.median(np.asarray(durations, dtype=float)))
 
 
 class _TerminalOutputSanitizer:
@@ -367,6 +532,7 @@ NON_BLOCKING_FAILURE_CONTENDERS = {
     "python_xgboost_aft",
 }
 _BENCH_CI_PROFILE = os.environ.get("BENCH_CI_PROFILE", "full").strip().lower() or "full"
+_ACTIVE_CONTENDER_FILTER: frozenset[str] | None = None
 _LEAN_PROFILE_EXCLUDED_CONTENDERS = {
     # These contenders materially increase CI runtime and peak memory on
     # GitHub-hosted runners. Keep them in the nightly/full profile.
@@ -565,12 +731,25 @@ def _init_plot_payload(ds: dict[str, typing.Any]) -> dict[str, typing.Any]:
                 "target": str(ds["target"]),
                 "actual": [],
                 "predicted": [],
+                "linear_predictor": [],
+                "_diagnostic_eta_variance": [],
+                "_diagnostic_design_rows": [],
+                "_diagnostic_design_columns": None,
             }
         )
     return payload
 
 
-def _append_supervised_plot_fold(payload: dict[str, typing.Any], test_df: pd.DataFrame, pred: np.ndarray, target_col: str) -> None:
+def _append_supervised_plot_fold(
+    payload: dict[str, typing.Any],
+    test_df: pd.DataFrame,
+    pred: np.ndarray,
+    target_col: str,
+    *,
+    linear_predictor: np.ndarray | None = None,
+    eta_variance: np.ndarray | None = None,
+    design_matrix: np.ndarray | None = None,
+) -> None:
     y_true = test_df[target_col].to_numpy(dtype=float).reshape(-1)
     y_pred = np.asarray(pred, dtype=float).reshape(-1)
     if y_true.shape[0] != y_pred.shape[0]:
@@ -579,6 +758,40 @@ def _append_supervised_plot_fold(payload: dict[str, typing.Any], test_df: pd.Dat
         )
     payload["actual"].extend(float(v) for v in y_true)
     payload["predicted"].extend(float(v) for v in y_pred)
+    if linear_predictor is not None:
+        eta = np.asarray(linear_predictor, dtype=float).reshape(-1)
+        if eta.shape[0] != y_pred.shape[0]:
+            raise RuntimeError(
+                "plot payload linear-predictor length mismatch: "
+                f"linear_predictor={eta.shape[0]}, predicted={y_pred.shape[0]}"
+            )
+        payload["linear_predictor"].extend(float(v) for v in eta)
+    if eta_variance is not None:
+        variance = np.asarray(eta_variance, dtype=float).reshape(-1)
+        if variance.shape[0] != y_pred.shape[0]:
+            raise RuntimeError(
+                "plot payload eta-variance length mismatch: "
+                f"eta_variance={variance.shape[0]}, predicted={y_pred.shape[0]}"
+            )
+        payload["_diagnostic_eta_variance"].extend(float(v) for v in variance)
+    if design_matrix is not None:
+        design = np.asarray(design_matrix, dtype=float)
+        if design.ndim != 2 or design.shape[0] != y_pred.shape[0]:
+            raise RuntimeError(
+                "plot payload design-matrix shape mismatch: "
+                f"design={design.shape}, predicted={y_pred.shape[0]}"
+            )
+        expected_columns = payload.get("_diagnostic_design_columns")
+        if expected_columns is None:
+            payload["_diagnostic_design_columns"] = int(design.shape[1])
+        elif int(expected_columns) != design.shape[1]:
+            raise RuntimeError(
+                "plot payload design-matrix column count changed across folds: "
+                f"{expected_columns} -> {design.shape[1]}"
+            )
+        payload["_diagnostic_design_rows"].extend(
+            [[float(value) for value in row] for row in design]
+        )
     primary_feature = payload.get("primary_feature")
     if primary_feature:
         x = test_df[str(primary_feature)].to_numpy(dtype=float).reshape(-1)
@@ -633,6 +846,183 @@ def _finalize_plot_payload(payload: dict[str, typing.Any]) -> dict[str, typing.A
     return payload
 
 
+def _attach_design_subspace_diagnostics(results: list[dict[str, typing.Any]]) -> None:
+    """Compare fitted Rust/mgcv function spaces, then discard raw probe matrices."""
+    by_scenario: dict[str, dict[str, dict[str, typing.Any]]] = {}
+    for result in results:
+        if result.get("status") != "ok":
+            continue
+        by_scenario.setdefault(str(result.get("scenario_name")), {})[
+            str(result.get("contender"))
+        ] = result
+
+    for contenders in by_scenario.values():
+        rust = contenders.get("rust_gam")
+        mgcv = contenders.get("r_mgcv")
+        if rust is None or mgcv is None:
+            continue
+        rust_payload = rust.get("plot_payload")
+        mgcv_payload = mgcv.get("plot_payload")
+        if not isinstance(rust_payload, dict) or not isinstance(mgcv_payload, dict):
+            continue
+        rust_rows = rust_payload.get("_diagnostic_design_rows")
+        mgcv_rows = mgcv_payload.get("_diagnostic_design_rows")
+        if not isinstance(rust_rows, list) or not isinstance(mgcv_rows, list):
+            continue
+        rust_design = np.asarray(rust_rows, dtype=float)
+        mgcv_design = np.asarray(mgcv_rows, dtype=float)
+        if (
+            rust_design.ndim != 2
+            or mgcv_design.ndim != 2
+            or rust_design.shape[0] != mgcv_design.shape[0]
+            or rust_design.shape[0] == 0
+        ):
+            continue
+        rust_u, rust_s, _ = np.linalg.svd(rust_design, full_matrices=False)
+        mgcv_u, mgcv_s, _ = np.linalg.svd(mgcv_design, full_matrices=False)
+        rust_threshold = (
+            np.finfo(float).eps * max(rust_design.shape) * float(rust_s[0])
+        )
+        mgcv_threshold = (
+            np.finfo(float).eps * max(mgcv_design.shape) * float(mgcv_s[0])
+        )
+        rust_rank = int(np.count_nonzero(rust_s > rust_threshold))
+        mgcv_rank = int(np.count_nonzero(mgcv_s > mgcv_threshold))
+        common_rank = min(rust_rank, mgcv_rank)
+        if common_rank == 0:
+            continue
+        rust_q = rust_u[:, :common_rank]
+        mgcv_q = mgcv_u[:, :common_rank]
+        singular_values = np.linalg.svd(rust_q.T @ mgcv_q, compute_uv=False)
+        min_cosine = float(np.clip(np.min(singular_values), 0.0, 1.0))
+        max_principal_sine = float(np.sqrt(max(0.0, 1.0 - min_cosine * min_cosine)))
+        rust_outside_mgcv = float(
+            np.linalg.norm(rust_design - mgcv_q @ (mgcv_q.T @ rust_design))
+            / max(np.linalg.norm(rust_design), np.finfo(float).tiny)
+        )
+        mgcv_outside_rust = float(
+            np.linalg.norm(mgcv_design - rust_q @ (rust_q.T @ mgcv_design))
+            / max(np.linalg.norm(mgcv_design), np.finfo(float).tiny)
+        )
+        rust_eta_variance = np.asarray(
+            rust_payload.get("_diagnostic_eta_variance", []), dtype=float
+        )
+        mgcv_eta_variance = np.asarray(
+            mgcv_payload.get("_diagnostic_eta_variance", []), dtype=float
+        )
+        variance_difference = None
+        eta_difference = None
+        rust_eta = np.asarray(rust_payload.get("linear_predictor", []), dtype=float)
+        mgcv_eta = np.asarray(mgcv_payload.get("linear_predictor", []), dtype=float)
+        if (
+            rust_eta.shape == mgcv_eta.shape
+            and rust_eta.shape == (rust_design.shape[0],)
+        ):
+            delta = rust_eta - mgcv_eta
+            eta_difference = {
+                "rms": float(np.sqrt(np.mean(delta * delta))),
+                "max_abs": float(np.max(np.abs(delta))),
+            }
+        if (
+            rust_eta_variance.shape == mgcv_eta_variance.shape
+            and rust_eta_variance.shape == (rust_design.shape[0],)
+        ):
+            delta = rust_eta_variance - mgcv_eta_variance
+            variance_difference = {
+                "rms": float(np.sqrt(np.mean(delta * delta))),
+                "max_abs": float(np.max(np.abs(delta))),
+            }
+        penalty_congruence = None
+        rust_quality = rust.get("fit_quality")
+        mgcv_quality = mgcv.get("fit_quality")
+        rust_folds = (
+            rust_quality.get("per_fold", []) if isinstance(rust_quality, dict) else []
+        )
+        mgcv_folds = (
+            mgcv_quality.get("per_fold", []) if isinstance(mgcv_quality, dict) else []
+        )
+        if len(rust_folds) == len(mgcv_folds) == 1:
+            rust_matrices = rust_folds[0].get(
+                "duchon_fitted_primary_penalty_matrices", []
+            )
+            mgcv_matrices_by_smooth = mgcv_folds[0].get(
+                "smooth_penalty_matrices", []
+            )
+            mgcv_matrices = []
+            for smooth in mgcv_matrices_by_smooth:
+                if isinstance(smooth, dict):
+                    mgcv_matrices.extend(smooth.values())
+                elif isinstance(smooth, list):
+                    mgcv_matrices.extend(smooth)
+            if len(rust_matrices) == len(mgcv_matrices) == 1:
+                rust_penalty = np.asarray(rust_matrices[0], dtype=float)
+                mgcv_penalty = np.asarray(mgcv_matrices[0], dtype=float)
+                if (
+                    rust_penalty.shape
+                    == (rust_design.shape[1] - 1, rust_design.shape[1] - 1)
+                    and mgcv_penalty.shape
+                    == (mgcv_design.shape[1] - 1, mgcv_design.shape[1] - 1)
+                ):
+                    chart, *_ = np.linalg.lstsq(
+                        rust_design, mgcv_design, rcond=None
+                    )
+                    rust_full = np.zeros(
+                        (rust_design.shape[1], rust_design.shape[1]), dtype=float
+                    )
+                    rust_full[1:, 1:] = rust_penalty
+                    mgcv_full = np.zeros(
+                        (mgcv_design.shape[1], mgcv_design.shape[1]), dtype=float
+                    )
+                    mgcv_full[1:, 1:] = mgcv_penalty
+                    mapped = chart.T @ rust_full @ chart
+                    denominator = float(np.sum(mapped * mapped))
+                    if denominator > 0.0:
+                        scale = float(np.sum(mapped * mgcv_full) / denominator)
+                        residual = float(
+                            np.linalg.norm(scale * mapped - mgcv_full)
+                            / max(np.linalg.norm(mgcv_full), np.finfo(float).tiny)
+                        )
+                        penalty_congruence = {
+                            "relative_residual_after_scalar": residual,
+                            "mgcv_over_rust_penalty_scale": scale,
+                        }
+        for result in (rust, mgcv):
+            quality = result.setdefault("fit_quality", {})
+            if isinstance(quality, dict):
+                quality["design_subspace_max_principal_sine"] = max_principal_sine
+                quality["design_numerical_ranks"] = {
+                    "rust_gam": rust_rank,
+                    "r_mgcv": mgcv_rank,
+                }
+                quality["design_condition_numbers"] = {
+                    "rust_gam": float(rust_s[0] / rust_s[rust_rank - 1]),
+                    "r_mgcv": float(mgcv_s[0] / mgcv_s[mgcv_rank - 1]),
+                }
+                quality["design_relative_projection_residuals"] = {
+                    "rust_outside_mgcv": rust_outside_mgcv,
+                    "mgcv_outside_rust": mgcv_outside_rust,
+                }
+                if variance_difference is not None:
+                    quality["eta_variance_difference"] = variance_difference
+                if eta_difference is not None:
+                    quality["linear_predictor_difference"] = eta_difference
+                if penalty_congruence is not None:
+                    quality["duchon_penalty_congruence"] = penalty_congruence
+
+    for result in results:
+        quality = result.get("fit_quality")
+        if isinstance(quality, dict):
+            for fold in quality.get("per_fold", []):
+                if isinstance(fold, dict):
+                    fold.pop("duchon_fitted_primary_penalty_matrices", None)
+                    fold.pop("smooth_penalty_matrices", None)
+        payload = result.get("plot_payload")
+        if isinstance(payload, dict):
+            payload.pop("_diagnostic_design_rows", None)
+            payload.pop("_diagnostic_design_columns", None)
+            payload.pop("_diagnostic_eta_variance", None)
+
+
 def _finalize_cv_result(
     *,
     contender: str,
@@ -674,7 +1064,8 @@ def _finalize_cv_result(
     }
     result.update(metrics)
     result["evaluation"] = _evaluation_label_for_n_folds(n_folds)
-    # Aggregate per-fold fit_quality (final_neg_v, edf_per_term) for the
+    # Aggregate per-fold fit_quality (objective, smoothing parameters, and EDF)
+    # for the
     # statistical-regression gate. Lanes without it (R / non-rust / paths
     # that don't load model.json) leave the field at None and the gate
     # skips them.
@@ -687,8 +1078,9 @@ def _finalize_cv_result(
 def _aggregate_fit_quality_rows(cv_rows: list[dict[str, typing.Any]]) -> dict[str, typing.Any] | None:
     """Mean-aggregate per-fold ``fit_quality`` into a lane-level summary.
 
-    Each fold's ``fit_quality`` is either ``None`` or
-    ``{"final_neg_v": float, "edf_per_term": {name: float}}``. The
+    Each fold's ``fit_quality`` is either ``None`` or contains one or more of
+    ``final_neg_v``, ``smoothing_parameters``, ``edf_total``, and
+    ``edf_per_term``. The
     lane-level result reports unweighted means across folds plus a
     ``per_fold`` array so the gate can drill in if needed.
     """
@@ -700,6 +1092,18 @@ def _aggregate_fit_quality_rows(cv_rows: list[dict[str, typing.Any]]) -> dict[st
     if not fqs:
         return None
     neg_vs = [float(fq["final_neg_v"]) for fq in fqs if isinstance(fq.get("final_neg_v"), (int, float))]
+    edf_totals = [
+        float(fq["edf_total"])
+        for fq in fqs
+        if isinstance(fq.get("edf_total"), (int, float))
+    ]
+    smoothing_parameter_rows = [
+        [float(v) for v in values]
+        for fq in fqs
+        if isinstance((values := fq.get("smoothing_parameters")), list)
+        and values
+        and all(isinstance(v, (int, float)) for v in values)
+    ]
     edf_acc: dict[str, list[float]] = {}
     for fq in fqs:
         edf = fq.get("edf_per_term")
@@ -712,10 +1116,45 @@ def _aggregate_fit_quality_rows(cv_rows: list[dict[str, typing.Any]]) -> dict[st
     out: dict[str, typing.Any] = {"n_folds_with_quality": int(len(fqs))}
     if neg_vs:
         out["final_neg_v"] = float(sum(neg_vs) / len(neg_vs))
+    if edf_totals:
+        out["edf_total"] = float(sum(edf_totals) / len(edf_totals))
+    if smoothing_parameter_rows:
+        widths = {len(row) for row in smoothing_parameter_rows}
+        if len(widths) == 1:
+            out["smoothing_parameters"] = [
+                float(sum(values) / len(values))
+                for values in zip(*smoothing_parameter_rows, strict=True)
+            ]
     if edf_acc:
         out["edf_per_term"] = {k: float(sum(vs) / len(vs)) for k, vs in edf_acc.items()}
+    for key in (
+        "inner_iterations",
+        "inner_gradient_norm",
+        "outer_iterations",
+        "outer_gradient_norm",
+        "outer_stationarity_bound",
+    ):
+        values = [
+            float(fq[key])
+            for fq in fqs
+            if isinstance(fq.get(key), (int, float))
+        ]
+        if values:
+            out[key] = float(sum(values) / len(values))
     out["per_fold"] = fqs
-    return out if ("final_neg_v" in out or "edf_per_term" in out) else None
+    return (
+        out
+        if any(
+            key in out
+            for key in (
+                "final_neg_v",
+                "smoothing_parameters",
+                "edf_total",
+                "edf_per_term",
+            )
+        )
+        else None
+    )
 
 
 def _normalize_result_metadata(results: list[dict[str, typing.Any]]) -> None:
@@ -1172,6 +1611,66 @@ def run_rust_scenario_cv(
                     fit_quality_row = _gate_extract_fit_quality({"payload": model_payload})
                 except Exception:
                     fit_quality_row = None
+            try:
+                model_summary = model.summary()
+            except Exception as e:
+                return {
+                    "contender": contender_name,
+                    "scenario_name": scenario_name,
+                    "status": "failed",
+                    "error": f"gamfit summary failed: {e}",
+                }
+            if fit_quality_row is None:
+                fit_quality_row = {}
+            if isinstance(model_payload, dict):
+                spectral_penalties = _duchon_spectral_penalty_eigenvalues(model_payload)
+                if spectral_penalties:
+                    fit_quality_row["duchon_spectral_penalty_eigenvalues"] = (
+                        spectral_penalties
+                    )
+                    fit_quality_row["duchon_fitted_primary_penalty_matrices"] = (
+                        _duchon_fitted_primary_penalty_matrices(model_payload)
+                    )
+            if model_summary.lambdas:
+                fit_quality_row["smoothing_parameters"] = [
+                    float(value) for value in model_summary.lambdas
+                ]
+            if model_summary.edf_total is not None:
+                fit_quality_row["edf_total"] = float(model_summary.edf_total)
+            fit_result_payload = (
+                model_payload.get("fit_result", {})
+                if isinstance(model_payload, dict)
+                else {}
+            )
+            inner_iterations = fit_result_payload.get("iterations")
+            if isinstance(inner_iterations, (int, float)):
+                fit_quality_row["inner_iterations"] = float(inner_iterations)
+            inner_gradient_norm = fit_result_payload.get("final_grad_norm")
+            if isinstance(inner_gradient_norm, (int, float)):
+                fit_quality_row["inner_gradient_norm"] = float(inner_gradient_norm)
+            outer_iterations = fit_result_payload.get("outer_iterations")
+            if isinstance(outer_iterations, (int, float)):
+                fit_quality_row["outer_iterations"] = float(outer_iterations)
+            outer_gradient_norm = fit_result_payload.get("outer_gradient_norm")
+            if isinstance(outer_gradient_norm, (int, float)):
+                fit_quality_row["outer_gradient_norm"] = float(outer_gradient_norm)
+            convergence_payload = fit_result_payload.get("convergence")
+            if isinstance(convergence_payload, dict):
+                outer_payload = convergence_payload.get("outer")
+                if isinstance(outer_payload, dict):
+                    analytic_payload = outer_payload.get("Analytic")
+                    if isinstance(analytic_payload, dict):
+                        stationarity_payload = analytic_payload.get("stationarity")
+                        if isinstance(stationarity_payload, dict):
+                            gradient_payload = stationarity_payload.get(
+                                "AnalyticGradient"
+                            )
+                            if isinstance(gradient_payload, dict):
+                                bound = gradient_payload.get("bound")
+                                if isinstance(bound, (int, float)):
+                                    fit_quality_row["outer_stationarity_bound"] = float(
+                                        bound
+                                    )
             if collect_continuous_order and model_payload is not None:
                 lambdas = model_payload.get("fit_result", {}).get("lambdas", [])
                 if isinstance(lambdas, list) and len(lambdas) >= 3:
@@ -1184,10 +1683,30 @@ def run_rust_scenario_cv(
                     adaptive_row["n_test"] = int(len(fold.test_idx))
                     adaptive_rows.append(adaptive_row)
 
-            t1 = perf_counter()
             try:
-                pred = _prediction_mean_array(model.predict(test_df, return_type="dict"))
-                pred_sec = perf_counter() - t1
+                pred, pred_sec = _time_stable_mean_prediction(
+                    lambda: model.predict(test_df, return_type="dict")
+                )
+                diagnostic_prediction = model.predict(test_df, return_type="dict")
+                diagnostic_mean = _prediction_mean_array(diagnostic_prediction)
+                if not np.array_equal(diagnostic_mean, pred, equal_nan=True):
+                    raise RuntimeError("untimed diagnostic prediction changed its response mean")
+                linear_predictor = _prediction_column_array(
+                    diagnostic_prediction, "linear_predictor"
+                )
+                affine_design = model.design_matrix(test_df)
+                diagnostic_design = np.asarray(affine_design.matrix, dtype=float)
+                diagnostic_eta_variance = None
+                if affine_design.covariance_conditional is not None:
+                    conditional_covariance = np.asarray(
+                        affine_design.covariance_conditional, dtype=float
+                    )
+                    diagnostic_eta_variance = np.einsum(
+                        "ij,jk,ik->i",
+                        diagnostic_design,
+                        conditional_covariance,
+                        diagnostic_design,
+                    )
             except Exception as e:
                 return {
                     "contender": contender_name,
@@ -1209,7 +1728,15 @@ def run_rust_scenario_cv(
             if ds["family"] == "binomial":
                 y_test = test_df[ds["target"]].to_numpy(dtype=float)
                 y_train = train_df[ds["target"]].to_numpy(dtype=float)
-                _append_supervised_plot_fold(plot_payload, test_df, pred, ds["target"])
+                _append_supervised_plot_fold(
+                    plot_payload,
+                    test_df,
+                    pred,
+                    ds["target"],
+                    linear_predictor=linear_predictor,
+                    eta_variance=diagnostic_eta_variance,
+                    design_matrix=diagnostic_design,
+                )
                 fitted_formula = formula
                 cv_rows.append(
                     {
@@ -2296,6 +2823,8 @@ def _extra_excluded_contenders_for_profile() -> set[str]:
 
 
 def _is_contender_enabled(s_cfg: typing.Any, contender: str) -> bool:
+    if _ACTIVE_CONTENDER_FILTER is not None and contender not in _ACTIVE_CONTENDER_FILTER:
+        return False
     excluded = set(s_cfg.get("exclude_contenders", []))
     excluded.update(_extra_excluded_contenders_for_profile())
     return contender not in excluded
@@ -2369,6 +2898,8 @@ def _format_blocking_failure(row: dict[str, typing.Any]) -> str:
 
 
 def main() -> None:
+    global _ACTIVE_CONTENDER_FILTER
+
     parser = argparse.ArgumentParser(description="Run GAM benchmark suite with leakage-safe evaluation.")
     parser.add_argument("--scenarios", type=Path, default=DEFAULT_SCENARIOS)
     parser.add_argument("--out", type=Path, default=BENCH_DIR / "results.json")
@@ -2377,6 +2908,24 @@ def main() -> None:
         action="append",
         dest="scenario_names",
         help="Run only the named scenario(s). Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--contender",
+        action="append",
+        dest="contenders",
+        help=(
+            "Run only the named contender(s). Can be passed multiple times; omitted means all "
+            "contenders enabled by the scenario/profile."
+        ),
+    )
+    parser.add_argument(
+        "--cv-splits",
+        type=int,
+        default=None,
+        help=(
+            "Override every selected scenario's CV split count. Use 1 for the deterministic "
+            "holdout seed run before a full benchmark."
+        ),
     )
     parser.add_argument(
         "--gate",
@@ -2394,6 +2943,13 @@ def main() -> None:
         help="Write/refresh the per-lane baselines under bench/baselines/ from this run.",
     )
     args = parser.parse_args()
+    if args.cv_splits is not None and args.cv_splits < 1:
+        parser.error("--cv-splits must be at least 1")
+    _ACTIVE_CONTENDER_FILTER = (
+        frozenset(str(contender) for contender in args.contenders)
+        if args.contenders
+        else None
+    )
     print(
         "bench runtime config | "
         f"force_serial={_FORCE_SERIAL} "
@@ -2421,6 +2977,8 @@ def main() -> None:
     results: list[dict[str, typing.Any]] = []
     for s_cfg in scenarios:
         ds = dataset_for_scenario(s_cfg)
+        if args.cv_splits is not None:
+            ds["_cv_splits"] = args.cv_splits
         folds = folds_for_dataset(ds)
         _assert_basis_parity_for_scenario(s_cfg, ds=ds)
         _assert_marginal_pspline_basis_budget(s_cfg, ds, folds)
@@ -2677,7 +3235,14 @@ def main() -> None:
             if r_gamlss_row is not None:
                 results.append(r_gamlss_row)
             if _is_contender_enabled(s_cfg, "r_mgcv"):
-                results.append(run_external_mgcv_cv(s_cfg, ds=ds, folds=folds))
+                results.append(
+                    run_external_mgcv_cv(
+                        s_cfg,
+                        ds=ds,
+                        folds=folds,
+                        shared_fold_artifacts=shared_fold_artifacts,
+                    )
+                )
             mgcv_gaulss_row = (
                 run_external_mgcv_gaulss_cv(s_cfg, ds=ds, folds=folds)
                 if _is_contender_enabled(s_cfg, "r_mgcv_gaulss")
@@ -2796,6 +3361,8 @@ def main() -> None:
                 deferred_exit_messages.append(
                     f"missing required successful {required_contender} result for scenario '{s_name}'"
                 )
+
+    _attach_design_subspace_diagnostics(results)
 
     # Hard guard: benchmark outputs must declare an evaluation mode consistent with model_spec.
     _normalize_result_metadata(results)

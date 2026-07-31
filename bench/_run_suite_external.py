@@ -253,7 +253,7 @@ if (inherits(fit, "error")) {
     status="failed",
     error=paste0("r_gamlss fit failed: ", conditionMessage(fit))
   )
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 
@@ -269,7 +269,7 @@ if (inherits(p, "error")) {
     status="failed",
     error=paste0("r_gamlss predict failed: ", conditionMessage(p))
   )
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 
@@ -279,7 +279,7 @@ sigma_hat <- tryCatch(
 )
 if (inherits(sigma_hat, "error")) {
   out <- list(status="failed", error=paste0("r_gamlss sigma predict failed: ", conditionMessage(sigma_hat)))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (length(sigma_hat) != length(y_test)) {
@@ -287,12 +287,12 @@ if (length(sigma_hat) != length(y_test)) {
     status="failed",
     error=paste0("r_gamlss sigma length mismatch (got ", length(sigma_hat), ", expected ", length(y_test), ")")
   )
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (any(!is.finite(sigma_hat) | sigma_hat <= 0)) {
   out <- list(status="failed", error="r_gamlss sigma has non-finite or non-positive values")
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (family_name == "binomial") {
@@ -315,6 +315,7 @@ if (family_name == "binomial") {
     fit_sec=fit_sec,
     predict_sec=pred_sec,
     pred=as.numeric(p),
+    eta=eta,
     auc=NULL,
     brier=NULL,
     logloss=logloss,
@@ -325,7 +326,7 @@ if (family_name == "binomial") {
     model_spec=paste0("gamlss(NO; sigma.formula=", deparse(sigma_formula), "): ", fit_formula)
   )
 }
-write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
 '''
         script_path.write_text(script)
 
@@ -439,11 +440,18 @@ write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
     )
 
 
-def run_external_mgcv_cv(scenario: typing.Any, *, ds: dict[str, typing.Any] | None = None, folds: list[Fold] | None = None) -> typing.Any:
-    if ds is None:
-        ds = dataset_for_scenario(scenario)
-    if folds is None:
-        folds = folds_for_dataset(ds)
+def run_external_mgcv_cv(
+    scenario: typing.Any,
+    *,
+    ds: dict[str, typing.Any],
+    folds: list[Fold],
+    shared_fold_artifacts: list[SharedFoldArtifact],
+) -> typing.Any:
+    if len(shared_fold_artifacts) != len(folds):
+        raise RuntimeError(
+            "mgcv shared-fold artifact count mismatch: "
+            f"artifacts={len(shared_fold_artifacts)}, folds={len(folds)}"
+        )
     contender_name = "r_survival_coxph" if ds["family"] == "survival" else "r_mgcv"
     mgcv_formula = None
     rust_cfg = _scenario_fit_mapping(scenario["name"])
@@ -465,6 +473,19 @@ def run_external_mgcv_cv(scenario: typing.Any, *, ds: dict[str, typing.Any] | No
             "dataset": ds,
             "scenario_name": scenario["name"],
             "mgcv_formula": mgcv_formula,
+            # A rank comparison is only identified when both contenders
+            # diagonalize the same landmark kernel. mgcv's implicit Duchon
+            # path sorts unique rows by their formatted string before its
+            # fixed-seed sample, while gam's production path deliberately
+            # preserves encounter order. Carry the shared coordinate names so
+            # the R contender can materialize the same explicit experiment.
+            "duchon_landmark_cols": (
+                list((rust_cfg or {}).get("smooth_cols", []))
+                if (rust_cfg or {}).get("smooth_basis") == "duchon"
+                else None
+            ),
+            "duchon_landmark_budget": 2000,
+            "duchon_landmark_seed": 1,
             "survival_formula": (
                 _coxph_survival_formula_for_scenario(scenario["name"], ds)
                 if ds["family"] == "survival"
@@ -478,8 +499,8 @@ def run_external_mgcv_cv(scenario: typing.Any, *, ds: dict[str, typing.Any] | No
 args <- commandArgs(trailingOnly = TRUE)
 data_path <- args[1]
 out_path <- args[2]
-train_idx_path <- args[3]
-test_idx_path <- args[4]
+train_scaled_path <- args[3]
+test_scaled_path <- args[4]
 
 suppressPackageStartupMessages({
   library(mgcv)
@@ -507,6 +528,28 @@ patch_mgcv_gam_fit5_matrix_drop <- function() {
 }
 
 patch_mgcv_gam_fit5_matrix_drop()
+
+patch_mgcv_slanczos_iteration_counter <- function() {
+  ns <- asNamespace("mgcv")
+  original <- get("slanczos", envir=ns)
+  assign(".gam_bench_slanczos_iterations", integer(0), envir=.GlobalEnv)
+  instrumented <- function(...) {
+    result <- original(...)
+    prior <- get(".gam_bench_slanczos_iterations", envir=.GlobalEnv)
+    assign(
+      ".gam_bench_slanczos_iterations",
+      c(prior, as.integer(result$iter)),
+      envir=.GlobalEnv
+    )
+    result
+  }
+  environment(instrumented) <- environment()
+  unlockBinding("slanczos", ns)
+  assign("slanczos", instrumented, envir=ns)
+  lockBinding("slanczos", ns)
+}
+
+patch_mgcv_slanczos_iteration_counter()
 
 # mgcv's `type="response"` is the inverse link at the coefficient mode.
 # gam's required default for curved links is instead the conditional
@@ -578,6 +621,11 @@ conditional_posterior_mean_predict <- function(fit, newdata) {
   logistic_normal_posterior_mean(location, pmax(variance, 0.0))
 }
 
+conditional_eta_variance <- function(fit, newdata) {
+  design <- predict(fit, newdata=newdata, type="lpmatrix")
+  as.numeric(rowSums((design %*% fit$Vp) * design))
+}
+
 payload <- fromJSON(data_path, simplifyVector = TRUE)
 df <- as.data.frame(payload$dataset$rows)
 target_name <- as.character(payload$dataset$target)
@@ -600,43 +648,26 @@ use_select <- TRUE
 if (!is.null(payload$use_select)) {
   use_select <- isTRUE(payload$use_select)
 }
+duchon_landmark_cols <- character(0)
+if (!is.null(payload$duchon_landmark_cols)) {
+  duchon_landmark_cols <- as.character(payload$duchon_landmark_cols)
+}
+duchon_landmark_budget <- as.integer(payload$duchon_landmark_budget)
+duchon_landmark_seed <- as.integer(payload$duchon_landmark_seed)
 
-train_idx <- scan(train_idx_path, what=integer(), quiet=TRUE) + 1L
-test_idx <- scan(test_idx_path, what=integer(), quiet=TRUE) + 1L
-
-train_df <- df[train_idx, , drop=FALSE]
-test_df <- df[test_idx, , drop=FALSE]
+train_df <- read.csv(train_scaled_path, check.names=FALSE)
+test_df <- read.csv(test_scaled_path, check.names=FALSE)
 y_test <- NULL
 y_train <- NULL
 if (family_name != "survival") {
-  y_all <- as.numeric(df[[target_name]])
-  y_train <- y_all[train_idx]
-  y_test <- y_all[test_idx]
+  y_train <- as.numeric(train_df[[target_name]])
+  y_test <- as.numeric(test_df[[target_name]])
 }
 
 fam <- if (family_name == "binomial") binomial(link="logit") else gaussian(link="identity")
 
-if (family_name != "survival") {
-  feature_cols <- as.character(payload$dataset$features)
-  for (cn in feature_cols) {
-    mu <- mean(train_df[[cn]])
-    sdv <- stats::sd(train_df[[cn]])
-    if (!is.finite(sdv) || sdv < 1e-8) sdv <- 1.0
-    train_df[[cn]] <- (train_df[[cn]] - mu) / sdv
-    test_df[[cn]] <- (test_df[[cn]] - mu) / sdv
-  }
-}
-
 if (family_name == "survival") {
   suppressPackageStartupMessages(library(survival))
-  feature_cols <- as.character(payload$dataset$features)
-  for (cn in feature_cols) {
-    mu <- mean(train_df[[cn]])
-    sdv <- stats::sd(train_df[[cn]])
-    if (!is.finite(sdv) || sdv < 1e-8) sdv <- 1.0
-    train_df[[cn]] <- (train_df[[cn]] - mu) / sdv
-    test_df[[cn]] <- (test_df[[cn]] - mu) / sdv
-  }
   if (is.null(survival_formula) || !nzchar(survival_formula)) {
     stop(sprintf("missing survival formula for scenario: %s", scenario_name))
   }
@@ -665,7 +696,7 @@ if (family_name == "survival") {
     r2=NULL,
     model_spec=ftxt
   )
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 
@@ -675,8 +706,54 @@ if (is.null(mgcv_formula) || !nzchar(mgcv_formula)) {
 ftxt <- mgcv_formula
 
 t0 <- proc.time()[["elapsed"]]
+duchon_knots <- NULL
+if (length(duchon_landmark_cols) > 0L) {
+  if (any(!(duchon_landmark_cols %in% colnames(train_df)))) {
+    stop("Duchon landmark columns are absent from the standardized training frame")
+  }
+  landmark_frame <- train_df[, duchon_landmark_cols, drop=FALSE]
+  landmark_frame <- landmark_frame[!duplicated(landmark_frame), , drop=FALSE]
+  landmark_count <- min(duchon_landmark_budget, nrow(landmark_frame))
+  if (landmark_count < 1L) {
+    stop("Duchon landmark experiment has no unique training rows")
+  }
+  if (landmark_count < nrow(landmark_frame)) {
+    had_random_seed <- exists(".Random.seed", envir=.GlobalEnv, inherits=FALSE)
+    if (had_random_seed) saved_random_seed <- .Random.seed
+    set.seed(duchon_landmark_seed)
+    landmark_rows <- sample(seq_len(nrow(landmark_frame)), landmark_count, replace=FALSE)
+    if (had_random_seed) {
+      .Random.seed <- saved_random_seed
+    } else {
+      rm(".Random.seed", envir=.GlobalEnv)
+    }
+    landmark_frame <- landmark_frame[landmark_rows, , drop=FALSE]
+  }
+  duchon_knots <- lapply(duchon_landmark_cols, function(column) landmark_frame[[column]])
+  names(duchon_knots) <- duchon_landmark_cols
+}
 fit <- tryCatch(
-  gam(as.formula(ftxt), family=fam, data=train_df, method="REML", select=use_select),
+  do.call(
+    gam,
+    c(
+      list(
+        formula=as.formula(ftxt),
+        family=fam,
+        data=train_df,
+        method="REML",
+        select=use_select,
+        # A benchmark reference must itself satisfy the repository's
+        # converged-only contract. mgcv defaults its Newton outer loop to
+        # conv.tol=1e-6, which leaves an O(1e-4) rho gradient on these Duchon
+        # lanes and turns optimizer truncation into apparent accuracy deltas.
+        control=gam.control(
+          epsilon=1e-10,
+          newton=list(conv.tol=1e-10)
+        )
+      ),
+      if (is.null(duchon_knots)) list() else list(knots=duchon_knots)
+    )
+  ),
   error = function(e) e
 )
 fit_sec <- proc.time()[["elapsed"]] - t0
@@ -686,25 +763,78 @@ if (inherits(fit, "error")) {
     status="failed",
     error=paste0("r_mgcv fit failed: ", conditionMessage(fit))
   )
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 
-pred_t0 <- proc.time()[["elapsed"]]
-p <- tryCatch(
-  conditional_posterior_mean_predict(fit, test_df),
+smooth_table <- tryCatch(summary(fit)$s.table, error=function(e) NULL)
+edf_per_term <- NULL
+if (!is.null(smooth_table) && nrow(smooth_table) > 0L && "edf" %in% colnames(smooth_table)) {
+  edf_per_term <- as.list(setNames(
+    as.numeric(smooth_table[, "edf"]),
+    rownames(smooth_table)
+  ))
+}
+fit_quality <- list(
+  smoothing_parameters=unname(as.list(as.numeric(fit$sp))),
+  edf_total=as.numeric(sum(fit$edf)),
+  edf_per_term=edf_per_term,
+  smooth_penalty_eigenvalues=lapply(
+    fit$smooth,
+    function(smooth) lapply(
+      smooth$S,
+      function(penalty) as.numeric(eigen(
+        (penalty + t(penalty)) / 2,
+        symmetric=TRUE,
+        only.values=TRUE
+      )$values)
+    )
+  ),
+  smooth_penalty_matrices=lapply(
+    fit$smooth,
+    function(smooth) lapply(smooth$S, function(penalty) unname(penalty))
+  ),
+  inner_iterations=as.numeric(fit$iter),
+  outer_iterations=as.numeric(fit$outer.info$iter),
+  outer_gradient_norm=as.numeric(max(abs(fit$outer.info$grad))),
+  spectral_iterations=unname(as.list(
+    get(".gam_bench_slanczos_iterations", envir=.GlobalEnv)
+  ))
+)
+
+stable_timed_prediction <- function(predict) {
+  expected <- predict()
+  durations <- numeric(0)
+  while (length(durations) < 3L ||
+         (sum(durations) < 1.0 && length(durations) < 9L)) {
+    started <- proc.time()[["elapsed"]]
+    current <- predict()
+    durations <- c(durations, proc.time()[["elapsed"]] - started)
+    if (!identical(current, expected)) {
+      stop("repeated mgcv prediction changed its output")
+    }
+  }
+  list(prediction=expected, seconds=as.numeric(median(durations)))
+}
+
+timed_prediction <- tryCatch(
+  stable_timed_prediction(function() conditional_posterior_mean_predict(fit, test_df)),
   error = function(e) e
 )
-pred_sec <- proc.time()[["elapsed"]] - pred_t0
 
-if (inherits(p, "error")) {
+if (inherits(timed_prediction, "error")) {
   out <- list(
     status="failed",
-    error=paste0("r_mgcv predict failed: ", conditionMessage(p))
+    error=paste0("r_mgcv predict failed: ", conditionMessage(timed_prediction))
   )
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
+p <- timed_prediction$prediction
+pred_sec <- timed_prediction$seconds
+eta <- as.numeric(predict(fit, newdata=test_df, type="link"))
+design_matrix <- unname(predict(fit, newdata=test_df, type="lpmatrix"))
+eta_variance <- conditional_eta_variance(fit, test_df)
 
 if (family_name == "binomial") {
   ord <- order(p)
@@ -737,10 +867,14 @@ if (family_name == "binomial") {
     fit_sec=fit_sec,
     predict_sec=pred_sec,
     pred=as.numeric(p),
+    eta=eta,
+    eta_variance=eta_variance,
+    design_matrix=design_matrix,
     auc=auc,
     brier=brier,
     logloss=logloss,
     nagelkerke_r2=nagelkerke_r2,
+    fit_quality=fit_quality,
     rmse=NULL,
     mae=NULL,
     r2=NULL,
@@ -761,7 +895,7 @@ if (family_name == "binomial") {
         status="failed",
         error=paste0("r_mgcv train-predict failed: ", conditionMessage(p_train))
       )
-      write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+      write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
       quit(save="no")
     }
     sigma_hat <- sqrt(mean((y_train - p_train)^2))
@@ -781,9 +915,12 @@ if (family_name == "binomial") {
     fit_sec=fit_sec,
     predict_sec=pred_sec,
     pred=as.numeric(p),
+    eta=eta,
+    design_matrix=design_matrix,
     auc=NULL,
     brier=NULL,
     logloss=logloss,
+    fit_quality=fit_quality,
     rmse=rmse,
     mae=mae,
     r2=r2,
@@ -791,7 +928,7 @@ if (family_name == "binomial") {
   )
 }
 
-write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
 '''
         script_path.write_text(script)
 
@@ -799,10 +936,7 @@ write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
         plot_payload = _init_plot_payload(ds)
         all_df = pd.DataFrame(ds["rows"])
         for fold_id, fold in enumerate(folds):
-            train_idx_path = td_path / f"train_idx_{fold_id}.txt"
-            test_idx_path = td_path / f"test_idx_{fold_id}.txt"
-            train_idx_path.write_text("\n".join(str(int(i)) for i in fold.train_idx) + "\n")
-            test_idx_path.write_text("\n".join(str(int(i)) for i in fold.test_idx) + "\n")
+            shared_artifact = shared_fold_artifacts[fold_id]
 
             code, out, err = run_cmd(
                 [
@@ -810,8 +944,8 @@ write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
                     str(script_path),
                     str(data_path),
                     str(out_path),
-                    str(train_idx_path),
-                    str(test_idx_path),
+                    str(shared_artifact.train_scaled_csv),
+                    str(shared_artifact.test_scaled_csv),
                 ],
                 cwd=ROOT,
             )
@@ -894,8 +1028,46 @@ write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
                         ),
                     }
                 test_df = all_df.iloc[fold.test_idx].copy()
-                _append_supervised_plot_fold(plot_payload, test_df, pred, ds["target"])
+                eta = np.asarray(fold_row.get("eta", []), dtype=float).reshape(-1)
+                if eta.shape[0] != len(fold.test_idx):
+                    return {
+                        "contender": contender_name,
+                        "scenario_name": scenario["name"],
+                        "status": "failed",
+                        "error": (
+                            f"{contender_name} fold output missing/invalid linear predictor "
+                            f"(got {eta.shape[0]}, expected {len(fold.test_idx)})"
+                        ),
+                    }
+                eta_variance = np.asarray(
+                    fold_row.get("eta_variance", []), dtype=float
+                ).reshape(-1)
+                if eta_variance.shape[0] != len(fold.test_idx):
+                    return {
+                        "contender": contender_name,
+                        "scenario_name": scenario["name"],
+                        "status": "failed",
+                        "error": (
+                            f"{contender_name} fold output missing/invalid eta variance "
+                            f"(got {eta_variance.shape[0]}, expected {len(fold.test_idx)})"
+                        ),
+                    }
+                _append_supervised_plot_fold(
+                    plot_payload,
+                    test_df,
+                    pred,
+                    ds["target"],
+                    linear_predictor=eta,
+                    eta_variance=eta_variance,
+                    design_matrix=np.asarray(
+                        fold_row.get("design_matrix", []),
+                        dtype=float,
+                    ),
+                )
                 fold_row.pop("pred", None)
+                fold_row.pop("eta", None)
+                fold_row.pop("eta_variance", None)
+                fold_row.pop("design_matrix", None)
             fold_row["n_test"] = int(len(fold.test_idx))
             cv_rows.append(fold_row)
 
@@ -1013,7 +1185,7 @@ for (cn in feature_cols) {
 rhs_parts <- strsplit(mu_formula, "~", fixed=TRUE)[[1]]
 if (length(rhs_parts) < 2) {
   out <- list(status="failed", error=paste0("invalid mu formula: ", mu_formula))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 mu_rhs <- trimws(rhs_parts[[2]])
@@ -1033,7 +1205,7 @@ fit_sec <- proc.time()[["elapsed"]] - t0
 
 if (inherits(fit, "error")) {
   out <- list(status="failed", error=paste0("r_mgcv_gaulss fit failed: ", conditionMessage(fit)))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 
@@ -1042,19 +1214,19 @@ pred <- tryCatch(as.matrix(predict(fit, newdata=test_df, type="response")), erro
 pred_sec <- proc.time()[["elapsed"]] - pred_t0
 if (inherits(pred, "error")) {
   out <- list(status="failed", error=paste0("r_mgcv_gaulss predict failed: ", conditionMessage(pred)))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 
 if (ncol(pred) < 1) {
   out <- list(status="failed", error="r_mgcv_gaulss predict returned empty matrix")
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 p <- as.numeric(pred[,1])
 if (ncol(pred) < 2) {
   out <- list(status="failed", error="r_mgcv_gaulss predict output missing sigma column")
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 inv_sigma_hat <- as.numeric(pred[,2])
@@ -1063,12 +1235,12 @@ if (length(inv_sigma_hat) != length(y_test)) {
     status="failed",
     error=paste0("r_mgcv_gaulss inverse-sigma length mismatch (got ", length(inv_sigma_hat), ", expected ", length(y_test), ")")
   )
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (any(!is.finite(inv_sigma_hat) | inv_sigma_hat <= 0)) {
   out <- list(status="failed", error="r_mgcv_gaulss inverse-sigma has non-finite or non-positive values")
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 sigma_hat <- 1.0 / inv_sigma_hat
@@ -1091,7 +1263,7 @@ out <- list(
   r2=r2,
   model_spec=paste0("gam(list(", target_name, " ~ ", mu_rhs, ", ", sigma_formula, "), family=gaulss())")
 )
-write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
 '''
         script_path.write_text(script)
 
@@ -1288,7 +1460,7 @@ fit_sec <- proc.time()[["elapsed"]] - t0
 
 if (inherits(fit, "error")) {
   out <- list(status="failed", error=paste0("r_gamboostlss fit failed: ", conditionMessage(fit)))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 
@@ -1301,7 +1473,7 @@ pred_sec <- proc.time()[["elapsed"]] - pred_t0
 
 if (inherits(p, "error")) {
   out <- list(status="failed", error=paste0("r_gamboostlss predict failed: ", conditionMessage(p)))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (length(p) != length(y_test)) {
@@ -1309,12 +1481,12 @@ if (length(p) != length(y_test)) {
     status="failed",
     error=paste0("r_gamboostlss mu length mismatch (got ", length(p), ", expected ", length(y_test), ")")
   )
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (any(!is.finite(p))) {
   out <- list(status="failed", error="r_gamboostlss mu has non-finite values")
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 sigma_pred <- tryCatch(
@@ -1323,7 +1495,7 @@ sigma_pred <- tryCatch(
 )
 if (inherits(sigma_pred, "error")) {
   out <- list(status="failed", error=paste0("r_gamboostlss sigma predict failed: ", conditionMessage(sigma_pred)))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (length(sigma_pred) != length(y_test)) {
@@ -1331,12 +1503,12 @@ if (length(sigma_pred) != length(y_test)) {
     status="failed",
     error=paste0("r_gamboostlss sigma length mismatch (got ", length(sigma_pred), ", expected ", length(y_test), ")")
   )
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (any(!is.finite(sigma_pred) | sigma_pred <= 0)) {
   out <- list(status="failed", error="r_gamboostlss sigma has non-finite or non-positive values")
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 
@@ -1366,7 +1538,7 @@ out <- list(
     sigma_formula
   )
 )
-write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
 '''
         script_path.write_text(script)
 
@@ -1562,7 +1734,7 @@ fit_sec <- proc.time()[["elapsed"]] - t0
 
 if (inherits(fit, "error")) {
   out <- list(status="failed", error=paste0("r_bamlss fit failed: ", conditionMessage(fit)))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 
@@ -1575,7 +1747,7 @@ pred_sec <- proc.time()[["elapsed"]] - pred_t0
 
 if (inherits(p, "error")) {
   out <- list(status="failed", error=paste0("r_bamlss predict failed: ", conditionMessage(p)))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (length(p) != length(y_test)) {
@@ -1583,12 +1755,12 @@ if (length(p) != length(y_test)) {
     status="failed",
     error=paste0("r_bamlss mu length mismatch (got ", length(p), ", expected ", length(y_test), ")")
   )
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (any(!is.finite(p))) {
   out <- list(status="failed", error="r_bamlss mu has non-finite values")
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 sigma_pred <- tryCatch(
@@ -1597,7 +1769,7 @@ sigma_pred <- tryCatch(
 )
 if (inherits(sigma_pred, "error")) {
   out <- list(status="failed", error=paste0("r_bamlss sigma predict failed: ", conditionMessage(sigma_pred)))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (length(sigma_pred) != length(y_test)) {
@@ -1605,12 +1777,12 @@ if (length(sigma_pred) != length(y_test)) {
     status="failed",
     error=paste0("r_bamlss sigma length mismatch (got ", length(sigma_pred), ", expected ", length(y_test), ")")
   )
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (any(!is.finite(sigma_pred) | sigma_pred <= 0)) {
   out <- list(status="failed", error="r_bamlss sigma has non-finite or non-positive values")
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 
@@ -1633,7 +1805,7 @@ out <- list(
   r2=r2,
   model_spec=paste0("bamlss(gaussian; optimizer-only): ", mu_formula, " ; sigma ", sigma_formula)
 )
-write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
 '''
         script_path.write_text(script)
 
@@ -1879,7 +2051,7 @@ if (!inherits(fit, "error") && nzchar(cache_path) && !file.exists(cache_path)) {
 
 if (inherits(fit, "error")) {
   out <- list(status="failed", error=paste0("r_brms fit failed: ", conditionMessage(fit)))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 
@@ -1892,7 +2064,7 @@ pred_sec <- proc.time()[["elapsed"]] - pred_t0
 
 if (inherits(p, "error")) {
   out <- list(status="failed", error=paste0("r_brms predict failed: ", conditionMessage(p)))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 sigma_pred <- tryCatch(
@@ -1901,7 +2073,7 @@ sigma_pred <- tryCatch(
 )
 if (inherits(sigma_pred, "error")) {
   out <- list(status="failed", error=paste0("r_brms sigma extract failed: ", conditionMessage(sigma_pred)))
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (length(sigma_pred) != length(y_test)) {
@@ -1909,12 +2081,12 @@ if (length(sigma_pred) != length(y_test)) {
     status="failed",
     error=paste0("r_brms sigma length mismatch (got ", length(sigma_pred), ", expected ", length(y_test), ")")
   )
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 if (any(!is.finite(sigma_pred) | sigma_pred <= 0)) {
   out <- list(status="failed", error="r_brms sigma has non-finite or non-positive values")
-  write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+  write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
   quit(save="no")
 }
 
@@ -1937,7 +2109,7 @@ out <- list(
   r2=r2,
   model_spec=paste0("brms::brm(bf(", mu_formula, ", sigma ", sigma_formula, "); gaussian)")
 )
-write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
 '''
         script_path.write_text(script)
 
@@ -2129,7 +2301,7 @@ out <- list(
   r2=NULL,
   model_spec=ftxt
 )
-write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
 '''
         script_path.write_text(script)
 
@@ -2591,7 +2763,7 @@ out <- list(
   r2=NULL,
   model_spec="cv.glmnet(family='cox', alpha=0.5, s='lambda.min')"
 )
-write(toJSON(out, auto_unbox=TRUE, null="null"), file=out_path)
+write(toJSON(out, auto_unbox=TRUE, null="null", digits=NA), file=out_path)
 '''
         script_path.write_text(script)
 
