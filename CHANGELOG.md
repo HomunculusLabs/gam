@@ -1,5 +1,45 @@
 ## Unreleased
 
+- **A monotone link warp no longer ships an unpenalized rescale of the index it
+  is composed onto (#2647).** `binomial_location_scalewiggle_termswith_matern_spatial_blocks_fit_finitely`
+  refused all four startup seeds with `did not converge after 48 cycle(s)`, which
+  reads like a budget problem and is not one: at 600 inner cycles the arms are
+  bit-identical to 200 and one seed is *worse* than at 48. The per-cycle trace
+  says what is happening — `|beta|inf` climbs 230x while `0.5 b'Sb` falls 41x
+  (fitting `pen ~ |beta|^-2` on two seeds) and `-loglik` is flat to `8e-4`. The
+  solve was descending toward an infimum at infinity that is never attained.
+
+  The free direction is the warp's LINEAR element. The model is
+  `q = q0 + w(q0)` with `q0 = -eta_t*exp(-eta_ls)`, so a linear warp element is a
+  rescale of the index; the index block is penalized, so the penalty falls along
+  that orbit while the likelihood does not move. Measured on the failing
+  fixture's own knots, the anchored I-spline span contains `u -> (u - left)` to
+  `2.7e-15`, its coefficient vector is componentwise non-negative (the whole ray
+  stays inside the monotone cone `beta_w >= 0`), and the order-2 roughness
+  charges `3.0e-14` for it. `ispline_function_penalties` sets
+  `roughness_nullspace_dim = derivative_order - 1`, so this is structural: every
+  configuration whose smallest requested order exceeds one shipped an unpenalized
+  warp direction unless `double_penalty` happened to close it.
+
+  `canonical_wiggle_function_penalties` now closes the assembled set's own joint
+  null space unconditionally, reading `null(sum_j S_j)` in the function metric off
+  a per-block-normalized sum and appending one shrinkage coordinate spanning it.
+  This is the same treatment, and the same argument, that
+  `build_binomial_threshold_and_scale_blocks` already applies unconditionally to
+  the log-sigma block, where `(beta_t, beta_ls) -> (c*beta_t, beta_ls + ln c)` is
+  the exactly analogous index-scale gauge. It is a no-op on every configuration
+  that was already well posed, including the shipped default (`orders = [1,2,3]`,
+  whose order-one roughness is full rank on the anchored basis). The smallest
+  eigenvalue of the exact joint penalized Hessian at the fixture's seed went from
+  the `~1e-10` the family's own source comment records to `7.254550e-1`, the fit
+  completes in 0.1 s at its original 48-cycle budget, and the same objective comes
+  back at 48, 200 and 600 cycles.
+
+  A model saved before this change whose warp set gains a coordinate will refuse
+  to load with a `SchemaMismatch` naming the reason: its coefficients and
+  log-lambdas index a penalty system this build no longer assembles, and they were
+  obtained from a criterion with no minimiser. Refit.
+
 - **The CLI and the engine no longer disagree about where a survival fit is
   anchored (#2631).** The survival time-basis centering anchor was decided in two
   places. `materialize_survival` — the engine path behind `fit_from_formula` and

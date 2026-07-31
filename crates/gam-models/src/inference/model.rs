@@ -3609,9 +3609,25 @@ impl FittedModel {
                 reason: format!("saved link-wiggle penalty metadata is invalid: {reason}"),
             })?;
             if canonical.metadata != *metadata {
+                // A saved model carries one log-lambda per penalty block, so a
+                // topology disagreement is not cosmetic: the coefficients and
+                // smoothing parameters in the payload belong to a different
+                // penalty system than the one this build assembles. gam#2647 is
+                // the expected trigger — a warp whose assembled penalty set left
+                // a reparameterization of the index unpenalized now gains one
+                // gauge-closure coordinate — and a model fitted before that gained
+                // its coefficients from a criterion with no minimiser, i.e. from
+                // wherever its inner budget happened to stop. Refitting is the
+                // remedy, and saying so is more useful than the bare comparison.
                 return Err(FittedModelError::SchemaMismatch {
                     reason: format!(
-                        "saved link-wiggle penalty topology {:?} disagrees with canonical topology {:?}",
+                        "saved link-wiggle penalty topology {:?} disagrees with the topology this \
+                         build assembles from the same knots and orders, {:?}. The saved \
+                         coefficients and log-lambdas index the saved topology, so they cannot be \
+                         replayed against this one; refit the model. (A set gaining a \
+                         `NullspaceShrinkage` coordinate is gam#2647: the warp's linear element is \
+                         a rescale of the index it is composed onto, and leaving it unpenalized \
+                         made the penalized criterion unbounded below.)",
                         metadata.blocks, canonical.metadata.blocks,
                     ),
                 });
