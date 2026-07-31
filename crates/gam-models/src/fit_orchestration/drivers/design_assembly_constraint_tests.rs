@@ -727,6 +727,71 @@ fn assert_frozen_replay_matches_fit(
         // `fast_ab(&kernel_transform, v)` fold, or the constrained-penalty
         // assembly feeding it); if it does not, storage/retrieval of `V` is the
         // defect and the design column is just where it shows first.
+        // `V` round-trips bit-identically (measured), so the defect is DOWNSTREAM
+        // of it. Both paths reach the same `fast_ab(&kernel_transform, v)` fold
+        // with the same `v`, which leaves `kernel_transform` — i.e. what
+        // `kernel_constraint_nullspace` returned — as the remaining candidate.
+        //
+        // Note the asymmetry that makes this plausible: the fit path calls that
+        // routine TWICE (once in `build_duchon_basis_spec_chart` to assemble
+        // `omega_constrained`, again inside `build_duchon_basis`), while the
+        // replay path early-returns and calls it ONCE. If it is not
+        // bit-deterministic (an eigen/QR sign or ordering convention), the two
+        // folded transforms differ in exactly one direction — the observed
+        // signature. Compare every replayed matrix so the differing one names
+        // itself instead of being guessed at.
+        let matrix_notes = {
+            let mats = |d: &TermCollectionDesign| -> Vec<(&'static str, Option<Array2<f64>>)> {
+                match &d.smooth.terms[0].metadata {
+                    BasisMetadata::Duchon {
+                        centers,
+                        identifiability_transform,
+                        operator_collocation_points,
+                        radial_reparam,
+                        ..
+                    } => vec![
+                        ("centers", Some(centers.clone())),
+                        ("identifiability_transform", identifiability_transform.clone()),
+                        ("operator_collocation_points", operator_collocation_points.clone()),
+                        ("radial_reparam", radial_reparam.clone()),
+                    ],
+                    BasisMetadata::ThinPlate {
+                        centers,
+                        identifiability_transform,
+                        radial_reparam,
+                        ..
+                    } => vec![
+                        ("centers", Some(centers.clone())),
+                        ("identifiability_transform", identifiability_transform.clone()),
+                        ("radial_reparam", radial_reparam.clone()),
+                    ],
+                    _ => vec![],
+                }
+            };
+            let (a, b) = (mats(&fit_design), mats(&replay_design));
+            a.into_iter()
+                .zip(b)
+                .map(|((name, x), (_, y))| match (x, y) {
+                    (Some(x), Some(y)) if x.dim() == y.dim() => {
+                        let worst = x
+                            .iter()
+                            .zip(y.iter())
+                            .map(|(&p, &q)| (p - q).abs())
+                            .fold(0.0_f64, f64::max);
+                        let bitwise =
+                            x.iter().zip(y.iter()).all(|(&p, &q)| p.to_bits() == q.to_bits());
+                        format!("{name}{:?} bit_identical={bitwise} max|Δ|={worst:.6e}", x.dim())
+                    }
+                    (Some(x), Some(y)) => {
+                        format!("{name} SHAPE {:?} -> {:?}", x.dim(), y.dim())
+                    }
+                    (Some(x), None) => format!("{name}{:?} -> None", x.dim()),
+                    (None, Some(y)) => format!("{name} None -> {:?}", y.dim()),
+                    (None, None) => format!("{name} absent both"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let reparam_note = {
             let pick = |d: &TermCollectionDesign| match &d.smooth.terms[0].metadata {
                 BasisMetadata::Duchon { radial_reparam, .. } => radial_reparam.clone(),
@@ -789,7 +854,7 @@ fn assert_frozen_replay_matches_fit(
         panic!(
             "{label} frozen replay changed realized design: max_abs={max_abs} \
              over a {rows}x{cols} design; {} of {cols} columns exceed 1e-10. \
-             Worst columns: [{}]{reparam_note}",
+             Worst columns: [{}]{reparam_note}; replayed matrices: {matrix_notes}",
             per_column.len(),
             offenders.join("; ")
         );
