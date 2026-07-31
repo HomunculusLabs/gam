@@ -100,6 +100,13 @@ pub struct ArrowPcgDiagnostics {
     pub stopping_reason: PcgStopReason,
     /// Mixed-precision certificate outcome for this solve.
     pub mixed_precision_status: MixedPrecisionStatus,
+    /// True exactly when the matrix-free reduced-Schur PCG algorithm was
+    /// selected. This records the numerical owner independently of execution
+    /// placement: CPU and device InexactPCG both set it, while dense Direct
+    /// assembly/solve (including dense Steihaug trust-region work) leaves it
+    /// false. Use [`Self::used_device_arrow`] separately to answer where the
+    /// selected algorithm ran.
+    pub selected_matrix_free_pcg: bool,
     /// True only when the reduced-Schur solve was **actually executed on the
     /// device**: either the fully device-resident batched Arrow-Schur Direct
     /// sequence (`try_device_arrow_direct` → `solve_arrow_newton_step`) or the
@@ -310,15 +317,16 @@ pub struct ArrowSolveOptions {
     /// #1017 device-resident framed SAE frame for the LM ridge ladder.
     ///
     /// When set (by [`super::newton_step::solve_with_lm_escalation_inner`] on a
-    /// device-admitted matrix-free SAE system), both the Direct SAE-PCG seam
-    /// ([`super::newton_step::try_device_arrow_direct_sae_pcg`]) and the native
-    /// large-border InexactPCG branch recompute only the ridge-dependent per-row
-    /// `ainv` per ladder trial and reuse the resident ridge-independent operand
-    /// buffers, instead of re-marshalling and re-uploading every operand through
-    /// `flatten_device_sae_frame_data` on each trial. The solve is bit-identical;
-    /// only the redundant per-trial upload is removed. `None` (default) keeps the
-    /// per-trial re-flatten path. A trait object (like [`GpuSchurMatvec`]) keeps
-    /// the CUDA-only device buffers out of these cfg-independent options.
+    /// device-admitted matrix-free SAE system), the large-border InexactPCG
+    /// branch recomputes only the ridge-dependent per-row `ainv` per ladder trial
+    /// and reuses the resident ridge-independent operand buffers, instead of
+    /// re-marshalling and re-uploading every operand through
+    /// `flatten_device_sae_frame_data` on each trial. Direct never installs this
+    /// frame: its canonical dense Schur factor owns both the step and evidence.
+    /// The InexactPCG solve is bit-identical; only the redundant per-trial upload
+    /// is removed. `None` (default) keeps the per-trial re-flatten path. A trait
+    /// object (like [`GpuSchurMatvec`]) keeps the CUDA-only device buffers out of
+    /// these cfg-independent options.
     pub sae_resident_frame:
         Option<std::sync::Arc<dyn crate::gpu_kernels::arrow_schur::SaeResidentFrame + Send + Sync>>,
 }

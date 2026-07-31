@@ -3867,16 +3867,24 @@ pub(crate) fn well_posed_device_sae_system_1551() -> (ArrowSchurSystem, usize, u
     (sys, n, q)
 }
 
-/// #1551 PRODUCTION ENGAGEMENT — end-to-end on a GPU host the SAE Direct inner
-/// solve must run on the DEVICE (`used_device_arrow == true`) and match the CPU
-/// dense reference Newton step. This is the test the issue asked for: it drives
-/// the public production entry `solve_arrow_newton_step_artifacts` with a
-/// device-equipped matrix-free SAE system whose `(n, k, d, cg_iters)` clears the
-/// reduced-Schur offload gate, so on a CUDA box `try_device_arrow_direct_sae_pcg`
-/// engages. On a non-CUDA host it skips cleanly (the seam declines → bit-identical
-/// CPU path); on a CUDA host it FAILS LOUD if the device path does not engage.
+/// #2660 ALGORITHM SELECTION — a Direct SAE solve must have one canonical dense
+/// owner even when the system carries device-PCG data and clears that lane's
+/// economic gate. Automatic Direct is bounded by `DIRECT_SOLVE_MAX_K`, so it
+/// already needs the exact dense Schur factor for evidence; running matrix-free
+/// PCG first would duplicate the dominant reduction and, before #2660, solve an
+/// unquotiented/unfloored operator whose result disagreed with that factor.
+///
+/// Drive the public production core with the exact formerly-eligible fixture.
+/// The profitable stacked dense-Schur sequence may still run on the device, so
+/// generic device-ownership telemetry and generic PCG counters cannot distinguish
+/// it from matrix-free PCG (dense Steihaug may legitimately use the latter). Pin
+/// the algorithm selector itself instead: Direct must neither prepare a resident
+/// SAE-PCG frame nor select matrix-free PCG. Tolerance-based parity against the
+/// dense reference then proves the selected dense owner remains numerically
+/// exact without requiring bit identity across independent Auto-dispatched
+/// assembly executions.
 #[test]
-pub(crate) fn sae_direct_inner_solve_engages_device_and_matches_cpu_1551() {
+pub(crate) fn sae_direct_uses_canonical_dense_owner_not_matrix_free_pcg_2660() {
     let (sys, n, q) = well_posed_device_sae_system_1551();
 
     let policy = gam_gpu::policy::GpuDispatchPolicy::default();
@@ -3889,28 +3897,27 @@ pub(crate) fn sae_direct_inner_solve_engages_device_and_matches_cpu_1551() {
     let ridge_t = 1e-7;
     let ridge_beta = 1e-6;
 
+    let resident = prepare_sae_resident_frame(&sys, &options, None)
+        .expect("Direct algorithm-selection probe");
+    assert!(
+        resident.is_none(),
+        "#2660: Direct prepared the forbidden resident matrix-free SAE-PCG owner"
+    );
+
+    let (_, _, diagnostics) =
+        solve_arrow_newton_step_core(&sys, ridge_t, ridge_beta, &options)
+            .expect("SAE Direct production-core solve");
+    assert!(
+        !diagnostics.selected_matrix_free_pcg,
+        "#2660: Direct selected the forbidden matrix-free PCG algorithm"
+    );
+
     let artifacts = solve_arrow_newton_step_artifacts(&sys, ridge_t, ridge_beta, &options)
-        .expect("SAE Direct artifacts solve");
-
-    if !gpu_available_or_fail() {
-        // No CUDA device: the seam must have declined and run the CPU path. The
-        // step must NOT be flagged device-served. (Parity below still holds.)
-        assert!(
-            !artifacts.pcg_diagnostics.used_device_arrow,
-            "no CUDA device present, yet the step was flagged device-served"
-        );
-    } else {
-        // CUDA present + the fixture clears the gate ⇒ the production SAE Direct
-        // inner solve MUST have run on the device. A silent CPU fallback here is
-        // exactly the #1551 failure (0% GPU); fail loud.
-        assert!(
-            artifacts.pcg_diagnostics.used_device_arrow,
-            "#1551: CUDA device present and the offload gate cleared, but the SAE \
-             Direct inner solve did NOT engage the device (used_device_arrow=false) \
-             — the device path silently fell back to CPU"
-        );
-    }
-
+        .expect("SAE Direct canonical artifacts solve");
+    assert!(
+        artifacts.schur_factor.is_some(),
+        "#2660: Direct must retain the same canonical dense factor for evidence"
+    );
     // Parity (holds on every host): the produced Newton step must match the dense
     // joint-system reference. On a GPU host this is the device==CPU parity gate;
     // on a CPU host it pins the matrix-free reduced solve to the dense oracle.
@@ -3930,9 +3937,8 @@ pub(crate) fn sae_direct_inner_solve_engages_device_and_matches_cpu_1551() {
     }
     assert!(
         max_db_rel <= 1e-7,
-        "#1551 SAE Direct Δβ parity vs dense reference: max_rel={max_db_rel:e} (>1e-7) \
-         (device-served={})",
-        artifacts.pcg_diagnostics.used_device_arrow
+        "#2660 SAE Direct canonical Δβ parity vs dense reference: \
+         max_rel={max_db_rel:e} (>1e-7)"
     );
     let dt_scale = reference
         .delta_t
@@ -3945,7 +3951,8 @@ pub(crate) fn sae_direct_inner_solve_engages_device_and_matches_cpu_1551() {
     }
     assert!(
         max_dt_rel <= 1e-7,
-        "#1551 SAE Direct Δt parity vs dense reference: max_rel={max_dt_rel:e} (>1e-7)"
+        "#2660 SAE Direct canonical Δt parity vs dense reference: \
+         max_rel={max_dt_rel:e} (>1e-7)"
     );
 }
 
@@ -3986,6 +3993,10 @@ pub(crate) fn sae_inexact_pcg_inner_solve_engages_device_and_matches_cpu_1551() 
 
     let artifacts = solve_arrow_newton_step_artifacts(&sys, ridge_t, ridge_beta, &options)
         .expect("SAE InexactPCG artifacts solve");
+    assert!(
+        artifacts.pcg_diagnostics.selected_matrix_free_pcg,
+        "#2660: InexactPCG did not select its matrix-free reduced-Schur owner"
+    );
 
     if !gpu_available_or_fail() {
         assert!(

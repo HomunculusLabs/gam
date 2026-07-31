@@ -313,19 +313,19 @@ pub(crate) fn build_dense_schur_direct<B: BatchedBlockSolver + Sync>(
     }
     // Fail LOUD, never OOM-kill (#1017): the dense reduced Schur is `k × k` f64.
     // At SAE LLM borders (qwen `k = 98304` ⇒ 77 GiB) materialising it would crash
-    // the host. The matrix-free device PCG already solves the *step* without it
-    // (`try_device_arrow_direct_sae_pcg`); only the joint-Hessian log-det still
-    // routes here. A matrix-free determinant-lemma log-det (the proper follow-up)
-    // is not yet wired, so refuse the allocation with an actionable error rather
-    // than degrading silently into an OOM. The budget is generous so every
-    // currently-feasible border (k ≤ 5120 ⇒ 0.2 GiB) is unaffected.
+    // the host. Direct deliberately uses this one canonical dense Schur for both
+    // the Newton step and evidence; large-border matrix-free solves belong to
+    // InexactPCG (and automatic selection routes them there). Refuse an explicit
+    // oversized Direct request with an actionable error rather than duplicating
+    // ownership or degrading silently into an OOM. The budget is generous so
+    // every currently-feasible border (k ≤ 5120 ⇒ 0.2 GiB) is unaffected.
     let dense_bytes = (k as u128).saturating_mul(k as u128).saturating_mul(8);
     if dense_bytes > DENSE_SCHUR_BYTES_BUDGET {
         return Err(ArrowSchurError::SchurFactorFailed {
             reason: format!(
                 "dense reduced Schur is {k}×{k} f64 = {} MiB, exceeding the {} MiB host budget; \
-                 this border is matrix-free-only (the device PCG solves the step without the dense \
-                 Schur) and a matrix-free determinant-lemma log-det is the required follow-up",
+                 Direct requires one canonical dense Schur for its step and evidence; select \
+                 InexactPCG for a matrix-free large-border step",
                 dense_bytes / (1024 * 1024),
                 DENSE_SCHUR_BYTES_BUDGET / (1024 * 1024),
             ),
@@ -1618,9 +1618,8 @@ impl<'a, B: BatchedBlockSolver + Sync> ReducedSchurOperator<'a, B> {
 ///
 /// `htt_factors` are the per-row `(H_tt^(i)+ρ_t I)` Cholesky factors; `resident`
 /// is the optional pre-staged SAE residency operator (`None` for the framed /
-/// closure `H_tβ` path). SLQ is an ESTIMATE — the same accuracy contract the
-/// device seam already accepts for `k ≥ SCHUR_SLQ_LOGDET_MIN_DIM`; callers that
-/// need the exact dense log-det at small `k` must stay on the dense route.
+/// closure `H_tβ` path). SLQ is an ESTIMATE; callers that need the exact dense
+/// log-det at small `k` must stay on the dense route.
 ///
 /// Crate-internal because the `resident` parameter carries the `pub(crate)`
 /// [`SaeResidentReducedSchur`] operator; cross-crate callers use the

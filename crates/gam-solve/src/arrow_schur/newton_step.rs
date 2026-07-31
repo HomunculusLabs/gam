@@ -4,17 +4,6 @@
 
 use super::*;
 
-/// Reduced-Schur dimension `k` at/above which the SAE evidence log-determinant
-/// switches from the exact dense `O(k³/3)` Cholesky to the matrix-free
-/// Stochastic Lanczos Quadrature estimate ([`crate::arrow_schur::slq_logdet`]).
-///
-/// Below this, the exact dense factor is kept for bit-reproducibility on the
-/// small problems where the Cholesky is cheap. Chosen at 4096: the Cholesky
-/// flop count (`~k³/3 ≈ 2.3e10`) and the dense `S` memory (`k² · 8 B ≈ 134 MiB`)
-/// both start to dominate around here, while SLQ's `O(probes·steps·k²)` cost is
-/// an order of magnitude smaller.
-pub const SCHUR_SLQ_LOGDET_MIN_DIM: usize = 4096;
-
 /// Number of Rademacher probe vectors for the SAE-evidence SLQ log-determinant.
 /// 32 probes give a sub-percent relative standard error on the well-conditioned
 /// reduced-Schur operators the Laplace evidence forms (the per-probe variance is
@@ -563,374 +552,6 @@ pub(crate) fn try_device_arrow_direct(
     }
 }
 
-/// Admission + dispatch for the device-resident SAE matrix-free PCG **under the
-/// production Direct mode** (issue #1551).
-///
-/// The real SAE inner solve (`converge_inner_for_undamped_logdet` and the
-/// Laplace-evidence drivers) runs `ArrowSolveOptions::direct()` with a finite
-/// trust-region radius and installs the matrix-free `H_tβ` / `H_ββ` operators
-/// (`htbeta_matvec.is_some()`). Both existing device entries decline that shape:
-/// `try_device_arrow_direct` rejects matrix-free systems, and the InexactPCG
-/// device branch only fires when `radius == INFINITY` (never set in production).
-/// So every real SAE fit ran the inner arrow-Schur on the CPU (GPU 0%).
-///
-/// This seam is valid only when the unbounded device PCG step is also the step
-/// the dense Direct CPU path would accept. Dense Direct first factors `S` and
-/// computes the exact Newton step, but it still falls back to Steihaug-CG when
-/// that step leaves a finite trust ball. The device kernel does not implement
-/// Steihaug truncation, so after it returns the unbounded step we admit it only
-/// when [`step_inside_trust_region`] proves the β step is inside the active
-/// trust radius (or the radius is unbounded). Otherwise we transparently decline
-/// and let the existing CPU Direct path compute the principled truncated step.
-///
-/// Returns `Some(Ok(..))` when the device produced a converged step (caller
-/// returns it), `Some(Err(..))` only for a numerical failure the LM escalation
-/// must respond to, and `None` when the device declines (no `device_sae_pcg`
-/// data, GPU not admitted, mode not Direct, or a transient device decline) — the
-/// caller then falls through to the bit-identical CPU dense Direct path
-/// unchanged.
-///
-/// SCOPE — only the Newton STEP is matrix-free here. The Laplace evidence still
-/// needs `½log|H|`, which with `k > 0` requires a dense reduced Schur
-/// (`schur_factor`); this function therefore still forms and Cholesky-factors a
-/// dense `k×k` Schur on the CPU (see the inline note at the build site). That is
-/// O(k²) memory and O(k³) flops and does NOT scale to very large K, so this path
-/// is NOT a fully matrix-free / device-resident EVIDENCE path — only the step is.
-///
-/// The framed-vs-legacy split (`G ⊗ W_{ij}` factored frames vs full-`B`
-/// `⊗ I_p`) is handled inside `solve_sae_matrix_free_pcg` by its existing
-/// dispatch guard (`data.frame.is_some()`), so this site is agnostic to it.
-pub(crate) fn try_device_arrow_direct_sae_pcg(
-    sys: &ArrowSchurSystem,
-    htt_factors: &ArrowFactorSlab,
-    rhs_beta: &Array1<f64>,
-    ridge_t: f64,
-    ridge_beta: f64,
-    options: &ArrowSolveOptions,
-    backend: &CpuBatchedBlockSolver,
-) -> Option<Result<ArrowNewtonStepArtifacts, ArrowSchurError>> {
-    // #1017 device-engagement trace: emitted through the `log` crate at debug
-    // level so a perf/triage run (`RUST_LOG=gam_solve=debug`) can see EXACTLY why
-    // the production SAE Direct inner solve declined the device instead of
-    // silently dropping to a multi-minute dense CPU Cholesky. No-op (a level
-    // check) at the default log level, so production pays nothing.
-    macro_rules! trace_decline {
-        ($($arg:tt)*) => {
-            let reason = format!($($arg)*);
-            log::debug!("arrow-schur device SAE Direct PCG declined: {}", reason);
-            // #1017/#2231 observability: the decline ALSO lands in the GPU
-            // telemetry counter so a fit report can say why the device path was
-            // skipped without a RUST_LOG debug rerun.
-            gam_gpu::profile::telemetry_record_cpu_fallback(format!(
-                "sae-direct-pcg decline: {reason}"
-            ));
-        };
-    }
-    if options.mode != ArrowSolverMode::Direct {
-        trace_decline!("mode != Direct (mode={:?})", options.mode);
-        return None;
-    }
-    // Only the matrix-free SAE system carries device PCG frames; a dense Direct
-    // system routes through `try_device_arrow_direct` instead.
-    let Some(device_data) = sys.device_sae_pcg.as_ref() else {
-        trace_decline!(
-            "no device_sae_pcg data on system (n={}, k={}, d={})",
-            sys.rows.len(),
-            sys.k,
-            sys.d
-        );
-        return None;
-    };
-    // Cross-row penalties / streaming are not on this matrix-free PCG path.
-    if !sys.cross_row_penalties.is_empty() || options.streaming_chunk_size.is_some() {
-        trace_decline!(
-            "cross_row_penalties={} or streaming_chunk_size={:?}",
-            sys.cross_row_penalties.len(),
-            options.streaming_chunk_size
-        );
-        return None;
-    }
-    // CG-amortised work gate (same predicate the InexactPCG matvec-offload site
-    // uses): the SAE reduced-Schur apply is `O(n · k · d)` reused over the CG
-    // iteration budget, so it registers the real batched arithmetic the cold
-    // single-launch dense floor misses.
-    //
-    // Evaluated BEFORE the device probe (startup-tax ordering fix): the
-    // predicate reads only associated constants — never a calibrated policy
-    // field — so the pre-probe default policy decides identically to the probed
-    // runtime's policy, and a rejected shape skips availability resolution
-    // (whose first call creates a CUDA primary context on every GPU) entirely.
-    let cg_iters = options
-        .pcg
-        .max_iterations
-        .min(options.trust_region.max_iterations);
-    if !gam_gpu::GpuDispatchPolicy::default().reduced_schur_matvec_should_offload(
-        sys.rows.len(),
-        sys.k,
-        sys.d,
-        cg_iters,
-    ) {
-        trace_decline!(
-            "offload predicate rejected shape (n={}, k={}, d={}, cg_iters={})",
-            sys.rows.len(),
-            sys.k,
-            sys.d,
-            cg_iters
-        );
-        return None;
-    }
-    match gam_gpu::device_runtime::GpuRuntime::resolve(options.gpu_policy) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            trace_decline!("typed CUDA absence under the configured policy");
-            return None;
-        }
-        Err(error) => {
-            return Some(Err(ArrowSchurError::SchurFactorFailed {
-                reason: format!("SAE direct GPU runtime resolution failed: {error}"),
-            }));
-        }
-    }
-    log::debug!(
-        "arrow-schur device SAE Direct PCG ENGAGING device (n={}, k={}, d={}, frame={})",
-        sys.rows.len(),
-        sys.k,
-        sys.d,
-        device_data.frame.is_some()
-    );
-    // First compute the unbounded Direct Newton step: when it lies inside the
-    // trust ball it is exactly the step the dense Direct path accepts. If the
-    // post-solve radius check below fails, this seam declines so CPU Direct can
-    // compute the required Steihaug boundary step.
-    let max_iterations = options.pcg.max_iterations.max(sys.k.saturating_add(1));
-    let relative_tolerance = options.pcg.relative_tolerance.min(1e-12);
-    // #1017: when the LM ridge ladder installed a device-resident SAE frame,
-    // recompute only the ridge-dependent per-row `ainv` and reuse the resident
-    // ridge-independent operand buffers instead of re-marshalling+re-uploading
-    // every operand through `flatten_device_sae_frame_data` on this trial. The
-    // solve is bit-identical; a resident `Unavailable` decline (shape drift /
-    // transient) retries via the established per-trial flatten so we neither drop
-    // to full CPU dense nor mask a genuine numerical signal — a
-    // `RidgeBumpRequired`/`SchurFactorFailed` still flows into the classifier
-    // below and drives the escalation exactly as the flatten path would.
-    let per_trial_flatten = || {
-        crate::gpu_kernels::arrow_schur::solve_sae_matrix_free_pcg(
-            sys,
-            device_data.as_ref(),
-            ridge_t,
-            ridge_beta,
-            rhs_beta,
-            max_iterations,
-            relative_tolerance,
-        )
-    };
-    let solve_result = match options.sae_resident_frame.as_ref() {
-        Some(resident) => match resident.resolve(
-            sys,
-            ridge_t,
-            ridge_beta,
-            rhs_beta,
-            max_iterations,
-            relative_tolerance,
-        ) {
-            Err(crate::gpu_kernels::arrow_schur::ArrowSchurGpuFailure::Unavailable) => {
-                per_trial_flatten()
-            }
-            other => other,
-        },
-        None => per_trial_flatten(),
-    };
-    match solve_result {
-        Ok((delta_beta, mut diag)) => {
-            if !step_inside_trust_region(delta_beta.view(), options.trust_region.radius, None) {
-                trace_decline!(
-                    "unbounded device step lies outside finite trust radius {} — \
-                     CPU Direct must compute the Steihaug-truncated step",
-                    options.trust_region.radius
-                );
-                return None;
-            }
-            diag.used_device_arrow = true;
-            let delta_t = back_substitute_delta_t(sys, htt_factors, delta_beta.view(), backend);
-            // The matrix-free device PCG returns the step ONLY (it never forms the
-            // dense reduced Schur). But every production SAE inner solve consumes
-            // the cache's joint-Hessian log-det (½log|H| Laplace normaliser, read
-            // through `arrow_log_det_from_cache`), which with `k > 0` REQUIRES a
-            // reduced-Schur determinant — without it the cache yields `None` and the
-            // evidence solve errors out. So we must still produce `log|S|`.
-            //
-            // We assemble the dense reduced Schur `S` (`O(n·d·k²)`, the cost the
-            // dense Direct path already pays) and then split on `k`:
-            //
-            //   * Small k (< SCHUR_SLQ_LOGDET_MIN_DIM): the exact dense Cholesky
-            //     log-determinant, bit-identical to the CPU Direct path (including
-            //     the #1026 Newton Tikhonov handling). Cheap and reproducible.
-            //
-            //   * Large k (≥ SCHUR_SLQ_LOGDET_MIN_DIM): Stochastic Lanczos
-            //     Quadrature (`crate::arrow_schur::slq_logdet`) on the SPD
-            //     reduced-Schur operator `v ↦ S·v`. This DROPS the `O(k³/3)`
-            //     Cholesky entirely, replacing it with
-            //     `O(num_probes·lanczos_steps·k²)` matvec work — a real flop
-            //     reduction at scale. The estimate is seeded deterministically so
-            //     the REML outer loop stays reproducible. We carry `log|S|` as the
-            //     cache's `schur_log_det_override` and leave `schur_factor = None`,
-            //     so the Laplace normaliser reads the SLQ value directly.
-            //
-            // RESIDENCY note (#1017): SLQ here is now both FLOP- and
-            // MEMORY-matrix-free — no dense `k×k` `S` is ever formed (see the
-            // IMPORTANT block below and `slq_reduced_schur_log_det`). Every
-            // Lanczos apply goes through `ReducedSchurOperator::apply`, which
-            // routes to the device `GpuSchurMatvec` when one is built
-            // (`maybe_build_evidence_gpu_matvec`) and otherwise to the CPU
-            // `schur_matvec` resident row-factor lane — both matrix-free.
-            //
-            // Device residency at massive K (#1017, LANDED): when the framed
-            // matrix-free system carries `sys.device_sae_pcg` (the production
-            // SAE border), `maybe_build_evidence_gpu_matvec` builds the
-            // device-resident DETERMINISTIC framed apply the PCG hot loop
-            // already runs (`ResidentSaeFrameHandle` + `launch_sae_frame_matvec`,
-            // #1551 parity-tested), uploading the ridge-independent operands once
-            // and crossing only `x`/`out` per Lanczos apply — measured 97% GPU
-            // util over the SLQ loop. The CPU row-procedural closure
-            // `gpu_schur_matvec_backend` returns for `htbeta_matvec` systems
-            // (`build_row_procedural_matvec`, applies on rayon) is now only the
-            // FALLBACK: taken when no `device_sae_pcg` is installed (e.g. the
-            // legacy sparse lane) or when the framed builder declines the
-            // shape/device/ridge.
-            //
-            // On any failure forming/factoring the Schur (non-PD pivot the LM
-            // escalation must respond to), surface the error rather than returning a
-            // cache that would silently starve the evidence of its log-det.
-            let (schur_factor, schur_log_det_override) = if sys.k >= SCHUR_SLQ_LOGDET_MIN_DIM {
-                // Matrix-free log|S| via SLQ on the exact reduced-Schur apply.
-                //
-                // IMPORTANT (#1017): do not build the dense `k×k` Schur here.
-                // The old implementation still called `build_dense_schur_direct`
-                // before this branch and then ran SLQ over `schur.dot(v)`, which
-                // removed the Cholesky but left the production color/Qwen path
-                // paying (or refusing/OOMing) the dense assembly.  The whole
-                // point of the SAE Direct device-PCG seam is that the step is
-                // solved matrix-free; the evidence log-det must consume the same
-                // matrix-free reduced operator.  `slq_reduced_schur_log_det`
-                // stages the CPU resident row factors when available and then
-                // applies
-                //
-                //     S v = (H_ββ + ρ_β I)v
-                //           - Σ_i H_βt_i (H_tt_i + ρ_t I)⁻¹ H_tβ_i v
-                //
-                // without materialising `S`.
-                // #1017 Phase-3: run the SLQ log|S| probes on the SAME resident
-                // device `S·v` this Direct path already solves the step through,
-                // built once for the evaluation. With the operator engaged every
-                // Lanczos apply runs on device (no `O(k²)` dense assembly, no
-                // per-apply host round-trip); when it declines the shape/device
-                // the byte-identical CPU resident row-factor lane is staged
-                // instead.
-                let device_matvec = match crate::arrow_schur::maybe_build_evidence_gpu_matvec(
-                    sys,
-                    ridge_t,
-                    ridge_beta,
-                    options,
-                    (SCHUR_SLQ_LOGDET_PROBES * SCHUR_SLQ_LOGDET_LANCZOS_STEPS).max(1),
-                ) {
-                    Ok(matvec) => matvec,
-                    Err(error) => return Some(Err(error)),
-                };
-                let gpu_matvec = options.gpu_matvec.as_ref().or(device_matvec.as_ref());
-                let resident = if gpu_matvec.is_none() {
-                    SaeResidentReducedSchur::build(sys, htt_factors, backend)
-                } else {
-                    None
-                };
-                let slq = crate::arrow_schur::slq_reduced_schur_log_det(
-                    sys,
-                    htt_factors,
-                    ridge_beta,
-                    backend,
-                    resident.as_ref(),
-                    gpu_matvec,
-                    options.evidence_policy,
-                    SCHUR_SLQ_LOGDET_PROBES,
-                    SCHUR_SLQ_LOGDET_LANCZOS_STEPS,
-                    SCHUR_SLQ_LOGDET_SEED,
-                );
-                if !slq.estimate.is_finite() {
-                    return Some(Err(ArrowSchurError::SchurFactorFailed {
-                        reason: format!(
-                            "device SAE Direct: SLQ reduced-Schur log-det non-finite ({})",
-                            slq.estimate
-                        ),
-                    }));
-                }
-                log::debug!(
-                    "arrow-schur SAE evidence: SLQ log|S| estimate={:.6} std_err={:.3e} \
-                     (k={}, probes={}, steps={})",
-                    slq.estimate,
-                    slq.std_err,
-                    sys.k,
-                    SCHUR_SLQ_LOGDET_PROBES,
-                    SCHUR_SLQ_LOGDET_LANCZOS_STEPS,
-                );
-                (None, Some(slq.estimate))
-            } else {
-                // Exact dense Cholesky log-determinant for small k. We route through
-                // `solve_dense_reduced_system` (the exact CPU Direct reduce) so the
-                // emitted factor — and therefore the log-det — is bit-identical to
-                // the non-device path.
-                let schur = match build_dense_schur_direct(
-                    sys,
-                    htt_factors,
-                    ridge_beta,
-                    backend,
-                    options.gpu_policy,
-                ) {
-                    Ok(schur) => schur,
-                    Err(err) => return Some(Err(err)),
-                };
-                let factor = match solve_dense_reduced_system(&schur, rhs_beta, options, None) {
-                    Ok((_cpu_delta_beta, Some(factor), _diag)) => factor,
-                    Ok((_, None, _)) => {
-                        // Direct mode always returns a dense factor; a `None` here
-                        // would be an InexactPCG artifact that cannot happen here.
-                        return Some(Err(ArrowSchurError::SchurFactorFailed {
-                            reason: "device SAE Direct: reduced solve returned no dense factor"
-                                .to_string(),
-                        }));
-                    }
-                    Err(err) => return Some(Err(err)),
-                };
-                (Some(factor), None)
-            };
-            Some(Ok(ArrowNewtonStepArtifacts {
-                delta_t,
-                delta_beta,
-                htt_factors: htt_factors.clone(),
-                schur_factor,
-                schur_log_det_override,
-                pcg_diagnostics: diag,
-            }))
-        }
-        // A non-PD per-row / Schur condition is a real numerical signal the LM
-        // escalation must respond to; surface the matching CPU error variant so
-        // the ridge is bumped and the solve retried (rather than silently
-        // continuing on a wrong step).
-        Err(crate::gpu_kernels::arrow_schur::ArrowSchurGpuFailure::RidgeBumpRequired {
-            row,
-            bump,
-        }) => Some(Err(ArrowSchurError::PerRowFactorFailed {
-            row,
-            reason: format!("device SAE PCG per-row block non-PD; suggested ridge bump {bump:e}"),
-        })),
-        Err(crate::gpu_kernels::arrow_schur::ArrowSchurGpuFailure::SchurFactorFailed {
-            reason,
-        }) => Some(Err(ArrowSchurError::SchurFactorFailed { reason })),
-        Err(failure) => Some(Err(device_failure_as_arrow_error(
-            "SAE direct device solve after admission",
-            failure,
-        ))),
-    }
-}
-
 /// #1017: build a base-block-resident Arrow-Schur frame for the LM ridge ladder,
 /// or `None` when the current path should keep its per-trial re-upload behaviour.
 ///
@@ -994,19 +615,13 @@ fn build_resident_base_frame_if_admitted(
 /// #1017: build a device-resident framed SAE frame for the LM ridge ladder, or
 /// `None` to keep the per-trial re-flatten path.
 ///
-/// The matrix-free SAE-PCG system is exactly the shape
-/// [`build_resident_base_frame_if_admitted`] declines (it rejects
-/// `htbeta_matvec.is_some()`), so it re-marshalled and re-uploaded every device
-/// operand through `flatten_device_sae_frame_data` on each ladder trial even
-/// though only `ainv = (H_tt + ridge_t·I)⁻¹` depends on the ridge. This admits
-/// the same framed `device_sae_pcg` shape served by BOTH production solver
-/// modes: [`try_device_arrow_direct_sae_pcg`] under `Direct`, and the native
-/// matrix-free device branch under `InexactPCG`. The old `Direct`-only gate
-/// meant the actual color-arm shape (`k > DIRECT_SOLVE_MAX_K`, hence
-/// `InexactPCG`) rebuilt and re-uploaded every ridge-independent operand on
-/// every LM retry. Both modes execute the identical resident PCG kernel, so the
-/// frame lifetime belongs to the ridge ladder, not to the mode enum. Hand the
-/// runtime/offload gate + the one-time upload to
+/// This frame belongs only to the genuinely matrix-free `InexactPCG` owner.
+/// Direct always forms the exact dense Schur for its step and evidence, so
+/// preparing a resident PCG frame in Direct mode would allocate and upload an
+/// operator that no solve can consume. The large-border InexactPCG lane reuses
+/// the frame across its ridge ladder because only
+/// `ainv = (H_tt + ridge_t·I)⁻¹` depends on the ridge. Hand the runtime/offload
+/// gate + the one-time upload to
 /// [`crate::gpu_kernels::arrow_schur::build_sae_resident_frame`]. Whenever this
 /// returns `Some`, the per-trial device solve it replaces would ALSO have run on
 /// the device — the resident frame changes only how the (identical) solve is fed.
@@ -1017,10 +632,7 @@ fn build_resident_sae_frame_if_admitted(
     Option<std::sync::Arc<dyn crate::gpu_kernels::arrow_schur::SaeResidentFrame + Send + Sync>>,
     ArrowSchurError,
 > {
-    if !matches!(
-        options.mode,
-        ArrowSolverMode::Direct | ArrowSolverMode::InexactPCG
-    ) {
+    if options.mode != ArrowSolverMode::InexactPCG {
         return Ok(None);
     }
     let Some(data) = sys.device_sae_pcg.as_ref() else {
@@ -1058,10 +670,7 @@ pub fn prepare_sae_resident_frame(
     Option<std::sync::Arc<dyn crate::gpu_kernels::arrow_schur::SaeResidentFrame + Send + Sync>>,
     ArrowSchurError,
 > {
-    if !matches!(
-        options.mode,
-        ArrowSolverMode::Direct | ArrowSolverMode::InexactPCG
-    ) || sys
+    if options.mode != ArrowSolverMode::InexactPCG || sys
         .device_sae_pcg
         .as_ref()
         .is_none_or(|data| data.frame.is_none())
@@ -1126,15 +735,12 @@ pub fn solve_with_lm_escalation_inner(
     // per-trial re-upload path unchanged (Off, non-Direct, matrix-free, or below
     // the device threshold).
     let mut resident_frame = build_resident_base_frame_if_admitted(sys, options)?;
-    // #1017: the matrix-free SAE-PCG system is exactly the shape the dense base
-    // frame above declines, so it re-flattened every device operand each trial.
-    // Give it a device-resident frame that reuses the ridge-independent buffers
-    // and recomputes only `ainv` per trial (consumed through
-    // `options.sae_resident_frame` by both the Direct SAE-PCG seam and the
-    // production large-border InexactPCG branch). Only built when the dense base
-    // frame is absent (mutually exclusive shapes); a `None` keeps the per-trial
-    // re-flatten path bit-identical. Carried via a `Cow` so options are cloned
-    // only when a resident frame is actually installed.
+    // #1017: the large-border InexactPCG owner reuses one matrix-free SAE frame
+    // across the ridge ladder and recomputes only `ainv` per trial. Direct owns
+    // an exact dense factor and therefore never prepares this PCG frame. The
+    // dense base frame and matrix-free SAE frame remain mutually exclusive by
+    // solver mode; `None` keeps the per-trial path unchanged. Carried via a
+    // `Cow` so options are cloned only when a resident frame is installed.
     let core_options = if options.sae_resident_frame.is_some() {
         // A production caller may retain the frame allocation across accepted
         // nonlinear iterates and refresh it before entering this fixed-system
@@ -2391,23 +1997,17 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
     let mut mixed_precision_status = MixedPrecisionStatus::Off;
     let (delta_beta, schur_factor, mut pcg_diagnostics) = match options.mode {
         ArrowSolverMode::Direct => {
-            // #1551 production device seam: when the matrix-free SAE PCG frames are
-            // present and the GPU admits the CG-amortised work, run the exact full
-            // Direct step on the device when that unbounded step is inside the
-            // active trust radius. If the step needs Steihaug truncation, or on any
-            // other device decline, this returns `None` and the CPU dense path below
-            // runs bit-identically.
-            if let Some(device_step) = try_device_arrow_direct_sae_pcg(
-                sys,
-                &htt_factors,
-                &rhs_beta_evidence,
-                ridge_t,
-                ridge_beta,
-                options,
-                &backend,
-            ) {
-                return device_step;
-            }
+            // #2660 — Direct has one numerical owner. Automatic mode selects it
+            // only for `k <= DIRECT_SOLVE_MAX_K`, where the exact dense Schur is
+            // required for the evidence factor as well as the Newton step. The
+            // former SAE device-PCG detour solved a different (unquotiented,
+            // unfloored) operator, then built this same canonical factor for
+            // logdet and discarded its correct step. Assemble once and let the
+            // quotient-aware, spectrally-conditioned factor own both results.
+            // Profitable stacked Schur assembly still offloads through
+            // `build_dense_schur_direct`; only the redundant iterative solve is
+            // gone. Large borders remain the genuine matrix-free InexactPCG
+            // device lane below.
             let schur = build_dense_schur_direct(
                 sys,
                 &htt_factors,
@@ -2553,9 +2153,9 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                         .pcg
                         .relative_tolerance
                         .max(options.trust_region.steihaug_relative_tolerance);
-                    // #1209/#1551 fail-loud routing — classify the device result
-                    // EXACTLY as the Direct seam (`try_device_arrow_direct_sae_pcg`)
-                    // does, never with a bare `if let Ok` that swallows hard faults.
+                    // #1209/#1551 fail-loud routing — classify every device
+                    // result explicitly, never with a bare `if let Ok` that
+                    // swallows hard faults.
                     // A `SchurFactorFailed` / `RidgeBumpRequired` here is a REAL
                     // numerical signal the LM escalation must respond to (bump the
                     // ridge and retry); silently falling through to the CPU
@@ -2567,10 +2167,10 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                     // Only a genuine "device declined" (`Unavailable` /
                     // `GpuRequiresDenseSystem` / transient) falls through to CPU.
                     // #1017: the production large-border lane is InexactPCG, not
-                    // Direct. Consume the SAME ladder-scoped resident frame as the
-                    // Direct SAE-PCG seam so LM retries refresh only the
-                    // ridge-dependent `ainv`; the old call below flattened and
-                    // uploaded every ridge-independent operand on every retry.
+                    // Direct. Consume the ladder-scoped resident frame so LM
+                    // retries refresh only the ridge-dependent `ainv`; the old
+                    // call below flattened and uploaded every ridge-independent
+                    // operand on every retry.
                     // `Unavailable` is a residency decline only, so it retries via
                     // the established per-trial path. Numerical failures remain
                     // fail-loud and are classified by the shared match below.
@@ -2603,6 +2203,7 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                     };
                     match device_result {
                         Ok((delta, mut diag)) => {
+                            diag.selected_matrix_free_pcg = true;
                             diag.used_device_arrow = true;
                             return Ok(ArrowNewtonStepArtifacts {
                                 delta_t: back_substitute_delta_t(
@@ -2655,7 +2256,7 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                     }
                 }
             }
-            let (delta, diag) = steihaug_pcg_auto(
+            let (delta, mut diag) = steihaug_pcg_auto(
                 sys,
                 &htt_factors,
                 ridge_beta,
@@ -2669,6 +2270,7 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                 // the matrix-free unbounded-PCG curvature-floor retry.
                 options.newton_schur_tikhonov_rel_floor,
             )?;
+            diag.selected_matrix_free_pcg = true;
             (delta, None, diag)
         }
     };
@@ -3145,6 +2747,7 @@ pub(crate) fn solve_arrow_newton_step_cross_row(
         },
         stopping_reason: PcgStopReason::Converged,
         mixed_precision_status: MixedPrecisionStatus::Off,
+        selected_matrix_free_pcg: false,
         used_device_arrow: false,
         injected_host_procedural_matvec: false,
     };
