@@ -9,9 +9,34 @@ use super::*;
 // the call site rather than via the pirls prelude re-export (#2306/build).
 use faer::Unbind;
 
-// Fixed stabilization ridge for PIRLS/PLS. `penalty_term` carries this as
-// ridge * ||beta||^2 (equivalently 0.5 * ridge * ||beta||^2 in the
-// 0.5 * (deviance + penalty_term) objective), and it is constant w.r.t. rho.
+// Fixed stabilization ridge for PIRLS/PLS. It is constant w.r.t. rho.
+//
+// IT IS CENTERED, NOT SHRUNK TOWARD ZERO. `penalty_term` carries
+// `ridge * ||beta - mu||^2`, where `mu` is `PirlsPenalty::prior_mean_target()`:
+// `pls_solver` augments the normal-equation RHS with `r + ridge * mu`
+// (`pls_solver.rs:305` and `:543`), which makes the system a Tikhonov
+// regularization centered at the prior-mean target. This comment used to read
+// "`penalty_term` carries this as ridge * ||beta||^2", and that shorthand is
+// only true when `mu = 0`.
+//
+// The distinction is not cosmetic, and it cost two people a session on #2644.
+// From `ridge * ||beta||^2` it follows that the criterion depends on where the
+// origin of the response sits -- an intercept absorbing a shift in `y` would be
+// charged for it, which reads as a SPEC.md line 12 violation ("an intercept
+// generally should not have a penalty") and appears to justify exempting the
+// intercept. MEASURED, it does not: `mu` moves with `beta` under an origin
+// shift, so the term is unchanged. Fitting `y` against `y + 10` moved the
+// criterion by 4.085621e-14 (relative 4.504937e-15, ~20 machine epsilons)
+// against a 5.092357e-05 prediction from the uncentered reading -- nine orders
+// out. `tests/regression_2644_outer_criterion_conditioning.rs::
+// outer_criterion_is_invariant_to_the_origin_of_y` is the standing guard.
+//
+// What IS true: `beta` moving relative to a FIXED `mu` is charged, which is how
+// #2644's cross-route criterion disagreement became visible at all (the ridge
+// accounted for 100% of it, ratio 1.00000009). That makes this constant the
+// DETECTOR of a coefficient disagreement, not its cause -- see #2671. Removing
+// it from the intercept would delete the only term that can see two routes
+// compute different coefficients, while they went on doing so.
 //
 // Math note:
 //   Objective: V(ρ) includes log|H(ρ)| with H(ρ) = X' W X + S_λ(ρ) + δ I.
