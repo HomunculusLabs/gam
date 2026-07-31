@@ -42,14 +42,19 @@ fn wiggle_penalty_orders_requested_by_spec_are_not_silently_dropped() {
     );
 
     let all_requested_orders = [primary, extras[0], extras[1]];
-    let error = buildwiggle_block_input_from_orders(
+    // `expect_err` would require the Ok type to be `Debug` so it can print it,
+    // and `ParameterBlockInput` is not (E0277). Match instead of deriving Debug
+    // on a production type purely to satisfy a test formatter.
+    let error = match buildwiggle_block_input_from_orders(
         seed.view(),
         &knots,
         cfg.degree,
         &all_requested_orders,
         cfg.double_penalty,
-    )
-    .expect_err("an unavailable order-seven function derivative must be rejected");
+    ) {
+        Ok(_) => panic!("an unavailable order-seven function derivative must be rejected"),
+        Err(error) => error,
+    };
     assert_eq!(
         supported_block.penalties.len(),
         baseline_penalty_count + 1,
