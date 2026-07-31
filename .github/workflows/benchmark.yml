@@ -342,7 +342,10 @@ jobs:
       - name: Run scenario shard
         shell: bash
         env:
-          PYTHONPATH: ${{ github.workspace }}/bench/runtime/pydeps
+          # Executing `python3 bench/run_suite.py` makes `bench/`, not the
+          # repository root, `sys.path[0]`. Keep the source-tree `gamfit`
+          # package importable alongside the staged third-party dependencies.
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/bench/runtime/pydeps
           R_LIBS_USER: ${{ github.workspace }}/bench/runtime/r-lib
           BENCH_GAM_BIN: ${{ github.workspace }}/bench/runtime/gam
         run: |
@@ -375,6 +378,8 @@ jobs:
           test -x "${BENCH_GAM_BIN}"
           echo "smoke-import python deps"
           python3 .github/scripts/workflow_tasks.py check_python_deps
+          echo "smoke-import gamfit extension"
+          python3 -c 'import gamfit, gamfit._rust; print(gamfit._rust.__file__)'
           echo "smoke-load R deps"
           Rscript -e 'library(mgcv); library(jsonlite); library(survival); library(glmnet); library(gamlss); library(gamlss.dist); library(gamboostLSS); library(mboost); library(bamlss); library(brms); cat("R deps ok\n")'
           mkdir -p bench/results-shards
@@ -496,7 +501,10 @@ jobs:
       - name: Run scenario shard
         shell: bash
         env:
-          PYTHONPATH: ${{ github.workspace }}/bench/runtime/pydeps
+          # Executing `python3 bench/run_suite.py` makes `bench/`, not the
+          # repository root, `sys.path[0]`. Keep the source-tree `gamfit`
+          # package importable alongside the staged third-party dependencies.
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/bench/runtime/pydeps
           R_LIBS_USER: ${{ github.workspace }}/bench/runtime/r-lib
           BENCH_GAM_BIN: ${{ github.workspace }}/bench/runtime/gam
         run: |
@@ -529,6 +537,8 @@ jobs:
           test -x "${BENCH_GAM_BIN}"
           echo "smoke-import python deps"
           python3 .github/scripts/workflow_tasks.py check_python_deps
+          echo "smoke-import gamfit extension"
+          python3 -c 'import gamfit, gamfit._rust; print(gamfit._rust.__file__)'
           echo "smoke-load R deps"
           Rscript -e 'library(mgcv); library(jsonlite); library(survival); library(glmnet); library(gamlss); library(gamlss.dist); library(gamboostLSS); library(mboost); library(bamlss); library(brms); cat("R deps ok\n")'
           mkdir -p bench/results-shards
