@@ -2688,6 +2688,36 @@ where
             // WPS corrected-EDF correction never has to recover it from an
             // inconsistent `H·F` product.
             let mut xwx = &penalized_hessian - &s_mat;
+            // `H·F = H(I − H⁻¹S) = H − S` is the RAW difference, but the gram
+            // stored below is `sym(H − S)`. When `H` and `S` are both symmetric
+            // those coincide and `H·F = X'WX` exactly; when they are not, this
+            // `symmetrize_in_place` silently absorbs the difference and the
+            // identity fails downstream with no way to see which operand caused
+            // it (#2668 measures a 3.9% gap on `y ~ s(x)` and could only rule
+            // out `H`: `max|H − Hᵀ| = 0.000e0` there). Report both asymmetries
+            // at the one place that holds `s_mat`. `debug!` so it costs nothing
+            // without a backend installed, and O(p²) beside the O(p³) work above.
+            if log::log_enabled!(log::Level::Debug) {
+                let asym = |m: &ndarray::Array2<f64>| {
+                    let mut worst = 0.0_f64;
+                    for i in 0..m.nrows() {
+                        for j in 0..m.ncols() {
+                            worst = worst.max((m[[i, j]] - m[[j, i]]).abs());
+                        }
+                    }
+                    worst
+                };
+                let scale = xwx.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+                log::debug!(
+                    "[WPS-GRAM #2668] max|H-H^T|={:.3e} max|S-S^T|={:.3e} \
+                     max|H-S|={:.3e} (the stored gram is symmetrize(H-S); a \
+                     non-zero S asymmetry is absorbed here and surfaces as \
+                     H*F != X'WX)",
+                    asym(&penalized_hessian),
+                    asym(&s_mat),
+                    scale
+                );
+            }
             gam_linalg::matrix::symmetrize_in_place(&mut xwx);
             weighted_gram = Some(xwx);
             coefficient_influence = Some(f_mat);
