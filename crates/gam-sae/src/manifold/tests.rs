@@ -4131,6 +4131,167 @@ fn laplace_value_and_gradient_are_route_invariant_2515() {
     );
 }
 
+/// #2515 — the route gap is TWO coordinates with TWO different causes, and the
+/// named witness `laplace_value_and_gradient_are_route_invariant_2515` can report
+/// neither, because it asserts per-coordinate and panics on the first violation.
+///
+/// `∂A/∂ρ = ∂B/∂ρ + ∂ΔC/∂ρ`, so a bundle route that prices `B` can be wrong in two
+/// independent ways: it can contract the wrong INVERSE, or it can differentiate the
+/// wrong OPERATOR. Which one applies is a per-coordinate fact, and it decides the
+/// repair:
+///
+/// * on the SMOOTH coordinates `ΔC` has no `λ_smooth` dependence at all — the
+///   smoothness penalty is a β-side quadratic and `ΔC_ββ ≡ 0` — so `∂A/∂λ_smooth`
+///   and `∂B/∂λ_smooth` are the same operator and the bundle route's formula is
+///   already the right one. Only its inverse is wrong;
+/// * on the ARD coordinates `ΔC` is the periodic concave-clamp remainder, which is
+///   a function of `α`, so the operator derivative genuinely differs too.
+///
+/// The first bullet is the load-bearing one and it is asserted STRUCTURALLY here,
+/// off `exact_stationarity_penalty_derivative_delta_by_flat`'s own key set, rather
+/// than inferred from two numbers that happen to differ. It is stable across the
+/// repair: whatever `A`-geometry the bundle route eventually contracts, `ΔC` still
+/// will not depend on `λ_smooth`, so this test does not encode the bug.
+///
+/// The per-coordinate gaps are REPORTED rather than asserted, because the contract
+/// they belong to is the witness's and it already owns it. What would otherwise be
+/// lost is that there is a second one at all.
+#[test]
+fn exact_a_route_gap_is_two_coordinates_with_two_causes_2515() {
+    let n = 24usize;
+    let p = 2usize;
+    let coords = Array2::from_shape_fn((n, 1), |(row, _)| (row as f64 + 0.25) / n as f64);
+    let (phi, jet) = periodic_basis(&coords);
+    let decoder = array![[0.30, -0.10], [1.20, 0.20], [0.10, 1.10]];
+    assert_eq!(decoder.ncols(), p);
+    let mut target = phi.dot(&decoder);
+    for row in 0..n {
+        target[[row, 0]] += 1.0e-3 * (0.37 * row as f64).sin();
+        target[[row, 1]] += 1.0e-3 * (0.29 * row as f64).cos();
+    }
+    let atom = SaeManifoldAtom::new_with_provided_function_gram(
+        "periodic",
+        SaeAtomBasisKind::Periodic,
+        1,
+        phi,
+        jet,
+        decoder,
+        Array2::<f64>::eye(3),
+    )
+    .unwrap()
+    .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::zeros((n, 1)),
+        vec![coords],
+        vec![LatentManifold::Circle { period: 1.0 }],
+        AssignmentMode::softmax(1.0),
+    )
+    .unwrap();
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![250.0_f64.ln()]]);
+    let sys = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .unwrap();
+    let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+    let (_delta_t, _delta_beta, cache) =
+        solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options).unwrap();
+    let loss = term.loss(target.view(), &rho).unwrap();
+
+    // (1) THE INVARIANT. `∂ΔC/∂ρ` is keyed by flat outer coordinate; the smooth
+    // coordinates must not appear in it, and the ARD coordinate must — otherwise
+    // this fixture cannot separate the two causes and the report below is vacuous.
+    let delta_by_flat = term
+        .exact_stationarity_penalty_derivative_delta_by_flat(&rho, &cache)
+        .expect("the exact-A penalty derivative delta must be assemblable at this state");
+    for atom_idx in 0..rho.k_atoms() {
+        let smooth = rho.smooth_flat_index(atom_idx);
+        assert!(
+            !delta_by_flat.contains_key(&smooth),
+            "#2515: ΔC must not depend on λ_smooth (atom {atom_idx}, flat coordinate \
+             {smooth}), so ∂A/∂λ_smooth == ∂B/∂λ_smooth and the smooth-coordinate \
+             desync is a wrong-inverse gap, not a wrong-operator one. Keys present: {:?}",
+            delta_by_flat.keys().collect::<Vec<_>>()
+        );
+    }
+    let ard_flat = rho.ard_flat_index(0, 0);
+    assert!(
+        delta_by_flat.contains_key(&ard_flat),
+        "#2515: this fixture must carry a live ∂ΔC/∂log α on the ARD coordinate \
+         {ard_flat} (α=250 on a unit-period Circle puts cos κt below zero over a third \
+         of the rows), or it cannot distinguish the wrong-operator cause from the \
+         wrong-inverse one. Keys present: {:?}",
+        delta_by_flat.keys().collect::<Vec<_>>()
+    );
+
+    // (2) THE REPORT. Every coordinate, so a second desync cannot hide behind the
+    // first one's panic.
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let dense = term
+        .analytic_outer_rho_gradient_components(target.view(), &rho, &loss, &cache, &solver)
+        .unwrap();
+    let k = cache.k;
+    let sqrt_k = (k as f64).sqrt();
+    let probes: Vec<Array1<f64>> = (0..k)
+        .map(|j| {
+            let mut v = Array1::<f64>::zeros(k);
+            v[j] = sqrt_k;
+            v
+        })
+        .collect();
+    let sinv: Vec<Array1<f64>> = probes
+        .iter()
+        .map(|v| cache.schur_inverse_apply(v.view()).unwrap())
+        .collect();
+    let bundled = term
+        .analytic_outer_rho_gradient_components_with_bundle(
+            target.view(),
+            &rho,
+            &loss,
+            &cache,
+            &solver,
+            Some((&probes, &sinv)),
+            None,
+        )
+        .unwrap();
+    for i in 0..dense.logdet_trace.len() {
+        let role = if Some(i) == rho.sparse_flat_index() {
+            "assignment-log-strength".to_string()
+        } else if i >= rho.smooth_flat_start() && i < rho.smooth_flat_start() + rho.k_atoms() {
+            format!("smooth-atom-{} (wrong-inverse only)", i - rho.smooth_flat_start())
+        } else if delta_by_flat.contains_key(&i) {
+            format!("ard-flat-{i} (wrong-inverse AND wrong-operator)")
+        } else {
+            format!("ard-flat-{i}")
+        };
+        println!(
+            "[#2515 ROUTE-GAP] coord {i} ({role}) dense_A={:.17e} bundle_on_B={:.17e} \
+             |Δ|={:.6e}",
+            dense.logdet_trace[i],
+            bundled.logdet_trace[i],
+            (dense.logdet_trace[i] - bundled.logdet_trace[i]).abs(),
+        );
+    }
+
+    // (3) The exact-A evidence system must be CONSTRUCTIBLE at this state — Phase-2b
+    // (#2509) made the streaming lane's log-determinant depend on it, so an assembly
+    // failure here is that lane refusing, not a test-only concern.
+    term.exact_a_evidence_system(target.view(), &rho, &sys)
+        .expect("the assembled exact-A evidence system must be constructible");
+
+    // Falsifiable floor: both routes produce finite gradients of the declared layout.
+    let dense_grad = dense.gradient();
+    let bundled_grad = bundled.gradient();
+    assert_eq!(dense_grad.len(), bundled_grad.len());
+    assert!(
+        dense_grad
+            .iter()
+            .chain(bundled_grad.iter())
+            .all(|v| v.is_finite()),
+        "#2515: both routes must produce a finite gradient: dense={dense_grad:?} \
+         bundled={bundled_grad:?}"
+    );
+}
+
 /// #2499 spin-off measurement. `analytic_outer_gradient_with_bundle_matches_dense_assembly`
 /// desyncs on `logdet-trace coordinate 1 (smooth atom 0)` by `1.23e-1`. The two
 /// smoothness-EDF routes it compares are NOT the same operator whenever a
