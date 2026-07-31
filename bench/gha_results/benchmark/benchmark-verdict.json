@@ -6,7 +6,7 @@
     "full_suite_required": true
   },
   "configured_scenario_count": 110,
-  "observed_scenario_count": 0,
+  "observed_scenario_count": 3,
   "missing_scenarios": [
     "bone_gamair",
     "cirrhosis_survival",
@@ -93,9 +93,6 @@
     "icu_survival_los",
     "lidar_semipar",
     "medium",
-    "papuan_oce4_duchon_k12",
-    "papuan_oce4_duchon_k24",
-    "papuan_oce4_duchon_k6",
     "papuan_oce4_matern_k12",
     "papuan_oce4_matern_k24",
     "papuan_oce4_matern_k6",
@@ -120,7 +117,224 @@
     "wine_temp_vs_year"
   ],
   "full_suite": false,
-  "comparisons": [],
-  "worst_performance_measure": null,
+  "comparisons": [
+    {
+      "scenario_name": "papuan_oce4_duchon_k12",
+      "gam_contender": "rust_gam",
+      "reference_contender": "r_mgcv",
+      "gam_status": "ok",
+      "reference_status": "ok",
+      "performance": [
+        {
+          "measure": "fit_sec",
+          "gam": 8.761618881000004,
+          "reference": 8.633,
+          "gam_over_reference": 1.0148985151164143,
+          "passed": true
+        },
+        {
+          "measure": "predict_sec",
+          "gam": 0.2507773360000556,
+          "reference": 1.0110000000000001,
+          "gam_over_reference": 0.2480487992087592,
+          "passed": true
+        }
+      ],
+      "accuracy": [
+        {
+          "measure": "auc",
+          "direction": "higher",
+          "gam": 0.8293822479345018,
+          "reference": 0.8293822479345018,
+          "gam_minus_reference": 0.0,
+          "passed": true
+        },
+        {
+          "measure": "nagelkerke_r2",
+          "direction": "higher",
+          "gam": 0.3739580007954733,
+          "reference": 0.3739579978644811,
+          "gam_minus_reference": 2.9309922267017896e-09,
+          "passed": true
+        },
+        {
+          "measure": "brier",
+          "direction": "lower",
+          "gam": 0.10634701838502111,
+          "reference": 0.10634701796934863,
+          "gam_minus_reference": 4.156724825454816e-10,
+          "passed": false
+        },
+        {
+          "measure": "logloss",
+          "direction": "lower",
+          "gam": 0.32513278989271793,
+          "reference": 0.3251327908249734,
+          "gam_minus_reference": -9.322554395119198e-10,
+          "passed": true
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_name": "papuan_oce4_duchon_k12",
+      "gam_contender": "rust_gamlss",
+      "reference_contender": "r_mgcv_gaulss",
+      "gam_status": "failed",
+      "reference_status": null,
+      "performance": [],
+      "accuracy": [],
+      "passed": false,
+      "failure": "missing or failed matched contender"
+    },
+    {
+      "scenario_name": "papuan_oce4_duchon_k24",
+      "gam_contender": "rust_gam",
+      "reference_contender": "r_mgcv",
+      "gam_status": "ok",
+      "reference_status": "ok",
+      "performance": [
+        {
+          "measure": "fit_sec",
+          "gam": 10.807697499000028,
+          "reference": 9.817,
+          "gam_over_reference": 1.1009165222573116,
+          "passed": true
+        },
+        {
+          "measure": "predict_sec",
+          "gam": 0.1757404999999892,
+          "reference": 0.923,
+          "gam_over_reference": 0.1904014084506925,
+          "passed": true
+        }
+      ],
+      "accuracy": [
+        {
+          "measure": "auc",
+          "direction": "higher",
+          "gam": 0.8284809850746269,
+          "reference": 0.8284809850746268,
+          "gam_minus_reference": 1.1102230246251565e-16,
+          "passed": true
+        },
+        {
+          "measure": "nagelkerke_r2",
+          "direction": "higher",
+          "gam": 0.37852770382550316,
+          "reference": 0.3785277008144735,
+          "gam_minus_reference": 3.011029647836949e-09,
+          "passed": true
+        },
+        {
+          "measure": "brier",
+          "direction": "lower",
+          "gam": 0.1058912620255664,
+          "reference": 0.10589126204221198,
+          "gam_minus_reference": -1.664558768599278e-11,
+          "passed": true
+        },
+        {
+          "measure": "logloss",
+          "direction": "lower",
+          "gam": 0.3234124949566792,
+          "reference": 0.3234124959794943,
+          "gam_minus_reference": -1.0228151103852667e-09,
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_name": "papuan_oce4_duchon_k24",
+      "gam_contender": "rust_gamlss",
+      "reference_contender": "r_mgcv_gaulss",
+      "gam_status": "failed",
+      "reference_status": null,
+      "performance": [],
+      "accuracy": [],
+      "passed": false,
+      "failure": "missing or failed matched contender"
+    },
+    {
+      "scenario_name": "papuan_oce4_duchon_k6",
+      "gam_contender": "rust_gam",
+      "reference_contender": "r_mgcv",
+      "gam_status": "ok",
+      "reference_status": "ok",
+      "performance": [
+        {
+          "measure": "fit_sec",
+          "gam": 4.960548949000042,
+          "reference": 7.386,
+          "gam_over_reference": 0.6716150756837317,
+          "passed": true
+        },
+        {
+          "measure": "predict_sec",
+          "gam": 0.1413336979999542,
+          "reference": 0.7525,
+          "gam_over_reference": 0.18781886777402554,
+          "passed": true
+        }
+      ],
+      "accuracy": [
+        {
+          "measure": "auc",
+          "direction": "higher",
+          "gam": 0.8281559797259948,
+          "reference": 0.8281559797259949,
+          "gam_minus_reference": -1.1102230246251565e-16,
+          "passed": true
+        },
+        {
+          "measure": "nagelkerke_r2",
+          "direction": "higher",
+          "gam": 0.36774012987025284,
+          "reference": 0.3677401305740071,
+          "gam_minus_reference": -7.037542770760297e-10,
+          "passed": false
+        },
+        {
+          "measure": "brier",
+          "direction": "lower",
+          "gam": 0.10707982850980233,
+          "reference": 0.10707982836760219,
+          "gam_minus_reference": 1.422001405515516e-10,
+          "passed": false
+        },
+        {
+          "measure": "logloss",
+          "direction": "lower",
+          "gam": 0.32749657756727313,
+          "reference": 0.32749657728142956,
+          "gam_minus_reference": 2.8584357103511593e-10,
+          "passed": false
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_name": "papuan_oce4_duchon_k6",
+      "gam_contender": "rust_gamlss",
+      "reference_contender": "r_mgcv_gaulss",
+      "gam_status": "failed",
+      "reference_status": null,
+      "performance": [],
+      "accuracy": [],
+      "passed": false,
+      "failure": "missing or failed matched contender"
+    }
+  ],
+  "worst_performance_measure": {
+    "measure": "fit_sec",
+    "gam": 10.807697499000028,
+    "reference": 9.817,
+    "gam_over_reference": 1.1009165222573116,
+    "passed": true,
+    "scenario_name": "papuan_oce4_duchon_k24",
+    "gam_contender": "rust_gam",
+    "reference_contender": "r_mgcv"
+  },
   "certified": false
 }
