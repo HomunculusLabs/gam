@@ -18,6 +18,7 @@ use gam::inference::data::{EncodedDataset, encode_recordswith_inferred_schema};
 use gam::solver::fit_orchestration::{
     FitConfig, FitResult, StandardFitResult, fit_from_formula, fit_model, materialize,
 };
+use gam_linalg::matrix::LinearOperator;
 
 /// `y = 0.5 + 1.25·x` on `n` rows, plus a deterministic per-row perturbation of
 /// size `noise`. At `noise == 0` the response is an EXACT affine function of the
@@ -133,24 +134,40 @@ fn a_fit_with_residual_variance_keeps_its_criterion_on_both_routes() {
     assert!(!formula_fit.fit.at_zero_dispersion_boundary());
 }
 
-/// A penalized smooth on the SAME noiseless data does not interpolate — the
-/// penalty keeps a real residual — so it must keep its criterion. This is the
-/// over-firing guard: the boundary is about the arithmetic's resolution, not
-/// about the fixture being synthetic.
+/// A default smooth carries two precisions. On an exact affine response its
+/// roughness precision tends to infinity while the complementary null-space
+/// shrinkage tends to zero. There is no finite REML interior at that corner.
 #[test]
-fn a_penalized_smooth_on_noiseless_data_still_has_a_criterion() {
-    let fit = via_formula("y ~ s(x)", 0.0);
-    let score = fit
-        .fit
-        .reml_score()
-        .expect("a penalized smooth does not interpolate, so it has a criterion");
-    assert!(score.is_finite(), "score={score}");
-    assert!(
-        fit.fit.standard_deviation > 0.0,
-        "sigma={}",
-        fit.fit.standard_deviation
-    );
-    assert!(!fit.fit.at_zero_dispersion_boundary());
+fn an_exact_affine_smooth_uses_the_mixed_penalty_boundary() {
+    for fit in [via_formula("y ~ s(x)", 0.0), via_fit_model("y ~ s(x)", 0.0)] {
+        assert_eq!(fit.fit.reml_score(), None);
+        assert!(fit.fit.at_zero_dispersion_boundary());
+        assert_eq!(fit.fit.standard_deviation, 0.0);
+        assert_eq!(fit.fit.log_lambdas.len(), 2);
+        assert_eq!(
+            fit.fit
+                .log_lambdas
+                .iter()
+                .filter(|&&rho| rho == gam_problem::LOG_STRENGTH_MIN)
+                .count(),
+            1,
+            "the null-space shrinkage precision must take the zero face: {:?}",
+            fit.fit.log_lambdas
+        );
+        assert_eq!(
+            fit.fit.log_lambdas.iter().filter(|&&rho| rho > 0.0).count(),
+            1,
+            "the roughness precision must take the infinite face: {:?}",
+            fit.fit.log_lambdas
+        );
+        let edf = fit.fit.edf_total().expect("deterministic fit reports EDF");
+        assert!((edf - 2.0).abs() < 1.0e-5, "affine EDF was {edf}");
+        let fitted = fit.design.design.apply(&fit.fit.beta);
+        let data = dataset(0.0);
+        for (actual, expected) in fitted.iter().zip(data.matrix.column(1)) {
+            assert!((actual - expected).abs() < 1.0e-9);
+        }
+    }
 }
 
 /// A constant response reaches the boundary through the OTHER dispatch branch

@@ -165,9 +165,15 @@ pub fn fit_model(request: FitRequest<'_>) -> Result<FitResult, WorkflowError> {
     let wrap_solver_err =
         |reason: String| -> WorkflowError { WorkflowError::IntegrationFailed { reason } };
     match request {
-        FitRequest::Standard(request) => fit_standard_model(request)
-            .map(FitResult::Standard)
-            .map_err(wrap_solver_err),
+        FitRequest::Standard(request) => {
+            if let Some(fitted) = try_deterministic_gaussian_standard_fit(&request)? {
+                Ok(FitResult::Standard(fitted))
+            } else {
+                fit_standard_model(request)
+                    .map(FitResult::Standard)
+                    .map_err(wrap_solver_err)
+            }
+        }
         FitRequest::GaussianLocationScale(request) => fit_gaussian_location_scale_model(request)
             .map(FitResult::GaussianLocationScale)
             .map_err(wrap_solver_err),
@@ -482,14 +488,30 @@ mod expectile_convergence_tests {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeterministicPenaltyFace {
+    /// The exact coefficient lies in this penalty's null space, so unsupported
+    /// directions are removed at the infinite-precision face.
+    Infinite,
+    /// This penalty acts on the exact coefficient and must vanish for the
+    /// zero-residual fit to remain attainable.
+    Zero,
+}
+
+struct ExactGaussianBoundary {
+    beta: Array1<f64>,
+    penalty_faces: Vec<DeterministicPenaltyFace>,
+}
+
 fn deterministic_gaussian_standard_fit(
     request: &StandardFitRequest<'_>,
-    exact_unpenalized_beta: Option<Array1<f64>>,
+    exact_boundary: Option<ExactGaussianBoundary>,
 ) -> Result<StandardFitResult, WorkflowError> {
     if !request.family.is_gaussian_identity() || request.y.is_empty() {
         return Err(WorkflowError::InvalidConfig {
-            reason: "deterministic Gaussian shortcut requires a non-empty Gaussian identity request"
-                .to_string(),
+            reason:
+                "deterministic Gaussian shortcut requires a non-empty Gaussian identity request"
+                    .to_string(),
         });
     }
     if request.y.iter().any(|value| !value.is_finite())
@@ -517,17 +539,20 @@ fn deterministic_gaussian_standard_fit(
             }
         })?;
     let p = design.design.ncols();
-    let beta = match exact_unpenalized_beta {
-        Some(beta) => {
-            if beta.len() != p {
+    let n_penalties = design.penalties.len();
+    let (beta, penalty_faces) = match exact_boundary {
+        Some(boundary) => {
+            if boundary.beta.len() != p || boundary.penalty_faces.len() != n_penalties {
                 return Err(WorkflowError::IntegrationFailed {
                     reason: format!(
-                        "deterministic Gaussian coefficient width {} does not match rebuilt design width {p}",
-                        beta.len()
+                        "deterministic Gaussian boundary shape changed while rebuilding: \
+                         coefficients {} vs {p}, penalty faces {} vs {n_penalties}",
+                        boundary.beta.len(),
+                        boundary.penalty_faces.len(),
                     ),
                 });
             }
-            beta
+            (boundary.beta, boundary.penalty_faces)
         }
         None => {
             // Dispatch proved every represented `y - offset` value is
@@ -542,10 +567,10 @@ fn deterministic_gaussian_standard_fit(
                     beta[col] = intercept;
                 }
             }
-            beta
+            (beta, vec![DeterministicPenaltyFace::Infinite; n_penalties])
         }
     };
-    let fitted_eta = design.design.apply(&beta) + request.offset.as_ref();
+    let fitted_eta = design.design.apply(&beta) + &design.affine_offset + request.offset.as_ref();
     let max_abs_eta = fitted_eta
         .iter()
         .copied()
@@ -567,8 +592,7 @@ fn deterministic_gaussian_standard_fit(
     let x_dense = design.design.to_dense();
     let weights = request.weights.as_ref().clone();
     let xtwx = gam_linalg::faer_ndarray::fast_xt_diag_x(&x_dense, &weights);
-    let n_penalties = design.penalties.len();
-    let mut unit_penalty = Array2::<f64>::zeros((p, p));
+    let mut infinite_face_penalty = Array2::<f64>::zeros((p, p));
     for (penalty_index, block) in design.penalties.iter().enumerate() {
         let r = block.col_range.clone();
         if r.is_empty()
@@ -592,24 +616,39 @@ fn deterministic_gaussian_standard_fit(
                 ),
             });
         }
-        unit_penalty
-            .slice_mut(ndarray::s![r.clone(), r])
-            .scaled_add(1.0, &block.local);
+        if !matches!(&block.prior_mean, gam_problem::CoefficientPriorMean::Zero) {
+            return Err(WorkflowError::IntegrationFailed {
+                reason: format!(
+                    "deterministic Gaussian shortcut does not admit a nonzero coefficient \
+                     prior mean on penalty {penalty_index}"
+                ),
+            });
+        }
+        if penalty_faces[penalty_index] == DeterministicPenaltyFace::Infinite {
+            infinite_face_penalty
+                .slice_mut(ndarray::s![r.clone(), r])
+                .scaled_add(1.0, &block.local);
+        }
     }
 
-    // This fit is the analytic λ→∞ boundary: every direction in range(S) is a
-    // hard constraint and only null(S) carries EDF. Arrays cannot store an
-    // infinite precision because `∞·0` is NaN, so represent that boundary at
-    // floating-point resolution. Choose λ from the ACTUAL penalty spectrum:
+    // Infinite-face penalties are hard constraints; zero-face penalties vanish.
+    // Arrays cannot store either exact endpoint (`∞·0` is NaN and log(0) is not
+    // finite), so represent the upper face at floating-point resolution and the
+    // lower face at the exact supported log-strength endpoint. Choose the upper
+    // precision from the ACTUAL joint infinite-face penalty spectrum:
     // the weakest numerically non-null penalty direction must dominate the
     // largest data-information scale by 1/sqrt(ε). Unlike the former `1e10`
     // multiplier, this is invariant to rescaling either X'WX or S and contains
     // no model-specific tuning knob.
-    let lambda_full = if n_penalties == 0 {
+    let has_infinite_face = penalty_faces
+        .iter()
+        .any(|face| *face == DeterministicPenaltyFace::Infinite);
+    let lambda_infinite = if !has_infinite_face {
         0.0
     } else {
         use gam_linalg::faer_ndarray::FaerEigh;
-        let symmetric_penalty = (&unit_penalty + &unit_penalty.t().to_owned()) * 0.5;
+        let symmetric_penalty =
+            (&infinite_face_penalty + &infinite_face_penalty.t().to_owned()) * 0.5;
         let (penalty_eigenvalues, _) =
             symmetric_penalty.eigh(faer::Side::Lower).map_err(|error| {
                 WorkflowError::IntegrationFailed {
@@ -623,8 +662,9 @@ fn deterministic_gaussian_standard_fit(
             .fold(0.0_f64, |largest, &value| largest.max(value.abs()));
         if !(largest_penalty.is_finite() && largest_penalty > 0.0) {
             return Err(WorkflowError::IntegrationFailed {
-                reason: "deterministic Gaussian shortcut received penalties with zero numerical rank"
-                    .to_string(),
+                reason:
+                    "deterministic Gaussian shortcut received penalties with zero numerical rank"
+                        .to_string(),
             });
         }
         let rank_floor = f64::EPSILON * (p.max(1) as f64) * largest_penalty;
@@ -684,11 +724,13 @@ fn deterministic_gaussian_standard_fit(
     // and hoping it is idempotent — makes the pair consistent by construction,
     // and doing it here rather than at the reporting site keeps the λ that
     // enters the penalized Hessian identical to the λ the result reports.
-    let log_lambda_full = lambda_full.max(f64::MIN_POSITIVE).ln();
-    let lambda_full = if n_penalties == 0 {
-        lambda_full
+    let log_lambda_infinite = if has_infinite_face {
+        lambda_infinite.ln()
     } else {
-        gam_problem::checked_exp_log_strength(log_lambda_full).map_err(|error| {
+        0.0
+    };
+    let lambda_infinite = if has_infinite_face {
+        gam_problem::checked_exp_log_strength(log_lambda_infinite).map_err(|error| {
             WorkflowError::IntegrationFailed {
                 reason: format!(
                     "deterministic Gaussian shortcut produced a boundary precision outside the \
@@ -696,15 +738,53 @@ fn deterministic_gaussian_standard_fit(
                 ),
             }
         })?
+    } else {
+        0.0
     };
+    let log_lambda_zero = gam_problem::LOG_STRENGTH_MIN;
+    let lambda_zero = gam_problem::checked_exp_log_strength(log_lambda_zero).map_err(|error| {
+        WorkflowError::IntegrationFailed {
+            reason: format!(
+                "deterministic Gaussian shortcut could not represent the zero-strength \
+                 boundary: {error}"
+            ),
+        }
+    })?;
+    let log_lambdas = Array1::from_iter(penalty_faces.iter().map(|face| match face {
+        DeterministicPenaltyFace::Infinite => log_lambda_infinite,
+        DeterministicPenaltyFace::Zero => log_lambda_zero,
+    }));
+    let lambdas = Array1::from_iter(penalty_faces.iter().map(|face| match face {
+        DeterministicPenaltyFace::Infinite => lambda_infinite,
+        DeterministicPenaltyFace::Zero => lambda_zero,
+    }));
+
     let mut penalized_hessian = xtwx.clone();
-    penalized_hessian.scaled_add(lambda_full, &unit_penalty);
+    let mut penalty_quadratic = 0.0_f64;
+    for ((block, &lambda), penalty_index) in design
+        .penalties
+        .iter()
+        .zip(lambdas.iter())
+        .zip(0..n_penalties)
+    {
+        let r = block.col_range.clone();
+        penalized_hessian
+            .slice_mut(ndarray::s![r.clone(), r.clone()])
+            .scaled_add(lambda, &block.local);
+        let beta_local = beta.slice(ndarray::s![r]);
+        let contribution = lambda * beta_local.dot(&block.local.dot(&beta_local));
+        if !contribution.is_finite() {
+            return Err(WorkflowError::IntegrationFailed {
+                reason: format!(
+                    "deterministic Gaussian penalty {penalty_index} produced non-finite \
+                     quadratic contribution {contribution}"
+                ),
+            });
+        }
+        penalty_quadratic += contribution;
+    }
     // Symmetrize defensively against accumulated round-off before the Cholesky.
     penalized_hessian = (&penalized_hessian + &penalized_hessian.t()) * 0.5;
-    // βᵀS(λ)β at the λ this fit reports, from the same `unit_penalty` that
-    // entered the Hessian above — so the reported penalty quadratic and the
-    // reported curvature are the same S and the same λ by construction.
-    let penalty_quadratic = lambda_full * beta.dot(&unit_penalty.dot(&beta));
     // Effective degrees of freedom from the influence matrix `F = H⁻¹ XᵀWX`,
     // decomposed per penalty by the SAME trace formula the standard REML path
     // (`estimate.rs`) and the survival fast-path (`survival_transformation_edf`)
@@ -763,20 +843,54 @@ fn deterministic_gaussian_standard_fit(
                 for j in 0..block_cols {
                     trace += sol[[r.start + j, j]];
                 }
-                raw_traces[kk] = lambda_full * trace;
+                raw_traces[kk] = lambdas[kk] * trace;
             }
-            // `unit_penalty` is `Σ_k S_k` by construction above, and
-            // `H = XᵀWX + λ·Σ_k S_k`, so `p − Σ_k λ·tr(H⁻¹S_k) = tr(F)` exactly
-            // — the shared accounting reports the same total this path used to
-            // read off the influence diagonal, now with the floor that total
-            // cannot legitimately fall below.
-            let joint_penalty_rank = penalty_matrix_root(&unit_penalty)
+            // At the mixed boundary, only infinite-face penalties constrain a
+            // coefficient direction. Zero-face blocks contribute no limiting
+            // rank, even though their finite representation is the smallest
+            // positive strength admitted by the solver's log domain.
+            let joint_penalty_rank = penalty_matrix_root(&infinite_face_penalty)
                 .map_err(|reason| WorkflowError::IntegrationFailed {
                     reason: format!(
-                        "deterministic Gaussian shortcut joint penalty rank factorization                          failed: {reason}"
+                        "deterministic Gaussian shortcut infinite-face joint penalty rank factorization failed: {reason}"
                     ),
                 })?
                 .nrows();
+            // The Hessian uses finite endpoints so it can be factorized, but
+            // inference describes the mathematical mixed boundary. Preserve the
+            // finite solve's relative trace allocation among overlapping
+            // infinite-face penalties, then normalize those shares to the exact
+            // rank of their joint PSD sum. Zero-face penalties contribute no
+            // limiting trace. This keeps all three EDF fields mutually coherent
+            // without reporting finite-precision leakage as model complexity.
+            let mut measured_infinite_trace = gam_linalg::utils::KahanSum::default();
+            for (&trace, face) in raw_traces.iter().zip(penalty_faces.iter()) {
+                if *face == DeterministicPenaltyFace::Infinite {
+                    measured_infinite_trace.add(trace);
+                }
+            }
+            let measured_infinite_trace = measured_infinite_trace.sum();
+            if joint_penalty_rank > 0
+                && !(measured_infinite_trace.is_finite() && measured_infinite_trace > 0.0)
+            {
+                return Err(WorkflowError::IntegrationFailed {
+                    reason: format!(
+                        "deterministic Gaussian shortcut could not allocate joint boundary rank \
+                         {joint_penalty_rank} across trace {measured_infinite_trace:?}"
+                    ),
+                });
+            }
+            let trace_scale = if joint_penalty_rank > 0 {
+                joint_penalty_rank as f64 / measured_infinite_trace
+            } else {
+                0.0
+            };
+            for (trace, face) in raw_traces.iter_mut().zip(penalty_faces.iter()) {
+                *trace = match face {
+                    DeterministicPenaltyFace::Infinite => *trace * trace_scale,
+                    DeterministicPenaltyFace::Zero => 0.0,
+                };
+            }
             let bundle = gam_solve::estimate::penalized_edf_bundle(
                 &raw_traces,
                 &block_ranks,
@@ -794,11 +908,6 @@ fn deterministic_gaussian_standard_fit(
     // IRLS working response for the identity link is the raw response y (η
     // absorbs the offset); the working weights are the prior weights.
     let working_response = request.y.as_ref().clone();
-    // Both from the SAME `ρ`: `lambda_full` is the value `checked_exp_log_strength`
-    // returned for `log_lambda_full`, so `lambdas == exp(log_lambdas)` holds to
-    // the bit without assuming `ln`/`exp` round-trip.
-    let lambdas = Array1::<f64>::from_elem(n_penalties, lambda_full);
-    let log_lambdas = Array1::<f64>::from_elem(n_penalties, log_lambda_full);
     let penalized_hessian_precision =
         gam_problem::dispersion_cov::UnscaledPrecision::wrap(penalized_hessian.clone());
     let inference = gam_solve::estimate::FitInference {
@@ -954,30 +1063,89 @@ fn gaussian_response_is_constant(request: &StandardFitRequest<'_>) -> bool {
     true
 }
 
-/// Certify that an unpenalized Gaussian design represents the adjusted
-/// response exactly, up to the round-off already committed by evaluating the
-/// fitted row dot products.
+fn exact_gaussian_coefficients(
+    x: &Array2<f64>,
+    adjusted_response: &Array1<f64>,
+    weights: &Array1<f64>,
+    subspace: Option<&Array2<f64>>,
+) -> Option<Array1<f64>> {
+    let p = x.ncols();
+    let reduced_x = match subspace {
+        Some(z) => gam_linalg::faer_ndarray::fast_ab(x, z),
+        None => x.clone(),
+    };
+    let beta = if reduced_x.ncols() == 0 {
+        Array1::<f64>::zeros(p)
+    } else {
+        let gram = gam_linalg::faer_ndarray::fast_xt_diag_x(&reduced_x, weights);
+        let rhs_matrix = gam_linalg::faer_ndarray::fast_xt_diag_y(
+            &reduced_x,
+            weights,
+            &adjusted_response.view().insert_axis(ndarray::Axis(1)),
+        );
+        let rhs = rhs_matrix.column(0).to_owned();
+        let reduced_beta = gam_linalg::utils::certified_symmetric_solve(
+            &gram,
+            &rhs,
+            "deterministic Gaussian normal equations",
+        )
+        .ok()?
+        .into_solution();
+        match subspace {
+            Some(z) => z.dot(&reduced_beta),
+            None => reduced_beta,
+        }
+    };
+    let fitted = x.dot(&beta);
+    let operations = (p + 1) as f64;
+    let roundoff = operations * f64::EPSILON;
+    if !(roundoff < 1.0) {
+        return None;
+    }
+    let gamma = roundoff / (1.0 - roundoff);
+    for row in 0..x.nrows() {
+        if weights[row] == 0.0 {
+            continue;
+        }
+        let operand_scale = adjusted_response[row].abs()
+            + x.row(row)
+                .iter()
+                .zip(beta.iter())
+                .map(|(&value, &coefficient)| (value * coefficient).abs())
+                .sum::<f64>();
+        let residual = (adjusted_response[row] - fitted[row]).abs();
+        if !residual.is_finite() || residual > gamma * operand_scale {
+            return None;
+        }
+    }
+    Some(beta)
+}
+
+/// Certify that a Gaussian design represents its adjusted response exactly and
+/// identify the asymptotic face of every smoothing precision.
 ///
 /// A profiled Gaussian likelihood has no finite-density interior optimum when
 /// `y - offset = X beta` exactly: its residual variance is zero and the correct
 /// fitted law is the same deterministic boundary used by the constant-response
-/// route. The old predicate only recognized the intercept subspace, so an
-/// equally exact affine fit (for example `y = 1 + x`) entered general REML and
-/// failed during normalized-likelihood reporting.
+/// route. For a penalized design the boundary can be mixed: a penalty whose
+/// null space still represents the response goes to infinite precision, while
+/// a penalty acting on the unique exact coefficient goes to zero. A default
+/// double-penalty `s(x)` on an exact line is the canonical case: roughness goes
+/// to infinity and null-space shrinkage goes to zero.
 ///
-/// This recognizer is deliberately narrow. Penalized designs remain on REML,
-/// and the normal equations must have a unique, backward-error-certified
-/// solution. The final rowwise audit uses the standard `gamma_(p+1)` dot-product
-/// bound; data with represented variation beyond arithmetic round-off cannot
-/// enter the deterministic route.
-fn exact_unpenalized_gaussian_beta(
+/// The full and every restricted normal equation must have a unique certified
+/// solution, and each final row must pass the `gamma_(p+1)` dot-product bound.
+/// Thus a merely small residual cannot enter this route.
+fn exact_gaussian_boundary(
     request: &StandardFitRequest<'_>,
-) -> Result<Option<Array1<f64>>, WorkflowError> {
+) -> Result<Option<ExactGaussianBoundary>, WorkflowError> {
     if !request.family.is_gaussian_identity()
         || request.y.is_empty()
-        || !request.spec.smooth_terms.is_empty()
         || !request.spec.random_effect_terms.is_empty()
         || request.options.linear_constraints.is_some()
+        || request.wiggle.is_some()
+        || request.latent_coord.is_some()
+        || !request.penalty_block_gamma_priors.is_empty()
         || request.spec.linear_terms.iter().any(|term| {
             !matches!(
                 &term.coefficient_geometry,
@@ -994,14 +1162,21 @@ fn exact_unpenalized_gaussian_beta(
         build_term_collection_design(request.data.view(), &request.spec).map_err(|err| {
             WorkflowError::InvalidConfig {
                 reason: format!(
-                    "deterministic Gaussian candidate could not build its parametric design: {err}"
+                    "deterministic Gaussian candidate could not build its design: {err}"
                 ),
             }
         })?;
-    if !design.penalties.is_empty() || design.design.ncols() == 0 {
+    if design.design.ncols() == 0
+        || design.coefficient_lower_bounds.is_some()
+        || design.linear_constraints.is_some()
+        || design
+            .penalties
+            .iter()
+            .any(|block| !matches!(&block.prior_mean, gam_problem::CoefficientPriorMean::Zero))
+    {
         return Ok(None);
     }
-    let adjusted_response = request.y.as_ref() - request.offset.as_ref();
+    let adjusted_response = request.y.as_ref() - request.offset.as_ref() - &design.affine_offset;
     if adjusted_response.iter().any(|value| !value.is_finite())
         || request
             .weights
@@ -1011,47 +1186,77 @@ fn exact_unpenalized_gaussian_beta(
         return Ok(None);
     }
     let x = design.design.to_dense();
-    let gram = gam_linalg::faer_ndarray::fast_xt_diag_x(&x, request.weights.as_ref());
-    let rhs_matrix = gam_linalg::faer_ndarray::fast_xt_diag_y(
-        &x,
-        request.weights.as_ref(),
-        &adjusted_response.view().insert_axis(ndarray::Axis(1)),
-    );
-    let rhs = rhs_matrix.column(0).to_owned();
-    let beta = match gam_linalg::utils::certified_symmetric_solve(
-        &gram,
-        &rhs,
-        "deterministic Gaussian normal equations",
-    ) {
-        Ok(solution) => solution.into_solution(),
-        // A singular or numerically unresolved design has no uniquely
-        // certified deterministic coefficient vector. It belongs to the
-        // ordinary rank-aware fitter, not this boundary identity.
-        Err(_) => return Ok(None),
-    };
-    let fitted = design.design.apply(&beta);
-    let operations = (x.ncols() + 1) as f64;
-    let roundoff = operations * f64::EPSILON;
-    if !(roundoff < 1.0) {
+    let Some(beta) =
+        exact_gaussian_coefficients(&x, &adjusted_response, request.weights.as_ref(), None)
+    else {
         return Ok(None);
-    }
-    let gamma = roundoff / (1.0 - roundoff);
-    for row in 0..x.nrows() {
-        if request.weights[row] == 0.0 {
-            continue;
+    };
+
+    let p = x.ncols();
+    let mut penalty_faces = vec![DeterministicPenaltyFace::Zero; design.penalties.len()];
+    let mut infinite_face_penalty = Array2::<f64>::zeros((p, p));
+    for (penalty_index, block) in design.penalties.iter().enumerate() {
+        let r = block.col_range.clone();
+        if r.is_empty()
+            || r.end > p
+            || block.local.nrows() != r.len()
+            || block.local.ncols() != r.len()
+            || block.local.iter().any(|value| !value.is_finite())
+        {
+            return Err(WorkflowError::IntegrationFailed {
+                reason: format!(
+                    "deterministic Gaussian candidate received malformed penalty \
+                     {penalty_index}: range={r:?}, local={}x{}, design width={p}",
+                    block.local.nrows(),
+                    block.local.ncols(),
+                ),
+            });
         }
-        let operand_scale = adjusted_response[row].abs()
-            + x.row(row)
+        // Classify every face against the ONE exact coefficient certified by
+        // the full design. Asking whether each penalty null space can reproduce
+        // the response independently is not closed under intersection when X
+        // has aliased coefficient representations: two different restricted
+        // coefficients can each fit y even though no coefficient satisfies
+        // both restrictions. The full-design coefficient is the common witness
+        // every infinite face must annihilate.
+        let beta_local = beta.slice(ndarray::s![r.clone()]);
+        let penalty_beta = block.local.dot(&beta_local);
+        let roundoff = (r.len().max(1) as f64) * f64::EPSILON;
+        let gamma = roundoff / (1.0 - roundoff);
+        let annihilates = penalty_beta.iter().enumerate().all(|(row, &value)| {
+            let operand_scale = block
+                .local
+                .row(row)
                 .iter()
-                .zip(beta.iter())
-                .map(|(&value, &coefficient)| (value * coefficient).abs())
+                .zip(beta_local.iter())
+                .map(|(&penalty, &coefficient)| (penalty * coefficient).abs())
                 .sum::<f64>();
-        let residual = (adjusted_response[row] - fitted[row]).abs();
-        if !residual.is_finite() || residual > gamma * operand_scale {
-            return Ok(None);
+            value.is_finite() && value.abs() <= gamma * operand_scale
+        });
+        if annihilates {
+            penalty_faces[penalty_index] = DeterministicPenaltyFace::Infinite;
+            infinite_face_penalty
+                .slice_mut(ndarray::s![r.clone(), r])
+                .scaled_add(1.0, &block.local);
         }
     }
-    Ok(Some(beta))
+
+    Ok(Some(ExactGaussianBoundary {
+        beta,
+        penalty_faces,
+    }))
+}
+
+fn try_deterministic_gaussian_standard_fit(
+    request: &StandardFitRequest<'_>,
+) -> Result<Option<StandardFitResult>, WorkflowError> {
+    if gaussian_response_is_constant(request) {
+        return deterministic_gaussian_standard_fit(request, None).map(Some);
+    }
+    let Some(boundary) = exact_gaussian_boundary(request)? else {
+        return Ok(None);
+    };
+    deterministic_gaussian_standard_fit(request, Some(boundary)).map(Some)
 }
 
 pub fn fit_from_formula(
@@ -1426,20 +1631,10 @@ fn fit_materialized_once_with_notes(
     // (main.rs run_fit) and FFI consumers, which build the persistence payload
     // from this same `SplineScanFit`.
     if let FitRequest::Standard(request) = &mat.request {
-        if gaussian_response_is_constant(request) {
-            return deterministic_gaussian_standard_fit(request, None).map(|result| {
-                FormulaFitResult {
-                    result: FitResult::Standard(result),
-                    inference_notes,
-                }
-            });
-        }
-        if let Some(beta) = exact_unpenalized_gaussian_beta(request)? {
-            return deterministic_gaussian_standard_fit(request, Some(beta)).map(|result| {
-                FormulaFitResult {
-                    result: FitResult::Standard(result),
-                    inference_notes,
-                }
+        if let Some(result) = try_deterministic_gaussian_standard_fit(request)? {
+            return Ok(FormulaFitResult {
+                result: FitResult::Standard(result),
+                inference_notes,
             });
         }
         if let Some(inputs) = spline_scan_fast_path(request) {
