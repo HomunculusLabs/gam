@@ -125,6 +125,34 @@ success-output = "never"
 filter = 'test(/hifreq_tensor_k(8|10)/)'
 slow-timeout = { period = "600s", terminate-after = 4 }
 
+# gam#2539: the SAE device-resident PARITY probe is legitimately slow on a
+# GPU-less runner and was being SIGKILLed before its assertion ran — the same
+# lost-coverage failure the hifreq and survival exemptions above address.
+#
+# Measured standalone on a dedicated node:
+#   outer_sequence_reuses_frame_and_matches_independent -> PASS in 397.782s
+# It exceeds the 300s SLOW period, and under the parallel load of a full
+# gam-solve run it crosses the 600s SIGKILL, so the whole-crate sweep reported it
+# as TIMEOUT while it is in fact CORRECT. The cost is structural, not a hang:
+# `DeviceResidentArrowShape::color_arm` is `n=180, p=5120, d=2`, the parity
+# harness does a DENSE reference factorisation at that border (~p^3/3 flops) for
+# each step of a 3-step outer sequence, and on a machine with no GPU the
+# "device-resident" side falls back to host code too, so the work is done twice.
+#
+# 1200s gives ~3x the measured standalone runtime, which covers the parallel-load
+# case without weakening the cap into uselessness.
+#
+# Its sibling `moving_ridge_takes_no_host_rebuild_and_matches_independent_2539`
+# is deliberately NOT exempted here. It has never been observed to finish, and
+# three attempts to raise its ceiling all re-measured the 600s default instead of
+# changing it, so whether it terminates at all is still unmeasured. Exempting it
+# on the assumption that it is merely slow would convert an unknown into 3600s of
+# burned wall-clock per run. It stays at the default cap until a run with an
+# actually-applied longer budget says otherwise.
+[[profile.default.overrides]]
+filter = 'test(/sae_resident::tests::outer_sequence_reuses_frame_and_matches_independent/)'
+slow-timeout = { period = "600s", terminate-after = 2 }
+
 # Two survival integration probes carry a per-test wall-clock that exceeds the
 # default 600s SIGKILL by construction, so at the default budget nextest kills
 # them BEFORE their assertion runs — turning a designed verdict into an opaque
