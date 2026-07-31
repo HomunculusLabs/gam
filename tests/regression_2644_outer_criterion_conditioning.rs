@@ -1,24 +1,51 @@
-//! Scratch probes for #2644: the outer smoothing-parameter optimizer refusing
-//! to certify a stationary optimum.
+//! #2644: the outer smoothing-parameter optimizer refusing to certify a
+//! stationary optimum at an interior PSD minimum.
 //!
-//! Witness A (`prostate`): the three reference-quality `GAM_ERROR` rows
-//! `families::quality_vs_sklearn_binomial_logit::*` and
-//! `families::quality_vs_interpretml_ebm_binomial_logit::*` all report the SAME
-//! numbers on run 30602192415 (`a20af61da`):
+//! ONE GATE and two reporting probes.
+//!
+//! ## The gate — `te_with_disparate_scales_certifies`
+//!
+//! `y ~ te(a,b,k=5)` on 300 rows with `a ∈ [0,1]` against `b ∈ [0,1000]`. This
+//! is `misc::mega_batch_k::te_with_disparate_scales`, a `GAM_ERROR` row on both
+//! of the last two reference-quality nightlies, and it moved BETWEEN the two
+//! shapes the refusal takes:
 //!
 //! ```text
-//! standard REML: |g|=1.792e-3 |Pg|=1.792e-3 bound=1.133e-3
-//!                (rung=curvature-resolvability)
+//! run 30602192415:  cost-only value disagrees with analytic-sample value at
+//!                   the same outer point (4.141e-5 vs a 2.842e-5 roundoff bound)
+//! run 30619084852:  |g|=|Pg|=2.458e2  bound=1.015e1  hessian_psd=yes
+//!                   after exhausting a 400-iteration outer budget
 //! ```
 //!
-//! `y ~ s(pc1,k=5) + s(pc2,k=5)`, binomial/logit, 490 training rows — the
-//! cheapest witness of the refusal in the whole suite.
+//! Both are the same criterion. Its penalty blocks reach `κ(S_λ) = 3.5e19`,
+//! where the assembled-matrix Cholesky that used to price `log|S_λ|₊` disagrees
+//! with the root-scale spectrum by **20 log units** — and, because that Cholesky
+//! FAILS at some trial `rho` and succeeds at others, `V(rho)` was priced by two
+//! different formulas with a step of that size between them. 196 of this fit's
+//! 1015 penalty-logdet builds took one formula and 819 the other.
 //!
-//! Witness B (`matern`): the `tests/measure_jet` comparator fit named in the
-//! issue thread (`|Pg|=2.751e1` vs `bound=6.441e-1`).
+//! Measured here: **refused after 400 outer iterations in 0.94 s** before
+//! `75563f13e`, **certifies in 0.18 s** after it.
 //!
-//! Reporting probes, not gates.
-
+//! The gate lives in `tests/` rather than only in the nightly quality suite
+//! because the quality suite runs on a 6-hour schedule and this is a
+//! sub-second fit.
+//!
+//! ## Reporting probes (print, never fail)
+//!
+//! * `prostate` — `y ~ s(pc1,k=5) + s(pc2,k=5)`, binomial/logit, 490 rows of
+//!   `bench/datasets/prostate.csv`. Three reference-quality rows report the
+//!   same `|g|=|Pg|=1.792e-3 bound=1.133e-3` from it. STILL REFUSES after the
+//!   `log|S_λ|₊` fix, now at `|Pg|=3.396e-3` against `bound=3.015e-3`, because
+//!   its residual criterion noise is `log|H|`, which is priced from the
+//!   eigenvalues of the ASSEMBLED `H` (`κ = 3.8e12` ⇒ `6.6e-4` of scatter at
+//!   fixed `rho`, against an outer cost floor of `1.8e-5`). Recovering that one
+//!   needs a root of `H` that is not formed by summing `XᵀWX` and `S_λ` in f64,
+//!   which is a change to what P-IRLS publishes; it is not attempted here.
+//! * `matern` — the fit the issue thread recommends as a reproducer. Recorded
+//!   because it does NOT reproduce any more (it certifies at `|Pg|=2.025e-5`
+//!   against `bound=9.876e-5`).
+//!
 use gam::data::EncodedDataset;
 use gam::{FitConfig, encode_recordswith_inferred_schema, fit_from_formula, load_csvwith_inferred_schema};
 use csv::StringRecord;
@@ -130,16 +157,7 @@ fn zz_probe_2644_matern_outer_gradient() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Witness C: `misc::mega_batch_k::te_with_disparate_scales`.
-//
-// `y ~ te(a,b,k=5)`, Gaussian, 300 rows, `a ∈ [0,1]` against `b ∈ [0,1000]`.
-// On run 30619084852 it refuses with
-//   |g| = |Pg| = 2.458e2  bound = 1.015e1  (rung=curvature-resolvability,
-//   derived_standard=true, hessian_psd=yes)
-// and on the PREVIOUS run (30602192415) the SAME test refused with the OTHER
-// shape — the cost-only/analytic-sample value disagreement. One second.
-// ─────────────────────────────────────────────────────────────────────────
+// The gate. See the module header.
 
 fn mk_2d(
     n: usize,
@@ -169,7 +187,7 @@ fn mk_2d(
 }
 
 #[test]
-fn zz_probe_2644_te_disparate_scales() {
+fn te_with_disparate_scales_certifies() {
     gam_solve::progress_log::init_logging_at(log::LevelFilter::Info);
     let ds = mk_2d(300, |a, b| a + b, (0.0, 1.0), (0.0, 1000.0), 0.05, 7);
     let cfg = FitConfig {
@@ -182,8 +200,17 @@ fn zz_probe_2644_te_disparate_scales() {
         "[probe-2644-te] elapsed={:.2}s",
         started.elapsed().as_secs_f64()
     );
-    match outcome {
-        Ok(_) => println!("[probe-2644-te] FIT OK"),
-        Err(e) => println!("[probe-2644-te] FIT ERR: {e}"),
-    }
+    let Err(error) = outcome else {
+        println!("[probe-2644-te] FIT OK");
+        return;
+    };
+    panic!(
+        "#2644: `y~te(a,b,k=5)` on disparate scales must reach a certified outer \
+         optimum. This fit refused for 400 outer iterations at |Pg|=2.458e2 while \
+         `log|S_lambda|+` was priced from a factorization of the assembled penalty \
+         sum, whose error is O(eps*kappa) and whose Cholesky FAILS at some trial \
+         rho and succeeds at others -- so the objective carried a step of ~20 log \
+         units. A refusal here means that pricing (or an equivalent one) is back: \
+         {error}"
+    );
 }
