@@ -28,6 +28,7 @@ fn sae_manifold_fit_minimal<'py>(
     ridge_beta: f64,
     gumbel_schedule: Option<&Bound<'py, PyDict>>,
     analytic_penalties: Option<String>,
+    block_orthogonality_weight: f64,
     random_state: u64,
     top_k: Option<usize>,
     initial_logits: Option<PyReadonlyArray2<'py, f64>>,
@@ -84,6 +85,25 @@ fn sae_manifold_fit_minimal<'py>(
         initial_coords: start_coords,
         refine_routing,
     } = seed;
+    // Public `d_atom` is an INTRINSIC dimension, whereas analytic penalties on
+    // `t` index its resolved STORAGE coordinates.  Those differ for ambient
+    // sphere / projective-plane atoms (2 intrinsic dimensions, 3 stored
+    // coordinates), and an `auto` seed is not resolved until the minimal seed
+    // has been built.  Construct the singleton-axis partition only now, from
+    // the exact geometry that owns the target.
+    let latent_storage_width = geometry_plans
+        .iter()
+        .map(SaeAtomGeometryPlan::latent_dim)
+        .max()
+        .ok_or_else(|| {
+            py_value_error("sae_manifold_fit: resolved geometry contains no atoms".to_string())
+        })?;
+    let analytic_penalties = append_public_block_orthogonality_penalty(
+        analytic_penalties,
+        block_orthogonality_weight,
+        latent_storage_width,
+    )
+    .map_err(py_value_error)?;
     let fisher_u = fisher_factors.as_ref().map(|f| f.as_array());
     let fisher_mr = fisher_mass_residual.as_ref().map(|m| m.as_array());
     let row_w = row_loss_weights.as_ref().map(|w| w.as_array());
@@ -161,8 +181,47 @@ struct PublicFitPenaltyArgs<'a> {
     nuclear_norm_max_rank: Option<usize>,
     decoder_incoherence_weight: f64,
     k_atoms: usize,
-    d_max: usize,
     p_out: usize,
+}
+
+fn append_public_block_orthogonality_penalty(
+    analytic_penalties: Option<String>,
+    weight: f64,
+    latent_storage_width: usize,
+) -> Result<Option<String>, String> {
+    if !weight.is_finite() || weight < 0.0 {
+        return Err(format!(
+            "sae_manifold_fit: block_orthogonality_weight must be finite and non-negative; got {weight}"
+        ));
+    }
+    if weight == 0.0 {
+        return Ok(analytic_penalties);
+    }
+    if latent_storage_width < 2 {
+        return Err(format!(
+            "sae_manifold_fit: block_orthogonality_weight requires at least two resolved latent storage axes; got {latent_storage_width}"
+        ));
+    }
+    let mut descriptors: Vec<serde_json::Value> = match analytic_penalties {
+        Some(json) => serde_json::from_str(&json).map_err(|error| {
+            format!(
+                "sae_manifold_fit: internal analytic-penalty descriptor list is invalid: {error}"
+            )
+        })?,
+        None => Vec::new(),
+    };
+    let groups = (0..latent_storage_width)
+        .map(|axis| vec![axis])
+        .collect::<Vec<_>>();
+    descriptors.push(serde_json::json!({
+        "kind": "block_orthogonality",
+        "target": "t",
+        "groups": groups,
+        "weight": weight,
+    }));
+    serde_json::to_string(&descriptors)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 fn public_fit_penalties(
@@ -179,7 +238,6 @@ fn public_fit_penalties(
         nuclear_norm_max_rank,
         decoder_incoherence_weight,
         k_atoms,
-        d_max,
         p_out,
     } = args;
     for (name, value) in [
@@ -233,18 +291,8 @@ fn public_fit_penalties(
         names.push("IsometryPenalty".to_string());
     }
     if block_orthogonality_weight > 0.0 {
-        if d_max < 2 {
-            return Err(format!(
-                "sae_manifold_fit: block_orthogonality_weight requires d_atom >= 2; got d_max={d_max}"
-            ));
-        }
-        let groups = (0..d_max).map(|axis| vec![axis]).collect::<Vec<_>>();
-        descriptors.push(serde_json::json!({
-            "kind": "block_orthogonality",
-            "target": "t",
-            "groups": groups,
-            "weight": block_orthogonality_weight,
-        }));
+        // The descriptor is appended after seed resolution, when the target's
+        // true storage width (not merely public intrinsic `d_atom`) is known.
         names.push("BlockOrthogonalityPenalty".to_string());
     }
     if let Some(groups) = decoder_feature_sparsity_groups {
@@ -568,7 +616,6 @@ fn sae_manifold_fit_model<'py>(
     } else {
         1.0
     });
-    let d_max = atom_dim.iter().copied().max().unwrap_or(1);
     let (analytic_penalties, mut penalties) = public_fit_penalties(PublicFitPenaltyArgs {
         isometry_weight,
         coord_sparsity,
@@ -580,7 +627,6 @@ fn sae_manifold_fit_model<'py>(
         nuclear_norm_max_rank,
         decoder_incoherence_weight,
         k_atoms,
-        d_max,
         p_out,
     })
     .map_err(py_value_error)?;
@@ -717,6 +763,7 @@ fn sae_manifold_fit_model<'py>(
         1.0e-6,
         gumbel_schedule,
         analytic_penalties,
+        block_orthogonality_weight,
         random_state,
         top_k,
         initial_logits,
@@ -2798,6 +2845,43 @@ fn latent_relative_stationarity(grad_norm: f64, grad0_norm: f64) -> f64 {
         return f64::INFINITY;
     }
     grad_norm / grad0_norm.max(1.0)
+}
+
+#[cfg(test)]
+mod public_block_orthogonality_tests {
+    use super::append_public_block_orthogonality_penalty;
+
+    #[test]
+    fn singleton_groups_use_resolved_storage_width() {
+        let existing = serde_json::json!([{
+            "kind": "isometry",
+            "target": "t",
+            "weight": 2.0,
+        }])
+        .to_string();
+        let augmented = append_public_block_orthogonality_penalty(Some(existing), 3.5, 3)
+            .expect("three-axis ambient geometry is admissible")
+            .expect("positive weight emits a descriptor");
+        let descriptors: Vec<serde_json::Value> =
+            serde_json::from_str(&augmented).expect("descriptor JSON");
+
+        assert_eq!(descriptors.len(), 2);
+        assert_eq!(descriptors[0]["kind"], "isometry");
+        assert_eq!(descriptors[1]["kind"], "block_orthogonality");
+        assert_eq!(
+            descriptors[1]["groups"],
+            serde_json::json!([[0], [1], [2]]),
+            "S² has two intrinsic degrees of freedom but three ambient storage axes"
+        );
+        assert_eq!(descriptors[1]["weight"], 3.5);
+    }
+
+    #[test]
+    fn one_storage_axis_is_not_a_block_partition() {
+        let error = append_public_block_orthogonality_penalty(None, 1.0, 1)
+            .expect_err("a single stored axis cannot form orthogonal blocks");
+        assert!(error.contains("at least two resolved latent storage axes"));
+    }
 }
 
 #[cfg(test)]
