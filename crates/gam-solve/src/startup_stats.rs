@@ -856,6 +856,7 @@ mod tests {
             resolvable_negative_curvature: false,
             best_stationarity_residual: 8.095899e-3,
             cycles_since_best_residual: 4,
+            termination_reason: gam_problem::JointNewtonTerminalReason::CycleBudget,
         };
         let source =
             EstimationError::CustomFamily(gam_problem::CustomFamilyError::InnerSolveNotConverged {
