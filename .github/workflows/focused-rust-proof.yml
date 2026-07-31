@@ -49,6 +49,14 @@ on:
         description: "Optional commit to check out INSTEAD of the dispatch ref. Use to run the identical filters on two commits for attribution; leave empty for the branch tip."
         default: ""
         required: false
+      profile:
+        description: "Cargo profile. `dev` is the default test profile. `release` is the ONLY lane in which a wall-clock ratio gate measures anything: those assertions compare a compiled lowering against a hand path, and `[profile.test.package.gam-models]` sets codegen-units = 16, which blocks the cross-CGU inlining the compiled side's whole advantage depends on. Every such gate in this repo is written `assert!(cfg!(debug_assertions) || ratio < 1.0, ...)`, so in any dev lane it is a no-op (#932)."
+        type: choice
+        options:
+          - dev
+          - release
+        default: dev
+        required: false
 
 concurrency:
   group: focused-rust-proof-${{ github.event.inputs.issue }}-${{ github.event.inputs.package }}
@@ -76,6 +84,11 @@ env:
   # about, so execution gets its own allowance, set to the 600s per-test kill
   # the nextest lanes already use as the "this is a hang" threshold.
   RUN_BUDGET_SECONDS: "600"
+  # `[profile.release]` carries thin-LTO and codegen-units = 1, so a release
+  # test target is a substantially larger compile than the dev one the 1200s
+  # allowance was set for. This is the same KIND of budget, sized for the other
+  # profile -- not a looser bound on the same work.
+  RELEASE_BUILD_BUDGET_SECONDS: "3000"
 
 jobs:
   prove:
@@ -86,8 +99,9 @@ jobs:
     # cap does. A job cancelled at the cap is the opaque outcome #2429 exists to
     # eliminate — it names no phase, writes no summary, and looks like a
     # failure of the code under test. This is not a larger compile allowance;
-    # that is fixed at BUILD_BUDGET_SECONDS.
-    timeout-minutes: 35
+    # that is fixed at BUILD_BUDGET_SECONDS (RELEASE_BUILD_BUDGET_SECONDS for the
+    # release profile), and the cap here only has to stay clear of it.
+    timeout-minutes: ${{ github.event.inputs.profile == 'release' && 75 || 35 }}
     steps:
       - name: Provide bounded execution on macOS
         if: runner.os == 'macOS'
@@ -195,12 +209,31 @@ jobs:
           PACKAGE: ${{ github.event.inputs.package }}
           TARGET: ${{ github.event.inputs.target }}
           TEST_BINARY: ${{ github.event.inputs.test_binary }}
+          PROFILE: ${{ github.event.inputs.profile }}
         run: |
           set -euo pipefail
           if [[ ! "$PACKAGE" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]]; then
             echo "::error::package contains unsupported characters: ${PACKAGE}"
             exit 1
           fi
+
+          # Both cargo invocations below take the SAME profile flag, so a
+          # `--no-run` build and the run that follows can never end up in
+          # different target directories measuring different code.
+          case "${PROFILE:-dev}" in
+            ""|dev)
+              printf 'PROFILE_ARGS=\n' >> "$GITHUB_ENV"
+              printf 'EFFECTIVE_BUILD_BUDGET=%s\n' "$BUILD_BUDGET_SECONDS" >> "$GITHUB_ENV"
+              ;;
+            release)
+              printf 'PROFILE_ARGS=--release\n' >> "$GITHUB_ENV"
+              printf 'EFFECTIVE_BUILD_BUDGET=%s\n' "$RELEASE_BUILD_BUDGET_SECONDS" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "::error::unsupported profile: ${PROFILE}"
+              exit 1
+              ;;
+          esac
 
           case "$TARGET" in
             lib)
@@ -256,6 +289,12 @@ jobs:
         run: |
           set -euo pipefail
           read -r -a target_args <<< "$TARGET_ARGS"
+          # `PROFILE_ARGS` is empty for the dev profile. On the macos-15 lane
+          # `shell: bash` is bash 3.2, where `"${arr[@]}"` on an EMPTY array is an
+          # unbound-variable error under `set -u`, so build the array explicitly
+          # and expand it with the portable `${arr[@]+...}` "only if set" form.
+          profile_args=()
+          if [[ -n "${PROFILE_ARGS:-}" ]]; then profile_args=("$PROFILE_ARGS"); fi
           mkdir -p focused-rust-logs
           log_file="focused-rust-logs/00-build.log"
 
@@ -265,16 +304,16 @@ jobs:
           # zero compiler objects. Splitting it out of the per-filter loop also
           # fixes the accounting — the old single bound was charged afresh to
           # every filter even though only the first one compiled anything.
-          echo "cargo test -p ${PACKAGE} --all-features ${target_args[*]} --no-run"
+          echo "cargo test -p ${PACKAGE} --all-features ${PROFILE_ARGS:-} ${target_args[*]} --no-run"
           started=$(date +%s)
           set +e
-          "$FOCUSED_TIMEOUT" --signal=TERM --kill-after=15s "$BUILD_BUDGET_SECONDS" \
-            cargo test -p "$PACKAGE" --all-features "${target_args[@]}" --no-run \
+          "$FOCUSED_TIMEOUT" --signal=TERM --kill-after=15s "$EFFECTIVE_BUILD_BUDGET" \
+            cargo test -p "$PACKAGE" --all-features ${profile_args[@]+"${profile_args[@]}"} "${target_args[@]}" --no-run \
             2>&1 | tee "$log_file"
           status=${PIPESTATUS[0]}
           set -e
           elapsed=$(( $(date +%s) - started ))
-          echo "build step exit=${status} elapsed=${elapsed}s budget=${BUILD_BUDGET_SECONDS}s"
+          echo "build step exit=${status} elapsed=${elapsed}s budget=${EFFECTIVE_BUILD_BUDGET}s profile=${PROFILE_ARGS:-dev}"
 
           # `timeout` reports 124 when its TERM landed, or 137 when the process
           # had to be SIGKILLed after `--kill-after`. Both mean the same thing:
@@ -285,7 +324,7 @@ jobs:
             {
               echo "### NOT ATTEMPTED — build budget exceeded"
               echo
-              echo "\`${PACKAGE}\` did not finish compiling within \`${BUILD_BUDGET_SECONDS}s\`,"
+              echo "\`${PACKAGE}\` did not finish compiling within \`${EFFECTIVE_BUILD_BUDGET}s\`,"
               echo "so **no test ran and nothing was verified**."
               echo "This is an infrastructure outcome (#2429), *not* a result about the code"
               echo "under test — do not debug your change against this run."
@@ -293,7 +332,7 @@ jobs:
               echo "- last build activity: \`${last_unit:-<none recorded>}\`"
               echo "- elapsed: \`${elapsed}s\`"
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error title=NOT ATTEMPTED: build budget exceeded (#2429)::${PACKAGE} did not finish compiling within ${BUILD_BUDGET_SECONDS}s. No test ran and nothing was verified; this is an infrastructure outcome, not a result about the code under test. Last build activity: ${last_unit:-<none recorded>}"
+            echo "::error title=NOT ATTEMPTED: build budget exceeded (#2429)::${PACKAGE} did not finish compiling within ${EFFECTIVE_BUILD_BUDGET}s. No test ran and nothing was verified; this is an infrastructure outcome, not a result about the code under test. Last build activity: ${last_unit:-<none recorded>}"
             exit 1
           fi
           if [[ "$status" -ne 0 ]]; then
@@ -306,7 +345,7 @@ jobs:
             echo "::error title=NOT ATTEMPTED: test target did not compile::${PACKAGE} failed to build (exit ${status}); no test ran."
             exit "$status"
           fi
-          echo "build completed in ${elapsed}s of a ${BUILD_BUDGET_SECONDS}s budget."
+          echo "build completed in ${elapsed}s of a ${EFFECTIVE_BUILD_BUDGET}s budget."
 
       # Execution only — the target is already built, so a bound exceeded here
       # really is a statement about the tests (a hang or a runaway fit), which
@@ -319,16 +358,22 @@ jobs:
         run: |
           set -euo pipefail
           read -r -a target_args <<< "$TARGET_ARGS"
+          # `PROFILE_ARGS` is empty for the dev profile. On the macos-15 lane
+          # `shell: bash` is bash 3.2, where `"${arr[@]}"` on an EMPTY array is an
+          # unbound-variable error under `set -u`, so build the array explicitly
+          # and expand it with the portable `${arr[@]+...}` "only if set" form.
+          profile_args=()
+          if [[ -n "${PROFILE_ARGS:-}" ]]; then profile_args=("$PROFILE_ARGS"); fi
           read -r -a filters <<< "$FILTERS"
           mkdir -p focused-rust-logs
           total_ran=0
           for filter in "${filters[@]}"; do
             log_file="focused-rust-logs/${filter//[:.]/_}.log"
-            echo "cargo test -p ${PACKAGE} --all-features ${target_args[*]} ${filter}"
+            echo "cargo test -p ${PACKAGE} --all-features ${PROFILE_ARGS:-} ${target_args[*]} ${filter}"
             set +e
             "$FOCUSED_TIMEOUT" --signal=TERM --kill-after=15s "$RUN_BUDGET_SECONDS" \
               cargo test -p "$PACKAGE" --all-features \
-                "${target_args[@]}" "$filter" \
+                ${profile_args[@]+"${profile_args[@]}"} "${target_args[@]}" "$filter" \
                 -- --nocapture --test-threads=1 2>&1 | tee "$log_file"
             status=${PIPESTATUS[0]}
             set -e
@@ -369,7 +414,7 @@ jobs:
           {
             echo "### VERIFIED — ${total_ran} test(s) executed"
             echo
-            echo "Package \`${PACKAGE}\`, filters: \`${FILTERS}\`."
+            echo "Package \`${PACKAGE}\`, profile \`${PROFILE_ARGS:-dev}\`, filters: \`${FILTERS}\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Require measured compiler-cache reuse
@@ -384,10 +429,22 @@ jobs:
             exit 1
           fi
           if (( hits == 0 )); then
-            echo "::error::Focused proof reused zero compiler objects; this was a cold build."
-            exit 1
+            # A release proof compiles into its own sccache namespace (different
+            # opt-level, codegen-units and LTO), so zero reuse is what the FIRST
+            # release run of a given tree looks like — not the cold-source build
+            # this gate was written to refuse. The release build budget already
+            # refuses a compile that cannot finish, so reporting is the correct
+            # outcome here; failing would make the lane unusable exactly once
+            # per new namespace and teach people to ignore it.
+            if [[ "${PROFILE_ARGS:-}" == "--release" ]]; then
+              echo "::warning::Release proof reused zero compiler objects; the release profile has its own sccache namespace, so a first run in it is cold by construction."
+            else
+              echo "::error::Focused proof reused zero compiler objects; this was a cold build."
+              exit 1
+            fi
+          else
+            echo "Focused proof reused ${hits} cached compiler object(s)."
           fi
-          echo "Focused proof reused ${hits} cached compiler object(s)."
 
       - name: Report compiler-cache evidence
         if: ${{ always() }}
