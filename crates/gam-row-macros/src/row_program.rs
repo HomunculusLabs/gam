@@ -1505,45 +1505,36 @@ fn dense_taylor_multiply(left: DenseTaylorJet, right: DenseTaylorJet) -> DenseTa
     out
 }
 
-#[allow(clippy::too_many_arguments)]
+struct DenseTaylorCompositionPartitions<'a> {
+    candidates: &'a [(usize, String, Vec<usize>)],
+    order: usize,
+    counts: &'a mut [usize],
+    selected: &'a mut Vec<usize>,
+    derivative: &'a str,
+    output: &'a mut DenseTaylorJet,
+}
+
 fn dense_taylor_composition_partitions(
-    candidates: &[(usize, String, Vec<usize>)],
+    state: &mut DenseTaylorCompositionPartitions<'_>,
     start: usize,
     remaining: usize,
-    order: usize,
-    counts: &mut [usize],
-    selected: &mut Vec<usize>,
     product: Option<String>,
-    derivative: &str,
-    output: &mut DenseTaylorJet,
 ) {
     if remaining == 0 {
-        let index = dense_taylor_index(counts);
+        let index = dense_taylor_index(state.counts);
         let mut multiplicity_factorial = 1usize;
         let mut run = 1usize;
-        for pair in selected.windows(2) {
+        for pair in state.selected.windows(2) {
             if pair[0] == pair[1] {
                 run += 1;
             } else {
-                multiplicity_factorial *= match run {
-                    1 => 1,
-                    2 => 2,
-                    3 => 6,
-                    4 => 24,
-                    _ => unreachable!("dense Taylor order is at most four"),
-                };
+                multiplicity_factorial *= (2..=run).product::<usize>();
                 run = 1;
             }
         }
-        multiplicity_factorial *= match run {
-            1 => 1,
-            2 => 2,
-            3 => 6,
-            4 => 24,
-            _ => unreachable!("dense Taylor order is at most four"),
-        };
+        multiplicity_factorial *= (2..=run).product::<usize>();
         let mut term = symbolic_multiply(
-            derivative,
+            state.derivative,
             product
                 .as_deref()
                 .expect("composition partition has at least one factor"),
@@ -1554,43 +1545,41 @@ fn dense_taylor_composition_partitions(
                 &format!("{:.17}", 1.0 / multiplicity_factorial as f64),
             );
         }
-        output.coefficients[index] =
-            symbolic_add_component(&output.coefficients[index], &Some(term))
+        state.output.coefficients[index] =
+            symbolic_add_component(&state.output.coefficients[index], &Some(term))
                 .and_then(|value| dense_taylor_component(value, index));
         return;
     }
 
-    for candidate_index in start..candidates.len() {
-        let (_, component, candidate_counts) = &candidates[candidate_index];
-        if counts
+    for candidate_index in start..state.candidates.len() {
+        let (_, component, candidate_counts) = &state.candidates[candidate_index];
+        let component = component.clone();
+        let candidate_counts = candidate_counts.clone();
+        if state
+            .counts
             .iter()
-            .zip(candidate_counts)
+            .zip(&candidate_counts)
             .map(|(left, right)| left + right)
             .sum::<usize>()
-            > order
+            > state.order
         {
             continue;
         }
-        for (count, added) in counts.iter_mut().zip(candidate_counts) {
+        for (count, added) in state.counts.iter_mut().zip(&candidate_counts) {
             *count += added;
         }
-        selected.push(candidate_index);
+        state.selected.push(candidate_index);
         dense_taylor_composition_partitions(
-            candidates,
+            state,
             candidate_index,
             remaining - 1,
-            order,
-            counts,
-            selected,
             Some(match &product {
-                Some(product) => symbolic_multiply(product, component),
-                None => component.clone(),
+                Some(product) => symbolic_multiply(product, &component),
+                None => component,
             }),
-            derivative,
-            output,
         );
-        selected.pop();
-        for (count, added) in counts.iter_mut().zip(candidate_counts) {
+        state.selected.pop();
+        for (count, added) in state.counts.iter_mut().zip(&candidate_counts) {
             *count -= added;
         }
     }
@@ -1616,17 +1605,18 @@ fn dense_taylor_compose(input: DenseTaylorJet, stack: &str) -> DenseTaylorJet {
         .collect::<Vec<_>>();
     let mut out = DenseTaylorJet::constant(format!("{stack}[0]"), dimension, order);
     for derivative_order in 1..=order {
-        dense_taylor_composition_partitions(
-            &candidates,
-            0,
-            derivative_order,
+        let mut counts = vec![0usize; dimension];
+        let mut selected = Vec::with_capacity(derivative_order);
+        let derivative = format!("{stack}[{derivative_order}]");
+        let mut state = DenseTaylorCompositionPartitions {
+            candidates: &candidates,
             order,
-            &mut vec![0usize; dimension],
-            &mut Vec::with_capacity(derivative_order),
-            None,
-            &format!("{stack}[{derivative_order}]"),
-            &mut out,
-        );
+            counts: &mut counts,
+            selected: &mut selected,
+            derivative: &derivative,
+            output: &mut out,
+        };
+        dense_taylor_composition_partitions(&mut state, 0, derivative_order, None);
     }
     out
 }
@@ -1681,27 +1671,31 @@ fn materialize_dense_taylor(
     DenseTaylorJet::reference(&name, &support, value.dimension, value.order)
 }
 
-#[allow(clippy::too_many_arguments)]
+struct DenseTaylorExpressionEnvironment<'a> {
+    leaves: &'a [Leaf],
+    constants: &'a HashSet<String>,
+    bindings: &'a HashMap<String, DenseTaylorJet>,
+    dimension: usize,
+    order: usize,
+}
+
 fn dense_taylor_expression(
     expression: &ProgramExpr,
     owner: &str,
-    leaves: &[Leaf],
-    constants: &HashSet<String>,
-    bindings: &HashMap<String, DenseTaylorJet>,
-    dimension: usize,
-    order: usize,
+    environment: &DenseTaylorExpressionEnvironment<'_>,
     temporary_index: &mut usize,
     preludes: &mut Vec<String>,
 ) -> Result<DenseTaylorJet> {
+    let leaves = environment.leaves;
+    let constants = environment.constants;
+    let bindings = environment.bindings;
+    let dimension = environment.dimension;
+    let order = environment.order;
     let mut child = |expression: &ProgramExpr| {
         dense_taylor_expression(
             expression,
             owner,
-            leaves,
-            constants,
-            bindings,
-            dimension,
-            order,
+            environment,
             temporary_index,
             preludes,
         )
@@ -1998,14 +1992,17 @@ fn dense_taylor_schedule(
                 value,
             } => {
                 let mut preludes = Vec::new();
+                let environment = DenseTaylorExpressionEnvironment {
+                    leaves,
+                    constants,
+                    bindings: &bindings,
+                    dimension,
+                    order,
+                };
                 let value = dense_taylor_expression(
                     value,
                     &name.to_string(),
-                    leaves,
-                    constants,
-                    &bindings,
-                    dimension,
-                    order,
+                    &environment,
                     &mut temporary_index,
                     &mut preludes,
                 )?;
@@ -2032,14 +2029,17 @@ fn dense_taylor_schedule(
                 for (target_name, value) in assignments {
                     assigned.insert(target_name.to_string());
                     let mut preludes = Vec::new();
+                    let environment = DenseTaylorExpressionEnvironment {
+                        leaves,
+                        constants,
+                        bindings: &bindings,
+                        dimension,
+                        order,
+                    };
                     let value = dense_taylor_expression(
                         value,
                         &target_name.to_string(),
-                        leaves,
-                        constants,
-                        &bindings,
-                        dimension,
-                        order,
+                        &environment,
                         &mut temporary_index,
                         &mut preludes,
                     )?;
@@ -2070,16 +2070,12 @@ fn dense_taylor_schedule(
         }
     }
     let mut result_preludes = Vec::new();
-    let (result, root_compose_stack) =
-        if order == 3 && matches!(result, ProgramExpr::Compose { .. }) {
-            let ProgramExpr::Compose {
-                leaf,
-                value,
-                arguments,
-            } = result
-            else {
-                unreachable!("matched dense Taylor root compose")
-            };
+    let (result, root_compose_stack) = match result {
+        ProgramExpr::Compose {
+            leaf,
+            value,
+            arguments,
+        } if order == 3 => {
             let input = bindings.get(&value.to_string()).cloned().ok_or_else(|| {
                 syn::Error::new_spanned(value, "dense root compose input is not defined")
             })?;
@@ -2095,22 +2091,27 @@ fn dense_taylor_schedule(
                 leaf_arguments.join(", ")
             ));
             (input, Some(stack))
-        } else {
+        }
+        _ => {
+            let environment = DenseTaylorExpressionEnvironment {
+                leaves,
+                constants,
+                bindings: &bindings,
+                dimension,
+                order,
+            };
             (
                 dense_taylor_expression(
                     result,
                     "result",
-                    leaves,
-                    constants,
-                    &bindings,
-                    dimension,
-                    order,
+                    &environment,
                     &mut temporary_index,
                     &mut result_preludes,
                 )?,
                 None,
             )
-        };
+        }
+    };
     Ok(DenseTaylorSchedule {
         statements: dense_statements,
         result,
@@ -2585,16 +2586,10 @@ fn dense_taylor_derivative(value: &DenseTaylorJet, axes: &[usize]) -> Option<Str
     let component = value.coefficients[dense_taylor_index(&counts)]
         .as_ref()?
         .clone();
-    let factorial = counts.iter().fold(1usize, |product, count| {
-        product
-            * match count {
-                0 | 1 => 1,
-                2 => 2,
-                3 => 6,
-                4 => 24,
-                _ => unreachable!("dense Taylor order is at most four"),
-            }
-    });
+    let factorial = counts
+        .iter()
+        .map(|count| (2..=*count).product::<usize>())
+        .product::<usize>();
     if factorial == 1 {
         Some(component)
     } else {
