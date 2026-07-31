@@ -1,6 +1,6 @@
 //! Laplace-correction / mode-posterior sampler contract (trait-inversion #1521).
 //!
-//! gam-solve's REML inner loop (`#784` block-local sampled marginal correction)
+//! gam-solve's REML inner loop (`#784` block-local quadrature correction)
 //! and the custom-family never-fail covariance path call into the
 //! gam-inference-tier NUTS / importance-sampling engine (`inference::hmc_io`,
 //! ~8k lines) — an UP-edge that keeps gam-solve in the inference SCC.
@@ -11,11 +11,11 @@
 //! data-down (#1521):
 //!
 //! * the plain-DATA result carriers gam-solve reads
-//!   ([`BlockSampledMarginal`], [`BlockSampledMoments`],
+//!   ([`BlockQuadratureMarginal`], [`BlockQuadratureMoments`],
 //!   [`LaplaceTrustworthiness`]);
 //! * the caller-supplied [`BlockExcessTarget`] evaluator gam-solve IMPLEMENTS
 //!   (its `Gam784BlockTarget`), so the trait must live below both;
-//! * the SAMPLER TRAIT [`LaplaceMarginalSampler`] gam-solve calls THROUGH; the
+//! * the CORRECTOR TRAIT [`LaplaceMarginalCorrector`] gam-solve calls THROUGH; the
 //!   monolith / gam-inference implements it over `hmc_io` and injects the impl
 //!   via the process-level registry below.
 //!
@@ -64,12 +64,12 @@ impl LaplaceTrustworthiness {
     }
 }
 
-/// Self-normalized importance-weighted moments of the per-draw gradient channels
-/// — the sampler-side half of the #784 exact-gradient seam. All expectations are
-/// under `p ∝ q·e^{−ΔF}` over the SAME fixed-seed draws that produced the value,
-/// so the spliced value and its assembled gradient can never desync (#901).
+/// Quadrature-weighted moments of the per-node gradient channels — the
+/// integration-side half of the #784 exact-gradient seam. All expectations are
+/// under `p ∝ q·e^{−ΔF}` over the SAME deterministic nodes that produced the
+/// value, so the spliced value and its assembled gradient cannot desync (#901).
 #[derive(Clone, Debug)]
-pub struct BlockSampledMoments {
+pub struct BlockQuadratureMoments {
     /// `E_p[t]`, length `m`.
     pub e_t: Array1<f64>,
     /// `E_p[t tᵀ]`, shape `m × m`.
@@ -80,45 +80,32 @@ pub struct BlockSampledMoments {
     pub e_t_neg_score: Array2<f64>,
 }
 
-/// Block-local sampled marginal correction (issue #784).
+/// Block-local deterministic quadrature correction (issue #784).
 ///
 /// `value` is `Δ_b` (added to the block marginal log-likelihood, subtracted from
 /// the REML/LAML cost); `rho_gradient` is the explicit penalty-score channel (a)
 /// of the gradient exactness contract; `moments` carries the channels (b)–(d) the
 /// gam-solve assembly contracts against fields it already owns.
 #[derive(Clone, Debug)]
-pub struct BlockSampledMarginal {
+pub struct BlockQuadratureMarginal {
     /// `Δ_b`: additive correction to the block marginal log-likelihood.
     pub value: f64,
     /// `∂Δ_b/∂ρ`, length `rho_dim()` — explicit channel (a) ONLY.
     pub rho_gradient: Array1<f64>,
-    /// Importance-sampling effective sample size (draws), for trust gating.
-    pub importance_ess: f64,
-    /// Number of draws used.
-    pub n_draws: usize,
-    /// The estimator's OWN Monte-Carlo standard error on `value`, in the same
-    /// log-likelihood units as `value` itself.
-    ///
-    /// `Δ_b = log( (1/S) Σ_s w_s )` with `w_s = exp(−ΔF(t_s))`, so by the delta
-    /// method `se(Δ_b) = se(w̄)/w̄ = cv(w)/√S`, and with the Kish
-    /// `ESS = (Σw)²/Σw²` that is exactly
-    ///
-    /// ```text
-    ///     se(Δ_b) = sqrt(1/ESS − 1/S)
-    /// ```
-    ///
-    /// — a closed form in quantities the estimator already accumulates, costing
-    /// nothing to report. It is the quantity a trust gate on a *stochastic
-    /// splice into a deterministic objective* has to compare against: `ESS`
-    /// alone is a relative-efficiency number and says nothing about how
-    /// precisely `Δ_b` is known, so a gate written on `ESS/S` can accept an
-    /// imprecise estimate obtained efficiently and reject a precise one
-    /// obtained inefficiently (gam#2584).
-    pub standard_error: f64,
+    /// Absolute difference between the five-node and three-node product rules,
+    /// in the same log-likelihood units as `value`.
+    pub quadrature_error: f64,
+    /// Number of nodes in the fine product rule.
+    pub node_count: usize,
     /// Gradient-channel moments for the exact (b)–(d) assembly; `None` only when
     /// the block is empty (`m == 0`, where the correction is zero).
-    pub moments: Option<BlockSampledMoments>,
+    pub moments: Option<BlockQuadratureMoments>,
 }
+
+/// Maximum curvature-heavy block dimension for deterministic product
+/// Gauss–Hermite quadrature. The fine rule has five nodes per axis, so the cap
+/// follows from the 4096-node work ceiling: `5^5 = 3125`, while `5^6 = 15625`.
+pub const BLOCK_GH_MAX_DIM: usize = 5;
 
 // ───────────────────────── pure threshold math (moved down) ──────────────────
 
@@ -164,16 +151,16 @@ pub fn laplace_trustworthiness_from_skewness(
 /// log-posterior, restricted to the curvature-heavy block subspace (issue #784).
 ///
 /// Implemented by gam-solve's `Gam784BlockTarget`; consumed by
-/// [`LaplaceMarginalSampler::block_sampled_marginal_correction`]. Lives in this
+/// [`LaplaceMarginalCorrector::block_quadrature_marginal_correction`]. Lives in this
 /// neutral crate so both the implementor (gam-solve) and the sampler impl (the
 /// gam-inference monolith) name the same trait without an SCC edge.
 pub trait BlockExcessTarget {
     /// Dimension `m` of the block subspace (number of untrustworthy directions
-    /// being sampled).
+    /// being integrated).
     fn block_dim(&self) -> usize;
     /// Number of outer ρ coordinates the gradient is reported against.
     fn rho_dim(&self) -> usize;
-    /// Block curvatures `λ_r` (the H-eigenvalues of the sampled directions),
+    /// Block curvatures `λ_r` (the H-eigenvalues of the integrated directions),
     /// length `block_dim()`.
     fn block_curvatures(&self) -> &Array1<f64>;
     /// Non-Gaussian remainder `ΔF(t)` at whitened block displacement `t`
@@ -224,6 +211,19 @@ pub trait BlockExcessTarget {
         }
         out
     }
+
+    /// Batched excess-only evaluation for a matrix of quadrature nodes. The
+    /// coarse error rule does not consume score moments, so requiring them
+    /// would duplicate the expensive row-score work solely to discard it.
+    fn excess_batch(&self, nodes: &Array2<f64>) -> Vec<f64> {
+        let mut out = Vec::with_capacity(nodes.ncols());
+        let mut t = Array1::<f64>::zeros(nodes.nrows());
+        for column in nodes.columns() {
+            t.assign(&column);
+            out.push(self.excess(&t));
+        }
+        out
+    }
 }
 
 // ───────────────────────── injected sampler traits ───────────────────────────
@@ -231,11 +231,11 @@ pub trait BlockExcessTarget {
 /// The gam-inference-tier sampler for the #784 block-local Laplace correction.
 ///
 /// Implementable UP in an inference tier over
-/// (`laplace_directional_cubic_diagnostic` + `block_sampled_marginal_correction`)
-/// and explicitly injected DOWN via [`set_laplace_marginal_sampler`] by an
-/// embedding that chooses sampled marginalization. The standard estimator does
-/// not install one: its fit criterion is deterministic analytic LAML.
-pub trait LaplaceMarginalSampler: Send + Sync {
+/// (`laplace_directional_cubic_diagnostic` + `block_quadrature_marginal_correction`)
+/// and injected DOWN via [`set_laplace_marginal_corrector`]. The standard
+/// estimator installs the deterministic quadrature implementation; alternate
+/// embeddings may install another implementation before process initialization.
+pub trait LaplaceMarginalCorrector: Send + Sync {
     /// Per-direction standardized cubic skewness `γ_r` of the local posterior:
     /// returns `(max_r |γ_r|, γ)`. Pure eigen-diagnostic (no sampling), but kept
     /// behind the trait because it lives in the sampler module up-tier.
@@ -247,32 +247,30 @@ pub trait LaplaceMarginalSampler: Send + Sync {
         refine_supremum: bool,
     ) -> Result<(f64, Array1<f64>), String>;
 
-    /// Estimate `Δ_b` and its ρ-gradient by importance sampling against the local
-    /// Laplace Gaussian, contracting the caller-supplied [`BlockExcessTarget`].
-    fn block_sampled_marginal_correction(
+    /// Integrate `Δ_b` and its ρ-gradient against the local Laplace Gaussian,
+    /// contracting the caller-supplied [`BlockExcessTarget`].
+    fn block_quadrature_marginal_correction(
         &self,
         target: &dyn BlockExcessTarget,
-    ) -> Result<BlockSampledMarginal, String>;
+    ) -> Result<BlockQuadratureMarginal, String>;
 }
 
 // ───────────────────────── process-level injection registry ──────────────────
 
-static LAPLACE_MARGINAL_SAMPLER: OnceLock<Box<dyn LaplaceMarginalSampler>> = OnceLock::new();
+static LAPLACE_MARGINAL_CORRECTOR: OnceLock<Box<dyn LaplaceMarginalCorrector>> = OnceLock::new();
 
-/// Explicitly register a #784 Laplace-correction sampler for an embedding that
-/// chooses sampled marginalization. First writer wins; a later call is ignored
-/// (returns `Err` with the boxed value) so a re-init can never swap a live
-/// sampler mid-run.
-pub fn set_laplace_marginal_sampler(
-    sampler: Box<dyn LaplaceMarginalSampler>,
-) -> Result<(), Box<dyn LaplaceMarginalSampler>> {
-    LAPLACE_MARGINAL_SAMPLER.set(sampler)
+/// Register the #784 block-local Laplace corrector. First writer wins; a later
+/// call is ignored so a re-init can never swap a live criterion mid-run.
+pub fn set_laplace_marginal_corrector(
+    corrector: Box<dyn LaplaceMarginalCorrector>,
+) -> Result<(), Box<dyn LaplaceMarginalCorrector>> {
+    LAPLACE_MARGINAL_CORRECTOR.set(corrector)
 }
 
-/// The explicitly registered #784 Laplace-correction sampler, or `None` for the
-/// standard deterministic analytic-LAML estimator.
-pub fn laplace_marginal_sampler() -> Option<&'static dyn LaplaceMarginalSampler> {
-    LAPLACE_MARGINAL_SAMPLER.get().map(|b| b.as_ref())
+/// The registered #784 block-local Laplace corrector, or `None` when the
+/// embedding has not initialized the inference tier.
+pub fn laplace_marginal_corrector() -> Option<&'static dyn LaplaceMarginalCorrector> {
+    LAPLACE_MARGINAL_CORRECTOR.get().map(|b| b.as_ref())
 }
 
 #[cfg(test)]

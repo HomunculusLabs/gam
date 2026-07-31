@@ -199,17 +199,16 @@ fn main() {
                         let fix = fixture(n, k, amp, link, design);
                         let rho = Array1::from(vec![r, r + 0.05]);
                         let (_, audit) = audited_cost(&fix, &rho);
-                        let (did, mg, tau, m, db, se, ess, ndraws) =
-                            match audit.sampled_marginal.as_ref() {
+                        let (did, mg, tau, m, db, error, nodes) =
+                            match audit.quadrature_marginal.as_ref() {
                                 Some(s) => (
-                                    audit.sampled_marginal_engaged,
+                                    audit.quadrature_marginal_engaged,
                                     s.max_abs_skewness,
                                     s.skewness_threshold,
                                     s.block_cols.len(),
                                     s.delta_b,
-                                    s.standard_error,
-                                    s.importance_ess,
-                                    s.n_draws,
+                                    s.quadrature_error,
+                                    s.node_count,
                                 ),
                                 None => (
                                     false,
@@ -218,11 +217,10 @@ fn main() {
                                     0,
                                     f64::NAN,
                                     f64::NAN,
-                                    f64::NAN,
                                     0,
                                 ),
                             };
-                        let rel_se = se / db.abs();
+                        let relative_error = error / db.abs();
                         let name = if matches!(link, StandardLink::Logit) {
                             "logit "
                         } else {
@@ -235,28 +233,13 @@ fn main() {
                         };
                         println!(
                             "{dname} {name} {n:5} {k:2} {amp:5.1} {r:6.2}   {did:5}   \
-                             {mg:10.4}  {tau:9.4} {m:2}  {db:11.4e} {se:9.3e} \
-                             {rel_se:9.3e} {ess:6.1}/{ndraws}"
+                             {mg:10.4}  {tau:9.4} {m:2}  {db:11.4e} {error:9.3e} \
+                             {relative_error:9.3e} nodes={nodes}"
                         );
-                        // Rank by EFFECTIVE SAMPLE SIZE, not by se/|Delta_b|.
-                        // The two disagree sharply here and the second is the
-                        // wrong key: when the importance weights collapse to one
-                        // draw, |Delta_b| inflates to 10^2..10^4 nats and
-                        // se/|Delta_b| goes SMALL, so ranking on it selects the
-                        // most degenerate cells. ESS/S names the thing that has
-                        // to be large for `Delta_b` to be an average at all.
-                        // Stored negated so the ascending sort puts the best
-                        // first.
-                        if did && ess.is_finite() && ndraws > 0 {
-                            engaged.push((
-                                -(ess / ndraws as f64),
-                                link,
-                                n,
-                                k,
-                                amp,
-                                r,
-                                design,
-                            ));
+                        // Rank deterministic candidates by their paired-rule
+                        // disagreement; lower is the sharper certificate.
+                        if did && relative_error.is_finite() && nodes > 0 {
+                            engaged.push((relative_error, link, n, k, amp, r, design));
                         }
                         }
                     }
@@ -269,8 +252,7 @@ fn main() {
         println!("\nNO CANDIDATE ENGAGED THE SPLICE — the channel FD cannot be taken.");
         return;
     }
-    // Take the cells with the LARGEST effective sample size: a channel FD is
-    // only as meaningful as the estimator it differentiates.
+    // Take the cells with the smallest paired-rule disagreement.
     engaged.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("finite resolutions"));
     // Run the best-resolved cell of EACH design, so the verdict is not read off
     // one conditioning regime.
@@ -313,20 +295,19 @@ fn channel_fd(link: StandardLink, n: usize, k: usize, amp: f64, r: f64, design: 
     let rho = Array1::from(vec![r, r + 0.05]);
     let (analytic, audit) = audited_gradient(&fix, &rho);
     let sampled = audit
-        .sampled_marginal
+        .quadrature_marginal
         .as_ref()
         .expect("engaged config must carry the channel split");
     let (cost0, comp0) = audit.criterion.expect("criterion recorded");
     println!(
-        "engaged={} m={} block_cols={:?} Delta_b={:.8e} se={:.3e} ESS={:.1}/{} max|gamma|={:.4} \
+        "engaged={} m={} block_cols={:?} Delta_b={:.8e} paired_error={:.3e} nodes={} max|gamma|={:.4} \
          tau={:.4}",
-        audit.sampled_marginal_engaged,
+        audit.quadrature_marginal_engaged,
         sampled.block_cols.len(),
         sampled.block_cols,
         sampled.delta_b,
-        sampled.standard_error,
-        sampled.importance_ess,
-        sampled.n_draws,
+        sampled.quadrature_error,
+        sampled.node_count,
         sampled.max_abs_skewness,
         sampled.skewness_threshold,
     );
@@ -346,11 +327,11 @@ fn channel_fd(link: StandardLink, n: usize, k: usize, amp: f64, r: f64, design: 
             minus[j] -= h;
             let (cost_p, audit_p) = audited_cost(&fix, &plus);
             let (cost_m, audit_m) = audited_cost(&fix, &minus);
-            let Some(sp) = audit_p.sampled_marginal.as_ref() else {
+            let Some(sp) = audit_p.quadrature_marginal.as_ref() else {
                 println!("j={j}: splice DECLINED at rho+h; the stencil is not comparable");
                 continue;
             };
-            let Some(sm) = audit_m.sampled_marginal.as_ref() else {
+            let Some(sm) = audit_m.quadrature_marginal.as_ref() else {
                 println!("j={j}: splice DECLINED at rho-h; the stencil is not comparable");
                 continue;
             };

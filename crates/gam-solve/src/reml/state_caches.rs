@@ -1468,7 +1468,7 @@ pub(crate) fn reml_fixed_glm_dispersion(
 // be compared against anything. Measured on a `geo_latlon`-shaped fit the weights
 // are near-uniform (`ESS = 508/512`), so the fraction never fired at all, while
 // `se` exceeded `|Δ_b|` outright as the search converged (gam#2584). The gate now
-// tests `se < |Δ_b|` directly in `block_local_sampled_correction_compute`, which
+// tests the paired-rule certificate in `block_local_quadrature_correction_compute`, which
 // needs no fraction: `se ≥ |Δ_b|` is the estimate failing to distinguish its own
 // correction from zero.
 
@@ -1839,6 +1839,17 @@ impl BlockExcessTarget for Gam784BlockTarget<'_> {
             })
             .collect();
         out
+    }
+
+    fn excess_batch(&self, nodes: &Array2<f64>) -> Vec<f64> {
+        // Preserve the BLAS-3 displacement path for the coarse rule. The row
+        // oracle currently produces value and score together atomically; drop
+        // the unused score here without falling back to one BLAS-2 matvec per
+        // node.
+        self.excess_with_displaced_neg_score_batch(nodes)
+            .into_iter()
+            .map(|(excess, _)| excess)
+            .collect()
     }
 }
 

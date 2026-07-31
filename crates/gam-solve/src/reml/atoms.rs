@@ -1370,7 +1370,7 @@ impl CriterionAtom for ThetaOnlyCorrectionAtom {
 //
 // LANDED (pass 4c, sampled-correction application atom): the live runtime
 // post-evaluator no longer splices sampled `TkCorrectionTerms` into
-// `RemlLamlResult` field-by-field. `block_local_sampled_correction` still
+// `RemlLamlResult` field-by-field. `block_local_quadrature_correction` still
 // computes the sampler emission, but `assemble_and_evaluate*` immediately
 // wraps it in a `ThetaOnlyCorrectionAtom`; cost, gradient, and Hessian are then
 // projected from that atom in one application site with arity checks. This

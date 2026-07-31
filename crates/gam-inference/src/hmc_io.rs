@@ -3402,8 +3402,8 @@ mod tests {
     }
 
     #[test]
-    fn block_sampled_marginal_is_zero_for_gaussian_block() {
-        // A purely Gaussian block has ΔF ≡ 0, so the sampled correction (the
+    fn block_quadrature_marginal_is_zero_for_gaussian_block() {
+        // A purely Gaussian block has ΔF ≡ 0, so the quadrature correction (the
         // log-ratio of true to Laplace block free energy) must be exactly 0,
         // with a zero ρ-gradient. This is the consistency anchor: where the
         // Gaussian summary holds, the fallback is a no-op.
@@ -3411,21 +3411,22 @@ mod tests {
             lambdas: array![2.0, 0.5],
             a: 0.0,
         };
-        let out = super::block_sampled_marginal_correction(&target).expect("correction");
+        let out = super::block_quadrature_marginal_correction(&target).expect("correction");
         assert!(
             out.value.abs() < 1e-12,
             "Gaussian block value {}",
             out.value
         );
         assert!(out.rho_gradient.iter().all(|&g| g.abs() < 1e-12));
-        assert!(out.n_draws > 0);
+        assert!(out.node_count > 0);
+        assert_eq!(out.quadrature_error, 0.0);
     }
 
     #[test]
-    fn block_sampled_marginal_recovers_analytic_quartic_correction() {
+    fn block_quadrature_marginal_recovers_analytic_quartic_correction() {
         // 1-D block with a quartic excess ΔF(t) = a t⁴ (a small positive
         // anharmonicity). Then exp(Δ_b) = E_{t~N(0,1/λ)}[exp(−a t⁴)], a known
-        // 1-D integral the IS estimator must recover. We check the sampled Δ_b
+        // 1-D integral the deterministic rule must recover. We check Δ_b
         // matches a high-accuracy deterministic quadrature of the same
         // expectation, and that Δ_b < 0 (an added quartic penalty makes the
         // true block mass *smaller* than the Gaussian's).
@@ -3435,7 +3436,7 @@ mod tests {
             lambdas: array![lambda],
             a,
         };
-        let out = super::block_sampled_marginal_correction(&target).expect("correction");
+        let out = super::block_quadrature_marginal_correction(&target).expect("correction");
 
         // Deterministic reference: Δ_b = log E_{t~N(0,1/λ)}[exp(−a t⁴)] via a
         // fine trapezoid rule over the Gaussian density.
@@ -3455,7 +3456,7 @@ mod tests {
         let reference = integral.ln();
         assert!(
             (out.value - reference).abs() < 5e-3,
-            "sampled Δ_b {} vs reference {}",
+            "quadrature Δ_b {} vs reference {}",
             out.value,
             reference,
         );
@@ -3548,7 +3549,7 @@ mod tests {
     }
 
     #[test]
-    fn block_sampled_marginal_batched_matches_serial_matvec() {
+    fn block_quadrature_marginal_batched_matches_serial_matvec() {
         // Real design / block-frame matvecs, large enough that the GEMM path is
         // actually taken (n, p ≥ faer threshold). The batched override must give
         // the same correction value, ρ-gradient, and moments as the serial path.
@@ -3570,7 +3571,7 @@ mod tests {
         let y: Array1<f64> = (0..n).map(|i| ((i % 5) as f64) * 0.2).collect();
         let lambdas = array![2.0, 1.0, 0.5];
 
-        let serial = super::block_sampled_marginal_correction(&MatvecBlock {
+        let serial = super::block_quadrature_marginal_correction(&MatvecBlock {
             lambdas: lambdas.clone(),
             x: x.clone(),
             v_b: v_b.clone(),
@@ -3578,7 +3579,7 @@ mod tests {
             batched: false,
         })
         .expect("serial");
-        let batched = super::block_sampled_marginal_correction(&MatvecBlock {
+        let batched = super::block_quadrature_marginal_correction(&MatvecBlock {
             lambdas,
             x,
             v_b,
@@ -3587,7 +3588,7 @@ mod tests {
         })
         .expect("batched");
 
-        assert_eq!(serial.n_draws, batched.n_draws);
+        assert_eq!(serial.node_count, batched.node_count);
         assert!(
             (serial.value - batched.value).abs() <= 1e-10 * (1.0 + serial.value.abs()),
             "value serial {} vs batched {}",
@@ -5964,19 +5965,20 @@ fn cubic_power_iteration_refinement(
 // the directional-cubic eigen diagnostic) stays UP in this module and
 // constructs these types under their original names via this re-export.
 pub use gam_problem::laplace_sampler_contract::{
-    BlockExcessTarget, BlockSampledMarginal, BlockSampledMoments, LaplaceTrustworthiness,
-    laplace_skewness_threshold, laplace_trustworthiness_from_skewness,
+    BLOCK_GH_MAX_DIM, BlockExcessTarget, BlockQuadratureMarginal, BlockQuadratureMoments,
+    LaplaceTrustworthiness, laplace_skewness_threshold,
+    laplace_trustworthiness_from_skewness,
 };
 
 /// Monolith (gam-inference-tier) implementor of the contract-downed
-/// [`LaplaceMarginalSampler`](gam_problem::laplace_sampler_contract::LaplaceMarginalSampler):
+/// [`LaplaceMarginalCorrector`](gam_problem::laplace_sampler_contract::LaplaceMarginalCorrector):
 /// wraps the `hmc_io` directional-cubic eigen diagnostic and the
-/// importance-sampled #784 block correction. This is an explicit research
-/// primitive; the standard process does not inject it into deterministic
-/// REML/LAML fitting.
-pub struct HmcIoLaplaceMarginalSampler;
+/// deterministic #784 block correction.
+pub struct HmcIoLaplaceMarginalCorrector;
 
-impl gam_problem::laplace_sampler_contract::LaplaceMarginalSampler for HmcIoLaplaceMarginalSampler {
+impl gam_problem::laplace_sampler_contract::LaplaceMarginalCorrector
+    for HmcIoLaplaceMarginalCorrector
+{
     fn directional_cubic_diagnostic(
         &self,
         hessian: &Array2<f64>,
@@ -5987,77 +5989,59 @@ impl gam_problem::laplace_sampler_contract::LaplaceMarginalSampler for HmcIoLapl
         laplace_directional_cubic_diagnostic(hessian, design, c_weights, refine_supremum)
     }
 
-    fn block_sampled_marginal_correction(
+    fn block_quadrature_marginal_correction(
         &self,
         target: &dyn BlockExcessTarget,
-    ) -> Result<BlockSampledMarginal, String> {
-        block_sampled_marginal_correction(target)
+    ) -> Result<BlockQuadratureMarginal, String> {
+        block_quadrature_marginal_correction(target)
     }
 }
 
-/// Auto-derive the number of importance draws for the block-local sampled
-/// marginalization from the block dimension.  MAGIC: more directions need more
-/// draws to control the importance-weight variance, but the block is small by
-/// construction (only the curvature-heavy directions), so this stays cheap.
-/// No CLI flag.
-fn block_sampling_draws(block_dim: usize) -> usize {
-    // Base budget plus a per-direction allowance; capped so a pathological
-    // block can never make a single inner evaluation explode.
-    const BASE: usize = 256;
-    const PER_DIM: usize = 256;
-    const CAP: usize = 4096;
-    (BASE + PER_DIM * block_dim).min(CAP)
-}
-
-/// Estimate the block-local sampled marginal correction `Δ_b` and its
-/// ρ-gradient by importance sampling against the local Laplace Gaussian
+/// Evaluate the block-local marginal correction `Δ_b` and its ρ-gradient by
+/// deterministic Gauss-Hermite quadrature against the local Laplace Gaussian
 /// (issue #784).
 ///
 /// # Math
 ///
-/// Draw `t_s ~ q = N(0, diag(1/λ_r))` (the local Laplace Gaussian in the block
-/// subspace; whitened draws `z_s ~ N(0, I)` give `t_{s,r} = z_{s,r}/√λ_r`).
+/// Integrate `t ~ q = N(0, diag(1/λ_r))` (the local Laplace Gaussian in the
+/// block subspace; standard-normal nodes `z_s` give `t_{s,r}=z_{s,r}/√λ_r`).
 /// With the non-Gaussian remainder `ΔF` defined on [`BlockExcessTarget`],
 ///
-///   exp(Δ_b) = E_q[ exp(−ΔF(t)) ]  ⇒  Δ_b = log mean_s exp(−ΔF(t_s)),
+///   exp(Δ_b) = E_q[ exp(−ΔF(t)) ],
 ///
-/// computed via a numerically-stable log-mean-exp.  The ρ-gradient follows
+/// computed via a numerically-stable weighted log-sum-exp. The ρ-gradient follows
 /// from differentiating `Δ_b = log E_q[e^{−ΔF}]` (the `q`-Gaussian normalizer
 /// `½Σ log(2π/λ_r)` cancels against `A_Lap`, leaving only the `ΔF` channel):
 ///
 ///   ∂Δ_b/∂ρ_k = E_p[ −∂ΔF/∂ρ_k ],   p ∝ q·e^{−ΔF},
 ///
-/// i.e. the self-normalized importance-weighted average of `−∂ΔF/∂ρ_k` over the
-/// same draws.  Because value and gradient come from one set of draws and one
-/// target, they are mutually consistent — the contract the outer REML needs.
+/// i.e. the normalized quadrature average of `−∂ΔF/∂ρ_k`. Because value,
+/// gradient, and all envelope moments come from the same nodes and target, they
+/// are mutually consistent — the contract the outer REML needs.
 ///
-/// Determinism: draws come from a fixed-seed RNG so the inner evaluation is a
-/// pure function of `(β̂, H, ρ)` and the outer optimizer sees a smooth,
-/// reproducible objective rather than Monte-Carlo jitter across evaluations.
-pub fn block_sampled_marginal_correction<T: BlockExcessTarget + ?Sized>(
+/// The five-node rule is exact for standard-normal polynomials through degree
+/// nine. A separate three-node rule (degree five) supplies a deterministic
+/// rule-difference estimate for the realized non-polynomial integrand; the
+/// caller admits the correction only when that difference resolves both `Δ_b`
+/// and the `O(1/n_eff)` Laplace floor.
+pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
     target: &T,
-) -> Result<BlockSampledMarginal, String> {
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
-
+) -> Result<BlockQuadratureMarginal, String> {
     let m = target.block_dim();
     let k = target.rho_dim();
     if m == 0 {
-        return Ok(BlockSampledMarginal {
+        return Ok(BlockQuadratureMarginal {
             value: 0.0,
             rho_gradient: Array1::zeros(k),
-            importance_ess: 0.0,
-            n_draws: 0,
-            // An empty block has an exactly-zero correction, not an estimated
-            // one: no draw is taken, so there is no sampling error to report.
-            standard_error: 0.0,
+            quadrature_error: 0.0,
+            node_count: 0,
             moments: None,
         });
     }
     let lambdas = target.block_curvatures();
     if lambdas.len() != m {
         return Err(format!(
-            "block_sampled_marginal_correction: block_curvatures len {} != block_dim {m}",
+            "block_quadrature_marginal_correction: block_curvatures len {} != block_dim {m}",
             lambdas.len()
         ));
     }
@@ -6073,37 +6057,32 @@ pub fn block_sampled_marginal_correction<T: BlockExcessTarget + ?Sized>(
     });
     if inv_sqrt_lambda.iter().any(|v| !v.is_finite()) {
         return Err(
-            "block_sampled_marginal_correction: non-positive block curvature (mode is not a \
-             strict local minimum in a sampled direction)"
+            "block_quadrature_marginal_correction: non-positive block curvature (mode is not a \
+             strict local minimum in an integrated direction)"
                 .to_string(),
         );
     }
+    if m > BLOCK_GH_MAX_DIM {
+        return Err(format!(
+            "block-local Gauss-Hermite correction supports at most {BLOCK_GH_MAX_DIM} \
+             curvature-heavy directions, got {m}"
+        ));
+    }
 
-    let n_draws = block_sampling_draws(m);
-    // ρ-invariant fixed seed → deterministic AND smooth-in-ρ objective.
-    //
-    // The doc comment above promises "the outer optimizer sees a smooth,
-    // reproducible objective rather than Monte-Carlo jitter across
-    // evaluations." That smoothness holds only if the importance draws
-    // `z_s` themselves do NOT depend on ρ — ρ may enter the estimator
-    // only through the per-sample importance weights `exp(−ΔF(t_s))` and
-    // the rescaling `t_s = z_s / √λ_r`, both of which are continuous in
-    // ρ for fixed `z_s`. A seed mixed from `λ_r = exp(ρ_k)` (or any
-    // other ρ-dependent quantity such as the H-eigenvalues) permutes
-    // `z_s` for every ρ probe, so the FD `(F(ρ+h) − F(ρ−h))/2h`
-    // identity fails by O(MC_stdev/h) — exactly the order-10²–10³ FD
-    // blow-up observed in the iso-κ Duchon binomial FD probes — and
-    // every outer trust-region step lands on a different random face of
-    // the objective. Mix only the (ρ-invariant) block / outer dimensions
-    // so different problems still get independent streams.
-    let mut seed_bits: u64 = 0x9E37_79B9_7F4A_7C15;
-    seed_bits ^= (m as u64).rotate_left(17);
-    seed_bits = seed_bits.wrapping_mul(0x1000_0000_01B3);
-    seed_bits ^= (k as u64).rotate_left(31);
-    seed_bits = seed_bits.wrapping_mul(0x1000_0000_01B3);
-    let mut rng = StdRng::seed_from_u64(seed_bits);
+    let fine_rule = crate::rho_posterior::standard_normal_gh_rule(5)
+        .expect("the five-node standard-normal Gauss-Hermite rule is built in");
+    let mut fine_nodes = Vec::new();
+    crate::rho_posterior::enumerate_gh_product(
+        m,
+        fine_rule,
+        0,
+        &mut Array1::zeros(m),
+        0.0,
+        &mut fine_nodes,
+    );
+    let node_count = fine_nodes.len();
 
-    // Streaming, numerically-stable accumulation of the log-mean-exp value,
+    // Streaming, numerically-stable accumulation of the weighted log-sum-exp value,
     // the explicit gradient channel `E_p[−∂ΔF/∂ρ]`, AND the gradient-channel
     // moments `E_p[t]`, `E_p[t tᵀ]`, `E_p[ngs]`, `E_p[t ⊗ ngs]` needed by the
     // exact (b)–(d) channel assembly (gradient exactness contract above).
@@ -6115,26 +6094,20 @@ pub fn block_sampled_marginal_correction<T: BlockExcessTarget + ?Sized>(
     let n_obs = target.base_neg_score()?.len();
     let mut max_lw = f64::NEG_INFINITY;
     let mut sum_w = 0.0_f64;
-    let mut sum_w2 = 0.0_f64;
     let mut grad_acc = Array1::<f64>::zeros(k);
     let mut e_t_acc = Array1::<f64>::zeros(m);
     let mut e_tt_acc = Array2::<f64>::zeros((m, m));
     let mut e_ngs_acc = Array1::<f64>::zeros(n_obs);
     let mut e_t_ngs_acc = Array2::<f64>::zeros((n_obs, m));
 
-    // Pre-generate ALL whitened draws into the columns of `draws` (m × n_draws)
-    // in the EXACT same RNG order as the serial loop (draw 0: r=0..m, draw 1:
-    // r=0..m, …). The per-draw design matvec `s = X_t·(V_b·t_s)` is then batched
+    // Materialize all transformed quadrature nodes into the columns of `draws`
+    // (`m × n_draws`). The per-node design matvec `s = X_t·(V_b·t_s)` is batched
     // into two BLAS-3 products over all columns at once (the #1082 hot path),
-    // instead of n_draws separate BLAS-2 matvecs — the draws, seed, budget, and
-    // importance weights are byte-for-byte unchanged; only the matvecs are
-    // reassociated into a GEMM.
-    let mut draws = Array2::<f64>::zeros((m, n_draws));
-    for s in 0..n_draws {
-        let mut col = draws.column_mut(s);
+    // instead of separate BLAS-2 matvecs.
+    let mut draws = Array2::<f64>::zeros((m, node_count));
+    for (s, (z, _)) in fine_nodes.iter().enumerate() {
         for r in 0..m {
-            let z = sample_standard_normal(&mut rng);
-            col[r] = z * inv_sqrt_lambda[r];
+            draws[(r, s)] = z[r] * inv_sqrt_lambda[r];
         }
     }
     let batched = target.excess_with_displaced_neg_score_batch(&draws);
@@ -6149,13 +6122,12 @@ pub fn block_sampled_marginal_correction<T: BlockExcessTarget + ?Sized>(
             // A finite excess always carries a score; absence means infeasible.
             continue;
         };
-        let lw = -excess;
+        let lw = fine_nodes[sidx].1 - excess;
         if lw > max_lw {
             // exp(−∞ − lw) = 0 zeroes the (empty) accumulators on the first
             // feasible draw, so no special-casing is needed.
             let rescale = (max_lw - lw).exp();
             sum_w *= rescale;
-            sum_w2 *= rescale * rescale;
             grad_acc *= rescale;
             e_t_acc *= rescale;
             e_tt_acc *= rescale;
@@ -6165,13 +6137,12 @@ pub fn block_sampled_marginal_correction<T: BlockExcessTarget + ?Sized>(
         }
         let w = (lw - max_lw).exp();
         sum_w += w;
-        sum_w2 += w * w;
         // Explicit channel: −∂ΔF/∂ρ.
         grad_acc.scaled_add(-w, &target.excess_rho_gradient(&t));
         // Moment channels (score already computed in the fused call above).
         if ngs.len() != n_obs {
             return Err(format!(
-                "block_sampled_marginal_correction: displaced_neg_score len {} != {n_obs}",
+                "block_quadrature_marginal_correction: displaced_neg_score len {} != {n_obs}",
                 ngs.len()
             ));
         }
@@ -6187,15 +6158,16 @@ pub fn block_sampled_marginal_correction<T: BlockExcessTarget + ?Sized>(
     }
     if !max_lw.is_finite() {
         return Err(
-            "block_sampled_marginal_correction: all importance draws were infeasible".to_string(),
+            "block_quadrature_marginal_correction: all fine quadrature nodes were infeasible"
+                .to_string(),
         );
     }
-    let value = max_lw + (sum_w / n_draws as f64).ln();
+    let value = max_lw + sum_w.ln();
     // Self-normalized importance-weighted gradient E_p[−∂ΔF/∂ρ] and moments.
     let (rho_gradient, moments) = if sum_w > 0.0 {
         (
             grad_acc / sum_w,
-            Some(BlockSampledMoments {
+            Some(BlockQuadratureMoments {
                 e_t: e_t_acc / sum_w,
                 e_tt: e_tt_acc / sum_w,
                 e_neg_score: e_ngs_acc / sum_w,
@@ -6205,31 +6177,55 @@ pub fn block_sampled_marginal_correction<T: BlockExcessTarget + ?Sized>(
     } else {
         (Array1::zeros(k), None)
     };
-    // Kish effective sample size of the importance weights.
-    let importance_ess = if sum_w2 > 0.0 {
-        (sum_w * sum_w) / sum_w2
-    } else {
-        0.0
-    };
-    // The estimator's own Monte-Carlo standard error on `value`, in `value`'s
-    // units. `Δ_b = log w̄` ⇒ `se(Δ_b) = cv(w)/√S = sqrt(1/ESS − 1/S)`; see
-    // `BlockSampledMarginal::standard_error`. Both terms are already on hand,
-    // so this costs two divides and reports the one number a consumer needs to
-    // decide whether splicing this correction adds more noise than the Laplace
-    // bias it removes (gam#2584). Clamped at zero: `ESS ≤ S` always, but a
-    // degenerate single-surviving-draw case can put the difference a rounding
-    // step below zero.
-    let standard_error = if importance_ess > 0.0 && n_draws > 0 {
-        (1.0 / importance_ess - 1.0 / n_draws as f64)
-            .max(0.0)
-            .sqrt()
-    } else {
-        f64::INFINITY
-    };
+    // Paired-rule error estimate: repeat only the scalar integral with the
+    // three-node (degree-five) product rule. The fine/coarse difference is in
+    // the same log-marginal units as Δ_b and is deterministic across rho.
+    let coarse_rule = crate::rho_posterior::standard_normal_gh_rule(3)
+        .expect("the three-node standard-normal Gauss-Hermite rule is built in");
+    let mut coarse_nodes = Vec::new();
+    crate::rho_posterior::enumerate_gh_product(
+        m,
+        coarse_rule,
+        0,
+        &mut Array1::zeros(m),
+        0.0,
+        &mut coarse_nodes,
+    );
+    let mut coarse_draws = Array2::<f64>::zeros((m, coarse_nodes.len()));
+    for (s, (z, _)) in coarse_nodes.iter().enumerate() {
+        for r in 0..m {
+            coarse_draws[(r, s)] = z[r] * inv_sqrt_lambda[r];
+        }
+    }
+    let coarse_values = target.excess_batch(&coarse_draws);
+    let coarse_max = coarse_values
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, excess)| {
+            excess.is_finite().then_some(coarse_nodes[idx].1 - excess)
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !coarse_max.is_finite() {
+        return Err(
+            "block_quadrature_marginal_correction: every coarse quadrature node was infeasible"
+                .to_string(),
+        );
+    }
+    let coarse_sum = coarse_values
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, excess)| {
+            excess
+                .is_finite()
+                .then_some((coarse_nodes[idx].1 - excess - coarse_max).exp())
+        })
+        .sum::<f64>();
+    let coarse_value = coarse_max + coarse_sum.ln();
+    let quadrature_error = (value - coarse_value).abs();
 
     if !value.is_finite() || rho_gradient.iter().any(|v| !v.is_finite()) {
         return Err(
-            "block_sampled_marginal_correction: produced a non-finite correction or gradient"
+            "block_quadrature_marginal_correction: produced a non-finite correction or gradient"
                 .to_string(),
         );
     }
@@ -6240,17 +6236,16 @@ pub fn block_sampled_marginal_correction<T: BlockExcessTarget + ?Sized>(
             || mo.e_t_neg_score.iter().any(|v| !v.is_finite()))
     {
         return Err(
-            "block_sampled_marginal_correction: produced non-finite gradient-channel moments"
+            "block_quadrature_marginal_correction: produced non-finite gradient-channel moments"
                 .to_string(),
         );
     }
 
-    Ok(BlockSampledMarginal {
+    Ok(BlockQuadratureMarginal {
         value,
         rho_gradient,
-        importance_ess,
-        n_draws,
-        standard_error,
+        quadrature_error,
+        node_count,
         moments,
     })
 }

@@ -142,27 +142,24 @@ fn sampled_marginal_splice_outer_gradient_matches_finite_difference_2623() {
     // build where the splice declines: the criterion and the gradient would then
     // agree because neither carries the channels this test exists to grade.
     assert!(
-        audit.sampled_marginal_engaged,
+        audit.quadrature_marginal_engaged,
         "#2623 gate is unarmed: the #784 splice DECLINED on this fixture, so the \
          channels this test grades were never formed. Fix the fixture, do not \
          relax the bound."
     );
     let sampled = audit
-        .sampled_marginal
+        .quadrature_marginal
         .as_ref()
         .expect("an engaged splice publishes its channel split");
 
-    // The FD reference is a difference of two `Δ_b` ESTIMATES, so it is only as
-    // good as the importance sampler that produced them. Collapsed weights would
-    // make every row below noise rather than evidence.
-    let ess_fraction = sampled.importance_ess / sampled.n_draws as f64;
+    // The FD reference is a difference of deterministic `Δ_b` quadratures.
+    // The engaged gate already certifies the fine/coarse rule difference; keep
+    // the node-count assertion here so a vacuous zero-node result cannot pass.
     assert!(
-        ess_fraction > 0.9,
-        "#2623 gate: the importance sampler is not resolved (ESS = {:.1}/{}, \
-         fraction {ess_fraction:.4}); the finite difference would be grading its \
-         own Monte-Carlo error",
-        sampled.importance_ess,
-        sampled.n_draws,
+        sampled.node_count > 0 && sampled.quadrature_error.is_finite(),
+        "#2623 gate: invalid quadrature certificate (nodes={}, error={})",
+        sampled.node_count,
+        sampled.quadrature_error,
     );
 
     let cost_at = |theta: &Array1<f64>| -> (f64, Vec<usize>) {
@@ -180,7 +177,7 @@ fn sampled_marginal_splice_outer_gradient_matches_finite_difference_2623() {
         .0;
         let audit = take_rho_outer_audit().expect("rho audit armed");
         let block = audit
-            .sampled_marginal
+            .quadrature_marginal
             .as_ref()
             .map(|record| record.block_cols.clone())
             .unwrap_or_default();

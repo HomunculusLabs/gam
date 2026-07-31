@@ -2506,7 +2506,7 @@ impl<'a> RemlState<'a> {
     /// band. The correction value therefore vanishes continuously as a
     /// direction approaches the threshold, so the spliced objective is
     /// continuous to leading order and does not bias ρ selection.
-    /// Per-bundle-cached wrapper around [`Self::block_local_sampled_correction_compute`].
+    /// Per-bundle-cached wrapper around [`Self::block_local_quadrature_correction_compute`].
     ///
     /// The block-local correction is a deterministic function of this bundle's
     /// converged inner state and ρ alone (mode-invariant, Hessian-free), but the
@@ -2518,7 +2518,7 @@ impl<'a> RemlState<'a> {
     /// computed exactly once per inner solution and every consumer at that ρ
     /// reads the identical value+gradient (exact hoist — #784, #1082). Keyed on
     /// `n_ext`, which is fixed for a fit, so one cell suffices.
-    pub(crate) fn block_local_sampled_correction(
+    pub(crate) fn block_local_quadrature_correction(
         &self,
         rho: &Array1<f64>,
         bundle: &EvalShared,
@@ -2532,12 +2532,12 @@ impl<'a> RemlState<'a> {
             // ρ whose splice engaged reads back as declined on every assemble
             // after the first (#2623).
             if let Some(record) = audit.as_ref() {
-                crate::estimate::outer_eval_capture::record_sampled_marginal(record.clone());
+                crate::estimate::outer_eval_capture::record_quadrature_marginal(record.clone());
             }
             return Ok((**terms).clone());
         }
-        let terms = self.block_local_sampled_correction_compute(rho, bundle, n_ext)?;
-        let audit = crate::estimate::outer_eval_capture::last_sampled_marginal_record();
+        let terms = self.block_local_quadrature_correction_compute(rho, bundle, n_ext)?;
+        let audit = crate::estimate::outer_eval_capture::last_quadrature_marginal_record();
         // First writer wins; a racing writer built from identical inputs, so
         // either stored object is correct. A `set` that loses the race (cell
         // already filled) is fine — both terms are equal — so the `Err` is
@@ -2551,7 +2551,7 @@ impl<'a> RemlState<'a> {
         }
     }
 
-    fn block_local_sampled_correction_compute(
+    fn block_local_quadrature_correction_compute(
         &self,
         rho: &Array1<f64>,
         bundle: &EvalShared,
@@ -2631,7 +2631,7 @@ impl<'a> RemlState<'a> {
         // yet carry. A spliced value whose ψ-gradient entries are zeroed (or
         // truncated) is an objective↔gradient desync (#901, the #752/#748
         // bug class); per the gradient exactness contract on
-        // `block_sampled_marginal_correction`, the correct response is to
+        // `block_quadrature_marginal_correction`, the correct response is to
         // DECLINE the splice — value AND gradient together — rather than
         // approximate.
         if n_ext > 0 {
@@ -2659,16 +2659,16 @@ impl<'a> RemlState<'a> {
             return Ok(zero());
         }
 
-        // Resolve the injected gam-inference sampler. When the sampler tier is
-        // not linked / registered, decline the correction (zero contribution) —
+        // Resolve the injected gam-inference corrector. When the inference tier
+        // is not linked / registered, decline the correction (zero contribution) —
         // the same safe no-op as every other decline branch here.
-        let Some(sampler) = gam_problem::laplace_sampler_contract::laplace_marginal_sampler()
+        let Some(corrector) = gam_problem::laplace_sampler_contract::laplace_marginal_corrector()
         else {
             return Ok(zero());
         };
 
         // Step 1: per-direction skewness diagnostic γ_r.
-        let (max_abs, directional) = sampler
+        let (max_abs, directional) = corrector
             .directional_cubic_diagnostic(h_total, x_design, c_weights, false)
             .map_err(EstimationError::InvalidInput)?;
         if !max_abs.is_finite() || max_abs == 0.0 {
@@ -2701,6 +2701,14 @@ impl<'a> RemlState<'a> {
             return Ok(zero());
         }
         let m = block_cols.len();
+        if m > gam_problem::laplace_sampler_contract::BLOCK_GH_MAX_DIM {
+            log::info!(
+                "[#784] block-local correction declined: {m} curvature-heavy directions exceed \
+                 the deterministic Gauss-Hermite product cap {}",
+                gam_problem::laplace_sampler_contract::BLOCK_GH_MAX_DIM,
+            );
+            return Ok(zero());
+        }
         let mut block_vecs = Array2::<f64>::zeros((p, m));
         let mut block_lambdas = Array1::<f64>::zeros(m);
         for (j, &r) in block_cols.iter().enumerate() {
@@ -2793,44 +2801,13 @@ impl<'a> RemlState<'a> {
             base_neg_score_at_mode,
         };
 
-        let sampled = sampler
-            .block_sampled_marginal_correction(&target)
+        let quadrature = corrector
+            .block_quadrature_marginal_correction(&target)
             .map_err(EstimationError::InvalidInput)?;
 
-        // Budget audit for the one stochastic channel that is NOT under the
-        // variance-targeted hypergradient budget (gam#2584).
-        //
-        // `block_sampling_draws` picks `256 + 256·m` draws from the block
-        // dimension and from nothing else — not from the achieved Monte-Carlo
-        // error of `Δ_b`, and not from the precision the outer search can act
-        // on — while `update_hypergradient_budget_after_outer_eval` already
-        // sizes the inner, linear and trace channels to a `target_mse`. The
-        // three numbers below are what a variance-targeted budget for this
-        // channel would consume, so a single `--log-level info` run measures
-        // whether the constant is over- or under-provisioned instead of
-        // leaving it an argument:
-        //
-        //   * `se`      — the estimator's own standard error `sqrt(1/ESS − 1/S)`,
-        //     in the same log-likelihood units as `Δ_b`;
-        //   * `se/|Δ_b|` — the relative precision actually achieved. At `≥ 1`
-        //     the splice is dominated by its own sampling noise;
-        //   * `S*`      — the draws that WOULD reach `HGB_TARGET_FRACTION`
-        //     relative precision, i.e. the same 10%-of-its-own-magnitude
-        //     target the hypergradient budget applies to its channels. From
-        //     `se² = cv²/S`, `S* = S·se²/(HGB_TARGET_FRACTION·|Δ_b|)²`.
-        //
-        // Also reported: `1/n_eff`, the order of the Laplace floor error this
-        // correction exists to remove. A correction whose `se` exceeds it adds
-        // more noise to the objective than the bias it takes out.
-        let abs_value = sampled.value.abs();
-        let target_se = HGB_TARGET_FRACTION * abs_value;
-        let relative_se = if abs_value > 0.0 {
-            sampled.standard_error / abs_value
-        } else {
-            f64::INFINITY
-        };
-        let draws_for_target = if target_se > 0.0 && sampled.standard_error.is_finite() {
-            (sampled.n_draws as f64) * (sampled.standard_error / target_se).powi(2)
+        let abs_value = quadrature.value.abs();
+        let relative_error = if abs_value > 0.0 {
+            quadrature.quadrature_error / abs_value
         } else {
             f64::INFINITY
         };
@@ -2840,66 +2817,36 @@ impl<'a> RemlState<'a> {
             f64::INFINITY
         };
 
-        // Trust gate: splice `Δ_b` only when the estimate resolves it.
-        //
-        // The gate this replaces was `importance_ess < 0.10·S`. That is a
-        // relative-EFFICIENCY test and it says nothing about how precisely `Δ_b`
-        // is known — and measured on a `geo_latlon`-shaped fit (n=960, ~9%
-        // prevalence, duchon smooth, gam#2584) it is INERT: the importance
-        // weights are near-uniform, `ESS = 508/512`, so it never fires. What it
-        // fails to see is the number that matters:
-        //
-        //   early in the search   Δ_b = 7.07e-2   se = 1.35e-2   se/|Δ_b| = 0.19
-        //   at convergence        Δ_b = -9.35e-4  se = 1.98e-3   se/|Δ_b| = 2.12
-        //
-        // The correction is well resolved while it is large and becomes SMALLER
-        // THAN ITS OWN STANDARD ERROR as the search converges — precisely where
-        // a roughened objective costs the most, and `S* = 2.3e5` draws says no
-        // affordable budget repairs it (512 are taken; each is a full n-row
-        // deviance sweep).
-        //
-        // `se ≥ |Δ_b|` is the estimate failing to distinguish its own correction
-        // from zero at one standard error. Splicing a value that is not
-        // distinguishable from zero adds variance to the objective without
-        // removing bias, so declining is better in mean-squared error, not
-        // merely cheaper. The threshold is the ratio 1 — not a tuned fraction:
-        // it is the point where the correction stops carrying information.
-        //
-        // This also SUBSUMES the efficiency test it replaces, since
-        // `se = sqrt(1/ESS − 1/S)` grows without bound as `ESS → 0`; what it
-        // additionally admits is a LARGE correction known to good relative
-        // precision from few effective draws, which the old gate rejected and
-        // which is exactly the case worth splicing.
-        if !(sampled.standard_error < abs_value) {
+        // Trust gate: splice `Δ_b` only when the independent degree-nine and
+        // degree-five product rules agree finely enough to resolve both the
+        // correction itself and the O(1/n_eff) Laplace error it is meant to
+        // remove. This makes admission a deterministic accuracy certificate,
+        // not a Monte-Carlo efficiency heuristic.
+        let resolution_target = abs_value.min(laplace_floor);
+        if !(quadrature.quadrature_error < resolution_target) {
             log::info!(
-                "[#784] block-local fallback declined: the sampled correction is not resolved by \
-                 its own draws — se={:.4e} ≥ |Δ_b|={:.4e} (se/|Δ_b|={:.3e}) \
-                 (m={m} dirs, max|γ|={:.3}, τ={:.3}, ESS={:.1}/{}, S*={:.3e}, 1/n_eff={:.3e})",
-                sampled.standard_error,
-                abs_value,
-                relative_se,
+                "[#784] block-local correction declined: paired Gauss-Hermite error \
+                 {:.4e} does not resolve min(|Δ_b|, 1/n_eff)={resolution_target:.4e} \
+                 (|Δ_b|={abs_value:.4e}, m={m}, max|γ|={:.3}, τ={:.3}, nodes={}, 1/n_eff={:.3e})",
+                quadrature.quadrature_error,
                 verdict.max_abs_skewness,
                 verdict.threshold,
-                sampled.importance_ess,
-                sampled.n_draws,
-                draws_for_target,
+                quadrature.node_count,
                 laplace_floor,
             );
             return Ok(zero());
         }
 
         log::info!(
-            "[#784] block-local sampled marginalization ENGAGED: m={m} curvature-heavy dirs, \
-             max|γ|={:.3}, τ={:.3}, Δ_b={:.4e}, ESS={:.1}/{} \
-             [budget audit: se={:.4e} se/|Δ_b|={:.3e} S*={:.3e} 1/n_eff={:.3e}]",
+            "[#784] deterministic block-local Gauss-Hermite correction ENGAGED: \
+             m={m}, max|γ|={:.3}, τ={:.3}, Δ_b={:.4e}, nodes={} \
+             [paired-rule error={:.4e}, error/|Δ_b|={:.3e}, 1/n_eff={:.3e}]",
             verdict.max_abs_skewness,
             verdict.threshold,
-            sampled.value,
-            sampled.importance_ess,
-            sampled.n_draws,
-            sampled.standard_error,
-            relative_se,
-            draws_for_target,
+            quadrature.value,
+            quadrature.node_count,
+            quadrature.quadrature_error,
+            relative_error,
             laplace_floor,
         );
 
@@ -2908,15 +2855,15 @@ impl<'a> RemlState<'a> {
         // negative sign.
         //
         // ── Exact gradient channels (b)–(d) ─────────────────────────────
-        // The explicit channel `sampled.rho_gradient` is NOT
-        // the total ρ-derivative of the realized estimator: with fixed-seed
-        // draws `t_s = z_s/√λ_r(ρ)`, the value also moves through the block
-        // eigenvalues (draw rescale, (b)), the block eigenvectors (frame
+        // The explicit channel `quadrature.rho_gradient` is NOT
+        // the total ρ-derivative of the realized quadrature: the fixed nodes
+        // `t_s = z_s/√λ_r(ρ)` also move through the block eigenvalues
+        // (node rescale, (b)), the block eigenvectors (frame
         // rotation, (c)), and the mode β̂ (mode motion, (d)). Splicing (a)
         // alone is the #752/#748/#901 objective↔gradient desync. The four
         // channels are assembled here per the gradient exactness contract on
-        // `block_sampled_marginal_correction`, contracting the sampler's
-        // self-normalized moments against fields this evaluator already owns:
+        // `block_quadrature_marginal_correction`, contracting the corrector's
+        // normalized moments against fields this evaluator already owns:
         //
         //   d(cost)/dρ_j = E_p[dΔF/dρ_j]
         //                = (a) E_p[∂ΔF/∂ρ_j]
@@ -2934,8 +2881,8 @@ impl<'a> RemlState<'a> {
         // Eigenvalue near-degeneracies `λ_r ≈ σ_q` are genuine
         // non-differentiability points of the eigenframe; the splice is
         // declined there rather than clamped.
-        let Some(moments) = sampled.moments.as_ref() else {
-            // m > 0 is guaranteed above, so absent moments means every draw
+        let Some(moments) = quadrature.moments.as_ref() else {
+            // m > 0 is guaranteed above, so absent moments means every node
             // carried zero weight — nothing trustworthy to splice.
             return Ok(zero());
         };
@@ -3065,18 +3012,18 @@ impl<'a> RemlState<'a> {
         //                                      from the REML/LAML cost
         //     rho_gradient: d(Delta_b)/d(rho)  explicit channel (a) ONLY
         //
-        // So channel (a) is PLUS sampled.rho_gradient, not its negation, and a
+        // So channel (a) is PLUS quadrature.rho_gradient, not its negation, and a
         // sum of four Delta_b-side channels is d(Delta_b)/d(rho), not
         // d(cost)/d(rho). The formula above labels its left side d(cost)/d(rho)
         // while listing (a) in Delta_b-side form, and separately calls the
-        // NEGATION of sampled.rho_gradient channel (a). A Delta_b-side term
+        // NEGATION of quadrature.rho_gradient channel (a). A Delta_b-side term
         // cannot appear unnegated in a cost-side total, so the label, the terms
         // and the type contract cannot all three be right.
         //
         // What is settled: value is PLUS Delta_b, confirmed independently by
-        // block_sampled_marginal_recovers_analytic_quartic_correction, which
+        // block_quadrature_marginal_recovers_analytic_quartic_correction, which
         // checks it against a 20001-point trapezoid reference and asserts it is
-        // negative for an added quartic penalty. So the value: -sampled.value
+        // negative for an added quartic penalty. So the value: -quadrature.value
         // below is correct.
         //
         // What is OPEN: whether trace_j and mode_j below are Delta_b-side or
@@ -3113,7 +3060,7 @@ impl<'a> RemlState<'a> {
         // search on the #2623 fold, where the true slope is a three-way
         // near-cancellation.
         let mut gradient = Array1::<f64>::zeros(n_rho + n_ext);
-        for j in 0..n_rho.min(sampled.rho_gradient.len()) {
+        for j in 0..n_rho.min(quadrature.rho_gradient.len()) {
             let lam_j = target.lambdas[j];
             let a_j = target.penalty_scores[j].mapv(|v| lam_j * v); // λ_j S_j β̂
             // v_j = H⁻¹ a_j through the same eigendecomposition as Q.
@@ -3136,21 +3083,20 @@ impl<'a> RemlState<'a> {
             }
             let trace_j = lam_j * tr_sq - tr_cq;
             let mode_j = -v_j.dot(&g_d);
-            gradient[j] = -sampled.rho_gradient[j] + trace_j + mode_j;
+            gradient[j] = -quadrature.rho_gradient[j] + trace_j + mode_j;
             if audit_armed {
-                audit_a.push(sampled.rho_gradient[j]);
+                audit_a.push(quadrature.rho_gradient[j]);
                 audit_trace.push(trace_j);
                 audit_mode.push(mode_j);
                 audit_spliced.push(gradient[j]);
             }
         }
         if audit_armed {
-            crate::estimate::outer_eval_capture::record_sampled_marginal(
-                crate::estimate::outer_eval_capture::SampledMarginalAudit {
-                    delta_b: sampled.value,
-                    standard_error: sampled.standard_error,
-                    importance_ess: sampled.importance_ess,
-                    n_draws: sampled.n_draws,
+            crate::estimate::outer_eval_capture::record_quadrature_marginal(
+                crate::estimate::outer_eval_capture::QuadratureMarginalAudit {
+                    delta_b: quadrature.value,
+                    quadrature_error: quadrature.quadrature_error,
+                    node_count: quadrature.node_count,
                     max_abs_skewness: verdict.max_abs_skewness,
                     skewness_threshold: verdict.threshold,
                     block_cols: block_cols.clone(),
@@ -3162,7 +3108,7 @@ impl<'a> RemlState<'a> {
             );
         }
         Ok(TkCorrectionTerms {
-            value: -sampled.value,
+            value: -quadrature.value,
             gradient: Some(gradient),
             hessian: None,
         })

@@ -5246,7 +5246,7 @@ pub(crate) struct EvalShared {
     pub(crate) block_local_correction: std::sync::OnceLock<(
         usize,
         Arc<outer_eval::TkCorrectionTerms>,
-        Option<crate::estimate::outer_eval_capture::SampledMarginalAudit>,
+        Option<crate::estimate::outer_eval_capture::QuadratureMarginalAudit>,
     )>,
 }
 

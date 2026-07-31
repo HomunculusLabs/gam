@@ -482,13 +482,13 @@ pub struct PenaltyFrameAudit {
     pub penalty_logdet_value: f64,
 }
 
-/// One outer evaluation's #784 block-local sampled-marginalization record: the
+/// One outer evaluation's #784 block-local quadrature record: the
 /// spliced value `Δ_b`, the block the splice selected, and the four gradient
 /// channels PER ρ COORDINATE exactly as the assembly formed them (#2623).
 ///
-/// Every field is in the sampler's own `Δ_b`-side convention, i.e. the sign the
+/// Every field is in the corrector's own `Δ_b`-side convention, i.e. the sign the
 /// producer emits, NOT the cost-side sign. `delta_b` is `+Δ_b` (the criterion
-/// carries `−Δ_b`) and `explicit_a` is the raw `sampled.rho_gradient`. Recording
+/// carries `−Δ_b`) and `explicit_a` is the raw quadrature gradient. Recording
 /// the raw values is the whole point: the sign question this decides is which
 /// side of `d(cost)/dρ = −d(Δ_b)/dρ` each channel already lives on, and a record
 /// that pre-applied a sign would assume the answer.
@@ -497,29 +497,26 @@ pub struct PenaltyFrameAudit {
 /// `spliced` vs `−(explicit_a + trace_bc + mode_d)` is the disagreement itself,
 /// readable without re-deriving it.
 #[derive(Clone, Debug)]
-pub struct SampledMarginalAudit {
-    /// `Δ_b` as the sampler reports it: added to the block marginal
+pub struct QuadratureMarginalAudit {
+    /// `Δ_b` as the corrector reports it: added to the block marginal
     /// log-likelihood, SUBTRACTED from the criterion.
     pub delta_b: f64,
-    /// The sampler's own Monte-Carlo standard error on `delta_b`, and the
-    /// importance diagnostics behind it. An FD comparison against a channel sum
-    /// is only as sharp as `standard_error` allows, so the reader needs it to
-    /// state its own resolution rather than assume one.
-    pub standard_error: f64,
-    pub importance_ess: f64,
-    pub n_draws: usize,
+    /// Absolute fine/coarse quadrature-rule difference on `delta_b`.
+    pub quadrature_error: f64,
+    /// Number of nodes in the fine rule.
+    pub node_count: usize,
     /// The activation evidence: `max|γ_r|` over curvature directions and the
     /// threshold `τ(n_eff)` it had to exceed.
     pub max_abs_skewness: f64,
     pub skewness_threshold: f64,
-    /// Which `H` eigenvector indices form the sampled block, ascending.
+    /// Which `H` eigenvector indices form the integrated block, ascending.
     ///
     /// An FD stencil must compare this ACROSS its points. The block is selected
     /// by a threshold on a per-direction diagnostic, so a stencil that changes
     /// block membership is differencing two different functions and its
     /// quotient is not a derivative of either.
     pub block_cols: Vec<usize>,
-    /// Channel (a), `∂Δ_b/∂ρ_j` — the sampler's explicit penalty-score channel,
+    /// Channel (a), `∂Δ_b/∂ρ_j` — the corrector's explicit penalty-score channel,
     /// raw.
     pub explicit_a: Vec<f64>,
     /// Channels (b)+(c) together, `tr(Ḣ_j · (Q_b + Q_c))`.
@@ -543,7 +540,7 @@ pub struct RhoOuterAudit {
     /// The original-frame vs transformed-frame penalty roots at the assembly
     /// site.
     pub penalty_frame: Option<PenaltyFrameAudit>,
-    /// Whether the #784 block-local sampled marginalization ENGAGED on this
+    /// Whether the #784 block-local quadrature ENGAGED on this
     /// evaluation (#2623).
     ///
     /// False means the splice DECLINED, so gradient channels (b), (c) and (d)
@@ -552,15 +549,15 @@ pub struct RhoOuterAudit {
     /// satisfied by an absence. Any FD row that means to exercise them must
     /// ASSERT this true before comparing, or it silently degenerates into the
     /// well-behaved regime where the splice never runs.
-    pub sampled_marginal_engaged: bool,
+    pub quadrature_marginal_engaged: bool,
     /// The engaged splice's value, block and per-coordinate channel split, or
     /// `None` when it declined (#2623).
     ///
-    /// Present exactly when `sampled_marginal_engaged` is true. Kept beside the
+    /// Present exactly when `quadrature_marginal_engaged` is true. Kept beside the
     /// flag rather than behind a separate accessor so a reader cannot assert
     /// engagement without having the channels in hand, nor read the channels
     /// without having checked engagement.
-    pub sampled_marginal: Option<SampledMarginalAudit>,
+    pub quadrature_marginal: Option<QuadratureMarginalAudit>,
 }
 
 thread_local! {
@@ -601,20 +598,20 @@ pub(crate) fn begin_rho_outer_audit_eval() {
             // here and set again if the splice runs. Latching it across
             // evaluations would let one engaged eval vouch for a later
             // declined one (#2623).
-            state.sampled_marginal_engaged = false;
-            state.sampled_marginal = None;
+            state.quadrature_marginal_engaged = false;
+            state.quadrature_marginal = None;
         }
     });
 }
 
-/// Record that the #784 sampled-marginalization splice engaged on this
+/// Record that the #784 quadrature splice engaged on this
 /// evaluation, together with the channels it formed (#2623). No-op when the
 /// audit is disarmed.
-pub(crate) fn record_sampled_marginal(record: SampledMarginalAudit) {
+pub(crate) fn record_quadrature_marginal(record: QuadratureMarginalAudit) {
     RHO_AUDIT.with(|audit| {
         if let Some(state) = audit.borrow_mut().as_mut() {
-            state.sampled_marginal_engaged = true;
-            state.sampled_marginal = Some(record);
+            state.quadrature_marginal_engaged = true;
+            state.quadrature_marginal = Some(record);
         }
     });
 }
@@ -630,12 +627,12 @@ pub(crate) fn record_sampled_marginal(record: SampledMarginalAudit) {
 /// which would report a genuinely engaged evaluation as declined. The cache
 /// carries this record forward and re-publishes it, which is what this reader is
 /// for (#2623).
-pub(crate) fn last_sampled_marginal_record() -> Option<SampledMarginalAudit> {
+pub(crate) fn last_quadrature_marginal_record() -> Option<QuadratureMarginalAudit> {
     RHO_AUDIT.with(|audit| {
         audit
             .borrow()
             .as_ref()
-            .and_then(|state| state.sampled_marginal.clone())
+            .and_then(|state| state.quadrature_marginal.clone())
     })
 }
 

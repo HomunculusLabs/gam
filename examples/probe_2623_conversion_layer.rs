@@ -27,7 +27,7 @@
 //!
 //! It asserts nothing and prints what it measures.
 
-use gam::inference::hmc_io::block_sampled_marginal_correction;
+use gam::inference::hmc_io::block_quadrature_marginal_correction;
 use gam_problem::laplace_sampler_contract::BlockExcessTarget;
 use ndarray::{Array1, Array2, Axis};
 
@@ -413,19 +413,15 @@ fn main() {
         let (evals, evecs) = spectrum(&base, None);
         println!("  spectrum = {:?}", evals.mapv(|v| (v * 1.0e4).round() / 1.0e4).to_vec());
 
-        let out = block_sampled_marginal_correction(&base).expect("correction");
+        let out = block_quadrature_marginal_correction(&base).expect("correction");
         let Some(moments) = out.moments.as_ref() else {
             println!("  no moments");
             continue;
         };
         println!(
-            "  Delta_b={:+.8e}  ESS={:.1}/{}",
-            out.value, out.importance_ess, out.n_draws
+            "  Delta_b={:+.8e}  paired_error={:.3e} nodes={}",
+            out.value, out.quadrature_error, out.node_count
         );
-        if out.importance_ess < 0.9 * out.n_draws as f64 {
-            println!("  ESS below 0.9*S — the FD reference is not resolved; skipping");
-            continue;
-        }
 
         // ── the assembly's Q and g_d, transcribed from gradient_hessian.rs ──
         let x = &base.x;
@@ -555,10 +551,10 @@ fn main() {
                 }
                 let trace_j = tr_hq;
                 let mode_j = -v_j.dot(&g_d);
-                let fd_total = (block_sampled_marginal_correction(&plus)
+                let fd_total = (block_quadrature_marginal_correction(&plus)
                     .expect("plus")
                     .value
-                    - block_sampled_marginal_correction(&minus)
+                    - block_quadrature_marginal_correction(&minus)
                         .expect("minus")
                         .value)
                     / (2.0 * step);

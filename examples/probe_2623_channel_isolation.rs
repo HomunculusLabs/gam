@@ -25,7 +25,7 @@
 //!
 //! `M_r`, `R` and `g_d` are recomputed here EXACTLY as
 //! `gam-solve/src/reml/gradient_hessian.rs` assembles them from
-//! `BlockSampledMoments`, so a failing row indicts that assembly's moment
+//! `BlockQuadratureMoments`, so a failing row indicts that assembly's moment
 //! contraction, not this probe's algebra.
 //!
 //! Note what these four identities do NOT depend on: none of them uses the
@@ -47,7 +47,7 @@
 //!
 //! It asserts nothing and prints what it measures.
 
-use gam::inference::hmc_io::block_sampled_marginal_correction;
+use gam::inference::hmc_io::block_quadrature_marginal_correction;
 use gam_problem::laplace_sampler_contract::BlockExcessTarget;
 use ndarray::{Array1, Array2, Axis};
 
@@ -284,7 +284,7 @@ struct Channels {
 
 fn assemble_channels(
     probe: &Probe,
-    moments: &gam_problem::laplace_sampler_contract::BlockSampledMoments,
+    moments: &gam_problem::laplace_sampler_contract::BlockQuadratureMoments,
 ) -> Channels {
     let x = &probe.x;
     let n_rows = x.nrows();
@@ -412,7 +412,7 @@ fn build(n: usize, amp: f64, rho: f64) -> Probe {
 
 /// `Δ_b` at the probe's current inputs, against the same fixed draws every time.
 fn delta_b(probe: &Probe) -> f64 {
-    block_sampled_marginal_correction(probe)
+    block_quadrature_marginal_correction(probe)
         .expect("correction")
         .value
 }
@@ -441,28 +441,19 @@ fn main() {
     ] {
         println!("\n======== n={n} amp={amp} rho0={rho} ========");
         let base = build(n, amp, rho);
-        let out = block_sampled_marginal_correction(&base).expect("correction");
+        let out = block_quadrature_marginal_correction(&base).expect("correction");
         let Some(moments) = out.moments.as_ref() else {
             println!("  no moments (every draw carried zero weight)");
             continue;
         };
         let ch = assemble_channels(&base, moments);
         println!(
-            "  Delta_b={:+.10e}  ESS={:.1}/{}  se={:.3e}  block_lambdas={:?}",
+            "  Delta_b={:+.10e}  paired_error={:.3e}  nodes={}  block_lambdas={:?}",
             out.value,
-            out.importance_ess,
-            out.n_draws,
-            out.standard_error,
+            out.quadrature_error,
+            out.node_count,
             base.block_lambdas.to_vec(),
         );
-
-        // Only report on a cell whose importance sampler is essentially exact:
-        // the FD reference is a difference of two Δ_b estimates, so a collapsed
-        // weight set makes every row below noise, not evidence.
-        if out.importance_ess < 0.9 * out.n_draws as f64 {
-            println!("  ESS below 0.9*S — the FD reference is not resolved; skipping the rows");
-            continue;
-        }
 
         let m = base.block_lambdas.len();
         let p = base.x.ncols();

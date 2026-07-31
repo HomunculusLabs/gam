@@ -231,7 +231,9 @@ fn whitening_factor_from_outer_hessian(outer_hessian: &Array2<f64>) -> Option<Ar
 /// convention: nodes are `√2·x_i`, weights `w_i/√π` of the physicists' rule, so
 /// the weights sum to 1 and the rule integrates polynomials of degree
 /// `2n−1` exactly against `N(0,1)`).
-fn standard_normal_gh_rule(nodes_per_axis: usize) -> Option<&'static [(f64, f64)]> {
+pub(crate) fn standard_normal_gh_rule(
+    nodes_per_axis: usize,
+) -> Option<&'static [(f64, f64)]> {
     match nodes_per_axis {
         3 => Some(&[
             (-1.732_050_807_568_877_2, 1.0 / 6.0),
@@ -249,7 +251,7 @@ fn standard_normal_gh_rule(nodes_per_axis: usize) -> Option<&'static [(f64, f64)
     }
 }
 
-fn enumerate_gh_product(
+pub(crate) fn enumerate_gh_product(
     dim: usize,
     rule: &[(f64, f64)],
     axis: usize,

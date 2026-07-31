@@ -96,13 +96,16 @@ pub fn init_parallelism() {
         gam_linalg::gpu_hook::register_gpu_dispatch(Box::new(
             crate::gpu::linalg_dispatch::CudaGemmDispatch,
         ));
-        // Register the post-fit rho-posterior escalator into the neutral
-        // problem-tier contract. The block-local importance sampler remains an
-        // explicit inference primitive, but is deliberately not injected into
-        // REML/LAML fitting: its fixed draw lattice made one outer evaluation
-        // O(n * draws), even when its own uncertainty gate later discarded the
-        // correction. The fitted estimator is the deterministic analytic LAML
-        // criterion required by SPEC; sampling is an explicit posterior task.
+        // Register the deterministic block-local higher-order LAML corrector
+        // and the post-fit rho-posterior escalator into their neutral
+        // problem-tier contracts. The former uses paired Gauss-Hermite rules,
+        // not sampled draws: its value, analytic rho derivative, and numerical
+        // error certificate are all deterministic functions of the fit.
+        drop(
+            gam_problem::laplace_sampler_contract::set_laplace_marginal_corrector(Box::new(
+                gam_inference::hmc_io::HmcIoLaplaceMarginalCorrector,
+            )),
+        );
         drop(gam_problem::rho_posterior::set_rho_posterior_escalator(
             Box::new(gam_inference::rho_posterior::HmcIoRhoPosteriorEscalator),
         ));

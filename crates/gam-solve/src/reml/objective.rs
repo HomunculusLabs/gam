@@ -2115,7 +2115,7 @@ impl<'a> RemlState<'a> {
         // the same value+gradient splicing contract as the TK correction so the
         // outer REML/LAML stays consistent. A no-op when every direction is
         // Laplace-trustworthy.
-        let block_terms = self.block_local_sampled_correction(rho, bundle, assembly_ext_len)?;
+        let block_terms = self.block_local_quadrature_correction(rho, bundle, assembly_ext_len)?;
         let block_atom = super::atoms::ThetaOnlyCorrectionAtom::from_tk_terms(
             "sampled_block_marginal",
             block_terms,
@@ -2211,7 +2211,7 @@ impl<'a> RemlState<'a> {
         // surface. The correction enters through the gradient channel exactly
         // like TK, which the universal EFS step already folds in. No-op when no
         // direction is non-Gaussian.
-        let block_terms = self.block_local_sampled_correction(rho, bundle, assembly_ext_len)?;
+        let block_terms = self.block_local_quadrature_correction(rho, bundle, assembly_ext_len)?;
         let block_atom = super::atoms::ThetaOnlyCorrectionAtom::from_tk_terms(
             "sampled_block_marginal",
             block_terms,
