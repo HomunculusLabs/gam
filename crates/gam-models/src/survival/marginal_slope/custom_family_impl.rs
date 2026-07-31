@@ -688,6 +688,46 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         Ok(Some(axes))
     }
 
+    fn joint_jeffreys_information_second_directional_all_axes_many_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_us: &[Array1<f64>],
+    ) -> Result<Option<Vec<Vec<Array2<f64>>>>, String> {
+        if !self.outer_default_trustworthy_for_joint_hessian(specs)
+            && !self.joint_hessian_is_structurally_coupled(block_states)?
+        {
+            return Ok(None);
+        }
+
+        // Every rigid fixed direction shares the same beta-fixed per-row
+        // fourth-order tower. Build it once for the whole outer-coordinate
+        // batch, then preserve the singular hook's direction/axis ordering for
+        // every contraction.
+        if !self.per_z_logslope_active()
+            && !self.effective_flex_active(block_states)?
+            && !self.flex_timewiggle_active()
+        {
+            let kern = SurvivalMarginalSlopeRowKernel::new(self.clone(), block_states.to_vec());
+            return kern
+                .second_directional_derivative_all_axes_many_build_once(d_beta_us)
+                .map(Some);
+        }
+
+        let mut batches = Vec::with_capacity(d_beta_us.len());
+        for direction in d_beta_us {
+            match self.joint_jeffreys_information_second_directional_all_axes_with_specs(
+                block_states,
+                specs,
+                direction,
+            )? {
+                Some(axes) => batches.push(axes),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(batches))
+    }
+
     /// gam#979 wide-p Jeffreys completion: `∇²_β tr(W · H(β))` for a
     /// caller-supplied full-joint trace weight `W`, in ONE `O(n · p_block²)`
     /// pass instead of the `p(p+1)/2` pairwise `H''[e_a, e_b]` fallback.
