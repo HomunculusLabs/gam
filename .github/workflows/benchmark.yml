@@ -613,7 +613,13 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0 # #1458: full history so build.rs author gate resolves real last editor, not HEAD
-          sparse-checkout: bench
+          # The aggregate job executes the workflow helper and a repository-local
+          # publishing action. Keep its sparse dependency closure explicit: a
+          # bench-only checkout makes both paths disappear before they are used.
+          sparse-checkout: |
+            bench
+            .github/scripts/workflow_tasks.py
+            .github/actions/publish-gha-results
 
       - name: Download all shard artifacts
         shell: bash

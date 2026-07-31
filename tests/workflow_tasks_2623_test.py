@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TASKS_PATH = _REPO_ROOT / ".github" / "scripts" / "workflow_tasks.py"
+_BENCHMARK_WORKFLOW_PATH = _REPO_ROOT / ".github" / "workflows" / "benchmark.yml"
 _SPEC = importlib.util.spec_from_file_location("workflow_tasks_2623", _TASKS_PATH)
 if _SPEC is None or _SPEC.loader is None:
     raise RuntimeError(f"failed to load {_TASKS_PATH}")
@@ -17,6 +18,21 @@ _SPEC.loader.exec_module(_TASKS)
 
 
 class WorkflowTasks2623Tests(unittest.TestCase):
+    def test_aggregate_sparse_checkout_contains_its_repository_dependencies(self) -> None:
+        workflow = _BENCHMARK_WORKFLOW_PATH.read_text()
+        aggregate = workflow.split("  aggregate:", 1)[1]
+        checkout = aggregate.split("- name: Download all shard artifacts", 1)[0]
+        for required_path in (
+            "bench",
+            ".github/scripts/workflow_tasks.py",
+            ".github/actions/publish-gha-results",
+        ):
+            self.assertIn(
+                required_path,
+                checkout,
+                f"aggregate checkout omits repository dependency {required_path}",
+            )
+
     def test_targeted_matrix_preserves_requested_order_and_rejects_unknown_names(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             output = Path(td) / "output"
