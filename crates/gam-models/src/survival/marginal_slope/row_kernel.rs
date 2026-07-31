@@ -1783,53 +1783,48 @@ impl SurvivalMarginalSlopeRowKernel {
             ));
         }
 
-        let chunk = crate::outer_subsample::ARROW_ROW_CHUNK;
-        let n_chunks = crate::outer_subsample::arrow_row_chunk_count(n);
+        // Split the packed J into four contiguous n×p primary blocks once.
+        // For canonical coefficient axis a, symmetry of T³ gives the exact
+        // weighted-Gram decomposition
+        //
+        //   Hdot[e_a] = Σ_{α≤β} sym_{αβ}(
+        //       J_αᵀ diag(Σ_γ T³_{αβγ} J_γ[:,a]) J_β),
+        //
+        // where sym keeps a diagonal-primary Gram once and adds G+Gᵀ for an
+        // off-diagonal primary pair. Thus each axis is ten cache-friendly
+        // BLAS-3 Grams rather than n scalar p×p pullbacks. The row weights are
+        // built in index order from the same cached tower, so only the Gram's
+        // associative reduction changes (covered by the all-axes oracle).
+        let jacobian_blocks: [Array2<f64>; 4] = std::array::from_fn(|primary| {
+            jacobians
+                .slice(s![.., primary * p..(primary + 1) * p])
+                .to_owned()
+        });
         (0..p)
             .into_par_iter()
             .map(|axis| {
                 let mut total = Array2::<f64>::zeros((p, p));
-                // Reused for every row of this axis: (T³[J·e_axis]) · J.
-                let mut third_j = vec![0.0_f64; 4 * p];
-                for chunk_idx in 0..n_chunks {
-                    let start = chunk_idx * chunk;
-                    let end = (start + chunk).min(n);
-                    let mut acc = Array2::<f64>::zeros((p, p));
-                    let acc_slice = acc
-                        .as_slice_mut()
-                        .expect("all-axes dense accumulator must be contiguous");
-                    for row in start..end {
-                        let j_row_view = jacobians.row(row);
-                        let j_row = j_row_view
-                            .as_slice()
-                            .expect("J·I row must be contiguous");
-                        let dir = std::array::from_fn(|primary| {
-                            j_row[primary * p + axis]
+                for primary_left in 0..4 {
+                    for primary_right in primary_left..4 {
+                        let weights = Array1::from_shape_fn(n, |row| {
+                            let mut weight = 0.0;
+                            for direction_primary in 0..4 {
+                                weight += towers[row].t3[primary_left][primary_right]
+                                    [direction_primary]
+                                    * jacobian_blocks[direction_primary][[row, axis]];
+                            }
+                            weight
                         });
-                        let third = tower3_third_contracted(&towers[row].t3, &dir);
-
-                        for primary_out in 0..4 {
-                            for col in 0..p {
-                                let mut value = 0.0;
-                                for primary_in in 0..4 {
-                                    value += third[primary_out][primary_in]
-                                        * j_row[primary_in * p + col];
-                                }
-                                third_j[primary_out * p + col] = value;
-                            }
-                        }
-                        for row_coeff in 0..p {
-                            for col_coeff in 0..p {
-                                let mut value = 0.0;
-                                for primary in 0..4 {
-                                    value += j_row[primary * p + row_coeff]
-                                        * third_j[primary * p + col_coeff];
-                                }
-                                acc_slice[row_coeff * p + col_coeff] += value;
-                            }
+                        let gram = gam_linalg::faer_ndarray::fast_xt_diag_y(
+                            &jacobian_blocks[primary_left],
+                            &weights,
+                            &jacobian_blocks[primary_right],
+                        );
+                        total.scaled_add(1.0, &gram);
+                        if primary_left != primary_right {
+                            total.scaled_add(1.0, &gram.t());
                         }
                     }
-                    total += &acc;
                 }
                 Ok(total)
             })
