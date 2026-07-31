@@ -2358,7 +2358,34 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         // not merely a stationary point whose raw negative curvature was cleared
         // by the generic gradient-residue floor. Declare that requirement before
         // optimization so the mint can escape and re-optimize such a saddle.
-        .with_require_measured_psd(true)
+        //
+        // Gated on `need_outer_hessian` (this family's own
+        // `DeclaredHessianForm::is_analytic()`, computed above) because the
+        // requirement is only satisfiable when the family exposes an analytic
+        // outer Hessian. `custom_family_outer_derivatives` returns
+        // `DeclaredHessianForm::Unavailable` unless `use_outer_hessian`,
+        // `include_exact_newton_logdet_h` and `policy.capability.has_hessian()`
+        // all hold; the middle one needs `exact_newton_outerobjective()` to be
+        // `RidgedQuadraticReml` or `StrictPseudoLaplace`, which the dispersion
+        // location-scale families are not.
+        //
+        // When the form is `Unavailable`, `certify_fixed_point_optimality`
+        // never requests curvature (`wants_analytic_hessian` is false), so
+        // `certificate.hessian_psd()` is `None` — and
+        // `certificate_meets_curvature_requirement` treats `None` exactly like
+        // `Some(false)`. The fit is then refused for an ABSENCE of evidence
+        // rather than evidence of a saddle, with the escape path this
+        // requirement was declared to enable unable to engage because there is
+        // no measured curvature to escape from. Measured on a converged fit:
+        //
+        //   |Pg|=4.008e-3  bound=8.464e-3  -> stationary
+        //   hessian_psd=n/a  curvature_source=unavailable
+        //   plan=solver=Efs  claimed_converged=true  |step|=0.000000e0
+        //
+        // Demanding a measurement the family cannot produce refuses every such
+        // fit unconditionally. Where the family DOES expose an analytic Hessian
+        // the requirement is unchanged and still binds, saddle escape included.
+        .with_require_measured_psd(need_outer_hessian)
         .with_disable_fixed_point(multi_block_beta_dependent)
         .with_tolerance(options.outer_tol)
         .with_rel_cost_tolerance(options.outer_rel_cost_tol)
