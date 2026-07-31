@@ -5628,11 +5628,27 @@ fn strict_curvature_requirement_does_not_reinterpret_floor_clearance_as_psd() {
         "control: the generic certificate deliberately admits unresolved negative curvature"
     );
     assert!(
-        !certificate_meets_curvature_requirement(&floor_cleared, true),
+        certificate_meets_curvature_requirement(
+            &floor_cleared,
+            true,
+            CertificationFidelity::Screening,
+        ),
+        "first-order screening must retain the candidate because curvature is deliberately not spent"
+    );
+    assert!(
+        !certificate_meets_curvature_requirement(
+            &floor_cleared,
+            true,
+            CertificationFidelity::Mint,
+        ),
         "a declared local-minimum consumer requires the raw measured PSD fact"
     );
     assert!(
-        certificate_meets_curvature_requirement(&floor_cleared, false),
+        certificate_meets_curvature_requirement(
+            &floor_cleared,
+            false,
+            CertificationFidelity::Mint,
+        ),
         "generic objectives retain the gradient-floor admissibility contract"
     );
 
@@ -5641,7 +5657,11 @@ fn strict_curvature_requirement_does_not_reinterpret_floor_clearance_as_psd() {
         curvature_floor: None,
         ..floor_cleared
     };
-    assert!(certificate_meets_curvature_requirement(&measured_psd, true));
+    assert!(certificate_meets_curvature_requirement(
+        &measured_psd,
+        true,
+        CertificationFidelity::Mint,
+    ));
 
     let unmeasured = OuterCriterionCertificate {
         stationarity: stationary,
@@ -5651,7 +5671,11 @@ fn strict_curvature_requirement_does_not_reinterpret_floor_clearance_as_psd() {
         curvature_floor: None,
     };
     assert!(
-        !certificate_meets_curvature_requirement(&unmeasured, true),
+        !certificate_meets_curvature_requirement(
+            &unmeasured,
+            true,
+            CertificationFidelity::Mint,
+        ),
         "absence of a measurement is not a measured local-minimum certificate"
     );
 }
