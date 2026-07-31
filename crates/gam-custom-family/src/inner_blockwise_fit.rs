@@ -6742,7 +6742,28 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 // which folded H_Φ=0/∇Φ=0 this cycle. Avoids the dense H/eigh.
                 None
             } else if let Some(z_joint) = joint_jeffreys_subspace.as_ref() {
-                match custom_family_joint_jeffreys_term(family, &states, specs, &ranges, z_joint)? {
+                let workspace_term = match cached_joint_workspace.as_ref() {
+                    Some(workspace) => custom_family_joint_jeffreys_term_from_workspace(
+                        workspace.as_ref(),
+                        total_p,
+                        z_joint,
+                    )?,
+                    None => None,
+                };
+                // Workspace evidence is authoritative when available. Families
+                // whose workspace does not expose a batched all-axes derivative
+                // keep the existing exact family assembly.
+                let jeffreys_term = match workspace_term {
+                    Some(term) => Some(term),
+                    None => custom_family_joint_jeffreys_term(
+                        family,
+                        &states,
+                        specs,
+                        &ranges,
+                        z_joint,
+                    )?,
+                };
+                match jeffreys_term {
                     Some((_phi, grad_phi, hphi))
                         if grad_phi.len() == gradient.len()
                             && hphi.nrows() == total_p
