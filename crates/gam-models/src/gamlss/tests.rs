@@ -12,10 +12,6 @@
 use super::*;
 // Helpers exercised only by these tests; imported here (not at module scope)
 // so they are not flagged unused in a non-test `--lib` build.
-use super::binomial_q_coeffs::oracle_tests::{
-    directionalhessian_coeff_fromobjective_q_terms,
-    second_directionalhessian_coeff_fromobjective_q_terms,
-};
 use super::binomial_q_derivs::{
     binomial_neglog_q_derivatives_cloglog_closed_form,
     binomial_neglog_q_derivatives_logit_closed_form,
@@ -25,6 +21,80 @@ use super::binomial_q_derivs::{
     binomial_neglog_q_fourth_derivative_probit_closed_form,
 };
 use super::dispersion_family::{DispersionRowKernel, dispersion_row_kernel};
+use gam_math::fast_channel::{faa_top3, faa_top4};
+
+#[inline]
+fn directionalhessian_coeff_fromobjective_q_terms(
+    m1: f64,
+    m2: f64,
+    m3: f64,
+    dq: f64,
+    q_a: f64,
+    q_b: f64,
+    q_ab: f64,
+    dq_a: f64,
+    dq_b: f64,
+    dq_ab: f64,
+) -> f64 {
+    // #932 unified source: `D_u H_ab = ∂³(F∘q)/∂a∂b∂u` is the fully-mixed
+    // order-3 top channel, so it IS `fast_channel::faa_top3` — the universal
+    // partition sum over the three distinct directions {a, b, u}. Pack the
+    // q-map block partials into the bitmask array (a=1, b=2, u=4) and read the
+    // top channel. This is the SAME jet truth as `Tower4<3>::compose.t3[a][b][u]`
+    // (pinned in `oracle_tests`) but computes ONLY the read channel as a
+    // compile-time-unrolled sum — measured at ~hand instruction count, vs ~19×
+    // for the dense tower that materializes the whole 3⁴ tensor.
+    let q = [
+        0.0, q_a, q_b, q_ab, // _, a, b, ab
+        dq, dq_a, dq_b, dq_ab, // u, au, bu, abu
+    ];
+    faa_top3([m1, m2, m3], &q)
+}
+
+#[inline]
+fn second_directionalhessian_coeff_fromobjective_q_terms(
+    m1: f64,
+    m2: f64,
+    m3: f64,
+    m4: f64,
+    dq_u: f64,
+    dqv: f64,
+    d2q_uv: f64,
+    q_a: f64,
+    q_b: f64,
+    q_ab: f64,
+    dq_a_u: f64,
+    dq_av: f64,
+    dq_b_u: f64,
+    dq_bv: f64,
+    d2q_a_uv: f64,
+    d2q_b_uv: f64,
+    dq_ab_u: f64,
+    dq_abv: f64,
+    d2q_ab_uv: f64,
+) -> f64 {
+    // #932 unified source: `D²_{uv} H_ab = ∂⁴(F∘q)/∂a∂b∂u∂v` is the fully-mixed
+    // order-4 top channel, so it IS `fast_channel::faa_top4` — the universal
+    // partition sum over the four distinct directions {a, b, u, v}. Pack the
+    // q-map block partials into the bitmask array (a=1, b=2, u=4, v=8) and read
+    // the top channel. Same jet truth as `Tower4<4>::compose.t4[a][b][u][v]`
+    // (pinned in `oracle_tests`) but computes ONLY that channel as a
+    // compile-time-unrolled 15-term sum — measured at ≤ hand instruction count,
+    // vs ~19× for the dense tower. The single `dq_u·dqv·q_ab` term an even-older
+    // hand path once DOUBLE-counted is one partition (`{u}{v}` over the `q_ab`
+    // block) the universal rule emits exactly once.
+    let q = [
+        0.0, q_a, q_b, q_ab, // _, a, b, ab
+        dq_u, dq_a_u, dq_b_u, dq_ab_u, // u, au, bu, abu
+        dqv, dq_av, dq_bv, dq_abv, // v, av, bv, abv
+        d2q_uv, d2q_a_uv, d2q_b_uv, d2q_ab_uv, // uv, auv, buv, abuv
+    ];
+    faa_top4([m1, m2, m3, m4], &q)
+}
+
+
+
+
 use super::test_support::{binomial_location_scale_nll_tower, dispersion_tweedie_nll_generic};
 use crate::custom_family::CustomFamilyHyperLayout;
 use crate::fit_orchestration::{FitConfig, FitResult, fit_from_formula};
