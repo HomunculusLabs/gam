@@ -193,14 +193,11 @@ pub(crate) fn custom_family_joint_jeffreys_value<
         Ok(Some(h)) if h.nrows() == total_p && h.ncols() == total_p => h,
         _ => return 0.0,
     };
-    match gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_term(
+    gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_value(
         h_joint.view(),
         z_joint.view(),
-        |_: &Array1<f64>| Ok(None),
-    ) {
-        Ok((phi, _grad, _hphi)) => phi,
-        Err(_) => 0.0,
-    }
+    )
+    .unwrap_or(0.0)
 }
 
 /// Evaluate the family-general Jeffreys term `(Phi, grad, H_Phi)` at the current
