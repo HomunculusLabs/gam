@@ -551,6 +551,7 @@ pub(crate) fn build_manifold_sae_payload(
         incoherence_report: report("incoherence_report"),
         curvature_report: report("curvature_report"),
         coordinate_fidelity: report("coordinate_fidelity"),
+        decoder_embeddedness: report("decoder_embeddedness"),
         topology_persistence: report("topology_persistence"),
         atom_inference: report("atom_inference"),
         certificates: report("certificates"),

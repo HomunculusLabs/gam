@@ -208,6 +208,7 @@ pub mod curve_promotion;
 mod derivative_oracle;
 pub mod dormant_certificate;
 mod dual;
+mod embeddedness;
 mod evaluator_rebuild;
 mod fisher_metric;
 mod fit_drivers;
@@ -482,6 +483,9 @@ mod tests_topology_persistence_f3;
 mod tests_chart_angle_fidelity_2081;
 
 #[cfg(test)]
+mod tests_embeddedness_2518;
+
+#[cfg(test)]
 mod tests_joint_vs_cascade_2131;
 
 #[cfg(test)]
@@ -546,6 +550,7 @@ pub use crosscoder_fit::*;
 pub use curl::*;
 pub use curl_census::*;
 pub use derivative_oracle::*;
+pub use embeddedness::*;
 pub use evaluator_rebuild::*;
 pub use fisher_metric::*;
 pub use fit_entry::*;

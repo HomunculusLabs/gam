@@ -6611,6 +6611,10 @@ impl ManifoldSaeCore {
         manifold_sae_report(py, &self.inner.coordinate_fidelity)
     }
     #[getter]
+    fn decoder_embeddedness(&self, py: Python<'_>) -> PyResult<PyObject> {
+        manifold_sae_report(py, &self.inner.decoder_embeddedness)
+    }
+    #[getter]
     fn topology_persistence(&self, py: Python<'_>) -> PyResult<PyObject> {
         manifold_sae_report(py, &self.inner.topology_persistence)
     }

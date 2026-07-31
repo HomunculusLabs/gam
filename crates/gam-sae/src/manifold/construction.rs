@@ -2295,6 +2295,17 @@ impl SaeManifoldTerm {
             .map(|atom_idx| atom_coordinate_fidelity(self, atom_idx))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // #2518 item 2 — per-atom decoded-image embeddedness certificate. Every
+        // other per-atom certificate here is infinitesimal or reparameterization
+        // shaped, so a decoder that wraps its ambient loop twice passes all of
+        // them while every encode fiber has two points; this is the global read
+        // that sees it. One entry per atom, `None` for atoms outside the `d = 1`
+        // periodic family, and — like the fidelity report — a pure read that
+        // feeds nothing back into the loss or criterion.
+        let decoder_embeddedness = (0..self.k_atoms())
+            .map(|atom_idx| atom_decoder_embeddedness(self, atom_idx))
+            .collect::<Result<Vec<_>, _>>()?;
+
         // Reviewer-F3 persistent-homology topology audit (one entry per atom,
         // `None` for caller-supplied or under-sampled atoms). A pure read of the
         // fitted decoder image and shared soft support measure; never gated by a flag and
@@ -2314,6 +2325,7 @@ impl SaeManifoldTerm {
             },
             atom_inference,
             coordinate_fidelity,
+            decoder_embeddedness,
             topology_persistence,
         })
     }

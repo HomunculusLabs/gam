@@ -284,6 +284,18 @@ pub struct SaeManifoldFitDiagnostics {
     /// coordinate quality — which reconstruction EV provably does not certify
     /// (see [`AtomCoordinateFidelity`]).
     pub coordinate_fidelity: Vec<Option<AtomCoordinateFidelity>>,
+    /// #2518 — per-atom certificate that the atom's DECODED IMAGE is embedded,
+    /// not merely immersed: a rigorous lower bound on the separation function
+    /// `‖m(u+s) − m(u)‖² / 4sin²(πs)` over the whole `(center, separation)`
+    /// domain ([`crate::manifold::embeddedness::AtomEmbeddednessCertificate`]).
+    /// One entry per fitted atom in atom order; `None` for atoms outside the
+    /// `d = 1` periodic family. This is the only global statement in this
+    /// struct: coordinate fidelity, the residual gauge and the chart guards are
+    /// all local or reparameterization-shaped, and a decoder that traverses its
+    /// image twice satisfies every one of them while making each encode fiber
+    /// two-valued. Read `embedded` as CERTIFIED EMBEDDED — its negation
+    /// certifies nothing.
+    pub decoder_embeddedness: Vec<Option<crate::manifold::AtomEmbeddednessCertificate>>,
     /// Reviewer-F3 persistent-homology topology audit: for each atom, the
     /// Vietoris–Rips persistence of its assigned-row image points confronted
     /// with the topology the raced type predicts. `Some(..)` carries the

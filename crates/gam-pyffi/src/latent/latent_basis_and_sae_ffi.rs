@@ -2396,6 +2396,14 @@ fn sae_fit_report_into_dict<'py>(
         "coordinate_fidelity",
         sae_coordinate_fidelity_dict(py, &fit_diagnostics.coordinate_fidelity)?,
     )?;
+    // #2518 item 2 — per-atom decoded-image embeddedness certificate. The one
+    // global statement in this block: everything else here is local or
+    // reparameterization-shaped and cannot see a decoder that wraps its ambient
+    // image twice.
+    out.set_item(
+        "decoder_embeddedness",
+        sae_decoder_embeddedness_dict(py, &fit_diagnostics.decoder_embeddedness)?,
+    )?;
     out.set_item(
         "topology_persistence",
         topology_persistence_ffi::sae_topology_persistence_dict(
@@ -2883,6 +2891,61 @@ fn sae_coordinate_fidelity_dict<'py>(
             }
             None => {
                 a.set_item("topology", py.None())?;
+            }
+        }
+        atoms.append(a)?;
+    }
+    d.set_item("atoms", atoms)?;
+    Ok(d)
+}
+
+/// Build the result-dict entry for the per-atom decoded-image embeddedness
+/// certificate (#2518 item 2).
+fn sae_decoder_embeddedness_dict<'py>(
+    py: Python<'py>,
+    embeddedness: &[Option<gam::terms::sae::manifold::AtomEmbeddednessCertificate>],
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item(
+        "note",
+        "SAE per-atom decoded-image embeddedness certificate (#2518). For a d=1 periodic \
+         atom the decoder is a trig polynomial m(t), and m is an EMBEDDING iff the \
+         separation G(c, x) = ||m(u+s) - m(u)||^2 / (4 sin^2(pi s)) — written in the \
+         centered coordinate c = u + s/2 and x = cos(pi s), where it is a polynomial of \
+         degree H-1 in x and a trig polynomial of degree H in c — is strictly positive on \
+         the whole domain. Its x = +/-1 edge is exactly the immersion condition \
+         ||m'||^2/4pi^2, so injectivity and immersion are certified by one bound. \
+         `certified_min` = `grid_min` - `grid_correction` is a RIGOROUS lower bound on G \
+         everywhere (the correction is the closed-form inter-node modulus of continuity \
+         from the decoder coefficients, not a Bernstein sup-norm charge), and `embedded` \
+         is `certified_min > 0`. The certificate is ONE-SIDED: `embedded=true` proves the \
+         image is embedded, while `embedded=false` proves nothing — it means the grid plus \
+         its correction could not separate G from zero. `relative_margin` is \
+         `certified_min` divided by the closed-form sup bound on G, so it is invariant \
+         under rescaling the decoder (and hence under the atom amplitude). This is the \
+         only GLOBAL per-atom certificate: a decoder that traverses its image twice has \
+         an honest arc-length chart, zero isometry defect and exact reconstruction, yet \
+         every encode fiber has two points. Entries with null `harmonics` are atoms \
+         outside the d=1 periodic family, which this algebra does not cover.",
+    )?;
+    let atoms = PyList::empty(py);
+    for (atom_idx, entry) in embeddedness.iter().enumerate() {
+        let a = PyDict::new(py);
+        a.set_item("atom", atom_idx)?;
+        match entry {
+            Some(cert) => {
+                a.set_item("harmonics", cert.harmonics)?;
+                a.set_item("grid_min", cert.grid_min)?;
+                a.set_item("grid_correction", cert.grid_correction)?;
+                a.set_item("certified_min", cert.certified_min)?;
+                a.set_item("scale", cert.scale)?;
+                a.set_item("relative_margin", cert.relative_margin)?;
+                a.set_item("embedded", cert.embedded)?;
+                a.set_item("center_nodes", cert.center_nodes)?;
+                a.set_item("separation_nodes", cert.separation_nodes)?;
+            }
+            None => {
+                a.set_item("harmonics", py.None())?;
             }
         }
         atoms.append(a)?;
