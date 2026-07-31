@@ -414,9 +414,10 @@ class RunSuiteMappingTests(unittest.TestCase):
             ", double_penalty=true",
         )
         self.assertIn("order=0", term)
-        # Joint 16-PC Duchon needs power=dim//2+1=9 so phi^(2)(0) exists
-        # strictly (2*(1+9)=20 > 16+2=18).
-        self.assertIn("power=9", term)
+        # Match mgcv's continuous m=1 Duchon promotion:
+        # s=d/2-1/2=7.5, which satisfies both pointwise existence and the
+        # pure-kernel CPD bound.
+        self.assertIn("power=7.5", term)
         self.assertNotIn("length_scale=", term)
         self.assertNotIn("double_penalty", term)
 

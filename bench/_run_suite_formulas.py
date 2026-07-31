@@ -390,17 +390,13 @@ def _emit_joint_pc_term(
         if pc_basis in {"thinplate", "tps"}:
             return f"thinplate({cols}, centers={knot_count}{dp})"
         if pc_basis == "duchon":
-            # With order=0 (p_order=1), the Duchon center-collision derivative
-            # phi^(2)(0) exists iff 2*(p+s) > dimension+2, i.e. s > dimension/2.
-            # The smallest integer power satisfying this strictly is dim//2 + 1.
-            #
             # `length_scale` would opt gam into a hybrid Duchon-Matérn
             # estimator with an additional learned kappa axis.  mgcv's
             # `bs="ds"` reference is the scale-free Duchon estimator, so a
             # matched benchmark must leave that hybrid parameter absent.
             return (
-                f"duchon({cols}, centers={knot_count}, "
-                f"order=0, power={len(pc_cols) // 2 + 1})"
+                f"duchon({cols}, centers={knot_count}"
+                f"{_rust_duchon_options_for_dimension(len(pc_cols))})"
             )
         if pc_basis == "matern":
             return f"matern({cols}, centers={knot_count}{dp})"
@@ -444,11 +440,16 @@ def _requires_joint_spatial_term(cfg: dict[str, typing.Any] | None) -> bool:
 
 
 def _rust_duchon_options_for_dimension(dimension: int) -> str:
-    # With order=0 (p_order=1), the Duchon center-collision derivative
-    # phi^(2)(0) exists iff 2*(p+s) > dimension+2, i.e. s > dimension/2.
-    # The smallest integer power satisfying this strictly is dim//2 + 1.
-    power = dimension // 2 + 1
-    return f", order=0, power={power}"
+    # Match mgcv `bs="ds", m=c(1,0)`. For d-dimensional data, mgcv promotes
+    # the requested s=0 to the smallest half-integer giving a continuous
+    # first-derivative-penalty spline: s=d/2-1/2. This lies strictly between
+    # the pure-Duchon existence and CPD bounds
+    #     m+s > d/2  and  s < d/2
+    # for m=1 (our order=0 / constants-only polynomial nullspace). The former
+    # integer `d//2+1` was outside the CPD range and every pure joint-Duchon
+    # benchmark was therefore invalid before either timing or accuracy.
+    power = max(0.0, dimension / 2.0 - 0.5)
+    return f", order=0, power={power:g}"
 
 
 def _rust_joint_spatial_term(basis: str, smooth_cols: list[str], knot_count: int, dp_opt: str) -> str:
@@ -839,4 +840,3 @@ def _is_matern_rust_scenario(s_cfg: typing.Any) -> bool:
     if cfg is None:
         return False
     return bool(_canonical_smooth_basis(cfg.get("smooth_basis", "ps")) == "matern")
-
