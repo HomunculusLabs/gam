@@ -354,6 +354,20 @@ pub fn column_map_with_alias(
     aliased
 }
 
+/// The canonical marginal-slope alias: `z` in a formula binds to the column
+/// named by `z_column`.
+pub const MARGINAL_SLOPE_Z_ALIAS: &str = "z";
+
+/// Whether writing `z` in a formula would resolve to `z_column` for this frame.
+///
+/// `column_map_with_alias` inserts with `or_insert`, so a frame that carries its
+/// own real `z` column keeps it and the alias is inert — writing `z` there means
+/// that column, which is legitimate. The alias is live only when `z_column`
+/// exists and `z` does not, and only then does `z` silently denote the score.
+pub fn marginal_slope_z_alias_is_live(col_map: &HashMap<String, usize>, z_column: &str) -> bool {
+    col_map.contains_key(z_column) && !col_map.contains_key(MARGINAL_SLOPE_Z_ALIAS)
+}
+
 // ---------------------------------------------------------------------------
 // ParsedTerm[] + Dataset → TermCollectionSpec
 // ---------------------------------------------------------------------------

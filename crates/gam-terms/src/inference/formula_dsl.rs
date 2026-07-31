@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use pest::Parser;
 use pest::iterators::Pair;
 use pest_derive::Parser;
 
 use crate::smooth::BoundedCoefficientPriorSpec;
+use crate::term_builder::{MARGINAL_SLOPE_Z_ALIAS, marginal_slope_z_alias_is_live};
 use gam_problem::types::{
     InverseLink, LikelihoodSpec, LinkComponent, LinkFunction, StandardLink, WigglePenaltyConfig,
 };
@@ -781,9 +782,9 @@ mod tests {
     use super::{
         CallArgSpec, ParsedTerm, parse_formula, parse_formula_dsl, parse_function_call,
         parse_linkwiggle_formulaspec, parsed_term_column_names, parsed_terms_reference_column,
-        validate_marginal_slope_z_column_exclusion,
+        validate_marginal_slope_z_alias_exclusion, validate_marginal_slope_z_column_exclusion,
     };
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     #[test]
     fn parsed_term_column_names_includes_by_smooth_grouping_variable() {
@@ -1197,6 +1198,98 @@ mod tests {
         assert!(err.contains("cannot also appear in --logslope-formula"));
     }
 
+    /// Column map helper for the alias tests: names -> positional indices.
+    fn frame(columns: &[&str]) -> HashMap<String, usize> {
+        columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ((*c).to_string(), i))
+            .collect()
+    }
+
+    /// The case the literal-name validator is structurally blind to.
+    ///
+    /// Every pre-existing test above uses `z_column = "z"`, where the reserved
+    /// name and the canonical alias are the same string — so none of them can
+    /// distinguish a validator that resolves the alias from one that only
+    /// compares text. With `z_column != "z"` they come apart, and `y ~ x + z`
+    /// silently put the score into the marginal design (gam#2432).
+    #[test]
+    fn marginal_slope_alias_validator_rejects_bare_z_when_z_column_is_named_otherwise() {
+        let cols = frame(&["y", "x", "pgs_ctn_z"]);
+        let main = parse_formula("y ~ x + z").expect("parse main");
+
+        // The literal-name validator accepts it: the term is named `z`, the
+        // reserved column is `pgs_ctn_z`, and the two strings differ.
+        validate_marginal_slope_z_column_exclusion(
+            &main,
+            &parse_formula("y ~ 1").expect("parse logslope"),
+            "pgs_ctn_z",
+            "bernoulli marginal-slope",
+            "logslope_formula",
+        )
+        .expect("literal-name validator cannot see the alias");
+
+        let err = validate_marginal_slope_z_alias_exclusion(
+            &main,
+            &cols,
+            "pgs_ctn_z",
+            "bernoulli marginal-slope",
+        )
+        .expect_err("bare `z` resolves to the reserved score column");
+        assert!(err.contains("reserves z column 'pgs_ctn_z'"), "{err}");
+        assert!(err.contains("cannot also appear in the main formula"), "{err}");
+    }
+
+    /// Negative controls: the alias guard must not reject anything else.
+    #[test]
+    fn marginal_slope_alias_validator_accepts_legitimate_formulas() {
+        // A baseline that never mentions the score, under either spelling.
+        validate_marginal_slope_z_alias_exclusion(
+            &parse_formula("y ~ x + w").expect("parse clean main"),
+            &frame(&["y", "x", "w", "pgs_ctn_z"]),
+            "pgs_ctn_z",
+            "bernoulli marginal-slope",
+        )
+        .expect("a baseline without the score is legitimate");
+
+        // A frame carrying its OWN `z` column keeps it: `column_map_with_alias`
+        // inserts with `or_insert`, so the alias is inert and `z` in the main
+        // formula means that column, not the score.
+        validate_marginal_slope_z_alias_exclusion(
+            &parse_formula("y ~ x + z").expect("parse main with real z"),
+            &frame(&["y", "x", "z", "pgs_ctn_z"]),
+            "pgs_ctn_z",
+            "bernoulli marginal-slope",
+        )
+        .expect("a real `z` column is not the alias");
+
+        // z_column == "z": the literal-name validator already covers this
+        // verbatim, so the alias guard must stay out of its way.
+        validate_marginal_slope_z_alias_exclusion(
+            &parse_formula("y ~ x + z").expect("parse main"),
+            &frame(&["y", "x", "z"]),
+            "z",
+            "bernoulli marginal-slope",
+        )
+        .expect("alias guard defers to the literal-name validator when they coincide");
+    }
+
+    /// The alias guard is an addition, not a replacement: spelling the reserved
+    /// column out in full is still rejected, by the original validator.
+    #[test]
+    fn marginal_slope_literal_z_column_is_still_rejected() {
+        let err = validate_marginal_slope_z_column_exclusion(
+            &parse_formula("y ~ x + pgs_ctn_z").expect("parse main"),
+            &parse_formula("y ~ 1").expect("parse logslope"),
+            "pgs_ctn_z",
+            "bernoulli marginal-slope",
+            "logslope_formula",
+        )
+        .expect_err("the reserved column named in full must still be rejected");
+        assert!(err.contains("reserves z column 'pgs_ctn_z'"), "{err}");
+    }
+
     #[test]
     fn logslope_surface_declarations_are_additive() {
         let parsed = parse_formula("y ~ s(pc1) + logslope(z2, s(pc2)) + logslope(z3, x3)")
@@ -1468,6 +1561,51 @@ pub fn parsed_terms_reference_column(terms: &[ParsedTerm], column_name: &str) ->
             z_column == column_name || parsed_terms_reference_column(terms, column_name)
         }
     })
+}
+
+/// Reject the score entering the main formula through its canonical alias.
+///
+/// `validate_marginal_slope_z_column_exclusion` compares each parsed term's
+/// literal name against the configured `z_column`, so it rejects
+/// `disease ~ pgs_ctn_z` — and accepts `disease ~ z`, which
+/// `column_map_with_alias(col_map, "z", z_column)` then resolves to *the same
+/// column*. The score lands in the marginal design either way; only one
+/// spelling is caught. That is not a cosmetic gap: with an intercept-only
+/// log-slope the effective log-slope direction is `f = a*1 + s*z`, which lies
+/// in the span of the effective marginal design `[1, z]` row by row for ANY
+/// data, so the fit is degenerate by construction. It used to surface ~12 s
+/// later as a `FullyConfounded` refusal from the BMS audit, a message that
+/// reads like a solver failure rather than a formula mistake (gam#2432).
+///
+/// Checked against the frame rather than the formula text because the alias is
+/// only live when the frame has no real `z` column of its own — see
+/// [`marginal_slope_z_alias_is_live`]. A frame that genuinely carries `z` keeps
+/// it, and writing `z` there is legitimate and still accepted.
+pub fn validate_marginal_slope_z_alias_exclusion(
+    main_formula: &ParsedFormula,
+    col_map: &HashMap<String, usize>,
+    z_column: &str,
+    context: &str,
+) -> Result<(), String> {
+    if z_column == MARGINAL_SLOPE_Z_ALIAS {
+        // Already covered verbatim by the literal-name exclusion.
+        return Ok(());
+    }
+    if !marginal_slope_z_alias_is_live(col_map, z_column) {
+        return Ok(());
+    }
+    if parsed_terms_reference_column(&main_formula.terms, MARGINAL_SLOPE_Z_ALIAS) {
+        return Err(FormulaDslError::IncompatibleTerm {
+            reason: format!(
+                "{context} reserves z column '{z_column}' as the auxiliary latent score, and the \
+                 bare name '{MARGINAL_SLOPE_Z_ALIAS}' in the main formula resolves to it; it \
+                 cannot also appear in the main formula. Give the baseline its own covariates \
+                 (the score's effect is carried by the log-slope formula)."
+            ),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 pub fn validate_marginal_slope_z_column_exclusion(

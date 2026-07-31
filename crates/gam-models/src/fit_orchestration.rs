@@ -130,7 +130,8 @@ use gam_terms::inference::formula_dsl::{
     LinkChoice, LinkWiggleFormulaSpec, ParsedFormula, ParsedTerm, effectivelinkwiggle_formulaspec,
     marginal_slope_logslope_surfaces, parse_formula, parse_link_choice,
     parse_matching_auxiliary_formula, parse_surv_interval_response, parse_surv_response,
-    require_inverse_link_supports_joint_wiggle, validate_marginal_slope_z_column_exclusion,
+    require_inverse_link_supports_joint_wiggle, validate_marginal_slope_z_alias_exclusion,
+    validate_marginal_slope_z_column_exclusion,
 };
 
 use gam_terms::term_builder::{

@@ -279,6 +279,16 @@ pub(crate) fn materialize_survival<'a>(
             "survival marginal-slope",
             "logslope_formula",
         )?;
+        // Same alias hole as the Bernoulli path (gam#2432): this survival
+        // entry installs `column_map_with_alias(col_map, "z", z_column)` below,
+        // so a bare `z` in the main formula binds to the score even though the
+        // literal-name check above cannot see it.
+        validate_marginal_slope_z_alias_exclusion(
+            parsed,
+            col_map,
+            z_column,
+            "survival marginal-slope",
+        )?;
     }
     let effective_timewiggle = parsed.timewiggle.clone();
     let baseline_target_raw = match survival_mode {

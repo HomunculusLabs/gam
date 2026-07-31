@@ -119,6 +119,16 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
             "Bernoulli marginal-slope",
             "logslope_formula",
         )?;
+        // The literal-name check above cannot see the score entering the main
+        // formula under its canonical alias `z` (gam#2432); the alias is
+        // installed a few lines below, so refuse here rather than let the BMS
+        // confounding audit report it as a solver failure much later.
+        validate_marginal_slope_z_alias_exclusion(
+            parsed,
+            col_map,
+            z_column,
+            "Bernoulli marginal-slope",
+        )?;
     }
 
     let mut inference_notes = Vec::new();
