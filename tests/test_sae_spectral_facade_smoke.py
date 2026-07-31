@@ -49,7 +49,16 @@ def test_dimension_spectrometer_smoke():
     # Rows spread along a low-dimensional planted structure in R^12.
     x, _ = _planted_atoms(rng, k=6, p=12, n=400)
     x = x + np.float32(0.01) * rng.standard_normal(x.shape).astype(np.float32)
-    report = dimension_spectrometer(x, k_min=2, n_doublings=3, max_epochs=8)
+    # This is a bounded facade smoke over FP32 state, not a precision benchmark.
+    # Use the dtype-derived stationarity scale instead of requiring the
+    # eight-epoch smoke budget to resolve below FP32's square-root epsilon.
+    report = dimension_spectrometer(
+        x,
+        k_min=2,
+        n_doublings=3,
+        max_epochs=8,
+        tolerance=float(np.sqrt(np.finfo(np.float32).eps)),
+    )
     assert len(report.rungs) == 4  # n_doublings + 1 rungs
     assert [k for k, _ in report.rungs] == [2, 4, 8, 16]
     assert all(math.isfinite(loss) for _, loss in report.rungs)
