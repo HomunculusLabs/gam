@@ -34,7 +34,16 @@ import xml.etree.ElementTree as ET
 # Raw step output has no prefix. Tolerate both so the script gives the same
 # answer on a downloaded log as it does in-job.
 _LOG_PREFIX = re.compile(r"^[^\t]*\t[^\t]*\t\d{4}-\d\d-\d\dT[\d:.]+Z ")
-_DUMP_HEADER = re.compile(r"^Timeout \(\d+:\d\d:\d\d\)!")
+# NOT anchored to the start of the line. faulthandler writes its header to fd 2
+# with no regard for whether pytest's progress stream has emitted a newline yet,
+# so `.....Timeout (0:04:00)!` is as common as a header on its own line — and
+# which one you get is a race between two writers. Anchoring cost 24 of 29
+# recoveries on run 30657860492, where 37 dumps were present and NOT ONE started
+# a line, while the run before it had 43 that mostly did.
+_DUMP_HEADER = re.compile(r"Timeout \(\d+:\d\d:\d\d\)!")
+# Same reasoning for the end of a dump: the worker's last frame can be followed
+# on the same line by whatever the controller writes next.
+_DUMP_TAIL = 'File "<string>", line 1 in <module>'
 _TEST_FRAME = re.compile(r'File "([^"]*[/\\]tests[/\\][^"]+)", line \d+ in (\w+)')
 _PKG_FRAME = re.compile(r'File "[^"]*[/\\]site-packages[/\\]gamfit[/\\]([^"]+)", line (\d+) in (\w+)')
 
@@ -103,16 +112,19 @@ def read_dumps(path):
     with open(path, errors="replace") as handle:
         for raw in handle:
             line = _LOG_PREFIX.sub("", raw.rstrip("\n"))
-            if _DUMP_HEADER.match(line):
+            header = _DUMP_HEADER.search(line)
+            if header:
                 if block is not None:
                     flush(block)
-                block = []
+                # Keep whatever followed the header on the same line: with two
+                # writers on one fd, the first frame can share the header's line.
+                block = [line[header.end():]]
                 dumps += 1
                 continue
             if block is not None:
                 block.append(line)
                 # A dump ends at the outermost frame of the worker's main thread.
-                if line.strip() == 'File "<string>", line 1 in <module>':
+                if _DUMP_TAIL in line:
                     flush(block)
                     block = None
     if block is not None:
