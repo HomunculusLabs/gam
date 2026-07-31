@@ -23,6 +23,7 @@ def _scenario_fit_mapping(scenario_name: typing.Any) -> typing.Any:
             "smooth_basis": geo_eas_cfg["smooth_basis"],
             "linear_cols": geo_eas_cfg["linear_cols"],
             "knots": int(geo_eas_cfg["knots"]),
+            "pc_layout": geo_eas_cfg["pc_layout"],
         }
     if papuan_cfg is not None:
         return {
@@ -31,6 +32,7 @@ def _scenario_fit_mapping(scenario_name: typing.Any) -> typing.Any:
             "smooth_basis": papuan_cfg["smooth_basis"],
             "linear_cols": papuan_cfg["linear_cols"],
             "knots": int(papuan_cfg["knots"]),
+            "pc_layout": papuan_cfg["pc_layout"],
         }
     if subpop_cfg is not None:
         return {
@@ -39,6 +41,7 @@ def _scenario_fit_mapping(scenario_name: typing.Any) -> typing.Any:
             "smooth_basis": subpop_cfg["smooth_basis"],
             "linear_cols": subpop_cfg["linear_cols"],
             "knots": int(subpop_cfg["knots"]),
+            "pc_layout": subpop_cfg["pc_layout"],
         }
     if latlon_cfg is not None:
         return {
@@ -47,6 +50,7 @@ def _scenario_fit_mapping(scenario_name: typing.Any) -> typing.Any:
             "smooth_basis": latlon_cfg["smooth_basis"],
             "linear_cols": latlon_cfg["linear_cols"],
             "knots": int(latlon_cfg["knots"]),
+            "pc_layout": latlon_cfg["pc_layout"],
         }
     return {
         "small_dense": dict(
@@ -296,16 +300,16 @@ def _is_joint_spatial_basis(basis: str) -> bool:
 # ---------------------------------------------------------------------------
 # Joint-PC contract
 #
-# PCs are ALWAYS a single joint smooth, never N independent 1D smooths and
-# never a mixture of smoothed-leading-PCs + linear-trailing-PCs. The PC
+# PCs are a single joint smooth unless a benchmark explicitly declares an
+# additive per-PC layout. The PC
 # eigenbasis has been deliberately decorrelated, so per-axis additivity is
 # both statistically misspecified (the meaningful heterogeneity lives on the
 # joint manifold) and a wallclock disaster at large scale (16 separate
 # `s(pcN, ...)` blocks instead of one multi-D Duchon).
 #
-# Every formula builder in this file routes PC-named columns through these
-# helpers so the contract is enforced from a single place rather than at
-# every call site.
+# Every formula builder routes PC-named columns through these helpers so the
+# declared contract is enforced from a single place rather than inferred from
+# a scenario name.
 # ---------------------------------------------------------------------------
 
 _PC_COL_PATTERN = re.compile(r"^pc\d+(?:_std)?$")
@@ -327,6 +331,16 @@ def _split_pc_columns(cols: typing.Any) -> tuple[list[str], list[str]]:
         else:
             other_cols.append(s)
     return pc_cols, other_cols
+
+
+def _pc_smooth_layout(cfg: dict[str, typing.Any] | None) -> str:
+    """Return and validate the declared relationship among PC smooths."""
+    layout = str((cfg or {}).get("pc_layout", "joint")).strip().lower()
+    if layout not in {"joint", "additive"}:
+        raise RuntimeError(f"unsupported PC smooth layout '{layout}'")
+    if layout == "additive" and _canonical_smooth_basis((cfg or {}).get("smooth_basis", "ps")) != "ps":
+        raise RuntimeError("additive PC smooth layout requires the marginal P-spline basis")
+    return layout
 
 
 def _joint_pc_basis(requested_basis: typing.Any) -> str:
@@ -418,9 +432,8 @@ def _requires_joint_spatial_term(cfg: dict[str, typing.Any] | None) -> bool:
 
     * its declared `smooth_basis` is multi-D-capable AND there are 2+ smooth
       columns (the original criterion), OR
-    * its smooth columns include 2+ PCs (the joint-PC contract — the basis
-      may be `ps` in the YAML for legacy reasons but the runtime emission
-      will route to `_emit_joint_pc_term`, which is multi-D).
+    * its smooth columns include 2+ PCs and the scenario declares the joint-PC
+      layout (the default model contract).
 
     `linear_cols` containing PCs also flips this true: those columns get
     folded into the joint smooth by the formula builders, so the effective
@@ -428,11 +441,12 @@ def _requires_joint_spatial_term(cfg: dict[str, typing.Any] | None) -> bool:
     """
     if not cfg:
         return False
+    pc_layout = _pc_smooth_layout(cfg)
     smooth_cols = list(cfg.get("smooth_cols") or [])
     linear_cols = list(cfg.get("linear_cols") or [])
     pc_smooth = [c for c in smooth_cols if _is_pc_column(c)]
     pc_linear = [c for c in linear_cols if _is_pc_column(c)]
-    if len(pc_smooth) + len(pc_linear) >= 2:
+    if pc_layout == "joint" and len(pc_smooth) + len(pc_linear) >= 2:
         return True
     if _is_joint_spatial_basis(cfg.get("smooth_basis", "ps")) and len(smooth_cols) >= 2:
         return True
@@ -481,12 +495,13 @@ def _rust_formula_for_scenario(scenario_name: typing.Any, ds: typing.Any, *, cfg
     if cfg is None:
         raise RuntimeError(f"No Rust formula mapping configured for scenario '{scenario_name}'")
     target = ds["target"]
-    # Fold any PC linear_cols into the joint-PC smooth — PCs are always one
-    # joint object, never partly smooth and partly linear.
+    pc_layout = _pc_smooth_layout(cfg)
+    # Under the joint layout, fold PC linear columns into the single PC smooth.
+    # The additive layout preserves the scenario's explicit term declarations.
     raw_linear = list(cfg.get("linear_cols", []))
     pc_linear, true_linear = _split_pc_columns(raw_linear)
     raw_smooth = list(cfg.get("smooth_cols") or [])
-    if pc_linear:
+    if pc_layout == "joint" and pc_linear:
         # Move PC linear terms into smooth_cols so they participate in the
         # joint smooth below.
         existing = set(str(c) for c in raw_smooth)
@@ -508,16 +523,15 @@ def _rust_formula_for_scenario(scenario_name: typing.Any, ds: typing.Any, *, cfg
     dp_opt = f", double_penalty={'true' if use_double_penalty else 'false'}"
     smooth_cols = cfg.get("smooth_cols")
     if smooth_cols:
-        # PCs are always a single joint object regardless of the scenario's
-        # nominal basis. If the scenario asked for `ps` over PC columns, route
-        # them through a joint multi-D smooth (default duchon) — never N
-        # independent 1D smooths.
         pc_smooth_cols, other_smooth_cols = _split_pc_columns(smooth_cols)
-        if len(pc_smooth_cols) >= 2:
+        if pc_layout == "joint" and len(pc_smooth_cols) >= 2:
             pc_basis = _joint_pc_basis(basis)
             terms.append(_rust_joint_spatial_term(pc_basis, pc_smooth_cols, knot_count, dp_opt))
         elif len(pc_smooth_cols) == 1:
             # Only one PC — emit the single-axis smooth using the scenario basis.
+            other_smooth_cols = pc_smooth_cols + other_smooth_cols
+            pc_smooth_cols = []
+        elif pc_layout == "additive":
             other_smooth_cols = pc_smooth_cols + other_smooth_cols
             pc_smooth_cols = []
         if other_smooth_cols:
@@ -650,12 +664,12 @@ def _mgcv_formula_for_scenario(scenario_name: typing.Any, ds: typing.Any) -> typ
     if cfg is None:
         raise RuntimeError(f"No shared smooth mapping configured for scenario '{scenario_name}'")
     target = ds["target"]
-    # Fold any PC linear_cols into the joint-PC smooth — PCs are always one
-    # joint object, never partly smooth and partly linear.
+    pc_layout = _pc_smooth_layout(cfg)
+    # Mirror the Rust term relationship exactly.
     raw_linear = list(cfg.get("linear_cols", []))
     pc_linear, true_linear = _split_pc_columns(raw_linear)
     raw_smooth = list(cfg.get("smooth_cols") or [])
-    if pc_linear:
+    if pc_layout == "joint" and pc_linear:
         existing = set(str(c) for c in raw_smooth)
         for c in pc_linear:
             if c not in existing:
@@ -689,9 +703,8 @@ def _mgcv_formula_for_scenario(scenario_name: typing.Any, ds: typing.Any) -> typ
     smooth_cols = cfg.get("smooth_cols")
     if smooth_cols:
         k_val = knot_count + 4 if bs_code == "ps" else knot_count
-        # Mirror the rust contract: PCs always enter as a single joint smooth.
         pc_smooth_cols, other_smooth_cols = _split_pc_columns(smooth_cols)
-        if len(pc_smooth_cols) >= 2:
+        if pc_layout == "joint" and len(pc_smooth_cols) >= 2:
             pc_basis = _joint_pc_basis(basis)
             # #2623: pass the UNBUMPED knot count. `k_val` adds the P-spline
             # `+4` knots->basis-dimension conversion, which is meaningless once
@@ -706,6 +719,9 @@ def _mgcv_formula_for_scenario(scenario_name: typing.Any, ds: typing.Any) -> typ
             # `knot_count` is right here for every declared basis.
             terms.append(_mgcv_joint_spatial_term(pc_basis, pc_smooth_cols, knot_count))
         elif len(pc_smooth_cols) == 1:
+            other_smooth_cols = pc_smooth_cols + other_smooth_cols
+            pc_smooth_cols = []
+        elif pc_layout == "additive":
             other_smooth_cols = pc_smooth_cols + other_smooth_cols
             pc_smooth_cols = []
         if other_smooth_cols:

@@ -71,17 +71,17 @@ def _feature_should_be_smooth(ds: dict[str, typing.Any], col: str) -> bool:
 def _sigma_feature_terms(ds: dict[str, typing.Any], *, scenario_name: str | None, backend: str) -> list[str]:
     """Build the per-feature term list for the GAMLSS sigma block.
 
-    Contract (joint-PC, applied uniformly across backends):
+    Contract (applied uniformly across backends):
 
-    * If the dataset's features include 2+ PC columns, they are emitted as
-      ONE joint multi-D smooth via `_emit_joint_pc_term`. Backends without a
+    * If the scenario declares the joint PC layout and the dataset includes 2+
+      PC columns, they are emitted as ONE joint multi-D smooth via
+      `_emit_joint_pc_term`. Backends without a
       clean multi-D smoother (gamlss, gamboostlss) raise — the harness must
       filter those lanes out rather than fall back to per-axis 1D fits.
 
     * Non-PC features keep their existing per-feature smooth/linear treatment.
 
-    * Single-PC scenarios (rare; only `pc1`) fall through to the per-feature
-      branch since there's nothing to "join".
+    * Additive-PC and single-PC scenarios use the per-feature branch.
 
     The DoF budget computation for mgcv/brms/bamlss counts the joint PC term
     as ONE smooth regardless of dimension; this matches the actual GAM model
@@ -96,7 +96,7 @@ def _sigma_feature_terms(ds: dict[str, typing.Any], *, scenario_name: str | None
 
     cfg = _effective_scenario_fit_mapping(scenario_name) if scenario_name else None
     pc_basis = _joint_pc_basis((cfg or {}).get("smooth_basis", "ps"))
-    use_joint_pc = len(smoothed_pc) >= 2
+    use_joint_pc = _pc_smooth_layout(cfg) == "joint" and len(smoothed_pc) >= 2
 
     # Total smooth-block count for GAULSS-style total-DoF caps. The joint PC
     # term counts as 1 regardless of dimension because it shares one λ in
