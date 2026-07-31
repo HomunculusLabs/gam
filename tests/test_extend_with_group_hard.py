@@ -331,27 +331,48 @@ def test_precision_hyperpriors_callable_returning_nonfinite_is_rejected() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_hyperprior_plus_prior_mean_matches_closed_form_lambda_star() -> None:
+def test_hyperprior_precision_is_preserved_by_prior_mean_extension() -> None:
     fit_model = gamfit.fit(
         _training_frame(),
         "y ~ x + group(g)",
         precision_hyperpriors={"g": (3.0, 0.5)},
     )
-    extended = fit_model.extend_with_group(
+    extended_mu = fit_model.extend_with_group(
         new_group_spec={"term": "g", "level": "delta"},
         prior={"mean": 0.4},
     )
-    # Placeholder for the closed-form check; the assertion below merely
-    # exercises the code path. Once a `model.smoothing_parameters()`
-    # accessor lands, replace with:
-    #   q = sum_p (beta_p - mu_p)^2  (using model.coefficients_frame())
-    #   a, b = 3.0, 0.5
-    #   nu = effective_dim_of_g
-    #   lambda_star = (a - 1.0 + 0.5 * nu) / (b + 0.5 * q)
-    #   assert math.isclose(lambdas['g'], lambda_star, rel_tol=1e-3)
-    eta = _predict_eta(extended, [{"x": 0.0, "g": "delta"}])
-    assert np.all(np.isfinite(eta))
-    raise AssertionError("closed-form lambda* not verifiable from Python API")
+    extended_zero = fit_model.extend_with_group(
+        new_group_spec={"term": "g", "level": "epsilon"},
+        prior={"mean": 0.0},
+    )
+
+    # The Gamma hyperprior participates in the fit-time marginal REML
+    # optimisation.  A deployment extension does not refit the model, so its
+    # prior mean must not alter the already-fitted precision.
+    fitted = fit_model.smoothing_parameters()
+    assert len(fitted) == 1
+    fitted_lambda = next(iter(fitted.values()))
+    assert np.isfinite(fitted_lambda)
+    assert fitted_lambda > 0.0
+    assert extended_mu.smoothing_parameters() == fitted
+    assert extended_zero.smoothing_parameters() == fitted
+
+    # The extension prior controls only the inserted coefficient.  With the
+    # same hyperprior-fitted base model, the two new levels therefore differ
+    # by exactly their prior-mean difference at every covariate value.
+    grid = [-0.6, -0.2, 0.0, 0.3, 0.7]
+    eta_mu = _predict_eta(
+        extended_mu, [{"x": x, "g": "delta"} for x in grid]
+    )
+    eta_zero = _predict_eta(
+        extended_zero, [{"x": x, "g": "epsilon"} for x in grid]
+    )
+    np.testing.assert_allclose(
+        eta_mu - eta_zero,
+        np.full(len(grid), 0.4),
+        atol=1e-10,
+        rtol=0.0,
+    )
 
 
 # ---------------------------------------------------------------------------
