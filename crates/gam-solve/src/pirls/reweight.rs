@@ -525,6 +525,14 @@ where
     // one O(p) candidate allocation for the whole solve.
     let mut candidate_buf: Array1<f64> = Array1::zeros(beta.len());
     let kkt_tolerance = effective_kkt_tolerance(options);
+    // Only this geometry admits a plain coefficient-space Newton certificate:
+    // active constraints carry multipliers, and Arrow-Schur has latent
+    // directions outside beta. Keep the in-loop plateau handoff and the
+    // post-loop polish on one predicate so neither can silently broaden the
+    // other's mathematical scope.
+    let undamped_polish_allowed = options.linear_constraints.is_none()
+        && options.coefficient_lower_bounds.is_none()
+        && options.arrow_schur.is_none();
     if let Some(adaptive) = options.adaptive_kkt_tolerance {
         log::info!(
             "[ADAPTIVE-KKT] outer_g_norm={:.3e} effective_tol={:.3e} floor={:.3e} ceiling={:.3e}",
@@ -1608,6 +1616,38 @@ where
                             break 'pirls_loop;
                         }
 
+                        // Once the objective reduction is below its own
+                        // floating-point resolution, the gain ratio has no
+                        // information left with which to choose an LM radius.
+                        // Continuing from here can only accept neutral,
+                        // ever-more-damped steps: beta barely moves, the exact
+                        // decrement stays above the strict certificate, and the
+                        // loop can burn its entire iteration budget repeating
+                        // the same state. The beta-precision fixed-point fit in
+                        // #2616 exposed exactly that failure (295 identical
+                        // iterations after the first zero-reduction step).
+                        //
+                        // A finite exact decrement proves that the bare
+                        // coefficient Hessian is available. Hand that state to
+                        // the bounded undamped Newton refinement below, whose
+                        // acceptance requires BOTH non-increasing objective and
+                        // strictly smaller stationarity. If refinement cannot
+                        // certify the mode, this non-converged status survives;
+                        // the handoff itself never mints convergence.
+                        if numerical_plateau
+                            && exact_decrement_sq.is_some()
+                            && undamped_polish_allowed
+                        {
+                            log::debug!(
+                                "[PIRLS] objective resolution exhausted at iter {iter}; \
+                                 handing exact-decrement state to undamped refinement \
+                                 (decrement_sq={:.3e}, threshold={exact_nd_threshold:.3e})",
+                                exact_decrement_sq.unwrap_or(f64::NAN),
+                            );
+                            status = PirlsStatus::LmStepSearchExhausted;
+                            break 'pirls_loop;
+                        }
+
                         // An objective plateau or a relative-band soft
                         // acceptance is NOT, on its own, a constrained
                         // stationarity certificate: the inner solve can flatten
@@ -2157,12 +2197,13 @@ where
     // Matérn DESYNC, amplified by the profiled-REML datafit prefactor
     // `(denom/2)·(dp_c'/dp_c)` (~259 at θ₀).
     //
-    // Restore the documented invariant: take ONE exact, *undamped* (λ=0)
-    // Newton step `β̂ ← β̂ − H⁻¹ g_bare` on the bare penalized Hessian once the
-    // loop has converged. For a quadratic problem this lands on the exact
-    // optimum (g_bare → 0); for a genuinely nonlinear family it is a pure
-    // Newton refinement of an already-converged point. It is gated on three
-    // safety conditions so it can NEVER worsen a fit:
+    // Restore the documented invariant with bounded exact, *undamped* (λ=0)
+    // Newton refinement `β̂ ← β̂ − H⁻¹ g_bare` on the bare penalized Hessian.
+    // For a quadratic problem the first step lands on the exact optimum
+    // (g_bare → 0); a nonlinear likelihood can require another quadratically
+    // contracting step after its value differences fall below floating-point
+    // resolution. It is gated on three safety conditions so it can NEVER
+    // worsen a fit:
     //   (1) unconstrained only — a constrained KKT point carries multipliers,
     //       so its residual is not a plain gradient to be zeroed;
     //   (2) the bare Hessian factorizes (PD) and the step is finite;
@@ -2170,10 +2211,7 @@ where
     // Condition (3) makes the polish Pareto-safe: a fit that is already
     // machine-stationary (residual at round-off) sees no accepted step, so
     // existing golden values are untouched; only LM-ridge-biased iterates move.
-    let polish_allowed = options.linear_constraints.is_none()
-        && options.coefficient_lower_bounds.is_none()
-        && options.arrow_schur.is_none();
-    if polish_allowed {
+    if undamped_polish_allowed {
         // #2273 state locality. The polish inverts the OBJECTIVE's curvature,
         // and the omitted part of it (`HΦ`) is read off the model, which holds
         // whatever point it evaluated LAST — after an LM rejection that is a
@@ -2187,97 +2225,98 @@ where
         if model.objective_hessian_matrix_correction().is_some() {
             state = model.update_with_curvature(&beta, state.hessian_curvature)?;
         }
-        if let Some(bare_h) = state.hessian.as_dense() {
+        const MAX_UNDAMPED_POLISH_STEPS: usize = 8;
+        for polish_iter in 0..MAX_UNDAMPED_POLISH_STEPS {
+            let Some(bare_h) = state.hessian.as_dense() else {
+                break;
+            };
             let g_norm_before =
                 constrained_stationarity_norm(&state.gradient, beta.as_ref(), None, None);
+            if state.certifies_kkt(g_norm_before, kkt_tolerance) {
+                break;
+            }
             // Only bother when there is a residual worth removing and the
             // gradient/Hessian are finite — skip the work for already-exact fits.
             let bare_finite = state.gradient.iter().all(|v| v.is_finite())
                 && bare_h.iter().all(|v| v.is_finite());
-            if g_norm_before > 0.0 && bare_finite {
-                // `solve_direction_with_dense_factor` returns the Newton
-                // DIRECTION d = −H⁻¹g (sign already applied), so the polished
-                // iterate is β̂ + d. Factorize the BARE (undamped) penalized
-                // Hessian — `state.hessian` carries no LM ridge (the damping
-                // lived only on the throwaway `regularized` clone in the loop).
-                // #2273 — the polish is a Newton step, so it has to invert the
-                // OBJECTIVE's curvature. `state.hessian` omits `HΦ`, and
-                // stepping on `X'WX + S` instead made the refinement partial
-                // (probit: ‖g‖ 1.349e-7 → 7.447e-8, where an exact step reaches
-                // the arithmetic floor) or made it fail the strict-improvement
-                // guard outright and be declined (cloglog), leaving the fit one
-                // step short of its own certificate.
-                let curvature = objective_curvature_for_direction(
-                    bare_h,
-                    model.objective_hessian_matrix_correction(),
-                )?
-                .into_owned();
-                let direction = StableSolver::new()
-                    .factorize(&curvature)
-                    .ok()
-                    .map(|factor| {
-                        let mut d = Array1::<f64>::zeros(state.gradient.len());
-                        solve_direction_with_dense_factor(&factor, &state.gradient, &mut d);
-                        d
-                    });
-                if let Some(direction) = direction {
-                    let step_finite = direction.iter().all(|v| v.is_finite());
-                    // Guard against a runaway step: an exact Newton refinement
-                    // of a converged iterate is small relative to ‖β̂‖. A large
-                    // step signals a near-singular bare H (the LM damping was
-                    // load-bearing) — decline rather than risk a worse point.
-                    let beta_norm_sq = beta.as_ref().dot(beta.as_ref());
-                    let step_norm_sq = direction.dot(&direction);
-                    let step_reasonable =
-                        step_finite && (step_norm_sq <= 0.25 * beta_norm_sq.max(1.0));
-                    if step_reasonable {
-                        let polished: Array1<f64> = beta.as_ref() + &direction;
-                        if polished.iter().all(|v| v.is_finite()) {
-                            let polished_beta = Coefficients::new(polished);
-                            if let Ok(polished_state) =
-                                model.update_with_curvature(&polished_beta, state.hessian_curvature)
-                            {
-                                let g_norm_after = constrained_stationarity_norm(
-                                    &polished_state.gradient,
-                                    polished_beta.as_ref(),
-                                    None,
-                                    None,
-                                );
-                                // Commit ONLY on a strict improvement, and only
-                                // when the polished objective did not increase
-                                // (a quadratic Newton step cannot increase F, so
-                                // this rejects only nonlinear-family overshoot).
-                                // Same dispersion scale `k` as the gain-ratio
-                                // objective above (the shape lock is constant
-                                // across this inner solve); read locally since
-                                // this polish branch sits outside the iter-start
-                                // binding's scope.
-                                let polish_dev_scale = model.penalized_deviance_scale()?;
-                                let obj_before = penalizedobjective(&state, polish_dev_scale);
-                                let obj_after =
-                                    penalizedobjective(&polished_state, polish_dev_scale);
-                                let objective_ok = !obj_after.is_finite()
-                                    || !obj_before.is_finite()
-                                    || obj_after <= obj_before + obj_before.abs().max(1.0) * 1e-12;
-                                if g_norm_after.is_finite()
-                                    && g_norm_after < g_norm_before
-                                    && objective_ok
-                                {
-                                    log::debug!(
-                                        "[PIRLS] undamped Newton polish (#1122): \
-                                         ‖g‖ {g_norm_before:.3e} → {g_norm_after:.3e} \
-                                         (‖step‖={:.3e})",
-                                        step_norm_sq.sqrt()
-                                    );
-                                    beta = polished_beta;
-                                    state = polished_state;
-                                    lastgradient_norm = g_norm_after;
-                                }
-                            }
-                        }
-                    }
-                }
+            if !(g_norm_before > 0.0 && bare_finite) {
+                break;
             }
+            // `solve_direction_with_dense_factor` returns the Newton DIRECTION
+            // d = −H⁻¹g (sign already applied), so the polished iterate is
+            // β̂ + d. Factorize the BARE (undamped) penalized Hessian —
+            // `state.hessian` carries no LM ridge (the damping lived only on the
+            // throwaway `regularized` clone in the loop).
+            //
+            // #2273 — the polish has to invert the OBJECTIVE's curvature.
+            // `state.hessian` omits `HΦ`; stepping on `X'WX + S` instead made
+            // the refinement partial or made it fail the strict-improvement
+            // guard outright.
+            let curvature = objective_curvature_for_direction(
+                bare_h,
+                model.objective_hessian_matrix_correction(),
+            )?
+            .into_owned();
+            let Some(direction) = StableSolver::new()
+                .factorize(&curvature)
+                .ok()
+                .map(|factor| {
+                    let mut d = Array1::<f64>::zeros(state.gradient.len());
+                    solve_direction_with_dense_factor(&factor, &state.gradient, &mut d);
+                    d
+                })
+            else {
+                break;
+            };
+            let step_finite = direction.iter().all(|v| v.is_finite());
+            // Guard against a runaway step: an exact Newton refinement of a
+            // converged iterate is small relative to ‖β̂‖. A large step signals
+            // a near-singular bare H (the LM damping was load-bearing).
+            let beta_norm_sq = beta.as_ref().dot(beta.as_ref());
+            let step_norm_sq = direction.dot(&direction);
+            let step_reasonable = step_finite && (step_norm_sq <= 0.25 * beta_norm_sq.max(1.0));
+            if !step_reasonable {
+                break;
+            }
+            let polished: Array1<f64> = beta.as_ref() + &direction;
+            if !polished.iter().all(|v| v.is_finite()) {
+                break;
+            }
+            let polished_beta = Coefficients::new(polished);
+            let Ok(polished_state) =
+                model.update_with_curvature(&polished_beta, state.hessian_curvature)
+            else {
+                break;
+            };
+            let g_norm_after = constrained_stationarity_norm(
+                &polished_state.gradient,
+                polished_beta.as_ref(),
+                None,
+                None,
+            );
+            // Commit ONLY on a strict improvement, and only when the polished
+            // objective did not increase (a quadratic Newton step cannot
+            // increase F, so this rejects nonlinear-family overshoot).
+            // Same dispersion scale `k` as the gain-ratio objective above.
+            let polish_dev_scale = model.penalized_deviance_scale()?;
+            let obj_before = penalizedobjective(&state, polish_dev_scale);
+            let obj_after = penalizedobjective(&polished_state, polish_dev_scale);
+            let objective_ok = obj_before.is_finite()
+                && obj_after.is_finite()
+                && obj_after <= obj_before + obj_before.abs().max(1.0) * 1e-12;
+            if !(g_norm_after.is_finite() && g_norm_after < g_norm_before && objective_ok) {
+                break;
+            }
+            log::debug!(
+                "[PIRLS] undamped Newton polish (#1122) step {}: \
+                 ‖g‖ {g_norm_before:.3e} → {g_norm_after:.3e} \
+                 (‖step‖={:.3e})",
+                polish_iter + 1,
+                step_norm_sq.sqrt()
+            );
+            beta = polished_beta;
+            state = polished_state;
+            lastgradient_norm = g_norm_after;
         }
     }
 
@@ -2305,7 +2344,7 @@ where
     // contract: only a genuinely certified inner mode is recorded as
     // `Converged`.
     let can_still_certify = !status.is_converged() && status != PirlsStatus::Unstable;
-    let final_exact_decrement_sq = if can_still_certify && polish_allowed {
+    let final_exact_decrement_sq = if can_still_certify && undamped_polish_allowed {
         let curvature_correction = model.objective_hessian_matrix_correction().cloned();
         model
             .exact_unconstrained_decrement_sq(&beta, &state)?
