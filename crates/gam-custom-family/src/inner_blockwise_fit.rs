@@ -7376,6 +7376,25 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     certificate_decision,
                     ConstrainedStationaryCertificate::NotCandidate
                 ) {
+                    // A multiplier/null-plateau diagnosis requires a
+                    // positive-semidefinite local mode. When this cycle's exact
+                    // returned-mode spectrum has resolvable negative curvature,
+                    // the residual is not trapped multiplier mass: the
+                    // Moré–Sorensen hard case has a certified descent direction.
+                    // Its accepted step moves beta after this spectrum was
+                    // assembled, so only the next cycle's fresh spectrum may
+                    // decide whether the new point is a local mode. Refusing here
+                    // after the short descent-history window mislabeled every
+                    // survival Matérn startup as a four-cycle "budget" exit while
+                    // the terminal evidence itself said strict saddle. Continue
+                    // the hard-case escape and re-certify curvature at the moved
+                    // coefficient state.
+                    if has_resolvable_negative_curvature {
+                        log::info!(
+                            "[PIRLS/joint-Newton convergence] cycle {cycle:>3} |                              constrained-stationary plateau decision deferred: the exact                              pre-step spectrum has resolvable negative curvature, so the                              accepted hard-case escape must receive a fresh returned-mode                              curvature certificate next cycle"
+                        );
+                        continue;
+                    }
                     // The `linearized_rel >= 0.5` signal is necessary but not
                     // sufficient. It proves either (a) g carries a Lagrange
                     // multiplier of an active constraint that the QP's active
