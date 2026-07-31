@@ -578,4 +578,110 @@ mod oracle_tests {
             );
         }
     }
+
+    /// Honest strongest-hand gate for the order-four binomial coefficient
+    /// lowering. The opponent is the pre-migration, manually factored
+    /// non-abstracted formula, not a generic tower. Both sides cross the same
+    /// outlined ABI and are measured as paired, alternating-order medians.
+    #[test]
+    fn release_measure_binomial_q_order4_faa_top_vs_strongest_hand_932() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        #[inline(never)]
+        fn production_order4(x: [f64; 19]) -> f64 {
+            second_directionalhessian_coeff_fromobjective_q_terms(
+                x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7], x[8], x[9], x[10], x[11], x[12],
+                x[13], x[14], x[15], x[16], x[17], x[18],
+            )
+        }
+
+        #[inline(never)]
+        fn hand_order4(x: [f64; 19]) -> f64 {
+            let [
+                m1,
+                m2,
+                m3,
+                m4,
+                dq_u,
+                dq_v,
+                d2q_uv,
+                q_a,
+                q_b,
+                q_ab,
+                dq_a_u,
+                dq_a_v,
+                dq_b_u,
+                dq_b_v,
+                d2q_a_uv,
+                d2q_b_uv,
+                dq_ab_u,
+                dq_ab_v,
+                d2q_ab_uv,
+            ] = x;
+            let d_qaqb_u = dq_a_u * q_b + q_a * dq_b_u;
+            let d_qaqb_v = dq_a_v * q_b + q_a * dq_b_v;
+            let d2_qaqb_uv = d2q_a_uv * q_b + dq_a_u * dq_b_v + dq_a_v * dq_b_u + q_a * d2q_b_uv;
+            m4 * dq_u * dq_v * q_a * q_b
+                + m3 * (d2q_uv * q_a * q_b + dq_u * d_qaqb_v + dq_v * d_qaqb_u + dq_u * dq_v * q_ab)
+                + m2 * (d2_qaqb_uv + d2q_uv * q_ab + dq_u * dq_ab_v + dq_v * dq_ab_u)
+                + m1 * d2q_ab_uv
+        }
+
+        fn paired_medians<const N: usize>(
+            input: [f64; N],
+            iterations: usize,
+            production: fn([f64; N]) -> f64,
+            hand: fn([f64; N]) -> f64,
+        ) -> (f64, f64) {
+            let mut production_samples = [0.0; 7];
+            let mut hand_samples = [0.0; 7];
+            for round in 0..7 {
+                let production_first = round % 2 == 0;
+                for side in 0..2 {
+                    let run_production = production_first == (side == 0);
+                    let mut x = input;
+                    let mut checksum = 0.0;
+                    let started = Instant::now();
+                    for _ in 0..iterations {
+                        x[0] += checksum * 1e-18;
+                        checksum += if run_production {
+                            production(black_box(x))
+                        } else {
+                            hand(black_box(x))
+                        };
+                    }
+                    black_box(checksum);
+                    let elapsed = started.elapsed().as_secs_f64() * 1e9 / iterations as f64;
+                    if run_production {
+                        production_samples[round] = elapsed;
+                    } else {
+                        hand_samples[round] = elapsed;
+                    }
+                }
+            }
+            production_samples.sort_by(f64::total_cmp);
+            hand_samples.sort_by(f64::total_cmp);
+            (production_samples[3], hand_samples[3])
+        }
+
+        let mut next = stream(0x9320_0bad);
+        let input = std::array::from_fn(|_| next());
+        let production_value = production_order4(input);
+        let hand_value = hand_order4(input);
+        close("order4 strongest hand", production_value, hand_value);
+
+        let (production_ns, hand_ns) =
+            paired_medians(input, 400_000, production_order4, hand_order4);
+        assert!(
+            hand_ns > production_ns,
+            "order-four universal partition lowering must beat the strongest historical hand \
+             factorization: production={production_ns:.3} ns hand={hand_ns:.3} ns"
+        );
+        eprintln!(
+            "BINOMIAL-Q-HAND-932 order=4 production={production_ns:.3} ns/row \
+             strongest_hand={hand_ns:.3} ns/row hand_over_production={:.6}",
+            hand_ns / production_ns,
+        );
+    }
 }

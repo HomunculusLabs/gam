@@ -2913,6 +2913,13 @@ mod tests {
                         let hand_ns =
                             best_ns(5_000, || evaluate_hand(&mut hand_workspace));
                         let fastest_canonical_ns = fixed_ns.min(graph_ns).min(dynamic_ns);
+                        assert!(
+                            hand_ns > production_ns,
+                            "runtime-width feature pullback must beat the reusable strongest-hand \
+                             schedule: covariance={label} event={event:.0} k={} \
+                             production={production_ns:.3} ns hand={hand_ns:.3} ns",
+                            $k,
+                        );
                         eprintln!(
                             "G932_PACKED_WIDTH_RELEASE covariance={label} event={event:.0} \
                              k={} dim={} production_ns={production_ns:.3} fixed_ns={fixed_ns:.3} \
@@ -2936,6 +2943,10 @@ mod tests {
         measure_width!(6, 9);
         measure_width!(7, 10);
         measure_width!(8, 11);
+        // Cross the graph oracle's exact u16-axis-mask boundary. This is the
+        // representative runtime-width cell: production has no width dispatch,
+        // and the same feature-pullback schedule serves every larger K.
+        measure_width!(14, 17);
     }
 
     /// #932 release speed gate for the hot K=1 SCALAR rigid row (the
