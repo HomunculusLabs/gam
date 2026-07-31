@@ -22,6 +22,7 @@ from typing import Literal, Sequence
 
 import torch
 
+from .._binding import rust_module
 from ..smooth import (
     BSpline,
     Categorical,
@@ -34,6 +35,7 @@ from ..smooth import (
     TensorBSpline,
 )
 from ._basis import bspline_basis, duchon_basis, periodic_spline_curve_basis, sphere_basis
+from ._coerce import from_numpy_like, to_numpy_f64
 from ._dispatch import (
     resolve_fit_mode,
     shape_kind_for_smooths_arg,
@@ -107,6 +109,29 @@ def _smooth_by_tensor(smooth: Smooth, design: torch.Tensor) -> torch.Tensor | No
     if by is None:
         return None
     return _to_tensor(by, design).reshape(-1)
+
+
+def _weighted_sum_to_zero_chart(
+    design: torch.Tensor,
+    penalty: torch.Tensor,
+    weights: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Restrict one smooth to the engine's weighted sum-to-zero chart.
+
+    The chart itself is structural and comes from the terms-layer canonical
+    RRQR policy.  The congruence products stay in torch, so gradients through
+    the supplied design and penalty are preserved.  The returned transform
+    lifts fitted chart coefficients back to the smooth's raw coefficient
+    coordinates.
+    """
+    transform_np = rust_module().weighted_sum_to_zero_transform(
+        to_numpy_f64(design),
+        None if weights is None else to_numpy_f64(weights),
+    )
+    transform = from_numpy_like(transform_np, design).to(torch.float64)
+    constrained_design = design @ transform
+    constrained_penalty = transform.mT @ penalty @ transform
+    return constrained_design, constrained_penalty, transform
 
 
 def _coerce_2d(t: torch.Tensor, name: str) -> torch.Tensor:
@@ -749,6 +774,7 @@ def _fit_independent(
     F = len(smooths_list)
     designs: list[torch.Tensor] = []
     penalties: list[torch.Tensor] = []
+    coefficient_transforms: list[torch.Tensor | None] = []
     if init_lambdas is not None:
         init_lam_arr = init_lambdas.detach().reshape(-1)
         if init_lam_arr.numel() != F:
@@ -768,6 +794,13 @@ def _fit_independent(
         by_t = _smooth_by_tensor(smooth, design)
         if by_t is not None:
             design = design * by_t.to(torch.float64).unsqueeze(1)
+        if isinstance(smooth, PeriodicSplineCurve):
+            design, penalty, transform = _weighted_sum_to_zero_chart(
+                design, penalty, weights_f64,
+            )
+            coefficient_transforms.append(transform)
+        else:
+            coefficient_transforms.append(None)
         designs.append(design)
         penalties.append(penalty)
 
@@ -778,8 +811,12 @@ def _fit_independent(
         weights=weights_f64,
         init_log_lambdas=init_log_lambdas,
     )
+    coefficients = [
+        coefficient if transform is None else transform @ coefficient
+        for coefficient, transform in zip(out.coefficients, coefficient_transforms)
+    ]
     return FitResult(
-        coefficients=list(out.coefficients),
+        coefficients=coefficients,
         fitted=out.fitted,
         lambdas=out.lambdas,
         reml_score=out.reml_score,
@@ -965,8 +1002,21 @@ def fit(
         bys.append(_smooth_by_tensor(s, design))
 
     modulated: list[torch.Tensor] = []
-    for design, by_t in zip(designs, bys):
-        modulated.append(design * by_t.unsqueeze(1) if by_t is not None else design)
+    coefficient_transforms: list[torch.Tensor | None] = []
+    identified_penalties: list[torch.Tensor] = []
+    for smooth, design, penalty, by_t in zip(smooths_list, designs, penalties, bys):
+        actual_design = design * by_t.unsqueeze(1) if by_t is not None else design
+        if isinstance(smooth, PeriodicSplineCurve):
+            actual_design, penalty, transform = _weighted_sum_to_zero_chart(
+                actual_design.to(torch.float64),
+                penalty.to(torch.float64),
+                weights_f64,
+            )
+            coefficient_transforms.append(transform)
+        else:
+            coefficient_transforms.append(None)
+        modulated.append(actual_design)
+        identified_penalties.append(penalty)
     init_log_lambdas = None
     if init_lambdas is not None:
         init_lam_arr = init_lambdas.to(torch.float64).reshape(-1)
@@ -974,18 +1024,26 @@ def fit(
             raise ValueError(
                 f"init_lambdas must have length F={F}; got {init_lam_arr.numel()}"
             )
-        init_log_lambdas = torch.log(init_lam_arr.clamp_min(1.0e-300))
+        if not bool(torch.isfinite(init_lam_arr).all()) or not bool(
+            (init_lam_arr > 0.0).all()
+        ):
+            raise ValueError("init_lambdas must be finite and strictly positive")
+        init_log_lambdas = torch.log(init_lam_arr)
     # ``mode='joint'`` reaches here only for D == 1. Preserve the full
     # vector warm start instead of collapsing to init_lambdas[0].
     add_out: AdditiveRemlOutput = gaussian_reml_fit_blocks(
         modulated,
-        penalties,
+        identified_penalties,
         response_f64,
         weights=weights_f64,
         init_log_lambdas=init_log_lambdas,
     )
+    coefficients = [
+        coefficient if transform is None else transform @ coefficient
+        for coefficient, transform in zip(add_out.coefficients, coefficient_transforms)
+    ]
     return FitResult(
-        coefficients=list(add_out.coefficients),
+        coefficients=coefficients,
         fitted=add_out.fitted,
         lambdas=add_out.lambdas,
         reml_score=add_out.reml_score,

@@ -1,9 +1,15 @@
 use crate::estimate::EstimationError;
-use gam_problem::StationarityStandard;
+use crate::rho_optimizer::{FallbackPolicy, OuterProblem};
 use faer::Side;
 use gam_linalg::faer_ndarray::{
-    FaerCholesky, FaerEigh, fast_ab, fast_atb, fast_xt_diag_x, fast_xt_diag_y,
+    FaerCholesky, FaerEigh, default_rrqr_rank_alpha, fast_ab, fast_atb, fast_xt_diag_x,
+    fast_xt_diag_y, rrqr_with_permutation,
 };
+use gam_problem::{
+    DeclaredHessianForm, Derivative, HessianValue, OuterEval, StationarityStandard,
+};
+use gam_terms::construction::CanonicalPenalty;
+use gam_terms::smooth::BlockwisePenalty;
 use ndarray::{
     Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, ArrayViewMut1, ArrayViewMut2, Axis,
     s,
@@ -59,6 +65,742 @@ const BLOCK_ORTHOGONAL_MAX_OUTER_PASSES: usize = 200;
 /// This is not a convergence criterion: the joint analytic score below is the
 /// only condition that can mint a fit.
 const BLOCK_ORTHOGONAL_BLOCK_UPDATES_PER_PASS: usize = 32;
+
+/// Canonical coefficient-domain contract for the raw multi-block Gaussian
+/// REML entry point.
+///
+/// Every block is classified once by the terms-layer spectral policy.  The
+/// resulting roots define both the nullities supplied to the forward REML
+/// objective and the augmented operator whose full column rank identifies the
+/// coefficient map:
+///
+/// ```text
+/// A(lambda) = [sqrt(W) X; sqrt(lambda_1) R_1; ...; sqrt(lambda_F) R_F].
+/// ```
+///
+/// Thus forward and backward cannot disagree about penalty rank, and a shared
+/// design/penalty null direction is rejected before an optimizer can mint
+/// gauge-dependent coefficients.  There is deliberately no ridge, spectral
+/// floor, pseudoinverse coefficient solve, or compatibility fallback.
+#[derive(Clone)]
+pub struct GaussianRemlBlocksDomain {
+    p_total: usize,
+    canonical_penalties: Vec<CanonicalPenalty>,
+    nullspace_dims: Vec<usize>,
+}
+
+impl GaussianRemlBlocksDomain {
+    pub fn from_blockwise_penalties(
+        p_total: usize,
+        penalties: &[BlockwisePenalty],
+    ) -> Result<Self, EstimationError> {
+        if p_total == 0 || penalties.is_empty() {
+            return Err(EstimationError::InvalidInput(
+                "block Gaussian REML domain requires at least one coefficient and one penalty block"
+                    .to_string(),
+            ));
+        }
+
+        let mut canonical_penalties = Vec::with_capacity(penalties.len());
+        let mut nullspace_dims = Vec::with_capacity(penalties.len());
+        let mut expected_start = 0_usize;
+        for (block, penalty) in penalties.iter().enumerate() {
+            if penalty.col_range.start != expected_start
+                || penalty.col_range.end <= penalty.col_range.start
+            {
+                return Err(EstimationError::InvalidInput(format!(
+                    "block Gaussian REML penalties must form a non-empty contiguous partition: \
+                     block {block} has range {:?}, expected start {expected_start}",
+                    penalty.col_range
+                )));
+            }
+            expected_start = penalty.col_range.end;
+
+            let spec = gam_terms::PenaltySpec::from_blockwise_ref(penalty);
+            let canonical = gam_terms::construction::canonicalize_penalty_spec(
+                &spec,
+                p_total,
+                block,
+                "block Gaussian REML domain",
+            )?
+            .ok_or_else(|| {
+                EstimationError::InvalidInput(format!(
+                    "block Gaussian REML penalty {block} has no positive-curvature direction"
+                ))
+            })?;
+            let block_dim = canonical.block_dim();
+            let rank = canonical.rank();
+            if rank + canonical.nullity != block_dim {
+                return Err(EstimationError::InvalidInput(format!(
+                    "block Gaussian REML penalty {block} is not positive semidefinite under the \
+                     canonical spectral classification: rank={rank}, nullity={}, dimension={block_dim}",
+                    canonical.nullity
+                )));
+            }
+            if canonical.positive_eigenvalues.len() != rank {
+                return Err(EstimationError::InvalidInput(format!(
+                    "block Gaussian REML penalty {block} canonical root/eigenspectrum mismatch: \
+                     root rank={rank}, positive eigenvalues={}",
+                    canonical.positive_eigenvalues.len()
+                )));
+            }
+            nullspace_dims.push(canonical.nullity);
+            canonical_penalties.push(canonical);
+        }
+        if expected_start != p_total {
+            return Err(EstimationError::InvalidInput(format!(
+                "block Gaussian REML penalty partition ends at {expected_start}, \
+                 but the joint design has {p_total} columns"
+            )));
+        }
+
+        Ok(Self {
+            p_total,
+            canonical_penalties,
+            nullspace_dims,
+        })
+    }
+
+    #[inline]
+    pub fn nullspace_dims(&self) -> &[usize] {
+        &self.nullspace_dims
+    }
+
+    fn local_penalties(&self) -> Vec<Array2<f64>> {
+        self.canonical_penalties
+            .iter()
+            .map(CanonicalPenalty::local_penalty)
+            .collect()
+    }
+
+    fn normal_matrix(
+        &self,
+        xtwx: &Array2<f64>,
+        lambdas: ArrayView1<'_, f64>,
+    ) -> Result<Array2<f64>, EstimationError> {
+        if xtwx.dim() != (self.p_total, self.p_total) {
+            return Err(EstimationError::InvalidInput(format!(
+                "block Gaussian REML Gram shape mismatch: expected {}x{}, got {}x{}",
+                self.p_total,
+                self.p_total,
+                xtwx.nrows(),
+                xtwx.ncols()
+            )));
+        }
+        if lambdas.len() != self.canonical_penalties.len() {
+            return Err(EstimationError::InvalidInput(format!(
+                "block Gaussian REML lambda count mismatch: expected {}, got {}",
+                self.canonical_penalties.len(),
+                lambdas.len()
+            )));
+        }
+        let mut normal = xtwx.clone();
+        for (block, penalty) in self.canonical_penalties.iter().enumerate() {
+            let lambda = lambdas[block];
+            if !lambda.is_finite() || lambda <= 0.0 {
+                return Err(EstimationError::InvalidInput(format!(
+                    "block Gaussian REML lambda[{block}] must be finite and positive; got {lambda}"
+                )));
+            }
+            penalty.accumulate_weighted(&mut normal, lambda);
+        }
+        gam_linalg::matrix::symmetrize_in_place(&mut normal);
+        Ok(normal)
+    }
+
+    /// Moore-Penrose inverse on the canonical positive-curvature range.
+    ///
+    /// This is not a coefficient-solve fallback: it is the derivative of the
+    /// REML penalty pseudo-determinant.  Building it from the already
+    /// classified root/eigenvalue pairs prevents a second rank policy from
+    /// silently changing the differentiated objective.
+    fn penalty_pseudoinverses(&self) -> Result<Vec<Array2<f64>>, EstimationError> {
+        let mut out = Vec::with_capacity(self.canonical_penalties.len());
+        for (block, penalty) in self.canonical_penalties.iter().enumerate() {
+            let k = penalty.block_dim();
+            let mut pinv = Array2::<f64>::zeros((k, k));
+            for (row, &eigenvalue) in penalty.positive_eigenvalues.iter().enumerate() {
+                if !eigenvalue.is_finite() || eigenvalue <= 0.0 {
+                    return Err(EstimationError::InvalidInput(format!(
+                        "block Gaussian REML penalty {block} has invalid canonical positive \
+                         eigenvalue {row}: {eigenvalue}"
+                    )));
+                }
+                let scale = 1.0 / (eigenvalue * eigenvalue);
+                for i in 0..k {
+                    for j in 0..k {
+                        pinv[[i, j]] += scale * penalty.root[[row, i]] * penalty.root[[row, j]];
+                    }
+                }
+            }
+            if pinv.iter().any(|value| !value.is_finite()) {
+                return Err(EstimationError::InvalidInput(format!(
+                    "block Gaussian REML penalty {block} canonical pseudoinverse is not representable"
+                )));
+            }
+            out.push(pinv);
+        }
+        Ok(out)
+    }
+
+    /// Certify that the supplied design and positive penalty scales determine
+    /// a unique coefficient vector, returning the exact normal matrix used by
+    /// the strict solve.
+    pub fn certify_joint_coefficient_map(
+        &self,
+        design: ArrayView2<'_, f64>,
+        weights: ArrayView1<'_, f64>,
+        lambdas: ArrayView1<'_, f64>,
+    ) -> Result<Array2<f64>, EstimationError> {
+        if design.ncols() != self.p_total || weights.len() != design.nrows() {
+            return Err(EstimationError::InvalidInput(format!(
+                "block Gaussian REML domain shape mismatch: design={}x{}, weights={}, coefficients={}",
+                design.nrows(),
+                design.ncols(),
+                weights.len(),
+                self.p_total
+            )));
+        }
+        if lambdas.len() != self.canonical_penalties.len() {
+            return Err(EstimationError::InvalidInput(format!(
+                "block Gaussian REML lambda count mismatch: expected {}, got {}",
+                self.canonical_penalties.len(),
+                lambdas.len()
+            )));
+        }
+        if let Some(((row, col), value)) =
+            design.indexed_iter().find(|(_, value)| !value.is_finite())
+        {
+            return Err(EstimationError::InvalidInput(format!(
+                "block Gaussian REML design[{row},{col}] must be finite; got {value}"
+            )));
+        }
+        if let Some((row, value)) = weights
+            .iter()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite() || **value < 0.0)
+        {
+            return Err(EstimationError::InvalidInput(format!(
+                "block Gaussian REML weights[{row}] must be finite and non-negative; got {value}"
+            )));
+        }
+        if let Some((block, value)) = lambdas
+            .iter()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite() || **value <= 0.0)
+        {
+            return Err(EstimationError::InvalidInput(format!(
+                "block Gaussian REML lambda[{block}] must be finite and positive; got {value}"
+            )));
+        }
+
+        let augmented_rows = design.nrows()
+            + self
+                .canonical_penalties
+                .iter()
+                .map(CanonicalPenalty::rank)
+                .sum::<usize>();
+        let mut augmented = Array2::<f64>::zeros((augmented_rows, self.p_total));
+        for row in 0..design.nrows() {
+            let scale = weights[row].sqrt();
+            for col in 0..self.p_total {
+                augmented[[row, col]] = scale * design[[row, col]];
+            }
+        }
+        let mut augmented_row = design.nrows();
+        for (block, penalty) in self.canonical_penalties.iter().enumerate() {
+            let scale = lambdas[block].sqrt();
+            for root_row in 0..penalty.rank() {
+                for local_col in 0..penalty.block_dim() {
+                    augmented[[
+                        augmented_row + root_row,
+                        penalty.col_range.start + local_col,
+                    ]] = scale * penalty.root[[root_row, local_col]];
+                }
+            }
+            augmented_row += penalty.rank();
+        }
+
+        let rank = rrqr_with_permutation(&augmented, default_rrqr_rank_alpha())
+            .map_err(|error| {
+                EstimationError::InvalidInput(format!(
+                    "block Gaussian REML augmented-rank certificate failed: {error}"
+                ))
+            })?
+            .rank;
+        if rank != self.p_total {
+            return Err(EstimationError::InvalidInput(format!(
+                "block Gaussian REML joint coefficient map is not identified: \
+                 augmented operator [sqrt(W)X; sqrt(lambda_k)R_k] has numerical \
+                 rank {rank} < {}; constrain shared design/penalty-null directions \
+                 before fitting",
+                self.p_total
+            )));
+        }
+
+        let xtwx = fast_xt_diag_x(&design, &weights);
+        let normal = self.normal_matrix(&xtwx, lambdas)?;
+        gam_linalg::utils::certified_spd_factorize(
+            &normal,
+            "block Gaussian REML penalized normal matrix",
+        )
+        .map_err(|error| {
+            EstimationError::InvalidInput(format!(
+                "block Gaussian REML requires an exact SPD penalized normal matrix: {error}"
+            ))
+        })?;
+        Ok(normal)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GaussianRemlBlocksResult {
+    pub coefficients: Array2<f64>,
+    pub fitted: Array2<f64>,
+    pub lambdas: Array1<f64>,
+    pub log_lambdas: Array1<f64>,
+    pub reml_score: f64,
+    pub edf: Array1<f64>,
+}
+
+struct GaussianRemlBlocksProfile {
+    domain: GaussianRemlBlocksDomain,
+    design: Array2<f64>,
+    weights: Array1<f64>,
+    y: Array1<f64>,
+    xtwx: Array2<f64>,
+    xtwy: Array1<f64>,
+    nu: f64,
+}
+
+struct GaussianRemlBlocksProfileEval {
+    cost: f64,
+    gradient: Array1<f64>,
+    hessian: Array2<f64>,
+    lambdas: Array1<f64>,
+    coefficients: Array1<f64>,
+    fitted: Array1<f64>,
+    edf: Array1<f64>,
+}
+
+impl GaussianRemlBlocksProfile {
+    fn evaluate(
+        &self,
+        rhos: ArrayView1<'_, f64>,
+    ) -> Result<GaussianRemlBlocksProfileEval, EstimationError> {
+        let f_blocks = self.domain.canonical_penalties.len();
+        if rhos.len() != f_blocks {
+            return Err(EstimationError::InvalidInput(format!(
+                "block Gaussian REML rho count mismatch: expected {f_blocks}, got {}",
+                rhos.len()
+            )));
+        }
+        let lambdas = Array1::from_vec(
+            gam_problem::checked_exp_log_strengths(rhos.iter().copied())
+                .map_err(|error| EstimationError::InvalidInput(error.to_string()))?,
+        );
+        let normal = self.domain.normal_matrix(&self.xtwx, lambdas.view())?;
+        let inverse = gam_linalg::utils::certified_spd_inverse(
+            &normal,
+            "block Gaussian REML penalized normal matrix",
+        )
+        .map(gam_linalg::utils::CertifiedSpdInverse::into_inverse)
+        .map_err(|error| {
+            EstimationError::InvalidInput(format!(
+                "block Gaussian REML requires an exact SPD penalized normal matrix: {error}"
+            ))
+        })?;
+        // The inverse above certifies this exact, unperturbed normal matrix.
+        // A second strict Cholesky supplies its determinant without exposing a
+        // separate repaired spectrum or rank policy.
+        let lower = normal
+            .cholesky(Side::Lower)
+            .map_err(|error| {
+                EstimationError::InvalidInput(format!(
+                    "block Gaussian REML penalized normal log-determinant failed: {error}"
+                ))
+            })?
+            .lower_triangular();
+        let logdet_normal = 2.0 * lower.diag().iter().map(|value| value.ln()).sum::<f64>();
+        if !logdet_normal.is_finite() {
+            return Err(EstimationError::InvalidInput(
+                "block Gaussian REML penalized normal log-determinant is not finite".to_string(),
+            ));
+        }
+
+        let coefficients = inverse.dot(&self.xtwy);
+        let fitted = self.design.dot(&coefficients);
+        let residual = &self.y - &fitted;
+
+        // q = y'Wy - b'K^-1b = r'Wr + beta'P beta.  The right-hand form is a
+        // sum of non-negative terms and remains representable for nearly
+        // interpolating designs; replacing a non-positive q by a floor would
+        // change both the objective and the VJP, so the profile is refused.
+        let mut q = residual
+            .iter()
+            .zip(self.weights.iter())
+            .map(|(&value, &weight)| weight * value * value)
+            .sum::<f64>();
+        let mut logdet_penalty = 0.0_f64;
+        let mut p_betas = Vec::with_capacity(f_blocks);
+        let mut rp_matrices = Vec::with_capacity(f_blocks);
+        let mut b_values = Array1::<f64>::zeros(f_blocks);
+        let mut t_values = Array1::<f64>::zeros(f_blocks);
+        let mut edf = Array1::<f64>::zeros(f_blocks);
+        for (block, penalty) in self.domain.canonical_penalties.iter().enumerate() {
+            let start = penalty.col_range.start;
+            let end = penalty.col_range.end;
+            let beta_block = coefficients.slice(s![start..end]);
+            let local_p_beta = penalty.local.dot(&beta_block);
+            let lambda = lambdas[block];
+            let mut p_beta = Array1::<f64>::zeros(self.domain.p_total);
+            for local in 0..penalty.block_dim() {
+                p_beta[start + local] = lambda * local_p_beta[local];
+            }
+            let b_value = coefficients.dot(&p_beta);
+            q += b_value;
+            b_values[block] = b_value;
+
+            let weighted_penalty = penalty.local.mapv(|value| lambda * value);
+            let rp_block = inverse
+                .slice(s![.., start..end])
+                .dot(&weighted_penalty);
+            let mut rp = Array2::<f64>::zeros((self.domain.p_total, self.domain.p_total));
+            rp.slice_mut(s![.., start..end]).assign(&rp_block);
+            let trace = (0..penalty.block_dim())
+                .map(|local| rp_block[[start + local, local]])
+                .sum::<f64>();
+            t_values[block] = trace;
+            edf[block] = penalty.block_dim() as f64 - trace;
+            logdet_penalty += penalty
+                .positive_eigenvalues
+                .iter()
+                .map(|eigenvalue| eigenvalue.ln())
+                .sum::<f64>()
+                + penalty.rank() as f64 * rhos[block];
+            p_betas.push(p_beta);
+            rp_matrices.push(rp);
+        }
+        if !q.is_finite() || q <= 0.0 {
+            return Err(EstimationError::InvalidInput(format!(
+                "block Gaussian REML profiled residual quadratic form must be finite and positive; got {q}"
+            )));
+        }
+        if !logdet_penalty.is_finite() {
+            return Err(EstimationError::InvalidInput(
+                "block Gaussian REML penalty pseudo-log-determinant is not finite".to_string(),
+            ));
+        }
+
+        let tau = self.nu / q;
+        let tau_q = -self.nu / (q * q);
+        let cost = 0.5
+            * (self.nu
+                * (1.0 + (2.0 * std::f64::consts::PI * q / self.nu).ln())
+                + logdet_normal
+                - logdet_penalty);
+        let mut gradient = Array1::<f64>::zeros(f_blocks);
+        for block in 0..f_blocks {
+            gradient[block] = 0.5
+                * (t_values[block]
+                    - self.domain.canonical_penalties[block].rank() as f64
+                    + tau * b_values[block]);
+        }
+
+        let mut hessian = Array2::<f64>::zeros((f_blocks, f_blocks));
+        for k in 0..f_blocks {
+            for j in 0..f_blocks {
+                let trace_pair = gam_linalg::utils::trace_of_product(
+                    rp_matrices[k].view(),
+                    rp_matrices[j].view(),
+                );
+                let beta_pk_r_pj_beta = p_betas[k].dot(&inverse.dot(&p_betas[j]));
+                hessian[[k, j]] = 0.5
+                    * ((if k == j { t_values[k] } else { 0.0 }) - trace_pair
+                        + tau_q * b_values[k] * b_values[j]
+                        + tau
+                            * ((if k == j { b_values[k] } else { 0.0 })
+                                - 2.0 * beta_pk_r_pj_beta));
+            }
+        }
+        gam_linalg::matrix::symmetrize_in_place(&mut hessian);
+        if !cost.is_finite()
+            || coefficients.iter().any(|value| !value.is_finite())
+            || fitted.iter().any(|value| !value.is_finite())
+            || edf.iter().any(|value| !value.is_finite())
+            || gradient.iter().any(|value| !value.is_finite())
+            || hessian.iter().any(|value| !value.is_finite())
+        {
+            return Err(EstimationError::InvalidInput(
+                "block Gaussian REML profile evaluation produced a non-finite value".to_string(),
+            ));
+        }
+
+        Ok(GaussianRemlBlocksProfileEval {
+            cost,
+            gradient,
+            hessian,
+            lambdas,
+            coefficients,
+            fitted,
+            edf,
+        })
+    }
+}
+
+fn gaussian_reml_blocks_profile_cost(
+    state: &mut GaussianRemlBlocksProfile,
+    rhos: &Array1<f64>,
+) -> Result<f64, EstimationError> {
+    Ok(state.evaluate(rhos.view())?.cost)
+}
+
+fn gaussian_reml_blocks_profile_outer_eval(
+    state: &mut GaussianRemlBlocksProfile,
+    rhos: &Array1<f64>,
+) -> Result<OuterEval, EstimationError> {
+    let evaluated = state.evaluate(rhos.view())?;
+    Ok(OuterEval {
+        cost: evaluated.cost,
+        gradient: evaluated.gradient,
+        hessian: HessianValue::Dense(evaluated.hessian),
+        inner_beta_hint: Some(evaluated.coefficients),
+    })
+}
+
+/// Exact profiled Gaussian REML for a joint additive design with one
+/// smoothing parameter per coefficient block.
+///
+/// The scalar value, score, Hessian, and analytic backward all use the same
+/// criterion
+///
+/// `V = 1/2 { nu [1 + log(2 pi q / nu)] + log|K| - log|P|_+ }`,
+///
+/// where `K = X'WX + P`, `P = blockdiag(lambda_k S_k)`, and
+/// `q = y'Wy - (X'Wy)' K^-1 (X'Wy)`.  The one-block case deliberately reduces
+/// through the established grid-free scalar solver, making that algebraic
+/// reduction exact rather than merely numerically close.
+pub fn gaussian_reml_fit_blocks_exact(
+    designs: &[Array2<f64>],
+    penalties: &[Array2<f64>],
+    y: ArrayView1<'_, f64>,
+    weights: Option<ArrayView1<'_, f64>>,
+    init_rhos: Option<&[f64]>,
+) -> Result<GaussianRemlBlocksResult, EstimationError> {
+    let f_blocks = designs.len();
+    if f_blocks == 0 || penalties.len() != f_blocks {
+        return Err(EstimationError::InvalidInput(format!(
+            "exact block Gaussian REML requires equal non-zero design and penalty block counts; \
+             got designs={}, penalties={}",
+            f_blocks,
+            penalties.len()
+        )));
+    }
+    if let Some(rhos) = init_rhos {
+        if rhos.len() != f_blocks {
+            return Err(EstimationError::InvalidInput(format!(
+                "exact block Gaussian REML init_rhos length mismatch: expected {f_blocks}, got {}",
+                rhos.len()
+            )));
+        }
+        if let Some((block, value)) = rhos
+            .iter()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(EstimationError::InvalidInput(format!(
+                "exact block Gaussian REML init_rhos[{block}] must be finite; got {value}"
+            )));
+        }
+    }
+
+    let n = y.len();
+    if n == 0 {
+        return Err(EstimationError::InvalidInput(
+            "exact block Gaussian REML requires at least one observation".to_string(),
+        ));
+    }
+    if let Some((row, value)) = y.iter().enumerate().find(|(_, value)| !value.is_finite()) {
+        return Err(EstimationError::InvalidInput(format!(
+            "exact block Gaussian REML y[{row}] must be finite; got {value}"
+        )));
+    }
+
+    let mut offsets = Vec::with_capacity(f_blocks + 1);
+    offsets.push(0_usize);
+    let mut p_total = 0_usize;
+    for (block, (design, penalty)) in designs.iter().zip(penalties.iter()).enumerate() {
+        if design.nrows() != n {
+            return Err(EstimationError::InvalidInput(format!(
+                "exact block Gaussian REML designs[{block}] has {} rows, expected {n}",
+                design.nrows()
+            )));
+        }
+        if design.ncols() == 0 || penalty.dim() != (design.ncols(), design.ncols()) {
+            return Err(EstimationError::InvalidInput(format!(
+                "exact block Gaussian REML block {block} requires a non-empty square penalty \
+                 matching its {} design columns; got {}x{}",
+                design.ncols(),
+                penalty.nrows(),
+                penalty.ncols()
+            )));
+        }
+        if let Some(((row, col), value)) =
+            design.indexed_iter().find(|(_, value)| !value.is_finite())
+        {
+            return Err(EstimationError::InvalidInput(format!(
+                "exact block Gaussian REML designs[{block}][{row},{col}] must be finite; got {value}"
+            )));
+        }
+        if let Some(((row, col), value)) =
+            penalty.indexed_iter().find(|(_, value)| !value.is_finite())
+        {
+            return Err(EstimationError::InvalidInput(format!(
+                "exact block Gaussian REML penalties[{block}][{row},{col}] must be finite; got {value}"
+            )));
+        }
+        p_total += design.ncols();
+        offsets.push(p_total);
+    }
+
+    let weight = gaussian_reml_weights(n, weights)?;
+    let mut design = Array2::<f64>::zeros((n, p_total));
+    let mut blockwise_penalties = Vec::with_capacity(f_blocks);
+    let mut canonical_keys = Vec::with_capacity(f_blocks);
+    for block in 0..f_blocks {
+        design
+            .slice_mut(s![.., offsets[block]..offsets[block + 1]])
+            .assign(&designs[block]);
+        blockwise_penalties.push(BlockwisePenalty::new(
+            offsets[block]..offsets[block + 1],
+            penalties[block].clone(),
+        ));
+        canonical_keys.push(fnv1a_mix(
+            matrix_fingerprint(designs[block].view()),
+            matrix_fingerprint(penalties[block].view()),
+        ));
+    }
+    let domain =
+        GaussianRemlBlocksDomain::from_blockwise_penalties(p_total, &blockwise_penalties)?;
+    let unit_lambdas = Array1::<f64>::ones(f_blocks);
+    domain.certify_joint_coefficient_map(design.view(), weight.view(), unit_lambdas.view())?;
+
+    let n_effective = effective_observation_count(weight.view());
+    let nullity = domain.nullspace_dims.iter().sum::<usize>();
+    if n_effective <= nullity {
+        return Err(EstimationError::InvalidInput(format!(
+            "exact block Gaussian REML requires more positive-weight rows than total penalty \
+             nullity; got n_effective={n_effective}, nullity={nullity}"
+        )));
+    }
+
+    if f_blocks == 1 {
+        // The scalar solver whitens by X'WX.  Certify that exact matrix before
+        // delegating so this block entry point never reaches the scalar
+        // compatibility jitter path.
+        let xtwx = fast_xt_diag_x(&design.view(), &weight.view());
+        gam_linalg::utils::certified_spd_factorize(
+            &xtwx,
+            "one-block Gaussian REML unpenalized normal matrix",
+        )
+        .map_err(|error| {
+            EstimationError::InvalidInput(format!(
+                "one-block Gaussian REML requires an exact SPD unpenalized normal matrix: {error}"
+            ))
+        })?;
+        let scalar = gaussian_reml_closed_form(
+            design.view(),
+            y,
+            penalties[0].view(),
+            Some(weight.view()),
+            init_rhos.map(|rhos| rhos[0]),
+        )?;
+        let lambdas = Array1::from_elem(1, scalar.lambda);
+        domain.certify_joint_coefficient_map(design.view(), weight.view(), lambdas.view())?;
+        return Ok(GaussianRemlBlocksResult {
+            coefficients: scalar.coefficients.insert_axis(Axis(1)),
+            fitted: scalar.fitted.insert_axis(Axis(1)),
+            lambdas,
+            log_lambdas: Array1::from_elem(1, scalar.rho),
+            reml_score: scalar.reml_score,
+            edf: Array1::from_elem(1, scalar.edf),
+        });
+    }
+
+    let xtwx = fast_xt_diag_x(&design.view(), &weight.view());
+    let y_owned = y.to_owned();
+    let y_matrix = y_owned.view().insert_axis(Axis(1));
+    let xtwy = fast_xt_diag_y(&design.view(), &weight.view(), &y_matrix)
+        .column(0)
+        .to_owned();
+    let profile = GaussianRemlBlocksProfile {
+        domain,
+        design,
+        weights: weight,
+        y: y_owned,
+        xtwx,
+        xtwy,
+        nu: (n_effective - nullity) as f64,
+    };
+
+    let mut seed_config = gam_problem::SeedConfig::default();
+    seed_config.bounds = (RHO_LOWER, RHO_UPPER);
+    seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;
+    let mut problem = OuterProblem::new(f_blocks)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_prefer_gradient_only(false)
+        .with_disable_fixed_point(true)
+        .with_tolerance(1.0e-10)
+        .with_required_projected_gradient_norm(Some(1.0e-8))
+        .with_max_iter(200)
+        .with_bounds(
+            Array1::from_elem(f_blocks, RHO_LOWER),
+            Array1::from_elem(f_blocks, RHO_UPPER),
+        )
+        .with_rho_bound(RHO_UPPER)
+        .with_seed_config(seed_config)
+        .with_rho_canonical_keys(Some(canonical_keys))
+        .with_fallback_policy(FallbackPolicy::Disabled)
+        .with_problem_size(n, p_total);
+    if let Some(rhos) = init_rhos {
+        problem = problem
+            .with_initial_rho(Array1::from_iter(
+                rhos
+                    .iter()
+                    .map(|rho| rho.clamp(RHO_LOWER, RHO_UPPER)),
+            ))
+            .with_screen_initial_rho(true);
+    }
+    let mut objective = problem.build_objective(
+        profile,
+        gaussian_reml_blocks_profile_cost,
+        gaussian_reml_blocks_profile_outer_eval,
+        None::<fn(&mut GaussianRemlBlocksProfile)>,
+        None::<
+            fn(
+                &mut GaussianRemlBlocksProfile,
+                &Array1<f64>,
+            ) -> Result<gam_problem::EfsEval, EstimationError>,
+        >,
+    );
+    let optimum = problem.run(&mut objective, "exact block Gaussian REML")?;
+    let final_eval = objective.state.evaluate(optimum.rho.view())?;
+    objective.state.domain.certify_joint_coefficient_map(
+        objective.state.design.view(),
+        objective.state.weights.view(),
+        final_eval.lambdas.view(),
+    )?;
+
+    Ok(GaussianRemlBlocksResult {
+        coefficients: final_eval.coefficients.insert_axis(Axis(1)),
+        fitted: final_eval.fitted.insert_axis(Axis(1)),
+        lambdas: final_eval.lambdas,
+        log_lambdas: optimum.rho,
+        reml_score: final_eval.cost,
+        edf: final_eval.edf,
+    })
+}
 
 #[derive(Clone, Copy)]
 struct BlockOrthogonalControls {
@@ -6970,10 +7712,33 @@ pub fn gaussian_reml_fit_blocks_backward_analytic(
 ) -> Result<GaussianRemlBlocksBackwardAnalytic, EstimationError> {
     let n = y.len();
     let f_blocks = designs.len();
+    if f_blocks == 0 || penalties_raw.len() != f_blocks {
+        return Err(EstimationError::InvalidInput(format!(
+            "gaussian_reml_fit_blocks_backward requires equal non-zero design and penalty \
+             block counts; got designs={}, penalties={}",
+            f_blocks,
+            penalties_raw.len()
+        )));
+    }
     let mut offsets = Vec::with_capacity(f_blocks + 1);
     let mut cursor = 0_usize;
     offsets.push(cursor);
-    for design in designs {
+    for (block, design) in designs.iter().enumerate() {
+        if design.nrows() != n {
+            return Err(EstimationError::InvalidInput(format!(
+                "designs[{block}] has {} rows, expected {n}",
+                design.nrows()
+            )));
+        }
+        if penalties_raw[block].dim() != (design.ncols(), design.ncols()) {
+            return Err(EstimationError::InvalidInput(format!(
+                "penalties[{block}] has shape {}x{}, expected {}x{}",
+                penalties_raw[block].nrows(),
+                penalties_raw[block].ncols(),
+                design.ncols(),
+                design.ncols()
+            )));
+        }
         cursor += design.ncols();
         offsets.push(cursor);
     }
@@ -7116,43 +7881,63 @@ pub fn gaussian_reml_fit_blocks_backward_analytic(
             .assign(&designs[k]);
     }
 
-    let penalties: Vec<Array2<f64>> = penalties_raw
-        .iter()
-        .map(|p| {
-            let mut out = p.clone();
-            gam_linalg::matrix::symmetrize_in_place(&mut out);
-            out
-        })
-        .collect();
-    let mut ranks = Vec::with_capacity(f_blocks);
-    let mut pinvs = Vec::with_capacity(f_blocks);
-    for penalty in &penalties {
-        let geometry = gam_linalg::utils::rank_certified_psd_pseudoinverse(penalty, 1.0e-10)?;
-        ranks.push(geometry.rank());
-        pinvs.push(geometry.into_pseudoinverse());
-    }
-
-    let lambdas = Array1::from_iter(rhos.iter().map(|rho| rho.exp()));
-    if let Some((block, lambda)) = lambdas
+    let blockwise_penalties: Vec<BlockwisePenalty> = penalties_raw
         .iter()
         .enumerate()
-        .find(|(_, lambda)| !lambda.is_finite() || **lambda <= 0.0)
-    {
-        return Err(EstimationError::InvalidInput(format!(
-            "exp(log_lambdas[{block}]) must be finite and positive; got {lambda}"
-        )));
-    }
-    let mut k_matrix = fast_xt_diag_x(&z.view(), &weights);
-    for block in 0..f_blocks {
-        let lambda = lambdas[block];
-        for local_i in 0..penalties[block].nrows() {
-            let global_i = offsets[block] + local_i;
-            for local_j in 0..penalties[block].ncols() {
-                let global_j = offsets[block] + local_j;
-                k_matrix[[global_i, global_j]] += lambda * penalties[block][[local_i, local_j]];
-            }
+        .map(|(block, penalty)| {
+            BlockwisePenalty::new(offsets[block]..offsets[block + 1], penalty.clone())
+        })
+        .collect();
+    let domain = GaussianRemlBlocksDomain::from_blockwise_penalties(p_total, &blockwise_penalties)?;
+    let lambdas = Array1::from_vec(
+        gam_problem::checked_exp_log_strengths(rhos.iter().copied())
+            .map_err(|error| EstimationError::InvalidInput(error.to_string()))?,
+    );
+    let k_matrix = domain.certify_joint_coefficient_map(z.view(), weights, lambdas.view())?;
+
+    // The one-block forward is an exact algebraic reduction through the
+    // established scalar closed-form solver.  Its VJP must reduce through the
+    // same implementation as well: doing so preserves the scalar solver's
+    // grid-free stationary-root selection and all of its boundary semantics,
+    // rather than asking a nominally equivalent multi-block derivation to
+    // reproduce them to roundoff.
+    if f_blocks == 1 {
+        let mut upstream_lambda = grad_lambdas.map_or(0.0, |gradient| gradient[0]);
+        if let Some(gradient) = grad_log_lambdas {
+            upstream_lambda += gradient[0] / lambdas[0];
         }
+        let y_owned = y.to_owned().insert_axis(Axis(1));
+        let weights_owned = weights.to_owned();
+        let fit = gaussian_reml_multi_closed_form_with_cache(
+            z.view(),
+            y_owned.view(),
+            penalties_raw[0].view(),
+            Some(weights_owned.view()),
+            Some(lambdas[0]),
+            None,
+        )?;
+        let backward = gaussian_reml_multi_closed_form_backward_from_fit(
+            z.view(),
+            y_owned.view(),
+            penalties_raw[0].view(),
+            Some(weights_owned.view()),
+            &fit,
+            upstream_lambda,
+            grad_coefficients,
+            grad_fitted,
+            grad_reml_score,
+            grad_edf.map_or(0.0, |gradient| gradient[0]),
+        )?;
+        return Ok(GaussianRemlBlocksBackwardAnalytic {
+            grad_designs: vec![backward.grad_x],
+            grad_penalties: vec![backward.grad_penalty],
+            grad_y: backward.grad_y,
+            grad_weights: backward.grad_weights,
+        });
     }
+
+    let penalties = domain.local_penalties();
+    let pinvs = domain.penalty_pseudoinverses()?;
     let r = gam_linalg::utils::certified_spd_inverse(
         &k_matrix,
         "block Gaussian REML penalized normal matrix",
@@ -7184,23 +7969,23 @@ pub fn gaussian_reml_fit_blocks_backward_analytic(
     }
     let residual = &y.to_owned() - &fitted;
     let weighted_residual = &residual * &weights.to_owned();
-    let ywy = y
+    let mut q = residual
         .iter()
         .zip(weights.iter())
-        .map(|(&yi, &wi)| wi * yi * yi)
+        .map(|(&value, &weight)| weight * value * value)
         .sum::<f64>();
-    let q_raw = ywy - xtwy.dot(&beta);
-    if !q_raw.is_finite() {
+    for block in 0..f_blocks {
+        let start = offsets[block];
+        let end = offsets[block + 1];
+        let beta_block = beta.slice(s![start..end]);
+        q += lambdas[block] * beta_block.dot(&penalties[block].dot(&beta_block));
+    }
+    if !q.is_finite() || q <= 0.0 {
         return Err(EstimationError::InvalidInput(format!(
-            "Gaussian REML residual quadratic form must be finite; got {q_raw}"
+            "Gaussian REML residual quadratic form must be finite and positive; got {q}"
         )));
     }
-    let q = q_raw.max(1.0e-300);
-    let nullity = penalties
-        .iter()
-        .zip(ranks.iter())
-        .map(|(penalty, rank)| penalty.nrows().saturating_sub(*rank))
-        .sum::<usize>();
+    let nullity = domain.nullspace_dims().iter().sum::<usize>();
     // Match the block-orthogonal forward's effective sample size: zero
     // prior-weight rows are excluded from the residual degrees of freedom.
     let nu = effective_observation_count(weights) as f64 - nullity as f64;
@@ -7448,53 +8233,6 @@ pub fn gaussian_reml_fit_blocks_backward_analytic(
             .map(|col| z[[row, col]] * zg[[row, col]])
             .sum::<f64>();
         grad_weights[row] = q_kernel * residual[row] * residual[row] + diag_zgz + y[row] * zh[row];
-    }
-
-    // Weight-scale invariance of the REML score (issue #877). The Gaussian REML
-    // criterion the score adjoint targets — the profiled cost assembled in
-    // `reml_outer_engine::objective` — carries the data-density normalization
-    // `−½ Σ_{wᵢ>0} log(wᵢ)` (the `|W|^{½}` factor of the weighted normal
-    // likelihood) together with the geometric-mean weight anchor on ρ. Their
-    // net effect is that the *score* depends on the observation weights only up
-    // to a global scale: replacing `w → c·w` leaves it unchanged. By Euler's
-    // homogeneity identity that invariance is exactly
-    //   Σ_i wᵢ · ∂(score)/∂wᵢ = 0,
-    // i.e. the score's weight-gradient is orthogonal to the scaling direction
-    // `1/wᵢ`. The kernel propagation above produces the *raw* (un-normalized)
-    // weight partials `aᵢ`, which do not satisfy this constraint; the missing
-    // piece is the projection that removes the scaling component. Subtract the
-    // multiple of `1/wᵢ` that restores `Σ_i wᵢ·gradᵢ = 0`:
-    //   gradᵢ ← aᵢ − μ/wᵢ,  μ = (Σ_{j:wⱼ>0} wⱼ aⱼ) / n₊.
-    // Only the score seed is scale-invariant — β̂, fitted = Zβ̂ and the EDF all
-    // scale with the weights (the λS term in K = ZᵀWZ + λS does not), so their
-    // adjoints must NOT be projected. We therefore form the score-only partials
-    // `aᵢˢ = ½·grs·(τ·rᵢ² + zᵢᵀ R zᵢ)` from the score's own kernel
-    // contributions (q_kernel ← ½·grs·τ, g_kernel ← ½·grs·R) and project just
-    // those, leaving the coefficient/fitted/EDF/λ weight-gradients intact.
-    if grad_reml_score != 0.0 {
-        let q_kernel_score = 0.5 * grad_reml_score * tau;
-        let zr = z.dot(&r);
-        let n_pos = (0..n).filter(|&i| weights[i] > 0.0).count();
-        if n_pos > 0 {
-            let mut weighted_score_partial_sum = 0.0_f64;
-            for row in 0..n {
-                if weights[row] <= 0.0 {
-                    continue;
-                }
-                let z_r_z = (0..p_total)
-                    .map(|col| z[[row, col]] * zr[[row, col]])
-                    .sum::<f64>();
-                let a_score =
-                    q_kernel_score * residual[row] * residual[row] + 0.5 * grad_reml_score * z_r_z;
-                weighted_score_partial_sum += weights[row] * a_score;
-            }
-            let projection = weighted_score_partial_sum / n_pos as f64;
-            for row in 0..n {
-                if weights[row] > 0.0 {
-                    grad_weights[row] -= projection / weights[row];
-                }
-            }
-        }
     }
 
     let mut grad_penalties = Vec::with_capacity(f_blocks);

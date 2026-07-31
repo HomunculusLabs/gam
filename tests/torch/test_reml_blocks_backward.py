@@ -8,8 +8,16 @@ gt = pytest.importorskip("gamfit.torch")
 torch = pytest.importorskip("torch")
 
 
-def _smooth_block(n: int, k: int, phase: float) -> tuple[torch.Tensor, torch.Tensor]:
-    t = torch.remainder(torch.arange(n, dtype=torch.float64) / n + phase, 1.0)
+def _smooth_block(
+    n: int,
+    k: int,
+    phase: float,
+    frequency: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    t = torch.remainder(
+        frequency * torch.arange(n, dtype=torch.float64) / n + phase,
+        1.0,
+    )
     return gt.periodic_spline_curve_basis(t, k)
 
 
@@ -18,14 +26,29 @@ def _block_setup(
     k: int = 6,
     blocks: int = 3,
     seed: int = 0,
+    *,
+    identified: bool = True,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
+    from gamfit.torch.fit import _weighted_sum_to_zero_chart
+
     g = torch.Generator().manual_seed(seed)
     designs: list[torch.Tensor] = []
     penalties: list[torch.Tensor] = []
     y = torch.zeros(n, 1, dtype=torch.float64)
     for block in range(blocks):
-        design, penalty = _smooth_block(n, k, phase=0.017 * block)
-        coef = torch.randn(k, 1, generator=g, dtype=torch.float64)
+        # Phase shifts alone span the same cyclic-spline function space and
+        # therefore make the per-block smoothing parameters non-identifiable.
+        # Distinct frequencies exercise a genuinely joint, identified REML
+        # optimum while preserving the same periodic basis construction.
+        design, penalty = _smooth_block(
+            n,
+            k,
+            phase=0.017 * block,
+            frequency=block + 1,
+        )
+        if identified:
+            design, penalty, _ = _weighted_sum_to_zero_chart(design, penalty, None)
+        coef = torch.randn(design.shape[1], 1, generator=g, dtype=torch.float64)
         designs.append(design)
         penalties.append(penalty)
         y = y + design @ coef
@@ -45,7 +68,9 @@ def _scalar_loss(result) -> torch.Tensor:
 
 
 def test_f1_matches_single_smooth_forward_and_backward() -> None:
-    designs, penalties, y = _block_setup(n=60, k=8, blocks=1, seed=1)
+    designs, penalties, y = _block_setup(
+        n=60, k=8, blocks=1, seed=1, identified=False,
+    )
     design, penalty = designs[0], penalties[0]
 
     x_single = design.clone().requires_grad_(True)
@@ -77,6 +102,28 @@ def test_f1_matches_single_smooth_forward_and_backward() -> None:
     )
     for actual, expected in zip(grad_blocks, grad_single):
         torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-10)
+
+
+def test_raw_shared_periodic_null_direction_is_rejected_on_both_paths() -> None:
+    import numpy as np
+
+    from gamfit import _api
+
+    designs, penalties, y = _block_setup(
+        n=30, k=6, blocks=2, seed=2, identified=False,
+    )
+    match = "joint coefficient map is not identified"
+    with pytest.raises(ValueError, match=match):
+        gt.gaussian_reml_fit_blocks(designs, penalties, y)
+
+    with pytest.raises(ValueError, match=match):
+        _api.gaussian_reml_fit_blocks_backward(
+            [design.detach().numpy() for design in designs],
+            [penalty.detach().numpy() for penalty in penalties],
+            y.detach().numpy().reshape(-1, 1),
+            np.zeros(2, dtype=np.float64),
+            grad_reml_score=1.0,
+        )
 
 
 def test_public_blocks_gradcheck() -> None:

@@ -125,6 +125,43 @@ def test_fit_periodic_spline_curve_single():
     assert res.fitted.shape == (20, 1)
 
 
+def test_fit_two_periodic_splines_uses_identified_chart_and_lifts_coefficients():
+    n = 80
+    t1 = torch.arange(n, dtype=torch.float64) / n
+    t2 = torch.remainder(
+        0.137 + 0.6180339887498948 * torch.arange(n, dtype=torch.float64),
+        1.0,
+    )
+    y = torch.sin(2.0 * torch.pi * t1) + 0.6 * torch.cos(2.0 * torch.pi * t2)
+    y = y - y.mean()
+    smooths = [
+        gt.PeriodicSplineCurve(n_knots=7, degree=3),
+        gt.PeriodicSplineCurve(n_knots=8, degree=3),
+    ]
+
+    res = gt.fit([t1, t2], y, smooths, mode="joint")
+
+    assert isinstance(res.coefficients, list)
+    assert [tuple(coef.shape) for coef in res.coefficients] == [(7, 1), (8, 1)]
+    assert res.fitted.shape == (n, 1)
+    assert torch.isfinite(res.fitted).all()
+    assert torch.isfinite(res.lambdas).all()
+
+    # Public coefficients are lifted to the raw cyclic bases while retaining
+    # the terms-layer weighted sum-to-zero gauge used by the fit.
+    for t, smooth, coefficient in zip([t1, t2], smooths, res.coefficients):
+        raw_design, _ = gt.periodic_spline_curve_basis(
+            t, smooth.n_knots, degree=smooth.degree,
+        )
+        weighted_mean = raw_design.sum(dim=0) @ coefficient[:, 0]
+        torch.testing.assert_close(
+            weighted_mean,
+            torch.zeros_like(weighted_mean),
+            rtol=0.0,
+            atol=1.0e-10,
+        )
+
+
 def test_matern_fit_single_1d():
     """Matern tensor backend is wired (#1105): kernel design vs centers, RKHS
     covariance-Gram penalty. The fit must produce finite coefficients and a

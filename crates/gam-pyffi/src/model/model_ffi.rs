@@ -2328,6 +2328,65 @@ fn periodic_spline_curve_basis<'py>(
     ))
 }
 
+/// Return the terms-layer orthonormal coefficient chart for the weighted
+/// sum-to-zero constraint `1ᵀ W B Z = 0`.
+///
+/// Python performs the `B @ Z` and `Z.T @ S @ Z` products in torch so the fit
+/// remains connected to differentiable design/penalty inputs; Rust remains
+/// the sole owner of the rank convention and gauge construction.
+#[pyfunction(signature = (basis, weights = None))]
+fn weighted_sum_to_zero_transform<'py>(
+    py: Python<'py>,
+    basis: PyReadonlyArray2<'py, f64>,
+    weights: Option<PyReadonlyArray1<'py, f64>>,
+) -> PyResult<Py<PyArray2<f64>>> {
+    let basis_view = basis.as_array();
+    if basis_view.nrows() == 0 {
+        return Err(py_value_error(
+            "weighted_sum_to_zero_transform requires at least one basis row".to_string(),
+        ));
+    }
+    if let Some(((row, col), value)) = basis_view
+        .indexed_iter()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(py_value_error(format!(
+            "basis[{row},{col}] must be finite; got {value}"
+        )));
+    }
+    let weights_view = match weights.as_ref() {
+        Some(weights) => {
+            let view = weights.as_array();
+            if view.len() != basis_view.nrows() {
+                return Err(py_value_error(format!(
+                    "weights length {} does not match basis rows {}",
+                    view.len(),
+                    basis_view.nrows()
+                )));
+            }
+            if let Some((row, value)) = view
+                .iter()
+                .enumerate()
+                .find(|(_, value)| !value.is_finite() || **value < 0.0)
+            {
+                return Err(py_value_error(format!(
+                    "weights[{row}] must be finite and non-negative; got {value}"
+                )));
+            }
+            if view.iter().all(|value| *value == 0.0) {
+                return Err(py_value_error(
+                    "weighted_sum_to_zero_transform requires positive total weight".to_string(),
+                ));
+            }
+            Some(view)
+        }
+        None => None,
+    };
+    let (_, transform) = gam::terms::basis::apply_sum_to_zero_constraint(basis_view, weights_view)
+        .map_err(basis_error_to_pyerr)?;
+    Ok(transform.into_pyarray(py).unbind())
+}
+
 /// Exact periodic B-spline function roughness
 /// `S_ab = ∮ B_a^(order)(t) B_b^(order)(t) dt` over one period.
 #[pyfunction(signature = (num_basis, degree = 3, period = 1.0, order = 2))]
@@ -5206,10 +5265,10 @@ fn tangent_reml_result_to_pydict<'py>(
 
 /// Multi-block Gaussian REML forward fit with per-smooth λ_k.
 ///
-/// Programmatic (formula-API-bypass) entry into the same joint multi-smooth
-/// REML driver used by `gamfit.fit(data, "y ~ s(x1) + s(x2)")`: concatenates
-/// per-smooth design blocks into a global X, builds a `BlockwisePenalty`
-/// list (one entry per smooth), and runs `fit_gam` with one λ_k per block.
+/// Programmatic (formula-API-bypass) entry into the exact profiled Gaussian
+/// REML criterion differentiated by `gaussian_reml_fit_blocks_backward`.
+/// Each penalty block receives one λ_k and the joint coefficient map must be
+/// identified by the weighted design plus the canonical penalty roots.
 ///
 /// Inputs:
 /// - `designs`: list of per-smooth design blocks `(N, K_k)`.
@@ -5278,14 +5337,11 @@ fn gaussian_reml_fit_blocks_forward<'py>(
                 .to_string(),
         ));
     }
-    let mut joint_x = Array2::<f64>::zeros((n_rows, p_total));
-    for (i, d) in designs.iter().enumerate() {
-        joint_x
-            .slice_mut(s![.., col_offsets[i]..col_offsets[i + 1]])
-            .assign(&d.as_array());
-    }
-
-    let mut s_list: Vec<gam::terms::smooth::BlockwisePenalty> = Vec::with_capacity(designs.len());
+    let designs_owned: Vec<Array2<f64>> = designs
+        .iter()
+        .map(|design| design.as_array().to_owned())
+        .collect();
+    let mut penalties_owned: Vec<Array2<f64>> = Vec::with_capacity(designs.len());
     for (i, p) in penalties.iter().enumerate() {
         let pv = p.as_array();
         let k = col_offsets[i + 1] - col_offsets[i];
@@ -5303,10 +5359,7 @@ fn gaussian_reml_fit_blocks_forward<'py>(
                 "penalties[{i}][{row},{col}] must be finite; got {value}"
             )));
         }
-        s_list.push(gam::terms::smooth::BlockwisePenalty::new(
-            col_offsets[i]..col_offsets[i + 1],
-            pv.to_owned(),
-        ));
+        penalties_owned.push(pv.to_owned());
     }
 
     let y_arr = y.as_array();
@@ -5375,33 +5428,14 @@ fn gaussian_reml_fit_blocks_forward<'py>(
         None => None,
     };
 
-    let offset_zero = Array1::<f64>::zeros(n_rows);
-    // #2630: this used to be a hand-built 19-field `FitOptions` literal — the
-    // only one in non-test code that did not go through the canonical seam — and
-    // it had drifted from the policy the formula path uses on five fields. The
-    // seam now owns this variant, so a new policy field cannot silently skip
-    // the entry point that advertises itself as running the SAME driver as
-    // `gamfit.fit`. The remaining deviations and their justifications are
-    // documented on `canonical_blocks_forward_fit_options`.
-    let opts = gam::solver::fit_orchestration::canonical_blocks_forward_fit_options(vec![
-        0;
-        s_list.len()
-    ]);
-    let joint_x_for_fit = joint_x.clone();
+    let weights_for_fit = weights_owned.clone();
     let fit = detach_estimation_result(py, "gaussian_reml_fit_blocks_forward", move || {
-        let heuristic_slice = heuristic_owned.as_ref().map(|values| values.as_slice());
-        gam::solver::estimate::fit_gamwith_heuristic_lambdas(
-            joint_x_for_fit,
+        gam::solver::gaussian_reml::gaussian_reml_fit_blocks_exact(
+            &designs_owned,
+            &penalties_owned,
             y_col.view(),
-            weights_owned.view(),
-            offset_zero.view(),
-            &s_list,
-            heuristic_slice,
-            LikelihoodSpec::new(
-                ResponseFamily::Gaussian,
-                InverseLink::Standard(StandardLink::Identity),
-            ),
-            &opts,
+            Some(weights_for_fit.view()),
+            heuristic_owned.as_deref(),
         )
     })?;
 
@@ -5415,27 +5449,14 @@ fn gaussian_reml_fit_blocks_forward<'py>(
             "fitted lambda[{block}] must be finite and positive; got {value}"
         )));
     }
-    let edf_vec = fit
-        .inference
-        .as_ref()
-        .map(|inf| inf.edf_by_block.clone())
-        .unwrap_or_else(|| vec![0.0; lambdas.len()]);
-    let edf_arr = if edf_vec.len() == lambdas.len() {
-        Array1::from_vec(edf_vec)
-    } else {
-        Array1::zeros(lambdas.len())
-    };
-    let coefficients_2d = fit.beta.clone().insert_axis(ndarray::Axis(1));
-    let fitted_2d = joint_x.dot(&fit.beta).insert_axis(ndarray::Axis(1));
-    let log_lambdas_arr = lambdas.mapv(|value| value.max(1.0e-300).ln());
 
     let out = PyDict::new(py);
-    out.set_item("coefficients", coefficients_2d.into_pyarray(py))?;
-    out.set_item("fitted", fitted_2d.into_pyarray(py))?;
+    out.set_item("coefficients", fit.coefficients.into_pyarray(py))?;
+    out.set_item("fitted", fit.fitted.into_pyarray(py))?;
     out.set_item("lambdas", lambdas.into_pyarray(py))?;
-    out.set_item("log_lambdas", log_lambdas_arr.into_pyarray(py))?;
-    out.set_item("reml_score", fit.reml_score())?;
-    out.set_item("edf", edf_arr.into_pyarray(py))?;
+    out.set_item("log_lambdas", fit.log_lambdas.into_pyarray(py))?;
+    out.set_item("reml_score", fit.reml_score)?;
+    out.set_item("edf", fit.edf.into_pyarray(py))?;
     out.set_item(
         "col_offsets",
         ndarray::Array1::from_iter(col_offsets.into_iter().map(|v| v as u64)).into_pyarray(py),

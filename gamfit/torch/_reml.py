@@ -555,11 +555,11 @@ def gaussian_reml_fit_blocks(
 ) -> AdditiveRemlOutput:
     """Multi-block Gaussian REML forward fit with per-smooth λ.
 
-    Single-output fits use the Rust ``optimize_external_design`` multi-block
-    outer-loop (Gaussian identity link). Multi-output fits use the internal
+    Single-output fits use the exact Rust profiled Gaussian REML criterion,
+    with one jointly optimized λ per block and an analytic outer score and
+    Hessian shared by forward and backward. Multi-output fits use the internal
     shared-scale block-orthogonal estimator: one λ per block, one profiled
-    residual scale per output column, and no single-λ block-diagonal
-    collapse.
+    residual scale per output column, and no single-λ block-diagonal collapse.
 
     Parameters
     ----------
@@ -574,6 +574,17 @@ def gaussian_reml_fit_blocks(
     init_log_lambdas:
         Optional warm-start log-λ vector of shape ``(F,)`` (one entry per
         block). When omitted the driver chooses its own seeds.
+
+    Notes
+    -----
+    This is a raw matrix API and therefore does not choose an identifiability
+    gauge. The stacked operator
+    ``[sqrt(W) X; sqrt(lambda_1) R_1; ...; sqrt(lambda_F) R_F]`` must have full
+    column rank, where ``R_k.T @ R_k`` is the canonically classified penalty
+    block. Shared design/penalty-null directions raise ``ValueError`` in both
+    forward and backward. Use :func:`gamfit.torch.fit` for high-level periodic
+    smooths; it applies the terms-layer weighted sum-to-zero chart and lifts
+    coefficients back to the public raw basis.
 
     Returns
     -------
