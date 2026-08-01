@@ -330,6 +330,10 @@ fn best_effort<T: Default>(
     }
 }
 
+/// Encode a record for the store.
+///
+/// See [`load_json_record`] before changing the encoding: JSON's inability to
+/// represent non-finite `f64` is relied upon on the load side (gam#2721).
 fn store_json_record<T: Serialize>(
     configured: &ConfiguredWarmStartStore,
     key: &str,
@@ -351,6 +355,28 @@ fn store_json_record<T: Serialize>(
     Ok(())
 }
 
+/// Decode a stored record.
+///
+/// THE JSON ENCODING IS LOAD-BEARING, NOT INCIDENTAL (gam#2721). `serde_json`
+/// cannot represent a non-finite `f64`: it writes `NaN` / `+-inf` as `null`, and
+/// deserializing `null` into `f64` fails here as
+/// [`PersistentStoreError::Rejected`]. That is the SECOND of exactly two
+/// independent barriers keeping a non-finite coefficient out of a restored
+/// warm start, and so out of `state.beta` at the cached-seed restore in
+/// `inner_blockwise_fit`, which applies no finiteness check of its own:
+///
+///   1. the write side refuses to persist a record whose `block_beta` holds a
+///      non-finite value (`store_persistent_custom_family_warm_start`);
+///   2. this encoding cannot carry one, so a record written by an older binary,
+///      hand-edited, or corrupted is REJECTED at parse rather than decoded into
+///      a `NaN`.
+///
+/// Barrier 1 covers only records this code wrote. Barrier 2 covers every other
+/// origin, and it is a property of the FORMAT rather than of any check — so
+/// swapping this encoding for one that can carry non-finite values (bincode,
+/// msgpack, arrow, CBOR) removes it with no diff to any guard and no failing
+/// test. A format change here must therefore come with a load-side finiteness
+/// check on the decoded coefficient vectors.
 fn load_json_record<T: for<'de> Deserialize<'de>>(
     configured: &ConfiguredWarmStartStore,
     key: &str,
