@@ -2150,6 +2150,7 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
     write_bernoulli_marginal_slope_train_csv(&train_path);
 
     run_fit(FitArgs {
+        inference: true,
         expectile_tau: None,
         data: train_path.clone(),
         request: None,
@@ -2811,6 +2812,7 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "write training csv", e));
 
     let fit_args = FitArgs {
+        inference: true,
         expectile_tau: None,
         data: train_path.clone(),
         request: None,
@@ -2955,6 +2957,7 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
 /// cap-guard regression tests below.
 fn binomial_link_fit_args(data: PathBuf, out: PathBuf, formula: &str) -> FitArgs {
     FitArgs {
+        inference: true,
         expectile_tau: None,
         data,
         request: None,
