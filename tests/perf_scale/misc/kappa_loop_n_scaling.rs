@@ -396,7 +396,14 @@ fn kappa_outer_loop_is_n_independent_fast_ladder() {
         "efs_s"
     );
     for &n in &ns {
-        let kappa = run_kappa_trial_seconds(n, aniso, bounds).unwrap();
+        let kappa = run_kappa_trial_seconds(n, aniso, bounds).unwrap_or_else(|reason| {
+            // The refusal text carries |Pg|, its bound, the rung, the rail tests and a
+            // rho checkpoint. A bare `.unwrap()` buries all of it in a panic payload,
+            // where a capture filter can drop it and leave a panic with no reason --
+            // indistinguishable from an unexplained crash. The warm-up above already
+            // uses this form; match it.
+            panic!("[kappa-fast-ladder] n={n} kappa trial failed: {reason}")
+        });
         let timing = kappa.kappa_timing.unwrap();
         let phase = timing.trial_total_s().max(0.0);
         let callback_avg = kappa.kappa_callback_avg_s().unwrap_or(0.0).max(0.0);
@@ -596,7 +603,14 @@ fn zzz_diag_n16000_reset_reasons() {
     if let Err(error) = run_fit(1000, true, aniso, bounds) {
         eprintln!("[diag-16k] warm-up fit failed: {error}");
     }
-    let r = run_kappa_trial_seconds(16_000, aniso, bounds).unwrap();
+    let r = run_kappa_trial_seconds(16_000, aniso, bounds).unwrap_or_else(|reason| {
+        // The refusal text carries |Pg|, its bound, the rung, the rail tests and a
+        // rho checkpoint. A bare `.unwrap()` buries all of it in a panic payload,
+        // where a capture filter can drop it and leave a panic with no reason --
+        // indistinguishable from an unexplained crash. The warm-up above already
+        // uses this form; match it.
+        panic!("[diag-16k] n=16000 kappa trial failed: {reason}")
+    });
     let t = r.kappa_timing.unwrap();
     eprintln!(
         "[diag-16k] resets={} miss(shape/value/grad/pen/rev)={}/{}/{}/{}/{}",
@@ -623,7 +637,14 @@ fn kappa_micro_2point_n_independence() {
     let mut skip_touches = Vec::new();
     let mut timings = Vec::new();
     for &n in &ns {
-        let kappa = run_kappa_trial_seconds(n, aniso, bounds).unwrap();
+        let kappa = run_kappa_trial_seconds(n, aniso, bounds).unwrap_or_else(|reason| {
+            // The refusal text carries |Pg|, its bound, the rung, the rail tests and a
+            // rho checkpoint. A bare `.unwrap()` buries all of it in a panic payload,
+            // where a capture filter can drop it and leave a panic with no reason --
+            // indistinguishable from an unexplained crash. The warm-up above already
+            // uses this form; match it.
+            panic!("[kappa-micro] n={n} kappa trial failed: {reason}")
+        });
         let timing = kappa.kappa_timing.unwrap();
         let calls = (timing.cost_calls + timing.eval_calls + timing.efs_calls).max(1);
         let per_cb = timing.trial_total_s().max(0.0) / calls as f64;
@@ -722,7 +743,14 @@ fn assert_kappa_n_free_at(n: usize) {
         warm.wall_s
     );
 
-    let kappa = run_kappa_trial_seconds(n, aniso, bounds).unwrap();
+    let kappa = run_kappa_trial_seconds(n, aniso, bounds).unwrap_or_else(|reason| {
+        // The refusal text carries |Pg|, its bound, the rung, the rail tests and a
+        // rho checkpoint. A bare `.unwrap()` buries all of it in a panic payload,
+        // where a capture filter can drop it and leave a panic with no reason --
+        // indistinguishable from an unexplained crash. The warm-up above already
+        // uses this form; match it.
+        panic!("[kappa-n-scaling] n={n} kappa trial failed: {reason}")
+    });
     let timing = kappa.kappa_timing.unwrap();
     let callback_avg = kappa.kappa_callback_avg_s().unwrap_or(0.0).max(0.0);
     let calls = timing.cost_calls + timing.eval_calls + timing.efs_calls;
