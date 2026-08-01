@@ -2100,6 +2100,13 @@ fn minimax_tilt(
     };
 
     const MAX_PASSES: usize = 200;
+    // Under-relaxation of the Gauss-Seidel moment sweep, not a matrix ridge:
+    // the hazard map `rho(t) = phi(t)/Phibar(t)` is steep in the deep tail, so
+    // an undamped fixed-point sweep oscillates between the walls instead of
+    // contracting. Taking half of each proposed update is the standard
+    // successive-under-relaxation choice and leaves the FIXED POINT unchanged
+    // (a converged sweep satisfies the same stationarity equations), so it can
+    // only affect how many of the `MAX_PASSES` sweeps are needed.
     const DAMPING: f64 = 0.5;
     let mut mu = Array1::<f64>::zeros(q);
     let mut z = Array1::<f64>::zeros(q);

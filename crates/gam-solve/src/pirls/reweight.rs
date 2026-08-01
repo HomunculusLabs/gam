@@ -2225,6 +2225,15 @@ where
         if model.objective_hessian_matrix_correction().is_some() {
             state = model.update_with_curvature(&beta, state.hessian_curvature)?;
         }
+        // Iteration cap on the undamped KKT polish, not a time budget: every
+        // pass either certifies the KKT residual (the `break` above) or takes
+        // one exact Newton step on the BARE penalized Hessian, which is
+        // quadratically convergent near a nondegenerate stationary point — 8
+        // passes is far past the point where a converging polish has stopped
+        // moving, and a polish still uncertified after 8 is not converging, so
+        // continuing would burn factorizations for no residual reduction. The
+        // fit's convergence verdict is the caller's KKT certificate, never this
+        // count.
         const MAX_UNDAMPED_POLISH_STEPS: usize = 8;
         for polish_iter in 0..MAX_UNDAMPED_POLISH_STEPS {
             let Some(bare_h) = state.hessian.as_dense() else {

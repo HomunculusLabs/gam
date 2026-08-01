@@ -32,6 +32,17 @@ pub(crate) const HGB_SECANT_DRHO_MAX_SQUARED: f64 = 1.0;
 
 pub(crate) const HGB_MIN_PAIRS_FOR_SENSITIVITY: usize = 3;
 
+/// Tikhonov prior on the local secant regression that estimates hyper-gradient
+/// sensitivities (`estimate_energy_sensitivity`): it seeds the `XᵀX` diagonal
+/// before the `Σ Δρ Δρᵀ` accumulation, so a rank-deficient set of secant pairs
+/// shrinks the fitted sensitivity toward zero instead of failing the Cholesky
+/// and dropping the estimate entirely.
+///
+/// Denominated against a design scale that is bounded above by construction:
+/// [`HGB_SECANT_DRHO_MAX_SQUARED`] rejects any pair with `‖Δρ‖² > 1`, so the
+/// accumulated diagonal entries are `O(1)` and this ridge is six decades below
+/// them. Its output is a heuristic step-scaling, never an estimand — the
+/// selected `λ`, the fit, and the reported dispersion do not read it.
 pub(crate) const HGB_REGRESSION_RIDGE: f64 = 1e-6;
 
 pub(crate) const HGB_SENS_STABILITY_RATIO: f64 = 1.5;

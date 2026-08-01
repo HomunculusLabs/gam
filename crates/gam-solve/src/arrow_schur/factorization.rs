@@ -906,6 +906,18 @@ pub(crate) fn factor_one_row_result(
     // diagonal magnitude), multiplies geometrically each rejection, and is
     // capped at a large multiple of the base scale so a genuinely broken block
     // surfaces as an error instead of looping forever.
+    // The three magnitudes are tied to each other and to the block's own
+    // diagonal scale, so the escalation terminates in a bounded number of
+    // attempts with the ridge never exceeding the curvature it is damping:
+    //   * with no caller ridge, `ridge_cap = 1e-12·diag · 1e12 = diag`, so the
+    //     ladder runs `1e-10·diag → 1·diag` in 10 rejections and its last
+    //     admissible rung is exactly the block's own diagonal scale. Past that
+    //     the "factorization" would be of the ridge rather than of `H_tt`, and
+    //     reporting `PerRowFactorFailed` is the honest answer;
+    //   * with a caller ridge `ridge_t > 0`, `ridge_cap = 1e12 · ridge_t`, so
+    //     the same decade-per-rejection ladder terminates after 12 rejections.
+    // Every quantity is a FRACTION of `diag_scale`, so the policy is invariant
+    // to the units of the latent block.
     const RIDGE_GROWTH_FACTOR: f64 = 10.0;
     const RIDGE_SEED_DIAG_FRACTION: f64 = 1.0e-10;
     const RIDGE_CAP_DIAG_FRACTION: f64 = 1.0e-12;
