@@ -56,6 +56,38 @@
 //! the outcome. A median ratio that clears the bar while `wins_fraction` sits
 //! near 0.5 means the margin is inside the measurement's resolution and the
 //! claim is not established, however good the point estimate looks.
+//!
+//! **Lead with `wins_fraction`, not the ratio.** It is the statistic that
+//! survives someone disbelieving the rest of the output. `wins == 1.0` over `n`
+//! repetitions is a sign test at `2⁻ⁿ` — 15 repetitions is `≈3e-5` — and it is
+//! **distribution-free**: it does not depend on [`PairedTiming::ratio_resolution`]
+//! being correctly characterised, which is the one number a skeptic can
+//! reasonably question. The ratio says *how much*; `wins` says *whether*. When
+//! the first real migration onto this harness reported `median_ratio=0.938934`
+//! with `wins=0.00`, it was the `wins` that settled a question two lanes had
+//! been arguing from opposite directions.
+//!
+//! # The design lesson, for the next gate
+//!
+//! [`PairedTiming::first_position_bias`] is here because of a specific failure:
+//! a fixed-order harness cannot separate a real 6% margin from a 6%
+//! first-versus-second offset, since **both** produce a stable ratio with noisy
+//! absolutes. The pre-existing answer was to run the whole gate a second time
+//! with the arms swapped and see whether the verdict flipped — which works, but
+//! only ever yields yes/no, costs a full second measurement, and has to be
+//! redone by hand every time anyone doubts it.
+//!
+//! Randomising the order and reporting the residual **apportions** the confound
+//! instead: on the measurement above, ordering contributed 0.0001 and the code
+//! contributed 0.061. Generalising:
+//!
+//! > **Report a confound as a measured field rather than eliminating it by
+//! > argument.** An argument that a confound was controlled has to be re-made,
+//! > and re-believed, by every later reader. A field in the output is checked
+//! > once and then simply read.
+//!
+//! That is the property to copy when building the next gate here, more than any
+//! particular statistic in this module.
 
 use std::hint::black_box;
 use std::time::Instant;

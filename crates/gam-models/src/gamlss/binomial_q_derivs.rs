@@ -1014,7 +1014,9 @@ mod tests {
     /// `hand_over_production` token.
     #[test]
     fn release_measure_binomial_q_tower3_prune_vs_tower4_932() {
-        use std::time::Instant;
+        // `std::time::Instant` was imported here for the local `best_ns`; the
+        // paired harness owns the clock now.
+        use gam_math::paired_timing::paired_interleaved;
 
         let y = 0.7_f64;
         let w = 1.3_f64;
@@ -1050,58 +1052,57 @@ mod tests {
             "m3 prune bit-identity"
         );
 
-        fn best_ns<F: FnMut(f64) -> f64>(iterations: usize, base_q: f64, mut evaluate: F) -> f64 {
-            let mut best = f64::INFINITY;
-            for _ in 0..5 {
-                let mut checksum = 0.0_f64;
-                let started = Instant::now();
-                for _ in 0..iterations {
-                    checksum += evaluate(base_q + checksum * 1e-18);
-                }
-                assert!(
-                    checksum.is_finite(),
-                    "binomial tower-prune release-measure checksum must stay finite"
-                );
-                best = best.min(started.elapsed().as_secs_f64());
-            }
-            best * 1e9 / iterations as f64
-        }
+        // One paired, interleaved, order-randomised measurement
+        // (`gam_math::paired_timing`, #932), replacing this file's copy of the
+        // `best_ns` min-of-5-per-arm pattern. Both arms are timed adjacent in
+        // time within each repetition, in an order chosen per repetition, so a
+        // first-versus-second offset cannot masquerade as a margin — which is
+        // the failure mode a 5% "timing noise" allowance cannot detect.
+        let timing = paired_interleaved(
+            15,
+            300_000,
+            0x9320_09E1,
+            |nudge| {
+                let (jet_mu, jet_d1, jet_d2, jet_d3, _) = logit_jet(q0 + nudge);
+                let (m1, m2, m3) =
+                    binomial_neglog_q_derivatives_from_jet(y, w, jet_mu, jet_d1, jet_d2, jet_d3);
+                m1 + m2 + m3
+            },
+            |nudge| {
+                let (m1, m2, m3) = tower4_m123(q0 + nudge);
+                m1 + m2 + m3
+            },
+        );
 
-        let iterations = 2_000_000usize;
-        let tower3_ns = best_ns(iterations, q0, |q| {
-            let (jet_mu, jet_d1, jet_d2, jet_d3, _) = logit_jet(q);
-            let (m1, m2, m3) =
-                binomial_neglog_q_derivatives_from_jet(y, w, jet_mu, jet_d1, jet_d2, jet_d3);
-            m1 + m2 + m3
-        });
-        let tower4_ns = best_ns(iterations, q0, |q| {
-            let (m1, m2, m3) = tower4_m123(q);
-            m1 + m2 + m3
-        });
-        // The prune must never be a measurable pessimization: allow only
-        // timing noise (5%) against the full Tower4 composition it replaces.
+        // `median_ratio` is tower4 / tower3, so above 1 means the prune is
+        // faster — the same orientation as the token below.
+        //
+        // The prune must never be a measurable pessimization. THE 1.05 IS
+        // UNCHANGED HERE ON PURPOSE: it is a chosen constant ("allow only timing
+        // noise (5%)"), and this commit migrates the instrument without moving
+        // the bar, so a change in verdict can only come from the measurement.
+        // What is new is that the line below now reports `resolution` — the
+        // measurement's own noise floor — which is the quantity 5% was standing
+        // in for and was never compared against. Deriving the tolerance from it
+        // is the follow-up (#2469: derived in form, unsupported in value); doing
+        // it in the same commit would be choosing a tolerance to fit the numbers
+        // it is being validated against.
+        //
         // #932: release-only -- but NOT because the test lane is unoptimized.
         // It is not: [profile.test] sets opt-level = 2. The difference is
         // CODEGEN LAYOUT. [profile.test.package.gam-models] sets
         // codegen-units = 16 and the test profile carries no LTO, while
-        // [profile.release] is codegen-units = 1 + lto = "thin".
-        // Cargo.toml's own note records that CGU splitting is what blocks LLVM
-        // from inlining hot accessors into the per-row loops, and that
-        // "release is unaffected: it already carries thin-LTO +
-        // codegen-units = 1". A compiled-vs-hand ratio whose whole margin is
-        // cross-CGU inlining therefore measures a different thing here than in
-        // the shipped profile. Measured: this assertion fails in the default
-        // test lane. The parity/correctness checks around it are
-        // build-independent and still run in every build.
+        // [profile.release] is codegen-units = 1 + lto = "thin". The
+        // bit-identity checks above are build-independent and still run in
+        // every build.
         assert!(
-            cfg!(debug_assertions) || tower3_ns <= tower4_ns * 1.05,
-            "Tower3 prune slower than the full Tower4 it prunes: \
-             tower3={tower3_ns:.2} ns/row tower4={tower4_ns:.2} ns/row"
+            cfg!(debug_assertions) || timing.median_ratio() >= 1.0 / 1.05,
+            "Tower3 prune slower than the full Tower4 it prunes: {}",
+            timing.summary("tower3", "tower4"),
         );
         eprintln!(
-            "BINOMIAL-Q-PRUNE-932 production_tower3={tower3_ns:.2} ns/row \
-             full_tower4={tower4_ns:.2} ns/row tower4_over_tower3={:.6}",
-            tower4_ns / tower3_ns,
+            "BINOMIAL-Q-PRUNE-932 {}",
+            timing.summary("production_tower3", "full_tower4"),
         );
     }
 }
