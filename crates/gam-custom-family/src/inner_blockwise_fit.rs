@@ -557,6 +557,13 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
 /// `(H delta - rhs + lambda D delta) - A' mu = 0`, and positive semidefiniteness
 /// of `Z'(H + lambda D)Z` all certify. Thus the step, predicted gain, blockers,
 /// and first-/second-order KKT certificate describe one subproblem (#2656).
+///
+/// The exchange itself is a heuristic and can cycle on a degenerate face (a row
+/// at exactly zero scaled slack whose multiplier is negative on the face and
+/// which is re-added as the first blocker once released). That is not a
+/// contract violation, so a revisited face returns `Ok(None)` — no certified
+/// reduced-face candidate — exactly like an empty warm face, and the caller's
+/// general constrained QP owns the subproblem (gam#2600).
 fn certified_reduced_face_candidate(
     exact_hessian: &Array2<f64>,
     rhs: &Array1<f64>,
@@ -697,11 +704,28 @@ fn certified_reduced_face_candidate(
         let (face_a, face_b, canonical_active) = reduce_face(&working_active)?;
         working_active = canonical_active;
         if !seen_faces.insert(working_active.clone()) {
-            return Err(format!(
-                "physical reduced-face active-set exchange cycled \
-                 (active_rows={working_active:?}, visited_faces={})",
+            // A revisited face is a proven cycle of the exchange, and it is a
+            // failure of this heuristic rather than a violated contract. At a
+            // constraint sitting at exactly zero scaled slack the support map
+            // is not idempotent: the face solve returns a negative multiplier
+            // for that row, releasing it makes the free step re-add the very
+            // same row as its first blocker, and the two faces alternate
+            // forever. Nothing about the model, the metric, or the geometry is
+            // wrong -- there is simply no certified reduced-face candidate
+            // here, which is exactly the state this routine already reports by
+            // declining an empty warm face. Decline, and let the caller's
+            // general constrained QP own the same subproblem; every guard,
+            // tolerance, and certificate below is untouched, and no
+            // uncertified point is ever returned. Erroring instead ends the
+            // entire fit on one trial point (gam#2600).
+            log::warn!(
+                "[gam#2600 reduced-face] declining a cycled active-set exchange \
+                 (face_rows={}, visited_faces={}); the general constrained QP \
+                 owns this subproblem",
+                working_active.len(),
                 seen_faces.len(),
-            ));
+            );
+            return Ok(None);
         }
 
         // The equality face is affine in the step:
