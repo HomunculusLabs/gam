@@ -69,38 +69,42 @@ pub struct RemlCriterionComponents {
 // Canonical definitions live in estimate.rs; re-use them here.
 use crate::estimate::smooth_floor_dp;
 
-/// Ridge floor for denominator safety.
-pub(crate) const DENOM_RIDGE: f64 = 1e-8;
-
-/// #2669 instrumentation: the smallest `n − M_p` any profiled-Gaussian
-/// evaluation in this process has produced, in milli-units, and the number of
-/// evaluations that reached the site. Together they answer the question three
-/// external fixtures could not: does `n − M_p ≤ 0` occur, and did the site run
-/// at all (non-vacuity control for a null result).
-static RESIDUAL_DOF_MIN_MILLI_2669: std::sync::atomic::AtomicI64 =
-    std::sync::atomic::AtomicI64::new(i64::MAX);
-static RESIDUAL_DOF_CALLS_2669: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Profiled-Gaussian residual degrees of freedom `n − M_p`, floored by
-/// [`DENOM_RIDGE`]. Single definition shared by the REML criterion, both
-/// outer-derivative backends, and EFS, so #2669's instrument sits AT the
-/// clamp instead of around it.
-pub(crate) fn profiled_gaussian_residual_dof(solution: &InnerSolution<'_>) -> f64 {
-    let n = solution.n_observations as f64;
-    let m_p = solution.nullspace_dim;
-    let dof = n - m_p;
-    let calls = RESIDUAL_DOF_CALLS_2669.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    let milli = (dof * 1000.0).round().clamp(i64::MIN as f64, i64::MAX as f64) as i64;
-    let previous_min =
-        RESIDUAL_DOF_MIN_MILLI_2669.fetch_min(milli, std::sync::atomic::Ordering::Relaxed);
-    if milli < previous_min {
-        eprintln!(
-            "[#2669-dof] call {calls} n={n} M_p={m_p} n-M_p={dof} clamp_binds={}",
-            if dof < DENOM_RIDGE { "YES" } else { "no" }
-        );
+/// Residual degrees of freedom `ν = n − M_p` of the profiled-Gaussian scale.
+///
+/// `n` is the positive-weight observation count and `M_p = p − rank(S_λ)` the
+/// number of UNPENALIZED coefficient directions, so `ν` is a difference of two
+/// integer counts: it is either `≥ 1` or `≤ 0`, never in between. Both
+/// consumers — the profiled scale `φ̂ = D_p/ν` and the `(ν/2)·log(2πφ̂)`
+/// REML term — are undefined at `ν ≤ 0`: a design whose unpenalized directions
+/// already exhaust the observations carries no residual information from which
+/// to estimate a scale. This refuses there, which is what the rest of the
+/// codebase does with exactly this condition
+/// (`estimate/optimizer.rs`, `gaussian_reml.rs` × 3,
+/// `fit_orchestration/drivers/design_construction.rs`).
+///
+/// It replaces a `.max(1e-8)` clamp (#2669). Because `ν` is integer-valued that
+/// clamp could never interpolate: it was exactly `if ν ≤ 0 { 1e-8 }`, and what
+/// it produced there was `φ̂ = D_p/1e-8`, which collapses the data-fit term
+/// `D_p/(2φ̂) = ν/2` to `5e-9` INDEPENDENTLY of the response and leaves the
+/// outer optimizer selecting λ against a bare `½(log|H| − log|S|)` determinant
+/// ratio. Fabricating a finite criterion for a structurally invalid fit is
+/// worse than refusing it (SPEC: a fit object must only ever come from a
+/// converged optimization).
+///
+/// Takes the two scalars rather than the whole `InnerSolution` so the refusal
+/// is directly exercisable — see `profiled_gaussian_residual_dof_tests`.
+pub(crate) fn profiled_gaussian_residual_dof(
+    n_observations: usize,
+    nullspace_dim: f64,
+) -> Result<f64, String> {
+    let dof = n_observations as f64 - nullspace_dim;
+    if dof > 0.0 {
+        Ok(dof)
+    } else {
+        Err(format!(
+            "profiled Gaussian residual degrees of freedom must be positive; got              n({n_observations}) − M_p({nullspace_dim}) = {dof}. Every unpenalized              coefficient direction consumes one observation, so this design leaves              nothing to estimate the Gaussian scale from: penalize the offending              directions or drop them."
+        ))
     }
-    dof.max(DENOM_RIDGE)
 }
 
 /// Apply the curvature-conditioning scale `s = rho_curvature_scale` to a
@@ -437,15 +441,16 @@ pub(crate) fn efs_log_step_from_grad(q_eff: f64, g_full: f64) -> Option<f64> {
 /// gradient assembly. For Fixed dispersion both are unused; we return
 /// `(phi, 0.0)` so that `efs_q_eff` simply uses `2·a_i`.
 #[inline]
-pub(crate) fn efs_profiling(solution: &InnerSolution<'_>) -> (f64, f64) {
+pub(crate) fn efs_profiling(solution: &InnerSolution<'_>) -> Result<(f64, f64), String> {
     match &solution.dispersion {
         DispersionHandling::ProfiledGaussian => {
             let dp_raw = -2.0 * solution.log_likelihood + solution.penalty_quadratic;
             let (dp_c, dp_cgrad, _) = smooth_floor_dp(dp_raw, solution.dp_floor_scale);
-            let denom = profiled_gaussian_residual_dof(solution);
-            (dp_c / denom, dp_cgrad)
+            let denom =
+                profiled_gaussian_residual_dof(solution.n_observations, solution.nullspace_dim)?;
+            Ok((dp_c / denom, dp_cgrad))
         }
-        DispersionHandling::Fixed { phi, .. } => (*phi, 0.0),
+        DispersionHandling::Fixed { phi, .. } => Ok((*phi, 0.0)),
     }
 }
 
@@ -1310,4 +1315,42 @@ pub(crate) fn try_tangent_projected_evaluate(
     };
     let result = reml_laml_evaluate(&projected, rho, mode, prior_cost_gradient)?;
     Ok(Some(result))
+}
+
+#[cfg(test)]
+mod profiled_gaussian_residual_dof_tests {
+    use super::profiled_gaussian_residual_dof;
+
+    /// The positive control: the refusal this replaced `.max(DENOM_RIDGE)`
+    /// with must actually fire, at the step of one in an integer where the old
+    /// clamp used to take over.
+    #[test]
+    fn refuses_at_and_below_zero_residual_dof_and_accepts_one() {
+        assert_eq!(
+            profiled_gaussian_residual_dof(8, 7.0).expect("nu = 1 is a fittable model"),
+            1.0
+        );
+        for nullspace_dim in [8.0, 9.0, 23.0] {
+            let refusal = profiled_gaussian_residual_dof(8, nullspace_dim)
+                .expect_err("nu <= 0 has no profiled scale and must refuse");
+            assert!(
+                refusal.contains("residual degrees of freedom must be positive"),
+                "refusal must name the condition, got: {refusal}"
+            );
+        }
+    }
+
+    /// The old clamp's whole justification was "denominator safety", and the
+    /// value it delivered at `nu <= 0` was `1e-8`, eight orders of magnitude
+    /// below the `nu = 1` it neighbours across a step of one in an integer.
+    /// Nothing may return a positive number in that regime again.
+    #[test]
+    fn no_fabricated_positive_denominator_below_one() {
+        assert!(profiled_gaussian_residual_dof(0, 0.0).is_err());
+        assert!(profiled_gaussian_residual_dof(3, 3.0).is_err());
+        assert_eq!(
+            profiled_gaussian_residual_dof(3, 2.0).expect("nu = 1"),
+            1.0
+        );
+    }
 }

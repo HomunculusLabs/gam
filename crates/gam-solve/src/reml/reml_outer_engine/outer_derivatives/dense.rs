@@ -61,7 +61,10 @@ pub(crate) fn compute_outer_hessian(
             DispersionHandling::ProfiledGaussian => {
                 let dp_raw = -2.0 * solution.log_likelihood + solution.penalty_quadratic;
                 let (dp_c, dp_cgrad, dp_cgrad2) = smooth_floor_dp(dp_raw, solution.dp_floor_scale);
-                let nu = profiled_gaussian_residual_dof(solution);
+                let nu = profiled_gaussian_residual_dof(
+                    solution.n_observations,
+                    solution.nullspace_dim,
+                )?;
                 let phi_hat = dp_c / nu;
                 (phi_hat, nu, dp_cgrad, dp_cgrad2, true)
             }

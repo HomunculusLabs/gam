@@ -37,7 +37,7 @@ fn efs_penalty_like_steps(
     );
     let mut steps = vec![0.0; total];
 
-    let (profiled_scale, dp_cgrad) = efs_profiling(solution);
+    let (profiled_scale, dp_cgrad) = efs_profiling(solution)?;
     let lambdas = gam_problem::checked_exp_log_strengths(rho.iter().copied())
         .map_err(|error| format!("EFS rho: {error}"))?;
     let penalty_quad_atom = crate::estimate::reml::atoms::PenaltyQuadAtom::from_penalty_coords(
