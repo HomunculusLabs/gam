@@ -3,8 +3,7 @@ use super::{
     FAMILY_GAUSSIAN_LOCATION_SCALE, FamilyArg, FittedFamily, LikelihoodSpec, LinkChoice, LinkMode,
     ResponseFamily, SavedFitSummary, SavedModel, SurvivalArgs, SurvivalBaselineTarget,
     SurvivalLikelihoodMode, SurvivalTimeBasisConfig, build_survival_time_basis, classify_cli_error,
-    collect_hierarchical_smooth_overlapwarnings, collect_linear_smooth_overlapwarnings,
-    collect_spatial_smooth_usagewarnings, compact_fit_result_for_batch,
+    collect_smooth_structure_warnings, compact_fit_result_for_batch,
     compact_saved_multiblock_fit_result, compute_probit_q0_from_eta, core_saved_fit_result,
     covariance_from_model, effectivelinkwiggle_formulaspec, family_arg_canonical_name,
     load_dataset_projected, parse_formula, parse_link_choice, parse_matching_auxiliary_formula,
@@ -4079,7 +4078,7 @@ fn warns_for_repeated_univariate_duchon_spatial_terms() {
     };
     let headers = vec!["pc1".to_string(), "pc2".to_string(), "pc3".to_string()];
 
-    let warnings = collect_spatial_smooth_usagewarnings(&spec, &headers, "model");
+    let warnings = collect_smooth_structure_warnings(&spec, &headers, "model");
 
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("3 separate 1D duchon spatial smooths"));
@@ -4118,7 +4117,7 @@ fn does_notwarn_for_singlemultivariate_matern_spatial_term() {
     };
     let headers = vec!["pc1".to_string(), "pc2".to_string(), "pc3".to_string()];
 
-    let warnings = collect_spatial_smooth_usagewarnings(&spec, &headers, "model");
+    let warnings = collect_smooth_structure_warnings(&spec, &headers, "model");
 
     assert!(warnings.is_empty());
 }
@@ -4167,7 +4166,7 @@ fn warns_for_repeated_univariate_thinplate_spatial_terms() {
     };
     let headers = vec!["pc1".to_string(), "pc2".to_string()];
 
-    let warnings = collect_spatial_smooth_usagewarnings(&spec, &headers, "model");
+    let warnings = collect_smooth_structure_warnings(&spec, &headers, "model");
 
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("2 separate 1D thinplate/tps spatial smooths"));
@@ -4214,7 +4213,7 @@ fn warns_for_linear_terms_overlappingwith_smoothvariables() {
     };
     let headers = vec!["pc1".to_string(), "pc2".to_string(), "pc3".to_string()];
 
-    let warnings = collect_linear_smooth_overlapwarnings(&spec, &headers, "model");
+    let warnings = collect_smooth_structure_warnings(&spec, &headers, "model");
 
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("feature(s) [pc1]"));
@@ -4275,7 +4274,7 @@ fn warns_for_nested_smooth_terms_with_hierarchical_ownership() {
     };
     let headers = vec!["pc1".to_string(), "pc2".to_string()];
 
-    let warnings = collect_hierarchical_smooth_overlapwarnings(&spec, &headers, "model");
+    let warnings = collect_smooth_structure_warnings(&spec, &headers, "model");
 
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("duchon(pc1, pc2)"));

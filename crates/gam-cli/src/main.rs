@@ -90,8 +90,7 @@ pub(crate) use gam::probability::{
 pub(crate) use gam::families::fit_orchestration::drivers::freeze_term_collection_from_design;
 pub(crate) use gam::smooth::{
     BoundedCoefficientPriorSpec, LinearCoefficientGeometry, LinearTermSpec, SmoothBasisSpec,
-    SmoothStructureAnalysis, SmoothTermSpec, SpatialLengthScaleOptimizationOptions,
-    TermCollectionSpec, analyze_smooth_ownership, smooth_term_feature_cols,
+    SmoothTermSpec, SpatialLengthScaleOptimizationOptions, TermCollectionSpec,
 };
 // #1521: relocated DOWN into gam_terms::smooth (was families::...::drivers).
 pub(crate) use gam::terms::smooth::build_term_collection_design;
@@ -163,7 +162,7 @@ pub(crate) use rand::{SeedableRng, rngs::StdRng};
 
 pub(crate) use statrs::distribution::ContinuousCDF;
 
-pub(crate) use std::collections::{BTreeMap, BTreeSet, HashMap};
+pub(crate) use std::collections::{BTreeSet, HashMap};
 
 pub(crate) use std::path::{Path, PathBuf};
 

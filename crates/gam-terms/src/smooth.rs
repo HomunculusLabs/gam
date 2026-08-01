@@ -35,6 +35,15 @@ pub use self::structure_analysis::{
     SmoothStructureAnalysis, analyze_smooth_ownership, smooth_term_feature_cols,
 };
 
+// The advisories that read the structure `structure_analysis` computes. They
+// lived in `gam-cli` with no counterpart on any other surface, so a smooth
+// silently residualized against an overlapping linear term was announced to a
+// CLI user and to nobody else (#2470, SPEC line 10). Only the aggregator is
+// public: the per-shape collectors have no caller outside the module, and an
+// unreferenced `pub` item in this workspace reads as live code.
+mod structure_warnings;
+pub use self::structure_warnings::collect_smooth_structure_warnings;
+
 // Term-collection design construction (#1521), relocated DOWN from gam-models
 // `fit_orchestration/drivers/design_construction.rs`. The three re-exports are
 // the entry points the staying gam-models drivers still call (via their
