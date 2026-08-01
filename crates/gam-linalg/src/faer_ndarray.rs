@@ -108,6 +108,56 @@ static EIGH_SEQ_CALLS: AtomicU64 = AtomicU64::new(0);
 /// shape under investigation rather than being assumed to have.
 static EIGH_MAX_DIM: AtomicU64 = AtomicU64::new(0);
 
+// The same four tallies, for the CALLING THREAD only.
+//
+// The process-global counters above answer *"how many `eigh` calls did this
+// RUN make?"*. They cannot answer *"how many did THIS REGION make?"*, because
+// every other thread's `eigh` lands inside the same window — and under
+// `cargo test` there are as many such threads as the harness chose. An exact
+// delta taken across a region of a global counter is therefore an assertion
+// about which OTHER tests happened to share the process, which is not a
+// property anybody meant to test: measured at `0033169a9`,
+// `eigh_census_counts_calls_and_separates_the_sequential_arm` read `+12`
+// instead of `+1` under the default thread count and passed under
+// `--test-threads=1`. The per-thread tallies make the delta exact under any
+// schedule, so the assertion can stay an equality instead of being weakened to
+// an inequality that no longer detects over-counting.
+thread_local! {
+    static EIGH_THREAD: std::cell::Cell<EighCensus> = const {
+        std::cell::Cell::new(EighCensus {
+            calls: 0,
+            sequential_calls: 0,
+            max_dim: 0,
+            nanos: 0,
+        })
+    };
+}
+
+/// Add one `eigh` to the calling thread's tallies.
+fn record_thread_eigh(sequential: bool, dim: u64, nanos: u64) {
+    EIGH_THREAD.with(|cell| {
+        let mut census = cell.get();
+        census.calls += 1;
+        if sequential {
+            census.sequential_calls += 1;
+        }
+        census.max_dim = census.max_dim.max(dim);
+        census.nanos += nanos;
+        cell.set(census);
+    });
+}
+
+/// Read the census for the CALLING THREAD only.
+///
+/// Use this, not [`eigh_census`], whenever the question is "did THIS region
+/// decompose anything, and how" — a delta on the global census across a region
+/// counts every concurrent caller too. Use [`eigh_census`] for whole-run
+/// questions ("did this job ever reach `dim` in the thousands?"), where the
+/// cross-thread accumulation is the point.
+pub fn eigh_census_this_thread() -> EighCensus {
+    EIGH_THREAD.with(|cell| cell.get())
+}
+
 /// #2267/#2738 — the eigendecomposition census, readable from a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EighCensus {
@@ -2377,6 +2427,11 @@ impl<S: Data<Elem = f64>> FaerEigh for ArrayBase<S, Ix2> {
             let eigh_nanos_total = EIGH_NANOS
                 .fetch_add(eigh_elapsed.as_nanos() as u64, Ordering::Relaxed)
                 + eigh_elapsed.as_nanos() as u64;
+            record_thread_eigh(
+                eigh_par == Par::Seq,
+                matrix.nrows() as u64,
+                eigh_elapsed.as_nanos() as u64,
+            );
             log::debug!(
                 "[eigh] dim={} elapsed={:.3}s faer_global_parallelism={:?} \
                  calls_so_far={eigh_calls} cumulative={:.3}s",
@@ -3887,9 +3942,16 @@ mod tests {
             let baseline = faer::get_global_parallelism();
             faer::set_global_parallelism(Par::rayon(2));
 
-            let before = eigh_census();
+            // The EXACT deltas are taken on the per-thread census. Differencing
+            // the process-global one here asserted a property of the whole test
+            // binary's schedule: at `0033169a9` this test read `+12` instead of
+            // `+1` under the default thread count, twice in a row, and passed
+            // under `--test-threads=1`. Both readings were correct about the
+            // global counter and neither was about this region.
+            let before = eigh_census_this_thread();
+            let before_global = eigh_census();
             sym.eigh(Side::Lower).expect("outside-scope eigh");
-            let outside = eigh_census();
+            let outside = eigh_census_this_thread();
             assert_eq!(
                 outside.calls,
                 before.calls + 1,
@@ -3910,7 +3972,7 @@ mod tests {
                 sym.eigh(Side::Lower).expect("inside-scope eigh");
                 drop(scope);
             }
-            let inside = eigh_census();
+            let inside = eigh_census_this_thread();
             assert_eq!(
                 inside.calls,
                 outside.calls + 1,
@@ -3925,6 +3987,19 @@ mod tests {
             assert!(
                 inside.nanos >= outside.nanos,
                 "cumulative time must be monotonic",
+            );
+
+            // The GLOBAL census is still exercised, at the only strength it can
+            // carry under a parallel harness: it must have absorbed at least
+            // this thread's two calls. A global counter that stopped counting
+            // altogether still fails here.
+            let inside_global = eigh_census();
+            assert!(
+                inside_global.calls >= before_global.calls + 2,
+                "the process-global census must absorb this thread's calls too: \
+                 {} -> {}",
+                before_global.calls,
+                inside_global.calls,
             );
 
             faer::set_global_parallelism(baseline);
