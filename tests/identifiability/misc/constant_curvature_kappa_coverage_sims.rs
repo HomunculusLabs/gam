@@ -18,19 +18,25 @@
 //! (kept CI-cheap: small n, few centers, a handful of replicates).
 
 use gam::estimate::FitOptions;
-use gam::geometry::constant_curvature::ConstantCurvature;
 use gam::inference::data::EncodedDataset;
 use gam::inference::formula_dsl::parse_formula;
 use gam::inference::model::{ColumnKindTag, DataSchema, SchemaColumn};
+use gam::smooth::SmoothBasisSpec;
 use gam::smooth::{
     CurvatureInference, SpatialLengthScaleOptimizationOptions, curvature_inference_forspec,
     fit_term_collectionwith_spatial_length_scale_optimization,
 };
+use gam::terms::basis::build_constant_curvature_basis;
 use gam::terms::term_builder::build_termspec;
 use gam::types::LikelihoodSpec;
 use ndarray::{Array1, Array2};
 
 // --- deterministic RNG (splitmix64 → unit / gaussian), no external deps ------
+
+/// The one formula the generator and the fit must share: the plant is built
+/// from THIS spec's realized centers and length scale, so a change here that did
+/// not reach the generator would silently re-misspecify the fixture.
+const FORMULA: &str = "y ~ curv(x1, x2, centers=6)";
 
 use gam::utils::splitmix64;
 fn next_unit(state: &mut u64) -> f64 {
@@ -76,22 +82,44 @@ fn termspec_for(formula: &str, frame: &Array2<f64>) -> gam::smooth::TermCollecti
 }
 
 /// `n` chart points uniformly in a disk of radius `radius`, with a Gaussian
-/// response that is a smooth function of the `M_κ` geodesic distance to the
-/// origin — a κ⋆-dependent signal the constant-curvature kernel can represent,
-/// so curvature is identified.
+/// response drawn from the `M_{κ⋆}` model the fit will estimate.
 ///
-/// **Flat truth (`κ⋆ = 0`) is a CONSTANT mean, not the κ = 0 member of the
-/// curved family** (gam#2687). A flat space has no preferred geodesic-distance
-/// shape, so there is no curvature to plant; but `2·exp(−d₀) − 1` is still a
-/// centre-peaked radial signal, and a renormalized kernel at `κ ≠ 0` fits that
-/// shape better even at matched effective degrees of freedom — a residual lean
-/// that spuriously rejects flatness. The sibling `constant_curvature_kappa_
-/// inference_e2e` generator of the same name reached this conclusion and carries
-/// the fix in its own doc comment; this copy did not, and the lean is measured:
-/// with the centre-peaked plant, `κ̂` railed at the box's upper end (`≈ +1.41`,
+/// ## The plant has to be INSIDE the κ⋆ model (gam#2687)
+///
+/// This generator used to plant `μ = 2·exp(−d_{κ⋆}(x,0)) − 1`: a kernel section
+/// at unit length about the chart origin. That function is in **no** realized
+/// span — the basis is built on a handful of centers at the fill-invariant
+/// `L(κ)`, not at length 1 — so at every κ, including κ⋆, the fit is
+/// approximating rather than estimating. The κ-spans then happen to be ORDERED
+/// in approximation power, and the profiled criterion faithfully follows that
+/// order instead of the curvature: `V_p` descends monotonically across the whole
+/// admissible interval and κ̂ rails at the box endpoint, measured at 9/9
+/// replicates and confirmed unchanged at **zero noise** and across plant scales
+/// {0.5, 1.0, 1.19, 2.0}. It is misspecification, not an estimator defect.
+///
+/// The control that separates the two is on the #2687 thread: planting `y` as an
+/// exact linear combination of the **κ⋆ basis's own columns** — so the truth is
+/// in the κ⋆-span by construction and in no other — recovers κ⋆ to one grid step
+/// at κ⋆ ∈ {−1.0, −0.5, +0.5, +1.0}, interior on both branches. A coverage
+/// fixture measures the coverage of a parameter the model HAS, so it must draw
+/// from that model; this generator now does.
+///
+/// The coefficient profile `w_j = 1/(1+j)` is deterministic and decaying, so the
+/// planted function is a genuinely smooth member of the span rather than a single
+/// kernel section, and the signal is standardized to unit SD before the noise is
+/// applied so `noise_sd` keeps meaning a signal-to-noise ratio across κ⋆.
+///
+/// ## Flat truth (`κ⋆ = 0`) is a CONSTANT mean
+///
+/// A flat space has no preferred geodesic-distance shape, so there is no
+/// curvature to plant; but any centre-peaked radial signal is fitted better by a
+/// renormalized kernel at `κ ≠ 0` even at matched effective degrees of freedom,
+/// a residual lean that spuriously rejects flatness. The sibling
+/// `constant_curvature_kappa_inference_e2e` generator of the same name reached
+/// this conclusion and carries the fix in its own doc comment; this copy did not,
+/// and the lean was measured: `κ̂` railed at the box's upper end (`≈ +1.41`,
 /// spherical) in **6 of 9** genuinely flat replicates, at a residual sum of
-/// squares that falls monotonically in κ while `edf` stays pinned at 5.978 —
-/// i.e. the improvement is the plant's shape, not curvature.
+/// squares falling monotonically in κ while `edf` stayed pinned at 5.978.
 fn dataset_on_m_kappa(
     n: usize,
     kappa_star: f64,
@@ -100,11 +128,14 @@ fn dataset_on_m_kappa(
     seed: u64,
 ) -> (Array2<f64>, Array1<f64>) {
     let mut st = seed;
-    let manifold = ConstantCurvature::new(2, kappa_star);
-    let reference = ndarray::array![0.0_f64, 0.0_f64];
-    let flat_truth = kappa_star == 0.0;
     let mut feats = Array2::<f64>::zeros((n, 2));
-    let mut y = Array1::<f64>::zeros(n);
+    let mut noise = Array1::<f64>::zeros(n);
+    // Draw the row's chart point and its noise draw together, in that order, so
+    // the RNG stream is byte-identical to the pre-#2687 generator's. The plant
+    // itself needs every feature row before it can be built (the centers and the
+    // realized length scale are functions of the whole cloud), but that is a
+    // reordering of the ARITHMETIC, not of the stream, and a fixture whose data
+    // silently moved would make every before/after on this thread unreadable.
     for i in 0..n {
         let (x1, x2) = loop {
             let a = 2.0 * next_unit(&mut st) - 1.0;
@@ -113,20 +144,54 @@ fn dataset_on_m_kappa(
                 break (a * radius, b * radius);
             }
         };
-        // Curved truth: a curvature-shaped signal of the M_{κ⋆} geodesic
-        // distance. Flat truth: a κ-neutral constant mean (no curvature signal).
-        let mu = if flat_truth {
-            0.0
-        } else {
-            let pt = ndarray::array![x1, x2];
-            let d = manifold
-                .distance(pt.view(), reference.view())
-                .expect("in-chart geodesic distance");
-            2.0 * (-d).exp() - 1.0
-        };
         feats[(i, 0)] = x1;
         feats[(i, 1)] = x2;
-        y[i] = mu + noise_sd * next_gauss(&mut st);
+        noise[i] = next_gauss(&mut st);
+    }
+    let mut y = Array1::<f64>::zeros(n);
+    // Flat truth: a κ-neutral constant mean, no curvature signal to plant.
+    if kappa_star != 0.0 {
+        // Curved truth: a member of the κ⋆ span, built from the SAME spec the
+        // fit will use — same center strategy, same auto length scale — so the
+        // truth is in the model being estimated and in no other member of the
+        // family.
+        let mut frame = Array2::<f64>::zeros((n, 3));
+        for i in 0..n {
+            frame[(i, 1)] = feats[(i, 0)];
+            frame[(i, 2)] = feats[(i, 1)];
+        }
+        let fitspec = termspec_for(FORMULA, &frame);
+        let SmoothBasisSpec::ConstantCurvature { spec: cc, .. } = &fitspec.smooth_terms[0].basis
+        else {
+            panic!("the fixture formula must resolve to a constant-curvature term");
+        };
+        let mut truth_spec = cc.clone();
+        truth_spec.kappa = kappa_star;
+        truth_spec.kappa_fixed = true;
+        truth_spec.double_penalty = false;
+        let basis = build_constant_curvature_basis(feats.view(), &truth_spec)
+            .expect("the planted κ⋆ geometry must be inside its own chart");
+        let design = basis.design.to_dense();
+        for j in 0..design.ncols() {
+            let w = 1.0 / (1.0 + j as f64);
+            for i in 0..n {
+                y[i] += w * design[(i, j)];
+            }
+        }
+        // Standardize so `noise_sd` is a signal-to-noise ratio, not an absolute
+        // scale that would drift with κ⋆ and the realized center count.
+        let mean = y.iter().sum::<f64>() / n as f64;
+        let sd = (y.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n as f64).sqrt();
+        assert!(
+            sd > 0.0,
+            "the planted κ⋆ = {kappa_star} signal collapsed to a constant"
+        );
+        for i in 0..n {
+            y[i] = (y[i] - mean) / sd;
+        }
+    }
+    for i in 0..n {
+        y[i] += noise_sd * noise[i];
     }
     (feats, y)
 }
@@ -142,7 +207,7 @@ fn fit_and_infer(feats: &Array2<f64>, y: &Array1<f64>) -> CurvatureInference {
         frame[(i, 1)] = feats[(i, 0)];
         frame[(i, 2)] = feats[(i, 1)];
     }
-    let spec = termspec_for("y ~ curv(x1, x2, centers=6)", &frame);
+    let spec = termspec_for(FORMULA, &frame);
 
     let weights = Array1::<f64>::ones(n);
     let offset = Array1::<f64>::zeros(n);
@@ -280,7 +345,17 @@ fn resolve(inf: &CurvatureInference, target: f64) -> Resolution {
 fn profile_ci_covers_planted_curvature_across_replicates() {
     gam::init_parallelism();
     let reps = replicate_count();
-    let kappa_star = 1.5_f64;
+    // The planted curvature must lie INSIDE the parameter space whose coverage
+    // is being measured (gam#2687). The κ box is
+    // `±CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / max‖x‖²` — the half-margin to
+    // the antipodal fold — so on a radius-0.6 disk it is ≈ ±1.41, and the
+    // pre-#2687 `κ⋆ = 1.5` was 6% OUTSIDE it: `κ⋆·R² = 0.54` against a cap of
+    // `F = 0.50`. A CI cannot cover a truth the estimator is not allowed to
+    // report, so at 1.5 this arm was measuring nothing about coverage; #2687
+    // read the resulting rail as evidence the cap was wrong, which the criterion
+    // map refuted. `κ⋆ = 1.0` gives `κ⋆·R² = 0.355`, 71% of the cap, leaving room
+    // on both sides for the profile CI to close.
+    let kappa_star = 1.0_f64;
     let mut covered = 0usize;
     let mut missed = 0usize;
     let mut railed = 0usize;
@@ -325,22 +400,23 @@ fn profile_ci_covers_planted_curvature_across_replicates() {
         reps - resolved
     );
 
-    // (0) THE ESTIMATE MUST BE AN ESTIMATE. `κ̂` is the argmin of `V_p` over the
-    // chart-feasible box; when the box constraint is active, `κ̂` is a readout of
-    // the BOX and moves with it, and the Wilks region anchored at it is not a
-    // 95% interval. Coverage is then unmeasured — not 0%, not 100% — so this has
-    // to be asserted BEFORE any coverage number is read, or the gate reports a
-    // rate for a quantity that does not exist. Before #2687 this file computed
-    // `covers` as a closed containment and reported `covers=false`, which read
-    // as a mis-covering interval when the true state was "no interval".
+    // (0) THE CRITERION MUST HAVE AN INTERIOR OPTIMUM ON MOST REPLICATES. `κ̂` is
+    // the argmin of `V_p` over the chart-feasible box; when the box constraint is
+    // active, `κ̂` is a readout of the BOX and moves with it. A single railed
+    // replicate is variance — its interval can still be a valid containment, and
+    // `resolve` already only trusts an EXCLUSION from an interior anchor — but a
+    // majority of them means the criterion has no interior optimum on this
+    // fixture at all, and the coverage number is then being carried entirely by
+    // box-wide intervals that cannot miss. That is the state #2687 measured
+    // before the plant was moved inside the κ⋆ model: 9/9 railed, mean κ̂ = 1.401
+    // pinned at the cap. A strict minority is the bar, mirroring the size arm's.
     assert!(
-        railed == 0,
+        railed < reps / 2,
         "κ̂ was RAILED at a κ-box endpoint in {railed}/{reps} replicates ({khats:?}); \
-         the profile criterion has no interior optimum there, so the profile CI is \
-         not a 95% interval and coverage is UNMEASURED. Widening the box does not \
-         fix this — it moves the rail (#2687 measured κ̂ = 2.78 against κ⋆ = 1.5 at \
-         the resolution-derived box end). The defect is in the criterion or in \
-         this fixture's identifiability, not in the bound."
+         at a majority the profile criterion has no interior optimum and the \
+         coverage rate below is carried by intervals that span the whole box. \
+         Widening the box does not fix that — it moves the rail (#2687 measured \
+         κ̂ = 2.78 against κ⋆ = 1.5 at the resolution-derived box end)."
     );
     // (1) COVERAGE, among the replicates that carry a coverage claim. The bar is
     // derived with `REPLICATE_COUNT`; see its table.

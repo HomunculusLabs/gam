@@ -112,6 +112,87 @@ mod constant_curvature_kappa_box_probe_tests {
     /// says the drift "rails kappa-hat to the +chart bound for any curved data").
     /// Mirror the value block of `profiled_gaussian_reml_value_kappa_jet` and
     /// print the three pieces separately.
+    /// THE CONTROL. Every fixture in the tree plants a signal that is NOT in the
+    /// k*-RKHS: `2*exp(-d_{k*}(x,0)) - 1` is a kernel section at length 1, while
+    /// the basis is built at `L(kappa)` on a handful of centers, so the truth is
+    /// only approximated at EVERY kappa including k*. If the kappa-spans happen
+    /// to be ordered in approximation power, the criterion will follow that order
+    /// and never see k*. That is misspecification, not a broken estimator.
+    ///
+    /// So: generate `y` as an exact linear combination of the k*-basis's OWN
+    /// columns plus noise. The truth is then in the k*-span by construction and
+    /// in no other span. If the criterion still has no interior optimum at k*,
+    /// the estimator is broken; if it recovers k*, every fixture is misspecified
+    /// and the repair is on the fixture side.
+    #[test]
+    fn probe_control_truth_exactly_inside_the_kappa_star_span() {
+        let radius = 0.6_f64;
+        for kappa_star in [-1.0_f64, -0.5, 0.5, 1.0] {
+            for centers in [6usize, 20] {
+                let mut st = 0x5EED_0944_0000_0000_u64;
+                let n = 240usize;
+                let mut feats = Array2::<f64>::zeros((n, 2));
+                for i in 0..n {
+                    let (x1, x2) = loop {
+                        let a = 2.0 * next_unit(&mut st) - 1.0;
+                        let b = 2.0 * next_unit(&mut st) - 1.0;
+                        if a * a + b * b <= 1.0 {
+                            break (a * radius, b * radius);
+                        }
+                    };
+                    feats[(i, 0)] = x1;
+                    feats[(i, 1)] = x2;
+                }
+                let mut truth_spec = spec_at(kappa_star, centers);
+                truth_spec.double_penalty = false;
+                let truth_basis =
+                    gam_terms::basis::build_constant_curvature_basis(feats.view(), &truth_spec)
+                        .expect("truth basis");
+                let xs = truth_basis.design.to_dense();
+                let mut y = Array1::<f64>::zeros(n);
+                // A smooth coefficient vector: low-index columns get more weight,
+                // so the planted function is in the span but not a single column.
+                for j in 0..xs.ncols() {
+                    let w = 1.0 / (1.0 + j as f64);
+                    for i in 0..n {
+                        y[i] += w * xs[(i, j)];
+                    }
+                }
+                let sd = {
+                    let m = y.iter().sum::<f64>() / n as f64;
+                    (y.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / n as f64).sqrt()
+                };
+                for i in 0..n {
+                    y[i] += 0.05 * sd * next_gauss(&mut st);
+                }
+                let mut max_r2 = 0.0_f64;
+                for row in feats.outer_iter() {
+                    max_r2 = max_r2.max(row.dot(&row));
+                }
+                let cap = 0.5 / max_r2;
+                let mut best = (f64::INFINITY, f64::NAN);
+                for i in 0..=100 {
+                    let kappa = -cap + 2.0 * cap * (i as f64) / 100.0;
+                    if let Ok((v, _, _)) = constant_curvature_kappa_profile_value_jet(
+                        feats.view(),
+                        y.view(),
+                        &spec_at(kappa, centers),
+                    ) && v < best.0
+                    {
+                        best = (v, kappa);
+                    }
+                }
+                let interior = best.1.abs() < cap * 0.999;
+                eprintln!(
+                    "k*={kappa_star:<6} centers={centers:<4} argmin={:<10.4} cap=±{cap:.4} \
+                     interior={interior}  err={:+.4}",
+                    best.1,
+                    best.1 - kappa_star
+                );
+            }
+        }
+    }
+
     #[test]
     fn probe_which_block_of_the_reml_value_descends_in_kappa() {
         use faer::Side;
