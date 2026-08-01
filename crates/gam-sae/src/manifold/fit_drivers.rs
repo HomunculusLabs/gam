@@ -2359,14 +2359,58 @@ impl SaeManifoldTerm {
 
     /// Norm² of a full-length `(n·q + β)` residual vector after projecting out
     /// BOTH the chart reparametrisation orbit AND the rank-deficient decoder
-    /// β-null (#1051/#1117): along either the penalised joint objective is flat,
-    /// so a component there is gauge freedom, not un-converged motion. Shared by
-    /// the convergence STEP gate ([`Self::quotient_newton_step_norm_sq`]) and the
-    /// convergence GRADIENT gate ([`Self::quotient_gradient_norm_sq`]) so both
-    /// measure progress on the SAME identified quotient — otherwise a
-    /// rank-deficient circle whose only remaining motion is gauge/null crawl is
-    /// recognised as converged by the step measure but rejected forever by the
-    /// raw-gradient measure, burning the inner refine budget (the #1117 stall).
+    /// β-null (#1051/#1117). Shared by the convergence STEP gate
+    /// ([`Self::quotient_newton_step_norm_sq`]) and the convergence GRADIENT gate
+    /// ([`Self::quotient_gradient_norm_sq`]) so both measure progress on the SAME
+    /// identified quotient — otherwise a rank-deficient circle whose only
+    /// remaining motion is gauge/null crawl is recognised as converged by the
+    /// step measure but rejected forever by the raw-gradient measure, burning the
+    /// inner refine budget (the #1117 stall).
+    ///
+    /// ## WHAT IS FLAT ALONG THE ORBIT, AND WHAT IS NOT (gam#2715)
+    ///
+    /// This doc previously said "along either the penalised joint objective is
+    /// flat, so a component there is gauge freedom, not un-converged motion".
+    /// **The first clause is false and the second does not follow.** Measured:
+    ///
+    /// * The orbit IS an exact first-order symmetry of the **likelihood**.
+    ///   [`Self::dense_step_gauge_vector_from_field`] cancels the reconstruction
+    ///   motion with a least-squares decoder compensation, and the residual of
+    ///   that solve — which is precisely the first-order reconstruction change —
+    ///   measured `1.29e-16 … 1.11e-15` RELATIVE over 1333 constructions on two
+    ///   fixtures. So the data-fit term really is flat here.
+    /// * The orbit is NOT a symmetry of the **posterior**. The ARD prior on `t`
+    ///   and the smoothness prior on `β` depend on those coordinates directly,
+    ///   not only through the reconstruction, and a chart reparametrisation moves
+    ///   them. Measured at one stall state: the directional derivatives of the
+    ///   PENALISED objective along the two orbit directions are `4.592144e-3` and
+    ///   `5.823201e-3` against a `5.574613e-4` convergence tolerance — **8.2x and
+    ///   10.4x**, and they reconstruct the projected gradient component
+    ///   (`hypot = 7.4160270e-3` vs `‖Π∥gauge g‖ = 7.416027e-3`) to `5.6e-10`.
+    ///
+    /// A component along the orbit is therefore **likelihood-gauge but live
+    /// posterior descent**, and removing it from a convergence measure is only
+    /// sound where the priors are inactive along it. Any consumer that reads a
+    /// small quotient as "stationary" is relying on the false clause, not on this
+    /// one: the inner acceptance gate ([`Self::quotient_gradient_norm_sq`] via
+    /// `quasi_laplace_kkt_stationary`), the terminal Newton polish's stationarity
+    /// return, and `SaeInstalledInnerKktAudit::certifies()`, whose
+    /// `extensive OR intensive` disjunction reaches users as
+    /// `parameter_space.certifies()`.
+    ///
+    /// Worse, the omission is self-concealing: the solver can only move in the
+    /// complement, so it drives the complement component down and leaves the
+    /// orbit component alone, and the retained fraction `‖Π⊥g‖/‖g‖` therefore
+    /// tends to zero at ANY fixed point whether or not it is stationary
+    /// (measured on one trajectory at constant projector rank: `0.978` far out,
+    /// `0.500` at the stall, `0.00108` after a polish step). An acceptance
+    /// denominated in it is an eventual-acceptance guarantee rather than a test.
+    ///
+    /// This comment documents the state of the code; it does not fix it. The
+    /// precondition the accept path assumes — `maxᵢ |gᵀvᵢ| ≤ tolerance` over the
+    /// removed directions — is available here as `coeff` and is not checked.
+    /// Making the orbit a genuine posterior symmetry is a modelling change and is
+    /// tracked separately.
     pub(crate) fn quotient_residual_norm_sq(
         &self,
         mut residual: Array1<f64>,
