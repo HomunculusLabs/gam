@@ -9009,3 +9009,210 @@ pub(crate) fn near_wall_wiggle_coordinate_keeps_cross_covariance_in_moments_2390
         );
     }
 }
+
+/// gam#2695 — FD ORACLE on the LINK-WIGGLE joint block gradient.
+///
+/// `survival_ls_block_gradient_matches_single_sourced_tower_932` pins the block
+/// gradient against the §13 tower for the THREE-block family
+/// (`x_link_wiggle: None`). The wiggle path has no such witness: the wiggle row
+/// kernel exposes `hessian_dense`, `directional_derivative_dense` and
+/// `second_directional_derivative_dense`, but NO gradient, so nothing compares
+/// `evaluate_log_likelihood_and_block_gradients` against a second source once a
+/// link warp is installed — and that is the one arm where the design is
+/// `beta`-dependent (`q = q0 + Σ_j βw_j·B_j(q0)`, `m1 = 1 + Σ_j βw_j·B'_j(q0)`),
+/// i.e. the one arm where a dropped chain-rule term is possible.
+///
+/// This differentiates the routine against ITSELF: the same call returns `ℓ` and
+/// `∇ℓ`, so a central difference of the returned value must reproduce the
+/// returned gradient at every coefficient of every block. The step is
+/// `ε^(1/3)·(1+|x|)` — the central-difference optimum, derived from `f64::EPSILON`
+/// and the coefficient scale, not chosen — and the bound is
+/// `64·ε^(2/3)·(1+|analytic|)`, the matching truncation+roundoff floor.
+#[test]
+fn survival_ls_link_wiggle_block_gradient_matches_finite_difference_2695() {
+    let primaries: Vec<[f64; SLS_ROW_K]> = vec![
+        [0.2, 0.9, 1.3, 0.6, 0.4, 0.25, 0.3, 0.1, -0.2],
+        [-0.4, 0.5, 0.9, -0.8, -0.5, 0.4, -0.25, 0.35, 0.3],
+        [1.4, 2.1, 0.8, -1.1, -0.9, 0.2, 0.45, 0.55, 0.35],
+        [0.1, 0.6, 1.0, 0.3, 0.2, -0.3, -0.2, 0.15, 0.25],
+    ];
+    let event = [1.0, 0.0, 1.0, 1.0];
+    let weight = [1.0, 0.8, 1.2, 1.1];
+    let n = primaries.len();
+    let q0_exit = Array1::from_shape_fn(n, |i| {
+        -primaries[i][3] * (-primaries[i][6]).exp()
+    });
+    let knots = Array1::from_vec(vec![
+        -3.0, -3.0, -3.0, -3.0, -1.5, 0.0, 1.5, 3.0, 3.0, 3.0, 3.0,
+    ]);
+    let degree = 3usize;
+    let xwiggle =
+        survival_wiggle_basis_with_options(q0_exit.view(), &knots, degree, BasisOptions::value())
+            .expect("link wiggle design");
+    let pw = xwiggle.ncols();
+    assert!(pw >= 2, "the fixture must install a real wiggle block, got pw={pw}");
+
+    let inverse_link = residual_distribution_inverse_link(ResidualDistribution::Gaussian);
+    // BOTH channel layouts. `evaluate_log_likelihood_and_block_gradients` takes a
+    // different branch for the threshold and log-sigma blocks depending on
+    // whether the family carries separate entry/derivative designs: the `Some`
+    // arm contracts the three channels independently, the `None` arm uses the
+    // #2342 regrouped `S1·dq_exit + d1_q0·(dq_entry − dq_exit)` sum. The witness
+    // fit (an intercept threshold and an intercept log-sigma) takes the `None`
+    // arm, so a fixture that only exercises `Some` would leave the live branch
+    // unwitnessed.
+    for time_varying_channels in [true, false] {
+    let mut family = survival_ls_joint_oracle_family(&inverse_link, &primaries, &event, &weight);
+    if !time_varying_channels {
+        family.x_threshold_entry = None;
+        family.x_threshold_deriv = None;
+        family.x_log_sigma_entry = None;
+        family.x_log_sigma_deriv = None;
+    }
+    family.x_link_wiggle = Some(DesignMatrix::Dense(
+        gam_linalg::matrix::DenseDesignMatrix::from(xwiggle.clone()),
+    ));
+    family.wiggle_knots = Some(knots.clone());
+    family.wiggle_degree = Some(degree);
+
+    // The oracle family's three additive designs are single columns holding the
+    // primary channels, so `eta_channel = channel · beta` exactly and the states
+    // can be rebuilt from the coefficients alone.
+    // Small positive amplitudes. The warp multiplies the event-time Jacobian by
+    // `m1 = 1 + sum_j betaw_j * B'_j(q0)`, and the family REFUSES any state whose
+    // `d_eta/dt` falls to zero (structural monotonicity, floor 1e-8); at
+    // `0.05 + 0.03*j` this fixture's row 1 lands at `d_eta/dt = -1.243e-2` and the
+    // gradient call errs before any derivative is compared. These amplitudes keep
+    // `m1` within a few percent of 1 while leaving every wiggle column live.
+    let beta_w0 = Array1::from_shape_fn(pw, |j| 0.002 + 0.001 * (j as f64));
+    let build = |betas: [f64; 3], beta_w: &Array1<f64>| -> Vec<ParameterBlockState> {
+        let stacked = |first: usize, second: usize, deriv: usize, scale: f64| {
+            let mut eta = Array1::<f64>::zeros(3 * n);
+            for i in 0..n {
+                eta[i] = primaries[i][first] * scale;
+                eta[n + i] = primaries[i][second] * scale;
+                eta[2 * n + i] = primaries[i][deriv] * scale;
+            }
+            eta
+        };
+        let flat = |channel: usize, scale: f64| {
+            Array1::from_shape_fn(n, |i| primaries[i][channel] * scale)
+        };
+        vec![
+            ParameterBlockState {
+                beta: array![betas[0]],
+                eta: stacked(0, 1, 2, betas[0]),
+            },
+            ParameterBlockState {
+                beta: array![betas[1]],
+                eta: if time_varying_channels {
+                    stacked(3, 4, 5, betas[1])
+                } else {
+                    flat(3, betas[1])
+                },
+            },
+            ParameterBlockState {
+                beta: array![betas[2]],
+                eta: if time_varying_channels {
+                    stacked(6, 7, 8, betas[2])
+                } else {
+                    flat(6, betas[2])
+                },
+            },
+            ParameterBlockState {
+                beta: beta_w.clone(),
+                eta: xwiggle.dot(beta_w),
+            },
+        ]
+    };
+
+    let betas0 = [1.0_f64, 1.0, 1.0];
+    let states = build(betas0, &beta_w0);
+    let (ll0, block_gradients) = family
+        .evaluate_log_likelihood_and_block_gradients(&states)
+        .expect("wiggle block gradients");
+    assert_eq!(
+        block_gradients.len(),
+        4,
+        "the wiggle family must report four blocks"
+    );
+    assert!(ll0.is_finite(), "fixture log-likelihood must be finite");
+    let analytic: Vec<f64> = block_gradients
+        .iter()
+        .flat_map(|block| block.iter().copied())
+        .collect();
+    assert_eq!(analytic.len(), 3 + pw);
+
+    // DISCRIMINATOR (gam#2695). The trust-region ratio's numerator and
+    // denominator do not come from the same evaluator: `actual_reduction` is
+    // built from `log_likelihood_only` (the backtracking fast path) while the
+    // Newton RHS is built from `evaluate`'s block gradients. If those two
+    // evaluate different functions of beta, no gradient fix repairs the ratio.
+    // Pin them at the same state before differentiating either.
+    {
+        use crate::custom_family::CustomFamily;
+        let fast = family
+            .log_likelihood_only(&states)
+            .expect("fast-path log-likelihood");
+        assert!(
+            (fast - ll0).abs() <= 1e-9 * (1.0 + ll0.abs()),
+            "the backtracking fast path `log_likelihood_only` reports {fast:.9e} where \
+             `evaluate_log_likelihood_and_block_gradients` reports {ll0:.9e} at the SAME \
+             state (arm time_varying_channels={time_varying_channels}); the trust-region ratio \
+             compares two different objectives"
+        );
+    }
+
+    let ll_at = |betas: [f64; 3], beta_w: &Array1<f64>| -> f64 {
+        family
+            .evaluate_log_likelihood_and_block_gradients(&build(betas, beta_w))
+            .expect("perturbed log-likelihood")
+            .0
+    };
+
+    let cbrt_eps = f64::EPSILON.cbrt();
+    let bound_scale = 64.0 * cbrt_eps * cbrt_eps;
+    let mut worst = 0.0_f64;
+    let mut worst_index = 0usize;
+    for index in 0..analytic.len() {
+        let base = if index < 3 { betas0[index] } else { beta_w0[index - 3] };
+        let h = cbrt_eps * (1.0 + base.abs());
+        let shift = |delta: f64| -> f64 {
+            let mut betas = betas0;
+            let mut beta_w = beta_w0.clone();
+            if index < 3 {
+                betas[index] = base + delta;
+            } else {
+                beta_w[index - 3] = base + delta;
+            }
+            ll_at(betas, &beta_w)
+        };
+        let fd = (shift(h) - shift(-h)) / (2.0 * h);
+        let tol = bound_scale * (1.0 + analytic[index].abs());
+        let drift = (fd - analytic[index]).abs();
+        if drift > worst {
+            worst = drift;
+            worst_index = index;
+        }
+        assert!(
+            drift <= tol,
+            "arm time_varying_channels={time_varying_channels}, coefficient {index} \
+             (block {}): analytic ∂ℓ/∂β = {:.9e} but the central \
+             difference of the SAME call's ℓ is {:.9e} (drift {:.3e} > {:.3e}); the joint \
+             gradient does not differentiate the log-likelihood it returns",
+            if index < 3 { index } else { 3 },
+            analytic[index],
+            fd,
+            drift,
+            tol
+        );
+    }
+    // Non-vacuity: the gradient must not be the zero vector at this fixture, or
+    // the loop above would pass on an empty claim.
+    assert!(
+        analytic.iter().any(|value| value.abs() > 1e-6),
+        "arm time_varying_channels={time_varying_channels}: fixture must produce a non-trivial \
+         gradient (worst drift {worst:.3e} at {worst_index})"
+    );
+    }
+}
