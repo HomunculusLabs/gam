@@ -674,7 +674,9 @@ pub(super) fn run(
         // exactly once per step.
         let mut normal_eq = DecoderNormalEq::zeros(k, p);
         normal_eq.accumulate(x, &certified_codes);
+        let accumulate_secs = epoch_start.elapsed().as_secs_f64();
         let sigma = residual_scale(x, &codes, decoder.view());
+        let sigma_secs = epoch_start.elapsed().as_secs_f64() - accumulate_secs;
         let (stats, _gate) = solve_decoder_with_routability_gate_recycled(
             &mut decoder,
             &normal_eq,
@@ -779,6 +781,8 @@ pub(super) fn run(
             "[SAE epoch {}/{}] ev={:.6} improve={:.3e} ev_resid={:.3e} decoder_resid={:.3e} \
              routing_resid={:.3e} births={} revived={} live={}/{} no_growth={} \
              support_saturated={} refresh_s={:.2} route_s={:.2} elapsed_s={:.1} \
+             accumulate_s={:.3} sigma_s={:.3} graph_build_s={:.3} \
+             precond_s={:.3} cg_solve_s={:.3} block_sweeps={} precond_cost_ratio={:.3} \
              mean_degree={:.1} giant_fraction={:.4} max_component={} \
              max_component_nnz={} operator_build_s={:.3} \
              cg_columns={} cg_iterations={} recycled_rank={} tile_columns={} \
@@ -800,6 +804,13 @@ pub(super) fn run(
             refresh_secs,
             route_secs,
             fit_start.elapsed().as_secs_f64(),
+            accumulate_secs,
+            sigma_secs,
+            decoder_solve_stats.graph_build_seconds,
+            decoder_solve_stats.cg_preconditioner_seconds,
+            decoder_solve_stats.cg_solve_seconds,
+            decoder_solve_stats.cg_block_sweeps,
+            decoder_solve_stats.cg_preconditioner_cost_ratio,
             decoder_solve_stats.mean_cofiring_degree,
             decoder_solve_stats.giant_component_fraction,
             decoder_solve_stats.max_component_size,
@@ -2208,6 +2219,50 @@ pub struct DecoderSolveStats {
     /// (#2283/#2441: 5.4×-26× refresh inflation at flat `nnz` and flat
     /// iteration count). `0` means no component reached the CG path.
     pub cg_min_tile_columns: usize,
+    /// Seconds spent building the symmetric co-firing adjacency and walking its
+    /// connected components — everything between the assembled normal equations
+    /// and the first component solve.
+    ///
+    /// This is one of the four phases the refresh wall can hide in, and the
+    /// only one that is unavoidably serial over `|E|`: the adjacency fill walks
+    /// every stored coupling into per-atom vectors, and the BFS walks them
+    /// again. Reported so that "the refresh is slow" can be attributed instead
+    /// of inferred (#2283/#2441).
+    pub graph_build_seconds: f64,
+    /// Seconds spent constructing the recycled Galerkin preconditioner —
+    /// restriction of the retained directions, the rank-revealing QR, the fresh
+    /// operator action and the SPD proof — summed over CG-solved components.
+    ///
+    /// Separated from [`Self::cg_solve_seconds`] because the preconditioner is
+    /// the OPTIONAL half of the solve: if this is a large share of the refresh,
+    /// or if the solve it accelerates does not shrink by more than this costs,
+    /// the accelerator is a net loss and the answer is to stop paying for it,
+    /// not to make it cheaper.
+    pub cg_preconditioner_seconds: f64,
+    /// Seconds inside the block-CG recurrence itself (`solve_block_cg`), summed
+    /// over components and column tiles. Excludes the operator CSR build
+    /// ([`Self::cg_operator_build_seconds`]) and the preconditioner build.
+    pub cg_solve_seconds: f64,
+    /// Operator applications the block recurrence actually performed: summed
+    /// over column tiles, the MAXIMUM per-column iteration count in each tile.
+    ///
+    /// [`Self::cg_iterations`] sums per-column iteration counts, which is the
+    /// right convergence statistic and the WRONG work statistic: the block
+    /// advances every column of a tile together, so a tile whose hardest column
+    /// needs 200 iterations applies the operator 200 times no matter how fast
+    /// its other columns converged, and the sum scales with the column count on
+    /// top of that. This field is the exact number of `A·P` applications, which
+    /// is what a traffic or flop model of the refresh has to be denominated in.
+    pub cg_block_sweeps: usize,
+    /// Extra operator applications per sweep that the recycled correction adds,
+    /// `2mr/(m+nnz)`, maximised over the CG-solved components of this refresh.
+    ///
+    /// This is the price the correction charges. Paired with
+    /// [`Self::cg_block_sweeps`] it is the whole break-even test: a correction
+    /// costing `cost_ratio` must remove a `cost_ratio/(1+cost_ratio)` share of
+    /// the sweeps to be worth building, and until this field existed nothing
+    /// on the trace let anyone check whether it did.
+    pub cg_preconditioner_cost_ratio: f64,
 }
 
 impl Default for DecoderSolveStats {
@@ -2230,6 +2285,11 @@ impl Default for DecoderSolveStats {
             device_refresh_columns: 0,
             cg_kappa_bound: None,
             cg_min_tile_columns: 0,
+            graph_build_seconds: 0.0,
+            cg_preconditioner_seconds: 0.0,
+            cg_solve_seconds: 0.0,
+            cg_block_sweeps: 0,
+            cg_preconditioner_cost_ratio: 0.0,
         }
     }
 }
@@ -2510,6 +2570,7 @@ fn solve_decoder_recycled(
     let p = eq.b.ncols();
     recycle.begin_refresh(k);
 
+    let graph_build_start = Instant::now();
     // Symmetric coupling adjacency, sorted per atom for deterministic assembly.
     let mut neigh: Vec<Vec<(u32, f64)>> = vec![Vec::new(); k];
     for (&(a, b), &val) in eq.off.iter() {
@@ -2523,6 +2584,7 @@ fn solve_decoder_recycled(
     neigh.par_iter_mut().for_each(|list| {
         list.sort_by_key(|&(nb, _)| nb);
     });
+    let adjacency_seconds = graph_build_start.elapsed().as_secs_f64();
 
     let mut stats = DecoderSolveStats {
         mean_cofiring_degree: if k == 0 {
@@ -2539,6 +2601,9 @@ fn solve_decoder_recycled(
     // matrix-free by CG (see `direct_solve_size_threshold`).
     let direct_threshold = direct_solve_size_threshold(k);
 
+    stats.graph_build_seconds = adjacency_seconds;
+    // The BFS below is interleaved with the solves, so its cost is accumulated
+    // per component rather than measured as one span.
     let mut visited = vec![false; k];
     for start in 0..k {
         if visited[start] {
@@ -2560,6 +2625,7 @@ fn solve_decoder_recycled(
             continue;
         }
         // Gather the whole connected component by BFS, then canonicalise order.
+        let component_walk_start = Instant::now();
         let mut comp = vec![start];
         visited[start] = true;
         let mut head = 0usize;
@@ -2575,6 +2641,7 @@ fn solve_decoder_recycled(
             }
         }
         comp.sort_unstable();
+        stats.graph_build_seconds += component_walk_start.elapsed().as_secs_f64();
         stats.component_count += 1;
         stats.max_component_size = stats.max_component_size.max(comp.len());
         solve_component(
@@ -2602,6 +2669,8 @@ fn solve_decoder_recycled(
     log::debug!(
         "[SAE percolation] K={k} mean_degree={:.4} giant_fraction={:.4} \
          components={} max_component={} max_component_nnz={} operator_build_s={:.3} \
+         graph_build_s={:.3} precond_s={:.3} cg_solve_s={:.3} block_sweeps={} \
+         precond_cost_ratio={:.3} \
          direct_threshold={direct_threshold} \
          cg_columns={} cg_iterations={} recycled_rank={} tile_columns={} \
          cg_kappa_hat={:?} cg_kappa_bound={:?} \
@@ -2612,6 +2681,11 @@ fn solve_decoder_recycled(
         stats.max_component_size,
         stats.cg_max_component_nnz,
         stats.cg_operator_build_seconds,
+        stats.graph_build_seconds,
+        stats.cg_preconditioner_seconds,
+        stats.cg_solve_seconds,
+        stats.cg_block_sweeps,
+        stats.cg_preconditioner_cost_ratio,
         stats.cg_columns,
         stats.cg_iterations,
         stats.cg_recycled_rank,
@@ -2953,6 +3027,7 @@ fn solve_component(
 
     let k_total = eq.diag.len();
     let rank_bound = decoder_recycle_rank_bound(k_total, p, m, nnz);
+    let preconditioner_start = Instant::now();
     let preconditioner = recycled_component_preconditioner(
         recycle,
         comp,
@@ -2962,8 +3037,17 @@ fn solve_component(
         &diag_ridge,
         rank_bound,
     )?;
+    stats.cg_preconditioner_seconds += preconditioner_start.elapsed().as_secs_f64();
     let recycled_rank = preconditioner.rank();
     stats.cg_recycled_rank = stats.cg_recycled_rank.max(recycled_rank);
+    // Cost the correction charges every sweep, in operator applications: the
+    // two `m×r×tile` contractions against the operator's own `(m+nnz)×tile`.
+    let cost_ratio = if m + nnz == 0 {
+        0.0
+    } else {
+        2.0 * m as f64 * recycled_rank as f64 / (m + nnz) as f64
+    };
+    stats.cg_preconditioner_cost_ratio = stats.cg_preconditioner_cost_ratio.max(cost_ratio);
 
     // The Jacobi Gershgorin/Chebyshev cap above does not describe the new
     // low-rank-preconditioned operator. A recycled solve therefore uses CG's
@@ -3027,6 +3111,7 @@ fn solve_component(
                 });
         }
 
+        let solve_start = Instant::now();
         let (results, solution, on_device) = solve_block_cg(
             gpu,
             &row_ptr,
@@ -3039,6 +3124,12 @@ fn solve_component(
             residual_tolerance,
             cap,
         )?;
+        stats.cg_solve_seconds += solve_start.elapsed().as_secs_f64();
+        stats.cg_block_sweeps += results
+            .iter()
+            .map(|core| core.iterations)
+            .max()
+            .unwrap_or(0);
         if on_device {
             stats.device_refresh_columns += t;
         }

@@ -77,6 +77,12 @@ struct EpochRow {
     cg_iterations: usize,
     recycled_rank: usize,
     tile_columns: usize,
+    accumulate_s: f64,
+    sigma_s: f64,
+    graph_build_s: f64,
+    precond_s: f64,
+    cg_solve_s: f64,
+    block_sweeps: usize,
     max_component: usize,
     max_component_nnz: usize,
     operator_build_s: f64,
@@ -169,6 +175,12 @@ fn parse_epochs(lines: &[String]) -> Vec<EpochRow> {
             cg_iterations: count(line, "cg_iterations"),
             recycled_rank: count(line, "recycled_rank"),
             tile_columns: count(line, "tile_columns"),
+            accumulate_s: number(line, "accumulate_s"),
+            sigma_s: number(line, "sigma_s"),
+            graph_build_s: number(line, "graph_build_s"),
+            precond_s: number(line, "precond_s"),
+            cg_solve_s: number(line, "cg_solve_s"),
+            block_sweeps: count(line, "block_sweeps"),
             max_component: count(line, "max_component"),
             max_component_nnz: count(line, "max_component_nnz"),
             operator_build_s: number(line, "operator_build_s"),
@@ -243,6 +255,112 @@ fn planted_activations(n: usize, p: usize, k_true: usize, s: usize, seed: u64) -
         }
     }
     x
+}
+
+/// Achievable memory bandwidth on THIS host, measured with the SAME rayon pool
+/// the refresh runs on.
+///
+/// Every seconds-number this bench prints is uninterpretable without it. A
+/// refresh sitting at 90% of the host's streaming ceiling and one sitting at 9%
+/// look identical from the wall and call for completely opposite work: the
+/// first can only be improved by moving fewer bytes (or moving them on a device
+/// with more bandwidth), while the second has headroom that a better kernel,
+/// a better preconditioner or more threads can still take.
+///
+/// Two numbers, because the block-CG matvec does two different things:
+///
+/// * **triad** — `a = b + c` over an array far past any cache. The sequential
+///   ceiling, and an upper bound on anything the refresh could achieve.
+/// * **gather** — the CSR access pattern itself: for each of `m` rows, read
+///   `degree` neighbour rows of `t` contiguous `f64`s and fold them. This is
+///   what `solve_block_cg`'s operator closure actually does, and it is the
+///   honest denominator, because the matvec never streams — it re-reads
+///   neighbour rows in graph order with no reuse guarantee.
+///
+/// The gather is reported at two block sizes on purpose. The resident block is
+/// `m·t·8` bytes, so a small-`K` fixture can sit entirely in cache while the
+/// production shape does not — which would make a small-`K` witness reproduce
+/// the production ITERATION regime while missing its MEMORY regime entirely.
+/// Reporting both sizes is what stops that being assumed either way.
+fn host_bandwidth() -> Vec<(String, f64)> {
+    use rayon::prelude::*;
+
+    let mut out = Vec::new();
+
+    // --- triad --------------------------------------------------------------
+    let n = 128usize << 20 / 8; // ~1 GiB per array, 3 arrays
+    let b = vec![1.0f64; n];
+    let c = vec![2.0f64; n];
+    let mut a = vec![0.0f64; n];
+    let mut best = f64::INFINITY;
+    for _ in 0..3 {
+        let started = Instant::now();
+        a.par_chunks_mut(1 << 16)
+            .zip(b.par_chunks(1 << 16))
+            .zip(c.par_chunks(1 << 16))
+            .for_each(|((achunk, bchunk), cchunk)| {
+                for i in 0..achunk.len() {
+                    achunk[i] = bchunk[i] + cchunk[i];
+                }
+            });
+        best = best.min(started.elapsed().as_secs_f64());
+    }
+    // Two reads and one write per element.
+    out.push(("triad".to_string(), 3.0 * n as f64 * 8.0 / best));
+    drop((a, b, c));
+
+    // --- gather, at the bench scale and at the production scale --------------
+    for (m, t, degree) in [(1024usize, 409usize, 380usize), (32768, 409, 380)] {
+        let block = vec![1.0f64; m * t];
+        let mut state = 0x2283u64;
+        let indices: Vec<u32> = (0..m * degree)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state % m as u64) as u32
+            })
+            .collect();
+        let mut sink = vec![0.0f64; m * t];
+        let mut best = f64::INFINITY;
+        for _ in 0..3 {
+            let started = Instant::now();
+            sink.par_chunks_mut(t).enumerate().for_each(|(i, row)| {
+                for slot in row.iter_mut() {
+                    *slot = 0.0;
+                }
+                for e in 0..degree {
+                    let j = indices[i * degree + e] as usize;
+                    let neighbour = &block[j * t..(j + 1) * t];
+                    for (slot, value) in row.iter_mut().zip(neighbour.iter()) {
+                        *slot += value;
+                    }
+                }
+            });
+            best = best.min(started.elapsed().as_secs_f64());
+        }
+        out.push((
+            format!("gather_m{m}_t{t}_deg{degree}_block{}MiB", (m * t * 8) >> 20),
+            m as f64 * degree as f64 * t as f64 * 8.0 / best,
+        ));
+    }
+    out
+}
+
+/// Bytes the CPU block-CG moves per operator application, derived from the
+/// source rather than assumed (`solve_block_cg`'s closure plus
+/// `CpuPcgBlockBackend`'s five `m × tile` state blocks).
+///
+/// Per iteration: the CSR matvec gathers `8·t` bytes for each of `nnz` stored
+/// couplings and walks `12·nnz` bytes of structure; three block inner products,
+/// the `x`/`r` update, the preconditioner apply and the `p` update together
+/// touch the dense state about eighteen times (`18·8·m·t`); the low-rank
+/// correction adds `16·m·rank`. The gather term dominates once the mean
+/// co-firing degree exceeds ~36, which every shape here is far past.
+fn bytes_per_sweep(m: usize, nnz: usize, tile: usize, rank: usize) -> f64 {
+    8.0 * tile as f64 * (nnz as f64 + 18.0 * m as f64)
+        + 12.0 * nnz as f64
+        + 16.0 * m as f64 * rank as f64
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -345,16 +463,23 @@ fn main() {
 
     let (ladder, seed) = command_line();
 
+    for (name, bytes_per_second) in host_bandwidth() {
+        println!("[refresh-host] {name} GBs {:.1}", bytes_per_second / 1.0e9);
+    }
     println!(
         "[refresh-epoch] n,p,k,s,epoch,refresh_s,route_s,refresh_over_route,births,\
          cg_columns,cg_iterations,recycled_rank,tile_columns,max_component,max_component_nnz,\
-         operator_build_s,kappa_bound,ev"
+         operator_build_s,accumulate_s,sigma_s,graph_build_s,precond_s,cg_solve_s,\
+         block_sweeps,kappa_bound,ev"
     );
     println!(
         "[refresh-config] n,p,k,s,epochs_run,fit_s,refresh_total_s,route_total_s,\
          refresh_frac,first_refresh_s,last_refresh_s,growth,\
          first_cg_iterations,last_cg_iterations,cg_growth,\
-         first_tile,last_tile,first_nnz,last_nnz,first_kappa,last_kappa"
+         first_tile,last_tile,first_nnz,last_nnz,first_kappa,last_kappa,\
+         acc_total_s,graph_total_s,opbuild_total_s,precond_total_s,cgsolve_total_s,\
+         total_block_sweeps,last_iters_per_column,\
+         cg_bytes_moved_TB,cg_achieved_GBs"
     );
 
     for shape in ladder {
@@ -398,7 +523,8 @@ fn main() {
 
         for row in &rows {
             println!(
-                "[refresh-epoch] {n},{p},{k},{s},{},{:.4},{:.4},{:.3},{},{},{},{},{},{},{},{:.4},{:.6e},{:.6}",
+                "[refresh-epoch] {n},{p},{k},{s},{},{:.4},{:.4},{:.3},{},{},{},{},{},{},{},{:.4},\
+                 {:.4},{:.4},{:.4},{:.4},{:.4},{},{:.6e},{:.6}",
                 row.epoch,
                 row.refresh_s,
                 row.route_s,
@@ -415,6 +541,12 @@ fn main() {
                 row.max_component,
                 row.max_component_nnz,
                 row.operator_build_s,
+                row.accumulate_s,
+                row.sigma_s,
+                row.graph_build_s,
+                row.precond_s,
+                row.cg_solve_s,
+                row.block_sweeps,
                 row.kappa_bound,
                 row.ev,
             );
@@ -422,11 +554,27 @@ fn main() {
 
         let first = rows.first().expect("non-empty");
         let last = rows.last().expect("non-empty");
+        // Traffic is per-epoch: `nnz`, the tile and the rank all move over a
+        // fit, so the model has to be evaluated on each epoch's own numbers and
+        // summed, never on the last epoch's numbers times the epoch count.
+        let cg_bytes: f64 = rows
+            .iter()
+            .map(|r| {
+                bytes_per_sweep(
+                    r.max_component,
+                    r.max_component_nnz,
+                    r.tile_columns,
+                    r.recycled_rank,
+                ) * r.block_sweeps as f64
+            })
+            .sum();
+        let cg_seconds: f64 = rows.iter().map(|r| r.cg_solve_s).sum();
         let refresh_total: f64 = rows.iter().map(|r| r.refresh_s).sum();
         let route_total: f64 = rows.iter().map(|r| r.route_s).sum();
         println!(
             "[refresh-config] {n},{p},{k},{s},{},{fit_s:.2},{refresh_total:.3},{route_total:.3},\
-             {:.4},{:.4},{:.4},{:.3},{},{},{:.3},{},{},{},{},{:.4e},{:.4e}",
+             {:.4},{:.4},{:.4},{:.3},{},{},{:.3},{},{},{},{},{:.4e},{:.4e},\
+             {:.3},{:.3},{:.3},{:.3},{:.3},{},{:.2},{:.4},{:.1}",
             rows.len(),
             refresh_total / (refresh_total + route_total).max(f64::MIN_POSITIVE),
             first.refresh_s,
@@ -441,6 +589,24 @@ fn main() {
             last.max_component_nnz,
             first.kappa_bound,
             last.kappa_bound,
+            rows.iter().map(|r| r.accumulate_s).sum::<f64>(),
+            rows.iter().map(|r| r.graph_build_s).sum::<f64>(),
+            rows.iter().map(|r| r.operator_build_s).sum::<f64>(),
+            rows.iter().map(|r| r.precond_s).sum::<f64>(),
+            rows.iter().map(|r| r.cg_solve_s).sum::<f64>(),
+            rows.iter().map(|r| r.block_sweeps).sum::<usize>(),
+            // The block recurrence advances all columns of a tile together, so
+            // per-column iterations is the honest convergence measure; the raw
+            // `cg_iterations` sum scales with the column count.
+            last.cg_iterations as f64 / (last.cg_columns.max(1)) as f64,
+            // Bytes the block recurrence moved across the whole fit, and the
+            // rate it moved them at. Compare `cg_achieved_GBs` to the
+            // `[refresh-host] gather` line above: close to it means the solve is
+            // memory-bound and only fewer bytes (or a device with more
+            // bandwidth) can help; far below it means there is headroom a
+            // better kernel or preconditioner could still take.
+            cg_bytes / 1.0e12,
+            if cg_seconds > 0.0 { cg_bytes / cg_seconds } else { f64::NAN } / 1.0e9,
         );
     }
 }
