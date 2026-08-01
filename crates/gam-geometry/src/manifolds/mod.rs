@@ -21,6 +21,10 @@ pub mod constant_curvature;
 /// [`ManifoldSpec`](crate::manifold::ManifoldSpec) variant.
 #[cfg(test)]
 mod constant_curvature_conformance_tests;
+/// PROBE (#2687): resolution of the shipped distance/κ-jet near the antipodal
+/// fold, measured against a cancellation-free closed form.
+#[cfg(test)]
+mod constant_curvature_antipodal_resolution_tests;
 pub mod euclidean;
 pub mod grassmann;
 pub mod lie_so;
