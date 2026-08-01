@@ -1,19 +1,13 @@
 use ndarray::{Array1, Array2};
 
-use super::cpu_traits::MatrixLocation;
-
 #[derive(Clone, Debug)]
 pub struct DeviceBuffer<T> {
     host_shadow: Vec<T>,
-    location: MatrixLocation,
 }
 
 impl<T> DeviceBuffer<T> {
     pub const fn from_host_shadow(host_shadow: Vec<T>) -> Self {
-        Self {
-            host_shadow,
-            location: MatrixLocation::Host,
-        }
+        Self { host_shadow }
     }
 
     pub const fn len(&self) -> usize {
@@ -22,10 +16,6 @@ impl<T> DeviceBuffer<T> {
 
     pub const fn is_empty(&self) -> bool {
         self.host_shadow.len() == 0
-    }
-
-    pub const fn location(&self) -> MatrixLocation {
-        self.location
     }
 
     pub fn host_shadow(&self) -> &[T] {

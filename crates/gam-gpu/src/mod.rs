@@ -20,7 +20,6 @@ pub mod backend_probe;
 pub mod blas;
 #[cfg(target_os = "linux")]
 pub mod calibration;
-pub mod cpu_traits;
 pub mod device;
 pub mod device_cache;
 pub mod device_runtime;
@@ -42,7 +41,6 @@ pub mod test_gate;
 // Domain-specific GPU kernels are isolated from the infrastructure modules.
 pub mod kernels;
 
-pub use cpu_traits::MatrixLocation;
 pub use device::GpuDeviceInfo;
 pub use device_runtime::{GpuAbsence, GpuAvailability, GpuAvailabilityRef, GpuRuntime};
 pub use dictionary_score::{
