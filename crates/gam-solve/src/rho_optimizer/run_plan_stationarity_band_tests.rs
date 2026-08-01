@@ -7,6 +7,13 @@
 use super::*;
 use ndarray::array;
 
+/// The certificate band alone. #2688 moved the rung into the production return
+/// type on purpose, so the value-only form lives in the tests that compare
+/// bands to each other rather than beside the thing it was extracted from.
+fn outer_stationarity_band_at(config: &OuterConfig, cost_at_point: f64) -> f64 {
+    outer_stationarity_band_and_rung_at(config, cost_at_point).bound
+}
+
 // ─── #2613 diagnostic (zz_measure): the gradient-only stiff-ridge trajectory ──
 
 /// Replay the #2392 recovery objective with every outer evaluation logged, so
@@ -770,6 +777,7 @@ fn the_curvature_rung_still_refuses_genuine_nonstationarity_2458() {
 fn exactly_one_rung_is_the_derived_standard_2458() {
     let rungs = [
         StationarityBoundSource::SolverBand,
+        StationarityBoundSource::CertificateScoreRelative,
         StationarityBoundSource::ProbeNoiseFloor,
         StationarityBoundSource::CurvatureResolvability,
         StationarityBoundSource::GradientReproducibility,
@@ -798,4 +806,20 @@ fn exactly_one_rung_is_the_derived_standard_2458() {
         rungs.len(),
         "two rungs share a label, so the enumeration above is not what it appears to be",
     );
+    // A distinct-label count still cannot see a variant that was never listed,
+    // so make the compiler the gate (#2688 added one and this list had to be
+    // edited by hand): this match is exhaustive with no wildcard arm, so the
+    // next variant added to the enum is a compile error HERE, on the test that
+    // owns the "which rungs exist" question.
+    for rung in rungs {
+        match rung {
+            StationarityBoundSource::SolverBand
+            | StationarityBoundSource::CertificateScoreRelative
+            | StationarityBoundSource::ProbeNoiseFloor
+            | StationarityBoundSource::CurvatureResolvability
+            | StationarityBoundSource::GradientReproducibility
+            | StationarityBoundSource::FixedPointResidual
+            | StationarityBoundSource::CallerRequirement => {}
+        }
+    }
 }

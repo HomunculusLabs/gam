@@ -2515,8 +2515,18 @@ pub(crate) fn certificate_railed_coordinates(
 /// inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StationarityBoundSource {
-    /// `outer_stationarity_band_at(config, cost)` -- the raw band.
+    /// The band the ENGINE declared before it saw the judged point:
+    /// `outer_engine_gradient_band(config)` -- the arithmetic floor
+    /// `max(tolerance, scale·√ε)`, widened by the DECLARED-scale rung
+    /// `τ·(1 + |scale|)`. A function of the declared problem and nothing else.
     SolverBand,
+    /// The CERTIFICATE's point-anchored widening `τ·(1 + |cost_at_point|)`,
+    /// reported when it strictly exceeds [`Self::SolverBand`] (#2688). A
+    /// different anchor and therefore a different quantity: the engine band is
+    /// sealed at run start, this one moves with wherever the search stopped
+    /// (#2613). Both were `solver-band` until #2688, so a `N× over bound` ratio
+    /// could not be read as a ratio against a resolution standard.
+    CertificateScoreRelative,
     /// The cost-stall guard's measured probe-noise floor `σ̂/Δ` (#2241). Diverges
     /// as the step collapses, which is the regime it fires in.
     ProbeNoiseFloor,
@@ -2553,6 +2563,7 @@ impl StationarityBoundSource {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::SolverBand => "solver-band",
+            Self::CertificateScoreRelative => "certificate-score-relative",
             Self::ProbeNoiseFloor => "probe-noise-floor",
             Self::CurvatureResolvability => "curvature-resolvability",
             Self::GradientReproducibility => "gradient-reproducibility",
@@ -3555,8 +3566,27 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // Anchored at the criterion value of the point being JUDGED, which is what
     // the mgcv `magic` rule means and what the solver's own band deliberately
     // no longer does (#2613): see `outer_stationarity_band_at`.
-    let solver_bound = outer_stationarity_band_at(config, evaluation.cost);
-    let mut bound_source = StationarityBoundSource::SolverBand;
+    //
+    // #2688: the band and its rung arrive TOGETHER. This used to be followed by
+    // `let mut bound_source = SolverBand;`, so the engine's declared band, the
+    // point-anchored widening and the caller's cap -- three quantities, one of
+    // which is not a defect in the fit -- all reported one label.
+    let band_at_point = outer_stationarity_band_and_rung_at(config, evaluation.cost);
+    let solver_bound = band_at_point.bound;
+    let mut bound_source = band_at_point.source;
+    if bound_source == StationarityBoundSource::CallerRequirement {
+        // #2568's audit line, which until #2688 could not print on this path:
+        // the cap it announces had already been applied silently in the band
+        // helper, so the guard below that emits it was false by construction.
+        log::info!(
+            "[2568-REQUIREMENT] {context}: caller requires |Pg| <= {:.6e}; \
+             engine bound was {:.6e} (rung {}); measured |Pg| = \
+             {projected_grad_norm:.6e}",
+            solver_bound,
+            band_at_point.engine_bound,
+            band_at_point.engine_source.label(),
+        );
+    }
     // #2458: this used to open with a rung gated on
     // `operator_stop_reason == CostStallFlatValley` that installed
     // `flat_valley_converged_grad_bound(cost)` — `1e-3·(1 + |score|)` capped at
@@ -3609,6 +3639,14 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // widens, so capping here is the only placement that cannot be defeated by a
     // rung that fires later; in particular the score-relative widening is what
     // produced the saturated `bound = 1.000e0` this issue was filed against.
+    //
+    // #2688 -- this is now the SECOND cap, not the only one, and it says so.
+    // `outer_stationarity_band_and_rung_at` already capped the engine's own
+    // band and labelled the result; what reaches here is a bound that a
+    // widening ABOVE (today: the probe-noise floor) pushed back past the
+    // requirement. Before #2688 `required < stationarity_bound` was false by
+    // construction on every exit where nothing widened the already-capped
+    // value, which is why this audit line had never been observed to print.
     //
     // No new refusal path is needed and none is added: the acceptance test below
     // already compares `projected_grad_norm` against `stationarity_bound`, so
@@ -7947,12 +7985,9 @@ fn outer_arithmetic_gradient_floor(config: &OuterConfig) -> f64 {
 /// iterate and is therefore the correctly-anchored version of the same idea.
 ///
 /// The certificate keeps the point-anchored form, which is what mgcv means:
-/// see [`outer_stationarity_band_at`].
+/// see [`outer_stationarity_band_and_rung_at`].
 pub(crate) fn outer_gradient_tolerance(config: &OuterConfig) -> GradientTolerance {
-    let mut abs = outer_arithmetic_gradient_floor(config);
-    if let Some(scale) = config.objective_scale {
-        abs = abs.max(outer_cost_relative_tolerance(config) * (1.0 + scale));
-    }
+    let mut abs = outer_engine_gradient_band(config);
     // #2568 -- a caller's requirement is the one input to this band that may
     // TIGHTEN it. Everything above widens: the arithmetic floor and the
     // scale-relative rung both exist to stop the optimizer chasing digits the
@@ -7977,6 +8012,41 @@ pub(crate) fn outer_gradient_tolerance(config: &OuterConfig) -> GradientToleranc
     }
 }
 
+/// The engine's own declared band, BEFORE any caller requirement caps it.
+///
+/// Split out of [`outer_gradient_tolerance`] for #2688: a rung cannot tell
+/// "the engine decided this" from "the caller decided this" out of a number in
+/// which the two have already been `min`-ed together.
+fn outer_engine_gradient_band(config: &OuterConfig) -> f64 {
+    let mut abs = outer_arithmetic_gradient_floor(config);
+    if let Some(scale) = config.objective_scale {
+        abs = abs.max(outer_cost_relative_tolerance(config) * (1.0 + scale));
+    }
+    abs
+}
+
+/// A certificate band together with the rung that produced it (#2688).
+///
+/// The band is decided three ways and every one of them used to reach the call
+/// site as a bare `f64` that was then labelled `SolverBand` unconditionally.
+/// Returning the pair is the invariant [`StationarityBound::from_ladder`]
+/// already enforces one level up, pushed down to where the number is decided,
+/// so no `SolverBand` literal is left at the call site for a fourth branch to
+/// drift past.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CertificateBandAt {
+    /// The band the certificate applies.
+    pub(crate) bound: f64,
+    /// Which of the three inputs produced [`Self::bound`].
+    pub(crate) source: StationarityBoundSource,
+    /// What the ENGINE would have applied with no caller requirement, reported
+    /// beside `bound` so a reader can judge whether the requirement was
+    /// reasonable. Equal to [`Self::bound`] unless the cap bound.
+    pub(crate) engine_bound: f64,
+    /// The rung that produced [`Self::engine_bound`]. Never `CallerRequirement`.
+    pub(crate) engine_source: StationarityBoundSource,
+}
+
 /// The stationarity band a CERTIFICATE applies at the point it is judging.
 ///
 /// Same formula, correct anchor: `cost_at_point` is the criterion value of the
@@ -7991,26 +8061,54 @@ pub(crate) fn outer_gradient_tolerance(config: &OuterConfig) -> GradientToleranc
 /// was asked to and the certificate then declares the stop illegitimate. The
 /// certificate may be LOOSER — that is what the score-relative widening is for
 /// — but never stricter.
-pub(crate) fn outer_stationarity_band_at(config: &OuterConfig, cost_at_point: f64) -> f64 {
-    let solver_band = outer_gradient_tolerance(config).abs;
-    if !cost_at_point.is_finite() {
-        return solver_band;
-    }
-    let widened =
-        solver_band.max(outer_cost_relative_tolerance(config) * (1.0 + cost_at_point.abs()));
+/// The value is bit-for-bit what this returned before #2688:
+/// `min(max(engine, score_relative), required)` is the same number as the old
+/// `min(max(min(engine, required), score_relative), required)`, the inner `min`
+/// being dominated by the outer one in every ordering of the three. What
+/// changed is that the caller now also learns WHICH of the three it got.
+pub(crate) fn outer_stationarity_band_and_rung_at(
+    config: &OuterConfig,
+    cost_at_point: f64,
+) -> CertificateBandAt {
+    let engine_band = outer_engine_gradient_band(config);
+    // A non-finite criterion value anchors nothing, so the declared band stands.
+    let score_relative = if cost_at_point.is_finite() {
+        outer_cost_relative_tolerance(config) * (1.0 + cost_at_point.abs())
+    } else {
+        f64::NEG_INFINITY
+    };
+    // Strict `>`: on a tie the widening added nothing and must not claim the rung.
+    let (engine_bound, engine_source) = if score_relative > engine_band {
+        (
+            score_relative,
+            StationarityBoundSource::CertificateScoreRelative,
+        )
+    } else {
+        (engine_band, StationarityBoundSource::SolverBand)
+    };
     // #2568 -- the score-relative widening above is what produced the saturated
     // `bound = 1.000e0`, so a caller requirement that did not survive it would
     // be defeated by exactly the case it was introduced for. Cap after widening.
-    //
     // This does NOT manufacture the "solver claimed convergence, certificate
-    // refused" family warned about above: `outer_gradient_tolerance` was floored
+    // refused" family warned about above: `outer_gradient_tolerance` is floored
     // at the same requirement, so the solver was told to reach the number the
-    // certificate now applies. The two spellings agree by construction.
+    // certificate now applies. #2688 -- strict `<`, and the rung says so.
     match config.required_projected_gradient_norm {
-        Some(required) => widened.min(required),
-        None => widened,
+        Some(required) if required < engine_bound => CertificateBandAt {
+            bound: required,
+            source: StationarityBoundSource::CallerRequirement,
+            engine_bound,
+            engine_source,
+        },
+        _ => CertificateBandAt {
+            bound: engine_bound,
+            source: engine_source,
+            engine_bound,
+            engine_source,
+        },
     }
 }
+
 
 pub(crate) fn outer_max_iterations(value: usize) -> Result<MaxIterations, EstimationError> {
     MaxIterations::new(value)
@@ -9632,16 +9730,23 @@ mod outer_stationarity_band_tests {
     //!   * [`outer_gradient_tolerance`] — the SOLVER's band — is a function of
     //!     the declared problem and of nothing else, so every seed of one fit
     //!     reaches the same verdict;
-    //!   * [`outer_stationarity_band_at`] — the CERTIFICATE's band — is anchored
-    //!     at the point being judged, which is what the mgcv `magic` rule means.
+    //!   * [`outer_stationarity_band_and_rung_at`] — the CERTIFICATE's band — is
+    //!     anchored at the point being judged, which is what mgcv `magic` means.
     //!
     //! Every number below is evaluated from #2392's criterion rather than
     //! transcribed from the issue, so the fixture cannot drift away from the
     //! defect it pins; the issue's printed values appear only as cross-checks.
     use super::{
         OuterConfig, outer_cost_relative_tolerance, outer_gradient_tolerance,
-        outer_stationarity_band_at,
+        outer_stationarity_band_and_rung_at,
     };
+
+    /// The band alone. These tests compare bands to each other; #2688 moved the
+    /// rung into the production return type on purpose, so the value-only form
+    /// lives here rather than beside the thing it was extracted from.
+    fn outer_stationarity_band_at(config: &OuterConfig, cost_at_point: f64) -> f64 {
+        outer_stationarity_band_and_rung_at(config, cost_at_point).bound
+    }
 
     /// #2392's gradient-only criterion `V(ρ) = A·(−q + ½q²)`, `q = e^{ρ★−ρ}`,
     /// with gradient `V′(ρ) = A·q(1−q)`. These are the same `AMPLITUDE` and
