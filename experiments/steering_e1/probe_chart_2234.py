@@ -127,6 +127,29 @@ def sweep(args) -> int:
         mu = X.mean(0, keepdims=True)
         Xc = X - mu
         _, svals, vt = np.linalg.svd(Xc, full_matrices=False)
+
+        # FIT-FREE REFERENCE. Before asking what the fitted chart recovers, ask
+        # what is there to recover: the top-2 plane's angle (cyclic) or PC1
+        # (ordinal), with no fit involved. A fitted chart that scores below this
+        # is a deficit of the fitter, not of the data — and a reference that is
+        # itself near zero means the cloud does not carry the generator and no
+        # steering result of any kind is available from it.
+        scores2 = Xc @ vt[:2].T
+        if structure.cyclic:
+            ref = structure_recovery(
+                np.arctan2(scores2[:, 1], scores2[:, 0]), label_idx, True, n_labels)
+        else:
+            ref = structure_recovery(scores2[:, 0], label_idx, False, n_labels)
+        results.append({
+            "per_template_center": center, "pca_dim": 2, "k_atoms": 0,
+            "pca_explained_variance": float((svals[:2] ** 2).sum()
+                                            / max((svals ** 2).sum(), 1e-30)),
+            "fit_ev": float("nan"), "structure_recovery_r2": float(ref),
+            "status": "fit-free PCA reference",
+        })
+        print(f"center={int(center)} REFERENCE (fit-free top-2 plane) "
+              f"recovery_r2={ref:.4f}", flush=True)
+
         for dim in dims:
             r = int(min(dim, vt.shape[0]))
             Xr = np.ascontiguousarray(Xc @ vt[:r].T)
@@ -139,13 +162,17 @@ def sweep(args) -> int:
                     fit_ev = float(
                         1.0 - np.sum((Xr - np.asarray(fit.fitted)) ** 2)
                         / max(np.sum((Xr - Xr.mean(0)) ** 2), 1e-30))
-                    recovery = -1.0
+                    recovery, coord_std = -1.0, 0.0
                     for k in range(K):
                         c = np.asarray(fit.coords[k], dtype=float)
                         coord = c[:, 0] if c.ndim == 2 else c
-                        recovery = max(recovery, structure_recovery(
-                            coord, label_idx, structure.cyclic, n_labels))
-                    status = "ok"
+                        r2 = structure_recovery(coord, label_idx, structure.cyclic, n_labels)
+                        if r2 > recovery:
+                            recovery, coord_std = r2, float(coord.std())
+                    # A CONSTANT fitted coordinate is the tell that the chart
+                    # collapsed: recovery is then ~0 for a numerical reason, not
+                    # because the coordinate disagrees with the generator.
+                    status = f"ok coord_std={coord_std:.4g}"
                 except Exception as error:  # a refusal is a datum, not a crash
                     fit_ev, recovery = float("nan"), float("nan")
                     status = f"{type(error).__name__}: {error}"
@@ -161,7 +188,8 @@ def sweep(args) -> int:
                     flush=True)
     if args.out:
         Path(args.out).write_text(json.dumps(results, indent=2) + "\n")
-    ok = [r for r in results if np.isfinite(r["structure_recovery_r2"])]
+    ok = [r for r in results
+          if np.isfinite(r["structure_recovery_r2"]) and r["k_atoms"] > 0]
     if ok:
         best = max(ok, key=lambda r: r["structure_recovery_r2"])
         print(f"BEST center={int(best['per_template_center'])} dim={best['pca_dim']} "
