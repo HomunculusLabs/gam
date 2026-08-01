@@ -1732,6 +1732,13 @@ impl LatentExactExpansion {
 
     /// Unique nearest-even binary64 rounding, proved against both adjacent
     /// midpoint boundaries.
+    ///
+    /// The starting point is the accumulated sum of the components, which is
+    /// only a neighbourhood of the exact value. Where it is not the nearest
+    /// binary64 the boundary comparison says so exactly, and the walk below
+    /// steps one ulp onto the neighbour that comparison names, so the returned
+    /// value is the correctly rounded one regardless of how the accumulation
+    /// happened to round.
     fn certified_round(self) -> Result<f64, &'static str> {
         if self.len == 0 {
             return Ok(0.0);
@@ -1744,57 +1751,97 @@ impl LatentExactExpansion {
             return Err("the exact cumulant is outside the finite binary64 range");
         }
 
-        let residual = self.add(Self::scalar(-candidate))?;
-        if residual.len == 0 {
-            return Ok(candidate);
-        }
-        let residual_sign = residual.exact_sign_after_adding_scalar(0.0)?;
-        let adjacent = if residual_sign > 0.0 {
-            Self::next_up(candidate)
-        } else {
-            Self::next_down(candidate)
-        };
-        let midpoint_distance = 0.5 * (adjacent - candidate).abs();
-        if midpoint_distance == 0.0 {
-            return Err("the exact cumulant reached an unrepresentable subnormal midpoint");
-        }
-        let boundary_offset = -residual_sign * midpoint_distance;
-        match residual
-            .exact_sign_after_adding_scalar(boundary_offset)?
-            .partial_cmp(&0.0)
-        {
-            Some(std::cmp::Ordering::Less) if residual_sign > 0.0 => Ok(candidate),
-            Some(std::cmp::Ordering::Greater) if residual_sign < 0.0 => Ok(candidate),
-            Some(std::cmp::Ordering::Equal) => {
-                // An exact midpoint is not an unroundable value. IEEE-754's
-                // default mode -- round to nearest, ties to EVEN -- makes it
-                // unique, and it is the mode every binary64 operation
-                // downstream of this one already uses. This function's own doc
-                // comment names that rule ("Unique nearest-even binary64
-                // rounding"), so refusing here contradicted the contract and
-                // was stricter than the arithmetic the result feeds.
-                //
-                // It is not a measure-zero case in practice. Measured on
-                // gam#2538 at current main: the latent-survival frailty fit
-                // rejects ALL SEVEN outer seeds in 0.49 s with
-                // `latent survival numerator derivative mask 0b0011 has no
-                // certified binary64 value`, because at the beta = 0 outer
-                // seed the cumulant is a small dyadic rational and lands
-                // exactly on a midpoint. The certification refused precisely
-                // the inputs it can round exactly.
-                //
-                // `candidate` and `adjacent` are bit-adjacent -- `next_up` /
-                // `next_down` are `to_bits() +/- 1` -- so exactly one of the
-                // two has an even significand, and the low bit of the pattern
-                // is that significand's LSB. Selecting the even one IS the
-                // tie-to-even neighbour; no tolerance and no choice enter.
-                Ok(if candidate.to_bits() % 2 == 0 {
-                    candidate
-                } else {
-                    adjacent
-                })
+        // The accumulation above rounds once per component, so `candidate` is a
+        // NEIGHBOURHOOD of the exact value, not provably its nearest binary64.
+        // When it is not, the certification below can say so exactly -- the
+        // residual expansion and the sign accumulator are both exact -- and the
+        // honest response is to MOVE to the neighbour it names rather than to
+        // refuse. A step is taken only when the exact value lies strictly
+        // beyond the midpoint separating `candidate` from `adjacent`, which is
+        // precisely the statement that `adjacent` is strictly nearer, so the
+        // walk contracts by one ulp per step, never reverses direction, and is
+        // bounded by the (finite) ulp distance to the exact value. The step cap
+        // is a runaway backstop, not the decision: it is the same structural
+        // support bound that bounds the number of roundings the accumulation
+        // above could have committed, since each component contributes at most
+        // one.
+        let mut walked = 0usize;
+        loop {
+            let residual = self.add(Self::scalar(-candidate))?;
+            if residual.len == 0 {
+                return Ok(candidate);
             }
-            _ => Err("the exact cumulant lies outside the candidate binary64 rounding cell"),
+            let residual_sign = residual.exact_sign_after_adding_scalar(0.0)?;
+            if residual_sign == 0.0 {
+                // Nonzero components summing to exactly zero: `candidate` IS the
+                // exact value, and no boundary comparison is meaningful.
+                return Ok(candidate);
+            }
+            let adjacent = if residual_sign > 0.0 {
+                Self::next_up(candidate)
+            } else {
+                Self::next_down(candidate)
+            };
+            if !adjacent.is_finite() {
+                return Err("the exact cumulant is outside the finite binary64 range");
+            }
+            let midpoint_distance = 0.5 * (adjacent - candidate).abs();
+            if midpoint_distance == 0.0 {
+                return Err("the exact cumulant reached an unrepresentable subnormal midpoint");
+            }
+            let boundary_offset = -residual_sign * midpoint_distance;
+            match residual
+                .exact_sign_after_adding_scalar(boundary_offset)?
+                .partial_cmp(&0.0)
+            {
+                Some(std::cmp::Ordering::Less) if residual_sign > 0.0 => return Ok(candidate),
+                Some(std::cmp::Ordering::Greater) if residual_sign < 0.0 => return Ok(candidate),
+                Some(std::cmp::Ordering::Equal) => {
+                    // An exact midpoint is not an unroundable value. IEEE-754's
+                    // default mode -- round to nearest, ties to EVEN -- makes it
+                    // unique, and it is the mode every binary64 operation
+                    // downstream of this one already uses. This function's own doc
+                    // comment names that rule ("Unique nearest-even binary64
+                    // rounding"), so refusing here contradicted the contract and
+                    // was stricter than the arithmetic the result feeds.
+                    //
+                    // It is not a measure-zero case in practice. Measured on
+                    // gam#2538 at current main: the latent-survival frailty fit
+                    // rejects ALL SEVEN outer seeds in 0.49 s with
+                    // `latent survival numerator derivative mask 0b0011 has no
+                    // certified binary64 value`, because at the beta = 0 outer
+                    // seed the cumulant is a small dyadic rational and lands
+                    // exactly on a midpoint. The certification refused precisely
+                    // the inputs it can round exactly.
+                    //
+                    // `candidate` and `adjacent` are bit-adjacent -- `next_up` /
+                    // `next_down` are `to_bits() +/- 1` -- so exactly one of the
+                    // two has an even significand, and the low bit of the pattern
+                    // is that significand's LSB. Selecting the even one IS the
+                    // tie-to-even neighbour; no tolerance and no choice enter.
+                    return Ok(if candidate.to_bits() % 2 == 0 {
+                        candidate
+                    } else {
+                        adjacent
+                    });
+                }
+                _ => {
+                    // The exact value lies AT OR BEYOND the far side of the
+                    // midpoint, so `adjacent` is strictly nearer than `candidate`:
+                    // the accumulated sum simply missed the nearest binary64. Step
+                    // onto the neighbour the exact comparison named and certify
+                    // again. Nothing here is a tolerance -- the step is decided by
+                    // the same exact sign accumulator that decides the return.
+                    if walked == LATENT_EXACT_EXPANSION_CAPACITY {
+                        return Err(
+                            "the exact cumulant stayed outside its rounding cell after a full \
+                             structural walk",
+                        );
+                    }
+                    walked += 1;
+                    candidate = adjacent;
+                }
+            }
         }
     }
 }

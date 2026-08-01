@@ -2724,6 +2724,49 @@
         );
     }
 
+    /// The accumulated sum of the components is only a NEIGHBOURHOOD of the
+    /// exact value. When it misses the nearest binary64, the exact boundary
+    /// comparison inside `certified_round` names the neighbour that is nearer,
+    /// and the honest response is to step onto it -- not to refuse the value as
+    /// unroundable. Refusing it is what stood between gam#2538 and a fit once
+    /// the tie arm was fixed: every seed died on `the exact cumulant lies
+    /// outside the candidate binary64 rounding cell`.
+    #[test]
+    fn latent_cumulant_expansion_walks_onto_the_nearest_binary64_2538() {
+        // `1.0 + 2^-53` is an exact midpoint and rounds to even, i.e. back to
+        // `1.0`, twice -- so the accumulation loses BOTH small components and
+        // lands a full ulp below the exact sum `1 + 2^-52`, which is itself
+        // exactly representable. This is the accumulation being wrong, not the
+        // value being unroundable.
+        let half_ulp_at_one = 2.0_f64.powi(-53);
+        let mut witness = LatentExactExpansion::ZERO;
+        witness.components[0] = 1.0;
+        witness.components[1] = half_ulp_at_one;
+        witness.components[2] = half_ulp_at_one;
+        witness.len = 3;
+
+        let mut accumulated = 0.0_f64;
+        for index in 0..witness.len {
+            accumulated += witness.component(index);
+        }
+        assert_eq!(
+            accumulated, 1.0,
+            "the fixture is only a witness if the accumulation really misses",
+        );
+
+        let exact = 1.0 + 2.0_f64.powi(-52);
+        assert!(
+            exact - 1.0 == 2.0_f64.powi(-52),
+            "the exact sum must be representable, so the correct answer is not itself a tie",
+        );
+        assert_eq!(
+            witness
+                .certified_round()
+                .expect("a value one ulp from the accumulated sum is roundable, not unroundable"),
+            exact,
+        );
+    }
+
     /// #2566 analytic/FD authority split across the measured scale cliff.
     ///
     /// The analytic authority is the production negative Hessian. Its audit
