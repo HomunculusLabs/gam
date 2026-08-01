@@ -76,9 +76,30 @@
 //! writing at the wrong intensity, instead of splitting it between the chart
 //! and the dose.
 //!
-//! Predicted and NOT yet measured: `steer_to_target_nats` should not overshoot,
-//! because it solves for the amplitude that lands a requested *dose* rather than
-//! assuming amplitude scales position. That API is landed; nobody has run it.
+//! ~~Predicted: `steer_to_target_nats` should not overshoot, because it solves
+//! for the amplitude that lands a requested *dose* rather than assuming
+//! amplitude scales position.~~ **That prediction is FALSE, and false by
+//! construction rather than by measurement** — it needed no run to refute.
+//!
+//! `steer_to_target_nats` destructures `t_from` / `t_to` out of its request once
+//! and passes them **unchanged** into every `steer_delta` call (the unit
+//! reference and the `plan_at` closure the secant drives). It never re-solves
+//! `t_to`. Since `steer_delta` is `delta = amplitude · (g(t_to) − g(t_from))`,
+//! the reachable set of every plan that API can return — seed or post-secant —
+//! is the ray `{a·dg : a > 0}` on the SAME chord. That is precisely the
+//! one-parameter family the amplitude sweep above already traverses, under the
+//! change of variable `a₀ = sqrt(q* / unit_nats)`: the `alpha` column
+//! `{1,2,4,8,16}` IS the target-dose response at
+//! `q* = {1,4,16,64,256}·unit_nats`.
+//!
+//! So the target-dose loop cannot repair the displacement. It selects `a` to
+//! land a requested DOSE, and the realized DISPLACEMENT is then `a·dg`, exact
+//! only at `a = 1`, i.e. only when `q*` happens to equal `unit_nats`. **Dose and
+//! displacement are two demands on one scalar**, which means a fix has to solve
+//! jointly for `(t_to, a)` rather than taking `t_to` literally.
+//!
+//! Credit: refuted by another lane reading the call graph at `669d59532`;
+//! verified here against `origin/main` before this note was written.
 //!
 //! (This paragraph is the one the landing commit `ca38dea1b` lost: backticks in
 //! its `-m` were command-substituted by the shell, so the sentence naming
