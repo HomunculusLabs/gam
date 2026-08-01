@@ -190,6 +190,103 @@ def reference(args) -> int:
     return 0
 
 
+def planted(args) -> int:
+    """The control that decides WHOSE deficit a collapsed chart is.
+
+    The real-activation scan found `sae_manifold_fit` minting a certified fit
+    whose circle coordinate is degenerate on a cloud whose top-2 plane is a
+    clean 7-point ring. Two explanations survive that on its own: the fitter
+    cannot recover this geometry at all, or something specific to real
+    activations defeats it. This subcommand builds surrogates of increasing
+    idealisation from the SAME cloud and fits each with the SAME call, so the
+    boundary between the two can be located instead of argued:
+
+      `real`      the measured chart, unchanged (the reference point);
+      `surrogate` the measured per-label centroids, with within-label scatter
+                  replaced by isotropic Gaussian noise of the measured size —
+                  identical first- and second-order label geometry, no real
+                  activation idiosyncrasy left;
+      `ideal`     an exact circle of the measured radius with the measured
+                  noise, embedded in the same chart dimension — the textbook
+                  case, which `tests_steering_e4` already certifies at R2 1.0.
+
+    A collapse that survives all the way to `ideal` is a plain fitter defect
+    with a seconds-long reproducer. A collapse that appears only on `real` is a
+    property of activation geometry and belongs in the finding, not in a bug.
+    """
+    import gamfit
+
+    E1 = _sibling("run_e1")
+    structure = E1.STRUCTURES[args.structure]
+    data = np.load(args.npz, allow_pickle=False)
+    X0, label_idx, template_idx = data["X"], data["label_index"], data["template_index"]
+    if args.max_heads:
+        keep = template_idx < args.max_heads
+        X0, label_idx, template_idx = X0[keep], label_idx[keep], template_idx[keep]
+    n_labels = int(label_idx.max()) + 1
+
+    X = X0.copy()
+    for ti in np.unique(template_idx):
+        rows = np.flatnonzero(template_idx == ti)
+        X[rows] -= X[rows].mean(0, keepdims=True)
+    Xc = X - X.mean(0, keepdims=True)
+    _, svals, vt = np.linalg.svd(Xc, full_matrices=False)
+    r = int(min(args.pca_dim, vt.shape[0]))
+    real = np.ascontiguousarray(Xc @ vt[:r].T)
+
+    cent = np.stack([real[label_idx == li].mean(0) for li in range(n_labels)])
+    resid = real - cent[label_idx]
+    noise = float(np.sqrt(np.mean(resid ** 2)))
+    radius = float(np.mean(np.linalg.norm(cent[:, :2], axis=1)))
+    rng = np.random.default_rng(args.seed)
+
+    surrogate = cent[label_idx] + rng.normal(0.0, noise, size=real.shape)
+
+    ideal = np.zeros_like(real)
+    if structure.cyclic:
+        theta = TAU * label_idx.astype(np.float64) / n_labels
+        ideal[:, 0] = radius * np.cos(theta)
+        ideal[:, 1] = radius * np.sin(theta)
+    else:
+        span = float(cent[:, 0].max() - cent[:, 0].min())
+        ideal[:, 0] = span * (label_idx.astype(np.float64) / max(n_labels - 1, 1) - 0.5)
+    ideal = ideal + rng.normal(0.0, noise, size=real.shape)
+
+    print(f"chart {real.shape} noise_rms={noise:.4g} mean_centroid_radius={radius:.4g}",
+          flush=True)
+    out = []
+    for name, Xr in (("real", real), ("surrogate", surrogate), ("ideal", ideal)):
+        if structure.cyclic:
+            v = Xr[:, :2] - Xr[:, :2].mean(0, keepdims=True)
+            free = structure_recovery(
+                np.arctan2(v[:, 1], v[:, 0]), label_idx, True, n_labels)
+        else:
+            free = structure_recovery(
+                Xr[:, 0] - Xr[:, 0].mean(), label_idx, False, n_labels)
+        try:
+            fit = gamfit.sae_manifold_fit(
+                np.ascontiguousarray(Xr), K=1, d_atom=1, atom_topology=structure.topology,
+                assignment="softmax", n_iter=args.n_iter, random_state=args.seed)
+            ev = float(1.0 - np.sum((Xr - np.asarray(fit.fitted)) ** 2)
+                       / max(np.sum((Xr - Xr.mean(0)) ** 2), 1e-30))
+            c = np.asarray(fit.coords[0], dtype=float)
+            coord = c[:, 0] if c.ndim == 2 else c
+            rec = structure_recovery(coord, label_idx, structure.cyclic, n_labels)
+            status = (f"ok coord_std={coord.std():.4g} "
+                      f"distinct={int(np.unique(np.round(coord, 6)).size)}/{coord.size}")
+        except Exception as error:
+            ev, rec = float("nan"), float("nan")
+            status = f"{type(error).__name__}: {error}"
+        row = {"arm": name, "pca_dim": r, "fit_free_r2": float(free), "fit_ev": ev,
+               "structure_recovery_r2": rec, "noise_rms": noise, "status": status[:220]}
+        out.append(row)
+        print(f"arm={name:9s} fit_free_r2={free:.4f} fit_ev={ev:.4f} "
+              f"recovery_r2={rec:.4f} {row['status']}", flush=True)
+    if args.out:
+        Path(args.out).write_text(json.dumps(out, indent=2) + "\n")
+    return 0
+
+
 def sweep(args) -> int:
     import gamfit
 
@@ -315,6 +412,16 @@ def main() -> int:
                         "actually sees")
     f.add_argument("--out", default="")
     f.set_defaults(func=reference)
+
+    pl = sub.add_parser("planted")
+    pl.add_argument("--npz", required=True)
+    pl.add_argument("--structure", choices=("weekday", "ordinal"), default="weekday")
+    pl.add_argument("--pca-dim", type=int, default=8)
+    pl.add_argument("--max-heads", type=int, default=10)
+    pl.add_argument("--n-iter", type=int, default=40)
+    pl.add_argument("--seed", type=int, default=20260731)
+    pl.add_argument("--out", default="")
+    pl.set_defaults(func=planted)
 
     s = sub.add_parser("sweep")
     s.add_argument("--npz", required=True)
