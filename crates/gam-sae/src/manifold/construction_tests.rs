@@ -1841,6 +1841,11 @@ mod exact_stationarity_solve_1418_tests {
 
     /// `‖A x − rhs‖` for the exact stationarity Jacobian `A` (the matrix-free
     /// `B v + ΔC v` apply).
+    ///
+    /// #2674 — the FULL ambient residual. This used to project the residual onto
+    /// the complement of the analytic chart-gauge orbit, matching a solve that
+    /// deleted that orbit before inverting; both the projection and the deletion
+    /// are gone, so the residual the caller asserts on is now the whole thing.
     fn a_residual_norm(
         term: &SaeManifoldTerm,
         rho: &SaeManifoldRho,
@@ -1856,21 +1861,14 @@ mod exact_stationarity_solve_1418_tests {
             t: &ax.t - &rhs.t,
             beta: &ax.beta - &rhs.beta,
         };
-        let gauges = term
-            .exact_joint_chart_gauge_basis(cache)
-            .expect("analytic chart-gauge basis");
-        let physical = SaeManifoldTerm::project_arrow_vector_away_from_chart_gauges(
-            &resid,
-            &gauges,
-        )
-        .expect("quotient residual projection");
-        sae_norm(&physical)
+        sae_norm(&resid)
     }
 
     /// #2653: the dense owner is a signed Moore--Penrose solve, not an SPD
     /// inverse and not a projected-residual proxy. A resolved negative mode is
-    /// retained, the declared quotient null is removed, and the physical
-    /// operator certifies the resulting response.
+    /// retained, the MEASURED spectral null band is removed (#2674 — nothing is
+    /// removed by declaration), and the physical operator certifies the
+    /// resulting response.
     #[test]
     fn dense_exact_stationarity_pseudoinverse_keeps_signed_range_and_drops_null_2653() {
         let eigenvalues = Array1::from_vec(vec![4.0_f64, 1.0e-12, -2.0]);
@@ -1878,7 +1876,6 @@ mod exact_stationarity_solve_1418_tests {
             operator: Array2::from_diag(&eigenvalues),
             eigenvalues,
             eigenvectors: Array2::from_diag(&Array1::ones(3)),
-            gauge_basis: Vec::new(),
             rank_floor: 1.0e-9,
         };
         let rhs = SaeArrowVector {
@@ -1926,9 +1923,11 @@ mod exact_stationarity_solve_1418_tests {
             .expect("B inverse");
         let surrogate_resid = a_residual_norm(&term, &rho, target.view(), &cache, &x_b, &rhs);
 
-        // 1) The exact solve drives the PHYSICAL quotient residual
-        //    `P(Ax-rhs)` to ~0.  The raw residual may retain the analytically
-        //    declared chart-gauge component of an arbitrary test RHS.
+        // 1) The exact solve drives the FULL ambient residual `Ax-rhs` to ~0.
+        //    #2674 — this used to be asserted on the chart-gauge quotient of the
+        //    residual, because the solve deleted that orbit and could not reduce
+        //    an arbitrary RHS's component along it. It no longer deletes it, so
+        //    the whole residual is now in scope and this bar is strictly harder.
         assert!(
             exact_resid <= 1.0e-6 * rhs_norm,
             "solve_exact_stationarity must invert the EXACT A: ‖A x − rhs‖/‖rhs‖ = {:.3e} \

@@ -86,37 +86,37 @@ pub(crate) struct ExactHessianDeltaRow {
 struct ExactHessianSpectralBlock {
     operator: Array2<f64>,
     eigenvalues: Array1<f64>,
-    /// Ambient eigenvectors spanning the physical complement.  This is
-    /// rectangular when analytic chart gauges have been quotiented out.
+    /// Ambient eigenvectors, SQUARE: every direction of the materialized
+    /// operator is classified by `rank_floor` and nothing is deleted ahead of
+    /// it.  #2674 — the analytic chart orbit used to be quotiented out here
+    /// before diagonalization, which deleted directions the penalized operator
+    /// has genuine curvature and genuine slope in.
     eigenvectors: Array2<f64>,
-    /// Orthonormal analytic gauge basis removed before diagonalization.
-    gauge_basis: Vec<Array1<f64>>,
     rank_floor: f64,
 }
 
 impl ExactHessianSpectralBlock {
-    /// Apply the symmetric Moore--Penrose inverse on the declared quotient.
-    /// Resolved positive and negative modes are both retained; only the
-    /// spectral null band is removed.  Three independent certificates guard
-    /// the result: physical backward residual on the retained range,
-    /// least-squares stationarity for the original RHS, and minimum-norm
-    /// membership in the retained quotient.
+    /// Apply the symmetric Moore--Penrose inverse.  Resolved positive and
+    /// negative modes are both retained; only the spectral null band
+    /// `|λ| ≤ rank_floor` is removed, and that band is the ONLY null predicate
+    /// on this route (#2674).  Three independent certificates guard the result:
+    /// physical backward residual on the retained range, least-squares
+    /// stationarity for the original RHS, and minimum-norm membership in the
+    /// retained range.
     fn solve_stationarity(&self, rhs: &SaeArrowVector) -> Result<SaeArrowVector, String> {
         let total_t = rhs.t.len();
         let dim = total_t + rhs.beta.len();
         let spectral_dim = self.eigenvalues.len();
         if self.operator.dim() != (dim, dim)
             || self.eigenvectors.dim() != (dim, spectral_dim)
-            || spectral_dim + self.gauge_basis.len() != dim
-            || self.gauge_basis.iter().any(|gauge| gauge.len() != dim)
+            || spectral_dim != dim
         {
             return Err(format!(
                 "dense exact-stationarity pseudoinverse: geometry dimension {:?}, spectrum {}, \
-                 eigenvectors {:?}, gauge rank {}, but RHS dimension is {dim}",
+                 eigenvectors {:?}, but RHS dimension is {dim}",
                 self.operator.dim(),
                 spectral_dim,
                 self.eigenvectors.dim(),
-                self.gauge_basis.len(),
             ));
         }
         let mut flat_rhs = Array1::<f64>::zeros(dim);
@@ -145,10 +145,10 @@ impl ExactHessianSpectralBlock {
         let solution = self.eigenvectors.dot(&inverse_coefficients);
         let projected_rhs = self.eigenvectors.dot(&projected_coefficients);
         let applied = self.operator.dot(&solution);
-        // Quotient stationarity is P A P x = P rhs.  The raw materialized A can
-        // carry roundoff-sized components along an analytic gauge; those are
-        // outside the physical cotangent space and must not contaminate either
-        // the backward or least-squares certificate.
+        // Range stationarity is `P_range A x = P_range rhs`, with `P_range` the
+        // projector onto the eigendirections the SPECTRAL floor retained.  The
+        // eigenbasis is complete, so this reprojection removes exactly the
+        // measured null band and nothing that was declared null in advance.
         let applied_coefficients = self.eigenvectors.t().dot(&applied);
         let projected_applied = self.eigenvectors.dot(&applied_coefficients);
         let physical_residual = &projected_applied - &projected_rhs;
@@ -181,15 +181,7 @@ impl ExactHessianSpectralBlock {
                 (lambda.abs() <= self.rank_floor).then_some(coefficient * coefficient)
             })
             .sum::<f64>();
-        let gauge_solution_norm_sq = self
-            .gauge_basis
-            .iter()
-            .map(|gauge| gauge.dot(&solution).powi(2))
-            .sum::<f64>();
-        let discarded_solution_norm = (spectral_null_solution_norm_sq
-            + gauge_solution_norm_sq)
-            .max(0.0)
-            .sqrt();
+        let discarded_solution_norm = spectral_null_solution_norm_sq.max(0.0).sqrt();
         let tolerance = f64::EPSILON.sqrt();
         let within = |residual: f64, scale: f64| {
             residual == 0.0 || (scale > 0.0 && residual <= tolerance * scale)
@@ -205,9 +197,7 @@ impl ExactHessianSpectralBlock {
                  normal-equation stationarity {normal_norm:.6e} / scale {normal_scale:.6e}, \
                  null-space solution mass {discarded_solution_norm:.6e} / solution norm \
                  {solution_norm:.6e}, tolerance {tolerance:.6e}, rank {retained_rank}/{spectral_dim} \
-                 on physical dimension {spectral_dim} (analytic gauge rank {}), \
-                 floor {:.6e}",
-                self.gauge_basis.len(),
+                 on ambient dimension {dim}, floor {:.6e}",
                 self.rank_floor,
             ));
         }
@@ -611,102 +601,6 @@ impl SaeManifoldTerm {
             cache.k,
             "exact_joint_chart_gauge_basis",
         )
-    }
-
-    /// Deterministic orthonormal complement of an already-orthonormal analytic
-    /// gauge basis.  Diagonalizing `Zᵀ A Z` (then lifting through `Z`) removes
-    /// the declared chart orbit structurally; it does not ask a spectral floor
-    /// to rediscover that orbit from a nearly-zero eigenvalue.
-    fn exact_hessian_physical_complement(
-        dimension: usize,
-        gauges: &[Array1<f64>],
-    ) -> Result<Array2<f64>, String> {
-        if gauges.len() > dimension {
-            return Err(format!(
-                "exact_hessian_physical_complement: gauge rank {} exceeds dimension {dimension}",
-                gauges.len()
-            ));
-        }
-        let orthogonality_tolerance = f64::EPSILON.sqrt();
-        for (column, gauge) in gauges.iter().enumerate() {
-            if gauge.len() != dimension || !gauge.iter().all(|value| value.is_finite()) {
-                return Err(format!(
-                    "exact_hessian_physical_complement: gauge {column} has length {} (expected {dimension}) or a non-finite value",
-                    gauge.len()
-                ));
-            }
-            for (prior, other) in gauges[..=column].iter().enumerate() {
-                let expected = if prior == column { 1.0 } else { 0.0 };
-                let error = (gauge.dot(other) - expected).abs();
-                if error > orthogonality_tolerance {
-                    return Err(format!(
-                        "exact_hessian_physical_complement: gauge Gram entry ({column},{prior}) differs from {expected} by {error:.6e}"
-                    ));
-                }
-            }
-        }
-
-        let physical_dimension = dimension - gauges.len();
-        let mut complement = Vec::<Array1<f64>>::with_capacity(physical_dimension);
-        for axis in 0..dimension {
-            let mut candidate = Array1::<f64>::zeros(dimension);
-            candidate[axis] = 1.0;
-            for _ in 0..2 {
-                for gauge in gauges {
-                    let coefficient = candidate.dot(gauge);
-                    candidate.scaled_add(-coefficient, gauge);
-                }
-                for kept in &complement {
-                    let coefficient = candidate.dot(kept);
-                    candidate.scaled_add(-coefficient, kept);
-                }
-            }
-            let norm = candidate.dot(&candidate).max(0.0).sqrt();
-            if norm > orthogonality_tolerance {
-                candidate.mapv_inplace(|value| value / norm);
-                complement.push(candidate);
-            }
-        }
-        if complement.len() != physical_dimension {
-            return Err(format!(
-                "exact_hessian_physical_complement: constructed rank {}, expected {physical_dimension} from ambient dimension {dimension} and gauge rank {}",
-                complement.len(),
-                gauges.len()
-            ));
-        }
-        let mut z = Array2::<f64>::zeros((dimension, physical_dimension));
-        for (column, vector) in complement.iter().enumerate() {
-            z.column_mut(column).assign(vector);
-        }
-        Ok(z)
-    }
-
-    fn project_arrow_vector_away_from_chart_gauges(
-        vector: &SaeArrowVector,
-        gauges: &[Array1<f64>],
-    ) -> Result<SaeArrowVector, String> {
-        if gauges.is_empty() {
-            return Ok(vector.clone());
-        }
-        let total_t = vector.t.len();
-        let dimension = total_t + vector.beta.len();
-        let mut flat = Array1::<f64>::zeros(dimension);
-        flat.slice_mut(s![..total_t]).assign(&vector.t);
-        flat.slice_mut(s![total_t..]).assign(&vector.beta);
-        for (index, gauge) in gauges.iter().enumerate() {
-            if gauge.len() != dimension {
-                return Err(format!(
-                    "project_arrow_vector_away_from_chart_gauges: gauge {index} has length {}, expected {dimension}",
-                    gauge.len()
-                ));
-            }
-            let coefficient = flat.dot(gauge);
-            flat.scaled_add(-coefficient, gauge);
-        }
-        Ok(SaeArrowVector {
-            t: flat.slice(s![..total_t]).to_owned(),
-            beta: flat.slice(s![total_t..]).to_owned(),
-        })
     }
 
     /// #2500 — the ONE authority for `∂H_tt/∂ρ_sparse` on the free-logit slots.
@@ -1422,8 +1316,7 @@ impl SaeManifoldTerm {
         system: &ArrowSchurSystem,
         rhs: &SaeArrowVector,
     ) -> Result<SaeArrowVector, String> {
-        let chart_gauges = self.exact_joint_chart_gauge_basis(cache)?;
-        let raw_apply_b = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
+        let apply_b = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
             let (t, beta) = matrix_free_arrow_operator_apply(
                 system,
                 cache,
@@ -1433,34 +1326,22 @@ impl SaeManifoldTerm {
             .map_err(|error| format!("matrix-free evidence operator: {error}"))?;
             Ok(SaeArrowVector { t, beta })
         };
-        let raw_apply_a = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
-            let base = raw_apply_b(vector)?;
+        let apply_a = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
+            let base = apply_b(vector)?;
             let correction = self.apply_exact_hessian_minus_b(rho, target, cache, vector)?;
             Ok(SaeArrowVector {
                 t: &base.t + &correction.t,
                 beta: &base.beta + &correction.beta,
             })
         };
-        // The Krylov sequence lives entirely in the same analytic physical
-        // complement as the dense `Zᵀ A Z` route.  Project both the input and
-        // output of A/B: this is the matrix-free action of P A P / P B P and
-        // prevents roundoff gauge components from re-entering the sequence.
-        let apply_b = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
-            let physical = Self::project_arrow_vector_away_from_chart_gauges(
-                vector,
-                &chart_gauges,
-            )?;
-            let applied = raw_apply_b(&physical)?;
-            Self::project_arrow_vector_away_from_chart_gauges(&applied, &chart_gauges)
-        };
-        let apply_a = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
-            let physical = Self::project_arrow_vector_away_from_chart_gauges(
-                vector,
-                &chart_gauges,
-            )?;
-            let applied = raw_apply_a(&physical)?;
-            Self::project_arrow_vector_away_from_chart_gauges(&applied, &chart_gauges)
-        };
+        // #2674 — the Krylov sequence runs on the SAME operator the dense route
+        // now diagonalizes: the full `A`, with no analytic chart orbit deleted
+        // ahead of the numerics. `A` is the Hessian of the PENALIZED objective
+        // and the orbit is a symmetry of the reconstruction only, so projecting
+        // it out of the applies removed live prior-driven descent here for the
+        // same reason it stalled the dense inner solve. A direction that is
+        // genuinely flat for `A` is still handled, by the `μ` deflation loop in
+        // `solve_exact_stationarity_preconditioned` — measured, not declared.
         let precondition = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
             // The outer exact-stationarity residual is certified to 1e-10 in
             // `solve_b_preconditioned_gmres`; drive its deterministic SPD
@@ -1475,33 +1356,18 @@ impl SaeManifoldTerm {
             // costs iterations here, never correctness — unlike the trace/
             // criterion consumers, where a truncation silently biases the
             // estimate (#2576).
-            let physical = Self::project_arrow_vector_away_from_chart_gauges(
-                vector,
-                &chart_gauges,
-            )?;
             let (t, beta, _cg) = matrix_free_arrow_inverse_apply(
                 system,
                 cache,
-                physical.t.view(),
-                physical.beta.view(),
+                vector.t.view(),
+                vector.beta.view(),
                 1.0e-10,
                 cache.k.max(1),
             )
             .map_err(|error| format!("matrix-free evidence inverse: {error}"))?;
-            Self::project_arrow_vector_away_from_chart_gauges(
-                &SaeArrowVector { t, beta },
-                &chart_gauges,
-            )
+            Ok(SaeArrowVector { t, beta })
         };
-        let physical_rhs =
-            Self::project_arrow_vector_away_from_chart_gauges(rhs, &chart_gauges)?;
-        let solved = solve_exact_stationarity_preconditioned(
-            &physical_rhs,
-            &apply_a,
-            &apply_b,
-            precondition,
-        )?;
-        Self::project_arrow_vector_away_from_chart_gauges(&solved, &chart_gauges)
+        solve_exact_stationarity_preconditioned(rhs, &apply_a, &apply_b, precondition)
     }
 
     /// PATH C (#2253) — the per-flat-coordinate penalty curvature operators
@@ -3906,6 +3772,16 @@ impl SaeManifoldTerm {
     /// count says the split is harmless there and both constants may stand. The
     /// refusal-site `log::debug!` in `exact_observed_information_log_dets` emits
     /// the per-direction half of that dump.
+    /// #2674 — this band is now the ONLY null predicate on the exact-A route.
+    /// `exact_hessian_spectral_block` used to delete the analytic chart-gauge
+    /// orbit structurally before the spectrum was ever classified, which made
+    /// the sentence above ("the band IS the radial-gauge quotient null") and the
+    /// code disagree about what had already been removed. The measurement that
+    /// settled which one to keep: on the #2336/#2330 stall the declared orbit
+    /// carried 86.6%–93.2% of the KKT gradient and per-direction slopes of the
+    /// PENALIZED objective at 8x, 10x and 210x the convergence tolerance, so it
+    /// was not a null of this operator at all — the priors are not invariant
+    /// along a symmetry of the reconstruction.
     pub(crate) const SAE_EXACT_A_PD_FLOOR_REL: f64 = 1.0e-9;
 
     /// #2330 Phase-2 — the EXACT observed-information Laplace log-determinants
@@ -3947,20 +3823,18 @@ impl SaeManifoldTerm {
         let e_diag = self
             .materialize_ard_concave_clamp_diagonal(rho, cache)
             .map_err(SaeCriterionError::Numerical)?;
+        // #2674 — DIAGNOSTIC ONLY. The chart orbit is no longer removed from the
+        // operator before it is diagonalized; it is retained here solely so the
+        // saddle refusal below can still report how much of the refusing
+        // direction lies along it.
         let joint_chart_gauges = self
             .exact_joint_chart_gauge_basis(cache)
             .map_err(SaeCriterionError::Numerical)?;
-        let joint = Self::exact_hessian_spectral_block(
-            a.clone(),
-            &e_diag,
-            total_t,
-            joint_chart_gauges,
-        )
-        .map_err(SaeCriterionError::Numerical)?;
+        let joint = Self::exact_hessian_spectral_block(a.clone(), &e_diag, total_t)
+            .map_err(SaeCriterionError::Numerical)?;
         let a_tt = a.slice(s![..total_t, ..total_t]).to_owned();
-        let coordinate =
-            Self::exact_hessian_spectral_block(a_tt, &e_diag, total_t, Vec::new())
-                .map_err(SaeCriterionError::Numerical)?;
+        let coordinate = Self::exact_hessian_spectral_block(a_tt, &e_diag, total_t)
+            .map_err(SaeCriterionError::Numerical)?;
         let quotient_log_det = |spectral: &ExactHessianSpectralBlock,
                                 block: &'static str|
          -> Result<f64, SaeCriterionError> {
@@ -4021,9 +3895,9 @@ impl SaeManifoldTerm {
                             // cannot become chatter.
                             let t_mass: f64 = (0..limit).map(|j| v[j] * v[j]).sum();
                             let v_av = v.dot(&spectral.operator.dot(&v));
-                            let chart_gauge_mass = spectral
-                                .gauge_basis
+                            let chart_gauge_mass = joint_chart_gauges
                                 .iter()
+                                .filter(|gauge| gauge.len() == v.len())
                                 .map(|gauge| gauge.dot(&v).powi(2))
                                 .sum::<f64>();
                             let mut row_gauge_mass = 0.0_f64;
@@ -4087,13 +3961,33 @@ impl SaeManifoldTerm {
         Ok((log_a, log_a_tt))
     }
 
-    /// Build a cluster-stable eigensystem and the shared absolute quotient floor
-    /// for one already-materialized exact-Hessian block.
+    /// Build a cluster-stable eigensystem and the shared absolute null floor for
+    /// one already-materialized exact-Hessian block.
+    ///
+    /// #2674 — this used to take an analytic chart-gauge basis and diagonalize
+    /// `Zᵀ A Z` on its orthogonal complement, deleting the declared orbit
+    /// STRUCTURALLY so a spectral floor never had to rediscover it. That made
+    /// two null predicates own one eigenvalue array, and the declaration-based
+    /// one is the one that is wrong here: the chart orbit is a symmetry of the
+    /// RECONSTRUCTION (measured reconstruction-invariant to `rel_ls ~1e-16`),
+    /// not of the PENALIZED objective this operator is the Hessian of — the ARD
+    /// and smoothing priors are not invariant along it. At the #2336/#2330 stall
+    /// the two declared directions carried 86.6%–93.2% of the KKT gradient's
+    /// norm and per-direction slopes of 8x, 10x and 210x the convergence
+    /// tolerance, so quotienting them out handed the Newton step a right-hand
+    /// side it was structurally unable to reduce and the inner solve stalled.
+    ///
+    /// One predicate now owns the classification: `rank_floor`. Where the orbit
+    /// really is flat for the penalized operator its eigenvalue lands in
+    /// `[−floor, floor]` and the pseudoinverse discards it exactly as before —
+    /// which is what `SAE_EXACT_A_PD_FLOOR_REL`'s own doc, and the independent
+    /// oracle in `exact_observed_information_log_det_matches_eigendecomposition_2330`
+    /// (full-spectrum `eigh` of the dense `A`, keeping `λ > floor`), have always
+    /// said the band is.
     fn exact_hessian_spectral_block(
         operator: Array2<f64>,
         e_diag: &Array1<f64>,
         total_t: usize,
-        gauge_basis: Vec<Array1<f64>>,
     ) -> Result<ExactHessianSpectralBlock, String> {
         let dimension = operator.nrows();
         if operator.ncols() != dimension || total_t > dimension || e_diag.len() < total_t {
@@ -4105,31 +3999,11 @@ impl SaeManifoldTerm {
         }
         // #2267 — the other half of the split; see `materialize_exact_hessian_dense`.
         let eigh_started = std::time::Instant::now();
-        let gauge_reduced = !gauge_basis.is_empty();
-        let (eigenvalues, eigenvectors) = if gauge_basis.is_empty() {
-            Self::cluster_stable_eigh(&operator, e_diag, total_t)?
-        } else {
-            let complement =
-                Self::exact_hessian_physical_complement(dimension, &gauge_basis)?;
-            let reduced_operator = complement.t().dot(&operator).dot(&complement);
-            let mut e_times_complement = Array2::<f64>::zeros(complement.dim());
-            for row in 0..total_t {
-                for column in 0..complement.ncols() {
-                    e_times_complement[[row, column]] = e_diag[row] * complement[[row, column]];
-                }
-            }
-            let reduced_e = complement.t().dot(&e_times_complement);
-            let (reduced_eigenvalues, reduced_eigenvectors) =
-                Self::cluster_stable_eigh_operator(&reduced_operator, &reduced_e)?;
-            (
-                reduced_eigenvalues,
-                complement.dot(&reduced_eigenvectors),
-            )
-        };
+        let (eigenvalues, eigenvectors) =
+            Self::cluster_stable_eigh(&operator, e_diag, total_t)?;
         let eigh_elapsed = eigh_started.elapsed();
         log::info!(
-            "[SAE-EXACT-DENSE] eigendecomposition DONE: dim={dimension}, \
-             gauge_reduced={gauge_reduced}, {:.3} s",
+            "[SAE-EXACT-DENSE] eigendecomposition DONE: dim={dimension}, {:.3} s",
             eigh_elapsed.as_secs_f64(),
         );
         let max_eigenvalue = eigenvalues
@@ -4141,7 +4015,6 @@ impl SaeManifoldTerm {
             operator,
             eigenvalues,
             eigenvectors,
-            gauge_basis,
             rank_floor,
         })
     }
@@ -4199,8 +4072,7 @@ impl SaeManifoldTerm {
         let total_t = cache.delta_t_len();
         let a = self.materialize_exact_hessian_dense(rho, target, cache)?;
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        let gauges = self.exact_joint_chart_gauge_basis(cache)?;
-        Self::exact_hessian_spectral_block(a, &e_diag, total_t, gauges)
+        Self::exact_hessian_spectral_block(a, &e_diag, total_t)
     }
 
     /// #2330 Phase-2/#2653 — one coherent quotient geometry for the exact-A
@@ -4232,14 +4104,11 @@ impl SaeManifoldTerm {
         // derivative of the value above.
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
         let a_tt_block = a.slice(s![..total_t, ..total_t]).to_owned();
-        let gauges = self.exact_joint_chart_gauge_basis(cache)?;
-        let joint = Self::exact_hessian_spectral_block(a, &e_diag, total_t, gauges)?;
+        let joint = Self::exact_hessian_spectral_block(a, &e_diag, total_t)?;
         let priced_joint_inverse =
             Self::priced_exact_hessian_inverse(&joint, &e_diag, total_t)?;
-        // The joint chart gauge requires decoder compensation.  With beta held
-        // fixed it is not a coordinate-block null, so A_tt remains unprojected.
         let coordinate =
-            Self::exact_hessian_spectral_block(a_tt_block, &e_diag, total_t, Vec::new())?;
+            Self::exact_hessian_spectral_block(a_tt_block, &e_diag, total_t)?;
         let priced_coordinate_inverse_small =
             Self::priced_exact_hessian_inverse(&coordinate, &e_diag, total_t)?;
         let mut priced_coordinate_inverse = Array2::<f64>::zeros((dim, dim));
@@ -4456,11 +4325,10 @@ impl SaeManifoldTerm {
         Self::cluster_stable_eigh_operator(m, &e_operator)
     }
 
-    /// Matrix-valued sibling of [`Self::cluster_stable_eigh`].  Quotienting an
-    /// ambient diagonal `E` through a physical complement `Z` produces the
-    /// generally dense reduced operator `Zᵀ E Z`; cluster stabilization must
-    /// rotate against that exact restriction rather than pretending its
-    /// diagonal alone survived the coordinate change.
+    /// Matrix-valued sibling of [`Self::cluster_stable_eigh`].  Cluster
+    /// stabilization must rotate against the exact `E` operator it is handed,
+    /// rather than pretending a diagonal survived every coordinate change a
+    /// caller may have applied.
     fn cluster_stable_eigh_operator(
         m: &Array2<f64>,
         e_operator: &Array2<f64>,
@@ -5965,13 +5833,11 @@ mod tests_lane_split_2755 {
             e_diag.iter().filter(|value| **value != 0.0).count(),
             cache.row_offsets
         );
-        let joint =
-            SaeManifoldTerm::exact_hessian_spectral_block(a.clone(), &e_diag, total_t, gauges)
-                .expect("#2755: joint spectral block");
+        let joint = SaeManifoldTerm::exact_hessian_spectral_block(a.clone(), &e_diag, total_t)
+            .expect("#2755: joint spectral block");
         let a_tt = a.slice(s![..total_t, ..total_t]).to_owned();
-        let coordinate =
-            SaeManifoldTerm::exact_hessian_spectral_block(a_tt, &e_diag, total_t, Vec::new())
-                .expect("#2755: coordinate spectral block");
+        let coordinate = SaeManifoldTerm::exact_hessian_spectral_block(a_tt, &e_diag, total_t)
+            .expect("#2755: coordinate spectral block");
         for (label, block) in [("joint", &joint), ("coordinate", &coordinate)] {
             println!(
                 "#2755 DENSE-SPECTRUM {label} floor={:.6e} eigs={:?}",
@@ -5981,15 +5847,14 @@ mod tests_lane_split_2755 {
         }
 
         // ---- is the joint block's CHART-GAUGE QUOTIENT the whole gap? -------
-        // The dense joint block is diagonalized on the physical complement of
-        // the analytic chart-gauge orbit (`gauge_rank` directions removed),
-        // while the `log|A_tt|` it is differenced against removes none. Price
-        // the SAME operator with an empty gauge basis and the difference has to
-        // be the honest Schur identity `log|A| − log|A_tt| = log|S|`, which is
-        // what the streaming lane computes.
-        let ungauged =
-            SaeManifoldTerm::exact_hessian_spectral_block(a.clone(), &e_diag, total_t, Vec::new())
-                .expect("#2755: ungauged joint spectral block");
+        // It WAS: the dense joint block used to be diagonalized on the physical
+        // complement of the analytic chart-gauge orbit while the `log|A_tt|` it
+        // is differenced against removed none, so the difference was not the
+        // Schur identity `log|A| − log|A_tt| = log|S|` the streaming lane
+        // computes. #2674 removed that structural quotient — the joint block IS
+        // the ungauged one now — so this arm is retained as a STANDING CHECK
+        // that the identity holds, not as a hypothesis about a gap.
+        let ungauged = &joint;
         let mut log_a_ungauged = 0.0_f64;
         for &lambda in ungauged.eigenvalues.iter() {
             if lambda > ungauged.rank_floor {
