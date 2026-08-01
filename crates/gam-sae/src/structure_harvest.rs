@@ -284,7 +284,18 @@ fn participation_ratio(spectrum: &[f64]) -> f64 {
 fn curved_topology_for_span(span: f64) -> (usize, usize) {
     match span.round().max(1.0) as usize {
         0 | 1 | 2 => (1, 3), // circle (PeriodicHarmonicEvaluator, 2·d+1 harmonics)
-        3 => (2, 7),         // sphere chart (SphereChartEvaluator)
+        // ⚠ STALE WIDTH, TRACKED AS #2749 -- do not read `7` as current.
+        // `SphereChartEvaluator` and the `(lat, lon)` chart it evaluated were
+        // DELETED in `1dfa70140`; `SaeAtomGeometryPlan::new` now REFUSES
+        // `(Sphere, 2, ..)` outright. The realizable sphere is the ambient
+        // harmonic one at width `(degree+1)^2`, so this arm prices a candidate
+        // the constructor cannot build. It is a LIVE number in the #2233
+        // description-length pre-screen, not a comment, so correcting it moves
+        // an acceptance boundary and needs the measurement #2749 owns
+        // (reprice -87.73 bits of 824.55 vs -789.54 for deleting the branch,
+        // i.e. repricing beats deletion). Left here deliberately rather than
+        // edited in passing.
+        3 => (2, 7),
         _ => (2, 25),        // torus (TorusHarmonicEvaluator, (2H+1)² at H=2)
     }
 }
