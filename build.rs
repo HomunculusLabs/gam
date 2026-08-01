@@ -4245,13 +4245,41 @@ fn count_file_lines(path: &Path) -> std::io::Result<usize> {
 /// exceed the limit, get reported, split the file, and add the path here so the
 /// redemption floor applies to the remainder.
 ///
-/// EMPTY, and that is a measurement rather than an omission. At the time of
-/// writing the three tracked files nearest the limit peaked BELOW it across
-/// their whole history — `term_specs.rs` 9,846, `rho_optimizer/run.rs` 9,929,
-/// `gpu_kernels/arrow_schur.rs` 9,807 — so none is on probation. The one file
-/// known to have crossed (`rho_optimizer/run_plan_tests.rs`, 10,063) was split
-/// to 6,116, which is under the floor and therefore redeemed. Files further
-/// from the limit were not swept exhaustively.
+/// EMPTY, AND THE FIRST VERSION OF THIS COMMENT READ THAT AS A MEASUREMENT
+/// WHEN IT WAS AN UNDER-MEASUREMENT (#2683). It checked only the three files
+/// nearest the limit — `term_specs.rs` peak 9,846, `rho_optimizer/run.rs`
+/// 9,929, `gpu_kernels/arrow_schur.rs` 9,807, all below 10k across their whole
+/// history — and said outright that files further from the limit had not been
+/// swept. They have since been swept exhaustively: every tracked file was
+/// line-counted at every commit touching it on `origin/main`, and THREE tracked
+/// paths that are currently in the 7k..=10k band did once cross the limit.
+///
+/// ```text
+///   crates/gam-models/src/gamlss/tests.rs      peak 10,077   now 7,146
+///   crates/gam-sae/src/structure_harvest.rs    peak 10,002   now 8,052
+///   docs/images/geometric_shapes_demo.gif      peak 37,019   now 9,500
+/// ```
+///
+/// The first is precisely the dodge the redemption floor exists to close: the
+/// commit that took it from 10,077 to 10,002 describes itself as splitting one
+/// test module out of "the over-budget gamlss tests.rs", and the file then
+/// settled 146 lines ABOVE the floor rather than below it. The second sits
+/// 1,052 lines above it. (`rho_optimizer/run_plan_tests.rs`, 10,063, was cut to
+/// 6,116 — under the floor, so it is genuinely redeemed and does not belong
+/// here.)
+///
+/// The list is still empty, and that is now a stated choice rather than a
+/// finding: adding either Rust path reddens every root-crate build until that
+/// file is cut to at most 7,000 lines, so arming the rule against two files
+/// another author is actively editing is a decision for their owner. What the
+/// sweep buys is that arming it is a one-line edit instead of another
+/// whole-history scan.
+///
+/// The `.gif` is a third result and points at a different gap: both size audits
+/// count newline BYTES and exempt only generated lockfiles, so a binary asset
+/// can be put on probation and then can never be redeemed, having no line seam
+/// to split along. Whether `scan_for_oversized_tracked_files` should skip
+/// binaries is a question about that function, not about this list.
 const OVERSIZED_PROBATION_PATHS: &[&str] = &[];
 
 /// A file on probation (once >10k lines) must drop below this to be redeemed.
