@@ -2442,6 +2442,12 @@ impl std::fmt::Debug for FitArtifacts {
     }
 }
 
+/// Serde default for `max_node_criterion_rise` on models written before the
+/// field existed: the rise was not measured, which is not the same as zero.
+fn unmeasured_criterion_rise() -> f64 {
+    f64::NAN
+}
+
 /// Serialized provenance of a retained smoothing-uncertainty correction.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SmoothingCorrectionMethod {
@@ -2460,7 +2466,24 @@ pub enum SmoothingCorrectionMethod {
     /// before inverting it for its own copy of `V_rho`; the branch now reuses
     /// the certified, UNPERTURBED inverse the first-order path produces, so
     /// there is no perturbation left to record (#2728).
-    SigmaPointCubature { rank: usize, n_points: usize },
+    SigmaPointCubature {
+        rank: usize,
+        n_points: usize,
+        /// Worst criterion rise `V(node) − V(ρ̂)` over the evaluation nodes the
+        /// correction was built from, against the `1/2` a one-sigma node is
+        /// asserted to sit at.
+        ///
+        /// This is the honest characterisation of the approximation, and it
+        /// replaces the perturbation ledger: what makes a sigma-point estimate
+        /// trustworthy is not that the rho-Hessian was left unperturbed, it is
+        /// that the nodes sit where the posterior actually has mass. A value of
+        /// `3309` — measured, before #2728 — says a node with posterior weight
+        /// `e^-3309` was carrying weight 1/2.
+        ///
+        /// `NaN` on a fit deserialized from before this field existed.
+        #[serde(default = "unmeasured_criterion_rise")]
+        max_node_criterion_rise: f64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
