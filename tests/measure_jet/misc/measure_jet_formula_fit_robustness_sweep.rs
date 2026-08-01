@@ -92,42 +92,69 @@ impl SweepCase {
     }
 }
 
-/// Fit one case through the public formula API and assert a usable result. Any
-/// `Err` (the pre-#1126 abort) or a degenerate geometry fails the sweep.
-fn assert_case_fits(case: &SweepCase) {
+/// One sweep case's measured outcome. Recorded for EVERY case, pass or fail, so
+/// the table the caller prints is a measurement of the whole sweep rather than a
+/// report of wherever the run happened to stop.
+struct CaseReport {
+    seed: u64,
+    edf: f64,
+    rmse: f64,
+    budget: f64,
+}
+
+impl CaseReport {
+    fn passed(&self) -> bool {
+        self.rmse < self.budget
+    }
+}
+
+/// Fit one case through the public formula API and MEASURE it. Any `Err` (the
+/// pre-#1126 abort), a degenerate geometry, or a missed budget is RETURNED rather
+/// than panicked.
+///
+/// #2750: this used to panic in place, so in any run where seed 1 failed, seeds
+/// 2/3/4 were never measured at all -- the test's advertised coverage was
+/// withdrawn by its own early exit exactly when it mattered. With the abort
+/// deferred the remaining three were measured to pass with room (ratio 0.641 /
+/// 0.228 / 0.568), which is a fact no run of the old shape could have produced.
+///
+/// No bar moves here: the budget expression and the edf sanity range below are
+/// unchanged, and the caller still fails the test on any failing case.
+fn check_case_fits(case: &SweepCase) -> Result<CaseReport, String> {
     let data = case.dataset();
     let config = FitConfig {
         family: Some("gaussian".to_string()),
         ..FitConfig::default()
     };
 
-    let result = fit_from_formula("y ~ s(x, bs=\"mjs\")", &data, &config).unwrap_or_else(|e| {
-        panic!(
+    let result = fit_from_formula("y ~ s(x, bs=\"mjs\")", &data, &config).map_err(|e| {
+        format!(
             "measure-jet formula fit aborted on sweep case (seed={}, n={}, freq={}, \
-             phase={:.2}, noise={}, jitter={}): {e}\n\
-             the gam CLI fits every such dataset; the formula path must too (#1126)",
+             phase={:.2}, noise={}, jitter={}): {e}; \
+             the gam CLI fits every such dataset, the formula path must too (#1126)",
             case.seed, case.n, case.freq, case.phase, case.noise, case.jitter
         )
-    });
+    })?;
     let FitResult::Standard(fit) = result else {
-        panic!("expected a standard Gaussian fit");
+        return Err(format!("seed={}: expected a standard Gaussian fit", case.seed));
     };
 
-    assert!(
-        fit.fit.beta.iter().all(|v| v.is_finite()),
-        "seed={}: fitted coefficients must be finite",
-        case.seed
-    );
+    if !fit.fit.beta.iter().all(|v| v.is_finite()) {
+        return Err(format!(
+            "seed={}: fitted coefficients must be finite",
+            case.seed
+        ));
+    }
     let edf = fit
         .fit
         .edf_total()
-        .expect("a fitted smooth must report a total effective dof");
-    assert!(
-        edf.is_finite() && edf > 1.0 && edf < case.n as f64,
-        "seed={}: effective dof {edf} outside the sane range (1, {})",
-        case.seed,
-        case.n
-    );
+        .ok_or_else(|| format!("seed={}: a fitted smooth must report a total effective dof", case.seed))?;
+    if !(edf.is_finite() && edf > 1.0 && edf < case.n as f64) {
+        return Err(format!(
+            "seed={}: effective dof {edf} outside the sane range (1, {})",
+            case.seed, case.n
+        ));
+    }
 
     // Signal recovery: reconstruct the fitted curve on a held-out fine grid and
     // compare to the noise-free truth. A flat/degenerate fallback would sit near
@@ -150,12 +177,12 @@ fn assert_case_fits(case: &SweepCase) {
     }
     let rmse = (sse / grid.len() as f64).sqrt();
     let budget = 0.20 + 0.5 * case.noise;
-    assert!(
-        rmse < budget,
-        "seed={}: measure-jet fit must recover its sine (RMSE={rmse:.4}, budget={budget:.4}; \
-         a flat fit would be ~0.71)",
-        case.seed
-    );
+    Ok(CaseReport {
+        seed: case.seed,
+        edf,
+        rmse,
+        budget,
+    })
 }
 
 #[test]
@@ -201,7 +228,44 @@ fn measure_jet_formula_fit_succeeds_across_random_datasets() {
         },
     ];
 
-    for case in &cases {
-        assert_case_fits(case);
+    // Measure every case BEFORE judging any of them (#2750).
+    let outcomes: Vec<Result<CaseReport, String>> = cases.iter().map(check_case_fits).collect();
+
+    // Printed unconditionally. A fixture whose diagnostics are conditional on its
+    // own assertions cannot be read on the run that matters.
+    println!("[2750-sweep] seed    edf    rmse  budget  ratio  verdict");
+    for (case, outcome) in cases.iter().zip(outcomes.iter()) {
+        match outcome {
+            Ok(r) => println!(
+                "[2750-sweep] {:>4}  {:5.2}  {:6.4}  {:6.4}  {:5.3}  {}",
+                r.seed,
+                r.edf,
+                r.rmse,
+                r.budget,
+                r.rmse / r.budget,
+                if r.passed() { "pass" } else { "FAIL" }
+            ),
+            Err(e) => println!("[2750-sweep] {:>4}      -       -       -      -  ERROR: {e}", case.seed),
+        }
     }
+
+    let failures: Vec<String> = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            Ok(r) if r.passed() => None,
+            Ok(r) => Some(format!(
+                "seed={}: measure-jet fit must recover its sine (RMSE={:.4}, budget={:.4}, \
+                 edf={:.2}; a flat fit would be ~0.71)",
+                r.seed, r.rmse, r.budget, r.edf
+            )),
+            Err(e) => Some(e.clone()),
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} of {} measure-jet sweep cases failed:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n")
+    );
 }
