@@ -131,6 +131,37 @@ jobs:
           # would fail the cross-compile arm for a reason that has nothing to do
           # with the target it exists to check.
           cargo check --locked --workspace --exclude gam-pyffi --all-targets
+      # Rustdoc had no CI job at all (#2711): nothing in `.github/` ran
+      # `cargo doc` or `rustdoc`, so a surface that exits 101 was dark by
+      # omission while `docs.yml` -- mkdocs, ~50s, nightly -- was green and said
+      # nothing about it.
+      #
+      # This runs here, last, for two reasons. Cost: the step above has already
+      # built every dependency's rmeta under sccache, and `--no-deps` means the
+      # marginal work is the rustdoc passes alone -- a standalone workflow pays
+      # for the whole dependency build again (measured: 10m17s standalone, of
+      # which ~4m20s was dependency build before the first crate's pass). Order:
+      # a compile break must report as a compile break, so the doc pass runs
+      # after the thing it depends on.
+      #
+      # It is a RATCHET, not a zero bar -- see scripts/rustdoc_ratchet.sh. It is
+      # on the push gate because it was DEMONSTRATED green on a normal commit
+      # first: run 30690710961 on 407d66f16 scanned 24 crates, 9 clean, and all
+      # 15 ledger crates still red. That run is the evidence; this step is not
+      # promoted on an expectation.
+      - name: Rustdoc ratchet (no crate outside the ledger may go red)
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: "0"
+        run: |
+          set +e
+          scripts/rustdoc_ratchet.sh
+          status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "::error title=Rustdoc ratchet could not measure::The scan did not run to completion, so this run says nothing about the rustdoc surface. Treat it as a non-run, not as a pass."
+          fi
+          exit "$status"
 
   windows-gnu-check:
     name: Non-Linux cross (x86_64-pc-windows-gnu)

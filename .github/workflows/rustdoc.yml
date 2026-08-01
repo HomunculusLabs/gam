@@ -15,16 +15,26 @@ name: Rustdoc ratchet
 # why the second direction is what makes a green run here distinguishable from a
 # run that measured nothing.
 #
-# Not on `push` yet. It runs nightly and on dispatch, which makes the count
-# visible and trending; promoting it to the push gate belongs with the commit
-# that can demonstrate it green there, not with the commit that introduces it.
-# `cross-check.yml`'s `linux-native-check` is the cheapest eventual home: it
-# already builds every dependency's rmeta with sccache, so the marginal cost is
-# the rustdoc passes alone.
+# THE GATE NOW LIVES IN `cross-check.yml`, on push. This workflow is the
+# on-demand full census, not the gate, and it is deliberately no longer
+# scheduled.
+#
+# It was introduced schedule-only, deferring promotion to "the commit that can
+# demonstrate it green there". Run 30690710961 on 407d66f16 was that
+# demonstration -- green on an ordinary commit, 24 crates scanned, 9 clean, all
+# 15 ledger crates still red -- so the deferral's condition was met and the step
+# moved to `linux-native-check`, which already has every dependency's rmeta
+# built under sccache.
+#
+# The nightly cron was REMOVED with that move rather than kept as a second
+# opinion. A scheduled job whose verdict nobody is required to look at is the
+# same shape as the `docs.yml` decoy this replaced: it accumulates green runs
+# while a crate going red outside the ledger fails only a run nobody opens.
+# "Visible and trending" is a claim about a reader, and the push gate is the
+# only place that has one. Dispatch this when you want the per-crate table --
+# e.g. after fixing a crate, to confirm it is ready to leave the ledger.
 
 on:
-  schedule:
-    - cron: "0 4 * * *"
   workflow_dispatch:
 
 permissions:
