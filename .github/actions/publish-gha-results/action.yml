@@ -144,7 +144,19 @@ runs:
           # [skip ci] is load-bearing: this pushes to main, and without it every
           # results commit would re-trigger the push-driven workflows, which
           # would publish again, forever.
-          git commit --quiet -m "results(${RESULTS_NAME}): run ${GITHUB_RUN_ID:-} (${JOB_STATUS:-unknown}) [skip ci]"
+          # `JOB_STATUS` is `job.status` -- the status of the job DOING THE
+          # PUBLISHING, not the conclusion of the run whose id sits next to it.
+          # Those differ exactly when they matter: an aggregate/publish job that
+          # succeeds while its shards fail produced
+          # `results(benchmark): run 30712111998 (success)` for a run whose
+          # conclusion is `failure` with 20 of 21 shards red. A "(success)" in
+          # the history is precisely what stops the next person re-running.
+          #
+          # The run's own conclusion is NOT knowable here -- this job is part of
+          # that run, so the run has not concluded. Rather than fabricate one,
+          # the label now names what it actually measures. Same rule as #2743:
+          # a status line must track the thing it names.
+          git commit --quiet -m "results(${RESULTS_NAME}): run ${GITHUB_RUN_ID:-} (publish job: ${JOB_STATUS:-unknown}; run verdict NOT measured here) [skip ci]"
           git push --quiet origin HEAD:main 2>/dev/null || return 1
           return 0
         }
