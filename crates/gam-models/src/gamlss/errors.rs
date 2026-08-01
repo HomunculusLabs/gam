@@ -442,7 +442,7 @@ pub(crate) fn locscale_joint_psi_direction_parts(
                         0..n,
                         &format!("{family_name} {primary_label}"),
                         policy,
-                    )?;
+                    ).map_err(|error| error.to_string())?;
                     primary_z = primary_psi
                         .forward_mul(beta_primary.view())
                         .map_err(|e| format!("{family_name} {primary_label} forward_mul: {e}"))?;
@@ -459,7 +459,7 @@ pub(crate) fn locscale_joint_psi_direction_parts(
                         0..n,
                         &format!("{family_name} log-sigma"),
                         policy,
-                    )?;
+                    ).map_err(|error| error.to_string())?;
                     log_sigma_z = log_sigma_psi
                         .forward_mul(beta_log_sigma.view())
                         .map_err(|e| format!("{family_name} log-sigma forward_mul: {e}"))?;
@@ -597,7 +597,7 @@ pub(crate) fn psi_psi_map_to_drift_slots(
         0..n,
         label,
         policy,
-    )? {
+    ).map_err(|error| error.to_string())? {
         crate::custom_family::PsiDesignMap::Second { action } => Ok((Some(action), None)),
         crate::custom_family::PsiDesignMap::Dense { matrix } => Ok((None, Some((*matrix).clone()))),
         crate::custom_family::PsiDesignMap::Zero { .. } => Ok((None, None)),

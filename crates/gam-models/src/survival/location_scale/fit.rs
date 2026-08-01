@@ -109,7 +109,7 @@ pub(crate) fn fit_reduced_parametric_aft(
         },
         &assembly_specs,
     )
-    .map_err(String::from)
+    .map_err(|error| error.to_string())
 }
 
 /// Variant that also returns the offset-channel residuals + curvatures at the
@@ -157,7 +157,7 @@ fn fit_survival_location_scale_with_geometry_authority(
     } else {
         match authority {
             SurvivalLocationScaleFitAuthority::Direct => {
-                fit_custom_family(&prepared.family, &prepared.blockspecs, &options)?
+                fit_custom_family(&prepared.family, &prepared.blockspecs, &options).map_err(|error| error.to_string())?
             }
             SurvivalLocationScaleFitAuthority::Certified { theta, outer, mode } => {
                 let exact_options = crate::outer_subsample::exact_outer_options_for_row_set(
@@ -171,7 +171,7 @@ fn fit_survival_location_scale_with_geometry_authority(
                     mode,
                     theta,
                     outer,
-                )?
+                ).map_err(|error| error.to_string())?
             }
         }
     };

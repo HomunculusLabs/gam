@@ -577,16 +577,22 @@ impl<F: LocationScaleJointPsiFamily> LocationScaleJointPsiWorkspace<F> {
         &self,
         psi_index: usize,
     ) -> Result<Option<Arc<LocationScaleJointPsiDirection>>, String> {
-        self.psi_directions.get_or_try_init(psi_index, || {
-            self.family.ws_psi_direction(
-                &self.block_states,
-                &self.derivative_blocks,
-                psi_index,
-                self.design_loc.as_ref(),
-                self.design_scale.as_ref(),
-                self.family.ws_policy(),
-            )
-        })
+        self.psi_directions
+            .get_or_try_init(psi_index, || {
+                self.family
+                    .ws_psi_direction(
+                        &self.block_states,
+                        &self.derivative_blocks,
+                        psi_index,
+                        self.design_loc.as_ref(),
+                        self.design_scale.as_ref(),
+                        self.family.ws_policy(),
+                    )
+                    .map_err(gam_problem::CustomFamilyError::trial_point)
+            })
+            // Display boundary (gam#2689): this accessor's `String` is the
+            // family-local currency shared with `GamlssError`.
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn subsample_rows(&self) -> Option<&[crate::outer_subsample::WeightedOuterRow]> {
@@ -1461,22 +1467,22 @@ pub(crate) fn gaussian_joint_psihessian_fromweights(
         xmu_psi,
         weights.hmumu.view(),
         CustomFamilyPsiLinearMapRef::Dense(xmu),
-    )?;
+    ).map_err(|error| error.to_string())?;
     let hmumu = &a_mu + &a_mu.t() + &xt_diag_x_dense(xmu, &weights.dhmumu)?;
     let hmu_ls = weighted_crossprod_psi_maps(
         xmu_psi,
         weights.hmu_ls.view(),
         CustomFamilyPsiLinearMapRef::Dense(x_ls),
-    )? + &weighted_crossprod_psi_maps(
+    ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
         CustomFamilyPsiLinearMapRef::Dense(xmu),
         weights.hmu_ls.view(),
         x_ls_psi,
-    )? + &xt_diag_y_dense(xmu, &weights.dhmu_ls, x_ls)?;
+    ).map_err(|error| error.to_string())? + &xt_diag_y_dense(xmu, &weights.dhmu_ls, x_ls)?;
     let a_ls = weighted_crossprod_psi_maps(
         x_ls_psi,
         weights.h_ls_ls.view(),
         CustomFamilyPsiLinearMapRef::Dense(x_ls),
-    )?;
+    ).map_err(|error| error.to_string())?;
     let h_ls_ls = &a_ls + &a_ls.t() + &xt_diag_x_dense(x_ls, &weights.dh_ls_ls)?;
     Ok(gaussian_pack_joint_symmetrichessian(
         &hmumu, &hmu_ls, &h_ls_ls,
@@ -1562,18 +1568,18 @@ pub(crate) fn gaussian_joint_psisecondhessian_fromweights(
         xmu_ab,
         weights_i.hmumu.view(),
         CustomFamilyPsiLinearMapRef::Dense(xmu),
-    )?;
-    let a_ij_mu = weighted_crossprod_psi_maps(xmu_i, weights_i.hmumu.view(), xmu_j)?;
+    ).map_err(|error| error.to_string())?;
+    let a_ij_mu = weighted_crossprod_psi_maps(xmu_i, weights_i.hmumu.view(), xmu_j).map_err(|error| error.to_string())?;
     let a_iwj_mu = weighted_crossprod_psi_maps(
         xmu_i,
         weights_j.dhmumu.view(),
         CustomFamilyPsiLinearMapRef::Dense(xmu),
-    )?;
+    ).map_err(|error| error.to_string())?;
     let a_jwi_mu = weighted_crossprod_psi_maps(
         xmu_j,
         weights_i.dhmumu.view(),
         CustomFamilyPsiLinearMapRef::Dense(xmu),
-    )?;
+    ).map_err(|error| error.to_string())?;
     let hmumu = &a_ab_mu
         + &a_ab_mu.t()
         + &a_ij_mu
@@ -1587,50 +1593,50 @@ pub(crate) fn gaussian_joint_psisecondhessian_fromweights(
         xmu_ab,
         weights_i.hmu_ls.view(),
         CustomFamilyPsiLinearMapRef::Dense(x_ls),
-    )? + &weighted_crossprod_psi_maps(xmu_i, weights_i.hmu_ls.view(), x_ls_j)?
-        + &weighted_crossprod_psi_maps(xmu_j, weights_i.hmu_ls.view(), x_ls_i)?
+    ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(xmu_i, weights_i.hmu_ls.view(), x_ls_j).map_err(|error| error.to_string())?
+        + &weighted_crossprod_psi_maps(xmu_j, weights_i.hmu_ls.view(), x_ls_i).map_err(|error| error.to_string())?
         + &weighted_crossprod_psi_maps(
             xmu_i,
             weights_j.dhmu_ls.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
-        )?
+        ).map_err(|error| error.to_string())?
         + &weighted_crossprod_psi_maps(
             xmu_j,
             weights_i.dhmu_ls.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
-        )?
+        ).map_err(|error| error.to_string())?
         + &weighted_crossprod_psi_maps(
             CustomFamilyPsiLinearMapRef::Dense(xmu),
             weights_i.dhmu_ls.view(),
             x_ls_j,
-        )?
+        ).map_err(|error| error.to_string())?
         + &weighted_crossprod_psi_maps(
             CustomFamilyPsiLinearMapRef::Dense(xmu),
             weights_j.dhmu_ls.view(),
             x_ls_i,
-        )?
+        ).map_err(|error| error.to_string())?
         + &xt_diag_y_dense(xmu, &secondweights.d2hmu_ls, x_ls)?
         + &weighted_crossprod_psi_maps(
             CustomFamilyPsiLinearMapRef::Dense(xmu),
             weights_i.hmu_ls.view(),
             x_ls_ab,
-        )?;
+        ).map_err(|error| error.to_string())?;
     let a_ab_ls = weighted_crossprod_psi_maps(
         x_ls_ab,
         weights_i.h_ls_ls.view(),
         CustomFamilyPsiLinearMapRef::Dense(x_ls),
-    )?;
-    let a_ij_ls = weighted_crossprod_psi_maps(x_ls_i, weights_i.h_ls_ls.view(), x_ls_j)?;
+    ).map_err(|error| error.to_string())?;
+    let a_ij_ls = weighted_crossprod_psi_maps(x_ls_i, weights_i.h_ls_ls.view(), x_ls_j).map_err(|error| error.to_string())?;
     let a_iwj_ls = weighted_crossprod_psi_maps(
         x_ls_i,
         weights_j.dh_ls_ls.view(),
         CustomFamilyPsiLinearMapRef::Dense(x_ls),
-    )?;
+    ).map_err(|error| error.to_string())?;
     let a_jwi_ls = weighted_crossprod_psi_maps(
         x_ls_j,
         weights_i.dh_ls_ls.view(),
         CustomFamilyPsiLinearMapRef::Dense(x_ls),
-    )?;
+    ).map_err(|error| error.to_string())?;
     let h_ls_ls = &a_ab_ls
         + &a_ab_ls.t()
         + &a_ij_ls
@@ -1656,22 +1662,22 @@ pub(crate) fn gaussian_joint_psi_mixedhessian_drift_fromweights(
         xmu_psi,
         mixedweights.dhmumu_u.view(),
         CustomFamilyPsiLinearMapRef::Dense(xmu),
-    )?;
+    ).map_err(|error| error.to_string())?;
     let hmumu = &a_mu + &a_mu.t() + &xt_diag_x_dense(xmu, &mixedweights.d2hmumu)?;
     let hmu_ls = weighted_crossprod_psi_maps(
         xmu_psi,
         mixedweights.dhmu_ls_u.view(),
         CustomFamilyPsiLinearMapRef::Dense(x_ls),
-    )? + &weighted_crossprod_psi_maps(
+    ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
         CustomFamilyPsiLinearMapRef::Dense(xmu),
         mixedweights.dhmu_ls_u.view(),
         x_ls_psi,
-    )? + &xt_diag_y_dense(xmu, &mixedweights.d2hmu_ls, x_ls)?;
+    ).map_err(|error| error.to_string())? + &xt_diag_y_dense(xmu, &mixedweights.d2hmu_ls, x_ls)?;
     let a_ls = weighted_crossprod_psi_maps(
         x_ls_psi,
         mixedweights.dh_ls_ls_u.view(),
         CustomFamilyPsiLinearMapRef::Dense(x_ls),
-    )?;
+    ).map_err(|error| error.to_string())?;
     let h_ls_ls = &a_ls + &a_ls.t() + &xt_diag_x_dense(x_ls, &mixedweights.d2h_ls_ls)?;
     Ok(gaussian_pack_joint_symmetrichessian(
         &hmumu, &hmu_ls, &h_ls_ls,

@@ -1298,7 +1298,7 @@ impl BernoulliMarginalSlopeFamily {
             0..n,
             psi_label,
             &self.policy,
-        )?;
+        ).map_err(|error| error.to_string())?;
         Ok(PsiAxisSpec {
             block_idx,
             idx_primary: if block_idx == 0 { 0 } else { 1 },
@@ -1535,7 +1535,7 @@ impl BernoulliMarginalSlopeFamily {
             0..n,
             label_i,
             &self.policy,
-        )?;
+        ).map_err(|error| error.to_string())?;
         let psi_map_j = gam_custom_family::resolve_custom_family_x_psi_map(
             deriv_j,
             n,
@@ -1543,7 +1543,7 @@ impl BernoulliMarginalSlopeFamily {
             0..n,
             label_j,
             &self.policy,
-        )?;
+        ).map_err(|error| error.to_string())?;
         let psi_map_ij = if block_i == block_j {
             Some(gam_custom_family::resolve_custom_family_x_psi_psi_map(
                 deriv_i,
@@ -1554,7 +1554,7 @@ impl BernoulliMarginalSlopeFamily {
                 0..n,
                 label_i,
                 &self.policy,
-            )?)
+            ).map_err(|error| error.to_string())?)
         } else {
             None
         };
@@ -1893,7 +1893,7 @@ impl BernoulliMarginalSlopeFamily {
                 0..n,
                 label,
                 &self.policy,
-            )?;
+            ).map_err(|error| error.to_string())?;
             let dir_idx = if block == 0 {
                 primary.q
             } else {
@@ -1944,7 +1944,7 @@ impl BernoulliMarginalSlopeFamily {
                     0..n,
                     label,
                     &self.policy,
-                )?;
+                ).map_err(|error| error.to_string())?;
                 cross_maps.insert((i, j), map);
             }
         }
@@ -2315,7 +2315,7 @@ impl BernoulliMarginalSlopeFamily {
             0..n,
             psi_label,
             &self.policy,
-        )?;
+        ).map_err(|error| error.to_string())?;
 
         // FLEX: prewarm the degree-21 cell-moment bundle so per-row third/
         // fourth recompute reuses prebuilt moments rather than recomputing
@@ -2456,7 +2456,7 @@ impl BernoulliMarginalSlopeFamily {
             0..n,
             psi_label,
             &self.policy,
-        )?;
+        ).map_err(|error| error.to_string())?;
 
         // FLEX: prewarm the degree-21 cell-moment bundle so per-row third/
         // fourth recompute reuses prebuilt moments rather than recomputing

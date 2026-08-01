@@ -11,12 +11,12 @@ use super::*;
 /// derivative `D²_β H[−v_l, −v_k]` (term2); the two are fused into a single
 /// `CompositeHyperOperator`. Returns `None` as soon as either term is absent.
 pub(crate) fn joint_second_derivative_correction_result(
-    compute_dh: &dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, String>,
-    compute_d2h: &dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, String>,
+    compute_dh: &dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError>,
+    compute_d2h: &dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError>,
     v_k: &Array1<f64>,
     v_l: &Array1<f64>,
     u_kl: &Array1<f64>,
-) -> Result<Option<DriftDerivResult>, String> {
+) -> Result<Option<DriftDerivResult>, CustomFamilyError> {
     let Some(term1) = compute_dh(u_kl)? else {
         return Ok(None);
     };
@@ -48,7 +48,10 @@ impl HessianDerivativeProvider for BorrowedJointDerivProvider<'_> {
         v_k: &Array1<f64>,
     ) -> Result<Option<DriftDerivResult>, String> {
         let neg_v = -v_k;
-        (self.compute_dh)(&neg_v)
+        // Display boundary: `HessianDerivativeProvider` (gam-solve) is a
+        // `String`-erroring trait, so the typed error is rendered HERE and
+        // visibly, rather than by a silent blanket `From` (gam#2689).
+        (self.compute_dh)(&neg_v).map_err(|error| error.to_string())
     }
 
     fn hessian_derivative_corrections_result(
@@ -57,11 +60,11 @@ impl HessianDerivativeProvider for BorrowedJointDerivProvider<'_> {
     ) -> Result<Vec<Option<DriftDerivResult>>, String> {
         let neg_vs: Vec<Array1<f64>> = v_ks.iter().map(|v_k| -v_k).collect();
         if let Some(compute_dh_many) = self.compute_dh_many {
-            compute_dh_many(&neg_vs)
+            compute_dh_many(&neg_vs).map_err(|error| error.to_string())
         } else {
             neg_vs
                 .iter()
-                .map(|neg_v| (self.compute_dh)(neg_v))
+                .map(|neg_v| (self.compute_dh)(neg_v).map_err(|error| error.to_string()))
                 .collect()
         }
     }
@@ -88,6 +91,7 @@ impl HessianDerivativeProvider for BorrowedJointDerivProvider<'_> {
         u_kl: &Array1<f64>,
     ) -> Result<Option<DriftDerivResult>, String> {
         joint_second_derivative_correction_result(self.compute_dh, self.compute_d2h, v_k, v_l, u_kl)
+            .map_err(|error| error.to_string())
     }
 
     fn hessian_second_derivative_corrections_result(
@@ -106,7 +110,7 @@ impl HessianDerivativeProvider for BorrowedJointDerivProvider<'_> {
             )?;
             let pairs: Vec<(Array1<f64>, Array1<f64>)> =
                 triples.iter().map(|(v_k, v_l, _)| (-v_l, -v_k)).collect();
-            let term2s = compute_d2h_many(&pairs)?;
+            let term2s = compute_d2h_many(&pairs).map_err(|error| error.to_string())?;
             triples
                 .iter()
                 .enumerate()
@@ -147,12 +151,12 @@ impl HessianDerivativeProvider for BorrowedJointDerivProvider<'_> {
 
 pub(crate) struct OwnedJointDerivProvider {
     pub(crate) compute_dh:
-        Arc<dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, String> + Send + Sync>,
+        Arc<dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError> + Send + Sync>,
     pub(crate) compute_dh_many: Option<
-        Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<DriftDerivResult>>, String> + Send + Sync>,
+        Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<DriftDerivResult>>, CustomFamilyError> + Send + Sync>,
     >,
     pub(crate) compute_d2h: Arc<
-        dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, String>
+        dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError>
             + Send
             + Sync,
     >,
@@ -160,7 +164,7 @@ pub(crate) struct OwnedJointDerivProvider {
     /// `BorrowedJointDerivProvider` for the dispatch contract.
     pub(crate) compute_d2h_many: Option<
         Arc<
-            dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Option<DriftDerivResult>>, String>
+            dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Option<DriftDerivResult>>, CustomFamilyError>
                 + Send
                 + Sync,
         >,
@@ -183,7 +187,10 @@ impl HessianDerivativeProvider for OwnedJointDerivProvider {
         v_k: &Array1<f64>,
     ) -> Result<Option<DriftDerivResult>, String> {
         let neg_v = -v_k;
-        (self.compute_dh)(&neg_v)
+        // Display boundary: `HessianDerivativeProvider` (gam-solve) is a
+        // `String`-erroring trait, so the typed error is rendered HERE and
+        // visibly, rather than by a silent blanket `From` (gam#2689).
+        (self.compute_dh)(&neg_v).map_err(|error| error.to_string())
     }
 
     fn hessian_derivative_corrections_result(
@@ -192,11 +199,11 @@ impl HessianDerivativeProvider for OwnedJointDerivProvider {
     ) -> Result<Vec<Option<DriftDerivResult>>, String> {
         let neg_vs: Vec<Array1<f64>> = v_ks.iter().map(|v_k| -v_k).collect();
         if let Some(compute_dh_many) = self.compute_dh_many.as_ref() {
-            compute_dh_many(&neg_vs)
+            compute_dh_many(&neg_vs).map_err(|error| error.to_string())
         } else {
             neg_vs
                 .iter()
-                .map(|neg_v| (self.compute_dh)(neg_v))
+                .map(|neg_v| (self.compute_dh)(neg_v).map_err(|error| error.to_string()))
                 .collect()
         }
     }
@@ -229,6 +236,7 @@ impl HessianDerivativeProvider for OwnedJointDerivProvider {
             v_l,
             u_kl,
         )
+        .map_err(|error| error.to_string())
     }
 
     fn hessian_second_derivative_corrections_result(
@@ -242,7 +250,7 @@ impl HessianDerivativeProvider for OwnedJointDerivProvider {
             )?;
             let pairs: Vec<(Array1<f64>, Array1<f64>)> =
                 triples.iter().map(|(v_k, v_l, _)| (-v_l, -v_k)).collect();
-            let term2s = compute_d2h_many(&pairs)?;
+            let term2s = compute_d2h_many(&pairs).map_err(|error| error.to_string())?;
             triples
                 .iter()
                 .enumerate()
@@ -277,9 +285,16 @@ impl HessianDerivativeProvider for OwnedJointDerivProvider {
     }
 
     fn outer_hessian_derivative_kernel(&self) -> Option<OuterHessianDerivativeKernel> {
+        // Display boundary: `OuterHessianDerivativeKernel::Callback` (gam-solve)
+        // is declared over `Result<_, String>`, so the adapters render the typed
+        // error explicitly instead of leaning on a blanket `From` (gam#2689).
+        let first = Arc::clone(&self.compute_dh);
+        let second = Arc::clone(&self.compute_d2h);
         Some(OuterHessianDerivativeKernel::Callback {
-            first: Arc::clone(&self.compute_dh),
-            second: Arc::clone(&self.compute_d2h),
+            first: Arc::new(move |v: &Array1<f64>| first(v).map_err(|error| error.to_string())),
+            second: Arc::new(move |v: &Array1<f64>, u: &Array1<f64>| {
+                second(v, u).map_err(|error| error.to_string())
+            }),
         })
     }
 
@@ -307,7 +322,7 @@ impl HessianDerivativeProvider for OwnedJointDerivProvider {
 /// term / missing exact derivative on some axis) leaves the inner likelihood
 /// drift unchanged for that direction.
 pub(crate) type JeffreysHphiDriftBatchFn =
-    Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<Array2<f64>>>, String> + Send + Sync>;
+    Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<Array2<f64>>>, CustomFamilyError> + Send + Sync>;
 
 /// Jeffreys-`H_Φ`-aware joint derivative provider.
 ///
@@ -350,7 +365,7 @@ impl<'a> JeffreysHphiAwareJointDerivatives<'a> {
     pub(crate) fn hphi_drifts(
         &self,
         v_ks: &[Array1<f64>],
-    ) -> Result<Vec<Option<Array2<f64>>>, String> {
+    ) -> Result<Vec<Option<Array2<f64>>>, CustomFamilyError> {
         let deltas: Vec<Array1<f64>> = v_ks.iter().map(|v| v.mapv(|value| -value)).collect();
         (self.drift)(&deltas)
     }
@@ -359,7 +374,7 @@ impl<'a> JeffreysHphiAwareJointDerivatives<'a> {
     /// batched closure with a one-element slice so the singular trait methods reuse
     /// the identical arithmetic; the dominant outer-gradient path goes through
     /// [`Self::hphi_drifts`] where the base is amortized across all `k` directions.
-    pub(crate) fn hphi_drift(&self, v_k: &Array1<f64>) -> Result<Option<Array2<f64>>, String> {
+    pub(crate) fn hphi_drift(&self, v_k: &Array1<f64>) -> Result<Option<Array2<f64>>, CustomFamilyError> {
         let delta = v_k.mapv(|value| -value);
         let mut out = (self.drift)(std::slice::from_ref(&delta))?;
         Ok(out.pop().flatten())
@@ -372,7 +387,8 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
         v_k: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
         let inner = self.inner.hessian_derivative_correction(v_k)?;
-        let drift = self.hphi_drift(v_k)?;
+        // Display boundary: `HessianDerivativeProvider` is `String`-erroring (gam#2689).
+        let drift = self.hphi_drift(v_k).map_err(|error| error.to_string())?;
         Ok(match (inner, drift) {
             (Some(mut ic), Some(d)) => {
                 ic += &d;
@@ -389,7 +405,8 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
         v_k: &Array1<f64>,
     ) -> Result<Option<DriftDerivResult>, String> {
         let inner = self.inner.hessian_derivative_correction_result(v_k)?;
-        let drift = self.hphi_drift(v_k)?;
+        // Display boundary: `HessianDerivativeProvider` is `String`-erroring (gam#2689).
+        let drift = self.hphi_drift(v_k).map_err(|error| error.to_string())?;
         Ok(match (inner, drift) {
             (Some(DriftDerivResult::Dense(mut dense)), Some(d)) => {
                 dense += &d;
@@ -420,7 +437,7 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
         // prepared ONCE rather than recomputed `k` times — the biobank #979
         // outer-gradient black hole. Per-direction values are byte-identical.
         let inner = self.inner.hessian_derivative_corrections_result(v_ks)?;
-        let drifts = self.hphi_drifts(v_ks)?;
+        let drifts = self.hphi_drifts(v_ks).map_err(|error| error.to_string())?;
         if drifts.len() != inner.len() {
             return Err(format!(
                 "JeffreysHphiAwareJointDerivatives: batched H_Φ drift returned {} results for {} directions",
@@ -523,9 +540,9 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
 pub(crate) struct ExtCoordBundle {
     pub(crate) coords: Vec<HyperCoord>,
     pub(crate) ext_ext_fn:
-        Option<Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>>,
+        Option<Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, CustomFamilyError> + Send + Sync>>,
     pub(crate) rho_ext_fn:
-        Option<Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>>,
+        Option<Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, CustomFamilyError> + Send + Sync>>,
     pub(crate) drift_fn: Option<FixedDriftDerivFn>,
     /// Direction-contracted ψψ second-order hook (#740). When `Some`, the
     /// outer-Hessian operator builder skips the `K²` per-pair ψψ assembly
@@ -647,13 +664,13 @@ impl ExtCoordBundle {
             Box::new(move |i: usize, j: usize| {
                 callback(i, j).map(|pair| scale_hypercoord_pair(pair, scale))
             })
-                as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>
+                as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, CustomFamilyError> + Send + Sync>
         });
         let rho_ext_fn = self.rho_ext_fn.map(|callback| {
             Box::new(move |i: usize, j: usize| {
                 callback(i, j).map(|pair| scale_hypercoord_pair(pair, scale))
             })
-                as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>
+                as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, CustomFamilyError> + Send + Sync>
         });
         let drift_fn = self.drift_fn.map(|callback| {
             Box::new(move |ext_idx: usize, direction: &Array1<f64>| {

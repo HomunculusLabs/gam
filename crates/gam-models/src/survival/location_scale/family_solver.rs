@@ -2540,24 +2540,24 @@ impl SurvivalLocationScaleFamily {
                 h_tt_exit.view(),
                 CustomFamilyPsiLinearMapRef::Dense(x_threshold_exit),
                 row_mask,
-            )? + mxtwx_psi(
+            ).map_err(|error| error.to_string())? + mxtwx_psi(
                 CustomFamilyPsiLinearMapRef::Dense(x_threshold_exit),
                 h_tt_exit.view(),
                 x_t_exit_map,
                 row_mask,
-            )? + mxtwx(x_threshold_exit, &dh_tt_exit, x_threshold_exit, row_mask)?
+            ).map_err(|error| error.to_string())? + mxtwx(x_threshold_exit, &dh_tt_exit, x_threshold_exit, row_mask)?
                 + mxtwx_psi(
                     x_t_entry_map,
                     h_tt_entry.view(),
                     CustomFamilyPsiLinearMapRef::Dense(x_threshold_entry),
                     row_mask,
-                )?
+                ).map_err(|error| error.to_string())?
                 + mxtwx_psi(
                     CustomFamilyPsiLinearMapRef::Dense(x_threshold_entry),
                     h_tt_entry.view(),
                     x_t_entry_map,
                     row_mask,
-                )?
+                ).map_err(|error| error.to_string())?
                 + mxtwx(x_threshold_entry, &dh_tt_entry, x_threshold_entry, row_mask)?;
         assign_symmetric_block(
             &mut hessian_psi,
@@ -2571,24 +2571,24 @@ impl SurvivalLocationScaleFamily {
                 h_ll_exit.view(),
                 CustomFamilyPsiLinearMapRef::Dense(x_log_sigma_exit),
                 row_mask,
-            )? + mxtwx_psi(
+            ).map_err(|error| error.to_string())? + mxtwx_psi(
                 CustomFamilyPsiLinearMapRef::Dense(x_log_sigma_exit),
                 h_ll_exit.view(),
                 x_ls_exit_map,
                 row_mask,
-            )? + mxtwx(x_log_sigma_exit, &dh_ll_exit, x_log_sigma_exit, row_mask)?
+            ).map_err(|error| error.to_string())? + mxtwx(x_log_sigma_exit, &dh_ll_exit, x_log_sigma_exit, row_mask)?
                 + mxtwx_psi(
                     x_ls_entry_map,
                     h_ll_entry.view(),
                     CustomFamilyPsiLinearMapRef::Dense(x_log_sigma_entry),
                     row_mask,
-                )?
+                ).map_err(|error| error.to_string())?
                 + mxtwx_psi(
                     CustomFamilyPsiLinearMapRef::Dense(x_log_sigma_entry),
                     h_ll_entry.view(),
                     x_ls_entry_map,
                     row_mask,
-                )?
+                ).map_err(|error| error.to_string())?
                 + mxtwx(x_log_sigma_entry, &dh_ll_entry, x_log_sigma_entry, row_mask)?;
         assign_symmetric_block(
             &mut hessian_psi,
@@ -2602,24 +2602,24 @@ impl SurvivalLocationScaleFamily {
                 h_tl_exit.view(),
                 CustomFamilyPsiLinearMapRef::Dense(x_log_sigma_exit),
                 row_mask,
-            )? + mxtwx_psi(
+            ).map_err(|error| error.to_string())? + mxtwx_psi(
                 CustomFamilyPsiLinearMapRef::Dense(x_threshold_exit),
                 h_tl_exit.view(),
                 x_ls_exit_map,
                 row_mask,
-            )? + mxtwx(x_threshold_exit, &dh_tl_exit, x_log_sigma_exit, row_mask)?
+            ).map_err(|error| error.to_string())? + mxtwx(x_threshold_exit, &dh_tl_exit, x_log_sigma_exit, row_mask)?
                 + mxtwx_psi(
                     x_t_entry_map,
                     h_tl_entry.view(),
                     CustomFamilyPsiLinearMapRef::Dense(x_log_sigma_entry),
                     row_mask,
-                )?
+                ).map_err(|error| error.to_string())?
                 + mxtwx_psi(
                     CustomFamilyPsiLinearMapRef::Dense(x_threshold_entry),
                     h_tl_entry.view(),
                     x_ls_entry_map,
                     row_mask,
-                )?
+                ).map_err(|error| error.to_string())?
                 + mxtwx(x_threshold_entry, &dh_tl_entry, x_log_sigma_entry, row_mask)?;
         assign_symmetric_block(
             &mut hessian_psi,
@@ -2633,14 +2633,14 @@ impl SurvivalLocationScaleFamily {
                 h_h0_t.view(),
                 x_t_entry_map,
                 row_mask,
-            )?
+            ).map_err(|error| error.to_string())?
             + mxtwx(&self.x_time_exit, &dh_h1_t, x_threshold_exit, row_mask)?
             + mxtwx_psi(
                 CustomFamilyPsiLinearMapRef::Dense(&self.x_time_exit),
                 h_h1_t.view(),
                 x_t_exit_map,
                 row_mask,
-            )?;
+            ).map_err(|error| error.to_string())?;
         assign_symmetric_block(&mut hessian_psi, offsets[0], offsets[1], &h_time_threshold);
         let h_time_log_sigma = mxtwx(&self.x_time_entry, &dh_h0_ls, x_log_sigma_entry, row_mask)?
             + mxtwx_psi(
@@ -2648,14 +2648,14 @@ impl SurvivalLocationScaleFamily {
                 h_h0_ls.view(),
                 x_ls_entry_map,
                 row_mask,
-            )?
+            ).map_err(|error| error.to_string())?
             + mxtwx(&self.x_time_exit, &dh_h1_ls, x_log_sigma_exit, row_mask)?
             + mxtwx_psi(
                 CustomFamilyPsiLinearMapRef::Dense(&self.x_time_exit),
                 h_h1_ls.view(),
                 x_ls_exit_map,
                 row_mask,
-            )?;
+            ).map_err(|error| error.to_string())?;
         assign_symmetric_block(&mut hessian_psi, offsets[0], offsets[2], &h_time_log_sigma);
 
         if let (Some(xw_dense), Some(w_offset)) = (xw, offsets.get(3).copied()) {
@@ -2667,13 +2667,13 @@ impl SurvivalLocationScaleFamily {
                 h_tw_exit.view(),
                 CustomFamilyPsiLinearMapRef::Dense(xw_dense),
                 row_mask,
-            )? + mxtwx(x_threshold_exit, &dh_tw_exit, xw_dense, row_mask)?
+            ).map_err(|error| error.to_string())? + mxtwx(x_threshold_exit, &dh_tw_exit, xw_dense, row_mask)?
                 + mxtwx_psi(
                     x_t_entry_map,
                     h_tw_entry.view(),
                     CustomFamilyPsiLinearMapRef::Dense(xw_dense),
                     row_mask,
-                )?
+                ).map_err(|error| error.to_string())?
                 + mxtwx(x_threshold_entry, &dh_tw_entry, xw_dense, row_mask)?;
             assign_symmetric_block(&mut hessian_psi, offsets[1], w_offset, &h_threshold_wiggle);
             let h_log_sigma_wiggle = mxtwx_psi(
@@ -2681,13 +2681,13 @@ impl SurvivalLocationScaleFamily {
                 h_lw_exit.view(),
                 CustomFamilyPsiLinearMapRef::Dense(xw_dense),
                 row_mask,
-            )? + mxtwx(x_log_sigma_exit, &dh_lw_exit, xw_dense, row_mask)?
+            ).map_err(|error| error.to_string())? + mxtwx(x_log_sigma_exit, &dh_lw_exit, xw_dense, row_mask)?
                 + mxtwx_psi(
                     x_ls_entry_map,
                     h_lw_entry.view(),
                     CustomFamilyPsiLinearMapRef::Dense(xw_dense),
                     row_mask,
-                )?
+                ).map_err(|error| error.to_string())?
                 + mxtwx(x_log_sigma_entry, &dh_lw_entry, xw_dense, row_mask)?;
             assign_symmetric_block(&mut hessian_psi, offsets[2], w_offset, &h_log_sigma_wiggle);
             let h_time_wiggle =

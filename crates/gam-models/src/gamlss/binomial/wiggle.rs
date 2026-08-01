@@ -1292,51 +1292,51 @@ impl BinomialLocationScaleWiggleFamily {
             x_t_map,
             coeff_tt_w.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_t),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             CustomFamilyPsiLinearMapRef::Dense(x_t),
             coeff_tt_w.view(),
             x_t_map,
-        )? + &xt_diag_x_dense(x_t, &coeff_tt_d)?;
+        ).map_err(|error| error.to_string())? + &xt_diag_x_dense(x_t, &coeff_tt_d)?;
         let h_tl_block = weighted_crossprod_psi_maps(
             x_t_map,
             coeff_tl_w.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             CustomFamilyPsiLinearMapRef::Dense(x_t),
             coeff_tl_w.view(),
             x_ls_map,
-        )? + &xt_diag_y_dense(x_t, &coeff_tl_d, x_ls)?;
+        ).map_err(|error| error.to_string())? + &xt_diag_y_dense(x_t, &coeff_tl_d, x_ls)?;
         let h_ll_block = weighted_crossprod_psi_maps(
             x_ls_map,
             coeff_ll_w.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
             coeff_ll_w.view(),
             x_ls_map,
-        )? + &xt_diag_x_dense(x_ls, &coeff_ll_d)?;
+        ).map_err(|error| error.to_string())? + &xt_diag_x_dense(x_ls, &coeff_ll_d)?;
         let h_tw = weighted_crossprod_psi_maps(
             x_t_map,
             coeff_tw_b_w.view(),
             CustomFamilyPsiLinearMapRef::Dense(&b0),
-        )? + &xt_diag_y_dense(x_t, &coeff_tw_b_d, &b0)?
+        ).map_err(|error| error.to_string())? + &xt_diag_y_dense(x_t, &coeff_tw_b_d, &b0)?
             + &weighted_crossprod_psi_maps(
                 x_t_map,
                 coeff_tw_d1_w.view(),
                 CustomFamilyPsiLinearMapRef::Dense(&d0),
-            )?
+            ).map_err(|error| error.to_string())?
             + &xt_diag_y_dense(x_t, &coeff_tw_d1_d, &d0)?
             + &xt_diag_y_dense(x_t, &coeff_tw_d2_d, &dd0)?;
         let h_lw = weighted_crossprod_psi_maps(
             x_ls_map,
             coeff_lw_b_w.view(),
             CustomFamilyPsiLinearMapRef::Dense(&b0),
-        )? + &xt_diag_y_dense(x_ls, &coeff_lw_b_d, &b0)?
+        ).map_err(|error| error.to_string())? + &xt_diag_y_dense(x_ls, &coeff_lw_b_d, &b0)?
             + &weighted_crossprod_psi_maps(
                 x_ls_map,
                 coeff_lw_d1_w.view(),
                 CustomFamilyPsiLinearMapRef::Dense(&d0),
-            )?
+            ).map_err(|error| error.to_string())?
             + &xt_diag_y_dense(x_ls, &coeff_lw_d1_d, &d0)?
             + &xt_diag_y_dense(x_ls, &coeff_lw_d2_d, &dd0)?;
         let a_ww = xt_diag_y_dense(&d0, &coeff_ww_db, &b0)?;
@@ -1745,12 +1745,12 @@ impl BinomialLocationScaleWiggleFamily {
 
             let xtr = x_t.row(row);
             let xlsr = x_ls.row(row);
-            let xta = x_t_a_map.row_vector(row)?;
-            let xtb = x_t_b_map.row_vector(row)?;
-            let xlsa = x_ls_a_map.row_vector(row)?;
-            let xlsb = x_ls_b_map.row_vector(row)?;
-            let xtab = x_t_ab_map.row_vector(row)?;
-            let xlsab = x_ls_ab_map.row_vector(row)?;
+            let xta = x_t_a_map.row_vector(row).map_err(|error| error.to_string())?;
+            let xtb = x_t_b_map.row_vector(row).map_err(|error| error.to_string())?;
+            let xlsa = x_ls_a_map.row_vector(row).map_err(|error| error.to_string())?;
+            let xlsb = x_ls_b_map.row_vector(row).map_err(|error| error.to_string())?;
+            let xtab = x_t_ab_map.row_vector(row).map_err(|error| error.to_string())?;
+            let xlsab = x_ls_ab_map.row_vector(row).map_err(|error| error.to_string())?;
 
             b.fill(0.0);
             b.slice_mut(s![0..pt]).scaled_add(q_t, &xtr);
@@ -2290,8 +2290,8 @@ impl BinomialLocationScaleWiggleFamily {
 
             let xtr = x_t.row(row);
             let xlsr = x_ls.row(row);
-            let xta = x_t_map.row_vector(row)?;
-            let xlsa = x_ls_map.row_vector(row)?;
+            let xta = x_t_map.row_vector(row).map_err(|error| error.to_string())?;
+            let xlsa = x_ls_map.row_vector(row).map_err(|error| error.to_string())?;
             let br = b0.row(row);
             let dr = d0.row(row);
             let ddr = dd0.row(row);

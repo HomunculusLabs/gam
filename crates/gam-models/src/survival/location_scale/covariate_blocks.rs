@@ -641,6 +641,9 @@ impl crate::spatial_psi_bridge::SpatialPsiBlockTransform for SurvivalTimeVarying
                 shared_dense_arc(&self.time_basis_derivative_exit),
             ],
         )
+        // Display boundary (gam#2689): `SpatialPsiBlockTransform` is declared
+        // over `Result<_, String>`.
+        .map_err(|error| error.to_string())
     }
 
     fn transform_design(&self, base: Array2<f64>) -> Array2<f64> {

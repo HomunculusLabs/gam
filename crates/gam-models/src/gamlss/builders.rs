@@ -2185,9 +2185,9 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                                 mode,
                                 theta,
                                 certified_outer,
-                            )?
+                            ).map_err(|error| error.to_string())?
                         } else {
-                            fit_custom_family(&family, &blocks, options)?
+                            fit_custom_family(&family, &blocks, options).map_err(|error| error.to_string())?
                         }
                     };
                     let (mean_beta, noise_beta) = builder.extract_primary_betas(&fit)?;
@@ -2258,7 +2258,7 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                         &hyper_layout,
                         warm_start.as_ref(),
                         eval_mode,
-                    )?;
+                    ).map_err(|error| error.to_string())?;
                     *hyper_warm_start_cell.borrow_mut() = Some(owned.result.warm_start.clone());
                     if !owned.result.inner_converged {
                         return Err(
@@ -2331,7 +2331,7 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                         &rho,
                         &hyper_layout,
                         warm_start.as_ref(),
-                    )?;
+                    ).map_err(|error| error.to_string())?;
                     *hyper_warm_start_cell.borrow_mut() = Some(owned.result.warm_start.clone());
                     if !owned.result.inner_converged {
                         return Err(
@@ -3456,7 +3456,7 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
             } else {
                 gam_problem::EvalMode::ValueAndGradient
             },
-        )?;
+        ).map_err(|error| error.to_string())?;
         Ok((eval, resolvedspec, design))
     };
 

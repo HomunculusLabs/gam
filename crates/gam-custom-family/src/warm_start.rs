@@ -111,17 +111,17 @@ pub(crate) fn inner_penalized_objective(
     include_logdet_h: bool,
     include_logdet_s: bool,
     context: &str,
-) -> Result<f64, String> {
+) -> Result<f64, CustomFamilyError> {
     let reml_term = if include_logdet_h {
         0.5 * inner
             .block_logdet_h
-            .ok_or_else(|| format!("{context}: certified Hessian logdet is unavailable"))?
+            .ok_or_else(|| CustomFamilyError::trial_point(format!("{context}: certified Hessian logdet is unavailable")))?
     } else {
         0.0
     } - if include_logdet_s {
         0.5 * inner
             .block_logdet_s
-            .ok_or_else(|| format!("{context}: certified penalty logdet is unavailable"))?
+            .ok_or_else(|| CustomFamilyError::trial_point(format!("{context}: certified penalty logdet is unavailable")))?
     } else {
         0.0
     };
@@ -138,7 +138,7 @@ pub(crate) fn nonconverged_outer_efs_result(
     rho: &Array1<f64>,
     theta_dim: usize,
     context: &str,
-) -> Result<(gam_problem::EfsEval, ConstrainedWarmStart, bool), String> {
+) -> Result<(gam_problem::EfsEval, ConstrainedWarmStart, bool), CustomFamilyError> {
     Ok((
         gam_problem::EfsEval {
             // A non-converged coefficient iterate is not a Laplace mode, so no
@@ -231,7 +231,7 @@ pub struct BlockwiseFitResultParts {
 pub(crate) fn validate_parameter_block_state_finiteness(
     label: &str,
     state: &ParameterBlockState,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     validate_all_finite_estimation(&format!("{label}.beta"), state.beta.iter().copied())
         .map_err(|e| e.to_string())?;
     validate_all_finite_estimation(&format!("{label}.eta"), state.eta.iter().copied())
@@ -243,7 +243,7 @@ pub(crate) fn validate_lambda_pair_consistency(
     log_lambdas: &Array1<f64>,
     lambdas: &Array1<f64>,
     label: &str,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     if log_lambdas.len() != lambdas.len() {
         return Err(CustomFamilyError::DimensionMismatch {
             reason: format!(
@@ -251,16 +251,15 @@ pub(crate) fn validate_lambda_pair_consistency(
                 log_lambdas.len(),
                 lambdas.len()
             ),
-        }
-        .into());
+        });
     }
     for (idx, (&log_lambda, &lambda)) in log_lambdas.iter().zip(lambdas.iter()).enumerate() {
         let expected = gam_problem::checked_exp_log_strength(log_lambda)
-            .map_err(|error| format!("{label} log coordinate {idx}: {error}"))?;
+            .map_err(|error| CustomFamilyError::DimensionMismatch { reason: format!("{label} log coordinate {idx}: {error}") })?;
         if lambda.to_bits() != expected.to_bits() {
-            return Err(format!(
+            return Err(CustomFamilyError::DimensionMismatch { reason: format!(
                 "{label}[{idx}] inconsistent with exp(log_lambda): got {lambda}, expected {expected}",
-            ));
+            ) });
         }
     }
     Ok(())
@@ -300,26 +299,26 @@ pub(crate) fn custom_family_blockwise_edf(
     penalized_hessian: &Array2<f64>,
     specs: &[ParameterBlockSpec],
     lambdas: &ndarray::ArrayView1<'_, f64>,
-) -> Result<(f64, Vec<f64>, Vec<f64>, Vec<f64>), String> {
+) -> Result<(f64, Vec<f64>, Vec<f64>, Vec<f64>), CustomFamilyError> {
     use gam_solve::estimate::reml::reml_outer_engine::penalty_matrix_root;
 
     let p = penalized_hessian.nrows();
     let total_cols: usize = specs.iter().map(|s| s.design.ncols()).sum();
     if penalized_hessian.ncols() != p || total_cols != p {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "custom-family edf: penalized Hessian {}x{} inconsistent with total block width {}",
             penalized_hessian.nrows(),
             penalized_hessian.ncols(),
             total_cols
-        ));
+        )));
     }
     let expected_rho: usize = specs.iter().map(|s| s.penalties.len()).sum();
     if lambdas.len() != expected_rho {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "custom-family edf: lambdas length {} does not match total penalty count {}",
             lambdas.len(),
             expected_rho
-        ));
+        )));
     }
 
     let h_sym = SymmetricMatrix::Dense(penalized_hessian.clone());
@@ -380,11 +379,11 @@ pub(crate) fn custom_family_blockwise_edf(
                 let r = block_col_start..block_col_start + block_cols;
                 s_full.slice_mut(ndarray::s![r.clone(), r]).assign(&s_local);
             } else {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "custom-family edf: penalty {global_k} materialized to {}x{}, expected {p}x{p} or {block_cols}x{block_cols}",
                     s_local.nrows(),
                     s_local.ncols()
-                ));
+                )));
             }
             // tr(H⁻¹ S_k) via H Z = S_k, summing the diagonal of Z.
             let z = factor.solvemulti(&s_full).map_err(|e| {
@@ -403,7 +402,7 @@ pub(crate) fn custom_family_blockwise_edf(
     }
 
     let joint_penalty_rank = penalty_matrix_root(&joint_penalty)
-        .map_err(|error| format!("custom-family edf: joint penalty rank failed: {error}"))?
+        .map_err(|error| CustomFamilyError::trial_point(format!("custom-family edf: joint penalty rank failed: {error}")))?
         .nrows();
     let bundle = gam_solve::estimate::penalized_edf_bundle(
         &raw_traces,
@@ -430,7 +429,7 @@ pub(crate) fn custom_family_blockwise_edf(
         || block_edf.iter().any(|v| !v.is_finite())
         || penalty_trace.iter().any(|v| !v.is_finite())
     {
-        return Err("custom-family edf: non-finite effective degrees of freedom".to_string());
+        return Err(CustomFamilyError::trial_point("custom-family edf: non-finite effective degrees of freedom".to_string()));
     }
     Ok((edf_total, edf_by_penalty, block_edf, penalty_trace))
 }
@@ -718,8 +717,7 @@ pub fn blockwise_fit_from_parts(
                          no fit was assembled",
                         certificate.summary()
                     ),
-                }
-                .into());
+                });
             }
         }
         None => {
@@ -729,16 +727,14 @@ pub fn blockwise_fit_from_parts(
                     reason: "refusing to assemble a fit after an outer optimization without its \
                              analytic convergence certificate"
                         .to_string(),
-                }
-                .into());
+                });
             }
         }
     }
     if block_states.is_empty() {
         return Err(CustomFamilyError::UnsupportedConfiguration {
             reason: "blockwise fit requires at least one block state".to_string(),
-        }
-        .into());
+        });
     }
     ensure_finite_scalar_estimation("blockwise_fit.log_likelihood", log_likelihood)
         .map_err(|e| e.to_string())?;
@@ -763,8 +759,7 @@ pub fn blockwise_fit_from_parts(
                 block_states.len(),
                 specs.len()
             ),
-        }
-        .into());
+        });
     }
     // `design`, unlike `solver_design()`, has one row per original
     // experimental unit. Survival and multi-output blocks may expand their
@@ -773,8 +768,7 @@ pub fn blockwise_fit_from_parts(
     if n == 0 {
         return Err(CustomFamilyError::DimensionMismatch {
             reason: "blockwise_fit requires at least one original training row".to_string(),
-        }
-        .into());
+        });
     }
     for (idx, spec) in specs.iter().enumerate().skip(1) {
         if spec.design.nrows() != n {
@@ -783,8 +777,7 @@ pub fn blockwise_fit_from_parts(
                     "blockwise_fit spec {idx} has {} original training rows, expected {n}",
                     spec.design.nrows()
                 ),
-            }
-            .into());
+            });
         }
     }
     let total_p = block_states
@@ -802,7 +795,7 @@ pub fn blockwise_fit_from_parts(
                 "blockwise_fit.block_states[{idx}] eta length mismatch: got {}, expected {} (solver design rows)",
                 state.eta.len(),
                 expected_rows
-            ) }.into());
+            ) });
         }
     }
 
@@ -816,8 +809,7 @@ pub fn blockwise_fit_from_parts(
                     "blockwise_fit.covariance_conditional must be {}x{}, got {}x{}",
                     total_p, total_p, rows, cols
                 ),
-            }
-            .into());
+            });
         }
     }
 
@@ -850,8 +842,7 @@ pub fn blockwise_fit_from_parts(
                     "blockwise_fit.geometry raw gauge partition {:?} does not match fitted block partition {:?}",
                     geom.coefficient_gauge.block_starts_raw, raw_block_starts
                 ),
-            }
-            .into());
+            });
         }
         let active_dimension = geom.coefficient_gauge.reduced_total();
         let (rows, cols) = geom.penalized_hessian.dim();
@@ -860,16 +851,14 @@ pub fn blockwise_fit_from_parts(
                 reason: format!(
                     "blockwise_fit.geometry active penalized_hessian must be {active_dimension}x{active_dimension}, got {rows}x{cols}"
                 ),
-            }
-            .into());
+            });
         }
         if !geom.coefficient_gauge.is_identity() && precomputed_edf.is_none() {
             return Err(CustomFamilyError::InvalidInput {
                 context: "blockwise_fit_from_parts",
                 reason: "non-identity active geometry requires its reduced-coordinate EDF; raw penalties cannot be paired with an active-coordinate Hessian"
                     .to_string(),
-            }
-            .into());
+            });
         }
         if let Some(working) = geom.working.as_ref()
             && working.weights.len() != n
@@ -877,7 +866,7 @@ pub fn blockwise_fit_from_parts(
             return Err(CustomFamilyError::DimensionMismatch { reason: format!(
                 "blockwise_fit.geometry single-diagonal working row count mismatch: got {}, expected {n}",
                 working.weights.len(),
-            ) }.into());
+            ) });
         }
     }
 
@@ -889,7 +878,7 @@ pub fn blockwise_fit_from_parts(
             "blockwise_fit.lambdas length ({}) does not match sum of per-block penalty counts ({})",
             lambdas.len(),
             expected_rho
-        ) }.into());
+        ) });
     }
     // Effective degrees of freedom and the inference block. The converged
     // coefficient geometry always carries the joint penalized Hessian; compute the
@@ -1065,7 +1054,7 @@ pub(crate) fn checked_penalizedobjective(
     penalty_value: f64,
     reml_term: f64,
     context: &str,
-) -> Result<f64, String> {
+) -> Result<f64, CustomFamilyError> {
     let objective = -log_likelihood + penalty_value + reml_term;
     if objective.is_finite() {
         Ok(objective)
@@ -1076,8 +1065,7 @@ pub(crate) fn checked_penalizedobjective(
              (log_likelihood={log_likelihood}, penalty_value={penalty_value}, \
              reml_term={reml_term}, objective={objective})"
             ),
-        }
-        .into())
+        })
     }
 }
 

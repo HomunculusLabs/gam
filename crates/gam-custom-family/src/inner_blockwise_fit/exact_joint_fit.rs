@@ -9,7 +9,7 @@ use super::*;
 
 pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     context: ExactJointFitContext<'_, F>,
-) -> Result<BlockwiseInnerResult, String> {
+) -> Result<BlockwiseInnerResult, CustomFamilyError> {
     let ExactJointFitContext {
         family,
         specs,
@@ -1194,7 +1194,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 }
             }
             check_linear_feasibility(&beta_joint, constraints)
-                .map_err(|e| format!("joint Newton constrained solve [cycle={cycle}]: {e}"))?;
+                .map_err(|e| CustomFamilyError::trial_point(format!("joint Newton constrained solve [cycle={cycle}]: {e}")))?;
             let warm_joint_active =
                 flatten_joint_active_set(&cached_active_sets, &block_constraints);
             let lower_bounds = match extract_simple_lower_bounds(constraints, total_p) {
@@ -1412,7 +1412,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     constraints,
                     warm_joint_active.as_deref(),
                 )
-                .map_err(|e| e.to_string())
+                .map_err(|error| CustomFamilyError::trial_point(error.to_string()))
             };
             drop(metric_projection_scope);
             let metric_projection_elapsed = metric_projection_started.elapsed();
@@ -1449,7 +1449,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     (beta_new, Some(active_set), 0usize, reduced_face_kind)
                 }
                 Err(error) => {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "joint constrained Newton QP failed at cycle {cycle} \
                              (constraint_rows={}, warm_active_rows={}, beta_inf={:.6e}, \
                              rhs_inf={:.6e}): {error}",
@@ -1463,7 +1463,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                             .iter()
                             .map(|value| value.abs())
                             .fold(0.0_f64, f64::max),
-                    ));
+                    )));
                 }
             }
         } else {
@@ -3307,7 +3307,9 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 Err(e) => {
                     likelihood_rejects += 1;
                     if first_likelihood_reject.is_none() {
-                        first_likelihood_reject = Some(e);
+                        // `first_likelihood_reject` is a log field, so the
+                        // render is the point of it (gam#2689).
+                        first_likelihood_reject = Some(e.to_string());
                     }
                     for (b, old) in old_beta.iter().enumerate() {
                         states[b].beta.assign(old);
@@ -3339,10 +3341,10 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // at β minus trial at β+δ) and denominator (rhs·δ − ½δᵀH δ)
             // MUST share a row measure with the Hessian/gradient build.
             // Bubble out via `Err` rather than panic; this function
-            // already returns `Result<_, String>`.
+            // already returns `Result<_, CustomFamilyError>`.
             let top_id = tr_row_measure_top.id;
             if tr_row_measure_hessian.id != top_id {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "trust-region row-measure invariant violated: \
                      Hessian id 0x{:016x} differs from top-of-cycle id 0x{:016x} \
                      (cycle {}); the joint Hessian was built against a different \
@@ -3350,10 +3352,10 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                      top of the cycle. ρ would compare ½δᵀHδ on one measure to \
                      F(β)−F(β+δ) on another.",
                     tr_row_measure_hessian.id, top_id, cycle
-                ));
+                )));
             }
             if tr_row_measure_gradient.id != top_id {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "trust-region row-measure invariant violated: \
                      gradient id 0x{:016x} differs from top-of-cycle id 0x{:016x} \
                      (cycle {}); `cached_joint_gradient` was loaded against a \
@@ -3361,20 +3363,20 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                      captured at the top of the cycle. rhs·δ in the predicted \
                      reduction would not match the rest of the ρ inputs.",
                     tr_row_measure_gradient.id, top_id, cycle
-                ));
+                )));
             }
             if tr_row_measure_old_objective.id != top_id {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "trust-region row-measure invariant violated: \
                      objective-at-β id 0x{:016x} differs from top-of-cycle id \
                      0x{:016x} (cycle {}); `lastobjective` was computed against \
                      a different row mask than the trust-region globalization \
                      captured at the top of the cycle.",
                     tr_row_measure_old_objective.id, top_id, cycle
-                ));
+                )));
             }
             if tr_row_measure_trial.id != top_id {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "trust-region row-measure invariant violated: \
                      trial-objective id 0x{:016x} differs from top-of-cycle id \
                      0x{:016x} (cycle {}, attempt {}); the line-search trial \
@@ -3383,7 +3385,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                      `coefficient_line_search_options` and \
                      `install_auto_outer_subsample_options`.",
                     tr_row_measure_trial.id, top_id, cycle, trust_attempt
-                ));
+                )));
             }
             let actual_reduction = old_objective - trialobjective;
             let trust_update = update_joint_trust_region_radius(
@@ -5678,10 +5680,10 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             let numerical_floor = certificate.numerical_floor;
             cached_joint_workspace = certificate.workspace;
             if has_negative_curvature {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "joint Newton tentative convergence rejected by fresh exact returned-mode curvature: lambda_min={:.6e} < -floor={:.6e}; an indefinite coefficient point cannot define a Laplace mode",
                     minimum_whitened_eigenvalue, numerical_floor,
-                ));
+                )));
             } else {
                 log::info!(
                     "[PIRLS/joint-Newton mode certificate] returned beta certified from fresh exact curvature: lambda_min={:.6e}, floor={:.6e}",

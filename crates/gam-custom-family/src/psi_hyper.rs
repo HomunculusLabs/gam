@@ -30,7 +30,7 @@ fn materialize_authoritative_psi_hessian_directional_derivative<
     psi_index: usize,
     direction: &Array1<f64>,
     total: usize,
-) -> Result<Option<Array2<f64>>, String> {
+) -> Result<Option<Array2<f64>>, CustomFamilyError> {
     let drift = if let Some(workspace) = psi_workspace {
         workspace.hessian_directional_derivative(psi_index, direction)?
     } else {
@@ -47,21 +47,21 @@ fn materialize_authoritative_psi_hessian_directional_derivative<
     match drift {
         Some(DriftDerivResult::Dense(matrix)) => {
             if matrix.dim() != (total, total) {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "authoritative psi Hessian directional derivative for axis {psi_index} \
                      has dense shape {:?}, expected ({total}, {total})",
                     matrix.dim(),
-                ));
+                )));
             }
             Ok(Some(matrix))
         }
         Some(DriftDerivResult::Operator(operator)) => {
             if operator.dim() != total {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "authoritative psi Hessian directional derivative for axis {psi_index} \
                      has operator dimension {}, expected {total}",
                     operator.dim(),
-                ));
+                )));
             }
             Ok(Some(operator.mul_mat(&Array2::<f64>::eye(total))))
         }
@@ -94,12 +94,12 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
     s_logdet_blocks: Option<&[PenaltyPseudologdet]>,
     hessian_beta_independent: bool,
     psi_workspace: Option<Arc<dyn ExactNewtonJointPsiWorkspace>>,
-) -> Result<Vec<HyperCoord>, String> {
+) -> Result<Vec<HyperCoord>, CustomFamilyError> {
     let ranges = block_param_ranges(specs);
     let total = beta_flat.len();
     let per_block = split_log_lambdas(&Array1::from_vec(rho.to_vec()), penalty_counts)?;
     let per_block_lambdas =
-        exact_lambdas_by_block(&per_block, "psi hyper log strength").map_err(String::from)?;
+        exact_lambdas_by_block(&per_block, "psi hyper log strength")?;
 
     let mut coords = Vec::new();
 
@@ -113,10 +113,10 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
     if let Some(terms) = batched_terms.as_ref()
         && terms.len() != total_axes
     {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "custom-family hyper workspace returned {} first-order axes for layout length {total_axes}",
             terms.len()
-        ));
+        )));
     }
 
     // EXPLICIT ∂_ρ H_Φ context (gam#854). The joint-Jeffreys curvature `H_Φ` is
@@ -194,7 +194,7 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
     for psi_global in 0..total_axes {
         let axis = hyper_layout
             .axis(psi_global)
-            .ok_or_else(|| format!("missing typed hyper axis {psi_global}"))?;
+            .ok_or_else(|| CustomFamilyError::trial_point(format!("missing typed hyper axis {psi_global}")))?;
         // 1. Get family-provided likelihood objects (joint flattened space).
         let psi_terms = if let Some(batched) = batched_terms.as_ref() {
             Some(batched[psi_global].clone())
@@ -217,9 +217,9 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                 ExactNewtonJointPsiTerms::zeros(total)
             }
             (CustomFamilyHyperAxis::Family { family_axis }, None) => {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "family-owned hyper axis {family_axis} has no exact first-order V_i/g_i/H_i terms"
-                ));
+                )));
             }
         };
 
@@ -343,11 +343,11 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                 firth_pert_axis_derivatives.as_ref(),
             ) {
                 if base_axes.len() != total || pert_axes.len() != total {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "explicit-psi Jeffreys axis batch lengths ({}, {}) != coefficient dimension {total}",
                         base_axes.len(),
                         pert_axes.len(),
-                    ));
+                    )));
                 }
                 for (a_idx, (hdot_a, psi_hdot_a)) in
                     base_axes.iter().zip(pert_axes.iter()).enumerate()
@@ -438,6 +438,9 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                             )
                         },
                         |dir: &Array1<f64>| {
+                            // Display boundary (gam#2689): the gam-solve
+                            // explicit-parameter-derivative entry point takes
+                            // `String`-erroring probes.
                             materialize_authoritative_psi_hessian_directional_derivative(
                                 family,
                                 synced_states,
@@ -448,6 +451,7 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                                 dir,
                                 total,
                             )
+                            .map_err(|error| error.to_string())
                         },
                     )?,
                 ),
@@ -542,7 +546,7 @@ pub fn build_jeffreys_hphi_ctx<F: CustomFamily + Clone + Send + Sync + 'static>(
     specs: &[ParameterBlockSpec],
     hyper_layout: &CustomFamilyHyperLayout,
     total: usize,
-) -> Result<Option<(Array2<f64>, Array2<f64>)>, String> {
+) -> Result<Option<(Array2<f64>, Array2<f64>)>, CustomFamilyError> {
     if family.joint_jeffreys_term_required() && !hyper_layout.is_empty() {
         let ranges = block_param_ranges(specs);
         Ok(
@@ -572,7 +576,7 @@ pub fn build_contracted_psi_hook(
     s_logdet_blocks: Option<&[PenaltyPseudologdet]>,
     psi_workspace: Option<Arc<dyn ExactNewtonJointPsiWorkspace>>,
     jeffreys_ctx: Option<(Array2<f64>, Array2<f64>)>,
-) -> Result<Option<ContractedPsiSecondOrderFn>, String> {
+) -> Result<Option<ContractedPsiSecondOrderFn>, CustomFamilyError> {
     // The contraction is a representation/cost choice for the family likelihood
     // ψψ second-order; without a contracted family kernel there is nothing to
     // accelerate, so decline (the per-pair `ext_ext_fn` path stays).
@@ -587,7 +591,7 @@ pub fn build_contracted_psi_hook(
         penalty_counts,
     )?);
     let per_block_lambdas = Arc::new(
-        exact_lambdas_by_block(&per_block, "contracted psi log strength").map_err(String::from)?,
+        exact_lambdas_by_block(&per_block, "contracted psi log strength")?,
     );
     let beta_arc = Arc::new(beta_flat.clone());
     let ranges_arc = Arc::new(ranges);
@@ -642,14 +646,14 @@ pub fn build_contracted_psi_hook(
             || terms.score.ncols() != total
             || terms.hessian.len() != psi_dim
         {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "contracted ψψ hook basis probe shape mismatch at axis {axis_idx}: \
                  objective={}, score={}x{}, hessian={}, psi_dim={psi_dim}, beta_dim={total}",
                 terms.objective.len(),
                 terms.score.nrows(),
                 terms.score.ncols(),
                 terms.hessian.len(),
-            ));
+            )));
         }
     }
 
@@ -721,12 +725,12 @@ pub fn build_contracted_psi_hook(
             _ => None,
         };
 
-    let hook = move |alpha_psi: &[f64]| -> Result<Option<ContractedPsiSecondOrder>, String> {
+    let hook = move |alpha_psi: &[f64]| -> Result<Option<ContractedPsiSecondOrder>, CustomFamilyError> {
         if alpha_psi.len() != psi_dim {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "contracted ψψ hook: alpha_psi length {} != psi_dim {psi_dim}",
                 alpha_psi.len()
-            ));
+            )));
         }
         // Family likelihood ψψ contraction (one combined-direction row pass).
         // The basis-axis probe above rejects partial kernels before the operator
@@ -746,13 +750,13 @@ pub fn build_contracted_psi_hook(
             || score.ncols() != total
             || hessian.len() != psi_dim
         {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "contracted ψψ hook: family kernel shape mismatch (objective={}, score={}x{}, hessian={}, psi_dim={psi_dim}, beta_dim={total})",
                 objective.len(),
                 score.nrows(),
                 score.ncols(),
                 hessian.len(),
-            ));
+            )));
         }
 
         for i in 0..psi_dim {
@@ -874,17 +878,22 @@ pub fn build_contracted_psi_hook(
         }))
     };
 
-    Ok(Some(Arc::new(hook) as ContractedPsiSecondOrderFn))
+    // Display boundary (gam#2689): `ContractedPsiSecondOrderFn` is a gam-problem
+    // alias over `Result<_, String>`, so the hook stays typed throughout and is
+    // rendered exactly here, once, instead of at every `?` inside it.
+    Ok(Some(Arc::new(move |alpha_psi: &[f64]| {
+        hook(alpha_psi).map_err(|error| error.to_string())
+    }) as ContractedPsiSecondOrderFn))
 }
 
 /// Build pair callbacks for ψ-ψ and ρ-ψ Hessian entries.
 ///
 /// Returns two closures:
 ///
-/// 1. **ext-ext** `(psi_i, psi_j) -> Result<HyperCoordPair, String>`: second-order
+/// 1. **ext-ext** `(psi_i, psi_j) -> Result<HyperCoordPair, CustomFamilyError>`: second-order
 ///    fixed-β objects for a pair of ψ coordinates.
 ///
-/// 2. **rho-ext** `(rho_k, psi_j) -> Result<HyperCoordPair, String>`: mixed second-order
+/// 2. **rho-ext** `(rho_k, psi_j) -> Result<HyperCoordPair, CustomFamilyError>`: mixed second-order
 ///    fixed-β objects for a ρ-ψ pair.
 ///
 /// The closures capture (via `Arc`) shared references to penalty derivatives,
@@ -913,10 +922,10 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
     jeffreys_ctx: Option<(Array2<f64>, Array2<f64>)>,
 ) -> Result<
     (
-        Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>,
-        Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>,
+        Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, CustomFamilyError> + Send + Sync>,
+        Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, CustomFamilyError> + Send + Sync>,
     ),
-    String,
+    CustomFamilyError,
 > {
     // Precompute shared data into Arc-wrapped clones for the closures.
     let ranges = block_param_ranges(specs);
@@ -927,7 +936,7 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
     )?);
     let per_block_lambdas = Arc::new(
         exact_lambdas_by_block(&per_block, "psi-pair callback log strength")
-            .map_err(String::from)?,
+            ?,
     );
     let specs_arc = Arc::new(specs.to_vec());
     let beta_arc = Arc::new(beta_flat.clone());
@@ -1011,10 +1020,10 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
                 if let Some(all) = batched_first.as_ref()
                     && all.len() != psi_dim
                 {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "custom-family hyper workspace returned {} first-order axes for layout length {psi_dim}",
                         all.len()
-                    ));
+                    )));
                 }
                 let mut pert_first: Vec<Array2<f64>> = Vec::with_capacity(psi_dim);
                 let mut ok = true;
@@ -1092,7 +1101,7 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
             rho_penalty_cache_bytes,
             "custom_family::psi_hyper::rho_penalty_cache",
         )
-        .map_err(|err| format!("rho-penalty dense cache refused by memory governor: {err}"))?;
+        .map_err(|err| CustomFamilyError::trial_point(format!("rho-penalty dense cache refused by memory governor: {err}")))?;
     let mut rho_penalty_cache: Vec<RhoPenaltyCacheEntry> = Vec::new();
     for (block_idx, &count) in penalty_counts.iter().enumerate() {
         let (start, end) = ranges_arc[block_idx];
@@ -1160,12 +1169,12 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
         let family_pair_cache = Arc::clone(&family_pair_cache);
 
         Box::new(
-            move |psi_i: usize, psi_j: usize| -> Result<HyperCoordPair, String> {
+            move |psi_i: usize, psi_j: usize| -> Result<HyperCoordPair, CustomFamilyError> {
                 if psi_i >= hyper_layout.len() || psi_j >= hyper_layout.len() {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "typed hyper pair index out of bounds: ({psi_i}, {psi_j}) for {} axes",
                         hyper_layout.len()
-                    ));
+                    )));
                 }
                 let cache_i = psi_penalty_cache[psi_i].as_ref();
                 let cache_j = psi_penalty_cache[psi_j].as_ref();
@@ -1218,16 +1227,16 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
                 let mut b_mat = hess_ll;
                 let mut b_operator = hess_ll_op;
                 if g.len() != total {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "typed hyper pair ({psi_i}, {psi_j}) returned score length {}, expected {total}",
                         g.len()
-                    ));
+                    )));
                 }
                 if b_mat.dim() != (0, 0) && b_mat.dim() != (total, total) {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "typed hyper pair ({psi_i}, {psi_j}) returned dense Hessian shape {:?}, expected (0, 0) or ({total}, {total})",
                         b_mat.dim()
-                    ));
+                    )));
                 }
 
                 // EXPLICIT Firth/Jeffreys ψψ VALUE second derivative (gam#1607):
@@ -1358,7 +1367,7 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
                     ld_s,
                 })
             },
-        ) as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>
+        ) as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, CustomFamilyError> + Send + Sync>
     };
 
     // ρ-ψ pair callback
@@ -1371,13 +1380,13 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
         let s_logdet_block_cache = Arc::clone(&s_logdet_block_cache);
 
         Box::new(
-            move |rho_k: usize, psi_j: usize| -> Result<HyperCoordPair, String> {
+            move |rho_k: usize, psi_j: usize| -> Result<HyperCoordPair, CustomFamilyError> {
                 if rho_k >= rho_penalty_cache.len() || psi_j >= hyper_layout.len() {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "rho×typed-hyper pair index out of bounds: ({rho_k}, {psi_j}) for {} rho and {} non-rho axes",
                         rho_penalty_cache.len(),
                         hyper_layout.len()
-                    ));
+                    )));
                 }
                 let rho_cache = &rho_penalty_cache[rho_k];
                 let psi_cache = psi_penalty_cache[psi_j].as_ref();
@@ -1472,7 +1481,7 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
                     ld_s,
                 })
             },
-        ) as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>
+        ) as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, CustomFamilyError> + Send + Sync>
     };
 
     Ok((ext_ext, rho_ext))
@@ -1504,17 +1513,16 @@ pub fn build_psi_drift_deriv_callback<F: CustomFamily + Clone + Send + Sync + 's
     hyper_layout: SharedCustomFamilyHyperLayout,
     hessian_beta_independent: bool,
     psi_workspace: Option<Arc<dyn ExactNewtonJointPsiWorkspace>>,
-) -> Result<Option<FixedDriftDerivFn>, String> {
+) -> Result<Option<FixedDriftDerivFn>, CustomFamilyError> {
     if hessian_beta_independent {
         // Likelihood Hessian is β-independent; M_i ≡ 0.
         return Ok(None);
     }
 
     if hyper_layout.family_axis_count() != 0 && psi_workspace.is_none() {
-        return Err(
-            "family-owned hyper axes require one owned exact-psi workspace for directional Hessian drift"
-                .to_string(),
-        );
+        return Err(CustomFamilyError::trial_point(
+            "family-owned hyper axes require one owned exact-psi workspace for directional Hessian drift",
+        ));
     }
 
     let synced_arc = Arc::new(synced_states.to_vec());
@@ -1522,10 +1530,9 @@ pub fn build_psi_drift_deriv_callback<F: CustomFamily + Clone + Send + Sync + 's
     let family_arc = Arc::new(family.clone());
     let psi_workspace = psi_workspace;
 
-    Ok(Some(Box::new(
-        move |ext_idx: usize,
-              direction: &Array1<f64>|
-              -> Result<Option<DriftDerivResult>, String> {
+    let typed_drift = move |ext_idx: usize,
+                            direction: &Array1<f64>|
+          -> Result<Option<DriftDerivResult>, CustomFamilyError> {
             // The family hook takes a psi index (0-based within ψ coordinates)
             // and a flattened coefficient direction.
             let result = if let Some(workspace) = psi_workspace.as_ref() {
@@ -1543,11 +1550,18 @@ pub fn build_psi_drift_deriv_callback<F: CustomFamily + Clone + Send + Sync + 's
             };
             match result? {
                 Some(drift) => Ok(Some(drift)),
-                None if hyper_layout.family_axis(ext_idx).is_some() => Err(format!(
+                None if hyper_layout.family_axis(ext_idx).is_some() => Err(CustomFamilyError::trial_point(format!(
                     "family-owned hyper axis {ext_idx} has no exact D_beta H_i[u] term for the requested direction"
-                )),
+                ))),
                 None => Ok(None),
             }
+    };
+    // Display boundary (gam#2689): `FixedDriftDerivFn` is a gam-problem alias
+    // over `Result<_, String>`; the drift closure stays typed and is rendered
+    // exactly once, here.
+    Ok(Some(Box::new(
+        move |ext_idx: usize, direction: &Array1<f64>| {
+            typed_drift(ext_idx, direction).map_err(|error| error.to_string())
         },
     )))
 }
@@ -1806,7 +1820,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
         // differentiate the same log|S|_+ objective.
         let s_logdet_blocks = if include_logdet_s {
             use rayon::iter::{IntoParallelIterator, ParallelIterator};
-            let block_results: Vec<Result<PenaltyPseudologdet, String>> = (0..specs.len())
+            let block_results: Vec<Result<PenaltyPseudologdet, CustomFamilyError>> = (0..specs.len())
                 .into_par_iter()
                 .map(|b| {
                     let spec = &specs[b];
@@ -1832,6 +1846,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                     // eigenspace from the assembled spectrum alone (issues
                     // #192/#318).
                     PenaltyPseudologdet::from_assembled(s_lambda, ridge_hint)
+                        .map_err(CustomFamilyError::trial_point)
                 })
                 .collect();
             let blocks: Result<Vec<_>, _> = block_results.into_iter().collect();
@@ -1915,10 +1930,10 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                     batched_gradient_override = Some(gradient);
                 } else {
                     let no_dh =
-                        |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+                        |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> { Ok(None) };
                     let no_d2h = |_: &Array1<f64>,
                                   _: &Array1<f64>|
-                     -> Result<Option<DriftDerivResult>, String> {
+                     -> Result<Option<DriftDerivResult>, CustomFamilyError> {
                         Ok(None)
                     };
                     let value_only = joint_outer_evaluate(
@@ -2574,7 +2589,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
     let beta_flat = inner.block_states[b].beta.clone();
 
     // Build a derivative provider that computes D_β H_L[direction] on demand.
-    let compute_dh = |direction: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
+    let compute_dh = |direction: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> {
         if !include_logdet_h {
             return Ok(None);
         }
@@ -2592,7 +2607,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                     )?))),
                     None => Err(CustomFamilyError::UnsupportedConfiguration { reason: format!(
                         "missing exact-newton dH callback for block {b} while REML gradient requires H_beta term"
-                    ) }.into()),
+                    ) }),
                 }
             }
             BlockWorkingSet::Diagonal {
@@ -2656,8 +2671,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                             dw.len(),
                             n
                         ),
-                    }
-                    .into());
+                    });
                 }
                 let mut scaled_x = x_dense.clone();
                 ndarray::Zip::from(scaled_x.rows_mut())
@@ -2675,7 +2689,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
     // Build a derivative provider that computes D²_β H_L[u, v] on demand.
     let compute_d2h = |u: &Array1<f64>,
                        v: &Array1<f64>|
-     -> Result<Option<DriftDerivResult>, String> {
+     -> Result<Option<DriftDerivResult>, CustomFamilyError> {
         if !include_logdet_h {
             return Ok(None);
         }
@@ -2694,7 +2708,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                     )?))),
                     None => Err(CustomFamilyError::UnsupportedConfiguration { reason: format!(
                         "missing exact-newton d2H callback for block {b} while REML Hessian requires H_beta_beta term"
-                    ) }.into()),
+                    ) }),
                 }
             }
             BlockWorkingSet::Diagonal {
@@ -2711,13 +2725,13 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                                                     geom: Option<
                     BlockGeometryDirectionalDerivative,
                 >|
-                 -> Result<(), String> {
+                 -> Result<(), CustomFamilyError> {
                     if let Some(geom_dir) = geom {
                         let has_offset = geom_dir.d_offset.iter().any(|value| *value != 0.0);
                         if geom_dir.d_design.is_some() || has_offset {
                             return Err(CustomFamilyError::UnsupportedConfiguration { reason: format!(
                                 "block {b} diagonal d2H requires second-order block-geometry derivatives for {label}; use an exact-newton or joint outer path"
-                            ) }.into());
+                            ) });
                         }
                     }
                     Ok(())
@@ -2762,8 +2776,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                             d2w.len(),
                             n
                         ),
-                    }
-                    .into());
+                    });
                 }
                 let mut scaled_x = x_dense.clone();
                 ndarray::Zip::from(scaled_x.rows_mut())
@@ -3567,7 +3580,7 @@ pub(crate) fn evaluate_custom_family_joint_hyper_efs_internal_shared<
 
     let s_logdet_blocks = if include_logdet_s {
         use rayon::iter::{IntoParallelIterator, ParallelIterator};
-        let block_results: Vec<Result<PenaltyPseudologdet, String>> = (0..specs.len())
+        let block_results: Vec<Result<PenaltyPseudologdet, CustomFamilyError>> = (0..specs.len())
             .into_par_iter()
             .map(|b| {
                 let spec = &specs[b];
@@ -3593,6 +3606,7 @@ pub(crate) fn evaluate_custom_family_joint_hyper_efs_internal_shared<
                 // eigenspace from the assembled spectrum alone (issues
                 // #192/#318).
                 PenaltyPseudologdet::from_assembled(s_lambda, ridge_hint)
+                    .map_err(CustomFamilyError::trial_point)
             })
             .collect();
         let blocks: Result<Vec<_>, _> = block_results.into_iter().collect();

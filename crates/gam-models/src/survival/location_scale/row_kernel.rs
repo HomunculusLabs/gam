@@ -274,7 +274,7 @@ impl SurvivalJointPsiDirection {
     ) -> Result<[f64; SLS_ROW_K], String> {
         let mut out = [0.0; SLS_ROW_K];
         for channel in 3..SLS_ROW_K {
-            let Some(design_row) = self.channel_row(channel, row)? else {
+            let Some(design_row) = self.channel_row(channel, row).map_err(|error| error.to_string())? else {
                 continue;
             };
             let block = if channel <= 5 { 1 } else { 2 };
@@ -2821,7 +2821,7 @@ pub(crate) fn survival_ls_joint_psi_hessian_directional_derivative_dense(
                         .channel_row(channel, row)
                         .map(|row| row.map(|design_row| (offsets[block], design_row)))
                 })
-                .collect::<Result<_, gam_problem::CustomFamilyError>>()?;
+                .collect::<Result<_, gam_problem::CustomFamilyError>>().map_err(|error| error.to_string())?;
 
             for a in 0..SLS_ROW_K {
                 if let Some((psi_offset, psi_row)) = psi_rows[a].as_ref() {
@@ -4271,12 +4271,12 @@ impl SurvivalLocationScaleFamily {
                                 0..total_rows,
                                 "SurvivalLocationScaleFamily threshold",
                                 &self.policy,
-                            )? {
+                            ).map_err(|error| error.to_string())? {
                                 PsiDesignMap::First { action } => {
                                     if t_time_varying {
-                                        let exit_action = action.slice_rows(0..n)?;
-                                        let entry_action = action.slice_rows(n..2 * n)?;
-                                        let deriv_action = action.slice_rows(2 * n..3 * n)?;
+                                        let exit_action = action.slice_rows(0..n).map_err(|error| error.to_string())?;
+                                        let entry_action = action.slice_rows(n..2 * n).map_err(|error| error.to_string())?;
+                                        let deriv_action = action.slice_rows(2 * n..3 * n).map_err(|error| error.to_string())?;
                                         z_t_exit_psi = exit_action.forward_mul(beta_t.view());
                                         z_t_entry_psi = entry_action.forward_mul(beta_t.view());
                                         z_t_deriv_psi = deriv_action.forward_mul(beta_t.view());
@@ -4322,12 +4322,12 @@ impl SurvivalLocationScaleFamily {
                                 0..total_rows,
                                 "SurvivalLocationScaleFamily log-sigma",
                                 &self.policy,
-                            )? {
+                            ).map_err(|error| error.to_string())? {
                                 PsiDesignMap::First { action } => {
                                     if ls_time_varying {
-                                        let exit_action = action.slice_rows(0..n)?;
-                                        let entry_action = action.slice_rows(n..2 * n)?;
-                                        let deriv_action = action.slice_rows(2 * n..3 * n)?;
+                                        let exit_action = action.slice_rows(0..n).map_err(|error| error.to_string())?;
+                                        let entry_action = action.slice_rows(n..2 * n).map_err(|error| error.to_string())?;
+                                        let deriv_action = action.slice_rows(2 * n..3 * n).map_err(|error| error.to_string())?;
                                         z_ls_exit_psi = exit_action.forward_mul(beta_ls.view());
                                         z_ls_entry_psi = entry_action.forward_mul(beta_ls.view());
                                         z_ls_deriv_psi = deriv_action.forward_mul(beta_ls.view());

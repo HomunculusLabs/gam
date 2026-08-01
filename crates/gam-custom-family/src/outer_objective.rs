@@ -187,7 +187,7 @@ pub(crate) fn custom_family_batched_outer_hessian_operator<F: CustomFamily>(
     rho: &Array1<f64>,
     workspace: Option<Arc<dyn ExactNewtonJointHessianWorkspace>>,
     eval_mode: EvalMode,
-) -> Result<Option<Arc<dyn gam_problem::HessianOperator>>, String> {
+) -> Result<Option<Arc<dyn gam_problem::HessianOperator>>, CustomFamilyError> {
     if eval_mode != EvalMode::ValueGradientHessian {
         return Ok(None);
     }
@@ -315,8 +315,8 @@ pub(crate) fn with_block_geometry<F: CustomFamily + ?Sized, T>(
     block_states: &[ParameterBlockState],
     spec: &ParameterBlockSpec,
     block_idx: usize,
-    f: impl FnOnce(&DesignMatrix, &Array1<f64>) -> Result<T, String>,
-) -> Result<T, String> {
+    f: impl FnOnce(&DesignMatrix, &Array1<f64>) -> Result<T, CustomFamilyError>,
+) -> Result<T, CustomFamilyError> {
     if family.block_geometry_is_dynamic() {
         let (x_dyn, off_dyn) = family.block_geometry(block_states, spec)?;
         let expected_rows = spec.solver_design().nrows();
@@ -327,8 +327,7 @@ pub(crate) fn with_block_geometry<F: CustomFamily + ?Sized, T>(
                     x_dyn.nrows(),
                     expected_rows
                 ),
-            }
-            .into());
+            });
         }
         if x_dyn.ncols() != spec.design.ncols() {
             return Err(CustomFamilyError::DimensionMismatch {
@@ -337,8 +336,7 @@ pub(crate) fn with_block_geometry<F: CustomFamily + ?Sized, T>(
                     x_dyn.ncols(),
                     spec.design.ncols()
                 ),
-            }
-            .into());
+            });
         }
         if off_dyn.len() != expected_rows {
             return Err(CustomFamilyError::DimensionMismatch {
@@ -347,8 +345,7 @@ pub(crate) fn with_block_geometry<F: CustomFamily + ?Sized, T>(
                     off_dyn.len(),
                     expected_rows
                 ),
-            }
-            .into());
+            });
         }
         f(&x_dyn, &off_dyn)
     } else {

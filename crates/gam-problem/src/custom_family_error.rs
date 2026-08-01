@@ -430,12 +430,6 @@ impl From<String> for CustomFamilyError {
     }
 }
 
-impl From<CustomFamilyError> for String {
-    fn from(value: CustomFamilyError) -> Self {
-        value.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

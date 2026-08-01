@@ -381,7 +381,7 @@ pub(crate) fn synchronized_states_from_flat_beta<
     specs: &[ParameterBlockSpec],
     states: &[ParameterBlockState],
     beta_flat: &Array1<f64>,
-) -> Result<Vec<ParameterBlockState>, String> {
+) -> Result<Vec<ParameterBlockState>, CustomFamilyError> {
     let mut synced = states.to_vec();
     set_states_from_flat_beta(&mut synced, specs, beta_flat)?;
     refresh_all_block_etas(family, specs, &mut synced)?;
@@ -1094,7 +1094,7 @@ pub(crate) fn exact_newton_joint_kkt_residual_for_ift<F: CustomFamily + ?Sized>(
     ridge_policy: RidgePolicy,
     block_active_sets: Option<&[Option<Vec<usize>>]>,
     joint_penalty_score: Option<&Array1<f64>>,
-) -> Result<Option<ProjectedKktResidual>, String> {
+) -> Result<Option<ProjectedKktResidual>, CustomFamilyError> {
     let eval = family.evaluate(states)?;
     let Some(gradient) = exact_newton_joint_gradient_from_eval(&eval, specs, states)? else {
         return Ok(None);
@@ -1125,7 +1125,7 @@ pub(crate) fn exact_newton_joint_kkt_residual_for_ift_from_cached_gradient<
     block_active_sets: Option<&[Option<Vec<usize>>]>,
     cached_gradient: Option<&Array1<f64>>,
     joint_penalty_score: Option<&Array1<f64>>,
-) -> Result<Option<ProjectedKktResidual>, String> {
+) -> Result<Option<ProjectedKktResidual>, CustomFamilyError> {
     if let Some(gradient) = cached_gradient {
         let block_constraints = collect_block_linear_constraints(family, states, specs)?;
         return exact_newton_joint_projected_kkt_residual_for_ift_from_gradient(
@@ -1162,7 +1162,7 @@ pub(crate) fn exact_newton_joint_projected_kkt_residual_for_ift_from_gradient(
     block_constraints: &[Option<ConstraintSet>],
     block_active_sets: Option<&[Option<Vec<usize>>]>,
     joint_penalty_score: Option<&Array1<f64>>,
-) -> Result<Option<ProjectedKktResidual>, String> {
+) -> Result<Option<ProjectedKktResidual>, CustomFamilyError> {
     let residual = exact_newton_joint_projected_stationarity_vector_from_gradient(
         gradient,
         states,
@@ -1295,7 +1295,7 @@ pub(crate) fn materialize_owned_terminal_unpenalized_hessian<
     workspace: Option<&Arc<dyn ExactNewtonJointHessianWorkspace>>,
     working_sets: Option<&[BlockWorkingSet]>,
     context: &str,
-) -> Result<Array2<f64>, String> {
+) -> Result<Array2<f64>, CustomFamilyError> {
     let ranges = block_param_ranges(specs);
     let total = ranges.last().map(|(_, end)| *end).unwrap_or(0);
     // #2580.  `Ok(None)` from the workspace means "this workspace exposes no
@@ -1338,11 +1338,11 @@ pub(crate) fn materialize_owned_terminal_unpenalized_hessian<
     }
 
     if states.len() != specs.len() {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "{context}: the certified terminal mode retained {} block states for {} parameter blocks",
             states.len(),
             specs.len(),
-        ));
+        )));
     }
     // The coupled-Jeffreys recompute is attempted BEFORE requiring per-block
     // working sets, because it derives the joint Hessian from the frozen block
@@ -1377,14 +1377,14 @@ pub(crate) fn materialize_owned_terminal_unpenalized_hessian<
         {
             return Ok(hessian);
         }
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "{context}: a coupled {}-block likelihood cannot derive its joint Hessian from block working sets, and the family exposes no exact joint Hessian to recompute at the certified mode{}",
             specs.len(),
             workspace_refusal
                 .as_deref()
                 .map(|refusal| format!("; {refusal}"))
                 .unwrap_or_default(),
-        ));
+        )));
     }
 
     let working_sets = working_sets.ok_or_else(|| {
@@ -1397,11 +1397,11 @@ pub(crate) fn materialize_owned_terminal_unpenalized_hessian<
         )
     })?;
     if working_sets.len() != specs.len() {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "{context}: the certified terminal mode retained {} working sets for {} parameter blocks",
             working_sets.len(),
             specs.len(),
-        ));
+        )));
     }
 
     let mut hessian = Array2::<f64>::zeros((total, total));
@@ -1414,10 +1414,10 @@ pub(crate) fn materialize_owned_terminal_unpenalized_hessian<
         let (start, end) = ranges[block_idx];
         let width = end - start;
         if state.beta.len() != width {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "{context}: block {block_idx} terminal beta has length {}, expected {width}",
                 state.beta.len(),
-            ));
+            )));
         }
         let block_hessian = match work {
             BlockWorkingSet::Diagonal {
@@ -1429,12 +1429,12 @@ pub(crate) fn materialize_owned_terminal_unpenalized_hessian<
                     || working_weights.len() != expected_rows
                     || state.eta.len() != expected_rows
                 {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "{context}: block {block_idx} diagonal terminal evidence has response/weight/eta lengths {}/{}/{}, expected {expected_rows}",
                         working_response.len(),
                         working_weights.len(),
                         state.eta.len(),
-                    ));
+                    )));
                 }
                 with_block_geometry(family, states, spec, block_idx, |design, _| {
                     let weights = certify_finite_working_weights(working_weights)?;
@@ -1444,19 +1444,19 @@ pub(crate) fn materialize_owned_terminal_unpenalized_hessian<
             }
             BlockWorkingSet::ExactNewton { hessian, .. } => {
                 if hessian.nrows() != width || hessian.ncols() != width {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "{context}: block {block_idx} exact terminal Hessian has shape {}x{}, expected {width}x{width}",
                         hessian.nrows(),
                         hessian.ncols(),
-                    ));
+                    )));
                 }
                 hessian.to_dense()
             }
         };
         if block_hessian.iter().any(|value| !value.is_finite()) {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "{context}: block {block_idx} terminal Hessian contains non-finite values"
-            ));
+            )));
         }
         hessian
             .slice_mut(ndarray::s![start..end, start..end])
@@ -1478,7 +1478,7 @@ fn spd_covariance_from_precision(
     precision: &Array2<f64>,
     dim_for_tol: usize,
     face: &str,
-) -> Result<Array2<f64>, String> {
+) -> Result<Array2<f64>, CustomFamilyError> {
     let p = precision.nrows();
     let (evals, evecs) = FaerEigh::eigh(precision, Side::Lower).map_err(|e| {
         format!("joint posterior-precision eigendecomposition failed on the {face}: {e}")
@@ -1492,24 +1492,24 @@ fn spd_covariance_from_precision(
         .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
     {
         let below = evals.iter().filter(|&&ev| ev < -tol).count();
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "joint posterior precision H + S_λ is non-PD at the converged optimum on the \
              {face} ({below} eigenvalue(s) below -tol, min(λ)={min_eval:.6e}, \
              max|λ|={max_abs_eval:.6e}, tol={tol:.6e}); the mode is not a strict posterior \
              maximum, so the reported covariance would be meaningless — fit-quality failure \
              surfaced instead of δ-ridge masking (gam#748)"
-        ));
+        )));
     }
     let flat = evals.iter().filter(|&&ev| ev <= tol).count();
     if flat > 0 {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "joint posterior precision H + S_λ is singular at the converged optimum on the \
              {face}: {flat} flat direction(s) (max|λ|={max_abs_eval:.6e}, tol={tol:.6e}). The \
              posterior is improper along a flat direction — its variance is unbounded, so no \
              finite covariance entry is honest there (a pseudo-inverse would claim zero \
              variance, a δ-ridge an arbitrary finite one). Identify the direction via a \
              constraint, penalty, or canonicalisation instead"
-        ));
+        )));
     }
     // Strictly SPD: exact inverse through the eigenbasis, Σ = V diag(1/λ) Vᵀ.
     let mut cov = Array2::<f64>::zeros((p, p));
@@ -1539,14 +1539,14 @@ fn terminal_score_from_working_sets(
     working_sets: &[BlockWorkingSet],
     specs: &[ParameterBlockSpec],
     states: &[ParameterBlockState],
-) -> Result<Array1<f64>, String> {
+) -> Result<Array1<f64>, CustomFamilyError> {
     if working_sets.len() != specs.len() || states.len() != specs.len() {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "terminal score ownership mismatch: working sets={}, specs={}, states={}",
             working_sets.len(),
             specs.len(),
             states.len(),
-        ));
+        )));
     }
     let total: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
     let mut score = Array1::<f64>::zeros(total);
@@ -1561,10 +1561,10 @@ fn terminal_score_from_working_sets(
         let block_score = match work {
             BlockWorkingSet::ExactNewton { gradient, .. } => {
                 if gradient.len() != width {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "terminal score block {block_idx} has gradient length {}, expected {width}",
                         gradient.len(),
-                    ));
+                    )));
                 }
                 gradient.clone()
             }
@@ -1576,12 +1576,12 @@ fn terminal_score_from_working_sets(
                 let n = design.nrows();
                 if working_response.len() != n || working_weights.len() != n || state.eta.len() != n
                 {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "terminal score block {block_idx} has z/w/eta lengths {}/{}/{}, expected {n}",
                         working_response.len(),
                         working_weights.len(),
                         state.eta.len(),
-                    ));
+                    )));
                 }
                 let weighted_score = Array1::from_iter(
                     working_weights
@@ -1606,14 +1606,14 @@ fn validated_joint_score(
     score: Array1<f64>,
     specs: &[ParameterBlockSpec],
     source: &str,
-) -> Result<Array1<f64>, String> {
+) -> Result<Array1<f64>, CustomFamilyError> {
     let total = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
     if score.len() != total || score.iter().any(|value| !value.is_finite()) {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "terminal {source} has length {} with finite={}, expected {total}",
             score.len(),
             score.iter().all(|value| value.is_finite()),
-        ));
+        )));
     }
     Ok(score)
 }
@@ -1643,7 +1643,7 @@ fn terminal_likelihood_score(
     retained_score: Option<&TerminalLikelihoodScore>,
     specs: &[ParameterBlockSpec],
     states: &[ParameterBlockState],
-) -> Result<Array1<f64>, String> {
+) -> Result<Array1<f64>, CustomFamilyError> {
     if let Some(working_sets) = working_sets {
         return terminal_score_from_working_sets(working_sets, specs, states);
     }
@@ -1655,18 +1655,18 @@ fn terminal_likelihood_score(
         return validated_joint_score(evaluation.gradient, specs, "workspace gradient");
     }
     let retained = retained_score.ok_or_else(|| {
-        "constrained posterior requires the exact terminal likelihood score, but the certified \
-         mode retained no working sets, no carried joint score, and no joint workspace exposing \
-         a gradient evaluation"
-            .to_string()
+        CustomFamilyError::trial_point(
+            "constrained posterior requires the exact terminal likelihood score, but the certified \
+             mode retained no working sets, no carried joint score, and no joint workspace exposing \
+             a gradient evaluation",
+        )
     })?;
     if !retained.evaluated_at(states) {
-        return Err(
+        return Err(CustomFamilyError::trial_point(
             "constrained posterior requires the exact terminal likelihood score, but the \
              retained joint score was evaluated at a different coefficient vector than the \
-             mode being assembled"
-                .to_string(),
-        );
+             mode being assembled",
+        ));
     }
     validated_joint_score(
         retained.score.clone(),
@@ -1693,22 +1693,22 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
     preferred_working_sets: Option<&[BlockWorkingSet]>,
     preferred_workspace: Option<&Arc<dyn ExactNewtonJointHessianWorkspace>>,
     preferred_likelihood_score: Option<&TerminalLikelihoodScore>,
-) -> Result<JointPosteriorAssembly, String> {
+) -> Result<JointPosteriorAssembly, CustomFamilyError> {
     if specs.len() != per_block_log_lambdas.len() {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "terminal posterior has {} parameter blocks but {} per-block smoothing vectors",
             specs.len(),
             per_block_log_lambdas.len(),
-        ));
+        )));
     }
     if let Some(working_sets) = preferred_working_sets
         && working_sets.len() != specs.len()
     {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "terminal posterior has {} parameter blocks but {} owned working sets",
             specs.len(),
             working_sets.len(),
-        ));
+        )));
     }
 
     let total = specs.iter().map(|spec| spec.design.ncols()).sum();
@@ -1745,12 +1745,12 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
                 || hphi.dim() != (total, total)
                 || completion.dim() != (total, total)
             {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "terminal Jeffreys geometry has gradient/divided-difference/completion shapes {}/{:?}/{:?}, expected {total}/({total}, {total})/({total}, {total})",
                     gradient.len(),
                     hphi.dim(),
                     completion.dim(),
-                ));
+                )));
             }
             jeffreys_gradient = gradient;
             precision += &hphi;
@@ -1778,10 +1778,10 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
             }),
             Some([BlockWorkingSet::ExactNewton { .. }]) => None,
             Some(working_sets) => {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "single-block terminal geometry requires exactly one owned working set, got {}",
                     working_sets.len(),
-                ));
+                )));
             }
         }
     } else {
@@ -1872,11 +1872,11 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
                     };
                     let cone_verdict = properness.summary();
                     if properness.is_proper() == Some(false) {
-                        return Err(format!(
+                        return Err(CustomFamilyError::trial_point(format!(
                             "constrained fit converged at a point whose cone-truncated posterior \
                              is provably IMPROPER, so no posterior covariance exists to report: \
                              {cone_verdict}. The ambient gate saw only ({reason})"
-                        ));
+                        )));
                     }
                     log::warn!(
                         "[custom-family covariance] constrained fit converged, but its \
@@ -1891,7 +1891,9 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
                             constraints,
                             mode,
                             gam_solve::constrained_posterior::ConePosteriorMomentDecline {
-                                ambient_precision_failure: reason,
+                                // Display boundary (gam#2689): gam-solve's
+                                // decline carries the reason as text.
+                                ambient_precision_failure: reason.to_string(),
                                 properness,
                             },
                         );
@@ -1966,7 +1968,7 @@ pub(crate) fn install_reported_posterior_mean<F: CustomFamily + Clone + Send + S
     specs: &[ParameterBlockSpec],
     states: &mut [ParameterBlockState],
     reported_beta: Option<&Array1<f64>>,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     let Some(reported_beta) = reported_beta else {
         return Ok(());
     };
@@ -1996,7 +1998,7 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
     // `½tr(H⁻¹∂H)` derivative, desyncing value and gradient. `None` ⇒ no joint
     // penalty (every per-block-only family) keeps this byte-identical.
     joint_penalty: Option<&Array2<f64>>,
-) -> Result<(f64, Option<PenaltySubspaceTrace>), String> {
+) -> Result<(f64, Option<PenaltySubspaceTrace>), CustomFamilyError> {
     if total == 0 {
         return Ok((0.0, None));
     }
@@ -2013,7 +2015,7 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
     }
     let s_evals = s_lambda
         .eigh(Side::Lower)
-        .map_err(|e| format!("joint penalty subspace eigendecomposition failed: {e}"))?
+        .map_err(|e| CustomFamilyError::trial_point(format!("joint penalty subspace eigendecomposition failed: {e}")))?
         .0;
     let s_threshold = positive_eigenvalue_threshold(
         s_evals
@@ -2156,27 +2158,27 @@ pub(crate) fn joint_smoothing_correction(
     block_states: &[ParameterBlockState],
     outer_hessian: &Array2<f64>,
     excluded_outer: &[usize],
-) -> Result<Option<(Array2<f64>, usize)>, String> {
+) -> Result<Option<(Array2<f64>, usize)>, CustomFamilyError> {
     let p_total: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
     let k_outer = rho_outer.len();
     if v_cond.dim() != (p_total, p_total) {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "joint smoothing correction: V_cond shape {:?} ≠ ({p_total}, {p_total})",
             v_cond.dim()
-        ));
+        )));
     }
     if outer_hessian.dim() != (k_outer, k_outer) {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "joint smoothing correction: outer Hessian shape {:?} ≠ ({k_outer}, {k_outer})",
             outer_hessian.dim()
-        ));
+        )));
     }
     if block_states.len() != specs.len() {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "joint smoothing correction: {} block states vs {} specs",
             block_states.len(),
             specs.len()
-        ));
+        )));
     }
 
     // β̂ stacked in block order — the reduced coefficient frame V_cond lives in.
@@ -2186,11 +2188,11 @@ pub(crate) fn joint_smoothing_correction(
     for (spec, state) in specs.iter().zip(block_states) {
         let width = spec.design.ncols();
         if state.beta.len() != width {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "joint smoothing correction: block '{}' beta length {} ≠ design width {width}",
                 spec.name,
                 state.beta.len()
-            ));
+            )));
         }
         offsets.push(at);
         beta_flat
@@ -2221,11 +2223,11 @@ pub(crate) fn joint_smoothing_correction(
             }
             let s_dense = penalty.to_dense();
             if s_dense.dim() != (width, width) {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "joint smoothing correction: block '{}' penalty shape {:?} ≠ ({width}, {width})",
                     spec.name,
                     s_dense.dim()
-                ));
+                )));
             }
             let s_beta = s_dense.dot(&beta_flat.slice(ndarray::s![base..base + width]));
             for i in 0..width {
@@ -2240,11 +2242,11 @@ pub(crate) fn joint_smoothing_correction(
             continue;
         }
         if spec.matrix.dim() != (p_total, p_total) {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "joint smoothing correction: joint penalty '{}' shape {:?} ≠ ({p_total}, {p_total})",
                 spec.label.as_deref().unwrap_or("<unlabeled>"),
                 spec.matrix.dim()
-            ));
+            )));
         }
         let m_beta = spec.matrix.dot(&beta_flat);
         for i in 0..p_total {
@@ -2736,18 +2738,18 @@ mod required_covariance_tests {
         )
         .expect_err("a provably improper cone-truncated posterior has no covariance to decline");
         assert!(
-            message.contains("IMPROPER"),
+            message.to_string().contains("IMPROPER"),
             "the refusal must carry the verdict, got: {message}"
         );
         assert!(
-            message.contains("In(ZᵀHZ)"),
+            message.to_string().contains("In(ZᵀHZ)"),
             "the refusal must name the quantity that decided it — the inertia on null(A),              which is where this fixture's negative direction lives — got: {message}"
         );
         // The ambient gate's own numbers must survive into the message too: they
         // are what triggered the branch, and a refusal that replaced them with
         // the cone verdict would lose the reason the route was abandoned.
         assert!(
-            message.contains("non-PD at the converged optimum"),
+            message.to_string().contains("non-PD at the converged optimum"),
             "got: {message}"
         );
     }
@@ -3024,7 +3026,7 @@ mod required_covariance_tests {
         states: &[ParameterBlockState],
         working_sets: Option<&[BlockWorkingSet]>,
         score: Option<&TerminalLikelihoodScore>,
-    ) -> Result<JointPosteriorAssembly, String> {
+    ) -> Result<JointPosteriorAssembly, CustomFamilyError> {
         compute_joint_posterior(
             &LowerBoundedQuadratic,
             &[spec],
@@ -3105,7 +3107,7 @@ mod required_covariance_tests {
         let error = lower_bounded_posterior(spec, &states, None, Some(&stale))
             .expect_err("a score from another beta cannot certify this mode");
         assert!(
-            error.contains("evaluated at a different coefficient vector"),
+            error.to_string().contains("evaluated at a different coefficient vector"),
             "the refusal must name the operating-point mismatch, got: {error}",
         );
     }

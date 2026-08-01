@@ -596,7 +596,7 @@ impl SurvivalMarginalSlopeFamily {
             0..self.n,
             label,
             &policy,
-        )?;
+        ).map_err(|error| error.to_string())?;
         let (objective_psi_psi, score_psi_psi, hessian_psi_psi_operator) = self
             .reduce_flex_family_coefficient_terms(block_states, options, |row| {
                 let derivative_row = psi_map

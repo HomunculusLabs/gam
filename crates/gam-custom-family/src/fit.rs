@@ -2423,7 +2423,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         )
         .map_err(|reason| CustomFamilyError::Optimization {
             context: "fit_custom_family no-smoothing terminal curvature ownership",
-            reason,
+            reason: reason.to_string(),
         })?;
         let posterior = compute_joint_posterior(
             family,
@@ -2471,7 +2471,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         )
         .map_err(|reason| CustomFamilyError::Optimization {
             context: "fit_custom_family no-smoothing penalized objective",
-            reason,
+            reason: reason.to_string(),
         })?;
         // Cross-fit FitArtifact capture (Phase 0/1): persist the converged
         // raw-β + ρ under the descriptor-indexed keyspace so a later fold
@@ -2498,7 +2498,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         )
         .map_err(|reason| CustomFamilyError::Optimization {
             context: "fit_custom_family no-smoothing reported posterior mean",
-            reason,
+            reason: reason.to_string(),
         })?;
         return assemble_custom_family_fit_result(
             inner,
@@ -3249,7 +3249,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 Err(e) => {
                     // A failure to build the EFS update at this rho is a
                     // statement about this rho (#2590).
-                    let failure = CustomFamilyError::trial_point(e);
+                    let failure = e.into_trial_point();
                     outer.last_error = Some(failure.clone());
                     Err(EstimationError::CustomFamily(failure))
                 }
@@ -3294,7 +3294,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 Err(e) => {
                     // A failure to screen this seed is a statement about this
                     // seed's rho (#2590).
-                    let failure = CustomFamilyError::trial_point(e);
+                    let failure = e.into_trial_point();
                     outer.last_error = Some(failure.clone());
                     Err(EstimationError::CustomFamily(failure))
                 }
@@ -3451,7 +3451,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     )
     .map_err(|reason| CustomFamilyError::Optimization {
         context: "fit_custom_family terminal curvature ownership",
-        reason,
+        reason: reason.to_string(),
     })?;
     let posterior = compute_joint_posterior(
         family,
@@ -3507,7 +3507,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             )
             .map_err(|reason| CustomFamilyError::Optimization {
                 context: "fit_custom_family terminal EDF",
-                reason,
+                reason: reason.to_string(),
             })?,
         )
     } else {
@@ -3555,7 +3555,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             )
             .map_err(|reason| CustomFamilyError::Optimization {
                 context: "fit_custom_family smoothing correction",
-                reason,
+                reason: reason.to_string(),
             })?
             .map(|(correction, active_rank)| {
                 (
@@ -3577,7 +3577,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     )
     .map_err(|reason| CustomFamilyError::Optimization {
         context: "fit_custom_family reported posterior mean",
-        reason,
+        reason: reason.to_string(),
     })?;
     let geometry = Some(geometry);
     assemble_custom_family_fit_result(
@@ -3773,7 +3773,7 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
     )
     .map_err(|reason| CustomFamilyError::Optimization {
         context: "fit_custom_family_fixed_log_lambdas penalized objective",
-        reason,
+        reason: reason.to_string(),
     })?;
     refresh_all_block_etas(family, specs, &mut inner.block_states)?;
     audit_converged_identifiability(family, raw_specs, &canonical, &inner.block_states, 0)?;
@@ -3787,7 +3787,7 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
     )
     .map_err(|reason| CustomFamilyError::Optimization {
         context: "fit_custom_family_fixed_log_lambdas terminal curvature ownership",
-        reason,
+        reason: reason.to_string(),
     })?;
     let posterior = compute_joint_posterior(
         family,
@@ -3820,7 +3820,7 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
     )
     .map_err(|reason| CustomFamilyError::Optimization {
         context: "fit_custom_family_fixed_log_lambdas reported posterior mean",
-        reason,
+        reason: reason.to_string(),
     })?;
     let geometry = Some(geometry);
     assemble_custom_family_fit_result(
@@ -4011,7 +4011,7 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
     )
     .map_err(|reason| CustomFamilyError::Optimization {
         context: "fit_custom_family_fixed_log_lambdas_from_owned_mode curvature identity",
-        reason,
+        reason: reason.to_string(),
     })?;
 
     let posterior = compute_joint_posterior(
@@ -4027,7 +4027,7 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
     )
     .map_err(|reason| CustomFamilyError::Optimization {
         context: "fit_custom_family_fixed_log_lambdas_from_owned_mode posterior",
-        reason,
+        reason: reason.to_string(),
     })?;
     let JointPosteriorAssembly {
         covariance_conditional,
@@ -4042,7 +4042,7 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
     )
     .map_err(|reason| CustomFamilyError::Optimization {
         context: "fit_custom_family_fixed_log_lambdas_from_owned_mode reported posterior mean",
-        reason,
+        reason: reason.to_string(),
     })?;
     let geometry = Some(geometry);
 

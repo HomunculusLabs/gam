@@ -21,18 +21,18 @@ pub(crate) fn exact_newton_joint_hessian_symmetrized<
     specs: &[ParameterBlockSpec],
     total: usize,
     context: &str,
-) -> Result<Option<Array2<f64>>, String> {
+) -> Result<Option<Array2<f64>>, CustomFamilyError> {
     let Some(mut h) = family.exact_newton_joint_hessian_with_specs(states, specs)? else {
         return Ok(None);
     };
     if h.nrows() != total || h.ncols() != total {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "{context}: got {}x{}, expected {}x{}",
             h.nrows(),
             h.ncols(),
             total,
             total
-        ));
+        )));
     }
     symmetrize_dense_in_place(&mut h);
     Ok(Some(h))
@@ -45,13 +45,13 @@ pub(crate) fn exact_newton_joint_hessian_symmetrized<
 pub enum JointHessianSource {
     Dense(Array2<f64>),
     Operator {
-        apply: Arc<dyn Fn(&Array1<f64>) -> Result<Array1<f64>, String> + Send + Sync>,
+        apply: Arc<dyn Fn(&Array1<f64>) -> Result<Array1<f64>, CustomFamilyError> + Send + Sync>,
         /// Write-into matvec used by the inner-Newton PCG hot path so the
         /// matvec result no longer allocates an `Array1<f64>` per CG iter.
         /// At large scale (~6400 inner CG iters per outer iter, p~200) this
         /// removes thousands of small Vec<f64> allocations from the tightest
         /// loop. Wired from `workspace.hessian_matvec_into`.
-        apply_into: Arc<dyn Fn(&Array1<f64>, &mut Array1<f64>) -> Result<(), String> + Send + Sync>,
+        apply_into: Arc<dyn Fn(&Array1<f64>, &mut Array1<f64>) -> Result<(), CustomFamilyError> + Send + Sync>,
         /// Batched multi-RHS apply: `out = H · V` for `(total, n_rhs)` `V`.
         /// Wired from `workspace.hessian_apply_mat`, which for the BMS tiled
         /// row-primary Hessian sweeps each row tile once and applies its `Hᵢ`
@@ -59,24 +59,24 @@ pub enum JointHessianSource {
         /// to materialise the operator in one batched sweep (`H = H · I`)
         /// rather than `total` single-vector HVPs, each of which re-reads every
         /// row tile. Numerically identical to looping `apply_into`.
-        apply_mat: Arc<dyn Fn(&Array2<f64>, &mut Array2<f64>) -> Result<(), String> + Send + Sync>,
+        apply_mat: Arc<dyn Fn(&Array2<f64>, &mut Array2<f64>) -> Result<(), CustomFamilyError> + Send + Sync>,
         diagonal: Array1<f64>,
         /// Forced dense materialization that bypasses the workspace's
         /// `hessian_dense` amortization gate. Returns `Some` when the
         /// workspace can build dense via a structural direct path (e.g.
         /// CTN's `scop_gradient_and_negative_hessian`), `None` when the
         /// caller should fall back to column-basis HVP through `apply`.
-        dense_forced: Arc<dyn Fn() -> Result<Option<Array2<f64>>, String> + Send + Sync>,
+        dense_forced: Arc<dyn Fn() -> Result<Option<Array2<f64>>, CustomFamilyError> + Send + Sync>,
     },
 }
 
 pub(crate) const EXACT_JOINT_HESSIAN_DENSE_MAX_BYTES: usize = 512 * 1024 * 1024;
 
-pub(crate) fn exact_joint_hessian_dense_bytes(total: usize) -> Result<usize, String> {
+pub(crate) fn exact_joint_hessian_dense_bytes(total: usize) -> Result<usize, CustomFamilyError> {
     total
         .checked_mul(total)
         .and_then(|n| n.checked_mul(std::mem::size_of::<f64>()))
-        .ok_or_else(|| format!("joint Hessian dense byte count overflow for dim={total}"))
+        .ok_or_else(|| CustomFamilyError::trial_point(format!("joint Hessian dense byte count overflow for dim={total}")))
 }
 
 pub(crate) fn ensure_exact_joint_hessian_dense_budget(
@@ -110,13 +110,13 @@ pub(crate) struct JointHessianBundle<'a> {
     /// amortise the row-walk across all pairs instead of paying it per pair.
     pub(crate) compute_d2h_many: Option<Box<DriftSecondDerivManyFn<'a>>>,
     pub(crate) owned_compute_dh:
-        Option<Arc<dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, String> + Send + Sync>>,
+        Option<Arc<dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError> + Send + Sync>>,
     pub(crate) owned_compute_dh_many: Option<
-        Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<DriftDerivResult>>, String> + Send + Sync>,
+        Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<DriftDerivResult>>, CustomFamilyError> + Send + Sync>,
     >,
     pub(crate) owned_compute_d2h: Option<
         Arc<
-            dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, String>
+            dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError>
                 + Send
                 + Sync,
         >,
@@ -127,7 +127,7 @@ pub(crate) struct JointHessianBundle<'a> {
     /// through the parallel pair dispatch.
     pub(crate) owned_compute_d2h_many: Option<
         Arc<
-            dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Option<DriftDerivResult>>, String>
+            dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Option<DriftDerivResult>>, CustomFamilyError>
                 + Send
                 + Sync,
         >,
@@ -137,17 +137,17 @@ pub(crate) struct JointHessianBundle<'a> {
 }
 
 pub(crate) type DriftDerivFn<'a> =
-    dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, String> + Send + Sync + 'a;
+    dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError> + Send + Sync + 'a;
 
 pub(crate) type DriftDerivManyFn<'a> =
-    dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<DriftDerivResult>>, String> + Send + Sync + 'a;
+    dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<DriftDerivResult>>, CustomFamilyError> + Send + Sync + 'a;
 
-pub(crate) type DriftSecondDerivFn<'a> = dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, String>
+pub(crate) type DriftSecondDerivFn<'a> = dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError>
     + Send
     + Sync
     + 'a;
 
-pub(crate) type DriftSecondDerivManyFn<'a> = dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Option<DriftDerivResult>>, String>
+pub(crate) type DriftSecondDerivManyFn<'a> = dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Option<DriftDerivResult>>, CustomFamilyError>
     + Send
     + Sync
     + 'a;
@@ -214,7 +214,7 @@ pub(crate) fn materialize_joint_hessian_source(
     source: &JointHessianSource,
     total: usize,
     context: &str,
-) -> Result<Array2<f64>, String> {
+) -> Result<Array2<f64>, CustomFamilyError> {
     match source {
         JointHessianSource::Dense(matrix) => Ok(matrix.clone()),
         JointHessianSource::Operator {
@@ -235,13 +235,12 @@ pub(crate) fn materialize_joint_hessian_source(
                         "{context}: dense_forced shape mismatch: got {}x{}, expected {total}x{total}",
                         matrix.nrows(),
                         matrix.ncols()
-                    ) }.into());
+                    ) });
                 }
                 if matrix.iter().any(|value| !value.is_finite()) {
                     return Err(CustomFamilyError::NumericalFailure {
                         reason: format!("{context}: dense_forced returned non-finite values"),
-                    }
-                    .into());
+                    });
                 }
                 symmetrize_dense_in_place(&mut matrix);
                 return Ok(matrix);
@@ -257,8 +256,7 @@ pub(crate) fn materialize_joint_hessian_source(
             if matrix.iter().any(|value| !value.is_finite()) {
                 return Err(CustomFamilyError::NumericalFailure {
                     reason: format!("{context}: operator matvec returned non-finite values"),
-                }
-                .into());
+                });
             }
             symmetrize_dense_in_place(&mut matrix);
             Ok(matrix)
@@ -271,7 +269,7 @@ pub fn exact_newton_joint_hessian_source_from_workspace(
     total: usize,
     intent: MaterializationIntent,
     context: &str,
-) -> Result<Option<JointHessianSource>, String> {
+) -> Result<Option<JointHessianSource>, CustomFamilyError> {
     if workspace.hessian_source_preference_for_intent(intent)
         == JointHessianSourcePreference::Operator
     {
@@ -288,14 +286,12 @@ pub fn exact_newton_joint_hessian_source_from_workspace(
                     hessian.nrows(),
                     hessian.ncols()
                 ),
-            }
-            .into());
+            });
         }
         if hessian.iter().any(|value| !value.is_finite()) {
             return Err(CustomFamilyError::NumericalFailure {
                 reason: format!("{context}: dense Hessian contains non-finite values"),
-            }
-            .into());
+            });
         }
         symmetrize_dense_in_place(&mut hessian);
         return Ok(Some(JointHessianSource::Dense(hessian)));
@@ -309,7 +305,7 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
     total: usize,
     intent: MaterializationIntent,
     context: &str,
-) -> Result<Option<JointHessianSource>, String> {
+) -> Result<Option<JointHessianSource>, CustomFamilyError> {
     let Some(diagonal) = workspace.hessian_diagonal()? else {
         if workspace.hessian_source_preference_for_intent(intent)
             == JointHessianSourcePreference::Operator
@@ -318,8 +314,7 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                 reason: format!(
                     "{context}: operator-preferred Hessian workspace did not provide a diagonal"
                 ),
-            }
-            .into());
+            });
         }
         return Ok(None);
     };
@@ -330,14 +325,12 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                 diagonal.len(),
                 total
             ),
-        }
-        .into());
+        });
     }
     if diagonal.iter().any(|value| !value.is_finite()) {
         return Err(CustomFamilyError::NumericalFailure {
             reason: format!("{context}: operator diagonal contains non-finite values"),
-        }
-        .into());
+        });
     }
 
     if !workspace.hessian_matvec_available() {
@@ -348,8 +341,7 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                 reason: format!(
                     "{context}: operator-preferred Hessian workspace did not provide HVPs"
                 ),
-            }
-            .into());
+            });
         }
         return Ok(None);
     }
@@ -371,14 +363,12 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                         &*context_apply,
                         v.len()
                     ),
-                }
-                .into());
+                });
             }
             let Some(out) = workspace_apply.hessian_matvec(v)? else {
                 return Err(CustomFamilyError::UnsupportedConfiguration {
                     reason: "joint exact-newton operator matvec unavailable".to_string(),
-                }
-                .into());
+                });
             };
             if out.len() != total {
                 return Err(CustomFamilyError::DimensionMismatch {
@@ -387,8 +377,7 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                         &*context_apply,
                         out.len()
                     ),
-                }
-                .into());
+                });
             }
             if out.iter().any(|value| !value.is_finite()) {
                 return Err(CustomFamilyError::NumericalFailure {
@@ -396,8 +385,7 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                         "{}: operator matvec returned non-finite values",
                         &*context_apply
                     ),
-                }
-                .into());
+                });
             }
             Ok(out)
         }),
@@ -410,14 +398,12 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                         v.len(),
                         out.len()
                     ),
-                }
-                .into());
+                });
             }
             if !workspace_apply_into.hessian_matvec_into(v, out)? {
                 return Err(CustomFamilyError::UnsupportedConfiguration {
                     reason: "joint exact-newton operator matvec unavailable".to_string(),
-                }
-                .into());
+                });
             }
             if out.iter().any(|value| !value.is_finite()) {
                 return Err(CustomFamilyError::NumericalFailure {
@@ -425,8 +411,7 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                         "{}: operator matvec returned non-finite values",
                         &*context_apply_into
                     ),
-                }
-                .into());
+                });
             }
             Ok(())
         }),
@@ -441,8 +426,7 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                         out.nrows(),
                         out.ncols()
                     ),
-                }
-                .into());
+                });
             }
             if v_cols.ncols() != out.ncols() {
                 return Err(CustomFamilyError::DimensionMismatch {
@@ -452,14 +436,12 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                         v_cols.ncols(),
                         out.ncols()
                     ),
-                }
-                .into());
+                });
             }
             if !workspace_apply_mat.hessian_apply_mat(v_cols, out)? {
                 return Err(CustomFamilyError::UnsupportedConfiguration {
                     reason: "joint exact-newton operator batched apply unavailable".to_string(),
-                }
-                .into());
+                });
             }
             if out.iter().any(|value| !value.is_finite()) {
                 return Err(CustomFamilyError::NumericalFailure {
@@ -467,13 +449,12 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                         "{}: operator batched apply returned non-finite values",
                         &*context_apply_mat
                     ),
-                }
-                .into());
+                });
             }
             Ok(())
         }),
         diagonal,
-        dense_forced: Arc::new(move || -> Result<Option<Array2<f64>>, String> {
+        dense_forced: Arc::new(move || -> Result<Option<Array2<f64>>, CustomFamilyError> {
             match workspace_dense_forced.hessian_dense_forced()? {
                 Some(mut matrix) => {
                     if matrix.nrows() != total || matrix.ncols() != total {
@@ -482,7 +463,7 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                             &*context_dense_forced,
                             matrix.nrows(),
                             matrix.ncols()
-                        ) }.into());
+                        ) });
                     }
                     if matrix.iter().any(|value| !value.is_finite()) {
                         return Err(CustomFamilyError::NumericalFailure {
@@ -490,8 +471,7 @@ pub(crate) fn exact_newton_joint_hessian_operator_source_from_workspace(
                                 "{}: hessian_dense_forced returned non-finite values",
                                 &*context_dense_forced
                             ),
-                        }
-                        .into());
+                        });
                     }
                     symmetrize_dense_in_place(&mut matrix);
                     Ok(Some(matrix))
@@ -540,7 +520,7 @@ pub(crate) fn build_joint_hessian_closures<'a, F: CustomFamily + Clone + Send + 
     options: &BlockwiseFitOptions,
     preferred_workspace: Option<Arc<dyn ExactNewtonJointHessianWorkspace>>,
     eval_mode: EvalMode,
-) -> Result<Option<JointHessianBundle<'a>>, String> {
+) -> Result<Option<JointHessianBundle<'a>>, CustomFamilyError> {
     // Path 1: exact Newton joint Hessian (preferred).
     let beta_flat = flatten_state_betas(block_states, specs);
     let synced = Arc::new(synchronized_states_from_flat_beta(
@@ -724,7 +704,7 @@ pub(crate) fn build_joint_hessian_closures<'a, F: CustomFamily + Clone + Send + 
         let beta_flat = flatten_state_betas(block_states, specs);
 
         let compute_dh = Box::new(
-            move |v_k: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
+            move |v_k: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> {
                 let h_rho = family
                     .joint_outer_hyper_surrogate_hessian_directional_derivative_with_specs(
                         block_states,
@@ -740,13 +720,12 @@ pub(crate) fn build_joint_hessian_closures<'a, F: CustomFamily + Clone + Send + 
                     None => Err(CustomFamilyError::UnsupportedConfiguration {
                         reason: "joint surrogate dH unavailable for analytic outer gradient"
                             .to_string(),
-                    }
-                    .into()),
+                    }),
                 }
             },
         );
         let compute_d2h = Box::new(
-            move |u: &Array1<f64>, v: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
+            move |u: &Array1<f64>, v: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> {
                 match family
                     .joint_outer_hyper_surrogate_hessian_second_directional_derivative_with_specs(
                         block_states,
@@ -767,7 +746,7 @@ pub(crate) fn build_joint_hessian_closures<'a, F: CustomFamily + Clone + Send + 
         let states_owned = block_states.to_vec();
         let specs_owned = specs.to_vec();
         let owned_compute_dh = Arc::new(
-            move |v_k: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
+            move |v_k: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> {
                 match family_owned
                     .joint_outer_hyper_surrogate_hessian_directional_derivative_with_specs(
                         &states_owned,
@@ -782,8 +761,7 @@ pub(crate) fn build_joint_hessian_closures<'a, F: CustomFamily + Clone + Send + 
                     None => Err(CustomFamilyError::UnsupportedConfiguration {
                         reason: "joint surrogate dH unavailable for analytic outer gradient"
                             .to_string(),
-                    }
-                    .into()),
+                    }),
                 }
             },
         );
@@ -791,7 +769,7 @@ pub(crate) fn build_joint_hessian_closures<'a, F: CustomFamily + Clone + Send + 
         let states_owned = block_states.to_vec();
         let specs_owned = specs.to_vec();
         let owned_compute_d2h = Arc::new(
-            move |u: &Array1<f64>, v: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
+            move |u: &Array1<f64>, v: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> {
                 match family_owned
                     .joint_outer_hyper_surrogate_hessian_second_directional_derivative_with_specs(
                         &states_owned,
@@ -840,12 +818,11 @@ pub(crate) fn finalize_dh_dense(
     total: usize,
     scale: f64,
     check_finite: bool,
-) -> Result<Option<DriftDerivResult>, String> {
+) -> Result<Option<DriftDerivResult>, CustomFamilyError> {
     if check_finite && h.iter().any(|v| !v.is_finite()) {
         return Err(CustomFamilyError::NumericalFailure {
             reason: "joint exact-newton dH returned non-finite values".to_string(),
-        }
-        .into());
+        });
     }
     let mut sym = symmetrized_square_matrix(h, total, "joint exact-newton dH shape mismatch")?;
     if scale != 1.0 {
@@ -871,7 +848,7 @@ pub(crate) fn exact_newton_dh_apply<F: CustomFamily + Sync>(
     workspace: Option<&Arc<dyn ExactNewtonJointHessianWorkspace>>,
     check_finite: bool,
     v_k: &Array1<f64>,
-) -> Result<Option<DriftDerivResult>, String> {
+) -> Result<Option<DriftDerivResult>, CustomFamilyError> {
     // `v_k` is ALREADY the perturbation direction `δβ` the caller wants the
     // directional Hessian derivative evaluated along. The `HessianDerivativeProvider`s
     // (`BorrowedJointDerivProvider`/`OwnedJointDerivProvider`) own the implicit-
@@ -893,8 +870,7 @@ pub(crate) fn exact_newton_dh_apply<F: CustomFamily + Sync>(
             Some(h) => finalize_dh_dense(h, total, scale, check_finite),
             None => Err(CustomFamilyError::UnsupportedConfiguration {
                 reason: "joint exact-newton dH unavailable for analytic outer gradient".to_string(),
-            }
-            .into()),
+            }),
         };
     }
 
@@ -915,8 +891,7 @@ pub(crate) fn exact_newton_dh_apply<F: CustomFamily + Sync>(
         Some(h) => finalize_dh_dense(h, total, scale, check_finite),
         None => Err(CustomFamilyError::UnsupportedConfiguration {
             reason: "joint exact-newton dH unavailable for analytic outer gradient".to_string(),
-        }
-        .into()),
+        }),
     }
 }
 
@@ -928,7 +903,7 @@ pub(crate) fn exact_newton_dh_closure<'a, F: CustomFamily + Sync>(
     use_outer_curvature_derivatives: bool,
     scale: f64,
     workspace: Option<Arc<dyn ExactNewtonJointHessianWorkspace>>,
-) -> impl Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, String> + Send + Sync + 'a {
+) -> impl Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError> + Send + Sync + 'a {
     move |v_k: &Array1<f64>| {
         exact_newton_dh_apply(
             family,
@@ -982,7 +957,7 @@ pub(crate) fn exact_newton_d2h_apply<F: CustomFamily + Sync>(
     workspace: Option<&Arc<dyn ExactNewtonJointHessianWorkspace>>,
     u: &Array1<f64>,
     v: &Array1<f64>,
-) -> Result<Option<DriftDerivResult>, String> {
+) -> Result<Option<DriftDerivResult>, CustomFamilyError> {
     if use_outer_curvature_derivatives {
         return match family.exact_newton_outer_curvature_second_directional_derivative_with_specs(
             synced_states,
@@ -1038,7 +1013,7 @@ pub(crate) fn exact_newton_d2h_closure<'a, F: CustomFamily + Sync>(
     use_outer_curvature_derivatives: bool,
     scale: f64,
     workspace: Option<Arc<dyn ExactNewtonJointHessianWorkspace>>,
-) -> impl Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, String> + Send + Sync + 'a
+) -> impl Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError> + Send + Sync + 'a
 {
     move |u: &Array1<f64>, v: &Array1<f64>| {
         exact_newton_d2h_apply(
@@ -1081,7 +1056,7 @@ pub(crate) fn exact_newton_dh_closure_owned<F: CustomFamily + Clone + Send + Syn
     use_outer_curvature_derivatives: bool,
     scale: f64,
     workspace: Option<Arc<dyn ExactNewtonJointHessianWorkspace>>,
-) -> Arc<dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, String> + Send + Sync> {
+) -> Arc<dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError> + Send + Sync> {
     Arc::new(move |v_k: &Array1<f64>| {
         exact_newton_dh_apply(
             &family,
@@ -1101,7 +1076,7 @@ pub(crate) fn exact_newton_dh_many_closure_owned(
     scale: f64,
     workspace: Option<Arc<dyn ExactNewtonJointHessianWorkspace>>,
 ) -> Option<
-    Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<DriftDerivResult>>, String> + Send + Sync>,
+    Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<DriftDerivResult>>, CustomFamilyError> + Send + Sync>,
 > {
     let workspace = workspace?;
     Some(Arc::new(move |directions: &[Array1<f64>]| {
@@ -1125,7 +1100,7 @@ pub(crate) fn exact_newton_d2h_closure_owned<F: CustomFamily + Clone + Send + Sy
     use_outer_curvature_derivatives: bool,
     scale: f64,
     workspace: Option<Arc<dyn ExactNewtonJointHessianWorkspace>>,
-) -> Arc<dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, String> + Send + Sync>
+) -> Arc<dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError> + Send + Sync>
 {
     Arc::new(move |u: &Array1<f64>, v: &Array1<f64>| {
         exact_newton_d2h_apply(
@@ -1147,7 +1122,7 @@ pub(crate) fn exact_newton_d2h_many_closure_owned(
     workspace: Option<Arc<dyn ExactNewtonJointHessianWorkspace>>,
 ) -> Option<
     Arc<
-        dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Option<DriftDerivResult>>, String>
+        dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Option<DriftDerivResult>>, CustomFamilyError>
             + Send
             + Sync,
     >,
@@ -1246,18 +1221,18 @@ pub(crate) fn active_face_logdet_with_ridge_policy(
     ridge_floor: f64,
     ridge_policy: RidgePolicy,
     full_space_logdet_correction: f64,
-) -> Result<f64, String> {
+) -> Result<f64, CustomFamilyError> {
     let mut projected = None;
     let mut logdet_correction = full_space_logdet_correction;
     if let Some(active) = active_constraints {
         if active.a.ncols() != matrix.nrows() || matrix.nrows() != matrix.ncols() {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "active-face logdet shape mismatch: Hessian is {}x{}, active block is {}x{}",
                 matrix.nrows(),
                 matrix.ncols(),
                 active.a.nrows(),
                 active.a.ncols(),
-            ));
+            )));
         }
         match active_constraint_tangent_geometry(&active.a)? {
             ActiveConstraintTangentGeometry::Tangent(z) => {
@@ -1295,7 +1270,7 @@ pub(crate) fn active_face_logdet_with_ridge_policy(
             // emits for a genuine SPD-contract violation. A shape or
             // eigendecomposition failure is a real error, not an infeasible
             // mode, and still propagates with the face geometry annotation.
-            Err(error) if error.contains("genuinely indefinite") => f64::INFINITY,
+            Err(error) if error.to_string().contains("genuinely indefinite") => f64::INFINITY,
             Err(error) => {
                 let face = match (&projected, active_constraints) {
                     (Some(reduced), _) => format!(
@@ -1314,7 +1289,7 @@ pub(crate) fn active_face_logdet_with_ridge_policy(
                         matrix.nrows()
                     ),
                 };
-                return Err(format!("{error}; geometry: {face}"));
+                return Err(CustomFamilyError::trial_point(format!("{error}; geometry: {face}")));
             }
         }
     };
@@ -1354,7 +1329,7 @@ pub(crate) fn active_face_penalty_logdet(
         return Ok(Some(0.0));
     }
     let penalty = PenaltyPseudologdet::from_components(&tangent_components, &lambdas, ridge)
-        .map_err(|error| format!("active-face penalty pseudo-logdet failed: {error}"))?;
+        .map_err(|error| CustomFamilyError::trial_point(format!("active-face penalty pseudo-logdet failed: {error}")))?;
     Ok(Some(penalty.value()))
 }
 
@@ -1406,6 +1381,8 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
         && family.joint_jeffreys_information_matches_observed_hessian();
     let outer_jeffreys_precheck_skips = match preferred_workspace.as_ref() {
         Some(ws) if outer_precheck_eligible && ws.hessian_matvec_available() => {
+            // Display boundary (gam#2689): the gam-solve Jeffreys pre-check
+            // entry points are declared over `Result<_, String>`.
             let hv = |v: &Array1<f64>| -> Result<Array1<f64>, String> {
                 match ws.hessian_matvec(v)? {
                     Some(out) if out.len() == total => Ok(out),
@@ -1490,7 +1467,7 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
         } else {
             None
         };
-    let compute_block_logdet_term = |b: usize| -> Result<(Array2<f64>, f64), String> {
+    let compute_block_logdet_term = |b: usize| -> Result<(Array2<f64>, f64), CustomFamilyError> {
         let spec = &specs[b];
         let (start, end) = ranges[b];
         let p = end - start;
@@ -1575,7 +1552,7 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
     // does not nest under an existing worker. Collecting an indexed range into
     // a Vec preserves block order; totals are accumulated sequentially below
     // to keep floating-point summation deterministic.
-    let block_terms: Vec<Result<(Array2<f64>, f64), String>> =
+    let block_terms: Vec<Result<(Array2<f64>, f64), CustomFamilyError>> =
         if specs.len() > 1 && rayon::current_thread_index().is_none() {
             use rayon::iter::{IntoParallelIterator, ParallelIterator};
             (0..specs.len())
@@ -2560,7 +2537,7 @@ pub(crate) fn apply_joint_feasibility_limit<F: CustomFamily + ?Sized>(
     states: &[ParameterBlockState],
     ranges: &[(usize, usize)],
     trial_delta: &mut Array1<f64>,
-) -> Result<JointFeasibilityLimit, String> {
+) -> Result<JointFeasibilityLimit, CustomFamilyError> {
     // Collect each block's feasibility α and apply the *minimum* to the
     // JOINT trial step, not to each block in isolation.
     //
@@ -2644,17 +2621,17 @@ pub(crate) fn compute_joint_feasibility_alpha<F: CustomFamily + ?Sized>(
     states: &[ParameterBlockState],
     ranges: &[(usize, usize)],
     trial_delta: &Array1<f64>,
-) -> Result<(f64, Option<usize>), String> {
+) -> Result<(f64, Option<usize>), CustomFamilyError> {
     let mut joint_alpha = 1.0_f64;
     let mut limiting_block: Option<usize> = None;
     for (block_idx, (start, end)) in ranges.iter().copied().enumerate() {
         let block_delta = trial_delta.slice(s![start..end]).to_owned();
         if let Some(alpha_max) = family.max_feasible_step_size(states, block_idx, &block_delta)? {
             if !alpha_max.is_finite() || !(0.0..=1.0).contains(&alpha_max) {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "joint Newton block {block_idx} reported a feasible step fraction of \
                      {alpha_max:.6e}, which is not a fraction in [0, 1]"
-                ));
+                )));
             }
             if alpha_max < joint_alpha {
                 joint_alpha = alpha_max;
@@ -2967,16 +2944,16 @@ pub(crate) mod whitened_spectrum {
             rhs: &Array1<f64>,
             metric_diag: &Array1<f64>,
             rank_tol: f64,
-        ) -> Result<Self, String> {
+        ) -> Result<Self, CustomFamilyError> {
             let p = h_pen.nrows();
             if h_pen.ncols() != p || rhs.len() != p || metric_diag.len() != p {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "whitened trust-region decomposition dimension mismatch: H={}x{}, rhs={}, metric={}",
                     h_pen.nrows(),
                     h_pen.ncols(),
                     rhs.len(),
                     metric_diag.len()
-                ));
+                )));
             }
             let d_inv_sqrt = Array1::from_iter(
                 metric_diag
@@ -3022,7 +2999,7 @@ pub(crate) mod whitened_spectrum {
                     });
             }
             let (gamma, evecs) = FaerEigh::eigh(&a, Side::Lower)
-                .map_err(|e| format!("whitened trust-region eigendecomposition failed: {e}"))?;
+                .map_err(|e| CustomFamilyError::trial_point(format!("whitened trust-region eigendecomposition failed: {e}")))?;
             // c = Vᵀ (D^{-1/2} rhs).
             let whitened_rhs = &d_inv_sqrt * rhs;
             let c = evecs.t().dot(&whitened_rhs);
@@ -4752,7 +4729,7 @@ pub(crate) fn apply_joint_penalized_hessian_into(
     vector: &Array1<f64>,
     out: &mut Array1<f64>,
     joint_full_width: Option<&gam_problem::JointPenaltyBundle>,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     let mut penalty = Array1::<f64>::zeros(vector.len());
     apply_joint_penalized_hessian_into_with_workspace(
         source,
@@ -4783,7 +4760,7 @@ pub(crate) fn apply_joint_penalized_hessian_into_with_workspace(
     out: &mut Array1<f64>,
     penalty_scratch: &mut Array1<f64>,
     joint_full_width: Option<&gam_problem::JointPenaltyBundle>,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     match source {
         JointHessianSource::Dense(h_joint) => {
             gam_linalg::faer_ndarray::fast_av_view_into(h_joint, vector, out.view_mut());
@@ -4861,7 +4838,7 @@ pub(crate) fn joint_preconditioned_descent_delta(
     diagonal_ridge: f64,
     rhs: &Array1<f64>,
     joint_full_width: Option<&gam_problem::JointPenaltyBundle>,
-) -> Result<Array1<f64>, String> {
+) -> Result<Array1<f64>, CustomFamilyError> {
     let base_diagonal = match source {
         JointHessianSource::Dense(h_joint) => h_joint.diag().to_owned(),
         JointHessianSource::Operator { diagonal, .. } => diagonal.clone(),
@@ -4902,10 +4879,11 @@ pub(crate) fn joint_line_search_log_likelihood<F: CustomFamily + Clone + Send + 
     family: &F,
     line_search_options: &BlockwiseFitOptions,
     states: &[ParameterBlockState],
-) -> Result<(f64, Option<Arc<dyn ExactNewtonJointHessianWorkspace>>), String> {
+) -> Result<(f64, Option<Arc<dyn ExactNewtonJointHessianWorkspace>>), CustomFamilyError> {
     family
         .log_likelihood_only_with_options(states, line_search_options)
         .map(|log_likelihood| (log_likelihood, None))
+        .map_err(CustomFamilyError::trial_point)
 }
 
 /// Fused accept-trial likelihood: build the joint-Newton Hessian workspace at
@@ -4947,7 +4925,7 @@ pub(crate) fn joint_line_search_log_likelihood_with_workspace<
     options: &BlockwiseFitOptions,
     specs: &[ParameterBlockSpec],
     states: &[ParameterBlockState],
-) -> Result<Option<(f64, Arc<dyn ExactNewtonJointHessianWorkspace>)>, String> {
+) -> Result<Option<(f64, Arc<dyn ExactNewtonJointHessianWorkspace>)>, CustomFamilyError> {
     if !family.inner_joint_workspace_log_likelihood_available(specs) {
         return Ok(None);
     }
@@ -5006,7 +4984,7 @@ pub(crate) fn load_joint_gradient_evaluation<F: CustomFamily + Clone + Send + Sy
     states: &[ParameterBlockState],
     prefer_workspace: bool,
     preferred_workspace: Option<Arc<dyn ExactNewtonJointHessianWorkspace>>,
-) -> Result<JointGradientLoad, String> {
+) -> Result<JointGradientLoad, CustomFamilyError> {
     let workspace = match preferred_workspace {
         Some(workspace) => Some(workspace),
         None if prefer_workspace => Some(

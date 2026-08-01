@@ -34,14 +34,14 @@ struct RealizedPenaltyEmission {
 pub(crate) fn coefficient_group_block_index(
     specs: &[ParameterBlockSpec],
     selector: &CoefficientBlockSelector,
-) -> Result<usize, String> {
+) -> Result<usize, CustomFamilyError> {
     match selector {
         CoefficientBlockSelector::Index(index) => {
             if *index >= specs.len() {
-                Err(format!(
+                Err(CustomFamilyError::trial_point(format!(
                     "coefficient group references block index {index}, but only {} blocks exist",
                     specs.len()
-                ))
+                )))
             } else {
                 Ok(*index)
             }
@@ -49,7 +49,7 @@ pub(crate) fn coefficient_group_block_index(
         CoefficientBlockSelector::Name(name) => specs
             .iter()
             .position(|spec| spec.name == *name)
-            .ok_or_else(|| format!("coefficient group references unknown block '{name}'")),
+            .ok_or_else(|| CustomFamilyError::trial_point(format!("coefficient group references unknown block '{name}'"))),
     }
 }
 
@@ -189,10 +189,10 @@ pub fn realize_coefficient_groups_for_custom_family(
                 let block_idx = coefficient_group_block_index(specs, &label.block)?;
                 let p = specs[block_idx].design.ncols();
                 if label.column >= p {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "coefficient group '{}' references column {} in block '{}' (index {block_idx}), but the block has {p} columns",
                         group.label, label.column, specs[block_idx].name
-                    ));
+                    )));
                 }
                 coordinates.insert((block_idx, label.column));
             }
@@ -202,7 +202,7 @@ pub fn realize_coefficient_groups_for_custom_family(
                 coordinates,
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, CustomFamilyError>>()?;
     let hierarchy = ResolvedGroupHierarchy::build(resolved_groups)?;
 
     let realized_groups = groups

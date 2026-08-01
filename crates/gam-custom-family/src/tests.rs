@@ -604,9 +604,9 @@ pub(crate) fn joint_outer_gradient_uses_projected_trace_for_rank_deficient_penal
         use_outer_hessian: false,
         ..BlockwiseFitOptions::default()
     };
-    let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+    let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> { Ok(None) };
     let no_d2h =
-        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> { Ok(None) };
 
     let projected = joint_outer_evaluate(
         &inner,
@@ -783,9 +783,9 @@ pub(crate) fn joint_outer_gradient_projected_trace_drops_joint_null() {
         use_outer_hessian: false,
         ..BlockwiseFitOptions::default()
     };
-    let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+    let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> { Ok(None) };
     let no_d2h =
-        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> { Ok(None) };
 
     let projected = joint_outer_evaluate(
         &inner,
@@ -868,9 +868,9 @@ pub(crate) fn large_scale_rho_scan_joint_outer_evaluate_is_projection_invariant(
     let h: Array2<f64> =
         array![[4.0, 0.2, 7.0], [0.2, 9.0, -3.0], [7.0, -3.0, 30.0]].mapv(|v| v * n_scale);
 
-    let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+    let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> { Ok(None) };
     let no_d2h =
-        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> { Ok(None) };
 
     let mut g_un_at_10 = 0.0_f64;
     let mut g_pr_at_10 = 0.0_f64;
@@ -1191,10 +1191,10 @@ pub(crate) fn large_scale_multiblock_outer_gradient_with_realistic_drift_is_boun
     // `hessian_derivative_correction_result` β-chain — not in the
     // evaluator. If it FAILS, the evaluator itself has the defect at
     // large scale + Duchon-shape S.
-    let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+    let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> { Ok(None) };
     let compute_dh = no_dh;
     let no_d2h =
-        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+        |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> { Ok(None) };
 
     // ── ParameterBlockSpec for each block.
     let mk_spec = |name: &str,
@@ -1849,7 +1849,7 @@ pub(crate) fn fused_trial_advertised_missing_workspace_fails_closed() {
         Ok(_) => panic!("an advertised fused workspace is mandatory"),
     };
     assert!(
-        error.contains("returned no workspace"),
+        error.to_string().contains("returned no workspace"),
         "unexpected error: {error}"
     );
 }
@@ -1870,7 +1870,7 @@ pub(crate) fn fused_trial_advertised_missing_likelihood_fails_closed() {
         Ok(_) => panic!("an advertised fused likelihood is mandatory"),
     };
     assert!(
-        error.contains("returned no log-likelihood"),
+        error.to_string().contains("returned no log-likelihood"),
         "unexpected error: {error}",
     );
 }
@@ -1892,7 +1892,7 @@ pub(crate) fn fused_trial_workspace_error_is_not_scalarized() {
         Err(error) => error,
         Ok(_) => panic!("the trust-attempt gate must propagate workspace evaluation errors"),
     };
-    assert_eq!(error, "fused-trial-log-likelihood-error");
+    assert_eq!(error.to_string(), "fused-trial-log-likelihood-error");
 }
 
 #[test]
@@ -2042,7 +2042,7 @@ pub(crate) fn inner_workspace_prevalidation_reuses_cycle0_hessian_without_family
 
     let error = inner_blockwise_fit(&family, &[spec], &[Array1::zeros(0)], &options, None)
         .expect_err("fixture stops immediately after cycle-0 consumes its Hessian source");
-    assert_eq!(error, "inner-prelude-workspace-cycle0-reached");
+    assert_eq!(error.to_string(), "inner-prelude-workspace-cycle0-reached");
     assert_eq!(
         evaluations.load(Ordering::Relaxed),
         0,
@@ -2094,7 +2094,7 @@ pub(crate) fn advertised_inner_workspace_missing_fails_closed_without_family_fal
     )
     .expect_err("an advertised workspace source must not silently fall back");
     assert!(
-        error.contains("requested an exact Hessian workspace, but the family returned none"),
+        error.to_string().contains("requested an exact Hessian workspace, but the family returned none"),
         "unexpected missing-workspace error: {error}",
     );
     assert_eq!(workspace_builds.load(Ordering::Relaxed), 1);
@@ -2139,7 +2139,7 @@ pub(crate) fn advertised_workspace_gradient_missing_fails_before_row_measure_fal
     )
     .expect_err("an advertised workspace gradient must not fall back to a different row measure");
     assert!(
-        error.contains(
+        error.to_string().contains(
             "advertises inner joint workspace gradients, but its workspace returned none"
         ),
         "unexpected missing-workspace-gradient error: {error}",
@@ -2330,7 +2330,7 @@ pub(crate) fn finite_working_weight_certificate_preserves_zero_tiny_and_signed_r
 pub(crate) fn finite_working_weight_certificate_rejects_nonfinite_rows_atomically() {
     let nan = array![0.5, f64::NAN];
     let err = certify_finite_working_weights(&nan).expect_err("NaN curvature must be rejected");
-    assert!(err.contains("row 1"), "error should name the row: {err}");
+    assert!(err.to_string().contains("row 1"), "error should name the row: {err}");
 
     let inf = array![f64::INFINITY, 0.5];
     certify_finite_working_weights(&inf).expect_err("infinite curvature must be rejected");
@@ -3049,7 +3049,7 @@ pub(crate) fn contracted_psi_hook_rejects_wrong_score_width_before_installing_op
     };
 
     assert!(
-        err.contains("score=1x0") && err.contains("beta_dim=1"),
+        err.to_string().contains("score=1x0") && err.to_string().contains("beta_dim=1"),
         "unexpected wrong-score-width error: {err}"
     );
 }
@@ -3320,7 +3320,7 @@ fn owned_uncoupled_terminal_working_sets_materialize_exact_joint_hessian() {
         "owned terminal test",
     )
     .expect_err("coupled likelihoods must retain their joint workspace");
-    assert!(error.contains("coupled 2-block likelihood"), "{error}");
+    assert!(error.to_string().contains("coupled 2-block likelihood"), "{error}");
 }
 
 #[test]
@@ -5143,7 +5143,7 @@ pub(crate) fn joint_newton_rejects_one_step_stationary_strict_saddle_at_returned
         "a one-step Newton solve must not return a stationary strict saddle as a coefficient mode",
     );
     assert!(
-        error.contains("fresh exact returned-mode curvature"),
+        error.to_string().contains("fresh exact returned-mode curvature"),
         "unexpected returned-mode rejection: {error}",
     );
 }

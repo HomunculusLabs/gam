@@ -37,7 +37,7 @@ pub(crate) fn exact_lambdas_by_block(
 pub(crate) fn aggregate_labeled_hessian(
     hessian: &Array2<f64>,
     layout: &PenaltyLabelLayout,
-) -> Result<Array2<f64>, String> {
+) -> Result<Array2<f64>, CustomFamilyError> {
     // gam#1587: the evaluator Hessian indexes the per-block physical coords
     // followed by the appended joint coords. Build the unified physical→outer map
     // over both ranges (joint always maps to a concrete outer coord).
@@ -54,8 +54,7 @@ pub(crate) fn aggregate_labeled_hessian(
                 layout.physical_count(),
                 n_joint,
             ),
-        }
-        .into());
+        });
     }
     let to_outer: Vec<Option<usize>> = layout
         .physical_to_outer
@@ -83,15 +82,15 @@ pub(crate) fn aggregate_labeled_hessian(
 pub(crate) fn rho_prior_cost_gradient_hessian(
     prior: &gam_problem::RhoPrior,
     rho: &Array1<f64>,
-) -> Result<(f64, Array1<f64>, Option<Array2<f64>>), String> {
+) -> Result<(f64, Array1<f64>, Option<Array2<f64>>), CustomFamilyError> {
     use gam_solve::rho_prior_eval::{InvalidPriorPolicy, RhoPriorError};
     match gam_solve::rho_prior_eval::evaluate(prior, rho, InvalidPriorPolicy::HardError) {
         Ok(eval) => Ok((eval.cost, eval.gradient, eval.hessian)),
         Err(RhoPriorError::DimensionMismatch { reason }) => {
-            Err(CustomFamilyError::DimensionMismatch { reason }.into())
+            Err(CustomFamilyError::DimensionMismatch { reason })
         }
         Err(RhoPriorError::ConstraintViolation { reason }) => {
-            Err(CustomFamilyError::ConstraintViolation { reason }.into())
+            Err(CustomFamilyError::ConstraintViolation { reason })
         }
     }
 }
@@ -101,7 +100,7 @@ pub(crate) fn add_labeled_rho_prior_to_outer_eval(
     rho: &Array1<f64>,
     rho_prior: &gam_problem::RhoPrior,
     eval_mode: EvalMode,
-) -> Result<OuterObjectiveEvalResult, String> {
+) -> Result<OuterObjectiveEvalResult, CustomFamilyError> {
     // For tied physical penalties, the likelihood/LAML contribution is first
     // evaluated in the expanded physical coordinates and then pulled back to
     // the user-facing labeled coordinates.  The configured prior lives on the
@@ -128,8 +127,7 @@ pub(crate) fn add_labeled_rho_prior_to_outer_eval(
                     gradient.len(),
                     result.gradient.len()
                 ),
-            }
-            .into());
+            });
         }
         result.gradient += &gradient;
     }
@@ -165,7 +163,7 @@ pub(crate) fn pullback_labeled_outer_eval(
     layout: &PenaltyLabelLayout,
     rho_prior: &gam_problem::RhoPrior,
     eval_mode: EvalMode,
-) -> Result<OuterObjectiveEvalResult, String> {
+) -> Result<OuterObjectiveEvalResult, CustomFamilyError> {
     if eval_mode == EvalMode::ValueOnly {
         result.gradient = Array1::<f64>::zeros(layout.initial_rho.len());
     } else {
@@ -255,7 +253,7 @@ pub(crate) fn custom_family_seed_screening_proxy_labeled<
     rho: &Array1<f64>,
     warm_start: Option<&ConstrainedWarmStart>,
     rho_prior: &gam_problem::RhoPrior,
-) -> Result<(f64, ConstrainedWarmStart, bool), String> {
+) -> Result<(f64, ConstrainedWarmStart, bool), CustomFamilyError> {
     let physical_rho = expand_labeled_log_lambdas(rho, layout)?;
     let per_block = split_log_lambdas(&physical_rho, &layout.penalty_counts)?;
     let physical_warm_start = physical_warm_start_for_labeled(warm_start, &physical_rho, layout);
@@ -355,7 +353,7 @@ pub(crate) fn split_log_lambdas(
 pub(crate) fn buildblock_states<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
-) -> Result<Vec<ParameterBlockState>, String> {
+) -> Result<Vec<ParameterBlockState>, CustomFamilyError> {
     let mut states = Vec::with_capacity(specs.len());
     for (b, spec) in specs.iter().enumerate() {
         let p = spec.design.ncols();
@@ -404,7 +402,7 @@ pub(crate) fn refresh_all_block_etas<F: CustomFamily + Clone + Send + Sync + 'st
     family: &F,
     specs: &[ParameterBlockSpec],
     states: &mut [ParameterBlockState],
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     if family.block_geometry_is_dynamic() {
         for b in 0..specs.len() {
             refresh_single_block_eta(family, specs, states, b)?;
@@ -435,7 +433,7 @@ pub(crate) fn refresh_single_block_eta<F: CustomFamily + Clone + Send + Sync + '
     specs: &[ParameterBlockSpec],
     states: &mut [ParameterBlockState],
     block_idx: usize,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     let spec = &specs[block_idx];
     let beta = states[block_idx].beta.clone();
     states[block_idx].eta = with_block_geometry(family, states, spec, block_idx, |x, off| {
@@ -475,21 +473,19 @@ pub(crate) fn weighted_normal_equations(
     x: &DesignMatrix,
     w: &Array1<f64>,
     y_star: Option<&Array1<f64>>,
-) -> Result<(Array2<f64>, Option<Array1<f64>>), String> {
+) -> Result<(Array2<f64>, Option<Array1<f64>>), CustomFamilyError> {
     let n = x.nrows();
     if w.len() != n {
         return Err(CustomFamilyError::DimensionMismatch {
             reason: "weighted normal-equation dimension mismatch".to_string(),
-        }
-        .into());
+        });
     }
     if let Some(y) = y_star
         && y.len() != n
     {
         return Err(CustomFamilyError::DimensionMismatch {
             reason: "weighted RHS dimension mismatch".to_string(),
-        }
-        .into());
+        });
     }
 
     let xtwx = x.xt_diag_x_signed_op(FiniteSignedWeightsView::try_from_array(w)?)?;
@@ -690,21 +686,22 @@ pub(crate) fn stabilize_exact_newton_penalized_lhs_in_place<F: CustomFamily + ?S
 pub(crate) fn shift_linear_constraints_to_delta(
     constraints: &ConstraintSet,
     beta: &Array1<f64>,
-) -> Result<ConstraintSet, String> {
+) -> Result<ConstraintSet, CustomFamilyError> {
     if constraints.ncols() != beta.len() {
         return Err(CustomFamilyError::ConstraintViolation {
             reason: "linear constraints: shape mismatch".to_string(),
-        }
-        .into());
+        });
     }
-    constraints.shifted_to_delta(beta.view())
+    constraints
+        .shifted_to_delta(beta.view())
+        .map_err(|error| CustomFamilyError::trial_point(error.to_string()))
 }
 
 pub(crate) fn collect_block_linear_constraints<F: CustomFamily + ?Sized>(
     family: &F,
     states: &[ParameterBlockState],
     specs: &[ParameterBlockSpec],
-) -> Result<Vec<Option<ConstraintSet>>, String> {
+) -> Result<Vec<Option<ConstraintSet>>, CustomFamilyError> {
     let mut constraints = Vec::with_capacity(specs.len());
     for (block_idx, spec) in specs.iter().enumerate() {
         constraints.push(family.block_linear_constraints(states, block_idx, spec)?);
@@ -718,7 +715,7 @@ pub(crate) fn reject_constrained_post_update_repair(
     raw_beta: &Array1<f64>,
     updated_beta: &Array1<f64>,
     constraints: Option<&ConstraintSet>,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     let Some(constraints) = constraints else {
         return Ok(());
     };
@@ -730,8 +727,7 @@ pub(crate) fn reject_constrained_post_update_repair(
                 raw_beta.len(),
                 updated_beta.len(),
             ),
-        }
-        .into());
+        });
     }
     if raw_beta.len() != constraints.ncols() {
         return Err(CustomFamilyError::DimensionMismatch {
@@ -741,8 +737,7 @@ pub(crate) fn reject_constrained_post_update_repair(
                 raw_beta.len(),
                 constraints.ncols(),
             ),
-        }
-        .into());
+        });
     }
     let max_change = raw_beta
         .iter()
@@ -771,8 +766,7 @@ pub(crate) fn reject_constrained_post_update_repair(
                  constraints must be represented analytically in block_linear_constraints, not repaired after the Newton/QP solve",
                 spec.name,
             ),
-        }
-        .into());
+        });
     }
     Ok(())
 }
@@ -781,7 +775,7 @@ pub(crate) fn assemble_joint_linear_constraints(
     block_constraints: &[Option<ConstraintSet>],
     ranges: &[(usize, usize)],
     total_p: usize,
-) -> Result<Option<ConstraintSet>, String> {
+) -> Result<Option<ConstraintSet>, CustomFamilyError> {
     if block_constraints.len() != ranges.len() {
         return Err(CustomFamilyError::DimensionMismatch {
             reason: format!(
@@ -789,8 +783,7 @@ pub(crate) fn assemble_joint_linear_constraints(
                 block_constraints.len(),
                 ranges.len()
             ),
-        }
-        .into());
+        });
     }
     let total_rows = block_constraints
         .iter()
@@ -809,7 +802,7 @@ pub(crate) fn assemble_joint_linear_constraints(
                 "joint linear constraint assembly mismatch for block {block_idx}: {} constraint columns, block width is {}",
                 constraints.ncols(),
                 end - start
-            ) }.into());
+            ) });
         }
     }
     let all_dense = block_constraints
@@ -941,7 +934,7 @@ pub(crate) fn widen_active_sets_to_tight_face(
     block_constraints: &[Option<ConstraintSet>],
     states: &[ParameterBlockState],
     cached_active_sets: &[Option<Vec<usize>>],
-) -> Result<Vec<Option<Vec<usize>>>, String> {
+) -> Result<Vec<Option<Vec<usize>>>, CustomFamilyError> {
     let feasibility_tol = gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL;
     let mut tight_active_sets: Vec<Option<Vec<usize>>> =
         Vec::with_capacity(block_constraints.len());
@@ -1040,7 +1033,7 @@ pub(crate) struct SimpleLowerBounds {
 pub(crate) fn extract_simple_lower_bounds(
     constraints: &ConstraintSet,
     p: usize,
-) -> Result<Option<SimpleLowerBounds>, String> {
+) -> Result<Option<SimpleLowerBounds>, CustomFamilyError> {
     let constraints = match constraints {
         ConstraintSet::Dense(dense) => dense,
         // A factored cone USUALLY couples whole covariate rows, and then it is
@@ -1075,8 +1068,7 @@ pub(crate) fn extract_simple_lower_bounds(
             if cone.ncols() != p {
                 return Err(CustomFamilyError::ConstraintViolation {
                     reason: "linear constraints: factored cone width does not match the coefficient block".to_string(),
-                }
-                .into());
+                });
             }
             let mut lower_bounds = Array1::from_elem(p, f64::NEG_INFINITY);
             let mut coeff_to_row = vec![None; p];
@@ -1118,8 +1110,7 @@ pub(crate) fn extract_simple_lower_bounds(
     if constraints.a.ncols() != p || constraints.a.nrows() != constraints.b.len() {
         return Err(CustomFamilyError::ConstraintViolation {
             reason: "linear constraints: shape mismatch".to_string(),
-        }
-        .into());
+        });
     }
     let mut lower_bounds = Array1::from_elem(p, f64::NEG_INFINITY);
     let mut coeff_to_row = vec![None; p];
@@ -1223,7 +1214,7 @@ pub(crate) fn solve_quadratic_with_simple_lower_bounds(
     beta_start: &Array1<f64>,
     bounds: &SimpleLowerBounds,
     active_rows: Option<&[usize]>,
-) -> Result<(Array1<f64>, Vec<usize>), String> {
+) -> Result<(Array1<f64>, Vec<usize>), CustomFamilyError> {
     let gradient = lhs.dot(beta_start) - rhs;
     let mut delta = Array1::zeros(beta_start.len());
     let mut active_coeffs = lower_bound_active_rows_to_coeffs(bounds, active_rows);
@@ -1235,7 +1226,7 @@ pub(crate) fn solve_quadratic_with_simple_lower_bounds(
         &mut delta,
         Some(&mut active_coeffs),
     )
-    .map_err(|e| format!("lower-bound Newton solve failed: {e}"))?;
+    .map_err(|e| CustomFamilyError::trial_point(format!("lower-bound Newton solve failed: {e}")))?;
     let mut beta_new = beta_start + &delta;
     project_to_lower_bounds(&mut beta_new, &bounds.lower_bounds);
     active_coeffs = lower_bound_active_coeffs_from_solution(bounds, &beta_new);
@@ -1287,15 +1278,15 @@ pub(crate) struct BlockUpdateResult {
 /// the score, Hessian, and Laplace determinant into different models.
 pub(crate) fn certify_finite_working_weights(
     working_weights: &Array1<f64>,
-) -> Result<&Array1<f64>, String> {
+) -> Result<&Array1<f64>, CustomFamilyError> {
     if let Some((i, &wi)) = working_weights
         .iter()
         .enumerate()
         .find(|&(_, &wi)| !wi.is_finite())
     {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "invalid diagonal working weight at row {i}: {wi} (working curvature must be finite)"
-        ));
+        )));
     }
     Ok(working_weights)
 }
@@ -1304,7 +1295,7 @@ pub(crate) trait ParameterBlockUpdater {
     fn compute_update_step(
         &self,
         ctx: &BlockUpdateContext<'_>,
-    ) -> Result<BlockUpdateResult, String>;
+    ) -> Result<BlockUpdateResult, CustomFamilyError>;
 }
 
 pub(crate) struct DiagonalBlockUpdater<'a> {
@@ -1316,7 +1307,7 @@ impl ParameterBlockUpdater for DiagonalBlockUpdater<'_> {
     fn compute_update_step(
         &self,
         ctx: &BlockUpdateContext<'_>,
-    ) -> Result<BlockUpdateResult, String> {
+    ) -> Result<BlockUpdateResult, CustomFamilyError> {
         if self.working_response.len() != ctx.spec.design.nrows()
             || self.working_weights.len() != ctx.spec.design.nrows()
         {
@@ -1325,8 +1316,7 @@ impl ParameterBlockUpdater for DiagonalBlockUpdater<'_> {
                     "family diagonal working-set size mismatch on block {} ({})",
                     ctx.block_idx, ctx.spec.name
                 ),
-            }
-            .into());
+            });
         }
 
         let working_weights =
@@ -1372,7 +1362,7 @@ impl ParameterBlockUpdater for DiagonalBlockUpdater<'_> {
                         constraints,
                         ctx.cached_active_set,
                     )
-                    .map_err(|e| e.to_string())
+                    .map_err(|error| CustomFamilyError::trial_point(error.to_string()))
                 }
                 .map_err(|e| {
                     format!(
@@ -1421,7 +1411,7 @@ impl ParameterBlockUpdater for ExactNewtonBlockUpdater<'_> {
     fn compute_update_step(
         &self,
         ctx: &BlockUpdateContext<'_>,
-    ) -> Result<BlockUpdateResult, String> {
+    ) -> Result<BlockUpdateResult, CustomFamilyError> {
         let p = ctx.spec.design.ncols();
         if self.gradient.len() != p {
             return Err(CustomFamilyError::DimensionMismatch {
@@ -1430,8 +1420,7 @@ impl ParameterBlockUpdater for ExactNewtonBlockUpdater<'_> {
                     ctx.block_idx,
                     self.gradient.len()
                 ),
-            }
-            .into());
+            });
         }
         if self.hessian.nrows() != p || self.hessian.ncols() != p {
             return Err(CustomFamilyError::DimensionMismatch {
@@ -1443,8 +1432,7 @@ impl ParameterBlockUpdater for ExactNewtonBlockUpdater<'_> {
                     p,
                     p
                 ),
-            }
-            .into());
+            });
         }
 
         // Exact-Newton Hessians are the family's analytic second derivative: a
@@ -1678,12 +1666,11 @@ impl BlockWorkingSetUpdaterExt for BlockWorkingSet {
 pub(crate) fn check_linear_feasibility(
     beta: &Array1<f64>,
     constraints: &ConstraintSet,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     if constraints.ncols() != beta.len() {
         return Err(CustomFamilyError::ConstraintViolation {
             reason: "linear constraints: shape mismatch".to_string(),
-        }
-        .into());
+        });
     }
     let (worst_scaled, worst_row) = constraints.max_scaled_violation(beta.view()).map_err(|e| {
         CustomFamilyError::ConstraintViolation {
@@ -1738,8 +1725,7 @@ pub(crate) fn check_linear_feasibility(
                 gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL,
                 constraints.nrows()
             ),
-        }
-        .into());
+        });
     }
     Ok(())
 }
@@ -1814,7 +1800,7 @@ pub(crate) fn block_penalized_metric_diagonal(
     s_lambda: &Array2<f64>,
     ridge: f64,
     ridge_policy: RidgePolicy,
-) -> Result<Array1<f64>, String> {
+) -> Result<Array1<f64>, CustomFamilyError> {
     let mut diagonal = match work {
         BlockWorkingSet::ExactNewton { hessian, .. } => symmetric_matrix_diagonal(hessian),
         BlockWorkingSet::Diagonal {
@@ -1822,12 +1808,12 @@ pub(crate) fn block_penalized_metric_diagonal(
         } => spec.design.diag_gram(working_weights)?,
     };
     if diagonal.len() != s_lambda.nrows() || s_lambda.nrows() != s_lambda.ncols() {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "block penalized metric diagonal shape mismatch: diag={}, S={}x{}",
             diagonal.len(),
             s_lambda.nrows(),
             s_lambda.ncols()
-        ));
+        )));
     }
     for j in 0..diagonal.len() {
         diagonal[j] += s_lambda[[j, j]];
@@ -1846,14 +1832,14 @@ pub(crate) fn block_penalized_metric_norm(
     direction: &Array1<f64>,
     ridge: f64,
     ridge_policy: RidgePolicy,
-) -> Result<f64, String> {
+) -> Result<f64, CustomFamilyError> {
     let diagonal = block_penalized_metric_diagonal(spec, work, s_lambda, ridge, ridge_policy)?;
     if diagonal.len() != direction.len() {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "block penalized metric direction length mismatch: direction={}, diag={}",
             direction.len(),
             diagonal.len()
-        ));
+        )));
     }
     Ok(joint_trust_region_metric_step_norm(direction, &diagonal))
 }
@@ -1866,7 +1852,7 @@ pub(crate) fn truncate_block_step_to_metric_radius(
     radius: f64,
     ridge: f64,
     ridge_policy: RidgePolicy,
-) -> Result<(Array1<f64>, f64), String> {
+) -> Result<(Array1<f64>, f64), CustomFamilyError> {
     let norm = block_penalized_metric_norm(spec, work, s_lambda, &delta, ridge, ridge_policy)?;
     if norm.is_finite() && norm > radius && radius > 0.0 {
         Ok((&delta * (radius / norm), radius))
@@ -1953,7 +1939,7 @@ pub(crate) fn total_quadratic_penalty(
 pub(crate) fn smooth_regularized_logdet_hessian_finite_check(
     matrix: &Array2<f64>,
     block: Option<usize>,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     let Some((row, col, value)) = matrix
         .indexed_iter()
         .find_map(|((row, col), &value)| (!value.is_finite()).then_some((row, col, value)))
@@ -1966,7 +1952,7 @@ pub(crate) fn smooth_regularized_logdet_hessian_finite_check(
     };
     Err(CustomFamilyError::NumericalFailure { reason: format!(
         "smooth-regularized logdet Hessian contains non-finite entry at ({row}, {col}): {value}{block_context}"
-    ) }.into())
+    ) })
 }
 
 /// Validate that every exact-Newton block working set in a family
@@ -1983,7 +1969,7 @@ pub(crate) fn smooth_regularized_logdet_hessian_finite_check(
 /// silently "converging" because the gradient happens to be zero or
 /// the bad entries get hidden behind a downstream eigendecomposition
 /// fallback that the outer optimizer's flags may or may not invoke.
-pub(crate) fn validate_block_hessians_finite(eval: &FamilyEvaluation) -> Result<(), String> {
+pub(crate) fn validate_block_hessians_finite(eval: &FamilyEvaluation) -> Result<(), CustomFamilyError> {
     for (b, ws) in eval.blockworking_sets.iter().enumerate() {
         let BlockWorkingSet::ExactNewton { hessian, .. } = ws else {
             continue;
@@ -2004,7 +1990,7 @@ pub(crate) fn validate_block_hessians_finite(eval: &FamilyEvaluation) -> Result<
 pub(crate) fn exact_newton_hessian_finite_check(
     hessian: &SymmetricMatrix,
     block: usize,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     match hessian {
         SymmetricMatrix::Dense(matrix) => {
             smooth_regularized_logdet_hessian_finite_check(matrix, Some(block))?;
@@ -2022,7 +2008,7 @@ pub(crate) fn exact_newton_hessian_finite_check(
                     if !value.is_finite() {
                         return Err(CustomFamilyError::NumericalFailure { reason: format!(
                             "smooth-regularized logdet Hessian contains non-finite entry at ({row}, {col}): {value} for block {block}"
-                        ) }.into());
+                        ) });
                     }
                 }
             }
@@ -2035,7 +2021,7 @@ pub(crate) fn stable_logdet_with_ridge_policy(
     matrix: &Array2<f64>,
     ridge_floor: f64,
     ridge_policy: RidgePolicy,
-) -> Result<f64, String> {
+) -> Result<f64, CustomFamilyError> {
     let mut a = matrix.clone();
     symmetrize_dense_in_place(&mut a);
     let p = a.nrows();
@@ -2088,9 +2074,9 @@ pub(crate) fn stable_logdet_with_ridge_policy(
             // Negative-eigenvalue tolerance, relative to the spectrum scale.
             let neg_tol = CUSTOM_FAMILY_CONDITION_RELATIVE_FLOOR * max_eig.abs().max(1.0);
             if min_eig <= -neg_tol {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "cholesky failed while computing full ridge-aware logdet and the symmetric spectrum is genuinely indefinite (p={p}, ridge={ridge:.3e}, min_eig={min_eig:.6e}, max_eig={max_eig:.6e}); an indefinite Hessian has no SPD log-determinant and defines no Laplace mode"
-                ));
+                )));
             }
             // PD but ill-conditioned: exact logdet from the positive spectrum,
             // flooring round-off-nonpositive eigenvalues at the ridge-relative
@@ -2109,7 +2095,7 @@ pub(crate) fn symmetrize_dense_in_place(matrix: &mut Array2<f64>) {
 pub(crate) fn strict_solve_spd(
     matrix: &Array2<f64>,
     rhs: &Array1<f64>,
-) -> Result<Array1<f64>, String> {
+) -> Result<Array1<f64>, CustomFamilyError> {
     let mut sym = matrix.clone();
     symmetrize_dense_in_place(&mut sym);
     let chol = sym
@@ -2180,10 +2166,10 @@ pub(crate) fn strict_spd_lm_engine<R>(
     matrix: &Array2<f64>,
     op_label: &'static str,
     empty: R,
-    bare_path: impl FnOnce(&Array2<f64>) -> Result<R, String>,
+    bare_path: impl FnOnce(&Array2<f64>) -> Result<R, CustomFamilyError>,
     process_chol: impl FnOnce(&gam_linalg::faer_ndarray::FaerCholeskyFactor) -> R,
     process_eigen: impl FnOnce(&Array1<f64>, &Array2<f64>, f64) -> R,
-) -> Result<(R, StrictSpdLmStats), String> {
+) -> Result<(R, StrictSpdLmStats), CustomFamilyError> {
     if let Ok(r) = bare_path(matrix) {
         return Ok((r, StrictSpdLmStats::default()));
     }
@@ -2251,7 +2237,7 @@ pub(crate) fn strict_spd_lm_engine<R>(
 pub(crate) fn strict_solve_spd_with_lm_continuation(
     matrix: &Array2<f64>,
     rhs: &Array1<f64>,
-) -> Result<(Array1<f64>, StrictSpdLmStats), String> {
+) -> Result<(Array1<f64>, StrictSpdLmStats), CustomFamilyError> {
     let p = matrix.nrows();
     strict_spd_lm_engine(
         matrix,
@@ -2310,11 +2296,11 @@ pub(crate) fn strict_solve_spd_with_lm_continuation(
 pub(crate) fn strict_exact_pseudo_logdet(
     matrix: &Array2<f64>,
     accumulation_depth: usize,
-) -> Result<f64, String> {
+) -> Result<f64, CustomFamilyError> {
     let mut sym = matrix.clone();
     symmetrize_dense_in_place(&mut sym);
     let (evals, _) = FaerEigh::eigh(&sym, Side::Lower)
-        .map_err(|e| format!("strict pseudo-laplace eigendecomposition failed: {e}"))?;
+        .map_err(|e| CustomFamilyError::NumericalFailure { reason: format!("strict pseudo-laplace eigendecomposition failed: {e}") })?;
     let p = sym.nrows();
     let max_abs_eval = evals.iter().fold(0.0_f64, |acc, &ev| acc.max(ev.abs()));
     // Bauer-Fike: |δσ| ≤ p·‖δH‖_∞; n-term fma roundoff gives ‖δH‖_∞ ≤ ε·n·‖H‖,
@@ -2361,8 +2347,7 @@ pub(crate) fn strict_exact_pseudo_logdet(
              (min(λ)={min_eval:.6e}, max|λ|={max_abs_eval:.6e}, neg_tol={neg_tol:.6e}, εnp={eps_np:.6e}); \
              indefinite joint coefficient Hessian rejected (no δ-ridge masking, gam#748)"
             ),
-        }
-        .into());
+        });
     }
     Ok(evals
         .iter()
@@ -2425,22 +2410,22 @@ pub(crate) fn symmetric_constrained_hessian_geometry(
     matrix: &Array2<f64>,
     levenberg_mu: f64,
     damp_full_rank_ill_conditioned: bool,
-) -> Result<ConstrainedHessianGeometry, String> {
+) -> Result<ConstrainedHessianGeometry, CustomFamilyError> {
     let p = matrix.nrows();
     if p == 0 || matrix.ncols() != p {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "constrained Hessian must be nonempty and square, got {}x{}",
             matrix.nrows(),
             matrix.ncols()
-        ));
+        )));
     }
     let mut sym = matrix.clone();
     symmetrize_dense_in_place(&mut sym);
     let (evals, evecs) = FaerEigh::eigh(&sym, Side::Lower)
-        .map_err(|error| format!("constrained Hessian eigendecomposition failed: {error:?}"))?;
+        .map_err(|error| CustomFamilyError::trial_point(format!("constrained Hessian eigendecomposition failed: {error:?}")))?;
     let lambda_max_abs = evals.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     if !(lambda_max_abs.is_finite() && lambda_max_abs > 0.0) {
-        return Err("constrained Hessian has no finite nonzero curvature scale".to_string());
+        return Err(CustomFamilyError::trial_point("constrained Hessian has no finite nonzero curvature scale".to_string()));
     }
     let cutoff = KKT_REFUSAL_RANK_TOL * lambda_max_abs;
     let nullity = evals.iter().filter(|value| value.abs() < cutoff).count();

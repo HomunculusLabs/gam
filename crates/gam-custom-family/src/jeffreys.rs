@@ -32,7 +32,7 @@ pub(crate) fn block_param_ranges(specs: &[ParameterBlockSpec]) -> Vec<(usize, us
 pub(crate) fn build_joint_jeffreys_subspace(
     specs: &[ParameterBlockSpec],
     ranges: &[(usize, usize)],
-) -> Result<Option<Array2<f64>>, String> {
+) -> Result<Option<Array2<f64>>, CustomFamilyError> {
     let total_p = ranges.last().map(|(_, e)| *e).unwrap_or(0);
     if total_p == 0 {
         return Ok(None);
@@ -100,7 +100,7 @@ pub(crate) fn build_joint_jeffreys_subspace(
 pub(crate) fn jeffreys_term_skippable_for_source(
     source: &JointHessianSource,
     total_p: usize,
-) -> Result<bool, String> {
+) -> Result<bool, CustomFamilyError> {
     // Small joint system: the dense reduced eigendecomposition is itself cheap
     // (`O(p³)` with `p` in the tens), so run the EXACT conditioning gate directly
     // instead of forcing the always-on Jeffreys term on every cycle. The previous
@@ -139,7 +139,8 @@ pub(crate) fn jeffreys_term_skippable_for_source(
         };
         return gam_solve::estimate::reml::jeffreys_subspace::jeffreys_term_skippable_dense(
             h_dense.view(),
-        );
+        )
+        .map_err(CustomFamilyError::trial_point);
     }
     // Matrix-free Hessian-vector product against the OBSERVED joint information.
     // For families whose Jeffreys information IS the observed Hessian (the trait
@@ -159,13 +160,19 @@ pub(crate) fn jeffreys_term_skippable_for_source(
     // on saturated misclassified rows where the expected information decays).
     // Callers must gate this pre-check on
     // `family.joint_jeffreys_information_matches_observed_hessian()`.
+    // Display boundary (gam#2689): `jeffreys_term_skippable_via_matvec` is a
+    // gam-solve entry point declared over `Result<_, String>`, so the typed
+    // operator error is rendered here rather than by a silent blanket `From`.
     let hv = |v: &Array1<f64>| -> Result<Array1<f64>, String> {
         match source {
             JointHessianSource::Dense(matrix) => Ok(matrix.dot(v)),
-            JointHessianSource::Operator { apply, .. } => apply(v),
+            JointHessianSource::Operator { apply, .. } => {
+                apply(v).map_err(|error| error.to_string())
+            }
         }
     };
     gam_solve::estimate::reml::jeffreys_subspace::jeffreys_term_skippable_via_matvec(hv, total_p)
+        .map_err(CustomFamilyError::trial_point)
 }
 
 /// Evaluate ONLY the Jeffreys objective value `Phi = 1/2 log|Z_J^T H Z_J|` at
@@ -227,7 +234,7 @@ pub(crate) fn custom_family_joint_jeffreys_term<F: CustomFamily + Clone + Send +
     specs: &[ParameterBlockSpec],
     ranges: &[(usize, usize)],
     z_joint: &Array2<f64>,
-) -> Result<Option<(f64, Array1<f64>, Array2<f64>)>, String> {
+) -> Result<Option<(f64, Array1<f64>, Array2<f64>)>, CustomFamilyError> {
     let total_p = ranges.last().map(|(_, e)| *e).unwrap_or(0);
     if total_p == 0 || z_joint.ncols() == 0 {
         return Ok(None);
@@ -251,7 +258,7 @@ fn custom_family_joint_jeffreys_term_from_information<
     specs: &[ParameterBlockSpec],
     h_joint: &Array2<f64>,
     z_joint: &Array2<f64>,
-) -> Result<(f64, Array1<f64>, Array2<f64>), String> {
+) -> Result<(f64, Array1<f64>, Array2<f64>), CustomFamilyError> {
     // The reduced information and its conditioning gate are authoritative and
     // are prepared before this lazy provider can run.  A gated-off term therefore
     // performs ZERO all-axes builds.  When active, the provider is called once and
@@ -286,7 +293,7 @@ pub(crate) fn custom_family_joint_jeffreys_term_from_workspace(
     total_p: usize,
     z_joint: &Array2<f64>,
     strength: f64,
-) -> Result<Option<(f64, Array1<f64>, Array2<f64>)>, String> {
+) -> Result<Option<(f64, Array1<f64>, Array2<f64>)>, CustomFamilyError> {
     if total_p == 0 || z_joint.ncols() == 0 {
         return Ok(None);
     }
@@ -294,25 +301,26 @@ pub(crate) fn custom_family_joint_jeffreys_term_from_workspace(
         return Ok(None);
     };
     if h_joint.dim() != (total_p, total_p) {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "accepted workspace Jeffreys Hessian shape {:?}, expected ({total_p}, {total_p})",
             h_joint.dim(),
-        ));
+        )));
     }
     let Some(directional_derivatives) = workspace.directional_derivative_all_axes()? else {
         return Ok(None);
     };
     if directional_derivatives.len() != total_p {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "accepted workspace Jeffreys derivative count {}, expected {total_p}",
             directional_derivatives.len(),
-        ));
+        )));
     }
     gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_term_batched(
         h_joint.view(),
         z_joint.view(),
         || Ok(Some(directional_derivatives)),
     )
+    .map_err(CustomFamilyError::trial_point)
     .map(|term| Some(scale_jeffreys_triple(term, strength)))
 }
 
@@ -335,7 +343,7 @@ pub(crate) fn custom_family_joint_jeffreys_term_with_exact_completion<
     specs: &[ParameterBlockSpec],
     ranges: &[(usize, usize)],
     z_joint: &Array2<f64>,
-) -> Result<Option<(f64, Array1<f64>, Array2<f64>, Array2<f64>)>, String> {
+) -> Result<Option<(f64, Array1<f64>, Array2<f64>, Array2<f64>)>, CustomFamilyError> {
     let total_p = ranges.last().map(|(_, end)| *end).unwrap_or(0);
     if total_p == 0 || z_joint.ncols() == 0 {
         return Ok(None);
@@ -361,10 +369,10 @@ pub(crate) fn custom_family_joint_jeffreys_term_with_exact_completion<
         "active Jeffreys term did not supply its exact second-order completion".to_string()
     })?;
     if completion.dim() != (total_p, total_p) || completion.iter().any(|value| !value.is_finite()) {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "exact Jeffreys completion is non-finite or has shape {:?}, expected ({total_p}, {total_p})",
             completion.dim(),
-        ));
+        )));
     }
     Ok(Some((phi, gradient, hphi, completion)))
 }
@@ -437,20 +445,20 @@ pub(crate) fn custom_family_jeffreys_conditioning_gate_weight(
 pub(crate) fn custom_family_joint_jeffreys_contract_weight(
     h_joint: ndarray::ArrayView2<'_, f64>,
     z_joint: ndarray::ArrayView2<'_, f64>,
-) -> Result<Option<(f64, Array2<f64>)>, String> {
+) -> Result<Option<(f64, Array2<f64>)>, CustomFamilyError> {
     let p = h_joint.nrows();
     if h_joint.ncols() != p {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "custom_family_joint_jeffreys_contract_weight: H must be square, got {}x{}",
             h_joint.nrows(),
             h_joint.ncols()
-        ));
+        )));
     }
     if z_joint.nrows() != p {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "custom_family_joint_jeffreys_contract_weight: Z_J has {} rows, expected {p}",
             z_joint.nrows()
-        ));
+        )));
     }
     let m = z_joint.ncols();
     if m == 0 {
@@ -517,7 +525,7 @@ pub(crate) fn custom_family_joint_jeffreys_second_order_completion<
     h_joint: &Array2<f64>,
     z_joint: &Array2<f64>,
     assembly: JeffreysCompletionAssembly,
-) -> Result<Option<Array2<f64>>, String> {
+) -> Result<Option<Array2<f64>>, CustomFamilyError> {
     let p = h_joint.nrows();
     let Some((gate_weight, trace_weight)) =
         custom_family_joint_jeffreys_contract_weight(h_joint.view(), z_joint.view())?
@@ -535,10 +543,10 @@ pub(crate) fn custom_family_joint_jeffreys_second_order_completion<
     )? {
         Some(mut contracted) => {
             if contracted.dim() != (p, p) {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "custom_family_joint_jeffreys_second_order_completion: contracted shape {:?} != ({p}, {p})",
                     contracted.dim()
-                ));
+                )));
             }
             contracted.mapv_inplace(|value| -0.5 * gate_weight * value);
             Some(contracted)
@@ -589,7 +597,7 @@ pub(crate) fn custom_family_outer_jeffreys_hphi<F: CustomFamily + Clone + Send +
     states: &[ParameterBlockState],
     specs: &[ParameterBlockSpec],
     ranges: &[(usize, usize)],
-) -> Result<Option<(f64, Array2<f64>, Option<Array2<f64>>)>, String> {
+) -> Result<Option<(f64, Array2<f64>, Option<Array2<f64>>)>, CustomFamilyError> {
     if !family.joint_jeffreys_term_required() {
         return Ok(None);
     }
@@ -688,7 +696,7 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
     states: &[ParameterBlockState],
     specs: &[ParameterBlockSpec],
     ranges: &[(usize, usize)],
-) -> Result<Option<JeffreysHphiDriftBatchFn>, String> {
+) -> Result<Option<JeffreysHphiDriftBatchFn>, CustomFamilyError> {
     // Install one canonical lazy drift provider for every active Jeffreys
     // profile. Value-only evaluation can consume it through the moving-Hessian
     // KKT correction just as derivative evaluation consumes it through trace
@@ -797,7 +805,8 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                         Some(derivative)
                     })
             })
-            .collect()
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(CustomFamilyError::trial_point)
     });
     Ok(Some(batch))
 }

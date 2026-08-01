@@ -696,7 +696,7 @@ pub fn build_embedded_dense_psi_operator(
     global_range: Range<usize>,
     total_p: usize,
     axis: usize,
-) -> Result<Arc<dyn CustomFamilyPsiDerivativeOperator>, String> {
+) -> Result<Arc<dyn CustomFamilyPsiDerivativeOperator>, CustomFamilyError> {
     let second_cross_local = second_cross_local
         .map(|rows| {
             rows.iter()
@@ -993,7 +993,7 @@ impl MaterializablePsiDerivativeOperator for RowwiseKroneckerPsiDerivativeOperat
 pub fn build_rowwise_kronecker_psi_operator(
     base: Arc<dyn CustomFamilyPsiDerivativeOperator>,
     time_bases: Vec<Arc<Array2<f64>>>,
-) -> Result<Arc<dyn CustomFamilyPsiDerivativeOperator>, String> {
+) -> Result<Arc<dyn CustomFamilyPsiDerivativeOperator>, CustomFamilyError> {
     Ok(Arc::new(RowwiseKroneckerPsiDerivativeOperator::new(
         base, time_bases,
     )?))
@@ -1392,7 +1392,7 @@ impl PsiDesignMap {
         }
     }
 
-    pub fn forward_mul(&self, u: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
+    pub fn forward_mul(&self, u: ArrayView1<'_, f64>) -> Result<Array1<f64>, CustomFamilyError> {
         match self {
             Self::Zero { nrows, .. } => Ok(Array1::<f64>::zeros(*nrows)),
             Self::Dense { matrix } => Ok(matrix.dot(&u)),
@@ -2025,7 +2025,7 @@ impl<T> ExactNewtonJointPsiDirectCache<T> {
         }
     }
 
-    pub fn touch_lru(&self, index: usize) -> Result<(), String> {
+    pub fn touch_lru(&self, index: usize) -> Result<(), CustomFamilyError> {
         let mut lru = self
             .lru
             .lock()
@@ -2049,9 +2049,9 @@ impl<T> ExactNewtonJointPsiDirectCache<T> {
         Ok(())
     }
 
-    pub fn get_or_try_init<F>(&self, index: usize, init: F) -> Result<Option<Arc<T>>, String>
+    pub fn get_or_try_init<F>(&self, index: usize, init: F) -> Result<Option<Arc<T>>, CustomFamilyError>
     where
-        F: FnOnce() -> Result<Option<T>, String>,
+        F: FnOnce() -> Result<Option<T>, CustomFamilyError>,
     {
         let Some(entry) = self.entries.get(index) else {
             return Err(CustomFamilyError::DimensionMismatch {
@@ -2059,8 +2059,7 @@ impl<T> ExactNewtonJointPsiDirectCache<T> {
                     "psi cache index {index} out of bounds for size {}",
                     self.entries.len()
                 ),
-            }
-            .into());
+            });
         };
         {
             let guard = entry

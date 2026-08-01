@@ -328,8 +328,8 @@ impl BinomialMeanWiggleFamily {
                         0..n,
                         "BinomialMeanWiggleFamily eta",
                         &self.policy,
-                    )?;
-                    let x_eta_psi = x_eta_psi_map.row_chunk(0..n)?;
+                    ).map_err(|error| error.to_string())?;
+                    let x_eta_psi = x_eta_psi_map.row_chunk(0..n).map_err(|error| error.to_string())?;
                     let z_eta_psi = x_eta_psi.dot(beta_eta);
                     return Ok(Some(BinomialMeanWiggleJointPsiDirection {
                         x_eta_psi: Some(x_eta_psi),

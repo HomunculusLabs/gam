@@ -250,7 +250,7 @@ impl SurvivalMarginalSlopeFamily {
             0..self.n,
             psi_label,
             &policy,
-        )?;
+        ).map_err(|error| error.to_string())?;
 
         // Parallel accumulation: each worker gets its own block-local accumulators.
         type Acc = (
@@ -499,7 +499,7 @@ impl SurvivalMarginalSlopeFamily {
                 0..self.n,
                 psi_label,
                 &policy,
-            )?;
+            ).map_err(|error| error.to_string())?;
             let loading = spatial_block_primary_loading(block_idx)?;
             let beta_psi: &Array1<f64> = match block_idx {
                 1 => &block_states[1].beta,
@@ -771,7 +771,7 @@ impl SurvivalMarginalSlopeFamily {
             0..self.n,
             label_i,
             &policy,
-        )?;
+        ).map_err(|error| error.to_string())?;
         let psi_map_j = crate::custom_family::resolve_custom_family_x_psi_map(
             deriv_j,
             self.n,
@@ -779,7 +779,7 @@ impl SurvivalMarginalSlopeFamily {
             0..self.n,
             label_j,
             &policy,
-        )?;
+        ).map_err(|error| error.to_string())?;
         let psi_map_ij = if same_block {
             Some(crate::custom_family::resolve_custom_family_x_psi_psi_map(
                 deriv_i,
@@ -790,7 +790,7 @@ impl SurvivalMarginalSlopeFamily {
                 0..self.n,
                 label_i,
                 &policy,
-            )?)
+            ).map_err(|error| error.to_string())?)
         } else {
             None
         };
@@ -1262,7 +1262,7 @@ impl SurvivalMarginalSlopeFamily {
             0..self.n,
             psi_label,
             &policy,
-        )?;
+        ).map_err(|error| error.to_string())?;
 
         let row_iter = outer_row_indices(options, self.n).to_vec();
         let row_weights = outer_row_weights_by_index(options, self.n);

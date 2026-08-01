@@ -2916,7 +2916,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
                 hyper_layout,
                 &candidates,
                 effective_mode,
-            )?;
+            ).map_err(|error| error.to_string())?;
             if let Some(err) = bernoulli_marginal_slope_runaway_error(
                 &selection.result.warm_start,
                 &designs[0],

@@ -381,7 +381,7 @@ pub(crate) fn build_block_spatial_psi_derivatives_with_transform(
                     info.global_range.clone(),
                     info.total_p,
                     info.implicit_axis,
-                )?)
+                ).map_err(|error| error.to_string())?)
             } else {
                 None
             };

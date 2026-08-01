@@ -240,7 +240,7 @@ fn generalized_trust_region_reduced_step(
     reduced_trust_metric: &Array2<f64>,
     reduced_rhs: &Array1<f64>,
     trust_radius: f64,
-) -> Result<ReducedMoreSorensenStep, String> {
+) -> Result<ReducedMoreSorensenStep, CustomFamilyError> {
     let dimension = reduced_hessian.nrows();
     if dimension == 0
         || reduced_hessian.ncols() != dimension
@@ -249,11 +249,11 @@ fn generalized_trust_region_reduced_step(
         || reduced_rhs.len() != dimension
     {
         return Err(
-            "generalized reduced trust region requires equal matrix/vector dimensions".into(),
+            CustomFamilyError::trial_point("generalized reduced trust region requires equal matrix/vector dimensions"),
         );
     }
     if !(trust_radius.is_finite() && trust_radius > 0.0) {
-        return Err("generalized reduced trust region requires a finite positive radius".into());
+        return Err(CustomFamilyError::trial_point("generalized reduced trust region requires a finite positive radius".to_string()));
     }
 
     let mut trust_metric = reduced_trust_metric.clone();
@@ -266,7 +266,7 @@ fn generalized_trust_region_reduced_step(
         .iter()
         .any(|value| !value.is_finite() || *value <= 0.0)
     {
-        return Err("reduced trust metric is not positive definite".into());
+        return Err(CustomFamilyError::trial_point("reduced trust metric is not positive definite".to_string()));
     }
 
     let mut metric_inv_sqrt_columns = metric_eigenvectors.clone();
@@ -289,12 +289,12 @@ fn generalized_trust_region_reduced_step(
         .iter()
         .any(|value| !value.is_finite())
     {
-        return Err("whitened reduced Hessian contains non-finite curvature".into());
+        return Err(CustomFamilyError::trial_point("whitened reduced Hessian contains non-finite curvature".to_string()));
     }
     let whitened_rhs = metric_inv_sqrt.dot(reduced_rhs);
     let spectral_rhs = generalized_eigenvectors.t().dot(&whitened_rhs);
     if spectral_rhs.iter().any(|value| !value.is_finite()) {
-        return Err("whitened reduced trust-region rhs is non-finite".into());
+        return Err(CustomFamilyError::trial_point("whitened reduced trust-region rhs is non-finite".to_string()));
     }
     let lambda_max_abs = generalized_eigenvalues
         .iter()
@@ -314,11 +314,11 @@ fn generalized_trust_region_reduced_step(
     let trust_step = spectrum.trust_region_step(trust_radius);
     let Some(trust_shift) = trust_step.trust_region_shift else {
         return Err(
-            "generalized reduced trust region unexpectedly selected reflected fallback".into(),
+            CustomFamilyError::trial_point("generalized reduced trust region unexpectedly selected reflected fallback"),
         );
     };
     if !(trust_shift.is_finite() && trust_shift >= 0.0) {
-        return Err("generalized reduced trust-region shift is invalid".into());
+        return Err(CustomFamilyError::trial_point("generalized reduced trust-region shift is invalid".to_string()));
     }
     let exact_positive_curvature = trust_shift == 0.0
         && !trust_step.trust_region_hard_case
@@ -331,7 +331,7 @@ fn generalized_trust_region_reduced_step(
         .fold(f64::INFINITY, f64::min);
     let delta = metric_inv_sqrt.dot(&trust_step.delta);
     if delta.iter().any(|value| !value.is_finite()) {
-        return Err("generalized reduced trust-region step is non-finite".into());
+        return Err(CustomFamilyError::trial_point("generalized reduced trust-region step is non-finite".to_string()));
     }
 
     // `WhitenedHessianSpectrum::assemble` stores the hard-case fill directly
@@ -351,13 +351,13 @@ fn generalized_trust_region_reduced_step(
         let min_mode = generalized_eigenvectors.column(min_index);
         let tau = min_mode.dot(&trust_step.delta);
         if !tau.is_finite() {
-            return Err("hard-case reduced trust-region fill is non-finite".into());
+            return Err(CustomFamilyError::trial_point("hard-case reduced trust-region fill is non-finite".to_string()));
         }
         let mut alternate_whitened = trust_step.delta.clone();
         alternate_whitened.scaled_add(-2.0 * tau, &min_mode);
         let alternate = metric_inv_sqrt.dot(&alternate_whitened);
         if alternate.iter().any(|value| !value.is_finite()) {
-            return Err("alternate hard-case reduced trust-region step is non-finite".into());
+            return Err(CustomFamilyError::trial_point("alternate hard-case reduced trust-region step is non-finite".to_string()));
         }
         Some(alternate)
     } else {
@@ -394,39 +394,39 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
     constraints: &ConstraintSet,
     reference: &Array1<f64>,
     candidate: &Array1<f64>,
-) -> Result<(Array1<f64>, usize, f64), String> {
+) -> Result<(Array1<f64>, usize, f64), CustomFamilyError> {
     if reference.len() != candidate.len()
         || reference.iter().any(|value| !value.is_finite())
         || candidate.iter().any(|value| !value.is_finite())
     {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "feasible-chord finite/dimension contract failed \
              (reference={}, candidate={})",
             reference.len(),
             candidate.len(),
-        ));
+        )));
     }
     let (reference_violation, reference_worst_row) = constraints
         .max_scaled_violation(reference.view())
-        .map_err(|error| format!("feasible-chord reference classification failed: {error}"))?;
+        .map_err(|error| CustomFamilyError::trial_point(format!("feasible-chord reference classification failed: {error}")))?;
     let (candidate_violation, candidate_worst_row) = constraints
         .max_scaled_violation(candidate.view())
-        .map_err(|error| format!("feasible-chord candidate classification failed: {error}"))?;
+        .map_err(|error| CustomFamilyError::trial_point(format!("feasible-chord candidate classification failed: {error}")))?;
     if !reference_violation.is_finite()
         || reference_violation > 0.0
         || !candidate_violation.is_finite()
         || candidate_violation <= 0.0
     {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "feasible-chord clipping premise failed \
              (reference_scaled_violation={reference_violation:.6e}@{reference_worst_row:?}, \
              candidate_scaled_violation={candidate_violation:.6e}@{candidate_worst_row:?})"
-        ));
+        )));
     }
 
     let direction = candidate - reference;
     if direction.iter().any(|value| !value.is_finite()) {
-        return Err("feasible-chord direction overflowed binary64".into());
+        return Err(CustomFamilyError::trial_point("feasible-chord direction overflowed binary64".to_string()));
     }
     // The ratio test is an ACCELERATOR here, not the authority.
     //
@@ -448,7 +448,7 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
     // whole chord when it declines to answer.
     let (raw_boundary_step, ratio_test_row) = constraints
         .max_feasible_step(reference.view(), direction.view(), &[])
-        .map_err(|error| format!("feasible-chord boundary ratio test failed: {error}"))?;
+        .map_err(|error| CustomFamilyError::trial_point(format!("feasible-chord boundary ratio test failed: {error}")))?;
     let boundary_step = if raw_boundary_step.is_finite() && (0.0..=1.0).contains(&raw_boundary_step)
     {
         raw_boundary_step
@@ -459,11 +459,11 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
     // one; otherwise the row whose evaluated violation is what forced the clip,
     // which is the row the chord actually ran into.
     let Some(blocking_row) = ratio_test_row.or(candidate_worst_row) else {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "infeasible QP endpoint names no violated row \
              (candidate_scaled_violation={candidate_violation:.6e}@{candidate_worst_row:?}, \
              ratio_test_step={raw_boundary_step:.6e})"
-        ));
+        )));
     };
 
     let point_at = |step: f64| reference + &(&direction * step);
@@ -471,24 +471,24 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
     let mut clipped = point_at(certified_step);
     let (mut clipped_violation, mut clipped_worst_row) = constraints
         .max_scaled_violation(clipped.view())
-        .map_err(|error| format!("feasible-chord boundary classification failed: {error}"))?;
+        .map_err(|error| CustomFamilyError::trial_point(format!("feasible-chord boundary classification failed: {error}")))?;
     if !clipped_violation.is_finite() {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "feasible-chord boundary classification is non-finite \
              (step={certified_step:.6e}, blocking_row={blocking_row}, \
              scaled_violation={clipped_violation:.6e}@{clipped_worst_row:?})"
-        ));
+        )));
     }
 
     if clipped_violation > 0.0 {
         let mut feasible_bits = 0_u64;
         let mut infeasible_bits = certified_step.to_bits();
         if infeasible_bits == 0 {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "certified feasible reference became infeasible at zero chord step \
                  (blocking_row={blocking_row}, \
                  scaled_violation={clipped_violation:.6e}@{clipped_worst_row:?})"
-            ));
+            )));
         }
         while infeasible_bits - feasible_bits > 1 {
             let middle_bits = feasible_bits + (infeasible_bits - feasible_bits) / 2;
@@ -500,11 +500,11 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
                     format!("feasible-chord representable-step classification failed: {error}")
                 })?;
             if !middle_violation.is_finite() {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "feasible-chord representable-step classification is non-finite \
                      (step={middle_step:.6e}, blocking_row={blocking_row}, \
                      scaled_violation={middle_violation:.6e}@{middle_worst_row:?})"
-                ));
+                )));
             }
             if middle_violation <= 0.0 {
                 feasible_bits = middle_bits;
@@ -521,11 +521,11 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
         })?;
     }
     if !clipped_violation.is_finite() || clipped_violation > 0.0 {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "feasible-chord endpoint failed mathematical feasibility certification \
              (step={certified_step:.6e}, blocking_row={blocking_row}, \
              scaled_violation={clipped_violation:.6e}@{clipped_worst_row:?})"
-        ));
+        )));
     }
     Ok((clipped, blocking_row, certified_step))
 }
@@ -572,7 +572,7 @@ fn certified_reduced_face_candidate(
     active_rows: &[usize],
     trust_metric_diag: &Array1<f64>,
     trust_radius: f64,
-) -> Result<Option<(Array1<f64>, Vec<usize>, ReducedFaceCandidateKind)>, String> {
+) -> Result<Option<(Array1<f64>, Vec<usize>, ReducedFaceCandidateKind)>, CustomFamilyError> {
     let p = beta.len();
     if active_rows.is_empty() {
         return Ok(None);
@@ -589,7 +589,7 @@ fn certified_reduced_face_candidate(
             .iter()
             .any(|value| !value.is_finite() || *value <= 0.0)
     {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "reduced-face candidate dimension/metric contract failed \
              (p={p}, rhs={}, hessian={}x{}, constraints={}x{}, trust_metric={}, \
              trust_radius={trust_radius:.6e})",
@@ -599,7 +599,7 @@ fn certified_reduced_face_candidate(
             constraints.nrows(),
             constraints.ncols(),
             trust_metric_diag.len(),
-        ));
+        )));
     }
     let mut trust_metric = Array2::<f64>::zeros((p, p));
     for index in 0..p {
@@ -607,12 +607,12 @@ fn certified_reduced_face_candidate(
     }
     let (original_base_violation, original_base_worst_row) = constraints
         .max_scaled_violation(beta.view())
-        .map_err(|error| format!("reduced-face base feasibility classification failed: {error}"))?;
+        .map_err(|error| CustomFamilyError::trial_point(format!("reduced-face base feasibility classification failed: {error}")))?;
     if !original_base_violation.is_finite() {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "reduced-face base feasibility classification is non-finite \
              (base_scaled_violation={original_base_violation:.6e}@{original_base_worst_row:?})"
-        ));
+        )));
     }
     // Mathematical feasibility is the theorem premise, so any positive
     // violation triggers repair. This decision deliberately has no tolerance.
@@ -637,13 +637,13 @@ fn certified_reduced_face_candidate(
             format!("reduced-face feasible-reference certification failed: {error}")
         })?;
     if !reference_violation.is_finite() || reference_violation > 0.0 {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "reduced-face solver reference is not mathematically feasible \
              (base_scaled_violation={original_base_violation:.6e}@{original_base_worst_row:?}, \
              reference_scaled_violation={reference_violation:.6e}@{reference_worst_row:?})"
-        ));
+        )));
     }
-    let reduce_face = |rows: &[usize]| -> Result<(Array2<f64>, Array1<f64>, Vec<usize>), String> {
+    let reduce_face = |rows: &[usize]| -> Result<(Array2<f64>, Array1<f64>, Vec<usize>), CustomFamilyError> {
         let mut unique = rows.to_vec();
         unique.sort_unstable();
         unique.dedup();
@@ -656,17 +656,17 @@ fn certified_reduced_face_candidate(
         }
         let gathered = constraints
             .gather_rows(&unique)
-            .map_err(|error| format!("physical reduced-face row gather failed: {error}"))?;
+            .map_err(|error| CustomFamilyError::trial_point(format!("physical reduced-face row gather failed: {error}")))?;
         let mut normalized_a = gathered.a;
         let mut normalized_b = gathered.b;
         for row in 0..normalized_a.nrows() {
             let norm = normalized_a.row(row).dot(&normalized_a.row(row)).sqrt();
             if !(norm.is_finite() && norm > 0.0) {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "physical reduced face contains a zero/non-finite row \
                      (constraint_row={})",
                     unique[row],
-                ));
+                )));
             }
             normalized_a.row_mut(row).mapv_inplace(|value| value / norm);
             normalized_b[row] /= norm;
@@ -764,12 +764,12 @@ fn certified_reduced_face_candidate(
                 .iter()
                 .any(|value| !value.is_finite() || *value <= singular_floor)
             {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "physical reduced-face rank reduction left a singular affine system \
                      (active_rows={}, singular_min={:.6e}, rank_floor={singular_floor:.6e})",
                     working_active.len(),
                     singular.iter().copied().fold(f64::INFINITY, f64::min),
-                ));
+                )));
             }
             let affine_rhs = &face_b - &face_a.dot(beta);
             let spectral_rhs = u.t().dot(&affine_rhs);
@@ -793,7 +793,7 @@ fn certified_reduced_face_candidate(
             (particular, tangent)
         };
         if delta_particular.iter().any(|value| !value.is_finite()) {
-            return Err("physical reduced-face affine particular is non-finite".into());
+            return Err(CustomFamilyError::trial_point("physical reduced-face affine particular is non-finite".to_string()));
         }
         let particular_norm_sq = delta_particular
             .iter()
@@ -805,24 +805,24 @@ fn certified_reduced_face_candidate(
             * (p.max(1) as f64)
             * radius_sq.abs().max(particular_norm_sq.abs()).max(1.0);
         if !particular_norm_sq.is_finite() || particular_norm_sq > radius_sq + ball_roundoff {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "physical reduced face does not intersect the trust ball \
                  (minimum_face_norm_sq={particular_norm_sq:.6e}, \
                  radius_sq={radius_sq:.6e}, active_rows={})",
                 working_active.len(),
-            ));
+            )));
         }
 
         let face_step = if let Some(tangent) = tangent.as_ref() {
             let remaining_radius_sq = (radius_sq - particular_norm_sq).max(0.0);
             if remaining_radius_sq == 0.0 {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "physical reduced face touches the trust ball with a nonzero tangent \
                      (active_rows={}, tangent_dim={}); a trust multiplier cannot be \
                      certified from an empty reduced ball",
                     working_active.len(),
                     tangent.ncols(),
-                ));
+                )));
             }
             let mut reduced_hessian = tangent.t().dot(exact_hessian).dot(tangent);
             symmetrize_dense_in_place(&mut reduced_hessian);
@@ -871,7 +871,7 @@ fn certified_reduced_face_candidate(
             }
         };
         if face_step.minimum_shifted_curvature < -face_step.numerical_floor {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "physical reduced-face second-order KKT failed \
                  (lambda_min_shifted={:.6e}, numerical_floor={:.6e}, \
                  trust_shift={:.6e}, active_rows={})",
@@ -879,7 +879,7 @@ fn certified_reduced_face_candidate(
                 face_step.numerical_floor,
                 face_step.trust_shift,
                 working_active.len(),
-            ));
+            )));
         }
 
         // Preserve both signs of a hard-case fill until feasibility is known.
@@ -895,10 +895,10 @@ fn certified_reduced_face_candidate(
                     format!("physical reduced-face feasibility classification failed: {error}")
                 })?;
             if !violation.is_finite() {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "physical reduced-face feasibility classification is non-finite \
                      (scaled_violation={violation:.6e}@{worst_row:?})"
-                ));
+                )));
             }
             if violation <= 0.0 {
                 feasible_candidates.push((raw_candidate, raw_delta.clone(), model_gain(raw_delta)));
@@ -933,7 +933,7 @@ fn certified_reduced_face_candidate(
                     .partial_cmp(&right.1)
                     .unwrap_or(std::cmp::Ordering::Equal)
             }) else {
-                return Err("physical reduced-face step produced no candidate or blocker".into());
+                return Err(CustomFamilyError::trial_point("physical reduced-face step produced no candidate or blocker".to_string()));
             };
             working_active.push(blocker);
             continue;
@@ -947,7 +947,7 @@ fn certified_reduced_face_candidate(
             })
             .expect("nonempty feasible reduced-face candidates");
         if !predicted_gain.is_finite() {
-            return Err("physical reduced-face predicted gain is non-finite".into());
+            return Err(CustomFamilyError::trial_point("physical reduced-face predicted gain is non-finite".to_string()));
         }
         let (candidate_violation, candidate_worst_row) = constraints
             .max_scaled_violation(candidate.view())
@@ -955,10 +955,10 @@ fn certified_reduced_face_candidate(
                 format!("physical reduced-face final feasibility check failed: {error}")
             })?;
         if !candidate_violation.is_finite() || candidate_violation > 0.0 {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "physical reduced-face candidate is not mathematically feasible \
                  (scaled_violation={candidate_violation:.6e}@{candidate_worst_row:?})"
-            ));
+            )));
         }
 
         let h_delta = exact_hessian.dot(&delta);
@@ -972,7 +972,7 @@ fn certified_reduced_face_candidate(
                 &[],
             )
         else {
-            return Err("physical reduced-face operator KKT projection failed".into());
+            return Err(CustomFamilyError::trial_point("physical reduced-face operator KKT projection failed".to_string()));
         };
         let (_support_a, _support_b, support) = reduce_face(&support)?;
         if support != working_active {
@@ -993,14 +993,14 @@ fn certified_reduced_face_candidate(
             .fold(1.0_f64, f64::max);
         let kkt_tolerance = f64::EPSILON.sqrt() * (p.max(1) as f64) * stationarity_scale;
         if !closure_inf.is_finite() || closure_inf > kkt_tolerance {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "physical reduced-face first-order KKT failed \
                  (projected_residual_inf={closure_inf:.6e}, \
                  tolerance={kkt_tolerance:.6e}, trust_shift={:.6e}, \
                  active_rows={})",
                 face_step.trust_shift,
                 working_active.len(),
-            ));
+            )));
         }
 
         let trust_norm_sq = delta
@@ -1016,12 +1016,12 @@ fn certified_reduced_face_candidate(
         let trust_complementary =
             face_step.trust_shift == 0.0 || (trust_norm - trust_radius).abs() <= trust_tolerance;
         if !trust_norm.is_finite() || !trust_feasible || !trust_complementary {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "physical reduced-face trust-ball KKT failed \
                  (metric_norm={trust_norm:.6e}, radius={trust_radius:.6e}, \
                  trust_shift={:.6e}, tolerance={trust_tolerance:.6e})",
                 face_step.trust_shift,
-            ));
+            )));
         }
 
         if original_base_violation <= 0.0 {
@@ -1031,12 +1031,12 @@ fn certified_reduced_face_candidate(
                 * (p.max(1) as f64)
                 * linear.abs().max(quadratic.abs()).max(1.0);
             if predicted_gain < -gain_tolerance {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "physical reduced-face candidate is inferior to the feasible \
                      zero step (predicted_gain={predicted_gain:.6e}, \
                      tolerance={gain_tolerance:.6e}, active_rows={})",
                     working_active.len(),
-                ));
+                )));
             }
         }
 
@@ -1065,7 +1065,7 @@ fn canonical_accepted_active_rows(
     constraints: Option<&ConstraintSet>,
     accepted_beta: &Array1<f64>,
     endpoint_active: &[usize],
-) -> Result<Vec<usize>, String> {
+) -> Result<Vec<usize>, CustomFamilyError> {
     let Some(constraints) = constraints else {
         return Ok(endpoint_active.to_vec());
     };
@@ -1074,6 +1074,7 @@ fn canonical_accepted_active_rows(
         accepted_beta.view(),
         gam_solve::active_set::ACTIVE_SET_WORKING_FACE_TOL,
     )
+    .map_err(|error| CustomFamilyError::trial_point(error.to_string()))
     .map(|face| {
         face.representatives
             .into_iter()
@@ -1081,7 +1082,9 @@ fn canonical_accepted_active_rows(
             .collect()
     })
     .map_err(|error| {
-        format!("accepted constrained-Newton canonical face reduction failed: {error}")
+        CustomFamilyError::trial_point(format!(
+            "accepted constrained-Newton canonical face reduction failed: {error}"
+        ))
     })
 }
 
@@ -1113,7 +1116,7 @@ mod exact_face_newton_tests {
         .expect_err("an attempted reduced-face solve must never silently change models");
 
         assert!(
-            error.contains("dimension/metric contract failed"),
+            error.to_string().contains("dimension/metric contract failed"),
             "unexpected reduced-face diagnostic: {error}"
         );
     }
@@ -1602,7 +1605,7 @@ pub(crate) fn fused_first_attempt_log_likelihood<
     states: &[ParameterBlockState],
     trust_attempt: usize,
     joint_workspace_requested: bool,
-) -> Result<Option<(f64, Arc<dyn ExactNewtonJointHessianWorkspace>)>, String> {
+) -> Result<Option<(f64, Arc<dyn ExactNewtonJointHessianWorkspace>)>, CustomFamilyError> {
     if trust_attempt == 0 && joint_workspace_requested {
         joint_line_search_log_likelihood_with_workspace(family, options, specs, states)
     } else {
@@ -1625,15 +1628,15 @@ fn exact_joint_jeffreys_completion_at<F: CustomFamily + Clone + Send + Sync + 's
     z_joint: &Array2<f64>,
     total_p: usize,
     context: &str,
-) -> Result<Array2<f64>, String> {
+) -> Result<Array2<f64>, CustomFamilyError> {
     let h_information = family
         .joint_jeffreys_information_with_specs(states, specs)?
-        .ok_or_else(|| format!("{context}: active Jeffreys term has no information matrix"))?;
+        .ok_or_else(|| CustomFamilyError::trial_point(format!("{context}: active Jeffreys term has no information matrix")))?;
     if h_information.dim() != (total_p, total_p) {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "{context}: Jeffreys information shape {:?}, expected ({total_p}, {total_p})",
             h_information.dim(),
-        ));
+        )));
     }
     let completion = custom_family_joint_jeffreys_second_order_completion(
         family,
@@ -1647,10 +1650,10 @@ fn exact_joint_jeffreys_completion_at<F: CustomFamily + Clone + Send + Sync + 's
         format!("{context}: active Jeffreys term did not supply its exact second-order completion")
     })?;
     if completion.dim() != (total_p, total_p) || completion.iter().any(|value| !value.is_finite()) {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "{context}: Jeffreys completion is non-finite or has shape {:?}, expected ({total_p}, {total_p})",
             completion.dim(),
-        ));
+        )));
     }
     Ok(completion)
 }
@@ -1671,13 +1674,13 @@ fn assemble_true_joint_objective_hessian(
     hphi: Option<&Array2<f64>>,
     completion: Option<&Array2<f64>>,
     context: &str,
-) -> Result<Array2<f64>, String> {
+) -> Result<Array2<f64>, CustomFamilyError> {
     let total_p = likelihood_hessian.nrows();
     if likelihood_hessian.ncols() != total_p {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "{context}: likelihood Hessian is not square: {:?}",
             likelihood_hessian.dim(),
-        ));
+        )));
     }
     add_joint_penalty_to_matrix(
         &mut likelihood_hessian,
@@ -1695,31 +1698,31 @@ fn assemble_true_joint_objective_hessian(
             likelihood_hessian += completion;
         }
         (Some(hphi), Some(completion)) => {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "{context}: Jeffreys curvature shape mismatch: H_phi={:?}, completion={:?}, expected ({total_p}, {total_p})",
                 hphi.dim(),
                 completion.dim(),
-            ));
+            )));
         }
         _ => {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "{context}: H_phi and its exact second-order completion must be supplied together"
-            ));
+            )));
         }
     }
     symmetrize_dense_in_place(&mut likelihood_hessian);
     if likelihood_hessian.iter().any(|value| !value.is_finite()) {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "{context}: exact joint objective Hessian contains a non-finite value"
-        ));
+        )));
     }
     Ok(likelihood_hessian)
 }
 
-fn symmetric_eigen_extremes(matrix: &Array2<f64>, context: &str) -> Result<(f64, f64), String> {
+fn symmetric_eigen_extremes(matrix: &Array2<f64>, context: &str) -> Result<(f64, f64), CustomFamilyError> {
     let (eigenvalues, _) = matrix
         .eigh(Side::Lower)
-        .map_err(|error| format!("{context}: symmetric eigendecomposition failed: {error}"))?;
+        .map_err(|error| CustomFamilyError::trial_point(format!("{context}: symmetric eigendecomposition failed: {error}")))?;
     Ok((
         eigenvalues.iter().copied().fold(f64::INFINITY, f64::min),
         eigenvalues
@@ -1773,7 +1776,7 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
     joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
     total_p: usize,
     active_constraints: Option<&ActiveLinearConstraintBlock>,
-) -> Result<ExactJointModeCurvatureCertificate, String> {
+) -> Result<ExactJointModeCurvatureCertificate, CustomFamilyError> {
     let workspace =
         family.exact_newton_joint_hessian_workspace_with_options(states, specs, options)?;
     let source = match workspace.as_ref() {
@@ -2021,7 +2024,7 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
     previous_escape_lambda_min: Option<f64>,
     objective_tol: f64,
     jeffreys_completion_calls: &mut usize,
-) -> Result<ConstrainedModeResolution, String> {
+) -> Result<ConstrainedModeResolution, CustomFamilyError> {
     // Certify on the tangent of every NUMERICALLY-TIGHT constraint, not only the
     // QP's recorded active set. At a degenerate binding vertex the QP can leave a
     // row with slack below the primal-feasibility tolerance OUT of
@@ -2082,7 +2085,7 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
     objective_tol: f64,
     jeffreys_completion_calls: &mut usize,
     face_exchanges: usize,
-) -> Result<ConstrainedModeResolution, String> {
+) -> Result<ConstrainedModeResolution, CustomFamilyError> {
     let mode_active_block =
         assemble_active_constraint_block(block_constraints, &tight_active_sets, ranges, total_p);
     let certificate = exact_joint_mode_curvature_certificate(
@@ -2137,19 +2140,19 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
     if let Some(previous) = previous_escape_lambda_min
         && lambda_min <= previous
     {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "joint Newton returned-mode curvature is still a strict saddle after a negative-curvature escape that did not improve it: lambda_min={lambda_min:.6e} is no closer to zero than the pre-escape {previous:.6e} (floor={numerical_floor:.6e}, escapes spent={saddle_escapes_used}); the escape direction is not a way out of this saddle, so the remaining budget would only travel further",
-        ));
+        )));
     }
     if saddle_escapes_used >= MAX_SADDLE_ESCAPES {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "joint Newton tentative convergence rejected by fresh exact returned-mode curvature: lambda_min={lambda_min:.6e} < -floor={numerical_floor:.6e}; an indefinite coefficient point cannot define a Laplace mode (after {saddle_escapes_used} negative-curvature escapes)",
-        ));
+        )));
     }
     let Some(direction) = certificate.negative_curvature_direction else {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "joint Newton returned-mode curvature is a strict saddle (lambda_min={lambda_min:.6e} < -floor={numerical_floor:.6e}) but the certificate exposed no finite escape direction",
-        ));
+        )));
     };
     // Along the raw coefficient direction `δ` the exact curvature is `γ_min`
     // (`δᵀ H_pen δ = γ_min`), so a step `s·δ` lowers the quadratic model by
@@ -2169,13 +2172,13 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
     // `lambda_min` unchanged to seven significant figures across both escapes.
     let gamma_min = lambda_min.abs();
     if !(gamma_min.is_finite() && gamma_min > 0.0) {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "saddle-escape could not size a step: non-finite curvature magnitude lambda_min={lambda_min:.6e}",
-        ));
+        )));
     }
     let direction_norm = direction.dot(&direction).sqrt();
     if !(direction_norm.is_finite() && direction_norm > 0.0) {
-        return Err("saddle-escape direction is degenerate (zero or non-finite norm)".to_string());
+        return Err(CustomFamilyError::trial_point("saddle-escape direction is degenerate (zero or non-finite norm)".to_string()));
     }
     let beta = flatten_state_betas(states, specs);
     let beta_norm = beta.dot(&beta).sqrt();
@@ -2232,12 +2235,12 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
             // chord would be truncated by nothing at all. Refuse instead; the
             // predicate is the constraint carrier's own.
             if !gam_problem::feasibility_quantities_are_finite(&[scaled_slack, scaled_rate]) {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "saddle-escape feasibility row {row} cannot be decided: \
                      scaled slack={scaled_slack:.3e}, scaled rate={scaled_rate:.3e}; \
                      every comparison in the chord truncation is false for NaN, so \
                      skipping the row would leave the chord untruncated (gam#2721)"
-                ));
+                )));
             }
             if scaled_slack < 0.0 {
                 continue;
@@ -2328,9 +2331,9 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
         );
     }
     if !(magnitude.is_finite() && magnitude > 0.0) {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "joint Newton returned-mode curvature is a strict saddle (lambda_min={lambda_min:.6e} < -floor={numerical_floor:.6e}) with no feasible escape length along the negative-curvature tangent (locality_cap={locality_cap:.6e}, decrease_floor={decrease_floor:.6e}, feasible_cap={feasible_cap:.6e})",
-        ));
+        )));
     }
     // Which of the three terms BINDS is the whole diagnosis when an escape
     // fails to escape, and it is not recoverable from `alpha` alone (#2587 cost
@@ -2361,7 +2364,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
     block_log_lambdas: &[Array1<f64>],
     options: &BlockwiseFitOptions,
     warm_start: Option<&ConstrainedWarmStart>,
-) -> Result<BlockwiseInnerResult, String> {
+) -> Result<BlockwiseInnerResult, CustomFamilyError> {
     // Inner-blockwise prelude waypoints. At large-scale n the cold-start
     // path between function entry and the first PIRLS/JN cycle-summary
     // log can run for many minutes (sometimes hours) silently while
@@ -2560,8 +2563,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         let Some(block_log_lambda) = block_log_lambdas.get(b) else {
             return Err(CustomFamilyError::UnsupportedConfiguration {
                 reason: format!("missing log-smoothing parameter vector for block {b}"),
-            }
-            .into());
+            });
         };
         if block_log_lambda.len() != spec.penalties.len() {
             return Err(CustomFamilyError::DimensionMismatch {
@@ -2570,8 +2572,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     block_log_lambda.len(),
                     spec.penalties.len()
                 ),
-            }
-            .into());
+            });
         }
 
         let p = spec.design.ncols();
@@ -2587,7 +2588,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
     });
     let s_lambdas_collect_started = std::time::Instant::now();
     let s_lambdas_launch_elapsed = s_lambdas_launch_started.elapsed();
-    let s_lambdas = s_lambdas_par_iter.collect::<Result<Vec<_>, String>>()?;
+    let s_lambdas = s_lambdas_par_iter.collect::<Result<Vec<_>, CustomFamilyError>>()?;
     if prelude_log {
         log::info!(
             "[STAGE] PIRLS/inner step=s_lambdas par_iter launch={:.3}s collect={:.3}s blocks={} (since inner-start={:.3}s)",
@@ -2602,11 +2603,11 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
     if let Some(bundle) = joint_bundle {
         for (i, spec) in bundle.specs().iter().enumerate() {
             if spec.dim() != total_joint_p {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "joint penalty {i}: dim {} != total compiled p {}",
                     spec.dim(),
                     total_joint_p,
-                ));
+                )));
             }
         }
         assert_eq!(bundle.specs().len(), bundle.log_lambdas().len());
@@ -3002,11 +3003,11 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             },
         );
         if cycle_eval.blockworking_sets.len() != specs.len() {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "family returned {} block working sets, expected {}",
                 cycle_eval.blockworking_sets.len(),
                 specs.len()
-            ));
+            )));
         }
         // Track whether any block was modified this cycle (for dynamic families,
         // we only need to re-evaluate before block b if a previous block changed).
@@ -3019,11 +3020,11 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 refresh_all_block_etas(family, specs, &mut states)?;
                 cycle_eval = family.evaluate(&states)?;
                 if cycle_eval.blockworking_sets.len() != specs.len() {
-                    return Err(format!(
+                    return Err(CustomFamilyError::trial_point(format!(
                         "family returned {} block working sets, expected {}",
                         cycle_eval.blockworking_sets.len(),
                         specs.len()
-                    ));
+                    )));
                 }
             }
 
@@ -3580,7 +3581,7 @@ pub(crate) fn polish_joint_newton_step<F: CustomFamily + Clone + Send + Sync + '
     cached_eval: &mut FamilyEvaluation,
     current_penalty: &mut f64,
     converged: &mut bool,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     let ranges_joint: Vec<(usize, usize)> = {
         let mut offset = 0;
         specs
@@ -3846,7 +3847,7 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
     last_residual_tol: f64,
     terminal_convergence_state: Option<gam_problem::InnerConvergenceTerminalState>,
     exact_joint_curvature_available: bool,
-) -> Result<BlockwiseInnerResult, String> {
+) -> Result<BlockwiseInnerResult, CustomFamilyError> {
     let local_ranges = block_param_ranges(specs);
     let local_total_p = local_ranges.last().map(|(_, end)| *end).unwrap_or(0);
     let block_constraints = collect_block_linear_constraints(family, &states, specs)?;
@@ -3895,10 +3896,10 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
         let numerical_floor = certificate.numerical_floor;
         certified_workspace = certificate.workspace;
         if has_negative_curvature {
-            return Err(format!(
+            return Err(CustomFamilyError::trial_point(format!(
                 "blockwise/joint-polish tentative convergence rejected by fresh exact returned-mode curvature: lambda_min={:.6e} < -floor={:.6e}; an indefinite coefficient point cannot define a Laplace mode",
                 minimum_whitened_eigenvalue, numerical_floor,
-            ));
+            )));
         }
         log::info!(
             "[PIRLS/blockwise mode certificate] returned beta certified from fresh exact curvature: lambda_min={:.6e}, floor={:.6e}",

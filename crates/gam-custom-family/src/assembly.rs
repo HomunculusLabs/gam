@@ -40,7 +40,7 @@ pub(crate) fn build_custom_family_inner_assembly<'dp>(
         usize,
         Vec<f64>,
     ),
-    String,
+    CustomFamilyError,
 > {
     use gam_problem::PenaltyCoordinate;
     use gam_solve::estimate::reml::assembly::{
@@ -97,11 +97,11 @@ pub(crate) fn build_custom_family_inner_assembly<'dp>(
         .unwrap_or_default();
     let joint_penalty_roots = joint_bundle.map(|bundle| bundle.roots()).unwrap_or(&[]);
     if joint_penalty_roots.len() != joint_penalty_matrices.len() {
-        return Err(format!(
+        return Err(CustomFamilyError::trial_point(format!(
             "joint penalty geometry mismatch: {} matrices vs {} cached roots",
             joint_penalty_matrices.len(),
             joint_penalty_roots.len(),
-        ));
+        )));
     }
     for root in joint_penalty_roots {
         penalty_coords.push(PenaltyCoordinate::from_dense_root(root.clone()));
@@ -215,8 +215,18 @@ pub(crate) fn build_custom_family_inner_assembly<'dp>(
         nullspace_dim: None,
         barrier_config: None,
         ext_coords,
-        ext_coord_pair_fn,
-        rho_ext_pair_fn,
+        // Display boundary (gam#2689): `InnerAssembly` is a gam-solve struct
+        // whose hyper-pair callbacks are declared over `Result<_, String>`, so
+        // the typed error is rendered HERE, explicitly, rather than by a silent
+        // blanket `From` at every `?` inside the closures.
+        ext_coord_pair_fn: ext_coord_pair_fn.map(|f| {
+            Box::new(move |i: usize, j: usize| f(i, j).map_err(|error| error.to_string()))
+                as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>
+        }),
+        rho_ext_pair_fn: rho_ext_pair_fn.map(|f| {
+            Box::new(move |i: usize, j: usize| f(i, j).map_err(|error| error.to_string()))
+                as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>
+        }),
         fixed_drift_deriv,
         contracted_psi_second_order: contracted_psi_fn,
         kkt_residual: inner.kkt_residual.clone(),
@@ -478,7 +488,7 @@ pub(crate) fn unified_joint_cost_gradient(
         [f64; 4],
         Option<Array2<f64>>,
     ),
-    String,
+    CustomFamilyError,
 > {
     let trace_skip = first_order_trace_skip
         .as_ref()
@@ -590,7 +600,7 @@ pub(crate) fn unified_joint_efs_eval(
     rho_prior: gam_problem::RhoPrior,
     deriv_provider: Box<dyn HessianDerivativeProvider + '_>,
     ext_bundle: Option<ExtCoordBundle>,
-) -> Result<gam_problem::EfsEval, String> {
+) -> Result<gam_problem::EfsEval, CustomFamilyError> {
     let (assembly, _, joint_log_lambdas) = build_custom_family_inner_assembly(
         inner,
         specs,
@@ -900,21 +910,21 @@ pub(crate) fn joint_outer_evaluate(
     compute_d2h: &DriftSecondDerivFn<'_>,
     compute_d2h_many: Option<&DriftSecondDerivManyFn<'_>>,
     owned_compute_dh: Option<
-        Arc<dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, String> + Send + Sync>,
+        Arc<dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError> + Send + Sync>,
     >,
     owned_compute_dh_many: Option<
-        Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<DriftDerivResult>>, String> + Send + Sync>,
+        Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<DriftDerivResult>>, CustomFamilyError> + Send + Sync>,
     >,
     owned_compute_d2h: Option<
         Arc<
-            dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, String>
+            dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError>
                 + Send
                 + Sync,
         >,
     >,
     owned_compute_d2h_many: Option<
         Arc<
-            dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Option<DriftDerivResult>>, String>
+            dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Option<DriftDerivResult>>, CustomFamilyError>
                 + Send
                 + Sync,
         >,
@@ -950,7 +960,7 @@ pub(crate) fn joint_outer_evaluate(
     // makes the analytic gradient match the augmented objective. `None` ⇒ the
     // provider is used unwrapped.
     jeffreys_hphi_drift: Option<JeffreysHphiDriftBatchFn>,
-) -> Result<OuterObjectiveEvalResult, String> {
+) -> Result<OuterObjectiveEvalResult, CustomFamilyError> {
     let joint_trace_diagonal_ridge = moderidge + if !strict_spd { extra_logdet_ridge } else { 0.0 };
     let scaled_joint_trace_diagonal_ridge = rho_curvature_scale * joint_trace_diagonal_ridge;
 
@@ -1285,7 +1295,7 @@ pub(crate) fn joint_outer_evaluate(
                     &j_for_traces,
                     pseudo_logdet_mode,
                 )
-                .map_err(|e| format!("BlockCoupledOperator from joint Hessian: {e}"))?,
+                .map_err(|e| CustomFamilyError::trial_point(format!("BlockCoupledOperator from joint Hessian: {e}")))?,
             )
         };
         if let Ok(mut cache) = assembled_operator_cache().lock() {
@@ -1498,14 +1508,12 @@ pub(crate) fn joint_outer_evaluate(
         );
         return Err(CustomFamilyError::NumericalFailure {
             reason: "joint outer evaluation produced a non-finite objective".to_string(),
-        }
-        .into());
+        });
     }
     if grad.iter().any(|value| !value.is_finite()) {
         return Err(CustomFamilyError::NumericalFailure {
             reason: "joint outer evaluation produced a non-finite gradient".to_string(),
-        }
-        .into());
+        });
     }
     if grad.len() != expected_theta_dim {
         return Err(CustomFamilyError::DimensionMismatch {
@@ -1514,16 +1522,14 @@ pub(crate) fn joint_outer_evaluate(
                 grad.len(),
                 expected_theta_dim
             ),
-        }
-        .into());
+        });
     }
     match &outer_hessian {
         gam_problem::HessianValue::Dense(hessian) => {
             if hessian.iter().any(|value| !value.is_finite()) {
                 return Err(CustomFamilyError::NumericalFailure {
                     reason: "joint outer evaluation produced a non-finite Hessian".to_string(),
-                }
-                .into());
+                });
             }
             if hessian.nrows() != expected_theta_dim || hessian.ncols() != expected_theta_dim {
                 return Err(CustomFamilyError::DimensionMismatch {
@@ -1534,17 +1540,16 @@ pub(crate) fn joint_outer_evaluate(
                         expected_theta_dim,
                         expected_theta_dim
                     ),
-                }
-                .into());
+                });
             }
         }
         gam_problem::HessianValue::Operator(op) => {
             if op.dim() != expected_theta_dim {
-                return Err(format!(
+                return Err(CustomFamilyError::trial_point(format!(
                     "joint outer evaluation returned operator Hessian dim {}, expected {}",
                     op.dim(),
                     expected_theta_dim
-                ));
+                )));
             }
         }
         gam_problem::HessianValue::Unavailable => {}
@@ -1600,27 +1605,27 @@ pub(crate) fn joint_outer_evaluate_efs(
     compute_d2h: &DriftSecondDerivFn<'_>,
     compute_d2h_many: Option<&DriftSecondDerivManyFn<'_>>,
     owned_compute_dh: Option<
-        Arc<dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, String> + Send + Sync>,
+        Arc<dyn Fn(&Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError> + Send + Sync>,
     >,
     owned_compute_dh_many: Option<
-        Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<DriftDerivResult>>, String> + Send + Sync>,
+        Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<DriftDerivResult>>, CustomFamilyError> + Send + Sync>,
     >,
     owned_compute_d2h: Option<
         Arc<
-            dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, String>
+            dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Option<DriftDerivResult>, CustomFamilyError>
                 + Send
                 + Sync,
         >,
     >,
     owned_compute_d2h_many: Option<
         Arc<
-            dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Option<DriftDerivResult>>, String>
+            dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Option<DriftDerivResult>>, CustomFamilyError>
                 + Send
                 + Sync,
         >,
     >,
     ext_bundle: Option<ExtCoordBundle>,
-) -> Result<gam_problem::EfsEval, String> {
+) -> Result<gam_problem::EfsEval, CustomFamilyError> {
     let joint_trace_diagonal_ridge = moderidge + if !strict_spd { extra_logdet_ridge } else { 0.0 };
     let scaled_joint_trace_diagonal_ridge = rho_curvature_scale * joint_trace_diagonal_ridge;
 
@@ -1805,7 +1810,7 @@ pub(crate) fn joint_outer_evaluate_efs(
         }
         Arc::new(
             BlockCoupledOperator::from_joint_hessian_with_mode(&j_for_traces, pseudo_logdet_mode)
-                .map_err(|e| format!("BlockCoupledOperator from joint Hessian: {e}"))?,
+                .map_err(|e| CustomFamilyError::trial_point(format!("BlockCoupledOperator from joint Hessian: {e}")))?,
         )
     };
 
@@ -1905,7 +1910,7 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
         bool,
         BlockwiseInnerResult,
     ),
-    String,
+    CustomFamilyError,
 > {
     let include_logdet_h = include_exact_newton_logdet_h(family, options);
     let include_logdet_s = include_exact_newton_logdet_s(family, options);
@@ -1999,16 +2004,14 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
             )
         } else {
             if family.requires_joint_outer_hyper_path() {
-                return Err(
-                        "outer hyper fixed-point evaluation requires a joint exact path for this family"
-                            .to_string(),
-                    );
+                return Err(CustomFamilyError::trial_point(
+                    "outer hyper fixed-point evaluation requires a joint exact path for this family",
+                ));
             }
             if specs.len() != 1 {
-                return Err(
-                        "generic fixed-point outer fallback is only valid for single-block families; multi-block families must provide a joint outer path"
-                            .to_string(),
-                    );
+                return Err(CustomFamilyError::trial_point(
+                    "generic fixed-point outer fallback is only valid for single-block families; multi-block families must provide a joint outer path",
+                ));
             }
 
             let eval = family.evaluate(&inner.block_states)?;
@@ -2044,13 +2047,13 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                             hessian.ncols(),
                             p,
                             p
-                        ) }.into());
+                        ) });
                     }
                     hessian.to_dense()
                 }
             };
             let beta_flat = inner.block_states[block_idx].beta.clone();
-            let compute_dh = |direction: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
+            let compute_dh = |direction: &Array1<f64>| -> Result<Option<DriftDerivResult>, CustomFamilyError> {
                 if !include_logdet_h {
                     return Ok(None);
                 }
@@ -2072,7 +2075,7 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                             }
                             None => Err(CustomFamilyError::UnsupportedConfiguration { reason: format!(
                                 "missing exact-newton dH callback for block {block_idx} while fixed-point evaluation requires H_beta term"
-                            ) }.into()),
+                            ) }),
                         }
                     }
                     BlockWorkingSet::Diagonal {
@@ -2133,7 +2136,7 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                                 "block {block_idx} diagonal dW length mismatch in fixed-point outer evaluation: got {}, expected {}",
                                 dw.len(),
                                 n
-                            ) }.into());
+                            ) });
                         }
                         let mut scaled_x = x_dense.clone();
                         ndarray::Zip::from(scaled_x.rows_mut())
@@ -2147,7 +2150,7 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
             };
             let compute_d2h = |u: &Array1<f64>,
                                v: &Array1<f64>|
-             -> Result<Option<DriftDerivResult>, String> {
+             -> Result<Option<DriftDerivResult>, CustomFamilyError> {
                 if !include_logdet_h {
                     return Ok(None);
                 }
@@ -2170,7 +2173,7 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                             }
                             None => Err(CustomFamilyError::UnsupportedConfiguration { reason: format!(
                                 "missing exact-newton d2H callback for block {block_idx} while fixed-point evaluation requires H_beta_beta term"
-                            ) }.into()),
+                            ) }),
                         }
                     }
                     BlockWorkingSet::Diagonal {
@@ -2190,14 +2193,14 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                         let reject_second_order_geometry =
                             |label: &str,
                              geom: Option<BlockGeometryDirectionalDerivative>|
-                             -> Result<(), String> {
+                             -> Result<(), CustomFamilyError> {
                                 if let Some(geom_dir) = geom {
                                     let has_offset =
                                         geom_dir.d_offset.iter().any(|value| *value != 0.0);
                                     if geom_dir.d_design.is_some() || has_offset {
                                         return Err(CustomFamilyError::UnsupportedConfiguration { reason: format!(
                                             "block {block_idx} diagonal d2H requires second-order block-geometry derivatives for {label}; use an exact-newton or joint outer path"
-                                        ) }.into());
+                                        ) });
                                     }
                                 }
                                 Ok(())
@@ -2239,7 +2242,7 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                                 "block {block_idx} diagonal d2W length mismatch in fixed-point outer evaluation: got {}, expected {}",
                                 d2w.len(),
                                 n
-                            ) }.into());
+                            ) });
                         }
                         let mut scaled_x = x_dense.clone();
                         ndarray::Zip::from(scaled_x.rows_mut())

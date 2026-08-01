@@ -1341,41 +1341,41 @@ impl GaussianLocationScaleWiggleFamily {
             xmu_map,
             coeff_mm.view(),
             CustomFamilyPsiLinearMapRef::Dense(xmu),
-        )?;
+        ).map_err(|error| error.to_string())?;
         let h_mm = &h_mm_a1 + &h_mm_a1.t() + &xt_diag_x_dense(xmu, &coeff_mm_a)?;
         let h_ml = weighted_crossprod_psi_maps(
             xmu_map,
             coeff_ml.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             CustomFamilyPsiLinearMapRef::Dense(xmu),
             coeff_ml.view(),
             x_ls_map,
-        )? + &xt_diag_y_dense(xmu, &coeff_ml_a, x_ls)?;
+        ).map_err(|error| error.to_string())? + &xt_diag_y_dense(xmu, &coeff_ml_a, x_ls)?;
         let h_ll_a1 = weighted_crossprod_psi_maps(
             x_ls_map,
             coeff_ll.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
-        )?;
+        ).map_err(|error| error.to_string())?;
         let h_ll = &h_ll_a1 + &h_ll_a1.t() + &xt_diag_x_dense(x_ls, &coeff_ll_a)?;
         let h_mw = weighted_crossprod_psi_maps(
             xmu_map,
             a.view(),
             CustomFamilyPsiLinearMapRef::Dense(&geom.basis),
-        )? + &xt_diag_y_dense(xmu, &a_a, &geom.basis)?
+        ).map_err(|error| error.to_string())? + &xt_diag_y_dense(xmu, &a_a, &geom.basis)?
             + &xt_diag_y_dense(xmu, &a, &basis_a)?
             + &weighted_crossprod_psi_maps(
                 xmu_map,
                 c.view(),
                 CustomFamilyPsiLinearMapRef::Dense(&geom.basis_d1),
-            )?
+            ).map_err(|error| error.to_string())?
             + &xt_diag_y_dense(xmu, &c_a, &geom.basis_d1)?
             + &xt_diag_y_dense(xmu, &c, &basis1_a)?;
         let h_lw = weighted_crossprod_psi_maps(
             x_ls_map,
             l.view(),
             CustomFamilyPsiLinearMapRef::Dense(&geom.basis),
-        )? + &xt_diag_y_dense(x_ls, &l_a, &geom.basis)?
+        ).map_err(|error| error.to_string())? + &xt_diag_y_dense(x_ls, &l_a, &geom.basis)?
             + &xt_diag_y_dense(x_ls, &l, &basis_a)?;
         let h_ww_a1 = xt_diag_y_dense(&basis_a, &hessian_mm_base, &geom.basis)?;
         let h_ww = &h_ww_a1 + &h_ww_a1.t() + &xt_diag_x_dense(&geom.basis, &hessian_mm_u)?;
@@ -1583,18 +1583,18 @@ impl GaussianLocationScaleWiggleFamily {
             xmu_ab_map,
             coeff_mm.view(),
             CustomFamilyPsiLinearMapRef::Dense(xmu),
-        )?;
-        let hmm_ij = weighted_crossprod_psi_maps(xmu_a_map, coeff_mm.view(), xmu_b_map)?;
+        ).map_err(|error| error.to_string())?;
+        let hmm_ij = weighted_crossprod_psi_maps(xmu_a_map, coeff_mm.view(), xmu_b_map).map_err(|error| error.to_string())?;
         let hmm_iwj = weighted_crossprod_psi_maps(
             xmu_a_map,
             coeff_mm_b.view(),
             CustomFamilyPsiLinearMapRef::Dense(xmu),
-        )?;
+        ).map_err(|error| error.to_string())?;
         let hmm_jwi = weighted_crossprod_psi_maps(
             xmu_b_map,
             coeff_mm_a.view(),
             CustomFamilyPsiLinearMapRef::Dense(xmu),
-        )?;
+        ).map_err(|error| error.to_string())?;
         let h_mm = &hmm_ab
             + &hmm_ab.t()
             + &hmm_ij
@@ -1608,50 +1608,50 @@ impl GaussianLocationScaleWiggleFamily {
             xmu_ab_map,
             coeff_ml.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
-        )? + &weighted_crossprod_psi_maps(xmu_a_map, coeff_ml.view(), x_ls_b_map)?
-            + &weighted_crossprod_psi_maps(xmu_b_map, coeff_ml.view(), x_ls_a_map)?
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(xmu_a_map, coeff_ml.view(), x_ls_b_map).map_err(|error| error.to_string())?
+            + &weighted_crossprod_psi_maps(xmu_b_map, coeff_ml.view(), x_ls_a_map).map_err(|error| error.to_string())?
             + &weighted_crossprod_psi_maps(
                 xmu_a_map,
                 coeff_ml_b.view(),
                 CustomFamilyPsiLinearMapRef::Dense(x_ls),
-            )?
+            ).map_err(|error| error.to_string())?
             + &weighted_crossprod_psi_maps(
                 xmu_b_map,
                 coeff_ml_a.view(),
                 CustomFamilyPsiLinearMapRef::Dense(x_ls),
-            )?
+            ).map_err(|error| error.to_string())?
             + &weighted_crossprod_psi_maps(
                 CustomFamilyPsiLinearMapRef::Dense(xmu),
                 coeff_ml_a.view(),
                 x_ls_b_map,
-            )?
+            ).map_err(|error| error.to_string())?
             + &weighted_crossprod_psi_maps(
                 CustomFamilyPsiLinearMapRef::Dense(xmu),
                 coeff_ml_b.view(),
                 x_ls_a_map,
-            )?
+            ).map_err(|error| error.to_string())?
             + &xt_diag_y_dense(xmu, &coeff_ml_ab, x_ls)?
             + &weighted_crossprod_psi_maps(
                 CustomFamilyPsiLinearMapRef::Dense(xmu),
                 coeff_ml.view(),
                 x_ls_ab_map,
-            )?;
+            ).map_err(|error| error.to_string())?;
         let hll_ab = weighted_crossprod_psi_maps(
             x_ls_ab_map,
             coeff_ll.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
-        )?;
-        let hll_ij = weighted_crossprod_psi_maps(x_ls_a_map, coeff_ll.view(), x_ls_b_map)?;
+        ).map_err(|error| error.to_string())?;
+        let hll_ij = weighted_crossprod_psi_maps(x_ls_a_map, coeff_ll.view(), x_ls_b_map).map_err(|error| error.to_string())?;
         let hll_iwj = weighted_crossprod_psi_maps(
             x_ls_a_map,
             coeff_ll_b.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
-        )?;
+        ).map_err(|error| error.to_string())?;
         let hll_jwi = weighted_crossprod_psi_maps(
             x_ls_b_map,
             coeff_ll_a.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
-        )?;
+        ).map_err(|error| error.to_string())?;
         let h_ll = &hll_ab
             + &hll_ab.t()
             + &hll_ij
@@ -1665,79 +1665,79 @@ impl GaussianLocationScaleWiggleFamily {
             xmu_ab_map,
             a.view(),
             CustomFamilyPsiLinearMapRef::Dense(&geom.basis),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             xmu_a_map,
             a_b.view(),
             CustomFamilyPsiLinearMapRef::Dense(&geom.basis),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             xmu_a_map,
             a.view(),
             CustomFamilyPsiLinearMapRef::Dense(&basis_b),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             xmu_b_map,
             a_a.view(),
             CustomFamilyPsiLinearMapRef::Dense(&geom.basis),
-        )? + &xt_diag_y_dense(xmu, &a_ab, &geom.basis)?
+        ).map_err(|error| error.to_string())? + &xt_diag_y_dense(xmu, &a_ab, &geom.basis)?
             + &xt_diag_y_dense(xmu, &a_a, &basis_b)?
             + &weighted_crossprod_psi_maps(
                 xmu_b_map,
                 a.view(),
                 CustomFamilyPsiLinearMapRef::Dense(&basis_a),
-            )?
+            ).map_err(|error| error.to_string())?
             + &xt_diag_y_dense(xmu, &a_b, &basis_a)?
             + &xt_diag_y_dense(xmu, &a, &basis_ab)?
             + &weighted_crossprod_psi_maps(
                 xmu_ab_map,
                 c.view(),
                 CustomFamilyPsiLinearMapRef::Dense(&geom.basis_d1),
-            )?
+            ).map_err(|error| error.to_string())?
             + &weighted_crossprod_psi_maps(
                 xmu_a_map,
                 c_b.view(),
                 CustomFamilyPsiLinearMapRef::Dense(&geom.basis_d1),
-            )?
+            ).map_err(|error| error.to_string())?
             + &weighted_crossprod_psi_maps(
                 xmu_a_map,
                 c.view(),
                 CustomFamilyPsiLinearMapRef::Dense(&basis1_b),
-            )?
+            ).map_err(|error| error.to_string())?
             + &weighted_crossprod_psi_maps(
                 xmu_b_map,
                 c_a.view(),
                 CustomFamilyPsiLinearMapRef::Dense(&geom.basis_d1),
-            )?
+            ).map_err(|error| error.to_string())?
             + &xt_diag_y_dense(xmu, &c_ab, &geom.basis_d1)?
             + &xt_diag_y_dense(xmu, &c_a, &basis1_b)?
             + &weighted_crossprod_psi_maps(
                 xmu_b_map,
                 c.view(),
                 CustomFamilyPsiLinearMapRef::Dense(&basis1_a),
-            )?
+            ).map_err(|error| error.to_string())?
             + &xt_diag_y_dense(xmu, &c_b, &basis1_a)?
             + &xt_diag_y_dense(xmu, &c, &basis1_ab)?;
         let h_lw = weighted_crossprod_psi_maps(
             x_ls_ab_map,
             l.view(),
             CustomFamilyPsiLinearMapRef::Dense(&geom.basis),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             x_ls_a_map,
             l_b.view(),
             CustomFamilyPsiLinearMapRef::Dense(&geom.basis),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             x_ls_a_map,
             l.view(),
             CustomFamilyPsiLinearMapRef::Dense(&basis_b),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             x_ls_b_map,
             l_a.view(),
             CustomFamilyPsiLinearMapRef::Dense(&geom.basis),
-        )? + &xt_diag_y_dense(x_ls, &l_ab, &geom.basis)?
+        ).map_err(|error| error.to_string())? + &xt_diag_y_dense(x_ls, &l_ab, &geom.basis)?
             + &xt_diag_y_dense(x_ls, &l_a, &basis_b)?
             + &weighted_crossprod_psi_maps(
                 x_ls_b_map,
                 l.view(),
                 CustomFamilyPsiLinearMapRef::Dense(&basis_a),
-            )?
+            ).map_err(|error| error.to_string())?
             + &xt_diag_y_dense(x_ls, &l_b, &basis_a)?
             + &xt_diag_y_dense(x_ls, &l, &basis_ab)?;
         let hww_ab = xt_diag_y_dense(&basis_ab, &hessian_mm_base, &geom.basis)?;
@@ -1865,32 +1865,32 @@ impl GaussianLocationScaleWiggleFamily {
             xmu_map,
             coeff_mm_u.view(),
             CustomFamilyPsiLinearMapRef::Dense(xmu),
-        )?;
+        ).map_err(|error| error.to_string())?;
         let h_mm = &hmm_a1 + &hmm_a1.t() + &xt_diag_x_dense(xmu, &coeff_mm_a_u)?;
         let h_ml = weighted_crossprod_psi_maps(
             xmu_map,
             coeff_ml_u.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             CustomFamilyPsiLinearMapRef::Dense(xmu),
             coeff_ml_u.view(),
             x_ls_map,
-        )? + &xt_diag_y_dense(xmu, &coeff_ml_a_u, x_ls)?;
+        ).map_err(|error| error.to_string())? + &xt_diag_y_dense(xmu, &coeff_ml_a_u, x_ls)?;
         let hll_a1 = weighted_crossprod_psi_maps(
             x_ls_map,
             coeff_ll_u.view(),
             CustomFamilyPsiLinearMapRef::Dense(x_ls),
-        )?;
+        ).map_err(|error| error.to_string())?;
         let h_ll = &hll_a1 + &hll_a1.t() + &xt_diag_x_dense(x_ls, &coeff_ll_a_u)?;
         let h_mw = weighted_crossprod_psi_maps(
             xmu_map,
             a_u.view(),
             CustomFamilyPsiLinearMapRef::Dense(&geom.basis),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             xmu_map,
             a.view(),
             CustomFamilyPsiLinearMapRef::Dense(&basis_u),
-        )? + &xt_diag_y_dense(xmu, &a_a_u, &geom.basis)?
+        ).map_err(|error| error.to_string())? + &xt_diag_y_dense(xmu, &a_a_u, &geom.basis)?
             + &xt_diag_y_dense(xmu, &a_a, &basis_u)?
             + &xt_diag_y_dense(xmu, &a_u, &basis_a)?
             + &xt_diag_y_dense(xmu, &a, &basis_a_u)?
@@ -1898,12 +1898,12 @@ impl GaussianLocationScaleWiggleFamily {
                 xmu_map,
                 c_u.view(),
                 CustomFamilyPsiLinearMapRef::Dense(&geom.basis_d1),
-            )?
+            ).map_err(|error| error.to_string())?
             + &weighted_crossprod_psi_maps(
                 xmu_map,
                 c.view(),
                 CustomFamilyPsiLinearMapRef::Dense(&basis1_u),
-            )?
+            ).map_err(|error| error.to_string())?
             + &xt_diag_y_dense(xmu, &c_a_u, &geom.basis_d1)?
             + &xt_diag_y_dense(xmu, &c_a, &basis1_u)?
             + &xt_diag_y_dense(xmu, &c_u, &basis1_a)?
@@ -1912,11 +1912,11 @@ impl GaussianLocationScaleWiggleFamily {
             x_ls_map,
             l_u.view(),
             CustomFamilyPsiLinearMapRef::Dense(&geom.basis),
-        )? + &weighted_crossprod_psi_maps(
+        ).map_err(|error| error.to_string())? + &weighted_crossprod_psi_maps(
             x_ls_map,
             l.view(),
             CustomFamilyPsiLinearMapRef::Dense(&basis_u),
-        )? + &xt_diag_y_dense(x_ls, &l_a_u, &geom.basis)?
+        ).map_err(|error| error.to_string())? + &xt_diag_y_dense(x_ls, &l_a_u, &geom.basis)?
             + &xt_diag_y_dense(x_ls, &l_a, &basis_u)?
             + &xt_diag_y_dense(x_ls, &l_u, &basis_a)?
             + &xt_diag_y_dense(x_ls, &l, &basis_a_u)?;

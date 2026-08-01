@@ -1460,12 +1460,12 @@ pub(crate) fn non_finite_curvature_exits_joint_newton_far_below_budget() {
     // full production ceiling set above proves the fast exit does not depend on a
     // small budget.
     assert!(
-        err.contains("smooth-regularized logdet Hessian contains non-finite entry"),
+        err.to_string().contains("smooth-regularized logdet Hessian contains non-finite entry"),
         "non-finite curvature must be rejected loudly at the logdet boundary, far \
              below the Newton budget: {err}"
     );
     assert!(
-        !err.contains("exhausted the joint Newton budget"),
+        !err.to_string().contains("exhausted the joint Newton budget"),
         "non-finite curvature must NOT consume the joint Newton budget: {err}"
     );
 }
@@ -3262,7 +3262,7 @@ pub(crate) fn constrained_exact_newton_nan_hessian_refuses_loudly_at_logdet_boun
         })
         .expect_err("constrained exact-newton NaN Hessian must fail loudly, not no-op");
     assert!(
-        err.contains("smooth-regularized logdet Hessian contains non-finite entry"),
+        err.to_string().contains("smooth-regularized logdet Hessian contains non-finite entry"),
         "non-finite exact-Newton curvature must be rejected at the logdet boundary, \
              before the constrained subsystem solve: {err}"
     );
@@ -3546,7 +3546,7 @@ pub(crate) fn exact_newton_nan_hessian_fails_loudly_before_eigendecomposition() 
     );
     let err = result.expect_err("NaN exact Hessian must fail loudly");
     assert!(
-        err.contains("smooth-regularized logdet Hessian contains non-finite entry"),
+        err.to_string().contains("smooth-regularized logdet Hessian contains non-finite entry"),
         "expected explicit non-finite Hessian error, got: {err}"
     );
 }
@@ -3584,7 +3584,7 @@ pub(crate) fn checked_penalizedobjective_rejects_non_finite_values() {
     let err = checked_penalizedobjective(-1.0, 0.5, f64::NAN, "test objective")
         .expect_err("non-finite objective should fail loudly");
     assert!(
-        err.contains("non-finite penalized objective"),
+        err.to_string().contains("non-finite penalized objective"),
         "unexpected error: {err}"
     );
 }
@@ -3668,7 +3668,7 @@ pub(crate) fn exact_newton_dh_closure_rejects_non_finite_directional_derivative(
     );
     let compute_dh = exact_newton_dh_closure(&family, synced_states, &specs, 1, false, 1.0, None);
     let err = compute_dh(&array![1.0]).expect_err("non-finite dH should fail loudly");
-    assert!(err.contains("non-finite"), "unexpected error: {err}");
+    assert!(err.to_string().contains("non-finite"), "unexpected error: {err}");
 }
 
 #[test]
@@ -3767,7 +3767,7 @@ pub(crate) fn pseudo_laplace_path_skips_eigendecomposition_avoiding_nan_crash() 
         // betas which don't trigger a hard error.
         Err(ref msg) => {
             assert!(
-                !msg.contains("exact-newton eigendecomposition failed"),
+                !msg.to_string().contains("exact-newton eigendecomposition failed"),
                 "PseudoLaplace path should NOT hit eigendecomposition; \
                      got eigendecomposition error anyway: {msg}"
             );
