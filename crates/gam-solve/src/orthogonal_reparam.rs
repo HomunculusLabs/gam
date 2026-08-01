@@ -92,9 +92,6 @@ use gam_linalg::matrix::FactorizedSystem;
 /// §3 influence projection so the two share a numerical regime.
 pub const ORTHOGONAL_PROJECTION_RELATIVE_RIDGE: f64 = 1.0e-10;
 
-/// Absolute floor on the projection ridge, so a degenerate (all-zero) weighted
-/// primary Gram still yields an invertible system.
-pub const ORTHOGONAL_PROJECTION_RIDGE_FLOOR: f64 = 1.0e-12;
 
 /// An exact orthogonal reparameterization of one confound block against one
 /// primary block's column span in a fixed row metric `W`.
@@ -171,8 +168,23 @@ impl OrthogonalReparam {
         // Weighted primary Gram MᵀW M and cross term MᵀW C in the row metric.
         let mut gram = fast_xt_diag_x(&primary, w_metric);
         let gram_scale = (0..p_m).map(|i| gram[[i, i]]).fold(0.0_f64, f64::max);
-        let eps = (gram_scale * ORTHOGONAL_PROJECTION_RELATIVE_RIDGE)
-            .max(ORTHOGONAL_PROJECTION_RIDGE_FLOOR);
+        // A degenerate primary block has an EXACT answer, not a ridged one
+        // (#2669). `w_i ≥ 0` is enforced above, so `(MᵀWM)_ii = Σ_r w_r M_ri²`
+        // is a sum of non-negative terms; `gram_scale == 0` therefore forces
+        // `w_r M_ri = 0` for every `(r, i)`, hence `MᵀW C = 0` and the exact
+        // projection coefficients are `B = 0` — which is precisely what the
+        // previous absolute ridge floor computed after making a zero matrix
+        // invertible. Returning it directly removes the floor, and with it the
+        // floor's real cost: an ABSOLUTE `1e-12` overrode the relative ridge for
+        // every `gram_scale < 1e-2`, so `M → cM` did not scale `ε` by `c²` and
+        // the reparameterization was not scale-equivariant on small designs.
+        if gram_scale == 0.0 {
+            return Ok(Self {
+                shear: Array2::<f64>::zeros((p_m, p_c)),
+                confound_orthogonal: confound.to_owned(),
+            });
+        }
+        let eps = gram_scale * ORTHOGONAL_PROJECTION_RELATIVE_RIDGE;
         for i in 0..p_m {
             gram[[i, i]] += eps;
         }
