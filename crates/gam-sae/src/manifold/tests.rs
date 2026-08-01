@@ -3166,38 +3166,7 @@ pub(crate) fn sae_value_probe_refusal_classification_is_inner_only() {
 
 #[test]
 pub(crate) fn streaming_exact_reml_matches_full_batch_reml_small_sae() {
-    // #2681 — MEASURED at `d3024293d`: this witness panicked at `tests.rs:3182:10`,
-    // the `.unwrap()` on the FIRST criterion call, after 0.14s (every sibling
-    // selector on this fixture runs 4.6-5.2s). It never reached the comparison
-    // below, so it was a non-instrument, NOT — as had been reported — a second
-    // witness corroborating the residual dense-vs-streaming gap. That gap has
-    // exactly one live witness; see #2755.
-    //
-    // The refusal it died on is NOT the KKT stationarity verdict the other three
-    // #2509 witnesses hit. It is a dictionary co-collapse raised out of
-    // `run_joint_fit_arrow_schur` before any inner state exists
-    // (`decoder_span_rank=1` with K=2 atoms, so no residual structure can anchor
-    // two distinct charts). That refusal is a real statement about this fixture
-    // at a 2-iteration joint fit and it is tracked on its own as #2756; it is
-    // NOT addressed here and nothing below suppresses it.
-    //
-    // What IS fixed here is the same coupling defect #2681 names: an
-    // operator-parity assertion sitting downstream of a solver refusal it has no
-    // stake in. Two evidence operators agree or disagree at whatever state they
-    // are handed, so this witness is decoupled exactly as its three siblings
-    // were — `small_two_atom_periodic_term_at_shared_inner_state()` drives the
-    // criterion once and keeps whatever inner state the drive leaves behind, and
-    // each lane is then handed a CLONE of that one pinned term and priced
-    // through the production `FROZEN_INNER_STATE` freeze lane, which factors
-    // exactly once at the pinned iterate without invoking the stationarity gate
-    // (gam#577/#579/#850). The shared-state precondition this equality needs is
-    // therefore structural rather than inferred. The witness's original `2`
-    // inner iterations could not be preserved precisely because that drive is
-    // the one that co-collapses (#2756). No criterion value from here reaches
-    // production, and no bar is relaxed: #2681 records this fixture as
-    // non-stationary by ~4.8e2x extensive and ~2.6e3x in parameter units, and
-    // that is irrelevant to a claim evaluated at whatever state it is handed.
-    let (term0, target, rho) = small_two_atom_periodic_term_at_shared_inner_state();
+    let (term0, target, rho) = small_two_atom_periodic_term();
     let mut full = term0.clone();
     let mut streaming = term0;
     let (full_cost, full_loss, _cache) = full
@@ -3205,44 +3174,24 @@ pub(crate) fn streaming_exact_reml_matches_full_batch_reml_small_sae() {
             target.view(),
             &rho,
             None,
-            FROZEN_INNER_STATE,
+            2,
             0.25,
             1.0e-4,
             1.0e-4,
         )
-        .expect("dense REML must price the pinned inner state");
+        .unwrap();
     let (stream_cost, stream_loss) = streaming
         .penalized_quasi_laplace_criterion_streaming_exact(
             target.view(),
             &rho,
             None,
-            FROZEN_INNER_STATE,
+            2,
             0.25,
             1.0e-4,
             1.0e-4,
         )
-        .expect("streaming REML must price the SAME pinned inner state");
-    // #2681 — this equality is RED on this fixture, and the red is NOT this
-    // witness's own defect. `assert_abs_diff_eq!` cannot carry a custom message,
-    // so the SAME check is spelled out longhand: approx 0.5's `AbsDiffEq for f64`
-    // is literally `f64::abs(self - other) <= epsilon` (read from the vendored
-    // source, `approx-0.5.1/src/abs_diff_eq.rs`), and the epsilon below is the
-    // `1.0e-8` this witness has always carried, byte for byte. Nothing is
-    // relaxed, re-denominated or re-normed; the comparison is unchanged and only
-    // the FAILURE TEXT gains the routing the bare macro had nowhere to put.
-    let cost_gap = (stream_cost - full_cost).abs();
-    assert!(
-        cost_gap <= 1.0e-8,
-        "dense and streaming REML must price the SAME pinned inner state identically: \
-         stream_cost={stream_cost:?} full_cost={full_cost:?} |gap|={cost_gap:?} exceeds the \
-         1.0e-8 bound. This is the residual dense-vs-streaming EVIDENCE LOG-DETERMINANT desync \
-         left behind by #2509 Phase-2b, tracked as #2755 (measured 0.086061937491316, 3.86%). \
-         It is not a defect of this witness and it is NOT a bound to relax: the sibling gate \
-         `criterion_lane_gap_is_exactly_the_evidence_logdet_gap_2509` PASSES on this same \
-         fixture, which localises the WHOLE gap to the evidence log-determinant pair and proves \
-         the converged loss, the Occam term, the extra penalized energy and the MP rank charge \
-         all agree."
-    );
+        .unwrap();
+    assert_abs_diff_eq!(stream_cost, full_cost, epsilon = 1.0e-8);
     assert_abs_diff_eq!(stream_loss.total(), full_loss.total(), epsilon = 1.0e-8);
 }
 
@@ -3654,27 +3603,7 @@ pub(crate) fn reml_retries_refinement_after_non_pd_undamped_evidence_factor() {
             1.0e-4,
         )
         .expect("streaming REML must price the same refined post-retry state");
-    // #2681 — this equality is RED on this fixture, and the red is NOT this
-    // witness's own defect. `assert_abs_diff_eq!` cannot carry a custom message,
-    // so the SAME check is spelled out longhand: approx 0.5's `AbsDiffEq for f64`
-    // is literally `f64::abs(self - other) <= epsilon` (read from the vendored
-    // source, `approx-0.5.1/src/abs_diff_eq.rs`), and the epsilon below is the
-    // `1.0e-8` this witness has always carried, byte for byte. Nothing is
-    // relaxed, re-denominated or re-normed; the comparison is unchanged and only
-    // the FAILURE TEXT gains the routing the bare macro had nowhere to put.
-    let cost_gap = (stream_cost - full_cost).abs();
-    assert!(
-        cost_gap <= 1.0e-8,
-        "dense and streaming REML must price the SAME pinned inner state identically: \
-         stream_cost={stream_cost:?} full_cost={full_cost:?} |gap|={cost_gap:?} exceeds the \
-         1.0e-8 bound. This is the residual dense-vs-streaming EVIDENCE LOG-DETERMINANT desync \
-         left behind by #2509 Phase-2b, tracked as #2755 (measured 0.086061937491316, 3.86%). \
-         It is not a defect of this witness and it is NOT a bound to relax: the sibling gate \
-         `criterion_lane_gap_is_exactly_the_evidence_logdet_gap_2509` PASSES on this same \
-         fixture, which localises the WHOLE gap to the evidence log-determinant pair and proves \
-         the converged loss, the Occam term, the extra penalized energy and the MP rank charge \
-         all agree."
-    );
+    assert_abs_diff_eq!(stream_cost, full_cost, epsilon = 1.0e-8);
     assert_abs_diff_eq!(stream_loss.total(), full_loss.total(), epsilon = 1.0e-8);
 }
 

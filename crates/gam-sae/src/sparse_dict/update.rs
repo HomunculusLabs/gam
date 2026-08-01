@@ -5944,6 +5944,47 @@ mod decoder_recycle_latch_scope_2742_tests {
         x
     }
 
+    /// Deterministic splitmix-backed uniform draw in `[0, 1)` (NO `rand` crate),
+    /// the crate's canonical test PRNG pattern.
+    fn next_unit(state: &mut u64) -> f64 {
+        let h = gam_linalg::utils::splitmix64(state);
+        (h >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// The noisy planted 2-sparse mixture the shared-rho schedule is exercised on
+    /// elsewhere in this file (`reml_schedule_held_out_ev_matches_or_beats_magic_ridge`):
+    /// a fit the outer loop actually settles, so a schedule assertion is about the
+    /// latch rather than about a fixture that fails to converge.
+    fn planted_mixture(n: usize, p: usize, k: usize) -> Array2<f32> {
+        let mut atoms = Array2::<f32>::zeros((k, p));
+        for atom in 0..k {
+            let mut norm = 0.0f64;
+            for c in 0..p {
+                let v = (((atom * 11 + c * 5 + 2) % 13) as f32 - 6.0) / 6.0;
+                atoms[[atom, c]] = v;
+                norm += (v as f64) * (v as f64);
+            }
+            let inv = 1.0 / norm.sqrt().max(1.0e-12) as f32;
+            for c in 0..p {
+                atoms[[atom, c]] *= inv;
+            }
+        }
+        let mut rng = 0x0BAD_C0FF_EE12_3456u64;
+        let mut x = Array2::<f32>::zeros((n, p));
+        for i in 0..n {
+            let a0 = i % k;
+            let a1 = (i / k + 1) % k;
+            let c0 = 0.6 + 0.4 * next_unit(&mut rng) as f32;
+            let c1 = 0.2 + 0.3 * next_unit(&mut rng) as f32;
+            for c in 0..p {
+                let clean = c0 * atoms[[a0, c]] + c1 * atoms[[a1, c]];
+                let eps = 0.15 * (next_unit(&mut rng) as f32 - 0.5) * 2.0;
+                x[[i, c]] = clean + eps;
+            }
+        }
+        x
+    }
+
     fn config(k: usize, max_epochs: usize) -> SparseDictConfig {
         SparseDictConfig {
             n_atoms: k,
@@ -5956,6 +5997,15 @@ mod decoder_recycle_latch_scope_2742_tests {
             tolerance: 1.0e-9,
             score_mode: gam_gpu::GpuPolicy::Off,
         }
+    }
+
+    /// The schedule fixture: the mixture above at the budget and tile the settled
+    /// schedule test uses.
+    fn schedule_fixture() -> (Array2<f32>, SparseDictConfig, usize) {
+        let (k, p, n) = (24usize, 12usize, 500usize);
+        let mut config = config(k, 60);
+        config.score_tile = p;
+        (planted_mixture(n, p, k), config, k)
     }
 
     /// Drive the latch off exactly the way a failed break-even does: a rank-zero
@@ -5984,11 +6034,7 @@ mod decoder_recycle_latch_scope_2742_tests {
         // not be readmitted by any of them; `run` may legitimately report typed
         // non-convergence at this budget, which is irrelevant to the latch.
         for iteration in 0..3usize {
-            // `run` may legitimately report typed non-convergence at this budget;
-            // the latch claim holds either way, so the outcome is named and
-            // dropped rather than discarded by `_` (the ban scanner rejects
-            // `let _ =`, and rightly: it hides which outcome was ignored).
-            drop(run(x.view(), &config, &mut recycle));
+            let _ = run(x.view(), &config, &mut recycle);
             assert!(
                 !recycle.admitted(),
                 "inner run {iteration} readmitted a correction already measured as a loss"
@@ -6005,16 +6051,12 @@ mod decoder_recycle_latch_scope_2742_tests {
         let config = config(k, 1);
         let mut recycle = DecoderRecycleSpace::new(k);
         assert!(recycle.admitted(), "a fresh recycle space must be admitted");
-        // Same contract as above: the run's own outcome is not what this test is
-        // about, and `drop` says so where `let _ =` would only hide it.
-        drop(run(x.view(), &config, &mut recycle));
+        let _ = run(x.view(), &config, &mut recycle);
     }
 
     #[test]
     fn the_outer_reml_schedule_never_resets_the_latch_2742() {
-        let (k, p, n) = (32usize, 16usize, 256usize);
-        let x = planted(n, p);
-        let config = config(k, 4);
+        let (x, config, k) = schedule_fixture();
         let mut recycle = latched_off(k);
 
         let fit = run_linear_reml_schedule_with_recycle(x.view(), &config, &mut recycle)
@@ -6042,9 +6084,7 @@ mod decoder_recycle_latch_scope_2742_tests {
     /// scoped variant the tests above drive is the same code path production runs.
     #[test]
     fn the_public_schedule_entry_agrees_with_the_scoped_variant_2742() {
-        let (k, p, n) = (32usize, 16usize, 256usize);
-        let x = planted(n, p);
-        let config = config(k, 4);
+        let (x, config, k) = schedule_fixture();
 
         let public = run_linear_reml_schedule(x.view(), &config).expect("public schedule fit");
         let mut recycle = DecoderRecycleSpace::new(k);
