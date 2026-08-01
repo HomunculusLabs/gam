@@ -2673,3 +2673,446 @@ fn zz_measure_k2_wide_p_schur_floor_clamps_the_residual_2080() {
         );
     }
 }
+
+/// Ordinary least-squares slope of `ln y` on `ln x`, plus the largest absolute
+/// residual in `ln y`. A cost exponent is only readable when the fit is tight,
+/// so the residual travels with the slope and callers report both.
+fn log_log_slope(xs: &[f64], ys: &[f64]) -> (f64, f64) {
+    assert_eq!(xs.len(), ys.len(), "log-log fit needs paired samples");
+    assert!(xs.len() >= 2, "a slope needs at least two samples");
+    let lx: Vec<f64> = xs.iter().map(|v| v.ln()).collect();
+    let ly: Vec<f64> = ys.iter().map(|v| v.ln()).collect();
+    let count = lx.len() as f64;
+    let mx = lx.iter().sum::<f64>() / count;
+    let my = ly.iter().sum::<f64>() / count;
+    let mut sxy = 0.0_f64;
+    let mut sxx = 0.0_f64;
+    for idx in 0..lx.len() {
+        sxy += (lx[idx] - mx) * (ly[idx] - my);
+        sxx += (lx[idx] - mx) * (lx[idx] - mx);
+    }
+    if sxx == 0.0 {
+        // A constant abscissa carries no exponent. Say so rather than returning
+        // the 0/0 NaN a reader would have to interpret.
+        return (f64::NAN, 0.0);
+    }
+    let slope = sxy / sxx;
+    let intercept = my - slope * mx;
+    let mut worst = 0.0_f64;
+    for idx in 0..lx.len() {
+        worst = worst.max((ly[idx] - (intercept + slope * lx[idx])).abs());
+    }
+    (slope, worst)
+}
+
+/// Median of a small sample.
+fn median_of(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("timings are finite"));
+    sorted[sorted.len() / 2]
+}
+
+/// #2080 COST-EXPONENT MEASUREMENT (zz_measure) — is the wide-`p` criterion cost
+/// really CUBIC in ambient width, and if so, in WHAT dimension?
+///
+/// The thread's headline mechanism ("the REML criterion's dense `p x p`
+/// logdet/Hessian work scales ~O(p^3)") is a COST MODEL asserted from two
+/// wall-clock points: p=16 converges in 62 s, p=96 does not return in 600 s. A
+/// censored upper bound at one width cannot separate `p^2` from `p^3`; those two
+/// points only lower-bound the exponent at `ln(600/62)/ln 6 = 1.27`. This probe
+/// sweeps the width and fits the LOG SLOPE of each phase against the candidate
+/// exponents instead of accepting the stated cubic.
+///
+/// **Every phase is FIXED WORK.** The neighbouring cost probes time the whole
+/// criterion, whose wall clock is (arithmetic per inner iteration) x (a count of
+/// inner iterations that is itself a function of `p`) — an exponent read off
+/// that is a product of two unseparated factors. Here the inner fit runs on a
+/// FIXED warmup budget and the timed phases downstream (assembly, one Newton
+/// arrow/Schur solve, the dense exact-A materialization, the two symmetric
+/// eigendecompositions) each do a fixed amount of arithmetic per call, so their
+/// slopes are arithmetic exponents.
+///
+/// It also measures the operand the model is asserted about. There is no dense
+/// `p x p` matrix on this route: `materialize_exact_hessian_dense` builds a
+/// `dim x dim` operator with `dim = total_t + k`, `total_t = rows x latent dim`
+/// (INDEPENDENT of `p`) and `k = sum_atoms basis_size x p` (linear in `p`). So a
+/// cubic term, if present, is cubic in the BETA BORDER, and the sweep is chosen
+/// to cross the `total_t`-dominated / `k`-dominated crossover.
+///
+/// Third: a generic dense cost argument is false for a STRUCTURED operator. Beta
+/// enters the reconstruction linearly and channel-wise, and the penalty assembly
+/// writes the smooth block as exactly `G (x) I_p` (`c[[total_t + off + nu*r + oc,
+/// total_t + off + mu*r + oc]]`), with the solve path installing an
+/// `IdentityRightKroneckerPenaltyOp` rather than a dense `hbb`. If the
+/// beta-beta block is numerically Kronecker then `log|A_bb| = p * log|G|` and
+/// nothing about the border is intrinsically cubic — the measured cubic would be
+/// an artifact of materializing and eigendecomposing a Kronecker factor this
+/// route never exploits. The probe reports the two numbers that decide it: the
+/// largest cross-channel entry and the largest across-channel spread of the
+/// same-channel entries, both relative to the block's own scale.
+///
+/// Arms are INTERLEAVED (the width order rotates every repetition) because a
+/// wall clock measured under contention is not a runtime; the per-repetition
+/// table and the min-vs-median slope pair are what say whether the fit is
+/// resolved.
+///
+/// MEASURED 2026-08-01, acn112, `finished in 8.38 s`, n=96, K=1, m=5, warmup=16,
+/// 3 interleaved repetitions per width (minimum over reps, seconds):
+///
+/// ```text
+/// p    total_t   k   dim | warm    assemble newton  materialize eigh
+/// 12   192      20   212 | 0.1078  0.0014   0.0013  0.0889      0.0154
+/// 24   192      20   212 | 0.1721  0.0020   0.0016  0.1335      0.0156
+/// 48   192      20   212 | 0.2506  0.0030   0.0016  0.1897      0.0145
+/// 96   192      20   212 | 0.3540  0.0061   0.0013  0.2477      0.0131
+/// log slope vs p (min / median over reps):
+///   warm +0.569/+0.480   assemble +0.714/+0.715   newton -0.004/-0.006
+///   materialize +0.494/+0.473   eigh -0.081/-0.038
+/// cross_channel_rel ~1e-16, channel_spread_rel ~2e-15 at every width
+/// ```
+///
+/// REPLICATED: an earlier independent run of the same probe on the same box gave
+/// `warm +0.574/+0.525, assemble +0.817/+0.754, newton +0.039/+0.039,
+/// materialize +0.560/+0.605, eigh +0.049/+0.098`. Every phase agrees to within
+/// ~0.1 between runs, and the `eigh` slope straddles zero in both — the sign of a
+/// quantity with no `p` dependence to find, not of a measurement that missed one.
+/// The Kronecker numbers are bit-identical across runs.
+///
+/// **The cubic is not there, and neither is the operand.** `dim` is 212 at every
+/// width: `total_t = 192 = rows x latent dim` and `k = 20 = 5 basis x frame rank
+/// 4`, both independent of `p`, because the decoder is profiled onto a Grassmann
+/// frame (#972) whose rank is set by the atom rather than by the ambient width.
+/// The `eigh` phase — the one the thread calls cubic — has exponent **-0.08**,
+/// i.e. constant. Nothing in either run exceeds **+0.82**; the whole measured
+/// wide-`p` cost is SUB-LINEAR over 12 -> 96, and it lives in the phases that
+/// stream the `n x p` target (the inner fit and the assembly), not in any dense
+/// factorization. The beta-beta block is `G (x) I_r` to round-off, as predicted.
+///
+/// The criterion itself is NOT on the timed path here, deliberately: at the time
+/// of writing `penalized_quasi_laplace_criterion_with_cache` refuses on this
+/// same K=1 fixture at p=16 ("objective stalled for 3 consecutive refine
+/// rounds", |g|=1.563201e-2 against tolerance 1.012736e-3) in 9.86 s — a refusal, not a cost. The
+/// probe records that outcome per width as a READING rather than gating on it,
+/// so the cost question stays answerable while the refusal is someone's separate
+/// defect.
+#[test]
+fn zz_measure_wide_p_cost_exponent_2080() {
+    let harmonics = 2usize; // m = 1 + 2*2 = 5 basis columns per atom
+    let widths = [12usize, 24, 48, 96];
+    let reps = 3usize;
+    let n = 96usize;
+    let warmup = 16usize; // FIXED inner budget: the same work at every width.
+    let nw = widths.len();
+    let mut warm = vec![vec![0.0_f64; reps]; nw];
+    let mut assemble = vec![vec![0.0_f64; reps]; nw];
+    let mut newton = vec![vec![0.0_f64; reps]; nw];
+    let mut materialize = vec![vec![0.0_f64; reps]; nw];
+    let mut eigh = vec![vec![0.0_f64; reps]; nw];
+    let mut shape = vec![(0_usize, 0_usize, 0_usize); nw];
+    let mut kron = vec![(0.0_f64, 0.0_f64, 0.0_f64); nw];
+    // Per-width beta-layout channel stride (0 = the border is not a whole number
+    // of basis blocks, i.e. a framed decoder the Kronecker read cannot index).
+    let mut chan_of = vec![0_usize; nw];
+    let mut criterion_note = vec![String::new(); nw];
+
+    for rep in 0..reps {
+        for slot in 0..nw {
+            // Rotate the visit order so no width is always measured first.
+            let wi = (slot + rep) % nw;
+            let p = widths[wi];
+            let z = one_circle_wide_target(n, p, 0.05);
+            let (base, seed_dispersion) = two_circle_periodic_term(z.view(), 1, harmonics);
+            let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+            let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
+                .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+                .expect("seed dispersion is finite and strictly positive");
+
+            // Phase W: the inner evidence fit on a FIXED iteration budget.
+            let mut term = base.clone();
+            let mut rho_fixed = rho.clone();
+            let w0 = std::time::Instant::now();
+            term.run_joint_fit_arrow_schur_for_quasi_laplace(
+                z.view(),
+                &mut rho_fixed,
+                None,
+                warmup,
+                0.04,
+                1.0e-6,
+                1.0e-6,
+            )
+            .expect("the inner evidence fit must not hard-error on the K=1 wide-p rung");
+            warm[wi][rep] = w0.elapsed().as_secs_f64();
+
+            // Phase S: reassembly of the arrow/Schur system at the warmed iterate.
+            let s0 = std::time::Instant::now();
+            let sys = term
+                .assemble_arrow_schur(z.view(), &rho_fixed, None)
+                .expect("reassemble at the warmed iterate");
+            assemble[wi][rep] = s0.elapsed().as_secs_f64();
+            assert!(
+                sys.k > 0,
+                "p={p}: there must be a beta border to measure, got k=0"
+            );
+
+            // Phase N: ONE production inner Newton step through the same entry
+            // point and options the criterion's undamped evidence lane uses. Its
+            // by-product is the `ArrowFactorCache` the log-det phases consume,
+            // which is how this probe reaches them without going through the
+            // criterion's convergence gate.
+            let options = ArrowSolveOptions::direct()
+                .with_gpu_policy(term.gpu_policy)
+                .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
+                .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+            let n0 = std::time::Instant::now();
+            let (_delta_t, _delta_beta, cache) =
+                solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options)
+                    .expect("the production inner step must solve at the warmed iterate");
+            newton[wi][rep] = n0.elapsed().as_secs_f64();
+
+            let total_t = cache.delta_t_len();
+            let k = cache.k;
+
+            // Phase M: dense exact-A materialization — `dim` Hessian-vector
+            // applies plus the symmetrization sweep.
+            let m0 = std::time::Instant::now();
+            let a_dense = term
+                .materialize_exact_hessian_dense(&rho_fixed, z.view(), &cache)
+                .expect("materialize the exact stationarity Hessian");
+            materialize[wi][rep] = m0.elapsed().as_secs_f64();
+            assert_eq!(
+                (a_dense.nrows(), a_dense.ncols()),
+                (total_t + k, total_t + k),
+                "p={p}: the materialized exact A must be the square joint operator"
+            );
+
+            // Phase E: the two dense symmetric eigendecompositions the exact
+            // observed-information log-dets perform (joint `A`, then the
+            // coordinate block `A_tt`). Run here directly rather than through
+            // `exact_observed_information_log_dets` so an indefinite-A REFUSAL
+            // reports as a reading below instead of destroying the cost sample.
+            let a_tt = a_dense.slice(s![..total_t, ..total_t]).to_owned();
+            let e0 = std::time::Instant::now();
+            let (joint_eigs, _joint_vecs) = a_dense
+                .eigh(faer::Side::Lower)
+                .expect("the joint exact-A eigendecomposition must succeed");
+            let (tt_eigs, _tt_vecs) = a_tt
+                .eigh(faer::Side::Lower)
+                .expect("the coordinate-block eigendecomposition must succeed");
+            eigh[wi][rep] = e0.elapsed().as_secs_f64();
+            assert!(
+                joint_eigs.len() == total_t + k && tt_eigs.len() == total_t,
+                "p={p}: both timed eigendecompositions must have produced a full spectrum"
+            );
+
+            shape[wi] = (total_t, k, total_t + k);
+
+            if rep == 0 {
+                // What the production route does with those spectra, as a
+                // READING: `Ok` or the typed refusal, never a gate.
+                criterion_note[wi] = match term.exact_observed_information_log_dets(
+                    &rho_fixed,
+                    z.view(),
+                    &cache,
+                ) {
+                    Ok((joint, tt)) => format!("log_dets ok joint={joint:.6e} tt={tt:.6e}"),
+                    Err(error) => format!("log_dets refused: {error}"),
+                };
+
+                // The `off + basis*chan + channel` layout is `chan == p` only
+                // when no factored frame is engaged; a framed decoder narrows the
+                // per-basis stride to the frame rank. Derive the stride from the
+                // border itself rather than assuming it, so a framed run reports
+                // its own layout instead of indexing a structure that is not there.
+                let beta_dim = term.beta_dim();
+                let basis_total = if p > 0 && beta_dim % p == 0 {
+                    beta_dim / p
+                } else {
+                    0
+                };
+                let chan = if basis_total > 0 && k % basis_total == 0 {
+                    k / basis_total
+                } else {
+                    0
+                };
+                chan_of[wi] = chan;
+                if chan > 0 {
+                    let stride = chan;
+                    let mut block_max = 0.0_f64;
+                    let mut cross_channel = 0.0_f64;
+                    let mut channel_spread = 0.0_f64;
+                    for b1 in 0..basis_total {
+                        for b2 in 0..basis_total {
+                            let mut lo = f64::INFINITY;
+                            let mut hi = f64::NEG_INFINITY;
+                            for c1 in 0..stride {
+                                let same = a_dense[[
+                                    total_t + b1 * stride + c1,
+                                    total_t + b2 * stride + c1,
+                                ]];
+                                block_max = block_max.max(same.abs());
+                                lo = lo.min(same);
+                                hi = hi.max(same);
+                                for c2 in 0..stride {
+                                    if c1 == c2 {
+                                        continue;
+                                    }
+                                    let off = a_dense[[
+                                        total_t + b1 * stride + c1,
+                                        total_t + b2 * stride + c2,
+                                    ]];
+                                    block_max = block_max.max(off.abs());
+                                    cross_channel = cross_channel.max(off.abs());
+                                }
+                            }
+                            channel_spread = channel_spread.max(hi - lo);
+                        }
+                    }
+                    kron[wi] = (cross_channel, channel_spread, block_max);
+                }
+            }
+        }
+    }
+
+    let xs: Vec<f64> = widths.iter().map(|&p| p as f64).collect();
+    let dims: Vec<f64> = shape.iter().map(|s| s.2 as f64).collect();
+    eprintln!(
+        "[2080-EXP] n={n} K=1 harmonics={harmonics} warmup={warmup} reps={reps} interleaved \
+         (the width order rotates per rep)"
+    );
+    for wi in 0..nw {
+        let (total_t, k, dim) = shape[wi];
+        let (cross_channel, channel_spread, block_max) = kron[wi];
+        let scale = block_max.max(f64::MIN_POSITIVE);
+        eprintln!(
+            "[2080-EXP] p={:>3} total_t={total_t:>4} k={k:>5} dim={dim:>5} | \
+             warm min={:8.4}s | assemble min={:8.4}s | newton min={:8.4}s | \
+             materialize min={:8.4}s | eigh min={:8.4}s",
+            widths[wi],
+            warm[wi].iter().copied().fold(f64::INFINITY, f64::min),
+            assemble[wi].iter().copied().fold(f64::INFINITY, f64::min),
+            newton[wi].iter().copied().fold(f64::INFINITY, f64::min),
+            materialize[wi].iter().copied().fold(f64::INFINITY, f64::min),
+            eigh[wi].iter().copied().fold(f64::INFINITY, f64::min),
+        );
+        eprintln!(
+            "[2080-KRON] p={:>3} border_k={k} chan_stride={} block_max={block_max:.6e} \
+             cross_channel_rel={:.3e} channel_spread_rel={:.3e}",
+            widths[wi],
+            chan_of[wi],
+            cross_channel / scale,
+            channel_spread / scale,
+        );
+        eprintln!("[2080-LOGDET] p={:>3} {}", widths[wi], criterion_note[wi]);
+        for rep in 0..reps {
+            eprintln!(
+                "[2080-REPS] p={:>3} rep={rep} warm={:.4}s assemble={:.4}s newton={:.4}s \
+                 materialize={:.4}s eigh={:.4}s",
+                widths[wi],
+                warm[wi][rep],
+                assemble[wi][rep],
+                newton[wi][rep],
+                materialize[wi][rep],
+                eigh[wi][rep],
+            );
+        }
+    }
+
+    for (label, series) in [
+        ("warm", &warm),
+        ("assemble", &assemble),
+        ("newton", &newton),
+        ("materialize", &materialize),
+        ("eigh", &eigh),
+    ] {
+        let mins: Vec<f64> = series
+            .iter()
+            .map(|r| r.iter().copied().fold(f64::INFINITY, f64::min))
+            .collect();
+        let meds: Vec<f64> = series.iter().map(|r| median_of(r)).collect();
+        let (slope_min, resid_min) = log_log_slope(&xs, &mins);
+        let (slope_med, resid_med) = log_log_slope(&xs, &meds);
+        let dim_varies = dims.iter().any(|d| *d != dims[0]);
+        if dim_varies {
+            let (slope_dim, resid_dim) = log_log_slope(&dims, &mins);
+            eprintln!(
+                "[2080-SLOPE] {label:>12} vs p: min={slope_min:+.3} (max ln-resid \
+                 {resid_min:.3}) med={slope_med:+.3} (max ln-resid {resid_med:.3}) | vs dim: \
+                 min={slope_dim:+.3} (max ln-resid {resid_dim:.3})"
+            );
+        } else {
+            eprintln!(
+                "[2080-SLOPE] {label:>12} vs p: min={slope_min:+.3} (max ln-resid \
+                 {resid_min:.3}) med={slope_med:+.3} (max ln-resid {resid_med:.3}) | vs dim: \
+                 NOT FITTABLE, dim is CONSTANT at {} across the whole sweep",
+                dims[0]
+            );
+        }
+    }
+
+    for wi in 0..nw {
+        assert!(
+            warm[wi].iter().all(|v| v.is_finite() && *v > 0.0)
+                && materialize[wi].iter().all(|v| v.is_finite() && *v > 0.0)
+                && eigh[wi].iter().all(|v| v.is_finite() && *v > 0.0),
+            "p={}: every timed phase must have produced a positive finite duration",
+            widths[wi]
+        );
+    }
+
+    // THE LOAD-BEARING GATE, and the refutation of the thread's cost model.
+    // The exact-A operator this route materializes and eigendecomposes has
+    // dimension `total_t + k`, and NEITHER term grows with `p`: `total_t` is
+    // `rows x latent dim`, and the decoder is profiled onto a Grassmann frame
+    // (#972) whose rank `r` is set by the atom, not by the ambient width, so the
+    // border is `sum_atoms basis_size x r`. A shape that is identical at p=12 and
+    // p=96 cannot carry a `p^3` term, whatever the wall clock says. This is a
+    // structural equality, not a timing bound, so it is a deterministic gate: a
+    // future change that un-profiles the border (`border_frame_rank == p`) goes
+    // red HERE, where the cost consequence is stated, rather than surfacing as a
+    // wide-`p` hang someone has to re-diagnose.
+    for wi in 1..nw {
+        assert_eq!(
+            shape[wi], shape[0],
+            "the exact-A route's operator dimension must not depend on the ambient width: \
+             p={} gives (total_t, k, dim) = ({}, {}, {}) but p={} gives ({}, {}, {})",
+            widths[0],
+            shape[0].0,
+            shape[0].1,
+            shape[0].2,
+            widths[wi],
+            shape[wi].0,
+            shape[wi].1,
+            shape[wi].2,
+        );
+    }
+
+    // The beta-beta block is exactly `G (x) I_r` in the `basis*r + channel`
+    // layout: measured at 1e-16 (cross-channel) and 2e-15 (across-channel
+    // spread) relative to the block's own scale, i.e. round-off. Gate it well
+    // clear of that so the structure is a fact the tree keeps, not one this
+    // probe happened to observe once.
+    for wi in 0..nw {
+        if chan_of[wi] == 0 {
+            continue;
+        }
+        let (cross_channel, channel_spread, block_max) = kron[wi];
+        let scale = block_max.max(f64::MIN_POSITIVE);
+        assert!(
+            block_max > 0.0,
+            "p={}: an indexable beta-beta block (channel stride {}) must be nonzero for its \
+             Kronecker structure to mean anything",
+            widths[wi],
+            chan_of[wi]
+        );
+        assert!(
+            cross_channel / scale <= 1.0e-12 && channel_spread / scale <= 1.0e-12,
+            "p={}: the beta-beta block must be `G (x) I_{}` to round-off -- beta enters the \
+             reconstruction linearly and channel-wise -- but cross_channel_rel={:.3e} and \
+             channel_spread_rel={:.3e}",
+            widths[wi],
+            chan_of[wi],
+            cross_channel / scale,
+            channel_spread / scale,
+        );
+    }
+}
