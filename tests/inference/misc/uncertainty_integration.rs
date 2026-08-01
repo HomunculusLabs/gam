@@ -380,6 +380,14 @@ fn noiseless_gaussian_smoothing_correction_is_a_valid_covariance_2490() {
     }
 }
 
+/// Binomial trials per row for the uncertainty fixtures below.
+///
+/// These tests are about the SHAPE of the reported uncertainty, not about the
+/// counts, so any trial count works — but it must exist. `weights = 1` with a
+/// probability response is not a binomial observation at all, and the PIRLS
+/// row-geometry contract says so rather than silently fitting it.
+const TRIALS: f64 = 20.0;
+
 #[test]
 fn prediction_uncertainty_is_finite_andwell_shaped() {
     let n = 80usize;
@@ -389,10 +397,17 @@ fn prediction_uncertainty_is_finite_andwell_shaped() {
         let t = -2.0 + 4.0 * (i as f64) / (n as f64 - 1.0);
         x[[i, 0]] = 1.0;
         x[[i, 1]] = t;
-        y[i] = 1.0 / (1.0 + (-(-0.2 + 0.9 * t)).exp());
+        // A binomial observation is (trials, successes), not a probability. With
+        // unit weights `successes = weight * y` is the bare probability and is not
+        // an integer, which `full_log_likelihood_row` correctly refuses ("fully-
+        // normalized binomial trials/successes (exact integers required)"). Give
+        // the row real trials and round the success count onto the grid they
+        // define, so the signal is unchanged and the data is representable.
+        let p = 1.0 / (1.0 + (-(-0.2 + 0.9 * t)).exp());
+        y[i] = (p * TRIALS).round() / TRIALS;
     }
 
-    let weights = Array1::ones(n);
+    let weights = Array1::from_elem(n, TRIALS);
     let offset = Array1::zeros(n);
     let mut s = Array2::<f64>::zeros((2, 2));
     s[[1, 1]] = 1.0;
@@ -665,10 +680,17 @@ fn mixture_uncertainty_intervals_are_clamped_to_unit_interval() {
         let t = -2.0 + 4.0 * (i as f64) / (n as f64 - 1.0);
         x[[i, 0]] = 1.0;
         x[[i, 1]] = t;
-        y[i] = 1.0 / (1.0 + (-(-0.2 + 0.9 * t)).exp());
+        // A binomial observation is (trials, successes), not a probability. With
+        // unit weights `successes = weight * y` is the bare probability and is not
+        // an integer, which `full_log_likelihood_row` correctly refuses ("fully-
+        // normalized binomial trials/successes (exact integers required)"). Give
+        // the row real trials and round the success count onto the grid they
+        // define, so the signal is unchanged and the data is representable.
+        let p = 1.0 / (1.0 + (-(-0.2 + 0.9 * t)).exp());
+        y[i] = (p * TRIALS).round() / TRIALS;
     }
 
-    let weights = Array1::ones(n);
+    let weights = Array1::from_elem(n, TRIALS);
     let offset = Array1::zeros(n);
     let mut s = Array2::<f64>::zeros((2, 2));
     s[[1, 1]] = 1.0;
