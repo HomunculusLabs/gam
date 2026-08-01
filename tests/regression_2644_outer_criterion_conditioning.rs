@@ -261,15 +261,22 @@ fn te_with_disparate_scales_certifies() {
 // an identically zero affine channel), and the Gaussian sufficient-statistic
 // cache (`[gaussian-fixed-cache]` is built 11 times, on both routes).
 //
-// STILL OPEN: what makes the two routes solve different systems at all. Both
-// report the same `H` with `lambda_min = 1.386e-1` and a strictly convex
-// quadratic has one minimizer, so the designs must differ while
-// `X'X + S_lambda + delta I` stays bit-identical. Their own logs disagree at
-// the same `rho` on `inner pirls solve ... max_eta` (0.6 vs 0.8) and on
-// `reml_laml cost_only_done ... ext_dim` (0 vs 1).
+// RESOLVED by #2671, and the answer is in the last line above. What made the two
+// routes solve different systems is the RESPONSE, not the design: the scalar-rho
+// route conditions it (`optimizer.rs`, #1000 centering by `c = mean_w(y-offset)`
+// = 2.130e-1 here) and the joint psi route handed `y` to
+// `ExternalJointHyperEvaluator::new` verbatim. `beta` differs in coordinate 0
+// alone by 2.13012903753208305e-1 = `c` to 10 digits — the intercept absorbing
+// exactly the centering constant — which is why `H`, `logS`, `logH` and
+// `pirls_edf` are all bit-identical: at `delta = 0` the two are the SAME problem
+// under `b_joint = b_scalar + c*e0`, and only the ridge, priced against a fixed
+// zero, distinguishes them. `run_exact_joint_spatial_optimization` now conditions
+// through the same gate.
 //
-// This probe PRINTS and never fails: the defect is real but unfixed, and a
-// gate here would be a second red on a known-open cause.
+// This probe PRINTS and never fails; the GATE for the resolved defect is
+// `joint_route_outer_criterion_is_invariant_to_the_origin_of_y` below, which
+// checks the property (origin-invariance of the criterion) rather than this
+// fixture's particular gap.
 // ─────────────────────────────────────────────────────────────────────────
 
 fn mk_1d(n: usize, f: impl Fn(f64) -> f64, sigma: f64, seed: u64) -> EncodedDataset {
@@ -309,92 +316,284 @@ fn zz_probe_2644_matern_low_n_route_agreement() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// A REFUTED hypothesis, kept as a passing guard because the property it
-// checks is real and worth protecting.
+// #2671 — THE ORIGIN GUARD, ON A ROUTE THAT CAN FAIL IT.
 //
-// #2644's decomposition showed that the outer criterion notices `beta[0]`
-// (the intercept) moving ONLY through `FIXED_STABILIZATION_RIDGE = 1e-8`:
+// ## Why the previous guard was retired rather than re-tuned
 //
-//     ridge*(b0'^2 - b0^2) = 7.7024058e-10  vs measured dDp = 7.7024051e-10
-//                                           (ratio 1.00000009)
+// `outer_criterion_is_invariant_to_the_origin_of_y` fitted `y ~ s(x, k=5)`
+// against `y + 10` on `mk_1d(15, t^2, 0.05, 7)`, measured `gap = 4.085621e-14`
+// (relative 4.504937e-15) against a `5.092357e-05` prediction, and that nine-
+// order miss was recorded — here and in `FIXED_STABILIZATION_RIDGE`'s doc — as a
+// REFUTATION of the claim that the ridge shrinks toward a FIXED zero.
 //
-// I read that as a SPEC.md line 12 violation — "an intercept generally should
-// not have a penalty" — and predicted the observable harm: the criterion should
-// not be invariant under a shift in the ORIGIN of `y`. Adding a constant to the
-// response shifts the intercept by that constant and leaves the residuals,
-// `S_lambda`, `X'WX` and `log|H|` untouched, so if the ridge were charged
-// against a FIXED target the criterion would have to move by roughly
-// `(n/2)*delta*((b0+c)^2 - b0^2)/(rss+pen)`.
+// It refuted nothing. **THE QUANTITY WAS NEVER FREE TO DISAGREE.** That fixture
+// is Gaussian, identity-link, has an unpenalized intercept and no linear
+// constraints — every clause of `gaussian_identity_response_center`'s gate
+// (`gam-solve/src/estimate/optimizer.rs`) — so the #1000 centering subtracts the
+// weighted response mean from BOTH arms before the criterion exists, and
+// `reml_score` is the outer value of the CENTERED problem. `y` and `y + 10` map
+// to the same conditioned vector. The 4.085621e-14 is the floating-point residue
+// of `(y_i + 10) - 10.33` versus `y_i - 0.33`, and the `1e-10` bar was
+// denominated in that residue. A guard that cannot fail for the reason its own
+// comment gives is not a guard; re-tuning the bar would not have fixed it,
+// because no bar can make a constant-by-construction quantity informative.
 //
-// MEASURED (2026-07-31), and the prediction is WRONG by nine orders:
+// ## Where the origin was actually live
 //
-//     v(y)    = -9.06920633442079271e0
-//     v(y+10) = -9.06920633442075186e0
-//     gap     =  4.085621e-14   relative = 4.504937e-15   (~20 machine eps)
-//     predicted, had the ridge broken this:  5.092357e-05
+// The joint `[rho, psi]` spatial route (`run_exact_joint_spatial_optimization`)
+// handed `y` to `ExternalJointHyperEvaluator::new` VERBATIM — it never called
+// the conditioning function — and
+// `try_exact_joint_spatial_length_scale_optimization` then graded its criterion
+// against the scalar-rho route's `fit_score`, which IS conditioned. With
+// `FIXED_STABILIZATION_RIDGE = 1e-8` priced as `delta*||beta||^2` against zero,
+// the two routes minimized problems differing by `delta*(2*c*beta0 + c^2)` on
+// the intercept axis.
 //
-// The reason: the ridge is **Tikhonov centered on a moving `prior_mean_target`,
-// not on zero**. `pls_solver` augments the RHS with `r + delta*mu`, so
-// `penalty_term` carries `delta*||beta - mu||^2`; under an origin shift `mu`
-// moves with `beta` and the term is unchanged. The `delta*||beta||^2` shorthand
-// in `FIXED_STABILIZATION_RIDGE`'s own doc is what misled me — check the RHS
-// augmentation in `pls_solver`, not the doc comment.
+// MEASURED at `517b6303f`, release, one run, three arms of THIS fixture, against
+// the law `gap = (n/2)/D_p * delta * ((beta0 + m)^2 - beta0^2)` registered as a
+// VALUE before the run:
 //
-// CONSEQUENCE, and it is the useful part: **the ridge is not the defect, it is
-// the messenger.** In #2671 the two routes move `beta[0]` by 0.213 relative to a
-// FIXED `mu`, so the ridge does charge it — which is how the disagreement
-// becomes visible at all. Exempting the intercept would make that witness go
-// green by DELETING the only term that can see two routes computing different
-// coefficients, while they went on producing different fitted models. That is
-// strictly worse than the current loud refusal, and it would have looked like a
-// successful fix. Do not do it on #2644's evidence.
+//   arm          mean(y)      predicted     measured
+//   precentered  -3.70e-17    ~0            fit ACCEPTED
+//   asis          2.130e-1    3.674e-8      3.674e-8   REFUSED (tol 2.787e-8)
+//   plus10        1.0213e1     5.047e-5     5.047e-5   REFUSED, 1374x worse
 //
-// This test PASSES on main and is a guard, not a probe: a future change that
-// makes the criterion depend on the origin of `y` is a real defect and this
-// catches it directly. The bound is deliberately loose (1e-10 relative, ~5e4x
-// the measured 4.5e-15) so it fires on a mechanism, never on roundoff.
+// Linear-in-`m` is out by 29x, constant by 1374x. The scalar route moved
+// 4.085e-14 under the same +10 shift, in the same run: separation 1.24e9.
+// User-visible: subtracting `mean(y)` turned a refusing fit into a shipping one.
+//
+// ## What this test asserts, and why none of it is vacuous
+//
+// 1. ALL THREE ARMS MUST FIT. Two of the three REFUSED before the fix, so this
+//    clause is measured-falsifiable, not assumed.
+// 2. TWO-SIDED origin invariance of the reported criterion, relative bar 1e-12:
+//    ~67x above the residue the conditioned route actually leaves (~1.5e-14
+//    relative) and 1.8e7x BELOW the pre-fix 1.811e-5. It cannot pass by
+//    roundoff and it cannot fail on roundoff.
+// 3. THE ARMS COULD HAVE DIFFERED — asserted from live values, not from this
+//    comment. The fitted coefficient vectors of the `asis` and `plus10` arms
+//    must differ by exactly one coordinate moved by `SHIFT` (checked in both the
+//    L-infinity and L1 norms, so it is one coordinate and not a spread), and the
+//    ridge term the criterion is built from,
+//    `delta*(||b'||^2 - ||b||^2)`, must therefore differ between the arms by
+//    at least 1e-7 in absolute value — five orders ABOVE the invariance bar.
+//    That is the clause the retired guard lacked: the criterion was free to move
+//    by ~1e-6 and did not.
+//
+// The fixture is deliberately the one whose route DOES NOT satisfy the
+// `gaussian_identity_response_center` gate upstream of the criterion under test.
+// If a future change routes `y ~ matern(x, nu=5/2)` away from the joint spatial
+// route, clause 3 is what will notice that this test has gone mute.
 // ─────────────────────────────────────────────────────────────────────────
 
+/// `FIXED_STABILIZATION_RIDGE` (`gam-solve/src/pirls/gam_working_model.rs`),
+/// which is `pub(crate)` and therefore restated here. Clause 3 only needs its
+/// ORDER of magnitude, but the exact value is what makes the 1e-7 floor below a
+/// derived number rather than a guess.
+const FIXED_STABILIZATION_RIDGE: f64 = 1.0e-8;
+
 #[test]
-fn outer_criterion_is_invariant_to_the_origin_of_y() {
+fn joint_route_outer_criterion_is_invariant_to_the_origin_of_y() {
+    gam_solve::progress_log::init_logging_at(log::LevelFilter::Info);
     let cfg = FitConfig {
         family: Some("gaussian".to_string()),
         ..FitConfig::default()
     };
-    let base = mk_1d(15, |t| t.powi(2), 0.05, 7);
-    let mut shifted = base.clone();
-    // Column 1 is `y` (headers are ["x", "y"] in `mk_1d`).
     const SHIFT: f64 = 10.0;
-    for r in 0..shifted.values.nrows() {
-        shifted.values[[r, 1]] += SHIFT;
-    }
+    // Column 1 is `y` (headers are ["x", "y"] in `mk_1d`).
+    const Y_COL: usize = 1;
 
-    let score = |ds: &EncodedDataset, label: &str| -> f64 {
-        match fit_from_formula("y ~ s(x, k=5)", ds, &cfg) {
-            Ok(gam::FitResult::Standard(fit)) => fit
-                .fit
-                .reml_score()
-                .unwrap_or_else(|| panic!("{label}: fit reports no REML criterion")),
-            Ok(_) => panic!("{label}: expected a standard fit"),
-            Err(e) => panic!("{label}: fit failed: {e}"),
+    let base = mk_1d(15, |t| t.powi(2), 0.05, 7);
+    let n = base.values.nrows();
+    let base_mean: f64 = (0..n).map(|r| base.values[[r, Y_COL]]).sum::<f64>() / n as f64;
+
+    let shifted_by = |delta: f64| -> EncodedDataset {
+        let mut ds = base.clone();
+        for r in 0..ds.values.nrows() {
+            ds.values[[r, Y_COL]] += delta;
         }
+        ds
     };
 
-    let v0 = score(&base, "y");
-    let v1 = score(&shifted, "y + 10");
-    let relative = (v1 - v0).abs() / v0.abs().max(f64::MIN_POSITIVE);
-    println!(
-        "[2644-origin] v(y)={v0:.17e} v(y+{SHIFT})={v1:.17e} gap={:.6e} relative={relative:.6e}",
-        v1 - v0,
-    );
+    // Three arms spanning `mean(y)` from ~1e-17 to ~10.2 — the same span the
+    // pre-registered sweep used.
+    let arms = [
+        ("precentered", shifted_by(-base_mean)),
+        ("asis", base.clone()),
+        ("plus10", shifted_by(SHIFT)),
+    ];
+
+    // ── Phase 1: fit every arm, and report EVERY refusal, not the first ──
+    //
+    // Clause 1. Before the joint route was conditioned, `asis` AND `plus10` both
+    // refused (gap 3.674e-8 and 5.047e-5 against agreement_tolerance 2.787e-8)
+    // while `precentered` was ACCEPTED. A loop that panicked on the first
+    // failure would report one of those two and hide the other -- and the pair
+    // is the evidence, because their RATIO is what identifies the mechanism.
+    let mut scores: Vec<f64> = Vec::with_capacity(arms.len());
+    let mut betas: Vec<ndarray::Array1<f64>> = Vec::with_capacity(arms.len());
+    let mut means: Vec<f64> = Vec::with_capacity(arms.len());
+    let mut refusals: Vec<String> = Vec::new();
+    for (label, ds) in &arms {
+        let mean_y: f64 = (0..n).map(|r| ds.values[[r, Y_COL]]).sum::<f64>() / n as f64;
+        means.push(mean_y);
+        match fit_from_formula("y ~ matern(x, nu=5/2)", ds, &cfg) {
+            Ok(gam::FitResult::Standard(fitted)) => {
+                let score = fitted.fit.reml_score().unwrap_or(f64::NAN);
+                let beta = fitted.fit.beta.clone();
+                println!(
+                    "[2671-origin] arm={label} mean_y={mean_y:.17e} reml={score:.17e} p={}",
+                    beta.len()
+                );
+                scores.push(score);
+                betas.push(beta);
+            }
+            Ok(_) => refusals.push(format!("{label}: expected a standard fit")),
+            Err(error) => {
+                println!("[2671-origin] arm={label} mean_y={mean_y:.17e} REFUSED");
+                refusals.push(format!("  * {label} (mean_y={mean_y:.6e}): {error}"));
+            }
+        }
+    }
     assert!(
-        relative < 1.0e-10,
-        "the outer REML criterion must be a function of the MODEL, and adding a constant to \
-         `y` changes no part of the model: the intercept absorbs it while residuals, S_lambda, \
-         X'WX and log|H| are untouched. Measured relative change {relative:.6e} against a \
-         1e-10 bar (main measures 4.5e-15, ~20 machine epsilons). A failure here means some \
-         term is charging the intercept against a FIXED target -- see #2644, where exactly \
-         that term, `FIXED_STABILIZATION_RIDGE`, accounts for 100% of a cross-route criterion \
-         disagreement (ratio 1.00000009)."
+        refusals.is_empty(),
+        "#2671 clause 1: `y ~ matern(x, nu=5/2)` must fit regardless of where the origin of the \
+         response sits. Whether a fit ships must not depend on the user's choice of response \
+         units. {} of {} arms refused:\n{}\n\nBefore the joint [rho, psi] route was conditioned \
+         through `gaussian_identity_response_center` the `asis` arm refused with a \
+         criterion-agreement gap of 3.674e-8 and `plus10` with 5.047e-5, both against a \
+         2.787e-8 tolerance, while `precentered` was ACCEPTED.",
+        refusals.len(),
+        arms.len(),
+        refusals.join("\n"),
+    );
+
+    // ── Phase 2: every remaining clause is MEASURED, then reported together ──
+    //
+    // Collected rather than asserted one by one. A failing supporting clause
+    // must never suppress the measurement of the property this gate exists for:
+    // an early-aborting assert withdraws the coverage it advertises. (Measured
+    // on this very test: a mis-denominated clause-3b bar aborted the run before
+    // clause 2 -- the invariance itself -- had been evaluated at all.)
+    let mut failures: Vec<String> = Vec::new();
+
+    // Clause 2 is FIRST because it is the property under test: the reported
+    // criterion must not move when only the origin of `y` does. Two-sided.
+    let bar = 1.0e-12;
+    for (idx, label) in [(0_usize, "precentered"), (2_usize, "plus10")] {
+        let gap = scores[idx] - scores[1];
+        let relative = gap.abs() / scores[1].abs().max(f64::MIN_POSITIVE);
+        println!(
+            "[2671-origin] CLAUSE2 {label} vs asis: gap={gap:.6e} relative={relative:.6e} \
+             bar={bar:.1e}"
+        );
+        if !(relative < bar) {
+            failures.push(format!(
+                "CLAUSE 2 ({label}) -- THE PROPERTY UNDER TEST. The outer REML criterion must be \
+                 a function of the MODEL, and adding a constant to `y` moves the intercept and \
+                 nothing else. Arm `{label}` moved {relative:.6e} relative against a {bar:.1e} \
+                 bar. REGISTERED before the fix: 1.811e-5 relative (absolute 5.047e-5) and the \
+                 fit REFUSED; the conditioned route measured 1.34e-15. A failure here means an \
+                 outer lambda-search is again forming its criterion on an unconditioned \
+                 response, so lambda-hat depends on the origin of the user's response units. Do \
+                 NOT fix it by exempting the intercept from `FIXED_STABILIZATION_RIDGE` (that \
+                 deletes the detector) and do NOT fix it by deleting the #1000 centering (that \
+                 is what makes lambda-hat origin-invariant)."
+            ));
+        }
+    }
+
+    // Clause 3a: the arms really are separated along the axis the criterion must
+    // be blind to, and the `asis` arm is itself off the origin. Without this a
+    // fixture change that silently equalized the arms would make clause 2 pass
+    // by construction. These bars are exact arithmetic on the fixture, so they
+    // are denominated in nothing but f64.
+    let shift_span = means[2] - means[1];
+    println!(
+        "[2671-origin] CLAUSE3a means: precentered={:.17e} asis={:.17e} span={shift_span:.17e}",
+        means[0], means[1]
+    );
+    if !((shift_span - SHIFT).abs() < 1.0e-9 && means[0].abs() < 1.0e-9 && means[1].abs() > 1.0e-2)
+    {
+        failures.push(format!(
+            "CLAUSE 3a -- the arms must actually differ in the origin of `y`, and the `asis` arm \
+             must itself be off the origin (it is the arm whose 3.674e-8 gap opened this issue). \
+             Measured mean(y): precentered={:.17e} (must be ~0), asis={:.17e} (must be well away \
+             from 0; 2.130e-1 on this fixture), plus10-asis={shift_span:.17e} (must be {SHIFT}). \
+             An arm set that does not separate cannot test an invariance.",
+            means[0], means[1]
+        ));
+    }
+
+    // Clause 3b: the shift landed as a pure intercept relabeling -- exactly one
+    // coordinate of `beta` moved, and by `SHIFT`. `l1 == linf` is what says "one
+    // coordinate", so this does not depend on knowing the intercept's index.
+    //
+    // BOTH BARS ARE RELATIVE TO `SHIFT`, which is what produces the numbers.
+    // They were absolute (1e-6) on first writing and that was a denomination
+    // error, not a threshold that was merely too tight: `beta` is converged to a
+    // RELATIVE tolerance, so on a coefficient of magnitude 10 the residue scales
+    // with 10. MEASURED here: |linf - SHIFT| = 1.6e-7 and l1 - linf = 3.26e-6,
+    // i.e. 1.6e-8 and 3.3e-7 OF `SHIFT`. The 1e-5 relative bar leaves 625x and
+    // 30x of margin and still catches what this clause exists to catch: a shift
+    // spreading into the smooth is O(1), not O(1e-6).
+    let relabel_bar = 1.0e-5 * SHIFT;
+    let delta_beta = &betas[2] - &betas[1];
+    let linf = delta_beta.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    let l1: f64 = delta_beta.iter().map(|v| v.abs()).sum();
+    println!(
+        "[2671-origin] CLAUSE3b |d beta|_inf={linf:.17e} |d beta|_1={l1:.17e} \
+         bar={relabel_bar:.1e}"
+    );
+    if !((linf - SHIFT).abs() < relabel_bar && (l1 - linf).abs() < relabel_bar) {
+        failures.push(format!(
+            "CLAUSE 3b -- adding {SHIFT} to `y` must move exactly one coefficient (the intercept) \
+             by {SHIFT} and leave every other coefficient fixed. Measured |d beta|_inf={linf:.17e} \
+             (miss {:.3e}), |d beta|_1={l1:.17e} (spread into the other coefficients {:.3e}), \
+             against a bar of {relabel_bar:.1e} = 1e-5*SHIFT. If these disagree the shift spread \
+             across the smooth and the fit is no longer a pure origin relabeling -- in which case \
+             clause 2's invariance is not the property this gate means to assert.",
+            (linf - SHIFT).abs(),
+            (l1 - linf).abs(),
+        ));
+    }
+
+    // Clause 3c: THE FREEDOM CLAUSE. The criterion therefore carried a term that
+    // genuinely differed between the arms. `penalty_term` charges
+    // `delta*||beta||^2` against a target of zero (`gam_working_model.rs` and
+    // `loop_driver.rs` both spell it literally, with no `prior_mean_target` in
+    // the expression), so the two arms priced ridges differing by `ridge_gap` --
+    // which must sit far ABOVE clause 2's bar, or clause 2 is a property of the
+    // fixture rather than of the code.
+    let ridge_asis = FIXED_STABILIZATION_RIDGE * betas[1].dot(&betas[1]);
+    let ridge_plus10 = FIXED_STABILIZATION_RIDGE * betas[2].dot(&betas[2]);
+    let ridge_gap = (ridge_plus10 - ridge_asis).abs();
+    let clause2_absolute_bar = bar * scores[1].abs();
+    println!(
+        "[2671-origin] CLAUSE3c ridge_term_gap={ridge_gap:.17e} \
+         clause2_absolute_bar={clause2_absolute_bar:.6e} \
+         headroom={:.3e}x",
+        ridge_gap / clause2_absolute_bar.max(f64::MIN_POSITIVE)
+    );
+    if !(ridge_gap > 1.0e-7) {
+        failures.push(format!(
+            "CLAUSE 3c -- THE QUANTITY MUST BE FREE TO DISAGREE. The outer criterion is built \
+             from a penalty carrying `delta*||beta||^2` against a FIXED zero target \
+             (delta={FIXED_STABILIZATION_RIDGE:.1e}), and the arms' coefficient vectors differ by \
+             {SHIFT} on the intercept, so that term differs between them by {ridge_gap:.6e} -- \
+             which must be far above clause 2's absolute bar of {clause2_absolute_bar:.6e}, or \
+             the invariance is a property of the fixture rather than of the code. The retired \
+             guard `outer_criterion_is_invariant_to_the_origin_of_y` failed exactly here: its \
+             route centered the response upstream, so its two arms were the SAME problem and its \
+             4.5e-15 agreement was arithmetic, not evidence."
+        ));
+    }
+
+    assert!(
+        failures.is_empty(),
+        "#2671: {} of 4 clauses failed. Every clause was MEASURED before this panic, so the \
+         picture below is complete rather than truncated at the first failure.\n\n{}",
+        failures.len(),
+        failures.join("\n\n"),
     );
 }

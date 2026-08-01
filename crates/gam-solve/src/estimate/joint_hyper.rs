@@ -96,6 +96,68 @@ pub(crate) fn validate_joint_hyper_direction_shapes(
     Ok(())
 }
 
+/// The outer-λ-search conditioned response `(y − c)/s` for a caller that drives
+/// [`ExternalJointHyperEvaluator`] directly, or `None` when this fit is off the
+/// identity-link Gaussian conditioning path (borrow `y` verbatim).
+///
+/// # Why this is public (#2671)
+///
+/// `optimize_external_designwith_heuristic_lambdas_andwarm_start` — the
+/// scalar-ρ route — conditions its response before building its `RemlState`
+/// (#1000 centering, #1127 scaling) and reports `reml_score` as the outer value
+/// OF THE CONDITIONED PROBLEM. The joint `[ρ, ψ]` spatial route builds its
+/// `RemlState` here, from `y` verbatim, and its criterion is graded against the
+/// scalar route's. With `FIXED_STABILIZATION_RIDGE` charged against a target of
+/// zero the two problems differ by `delta*(2*c*beta0 + c^2)` on the intercept
+/// axis, so the two criteria disagree by `(n/2)/D_p * delta*((beta0+c)^2 −
+/// beta0^2)` — MEASURED `3.674e-8` at `c = mean(y) = 0.213` and `5.047e-5`
+/// after adding 10 to the same response, against an agreement tolerance of
+/// `2.787e-8`. The joint route must therefore condition through the SAME gate
+/// and the SAME arithmetic, which is what this function exposes; re-deriving
+/// either at the call site is how the two routes drifted apart in the first
+/// place.
+///
+/// The conditioning is exactly invertible and is applied for the hyperparameter
+/// SEARCH only: the accept-fit re-fits the original response at the selected
+/// `(λ̂, ψ̂)`, so every reported coefficient, fitted value and dispersion stays
+/// on the user's scale.
+pub fn gaussian_identity_outer_response_conditioning(
+    x: &DesignMatrix,
+    s_list: &[BlockwisePenalty],
+    opts: &ExternalOptimOptions,
+    y: ArrayView1<'_, f64>,
+    w: ArrayView1<'_, f64>,
+    offset: ArrayView1<'_, f64>,
+) -> Result<Option<Array1<f64>>, EstimationError> {
+    if let Some(message) = row_mismatch_message(y.len(), w.len(), x.nrows(), offset.len()) {
+        crate::bail_invalid_estim!("{}", message);
+    }
+    let specs: Vec<PenaltySpec> = s_list.iter().map(PenaltySpec::from_blockwise_ref).collect();
+    let conditioning = ParametricColumnConditioning::infer_from_penalty_specs(x, &specs);
+    let (cfg, _) = resolved_external_config(opts)?;
+    let has_linear_constraints = opts.linear_constraints.is_some();
+    let center = crate::estimate::optimizer::gaussian_identity_response_center(
+        &cfg,
+        &conditioning,
+        has_linear_constraints,
+        y,
+        w,
+        offset,
+    );
+    let scale = crate::estimate::optimizer::gaussian_identity_response_scale(
+        &cfg,
+        &conditioning,
+        has_linear_constraints,
+        center.unwrap_or(0.0),
+        y,
+        w,
+        offset,
+    );
+    Ok(crate::estimate::optimizer::conditioned_outer_response(
+        center, scale, y,
+    ))
+}
+
 pub struct ExternalJointHyperEvaluator<'a> {
     pub(crate) conditioning: ParametricColumnConditioning,
     pub(crate) kronecker_penalty_system: Option<gam_terms::smooth::KroneckerPenaltySystem>,

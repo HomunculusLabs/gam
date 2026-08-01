@@ -3685,6 +3685,58 @@ fn run_exact_joint_spatial_optimization(
         .compose_offset(offset, "spatial joint fit")
         .map_err(EstimationError::BasisError)?;
     let offset = effective_offset.view();
+    let external_opts = external_opts_for_design(&family, baseline_design, options);
+    // #2671: condition the response through the SAME gate and the SAME
+    // arithmetic the scalar-ρ route uses before it builds its `RemlState`
+    // (#1000 centering / #1127 scaling). This route used to hand `y` to
+    // `ExternalJointHyperEvaluator::new` VERBATIM, so the two routes minimized
+    // penalized problems differing by `delta*(2*c*beta0 + c^2)` on the intercept
+    // axis (`delta = FIXED_STABILIZATION_RIDGE`, charged against a target that
+    // is `Array1::zeros(p)` at every construction site) — and
+    // `try_exact_joint_spatial_length_scale_optimization` then grades
+    // `joint_seed_value` against the scalar route's `fit_score`.
+    //
+    // MEASURED at `517b6303f` on `mk_1d(15, t^2, 0.05, 7)` / `y ~ matern(x,
+    // nu=5/2)`, one run, three arms, against the registered law
+    // `gap = (n/2)/D_p * delta * ((beta0 + m)^2 - beta0^2)`:
+    //
+    //   mean(y) = -3.70e-17 (pre-centered)  gap ~ 0        fit ACCEPTED
+    //   mean(y) =  2.130e-1 (as-is)         gap 3.674e-8   REFUSED
+    //   mean(y) =  1.0213e1 (y + 10)        gap 5.047e-5   REFUSED, 1374x worse
+    //
+    // against `agreement_tolerance = 2.787e-8`. Whether the fit shipped depended
+    // on where the origin of the user's response units happened to sit. The
+    // scalar route moved 4.085e-14 under the same +10 shift (separation 1.24e9).
+    //
+    // This is the SEARCH response only. `theta_star` selects `(λ̂, ψ̂)` and the
+    // caller's accept-fit re-fits the ORIGINAL `y` at that point, exactly as the
+    // scalar route's accept-fit does, so no reported coefficient, fitted value or
+    // dispersion moves. Off the identity-link Gaussian path the helper returns
+    // `None` and `y` is borrowed verbatim — no allocation, no behavioural change.
+    //
+    // `y` is shadowed rather than threaded so that ALL THREE consumers below take
+    // the conditioned response together: the evaluator, the frozen-GLM inputs,
+    // and the `z = y − offset` vector the certified ψ-Gram tensor is built from.
+    // A partial application would pair an n-free fast path with a differently
+    // conditioned slow path.
+    let joint_conditioned_y = gam_solve::estimate::gaussian_identity_outer_response_conditioning(
+        &baseline_design.design,
+        &baseline_design.penalties,
+        &external_opts,
+        y,
+        weights,
+        offset,
+    )?;
+    if joint_conditioned_y.is_some() {
+        log::info!(
+            "[{label}] outer response conditioned for the joint [rho, psi] search (#2671): the \
+             criterion is now formed in the same coordinates as the scalar-rho route it is \
+             graded against"
+        );
+    }
+    let y = joint_conditioned_y
+        .as_ref()
+        .map_or(y, |conditioned| conditioned.view());
     // Use bounds and design metadata for validation.
     assert!(
         lower.len() == theta0.len() && upper.len() == theta0.len(),
@@ -3757,7 +3809,7 @@ fn run_exact_joint_spatial_optimization(
             &baseline_design.design,
             offset,
             &baseline_design.penalties,
-            &external_opts_for_design(&family, baseline_design, options),
+            &external_opts,
             label,
         )?,
         frozen_glm_inputs: if coord_dim == 1 && frozen_glm_tensor_eligible_family(&family) {

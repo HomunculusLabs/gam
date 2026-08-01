@@ -342,7 +342,27 @@ fn with_reml_beta_seed_hook<'state, 'data>() -> impl FnMut(
 /// identity-link Gaussian and carries an unpenalized intercept column to absorb
 /// the shift, and has no linear constraints that could pin the intercept. A zero
 /// or non-finite mean also returns `None` — there is nothing to gain.
-fn gaussian_identity_response_center(
+///
+/// # It is a CORRECTNESS requirement, not only a precision one (#2671)
+///
+/// `PirlsPenalty` charges `FIXED_STABILIZATION_RIDGE * ||beta||^2` against a
+/// target that is `Array1::zeros(p)` at every construction site, so the outer
+/// criterion is a function of WHERE THE ORIGIN OF `y` SITS: shifting `y` by `m`
+/// moves the intercept by `m` and moves the criterion by
+/// `(n/2)/D_p * delta * ((beta0 + m)^2 - beta0^2)`. Centering here pins that
+/// origin at the weighted response mean, which is what makes λ̂ invariant to a
+/// constant added to the response — which it must be for an identity-link
+/// Gaussian fit with an estimated intercept.
+///
+/// MEASURED at `517b6303f` on `mk_1d(15, t^2, 0.05, 7)`, `y ~ matern(x,nu=5/2)`,
+/// three arms of one run: the route that DOES center moved `4.085e-14` under a
+/// `+10` shift; the route that did not moved `5.047e-5` — a separation of
+/// `1.24e9`, and the un-centered route's fit went from ACCEPTED (pre-centered
+/// response) to REFUSED (`+10`). Any outer λ-search over this family must
+/// therefore condition through this gate and
+/// [`conditioned_outer_response`]; a route that skips it selects λ̂/ψ̂ from the
+/// user's choice of response units.
+pub(crate) fn gaussian_identity_response_center(
     cfg: &RemlConfig,
     conditioning: &ParametricColumnConditioning,
     has_linear_constraints: bool,
@@ -397,7 +417,7 @@ fn gaussian_identity_response_center(
 /// unpenalized intercept and no linear constraints); a non-finite, zero, or
 /// already-`O(1)` RMS returns `None` (do not scale, exact previous behaviour) —
 /// scaling near unity buys nothing and only risks a needless allocation.
-fn gaussian_identity_response_scale(
+pub(crate) fn gaussian_identity_response_scale(
     cfg: &RemlConfig,
     conditioning: &ParametricColumnConditioning,
     has_linear_constraints: bool,
@@ -441,6 +461,30 @@ fn gaussian_identity_response_scale(
     // factor within ~one order of magnitude of unity cannot push the objective
     // through the absolute floors, so leave the exact previous path untouched.
     (rms.is_finite() && rms > 0.0 && !(0.1..=10.0).contains(&rms)).then_some(rms)
+}
+
+/// Apply the outer-λ-search response conditioning `(y − center)/scale`.
+///
+/// The ONLY place this arithmetic is written. Both routes that run an outer
+/// λ-search over an identity-link Gaussian response must condition through this
+/// function, or they minimize two different penalized problems and their
+/// criteria are not comparable — see the module note on
+/// [`gaussian_identity_response_center`] and #2671. `(None, None)` returns
+/// `None` so the caller keeps borrowing the original response with no
+/// allocation and no behavioural change.
+pub(crate) fn conditioned_outer_response(
+    center: Option<f64>,
+    scale: Option<f64>,
+    y: ArrayView1<'_, f64>,
+) -> Option<Array1<f64>> {
+    match (center, scale) {
+        (None, None) => None,
+        (center, scale) => {
+            let c = center.unwrap_or(0.0);
+            let s = scale.unwrap_or(1.0);
+            Some(y.mapv(|value| (value - c) / s))
+        }
+    }
 }
 
 /// Pin the λ-search nuisance freeze to a canonical, cache-independent anchor
@@ -722,14 +766,8 @@ where
     // response verbatim — no allocation, no behavioural change. When only one is
     // active we still apply just that transform. Both are exactly invertible by
     // the accept-fit, which re-fits the original `y_o` at the selected λ̂.
-    let reml_y_conditioned: Option<Array1<f64>> = match (response_center, response_scale) {
-        (None, None) => None,
-        (center, scale) => {
-            let c = center.unwrap_or(0.0);
-            let s = scale.unwrap_or(1.0);
-            Some((&y_o - c) / s)
-        }
-    };
+    let reml_y_conditioned: Option<Array1<f64>> =
+        conditioned_outer_response(response_center, response_scale, y_o.view());
     let reml_y_view = reml_y_conditioned
         .as_ref()
         .map_or_else(|| y_o.view(), |conditioned| conditioned.view());

@@ -11,30 +11,68 @@ use faer::Unbind;
 
 // Fixed stabilization ridge for PIRLS/PLS. It is constant w.r.t. rho.
 //
-// IT IS CENTERED, NOT SHRUNK TOWARD ZERO. `penalty_term` carries
-// `ridge * ||beta - mu||^2`, where `mu` is `PirlsPenalty::prior_mean_target()`:
-// `pls_solver` augments the normal-equation RHS with `r + ridge * mu`
-// (`pls_solver.rs:305` and `:543`), which makes the system a Tikhonov
-// regularization centered at the prior-mean target. This comment used to read
-// "`penalty_term` carries this as ridge * ||beta||^2", and that shorthand is
-// only true when `mu = 0`.
+// IT SHRINKS TOWARD ZERO. `penalty_term` carries `ridge * ||beta||^2`, and both
+// objective sites spell it that way literally:
 //
-// The distinction is not cosmetic, and it cost two people a session on #2644.
-// From `ridge * ||beta||^2` it follows that the criterion depends on where the
-// origin of the response sits -- an intercept absorbing a shift in `y` would be
-// charged for it, which reads as a SPEC.md line 12 violation ("an intercept
-// generally should not have a penalty") and appears to justify exempting the
-// intercept. MEASURED, it does not: `mu` moves with `beta` under an origin
-// shift, so the term is unchanged. Fitting `y` against `y + 10` moved the
-// criterion by 4.085621e-14 (relative 4.504937e-15, ~20 machine epsilons)
-// against a 5.092357e-05 prediction from the uncentered reading -- nine orders
-// out. `tests/regression_2644_outer_criterion_conditioning.rs::
-// outer_criterion_is_invariant_to_the_origin_of_y` is the standing guard.
+//     gam_working_model.rs   `ridge_used * beta.as_ref().dot(beta.as_ref())`
+//     loop_driver.rs         `ridge_used * beta_transformed.as_ref().dot(...)`
 //
-// What IS true: `beta` moving relative to a FIXED `mu` is charged, which is how
-// #2644's cross-route criterion disagreement became visible at all (the ridge
-// accounted for 100% of it, ratio 1.00000009). That makes this constant the
-// DETECTOR of a coefficient disagreement, not its cause -- see #2671. Removing
+// CORRECTION (#2671, 2026-08-01). This comment previously read "IT IS CENTERED,
+// NOT SHRUNK TOWARD ZERO ... `ridge * ||beta - mu||^2` ... the `||beta||^2`
+// shorthand is only true when `mu = 0`". `penalty_term` NEVER carries a `mu`:
+// the two sites above are the only places the ridge enters the objective and
+// neither reads `prior_mean_target`. So the "shorthand" is the actual formula,
+// whatever `mu` is.
+//
+// Be precise about `mu` itself, because the naive survey is also wrong. Every
+// CONSTRUCTION site is `Array1::zeros(p)` (`loop_driver.rs:758`, `:1128`,
+// `:1139`, plus `penalty.rs`'s test fixtures), but there is a MUTATOR:
+// `attach_penalty_shift` (`penalty.rs:484`, called at `loop_driver.rs:1154`)
+// overwrites it with `canonical_prior_mean_aggregate` — the sum of each
+// canonical block's `full_width_prior_mean()`, which is nonzero for any penalty
+// that declares a shrinkage target. So `mu` is zero on the ordinary GAM path by
+// the DATA, not by construction, and a survey that stops at the struct literals
+// proves nothing. What settles it is the objective: the RHS augmentation the old
+// text cited (`pls_solver.rs:305`, `:543`,
+// `rhs.scaled_add(ridge_used, prior_mean_target)`) moves the SOLVED system's
+// minimizer, while the PRICED `penalty_term` is `ridge*||beta||^2` against zero
+// on every path.
+//
+// The consequence the old text denied is therefore live: THE CRITERION DEPENDS
+// ON WHERE THE ORIGIN OF THE RESPONSE SITS. Shifting `y` by `m` moves the
+// intercept by `m` and moves the outer criterion by
+// `(n/2)/D_p * ridge * ((beta0 + m)^2 - beta0^2)`.
+//
+// WHY THE OLD MEASUREMENT SAID OTHERWISE. The 4.085621e-14 it quotes is real and
+// reproduces bit-for-bit; it is not a measurement of this term. Its fixture
+// (`y ~ s(x, k=5)`, Gaussian identity, unpenalized intercept, no linear
+// constraints) satisfies every clause of `gaussian_identity_response_center`'s
+// gate, so the #1000 centering removed the origin from BOTH arms upstream, and
+// `reml_score` is the outer value of the CENTERED problem. That quantity was
+// never free to disagree; 4.085621e-14 is the residue of `(y_i + 10) - 10.33`
+// versus `y_i - 0.33`.
+//
+// MEASURED on a route where the origin was still live (`517b6303f`, release, one
+// run, `mk_1d(15, t^2, 0.05, 7)`, `y ~ matern(x, nu=5/2)`): the joint psi route,
+// which did not center, moved 5.047e-5 under the same +10 shift while the scalar
+// route moved 4.085e-14 in the SAME run -- a separation of 1.24e9, and a
+// registered VALUE prediction confirmed to four significant figures (linear-in-m
+// out by 29x, constant by 1374x). The pre-centered arm's fit was ACCEPTED where
+// the as-is arm REFUSED.
+//
+// The fix was to condition the joint route (`spatial_optimization.rs`), NOT to
+// exempt the intercept from this ridge and NOT to remove the centering: the
+// centering is what makes lambda-hat invariant to a constant added to `y`, which
+// it must be for an identity-link Gaussian fit with an estimated intercept.
+// `tests/regression_2644_outer_criterion_conditioning.rs::
+// joint_route_outer_criterion_is_invariant_to_the_origin_of_y` is the standing
+// guard, and it runs on the joint route precisely because the scalar route
+// cannot express the failure.
+//
+// What remains true: `beta` moving relative to the FIXED zero target is charged,
+// which is how #2644's cross-route criterion disagreement became visible at all
+// (the ridge accounted for 100% of it, ratio 1.00000009). That makes this
+// constant the DETECTOR of a coefficient disagreement, not its cause. Removing
 // it from the intercept would delete the only term that can see two routes
 // compute different coefficients, while they went on doing so.
 //

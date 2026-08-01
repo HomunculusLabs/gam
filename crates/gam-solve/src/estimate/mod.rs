@@ -92,7 +92,9 @@ pub(crate) use external_options::{
 };
 pub use fit::{fit_gam, fit_gam_with_penalty_specs, fit_gamwith_heuristic_lambdas};
 pub use gam_problem::{ensure_finite_scalar, validate_all_finite};
-pub use joint_hyper::ExternalJointHyperEvaluator;
+pub use joint_hyper::{
+    ExternalJointHyperEvaluator, gaussian_identity_outer_response_conditioning,
+};
 pub(crate) use optimizer::optimize_external_designwith_heuristic_lambdas_andwarm_start;
 pub use optimizer::{optimize_external_design, optimize_external_designwith_heuristic_lambdas};
 pub use outer_eval_capture::{
