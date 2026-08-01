@@ -81,15 +81,35 @@ MGCV_STATUS_OK = "ok"
 MGCV_STATUS_ERROR = "error"
 MGCV_STATUS_SKIPPED = "skipped"
 
-# Status of the gamfit-vs-mgcv *comparison*. Only COMPARISON_MADE says anything
-# about the fit under test; every other value means the reference never produced
-# a number, so the row is silent about gam quality and must not be read as red.
+# Status of the gamfit arm under test.
+GAMFIT_STATUS_OK = "ok"
+GAMFIT_STATUS_ERROR = "error"
+GAMFIT_STATUS_NO_METRIC = "no_metric"
+
+# Reasons a row carries no gamfit-vs-mgcv comparison. These are per-ARM and a
+# row can carry more than one: a trial where the fit errored AND the reference
+# errored is a fourth state, distinct from either alone, and it must not render
+# as whichever one happens to be checked first.
+REASON_MGCV_SKIPPED = "mgcv_skipped"
+REASON_MGCV_ERROR = "mgcv_error"
+REASON_MGCV_NO_METRIC = "mgcv_no_metric"
+REASON_GAMFIT_ERROR = "gamfit_error"
+REASON_GAMFIT_NO_METRIC = "gamfit_no_metric"
+# Reasons that mean the REFERENCE did not come back. A RAM skip is deliberate
+# harness behaviour and is deliberately not one of them.
+REASONS_REFERENCE_UNAVAILABLE = frozenset({REASON_MGCV_ERROR, REASON_MGCV_NO_METRIC})
 COMPARISON_MADE = "compared"
-COMPARISON_NO_REFERENCE = "no_reference:mgcv_error"
-COMPARISON_REFERENCE_SKIPPED = "no_reference:mgcv_skipped"
-COMPARISON_NO_REFERENCE_METRIC = "no_reference:mgcv_metric_missing"
-COMPARISON_GAMFIT_FAILED = "gamfit_failed"
-COMPARISON_NO_GAMFIT_METRIC = "gamfit_metric_missing"
+
+# Per-row verdicts. Exactly one is emitted per row, always. The point of
+# NO_VERDICT existing at all is that "the harness reached no conclusion" used to
+# be rendered by a `FAIL` string in the metric column -- a fallback wearing a
+# verdict's clothes -- while the real verdict below could not fire, because it
+# is keyed on a gap that is None precisely when an arm is missing.
+VERDICT_OK = "ok"
+VERDICT_WARN_GAP = "warn:gap"
+VERDICT_FAIL_GAP = "FAIL:gap"
+VERDICT_FAIL_NAN = "FAIL:nan"
+VERDICT_NO_VERDICT = "no-verdict"
 
 
 @dataclass
@@ -121,35 +141,77 @@ class FuzzResult:
             return MGCV_STATUS_ERROR
         return MGCV_STATUS_OK
 
-    def comparison_status(self) -> str:
-        """Why this row does or does not carry a gamfit-vs-mgcv comparison.
+    def _primary_metric_name(self) -> str:
+        return self.primary_metric or ("r2" if self.scenario.get("family") == "gaussian" else "auc")
 
-        A row whose reference errored and a row whose comparison ran and blew
-        past the gap threshold both used to surface as `FAIL`; only the latter
-        is evidence about gam. Keeping them apart is the point of this value.
+    def gamfit_status(self) -> str:
+        """Status of the arm under test, kept separate from the reference's so a
+        trial where BOTH failed is not reported as whichever was checked first."""
+        if self.rust.get("error"):
+            return GAMFIT_STATUS_ERROR
+        if self.rust.get(self._primary_metric_name()) is None:
+            return GAMFIT_STATUS_NO_METRIC
+        return GAMFIT_STATUS_OK
+
+    def comparison_reasons(self) -> list[str]:
+        """Every reason this row carries no comparison, one per arm. Empty means
+        a comparison was made.
+
+        Four states used to render identically as `FAIL`: a deliberate RAM skip
+        (correct behaviour), a dead reference, a failed fit, and both at once.
+        They are different facts about different things, so they are listed
+        rather than collapsed.
         """
-        metric = self.primary_metric or ("r2" if self.scenario.get("family") == "gaussian" else "auc")
+        metric = self._primary_metric_name()
+        reasons: list[str] = []
         mgcv_status = self.mgcv_status()
         if mgcv_status == MGCV_STATUS_SKIPPED:
-            return COMPARISON_REFERENCE_SKIPPED
-        if mgcv_status == MGCV_STATUS_ERROR:
-            return COMPARISON_NO_REFERENCE
-        if self.mgcv.get(metric) is None:
-            return COMPARISON_NO_REFERENCE_METRIC
-        if self.rust.get("error"):
-            return COMPARISON_GAMFIT_FAILED
-        if self.rust.get(metric) is None:
-            return COMPARISON_NO_GAMFIT_METRIC
-        return COMPARISON_MADE
+            reasons.append(REASON_MGCV_SKIPPED)
+        elif mgcv_status == MGCV_STATUS_ERROR:
+            reasons.append(REASON_MGCV_ERROR)
+        elif self.mgcv.get(metric) is None:
+            reasons.append(REASON_MGCV_NO_METRIC)
+        gamfit_status = self.gamfit_status()
+        if gamfit_status == GAMFIT_STATUS_ERROR:
+            reasons.append(REASON_GAMFIT_ERROR)
+        elif gamfit_status == GAMFIT_STATUS_NO_METRIC:
+            reasons.append(REASON_GAMFIT_NO_METRIC)
+        return reasons
+
+    def comparison_status(self) -> str:
+        reasons = self.comparison_reasons()
+        return COMPARISON_MADE if not reasons else "+".join(reasons)
 
     def reference_unavailable(self) -> bool:
         """True when no comparison was possible because the reference arm did
         not produce a number (errored, or returned no primary metric). RAM
         skips are a deliberate harness decision and are excluded."""
-        return self.comparison_status() in {
-            COMPARISON_NO_REFERENCE,
-            COMPARISON_NO_REFERENCE_METRIC,
-        }
+        return any(reason in REASONS_REFERENCE_UNAVAILABLE for reason in self.comparison_reasons())
+
+    def verdict(self) -> str:
+        """The row's single verdict, emitted unconditionally.
+
+        The gap-keyed verdict below cannot fire when `primary_gap is None` --
+        i.e. exactly when an arm is missing -- so a row with no comparison used
+        to fall through to whatever the metric column happened to print. Here
+        that case has its own value, carrying the per-arm reasons, and it is
+        never spelled like a comparison result.
+        """
+        for gate_metric in NAN_GATED_METRICS:
+            if _metric_is_finite(self.mgcv.get(gate_metric)) and _metric_is_nonfinite(self.rust.get(gate_metric)):
+                return VERDICT_FAIL_NAN
+        reasons = self.comparison_reasons()
+        if reasons:
+            return f"{VERDICT_NO_VERDICT}:{'+'.join(reasons)}"
+        gap = self.primary_gap
+        if gap is not None and gap > PER_TRIAL_FAIL_GAP:
+            return VERDICT_FAIL_GAP
+        level, _ = classify_primary_divergence(self)
+        if level == "fail":
+            return VERDICT_FAIL_GAP
+        if level == "warn":
+            return VERDICT_WARN_GAP
+        return VERDICT_OK
 
 
 ABS_GAP_WARN_THRESHOLD = 0.05
@@ -797,6 +859,20 @@ def _mgcv_absent_label(result: FuzzResult) -> str:
     return "  n/a"
 
 
+def _timing_cell(result: FuzzResult) -> str:
+    """Per-arm wall time, with a failed arm's seconds marked as what they are.
+
+    A fit that raised after 865.9 s spent that time reaching an error; printed
+    bare next to a successful arm's runtime it reads as a slow fit instead."""
+    t_rust = float(result.rust.get("time", 0) or 0)
+    t_mgcv = float(result.mgcv.get("time", 0) or 0)
+    if max(t_rust, t_mgcv) <= 0.5:
+        return ""
+    rust_suffix = "(to-failure)" if result.rust.get("error") else ""
+    mgcv_suffix = "(to-failure)" if result.mgcv.get("error") else ""
+    return f"  gamfit={t_rust:.1f}s{rust_suffix} mgcv={t_mgcv:.1f}s{mgcv_suffix}"
+
+
 def print_leaderboard(results: typing.Any, top_n: int = 25) -> None:
     groups: dict[tuple[typing.Any, typing.Any, typing.Any], list[typing.Any]] = {}
     for r in results:
@@ -1027,7 +1103,10 @@ def main() -> None:
                         # so the reason a row carries no comparison has to live
                         # here too, not only in the console line.
                         "mgcv_status": result.mgcv_status(),
+                        "gamfit_status": result.gamfit_status(),
                         "comparison_status": result.comparison_status(),
+                        "comparison_reasons": result.comparison_reasons(),
+                        "verdict": result.verdict(),
                     },
                     default=str,
                 )
@@ -1041,25 +1120,20 @@ def main() -> None:
             rs = _metric_cell(rv, "  ERR" if result.rust.get("error") else "  n/a")
             ms = _metric_cell(mv, _mgcv_absent_label(result))
             gap_s = f"{result.primary_gap:+.4f}" if result.primary_gap is not None else " N/A "
-            err_r = " [G:ERR]" if result.rust.get("error") else ""
-            comparison = result.comparison_status()
-            status_s = "" if comparison == COMPARISON_MADE else f" [{comparison}]"
+            # One verdict per row, always printed. It is the only token in this
+            # line that carries a pass/fail claim.
+            verdict_s = f" [{result.verdict()}]"
             divergence_level, _ = classify_primary_divergence(result)
             flag = " !!!" if divergence_level == "fail" else (" !!" if divergence_level == "warn" else "")
-            if result.primary_gap is not None and result.primary_gap > PER_TRIAL_FAIL_GAP:
-                flag += " [FAIL]"
-            for gate_metric in NAN_GATED_METRICS:
-                if _metric_is_finite(result.mgcv.get(gate_metric)) and _metric_is_nonfinite(result.rust.get(gate_metric)):
-                    flag += " [FAIL:nan]"
-                    break
-            t_rust = float(result.rust.get("time", 0) or 0)
-            t_mgcv = float(result.mgcv.get("time", 0) or 0)
-            time_s = f"  gamfit={t_rust:.1f}s mgcv={t_mgcv:.1f}s" if max(t_rust, t_mgcv) > 0.5 else ""
+            # An arm that errored still reports a time, and that time is a
+            # time-to-failure, not a runtime -- say so rather than let it be
+            # read as a throughput number.
+            time_s = _timing_cell(result)
             print(
                 f"  [{i + 1:3d}/{len(scenarios)}] {sc.name[:30]:30s} "
                 f"{sc.family[:4]}/{sc.model_type[:5]}/{sc.basis_type[:5]:5s} "
                 f"{metric}:gamfit={rs} {metric}:mgcv={ms} gap={gap_s} "
-                f"n={sc.n_obs:6d} p={sc.n_features:3d}{err_r}{status_s}{flag}{time_s}",
+                f"n={sc.n_obs:6d} p={sc.n_features:3d}{verdict_s}{flag}{time_s}",
                 flush=True,
             )
 
@@ -1072,7 +1146,14 @@ def main() -> None:
 
     print_leaderboard(results, top_n=args.top)
 
-    rust_only_failures = [r for r in results if r.rust.get("error") and not r.mgcv.get("error")]
+    # Unchanged population, stated in terms of the arm statuses: a gamfit error
+    # is a CI failure unless the reference errored too, in which case the
+    # scenario itself is suspect and the row is triaged as a dead reference.
+    rust_only_failures = [
+        r
+        for r in results
+        if r.gamfit_status() == GAMFIT_STATUS_ERROR and r.mgcv_status() != MGCV_STATUS_ERROR
+    ]
     baseline = None
     if args.baseline_json:
         try:
@@ -1096,7 +1177,8 @@ def main() -> None:
     print(
         f"\n  comparisons: {gates['valid_count']} made | "
         f"mgcv reference unavailable: {gates['reference_unavailable_count']} | "
-        f"mgcv arm ram-skipped: {gates['ram_skipped_count']} "
+        f"mgcv arm ram-skipped (deliberate): {gates['ram_skipped_count']} | "
+        f"gamfit fit errors: {sum(1 for r in results if r.gamfit_status() == GAMFIT_STATUS_ERROR)} "
         f"(of {gates['requested_trials']} requested trial(s))"
     )
 
