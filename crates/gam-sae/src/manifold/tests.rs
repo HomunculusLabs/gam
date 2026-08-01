@@ -5364,7 +5364,11 @@ pub(crate) fn giant_host_working_set_plan_flips_to_matrix_free_before_dense_allo
         d_max,
         border_dim,
         budget,
-        8 * 1024 * 1024,
+        // The production callers all pass `SAE_CPU_L2_CACHE_BYTES *
+        // SAE_CHUNK_CACHE_MULTIPLE` for the chunk window; take that derivation
+        // by name rather than transcribing the 8 MiB it currently evaluates to
+        // (#2704), so this case follows the L2 model if it is ever retuned.
+        SAE_CPU_L2_CACHE_BYTES * SAE_CHUNK_CACHE_MULTIPLE,
         120usize * 1024 * 1024 * 1024,
     );
 

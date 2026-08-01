@@ -59,9 +59,12 @@ impl_reason_error_boilerplate! {
 const RESCALE_CENTERED_SS_FLOOR: f64 = 1e-12;
 // Imported, not transcribed (#2704): the same streamed working-set budget,
 // used for a row chunk in `scale_design_row_chunk_size` and a column chunk in
-// the replay solve. Note `SCALE_OPERATOR_MATRIX_FREE_PCG_THRESHOLD` below is
-// derived from this value by matching it — i.e. derived from a literal that
-// is itself unmeasured.
+// the replay solve. `SCALE_OPERATOR_MATRIX_FREE_PCG_THRESHOLD` below is NOT a
+// derivation of this constant despite its prose: it is an independent literal
+// rounded to 10^6 doubles, 48_576 elements short of the 1_048_576 f64 elements
+// this budget actually holds. Deriving it exactly would move a routing
+// threshold by ~5%, so it is left as the independent literal it actually is
+// rather than dressed as a derivation from a value that is itself unmeasured.
 const SCALE_DESIGN_TARGET_CHUNK_BYTES: usize =
     gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
 // Numerical conditioning floor for the SVD truncation tolerance: we drop any
@@ -83,9 +86,10 @@ const SCALE_PROJECTION_LEVERAGE_AMPLIFICATION: f64 = 1.0e8;
 // Above this many materialized entries (rows × noise columns) the scale-deviation
 // operator routes its normal-equation solve through matrix-free PCG instead of
 // forming a dense `XᵀWX`. The dense path costs `O(n · p²)` time and `O(p²)`
-// memory; once the explicit operator footprint reaches ~10⁶ doubles (~8 MiB,
-// matching `SCALE_DESIGN_TARGET_CHUNK_BYTES`) the chunked matrix-free path is
-// the cheaper, more cache-friendly route.
+// memory; once the explicit operator footprint reaches ~10⁶ doubles (~8 MB,
+// the same order as `SCALE_DESIGN_TARGET_CHUNK_BYTES` but NOT derived from it —
+// see the note there) the chunked matrix-free path is the cheaper, more
+// cache-friendly route.
 const SCALE_OPERATOR_MATRIX_FREE_PCG_THRESHOLD: usize = 1_000_000;
 
 #[derive(Clone, Debug)]
@@ -246,7 +250,6 @@ impl ScaleDesignMatrixRef<'_> {
         }
     }
 }
-
 
 fn dim_err(reason: impl Into<String>) -> ScaleDesignError {
     ScaleDesignError::IncompatibleDimensions {

@@ -117,7 +117,13 @@ mod tests {
         assert!(plan.device_admitted);
         assert_eq!(plan.tile_items, 8_192);
         assert_eq!(plan.tile_count, 4);
-        assert_eq!(plan.peak_score_bytes, 8 * 1024 * 1024);
+        // The tile is sized off the canonical library row-chunk target, so the
+        // expected peak is that target by name, not a transcription of it
+        // (#2704).
+        assert_eq!(
+            plan.peak_score_bytes,
+            gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES
+        );
         assert_eq!(
             plan.dot_flops_lower_bound,
             2u128 * 256u128 * 32_768u128 * 64u128

@@ -19,6 +19,13 @@ pub use crate::cgroup_memory::{
 ///
 /// Consumers should size chunks with [`rows_for_target_bytes`], which performs
 /// the `target / (cols * 8)` division and floors the result at one row.
+///
+/// Re-declaring this value — as a module-local `const`, an inline literal, or
+/// any other spelling of 8 MiB — is caught by the workspace guard
+/// `tests/row_chunk_target_bytes_single_source_2704.rs`, which fails on any
+/// transcription of this value outside the exemption table it carries for the
+/// three sites that are a genuinely DIFFERENT quantity coinciding at 8 MiB.
+/// Import this constant instead, or derive from it under a name.
 pub const LIBRARY_ROW_CHUNK_TARGET_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -110,7 +117,7 @@ pub struct MemoryAvailability {
 }
 
 impl MemoryAvailability {
-    fn from_observation(
+    pub(crate) fn from_observation(
         host_available_bytes: u64,
         host_total_bytes: u64,
         cgroup: CgroupMemoryObservation,
@@ -689,8 +696,28 @@ impl ResourcePolicy {
     /// categories is bounded by one ledger — that reservation, not these caps,
     /// is what enforces "fits right now" (#2684).
     pub fn default_library() -> Self {
-        let governor = MemoryGovernor::global();
-        let single_cap = governor.single_materialization_cap_bytes();
+        Self::for_observed_memory(process_memory_availability())
+    }
+
+    /// The library-default policy a process would derive from `availability`.
+    ///
+    /// [`Self::default_library`] is exactly this function applied to the
+    /// process's own observation, so the routing thresholds a fit sees are a
+    /// pure function of the *observed environment* — and, because every scalar
+    /// below is taken from
+    /// [`MemoryAvailability::capacity_bytes`] rather than
+    /// [`MemoryAvailability::available_bytes`], a pure function of that
+    /// environment's stationary CAPACITY. Two observations of the same box that
+    /// differ only in how much memory happened to be free at the instant of the
+    /// probe therefore produce byte-identical policies, and any route selected
+    /// from one of these caps is reproducible across processes and across load
+    /// (#2684).
+    ///
+    /// Exposed rather than kept private so a test can hold capacity fixed and
+    /// vary free memory without racing the real machine; the live path uses the
+    /// same code, so the property under test is the shipped one.
+    pub fn for_observed_memory(availability: &MemoryAvailability) -> Self {
+        let single_cap = governor_materialization_cap_from_availability(availability);
         Self {
             max_single_materialization_bytes: single_cap,
             max_operator_cache_bytes: single_cap,
@@ -1290,8 +1317,10 @@ mod resource_policy_tests {
 
     #[test]
     fn rows_for_target_bytes_large_target() {
-        // 8 MiB target, 1024 cols → 1024 bytes/row → 8192 rows
-        let target = 8 * 1024 * 1024;
+        // Canonical target, 1024 cols → 8192 bytes/row → rows = target/8192.
+        // Taken by name rather than transcribed, so the case stays pinned to the
+        // library target if that target ever moves (#2704).
+        let target = LIBRARY_ROW_CHUNK_TARGET_BYTES;
         let cols = 1024_usize;
         let expected = target / (cols * std::mem::size_of::<f64>());
         assert_eq!(rows_for_target_bytes(target, cols), expected);
