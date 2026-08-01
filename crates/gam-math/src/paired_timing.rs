@@ -49,6 +49,40 @@
 //!   across iterations; `black_box` alone permits both, and one of the replaced
 //!   harnesses relied on `black_box` with no data dependence.
 //!
+//! # `wins_fraction` is evidence, not a gate
+//!
+//! Lead a report with it: `wins = 1.00` over fifteen repetitions is a
+//! distribution-free sign test at `2^-15`, it does not depend on the resolution
+//! estimate, and that matters most exactly when the resolution estimate is the
+//! thing under suspicion. It settled a multinomial cell whose margin was only
+//! **1.6x** its own resolution — a comparison of ratio against resolution
+//! declined to certify that cell.
+//!
+//! **Do not put it in a bar.** It is a within-run confidence statement *at that
+//! host's noise level*, so it degrades in the opposite direction from the
+//! quantity it would be guarding. Measured on one 1.6% effect: `wins = 0.00` on
+//! a quiet node, `0.27 / 0.40 / 0.27` on a node ~30x noisier, and three runs of
+//! **identical code** giving `0.67 / 0.87 / 1.00` — while `median_ratio` stayed
+//! inside a 0.8% band. ANDed into a gate it can only manufacture failures on a
+//! busy runner. **Gate on `median_ratio`; report `wins` and `ratio_resolution`.**
+//!
+//! # A derived margin is sometimes zero
+//!
+//! "Derive the margin from the resolution" **cannot mean "add a margin."**
+//! Sometimes the resolution says none is warranted and the derived answer is the
+//! bar already there. A zero-margin bar that looked like a coin flip was in fact
+//! guarding a real regression at many times its own resolution, and the obvious
+//! 5% tolerance would have passed that regression silently.
+//!
+//! The converse case is just as sharp. One gate's cell sits ~1.5% below its
+//! opponent across six measurements on three nodes, with two candidate
+//! mechanisms measured and refuted; the estimator it replaced called that cell a
+//! comfortable pass at `1.043911`. **Fixing the estimator did not make the bar
+//! assertable — it made clear the old numbers were not measuring the quantity at
+//! all.** Whether such a cell keeps a strict bar is a contract decision, and it
+//! must be taken explicitly with a stated reason, never by widening a bar in the
+//! commit that measured it.
+//!
 //! # The arm must be large relative to one closure call
 //!
 //! This harness costs a closure call plus a `black_box` per iteration, and it
