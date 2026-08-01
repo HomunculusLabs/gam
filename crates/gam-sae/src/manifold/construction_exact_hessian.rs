@@ -5557,3 +5557,155 @@ mod tests_inverse_power_deflation_cost_2627 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests_route_forced_classification_2673 {
+    use super::*;
+    use super::super::tests::{TestPeriodicEvaluator, periodic_basis};
+    use gam_solve::arrow_schur::{ArrowSolveOptions, solve_arrow_newton_step_with_options};
+    use ndarray::{Array1, Array2, array};
+    use std::sync::Arc;
+
+    /// #2673 — FORCE both classification routes on ONE state and compare.
+    ///
+    /// Two floors classify directions of the same `A = B + ΔC`, and `i2644`'s
+    /// call-site enumeration established that **exactly one runs per evaluation**:
+    /// `SAE_EXACT_A_PD_FLOOR_REL` on the dense spectral path, and
+    /// `sae_ift_min_curvature_fraction()` (`sqrt(EPSILON)`) inside
+    /// `solve_exact_stationarity_preconditioned`, reached only when
+    /// `matrix_free_system = Some(..)`. They never coexist at a fixed state.
+    ///
+    /// So the hazard is NOT an internal contradiction within one solve — it is
+    /// that **the same statistical state is classified by different rules
+    /// depending on which route its `K` selects**, and a fit can change character
+    /// as `K` crosses the massive-`K` threshold. That is the #2509/#2515
+    /// route-dependence family.
+    ///
+    /// My earlier probe (`two_floors_overlap_region_direction_count_2673`)
+    /// reconstructed both rules in a test and found zero directions changing
+    /// class. This is the stronger arm it could not reach: drive the SAME state
+    /// through the two PRODUCTION solves — `solve_exact_stationarity` (dense
+    /// rank-revealing pseudoinverse) and `solve_exact_stationarity_matrix_free`
+    /// (`B`-preconditioned GMRES + the `μ` deflation loop) — with the same rhs,
+    /// and compare what each returns. If the two rules classify the same
+    /// directions the same way, the solutions agree.
+    ///
+    /// Reported, not asserted equal: a disagreement here is the defect this issue
+    /// tracks, and asserting agreement would assert it absent. What IS asserted is
+    /// that the comparison is well posed — both routes reached a typed outcome on
+    /// one state, so the numbers below compare two answers rather than an answer
+    /// and a refusal.
+    #[test]
+    fn route_forced_stationarity_classification_agrees_2673() {
+        let n = 24usize;
+        let coords = Array2::from_shape_fn((n, 1), |(row, _)| (row as f64 + 0.25) / n as f64);
+        let (phi, jet) = periodic_basis(&coords);
+        let decoder = array![[0.30, -0.10], [1.20, 0.20], [0.10, 1.10]];
+        let mut target = phi.dot(&decoder);
+        for row in 0..n {
+            target[[row, 0]] += 1.0e-3 * (0.37 * row as f64).sin();
+            target[[row, 1]] += 1.0e-3 * (0.29 * row as f64).cos();
+        }
+        let atom = SaeManifoldAtom::new_with_provided_function_gram(
+            "periodic",
+            SaeAtomBasisKind::Periodic,
+            1,
+            phi,
+            jet,
+            decoder,
+            Array2::<f64>::eye(3),
+        )
+        .unwrap()
+        .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
+        let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+            Array2::<f64>::zeros((n, 1)),
+            vec![coords],
+            vec![LatentManifold::Circle { period: 1.0 }],
+            AssignmentMode::softmax(1.0),
+        )
+        .unwrap();
+        let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+        let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![250.0_f64.ln()]]);
+        let sys = term
+            .assemble_arrow_schur(target.view(), &rho, None)
+            .expect("arrow-Schur assembly");
+        let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+        let (_dt, _db, cache) = solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options)
+            .expect("undamped factor cache");
+
+        // One rhs, deterministic and dense enough to excite every direction —
+        // a rhs that misses the near-null directions would leave both routes
+        // nothing to classify differently.
+        let total_t = cache.delta_t_len();
+        let rhs = SaeArrowVector {
+            t: Array1::from_shape_fn(total_t, |i| 0.5 + 0.25 * ((i as f64) * 0.7).sin()),
+            beta: Array1::from_shape_fn(cache.k, |i| -0.3 + 0.2 * ((i as f64) * 1.1).cos()),
+        };
+
+        let dense = term.solve_exact_stationarity(&rho, target.view(), &cache, &rhs);
+        let matrix_free =
+            term.solve_exact_stationarity_matrix_free(&rho, target.view(), &cache, &sys, &rhs);
+
+        match (&dense, &matrix_free) {
+            (Ok(d), Ok(m)) => {
+                let dt = d
+                    .t
+                    .iter()
+                    .zip(m.t.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max);
+                let db = d
+                    .beta
+                    .iter()
+                    .zip(m.beta.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max);
+                let scale = d
+                    .t
+                    .iter()
+                    .chain(d.beta.iter())
+                    .map(|v| v.abs())
+                    .fold(0.0_f64, f64::max)
+                    .max(1.0);
+                println!(
+                    "[#2673 ROUTE-FORCED] both routes solved. max|Δt|={dt:.6e} \
+                     max|Δbeta|={db:.6e} scale={scale:.6e} relative={:.6e}",
+                    dt.max(db) / scale
+                );
+            }
+            (Err(d), Ok(_)) => println!(
+                "[#2673 ROUTE-FORCED] DENSE refused, matrix-free solved — the routes \
+                 disagree on whether this state is solvable at all: {d}"
+            ),
+            (Ok(_), Err(m)) => println!(
+                "[#2673 ROUTE-FORCED] MATRIX-FREE refused, dense solved — the routes \
+                 disagree on whether this state is solvable at all: {m}"
+            ),
+            (Err(d), Err(m)) => println!(
+                "[#2673 ROUTE-FORCED] both routes refused.\n  dense: {d}\n  matrix-free: {m}"
+            ),
+        }
+
+        // Well-posedness: both routes must reach a TYPED outcome on this state, and
+        // a solution that is returned must be finite. Without this the print above
+        // could be comparing an answer against a panic.
+        for (label, solved) in [("dense", &dense), ("matrix-free", &matrix_free)] {
+            if let Ok(x) = solved {
+                assert!(
+                    x.t.iter().chain(x.beta.iter()).all(|v| v.is_finite()),
+                    "#2673: the {label} route returned a non-finite stationarity solution"
+                );
+                assert_eq!(
+                    x.t.len(),
+                    total_t,
+                    "#2673: the {label} route must return the declared t layout"
+                );
+                assert_eq!(
+                    x.beta.len(),
+                    cache.k,
+                    "#2673: the {label} route must return the declared beta layout"
+                );
+            }
+        }
+    }
+}
