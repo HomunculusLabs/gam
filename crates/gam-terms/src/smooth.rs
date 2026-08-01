@@ -17,6 +17,21 @@ pub use penalty_priors::{
 
 include!("smooth/term_specs.rs");
 
+/// The caller's spatial length-scale window and the single expression that
+/// projects onto it (gam#2726). Re-exported into `smooth` so the ψ seed
+/// constructors in `term_specs.rs` and the outer fit driver share one
+/// definition instead of each spelling the projection out for themselves.
+mod spatial_length_scale_window;
+pub use spatial_length_scale_window::{
+    project_spatial_length_scale_into_window, project_spatial_length_scales_in_spec,
+    spatial_term_seed_psi,
+};
+
+/// gam#2726: the joint `[rho, psi]` seed and the scalar-rho incumbent it is
+/// graded against are one point, bit-for-bit, at both projection sites.
+#[cfg(test)]
+mod spatial_length_scale_projection_2726_tests;
+
 /// Exhaustive coordinate-scale laws for every smooth-basis constructor.
 ///
 /// Kept next to the term specification rather than in an individual basis

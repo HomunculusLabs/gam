@@ -2808,10 +2808,10 @@ impl SpatialLogKappaCoords {
                 out[slot] = cc.kappa;
                 continue;
             }
-            let length_scale = get_spatial_length_scale(spec, term_idx)
-                .unwrap_or(options.min_length_scale)
-                .clamp(options.min_length_scale, options.max_length_scale);
-            out[slot] = -length_scale.ln();
+            // ψ = −ln(length_scale) through the SAME expression the aniso
+            // constructor and the upstream spec projection use (#2726) — see
+            // `spatial_length_scale_window::spatial_term_seed_psi`.
+            out[slot] = spatial_term_seed_psi(spec, term_idx, options);
         }
         Self {
             values: out,
@@ -2859,10 +2859,10 @@ impl SpatialLogKappaCoords {
                 dims.push(1);
                 continue;
             }
-            let length_scale = get_spatial_length_scale(spec, term_idx)
-                .unwrap_or(options.min_length_scale)
-                .clamp(options.min_length_scale, options.max_length_scale);
-            let psi_bar = -length_scale.ln(); // global scale = −ln(length_scale)
+            // Global scale ψ̄ = −ln(length_scale), through the SAME expression
+            // the isotropic constructor and the upstream spec projection use
+            // (#2726).
+            let psi_bar = spatial_term_seed_psi(spec, term_idx, options);
 
             if spatial_term_uses_per_axis_psi(spec, term_idx) {
                 // Per-axis anisotropy is enrolled in the joint outer vector:

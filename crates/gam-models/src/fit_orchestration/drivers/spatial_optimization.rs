@@ -2546,6 +2546,63 @@ fn try_exact_joint_spatial_length_scale_optimization(
     // fires when the caller's own `min/max_length_scale` excludes the seed.
     let log_kappa0 = log_kappa0.clamp_to_bounds(&log_kappa_lower, &log_kappa_upper);
 
+    // #2726: ASSERT the `AT THE SAME POINT theta0` premise instead of stating it
+    // in prose. The monotonicity certificate below grades this route's criterion
+    // at θ0 against `fit_score(&best.fit)`, the scalar-ρ incumbent — a comparison
+    // that only means anything if the ψ half of θ0 is the ψ `best` was realized
+    // at. It was not: the seed constructors projected `length_scale` onto the
+    // caller's window while `best` was fit from the raw value, so the two routes
+    // sat `ln 10` apart and the refusal reported a criterion defect for a
+    // feasible-set mismatch. `resolvedspec` is frozen from `best.design`, so its
+    // `length_scale` IS the incumbent's realized scale; the projection now
+    // happens once upstream, before `best` is fit, which makes this check pass by
+    // construction and makes any future reintroduction of a second projection
+    // site fail here instead of twelve orders of magnitude downstream.
+    for (slot, &term_idx) in spatial_terms.iter().enumerate() {
+        if constant_curvature_term_spec(resolvedspec, term_idx).is_some()
+            || measure_jet_term_spec(resolvedspec, term_idx).is_some()
+        {
+            continue;
+        }
+        let Some(incumbent) = get_spatial_length_scale(resolvedspec, term_idx) else {
+            // No explicit incumbent scale: `reseed_from_data` owns this seed and
+            // there is no realized ψ for it to be equal to.
+            continue;
+        };
+        if !(incumbent.is_finite() && incumbent > 0.0) {
+            continue;
+        }
+        let psi_incumbent = -incumbent.ln();
+        let axes = log_kappa0.term_slice(slot);
+        if axes.is_empty() {
+            continue;
+        }
+        let psi_bar = axes.iter().sum::<f64>() / axes.len() as f64;
+        // Forward-error bound for the arithmetic actually performed: the d-term
+        // mean above (η_a are centered, so ψ̄ is exact for a scalar axis and
+        // accumulates only summation roundoff otherwise), plus one rounding for
+        // the box projection, which can move the seed to the nearest
+        // representable edge when the incumbent sits exactly on a face. Not a
+        // tolerance knob — the failure it guards against is a whole projection
+        // step, `ln 10` in the measured case, some 5e14x above this bound.
+        let max_abs_axis = axes.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+        let mean_roundoff =
+            (axes.len() as f64 + 1.0) * f64::EPSILON * (max_abs_axis + psi_incumbent.abs());
+        if (psi_bar - psi_incumbent).abs() > mean_roundoff {
+            return Err(EstimationError::RemlOptimizationFailed(format!(
+                "exact joint spatial optimization would grade its criterion at a psi the \
+                 scalar-rho incumbent was never realized at (term {term_idx}): \
+                 seed_psi_bar={psi_bar:.17e}, incumbent_psi={psi_incumbent:.17e}, \
+                 delta={:.6e}, incumbent_length_scale={incumbent:.17e}, \
+                 window=[{:.6e}, {:.6e}]. theta0 is not shared, so the monotonicity \
+                 certificate below would compare two different functions (#2726).",
+                psi_bar - psi_incumbent,
+                kappa_options.min_length_scale,
+                kappa_options.max_length_scale,
+            )));
+        }
+    }
+
     // The ρ half of the same invariant (#2454). This route grades
     // `joint_final_value` against `fit_score(&best.fit)` — the incumbent fit,
     // found by the standard scalar-ρ path over the WIDER ±`RHO_BOUND` box. If
@@ -8139,6 +8196,34 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
     {
         crate::bail_invalid_estim!(
             "spatial kappa optimization requires valid positive length_scale bounds"
+        );
+    }
+
+    // #2726: project every spatial term's `length_scale` onto the caller's
+    // `[min_length_scale, max_length_scale]` window ONCE, here, before the
+    // baseline fit — so the scalar-ρ incumbent `best` and the joint [ρ, ψ]
+    // route's seed are derived from the SAME length scale.
+    //
+    // Previously the projection lived only inside the ψ seed constructors. The
+    // joint route seeded ψ from the projected scale while `best` was realized
+    // at the raw one, so on the `length_scale = 1e-3` /
+    // `min_length_scale = 1e-2` arm the two routes evaluated the criterion
+    // `ln 10` apart and the monotonicity certificate refused with
+    // `gap = 98.857` against `accept_tol = 3.873e-5` — while asserting
+    // `AT THE SAME POINT theta0` in its own message. Moving the projection
+    // upstream makes that premise true instead of asserted, and keeps the
+    // caller's window authoritative (widening the ψ box to contain the raw
+    // incumbent would instead admit a scale below the caller's own
+    // `min_length_scale`).
+    let projected_scales =
+        project_spatial_length_scales_in_spec(&mut resolvedspec, &spatial_terms, kappa_options)?;
+    for &(term_idx, raw, projected) in &projected_scales {
+        log::info!(
+            "[spatial-kappa] term {term_idx}: length_scale projected onto the caller's window \
+             before the baseline fit: {raw:.6e} -> {projected:.6e} \
+             (window=[{:.6e}, {:.6e}])",
+            kappa_options.min_length_scale,
+            kappa_options.max_length_scale,
         );
     }
 
