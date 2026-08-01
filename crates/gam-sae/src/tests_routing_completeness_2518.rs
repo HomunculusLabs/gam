@@ -26,7 +26,8 @@ use std::sync::Arc;
 use ndarray::{Array1, Array2, Array3};
 
 use crate::basis::{PeriodicHarmonicEvaluator, SaeBasisEvaluator};
-use crate::encode::{certified_encode_candidates, nearest_charts_topk, AtlasConfig, EncodeAtlas};
+use crate::encode::{certified_encode_candidates, AtlasConfig, EncodeAtlas};
+use crate::test_support::nearest_charts_topk;
 use crate::manifold::{SaeAtomBasisKind, SaeManifoldAtom};
 
 /// A `d = 1` periodic atom whose decoded image FOLDS: the first harmonic traces a

@@ -4256,34 +4256,6 @@ pub(crate) fn certified_encode_candidates(
     .collect()
 }
 
-#[cfg(test)]
-pub(crate) fn nearest_charts_topk(
-    atom_atlas: &AtomEncodeAtlas,
-    x: ArrayView1<'_, f64>,
-    amplitude: f64,
-    k: usize,
-) -> Vec<usize> {
-    // `m₁(t_c) = BᵀΦ(t_c)` is an OFFLINE per-chart constant already distilled into
-    // `chart.recon_center` at build time (bit-for-bit the same φ·decoder
-    // accumulation this used to recompute). Reuse it instead of re-evaluating the
-    // basis at a fixed center for every row — that re-eval was the encode's
-    // dominant per-row cost. The amplitude-gating + tie-break comparator lives in
-    // `select_nearest_charts_topk` (shared with the GPU-host path).
-    select_nearest_charts_topk(atom_atlas.charts.len(), x, amplitude, k, |idx, out| {
-        let chart = &atom_atlas.charts[idx];
-        if chart.certified_radius <= 0.0 {
-            return false;
-        }
-        for (o, r) in out.iter_mut().zip(chart.recon_center.iter()) {
-            *o = *r;
-        }
-        true
-    })
-    .into_iter()
-    .map(|(idx, _)| idx)
-    .collect()
-}
-
 /// Reconstruction error `‖x − z·m(t)‖` of an encoded coordinate `t` — the
 /// criterion the certified encode minimizes over its candidate charts to pick the
 /// GLOBAL basin. `m(t) = Bᵀ Φ(t)` is the amplitude-1 reconstruction; `z` is the
@@ -5180,7 +5152,7 @@ mod encode_fix_tests {
             "z=0.1: must route to the m=10 chart (z·m=1 exact), not m=1"
         );
 
-        let ranked = nearest_charts_topk(&atlas, x.view(), 0.1, 2);
+        let ranked = crate::test_support::nearest_charts_topk(&atlas, x.view(), 0.1, 2);
         assert_eq!(ranked[0], 1, "z=0.1: nearest chart is the m=10 chart");
 
         // Negative amplitude: z=-0.1 makes z·m₂ = -1 (error 2) and z·m₁ = -0.1
@@ -5191,7 +5163,10 @@ mod encode_fix_tests {
         // No-regression at z=1: recovers the amplitude-1 argmin (m=1 chart exact).
         let (idx1, _) = nearest_chart(&atlas, x.view(), 1.0).expect("routes");
         assert_eq!(idx1, 0, "z=1 recovers the amplitude-1 nearest (m=1) chart");
-        assert_eq!(nearest_charts_topk(&atlas, x.view(), 1.0, 1)[0], 0);
+        assert_eq!(
+            crate::test_support::nearest_charts_topk(&atlas, x.view(), 1.0, 1)[0],
+            0
+        );
     }
 
     // ---------------------------------------------------------------------

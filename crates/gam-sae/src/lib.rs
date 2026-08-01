@@ -42,6 +42,8 @@ pub mod structure_harvest;
 pub mod super_resolution;
 pub mod tiered;
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests_routing_completeness_2518;
 pub mod trust_scores;
 

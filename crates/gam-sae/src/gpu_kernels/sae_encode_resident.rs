@@ -1874,7 +1874,7 @@ mod tests {
         let mut compared = 0usize;
         for (x, amp) in &rows {
             let xv = Array1::from(x.clone());
-            let cpu = crate::encode::nearest_charts_topk(atom_atlas, xv.view(), *amp, dev.topk);
+            let cpu = crate::test_support::nearest_charts_topk(atom_atlas, xv.view(), *amp, dev.topk);
             let gpu = nearest_charts_topk(&dev, x, *amp, &mut scratch);
             assert_eq!(
                 cpu, gpu,
