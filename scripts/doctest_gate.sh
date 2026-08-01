@@ -74,11 +74,17 @@ cd "${REPO_ROOT}" || die "cannot cd to ${REPO_ROOT}"
 # Only crates with a LIB target can have doctests. `cargo test --doc` is a
 # lib-only question and asking it of a bin-only crate is a category error, not
 # a finding.
-mapfile -t LIB_CRATES < <(
+# A `while read` loop rather than `mapfile`, so this script can be exercised on
+# a bash 3.2 host (macOS) as well as on the runner. A gate that only runs where
+# it is deployed cannot be given a positive/negative control before it lands.
+LIB_CRATES=()
+while IFS= read -r line; do
+  [ -n "$line" ] && LIB_CRATES+=("$line")
+done < <(
   cargo metadata --no-deps --format-version 1 \
     | jq -r '.packages[] | select([.targets[].kind[]] | any(. == "lib" or . == "rlib" or . == "proc-macro")) | .name' \
     | sort
-) || die "cargo metadata failed"
+)
 [ "${#LIB_CRATES[@]}" -gt 0 ] || die "cargo metadata returned no workspace lib crates"
 
 EXCLUDE_ARGS=()
