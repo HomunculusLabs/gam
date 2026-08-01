@@ -841,6 +841,56 @@ def _flexible_link_name(link_name: str) -> str:
     return f"flexible({raw})"
 
 
+# Family spellings that PIN their link, mapped to the response-only spelling
+# that leaves the link free. This mirrors the `pinned` column of the family
+# table in `crates/gam-models/src/fit_orchestration/materialize/family.rs`
+# (the `true` arms of `base_spec_for_family_name`): those spellings set
+# `link_pinned = true`, and the resolver then REFUSES any `link(type=...)`
+# term naming a different link. A benchmark companion lane that injects an
+# explicit link term must therefore hand the resolver the unpinned spelling,
+# exactly as the `rust_gamlss_flexible` lane already does by discarding the
+# mapping's family name entirely (`_run_rust_gamlss_scenario_cv_variant`).
+_LINK_PINNED_FAMILY_BASE = {
+    "gaussian-identity": "gaussian",
+    "binomial-logit": "binomial",
+    "bernoulli-logit": "bernoulli",
+    "logistic": "binomial",
+    "binomial-probit": "binomial",
+    "bernoulli-probit": "bernoulli",
+    "probit": "binomial",
+    "binomial-cloglog": "binomial",
+    "bernoulli-cloglog": "bernoulli",
+    "cloglog": "binomial",
+}
+
+
+def _unpin_family_link(family: str) -> str:
+    """Return the response-only spelling of ``family``.
+
+    A family name that pins its own link cannot be combined with an explicit
+    ``link(type=...)`` term naming a different link — the resolver rejects the
+    pair with "family '<f>' pins link '<a>', which conflicts with requested
+    link '<b>'". Callers that inject a link term therefore call this first.
+
+    Unknown pinned spellings must not pass through silently: a family name that
+    is neither in the table nor free of a hyphenated link suffix is refused, so
+    a new pinned spelling added upstream surfaces here as a loud harness error
+    rather than as a fit failure four minutes into a benchmark shard.
+    """
+    raw = str(family).strip()
+    if raw in _LINK_PINNED_FAMILY_BASE:
+        return _LINK_PINNED_FAMILY_BASE[raw]
+    suffix = raw.partition("-")[2]
+    if suffix in ("identity", "log", "logit", "probit", "cloglog", "sas"):
+        raise RuntimeError(
+            f"family '{raw}' looks link-pinned but has no unpinned spelling in "
+            "_LINK_PINNED_FAMILY_BASE; add it (mirroring the family table in "
+            "crates/gam-models/src/fit_orchestration/materialize/family.rs) "
+            "before injecting a link term"
+        )
+    return raw
+
+
 def _default_rust_formula_link_for_family(family: str) -> str:
     if family == "binomial":
         return "probit"

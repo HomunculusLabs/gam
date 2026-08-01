@@ -1709,12 +1709,23 @@ def run_rust_scenario_cv(
                 ds,
                 cfg_override=rust_cfg_override,
             )
+            # #2748: the scenario mapping's family spelling (`binomial-logit`)
+            # PINS its link, so appending an explicit `link(type=...)` term for
+            # a companion lane produced a formula the resolver refuses outright
+            # ("family 'binomial-logit' pins link 'logit', which conflicts with
+            # requested link 'probit'"). Hand the resolver the unpinned
+            # response-only spelling whenever a link term was actually injected
+            # — and only then, so the primary lanes keep the pinned spelling
+            # they have always been fitted with, bit for bit.
+            formula_before_link = formula
             formula = (
                 _append_formula_link_term(formula, binomial_link)
                 if ds["family"] == "binomial" and binomial_link
                 else formula
             )
             formula = _append_formula_link_term(formula, formula_link)
+            if formula != formula_before_link:
+                _family = _unpin_family_link(_family)
 
             t0 = perf_counter()
             try:
