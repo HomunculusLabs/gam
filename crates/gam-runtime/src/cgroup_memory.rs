@@ -93,6 +93,34 @@ pub struct CgroupMemoryAvailability {
 }
 
 impl CgroupMemoryAvailability {
+    /// Assemble one observation from counters that were read together.
+    ///
+    /// `None` when `inactive_file > current`, which is a torn read of the two
+    /// counters rather than a legal state: the working set would be negative.
+    /// This is the single construction site — the live probe, the replay used
+    /// by [`crate::test_support::simulated_cgroup_memory_environment`], and the
+    /// unit fixtures all funnel through it, so the derived `working_set` and
+    /// `available` can never disagree between a measured and a replayed
+    /// environment.
+    pub(crate) fn from_consistent_counters(
+        binding_path: impl Into<Box<str>>,
+        limit_bytes: u64,
+        current_bytes: u64,
+        inactive_file_bytes: u64,
+        inspected_levels: usize,
+    ) -> Option<Self> {
+        let working_set_bytes = current_bytes.checked_sub(inactive_file_bytes)?;
+        Some(Self {
+            binding_path: binding_path.into(),
+            limit_bytes,
+            current_bytes,
+            inactive_file_bytes,
+            working_set_bytes,
+            available_bytes: limit_bytes.saturating_sub(working_set_bytes),
+            inspected_levels,
+        })
+    }
+
     pub fn binding_path(&self) -> &str {
         &self.binding_path
     }
@@ -148,18 +176,14 @@ mod tests_fixtures {
             inactive_file_bytes: u64,
             inspected_levels: usize,
         ) -> Self {
-            let working_set_bytes = current_bytes
-                .checked_sub(inactive_file_bytes)
-                .expect("cgroup test fixture counters must be internally consistent");
-            Self {
-                binding_path: binding_path.into(),
+            Self::from_consistent_counters(
+                binding_path,
                 limit_bytes,
                 current_bytes,
                 inactive_file_bytes,
-                working_set_bytes,
-                available_bytes: limit_bytes.saturating_sub(working_set_bytes),
                 inspected_levels,
-            }
+            )
+            .expect("cgroup test fixture counters must be internally consistent")
         }
     }
 }
@@ -247,27 +271,6 @@ mod linux {
                 path: path.into(),
                 detail: detail.into(),
             }
-        }
-    }
-
-    impl CgroupMemoryAvailability {
-        fn from_consistent_counters(
-            binding_path: impl Into<Box<str>>,
-            limit_bytes: u64,
-            current_bytes: u64,
-            inactive_file_bytes: u64,
-            inspected_levels: usize,
-        ) -> Option<Self> {
-            let working_set_bytes = current_bytes.checked_sub(inactive_file_bytes)?;
-            Some(Self {
-                binding_path: binding_path.into(),
-                limit_bytes,
-                current_bytes,
-                inactive_file_bytes,
-                working_set_bytes,
-                available_bytes: limit_bytes.saturating_sub(working_set_bytes),
-                inspected_levels,
-            })
         }
     }
 

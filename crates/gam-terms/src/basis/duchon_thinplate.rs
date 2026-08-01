@@ -11,19 +11,19 @@ use gam_linalg::lanczos::{SymmetricExtremeLanczosOptions, symmetric_extreme_lanc
 /// spatial basis — center/knot selection, the thin-plate kernel evaluation, the
 /// kernel-constraint nullspace reparameterisation, the identifiability
 /// transform, and the penalty Grams — is a PURE FUNCTION of `(data, spec)`: it
-/// never reads the response. Its dense-versus-lazy representation additionally
-/// depends on the workspace's storage-routing policy, which is part of the
-/// cache fingerprint below. Thus diseases sharing the same columns and policy
-/// can reuse the complete [`BasisBuildResult`] without crossing a caller's
-/// materialization boundary.
+/// never reads the response. Its dense-versus-lazy REPRESENTATION additionally
+/// depends on the workspace's storage-routing policy — but that is a property
+/// of how the same basis is carried, so it is checked against the cached entry
+/// on lookup rather than folded into the key (see [`route_matches_policy`]).
+/// Thus diseases sharing the same columns can reuse the complete
+/// [`BasisBuildResult`] without crossing a caller's materialization boundary.
 ///
 /// This is a content-addressed, size-bounded, recomputable memo mirroring the
 /// FFI cross-disease column-encode cache (`encoded_column_cache` in
 /// `crates/gam-pyffi/src/manifold_and_posterior_ffi.rs`): the key is a 128-bit
 /// fingerprint of the data matrix CONTENT (shape + every element bit-pattern),
-/// the basis spec, and the policy fields that select dense versus lazy storage.
-/// A different cohort, spec, or routing boundary therefore MISSES; matching
-/// diseases HIT. A hit clones the cached `BasisBuildResult` (cheap
+/// the basis spec, and the caller's declared storage MODE. A different cohort
+/// or spec therefore MISSES; matching diseases HIT. A hit clones the cached `BasisBuildResult` (cheap
 /// `Arc`/ndarray clones vs. the kernel build + RRQR audit), so results are
 /// bit-identical to the miss path.
 /// Eviction (LRU under a byte budget) only ever forfeits the perf benefit, never
@@ -31,7 +31,23 @@ use gam_linalg::lanczos::{SymmetricExtremeLanczosOptions, symmetric_extreme_lanc
 type DuchonBasisCacheKey = (u64, u64);
 
 #[derive(Clone)]
-struct CachedDuchonBasis(BasisBuildResult);
+struct CachedDuchonBasis {
+    result: BasisBuildResult,
+    /// The storage route the *building* policy selected for this realized
+    /// shape — `true` for the streamed/operator design, `false` for the
+    /// materialized one.
+    ///
+    /// This is how the memory policy participates in the memo WITHOUT
+    /// participating in the memo's KEY. The key is `(data, spec)`: it names
+    /// WHICH basis this is, and that is a question memory has no vote in. The
+    /// route names HOW that basis is carried, and a hit is served only when the
+    /// asking policy would pick the same route for the same shape
+    /// ([`route_matches_policy`]). Hashing the cap into the key instead — which
+    /// is what shipped before #2684 — spelled a routing preference as a
+    /// difference of identity, so two processes that would have built the very
+    /// same basis missed each other over a byte count neither of them chose.
+    route_lazy: bool,
+}
 
 impl gam_runtime::resource::ResidentBytes for CachedDuchonBasis {
     fn resident_bytes(&self) -> usize {
@@ -39,13 +55,13 @@ impl gam_runtime::resource::ResidentBytes for CachedDuchonBasis {
         // and the penalty Grams. An estimate suffices — the byte budget only
         // bounds the cache, it never affects correctness.
         let design_bytes = self
-            .0
+            .result
             .design
             .nrows()
-            .saturating_mul(self.0.design.ncols())
+            .saturating_mul(self.result.design.ncols())
             .saturating_mul(std::mem::size_of::<f64>());
         let penalty_bytes: usize = self
-            .0
+            .result
             .active_penalties
             .iter()
             .map(|penalty| {
@@ -81,8 +97,19 @@ fn duchon_basis_cache()
 /// — produces a different key and misses. The spec is hashed via its serialized
 /// form (the spec carries `serde` derives), capturing center strategy, power,
 /// length scale, nullspace order, anisotropy, identifiability, and operator
-/// penalty dials. The materialization cap and storage mode prevent a dense
-/// result built under a permissive policy from bypassing a later lazy route.
+/// penalty dials. The storage MODE is hashed because it is an explicit caller
+/// choice — a caller that has committed to operator-only math is asking for a
+/// different artifact, not for a different copy of the same one.
+///
+/// What is deliberately NOT hashed is the materialization CAP (#2684). A byte
+/// ceiling is a statement about the machine, not about the model: two processes
+/// handed the same `(data, spec)` must agree on which basis that is, whatever
+/// their ceilings say. Before this change the cap was hashed here, so the
+/// artifact's very identity moved with a number the caller never chose — and
+/// while that cap was read from FREE memory, four processes on one node
+/// computed four different fingerprints for identical inputs. The cap now
+/// enters at the only place it has standing: whether a cached result's storage
+/// route is the route this policy would pick ([`route_matches_policy`]).
 fn duchon_basis_fingerprint(
     data: ArrayView2<'_, f64>,
     spec: &DuchonBasisSpec,
@@ -112,7 +139,6 @@ fn duchon_basis_fingerprint(
     for h in [&mut lo, &mut hi] {
         spec_bytes.len().hash(h);
         spec_bytes.hash(h);
-        policy.max_single_materialization_bytes.hash(h);
         let storage_mode = match policy.derivative_storage_mode {
             gam_runtime::resource::DerivativeStorageMode::AnalyticOperatorRequired => 0_u8,
             gam_runtime::resource::DerivativeStorageMode::MaterializeIfSmall => 1_u8,
@@ -123,6 +149,39 @@ fn duchon_basis_fingerprint(
     Some((lo.finish(), hi.finish()))
 }
 
+/// The storage route `policy` selects for a design of this realized shape.
+///
+/// Evaluated on the FINAL design rather than on the pre-identifiability width
+/// the builder routed on, and evaluated by the same function at insert and at
+/// lookup. That is what makes the comparison in [`route_matches_policy`] exact
+/// and idempotent: whatever a build produces, storing `f(shape, building
+/// policy)` means a later lookup under that same policy recomputes the same
+/// answer and hits. A predicate that could disagree with itself on its own
+/// output would turn every lookup in the disagreement band into a silent
+/// permanent cache miss.
+fn realized_route_is_lazy(
+    result: &BasisBuildResult,
+    policy: &gam_runtime::resource::ResourcePolicy,
+) -> bool {
+    should_use_lazy_spatial_design(result.design.nrows(), result.design.ncols(), policy)
+}
+
+/// Whether a cached basis may be served to a caller holding `policy`.
+///
+/// The question is NOT "is this policy as permissive as the one that built it"
+/// — that would make the answer depend on arrival order, so a permissive caller
+/// would get a dense or a streamed design according to who ran first. It is the
+/// symmetric one: do the two policies route this shape the same way? If they
+/// do, the cached artifact is the artifact this caller would have built. If
+/// they do not, the caller wanted a differently-carried copy of the same basis
+/// and gets one built for it.
+fn route_matches_policy(
+    cached: &CachedDuchonBasis,
+    policy: &gam_runtime::resource::ResourcePolicy,
+) -> bool {
+    realized_route_is_lazy(&cached.result, policy) == cached.route_lazy
+}
+
 pub fn build_duchon_basiswithworkspace(
     data: ArrayView2<'_, f64>,
     spec: &DuchonBasisSpec,
@@ -130,10 +189,19 @@ pub fn build_duchon_basiswithworkspace(
 ) -> Result<BasisBuildResult, BasisError> {
     if let Some(key) = duchon_basis_fingerprint(data, spec, workspace.policy()) {
         if let Some(hit) = duchon_basis_cache().get(&key) {
-            return Ok(hit.0);
+            if route_matches_policy(&hit, workspace.policy()) {
+                return Ok(hit.result);
+            }
         }
         let result = build_duchon_basis_uncached(data, spec, workspace)?;
-        duchon_basis_cache().insert(key, CachedDuchonBasis(result.clone()));
+        let route_lazy = realized_route_is_lazy(&result, workspace.policy());
+        duchon_basis_cache().insert(
+            key,
+            CachedDuchonBasis {
+                result: result.clone(),
+                route_lazy,
+            },
+        );
         return Ok(result);
     }
     build_duchon_basis_uncached(data, spec, workspace)

@@ -147,3 +147,6 @@ mod zz_measure_2489_tests;
 
 #[cfg(test)]
 mod zz_measure_polar_harmonic_jet_tests;
+
+#[cfg(test)]
+mod zz_basis_is_capacity_determined_2684_tests;

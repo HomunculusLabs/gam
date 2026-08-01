@@ -106,6 +106,48 @@ pub fn diagnostic_write_failures() -> usize {
     WRITE_FAILURES.load(Ordering::Relaxed)
 }
 
+/// Replay a cgroup-constrained memory environment without needing the machine
+/// to be in it.
+///
+/// The two knobs are deliberately the two that #2684 conflated:
+///
+/// * `cgroup_limit_bytes` is the job's hard ceiling — the CAPACITY. It is a
+///   property of how the process was launched and does not move while it runs.
+/// * `cgroup_current_bytes` is how much of that ceiling is charged RIGHT NOW —
+///   the load. It moves continuously, and on any cgroup that has done file I/O
+///   it sits near the ceiling because page cache fills whatever is free.
+///
+/// Holding the first fixed while sweeping the second is what lets a test ask
+/// "does this decision depend on ambient load?" as an assertion instead of an
+/// argument. The returned observation is built by the same constructor the live
+/// probe uses, so its derived `working_set`/`available` arithmetic is the
+/// shipped arithmetic and not a second implementation that could agree with the
+/// first only by luck.
+///
+/// The host numbers are taken as parameters too, because the host's own free
+/// memory is the other half of the conflation: the incident this exists for had
+/// hundreds of GB free on the host while the job's cgroup reported kilobytes.
+pub fn simulated_cgroup_memory_environment(
+    host_available_bytes: u64,
+    host_total_bytes: u64,
+    cgroup_limit_bytes: u64,
+    cgroup_current_bytes: u64,
+) -> crate::resource::MemoryAvailability {
+    let cgroup = crate::resource::CgroupMemoryAvailability::from_consistent_counters(
+        "/simulated/cgroup/memory",
+        cgroup_limit_bytes,
+        cgroup_current_bytes,
+        0,
+        6,
+    )
+    .expect("simulated cgroup counters must be internally consistent");
+    crate::resource::MemoryAvailability::from_observation(
+        host_available_bytes,
+        host_total_bytes,
+        crate::resource::CgroupMemoryObservation::V1Limited(cgroup),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
