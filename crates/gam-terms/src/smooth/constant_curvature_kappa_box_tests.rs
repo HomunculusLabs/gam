@@ -14,6 +14,7 @@
 
 use crate::basis::{
     CenterStrategy, ConstantCurvatureBasisSpec, ConstantCurvatureIdentifiability,
+    constant_curvature_center_chart_radius2, constant_curvature_data_chart_radius2,
     constant_curvature_kernel_matrix,
 };
 use crate::smooth::{
@@ -303,6 +304,102 @@ fn centers_inside_the_data_hull_never_widen_the_box() {
         "and it must stay strictly inside the wider data × center fold, which a \
          pair-wise bound would have handed the optimizer"
     );
+}
+
+/// gam#2687 read the symmetric window as the κ<0 chart constraint mirrored onto
+/// "a branch that has no such constraint". The branch does have one, and this
+/// pins it per strategy: **each wall retreats by the same fraction `F` from a
+/// wall its OWN branch has**, and both walls are the shipped geometry's, not
+/// this file's algebra.
+///
+/// * κ < 0 — the PER-POINT conformal gauge `λ = 1 + κR²`; at `κ_min` it has lost
+///   exactly `F` of its flat value, `λ = 1 − F`.
+/// * κ > 0 — the PER-PAIR Möbius denominator, `D = (1 − κR²)²` for an
+///   anti-aligned pair at the box radius; at `κ_max`, `√D = 1 − F`.
+///
+/// **What this test can and cannot discriminate.** It cannot separate the two
+/// DERIVATIONS numerically: both land on `F/R²`, which is gam#2687's resolution
+/// (`19edc9a2d`: "no number changed; what changed is the derivation"). Asserting
+/// `λ(κ_max) = 1 + F` as a foil would be scoring the observation against itself,
+/// since that holds at the same κ. What it does discriminate is whether the
+/// positive wall is still tied to a wall that EXISTS: the shipped
+/// `ConstantCurvature::distance` must refuse at `κ = 1/R²` and accept at `κ_max`,
+/// on every center strategy. That fails if the positive end is ever widened off
+/// the fold (the `9.5/R²` this issue proposed), or if `R` stops being taken over
+/// `data ∪ centers` so that the fold it retreats from is not the evaluated one.
+#[test]
+fn each_wall_retreats_by_f_from_its_own_branchs_gauge_never_the_others_2687() {
+    let data = ring(48, 0.7, 2);
+    let f = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION;
+    for strategy in [
+        CenterStrategy::FarthestPoint { num_centers: 6 },
+        CenterStrategy::KMeans {
+            num_centers: 6,
+            max_iter: 10,
+        },
+        CenterStrategy::EqualMass { num_centers: 6 },
+        CenterStrategy::UniformGrid { points_per_dim: 3 },
+        CenterStrategy::UserProvided(array![[1.4, 0.0], [-1.4, 0.0], [0.0, 0.2]]),
+    ] {
+        let spec = spec_with(strategy.clone(), 2);
+        let (lo, hi) = constant_curvature_kappa_bounds(data.view(), &spec, 0);
+        let feature_cols = [0usize, 1usize];
+        let r2 = constant_curvature_data_chart_radius2(data.view(), &feature_cols)
+            .max(constant_curvature_center_chart_radius2(
+                data.view(),
+                &feature_cols,
+                &strategy,
+            ))
+            .max(CONSTANT_CURVATURE_MIN_CHART_RADIUS2);
+
+        // κ < 0: the per-POINT gauge at the lower wall.
+        let lambda = 1.0 + lo * r2;
+        assert!(
+            (lambda - (1.0 - f)).abs() <= 1e-12,
+            "{strategy:?}: κ_min = {lo} must leave the per-point chart gauge at \
+             1 − F = {}, got λ = {lambda}",
+            1.0 - f
+        );
+
+        // κ > 0: the per-PAIR gauge at the upper wall, evaluated on the shipped
+        // geometry — an anti-aligned pair at the box radius, which is the worst
+        // case the box is denominated in.
+        let r = r2.sqrt();
+        let x = array![r, 0.0];
+        let c = array![-r, 0.0];
+        let d_pair = 1.0 + 2.0 * hi * x.dot(&c) + hi * hi * x.dot(&x) * c.dot(&c);
+        assert!(
+            (d_pair.sqrt() - (1.0 - f)).abs() <= 1e-9,
+            "{strategy:?}: κ_max = {hi} must leave the per-pair Möbius gauge at \
+             1 − F = {}, got √D = {}",
+            1.0 - f,
+            d_pair.sqrt()
+        );
+
+        // The wall itself, through the shipped distance rather than through the
+        // algebra above: it refuses AT the fold and accepts at the box's end.
+        assert!(
+            ConstantCurvature::new(2, 1.0 / r2)
+                .distance(x.view(), c.view())
+                .is_err(),
+            "{strategy:?}: the κ>0 branch must have a wall of its own at 1/R² = {}",
+            1.0 / r2
+        );
+        assert!(
+            ConstantCurvature::new(2, hi)
+                .distance(x.view(), c.view())
+                .is_ok(),
+            "{strategy:?}: and the box's upper end {hi} must be strictly inside it"
+        );
+        // The per-point guard, end to end, at both walls: `validate_chart_points`
+        // runs on data AND centers inside the kernel build.
+        for kappa in [lo, hi] {
+            assert!(
+                constant_curvature_kernel_matrix(data.view(), data.view(), kappa, 1.0).is_ok(),
+                "{strategy:?}: the per-point guard must accept at the box end {kappa}"
+            );
+        }
+    }
 }
 
 /// The regression this file exists to prevent, and the one that made the

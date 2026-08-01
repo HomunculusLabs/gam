@@ -157,8 +157,36 @@ impl Default for ConstantCurvatureBasisSpec {
 }
 
 /// Validate that every row of `points` is finite and inside the
-/// κ-stereographic chart (`1 + κ‖x‖² > 0`; automatic for κ ≥ 0, the open-ball
-/// constraint for κ < 0).
+/// κ-stereographic chart: `1 + κ‖x‖² > 0`, the open ball `‖x‖ < 1/√(−κ)` for
+/// κ < 0 and vacuous for κ ≥ 0.
+///
+/// **The vacuity on the κ ≥ 0 branch is not a gap, and this doc used to read as
+/// if it were** (gam#2687 quoted the old wording — *"automatic for κ ≥ 0"* — as
+/// evidence that the code did not implement its own comment). The two branches
+/// have different constraints, of different ARITY, enforced at different sites:
+///
+/// * **κ < 0 — a PER-POINT gauge, enforced here.** `λ(p) = 1 + κ‖p‖²` is the
+///   conformal factor's denominator; it vanishes when `p` reaches the Poincaré
+///   ball's boundary. One point is enough to violate it, so a per-row scan is
+///   the right check and this function is where it belongs. It runs on data
+///   **and** centers, because both are points the kernel evaluates.
+/// * **κ > 0 — a PER-PAIR fold, enforced by the κ box.** `λ` really cannot
+///   vanish for κ ≥ 0, but the quantity that does is
+///   `D = 1 + 2κ⟨x,c⟩ + κ²‖x‖²‖c‖²`, the Möbius denominator of
+///   `w = (−x) ⊕_κ c`, which is `(1 − κ‖x‖‖c‖)²` for an anti-aligned pair and
+///   vanishes at the antipodal fold `κ = 1/(‖x‖‖c‖)`. No per-point predicate can
+///   see it — it is a property of a PAIR — so the retreat is taken upstream, by
+///   [`constant_curvature_kappa_bounds`](crate::smooth::constant_curvature_kappa_bounds),
+///   which caps `|κ|` at `F/R²` over `R = max‖p‖` on `data ∪ centers` (gam#2716:
+///   over `data` alone, a user-provided center past `2·max‖x‖` put the box past
+///   the fold and made it doubly covered).
+///
+/// So there is exactly one wall per branch and each is checked against its own
+/// geometry; neither is the other mirrored. Gated by
+/// `spherical_branch_folds_at_kappa_r2_one_so_the_kappa_window_is_symmetric_2687`
+/// (gam-geometry) and by `crate::smooth::constant_curvature_kappa_box_tests`,
+/// which drives both endpoints of the shipped box through this function and
+/// through the shipped `distance`.
 pub(crate) fn validate_chart_points(
     points: ArrayView2<'_, f64>,
     kappa: f64,
