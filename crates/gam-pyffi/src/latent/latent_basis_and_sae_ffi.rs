@@ -2088,6 +2088,7 @@ fn sae_fit_report_into_dict<'py>(
         structure_search_json,
         structure_certificate_json,
         reported_log_alpha,
+        chart_degeneracy,
     } = report;
 
     // #977 variable-K boundary: structure search may grow or shrink the seed
@@ -2243,7 +2244,10 @@ fn sae_fit_report_into_dict<'py>(
     // measured a fully collapsed chart at a HIGHER explained variance than a
     // partially collapsed one).
     {
-        let chart = term.chart_degeneracy_report();
+        // Read the CARRIED report, not a recomputation off `term`: the dict must
+        // publish the value this fit actually produced, and a field the struct
+        // carries but no consumer reads is dead by construction (#2280).
+        let chart = chart_degeneracy;
         let block = PyDict::new(py);
         block.set_item(
             "atom",
