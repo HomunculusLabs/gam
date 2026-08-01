@@ -2899,7 +2899,7 @@ mod jet_tower_oracle_tests {
     /// cells.)
     #[test]
     fn release_measure_rigid_bernoulli_vgh_vs_hand_chain_932() {
-        use std::time::Instant;
+        use gam_math::paired_timing::paired_interleaved;
 
         // (eta, g, z, y, w): one ordinary interior row per outcome branch —
         // y=1 and y=0 are distinct live sign branches of the Mills-ratio
@@ -2910,34 +2910,16 @@ mod jet_tower_oracle_tests {
         ];
         let probit_scale = 0.8;
 
-        // Feedback-coupled timing barrier (no `std::hint::black_box`): each
-        // iteration nudges the log-slope primary by a negligible multiple of
-        // the running checksum, and the checksum folds value, gradient, and
-        // Hessian channels, so the pure row call can be neither hoisted nor
-        // dropped while the measured regime stays bit-adjacent to the fixture.
-        fn best_ns<F>(iterations: usize, base_g: f64, evaluate: F) -> f64
-        where
-            F: Fn(f64) -> (f64, [f64; 2], [[f64; 2]; 2]),
-        {
-            let mut best = f64::INFINITY;
-            for _ in 0..5 {
-                let mut checksum = 0.0_f64;
-                let started = Instant::now();
-                for _ in 0..iterations {
-                    let (value, gradient, hessian) = evaluate(base_g + checksum * 1e-18);
-                    checksum += value + gradient[0] + hessian[0][0];
-                }
-                assert!(
-                    checksum.is_finite(),
-                    "rigid Bernoulli release-measure checksum must stay finite"
-                );
-                best = best.min(started.elapsed().as_secs_f64());
-            }
-            best * 1e9 / iterations as f64
-        }
+        // Repetitions x iterations, not rounds x iterations: the arms are timed
+        // adjacent within each repetition and in a randomised order, so drift
+        // slower than one repetition divides out of that repetition's ratio.
+        // The local `best_ns` this replaces timed each arm to completion in a
+        // fixed order and took a minimum, which is the shape that cannot
+        // separate a real margin from a systematic first-versus-second offset.
+        let reps = 15usize;
+        let iterations = 300_000usize;
 
-        let iterations = 2_000_000usize;
-        for &(eta, g, z, y, w) in &cases {
+        for (case_idx, &(eta, g, z, y, w)) in cases.iter().enumerate() {
             let marginal = bernoulli_marginal_link_map(
                 &InverseLink::Standard(gam_problem::StandardLink::Probit),
                 eta,
@@ -2945,7 +2927,9 @@ mod jet_tower_oracle_tests {
             .expect("link map");
 
             // Parity pin on the exact benchmarked inputs (the full-grid check
-            // is `rigid_bernoulli_row_kernel_matches_hand_chain_witness`).
+            // is `rigid_bernoulli_row_kernel_matches_hand_chain_witness`). The
+            // timing below assumes the two arms compute the same thing; this is
+            // where that assumption is discharged.
             let (jet_value, ..) =
                 rigid_standard_normal_row_kernel(marginal, g, z, y, w, probit_scale)
                     .expect("jet kernel");
@@ -2956,17 +2940,39 @@ mod jet_tower_oracle_tests {
                 "y={y:.0} value: jet {jet_value:+.15e} vs hand {hand_value:+.15e}"
             );
 
-            let production_ns = best_ns(iterations, g, |perturbed_g| {
-                measured_production_rigid_vgh(marginal, perturbed_g, z, y, w, probit_scale)
-            });
-            let hand_ns = best_ns(iterations, g, |perturbed_g| {
-                measured_hand_rigid_vgh(marginal, perturbed_g, z, y, w, probit_scale)
-            });
-            eprintln!(
-                "RIGID-BERNOULLI-VGH-932 y={y:.0} production={production_ns:.2} ns/row \
-                 hand={hand_ns:.2} ns/row hand_over_production={:.6}",
-                hand_ns / production_ns,
+            // The harness perturbs by a negligible multiple of the running
+            // checksum; each arm folds value, gradient and Hessian channels back
+            // into it, so the row call can be neither hoisted nor dropped while
+            // the measured regime stays bit-adjacent to the fixture.
+            let timing = paired_interleaved(
+                reps,
+                iterations,
+                0x9320_0BAD ^ case_idx as u64,
+                |nudge| {
+                    let (value, gradient, hessian) = measured_production_rigid_vgh(
+                        marginal,
+                        g + nudge,
+                        z,
+                        y,
+                        w,
+                        probit_scale,
+                    );
+                    value + gradient[0] + hessian[0][0]
+                },
+                |nudge| {
+                    let (value, gradient, hessian) =
+                        measured_hand_rigid_vgh(marginal, g + nudge, z, y, w, probit_scale);
+                    value + gradient[0] + hessian[0][0]
+                },
             );
+
+            // `median_ratio` is `hand / production`, the same orientation as the
+            // `hand_over_production` token this gate has always printed.
+            eprintln!(
+                "RIGID-BERNOULLI-VGH-932 y={y:.0} {}",
+                timing.summary("production", "hand"),
+            );
+
             // #932: release-only -- but NOT because the test lane is unoptimized.
             // It is not: [profile.test] sets opt-level = 2. The difference is
             // CODEGEN LAYOUT. [profile.test.package.gam-models] sets
@@ -2977,13 +2983,21 @@ mod jet_tower_oracle_tests {
             // "release is unaffected: it already carries thin-LTO +
             // codegen-units = 1". A compiled-vs-hand ratio whose whole margin is
             // cross-CGU inlining therefore measures a different thing here than in
-            // the shipped profile. Measured: this assertion fails in the default
-            // test lane. The parity/correctness checks around it are
-            // build-independent and still run in every build.
+            // the shipped profile. The parity check above is build-independent
+            // and still runs in every build.
+            //
+            // The contract is UNCHANGED -- production must beat hand -- but it is
+            // now stated over the paired distribution rather than a ratio of two
+            // separately-minimised blocks. `wins_fraction` is what makes it a
+            // claim rather than a point estimate: a median above 1 with the
+            // repetitions split near 50/50 means the margin is inside the
+            // measurement's own resolution, which `ratio_resolution` reports on
+            // the line above, and such a gate would be asserting noise.
             assert!(
-                cfg!(debug_assertions) || production_ns < hand_ns,
-                "generated rigid BMS y={y:.0} must beat strongest hand: \
-                 production={production_ns:.2} ns/row hand={hand_ns:.2} ns/row",
+                cfg!(debug_assertions)
+                    || (timing.median_ratio() > 1.0 && timing.wins_fraction() >= 0.75),
+                "generated rigid BMS y={y:.0} must beat strongest hand: {}",
+                timing.summary("production", "hand"),
             );
         }
     }
