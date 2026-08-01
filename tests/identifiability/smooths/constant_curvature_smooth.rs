@@ -598,8 +598,28 @@ fn kappa_one_fit_recovers_planted_spherical_signal() {
 ///    0.8937), which is the same monotone-in-κ preference the coverage fixture
 ///    rails on, showing up in pure fit quality at a PINNED κ.
 ///
-/// None of the three is the κ box. This test asserts only that the measurement
-/// ran, so it records the numbers without adding a bar nobody derived.
+/// None of the three is the κ box.
+///
+/// ## The obvious repair, A/B'd and REJECTED
+///
+/// Point 2 suggests replacing the median PAIRWISE distance (a cloud-DIAMETER
+/// scale, which makes every basis function nearly constant across the data) with
+/// the median NEAREST-NEIGHBOUR distance (a centre-SPACING scale) — the textbook
+/// RBF range rule. Measured over the whole constant-curvature identifiability
+/// suite, that arm **fixes `kappa_one_fit_recovers_planted_spherical_signal` and
+/// breaks its κ = 0 sibling**: `kappa_zero_fit_recovers_planted_flat_signal`
+/// drops to R² = 0.9491 against its `matern − 0.05` baseline bar of 0.94994,
+/// missing by 0.0008. One in, one out, both marginal — so the heuristic is not
+/// the leading term and the change is not landed. Recorded here so the next
+/// reader does not re-run it.
+///
+/// What the κ = 0 arm also shows, incidentally, is that `curv` sits at ~0.95
+/// against `matern`'s 0.99994 on FLAT data too, and that fixture's 0.05 slack is
+/// sized to accommodate exactly that. The gap is the basis, on both branches,
+/// not the curvature.
+///
+/// This test asserts only that the measurement ran, so it records the numbers
+/// without adding a bar nobody derived.
 #[test]
 fn measure_2687_kappa_one_spherical_recovery_against_capacity_and_baselines() {
     use rand::RngExt;
