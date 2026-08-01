@@ -4546,11 +4546,11 @@ fn gaussian_penalty_positive_logdet(
     })?;
     // Scale-invariant relative tolerance — see the cousin site for the
     // rationale. Same `.max(1.0)` floor used to live here and corrupted
-    // the positive-eigenvalue count for small-scale penalties.
-    let pen_scale = pen_eigs
-        .iter()
-        .fold(0.0_f64, |acc, &value| acc.max(value.abs()));
-    let pen_tol = pen_scale * EIGEN_REL_TOL;
+    // the positive-eigenvalue count for small-scale penalties. This is a
+    // DIFFERENT array from the cache's (raw `S`, not `L⁻¹SL⁻ᵀ`), but it is the
+    // SAME criterion, so it is read from the one definition rather than
+    // re-derived here (#2740).
+    let pen_tol = penalty_range_tolerance(pen_eigs.view());
     let mut positive_eigs: Vec<f64> = pen_eigs
         .iter()
         .copied()
