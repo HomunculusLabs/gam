@@ -132,7 +132,11 @@ def reference(args) -> int:
     structure = E1.STRUCTURES[args.structure]
     data = np.load(args.npz, allow_pickle=False)
     X0, label_idx, template_idx = data["X"], data["label_index"], data["template_index"]
+    if args.max_heads:
+        keep = template_idx < args.max_heads
+        X0, label_idx, template_idx = X0[keep], label_idx[keep], template_idx[keep]
     n_labels = int(label_idx.max()) + 1
+    print(f"cloud {X0.shape} over {len(np.unique(template_idx))} heads", flush=True)
 
     out = []
     for center in (False, True):
@@ -302,6 +306,10 @@ def main() -> int:
     f.add_argument("--npz", required=True)
     f.add_argument("--structure", choices=("weekday", "ordinal"), default="weekday")
     f.add_argument("--pc-scan", type=int, default=12)
+    f.add_argument("--max-heads", type=int, default=0,
+                   help="restrict to the first N context heads — the same subset --max-heads "
+                        "gives run_e1.py, so the fit-free bar is measured on the cloud the fit "
+                        "actually sees")
     f.add_argument("--out", default="")
     f.set_defaults(func=reference)
 
