@@ -363,6 +363,103 @@ fn large_scale_reml_stress_main() {
     );
 }
 
+/// #2708: report WHICH of the three candidate causes the coverage number is
+/// consistent with. Report-only; it asserts nothing.
+///
+/// The aggregate SD of the standardised error `z = (truth − mean)/SE` splits two
+/// of them — `SD ≈ 1` with an off-centre mean says bias carries it, `SD ≈ 2`
+/// centred says the variance is understated — but it CANNOT separate a uniform
+/// scale error from a missing variance component, because both inflate the same
+/// aggregate. The binned columns do: a missing smoothing-parameter-uncertainty
+/// term is heteroscedastic by construction, so it lands on the high-leverage /
+/// boundary rows and leaves the interior near nominal, while a scale error is
+/// flat in leverage.
+///
+/// `SD(z)` binned by SE quantile is the leverage axis (SE² = xᵀΣx is a monotone
+/// leverage proxy); `SD(z)` binned by ‖x‖ is the boundary axis; and the mean
+/// RESIDUAL binned by `x₀` is the approximation-error axis, because the truth's
+/// out-of-model term is `0.4·sin(π·x₀)` and an approximation error is a
+/// systematic function of position while sampling error is not.
+///
+/// Also printed: `|z| > 3` frequency against the 0.27% a standard normal gives.
+/// A heavy tail with a near-nominal centre is the outcome the two-way split does
+/// not cover, and it would mean an interaction rather than either single cause.
+fn report_coverage_diagnostics(
+    z: &[f64],
+    resid: &[f64],
+    se: &[f64],
+    radius: &[f64],
+    x0: &[f64],
+) {
+    if z.is_empty() {
+        eprintln!("[cov-diag] no finite points");
+        return;
+    }
+    let n = z.len() as f64;
+    let mean_z = z.iter().sum::<f64>() / n;
+    let sd_z = (z.iter().map(|v| (v - mean_z).powi(2)).sum::<f64>() / (n - 1.0).max(1.0)).sqrt();
+    let tail = z.iter().filter(|v| v.abs() > 3.0).count() as f64 / n;
+    let mean_abs_resid = resid.iter().map(|v| v.abs()).sum::<f64>() / n;
+    let mean_se = se.iter().sum::<f64>() / n;
+    eprintln!(
+        "[cov-diag] n={} mean_z={mean_z:+.4} sd_z={sd_z:.4} |z|>3={:.4} (normal 0.0027) \
+         mean|resid|={mean_abs_resid:.5} mean_se={mean_se:.5} ratio={:.3}",
+        z.len(),
+        tail,
+        mean_abs_resid / mean_se.max(f64::MIN_POSITIVE),
+    );
+
+    // Binned SD(z): flat across bins => a scale error; ramping => a missing,
+    // leverage-dependent variance component.
+    let binned_sd = |key: &[f64], label: &str| {
+        let mut idx: Vec<usize> = (0..key.len()).collect();
+        idx.sort_by(|&a, &b| key[a].partial_cmp(&key[b]).unwrap_or(std::cmp::Ordering::Equal));
+        const BINS: usize = 5;
+        let per = idx.len() / BINS;
+        if per == 0 {
+            return;
+        }
+        let mut out = String::new();
+        for b in 0..BINS {
+            let lo = b * per;
+            let hi = if b + 1 == BINS { idx.len() } else { (b + 1) * per };
+            let slice = &idx[lo..hi];
+            let m = slice.len() as f64;
+            let mu = slice.iter().map(|&i| z[i]).sum::<f64>() / m;
+            let sd = (slice
+                .iter()
+                .map(|&i| (z[i] - mu).powi(2))
+                .sum::<f64>()
+                / (m - 1.0).max(1.0))
+            .sqrt();
+            out.push_str(&format!(" [{:.3}..{:.3}] sd={sd:.3} mean={mu:+.3};", key[slice[0]], key[slice[slice.len() - 1]]));
+        }
+        eprintln!("[cov-diag] SD(z) by {label}:{out}");
+    };
+    binned_sd(se, "SE quantile (leverage proxy)");
+    binned_sd(radius, "‖x‖ (distance from design centre)");
+
+    // Mean RESIDUAL by x0: the truth's out-of-model term is `0.4·sin(π·x₀)`, so a
+    // systematic sign pattern here is approximation error, not sampling error.
+    {
+        let mut idx: Vec<usize> = (0..x0.len()).collect();
+        idx.sort_by(|&a, &b| x0[a].partial_cmp(&x0[b]).unwrap_or(std::cmp::Ordering::Equal));
+        const BINS: usize = 8;
+        let per = idx.len() / BINS;
+        if per > 0 {
+            let mut out = String::new();
+            for b in 0..BINS {
+                let lo = b * per;
+                let hi = if b + 1 == BINS { idx.len() } else { (b + 1) * per };
+                let slice = &idx[lo..hi];
+                let mu = slice.iter().map(|&i| resid[i]).sum::<f64>() / slice.len() as f64;
+                out.push_str(&format!(" [{:+.2}]={mu:+.4};", x0[slice[slice.len() / 2]]));
+            }
+            eprintln!("[cov-diag] mean(truth-mean) by x0:{out}");
+        }
+    }
+}
+
 // ─── Coverage simulation ────────────────────────────────────────────────
 
 /// Repeatedly fit the same anisotropic Duchon model on freshly drawn
@@ -376,6 +473,28 @@ fn large_scale_reml_stress_main() {
 fn large_scale_reml_stress_coverage() {
     let mut total_in = 0usize;
     let mut total_pts = 0usize;
+    // #2708 diagnostic accumulators. Report-only: nothing below changes the
+    // assertion, the fixture, or the fit. The coverage number alone cannot say
+    // WHICH of three things is wrong, and each has a different fix:
+    //
+    //   * the posterior variance is understated by a roughly uniform factor
+    //     (a scale error or a missing term in `beta_covariance_corrected()`);
+    //   * a variance COMPONENT is missing (smoothing-parameter uncertainty is
+    //     the classic one), which is heteroscedastic by construction and so
+    //     shows up at the boundary / high-leverage rows and not in the interior;
+    //   * the truth is out of the fitted model's span, so a deterministic
+    //     APPROXIMATION error sits at every point and the intervals may be
+    //     perfectly calibrated for a mean function this test never asks about.
+    //
+    // The third is live here and is not hypothetical: `truth()` is a fixed
+    // analytic function (linear + a Gaussian bump + `0.4·sin(π·x₀)`) while the
+    // model is a hybrid-Duchon RBF over a finite center set, so the sinusoid in
+    // particular is not in the span.
+    let mut z_all: Vec<f64> = Vec::new();
+    let mut resid_all: Vec<f64> = Vec::new();
+    let mut se_all: Vec<f64> = Vec::new();
+    let mut radius_all: Vec<f64> = Vec::new();
+    let mut x0_all: Vec<f64> = Vec::new();
 
     for sim_idx in 0..N_COVERAGE_SIMS {
         let train_seed = SEED_BASE.wrapping_add(0xC0DE_0000 + sim_idx as u64);
@@ -436,8 +555,24 @@ fn large_scale_reml_stress_coverage() {
                 total_in += 1;
             }
             total_pts += 1;
+
+            // The interval is `mean ± z·SE`, so SE is recoverable from its own
+            // half-width without re-deriving it here — this stays a pure reader
+            // of what the assertion already consumed.
+            let se = (hi - lo) / (2.0 * NORMAL_95_TWO_SIDED_Z);
+            let resid = truth_i - pred_mean[i];
+            if se > 0.0 && resid.is_finite() {
+                z_all.push(resid / se);
+                resid_all.push(resid);
+                se_all.push(se);
+                let row = x_te.row(i);
+                radius_all.push(row.dot(&row).sqrt());
+                x0_all.push(row[0]);
+            }
         }
     }
+
+    report_coverage_diagnostics(&z_all, &resid_all, &se_all, &radius_all, &x0_all);
 
     let coverage = total_in as f64 / total_pts.max(1) as f64;
     assert!(
