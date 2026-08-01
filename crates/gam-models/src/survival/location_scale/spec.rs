@@ -117,8 +117,8 @@ pub struct TimeBlockInput {
 ///
 /// where B_time(t) is a B-spline basis row evaluated at log(t).
 /// The entry and exit tensor designs are precomputed:
-///   X_entry[i,:] = x_cov(i,:) ⊗ B_time(t_entry_i)
-///   X_exit[i,:]  = x_cov(i,:) ⊗ B_time(t_exit_i)
+///   X_entry\[i,:\] = x_cov(i,:) ⊗ B_time(t_entry_i)
+///   X_exit\[i,:\]  = x_cov(i,:) ⊗ B_time(t_exit_i)
 #[derive(Clone)]
 pub struct TimeDependentCovariateBlockInput {
     /// Covariate design matrix (n x p_cov), same for all time points.

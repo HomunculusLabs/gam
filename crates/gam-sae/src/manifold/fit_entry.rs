@@ -1943,7 +1943,7 @@ pub struct SaeCertifyRequest {
 ///
 /// The post-audit pipeline (structure search, finalization, diagnostics,
 /// certificates) is the same code the native fit entry runs — both call
-/// [`finalize_sae_fit_report`] (#2266).
+/// `finalize_sae_fit_report` (#2266).
 pub fn run_sae_manifold_certify(
     request: SaeCertifyRequest,
 ) -> Result<SaeExternalCertificationOutcome, SaeFitError> {

@@ -135,7 +135,7 @@ impl RetractionKind {
     }
 
     /// Per-ambient-axis periodicity, mirroring
-    /// [`gam_terms::latent::LatentManifold::axis_periods`]. A `Circle`
+    /// `gam_terms::latent::LatentManifold::axis_periods`. A `Circle`
     /// retraction wraps modulo `2π`; an embedded `Sphere` retraction is smooth
     /// with no cut and is reported non-periodic.
     pub fn axis_periods(&self) -> Vec<Option<f64>> {

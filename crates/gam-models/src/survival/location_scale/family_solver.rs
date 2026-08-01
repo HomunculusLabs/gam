@@ -1037,7 +1037,7 @@ impl FamilyChannelHessian for SurvivalLocationScaleChannelHessian {
 /// associated function so integration tests and downstream crates can verify the
 /// block Jacobian contract without depending on the internal struct.
 ///
-/// See [`SurvivalLocationScaleFamily::block_effective_jacobian`] for the full
+/// See `SurvivalLocationScaleFamily::block_effective_jacobian` for the full
 /// contract.
 pub fn survival_location_scale_block_effective_jacobian(
     specs: &[ParameterBlockSpec],

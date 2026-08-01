@@ -42,7 +42,7 @@ use ndarray::{Array2, ArrayView1};
 
 /// A penalty whose support spans the entire compiled parameter vector.
 ///
-/// Unlike [`crate::families::custom_family::PenaltyMatrix`], this carries a
+/// Unlike `crate::families::custom_family::PenaltyMatrix`, this carries a
 /// single dense `total_compiled × total_compiled` quadratic form — the
 /// shape produced by `T^T S_j T` pullback after the V+M / SMGS-exact
 /// compile. The `nullspace_dim` is the structural dimension of `ker(S)`
@@ -53,7 +53,7 @@ use ndarray::{Array2, ArrayView1};
 pub struct JointPenaltySpec {
     /// Optional user-visible precision label. Joint penalties that share a
     /// label share one smoothing parameter (same convention as
-    /// [`crate::families::custom_family::PenaltyMatrix::Labeled`]).
+    /// `crate::families::custom_family::PenaltyMatrix::Labeled`).
     pub label: Option<String>,
     /// Dense symmetric PSD matrix of shape `(total_compiled, total_compiled)`.
     pub matrix: Array2<f64>,
@@ -199,7 +199,7 @@ impl JointPenaltySpec {
     }
 
     /// Quadratic form `βᵀ S β`. Mirrors
-    /// [`crate::families::custom_family::PenaltyMatrix::quadratic_form`] for
+    /// `crate::families::custom_family::PenaltyMatrix::quadratic_form` for
     /// the full-width case.
     pub fn quadratic_form(&self, beta: ArrayView1<'_, f64>) -> f64 {
         assert_eq!(
@@ -318,7 +318,7 @@ impl JointPenaltySpec {
 ///
 /// The outer optimizer concatenates joint penalty `log λ` values onto the
 /// per-block ρ vector; the inner solver receives this bundle via
-/// [`crate::families::custom_family::BlockwiseFitOptions::joint_penalties`]
+/// `crate::families::custom_family::BlockwiseFitOptions::joint_penalties`
 /// and adds the full-width quadratic / matvec / preconditioner / Hessian
 /// contributions to the joint-Newton primitives.
 #[derive(Clone, Debug)]

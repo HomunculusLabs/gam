@@ -906,7 +906,7 @@ pub use cuda::{
 /// refinement, automatically falling back to fp64 when the policy rejects the
 /// attempt or when the fp32 path fails / diverges.
 ///
-/// The `p` threshold and maximum step count come from [`GpuDispatchPolicy`]
+/// The `p` threshold and maximum step count come from `GpuDispatchPolicy`
 /// constants — there is no user-facing knob. The decision path is:
 ///
 /// 1. `policy.iterative_refinement_should_attempt(p)` → `false` or

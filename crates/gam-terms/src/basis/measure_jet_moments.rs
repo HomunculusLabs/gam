@@ -238,7 +238,7 @@ pub(crate) fn accumulate_chunk(
 /// `[ones, y]`, with channel 0 = unit by convention.
 ///
 /// Streaming/parallel layout: rows are split into fixed
-/// [`MEASURE_JET_MOMENT_CHUNK_ROWS`]-sized chunks (the bms-style chunked row
+/// `MEASURE_JET_MOMENT_CHUNK_ROWS`-sized chunks (the bms-style chunked row
 /// reduction), each chunk is accumulated sequentially in row order, and the
 /// chunk partials are folded sequentially in chunk-index order — the sorted
 /// reduction that makes the output bit-deterministic regardless of thread
@@ -402,7 +402,7 @@ pub(crate) fn lex_cmp_centers(a: &Array1<f64>, b: &Array1<f64>) -> Ordering {
 /// (pure binomial shift, no kernel re-evaluation) and deterministic.
 ///
 /// Canonical orientation: the merged table lives at the lexicographically
-/// SMALLER of the two operand centers ([`lex_cmp_centers`]), and the other
+/// SMALLER of the two operand centers (`lex_cmp_centers`), and the other
 /// operand is the one recentered. Because the (host, guest) roles depend
 /// only on the centers — never on argument position — `merge(a, b)` and
 /// `merge(b, a)` execute identical arithmetic and agree BITWISE for

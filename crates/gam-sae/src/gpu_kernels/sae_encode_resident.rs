@@ -471,7 +471,7 @@ fn encode_grad_hess(
 /// Cyclic Jacobi symmetric eigensolver for a `d×d` matrix (row-major, `d ≤ 8`).
 /// Returns eigenvalues `vals[i]` and eigenvectors as COLUMNS
 /// `vecs[col*d + row]`. This is the device stand-in for the host LAPACK `eigh`
-/// used by [`crate::encode::beta_eta_newton`]; the Newton step is reconstructed
+/// used by `crate::encode::beta_eta_newton`; the Newton step is reconstructed
 /// from the (eigenvector-basis-independent) spectral sum, so the result agrees
 /// with LAPACK to eigen round-off. The CUDA `jacobi_eigh` mirror is identical.
 pub fn jacobi_eigh(a_in: &[f64], d: usize, vals: &mut [f64], vecs: &mut [f64]) {

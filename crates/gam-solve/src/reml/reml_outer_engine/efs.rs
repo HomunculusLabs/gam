@@ -125,7 +125,7 @@ fn efs_penalty_like_steps(
 ///
 /// At any stationary point of `V_total`, `g_full = 0`, so `Δρ = 0`.
 /// In the over-correction regime (`2·g_full ≥ q_eff`) the multiplicative
-/// form is undefined and the helper [`efs_log_step_from_grad`] returns
+/// form is undefined and the helper `efs_log_step_from_grad` returns
 /// `−EFS_MAX_STEP`; the outer cost line-search trims it and the
 /// canonical formula resumes once the iterate re-enters the stable
 /// regime. In the pathological regime (`q_eff ≤ 0`, e.g. when the

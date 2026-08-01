@@ -293,7 +293,7 @@ pub struct ArrowSolveOptions {
     /// as a relative fraction of `S`'s largest eigenvalue.
     ///
     /// `None` (default) keeps the strict contract: a non-PD `S` errors as
-    /// [`ArrowSchurError::SchurFactorFailed`] so the LM outer loop lifts
+    /// `ArrowSchurError::SchurFactorFailed` so the LM outer loop lifts
     /// `ridge_beta` globally and re-forms `S`.
     ///
     /// `Some(floor)` engages the #1026 SAE co-collapse cure on the SOLVE path:
@@ -309,13 +309,13 @@ pub struct ArrowSolveOptions {
     /// The inner Newton then makes a real descent step rather than crawling
     /// behind an inflated global ridge. Mirrors the per-row spectral floor the
     /// evidence path uses for #1377/#1117/#1118
-    /// ([`super::factorization::factor_spectral_deflated_criterion_row`]); the
+    /// (`super::factorization::factor_spectral_deflated_criterion_row`); the
     /// difference is the floored value — a small positive `floor·max λ`
     /// (Tikhonov) for the solve, vs unit stiffness `+1` (`log 1 = 0`) for the
     /// evidence log-det.
     ///
     /// Only consulted by the dense Direct / SqrtBA reduced solve (the only
-    /// caller of [`super::reduced_solve::solve_dense_reduced_system`]); the
+    /// caller of `super::reduced_solve::solve_dense_reduced_system`); the
     /// InexactPCG path is unaffected.
     pub newton_schur_tikhonov_rel_floor: Option<f64>,
     /// #1017 device-resident framed SAE frame for the LM ridge ladder.
@@ -530,7 +530,7 @@ impl ArrowSolveOptions {
     /// Only `F64Only` (the inherited default) is upgraded to `CertifiedMixed`;
     /// a caller that deliberately set a policy keeps it. The reduced-Schur f64
     /// factor and every evidence log-determinant are unaffected — see
-    /// [`mixed_precision_reduced_beta`].
+    /// `mixed_precision_reduced_beta`.
     #[must_use]
     pub fn with_streaming_solve_precision_default(&self) -> Self {
         let mut out = self.clone();

@@ -901,7 +901,7 @@ impl DecoderIncoherencePenalty {
     /// `β × β` block, accumulating `scale · H_GN` onto `hbb`.
     ///
     /// This produces exactly the operator [`AnalyticPenalty::psd_majorizer_hvp`]
-    /// applies (the `include_residual = false` branch of [`Self::hvp_impl`]), but
+    /// applies (the `include_residual = false` branch of `Self::hvp_impl`), but
     /// assembled block-by-block over the penalized atom pairs instead of
     /// reconstructed column-by-column from `β` unit-probe HVPs. Since `H_GN` is
     /// pair-local — it couples only the `(j, k)` pairs in `self.pairs`, each within

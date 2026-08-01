@@ -23,19 +23,19 @@
 //!   (and the null atom's RLCT `1/2`). A *centered* circle's cone is the plane, so
 //!   it is measure-level identifiable only through its radial law — the `(kappa-2)^2`
 //!   ISA producer (support vs measure are complementary halves). Grounding in
-//!   [`crate::identifiability`], [`isa_seed`], [`crate::structure_harvest`].
+//!   [`crate::identifiability`], `isa_seed`, [`crate::structure_harvest`].
 //! * **Persistence is bits.** Log-persistence is an evidence exchange rate — one
 //!   nat of log-barcode-length per active row buys one nat per unit codimension;
 //!   the RD gain is *activation-space* bits, orthogonal to behavioral nats.
-//!   Grounding in [`crate::description_length`], [`persistence`].
+//!   Grounding in [`crate::description_length`], `persistence`.
 //! * **Binding is transport.** Layers act through a transport groupoid; linear
 //!   transport of an elliptical atom is forced to be a phase shift `+-theta+phi`;
 //!   the residual gauge obstruction is the atom's linear stabilizer.
-//!   Grounding in [`chart_canonicalization`], [`certificate`].
+//!   Grounding in `chart_canonicalization`, `certificate`.
 //! * **Symmetry is charge.** The rank charge is a running complexity
 //!   `lambda(n) = d(-log Z)/d(log n)`; hard rank, the WBIC soft count, and the
 //!   RLCT are three regimes of one object, scaled by the atom's occupancy
-//!   `n_eff`. Grounding in [`construction`], [`wbic_audit`].
+//!   `n_eff`. Grounding in `construction`, `wbic_audit`.
 //!
 //! Learnability trichotomy: structure resolves in the strict order existence ->
 //! dimension -> topology, and *fidelity cannot buy topology, only occupancy can*
@@ -71,33 +71,33 @@
 //! This term is large enough that its concerns live in dedicated submodules,
 //! re-exported flat from here so the public surface is unchanged:
 //!
-//! * [`streaming_plan`] — host/device memory budgeting and the in-core vs
+//! * `streaming_plan` — host/device memory budgeting and the in-core vs
 //!   matrix-free streaming admission plan.
-//! * [`schedule`] — assignment-temperature annealing and the discrete-`K`
+//! * `schedule` — assignment-temperature annealing and the discrete-`K`
 //!   search strategy.
-//! * [`atom`] — one manifold atom (`SaeManifoldAtom`): basis topology, the
+//! * `atom` — one manifold atom (`SaeManifoldAtom`): basis topology, the
 //!   decoder/frame algebra, the intrinsic arc-length penalty, and the ARD
 //!   coordinate prior / Bessel normaliser it rests on.
-//! * [`rho`] — the REML-selected continuous hyperparameters and their flat
+//! * `rho` — the REML-selected continuous hyperparameters and their flat
 //!   outer-coordinate layout.
-//! * [`kronecker`] — the matrix-free Kronecker-factored β Jacobian primitive.
-//! * [`loss`] — the loss breakdown and outer-ρ gradient component value objects.
-//! * [`arrow_solver`] — the gauge-deflated arrow-factor solve and the per-row
+//! * `kronecker` — the matrix-free Kronecker-factored β Jacobian primitive.
+//! * `loss` — the loss breakdown and outer-ρ gradient component value objects.
+//! * `arrow_solver` — the gauge-deflated arrow-factor solve and the per-row
 //!   jet bookkeeping the curvature assembly threads through it.
-//! * [`row_layout`] — the per-row active-set layout for sparse assignment.
-//! * [`shape_uncertainty`] — the posterior shape-band payload types.
-//! * [`certificate`] — the curved-dictionary global-optimality certificate and
+//! * `row_layout` — the per-row active-set layout for sparse assignment.
+//! * `shape_uncertainty` — the posterior shape-band payload types.
+//! * `certificate` — the curved-dictionary global-optimality certificate and
 //!   the post-fit diagnostics it feeds.
-//! * [`term`] — the `SaeManifoldTerm` aggregate, its shared numeric constants,
+//! * `term` — the `SaeManifoldTerm` aggregate, its shared numeric constants,
 //!   and the mutable-state snapshot the inner line search restores.
-//! * [`construction`] — term construction, accessors, frame/border bookkeeping,
+//! * `construction` — term construction, accessors, frame/border bookkeeping,
 //!   and loss/penalty/criterion evaluation.
-//! * [`construction_arrow_schur_assembly`] — the Gauss-Newton bordered-Hessian
+//! * `construction_arrow_schur_assembly` — the Gauss-Newton bordered-Hessian
 //!   arrow-Schur assembly and its factored β-penalty curvature helpers.
-//! * [`penalties`] — the live analytic-penalty curvature contributions.
-//! * [`fit_drivers`] — gauge canonicalization, the Newton step, and the joint /
+//! * `penalties` — the live analytic-penalty curvature contributions.
+//! * `fit_drivers` — gauge canonicalization, the Newton step, and the joint /
 //!   fixed-decoder / streaming fit drivers.
-//! * [`outer_objective`] — the generic-engine REML outer objective and the
+//! * `outer_objective` — the generic-engine REML outer objective and the
 //!   curvature-homotopy entry walk.
 
 use ndarray::{Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3, ArrayView4, ArrayViewMut2, s};

@@ -355,7 +355,7 @@ pub trait OuterObjective {
     /// inner bridges, screening proxies, the EFS / hybrid-EFS sub-objectives)
     /// keep the host BFGS branch unconditionally — only the concrete
     /// REML-state objectives override this to consult
-    /// [`crate::estimate::reml::outer_eval::outer_reml_device_admission`].
+    /// `crate::estimate::reml::outer_eval::outer_reml_device_admission`.
     fn outer_device_admission(&self) -> Option<gam_gpu::policy::RemlOuterAdmission> {
         None
     }

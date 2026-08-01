@@ -20,36 +20,36 @@
 //! is available.
 //!
 //! This module separates those concerns into honest submodules:
-//! - [`error`]: the [`RemlError`] type and its `String` boundary conversion.
-//! - [`hessian_factorization`]: the [`HessianFactorization`] trait — backend-specific
+//! - `error`: the [`RemlError`] type and its `String` boundary conversion.
+//! - `hessian_factorization`: the [`HessianFactorization`] trait — backend-specific
 //!   linear algebra (logdet, trace, solve) plus its default trace-estimation
 //!   machinery and the shared [`StochasticTraceState`].
-//! - [`derivative_providers`]: the [`HessianDerivativeProvider`] trait and every
+//! - `derivative_providers`: the [`HessianDerivativeProvider`] trait and every
 //!   concrete provider (Gaussian, single-predictor GLM, Firth-aware, Jeffreys,
 //!   guarded-correction, barrier).
-//! - [`hyper_operator`]: the [`HyperOperator`] trait, all of its concrete
+//! - `hyper_operator`: the [`HyperOperator`] trait, all of its concrete
 //!   implementations, the projected-factor cache, and the drift-coordinate
 //!   machinery that assembles ∂H/∂ρ contributions.
-//! - [`penalty_coordinate`]: the penalty-logdet derivative coordinates
+//! - `penalty_coordinate`: the penalty-logdet derivative coordinates
 //!   ([`PenaltyCoordinate`], [`PenaltySubspaceTrace`]) and the constrained /
 //!   KKT-residual subspace kernels.
-//! - [`inner_solution`]: the converged inner state [`InnerSolution`], its builder,
+//! - `inner_solution`: the converged inner state [`InnerSolution`], its builder,
 //!   dispersion handling, [`EvalMode`], and [`RemlLamlResult`].
-//! - [`outer_entry_helpers`]: the per-coordinate outer gradient / Hessian entry
+//! - `outer_entry_helpers`: the per-coordinate outer gradient / Hessian entry
 //!   helpers and the tangent-projected evaluation path.
-//! - [`objective`]: the single LAML/REML objective [`reml_laml_evaluate`].
-//! - [`outer_derivatives`]: outer-Hessian routing, scale decisions, the
+//! - `objective`: the single LAML/REML objective `reml_laml_evaluate`.
+//! - `outer_derivatives`: outer-Hessian routing, scale decisions, the
 //!   derivative-trace computers, and the assembled outer-Hessian operator.
-//! - [`efs`]: the Extended Fellner–Schall and hybrid-EFS hyperparameter updates.
-//! - [`corrected_covariance`]: smoothing-parameter-corrected coefficient
+//! - `efs`: the Extended Fellner–Schall and hybrid-EFS hyperparameter updates.
+//! - `corrected_covariance`: smoothing-parameter-corrected coefficient
 //!   covariance and the spectral-regularization helpers.
-//! - [`dense_spectral`]: the dense spectral [`DenseSpectralOperator`] backend.
-//! - [`sparse_cholesky_backends`]: the [`SparseCholeskyOperator`] and the other
+//! - `dense_spectral`: the dense spectral [`DenseSpectralOperator`] backend.
+//! - `sparse_cholesky_backends`: the [`SparseCholeskyOperator`] and the other
 //!   concrete [`HessianFactorization`] backends (dense exact Cholesky,
 //!   block-coupled, matrix-free SPD) plus the penalty-root helpers.
-//! - [`stochastic_trace`]: the Girard–Hutchinson / Hutch++ trace estimators and
+//! - `stochastic_trace`: the Girard–Hutchinson / Hutch++ trace estimators and
 //!   their deterministic RNG.
-//! - [`pseudo_logdet`], [`dense_projection`]: leaf,
+//! - `pseudo_logdet`, `dense_projection`: leaf,
 //!   state-free linear-algebra kernels.
 //!
 //! # Spectral Consistency Guarantee
@@ -85,21 +85,21 @@
 //! `H⁻¹` solve per probe and adaptive Welford-style stopping. Common
 //! random numbers (deterministic seed) hold across rho coordinates, so
 //! each probe contributes coherently to every coordinate's gradient.
-//! Triggered for very large `p` via [`can_use_stochastic_logdet_hinv_kernel`].
+//! Triggered for very large `p` via `can_use_stochastic_logdet_hinv_kernel`.
 //!
 //! ## Tier 3: Hutch++ (single-target, HVP-only operator)
 //!
 //! When a single trace `tr(H⁻¹ M)` is needed against an HVP-only
-//! operator and `p ≥ 128`, [`hutchpp_estimate_trace_hinv_operator`]
+//! operator and `p ≥ 128`, `hutchpp_estimate_trace_hinv_operator`
 //! splits the trace via Meyer–Musco's randomized range finder. The
 //! sketch captures the dominant subspace of `H⁻¹ M` exactly; the
 //! Hutchinson residual handles the orthogonal complement with greatly
 //! reduced variance. Achieves `O(1/ε)` matvecs vs `O(1/ε²)` for plain
 //! Hutchinson.
 //!
-//! [`hutchpp_estimate_trace_hinv_op_squared`] handles the symmetric
+//! `hutchpp_estimate_trace_hinv_op_squared` handles the symmetric
 //! same-operator cross-trace `tr((H⁻¹A)²)` (used by outer-Hessian
-//! diagonals); [`hutchpp_estimate_trace_hinv_operator_cross`] handles
+//! diagonals); `hutchpp_estimate_trace_hinv_operator_cross` handles
 //! the asymmetric `tr(H⁻¹A_L H⁻¹A_R)` via a shared sketch. Default
 //! impls of [`HessianFactorization::trace_hinv_operator`],
 //! [`HessianFactorization::trace_logdet_operator`], and the cross-trace

@@ -24,13 +24,13 @@
 //!
 //! ## Layout
 //!
-//! * [`branch`] — host-side branch classifier; mirrors
+//! * `branch` — host-side branch classifier; mirrors
 //!   `cubic_cell_kernel::branch_cell` + the semi-infinite tail logic of
 //!   `evaluate_cell_state_dispatched`.
 //! * `tests_host_substrate` — test-only CPU oracle for device-kernel parity.
-//! * [`kernel_src`] — NVRTC-compilable CUDA C++ source as Rust string
+//! * `kernel_src` — NVRTC-compilable CUDA C++ source as Rust string
 //!   constants (D9 / D15 / D21 specializations).
-//! * [`device`] — Linux+CUDA dispatcher that classifies each cell once,
+//! * `device` — Linux+CUDA dispatcher that classifies each cell once,
 //!   compiles and launches the all-branch NVRTC kernel, and leaves moments
 //!   device-resident for the consuming row kernel.
 

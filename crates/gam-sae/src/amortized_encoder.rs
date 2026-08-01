@@ -73,7 +73,7 @@ pub struct AmortizedCode {
 /// for the fraction-of-period convention the periodic/torus/cylinder bases use,
 /// `TAU` for a longitude in radians — and `None` marks a flat (Euclidean or
 /// bounded-interval) axis with no wrap. This is a STRUCTURAL property, read from
-/// the atom's basis kind / [`LatentManifold`] (`Circle { period }` ⇒
+/// the atom's basis kind / `LatentManifold` (`Circle { period }` ⇒
 /// `Some(period)`; `Euclidean`/`Interval` ⇒ `None`), never inferred from the
 /// coordinate values.
 pub type AxisPeriods = Vec<Option<f64>>;

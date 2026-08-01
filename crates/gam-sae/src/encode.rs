@@ -7,7 +7,7 @@
 //! min_{t_1,…,t_K}  ½‖x − Σ_k z_k B_kᵀΦ_k(t_k)‖² + Σ_k prior_k(t_k).
 //! ```
 //!
-//! [`joint_encode_refine_row`] solves that objective with the shared residual.
+//! `joint_encode_refine_row` solves that objective with the shared residual.
 //! The per-atom atlas below is an initializer and a standalone single-atom
 //! projection facility; composing its independent optima is not a multi-atom
 //! encode. With the amplitude `z_k` and decoder block `B_k` held fixed, Newton on
@@ -3042,7 +3042,7 @@ impl EncodeAtlas {
     /// still uncertified) it is counted for the exact multi-start solve. The
     /// returned coords carry the best CERTIFIED encode reached; a multi-start row
     /// keeps the Newton iterate as its (uncertified) coordinate so the caller can
-    /// still decode it, exactly as [`super::SaeManifoldTerm::amortized_encode_target`]
+    /// still decode it, exactly as `super::SaeManifoldTerm::amortized_encode_target`
     /// does — the honesty flag rides `certified`.
     ///
     /// This is the instrumented analogue of [`Self::amortized_encode_batch`] +
@@ -3162,7 +3162,7 @@ impl EncodeAtlas {
 
     /// Batched GEMM "fast" amortized encode — the traditional-encoder forward
     /// pass, WITH manifolds. For every row this applies the SAME closed-form
-    /// affine predictor as [`amortized_warm_start`]
+    /// affine predictor as `amortized_warm_start`
     /// (`t̂ = t_c + (1/z)·A₁·(x − z·m₁)`), but routed and applied as batched
     /// matrix products instead of a per-row loop wrapped in the Kantorovich
     /// certificate + basin warmup. NO per-row certificate is taken: this is the
@@ -3360,7 +3360,7 @@ impl EncodeAtlas {
     /// is `m(t̂) = z·Φ(t̂)·B` (module header) — the SAME GEMM `Φ·B`, but the code
     /// `Φ(t̂)` is the curved chart basis evaluated at the encoded latent coordinate
     /// rather than a flat one-hot. So the fast forward is exactly:
-    ///   1. [`amortized_encode_batch_fast`] → per-row latent coords `t̂` (one
+    ///   1. `amortized_encode_batch_fast` → per-row latent coords `t̂` (one
     ///      routing GEMM + one affine GEMM per chart — a traditional `W·x+b`);
     ///   2. ONE batched basis evaluation `Φ(t̂)` (the manifold-curvature step a
     ///      flat SAE doesn't have — `n×m`);

@@ -65,7 +65,7 @@
 //! machinery all stay in the raw frame. This helper therefore does not touch
 //! the inner solve; it consumes an already-converged raw inner solution.
 //!
-//! It also does not build the transformed [`PenaltyCoordinate`] roots. Those are
+//! It also does not build the transformed `PenaltyCoordinate` roots. Those are
 //! produced at the seam directly from `ReparamResult.e_transformed` /
 //! `canonical_transformed` (which are already expressed in the `Qs` frame and
 //! are the single source of truth for penalty roots there); the seam plugs those

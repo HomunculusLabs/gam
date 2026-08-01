@@ -854,7 +854,7 @@ pub struct GaussianMixtureCertificate {
     pub parameter_residual: f64,
     pub parameter_tolerance: f64,
     /// Measured per-iteration contraction rate `ρ` of the parameter residual
-    /// over the trailing [`EM_RATE_WINDOW`], or `None` before a full window has
+    /// over the trailing `EM_RATE_WINDOW`, or `None` before a full window has
     /// accumulated. `ρ < 1` is the evidence that the iterate is still
     /// descending; `ρ ≥ 1` is the evidence that it has stalled.
     pub contraction_rate: Option<f64>,

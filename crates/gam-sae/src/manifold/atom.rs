@@ -597,7 +597,7 @@ pub struct SaeManifoldAtom {
     /// (`[1, sin, cos, …]`), against which the correct decoder is the full-width
     /// pre-image `B = Q B̃` (`M × p`), NOT the reduced `B̃`. Decoding the full
     /// design by the reduced block mismatches widths (`M` vs `r`) and is the
-    /// #2135 "decoder_blocks[k] has M=2 but rebuilt basis has M=3" defect.
+    /// #2135 "decoder_blocks\[k\] has M=2 but rebuilt basis has M=3" defect.
     /// [`Self::full_width_decoder`] / [`Self::full_basis_size`] re-expand the
     /// reduced frame at the emission boundary so it never leaks. `None` ⇒ the
     /// atom was never reduced and the stored decoder is already full-width.
@@ -1620,7 +1620,7 @@ impl SaeManifoldAtom {
     }
 
     /// Effective numerical column rank of the decoder `B_k` (`M_k × p`) from its
-    /// singular values, with the relative cutoff [`SAE_FRAME_RANK_CUTOFF`]. This
+    /// singular values, with the relative cutoff `SAE_FRAME_RANK_CUTOFF`. This
     /// is the smallest frame rank `r` that captures `B_k`'s span up to that
     /// energy floor; the auto-activation heuristic compares it against `p`.
     pub fn decoder_numerical_rank(&self) -> Result<usize, String> {
@@ -1678,7 +1678,7 @@ impl SaeManifoldAtom {
     /// this atom and, if so, activate it (issue #972) — magic-by-default, no
     /// flag. The frame is installed (decoder factored as `B_k = C_k Uᵀ`) only
     /// when the decoder's effective rank `r` shrinks the per-atom border
-    /// `M_k · p → M_k · r` by at least [`SAE_FRAME_ACTIVATION_MARGIN`] AND leaves
+    /// `M_k · p → M_k · r` by at least `SAE_FRAME_ACTIVATION_MARGIN` AND leaves
     /// a positive Grassmann dimension (`p − r ≥ 1`). Otherwise the atom stays on
     /// the bit-for-bit full-`B` path (`decoder_frame == None`).
     ///

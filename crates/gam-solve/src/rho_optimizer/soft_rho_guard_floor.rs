@@ -5,7 +5,7 @@
 //!
 //! [`OuterObjective::soft_rho_guard_gradient`] returns `None` by default, and
 //! that default is *correct* for most objective families and *wrong* for the
-//! ones built on a [`RemlState`]. The two are byte-identical at the trait: an
+//! ones built on a `RemlState`. The two are byte-identical at the trait: an
 //! objective that carries the barrier and says nothing looks exactly like one
 //! that has no barrier at all. #2545 fixed one family, #2629 fixed the second,
 //! and the table of "which of the remaining families carry it" in #2629 was
@@ -36,7 +36,6 @@
 //! they were reached on, so a refusal is readable without re-running anything.
 //!
 //! [`OuterObjective::soft_rho_guard_gradient`]: super::OuterObjective::soft_rho_guard_gradient
-//! [`RemlState`]: crate::estimate::reml::RemlState
 //! [`SoftRhoGuardPriorAtom`]: crate::estimate::reml::atoms::SoftRhoGuardPriorAtom
 
 use ndarray::Array1;

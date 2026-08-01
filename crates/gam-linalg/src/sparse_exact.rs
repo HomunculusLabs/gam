@@ -1186,7 +1186,7 @@ impl TakahashiInverse {
         })
     }
 
-    /// Get H⁻¹[i,j] in ORIGINAL (unpermuted) coordinates.
+    /// Get H⁻¹\[i,j\] in ORIGINAL (unpermuted) coordinates.
     pub fn get(&self, i: usize, j: usize) -> f64 {
         let pi = self.perm_inv[i];
         let pj = self.perm_inv[j];
@@ -1240,7 +1240,7 @@ impl TakahashiInverse {
     ///   entry and double it; the row > col mirror is skipped.  The diagonal
     ///   is stored once and counted once.
     ///
-    /// In both cases: tr(Z S) = Σ_diag Z[i,i] S[i,i] + 2 Σ_{i<j} Z[i,j] S[i,j].
+    /// In both cases: tr(Z S) = Σ_diag Z\[i,i\] S\[i,i\] + 2 Σ_{i<j} Z\[i,j\] S\[i,j\].
     pub fn trace_product_sparse(&self, s: &SparseColMat<usize, f64>) -> f64 {
         let (symbolic, values) = s.parts();
         let s_col_ptr = symbolic.col_ptr();

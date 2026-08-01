@@ -125,7 +125,7 @@
 //! hard diffeomorphism guard `det Dφ_θ > δ` on a check grid means a folded
 //! chart is REFUSED, never produced. The decoder transport is the same
 //! exact-LS recomposition — and the same honesty gate — as the `d = 1` path
-//! (shared helper [`recompose_decoder_exact_ls`]).
+//! (shared helper `recompose_decoder_exact_ls`).
 //!
 //! #1019 free-chart arm (`d = 2`, free/patch): a contractible Euclidean-patch
 //! atom (Duchon / EuclideanPatch basis kind) admits a **global** truncated
@@ -138,9 +138,9 @@
 //! (minimum-anisotropy) chart, with the residual chart freedom downgraded to
 //! the flat isometry group `O(2) ⋉ ℝ²` and provenance
 //! `PinnedByCanonicalization`. The torus, free-patch, and sphere arms share one
-//! pullback-metric extraction ([`extract_pullback_metric_d2`]) and the two
+//! pullback-metric extraction (`extract_pullback_metric_d2`) and the two
 //! flow-pinned arms share one exact Gauss–Newton core
-//! ([`minimize_isometry_defect_flow`]).
+//! (`minimize_isometry_defect_flow`).
 //!
 //! `S²` (sphere atoms): the hairy-ball theorem rules out a single global
 //! pole-free flow basis the way the torus and free-patch paths use, so the
@@ -623,7 +623,7 @@ pub struct TorusFlowModeKey {
 /// `component` of the flow Jacobian `Dφ`). Shared by the torus
 /// ([`TorusFlowBasis`]) and the free-patch ([`FreePatchFlowBasis`]) flow
 /// families — the isometry-defect Gauss–Newton core
-/// ([`minimize_isometry_defect_flow`]) consumes only this `(component, grad)`
+/// (`minimize_isometry_defect_flow`) consumes only this `(component, grad)`
 /// contract, so both families descend the same exact optimizer.
 #[derive(Debug, Clone, Copy)]
 pub struct FlowModeSample {
@@ -981,7 +981,7 @@ pub fn unit_speed_retraction(
 /// curve speed over a uniform grid of the chart's canonical domain. `0` ⟺ the
 /// parameterization is exactly arc-length (unit-speed); a positive value is the
 /// same gauge the in-loop retraction's early-out reads
-/// ([`speed_uniformity_defect`]), promoted here from a control signal to a
+/// (`speed_uniformity_defect`), promoted here from a control signal to a
 /// REPORTED per-atom certificate quantity.
 ///
 /// It is a pure property of `(decoder, basis)` — measured on a UNIFORM latent
@@ -1830,7 +1830,7 @@ pub fn torus_isometry_flow_reparameterization(
 /// which is back in the decoder basis **iff `d_f = 1`** (an affine flow leaves
 /// the polynomial degree unchanged). A higher-degree flow would push `γ ∘ φ⁻¹`
 /// out of the basis, the exact-LS recomposition gate
-/// ([`recompose_decoder_exact_ls`]) would see a large image drift, and the
+/// (`recompose_decoder_exact_ls`) would see a large image drift, and the
 /// canonicalization would be honestly REFUSED — so a degree > 1 flow basis
 /// could never actually commit a chart here. The affine family is exactly the
 /// one that keeps the image-freezing exact, and it captures the dominant patch
@@ -2105,7 +2105,7 @@ pub struct PatchIsometryFlowReparameterization {
 /// `c`, the exact Gauss–Newton, the `det Dφ > δ` diffeomorphism guard, and the
 /// exact-LS decoder transport with the [`CHART_RECOMPOSITION_REL_TOL`] honesty
 /// gate — is the SHARED machinery the torus path uses
-/// ([`minimize_isometry_defect_flow`], [`recompose_decoder_exact_ls`]); see
+/// (`minimize_isometry_defect_flow`, `recompose_decoder_exact_ls`); see
 /// [`torus_isometry_flow_reparameterization`] for the full derivation.
 ///
 /// The residual chart freedom after pinning is the finite isometry group of the
@@ -2341,7 +2341,7 @@ impl SphereBoostFlowBasis {
     }
 
     /// Mode identities in coefficient order: `[Z, X, Y]`. This IS the `θ`
-    /// index layout — [`Self::mode_samples`] returns samples in the same order.
+    /// index layout — `Self::mode_samples` returns samples in the same order.
     pub fn mode_layout(&self) -> [SphereBoostAxis; 3] {
         [SphereBoostAxis::Z, SphereBoostAxis::X, SphereBoostAxis::Y]
     }

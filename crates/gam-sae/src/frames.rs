@@ -948,7 +948,7 @@ impl GrassmannFrame {
     /// two atoms: two arcs of ONE circle span the same 2-plane (principal angles
     /// ≈ 0 via [`Self::max_principal_angle`]), while two genuinely distinct
     /// circles generically span different planes. The effective rank `r` is the
-    /// number of singular values at or above [`SAE_FRAME_RANK_CUTOFF`] · σ_max,
+    /// number of singular values at or above `SAE_FRAME_RANK_CUTOFF` · σ_max,
     /// so a rank-deficient decoder contributes only its live directions.
     ///
     /// Returns `None` for an empty decoder or one whose largest singular value is

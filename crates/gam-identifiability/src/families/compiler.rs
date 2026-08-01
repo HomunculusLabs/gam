@@ -1298,7 +1298,7 @@ pub fn build_raw_grams_structural(
 ///
 /// The GPU path is only attempted for survival-family geometry
 /// (`K = CHANNELS = 4`) — that is the case the GPU kernel
-/// ([`crate::families::gpu::try_primary_state_gram_cuda`])
+/// (`crate::families::gpu::try_primary_state_gram_cuda`)
 /// is specialised for via the packed-symmetric `n × 10` weight layout.
 /// For any other `K` the CPU builders are used unconditionally.
 ///

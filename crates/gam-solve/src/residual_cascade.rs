@@ -569,7 +569,7 @@ pub enum LogdetMethod {
     /// Diagonal control variate + stochastic Lanczos quadrature on fixed
     /// deterministic probes. NOT exact — the only route that is not, and taken
     /// only when the sparse factor's fill-in exceeds
-    /// [`SPARSE_FACTOR_MAX_NNZ`].
+    /// `SPARSE_FACTOR_MAX_NNZ`.
     Slq,
 }
 
@@ -795,7 +795,7 @@ pub enum ResidualCascadeError {
     /// Automatic smoothing-parameter selection needs mathematical outer
     /// enclosures of the score value and derivatives over λ CELLS, which only
     /// the λ-independent Schur spectrum provides. Past
-    /// [`CERTIFIED_SPECTRUM_MAX`] the dense eigendecomposition that spectrum is
+    /// `CERTIFIED_SPECTRUM_MAX` the dense eigendecomposition that spectrum is
     /// made of exceeds its memory budget, and what remains is a fixed-probe
     /// stochastic quadrature — a pointwise estimate, not an enclosure. Exact or
     /// numerically converged residual evidence cannot repair that gap, and
@@ -947,7 +947,7 @@ impl std::fmt::Display for ResidualCascadeError {
 impl std::error::Error for ResidualCascadeError {}
 
 /// One resolution level's geometry in a persisted snapshot: the data needed to
-/// rebuild a [`Level`] (its lookup grid, bumps, and column block) without the
+/// rebuild a `Level` (its lookup grid, bumps, and column block) without the
 /// training rows. Centers are flattened `dim`-major (`dim` floats per center).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LevelState {
@@ -3739,7 +3739,7 @@ impl ResidualCascadeDesign {
     /// Aspect ratio of the metric-scaled point cloud: the ratio of the largest
     /// to smallest per-axis standard deviation of the scaled coordinates `z`.
     /// This is the metric-condition measure the quasi-uniformity guard (issue
-    /// #1032, caveat 2) keys on — see [`QUASI_UNIFORMITY_MAX_ASPECT`]. A value
+    /// #1032, caveat 2) keys on — see `QUASI_UNIFORMITY_MAX_ASPECT`. A value
     /// near 1 is an isotropic (benign) cloud; a large value means the metric
     /// has collapsed the data onto a lower-dimensional sheet in `z`, breaking
     /// the BPX n-independent iteration bound.
@@ -3784,7 +3784,7 @@ impl ResidualCascadeDesign {
     /// iteration bound is trustworthy. When this returns `false`, automatic
     /// fitting must return a typed refusal rather than pay an iterative solve
     /// whose iteration count is no longer n-independent. The CG residual
-    /// certificate would still *catch* a mis-solve at [`CG_MAX_ITERS`], but
+    /// certificate would still *catch* a mis-solve at `CG_MAX_ITERS`, but
     /// the guard prevents the silent O(n·iters) blow-up up front.
     pub fn quasi_uniformity_certified(&self) -> bool {
         self.metric_scaled_aspect_ratio() <= QUASI_UNIFORMITY_MAX_ASPECT
@@ -3796,7 +3796,7 @@ impl ResidualCascadeDesign {
     /// of `A = X'WX + λD` exactly and Jacobi-preconditions the fine tail; exposed
     /// so the conditioning oracle can reconstruct that block-arrow preconditioner
     /// from the public dense system and certify it is uniformly conditioned in
-    /// depth. See [`COARSE_DOMINANCE`].
+    /// depth. See `COARSE_DOMINANCE`.
     pub fn coarse_space_cols(&self, log_lambda: f64) -> Result<usize, String> {
         let lambda = gam_problem::checked_exp_log_strength(log_lambda)
             .map_err(|error| format!("residual cascade: {error}"))?;
@@ -4011,10 +4011,10 @@ impl ResidualCascadeDesign {
     /// compared with both exact boundary candidates.
     ///
     /// Automatic selection is limited to designs whose λ-independent Schur
-    /// spectrum can be formed, i.e. inside [`CERTIFIED_SPECTRUM_MAX`] — NOT to
+    /// spectrum can be formed, i.e. inside `CERTIFIED_SPECTRUM_MAX` — NOT to
     /// designs that carry a dense Gram cache. The two used to be the same gate,
     /// which meant a cascade whose refinement legitimately crossed
-    /// [`DENSE_GRAM_MAX`] could be fitted but never certified, and so could not
+    /// `DENSE_GRAM_MAX` could be fitted but never certified, and so could not
     /// finish at all (#2546). The Gram is a cache; the spectrum is the proof.
     ///
     /// Past the spectrum budget there is no exact-real enclosure of the score,
@@ -4823,10 +4823,10 @@ fn decide_refinement(
     }
 }
 
-/// Fit the full magic-default cascade: start at [`INITIAL_LEVELS`], REML-fit,
+/// Fit the full magic-default cascade: start at `INITIAL_LEVELS`, REML-fit,
 /// and refine (add a level, refit, re-select λ) until the exact next-level
 /// gain bound certifies that one more level cannot move the penalized
-/// objective by more than [`REFINE_TOL`] of the penalized residual. A genuinely
+/// objective by more than `REFINE_TOL` of the penalized residual. A genuinely
 /// empty next-level net certifies zero remaining gain; a structural capacity
 /// reached before the tolerance passes is a typed
 /// [`ResidualCascadeError::Underresolved`] carrying the retained work and its

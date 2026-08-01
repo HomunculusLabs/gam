@@ -52,7 +52,7 @@ use crate::basis::{BasisError, MaternNu};
 /// Closed-form parameterisation of the radial families supported by the
 /// input-location derivative routines below.
 ///
-/// This is a thin convenience over [`RadialScalarKind`] (which itself is a
+/// This is a thin convenience over `RadialScalarKind` (which itself is a
 /// crate-internal enum carrying the same parameters). The public layer here
 /// is kept as a separate type so that downstream consumers — including the
 /// Python pyffi layer that will surface `LatentCoord` — can construct kernel
@@ -112,7 +112,7 @@ impl RadialInputKernel {
 ///
 /// This is the closed-form chain-rule reduction used by both the inner
 /// Newton step and the backward pyffi entrypoint. See
-/// [`crate::latent::LatentCoordValues::contract_gradient`] for
+/// `crate::latent::LatentCoordValues::contract_gradient` for
 /// the canonical signature.
 pub fn contract_input_loc_gradient(
     grad_phi: ArrayView2<'_, f64>,

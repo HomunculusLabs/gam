@@ -2,7 +2,7 @@
 //!
 //! The carrier is split into real submodules, each a single defensible concern:
 //!
-//! - [`block_spec`]       — the coefficient group/label/prior data model plus the
+//! - `block_spec`       — the coefficient group/label/prior data model plus the
 //!   fit-level blockspec validator and the block-role heuristic. The block
 //!   data-model types (`ParameterBlockSpec`, `ParameterBlockState`, …), the
 //!   `CustomFamilyError`, the `PenaltyMatrix` carrier, and the
@@ -10,19 +10,19 @@
 //!   `CustomFamily` trait, fit options, and ψ design-derivative operators live in
 //!   `gam-model-api`. They are re-exported through the prelude below so the prior
 //!   flat-namespace `crate::*` API is unchanged.
-//! - [`psi_design`]       — ψ design-derivative operators (now in `gam-model-api`).
-//! - [`blockwise_solve`]  — the inner block-coordinate solve + numeric kernels.
-//! - [`joint_newton`]     — joint (cross-block) Newton + trust region + PCG + KKT.
-//! - [`outer_objective`]  — the outer (ρ) objective and inner-fit driver.
-//! - [`assembly`], [`inner_blockwise_fit`], [`joint_derivatives`], [`warm_start`]
+//! - `psi_design`       — ψ design-derivative operators (now in `gam-model-api`).
+//! - `blockwise_solve`  — the inner block-coordinate solve + numeric kernels.
+//! - `joint_newton`     — joint (cross-block) Newton + trust region + PCG + KKT.
+//! - `outer_objective`  — the outer (ρ) objective and inner-fit driver.
+//! - `assembly`, `inner_blockwise_fit`, `joint_derivatives`, `warm_start`
 //!   — the #1145 split of `outer_objective`.
-//! - [`psi_hyper`]        — ψ `HyperCoord` construction + hyper-objective eval.
-//! - [`jeffreys`]         — the Jeffreys-prior contribution to the joint objective.
-//! - [`covariance`]       — joint covariance/geometry + stationarity/KKT residuals.
-//! - [`fit`]              — the public fit entry points + result assembly.
-//! - [`penalty_labels`]   — penalty-label layout + labeled log-λ (de)aggregation.
-//! - [`coefficient_groups`] — coefficient-group realization.
-//! - [`custom_family_persistent_warm_start`] — the persistent warm-start cache
+//! - `psi_hyper`        — ψ `HyperCoord` construction + hyper-objective eval.
+//! - `jeffreys`         — the Jeffreys-prior contribution to the joint objective.
+//! - `covariance`       — joint covariance/geometry + stationarity/KKT residuals.
+//! - `fit`              — the public fit entry points + result assembly.
+//! - `penalty_labels`   — penalty-label layout + labeled log-λ (de)aggregation.
+//! - `coefficient_groups` — coefficient-group realization.
+//! - `custom_family_persistent_warm_start` — the persistent warm-start cache
 //!   (hosted at crate root since #1521; re-exported into the prelude here).
 //!
 //! Cross-submodule items are `pub(crate)`; each submodule pulls the shared

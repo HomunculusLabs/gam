@@ -239,7 +239,7 @@ pub fn slq_logdet(
 /// `φ(θ) = θ ≥ deflate_floor ? ln θ : 0`, i.e. every eigenvalue at or below the
 /// floor is pinned to unit stiffness and contributes `ln 1 = 0` — the exact
 /// matrix-free analogue of the dense
-/// [`ReducedSchurPolicy::EvidenceUnitDeflation`](super::reduced_solve) convention
+/// `ReducedSchurPolicy::EvidenceUnitDeflation` convention
 /// (see #2308). `lambda_max_abs` and `deflate_floor` are reported so callers can
 /// audit the scale at which deflation kicked in.
 #[derive(Debug, Clone, Copy)]
@@ -298,7 +298,7 @@ impl SlqUnitDeflatedLogDet {
 /// of the deflation set).
 ///
 /// Determinism, probe fan-out, and the `dim == 0 ⇒ 0` convention are identical to
-/// [`slq_logdet`]; the two share [`probe_lanczos_eigenpairs`], so for a fixed
+/// [`slq_logdet`]; the two share `probe_lanczos_eigenpairs`, so for a fixed
 /// `(dim, matvec, num_probes, lanczos_steps, seed)` the two estimators build
 /// bit-identical Krylov spaces and differ ONLY in the applied spectral function.
 pub fn slq_logdet_unit_deflated(

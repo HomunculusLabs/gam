@@ -123,7 +123,7 @@ fn wbic_tempered_rank_fraction(mu: f64, edge: f64, n_eff: f64) -> f64 {
 /// `R·(1+√(p/n_eff))²`, `dispersion` is `R`, and
 /// `basis_edf = tr(G(G+λS)⁻¹)` is the ridge-trace effective basis count. This
 /// is exactly the decomposition inside
-/// [`super::construction::realised_rank_charge_dof`], surfaced so the WBIC soft
+/// `super::construction::realised_rank_charge_dof`, surfaced so the WBIC soft
 /// count, hard MP reconstruction count, and production chargeable count can be
 /// inspected without changing the production criterion.
 #[derive(Clone, Debug)]
@@ -183,8 +183,8 @@ impl ReconSpectrum {
     /// #2258 production CHARGEABLE rank — the hard MP reconstruction count,
     /// with a below-rank-edge but numerically ALIVE atom promoted to the
     /// minimum non-degenerate rank 1. Mirrors the identical rule inside
-    /// [`super::construction::realised_rank_charge_dof`] through the shared
-    /// [`super::construction::classify_reconstruction_rank`] primitive;
+    /// `super::construction::realised_rank_charge_dof` through the shared
+    /// `super::construction::classify_reconstruction_rank` primitive;
     /// the ρ-derivative MUST take the same branch or the value/gradient pair
     /// desyncs (measured: real-GPT-2 fit priced finite by the promoted value
     /// path, then refused by the derivative's independent rank-zero invariant).
@@ -273,7 +273,7 @@ impl ReconSpectrum {
 /// `gram = Φᵀdiag(a²)Φ` (`m×m`), decoder `D` (`m×p`), effective sample size
 /// `n_eff = Σ_row a²`, output dim `p_out`, noise floor `r_floor` (dispersion R),
 /// and smoothness `(lam_smooth, smooth_penalty)`. Mirrors
-/// [`super::construction::realised_rank_charge_dof`] byte-for-byte on the shared
+/// `super::construction::realised_rank_charge_dof` byte-for-byte on the shared
 /// quantities (checked in the parity test), returning the spectrum instead of the
 /// collapsed `rank_eff · basis_edf`.
 pub fn recon_spectrum(

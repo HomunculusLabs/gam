@@ -27,7 +27,7 @@ impl VarianceJet {
     /// representable `~1e-18`. `V = μ(1−μ)` then collapses to `0` and every
     /// observed-information quantity divides by it, so a row whose Fisher weight
     /// is a healthy `1e-14` is refused as unrepresentable instead of evaluated.
-    /// [`crate::mixture_link::inverse_link_complement_for_inverse_link`] recovers
+    /// `crate::mixture_link::inverse_link_complement_for_inverse_link` recovers
     /// the complement from `η` without cancellation; this constructor is how it
     /// reaches the variance.
     ///
@@ -527,7 +527,7 @@ pub(crate) fn compute_observed_hessian_curvature_arrays(
 ///
 /// These observed quantities are required for:
 /// 1. The outer REML/LAML Hessian H_obs = X' W_obs X + S (log|H| term).
-/// 2. The outer gradient's C[v] correction (uses c_obs).
+/// 2. The outer gradient's C\[v\] correction (uses c_obs).
 /// 3. The outer Hessian's Q[v_k, v_l] correction (uses d_obs).
 ///
 /// Using Fisher weights in the outer REML would yield a PQL-type surrogate

@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// lifetime; the fields stay private because the invariants that make
 /// `add_upper` sound (upper-triangle-only, `values.len() == nnz`,
 /// `first_row`/`contiguous` agreeing with `row_indices`) are established
-/// solely by [`SparseHessianSymbolic::build`].
+/// solely by `SparseHessianSymbolic::build`.
 pub struct SparseHessianSymbolic {
     dim: usize,
     nnz: usize,

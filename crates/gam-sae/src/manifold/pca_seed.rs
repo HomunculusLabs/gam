@@ -539,7 +539,7 @@ fn surplus_phase_plane(
 /// phase off disjoint PC pairs, and Euclidean/other atoms take score-scaled,
 /// min-max-normalized PC projections. Returns a padded
 /// `(K_atoms, n_obs, d_max)` coordinate array, where `d_max` is the widest
-/// per-atom coordinate STORAGE ([`seed_storage_width`]) — for `S²` / `RP²`
+/// per-atom coordinate STORAGE (`seed_storage_width`) — for `S²` / `RP²`
 /// that is 3, not the requested intrinsic `atom_dim` of 2.
 pub fn sae_pca_seed_initial_coords(
     z: ArrayView2<'_, f64>,

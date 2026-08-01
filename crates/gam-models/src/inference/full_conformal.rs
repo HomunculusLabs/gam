@@ -108,7 +108,7 @@
 //! KKT system the cold fit solves: exactness at corrector points is
 //! convergence of Newton, not ODE integration accuracy. The step size is
 //! CERTIFIED by the third-derivative data the tree already has (the PIRLS
-//! `c`-array bounds ‖D_βH[v]‖ along the step, giving a computable Newton
+//! `c`-array bounds ‖D_βH\[v\]‖ along the step, giving a computable Newton
 //! attraction radius) — the corrector cannot silently skip a basin. Score
 //! crossings between steps are localized by bisection on the corrected
 //! path. Discrete families (Binomial, Poisson) are FINITE: z walks the
@@ -2460,7 +2460,7 @@ impl GaussianJackknifePlusStats {
     /// Same exact jackknife+ statistics as [`new`](Self::new), but the
     /// penalized normal matrix `M = XᵀX + Sλ` is supplied directly rather than
     /// reassembled from `Sλ`. For a Gaussian-identity unit-weight fit the
-    /// converged penalized Hessian stored in [`FitGeometry`] *is* this `M` (the
+    /// converged penalized Hessian stored in `FitGeometry` *is* this `M` (the
     /// working weights are unity and the matrix is dispersion-unscaled), so
     /// persisting the design + `M` at fit time and replaying through this
     /// constructor reproduces the certified interval with no penalty
@@ -2592,7 +2592,7 @@ impl GaussianJackknifePlusStats {
 ///
 /// `Sλ` is recovered once at fit time from the converged penalized Hessian
 /// `M₀ = XᵀX + Sλ` (the Gaussian-identity, unit-weight, dispersion-unscaled
-/// normal matrix stored in [`FitGeometry`]) as `Sλ = M₀ − XᵀX`, so no penalty
+/// normal matrix stored in `FitGeometry`) as `Sλ = M₀ − XᵀX`, so no penalty
 /// re-derivation is needed — exactly the seam the jackknife+ substrate uses.
 ///
 /// The frozen-ρ self-diagnostic treats the entire frozen penalty as carrying a

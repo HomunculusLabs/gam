@@ -1,16 +1,16 @@
 //! Block 9 Phase 2/3 — device kernels that consume the row-primary Hessian
 //! cache (the per-row `r × r` blocks materialised by
-//! [`crate::bms::BernoulliMarginalSlopeFamily::build_row_primary_hessian_cache`]
-//! and stored in [`crate::bms::RowPrimaryEvalCache`])
+//! `crate::bms::BernoulliMarginalSlopeFamily::build_row_primary_hessian_cache`
+//! and stored in `crate::bms::RowPrimaryEvalCache`)
 //! and emit either:
 //!
 //! * **Phase 2 — per-row matvec** `y_i = H_i · v_i` for every row `i ∈ [0, n)`,
 //!   matching CPU
-//!   [`BernoulliMarginalSlopeFamily::exact_newton_joint_hessian_matvec_from_cache`]'s
+//!   `BernoulliMarginalSlopeFamily::exact_newton_joint_hessian_matvec_from_cache`'s
 //!   `scratch.hess.dot(&row_dir)` inner contraction; or
 //! * **Phase 3 — per-row diagonal** `d_i = diag(H_i)` (the `r` diagonal
 //!   entries), matching the cached-diagonal fast path in
-//!   [`BernoulliMarginalSlopeFamily::exact_newton_joint_hessian_diagonal_from_cache`]'s
+//!   `BernoulliMarginalSlopeFamily::exact_newton_joint_hessian_diagonal_from_cache`'s
 //!   `row_hess[[u, u]]` reads.
 //!
 //! Both kernels assume the cached layout produced by Phase 1 (FullRowMajor:

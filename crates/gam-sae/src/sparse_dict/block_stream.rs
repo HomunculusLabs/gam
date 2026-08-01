@@ -278,7 +278,7 @@ pub struct BlockRankCharges {
 impl BlockSparseStreamState {
     /// fit_begin: seed the block frames from `seed` (a representative sample) and
     /// prime the epoch accumulators. The seed fixes `P` and the initial
-    /// orthonormal frames ([`seed_frames`]); the corpus is streamed later through
+    /// orthonormal frames (`seed_frames`); the corpus is streamed later through
     /// [`Self::partial_fit`]. γ starts at 1.
     pub fn new(seed: ArrayView2<'_, f32>, config: &BlockSparseConfig) -> Result<Self, String> {
         validate_config(config)?;
@@ -416,7 +416,7 @@ impl BlockSparseStreamState {
 
     /// partial_fit: route + tied-code one shard against the FROZEN epoch frames/γ
     /// and fold its contributions into this epoch's accumulators. Reuses the exact
-    /// block-tiled router/coder of the one-shot lane ([`route_and_code_all`]), so
+    /// block-tiled router/coder of the one-shot lane (`route_and_code_all`), so
     /// streaming the shards yields the same accumulated sparse MOD / γ system as
     /// one full-batch pass over the concatenation.
     pub fn partial_fit(&mut self, shard: ArrayView2<'_, f32>) -> Result<BlockShardStats, String> {

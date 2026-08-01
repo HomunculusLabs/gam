@@ -5,7 +5,7 @@
 //!
 //! An H-harmonic circle atom occupies a `b = 2H` block whose within-block code
 //! `z ∈ ℝ^{2H}` splits into per-harmonic 2-vectors `(c_h, s_h)`, `h = 1..H`
-//! (see [`crate::sparse_dict::block`] for the block/frame vocabulary). Reading
+//! (see `crate::sparse_dict::block` for the block/frame vocabulary). Reading
 //! each pair as one complex Fourier coefficient `y_h = c_h + i·s_h`, the atom's
 //! *generative* model when the same feature fires **m times** in one context
 //! (two instances of one concept = two spikes on one circle) is a sum of `m`

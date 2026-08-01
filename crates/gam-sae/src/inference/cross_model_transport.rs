@@ -11,9 +11,9 @@
 //! ambient dimension mismatch therefore never enters the transport fit.
 //!
 //! The map fit itself is not new machinery. [`fit_cross_model_transport`] calls
-//! [`fit_transport_map`](crate::inference::layer_transport::fit_transport_map),
+//! `fit_transport_map`,
 //! reads the empirical isometry defect from that fit, and classifies circle maps
-//! with [`classify_circle_transport_fit`](crate::inference::transport_class::classify_circle_transport_fit).
+//! with `classify_circle_transport_fit`.
 //! The verdict follows the crate's measure-don't-latch convention: it reports
 //! "consistent within noise/gauge" when the measured defects are at or below
 //! their own uncertainty scale, and otherwise reports the measured obstruction

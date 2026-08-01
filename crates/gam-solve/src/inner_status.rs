@@ -15,9 +15,9 @@
 //! - Budget exhaustion / trust-region floor without certifying. This is
 //!   between the two — sometimes structural, sometimes just unlucky.
 //!
-//! [`InnerFailure`] captures these classes. Startup accounting projects typed
-//! engine errors through [`classify_estimation_error`]; only prose-only
-//! producers enter [`classify_inner_error`].
+//! `InnerFailure` captures these classes. Startup accounting projects typed
+//! engine errors through `classify_estimation_error`; only prose-only
+//! producers enter `classify_inner_error`.
 
 use gam_problem::{CustomFamilyError, EstimationError, diagnostics::KktRefusalDiagnosis};
 

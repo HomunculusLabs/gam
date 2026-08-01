@@ -307,7 +307,7 @@ impl crate::custom_family::BlockEffectiveJacobian for LogslopeBlockJacobian {
 /// ∂ad1[i]/∂β = 0
 /// ```
 ///
-/// At g=0 (β=0 init): c=1, so each row is just M[i,:].
+/// At g=0 (β=0 init): c=1, so each row is just M\[i,:\].
 pub struct MarginalBlockJacobian {
     /// The marginal basis design (n × p_marginal), `Arc`-shared with its
     /// owner rather than copied for the callback lifetime.

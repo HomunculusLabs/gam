@@ -135,7 +135,13 @@ jobs:
   # Rustdoc had no CI job at all (#2711): nothing in `.github/` ran `cargo doc`
   # or `rustdoc`, so a surface that exits 101 was dark by omission while
   # `docs.yml` -- mkdocs, ~50s, nightly -- was green and said nothing about it.
-  # It is a RATCHET, not a zero bar; see scripts/rustdoc_ratchet.sh.
+  # It landed (#2711) as a RATCHET against a ledger of 15 known-red crates,
+  # because zero was unreachable that day. #2753 measured the real tree -- 754
+  # rustdoc errors across 15 crates, four times the 182 the issue quoted -- and
+  # fixed every one, so the ledger is gone and the bar is ZERO for every crate.
+  # A ratchet at N licenses the N+1'th; see scripts/rustdoc_gate.sh for the
+  # coverage control that keeps a green from being a non-run now that there are
+  # no known-failing crates left to act as the positive control.
   #
   # WHY ITS OWN JOB, AND NOT A STEP IN `linux-native-check`.
   # It was first added as a step there, on the reasoning that the workspace
@@ -155,8 +161,8 @@ jobs:
   # whoever broke it -- while `linux-native-check` returns to answering "does
   # this commit compile" in ~5 minutes. It pays for its own dependency build,
   # which costs runner minutes but not verdict latency.
-  rustdoc-ratchet:
-    name: Rustdoc ratchet (no crate outside the ledger may go red)
+  rustdoc-gate:
+    name: Rustdoc (cargo doc --no-deps, zero errors, every crate)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -164,22 +170,22 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
-      - name: Rustdoc ratchet
+      - name: Rustdoc gate
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: sccache
           CARGO_INCREMENTAL: "0"
         run: |
           set +e
-          scripts/rustdoc_ratchet.sh
+          scripts/rustdoc_gate.sh
           status=$?
           if [ "$status" -eq 2 ]; then
-            echo "::error title=Rustdoc ratchet could not measure::The scan did not run to completion, so this run says nothing about the rustdoc surface. Treat it as a non-run, not as a pass."
+            echo "::error title=Rustdoc gate could not measure::The scan did not run to completion, so this run says nothing about the rustdoc surface. Treat it as a non-run, not as a pass."
           fi
           exit "$status"
 
   # `cargo test --doc` ran in NO CI job either (#2732) -- a second surface dark
-  # by omission, and NOT covered by the rustdoc ratchet above. Different
+  # by omission, and NOT covered by the rustdoc gate above. Different
   # command, different surface: `cargo doc --no-deps` GENERATES docs,
   # `cargo test --doc` COMPILES AND RUNS every doctest, and neither result
   # predicts the other. The rustdoc job's green must not be read as covering
@@ -192,7 +198,7 @@ jobs:
   # in a `///` comment that rustdoc was compiling as Rust, and all 25 are fenced
   # as text now. A ledger with nothing in it is not a ratchet.
   #
-  # WHY ITS OWN JOB. Same reasoning that split the rustdoc ratchet out
+  # WHY ITS OWN JOB. Same reasoning that split the rustdoc gate out
   # (`893cbc6aa`): `cargo test --doc` is the HEAVIER of the two, because it
   # codegens and links where a `--no-deps` doc pass does not. It gates under its
   # own name without adding latency to the compile verdict everyone waits on.

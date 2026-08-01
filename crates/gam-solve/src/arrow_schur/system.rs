@@ -173,7 +173,7 @@ pub struct ArrowSchurSystem {
     /// curvature is held here, applied during the solve as a full-latent
     /// Hessian-vector product `P_cross · Δt` against the penalty's
     /// `psd_majorizer_hvp`. When this vector is non-empty,
-    /// [`solve_arrow_newton_step_artifacts`] auto-selects the matrix-free
+    /// `solve_arrow_newton_step_artifacts` auto-selects the matrix-free
     /// full-system PCG path (arrow block-diagonal inverse as preconditioner)
     /// instead of the exact one-shot Schur elimination. When empty, the system
     /// is purely row-block-diagonal and the exact Schur path is unchanged.
@@ -2687,7 +2687,7 @@ pub fn arrow_factor_min_pivot(cache: &ArrowFactorCache) -> ArrowFactorMinPivot {
 /// diagonal magnitude scale a safe-SPD pivot floor is measured against: the
 /// curvature-homotopy tracker (#1007) compares the min pivot against
 /// `√eps · max(this, 1)`, the same floor the inner solver's
-/// [`safe_spd_pivot_min`] uses. `None` only for an empty cache.
+/// `safe_spd_pivot_min` uses. `None` only for an empty cache.
 pub fn arrow_factor_max_pivot(cache: &ArrowFactorCache) -> Option<f64> {
     let mut max_pivot: Option<f64> = None;
     for factor in cache.htt_factors.iter() {
@@ -2938,7 +2938,7 @@ impl ArrowFactorCache {
     ///
     /// # Errors
     ///
-    /// Returns [`ArrowSchurError::SchurFactorFailed`] when this cache has no
+    /// Returns `ArrowSchurError::SchurFactorFailed` when this cache has no
     /// dense Schur factor or no usable `H_βt` coupling — i.e. it was produced
     /// by an [`ArrowSolverMode::InexactPCG`] solve (no dense `K × K` factor) or
     /// by a `Disabled` `htbeta` cache. The selected-inverse block-trace is not
@@ -3131,7 +3131,7 @@ impl ArrowFactorCache {
     ///
     /// # Errors
     ///
-    /// Returns [`ArrowSchurError::SchurFactorFailed`] when this cache has no
+    /// Returns `ArrowSchurError::SchurFactorFailed` when this cache has no
     /// dense Schur factor (an [`ArrowSolverMode::InexactPCG`] solve) — the
     /// same not-yet-supported branch as [`Self::latent_block_inverse_diagonal`]
     /// — or when `rhs.len() != k`.
@@ -3186,7 +3186,7 @@ impl ArrowFactorCache {
     /// of `H⁻¹` is exactly `S_β⁻¹` (the inverse of the Schur complement whose
     /// Cholesky factor this cache holds). This returns the contiguous
     /// `block × block` sub-block — e.g. one SAE atom's decoder coefficients via
-    /// [`gam_terms::sae::manifold::SaeManifoldTerm::beta_block_offsets`] — by
+    /// `gam_terms::sae::manifold::SaeManifoldTerm::beta_block_offsets` — by
     /// solving `S_β x = e_j` for each `j ∈ block` (reusing the cached factor)
     /// and gathering the `block` rows of each solution column. `W`
     /// back-substitutions of size `K`; the result is symmetrized to clear
@@ -3261,7 +3261,7 @@ impl ArrowFactorCache {
     /// pseudo-inverse `M⁺` of the SAME operator `M = L Lᵀ` the plain path
     /// inverts, dropping every eigen-direction at or below the solver's
     /// canonical rank floor `SPECTRAL_DEFLATION_REL_FLOOR · max|λ|` (the exact
-    /// threshold [`factor_spectral_deflated_criterion_row`] and the per-row
+    /// threshold `factor_spectral_deflated_criterion_row` and the per-row
     /// gauge deflation already use — NOT a new epsilon and NOT a λ-smoothing
     /// floor). A doubly-null direction (`j ≈ 0 ∧ s ≈ 0`) deflates to `0` (it is
     /// unidentifiable, not a real DOF); a penalty-only direction survives. The

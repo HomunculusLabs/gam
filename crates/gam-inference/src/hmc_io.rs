@@ -690,10 +690,10 @@ impl NutsPosterior {
     ///
     /// # Arguments
     /// * `x` - Design matrix [n_samples, dim]
-    /// * `y` - Response vector [n_samples]
-    /// * `weights` - Observation/case weights [n_samples]
+    /// * `y` - Response vector \[n_samples\]
+    /// * `weights` - Observation/case weights \[n_samples\]
     /// * `penalty_matrix` - Combined penalty S [dim, dim]
-    /// * `mode` - MAP estimate μ [dim]
+    /// * `mode` - MAP estimate μ \[dim\]
     /// * `hessian` - Hessian H [dim, dim] (NOT the inverse!)
     /// * `nuts_family` - Family for log-likelihood computation
     ///

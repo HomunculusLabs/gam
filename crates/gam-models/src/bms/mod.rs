@@ -673,7 +673,7 @@ impl LatentZNormalization {
 /// latent score.
 ///
 /// When the latent z fails the standard-normal auto-detection
-/// ([`latent_z_is_standard_normal_enough`]), the BMS family applied to
+/// (`latent_z_is_standard_normal_enough`), the BMS family applied to
 /// pretend the score is N(0,1) anyway would distort the closed-form
 /// probit log-CDF kernel. The historical fallback (local- or
 /// global-empirical latent measure) is *mathematically correct* but
@@ -693,8 +693,8 @@ impl LatentZNormalization {
 /// Gaussian. The closed-form standard-normal kernel is therefore
 /// adequate only when the calibrated sample itself passes the same
 /// standard-normal adequacy gate applied to raw z
-/// ([`latent_z_is_standard_normal_enough`]);
-/// [`build_latent_measure_with_geometry`] re-checks the calibrated
+/// (`latent_z_is_standard_normal_enough`);
+/// `build_latent_measure_with_geometry` re-checks the calibrated
 /// sample and falls back to the mathematically exact global-empirical
 /// latent measure when that re-check fails. On the passing path the
 /// kept work is the same closed-form
@@ -915,7 +915,7 @@ impl LatentZRankIntCalibration {
 
 /// Optional calibration applied to the latent score before the BMS
 /// kernel runs. When `RankInverseNormal`, both the training and predict
-/// paths route the input z through [`LatentZRankIntCalibration::apply_*`]
+/// paths route the input z through `LatentZRankIntCalibration::apply_*`
 /// before the standard-normal closed-form kernel is invoked.
 #[derive(Clone, Debug)]
 pub enum LatentMeasureCalibration {
@@ -944,7 +944,7 @@ pub enum LatentMeasureCalibration {
 /// active) by construction, so the `b(C)·m(C)` leakage vanishes. Matching the
 /// first two conditional moments does **not** by itself make `ζ` standard
 /// normal (a two-point residual law survives location-scale correction
-/// unchanged in shape), so [`build_latent_measure_with_geometry`] re-checks
+/// unchanged in shape), so `build_latent_measure_with_geometry` re-checks
 /// the calibrated sample against the standard-normal adequacy gate and
 /// retains an empirical latent measure for the residual distribution when
 /// that re-check fails; only a passing `ζ` uses the closed-form
@@ -987,7 +987,7 @@ pub struct LatentZConditionalCalibration {
     /// cross-block proportional to the residual's third moment. Both vanish
     /// under a Gaussian residual, and neither vanishes on the branch this
     /// covariance serves (gam#2484). Built by
-    /// [`stacked_first_stage_sandwich_cov`]; the two retired fields were its
+    /// `stacked_first_stage_sandwich_cov`; the two retired fields were its
     /// diagonal blocks.
     ///
     /// Fit-time only: predict applies the map from `mean_coeffs`/`var_coeffs`

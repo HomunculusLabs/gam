@@ -111,7 +111,7 @@ pub struct IsometryDuchonRadialSource {
 /// The per-row Jacobian `J_n` is exactly the radial-derivative jet
 /// `design_gradient_wrt_t` already computes for `LatentCoordValues`; the
 /// second derivative `∂J/∂t` is built by the shared
-/// [`crate::basis::radial_basis_cartesian_derivative`] engine from the
+/// `crate::basis::radial_basis_cartesian_derivative` engine from the
 /// radial Hessian identity. A finite-difference oracle for the docstring is
 /// to central-difference `value(t ± h e_j)` against `grad_target(t)[j]`;
 /// the analytic value follows the oracle until finite-difference
@@ -122,7 +122,7 @@ pub struct IsometryDuchonRadialSource {
 /// `jacobian_cache_slot` and `jacobian_second_cache_slot` are interior-mutable
 /// (`RwLock<Option<Arc<…>>>`) so the SAE outer loop can refresh them in place
 /// each step without needing `&mut self` on the registry-held penalty (see
-/// `refresh_caches` and [`crate::terms::sae::manifold::refresh_isometry_caches_from_atom`]).
+/// `refresh_caches` and `crate::terms::sae::manifold::refresh_isometry_caches_from_atom`).
 /// Readers go through the [`Self::jacobian_cache`] / [`Self::jacobian_second_cache`]
 /// accessors, which take the read lock briefly and clone the inner `Arc`
 /// (refcount bump — no payload copy). Writers go through [`Self::refresh_caches`].
@@ -922,7 +922,7 @@ impl IsometryPenalty {
     /// gauge divides every per-row metric by.
     ///
     /// `value` / `grad_*` / `hvp` consume this implicitly through
-    /// [`Self::normalized_metric_state`]; the SAE arrow-Schur assembly cannot
+    /// `Self::normalized_metric_state`; the SAE arrow-Schur assembly cannot
     /// (it builds explicit per-row `htt` / `htbeta` / `hbb` curvature blocks
     /// from the raw pullback `g_n`, not through the trait operators), so it
     /// reads `gbar` here and folds `1/gbar²` into its Gauss-Newton curvature.

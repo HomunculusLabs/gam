@@ -36,7 +36,7 @@
 //!
 //! # What it produces
 //!
-//! [`StructuredResidualModel::row_metric`] materializes the **per-row precision
+//! `StructuredResidualModel::row_metric` materializes the **per-row precision
 //! factor** `U_n ∈ ℝ^{p×p}` with `U_n U_nᵀ = Σ_n^{-1}`, packaged as a
 //! [`RowMetric`](gam_problem::RowMetric) with
 //! [`MetricProvenance::WhitenedStructured`](gam_problem::MetricProvenance::WhitenedStructured).
@@ -86,7 +86,7 @@ const SCALE_REL_FLOOR: f64 = 1e-4;
 /// idiosyncratic diagonal `D`, and the smooth activity-scale `c(z)` evaluated at
 /// every row. Produces per-row precision factors and the
 /// [`MetricProvenance::WhitenedStructured`](gam_problem::MetricProvenance::WhitenedStructured)
-/// [`RowMetric`](gam_problem::RowMetric).
+/// `RowMetric`.
 #[derive(Clone, Debug)]
 pub struct StructuredResidualModel {
     /// Output dimensionality `p` (residual width).
@@ -518,7 +518,7 @@ impl StructuredResidualModel {
     /// Build the per-row precision factor stack `U_n ∈ ℝ^{p×p}` with
     /// `U_n U_nᵀ = Σ_n^{-1}` and package it as a
     /// [`MetricProvenance::WhitenedStructured`](gam_problem::MetricProvenance::WhitenedStructured)
-    /// [`RowMetric`](gam_problem::RowMetric). This is the single
+    /// `RowMetric`. This is the single
     /// production site of `WhitenedStructured`.
     ///
     /// The precision is formed in **Woodbury form**:

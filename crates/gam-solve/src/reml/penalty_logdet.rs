@@ -735,7 +735,7 @@ impl PenaltyPseudologdet {
     ///
     /// This no-hint path is kept for callers that only have an assembled
     /// matrix. Canonical callers should prefer
-    /// [`Self::from_assembled_with_rank_hint`] when multiple active penalty
+    /// `Self::from_assembled_with_rank_hint` when multiple active penalty
     /// components share a block, because the current weighted spectrum can hide
     /// small but structurally real modes below a relative threshold.
     pub fn from_assembled(s_total: Array2<f64>, ridge: Option<f64>) -> Result<Self, String> {

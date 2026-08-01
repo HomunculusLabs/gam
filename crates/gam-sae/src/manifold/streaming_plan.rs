@@ -321,7 +321,7 @@ pub fn sae_streaming_plan_for_shape(
 /// The plan has exactly two inputs: the model SHAPE (`n_obs`, `total_basis`,
 /// `k_atoms`, `d_max`, `border_dim`) and the ENVIRONMENT (available bytes —
 /// every budget below is derived from that one number by
-/// [`sae_host_in_core_budget_from_available`]). The shape legitimately moves
+/// `sae_host_in_core_budget_from_available`). The shape legitimately moves
 /// during a fit as atoms are rank-reduced and frames activate; the environment
 /// must not, or two probes of the same rho are priced by two different
 /// operators (#2532). A fit therefore samples ONCE and passes the sample here.

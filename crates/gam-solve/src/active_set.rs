@@ -21,8 +21,8 @@ use std::collections::HashSet;
 ///
 /// The solver accepts a step when the worst scaled violation is at or below
 /// this threshold (see the acceptance gate in
-/// [`solve_linear_constrained_newton_step`] and the KKT diagnostics in
-/// [`compute_constraint_kkt_diagnostics`]).
+/// `solve_linear_constrained_newton_step` and the KKT diagnostics in
+/// `compute_constraint_kkt_diagnostics`).
 ///
 /// The definition lives with the metric, in `gam_problem::constraint_set`, and
 /// is re-exported here under the solver-facing name so that the tolerance and
@@ -1001,7 +1001,7 @@ impl Drop for FeasibilityRepairGuard {
 ///
 /// This is the principled feasible cold-start seed for a shape-constrained
 /// (convex / concave / monotone) smooth. It is qualitatively different from
-/// [`feasible_point_for_linear_constraints`], which returns the *minimum-norm*
+/// `feasible_point_for_linear_constraints`, which returns the *minimum-norm*
 /// feasible point — for a homogeneous cone (`b = 0`, as the second-difference
 /// convexity / concavity constraints are) that minimum-norm point is the cone
 /// **vertex** `β = 0` (a flat line) where every constraint row is tight. A

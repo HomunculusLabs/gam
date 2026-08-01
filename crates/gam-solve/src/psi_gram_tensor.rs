@@ -917,7 +917,7 @@ impl PsiGramTensor {
     /// So the gate is not `measured ≤ ATOL` but the CERTIFIED BOUND on the true
     /// distance, `measured + err_ref + err_new ≤ ATOL` — the triangle inequality
     /// applied to the two error bars. This is the same rule the rank decision
-    /// already follows ([`Self::rank_guard_gap`]): decide with a margin wider than
+    /// already follows (`Self::rank_guard_gap`): decide with a margin wider than
     /// the backward error committed forming the quantity decided on. Where the
     /// eigen-gap is wide (in particular at FULL rank, where `P` is the identity
     /// exactly and both bars are 0) the bound is the measurement and nothing

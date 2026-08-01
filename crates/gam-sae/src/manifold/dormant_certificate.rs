@@ -4,10 +4,10 @@
 //! # The certificate the block lane cannot satisfy
 //!
 //! The Tier-1 block lane
-//! ([`crate::sparse_dict::block::fit_block_sparse_dictionary`]) certifies a fit by
+//! (`crate::sparse_dict::block::fit_block_sparse_dictionary`) certifies a fit by
 //! replaying one full alternation and requiring that the gauge-invariant
 //! Grassmann-projector displacement of **every** block frame fall under a
-//! tolerance ([`crate::sparse_dict::block::BlockSparseConvergence::frame_residual`]
+//! tolerance (`crate::sparse_dict::block::BlockSparseConvergence::frame_residual`
 //! is a max over ALL `G` blocks). In the same alternation, the AuxK lane
 //! deliberately identifies the DEAD blocks (zero utilisation) and reseeds their
 //! frames from the worst-reconstructed residual rows. The two requirements are
@@ -41,7 +41,7 @@
 //!    their motion is reported but never gates the verdict.
 //! 3. **No profitable birth** — no proposed birth clears its evidence/MDL threshold:
 //!    neither a residual-row block birth
-//!    ([`crate::sparse_dict::block::block_birth_evidence_margin`], a deviance-minus-
+//!    (`crate::sparse_dict::block::block_birth_evidence_margin`, a deviance-minus-
 //!    rank-charge margin in nats) nor a linear-community curved promotion
 //!    ([`super::curve_promotion::propose_curve_promotion`], a `dl_old − dl_new`
 //!    saving in bits). Both are *margins*: profitable iff strictly positive.

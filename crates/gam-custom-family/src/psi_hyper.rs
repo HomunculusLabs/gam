@@ -1487,7 +1487,7 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
     Ok((ext_ext, rho_ext))
 }
 
-/// Build the M_i[u] = D_β B_i[u] callback for ψ coordinates.
+/// Build the `M_i\[u\] = D_β B_i\[u\]` callback for ψ coordinates.
 ///
 /// This wraps `family.exact_newton_joint_psihessian_directional_derivative`
 /// into the unified `FixedDriftDerivFn` signature. For each external

@@ -284,12 +284,12 @@ pub(crate) fn radial_basis_cartesian_derivative(
 /// against its *first* kernel argument (i.e. per-row latent coordinates
 /// `t_n`); the full per-row gradient is reconstructed at the call site as
 /// `∂Φ_{n,k}/∂t_n = φ'(r_{n,k}) · (t_n − c_k) / r_{n,k}` (see
-/// [`crate::latent::LatentCoordValues::design_gradient_wrt_t`]).
+/// `crate::latent::LatentCoordValues::design_gradient_wrt_t`).
 ///
 /// `length_scale = None` selects the scale-free pure-Duchon spectrum
 /// (matches `gam_pyffi::position_basis_derivative` for the 1-D case).
 ///
-/// Thin adapter over [`duchon_radial_jets_nd`].
+/// Thin adapter over `duchon_radial_jets_nd`.
 pub fn duchon_radial_first_derivative_nd(
     t: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -329,7 +329,7 @@ pub fn duchon_radial_first_derivative_nd(
 /// `φ''(0) δ_ab`; `duchon_radial_jets` supplies that finite scalar whenever
 /// the selected Duchon order is smooth enough for the supported latent path.
 ///
-/// Thin adapter over [`duchon_radial_jets_nd`].
+/// Thin adapter over `duchon_radial_jets_nd`.
 pub fn duchon_radial_second_derivative_nd(
     t: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -354,9 +354,9 @@ pub fn duchon_radial_second_derivative_nd(
 ///
 /// Returns an `(n_rows, n_centers)` matrix whose `(n, k)` entry is the scalar
 /// third radial derivative `φ'''(r_{nk})` from the same
-/// [`duchon_radial_jets`] path used by the first/second derivative helpers.
+/// `duchon_radial_jets` path used by the first/second derivative helpers.
 ///
-/// Thin adapter over [`duchon_radial_jets_nd`].
+/// Thin adapter over `duchon_radial_jets_nd`.
 pub fn duchon_radial_third_derivative_nd(
     t: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -410,7 +410,7 @@ pub(crate) fn fill_duchon_1d_polynomial_derivative(
 
 /// N-D Duchon polynomial-nullspace first derivative `∂P/∂t` per row.
 ///
-/// Generalises [`fill_duchon_1d_polynomial_derivative`] to arbitrary spatial
+/// Generalises `fill_duchon_1d_polynomial_derivative` to arbitrary spatial
 /// dimension `d` and arbitrary nullspace degree. For the monomial
 /// `m_α(t) = ∏_a t_a^{α_a}`, the partial derivative w.r.t. `t_axis` is
 ///
@@ -841,7 +841,7 @@ pub fn duchon_sae_atom_second_jet(
 /// ```
 ///
 /// projected through `Z` and scaled by `α` (emitted directly by the shared
-/// [`radial_basis_cartesian_derivative`] engine at order 3); the polynomial
+/// `radial_basis_cartesian_derivative` engine at order 3); the polynomial
 /// block carries the monomial third derivative. At a coincident point `r = 0`
 /// the kernel third jet vanishes (odd-order radial derivative of an even kernel
 /// in the collision limit), which the engine encodes by skipping `r == 0`.
@@ -1540,11 +1540,11 @@ fn mixed_periodicity_additive_design_and_jets(
 /// The full per-row gradient is reconstructed at the call site as
 /// `∂Φ_{n,k}/∂t_n = φ'(r_{n,k}) · (t_n − c_k) / r_{n,k}` (chain rule of the
 /// radial kernel w.r.t. its first argument), reusing
-/// [`crate::latent::LatentCoordValues::design_gradient_wrt_t`].
+/// `crate::latent::LatentCoordValues::design_gradient_wrt_t`.
 ///
 /// All radial derivatives are obtained in closed form from the half-integer
 /// Matérn polynomial-times-exponential representation; the underlying scalar
-/// arithmetic is [`matern_kernel_radial_tripletwith_safe_ratio`].
+/// arithmetic is `matern_kernel_radial_tripletwith_safe_ratio`.
 pub fn matern_radial_first_derivative_nd(
     t: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -1659,7 +1659,7 @@ pub(crate) fn matern_metric_weights(dim: usize, aniso: Option<&[f64]>) -> Vec<f6
 /// exact partial derivative of the (un-projected) kernel value
 /// `Φ_{n,k} = φ(r_A)` w.r.t. the input coordinate `t_{n,a}`, where the
 /// anisotropic radius is `r_A = √(Σ_b w_b (t_b − c_b)²)` with the forward
-/// metric weights `w_b` from [`matern_metric_weights`]:
+/// metric weights `w_b` from `matern_metric_weights`:
 ///
 /// ```text
 /// ∂Φ_{n,k}/∂t_{n,a} = φ'(r_A) · w_a (t_{n,a} − c_{k,a}) / r_A.
@@ -1747,7 +1747,7 @@ pub fn matern_input_location_jet_nd(
 /// ```
 /// with `h = t − c`. At `r_A = 0` the smooth limit collapses to the diagonal
 /// `(φ'/r)|_0 · w_a δ_{ac}` (the regularized ratio from
-/// [`matern_kernel_radial_tripletwith_safe_ratio`], which equals `φ''(0)` for
+/// `matern_kernel_radial_tripletwith_safe_ratio`, which equals `φ''(0)` for
 /// ν ≥ 3/2 and carries the genuine ν = 1/2 singularity floor).
 pub fn matern_input_location_hessian_nd(
     t: ArrayView2<'_, f64>,

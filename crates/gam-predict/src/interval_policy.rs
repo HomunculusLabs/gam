@@ -136,7 +136,7 @@ const TRANSFORM_INTERVAL_SCAN_NODES: usize = 17;
 /// a (possibly non-monotone) response map, then clamping to `bounds`.
 ///
 /// `response_map` is the predictor's inverse-link / response transform. The map
-/// is evaluated on [`TRANSFORM_INTERVAL_SCAN_NODES`] evenly spaced nodes across
+/// is evaluated on `TRANSFORM_INTERVAL_SCAN_NODES` evenly spaced nodes across
 /// each row's η interval and the per-row min/max over the scan is returned, so
 /// interior extrema of a non-monotone transform (link wiggles) are captured
 /// rather than silently cut off by an endpoint-only image. Because some
@@ -516,7 +516,7 @@ pub struct LinearState {
 ///     delta method or is the η SE itself (identity link);
 ///   * [`bounds`](PredictionTransform::bounds) — the response-scale support
 ///     clamp;
-///   * [`response_interval`](PredictionTransform::response_interval) — which
+///   * `response_interval` — which
 ///     [`ResponseInterval`] policy maps the η interval onto the response scale;
 ///   * [`observation_noise`](PredictionTransform::observation_noise) — the
 ///     optional response-scale observation-noise σ.
@@ -578,7 +578,7 @@ pub trait PredictionTransform {
 
     /// The response distribution family. Used by the generic posterior-mean
     /// driver to build the per-family observation (prediction) interval via
-    /// [`family_observation_band`]; `RoystonParmar` yields the discrete
+    /// `family_observation_band`; `RoystonParmar` yields the discrete
     /// Bernoulli predictive set for the horizon indicator `1{T > t}`.
     fn response_family(&self) -> ResponseFamily;
 
@@ -598,7 +598,7 @@ pub trait PredictionTransform {
     /// heteroscedastic *dispersion* location-scale predictor whose response is
     /// skewed (Gamma/NB/Beta/Tweedie + `noise_formula`) overrides this to return
     /// equal-tailed quantiles of its per-row moment-matched predictive — the
-    /// two-block sibling of [`family_observation_band`] (#817/#1193/#1194). When
+    /// two-block sibling of `family_observation_band` (#817/#1193/#1194). When
     /// `Some`, the returned `(lower, upper)` replaces the symmetric band in both
     /// the full-uncertainty and posterior-mean drivers; when `None`, the symmetric
     /// path is used.

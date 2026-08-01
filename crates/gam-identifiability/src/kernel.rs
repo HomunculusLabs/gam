@@ -480,7 +480,7 @@ impl AnchorConsistencyReport {
 /// strict majority.
 ///
 /// Anchor separability requires the dominant atom to outweigh all remaining
-/// atoms combined (`share > 1/2`). Because [`anchor_consistency_metrics`] uses
+/// atoms combined (`share > 1/2`). Because `anchor_consistency_metrics` uses
 /// `>= threshold`, the next representable `f64` above one-half implements that
 /// theorem-derived strict inequality without an arbitrary robustness margin.
 /// Callers that want a stronger practical margin may request one explicitly.

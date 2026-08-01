@@ -107,7 +107,7 @@ where
 ///
 /// `combine` must be a deterministic binary operation; `identity` is its
 /// neutral element, returned for an empty slice. The association order is fixed
-/// by [`left_split`] / [`BASE_CHUNK`] and never depends on the values.
+/// by `left_split` / [`BASE_CHUNK`] and never depends on the values.
 ///
 /// This is the generic, monoid-style core. See [`pairwise_sum`] for the `f64`
 /// addition specialization.
@@ -164,7 +164,7 @@ pub fn pairwise_sum(xs: &[f64]) -> f64 {
 /// each tagged with the number of leaf elements it covers. Partials are merged
 /// only when two adjacent subtrees have equal leaf-counts that are
 /// power-of-two multiples of [`BASE_CHUNK`] — exactly the merges the recursive
-/// [`reduce_range`] tree would perform. This makes the resulting association
+/// `reduce_range` tree would perform. This makes the resulting association
 /// order identical to the whole-slice tree, regardless of how the input was
 /// sliced into chunks.
 ///
@@ -307,7 +307,7 @@ where
 /// contract — to
 /// `pairwise_reduce(&(0..n).map(map).collect::<Vec<_>>(), combine, identity)`,
 /// but evaluated in parallel without materializing the mapped values. The
-/// recursion mirrors [`reduce_range`] exactly (same [`left_split`] tree, same
+/// recursion mirrors `reduce_range` exactly (same `left_split` tree, same
 /// base-block seeding from the first element), except that the two subtrees of
 /// every internal node are evaluated via `rayon::join`. Because the
 /// association order is fixed by the code structure — never by which thread
@@ -367,7 +367,7 @@ where
 /// Parallel, deterministic block fold for non-`Copy` accumulators (matrix /
 /// vector partials).
 ///
-/// The index range `0..n` is split over the same length-only [`left_split`]
+/// The index range `0..n` is split over the same length-only `left_split`
 /// tree as [`par_pairwise_map_reduce`]; each base block `lo..hi` (at most
 /// [`BASE_CHUNK`] indices) is folded sequentially by `base`, and internal
 /// nodes merge their two subtree partials with `combine`. The association

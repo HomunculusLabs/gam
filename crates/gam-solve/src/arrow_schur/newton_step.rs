@@ -183,7 +183,7 @@ pub fn solve_arrow_newton_step_with_options(
 /// #2080 — per-row-only UNDAMPED evidence feasibility factorization.
 ///
 /// Factors ONLY the per-row `H_tt^(i)` blocks at `ridge_t = 0`, with the same
-/// gauge/spectral-deflation policy ([`factor_blocks_for_system`]) the full
+/// gauge/spectral-deflation policy (`factor_blocks_for_system`) the full
 /// evidence entry `solve_arrow_newton_step_with_options(sys, 0.0, 0.0, options)`
 /// applies as its FIRST stage — then discards the factors. It never forms the
 /// reduced border (β-Schur) system, so it costs `O(Σ_i d_i³)` per-row work
@@ -196,7 +196,7 @@ pub fn solve_arrow_newton_step_with_options(
 /// REML criterion only at the inner optimum, and every pre-stationarity factor
 /// was built and immediately discarded. What a NON-stationary refine round does
 /// need is exactly one bit: whether the undamped per-row blocks are PD (the
-/// infeasible-ρ signal, [`ArrowSchurError::PerRowFactorFailed`], which drives
+/// infeasible-ρ signal, `ArrowSchurError::PerRowFactorFailed`, which drives
 /// the #2080 probe fast-refusal and the refine-budget escalation). This probe
 /// surfaces that signal with the IDENTICAL error (same `factor_one_row` text,
 /// same deflation policy, same downdated blocks) without the cubic border work.

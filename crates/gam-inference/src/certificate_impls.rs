@@ -1,4 +1,4 @@
-//! [`Certificate`] implementations for the existing certificate zoo (task #16).
+//! `Certificate` implementations for the existing certificate zoo (task #16).
 //!
 //! The `impl Certificate for …` blocks that once lived here were relocated into
 //! their types' home crates to satisfy the coherence orphan rule (task #1521):

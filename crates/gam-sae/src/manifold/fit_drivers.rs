@@ -5675,7 +5675,7 @@ impl SaeManifoldTerm {
     /// basis-linear latents (Duchon, Euclidean patch, Poincaré, linear, finite
     /// set) — **retains its incoming coordinates**. It is fed here already
     /// carrying the natural-chart seed [`sae_pca_seed_initial_coords`] /
-    /// [`topology_curved_seed_initial_coords`] placed on it, and we do not
+    /// `topology_curved_seed_initial_coords` placed on it, and we do not
     /// overwrite that with a dishonest fixed-lattice projection: a finite
     /// multistart support cannot certify it found every stationary component of
     /// a compact multivariate chart, and this crate does not yet expose the
@@ -5909,7 +5909,7 @@ impl SaeManifoldTerm {
     /// `(lean_step, full_step)`.
     ///
     /// The fixed-decoder step reads ONLY `rows[*].htt`/`gt` + `row_offsets`
-    /// (see [`Self::fixed_decoder_step_from_rows`]), and the lean assembler
+    /// (see `Self::fixed_decoder_step_from_rows`), and the lean assembler
     /// builds those per-row blocks identically to the full path — it merely
     /// skips the wasted β-tier work. So the two returned vectors MUST be
     /// bit-identical. A regression that lets the lean and full per-row blocks

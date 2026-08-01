@@ -6,7 +6,7 @@
 //! *residual*: the structured-residual birth path
 //! ([`crate::structure_harvest`]) mines the reconstruction residual `R = x − x̂`
 //! for factor directions, and the compose/co-fit lane
-//! ([`crate::sparse_dict::cofit`]) fits charts to the linear tier's
+//! (`crate::sparse_dict::cofit`) fits charts to the linear tier's
 //! least-squares residual. Both share a sufficient statistic that is a function
 //! ONLY of the linear residual.
 //!

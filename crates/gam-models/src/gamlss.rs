@@ -9,26 +9,26 @@
 //! without a web of explicit per-symbol imports, while each file now holds a
 //! single concern:
 //!
-//! - [`errors`]    — `GamlssError`, module-wide numeric constants, the low-level
+//! - `errors`    — `GamlssError`, module-wide numeric constants, the low-level
 //!                   row-map / design-resolution / joint-ψ-direction helpers, and
 //!                   the `ParameterLink` link-identifier enum (the shared
 //!                   foundation every family builds on).
-//! - [`builders`]  — block/penalty construction, term specs, fit-result types,
+//! - `builders`  — block/penalty construction, term specs, fit-result types,
 //!                   the `LocationScaleFamilyBuilder` strategy + its four builders,
 //!                   and the public `fit_*` entry points (construction &
 //!                   orchestration).
-//! - [`gaussian`]  — the Gaussian location-scale family (+ its wiggle variant),
+//! - `gaussian`  — the Gaussian location-scale family (+ its wiggle variant),
 //!                   the shared location-scale joint-ψ trait/workspace, the
 //!                   Gaussian joint-Hessian assembly, the matrix-free
 //!                   `RowCoeffOperator`, and the Poisson/Gamma log-link families.
-//! - [`binomial`]  — the binomial location-scale numeric kernel (q-algebra,
+//! - `binomial`  — the binomial location-scale numeric kernel (q-algebra,
 //!                   towers, directional coefficients) and the binomial
 //!                   location-scale / wiggle / mean-wiggle families plus their
 //!                   exact-Newton Hessian workspaces.
 //!
-//! Pre-existing leaf concerns keep their own modules: [`dispersion_family`],
-//! [`binomial_q_derivs`], [`binomial_q_coeffs`], [`validation`],
-//! [`weighted_design_products`], [`row_linalg`], and [`joint_packing`].
+//! Pre-existing leaf concerns keep their own modules: `dispersion_family`,
+//! `binomial_q_derivs`, `binomial_q_coeffs`, `validation`,
+//! `weighted_design_products`, `row_linalg`, and `joint_packing`.
 
 use gam_terms::basis::{ActivePenaltyInfo, BasisOptions, PenaltySource};
 

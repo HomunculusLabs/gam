@@ -299,8 +299,8 @@ pub struct RowStratum {
 
 /// Stratify a set of per-row residual energies into factor-of-two energy bands,
 /// returning the row-index groups ASCENDING in energy. Reuses the same IEEE-754
-/// binary-exponent bins ([`EnergyExponentHistogram::bin_of`]) and Sturges cap
-/// ([`sturges_stratum_cap`]) as the streaming design; adjacent lowest-energy bands
+/// binary-exponent bins (`EnergyExponentHistogram::bin_of`) and Sturges cap
+/// (`sturges_stratum_cap`) as the streaming design; adjacent lowest-energy bands
 /// are merged to the cap so the high-energy tail (where rare discoverable structure
 /// concentrates) keeps its resolution. Empty / non-finite / negative energies fall
 /// in the low-energy floor bin. An empty input yields no strata.
@@ -641,7 +641,7 @@ impl StratifiedCorpusTarget {
 ///
 /// Two cheap streaming passes: pass A ([`design_stratified_subsample`]) builds
 /// the design; pass B recomputes each row's energy (cheap, no inner solve),
-/// maps it to its stratum rate `π_h`, includes the row iff [`row_included`], and
+/// maps it to its stratum rate `π_h`, includes the row iff `row_included`, and
 /// materializes exactly the selected rows with their `1/π_h` weights. Memory is
 /// `O(budget)` for the collected rows plus `O(2048)` for the histogram — never
 /// `O(N)` (SPEC.md §9).

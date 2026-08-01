@@ -400,7 +400,7 @@ pub fn score_block_kernel_source(p: usize) -> String {
 
 /// CPU reference for the score block: `scores[r*n_atoms + a] = Σ_c
 /// rows[r][c]·atoms[a][c]`, accumulated in ascending `c` with separate f32
-/// rounding — the SAME arithmetic [`super::scoring::score_row_tile`] runs
+/// rounding — the SAME arithmetic `super::scoring::score_row_tile` runs
 /// per atom. This is the parity oracle the device kernel is locked against.
 #[must_use]
 pub fn score_block_cpu(rows: ArrayView2<'_, f32>, atoms: ArrayView2<'_, f32>) -> Vec<f32> {

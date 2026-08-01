@@ -24,7 +24,8 @@
 # a triage cost, not a push-gate cost -- the second reason the gate is a single
 # workspace invocation instead of this loop.
 #
-# WHY THIS IS SEPARATE FROM scripts/rustdoc_ratchet.sh
+# WHY THIS IS SEPARATE FROM scripts/rustdoc_gate.sh (was rustdoc_ratchet.sh,
+# retired with its ledger by #2753 once the rustdoc surface reached zero)
 # ----------------------------------------------------
 # That one runs `cargo doc -p <crate> --no-deps` -- doc GENERATION. This runs
 # `cargo test --doc -p <crate>` -- doc TESTS. Different command, different

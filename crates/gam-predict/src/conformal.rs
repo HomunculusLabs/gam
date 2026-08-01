@@ -56,8 +56,8 @@
 //!   derived from the model's predict-time response-scale SE `s(x_cal_i)`.
 //!   This is
 //!   [`ConformalCalibrator::from_held_out_fold`], driven by
-//!   [`gam_predict::predict_full_uncertainty_conformal`] over a
-//!   [`gam_predict::ConformalCalibrationFold`]. The fold carries
+//!   `gam_predict::predict_full_uncertainty_conformal` over a
+//!   `gam_predict::ConformalCalibrationFold`. The fold carries
 //!   its own design and may be of ANY size, fully decoupled from the training
 //!   rows.
 //! * **In-sample (no held-out fold available).** When the only data are the
@@ -71,7 +71,7 @@
 //!
 //! Either way the predict path consumes `q̂` through the opt-in
 //! `conformal_level` field on
-//! [`gam_predict::PredictUncertaintyOptions`], which calls
+//! `gam_predict::PredictUncertaintyOptions`, which calls
 //! [`ConformalCalibrator::apply_to_uncertainty_result`] to overwrite the
 //! model-based response-scale bounds with the conformal ones.
 //!

@@ -113,7 +113,7 @@ fn alo_eta_updatewith_offset(
 /// Returns `(ℓ_i'(eta), ℓ_i''(eta))` where `ℓ_i` is the (dispersion-scaled)
 /// negative log-likelihood of observation `i` viewed as a univariate function
 /// of `eta_i = x_i^T β`. This is the local family geometry that the ALO
-/// frozen-curvature fixed point [`alo_eta_exact_frozen_curvature`] iterates to
+/// frozen-curvature fixed point `alo_eta_exact_frozen_curvature` iterates to
 /// convergence; supplying it upgrades the single-Newton-step ALO correction to
 /// the exact leave-`i`-out predictor under a frozen penalized Hessian.
 pub type AloScalarScoreCurvature<'a> =
@@ -1018,7 +1018,7 @@ pub struct AloInput<'a> {
     ///
     /// When supplied, the leave-`i`-out predictor is obtained by solving the
     /// frozen-curvature scalar fixed point `η = η̂_i + a_ii ℓ_i'(η)` to
-    /// convergence (see [`alo_eta_exact_frozen_curvature`]) instead of taking a
+    /// convergence (see `alo_eta_exact_frozen_curvature`) instead of taking a
     /// single Newton step. This eliminates the first-order linearization error
     /// that the one-step ALO incurs on small-`n`, strongly curved likelihoods
     /// (e.g. binomial logistic regression). Non-convergence or invalid scalar
@@ -1075,11 +1075,10 @@ impl<'a> AloInput<'a> {
     /// do not need a second `FitGeometry` wrapper or a covariance inversion.
     ///
     /// Same canonical (Fisher == Observed) contract as
-    /// [`from_active_geometry`]: the
+    /// `AloInput::from_active_geometry`: the
     /// supplied `working_weights` are the score-side Fisher weights and are
     /// re-viewed for the Hessian-side slot via `as_signed()`.
     ///
-    /// [`from_active_geometry`]: AloInput::from_active_geometry
     pub fn from_penalized_hessian_with_working_state(
         penalized_hessian: &'a Array2<f64>,
         design: &'a Array2<f64>,
@@ -1595,8 +1594,8 @@ pub struct MultiBlockAloInput<'a> {
 ///
 /// Then the (a, b) entry of the B × B matrix X_i H⁻¹ X_iᵀ is simply
 ///
-///   (X_i H⁻¹ X_iᵀ)_{a,b} = x_{a,i}ᵀ Q_b[:,i]
-///                           = Σ_k  X_a[i,k] · Q_b[k,i]
+///   (X_i H⁻¹ X_iᵀ)_{a,b} = x_{a,i}ᵀ Q_b\[:,i\]
+///                           = Σ_k  X_a\[i,k\] · Q_b\[k,i\]
 ///
 /// where x_{a,i} is the i-th row of coordinate-design a. This turns the per-
 /// observation work from O(B · p_tot²) into O(B² · p_tot), and the

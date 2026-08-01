@@ -573,7 +573,7 @@ impl DenseDesignOperator for NoDensifyOperator {
 }
 
 /// Build an operator-backed [`DesignMatrix`] from a dense array that will panic
-/// if any consumer tries to densify it. See [`NoDensifyOperator`].
+/// if any consumer tries to densify it. See `NoDensifyOperator`.
 pub fn no_densify_design(dense: Array2<f64>) -> DesignMatrix {
     DesignMatrix::from(DenseDesignMatrix::from(Arc::new(NoDensifyOperator {
         dense,

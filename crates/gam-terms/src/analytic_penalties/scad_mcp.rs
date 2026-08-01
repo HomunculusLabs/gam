@@ -385,7 +385,7 @@ impl AnalyticPenalty for ScadMcpPenalty {
         out
     }
 
-    /// PSD majorizer diagonal (see [`Self::psd_majorizer_one`]). SCAD/MCP are
+    /// PSD majorizer diagonal (see `Self::psd_majorizer_one`). SCAD/MCP are
     /// nonconvex, so this overrides the convex-only trait default — which would
     /// otherwise return the exact, negative [`Self::hessian_diag`] — with the
     /// reweighted-ℓ² MM surrogate. Coordinate-separable, so the inherited

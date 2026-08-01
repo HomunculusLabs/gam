@@ -267,7 +267,7 @@ impl RiemannianManifold for StiefelManifold {
     /// skew `YᵀΔ` and vanish). This is the metric-raising default specialized to
     /// the canonical metric — computed directly to avoid forming the `nk×nk`
     /// metric tensor. The *embedded* projection `E − Y·sym(YᵀE)`
-    /// ([`project_tangent`]) is the Euclidean-metric gradient and is wrong off
+    /// ([`Self::project_tangent`]) is the Euclidean-metric gradient and is wrong off
     /// the `YᵀΔ = 0` subspace for `k ≥ 2` (issue #955).
     fn riemannian_gradient(
         &self,

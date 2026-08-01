@@ -1,16 +1,16 @@
-//! [`Certificate`] implementations and margin-resolved [`Verdict`] mappings for
+//! `Certificate` implementations and margin-resolved `Verdict` mappings for
 //! the gam-solve-tier certificate zoo (task #16; descended #1521).
 //!
 //! Two concerns live here, both gam-solve-tier: (a) the `impl Certificate for …`
-//! blocks for the gam-solve-owned certificate types ([`OuterCriterionCertificate`],
+//! blocks for the gam-solve-owned certificate types (`OuterCriterionCertificate`,
 //! [`CoresetCertificate`](crate::row_sampling_measure::CoresetCertificate),
-//! [`LogdetEnclosure`], [`CollapseEvent`](crate::structure_search::CollapseEvent)),
+//! `LogdetEnclosure`, [`CollapseEvent`](crate::structure_search::CollapseEvent)),
 //! and (b) the two pure margin-resolution helpers, whose only inputs are
-//! gam-solve-tier types ([`LogdetEnclosure`]/[`MarginVerdict`] and
+//! gam-solve-tier types (`LogdetEnclosure`/`MarginVerdict` and
 //! [`CoresetMarginVerdict`](crate::row_sampling_measure::CoresetMarginVerdict))
-//! plus the contracted-down [`Verdict`] ladder. Both were relocated out of the
+//! plus the contracted-down `Verdict` ladder. Both were relocated out of the
 //! monolith root (`gam::inference::certificate_impls`) to satisfy the coherence
-//! orphan rule: the [`Certificate`] trait now lives in the neutral `gam-problem`
+//! orphan rule: the `Certificate` trait now lives in the neutral `gam-problem`
 //! crate and these types are owned here in `gam-solve`, so the impls must be
 //! defined in the type's home crate. The bodies are byte-identical to the
 //! monolith originals, so there remains exactly one decision rule per verdict.

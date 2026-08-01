@@ -3,7 +3,7 @@
 //!
 //! Both sparse lanes route a row by a **gate**: the linear lane
 //! ([`crate::sparse_dict`]) scores atom `k` by `|⟨x, d_k⟩|` (unit-norm `d_k`);
-//! the block lane ([`crate::sparse_dict::block`]) scores block `g` by the group
+//! the block lane (`crate::sparse_dict::block`) scores block `g` by the group
 //! ℓ₂ energy `‖x D_gᵀ‖₂` of an orthonormal `b_g`-frame `D_g`. A feature is
 //! *routable* only if its own block wins that gate against every other block. The
 //! question this module answers is quantitative: **below what target-to-clutter

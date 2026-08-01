@@ -342,7 +342,7 @@ pub enum JointHessianSourcePreference {
 ///   here and skip the operator wrapper entirely.
 ///
 /// Workspaces refine their representation choice per intent via
-/// [`ExactNewtonJointHessianWorkspace::hessian_source_preference_for_intent`];
+/// `ExactNewtonJointHessianWorkspace::hessian_source_preference_for_intent`;
 /// the default keeps the legacy single-preference behaviour so existing
 /// workspaces are unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

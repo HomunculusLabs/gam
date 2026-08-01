@@ -14,7 +14,7 @@
 //!
 //! ## Summary
 //!
-//! `LatentCoordValues` is the structural sibling of [`SpatialLogKappaCoords`]
+//! `LatentCoordValues` is the structural sibling of `SpatialLogKappaCoords`
 //! (see [`crate::smooth`]). Both store a flat `Array1<f64>` that the
 //! REML/IFT outer loop treats as *design-moving, non-penalty-like*
 //! hyper-coordinates. `SpatialLogKappaCoords` holds one or more kernel-shape
@@ -29,7 +29,7 @@
 //! ```
 //!
 //! The radial-gradient `φ'(r)` is the same scalar the kernel-shape machinery already
-//! computes via [`crate::basis::duchon_radial_jets`]; the chain rule
+//! computes via `crate::basis::duchon_radial_jets`; the chain rule
 //! `(t_n − c_k)/r_{nk}` is what differs between "differentiate against the
 //! kernel scale" and "differentiate against the first kernel argument t".
 //! Everything downstream of `HyperDesignDerivative::from_implicit` (matrix-free
@@ -841,7 +841,7 @@ impl LatentIdMode {
 }
 
 /// Carrier for the `∂Φ/∂t` chain-rule input, dispatched on basis kind by
-/// [`LatentCoordValues::design_gradient_wrt_t_dispatch`].
+/// `LatentCoordValues::design_gradient_wrt_t_dispatch`.
 ///
 /// * [`InputLocationDerivative::Radial`] is the *radial-kernel* path: the
 ///   caller supplies the radial kernel family together with the center

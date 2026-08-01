@@ -14,7 +14,7 @@
 //! the per-row primary coordinates `p = (gate logits ℓ, latent coordinates t)`.
 //! Production derives the complete arrow-Schur `first`/`second` and decoder-
 //! border channels from this semantic program. Softmax rows use the borrowed
-//! [`SaeOrder2RowProgramSource`] and the gate-specific structure-compiled schedules;
+//! `SaeOrder2RowProgramSource` and the gate-specific structure-compiled schedules;
 //! its bounded batch seam evaluates the same centered-moment identities on CPU
 //! or CUDA. Other gate graphs use [`SaeReconstructionRowProgram`] over the
 //! runtime jet algebra. The #1006 third-order logdet adjoint
@@ -401,7 +401,7 @@ impl SaeReconstructionRowProgram {
     /// only to discard it). For `K` up to 16 the dense tower's tensor build is
     /// ~19× the instruction count of the order-2 channels alone; this collapses
     /// it to the channels actually read. The packed `(v, g, H)` is BIT-IDENTICAL
-    /// to the order-≤2 channels of [`Self::reconstruction_column_tower`] (the
+    /// to the order-≤2 channels of `Self::reconstruction_column_tower` (the
     /// `Order2` newtype delegates to the same `Tower2` arithmetic the dense
     /// tower's order-≤2 channels use); the t3/t4 oracle pins the dense path.
     #[must_use]
@@ -589,7 +589,7 @@ impl SaeReconstructionRowProgram {
     /// SHARED across atoms (#932 perf): the gate jet `ζ_k` (the dominant `K`-exp
     /// / `K×K`-Hessian cost) is a function of the row's logits only, not of
     /// `basis_col`, and every atom's gate shares one softmax denominator /
-    /// reciprocal. [`Self::all_gates`] builds all `K` gates once (K exps + 1
+    /// reciprocal. `Self::all_gates` builds all `K` gates once (K exps + 1
     /// recip per row); each channel then just multiplies its atom's cached gate
     /// by its basis jet. Each result is **bit-identical** to
     /// [`Self::beta_border_tower_packed`] for the same `(atom, basis_col)` (same
@@ -619,7 +619,7 @@ impl SaeReconstructionRowProgram {
     /// per-channel `gate.mul(basis)` skips the `K²` Hessian product.
     ///
     /// Same hoisting as [`Self::beta_border_towers_packed`]: gate jets built once
-    /// via [`Self::all_gates`], each channel multiplies its atom's gate by its
+    /// via `Self::all_gates`, each channel multiplies its atom's gate by its
     /// basis jet.
     #[must_use]
     pub fn beta_border_order1_packed<const K: usize>(

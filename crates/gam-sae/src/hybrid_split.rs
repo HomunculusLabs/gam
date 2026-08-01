@@ -28,7 +28,7 @@
 //!
 //!   * the CURVED candidate is scored at its CONSTRAINED MINIMUM over the atom's
 //!     decoder coefficients — re-fit on `y_resp` as
-//!     `min_B ‖y_resp − a_k·(Φ(t)·B)‖²` ([`curved_refit_rss`]) — so its data-fit
+//!     `min_B ‖y_resp − a_k·(Φ(t)·B)‖²` (`curved_refit_rss`) — so its data-fit
 //!     deviance is the smallest weighted RSS the curved family can attain on this
 //!     residual at the realized codes, not the possibly-collapsed realized curve.
 //!   * the LINEAR candidate predicts `a_k · (b₀ + (t − t̄)·b₁)`, the best
@@ -40,7 +40,7 @@
 //!
 //! Both arms are now at their constrained minimum on the SAME leave-one-atom-out
 //! residual: the linear arm is the closed-form min-over-lines, and the curved arm
-//! is the min-over-decoders refit ([`curved_refit_rss`]). The linear special case
+//! is the min-over-decoders refit (`curved_refit_rss`). The linear special case
 //! `a_k·(b₀ + (t−t̄)·b₁)` is a MEMBER of the curved family whenever the straight
 //! lane `[1, (t−t̄)]` lies in the column span of the curved basis `Φ` — exactly for
 //! the interval / line-segment charts (whose basis carries the constant and linear
@@ -143,7 +143,7 @@ impl AtomLinearImage {
     /// image (`v` is set); `None` for the ordinary straight-image path (which has
     /// no projection direction and decodes at the atom's own coordinate).
     ///
-    /// This is the SAME math [`build_collapse_rescue_linear_image`] used to fit the
+    /// This is the SAME math `build_collapse_rescue_linear_image` used to fit the
     /// train image, so train and OOS share one model. Returns `None` if `resid`'s
     /// length disagrees with `v`.
     pub fn coordinate_from_residual(&self, resid: &[f64]) -> Option<f64> {

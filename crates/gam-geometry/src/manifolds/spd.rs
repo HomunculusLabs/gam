@@ -246,7 +246,7 @@ impl RiemannianManifold for SpdManifold {
     /// since the antisymmetric part of `E` contracts to zero against symmetric
     /// `ξ`. This is the metric-raising default specialized to the affine metric —
     /// computed directly here to avoid forming the `n²×n²` metric tensor, and to
-    /// stay exact. Merely projecting `E` to `sym(E)` ([`project_tangent`]) is the
+    /// stay exact. Merely projecting `E` to `sym(E)` ([`Self::project_tangent`]) is the
     /// *Euclidean*-metric gradient and is wrong off the identity (issue #955).
     fn riemannian_gradient(
         &self,

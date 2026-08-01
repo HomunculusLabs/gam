@@ -417,7 +417,7 @@ fn least_squares_line(xs: &[f64], ys: &[f64]) -> Option<LineFit> {
 ///   (raw, negative) and `kl_theta = exponent_s/(2·exponent_s+2)` per (I').
 ///
 /// Only entries with `d_k > 0` and `iter_index ≥ 1` participate (both are
-/// required for the logarithms). Fewer than [`MIN_FIT_POINTS`] such entries
+/// required for the logarithms). Fewer than `MIN_FIT_POINTS` such entries
 /// ⇒ `None`.
 ///
 /// **Tie-break (determinism).** When both models fit and their residuals are

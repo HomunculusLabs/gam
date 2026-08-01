@@ -149,7 +149,7 @@ fn parse_log_level(value: &str) -> Option<LevelFilter> {
 }
 
 /// Map a caller-supplied verbosity spelling onto a [`LevelFilter`]. Wraps the
-/// internal [`parse_log_level`] for out-of-crate callers (the CLI `--log-level`
+/// internal `parse_log_level` for out-of-crate callers (the CLI `--log-level`
 /// flag, the Python `set_log_level` shim). Returns `None` for blank/unrecognized
 /// input so the caller decides the fallback rather than guessing here.
 pub fn parse_level_directive(raw: &str) -> Option<LevelFilter> {

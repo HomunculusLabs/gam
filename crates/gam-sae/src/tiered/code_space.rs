@@ -337,7 +337,7 @@ pub fn harvest_code_space_promotions(
 /// Lissajous trajectory (an ellipse at equal frequency) — a null that preserves
 /// the very structure under test is not a null — and so is any AFFINE
 /// permutation, which maps an arithmetic phase grid to a Lissajous curve (see
-/// [`hashed_permutation`]). The hash-order permutation scrambles the ordering
+/// `hashed_permutation`). The hash-order permutation scrambles the ordering
 /// deterministically, so identical inputs give identical verdicts (no RNG).
 #[derive(Clone, Debug)]
 pub struct CensusPairVerdict {

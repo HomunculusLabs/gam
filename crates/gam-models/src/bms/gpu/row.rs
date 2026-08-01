@@ -1225,8 +1225,8 @@ pub(crate) const REDUCTION_THREADS: u32 = 256;
 pub(crate) const BMS_FLEX_ROW_HVP_MAX_RHS: usize = 8;
 
 /// Device-resident state produced by
-/// [`launch_bms_flex_row_kernel_device_resident`] and consumed by
-/// [`launch_bms_flex_row_hvp`] / [`launch_bms_flex_row_diagonal`].
+/// `launch_bms_flex_row_kernel_device_resident` and consumed by
+/// `launch_bms_flex_row_hvp` / `launch_bms_flex_row_diagonal`.
 ///
 /// Owns the canonical row value, gradient, Hessian, and design slices on-device
 /// so every downstream value/score/Hessian consumer shares one row evaluation

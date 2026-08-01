@@ -890,7 +890,7 @@ impl GaussianLocationScaleFamily {
 
     /// Build the [`BlockEffectiveJacobian`] for block `block_idx` given the
     /// realised block specs.  Returns an [`AdditiveBlockJacobian`] encoding the
-    /// linear map η_r[i] = X_r[i,:] · β_r:
+    /// linear map η_r\[i\] = X_r\[i,:\] · β_r:
     ///
     /// - block 0 (mu):       output 0 = design rows, output 1 = zeros
     /// - block 1 (log_sigma): output 0 = zeros, output 1 = design rows
@@ -918,7 +918,7 @@ impl CustomFamily for GaussianLocationScaleFamily {
     /// flat scale surfaces. Both observed weights depend on β through μ (via the
     /// residual in m,n) and through the scale predictor (σ,κ), so the curvature
     /// moves when either block moves — hence this override is `true`. The
-    /// β-dependence is essential for correct M_j[u] drift corrections when ψ
+    /// β-dependence is essential for correct M_j\[u\] drift corrections when ψ
     /// hyperparameters move the design matrices.
     fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {
         true

@@ -889,8 +889,8 @@ where
 }
 
 /// Gradient-only outer baseline-config optimizer. Thin adapter over
-/// [`run_baseline_theta_optimizer`] under the
-/// [`BaselineDerivativeContract::GradientOnly`] contract, which advertises
+/// `run_baseline_theta_optimizer` under the
+/// `BaselineDerivativeContract::GradientOnly` contract, which advertises
 /// `DeclaredHessianForm::Unavailable`, so the planner routes to BFGS and
 /// builds its own quasi-Newton curvature from successive gradient
 /// evaluations. Used by the survival location-scale path which has a
@@ -924,8 +924,8 @@ where
 }
 
 /// Gradient + Hessian outer baseline-config optimizer. Thin adapter over
-/// [`run_baseline_theta_optimizer`] under the
-/// [`BaselineDerivativeContract::GradientHessian`] contract, which advertises
+/// `run_baseline_theta_optimizer` under the
+/// `BaselineDerivativeContract::GradientHessian` contract, which advertises
 /// an analytic θ-Hessian so terminal mint certification can audit it.
 pub fn optimize_survival_baseline_config_with_gradient<F>(
     initial: &SurvivalBaselineConfig,
@@ -2016,7 +2016,7 @@ pub fn survival_robust_interior_time_anchor(age_exit: &Array1<f64>) -> Result<f6
 
 /// The single definition of "this dataset is genuinely left-truncated".
 ///
-/// **Any** row entering above [`ENTRY_AT_ORIGIN_THRESHOLD`] makes the data
+/// **Any** row entering above `ENTRY_AT_ORIGIN_THRESHOLD` makes the data
 /// left-truncated, not just the earliest one. Staggered entry — part of the
 /// cohort observed from the time origin, the rest joining at positive delayed
 /// entry times — is the ordinary shape of a real registry cohort, and it
@@ -2448,21 +2448,21 @@ where
 ///
 ///   d[0.5·deviance + 0.5·βᵀS_λβ] / dθ_k
 ///     = d[NLL(β*; o(θ))] / dθ_k
-///     = Σᵢ (∂NLL_i/∂o_X[i])·(∂o_X_i/∂θ_k)
-///       + (∂NLL_i/∂o_E[i])·(∂o_E_i/∂θ_k)
-///       + (∂NLL_i/∂o_D[i])·(∂o_D_i/∂θ_k)
-///       + (∂NLL_i/∂o_R[i])·(∂o_R_i/∂θ_k)
+///     = Σᵢ (∂NLL_i/∂o_X\[i\])·(∂o_X_i/∂θ_k)
+///       + (∂NLL_i/∂o_E\[i\])·(∂o_E_i/∂θ_k)
+///       + (∂NLL_i/∂o_D\[i\])·(∂o_D_i/∂θ_k)
+///       + (∂NLL_i/∂o_R\[i\])·(∂o_R_i/∂θ_k)
 ///
 /// The four `∂NLL_i/∂o_channel` terms are the `exit`, `entry`, `derivative`,
-/// `right` fields of [`OffsetChannelResiduals`] (sampleweight-scaled already).
+/// `right` fields of `OffsetChannelResiduals` (sampleweight-scaled already).
 /// The `∂o/∂θ_k` terms come from [`baseline_offset_theta_partials`] per obs at
 /// the appropriate age.
 ///
 /// Per the RP offset convention:
-///   o_E[i] = eta_target(age_entry[i])
-///   o_X[i] = eta_target(age_exit[i])
-///   o_D[i] = d/dt eta_target(t) |_{t=age_exit[i]}
-///   o_R[i] = eta_target(age_right[i])   (interval upper bound `R`; η-level only)
+///   o_E\[i\] = eta_target(age_entry\[i\])
+///   o_X\[i\] = eta_target(age_exit\[i\])
+///   o_D\[i\] = d/dt eta_target(t) |_{t=age_exit\[i\]}
+///   o_R\[i\] = eta_target(age_right\[i\])   (interval upper bound `R`; η-level only)
 ///
 /// so the exit and derivative partials are both evaluated at `age_exit[i]`,
 /// the entry partial at `age_entry[i]`, and the interval-right η-partial at

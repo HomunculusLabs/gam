@@ -939,7 +939,7 @@ impl AutoOuterSubsampleOptions {
         self.target_k_detailed(n).map(|choice| choice.k)
     }
 
-    /// Same as [`target_k`] but also reports the noise-only `K`, the
+    /// Same as `target_k` but also reports the noise-only `K`, the
     /// work-budget cap, and which constraint set the final value. Used by
     /// [`maybe_install_auto_outer_subsample`] to surface a `cap_reason`
     /// in the auto-subsample log line.
@@ -1439,7 +1439,7 @@ fn apply_feasible_step_boundary_backoff(fraction: f64) -> f64 {
 /// workspace.
 ///
 /// The two marginal-slope families (Bernoulli marginal-slope and survival
-/// marginal-slope) build an [`ExactNewtonJointPsiWorkspace`] whose four methods
+/// marginal-slope) build an `ExactNewtonJointPsiWorkspace` whose four methods
 /// share a single skeleton: a σ-auxiliary (log-σ frailty) dispatch branch on
 /// top of a family-specific non-σ row pass. The skeleton lives once in
 /// [`MarginalSlopeExactNewtonPsiWorkspace`]; each family supplies only the

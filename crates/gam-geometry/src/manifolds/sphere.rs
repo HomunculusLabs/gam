@@ -276,7 +276,7 @@ impl RiemannianManifold for SphereManifold {
     /// The round sphere carries the metric *induced* from the ambient Euclidean
     /// inner product, so the Riemannian gradient is the orthogonal projection of
     /// the ambient gradient onto the tangent space `T_pS = p^⊥` — exactly
-    /// [`project_tangent`]. (The metric-raising default would give the same
+    /// [`Self::project_tangent`]. (The metric-raising default would give the same
     /// vector but only after building the dense `m×m` identity metric.)
     fn riemannian_gradient(
         &self,

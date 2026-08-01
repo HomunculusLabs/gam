@@ -2375,7 +2375,7 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
     /// #2621: serve the joint score from the family's own row kernel rather
     /// than letting the caller hand-assemble it out of this family's
     /// Gauss–Seidel working responses. See
-    /// [`Self::exact_newton_joint_gradient_from_designs`].
+    /// `Self::exact_newton_joint_gradient_from_designs`.
     fn exact_newton_joint_gradient_evaluation(
         &self,
         block_states: &[ParameterBlockState],

@@ -32,7 +32,7 @@
 //! model overshoots near saturation. This is precisely the shared
 //! [`crate::penalized_vector_glm`] scaffold; this module supplies
 //! only the row-diagonal binomial Fisher block, residual, and log-likelihood
-//! via [`BinomialMultiLikelihood`].
+//! via `BinomialMultiLikelihood`.
 //!
 //! # Relation to the multi-class softmax driver
 //!

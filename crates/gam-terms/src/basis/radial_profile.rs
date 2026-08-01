@@ -308,7 +308,7 @@ impl RadialProfile {
     /// Per-channel jet tower at an in-range radius: for each channel `c ∈
     /// {φ, q, t}` returns `[c(r), dc/dr, d²c/dr², d³c/dr³]`.
     ///
-    /// The derivative stacks come from iterating [`Self::differentiate_coeffs`]
+    /// The derivative stacks come from iterating `Self::differentiate_coeffs`
     /// in the Chebyshev `x` variable; the affine map `x(u)` contributes a
     /// constant factor `dx/du = 2/(u_hi − u_lo)` per `u`-derivative, and the
     /// log map `u = ln r` contributes the `du/dr = 1/r` chain. Concretely, with

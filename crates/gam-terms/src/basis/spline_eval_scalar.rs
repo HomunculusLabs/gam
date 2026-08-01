@@ -1092,7 +1092,7 @@ pub(crate) fn create_ispline_dense(
 /// peels one order and one degree per level until it bottoms out in the first
 /// derivative (which itself is evaluated from the plain degree-`d` basis).
 /// Each level needs one lower-order output buffer; the base case additionally
-/// needs a plain-basis buffer and a [`internal::BsplineScratch`]. This arena
+/// needs a plain-basis buffer and a `internal::BsplineScratch`. This arena
 /// owns that whole chain so a tight evaluation loop can amortise the
 /// allocations across many points. Buffers grow on demand and are reused.
 #[derive(Default)]
@@ -1264,7 +1264,7 @@ pub(crate) fn evaluate_bspline_derivative_recurrence_into(
 
 /// Evaluates B-spline second derivatives at a single scalar point `x` into `out`.
 ///
-/// Thin adapter over [`evaluate_bspline_derivative_recurrence_into`] with
+/// Thin adapter over `evaluate_bspline_derivative_recurrence_into` with
 /// `derivative_order = 2`; the de-Boor recurrence body lives there exactly once.
 ///
 /// This returns derivatives in the raw spline basis. If a model uses an
@@ -1282,7 +1282,7 @@ pub fn evaluate_bsplinesecond_derivative_scalar(
 
 /// Evaluates B-spline third derivatives at a single scalar point `x` into `out`.
 ///
-/// Thin adapter over [`evaluate_bspline_derivative_recurrence_into`] with
+/// Thin adapter over `evaluate_bspline_derivative_recurrence_into` with
 /// `derivative_order = 3`; the de-Boor recurrence body lives there exactly once.
 ///
 /// This returns derivatives in the raw spline basis. If a model uses an
@@ -1300,7 +1300,7 @@ pub fn evaluate_bsplinethird_derivative_scalar(
 
 /// Evaluates B-spline fourth derivatives at a single scalar point `x` into `out`.
 ///
-/// Thin adapter over [`evaluate_bspline_derivative_recurrence_into`] with
+/// Thin adapter over `evaluate_bspline_derivative_recurrence_into` with
 /// `derivative_order = 4`; the de-Boor recurrence body lives there exactly once.
 ///
 /// This returns derivatives in the raw spline basis. If a model uses an

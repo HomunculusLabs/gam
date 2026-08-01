@@ -202,9 +202,9 @@ pub enum MetricProvenance {
     /// factor `U_n` is the top-`rank` factorization of the aggregated output
     /// Fisher `Σ_{t ≥ n} (∂logits_t/∂x_n)ᵀ F_t (∂logits_t/∂x_n)` over future
     /// positions the residual stream at `n` reaches. It is provenance-generic:
-    /// it whitens nothing ([`Self::whitens_likelihood`] is `false`, like
+    /// it whitens nothing (`Self::whitens_likelihood` is `false`, like
     /// [`MetricProvenance::OutputFisher`]) and drives the gauge / lens /
-    /// enrichment unchanged ([`Self::is_output_fisher_like`]). The lens/gauge
+    /// enrichment unchanged (`Self::is_output_fisher_like`). The lens/gauge
     /// machinery consumes it identically; only the *scientific* reading
     /// changes — dormant-feature detection becomes forward-looking (a feature
     /// driving far-future tokens now registers behavioral coupling that the

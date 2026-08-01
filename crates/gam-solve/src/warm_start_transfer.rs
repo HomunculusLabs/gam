@@ -168,7 +168,7 @@ pub enum TransferError {
 ///     otherwise leave the new fit's default in those slots.
 ///   - β: per matched term, least-squares project the parent's RAW β onto this
 ///     fold's reduced subspace via the per-block gauge lift `T_b` (see
-///     [`project_raw_beta_to_reduced`]). This delivers the cross-width LOSO
+///     `project_raw_beta_to_reduced`). This delivers the cross-width LOSO
 ///     transfer (parent reduced width ≠ new reduced width). Any anomaly —
 ///     unmatched term, missing/mismatched gauge block, non-finite or blown-up
 ///     projection — falls back to a cold zero β for that block. β is in the

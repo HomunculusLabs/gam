@@ -55,13 +55,13 @@
 //! of the individual tangent spaces `T M_1 ⊕ … ⊕ T M_K`, of dimension
 //! `Σ_k dim T M_k = Σ_k (d_k + 1)` counting the scale/translation directions
 //! each summand contributes. Here each atom's enumerated symmetry generators
-//! ([`atom_isometry_generators`], [`equal_ard_rotation_generators`], the
-//! cross-atom [`frame_rotation_generators`] / [`atom_permutation_generators`])
+//! (`atom_isometry_generators`, `equal_ard_rotation_generators`, the
+//! cross-atom `frame_rotation_generators` / `atom_permutation_generators`)
 //! are exactly a spanning set for that border-block tangent space, realised as
 //! literal tangent directions `ξ` in the fitted model's free-parameter space —
 //! this file's `param_dim()` coordinates are the ambient space Terracini's
 //! generic-point argument is stated in. The stacked curvature root `R`
-//! ([`stacked_curvature_root`]) is the empirical analogue of the Jacobian whose
+//! (`stacked_curvature_root`) is the empirical analogue of the Jacobian whose
 //! rank Terracini's theorem predicts: its RRQR-pinned rank (see
 //! `CurvatureReduction::from_model`) is the empirically REALISED tangent
 //! dimension the fit's curvature can see, and the per-generator relative
@@ -2756,13 +2756,13 @@ impl CurvatureReduction {
 ///
 /// 1. Enumerate the symmetry generators as tangent directions on the flattened
 ///    decoder frames: per-atom `Isom(M_k)` generators
-///    ([`atom_isometry_generators`]), equal-ARD rotations
-///    ([`equal_ard_rotation_generators`]), global output-frame rotations
-///    ([`frame_rotation_generators`]), and exchangeable-atom permutations
-///    ([`atom_permutation_generators`]).
+///    (`atom_isometry_generators`), equal-ARD rotations
+///    (`equal_ard_rotation_generators`), global output-frame rotations
+///    (`frame_rotation_generators`), and exchangeable-atom permutations
+///    (`atom_permutation_generators`).
 /// 2. Build the stacked curvature root `R` of the pinning operator
 ///    `H = H_data + H_isometry = RᵀR` in the fit's [`RowMetric`]
-///    ([`stacked_curvature_root`]); the pinning RANK is the audit's RRQR rank
+///    (`stacked_curvature_root`); the pinning RANK is the audit's RRQR rank
 ///    of `R`, reported alongside.
 /// 3. For each generator `ξ`, the **relative curvature fraction**
 ///    `‖R ξ̂‖² / σ_max(R)²` measures the curvature the converged objective has
@@ -2830,7 +2830,7 @@ pub fn residual_gauge_exact(
 /// This is the memory-scaled entry point for callers that can stream their
 /// metric-whitened Jacobian rows into the reductions the certificate consumes,
 /// instead of retaining every per-row `p × param_dim` Jacobian block. The Gram
-/// must include the same rows [`stacked_curvature_root`] would have placed in
+/// must include the same rows `stacked_curvature_root` would have placed in
 /// `R`; `root_rows` is that row count for the rank tolerance scale.
 pub fn residual_gauge_exact_from_curvature_gram(
     model: &FittedSaeManifold,

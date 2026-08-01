@@ -702,7 +702,7 @@ fn graph_union(parent: &mut [usize], a: usize, b: usize) {
 // ===========================================================================
 
 /// Upper cap on the spectral decode dimension `q`. The eigengap rule
-/// ([`select_spectral_q`]) never keeps more than this many non-trivial modes:
+/// (`select_spectral_q`) never keeps more than this many non-trivial modes:
 /// a decode coordinate is meant to be a *small* intrinsic chart (a circle is
 /// `q = 2`, a torus `q = 4`), and the pricing charges every kept mode
 /// ([`spectral_decode_rank_charge`]), so an unbounded `q` would both defeat the
@@ -1027,7 +1027,7 @@ impl SaeBasisEvaluator for NystromSpectralEvaluator {
 /// # Where this plugs into the race
 ///
 /// The single call site is
-/// [`crate::structure_harvest::topology_candidates_for_dim`] (crate-internal,
+/// `crate::structure_harvest::topology_candidates_for_dim` (crate-internal,
 /// concurrently edited elsewhere, so it is NOT touched here). After that
 /// function builds the typed `TopologyCandidateSpec`s for the born atom's `d_k`,
 /// a spectral candidate is appended when the born atom already carries a
@@ -1108,7 +1108,7 @@ impl LearnedGraphAtom {
     /// Diagonalises the SAME `L_W = ` [`Self::surviving_laplacian`] the atom's
     /// smoothness penalty lifts, strips the `b0` near-zero constant-per-component
     /// null modes, keeps the leading `q` non-trivial eigenvectors chosen by
-    /// [`select_spectral_q`], and reports their eigenvalues as the decode penalty
+    /// `select_spectral_q`, and reports their eigenvalues as the decode penalty
     /// (`diag(λ)`). Errors when the survived graph has no non-trivial mode (every
     /// vertex isolated, or a single constant component) — such a graph has no
     /// continuous coordinate to decode.

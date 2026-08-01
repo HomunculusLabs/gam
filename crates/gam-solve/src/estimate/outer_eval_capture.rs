@@ -386,7 +386,7 @@ pub(crate) fn record_outer_gradient_fd(record: OuterGradientFdRecord) {
 // integration test can neither consume nor overwrite another test's audit.
 
 /// One ρ coordinate's analytic gradient, split into the additive parts that
-/// match the criterion-value components of [`RemlCriterionComponents`].
+/// match the criterion-value components of `RemlCriterionComponents`.
 ///
 /// `fixed_beta + logdet_h + logdet_s` is the envelope gradient entry as
 /// assembled; `total` additionally carries any IFT/KKT correction folded in

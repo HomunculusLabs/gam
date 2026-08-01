@@ -674,7 +674,7 @@ pub struct GaussianJointRowScalars {
 /// The program borrows the exact certified row constants consumed by the live
 /// observed-Hessian and directional-weight paths. Its generic evaluator and
 /// those specialized order-2/third/fourth paths are emitted from the same
-/// [`gaussian_normalized_row`] declaration, so the parity oracle cannot retain
+/// `gaussian_normalized_row` declaration, so the parity oracle cannot retain
 /// an independent copy of the likelihood expression.
 pub struct GaussianJointRowProgram<'a> {
     rows: &'a GaussianJointRowScalars,

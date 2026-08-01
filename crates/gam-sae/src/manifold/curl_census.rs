@@ -263,7 +263,7 @@ fn circle_delta_charge_nats(harmonics: usize, n_eff: f64) -> f64 {
 
 /// Census the shattered circles a linear dictionary is hiding.
 ///
-/// Stages, in the order [`super::curl`] documents them: coalesce rectified
+/// Stages, in the order `super::curl` documents them: coalesce rectified
 /// antipodal halves into signed directions, generate co-firing candidate planes
 /// over a row subsample, project each candidate's joint parse, and adjudicate with
 /// [`curl_verdict`] at the supplied ambient noise scale `sigma`.

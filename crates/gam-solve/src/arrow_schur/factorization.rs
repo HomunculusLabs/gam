@@ -653,7 +653,7 @@ pub(crate) fn factor_spectral_deflated_criterion_row(
 
 /// The per-row `H_tt` eigen-directions a STEP-side solve must GAUGE-FIX — take
 /// exactly zero Newton step along — using the SAME spectral floor and hysteresis
-/// convention [`factor_spectral_deflated_criterion_row`] uses to unit-stiffness
+/// convention `factor_spectral_deflated_criterion_row` uses to unit-stiffness
 /// deflate them in the EVIDENCE log-det. This is the step twin of that evidence
 /// routine (#1095/#2228 second root).
 ///

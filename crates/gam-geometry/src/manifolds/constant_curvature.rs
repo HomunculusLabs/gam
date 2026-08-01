@@ -103,7 +103,7 @@ const MOBIUS_DENOM_EPS: f64 = 1.0e-14;
 
 /// Derivative stacks `[f, f′, f″, f‴, f⁗]` (in `u`) of the entire
 /// functions `C(u)` and `S(u)`. Exact: series inside
-/// [`CS_SERIES_U_MAX`], closed forms + the mutual recurrence outside.
+/// `CS_SERIES_U_MAX`, closed forms + the mutual recurrence outside.
 pub fn cs_stacks(u: f64) -> ([f64; 5], [f64; 5]) {
     if u.abs() <= CS_SERIES_U_MAX {
         let mut c = [0.0; 5];
@@ -539,7 +539,7 @@ fn dirichlet_weight_coefficients(
 ///
 /// Same assembly as the value, with the coefficient derivatives substituted —
 /// which is why they are computed together in
-/// [`dirichlet_weight_coefficients`] rather than in two places.
+/// `dirichlet_weight_coefficients` rather than in two places.
 pub fn constant_curvature_dirichlet_penalty_kappa_derivative(
     coords: ArrayView2<'_, f64>,
     basis_jacobian: ndarray::ArrayView3<'_, f64>,
@@ -838,10 +838,10 @@ impl ConstantCurvature {
     /// calls: the base `x` is constant across the batch (the κ-independent flat
     /// centroid), so its chart validation is hoisted out of the per-row work and
     /// the κ-stereographic `T`-series (the dominant cost) is evaluated four rows
-    /// at a time in [`wide::f64x4`] lanes via [`t0x4`]. Every `out[i]` is
+    /// at a time in [`wide::f64x4`] lanes via `t0x4`. Every `out[i]` is
     /// **bit-for-bit** identical to the scalar `distance(x, rows.row(i))`: the
     /// per-row Möbius/dot arithmetic is the same scalar `ndarray` code, and the
-    /// vectorised series reproduces the scalar [`t0`] value per lane exactly.
+    /// vectorised series reproduces the scalar `t0` value per lane exactly.
     /// Lanes in the closed-form (`|κ‖w‖²| > T_SERIES_W_MAX`) branch and the
     /// non-multiple-of-four tail fall back to the scalar path.
     pub fn distance_batch(

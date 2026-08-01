@@ -84,7 +84,7 @@ pub struct LambdaJump {
     /// negative for a death.
     pub delta_lambda: f64,
     /// Jackknife SE of the jump, `√(se_c0² + se_c1²)` (grid-node jackknife per
-    /// checkpoint), floored (see [`LAMBDA_JUMP_SE_ABS_FLOOR`]).
+    /// checkpoint), floored (see `LAMBDA_JUMP_SE_ABS_FLOOR`).
     pub se: f64,
     /// Studentized jump `Δλ / se`.
     pub z: f64,
@@ -189,7 +189,7 @@ pub struct WbicDynamicsReport {
 ///
 /// Per atom, per consecutive checkpoint step `c → c+1`:
 /// 1. builds the reconstruction spectrum of each checkpoint's decoder curve and
-///    reads `λ_k^{(c)}` ([`atom_learning_coefficient`]);
+///    reads `λ_k^{(c)}` (`atom_learning_coefficient`);
 /// 2. aligns the two charts (best-effort transport, checkpoint axis as layer axis);
 /// 3. studentizes the jump `Δλ` by a grid-node jackknife SE and absorbs the
 ///    calibrated anytime-valid e-value into the atom's no-jump ledger.

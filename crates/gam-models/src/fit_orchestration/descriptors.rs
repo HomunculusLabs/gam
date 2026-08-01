@@ -2,7 +2,7 @@
 //!
 //! A single source of truth for the analytic-penalty descriptor schema:
 //! weight schedules, temperature schedules, dense flattened arrays, the
-//! per-kind descriptor fields, and the final [`AnalyticPenaltyRegistry`]
+//! per-kind descriptor fields, and the final `AnalyticPenaltyRegistry`
 //! construction. Both entry points — the in-process `solver::fit_orchestration`
 //! pipeline and the Python FFI (`gam-pyffi`) — parse descriptors here, so
 //! workflow and Python users see the same accepted JSON, the same defaults,
@@ -10,7 +10,7 @@
 //! analytic penalty.
 //!
 //! PyFFI only deserializes Python objects/JSON into [`serde_json::Value`] and
-//! hands them to [`build_analytic_penalty_registry_from_descriptors`]; it never
+//! hands them to `build_analytic_penalty_registry_from_descriptors`; it never
 //! re-implements any of the parsing below.
 
 use ndarray::{Array1, Array2, Array3};

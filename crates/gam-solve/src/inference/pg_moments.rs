@@ -1,7 +1,7 @@
 //! Analytic Pólya–Gamma moments for deterministic gate-block evidence
 //! approximations (#1016).
 //!
-//! The Devroye sampler in [`crate::inference::polya_gamma`] draws `PG(1, c)`
+//! The Devroye sampler in `crate::inference::polya_gamma` draws `PG(1, c)`
 //! variates; that path is for Gibbs posteriors and for validating the algebra
 //! here. Evidence ranking uses deterministic approximations, so this module
 //! carries no RNG: the closed-form moments are pure functions of `(b, c)`.

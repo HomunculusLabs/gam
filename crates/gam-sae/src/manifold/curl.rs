@@ -82,7 +82,7 @@ pub struct CurlVerdict {
     /// Second circular resultant `R₂ = |E[e^{2iθ}]|` (`→ 1` diameter/line).
     pub resultant2: f64,
     /// `R̂ = √(max(E[r²] − 2σ², 0))` — the noise-debiased fitted radius (the raw
-    /// √(E[r²]) is biased up by the 2-D noise energy `2σ²` on the active support).
+    /// √(E\[r²\]) is biased up by the 2-D noise energy `2σ²` on the active support).
     pub radius: f64,
     /// `½·ln(3R̂²/(π²σ²))` — the per-row coding gain (Theorem-3 circle gain of
     /// `description_length::circle_coding_gain_bits`, in nats).

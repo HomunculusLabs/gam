@@ -34,8 +34,8 @@
 //! retained and only the next attempted distance is halved. No independent
 //! waypoint count, wall-clock deadline, or evaluation ceiling can fabricate an
 //! arrival. A successful solve at the literal `s = 0` target is the only
-//! [`ContinuationStep::Arrived`] value. If repeated refinement can no longer
-//! produce a strictly smaller representable waypoint, [`ContinuationPath::step`]
+//! `ContinuationStep::Arrived` value. If repeated refinement can no longer
+//! produce a strictly smaller representable waypoint, `ContinuationPath::step`
 //! returns a typed non-convergence error.
 //!
 //! Full objective checkpoints, rather than coefficient-only fallback state,
@@ -308,7 +308,7 @@ pub(crate) enum RefinementReason {
 /// homotopy. Entry is always the legal heavy endpoint at `s = 1`, and
 /// only a solved literal target can produce arrival.
 ///
-/// [`ContinuationPath::step`] transactionally installs and evaluates one exact
+/// `ContinuationPath::step` transactionally installs and evaluates one exact
 /// waypoint at a time. The path itself owns the accepted warm trajectory.
 #[derive(Debug, Clone)]
 pub struct ContinuationPath {

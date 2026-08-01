@@ -722,7 +722,7 @@ impl SaeManifoldTerm {
     /// The term is already at its optimum, so the inner re-solve converges
     /// immediately. When the streaming plan cannot expose the exact Direct
     /// factor, the returned atom entries carry explicit `None` bands. Call before
-    /// [`Self::into_fitted`] has run is not required; it takes the fitted
+    /// `Self::into_fitted` has run is not required; it takes the fitted
     /// `term`/`rho` directly.
     pub fn recompute_joint_shape_uncertainty(
         &mut self,

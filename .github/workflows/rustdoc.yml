@@ -1,4 +1,4 @@
-name: Rustdoc ratchet
+name: Rustdoc census
 
 # The rustdoc surface had NO job at all (#2711) -- not a job that ran without
 # gating, not a check scoped past its target: nothing in `.github/` ran
@@ -6,14 +6,16 @@ name: Rustdoc ratchet
 # ~50s, and builds the mkdocs site; it never touches Rust. So "docs is green"
 # was true and carried no information about rustdoc, which exits 101.
 #
-# What this job asserts is deliberately NOT "zero rustdoc errors". Hundreds of
-# them exist across most of the workspace, so a zero bar would be red on
-# arrival, and a gate that is red the day it lands is ignored from the day it
-# lands -- the same non-instrument as the job that never ran. It asserts a
-# ratchet instead: no crate outside `scripts/rustdoc_red_crates.txt` may go red,
-# and no crate inside it may quietly come back clean. See the script header for
-# why the second direction is what makes a green run here distinguishable from a
-# run that measured nothing.
+# What this job asserted was deliberately NOT "zero rustdoc errors" when it
+# landed: hundreds existed across most of the workspace, so a zero bar would
+# have been red on arrival, and a gate that is red the day it lands is ignored
+# from the day it lands. It was a ratchet against a ledger of known-red crates.
+#
+# #2753 paid that debt off. The tree-wide census measured 754 errors across 15
+# crates -- the issue quoted 182, because nobody had swept every crate -- every
+# one is fixed, and `scripts/rustdoc_gate.sh` now demands ZERO for every crate,
+# with a per-crate coverage control standing in for the ledger's positive
+# control. See that script's header for why a green here is not a non-run.
 #
 # THE GATE NOW LIVES IN `cross-check.yml`, on push. This workflow is the
 # on-demand full census, not the gate, and it is deliberately no longer
@@ -24,15 +26,15 @@ name: Rustdoc ratchet
 # demonstration -- green on an ordinary commit, 24 crates scanned, 9 clean, all
 # 15 ledger crates still red -- so the deferral's condition was met and the step
 # moved to `linux-native-check`, which already has every dependency's rmeta
-# built under sccache.
+# built under sccache. (The ledger it refers to is gone as of #2753.)
 #
 # The nightly cron was REMOVED with that move rather than kept as a second
 # opinion. A scheduled job whose verdict nobody is required to look at is the
 # same shape as the `docs.yml` decoy this replaced: it accumulates green runs
-# while a crate going red outside the ledger fails only a run nobody opens.
+# while a crate going red fails only a run nobody opens.
 # "Visible and trending" is a claim about a reader, and the push gate is the
 # only place that has one. Dispatch this when you want the per-crate table --
-# e.g. after fixing a crate, to confirm it is ready to leave the ledger.
+# e.g. while fixing a crate, before putting it in front of the push gate.
 
 on:
   workflow_dispatch:
@@ -43,12 +45,12 @@ permissions:
 concurrency:
   # Keyed on the commit: the verdict's subject is the commit, and superseding it
   # destroys the only record of it (the reasoning cross-check.yml records).
-  group: rustdoc-ratchet-${{ github.sha }}
+  group: rustdoc-census-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
-  ratchet:
-    name: cargo doc --no-deps, per crate, against the debt ledger
+  census:
+    name: cargo doc --no-deps, per crate, zero-error bar
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -56,16 +58,16 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
-      - name: Rustdoc ratchet
+      - name: Rustdoc census
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: sccache
           CARGO_INCREMENTAL: "0"
         run: |
           set +e
-          scripts/rustdoc_ratchet.sh
+          scripts/rustdoc_gate.sh
           status=$?
           if [ "$status" -eq 2 ]; then
-            echo "::error title=Rustdoc ratchet could not measure::The scan did not run to completion, so this run says nothing about the rustdoc surface. Treat it as a non-run, not as a pass."
+            echo "::error title=Rustdoc census could not measure::The scan did not run to completion, so this run says nothing about the rustdoc surface. Treat it as a non-run, not as a pass."
           fi
           exit "$status"

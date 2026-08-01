@@ -1478,7 +1478,7 @@ pub(crate) fn build_duchon_basis_mixed_periodicity(
 /// Public driver for the mixed-periodicity Duchon basis: derives per-axis
 /// ``(left_j, period_j)`` from the supplied centers (mirroring how the 1D
 /// periodic path infers the period from min/max), then dispatches into
-/// [`build_duchon_basis_mixed_periodicity`].
+/// `build_duchon_basis_mixed_periodicity`.
 ///
 /// `periods` may be `None` (auto-derive from centers along every periodic
 /// axis) or `Some(vec![...])` (length == data.ncols(); entries for

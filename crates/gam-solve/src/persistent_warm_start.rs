@@ -400,7 +400,7 @@ fn load_json_record<T: for<'de> Deserialize<'de>>(
 /// Open a [`gam_runtime::warm_start::Session`] for outer-iterate (rho-axis) checkpoints.
 ///
 /// Uses a different fingerprint tag than the inner `warm-start-key`
-/// absorption (see [`load_json_record`]) so the outer-iterate keyspace
+/// absorption (see `load_json_record`) so the outer-iterate keyspace
 /// is disjoint from the inner beta-record keyspace —
 /// the two layers persist different payload shapes and must not alias.
 pub fn open_outer_session(
@@ -413,13 +413,13 @@ pub fn open_outer_session(
     configured.open_session(fp)
 }
 
-/// Persist a descriptor-indexed cross-fit [`FitArtifact`] under the
+/// Persist a descriptor-indexed cross-fit `FitArtifact` under the
 /// `fit-artifact-key` keyspace, keyed by the descriptor's structural key (so
 /// an LOSO fold of the same model retrieves a prior full-data fit). The
 /// schema tag is folded into the key so legacy layouts are walled off.
 ///
 /// Best-effort: the public function cannot fail a fit. Its internal `try_*`
-/// counterpart retains typed failures for contract tests, and [`best_effort`]
+/// counterpart retains typed failures for contract tests, and `best_effort`
 /// owns the sole production interpretation.
 pub fn store_fit_artifact(
     store: &ConfiguredWarmStartStore,
@@ -459,7 +459,7 @@ fn try_store_fit_artifact(
     Ok(())
 }
 
-/// Load the newest valid cross-fit [`FitArtifact`] whose descriptor key
+/// Load the newest valid cross-fit `FitArtifact` whose descriptor key
 /// matches `descriptor_key_hex` (the hex of [`crate::warm_start_artifact::FitDescriptor::descriptor_key`]).
 ///
 /// Uses `lookup_latest` (newest-valid) rather than objective-ranked lookup:

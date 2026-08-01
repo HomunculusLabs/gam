@@ -884,10 +884,10 @@ impl OutputBlock {
 ///
 /// Every consumer of the augmented layout — stacking the target
 /// ([`stack_augmented_target`]), reading a block's residual sum of squares
-/// ([`SaeManifoldTerm::run_multiblock_reml_fit`]'s `augmented_block_rss`), and
+/// (`SaeManifoldTerm::run_multiblock_reml_fit`'s `augmented_block_rss`), and
 /// carving the honest per-layer decoder
 /// (`B_k^(ℓ) = C̃_k[:, off_ℓ..off_ℓ+p_ℓ] / √λ_ℓ`,
-/// [`SaeManifoldTerm::layer_decoder`]) — recomputed `off_ℓ = p_x + Σ_{m<ℓ} p_m`
+/// `SaeManifoldTerm::layer_decoder`) — recomputed `off_ℓ = p_x + Σ_{m<ℓ} p_m`
 /// by hand. This type owns that arithmetic once ([`Self::block_range`],
 /// [`Self::total_dim`]) and carries the fitted per-block weight `λ_ℓ` alongside
 /// the widths and labels, so a caller reads a layer's decoder in honest units
@@ -1015,7 +1015,7 @@ impl CrosscoderLayout {
     ///
     /// # Panics
     /// If `l >= num_blocks()`. Callers that take an untrusted index bounds-check
-    /// against [`Self::num_blocks`] first (e.g. [`SaeManifoldTerm::layer_decoder`]).
+    /// against [`Self::num_blocks`] first (e.g. `SaeManifoldTerm::layer_decoder`).
     pub fn block_range(&self, l: usize) -> std::ops::Range<usize> {
         assert!(
             l < self.block_dims.len(),

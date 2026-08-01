@@ -1177,7 +1177,7 @@ impl CustomFamily for BinomialMeanWiggleFamily {
         )))
     }
 
-    /// Exact second-order directional derivative D²H[u,v] of the joint Hessian
+    /// Exact second-order directional derivative D²H\[u,v\] of the joint Hessian
     /// for the BinomialMeanWiggle two-block model (eta, wiggle).
     ///
     /// # Mathematical derivation
@@ -1217,7 +1217,7 @@ impl CustomFamily for BinomialMeanWiggleFamily {
     /// **eta-eta block** (X_eta' diag(coeff) X_eta):
     ///   The Hessian element for eta indices (i,j) factors as
     ///     H(eta_i, eta_j) = [m2·a² + m1·b] · x_eta(i)·x_eta(j)
-    ///   so D²H_eta_eta[u,v] = X_eta' diag(coeff_eta) X_eta
+    ///   so D²H_eta_eta\[u,v\] = X_eta' diag(coeff_eta) X_eta
     ///   where `coeff_eta` is the eta-eta output of the shared order-four
     ///   curve/wiggle channel bundle with q_a=a, q_b=a, q_ab=b and their
     ///   chain-rule perturbations.
@@ -1225,14 +1225,14 @@ impl CustomFamily for BinomialMeanWiggleFamily {
     /// **eta-w block** (X_eta' diag(...) [B, B', B'', B''']):
     ///   The static Hessian is:
     ///     H(eta_i, w_j) = (m2·a)·x_eta(i)·B_j + m1·x_eta(i)·B'_j
-    ///   Taking D²[u,v] requires differentiating both the scalar coefficients
+    ///   Taking D²\[u,v\] requires differentiating both the scalar coefficients
     ///   (m2·a, m1) and the basis matrices (B, B' depend on q0 via the chain
     ///   rule dB_j/du = B'_j·xi_u).  The full product rule gives four basis-matrix
     ///   tiers: B, B', B'', B'''.
     ///
     /// **w-w block** (B' diag(...) B, etc.):
     ///   The static Hessian is H(w_i, w_j) = m2·B_i·B_j.
-    ///   D²[u,v] expands via the product rule on m2, B_i, B_j, each of which
+    ///   D²\[u,v\] expands via the product rule on m2, B_i, B_j, each of which
     ///   depends on beta through q and q0.  This gives terms involving
     ///   B·B, B'·B, B'·B', and B''·B (all symmetrised).
     fn exact_newton_joint_hessian_second_directional_derivative_with_specs(

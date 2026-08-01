@@ -57,7 +57,7 @@
 //! frozen value. The certificate below bounds the frozen-`W` Gram against an
 //! exact rebuild AT the frozen weights (so the tensor is bit-tight for what it
 //! claims — the frozen-W Gram), and a separate caller-side guard (the
-//! [`weight_drift_within`] tolerance) decides whether the warm `W` is still a
+//! `weight_drift_within` tolerance) decides whether the warm `W` is still a
 //! faithful stand-in for the trial's converged `W`; when the drift exceeds the
 //! guard the caller falls back to the exact per-trial PIRLS rebuild. This is the
 //! cleanest correct PIECE; the full mechanism-(c) endgame (a precision/SPDE
@@ -70,7 +70,7 @@
 //! The per-trial n-pass for the GLM design-moving lane lives in
 //! `SpatialJointContext::eval_full`
 //! (`gam_terms::smooth::spatial_optimization`), the same seam the Gaussian
-//! tensor plugs into: each θ=[ρ,ψ] trial re-realizes the n×k design at the new κ
+//! tensor plugs into: each θ=\[ρ,ψ\] trial re-realizes the n×k design at the new κ
 //! and runs PIRLS. For eligible GLM families the installed path is:
 //!
 //!   1. After the outer loop's warm β is available, snapshot the working weight
@@ -116,7 +116,7 @@
 //! the resulting conditioned-frame pair onto the inner REML surface (a GLM
 //! analogue of the Gaussian `install_gaussian_psi_gram_deriv` install). This
 //! module is the n-free provider they consume, with both guards
-//! ([`weight_drift_within`] for the value lane,
+//! (`weight_drift_within` for the value lane,
 //! [`FrozenWeightGramTensor::GRADIENT_WEIGHT_DRIFT_RTOL`] for the gradient lane)
 //! that keep the approximation honest.
 //!
@@ -158,7 +158,7 @@ use ndarray::{Array1, Array2, ArrayView1};
 /// n-free Gaussian-shaped O(D²k²) assembly — but the assembled `gram_at(ψ)` is
 /// the GLM Fisher data-fit Gram `XᵀW X(ψ)` at the frozen `W`. The frozen weight
 /// vector is retained so the caller can certify, per trial, that the warm `W`
-/// has not drifted past tolerance ([`weight_drift_within`]).
+/// has not drifted past tolerance (`weight_drift_within`).
 pub struct FrozenWeightGramTensor {
     inner: PsiGramTensor,
     /// The warm working weight `w` the tensor was frozen at. Retained for the

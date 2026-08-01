@@ -29,7 +29,7 @@ pub const SAE_DEFAULT_TORUS_HARMONICS: usize = 3;
 /// null space). For `dim ≥ 2` it grows the null space with the latent
 /// dimension — the previous hard-coded `m = 2` left the resolved power/order
 /// inconsistent with the power-0 evaluator. The seed build and every
-/// [`DuchonCoordinateEvaluator`] refresh read this same derived `m`, so the
+/// `DuchonCoordinateEvaluator` refresh read this same derived `m`, so the
 /// design `Φ`, its jet, and the penalty stay column-consistent (the issue-247
 /// invariant).
 pub fn sae_duchon_atom_m(dim: usize) -> usize {
@@ -51,7 +51,7 @@ pub const SAE_EUCLIDEAN_PATCH_MAX_DEGREE: usize = 2;
 /// Largest explicitly selectable Euclidean-patch degree in the topology race.
 /// Seed patches use degree 2 ([`SAE_EUCLIDEAN_PATCH_MAX_DEGREE`]); a structure
 /// birth may explicitly persist the degree-3 line candidate. The degree lives
-/// in [`SaeBasisResolution::Polynomial`], never inferred from decoder width.
+/// in `SaeBasisResolution::Polynomial`, never inferred from decoder width.
 pub const SAE_EUCLIDEAN_PATCH_RACE_MAX_DEGREE: usize = 3;
 
 /// Flat-line polynomial degree of a Cylinder `S¹ × ℝ` atom's line axis (axis 1).

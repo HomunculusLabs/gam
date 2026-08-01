@@ -13,7 +13,7 @@
 //! is no gate-only compatibility surface.
 //!
 //! The CUDA kernels evaluate the same centered-moment identities as
-//! [`crate::row_jet_program::execute_softmax_row_program`].  In particular they
+//! `crate::row_jet_program::execute_softmax_row_program`.  In particular they
 //! emit both orientations of every logit-by-coordinate block and the
 //! same-atom coordinate Hessian from the live decoded basis jets.  Every output
 //! element costs O(1); the old seeded dense-jet recurrence, whose intermediates

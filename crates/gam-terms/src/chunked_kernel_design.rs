@@ -45,7 +45,7 @@ impl SpatialKernelEvaluator for Arc<dyn SpatialKernelEvaluator> {
 
 /// Chunked kernel design operator for spatial smooths (TPS, Matérn, Duchon).
 ///
-/// Instead of storing a dense n × k matrix, evaluates K(data[i], center[j])
+/// Instead of storing a dense n × k matrix, evaluates K(data\[i\], center\[j\])
 /// on-the-fly in row chunks. Memory usage is O(chunk_size × k) instead of O(n × k).
 ///
 /// The optional `poly_basis` appends polynomial columns after the kernel columns

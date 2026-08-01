@@ -8,7 +8,7 @@
 //!   * `gate_params[i]`  — one routing scalar per active atom (the dense
 //!     `logits[i, k]` value; the realized gate is derived from it through the
 //!     [`AssignmentMode`], so this is the *fundamental* stored parameter, and it
-//!     is exactly the `f64` the [`SaeTopKCurvedBudget`] "gate values" slot
+//!     is exactly the `f64` the `SaeTopKCurvedBudget` "gate values" slot
 //!     budgets, one per active atom — see the layout contract below);
 //!   * `coords[i]`       — the on-manifold coordinates of ONLY the active atoms,
 //!     flattened in support order (`Σ_{k∈S_i} d_k` scalars per row).

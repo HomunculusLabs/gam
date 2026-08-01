@@ -132,7 +132,7 @@ pub fn block_gate_block_cpu(
 
 /// CPU oracle for the block route: each row's top-`k` `(block, gate)` shortlist,
 /// selected by `(gate desc, block asc)`. Bit-identical to
-/// [`super::block::route_block_minibatch`] up to f32 ties (that path forms `z`
+/// `super::block::route_block_minibatch` up to f32 ties (that path forms `z`
 /// with a blocked GEMM; this one and the device path share the ascending-`c`
 /// scalar dot), which are interchangeable for the reconstruction. This is the
 /// per-row-independent selection the device path must reproduce.

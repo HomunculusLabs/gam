@@ -239,7 +239,7 @@ impl std::fmt::Display for MemoryAvailability {
 /// Number of completed OS/cgroup availability probes in this process.
 ///
 /// Every [`resample_memory_availability`] call opens and parses `/proc/meminfo`
-/// plus the four to five cgroup files behind [`detect_cgroup_memory`], so this
+/// plus the four to five cgroup files behind `detect_cgroup_memory`, so this
 /// counter is a direct census of that syscall traffic. It exists so a planner
 /// can assert *in a test* that its budget decisions cost a bounded number of
 /// probes rather than one per unit of work (#2560).
@@ -417,7 +417,7 @@ struct GovernorLedger {
 ///
 /// The global budget is sized once from this process's stationary capacity
 /// (host total memory, clamped by the binding cgroup's hard limit inside
-/// containers or under a job scheduler) — see [`GOVERNOR_BUDGET_NUMERATOR`] for
+/// containers or under a job scheduler) — see `GOVERNOR_BUDGET_NUMERATOR` for
 /// the headroom rationale and [`governor_budget_from_availability`] for why it
 /// is not denominated in free memory (#2702).
 #[derive(Debug, Clone)]

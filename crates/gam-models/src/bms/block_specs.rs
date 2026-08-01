@@ -91,9 +91,9 @@ pub(crate) const EXACT_SPATIAL_OUTER_TOL_FLOOR: f64 = 1e-6;
 
 /// β-dependent Jacobian for the BMS marginal block.
 ///
-/// ∂η_i/∂β_m = c_i · M[i,:]
+/// ∂η_i/∂β_m = c_i · M\[i,:\]
 /// where c_i = sqrt(1 + (s · g_i)²),
-///       g_i = G[i,:] · β_s + offset_s[i],
+///       g_i = G\[i,:\] · β_s + offset_s\[i\],
 ///       s   = state.probit_frailty_scale.
 ///
 /// `probit_frailty_scale` is read from the evaluation state at call time (not
@@ -197,9 +197,9 @@ impl BlockEffectiveJacobian for BmsMarginalJacobian {
 
 /// β-dependent Jacobian for the BMS logslope block.
 ///
-/// ∂η_i/∂β_s = (q_i · s²·g_i / c_i + s·z_i) · G[i,:]
-/// where q_i = M[i,:] · β_m + offset_m[i],
-///       g_i = G[i,:] · β_s + offset_s[i],
+/// ∂η_i/∂β_s = (q_i · s²·g_i / c_i + s·z_i) · G\[i,:\]
+/// where q_i = M\[i,:\] · β_m + offset_m\[i\],
+///       g_i = G\[i,:\] · β_s + offset_s\[i\],
 ///       c_i = sqrt(1 + (s·g_i)²),
 ///       s   = state.probit_frailty_scale.
 ///

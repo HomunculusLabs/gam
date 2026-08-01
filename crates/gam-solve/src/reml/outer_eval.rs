@@ -2,12 +2,12 @@
 //! gradient/Hessian engine, and the outer objective evaluation, organized into
 //! real concern modules.
 //!
-//! - [`state_caches`]: the `RemlState`/`EvalShared` runtime state, the
+//! - `state_caches`: the `RemlState`/`EvalShared` runtime state, the
 //!   fit-owned IFT/hypergradient caches, and the fingerprinting and spec
 //!   helpers that feed them.
-//! - [`gradient_hessian`]: the analytic REML gradient + Hessian assembly,
+//! - `gradient_hessian`: the analytic REML gradient + Hessian assembly,
 //!   Tierney–Kadane correction, mode-response, and IFT warm-start prediction.
-//! - [`objective`]: the outer objective `compute_cost` / `evaluate` surface.
+//! - `objective`: the outer objective `compute_cost` / `evaluate` surface.
 //!
 //! The shared external imports used across all three concerns live here as
 //! `pub(crate) use` so each submodule inherits them through `use super::*;`,

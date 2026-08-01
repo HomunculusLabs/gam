@@ -1210,7 +1210,7 @@ pub struct JitFamilySpec {
     pub spec_id: u64,
     /// CUDA body source. Must read from `eta_i`, `y_i`, `wp`, set
     /// `status`, and assign to `mu`, `grad_eta`, `w_hessian`, `w_solver`,
-    /// and `dev`. See [`common_device_prolog`] for
+    /// and `dev`. See `common_device_prolog` for
     /// the available helpers.
     pub body: String,
 }

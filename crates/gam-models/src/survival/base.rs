@@ -479,7 +479,7 @@ struct CauseSpecificAtomInput {
 /// Royston-Parmar row.
 ///
 /// The generic evaluator and the live specialized order-2/third/fourth
-/// lowerings are all emitted from [`cause_specific_row`]. Predictor values are
+/// lowerings are all emitted from `cause_specific_row`. Predictor values are
 /// ordered as exit index, entry index, and positive spline derivative; entry
 /// and event activity remain row constants.
 pub struct CauseSpecificRowProgram {
@@ -2505,13 +2505,13 @@ impl WorkingModelSurvival {
     ///       − δ_i · (η1_i + log s_i)
     ///   ]
     ///
-    /// with η1_i = a1_iᵀβ + o_X[i], η0_i = a0_iᵀβ + o_E[i],
-    ///      s_i  = d_iᵀβ + o_D[i].
+    /// with η1_i = a1_iᵀβ + o_X\[i\], η0_i = a0_iᵀβ + o_E\[i\],
+    ///      s_i  = d_iᵀβ + o_D\[i\].
     ///
     /// The additive offsets enter each of the three η channels linearly, so
-    ///   ∂NLL_i/∂o_X[i] = w_i · (exp(η1_i) − δ_i)
-    ///   ∂NLL_i/∂o_E[i] = −w_i · exp(η0_i) · 1{has_entry_interval}
-    ///   ∂NLL_i/∂o_D[i] = −w_i · δ_i / s_i         (event-row only)
+    ///   ∂NLL_i/∂o_X\[i\] = w_i · (exp(η1_i) − δ_i)
+    ///   ∂NLL_i/∂o_E\[i\] = −w_i · exp(η0_i) · 1{has_entry_interval}
+    ///   ∂NLL_i/∂o_D\[i\] = −w_i · δ_i / s_i         (event-row only)
     ///
     /// These three arrays are the sampleweight-scaled residuals used to chain
     /// `∂NLL/∂offset` into `∂NLL/∂θ` via any closed-form `∂offset/∂θ` map

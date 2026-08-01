@@ -328,7 +328,7 @@ impl Default for OuterConfig {
 
 /// Declarative outer-problem builder.  Produces both the
 /// [`OuterCapability`] (what the objective can provide) and the
-/// [`OuterConfig`] (how the runner should behave) from a small set
+/// `OuterConfig` (how the runner should behave) from a small set
 /// of high-level declarations.
 pub struct OuterProblem {
     n_params: usize,
@@ -410,7 +410,7 @@ impl OuterProblem {
     /// Supply per-ρ-coordinate structural keys (native/formula order) so the
     /// outer search is canonicalized to be invariant to the order the smooth
     /// terms / tensor margins were written (#1538/#1539). See
-    /// [`OuterConfig::rho_canonical_keys`].
+    /// `OuterConfig::rho_canonical_keys`.
     pub fn with_rho_canonical_keys(mut self, keys: Option<Vec<u64>>) -> Self {
         self.rho_canonical_keys = keys;
         self
@@ -685,7 +685,7 @@ impl OuterProblem {
 
     /// Attach mirror cache sessions that receive a broadcast copy of
     /// the final-result finalize write. See
-    /// [`OuterConfig::cache_mirror_sessions`].
+    /// `OuterConfig::cache_mirror_sessions`.
     pub fn with_cache_mirror_sessions(mut self, sessions: Vec<Arc<CacheSession>>) -> Self {
         self.cache_mirror_sessions = sessions;
         self
@@ -1357,14 +1357,14 @@ pub struct OuterResult {
     pub operator_trust_radius: Option<f64>,
     /// Why the internal operator trust-region solver stopped.
     ///
-    /// Derived from [`Self::termination`] in
+    /// Derived from `Self::termination` in
     /// `bridges::solution_into_outer_result`; do not set it independently
     /// or the two can disagree.
     pub operator_stop_reason: Option<OperatorTrustRegionStopReason>,
     /// Which test the underlying `opt` solver stopped on, and the
     /// quantity it was decided against.
     ///
-    /// Distinct from [`OuterTermination`], which is gam's *certification*
+    /// Distinct from `OuterTermination`, which is gam's *certification*
     /// state machine (did a terminal analytic certificate authorize this
     /// point). This is the solver's own account of why it stopped
     /// searching, and the two answer different questions: a run can stop
@@ -1388,13 +1388,13 @@ pub struct OuterResult {
     /// `None` when no analytic gradient was measured at termination
     /// (gradient-free solvers, cache-hit short-circuits, per-atom EFS) or
     /// when an audit probe failed to evaluate. Populated once by
-    /// [`run_outer`] after the solver ladder returns, outside all hot loops.
+    /// `run_outer` after the solver ladder returns, outside all hot loops.
     pub criterion_certificate: Option<OuterCriterionCertificate>,
     /// Probe-noise-floor gradient bound measured by the cost-stall guard at a
     /// halted stall (#2241): σ̂/Δ, the criterion's evaluation-noise floor over
     /// the stall window divided by the radius the accepted steps actually
     /// probed. Present only on results rebuilt from a cost-stall exit;
-    /// [`certify_outer_optimality`] folds it into the stationarity bound so the
+    /// `certify_outer_optimality` folds it into the stationarity bound so the
     /// final re-measured gradient is judged against the same flat certificate
     /// the guard granted.
     /// Why the solver's line search gave up, when it did (#2465).
@@ -1417,7 +1417,7 @@ pub struct OuterResult {
     pub flat_noise_grad_bound: Option<f64>,
     /// Post-fit PSIS diagnostic for whether sampled smoothing-parameter weights
     /// show evidence that plug-in REML/LAML intervals are unreliable. Populated
-    /// once by [`run_outer`] when the exact rho Hessian is cheap enough to use.
+    /// once by `run_outer` when the exact rho Hessian is cheap enough to use.
     pub rho_uncertainty_diagnostic: Option<crate::rho_uncertainty::RhoUncertaintyDiagnostic>,
     /// Reseed point minted by a refused certification whose tail snap CONFIRMED
     /// an exponential tail (#2348 Inc 2b). A snap is a waypoint, never a
@@ -1480,7 +1480,7 @@ pub struct OuterResult {
     /// Seed start points this plan run STARTED and whose mandatory analytic
     /// certificate then REFUSED (#2569).
     ///
-    /// The certify-resume loop in [`run_outer`] re-runs the outer search seeded
+    /// The certify-resume loop in `run_outer` re-runs the outer search seeded
     /// at the refused checkpoint, and the seed cascade it re-enters is allowed
     /// to fall through its `seed_budget` while nothing has certified
     /// (`should_start_next_seed`). The fall-through lands on the SAME generated

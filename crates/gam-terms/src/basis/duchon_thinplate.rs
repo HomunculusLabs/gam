@@ -1776,7 +1776,7 @@ pub struct ResolvedDuchonChart {
 /// | realized centers | `select_centers_by_strategy` |
 /// | effective null-space order (degraded when the centers cannot span the requested polynomial block) | `duchon_effective_nullspace_order` |
 /// | auto-seeded anisotropy contrasts | `auto_seed_aniso_contrasts` |
-/// | data-metric radial reparam `V` (#1355) | [`duchon_resolve_radial_chart`] |
+/// | data-metric radial reparam `V` (#1355) | `duchon_resolve_radial_chart` |
 /// | identifiability transform `T`, derived from the **`V`-rotated** design | `spatial_identifiability_transform_from_design` |
 ///
 /// Until #2638 the log-κ derivative context re-made only the first of these and
@@ -3419,7 +3419,7 @@ pub fn apply_sum_to_zero_constraint(
 /// `Z` is dense `(k × (k-1))`; consequently `B_c = B Z` is returned as a
 /// dense matrix even when `B` is sparse. Callers that previously relied on
 /// the constrained basis being sparse should wrap the result in
-/// [`DenseDesignMatrix`].
+/// `DenseDesignMatrix`.
 pub fn apply_sum_to_zero_constraint_sparse(
     basis_matrix: &SparseColMat<usize, f64>,
     weights: Option<ArrayView1<f64>>,
@@ -3754,12 +3754,12 @@ pub struct AutoBSplineKnots {
 /// Build a clamped B-spline full knot vector from 1-D data.
 ///
 /// Thin public wrapper around
-/// [`internal::generate_full_knot_vector_quantile`] so external crates can
+/// `internal::generate_full_knot_vector_quantile` so external crates can
 /// request auto-derived knots without reimplementing the placement logic.
 ///
 /// When `n = data.len()` is too small to support the requested
 /// `(num_internal_knots, degree)` combination, this function auto-shrinks the
-/// configuration to the largest feasible one (see [`auto_shrink_bspline_config`]):
+/// configuration to the largest feasible one (see `auto_shrink_bspline_config`):
 ///   * `num_internal_knots` is capped at `n - 2`.
 ///   * `degree` is reduced (cubic → quadratic → linear) until `n >= degree + 1`.
 ///
@@ -3796,7 +3796,7 @@ pub fn auto_knot_vector_1d_quantile(
 /// endpoints). This wraps them in the standard clamped boundary stencil:
 /// `data_range.0` repeated `degree + 1` times, the sorted distinct internal
 /// positions, then `data_range.1` repeated `degree + 1` times — matching the
-/// layout produced by [`internal::generate_full_knot_vector`] for the uniform
+/// layout produced by `internal::generate_full_knot_vector` for the uniform
 /// case, except the interior positions are taken verbatim from the caller.
 ///
 /// Internal positions must lie strictly inside `(data_range.0, data_range.1)`,
@@ -3859,7 +3859,7 @@ pub fn clamped_knot_vector_from_internal_positions(
 
 /// Place `num_centers` Duchon centers on 1-D data via the equal-mass strategy.
 ///
-/// Thin public wrapper around [`select_equal_mass_centers`] specialised to a
+/// Thin public wrapper around `select_equal_mass_centers` specialised to a
 /// single covariate dimension. The returned vector is sorted.
 pub fn auto_centers_1d_equal_mass(
     data: ArrayView1<'_, f64>,

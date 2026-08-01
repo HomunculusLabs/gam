@@ -1,7 +1,7 @@
 //! Narrow `PG(1, c)` adapter over the upstream `polya-gamma` crate.
 //!
 //! The workspace uses `rand` 0.10 while `polya-gamma` 0.5 uses `rand` 0.8.
-//! [`Rand08`] bridges only the old `rand_core` random-bit interface, so callers
+//! `Rand08` bridges only the old `rand_core` random-bit interface, so callers
 //! keep the workspace RNG API and the sampler implementation remains wholly
 //! upstream.
 

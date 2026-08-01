@@ -1334,7 +1334,7 @@ impl ImplicitDesignPsiDerivative {
     /// Returns a vector of length p_out (total basis dimension after all transforms).
     ///
     /// Formula in raw knot space:
-    ///   [raw]_j = Σ_i v_i · q_{ij} · s_{d,ij}
+    ///   \[raw\]_j = Σ_i v_i · q_{ij} · s_{d,ij}
     /// then project through Z and pad.
     ///
     /// Note: q = φ_r/r and s_d = exp(2ψ_d)·h_d² are UNNORMALIZED axis components.

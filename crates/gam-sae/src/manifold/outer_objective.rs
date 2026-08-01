@@ -603,7 +603,7 @@ impl OuterProbeTelemetry {
 
     /// Total infeasible probes across all refusal kinds.
     ///
-    /// Sums over [`ProbeRefusalKind::ALL`] so a new kind is included here the
+    /// Sums over `ProbeRefusalKind::ALL` so a new kind is included here the
     /// moment it exists, instead of being silently omitted the way
     /// `AllZeroGatedDesign` and `TotalCoCollapse` were.
     pub fn infeasible_total(&self) -> usize {
@@ -1271,7 +1271,7 @@ impl SaeManifoldOuterObjective {
     /// order. Snapshots a PRISTINE (unscaled) copy of the non-anchor columns
     /// `[p_x, p̃)` — the drift-free source every `apply_block_scaling` reads —
     /// and seeds the last-applied `log λ_ℓ` to `0` (`λ = 1`, matching the target
-    /// as handed in per the [`CrosscoderBlockPricing`] invariant).
+    /// as handed in per the `CrosscoderBlockPricing` invariant).
     ///
     /// Validation (typed `String` error):
     /// - `p_x + Σ block_dims == target.ncols()` (the stacked augmented width);

@@ -3,7 +3,7 @@
 //!
 //! #976 closed with the move engine (`search`) and its triggers
 //! (`gam_sae::atom_codes::SparseAtomCodes::coactivation`, ARD precisions,
-//! terminal [`CollapseEvent`]s) on main but deliberately unwired: nothing
+//! terminal `CollapseEvent`s) on main but deliberately unwired: nothing
 //! harvested move proposals from a fitted dictionary or drove `search` around
 //! the production fit. This module is that seam. It owns three things:
 //!
@@ -15,7 +15,7 @@
 //!    routing, a fission splits an atom into two children that inherit its
 //!    decoder block, a fusion folds the weaker of a pair into the stronger, a
 //!    birth appends a residual-factor atom whose TOPOLOGY is chosen by EVIDENCE
-//!    (#977): [`race_birth_topology`] races the candidate bases matched to the
+//!    (#977): `race_birth_topology` races the candidate bases matched to the
 //!    atom's intrinsic dim (`d = 1`: circle vs line; `d = 2`: torus vs
 //!    sphere/constant-curvature vs euclidean vs cylinder) by TK-normalized REML and seeds the
 //!    born atom from the winner, so the discovered dictionary is genuinely
@@ -25,7 +25,7 @@
 //! 3. [`run_structure_search_rounds`] — the round driver: fit → harvest →
 //!    [`search`] (over held-out row-block shards, with warm child refits) →
 //!    re-fit → repeat until a round applies no moves. The accumulated
-//!    [`SearchLedger`] (with the joint fit's [`CollapseEvent`]s) is the honesty
+//!    [`SearchLedger`] (with the joint fit's `CollapseEvent`s) is the honesty
 //!    surface returned to the caller and serialized onto the fit payload.
 //!
 //! # Determinism
@@ -61,9 +61,9 @@
 //!
 //! This module's birth path (residual-factor mining in
 //! [`harvest_move_proposals`], candidate construction in
-//! [`topology_candidates_for_dim`], the commensurable evidence comparison in
-//! [`fit_topology_candidate`], the race itself in [`race_birth_topology`], and
-//! the seeding in [`born_atom`]) is the engine's CURE for that flatness
+//! `topology_candidates_for_dim`, the commensurable evidence comparison in
+//! `fit_topology_candidate`, the race itself in `race_birth_topology`, and
+//! the seeding in `born_atom`) is the engine's CURE for that flatness
 //! disease: instead of leaving a co-firing residual subspace as an
 //! unidentifiable flat blob (or forcing every birth to inherit a fixed
 //! circular template by fiat), it fits every topology whose intrinsic
@@ -485,7 +485,7 @@ fn proposal(term: &SaeManifoldTerm, mv: StructureMove, trigger: f64) -> MoveProp
 ///
 /// The four channels (#976/#997):
 ///
-/// * **Deaths** from diverged ARD precisions ∪ terminal [`CollapseEvent`]s. The
+/// * **Deaths** from diverged ARD precisions ∪ terminal `CollapseEvent`s. The
 ///   trigger is the ARD precision (descending); a terminally-collapsed atom is
 ///   proposed even with finite ARD (its routing is gone regardless of its
 ///   coordinate prior).
@@ -493,7 +493,7 @@ fn proposal(term: &SaeManifoldTerm, mv: StructureMove, trigger: f64) -> MoveProp
 /// * **Fission audits** from absorption-suspect pairs (high conditional
 ///   asymmetry). For each candidate that is a `d = 2` product atom the
 ///   within-atom functional-ANOVA carve (#975 / #993) RUNS on the atom's own
-///   fitted decoder via [`run_within_atom_carve`]: a carve that proves binding
+///   fitted decoder via `run_within_atom_carve`: a carve that proves binding
 ///   blocks the fission (the atom is irreducible), an additive carve rides as a
 ///   fission proposal ranked by its interaction fraction, and every outcome is
 ///   recorded on [`HarvestReport::fission_carve_results`]. A non-product
@@ -506,7 +506,7 @@ fn proposal(term: &SaeManifoldTerm, mv: StructureMove, trigger: f64) -> MoveProp
 ///   explained residual mass. This is a SHAPE-level mining step — it finds
 ///   directions the current dictionary does not reconstruct, not yet a claim
 ///   about what topology lives there. The topology itself is adjudicated
-///   downstream, atom-by-atom, by [`race_birth_topology`] (see the module
+///   downstream, atom-by-atom, by `race_birth_topology` (see the module
 ///   docs: curvature is what makes the winner identifiable). Note the two
 ///   halves of identifiability this leaves complementary rather than
 ///   redundant: this residual-factor step (and the topology race it feeds) is
@@ -2327,11 +2327,11 @@ pub fn apply_structure_move(
 
 /// A birth seed the seeded apply-move ([`apply_structure_move_seeded`])
 /// materializes. The residual-factor births carry only a flat decoder (the
-/// topology race in [`born_atom`] then adjudicates line vs circle vs …); a curl
+/// topology race in `born_atom` then adjudicates line vs circle vs …); a curl
 /// birth (INTEGRATION_PLAN Phase 4) instead carries a fully-formed periodic
 /// circle — decoder, per-row phase, and gate — because a shattered centered
 /// circle leaves NO residual for the race to seed from, so the seed IS the
-/// hypothesis and [`born_circle_atom`] installs it directly for the REML e-gate
+/// hypothesis and `born_circle_atom` installs it directly for the REML e-gate
 /// to adjudicate.
 #[derive(Clone, Debug)]
 pub enum BirthSeed {
@@ -2352,8 +2352,8 @@ pub enum BirthSeed {
 /// Apply one [`StructureMove`] with a heterogeneous birth-seed list — the curl
 /// extension of [`apply_structure_move`]. Non-birth moves are identical; a
 /// `Birth { candidate }` dispatches on the indexed [`BirthSeed`]: a
-/// `ResidualFactor` rides the topology race ([`born_atom`]), a `Circle` is
-/// installed directly as a periodic atom ([`born_circle_atom`]). The legacy
+/// `ResidualFactor` rides the topology race (`born_atom`), a `Circle` is
+/// installed directly as a periodic atom (`born_circle_atom`). The legacy
 /// [`apply_structure_move`] is exactly this with an all-`ResidualFactor` seed
 /// list, so bitwise legacy behavior is preserved when no curl seed is present.
 pub fn apply_structure_move_seeded(
@@ -4375,7 +4375,7 @@ fn radial_promoted_specs(
 static FINITE_SET_RACE_ENROLLED: AtomicBool = AtomicBool::new(false);
 
 /// Whether the birth race enrols the finite-set (discrete anchor) candidate.
-/// Default `false` — see [`FINITE_SET_RACE_ENROLLED`].
+/// Default `false` — see `FINITE_SET_RACE_ENROLLED`.
 pub fn finite_set_race_enrolled() -> bool {
     FINITE_SET_RACE_ENROLLED.load(Ordering::Relaxed)
 }
@@ -4390,8 +4390,8 @@ pub fn set_finite_set_race_enrolled(enrolled: bool) {
 /// whose occupancy is DISCRETE — the honest "seven cyclic points, not an occupied
 /// circle" alternative. Returns `(anchors, index_coords)` where `index_coords`
 /// (`n × 1`) assigns each row to its nearest of `anchors` anchors (the integer
-/// index the [`AnchorIndicatorEvaluator`] reads), and `anchors − 1` is the rank
-/// charge ([`finite_set_rank_charge`]). Returns `None` when the birth is not a
+/// index the `AnchorIndicatorEvaluator` reads), and `anchors − 1` is the rank
+/// charge (`finite_set_rank_charge`). Returns `None` when the birth is not a
 /// discrete finite set (uniform / continuous occupancy, wrong dimension, or a
 /// degenerate coordinate) — so it never fabricates a cluster structure.
 ///
@@ -5146,7 +5146,7 @@ pub struct PrimaryTopologyChoice {
 
 /// Per-atom topology discovery for the PRIMARY seed dictionary (#2238/#2239).
 ///
-/// [`race_birth_topology`] adjudicates topology by evidence, but it only ever
+/// `race_birth_topology` adjudicates topology by evidence, but it only ever
 /// runs on residual births — the K primary atoms created at fit entry kept the
 /// pinned default (a 1-D circle), hard-capping every intrinsically 2-D factor
 /// at R² ≈ 0.5. This lifts the SAME evidence race to fit entry: each atom
@@ -6740,7 +6740,7 @@ pub struct RoundDriverConfig {
 /// Configuration for the curl/flatten proposer (INTEGRATION_PLAN Phase 4). All
 /// derived-not-tuned in spirit; the fields are the pipeline's structural knobs,
 /// not statistical dials (the verdict's σ screens and the RD crossover are fixed
-/// in [`crate::manifold::curl`]).
+/// in `crate::manifold::curl`).
 #[derive(Clone, Copy, Debug)]
 pub struct CurlConfig {
     /// Decoder-cosine ceiling for two linear atoms to be treated as the

@@ -36,7 +36,7 @@
 //! [`gam_terms::inference::structure_evidence`]:
 //!
 //! * **Birth / fission / fusion** each assert structure BEYOND what the
-//!   current dictionary class expresses, so each runs an [`AtomBirthGate`]
+//!   current dictionary class expresses, so each runs an `AtomBirthGate`
 //!   (the mechanics are claim-generic: predictable alternative, honest
 //!   null sup, Ville threshold at the α fixed in [`MoveBudget`]). A move is
 //!   applied only when its claim is **Certified**; otherwise the structure is

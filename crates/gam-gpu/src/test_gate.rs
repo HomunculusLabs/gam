@@ -23,7 +23,7 @@
 //!   environment variable (`env::var` is banned in this tree).
 //!
 //! What remains — `Auto`/`Off` with no device — is a real skip, and it is
-//! counted. [`skipped_for_absent_device`] lets a suite assert how many gated
+//! counted. [`crate::test_gate::skipped_for_absent_device`] lets a suite assert how many gated
 //! tests declined to run, so "37 passed" can no longer hide "37 verified
 //! nothing".
 use crate::device_runtime::GpuRuntime;

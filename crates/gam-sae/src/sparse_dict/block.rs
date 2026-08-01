@@ -1588,13 +1588,13 @@ pub(super) fn seed_frames(x: ArrayView2<'_, f32>, n_blocks: usize, b: usize) -> 
 
 /// How the initial `K = G·b` block frames are chosen before the alternation.
 ///
-/// The alternation ([`advance_block_sparse_state`]) is seed-agnostic — it reaches
+/// The alternation (`advance_block_sparse_state`) is seed-agnostic — it reaches
 /// the same fixed point from any valid St(b,P) frame set — but the two seeds differ
 /// in cost and in how coherent the starting blocks are, which matters at different
 /// `K` regimes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockSeedPolicy {
-    /// Data-aware block-aware farthest-point pass ([`seed_frames`]). Each block is
+    /// Data-aware block-aware farthest-point pass (`seed_frames`). Each block is
     /// anchored on the row farthest from the completed frames and grown to rank `b`
     /// by uncovered-energy affinity, so unrelated subspaces never share a block.
     /// This is the best starting point at moderate `K` (near the intrinsic rank),
@@ -2238,7 +2238,7 @@ fn validate(x: ArrayView2<'_, f32>, config: &BlockSparseConfig) -> Result<(), Bl
 /// within-block code `z_g` = the atom's Euclidean latent coordinate. This
 /// alternation — projection code solve on orthonormal frames, polar frame
 /// refresh — is the BLOCK FAST KERNEL of that model (the `d = b` sibling of
-/// [`super::update::run_linear_fast_kernel`]): the code solve is the exact
+/// `super::update::run_linear_fast_kernel`): the code solve is the exact
 /// degenerate arrow-Schur inner solve for read-only gates on linear atoms
 /// (projection, no ridge pair to unify), and the polar step is the Grassmann
 /// retraction of the framed decoder refresh. The single public entry

@@ -417,7 +417,7 @@ pub trait HessianFactorization: Send + Sync {
         -dense::trace_product(&y_j, &y_i)
     }
 
-    /// Operator-backed mixed form of [`trace_logdet_hessian_cross`].
+    /// Operator-backed mixed form of `trace_logdet_hessian_cross`.
     ///
     /// The default materializes the operator; spectral and sparse backends
     /// override this to keep the exact analytic cross trace matrix-free.
@@ -429,7 +429,7 @@ pub trait HessianFactorization: Send + Sync {
         self.trace_logdet_hessian_cross(h_i, &h_j.to_dense())
     }
 
-    /// Operator-backed form of [`trace_logdet_hessian_cross`].
+    /// Operator-backed form of `trace_logdet_hessian_cross`.
     ///
     /// The default materializes both operators; exact backends override this
     /// when they can contract the logdet-Hessian kernel against operator

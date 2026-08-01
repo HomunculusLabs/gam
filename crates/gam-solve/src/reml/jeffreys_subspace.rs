@@ -839,8 +839,8 @@ where
 /// the `O(p³)` eigendecomposition in [`joint_jeffreys_term`].
 ///
 /// Returns `true` ONLY when the CONSERVATIVE spectral bounds from
-/// [`cheap_conditioning_bounds`] clear BOTH conditioning gates with the
-/// [`CHEAP_PRECHECK_SAFETY_MARGIN`] safety factor, i.e. the fit is so clearly
+/// `cheap_conditioning_bounds` clear BOTH conditioning gates with the
+/// `CHEAP_PRECHECK_SAFETY_MARGIN` safety factor, i.e. the fit is so clearly
 /// well-conditioned that the exact gate is certain to skip too. In that case the
 /// caller may return the EXACT-ZERO term (byte-identical to the gated-off dense
 /// path) without forming anything dense. Returns `false` (the conservative
@@ -893,7 +893,7 @@ where
 /// `p × p` reduced information and eigendecomposing it is itself `O(p³)`-cheap (`p`
 /// in the tens). On the full span (`Z_J = I`, so `H_id = H`) the conditioning gate
 /// depends only on `H`'s extreme eigenvalues, so this eigendecomposes `H` EXACTLY
-/// and returns whether [`conditioning_gate_weight`] is exactly `0` — i.e. whether
+/// and returns whether `conditioning_gate_weight` is exactly `0` — i.e. whether
 /// the term [`joint_jeffreys_term`] would form is exactly the zero term. A `true`
 /// here is therefore byte-identical to forming the gated-off term, with NO
 /// conservative margin needed (the eigenvalues are exact, not bounded).
@@ -1970,7 +1970,7 @@ where
 /// THE GAP THIS CLOSES (gam#854). `H_Φ` is built from the JOINT Hessian
 /// `H_joint(β, ρ) = H_data + Σ_m λ_m H_m^pen(β; ε_m)` (value path
 /// [`joint_jeffreys_term`]), so it depends on ρ BOTH through β̂ — the mode response,
-/// supplied by [`joint_jeffreys_hphi_directional_derivative`] — AND EXPLICITLY
+/// supplied by `joint_jeffreys_hphi_directional_derivative` — AND EXPLICITLY
 /// through the `λ_m`/`ε_m` that scale and shape the penalty blocks INSIDE
 /// `H_joint`. The outer score
 ///   `½ tr[(H+S_λ+H_Φ)⁻¹ ∂_ρ(H+S_λ+H_Φ)]`
@@ -2279,7 +2279,7 @@ impl JeffreysHphiDriftBase {
         Self::from_plan_axis_derivatives(plan, hdots)
     }
 
-    /// Same prepared base as [`prepare`], but consuming the PRECOMPUTED all-axes
+    /// Same prepared base as `prepare`, but consuming the PRECOMPUTED all-axes
     /// first-directional derivatives `{Hdot[e_a]}` (one entry per canonical axis,
     /// `a = 0..p`) instead of re-deriving them axis-by-axis. Families that assemble
     /// the whole canonical axis set in a single shared softmax/Gram pass (e.g.
@@ -2444,7 +2444,7 @@ impl JeffreysHphiDriftBase {
         self.perturbation_derivative_from_axis_matrices(pert_h, pert_hdots)
     }
 
-    /// Batched-axes variant of [`Self::perturbation_derivative`]: the caller
+    /// Batched-axes variant of `Self::perturbation_derivative`: the caller
     /// supplies the full all-axes object `{H²dot[δ,e_a]}_{a=0..p}` in ONE shot
     /// (e.g. via the row-kernel BLAS-3
     /// `second_directional_derivative_all_axes_dense_override`), avoiding the `p`

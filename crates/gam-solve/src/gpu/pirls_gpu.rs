@@ -3760,7 +3760,7 @@ pub fn allocate_sigma_pirls_workspace(
 
 /// Upload the reparameterisation matrix `Qs` (p×p) for the current ρ / σ
 /// point. Call once per ρ / σ point before calling
-/// [`pirls_loop_on_stream`]. When no reparameterisation is active, pass an
+/// `pirls_loop_on_stream`. When no reparameterisation is active, pass an
 /// identity matrix.
 #[cfg(target_os = "linux")]
 pub fn upload_qs_pirls(
@@ -3871,7 +3871,7 @@ pub fn allocate_pirls_loop_workspace(
 
 /// GPU exact penalised least-squares for Gaussian-identity models.
 ///
-/// Public wrapper around [`cuda::solve_gaussian_pls_on_stream`].  Delegates
+/// Public wrapper around `cuda::solve_gaussian_pls_on_stream`.  Delegates
 /// immediately if the CUDA runtime is initialised; returns an error otherwise
 /// so the caller can fall back to the CPU path.
 #[cfg(target_os = "linux")]

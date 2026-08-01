@@ -1086,7 +1086,7 @@ impl<'a> CoordinateFidelityCertificate<'a> {
 /// Build the coordinate-fidelity certificate for one fitted atom, or `None` when
 /// the atom has no `d = 1` circle/interval chart (higher-`d` / non-metric atoms,
 /// a demoted homotopy, or a lost basis evaluator — the same gate the in-loop
-/// unit-speed retraction uses, [`SaeManifoldTerm::d1_unit_speed_topology`]).
+/// unit-speed retraction uses, `SaeManifoldTerm::d1_unit_speed_topology`).
 ///
 /// The row set mirrors the existing per-atom diagnostics (e.g. the curvature
 /// bound): all of the atom's fitted coordinate rows,
@@ -1386,7 +1386,7 @@ fn raw_vs_arclength_defect_weighted(
 /// EV remains the primary criterion, and this can never return a materially
 /// worse-reconstructing basin. Within the `ev_tol` band the two basins are
 /// EV-equivalent (`ev_tol` is the caller-supplied #1026 negligibility tolerance
-/// [`crate::manifold::SAE_FINAL_EV_DEGRADATION_TOL`], a scale-invariant "0.1% of
+/// `crate::manifold::SAE_FINAL_EV_DEGRADATION_TOL`, a scale-invariant "0.1% of
 /// variance" point — no fresh constant), so the tie is broken on the
 /// coordinate-uniformity certificate: the candidate is preferred iff its
 /// aggregate Watson `U²` is strictly LOWER (more uniform coordinates), because

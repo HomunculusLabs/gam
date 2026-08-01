@@ -892,7 +892,7 @@ pub fn pcg_multi_core<B: PcgBlockBackend>(
 /// [`PcgBlockBackend::apply_block`].
 ///
 /// All block traversals parallelize only across DISJOINT outputs (row chunks
-/// for the elementwise updates, [`BLOCK_DOT_COLUMN_TILE`]-column tiles for the
+/// for the elementwise updates, `BLOCK_DOT_COLUMN_TILE`-column tiles for the
 /// inner products), and every per-column fold is strict ascending-row, so the
 /// results are independent of thread count — the same bit-reproducibility the
 /// Serial reduction gives `pcg_core`.

@@ -1293,7 +1293,7 @@ fn hermite_he(n: usize, x: f64) -> f64 {
 
 /// Whether `ln S(μ,σ)` is routed through the Gumbel-mixing quadrature.
 ///
-/// Mirrors [`cloglog_log_survival_term_controlled`]'s routing predicate so a
+/// Mirrors `cloglog_log_survival_term_controlled`'s routing predicate so a
 /// consumer of [`cloglog_log_survival_mu_derivative_gumbel_quadrature`] can ask
 /// whether the derivative it is about to request comes off the SAME
 /// approximation surface as the value. Reading the derivatives from one branch
@@ -1309,7 +1309,7 @@ pub fn cloglog_log_survival_uses_gumbel_quadrature(mu: f64, sigma: f64) -> bool 
 }
 
 /// `σ^j · ∂^j S/∂μ^j` in signed-log coordinates, off the same Gumbel-mixing
-/// quadrature that [`cloglog_log_survival_gumbel_quadrature`] uses for `ln S`.
+/// quadrature that `cloglog_log_survival_gumbel_quadrature` uses for `ln S`.
 ///
 /// The whole point is WHICH factor carries the parameters. In
 ///
@@ -1340,7 +1340,7 @@ pub fn cloglog_log_survival_uses_gumbel_quadrature(mu: f64, sigma: f64) -> bool 
 /// Returns `(ln|·|, sign)` with `(−∞, 0)` for an exact zero, so the magnitude
 /// survives value-space underflow exactly as the `ln S` path does (#798).
 /// `order` must be at least 1; order 0 is `ln S` itself, which
-/// [`cloglog_log_survival_gumbel_quadrature`] already returns.
+/// `cloglog_log_survival_gumbel_quadrature` already returns.
 pub fn cloglog_log_survival_mu_derivative_gumbel_quadrature(
     ctx: &QuadratureContext,
     mu: f64,
@@ -1865,7 +1865,7 @@ pub(crate) fn lognormal_laplace_unit_term_shared(
     cloglog_survival_term_controlled(ctx, shifted_mu, sigma)
 }
 
-/// Log-space twin of [`lognormal_laplace_unit_term_shared`]: returns
+/// Log-space twin of `lognormal_laplace_unit_term_shared`: returns
 /// `ln L(1; shifted_mu, σ) = ln S(shifted_mu, σ)`. Used by the lognormal kernel
 /// bundle so kernel log-magnitudes survive value-space underflow (#798).
 #[inline]

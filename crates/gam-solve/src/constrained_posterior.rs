@@ -967,7 +967,7 @@ impl OrthantNodeSink for JointCubatureAccumulator {
 /// callers add that deterministic shift to both returned endpoints.
 ///
 /// The interval comes from the quantiles of the convolution
-/// [`decompose_projection`] produces, not from `posterior_mean ± z·posterior_sd`.
+/// `decompose_projection` produces, not from `posterior_mean ± z·posterior_sd`.
 pub fn constrained_projection_equal_tailed_interval(
     ambient_covariance: &Array2<f64>,
     geometry: &ConstrainedPosteriorGeometry,

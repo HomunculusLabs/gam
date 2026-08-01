@@ -65,7 +65,7 @@ pub struct ExactNewtonJointGradientEvaluation {
 ///           - 0.5 * trace_s_pinv_sdot[j]
 /// ```
 ///
-/// matching the three-term convention in [`outer_gradient_entry`] (penalty +
+/// matching the three-term convention in `outer_gradient_entry` (penalty +
 /// trace − det).
 pub struct BatchedOuterHessianTerms {
     /// Exact profiled outer Hessian over θ = (ρ, ψ), assembled or exposed in
@@ -220,7 +220,7 @@ pub trait CustomFamily {
 
     /// Options-aware log-likelihood evaluation for line search.
     ///
-    /// Default forwards to [`log_likelihood_only`] and ignores `_options`.
+    /// Default forwards to `log_likelihood_only` and ignores `_options`.
     /// Families that consult `options.outer_score_subsample` (or other
     /// per-call options that affect the LL value) must override this so the
     /// joint-Newton line search and the post-accept gradient reload agree
@@ -269,7 +269,7 @@ pub trait CustomFamily {
 
     /// Whether the joint likelihood Hessian H_L depends on β.
     ///
-    /// When `true`, the unified evaluator includes M_j[u] = D_β B_j[u]
+    /// When `true`, the unified evaluator includes M_j\[u\] = D_β B_j\[u\]
     /// moving-design drift correction for ψ coordinates and marks
     /// `HyperCoord::b_depends_on_beta = true`.
     ///
@@ -343,7 +343,7 @@ pub trait CustomFamily {
     /// Families whose row likelihood couples all blocks (every row contributes
     /// a rank-`m` outer-product update to the full joint Hessian over
     /// `Σ p_b` coefficients) **must** override and delegate to
-    /// [`joint_coupled_coefficient_hessian_cost`] (or the equivalent factored
+    /// `joint_coupled_coefficient_hessian_cost` (or the equivalent factored
     /// form for tensor designs), otherwise the default undercounts the
     /// cross-block outer-product terms `2·Σ_{a<b} n·p_a·p_b`.
     ///
@@ -352,7 +352,7 @@ pub trait CustomFamily {
     /// * **Block-diagonal** (default OK): `LatentBinaryFamily` collects
     ///   separate `hess_time` and `hess_mean` per row, never forming an
     ///   off-diagonal contribution.
-    /// * **Joint-coupled** (override via [`joint_coupled_coefficient_hessian_cost`]):
+    /// * **Joint-coupled** (override via `joint_coupled_coefficient_hessian_cost`):
     ///   GAMLSS location-scale, GAMLSS wiggle variants, marginal-slope families
     ///   (Bernoulli, Survival), `LatentSurvivalFamily`,
     ///   `SurvivalLocationScaleFamily` — every row contributes to the full
@@ -377,7 +377,7 @@ pub trait CustomFamily {
     /// first-order optimizer.
     ///
     /// The default returns `coefficient_hessian_cost / 2` (see
-    /// [`default_coefficient_gradient_cost`]). Families whose gradient
+    /// `default_coefficient_gradient_cost`). Families whose gradient
     /// assembly differs structurally should override; in particular,
     /// joint-coupled families that override `coefficient_hessian_cost` to
     /// `joint_coupled_coefficient_hessian_cost(n, specs)` automatically
@@ -535,7 +535,7 @@ pub trait CustomFamily {
     ///
     /// Returning `Some(channels)` — a vector of length `specs.len()` giving the
     /// zero-based output channel each block drives — lets `fit_custom_family`
-    /// install the appropriate [`AdditiveBlockJacobian`] on any block that
+    /// install the appropriate `AdditiveBlockJacobian` on any block that
     /// lacks an explicit callback, so the audit routes channel-aware
     /// automatically. The total channel count is `channels.iter().max() + 1`.
     ///
@@ -591,14 +591,14 @@ pub trait CustomFamily {
     ///
     /// the directional derivative along `d_beta` is
     ///
-    ///   D eta[d_beta] = X d_beta + (D X[d_beta]) beta + D o[d_beta].
+    ///   D eta\[d_beta\] = X d_beta + (D X\[d_beta\]) beta + D o\[d_beta\].
     ///
     /// For diagonal working-set REML derivatives this contributes to both:
     ///
-    ///   D H[d_beta]
-    ///   = (D X[d_beta])^T W X
-    ///   + X^T W (D X[d_beta])
-    ///   + X^T diag(D w[D eta[d_beta]]) X,
+    ///   D H\[d_beta\]
+    ///   = (D X\[d_beta\])^T W X
+    ///   + X^T W (D X\[d_beta\])
+    ///   + X^T diag(D w[D eta\[d_beta\]]) X,
     ///
     /// and to the predictor drift fed into the weight directional derivative.
     ///
@@ -1113,8 +1113,8 @@ pub trait CustomFamily {
     /// matrix-free Hv operator — using its own directional θθ kernels and
     /// trace algebra rather than the generic per-pair enumeration — it
     /// overrides this method and returns `Some(op)`.  The unified REML/LAML
-    /// evaluator wires the operator into [`HessianValue::Operator`] via
-    /// the [`HessianDerivativeProvider::family_outer_hessian_operator`] hook
+    /// evaluator wires the operator into `HessianValue::Operator` via
+    /// the `HessianDerivativeProvider::family_outer_hessian_operator` hook
     /// the family installs on its provider; consumers see a generic
     /// `Arc<dyn HessianOperator>` (`apply_into`, `apply_mat`, `dim`, and the
     /// explicit materialization work model).
@@ -1168,17 +1168,17 @@ pub trait CustomFamily {
     ///
     ///   dJ/dtheta_i
     ///   = 0.5 beta^T A_k beta
-    ///     + 0.5 tr(H^{-1}(A_k + D_beta H_L[u_k]))
+    ///     + 0.5 tr(H^{-1}(A_k + D_beta H_L\[u_k\]))
     ///     - 0.5 tr(S^+ A_k),
     ///
     /// and when psi moves realized penalties the same spec-aware hook must be
-    /// able to reconstruct H(beta, theta), D_beta H[u], and D_beta^2 H[u, v]
+    /// able to reconstruct H(beta, theta), D_beta H\[u\], and D_beta^2 H[u, v]
     /// from the current realized specs so the generic joint assembler can form
     ///
-    ///   dot H_i  = H_i + D_beta H[beta_i],
+    ///   dot H_i  = H_i + D_beta H\[beta_i\],
     ///   ddot H_ij
-    ///   = H_ij + T_i[beta_j] + T_j[beta_i]
-    ///     + D_beta H[beta_ij] + D_beta^2 H[beta_i, beta_j].
+    ///   = H_ij + T_i\[beta_j\] + T_j\[beta_i\]
+    ///     + D_beta H\[beta_ij\] + D_beta^2 H[beta_i, beta_j].
     ///
     /// Families such as binomial location-scale with
     ///
@@ -1397,7 +1397,7 @@ pub trait CustomFamily {
     /// blocks make the multinomial fit invariant to the arbitrary reference class
     /// (gam#1587; the multinomial analogue of the ALR-reference sibling #1549).
     ///
-    /// A family returns one [`JointPenaltySpec`] per smoothing coordinate it wants
+    /// A family returns one `JointPenaltySpec` per smoothing coordinate it wants
     /// selected jointly. Each spec carries a dense PSD `raw_total × raw_total`
     /// quadratic form, an `initial_log_lambda`, a structural `nullspace_dim`, and
     /// an optional precision `label` (specs sharing a label tie to one outer ρ).
@@ -1847,14 +1847,14 @@ pub trait CustomFamily {
     /// `exact_newton_joint_hessian_directional_derivative`. It returns the
     /// exact joint likelihood-curvature drift
     ///
-    ///   D_beta H_L[u],
+    ///   D_beta H_L\[u\],
     ///
     /// for a flattened coefficient-space direction `u`. In the profiled
     /// Laplace gradient this appears after solving the exact joint mode
     /// response
     ///
     ///   H u_k = -A_k beta,
-    ///   dot H_k = A_k + D_beta H_L[u_k].
+    ///   dot H_k = A_k + D_beta H_L\[u_k\].
     ///
     /// Families that can reconstruct the exact joint geometry from `specs`
     /// should override this alongside
@@ -1905,12 +1905,12 @@ pub trait CustomFamily {
     ///
     /// which combines with
     ///
-    ///   dot H_k = A_k + D_beta H_L[u_k]
+    ///   dot H_k = A_k + D_beta H_L\[u_k\]
     ///
     /// and the second mode response
     ///
     ///   H u_{k,l}
-    ///   = -(A_k u_l + A_l u_k + B_{k,l} beta + D_beta H_L[u_l] u_k)
+    ///   = -(A_k u_l + A_l u_k + B_{k,l} beta + D_beta H_L\[u_l\] u_k)
     ///
     /// to form
     ///
@@ -2012,7 +2012,7 @@ pub trait CustomFamily {
     ///
     /// This callback supplies the `dw` term in
     ///
-    ///   D_beta J[u] = X^T diag(dw) X
+    ///   D_beta J\[u\] = X^T diag(dw) X
     ///
     /// for diagonal working-set blocks with
     ///
@@ -2086,7 +2086,7 @@ pub trait CustomFamily {
     ///
     /// forms
     ///
-    ///   dot H_i = H_i + D_beta H[beta_i],
+    ///   dot H_i = H_i + D_beta H\[beta_i\],
     ///
     /// and plugs those objects into the unified profiled/Laplace gradient
     ///
@@ -2205,19 +2205,19 @@ pub trait CustomFamily {
         false
     }
 
-    /// Optional mixed beta/psi Hessian drift D_beta H_psi[u].
+    /// Optional mixed beta/psi Hessian drift D_beta H_psi\[u\].
     ///
-    /// This is the missing T_i[u] object in the full exact joint profiled
+    /// This is the missing T_i\[u\] object in the full exact joint profiled
     /// Hessian:
     ///
     ///   ddot H_{ij}
     ///   = H_{ij}
-    ///     + D_beta H_i[beta_j]
-    ///     + D_beta H_j[beta_i]
+    ///     + D_beta H_i\[beta_j\]
+    ///     + D_beta H_j\[beta_i\]
     ///     + D_beta H[beta_{ij}]
     ///     + D_beta^2 H[beta_i, beta_j].
     ///
-    /// For i = psi_a this hook supplies D_beta H_{psi_a}[u].
+    /// For i = psi_a this hook supplies D_beta H_{psi_a}\[u\].
     ///
     /// This direct hook is dense-only. Families that can keep the drift in an
     /// operator-backed or block-local form should expose it through

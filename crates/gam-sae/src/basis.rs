@@ -9,7 +9,7 @@ pub trait SaeBasisEvaluator: Send + Sync + std::fmt::Debug {
     /// [`Self::evaluate`] performs on every call.
     ///
     /// The inner Newton loop re-evaluates each atom's basis on every
-    /// line-search trial ([`crate::manifold::atom::SaeManifoldAtom::refresh_basis`]);
+    /// line-search trial (`crate::manifold::atom::SaeManifoldAtom::refresh_basis`);
     /// there the term already owns correctly-shaped Φ / jet arrays, so reusing
     /// them removes the per-trial allocation churn (multiple trials per Newton
     /// iteration under LM / backtracking). `phi` must be shaped
@@ -172,7 +172,7 @@ pub trait SaeBasisEvaluator: Send + Sync + std::fmt::Debug {
 /// chart's `[x, y, z]`). The `eta = 0` endpoint is thus the base-topology
 /// relaxation, not an affine/Eckart-Young linear model. The genuine
 /// low-rank (Eckart-Young / PCA) certificate lives in
-/// [`crate::manifold::outer_objective::linear_span_anchor`] and is a rank
+/// `crate::manifold::outer_objective::linear_span_anchor` and is a rank
 /// ceiling that bounds every `eta`, independent of this split.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhiEtaSplit {

@@ -1399,7 +1399,7 @@ pub struct PredictPosteriorMeanResult {
     /// For heteroscedastic location-scale / dispersion predictors `Var(Y|μ)` is
     /// the *per-row* noise from [`PredictionTransform::observation_noise`]; for
     /// single-dispersion families it is the fit-level scalar built via
-    /// [`family_observation_band`].
+    /// `family_observation_band`.
     pub observation_lower: Option<Array1<f64>>,
     /// Response-scale observation (prediction) interval upper bound; companion of
     /// [`PredictPosteriorMeanResult::observation_lower`].
@@ -1651,7 +1651,7 @@ pub struct PredictUncertaintyOptions {
     /// broadcast to every row — the analytic sibling of the generative
     /// `sigma_i = σ̂/√(w_i)` scaling (#2025). These are resolved from the
     /// PREDICTION frame's weight column (the same column / unit-weight default
-    /// `sample_replicates` uses) and threaded into [`family_observation_band`].
+    /// `sample_replicates` uses) and threaded into `family_observation_band`.
     /// `None` (the default) or unit weights leave unweighted fits byte-identical.
     /// Only the Gaussian observation band consumes this; every other family
     /// encodes dispersion through its own precision parameter.

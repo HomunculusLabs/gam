@@ -109,7 +109,7 @@ pub struct IsaSeedConfig {
     /// global basin on the equal-amplitude worst case (#2111).
     pub n_inits: usize,
     /// Safety bound on cyclic Jacobi sweeps; convergence is the
-    /// [`ISA_SWEEP_RTOL`] relative-improvement stop, this only caps a
+    /// `ISA_SWEEP_RTOL` relative-improvement stop, this only caps a
     /// pathological cycle (mirrors the `max_births` bound-not-stop pattern).
     pub max_sweeps: usize,
 }

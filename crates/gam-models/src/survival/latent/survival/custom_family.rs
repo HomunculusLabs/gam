@@ -67,7 +67,7 @@ impl CustomFamily for LatentSurvivalFamily {
 
     /// Engage the inner self-vanishing Levenberg–Marquardt μ on a full-rank but
     /// indefinite / ill-conditioned penalized joint Hessian, mirroring the
-    /// sibling [`SurvivalMarginalSlopeFamily`]. Interval-censored rows contribute
+    /// sibling `SurvivalMarginalSlopeFamily`. Interval-censored rows contribute
     /// `ℓ = log[S(L) − S(R)]`, the log of a DIFFERENCE of two survival kernels:
     /// unlike the log-concave exact-event / right-censored contributions, its
     /// per-row Hessian is legitimately INDEFINITE away from the optimum, so the

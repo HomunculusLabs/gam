@@ -245,7 +245,7 @@ pub struct MeasureJetBasisSpec {
     /// Center/knot selection strategy (deterministic; quadrature of μ).
     pub center_strategy: CenterStrategy,
     /// Continuous smoothness order `s ∈ (0, 2)`; `0.0` sentinel = auto
-    /// ([`MEASURE_JET_DEFAULT_ORDER_S`]).
+    /// (`MEASURE_JET_DEFAULT_ORDER_S`).
     pub order_s: f64,
     /// Density-normalization exponent α (outer weight `q^{1−2α}`).
     pub alpha: f64,
@@ -256,7 +256,7 @@ pub struct MeasureJetBasisSpec {
     /// Number of scale nodes; `0` sentinel = auto dyadic band.
     pub num_scales: usize,
     /// Representer (Gaussian RBF) range ℓ; `0.0` sentinel = auto
-    /// (median nearest-center spacing × [`MEASURE_JET_AUTO_LENGTH_SCALE_FACTOR`]).
+    /// (median nearest-center spacing × `MEASURE_JET_AUTO_LENGTH_SCALE_FACTOR`).
     pub length_scale: f64,
     /// Add a separate function-space affine/null-component penalty alongside
     /// the jet-energy penalty. Its strength is independently REML-selected.
@@ -962,7 +962,7 @@ where
 /// ```
 ///
 /// with `G⁺` realized through the symmetric eigendecomposition and a
-/// machine-precision rank cutoff. One walk of [`assemble_weighted_forms`]
+/// machine-precision rank cutoff. One walk of `assemble_weighted_forms`
 /// with the unit weight.
 pub fn measure_jet_energy_form(
     centers: ArrayView2<'_, f64>,
@@ -1363,7 +1363,7 @@ fn measure_jet_design_log_length_jets(
 /// coordinate columns (the mass-weighted mean is the intercept's, not the
 /// head's) makes the rank test measure the genuine spread of the centers along
 /// each direction rather than its offset; the relative floor
-/// [`MEASURE_JET_PSEUDOINVERSE_RTOL`] is the module's own numerical rank
+/// `MEASURE_JET_PSEUDOINVERSE_RTOL` is the module's own numerical rank
 /// tolerance (the same one the local Gram pseudo-inverses use). The returned
 /// `T` satisfies `head(points) = points · T` (the mean-centering only informs
 /// the keep/drop decision; the constant component of `points · T` is removed

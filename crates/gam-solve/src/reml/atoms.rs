@@ -43,7 +43,7 @@
 //! dA/dθ" just relocates the desync into each atom's private chain rule.
 //! The discipline here is different — **atoms emit FROZEN partials only**:
 //!
-//! - `frozen_d1(dir)`  = ∂A/∂θ[dir] at FIXED inner state (β̂, W, H frozen);
+//! - `frozen_d1(dir)`  = ∂A/∂θ\[dir\] at FIXED inner state (β̂, W, H frozen);
 //! - `beta_channel()`  = the atom's exact ∂A/∂β̂ data (a gradient vector
 //!   and, for second order, the bilinear forms it needs);
 //!
@@ -332,7 +332,7 @@ pub trait CriterionAtom {
     fn name(&self) -> &'static str;
     /// The term's value at the current (θ, β̂) state.
     fn value(&self) -> f64;
-    /// Frozen partial ∂A/∂θ[dir] at fixed inner state.
+    /// Frozen partial ∂A/∂θ\[dir\] at fixed inner state.
     fn frozen_d1(&self, dir: &ThetaDirection) -> f64;
     // NOTE: the directional SECOND derivative (#740) is intentionally NOT a
     // method on this trait yet. Until an atom actually computes it from its
@@ -411,7 +411,7 @@ impl CriterionSum {
 /// IFT solve share an inverse by construction.
 ///
 /// - `value`      = Σ_{σ>thr} log σ (already the production value);
-/// - `frozen_d1`  = ½ tr(H⁺ · Ḣ_frozen[dir]) via the spectral kernel —
+/// - `frozen_d1`  = ½ tr(H⁺ · Ḣ_frozen\[dir\]) via the spectral kernel —
 ///   exact on the constant-rank stratum for ANY drift, moving-subspace ψ
 ///   included (first-order eigenvector motion cancels);
 /// - `beta_channel` = NONE — by design. The β̂-motion of H enters through
@@ -1165,7 +1165,7 @@ impl ThetaCorrectionProjection for TierneyKadaneAtom {
 /// correction emitted as one value + derivative bundle.
 ///
 /// The #784 sampler still owns the hard math that produces
-/// [`TkCorrectionTerms`](super::outer_eval::TkCorrectionTerms).
+/// `TkCorrectionTerms`.
 /// This atom owns the assembly-side invariant: once such a correction exists,
 /// cost, gradient, and Hessian are projected from one object, so the caller
 /// cannot add the scalar value while forgetting or shape-shifting its analytic

@@ -589,7 +589,7 @@ impl SmoothBasisSpec {
         )
     }
 
-    /// Feature columns this basis consumes, used alongside [`structural_kind`]
+    /// Feature columns this basis consumes, used alongside `structural_kind`
     /// to disambiguate two same-kind smooths on different axes. Wrapper
     /// variants delegate to their inner basis.
     pub fn structural_feature_cols(&self) -> Vec<usize> {
@@ -4423,7 +4423,7 @@ pub fn response_aware_axis_contrasts(
 /// of the existing geometry seed, so the optimizer starts in the correct basin
 /// instead of at a response-blind near-symmetric point (the #1376 under-recovery
 /// where a signal axis and a nuisance axis with equal coordinate spread seed to
-/// ~[0,0]). The nudge is clamped to keep this a perturbation, never a hard
+/// ~\[0,0\]). The nudge is clamped to keep this a perturbation, never a hard
 /// override, so shared aniso Matérn/Duchon fits cannot be destabilized by it.
 pub fn apply_response_aware_anisotropy_seed(
     data: ArrayView2<'_, f64>,
@@ -4692,7 +4692,7 @@ impl SpatialLengthScaleOptimizationOptions {
 #[derive(Debug, Clone)]
 pub struct RandomEffectBlock {
     pub name: String,
-    /// O(n) group-label vector: group_ids[i] = column index in [0, num_groups).
+    /// O(n) group-label vector: group_ids\[i\] = column index in [0, num_groups).
     /// `None` if the observation's level is not in the kept set.
     pub group_ids: Vec<Option<usize>>,
     pub num_groups: usize,

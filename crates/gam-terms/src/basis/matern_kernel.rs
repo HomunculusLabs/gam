@@ -431,7 +431,7 @@ pub fn build_thin_plate_basiswithworkspace(
 /// from FROZEN basis geometry — no data rows touched (#1033, n-free per-ψ
 /// penalty re-key). Mirrors the cold penalty assembly in
 /// `build_thin_plate_basiswithworkspace` (the bending + optional ridge built by
-/// [`build_thin_plate_penalty_matrices`], normalized, gauge-restricted through
+/// `build_thin_plate_penalty_matrices`, normalized, gauge-restricted through
 /// the frozen identifiability transform, then filtered), but every input is the
 /// already-frozen `BasisMetadata::ThinPlate` (centers, identifiability
 /// transform); only `length_scale` moves.

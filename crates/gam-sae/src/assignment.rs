@@ -469,7 +469,7 @@ pub struct SaeAssignment {
     /// #1777 PER-FIT ordered Beta--Bernoulli-α override. `Some(α)` forces a fixed value and bypasses
     /// the learnable schedule for this assignment/fit. `None` uses the
     /// [`AssignmentMode`]'s canonical fixed `α` or learnable schedule. Read via
-    /// [`Self::resolved_ordered_beta_bernoulli_alpha`]; set from the FFI through the term's
+    /// `Self::resolved_ordered_beta_bernoulli_alpha`; set from the FFI through the term's
     /// `set_fit_config`.
     pub ordered_beta_bernoulli_alpha_override: Option<f64>,
 }
@@ -834,7 +834,7 @@ impl SaeAssignment {
     }
 
     /// #1777 — install (or clear, with `None`) the PER-FIT ordered Beta--Bernoulli-α override on this
-    /// assignment. Source of truth used by [`Self::resolved_ordered_beta_bernoulli_alpha`]; the FFI
+    /// assignment. Source of truth used by `Self::resolved_ordered_beta_bernoulli_alpha`; the FFI
     /// reaches it through the term's `set_fit_config`.
     pub fn set_ordered_beta_bernoulli_alpha_override(&mut self, alpha: Option<f64>) {
         self.ordered_beta_bernoulli_alpha_override = alpha;

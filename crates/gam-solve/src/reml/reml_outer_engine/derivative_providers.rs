@@ -128,7 +128,7 @@ pub trait HessianDerivativeProvider: Send + Sync {
     /// Raw ingredients for the adjoint trace optimization.
     ///
     /// When available, the evaluator can use these to compute
-    /// tr(H⁻¹ C[u]) = uᵀ z_c  (O(p) dot product instead of O(p²) solve)
+    /// tr(H⁻¹ C\[u\]) = uᵀ z_c  (O(p) dot product instead of O(p²) solve)
     /// and fourth-derivative traces directly, without the trait having to
     /// implement the optimization algorithm.
     ///
@@ -155,8 +155,8 @@ pub trait HessianDerivativeProvider: Send + Sync {
     /// matrix-free Hv operator without enumerating θ_iθ_j pairs, it returns
     /// `Some(op)` here.  The unified evaluator then short-circuits the
     /// kernel-based assembly path at
-    /// [`reml_laml_evaluate`] and routes the result
-    /// straight into [`HessianValue::Operator`].
+    /// `reml_laml_evaluate` and routes the result
+    /// straight into `HessianValue::Operator`.
     ///
     /// Default returns `None`, in which case the evaluator falls through to
     /// the existing `outer_hessian_derivative_kernel` / `compute_outer_hessian`
@@ -170,7 +170,7 @@ pub trait HessianDerivativeProvider: Send + Sync {
 /// Raw ingredients for the adjoint trace optimization in scalar GLMs.
 ///
 /// For single-predictor GLMs, the third-derivative correction is
-///   C[u] = Xᵀ diag(c ⊙ Xu) X
+///   C\[u\] = Xᵀ diag(c ⊙ Xu) X
 /// and the fourth-derivative correction is
 ///   Q[vₖ, vₗ] = Xᵀ diag(d ⊙ (Xvₖ)(Xvₗ)) X
 ///
@@ -399,7 +399,7 @@ impl HessianDerivativeProvider for SinglePredictorGlmDerivatives {
 /// Firth-aware GLM derivative provider.
 ///
 /// Wraps the base GLM corrections with Firth/Jeffreys Hφ corrections:
-///   H_k = A_k + base_correction(v_k) − D(Hφ)[B_k]
+///   H_k = A_k + base_correction(v_k) − D(Hφ)\[B_k\]
 ///   H_{kl} = base_second(v_k, v_l, u_kl) − D(Hφ)[B_{kl}] − D²(Hφ)[B_k, B_l]
 ///
 /// where B_k = −v_k (mode response) and the Firth operators use δη = X·B_k.
@@ -842,7 +842,7 @@ impl BarrierConfig {
 
 /// Barrier-aware Hessian derivative provider wrapping an inner provider.
 ///
-/// Adds C_bar[u] = −2τ·diag(u ⊙ d^(3)) and Q_bar[u,v] = 6τ·diag(u ⊙ v ⊙ d^(4)).
+/// Adds C_bar\[u\] = −2τ·diag(u ⊙ d^(3)) and Q_bar\[u,v\] = 6τ·diag(u ⊙ v ⊙ d^(4)).
 pub struct BarrierDerivativeProvider<'a> {
     pub(crate) inner: &'a dyn HessianDerivativeProvider,
     pub(crate) tau: f64,

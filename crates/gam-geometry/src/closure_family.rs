@@ -24,7 +24,7 @@
 //!   columns become an interval (polynomial) basis.
 //!
 //! This is the **support-moving** version. The cheap MVP, implemented in
-//! [`crate::terms::basis::cyclic`] as a boundary-conductance penalty, is the
+//! `gam_terms::basis::cyclic` as a boundary-conductance penalty, is the
 //! penalty-moving version `S(γ) = S_open + c(γ)·S_wrap` with `c(0)=0, c(1)=1`.
 //!
 //! ## Why this is the #944 pattern
@@ -239,7 +239,7 @@ impl ClosureFamily {
     /// harmonic are store-bound and do not vectorise); the multiple widens on
     /// 4-wide-`f64` AVX2 hosts where a `f64x4` lane is a single instruction.
     /// Each lane is IEEE-`f64`, so the result is **bit-identical** to the scalar
-    /// [`Self::write_row_value`] row-by-row (asserted by
+    /// `Self::write_row_value` row-by-row (asserted by
     /// `simd_design_is_bit_identical_to_scalar_rows`).
     pub fn design(&self, s: ArrayView1<'_, f64>, gamma: f64) -> Array2<f64> {
         let n = s.len();
@@ -288,7 +288,7 @@ impl ClosureFamily {
     /// Assemble the raw design and its first/second γ-derivative matrices in one
     /// pass: `(Φ, ∂Φ/∂γ, ∂²Φ/∂γ²)`, each n × raw_dim. Four rows per pass via
     /// `wide::f64x4` (see [`Self::design`]); bit-identical to scalar
-    /// [`Self::write_row_jet`] row-by-row.
+    /// `Self::write_row_jet` row-by-row.
     pub fn design_jet(
         &self,
         s: ArrayView1<'_, f64>,

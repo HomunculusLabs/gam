@@ -384,7 +384,7 @@ pub struct CanonicalSpecs {
 /// `effective_jacobian_at(beta=0)` and check whether the returned
 /// matrix has `nrows > n` (i.e. `nrows == n * k` for some `k > 1`).
 /// If any block satisfies this, all blocks are treated as multi-channel
-/// and [`BlockJacobianAsRowOp`] adapters are built from each spec's
+/// and `BlockJacobianAsRowOp` adapters are built from each spec's
 /// callback to feed the channel-aware audit.
 ///
 /// For specs without a `jacobian_callback`, the flat design with a

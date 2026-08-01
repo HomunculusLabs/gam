@@ -1357,7 +1357,7 @@ fn reconstruction_rss_from_parts(
 ///
 /// Reconstructs the shared-ρ code Gram `A = CᵀC` from the fit's
 /// stored routing and computes the matrix-free effective dof
-/// `γ = tr(A(A+ρI)⁻¹)` ([`hutchinson_gram_edof`]) together with the reconstruction
+/// `γ = tr(A(A+ρI)⁻¹)` (`hutchinson_gram_edof`) together with the reconstruction
 /// `RSS` and the decoder penalty energy `‖D‖²_F` — exactly the aggregates
 /// [`linear_shared_rho_fs_step`] consumes. Matrix-free throughout (no dense
 /// `K×K`, no `K×P` right-hand side), so it holds at `K ≈ 32k`.
@@ -2354,7 +2354,7 @@ pub struct DecoderSolveStats {
     /// This is the width that decides whether the refresh is running the BLOCK
     /// recurrence #1017 landed or the per-column one it replaced: the tile is
     /// what the operator traversal and the three inner products are amortized
-    /// over, and it is not a constant — [`solve_component`] derives it from what
+    /// over, and it is not a constant — `solve_component` derives it from what
     /// the recycled history left of the `K×P` envelope. A refresh whose tile has
     /// collapsed toward 1 pays the per-column price with the block solve's name
     /// on it, which is invisible on every other field of this struct

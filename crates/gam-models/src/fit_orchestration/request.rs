@@ -423,7 +423,7 @@ pub struct CtnStage1Recipe {
     /// Stage-1 response column name (the `y` the CTN transforms).
     pub response_column: String,
     /// Stage-1 covariate-side formula right-hand side (e.g. `"s(pc1) + s(pc2)"`),
-    /// with no `~` and no response symbol. [`crossfit_score_calibration`] parses
+    /// with no `~` and no response symbol. `crossfit_score_calibration` parses
     /// it and builds the CTN covariate basis exactly as
     /// `materialize_transformation_normal` does, then FREEZES that basis once on
     /// the full data and reuses the frozen spec for every fold's refit — so the

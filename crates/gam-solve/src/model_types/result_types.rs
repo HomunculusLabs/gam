@@ -884,8 +884,8 @@ impl OuterStationarityCertificate {
 /// cross-checks live only in focused tests). The certificate answers,
 /// machine-checkably, the three questions every non-termination postmortem
 /// asks: does the KKT-projected analytic stationarity equation vanish HERE
-/// ([`Self::is_stationary`]); is the outer curvature admissible for a minimum
-/// HERE ([`Self::curvature_admissible`]); did any smoothing coordinate rail
+/// (`Self::is_stationary`); is the outer curvature admissible for a minimum
+/// HERE (`Self::curvature_admissible`); did any smoothing coordinate rail
 /// to a box bound (`lambdas_railed`). A failed certificate REJECTS the fit as
 /// typed non-convergence in `run_outer`; it is never a warn-and-continue
 /// diagnostic.
@@ -997,7 +997,7 @@ impl std::fmt::Display for CertifiedRung {
 /// What curvature evidence a certificate actually has (#2561).
 ///
 /// This was `Option<bool>`, and its `None` carried FOUR structurally different
-/// meanings that [`OuterCriterionCertificate::curvature_admissible`] accepted
+/// meanings that `OuterCriterionCertificate::curvature_admissible` accepted
 /// alike:
 ///
 /// 1. a multi-start screening pass deliberately declined to spend the
@@ -1145,7 +1145,7 @@ pub struct OuterCriterionCertificate {
     #[serde(rename = "hessian_psd")]
     pub curvature: CurvatureEvidence,
     /// Leading smoothing coordinates (ρ block) pinned within
-    /// [`CERTIFICATE_RAIL_MARGIN`] of either box bound at the optimum.
+    /// `CERTIFICATE_RAIL_MARGIN` of either box bound at the optimum.
     pub lambdas_railed: Vec<usize>,
     /// The interval and margin each railed coordinate was judged against
     /// (#2530). Empty when nothing is railed. `#[serde(default)]` so a
@@ -1191,10 +1191,10 @@ impl OuterCriterionCertificate {
     /// which reports `hessian=Unavailable`, every consultation answered `true`
     /// without inspecting anything.
     ///
-    /// Acceptance is unchanged. [`CurvatureAdmissibility::Unevaluated`] does
+    /// Acceptance is unchanged. `CurvatureAdmissibility::Unevaluated` does
     /// not refuse, exactly as `!= Some(false)` did not. The difference is that
     /// a caller wanting a genuine second-order guarantee can now ask for
-    /// [`CurvatureAdmissibility::Admissible`] and get one, instead of being
+    /// `CurvatureAdmissibility::Admissible` and get one, instead of being
     /// handed a `true` that means "nobody looked".
     pub fn curvature_verdict(&self) -> CurvatureAdmissibility {
         match self.curvature {
@@ -2534,7 +2534,7 @@ pub struct FitInference {
     /// exact active coefficient frame and therefore has dimension
     /// `geometry.coefficient_gauge.reduced_total()`. Without saved geometry it
     /// is in the saved/raw coefficient frame.
-    /// Stored as [`UnscaledPrecision`] so callers that need the φ-scaled
+    /// Stored as `UnscaledPrecision` so callers that need the φ-scaled
     /// covariance `Vb` know they must pair this with [`Self::dispersion`].
     /// `#[serde(transparent)]` on the newtype keeps the on-disk encoding
     /// identical to the pre-newtype `Array2<f64>` storage.
@@ -2737,7 +2737,7 @@ pub struct FitGeometry {
     /// Joint penalized Hessian `H = X'W_HX + S(λ)` at convergence, in the
     /// active coordinates of `coefficient_gauge` (dimension
     /// `coefficient_gauge.reduced_total()`).
-    /// Stored as [`UnscaledPrecision`] so the dispersion-ownership invariant
+    /// Stored as `UnscaledPrecision` so the dispersion-ownership invariant
     /// (this matrix is *not* φ-scaled) is enforced at the type level.
     pub penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision,
     /// Exact inequality-truncated posterior identity in the active coefficient
@@ -4210,7 +4210,7 @@ impl UnifiedFitResult {
     /// covariance representations bit-for-bit consistent.
     ///
     /// A GAM fit stores the conditional/corrected coefficient covariance in TWO
-    /// places that [`Self::validate`] requires to be *identical*: the top-level
+    /// places that `Self::validate` requires to be *identical*: the top-level
     /// `covariance_conditional` / `covariance_corrected` and the paired
     /// `inference.beta_covariance` / `beta_covariance_corrected`. Because
     /// `Vb = σ̂²·H⁻¹` (and `Vp` likewise) is linear in the dispersion, any
@@ -4606,7 +4606,7 @@ impl UnifiedFitResult {
     /// Boundary accessor: returns `&Array2<f64>` so out-of-scope consumers
     /// (CLI, GPU, families) keep their pre-newtype call shape. Use
     /// [`Self::penalized_hessian_unscaled`] when the caller wants the
-    /// [`UnscaledPrecision`] newtype to enforce the dispersion-ownership
+    /// `UnscaledPrecision` newtype to enforce the dispersion-ownership
     /// invariant.
     pub fn penalized_hessian(&self) -> Option<&Array2<f64>> {
         self.inference
@@ -4620,7 +4620,7 @@ impl UnifiedFitResult {
     }
 
     /// Get the active-coordinate penalized Hessian as the
-    /// [`UnscaledPrecision`] newtype if available. Use this when constructing
+    /// `UnscaledPrecision` newtype if available. Use this when constructing
     /// newtype-aware APIs (HMC whitening, sampling) so both the dispersion
     /// convention and the accompanying `geometry.coefficient_gauge` are
     /// handled explicitly.

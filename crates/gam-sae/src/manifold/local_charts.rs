@@ -238,7 +238,7 @@ impl LocalAtlasConfig {
     /// Principled defaults for `n` rows and chart dimension `d`: `⌈2√n⌉` centers,
     /// each grown to `⌈max(3, 2^d)·n/count⌉` (floored at `2(d+1)` so a chart's PCA
     /// and every overlap's Procrustes are over-determined), with
-    /// `min_overlap = d + 2`. See [`patch_size_overlap_multiplier`] for why the
+    /// `min_overlap = d + 2`. See `patch_size_overlap_multiplier` for why the
     /// overlap multiplier depends on `d`.
     #[must_use]
     pub fn balanced(n_points: usize, intrinsic_dim: usize) -> Self {
@@ -295,7 +295,7 @@ pub enum LocalChartError {
     /// The SVD backing a chart or a transition failed to converge.
     SvdFailure { center: usize, detail: String },
     /// Individually chartable centers were dropped (see [`LocalAtlas::rejected_centers`]),
-    /// but the certified charts that remain cover fewer than [`MIN_ATLAS_ROW_COVERAGE`]
+    /// but the certified charts that remain cover fewer than `MIN_ATLAS_ROW_COVERAGE`
     /// of the rows — the surviving sub-atlas describes only a minority of the sample,
     /// so the build refuses rather than returning a partial atlas.
     AtlasCoverageTooLow {

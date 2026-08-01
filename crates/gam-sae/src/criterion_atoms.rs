@@ -75,7 +75,7 @@
 //! makes any un-ported residue observable on every fit.
 //!
 //! The `JeffreysAtom` shape named above is REALIZED for the SAE decoder
-//! anti-collapse channel by [`super::manifold::penalties::BarrierComponent`]: the
+//! anti-collapse channel by `super::manifold::penalties::BarrierComponent`: the
 //! decoder Jeffreys prior `−½·log det F(B)` (the `√det F` prior), assembled per
 //! co-firing routed-support block with its value, gradient `−tr(F⁻¹ ∂F/∂B)`, and
 //! self-concordant curvature emitted from one factorization — the same

@@ -4587,7 +4587,7 @@ impl SaeSupportSparseTerm {
     }
 
     /// Select the accelerated parallel decoder update for this term's
-    /// fixed-point solves: `Some(passes)` runs [`Self::decoder_sweep_fista`]
+    /// fixed-point solves: `Some(passes)` runs `Self::decoder_sweep_fista`
     /// with that many majorized passes per cycle, `None` (the default) keeps
     /// the exact colour-class sweep. A typed knob on the term rather than an
     /// environment variable, so an A/B is two constructed terms, not two
@@ -4605,17 +4605,17 @@ impl SaeSupportSparseTerm {
         self.variable_priced_support = enabled;
     }
 
-    /// See [`Self::exact_affine_ranking`].
+    /// See `Self::exact_affine_ranking`.
     pub fn set_exact_affine_ranking(&mut self, enabled: bool) {
         self.exact_affine_ranking = enabled;
     }
 
-    /// See [`Self::grid_refinement`]. A value of zero is treated as one.
+    /// See `Self::grid_refinement`. A value of zero is treated as one.
     pub fn set_grid_refinement(&mut self, refinement: usize) {
         self.grid_refinement = refinement.max(1);
     }
 
-    /// See [`Self::admission_usage_amortized`]. No effect unless pricing is
+    /// See `Self::admission_usage_amortized`. No effect unless pricing is
     /// armed.
     pub fn set_admission_usage_amortization(&mut self, enabled: bool) {
         self.admission_usage_amortized = enabled;

@@ -81,7 +81,7 @@ const FARTHEST_POINT_SEED_MAX_OPS: u128 = 1_000_000_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TieredSeedPolicy {
     /// Pick by the farthest-point seed cost `N·P·G·b` against
-    /// [`FARTHEST_POINT_SEED_MAX_OPS`].
+    /// `FARTHEST_POINT_SEED_MAX_OPS`.
     #[default]
     Auto,
     /// Force the data-aware farthest-point seed regardless of `K`.
@@ -509,7 +509,7 @@ pub struct TieredFitReport {
     /// linear community for curved replacement, in bits, on its CODE cloud —
     /// the substrate where in-span curvature is visible after the linear tier
     /// reconstructs it exactly (the residual substrate is blind to that move by
-    /// construction; see [`crate::tiered::code_space`]).
+    /// construction; see `crate::tiered::code_space`).
     pub code_space: CodeSpacePromotionReport,
     /// Unified migration ledger of the adjudicated births / deaths / refusals.
     pub ledger: SaeMigrationLedger,
@@ -524,12 +524,12 @@ pub struct TieredFitReport {
 /// **Internal (in-crate) only.** The public tiered FFI/Python surface was deleted
 /// in unification Increment 4; this orchestrator is the in-Rust expression of the
 /// schedule for the risk-pin tests + `tiered_gpu_scale` example. Increment 5 moved
-/// its seed half into [`fit_linear_peel`], which the public support-sparse entry
+/// its seed half into `fit_linear_peel`, which the public support-sparse entry
 /// now runs too, so this function is a cadence over the same two phases and not a
 /// second implementation of them.
 ///
 /// The curved tier is fit on the Tier-1 residual through the canonical
-/// support-sparse engine ([`fit_tier2_support`] → [`run_sae_support_outer`]),
+/// support-sparse engine (`fit_tier2_support` → [`run_sae_support_outer`]),
 /// whose returned fit carries a certified inner fixed point and outer stationarity
 /// certificate. No principal-component reseeding occurs; the [`SaeMigrationLedger`]
 /// accounts for the curved births / deaths and pins `pc_reseed_events = 0`.

@@ -605,7 +605,7 @@ pub(crate) const EFFECTIVE_DF_FLOOR: f64 = 1.0;
 pub(crate) const EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION: f64 = 0.90;
 
 /// Uniform ρ = log λ over-smoothing ceiling for the custom-family outer box, on
-/// top of which each term's per-coordinate [`EFFECTIVE_DF_FLOOR`] bound is
+/// top of which each term's per-coordinate `EFFECTIVE_DF_FLOOR` bound is
 /// tightened. Two forces bracket it:
 ///
 ///  * FROM BELOW — legitimate REML optima. A smooth mean over a genuinely smooth

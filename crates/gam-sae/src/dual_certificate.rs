@@ -30,7 +30,7 @@
 //! polynomial is feasible — `sup_k |η_k| ≤ 1` — and *saturates* (`|η_k| = 1`)
 //! exactly on the active support. Feasibility gives (a) a measured global
 //! optimality certificate sitting beside the first-order LAML audit in
-//! [`crate::certificates`], and (b) a **threshold-free birth trigger**: any atom
+//! `crate::certificates`, and (b) a **threshold-free birth trigger**: any atom
 //! or location with `η > 1` strictly decreases the objective, so it is a
 //! principled residual-mining candidate. The threshold `1` is *derived* from
 //! convex duality (SPEC rule 19), not a tuned coherence knob — it is the exact

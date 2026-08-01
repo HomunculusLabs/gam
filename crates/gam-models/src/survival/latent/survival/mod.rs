@@ -4497,13 +4497,13 @@ impl LatentSurvivalFamily {
     ///   q_exit  = x_time_exit·β_time  + o_X(θ),
     ///   q̇_exit = x_time_deriv·β_time + o_D(θ),
     /// exactly the offset channel the transformation path carries through
-    /// [`WorkingModelSurvival::offset_channel_residuals`]. Because
+    /// `WorkingModelSurvival::offset_channel_residuals`. Because
     /// `∂q_ch/∂o_ch = 1`, the residual `∂NLL/∂o_ch_i` equals
     /// `−∂(log-likelihood)/∂q_ch_i`, and the per-row primary log-likelihood
     /// gradient over `(q_entry, q_exit, q̇_exit)` is precisely the
     /// `Q_ENTRY`/`Q_EXIT`/`QDOT_EXIT` components returned by
-    /// [`latent_survival_row_primary_gradient_hessian`]. Sampleweight-scaled to
-    /// match the [`OffsetChannelResiduals`] contract consumed by
+    /// `latent_survival_row_primary_gradient_hessian`. Sampleweight-scaled to
+    /// match the `OffsetChannelResiduals` contract consumed by
     /// `baseline_chain_rule_gradient`.
     ///
     /// At the converged (constrained) β̂ the envelope theorem makes this the
@@ -4512,7 +4512,7 @@ impl LatentSurvivalFamily {
     /// DOES carry its own baseline-θ offset `o_R(θ)` (the time basis evaluated at
     /// the bracket upper bound `R`), distinct from the exit offset at `L`, so its
     /// residual `−∂(log-likelihood)/∂q_right` is returned in the dedicated
-    /// [`OffsetChannelResiduals::right`] channel; it is exactly 0 on every
+    /// `OffsetChannelResiduals::right` channel; it is exactly 0 on every
     /// non-interval row (the `Q_RIGHT` primary channel is inert there) and the
     /// baseline-θ chain rule contracts it against the `age_right`-evaluated
     /// η-partial.
@@ -6164,7 +6164,7 @@ impl LatentBinaryFamily {
     /// primary gradient. The baseline θ enters only the additive entry/exit time
     /// offsets (`q̇_exit` is held at the constant deployment derivative `1`, so
     /// the derivative channel carries no baseline offset and its residual is 0).
-    /// Sampleweight-scaled to match the [`OffsetChannelResiduals`] contract.
+    /// Sampleweight-scaled to match the `OffsetChannelResiduals` contract.
     pub fn offset_channel_residuals(
         &self,
         block_states: &[ParameterBlockState],

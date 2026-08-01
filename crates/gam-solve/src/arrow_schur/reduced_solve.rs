@@ -1136,7 +1136,7 @@ pub(crate) const SCHUR_PROLOGUE_PARALLEL_K_MIN: usize = 512;
 ///
 /// The block `G_i = L_iᵀ Y_i` depends only on the assembled per-row blocks and
 /// the (already-computed, solve-stable) `H_tt` factor — NOT on the CG iterate
-/// `x`. The generic [`schur_matvec`] re-walks `apply_jbeta → apply_l →
+/// `x`. The generic `schur_matvec` re-walks `apply_jbeta → apply_l →
 /// solve(d×d) → apply_l_t → scatter` on every CG iteration; this object **stages
 /// the factors `(L_i, Y_i)` once per CG solve** (the "upload X once" residency
 /// mechanism, applied on CPU to the matvec rather than a dense factorization),
@@ -1678,11 +1678,11 @@ pub(crate) fn slq_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
 /// `log_det_tt = Σ_i Σ_axis 2·log Lᵢᵢ` from the Cholesky diagonals — the cheap
 /// `O(n·d³)` t-tier term), stages the SAE residency operator when the system
 /// carries `device_sae_pcg` full-`B` data, and estimates `log|S|` via
-/// [`slq_reduced_schur_log_det`] with NO dense `k×k` Schur formed at any point.
+/// `slq_reduced_schur_log_det` with NO dense `k×k` Schur formed at any point.
 ///
 /// Returns `(log_det_tt, log|S| SLQ estimate)`; the undamped joint evidence
 /// log-det the Laplace normaliser needs is their sum. Uses the identical
-/// [`factor_blocks_for_system`] the dense Direct evidence path uses (same gauge
+/// `factor_blocks_for_system` the dense Direct evidence path uses (same gauge
 /// deflation), so `log_det_tt` matches the dense convention exactly and only the
 /// `k×k` Schur term is replaced by its matrix-free SLQ estimate.
 pub fn matrix_free_arrow_evidence_log_det(
@@ -1947,7 +1947,7 @@ impl SurrogateLaneState {
 /// ONE shared factorization. The build-once companion to
 /// [`matrix_free_arrow_evidence_log_det`]:
 ///
-/// - `lane = None` runs the identical [`slq_reduced_schur_log_det`] path — a
+/// - `lane = None` runs the identical `slq_reduced_schur_log_det` path — a
 ///   bit-for-bit fallback so a caller that has not opted in is unchanged.
 /// - `lane = Some(state)` builds (or, when the reduced-Schur dimension is
 ///   unchanged, reuses) the frozen derived-rank [`RationalLogdetPlan`] and
@@ -2272,7 +2272,7 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
 }
 
 /// Power-iteration estimate of the largest eigenvalue `λ_max` of the SPD reduced
-/// Schur `S` through the matrix-free [`schur_matvec`] apply — the upper end of
+/// Schur `S` through the matrix-free `schur_matvec` apply — the upper end of
 /// the spectral bracket the #2080 rational log-det surrogate
 /// ([`RationalLogdetPlan`]) needs to size its bracket-centred DE quadrature.
 ///
@@ -2345,8 +2345,8 @@ pub fn reduced_schur_lambda_max<B: BatchedBlockSolver + Sync>(
 }
 
 /// Matrix-free reduced-Schur log-determinant `log|S|` via the #2080 fixed
-/// rational surrogate ([`RationalLogdetPlan`]) on the exact [`schur_matvec`]
-/// apply — the desync-safe companion to [`slq_reduced_schur_log_det`]. **The
+/// rational surrogate ([`RationalLogdetPlan`]) on the exact `schur_matvec`
+/// apply — the desync-safe companion to `slq_reduced_schur_log_det`. **The
 /// dense `k×k` `S` is NEVER formed.**
 ///
 /// Returns the built plan and its evaluation so the caller can (a) read
@@ -3091,7 +3091,7 @@ fn reduced_schur_cg_solve<B: BatchedBlockSolver + Sync>(
 }
 
 /// Matrix-free single-rhs reduced-Schur solve `S⁻¹ rhs` (`t = 0`) via CG on
-/// [`schur_matvec`], warm-started from `warm` (or cold). The base primitive for
+/// `schur_matvec`, warm-started from `warm` (or cold). The base primitive for
 /// the selected-inverse gradient channels whose `S⁻¹` argument is NOT the fixed
 /// probe family but a per-call probe-derived vector (e.g. `(H⁻¹)_tt`'s
 /// `H_βt(H_tt)⁻¹z` term in the ARD latent-block diagonal, and the per-row

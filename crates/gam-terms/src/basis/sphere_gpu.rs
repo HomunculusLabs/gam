@@ -144,11 +144,11 @@ impl DeviceS2KernelMatrix {
     ///   1. the device→host copy of the full `ld·cols·8 B` payload, and
     ///   2. the column-major→row-major transpose.
     /// On Linux the dtoh is staged through a *cacheable* pinned host buffer
-    /// (see [`PinnedF64`]) so the DMA runs at full PCIe bandwidth (~10 GB/s)
+    /// (see `PinnedF64`) so the DMA runs at full PCIe bandwidth (~10 GB/s)
     /// instead of the ~1.3 GB/s the driver achieves staging a pageable
     /// destination, and the subsequent host reads during the transpose hit
     /// L1/L2 normally (unlike write-combined pinned memory). The transpose
-    /// itself is the parallel cache-blocked [`col_major_to_row_major_parallel`].
+    /// itself is the parallel cache-blocked `col_major_to_row_major_parallel`.
     #[cfg(target_os = "linux")]
     pub fn to_host_array(&self) -> Result<Array2<f64>, GpuError> {
         let needed = self.ld * self.cols;

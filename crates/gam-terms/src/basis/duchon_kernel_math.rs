@@ -588,7 +588,7 @@ pub(crate) const RADIAL_PROFILE_MIN_PAIRS: usize = 16_384;
 /// The one m→order mapping: `m` is the spline ORDER knob (mgcv's `m`), and it
 /// selects the polynomial null space the smoother leaves unpenalized
 /// (1 → mean only, 2 → mean + linear, k → total degree ≤ k−1). It is NOT the
-/// spectral power. Inverse of [`duchon_p_from_nullspace_order`].
+/// spectral power. Inverse of `duchon_p_from_nullspace_order`.
 #[inline(always)]
 pub fn duchon_nullspace_order_from_m(m: usize) -> DuchonNullspaceOrder {
     match m {
@@ -2412,7 +2412,7 @@ fn center_aniso_log_scales(eta: &[f64]) -> Vec<f64> {
 pub enum AnisoSeedMode {
     /// All-zero `η` is the κ-optimizer / `scale_dims` seeding sentinel: replace
     /// it with geometry-derived contrasts from the knot cloud
-    /// ([`auto_seed_aniso_contrasts`]). This is the default for every internal
+    /// (`auto_seed_aniso_contrasts`). This is the default for every internal
     /// build entry; the optimizer's analytic ψ-gradient is computed against the
     /// same auto-seeded design, so value/gradient stay consistent. Note that by
     /// the time the κ-optimizer rebuilds a frozen design the center strategy has
@@ -2421,7 +2421,7 @@ pub enum AnisoSeedMode {
     /// be carried explicitly.
     AutoSeedFromGeometry,
     /// All-zero `η` is an explicit isotropic request and is honored literally
-    /// ([`centered_aniso_contrasts`]): the design reduces to the closed-form
+    /// (`centered_aniso_contrasts`): the design reduces to the closed-form
     /// isotropic Matérn and varies continuously through `η = 0`. The public
     /// `matern_basis` FFI (and its input-location jet/Hessian) selects this so a
     /// caller's explicit isotropic request is not hijacked into a data-driven

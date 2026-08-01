@@ -123,9 +123,9 @@ pub fn empirical_p_value(
 /// uses to count a decoder direction in the hard reconstruction rank at
 /// `(n_eff, p, R)`. This is the
 /// identical closed-form noise edge the production rank charge thresholds on
-/// ([`crate::manifold::construction::realised_rank_charge_dof`], and its
+/// (`crate::manifold::construction::realised_rank_charge_dof`, and its
 /// audit twin
-/// [`crate::manifold::wbic_audit::ReconSpectrum::mp_reconstruction_rank_edge`]) —
+/// `crate::manifold::wbic_audit::ReconSpectrum::mp_reconstruction_rank_edge`) —
 /// surfaced standalone so a caller can report the rank-charge diagnostic
 /// alongside a shape verdict without needing a fitted decoder Gram. It is not
 /// an information-theoretic detection limit and the predictive 2-D shape race

@@ -792,7 +792,7 @@ impl FittedTransport {
     /// Requires a strictly monotone, fold-free map (a degree-±1 cover for
     /// circle charts, a homeomorphism for intervals), so the inverse is
     /// single-valued; otherwise this errors rather than picking an arbitrary
-    /// branch. Monotonicity is established with [`Self::certify_strict_monotonicity`]
+    /// branch. Monotonicity is established with `Self::certify_strict_monotonicity`
     /// — a span-exact polynomial certificate, **not** the sampled
     /// `topology_preserved` diagnostic, which can miss a narrow fold between its
     /// grid samples. Non-finite targets are rejected. Interval targets reject a

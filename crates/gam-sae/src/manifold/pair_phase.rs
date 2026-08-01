@@ -1069,7 +1069,7 @@ pub struct PhaseCircuitCertificate {
     /// True ⇒ a certified phase circuit: a near-orthogonal transfer whose
     /// through-origin dose slope sits in the identity band and is significantly
     /// nonzero — the presence test `|β̂| > t_{n−1}(1 − α/2)·SE` at
-    /// [`PHASE_SCREEN_ALPHA`] (the transfer really tracks the prediction, not
+    /// `PHASE_SCREEN_ALPHA` (the transfer really tracks the prediction, not
     /// noise), the Student-`t` critical value at the fit's `n − 1` residual dof.
     pub certified: bool,
 }

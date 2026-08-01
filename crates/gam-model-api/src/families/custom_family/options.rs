@@ -510,12 +510,12 @@ pub fn default_coefficient_gradient_cost(specs: &[ParameterBlockSpec]) -> u64 {
 /// union covers `0..Σ p_block`.
 ///
 /// This is the canonical source of `block_offsets` for every
-/// [`crate::solver::arrow_schur::ArrowSchurSystem`] built for a custom family
+/// `crate::solver::arrow_schur::ArrowSchurSystem` built for a custom family
 /// (survival, GAMLSS, transformation-normal, latent-survival, marginal-slope,
 /// …). Pass the result to
-/// [`crate::solver::arrow_schur::ArrowSchurSystem::set_block_offsets`] before
+/// `crate::solver::arrow_schur::ArrowSchurSystem::set_block_offsets` before
 /// calling `solve` or `solve_with_options` whenever the system will use
-/// [`crate::solver::arrow_schur::ArrowSolverMode::InexactPCG`].
+/// `crate::solver::arrow_schur::ArrowSolverMode::InexactPCG`.
 ///
 /// Specs with zero columns produce a zero-width range; callers that want to
 /// skip trivial blocks may filter on `r.start < r.end` after calling this
@@ -630,7 +630,7 @@ pub struct BlockwiseFitOptions {
     pub outer_score_subsample: Option<Arc<crate::OuterScoreSubsample>>,
     /// Gate for marginal-slope families to auto-derive a stratified
     /// outer-score subsample at large scale (see
-    /// [`crate::families::marginal_slope_shared::auto_outer_score_subsample`]).
+    /// `crate::families::marginal_slope_shared::auto_outer_score_subsample`).
     ///
     /// **Default `true`.** Auto-subsampling makes the early rho-gradient
     /// evaluations unbiased stochastic estimators with bounded relative
@@ -653,8 +653,8 @@ pub struct BlockwiseFitOptions {
     /// inside a single outer eval. Keying on (rho, eval_id) instead
     /// keeps the mask stable across the inner Newton at one ρ, and
     /// suppresses auto-subsample entirely on inner trial evaluations via
-    /// the [`EvalScope::InnerCoefficient`] tag set by
-    /// [`coefficient_line_search_options`].
+    /// the `EvalScope::InnerCoefficient` tag set by
+    /// `coefficient_line_search_options`.
     ///
     /// `None` preserves legacy behavior (no context — install paths fall
     /// back to "no auto-subsample"). Default `None`.

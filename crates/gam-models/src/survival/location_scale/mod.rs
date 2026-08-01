@@ -2,32 +2,32 @@
 //!
 //! The module is split by concern rather than by mechanical line-cuts:
 //!
-//! - [`constants`]        — module-level numeric tuning constants and guard policy.
-//! - [`error`]            — the [`SurvivalLocationScaleError`] type and conversions.
-//! - [`residual_dist`]    — residual distribution, its derivative ops, link mapping,
+//! - `constants`        — module-level numeric tuning constants and guard policy.
+//! - `error`            — the [`SurvivalLocationScaleError`] type and conversions.
+//! - `residual_dist`    — residual distribution, its derivative ops, link mapping,
 //!                          and the probit / q0 scalar numeric primitives.
-//! - [`spec`]             — public input / spec / result / predict-IO types, the
+//! - `spec`             — public input / spec / result / predict-IO types, the
 //!                          smoothing-parameter layout, and `survival_fit_from_parts`.
-//! - [`family`]           — the [`SurvivalLocationScaleFamily`] struct and its small
+//! - `family`           — the `SurvivalLocationScaleFamily` struct and its small
 //!                          per-row state companions.
-//! - [`row_kernel`]       — the exact-Newton per-row likelihood kernel, the
+//! - `row_kernel`       — the exact-Newton per-row likelihood kernel, the
 //!                          `RowKernel<9>` adapter, joint-quantity collection, and the
 //!                          ratio / log-pdf / survival-derivative math.
-//! - [`wiggle_geometry`]  — dynamic (link/time-wiggle) geometry assembly.
-//! - [`dense_linalg`]     — weighted cross-product, row-scaling, and block-assignment
+//! - `wiggle_geometry`  — dynamic (link/time-wiggle) geometry assembly.
+//! - `dense_linalg`     — weighted cross-product, row-scaling, and block-assignment
 //!                          dense linear-algebra helpers.
-//! - [`covariate_blocks`] — covariate-block preparation, time-varying tensor designs,
+//! - `covariate_blocks` — covariate-block preparation, time-varying tensor designs,
 //!                          and the spatial-ψ transform.
-//! - [`time_block`]       — time-block identifiability, structural constraints, the
+//! - `time_block`       — time-block identifiability, structural constraints, the
 //!                          reduced-AFT time-warp pinning, and projection helpers.
-//! - [`moments`]          — exact Gaussian response-moment integration.
-//! - [`family_solver`]    — the `CustomFamily` impl, joint-Hessian / gradient
+//! - `moments`          — exact Gaussian response-moment integration.
+//! - `family_solver`    — the `CustomFamily` impl, joint-Hessian / gradient
 //!                          assembly, the parametric-AFT direct MLE, and the
 //!                          exact-Newton workspaces.
-//! - [`prepare`]          — spec validation and prepared-model assembly / finalization.
-//! - [`fit`]              — the fit entry points and the reduced-parametric-AFT route.
-//! - [`predict`]          — the predict entry points and prediction helpers.
-//! - [`numeric_guards`]   — overflow-safe scalar/array arithmetic primitives.
+//! - `prepare`          — spec validation and prepared-model assembly / finalization.
+//! - `fit`              — the fit entry points and the reduced-parametric-AFT route.
+//! - `predict`          — the predict entry points and prediction helpers.
+//! - `numeric_guards`   — overflow-safe scalar/array arithmetic primitives.
 
 use gam_terms::basis::BasisOptions;
 

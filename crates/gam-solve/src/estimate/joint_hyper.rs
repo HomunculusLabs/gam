@@ -656,8 +656,8 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
 
     /// Revision of the canonical surface pinned by the last slow-path
     /// `reset_surface`, if any. The spatial κ caller passes this revision back
-    /// on certified n-free value/gradient probes so [`Self::prepare_eval_state`]
-    /// and [`Self::prepare_eval_state_cost_only`] take their design-revision fast
+    /// on certified n-free value/gradient probes so `Self::prepare_eval_state`
+    /// and `Self::prepare_eval_state_cost_only` take their design-revision fast
     /// paths even if the caller-side realizer revision has since advanced on an
     /// unrelated miss. The fast path re-keys the Gaussian Gram and `S(ψ)` from
     /// k-space statistics, so it intentionally reuses this pinned surface rather
@@ -1404,7 +1404,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
     /// Cost-only evaluation at the current κ-realized design. Used by the
     /// joint [ρ, ψ] BFGS line-search cost callback so probes pay neither the
     /// `try_build_spatial_log_kappa_hyper_dirs` cost nor the gradient assembly
-    /// cost. The gradient callback continues to use [`evaluate_with_order`].
+    /// cost. The gradient callback continues to use `evaluate_with_order`.
     ///
     /// Contract: the caller MUST have already realized the design at the κ
     /// implied by `theta`'s ψ tail (typically via the

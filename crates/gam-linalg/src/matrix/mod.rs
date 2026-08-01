@@ -2294,7 +2294,7 @@ impl RandomEffectOperator {
     /// For a dense block X_dense (n × p_dense) and weights w, compute
     /// X_dense' diag(w) X_re  →  (p_dense × num_groups) matrix.
     ///
-    /// Column g of the result = Σ_{i: group[i]=g} w[i] * X_dense.row(i).
+    /// Column g of the result = Σ_{i: group\[i\]=g} w\[i\] * X_dense.row(i).
     /// Total cost: O(n × p_dense).
     pub fn weighted_cross_with_dense(
         &self,
@@ -2330,7 +2330,7 @@ impl RandomEffectOperator {
     }
 
     /// For two RE operators, compute X_re_a' diag(w) X_re_b → (qa × qb).
-    /// Entry (a, b) = Σ_{i: group_a[i]=a AND group_b[i]=b} w[i].
+    /// Entry (a, b) = Σ_{i: group_a\[i\]=a AND group_b\[i\]=b} w\[i\].
     /// Cost: O(n).
     pub fn weighted_cross_with_re(
         &self,
@@ -2370,7 +2370,7 @@ impl LinearOperator for RandomEffectOperator {
         self.num_groups
     }
 
-    /// Forward: out[i] = β[group[i]], or 0 if unmatched.
+    /// Forward: out\[i\] = β[group\[i\]], or 0 if unmatched.
     fn apply(&self, vector: &Array1<f64>) -> Array1<f64> {
         use rayon::prelude::*;
         let out: Vec<f64> = self
@@ -2381,7 +2381,7 @@ impl LinearOperator for RandomEffectOperator {
         Array1::from(out)
     }
 
-    /// Transpose: out[g] = Σ_{i: group[i]=g} v[i].
+    /// Transpose: out\[g\] = Σ_{i: group\[i\]=g} v\[i\].
     fn apply_transpose(&self, vector: &Array1<f64>) -> Array1<f64> {
         let mut out = Array1::<f64>::zeros(self.num_groups);
         for i in 0..self.n {
@@ -2392,7 +2392,7 @@ impl LinearOperator for RandomEffectOperator {
         out
     }
 
-    /// X'WX for a one-hot design is diagonal: D[g,g] = Σ_{i: group[i]=g} w[i].
+    /// X'WX for a one-hot design is diagonal: D\[g,g\] = Σ_{i: group\[i\]=g} w\[i\].
     fn diag_xtw_x(&self, weights: &Array1<f64>) -> Result<Array2<f64>, String> {
         certify_signed_weights("RandomEffectOperator::diag_xtw_x", weights, self.n)?;
         let q = self.num_groups;
@@ -2486,7 +2486,7 @@ impl DenseDesignOperator for RandomEffectOperator {
         Ok(out)
     }
 
-    /// diag(X M X') for one-hot X: out[i] = M[group[i], group[i]].
+    /// diag(X M X') for one-hot X: out\[i\] = M[group\[i\], group\[i\]].
     fn quadratic_form_diag(&self, middle: &Array2<f64>) -> Result<Array1<f64>, String> {
         use rayon::prelude::*;
         let out: Vec<f64> = self
@@ -2674,7 +2674,7 @@ impl DesignBlock {
 #[derive(Clone)]
 pub struct BlockDesignOperator {
     pub blocks: Vec<DesignBlock>,
-    /// Cumulative column offsets: block i owns columns col_offsets[i]..col_offsets[i+1].
+    /// Cumulative column offsets: block i owns columns col_offsets\[i\]..col_offsets[i+1].
     pub col_offsets: Vec<usize>,
     pub total_cols: usize,
     pub n: usize,

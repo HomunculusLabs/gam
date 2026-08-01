@@ -41,7 +41,7 @@
 //! A consumer must know *how far* the move can be trusted as a linear push. The
 //! **validity radius** is the latent step size at which the exact chord dose
 //! diverges from the initial-tangent quadratic prediction by more than
-//! [`VALIDITY_DIVERGENCE_FRACTION`]. Beyond it the surface has curved enough that
+//! `VALIDITY_DIVERGENCE_FRACTION`. Beyond it the surface has curved enough that
 //! the endpoint chord no longer represents the move. We **report** it; we do not
 //! silently clip to it.
 //!
@@ -59,7 +59,7 @@
 //!
 //! This module is a **pure read** over the fitted term and the metric. It calls
 //! only `g_k(t)` evaluation ([`SaeManifoldAtom`]'s decoder + installed
-//! [`SaeBasisEvaluator`]) and the criterion-facing
+//! `SaeBasisEvaluator`) and the criterion-facing
 //! [`RowMetric::fisher_mass`] / [`RowMetric::pullback`]. It never mutates the
 //! model, never touches a likelihood / criterion / penalty, and the solver floor
 //! `δ` of [`RowMetric`] never enters any number it reports (the fisher-mass /
@@ -142,7 +142,7 @@ pub struct SteerPlan {
     /// **VALIDITY RADIUS**: the latent step size (Euclidean norm of the move from
     /// `t_from`) at which the exact chord dose first diverges from the
     /// initial-tangent quadratic prediction by more than
-    /// [`VALIDITY_DIVERGENCE_FRACTION`]. Equals the full move length when the
+    /// `VALIDITY_DIVERGENCE_FRACTION`. Equals the full move length when the
     /// linearization is trusted all the way to `t_to`. `None` under a no-behavior
     /// metric (there is no dose to validate).
     pub validity_radius: Option<f64>,

@@ -1,5 +1,5 @@
 //! Per-atom **geometry lens** (#2091): an *additive*, read-only report on the
-//! actual SHAPE of each fitted [`SaeManifoldTerm`](crate::manifold::SaeManifoldTerm)
+//! actual SHAPE of each fitted `SaeManifoldTerm`
 //! atom — the thing that distinguishes a *manifold* SAE from a linear one.
 //!
 //! # Why this exists
@@ -56,7 +56,7 @@
 //!
 //! # Read-only / no loss contact
 //!
-//! Like [`atom_lens`], nothing here feeds back into any loss, criterion, penalty,
+//! Like `atom_lens`, nothing here feeds back into any loss, criterion, penalty,
 //! or optimizer state. It is a pure read of the fitted term.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, s};

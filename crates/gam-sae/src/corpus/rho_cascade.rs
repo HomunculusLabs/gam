@@ -119,10 +119,10 @@ const FULL_PASS_TAIL_STEPS: usize = 2;
 impl RhoCascadeSchedule {
     /// Build a schedule for `total_rows` rows over `n_steps` outer ρ steps.
     ///
-    /// The fraction ramps geometrically from [`MIN_FRACTION`] (or a higher
+    /// The fraction ramps geometrically from `MIN_FRACTION` (or a higher
     /// floor if the corpus is small enough that the floor would visit fewer
-    /// than [`MIN_SUBSAMPLE_ROWS`] rows) up to `1.0`, and the trailing
-    /// [`FULL_PASS_TAIL_STEPS`] steps are pinned to full passes. A corpus small
+    /// than `MIN_SUBSAMPLE_ROWS` rows) up to `1.0`, and the trailing
+    /// `FULL_PASS_TAIL_STEPS` steps are pinned to full passes. A corpus small
     /// enough that subsampling saves nothing degenerates to all-full-passes.
     pub fn new(total_rows: u64, n_steps: usize) -> Self {
         let n_steps = n_steps.max(1);

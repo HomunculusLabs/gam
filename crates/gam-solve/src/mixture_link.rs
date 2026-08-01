@@ -2653,7 +2653,7 @@ pub fn beta_logistic_inverse_link_jetwith_param_partials(
 ///   mu(eta) = Phi(sinh(smooth_bound(delta * asinh(eta) + epsilon, SAS_U_CLAMP))),
 ///   delta = exp(smooth_bound(log_delta, SAS_LOG_DELTA_BOUND)).
 /// `smooth_bound` is the interior-exact bounded latent map (see
-/// [`smooth_bound_jet`]); on the interior it is the identity, so this reduces to
+/// `smooth_bound_jet`); on the interior it is the identity, so this reduces to
 /// the pure probit jet exactly at `epsilon=0, delta=1`.
 ///
 /// The mathematical solver domain is every finite `f64` eta. Non-finite eta

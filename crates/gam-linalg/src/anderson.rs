@@ -46,7 +46,7 @@
 //! Anderson has no descent guarantee, and the honest contract is that the caller
 //! evaluates its own merit function at the candidate and keeps the plain iterate
 //! when the candidate does not improve on it (Walker & Ni §5; Toth & Kelley,
-//! *SINUM* 2015, for the safeguarded convergence theory). [`Self::reset`] is
+//! *SINUM* 2015, for the safeguarded convergence theory). `Self::reset` is
 //! there for the rejection path.
 
 use crate::LinalgError;
@@ -80,7 +80,7 @@ impl AndersonAccelerator {
     /// stored differences are nearly parallel, which is what a long history on a
     /// slowly-contracting map produces. Rather than pick a shift, the solve
     /// DERIVES the floor below which an eigenvalue is indistinguishable from the
-    /// Gram's own accumulation roundoff (see [`Self::solve_multisecant`]) and
+    /// Gram's own accumulation roundoff (see `Self::solve_multisecant`) and
     /// drops those modes. A flat direction then contributes nothing, instead of
     /// contributing a large coefficient that a chosen shift merely bounds.
     pub fn new(depth: usize) -> Result<Self, LinalgError> {

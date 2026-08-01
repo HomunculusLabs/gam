@@ -6,7 +6,7 @@
 use super::*;
 
 /// Rowwise-Kronecker design operator: represents the (n, p_cov × p_time) matrix
-/// whose row i is the Kronecker product cov[i,:] ⊗ time[i,:].
+/// whose row i is the Kronecker product cov\[i,:\] ⊗ time\[i,:\].
 ///
 /// This avoids materializing the full tensor product design, which at large-scale
 /// scale can be tens of GB.
@@ -568,10 +568,10 @@ impl LinearOperator for RowwiseKroneckerOperator {
     }
 
     /// X β where β is reshaped as (p_cov, p_time):
-    ///   result[i] = Σⱼ cov[i,j] * Σₜ time[i,t] * β[j*p_time + t]
+    ///   result\[i\] = Σⱼ cov\[i,j\] * Σₜ time\[i,t\] * β[j*p_time + t]
     ///
     /// Computed via p_time calls to cov.apply() to stay sparse-native:
-    ///   For each t: result += time[:,t] ⊙ cov · β[:,t]
+    ///   For each t: result += time\[:,t\] ⊙ cov · β\[:,t\]
     fn apply(&self, vector: &Array1<f64>) -> Array1<f64> {
         let p_cov = self.p_cov;
         let p_time = self.p_time;
@@ -596,10 +596,10 @@ impl LinearOperator for RowwiseKroneckerOperator {
     }
 
     /// X' v where the result is (p_cov * p_time):
-    ///   result[j*p_time + t] = Σᵢ v[i] * cov[i,j] * time[i,t]
+    ///   result[j*p_time + t] = Σᵢ v\[i\] * cov\[i,j\] * time\[i,t\]
     ///
     /// Computed via p_time calls to cov.apply_transpose() to stay sparse-native:
-    ///   For each t: result[:,t] = cov' · (v ⊙ time[:,t])
+    ///   For each t: result\[:,t\] = cov' · (v ⊙ time\[:,t\])
     fn apply_transpose(&self, vector: &Array1<f64>) -> Array1<f64> {
         let p_cov = self.p_cov;
         let p_time = self.p_time;
@@ -625,11 +625,11 @@ impl LinearOperator for RowwiseKroneckerOperator {
     /// X'WX via factored Gram computation.
     ///
     /// (X'WX)[j1*pt+t1, j2*pt+t2]
-    ///   = Σᵢ w[i] * cov[i,j1] * time[i,t1] * cov[i,j2] * time[i,t2]
-    ///   = Σᵢ (w[i] * cov[i,j1] * cov[i,j2]) * (time[i,t1] * time[i,t2])
+    ///   = Σᵢ w\[i\] * cov\[i,j1\] * time\[i,t1\] * cov\[i,j2\] * time\[i,t2\]
+    ///   = Σᵢ (w\[i\] * cov\[i,j1\] * cov\[i,j2\]) * (time\[i,t1\] * time\[i,t2\])
     ///
     /// For each (t1, t2) pair, we form the n-vector
-    ///   γ_{t1,t2}[i] = w[i] * time[i,t1] * time[i,t2]
+    ///   γ_{t1,t2}\[i\] = w\[i\] * time\[i,t1\] * time\[i,t2\]
     /// and then the (p_cov, p_cov) block is cov' diag(γ_{t1,t2}) cov.
     ///
     /// Cost: O(n * p_time² * p_cov²) vs O(n * (p_cov*p_time)²) for the naive path.

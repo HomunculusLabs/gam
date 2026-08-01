@@ -49,7 +49,7 @@ pub enum JointHessianSource {
         /// Write-into matvec used by the inner-Newton PCG hot path so the
         /// matvec result no longer allocates an `Array1<f64>` per CG iter.
         /// At large scale (~6400 inner CG iters per outer iter, p~200) this
-        /// removes thousands of small Vec<f64> allocations from the tightest
+        /// removes thousands of small `Vec<f64>` allocations from the tightest
         /// loop. Wired from `workspace.hessian_matvec_into`.
         apply_into: Arc<dyn Fn(&Array1<f64>, &mut Array1<f64>) -> Result<(), CustomFamilyError> + Send + Sync>,
         /// Batched multi-RHS apply: `out = H · V` for `(total, n_rhs)` `V`.

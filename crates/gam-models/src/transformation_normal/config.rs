@@ -6,7 +6,7 @@ pub struct TransformationNormalConfig {
     pub response_num_internal_knots: usize,
     /// Difference penalty order for the response-direction roughness penalty (default 2).
     pub response_penalty_order: usize,
-    /// Additional penalty orders for the response-direction (default [1]).
+    /// Additional penalty orders for the response-direction (default \[1\]).
     pub response_extra_penalty_orders: Vec<usize>,
     /// Whether to add a global identity (ridge) penalty (default true).
     pub double_penalty: bool,

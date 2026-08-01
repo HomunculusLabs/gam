@@ -166,7 +166,7 @@ pub trait RiemannianManifold: Send + Sync {
     ///   g_x(v, ξ) = Df_x[ξ] = ⟨e, ξ⟩   for every tangent ξ.
     /// ```
     ///
-    /// Orthogonally projecting `e` onto the tangent space ([`project_tangent`])
+    /// Orthogonally projecting `e` onto the tangent space ([`Self::project_tangent`])
     /// produces `v` **only** for the embedded/identity metric. For a genuine
     /// Riemannian metric (affine-invariant SPD, canonical Stiefel, …) the
     /// differential must be *raised through the metric* — projecting alone gives

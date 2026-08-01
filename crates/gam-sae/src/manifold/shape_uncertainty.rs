@@ -54,7 +54,7 @@ pub struct SaeAtomShapeUncertainty {
     pub band_sd: Option<Array2<f64>>,
     /// Sandwich (Godambe / robust) posterior standard deviation of each ambient
     /// channel, with the same shape as the model-based band, computed from the within-channel
-    /// sandwich covariance `A_c⁻¹ J_cc A_c⁻¹` (see [`super::sandwich`]). Reported
+    /// sandwich covariance `A_c⁻¹ J_cc A_c⁻¹` (see `super::sandwich`). Reported
     /// ALONGSIDE the model-based band, never in place of it; the two coincide
     /// when the information-matrix equality holds and diverge exactly to the
     /// degree the residuals violate the working likelihood (heteroskedastic

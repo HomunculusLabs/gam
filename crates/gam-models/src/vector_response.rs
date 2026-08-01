@@ -563,7 +563,7 @@ impl VectorLikelihood for GaussianVectorLikelihood {
 ///   vector. The row *weight* `w_n` scales the whole row's likelihood
 ///   contribution and is independent of the row mass — it is **not** the row
 ///   sum. Callers enforce the simplex precondition via
-///   [`validate_multinomial_simplex`] at every construction boundary; under it
+///   `validate_multinomial_simplex` at every construction boundary; under it
 ///   the residual gradient `y_a − p_a` and Fisher block `p_a δ_ab − p_a p_b`
 ///   below are the exact derivatives of the log-likelihood `Σ_c y_c log p_c`.
 /// - `eta` is the active linear predictor with shape `(N, M = K - 1)`.

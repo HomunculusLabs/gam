@@ -783,7 +783,7 @@ impl StochasticTraceEstimator {
 
     /// Estimate `tr(H⁻¹ A_k)` for a mix of dense matrices and implicit operators.
     ///
-    /// This extends [`estimate_traces`] to support implicit `HyperOperator` trait
+    /// This extends `estimate_traces` to support implicit `HyperOperator` trait
     /// objects alongside dense matrices. The dense matrices are passed first,
     /// followed by the operators. Each probe requires ONE `H⁻¹` solve (shared),
     /// plus one matvec per coordinate.

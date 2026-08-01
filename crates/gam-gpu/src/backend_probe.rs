@@ -5,14 +5,14 @@
 //! `survival_flex`, `cubic_bspline_moments`, `cubic_cell`, `pirls_row`,
 //! `sphere`, ...) carried its own near-identical `probe_linux` prologue:
 //!
-//!   1. Resolve the process-wide [`GpuRuntime`] losslessly. Typed hardware
+//!   1. Resolve the process-wide [`crate::GpuRuntime`] losslessly. Typed hardware
 //!      absence becomes a labelled `DriverLibraryUnavailable`; probe faults
-//!      keep their original [`GpuError`] variant.
+//!      keep their original [`crate::GpuError`] variant.
 //!   2. Read the runtime's selected device ordinal.
-//!   3. Create (or reuse) the per-ordinal [`CudaContext`] or fail with a
+//!   3. Create (or reuse) the per-ordinal `CudaContext` or fail with a
 //!      `DriverCallFailed { reason: "<module> backend: failed to create
 //!      CUDA context for device N" }`.
-//!   4. Open the context's default [`CudaStream`].
+//!   4. Open the context's default `CudaStream`.
 //!   5. Carry the device's compute capability alongside the handles.
 //!
 //! Those five steps are identical apart from the per-module label that gets

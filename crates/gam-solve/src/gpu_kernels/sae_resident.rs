@@ -2311,7 +2311,7 @@ pub struct MultiplexedFit {
 /// hardware must (shared SMs / copy engines), which is exactly the throughput
 /// multiplexing the issue's Phase 4 calls for.
 ///
-/// Concurrency is driven through [`run_topology_race_parallel`] (bac4af426),
+/// Concurrency is driven through `run_topology_race_parallel` (bac4af426),
 /// which already bounds nested Rayon so each fit's internal `par_iter`/faer
 /// parallelism stays inside its per-fit thread budget rather than oversubscribing
 /// the global pool. Results are returned in input order. A single A100 thus hosts

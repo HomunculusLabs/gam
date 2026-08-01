@@ -124,7 +124,7 @@ pub(crate) fn validated_exp_log_strength(log_strength: f64) -> f64 {
 
 /// Scalar annealing schedule for analytic penalty weights.
 ///
-/// This is the penalty-weight analogue of [`crate::terms::sae::manifold::GumbelTemperatureSchedule`]:
+/// This is the penalty-weight analogue of `crate::terms::sae::manifold::GumbelTemperatureSchedule`:
 /// it starts with a weak analytic regularizer and ramps toward the target
 /// weight during REML outer iterations. This follows the standard annealed
 /// regularization pattern in deep learning, where optimization first finds

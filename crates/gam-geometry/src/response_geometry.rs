@@ -7,7 +7,7 @@
 //! their own modules; this module supplies the same `(values 2-D, base 1-D) →
 //! tangent 2-D` / `(tangent 2-D, base 1-D) → values 2-D` contract for the
 //! curved matrix manifolds whose per-point math is already wired in
-//! [`crate::geometry`] but which were never reachable as a *fittable* response
+//! this crate but which were never reachable as a *fittable* response
 //! geometry: the SPD cone `Sym⁺(n)`, the Grassmannian `Gr(k, n)`, the Stiefel
 //! manifold `St(k, n)`, and the Poincaré ball `B^d_κ`.
 //!
@@ -623,7 +623,7 @@ fn ball_domain_residual(value: ArrayView1<'_, f64>, curvature: f64) -> GeometryR
 ///
 /// What it computes
 /// ----------------
-/// For each ambient row `x`, [`manifold_residual`](Self::manifold_residual)
+/// For each ambient row `x`, `manifold_residual`
 /// returns the closed-form distance to the candidate geometry (well-defined for
 /// every input and every rank — see that method for the per-geometry formulas),
 /// and this returns:

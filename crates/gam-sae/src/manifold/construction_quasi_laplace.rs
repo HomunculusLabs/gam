@@ -50,7 +50,7 @@ impl SaeManifoldTerm {
     ///
     /// where `ℓ_pen = loss.total()` is the penalised objective at the inner
     /// optimum and the middle line is the #2a occupancy-aware BIC/Laplace
-    /// complexity assembled by [`rank_adjusted_quasi_laplace_complexity`] from
+    /// complexity assembled by `rank_adjusted_quasi_laplace_complexity` from
     /// the EXACT observed information: `log|A|` joint, `log|A_tt|` on the
     /// coordinate block, plus the per-atom realised-DOF rank charge.
     ///

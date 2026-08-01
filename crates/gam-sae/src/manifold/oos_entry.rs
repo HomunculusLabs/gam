@@ -662,7 +662,7 @@ fn build_steer_term(request: SteerTermRequest) -> Result<SaeManifoldTerm, String
 
 /// Build the frozen trained dictionary and measure the steering plan for atom
 /// `atom_k` at a fixed `amplitude`. Mirrors the term rebuild of
-/// [`run_sae_manifold_oos`] (sharing [`build_oos_atom`]) with no coordinate solve.
+/// [`run_sae_manifold_oos`] (sharing `build_oos_atom`) with no coordinate solve.
 pub fn run_sae_manifold_steer(request: SaeSteerRequest) -> Result<SteerPlan, String> {
     let SaeSteerRequest {
         atoms,

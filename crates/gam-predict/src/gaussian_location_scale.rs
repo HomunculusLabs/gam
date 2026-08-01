@@ -9,7 +9,7 @@ use super::*;
 /// `response_scale` maps it back to raw response units. The `exp(η)` term is
 /// already in raw units (the persisted log-σ intercept is shifted by
 /// `+ln(response_scale)` at fit time), so only the floor is scaled here — see
-/// [`GaussianLocationScalePredictor::compute_sigma`].
+/// `GaussianLocationScalePredictor::compute_sigma`.
 pub struct GaussianLocationScalePredictor {
     pub beta_mu: Array1<f64>,
     pub beta_noise: Array1<f64>,

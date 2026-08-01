@@ -1227,7 +1227,7 @@ impl ImplicitHyperOperator {
     /// The design part of B_d is:
     ///   (∂X/∂ψ_d)^T W X + X^T W (∂X/∂ψ_d)
     ///
-    /// For vectors z and u, the bilinear form u^T [design_part] z equals:
+    /// For vectors z and u, the bilinear form u^T \[design_part\] z equals:
     ///   ((∂X/∂ψ_d) u)^T (W (Xz)) + (Xu)^T (W ((∂X/∂ψ_d) z))
     ///   = 2 * (w ⊙ y_vec)^T dx_z       [when u = u, z = z]
     ///

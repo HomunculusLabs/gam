@@ -274,7 +274,7 @@ impl SoftmaxAssignmentSparsityPenalty {
     ///    vanishing `H_k· = 0` (codimension `K`), which here happens exactly when
     ///    `a_k` underflows to 0; there `H_k· ≡ 0` and `Ḣ_k· ≡ 0`, so value and
     ///    derivative are identically zero and the exact-zero continuation that
-    ///    [`entropy_log_plus_one`] already uses carries through.
+    ///    `entropy_log_plus_one` already uses carries through.
     /// 3. **Tight.** `0 ≤ D̃_kk − D_kk ≤ K·ε₀·‖H_k·‖₂ ≤ SPECTRAL_DEFLATION_REL_FLOOR·D_kk`
     ///    (derivation in [`Self::soft_abs_temperature`]) — below the relative
     ///    resolution at which the factorization declares a direction null.

@@ -11,12 +11,12 @@
 //! minimisation with **no dense `N×K` object anywhere**:
 //!
 //! 1. **route** — for each row, score it against the whole dictionary in
-//!    `K`-tiles ([`scoring`]) and keep only the top-`s` atoms online, so the
+//!    `K`-tiles (`scoring`) and keep only the top-`s` atoms online, so the
 //!    `N×K` score matrix is produced one tile at a time and discarded;
 //! 2. **codes** — solve the small `s×s` active-set least-squares system per row
-//!    ([`codes`]), giving a fixed-width sparse code `(indices, codes)`;
+//!    (`codes`), giving a fixed-width sparse code `(indices, codes)`;
 //! 3. **decoder** — accumulate the sparse normal equations (method-of-optimal
-//!    -directions / sparse GEMM) and refresh each atom ([`update`]);
+//!    -directions / sparse GEMM) and refresh each atom (`update`);
 //! 4. **project** — re-unit-norm every atom so the code scale is identified.
 //!
 //! All heavy state is FP32. The only dense `K`-sized objects are the decoder
@@ -230,7 +230,7 @@ pub struct SparseDictConvergence {
     /// the gauge-invariant EV plateau, so both certified and open fits are returned;
     /// only a still-climbing objective (or a failed linear subsolve) is a genuine
     /// non-convergence error. Mirrors
-    /// [`super::block::BlockSparseConvergence::certified`].
+    /// `super::block::BlockSparseConvergence::certified`.
     pub certified: bool,
 }
 

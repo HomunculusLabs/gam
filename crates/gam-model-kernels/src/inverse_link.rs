@@ -109,7 +109,7 @@ pub fn apply_inverse_link_vec(eta: &[f64], family_kind: &str) -> Result<Vec<f64>
 }
 
 /// Apply a closed-form inverse link element-wise from a fully parameterized
-/// [`InverseLink`] spec.
+/// `InverseLink` spec.
 ///
 /// This is the typed companion to [`apply_inverse_link_vec`]. The string-tag
 /// entry point cannot evaluate the *parameterized* links — `Sas`, `Mixture`,

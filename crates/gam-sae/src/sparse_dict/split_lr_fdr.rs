@@ -188,9 +188,9 @@ pub fn crossfit_ui_log_evalue<A>(
 ///
 /// `coords` is `[n_rows, q]`, the block-coordinate observations for the rows
 /// where the candidate's block(s) fire. The null density is a 1-factor
-/// probabilistic-PCA Gaussian ([`fit_ppca1`], the rank-1 linear shell as a
+/// probabilistic-PCA Gaussian (`fit_ppca1`, the rank-1 linear shell as a
 /// proper density); the alternative is the Bessel-`I0` radial-ring marginal in
-/// the train data's top-2 eigen-plane ([`fit_ring`]). A candidate with fewer
+/// the train data's top-2 eigen-plane (`fit_ring`). A candidate with fewer
 /// than two coordinate channels cannot support a ring and returns `−∞`.
 pub fn shell_vs_ring_log_evalue(
     coords: &Array2<f64>,

@@ -82,7 +82,7 @@ pub fn with_nested_parallel<T>(body: impl FnOnce() -> T) -> T {
     out
 }
 
-/// `true` when the current thread is inside at least one [`NestedParallelGuard`]
+/// `true` when the current thread is inside at least one `NestedParallelGuard`
 /// scope, i.e. a parallel row reduction is already in flight on this thread.
 #[inline]
 pub fn in_nested_parallel_region() -> bool {
@@ -297,7 +297,7 @@ impl std::fmt::Display for ParallelismSnapshot {
 
 /// faer parallelism policy that respects nested data-parallel regions: returns
 /// faer's global policy at the top level, but `Par::Seq` once a
-/// [`NestedParallelGuard`] is active so a GEMM issued from inside a parallel row
+/// `NestedParallelGuard` is active so a GEMM issued from inside a parallel row
 /// fan-out does not multiply the live thread count against the outer pool.
 ///
 /// Use this in place of `faer::get_global_parallelism()` for any matmul that can

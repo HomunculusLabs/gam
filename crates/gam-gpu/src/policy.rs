@@ -39,7 +39,7 @@ impl Default for GpuDispatchPolicy {
     /// calibration cannot run on the current host.
     ///
     /// The production runtime replaces these with
-    /// [`crate::calibration::calibrated_policy_for_device`] after the CUDA
+    /// `crate::calibration::calibrated_policy_for_device` after the CUDA
     /// probe selects a concrete device. Keep these values conservative: they
     /// are the typed baseline for CPU-only builds, failed calibration, and unit
     /// tests that exercise policy predicates without initializing CUDA.
@@ -802,7 +802,7 @@ pub enum PirlsLoopCurvatureKind {
     Observed,
 }
 
-/// Inputs to [`should_run_reml_outer_on_device`]. The admission predicate
+/// Inputs to `should_run_reml_outer_on_device`. The admission predicate
 /// for routing the *outer* REML BFGS-over-ρ loop onto a fully device-resident
 /// driver (rather than the host orchestrator that hops out per step).
 ///
@@ -830,7 +830,7 @@ pub struct RemlOuterAdmission {
     pub gpu_available: bool,
 }
 
-/// Inputs to [`should_use_gpu_pirls_loop`]. Each field comes from data the
+/// Inputs to `should_use_gpu_pirls_loop`. Each field comes from data the
 /// CPU PIRLS entry has on hand before it touches the eigendecomposition
 /// engine, so the admission check itself is allocation-free and can short-
 /// circuit before any heavy work happens.

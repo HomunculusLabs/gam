@@ -123,10 +123,10 @@ impl DispersionFamilyKind {
         }
     }
 
-    /// The family's canonical [`LikelihoodSpec`] (mean response × mean link).
+    /// The family's canonical `LikelihoodSpec` (mean response × mean link).
     /// The overdispersion parameter is estimated by the log-precision channel,
     /// so the response-family placeholder parameters (`phi`, `theta`) mirror
-    /// the [`resolve_family`](crate::fit_orchestration::materialize::resolve_family) defaults
+    /// the `resolve_family` defaults
     /// and are not consumed as fixed values at predict time. This is the single
     /// source of truth for the persisted location-scale likelihood so the CLI
     /// and FFI save paths cannot diverge.
@@ -2295,7 +2295,7 @@ fn validate_dispersion_spatial_hyperparameter_request(
 
 /// Fit a dispersion-channel GAMLSS location-scale model (#913). All four
 /// genuine-dispersion mean families share this single entry; the per-family
-/// likelihood lives in [`dispersion_row_kernel`].
+/// likelihood lives in `dispersion_row_kernel`.
 pub fn fit_dispersion_glm_location_scale_terms(
     data: ndarray::ArrayView2<'_, f64>,
     spec: DispersionGlmLocationScaleTermSpec,

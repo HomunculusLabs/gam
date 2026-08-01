@@ -1188,7 +1188,7 @@ impl MatrixFreeSpdOperator {
         Self::new_with_mode_and_dense_assemble(dim, apply, mode, None)
     }
 
-    /// Like [`new_with_mode`], but additionally accepts an optional single-pass
+    /// Like `new_with_mode`, but additionally accepts an optional single-pass
     /// dense assembly of the same penalized operator. When present and it yields
     /// a matrix, `materialize_dense_operator` uses it instead of the `dim`
     /// canonical-basis matvecs. See the field doc on `dense_assemble`.

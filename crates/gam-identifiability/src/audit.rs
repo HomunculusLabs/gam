@@ -196,21 +196,21 @@ fn compute_leverage_s2(col: &ndarray::ArrayView1<f64>) -> f64 {
 /// instead of `φ`.  The population cosine between `φ` (from the other block)
 /// and `z ⊙ φ` (from the scaled block) is, under independence of z and φ,
 ///
-///   E[cos(φ, z⊙φ)] = E_p[z] / √(E_p[z²])
+///   E[cos(φ, z⊙φ)] = E_p\[z\] / √(E_p\[z²\])
 ///
 /// where E_p[·] = Σ_i p_i(·) with p_i = φ_i² / Σ_j φ_j² (leverage weights).
 ///
 /// For sample-standardised z (zero sample mean, unit sample variance),
-/// E_p[z] = Σ_i p_i z_i and E_p[z²] = Σ_i p_i z_i².  At small leverage
+/// E_p\[z\] = Σ_i p_i z_i and E_p\[z²\] = Σ_i p_i z_i².  At small leverage
 /// concentrations (S2_k ≈ 1/n, i.e. uniform φ) the leading-order expansion
-/// of the cosine about E_p[z] = 0 gives:
+/// of the cosine about E_p\[z\] = 0 gives:
 ///
-///   E[cos] ≈ −(μ_3 / 2) · S2_k
+///   E\[cos\] ≈ −(μ_3 / 2) · S2_k
 ///
 /// where μ_3 = E[(z − z̄)³] / σ_z³ is the standardised third moment
 /// (skewness) of z, and the negative sign comes from the sign of the
-/// second-order term in the Taylor expansion of 1/√(E_p[z²]) around the
-/// point E_p[z] = 0, E_p[z²] = 1.
+/// second-order term in the Taylor expansion of 1/√(E_p\[z²\]) around the
+/// point E_p\[z\] = 0, E_p\[z²\] = 1.
 ///
 /// Derivation sketch:
 ///   Let δ_i = z_i − z̄ (centred residuals, σ_z = 1 after standardisation).
@@ -219,7 +219,7 @@ fn compute_leverage_s2(col: &ndarray::ArrayView1<f64>) -> f64 {
 ///   Under independence and after isolating the O(S2_k) term, the mean
 ///   of Σ_i p_i δ_i vanishes (zero mean of z) but the covariance of the
 ///   numerator with the denominator's expansion produces a shift
-///   proportional to E[δ_i³] = μ_3 and Σ_i p_i² = S2_k.
+///   proportional to E\[δ_i³\] = μ_3 and Σ_i p_i² = S2_k.
 ///
 /// When BOTH blocks carry the same z, the shift cancels.  When NEITHER
 /// carries a row-scaling, μ_3 = 0 (the raw-cosine case), and the formula
@@ -3480,13 +3480,13 @@ pub(crate) fn count_rank(singular_values: &[f64], n: usize, p: usize) -> usize {
 /// design `D_k = diag(a_·k)·Φ_k`; it accumulates `G_k = D_kᵀ D_k` online across
 /// row chunks. The singular values of `D` are the square roots of the
 /// eigenvalues of `G` (`G = V diag(σ²) Vᵀ`), so the same RRQR rank tolerance
-/// that [`count_rank`] applies to QR pivots applies to `√λ`. This lets the
+/// that `count_rank` applies to QR pivots applies to `√λ`. This lets the
 /// pre-fit decoder identifiability audit run chunk-by-chunk with `O(M_k²)`
 /// state instead of an `O(N · M_k)` design retain.
 ///
 /// Negative eigenvalues from finite-precision accumulation are clamped to zero
 /// before the square root. Returns the count of singular values above the
-/// tolerance, identical in convention to [`count_rank`].
+/// tolerance, identical in convention to `count_rank`.
 pub fn rank_of_gram(gram: &Array2<f64>, n_total: usize) -> Result<usize, EstimationError> {
     let p = gram.ncols();
     if p == 0 {

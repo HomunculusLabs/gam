@@ -997,7 +997,7 @@ pub struct SaeSupportRehydrateRequest {
 /// evaluators, chart plans and effective dimensions are exactly the parts that
 /// must agree with the fitting path, so they are produced by the same code that
 /// produces them during a fit. Only the fitted decoder coefficients are then
-/// substituted, and the term is rebuilt through [`SaeSupportSparseTerm::new`]
+/// substituted, and the term is rebuilt through `SaeSupportSparseTerm::new`
 /// so the support inversion is recomputed rather than carried across.
 pub fn rehydrate_sae_support_term(
     request: SaeSupportRehydrateRequest,

@@ -1,5 +1,5 @@
 //! ISA post-fit **torus-merge audit** — the discovery-side dual of the ISA
-//! birth producer ([`crate::manifold::isa_seed`]).
+//! birth producer (`crate::manifold::isa_seed`).
 //!
 //! # What it catches
 //!
@@ -21,7 +21,7 @@
 //!   κ = E[s²] / E[s]²        (= E[(‖Wᵀz‖²)²] / E[‖Wᵀz‖²]²)
 //! ```
 //!
-//! the exact quantity [`isa_seed`](crate::manifold::isa_seed) rotates to
+//! the exact quantity `isa_seed` rotates to
 //! maximize. The population anchors are the producer's:
 //!
 //! * `κ ≈ 1` — a dense constant-radius circle (both atoms tracing one ring):
@@ -107,8 +107,8 @@ fn is_active(y: f64, mask: Option<bool>) -> bool {
 /// `active` optionally gives an explicit `(n_rows × n_atoms)` activation mask;
 /// without it a row is active for an atom iff its activation is a nonzero finite.
 ///
-/// A pair is flagged iff its co-active rows clear [`audit_row_floor`] and the
-/// standardized contrast `|κ̂ − 2|/SE` clears [`AUDIT_Z`]. Pure read; emits
+/// A pair is flagged iff its co-active rows clear `audit_row_floor` and the
+/// standardized contrast `|κ̂ − 2|/SE` clears `AUDIT_Z`. Pure read; emits
 /// candidates only.
 pub fn audit_torus_merges(
     latent: ArrayView2<f64>,

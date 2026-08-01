@@ -2284,7 +2284,7 @@ fn cascade_sobolev_order(requested: f64, d: usize) -> f64 {
 ///   over `d ∈ {2, 3}` coordinates with no shape constraint;
 /// - the offset is identically zero and every weight is finite and positive;
 /// - `n` is past the derived dense-kernel cliff
-///   ([`past_dense_kernel_cliff`]) — below it the dense radial path is both
+///   (`past_dense_kernel_cliff`) — below it the dense radial path is both
 ///   exact-posterior and cheap, so there is no reason to change estimators.
 ///
 /// The returned [`ResidualCascadeInputs`] carry a unit per-axis metric (the

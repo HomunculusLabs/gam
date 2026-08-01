@@ -131,7 +131,7 @@ impl Default for SeedConfig {
 ///
 /// This type makes the inverted state unrepresentable. It is constructed only
 /// through [`OrderedRhoBounds::new`], which refuses an inverted or non-finite
-/// interval with the same typed [`EstimationError::InvalidInput`] the outer
+/// interval with the same typed `EstimationError::InvalidInput` the outer
 /// entry (`run_outer_uncertified`) now enforces (#2379 / #2370). Every downstream
 /// clamp then operates on an interval that is ordered *by construction*, so
 /// `f64::clamp`'s `min <= max` precondition can never be violated.

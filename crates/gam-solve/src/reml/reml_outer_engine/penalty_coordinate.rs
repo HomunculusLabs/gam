@@ -156,7 +156,7 @@ impl PenaltySubspaceTrace {
     /// Computed in bulk as `Z = X · U_S` (`n × r`) then
     /// `h^{G,proj}_i = (Z H_proj⁻¹ Zᵀ)_{ii} = Σ_{a,b} Z_{ia} (H_proj⁻¹)_{ab} Z_{ib}`,
     /// total cost `O(n · p · r + n · r²)` — strictly cheaper than `n` calls
-    /// to [`Self::apply`] because the `n × p · p × r` GEMM streams the
+    /// to `Self::apply` because the `n × p · p × r` GEMM streams the
     /// `p`-axis once.  Streams `X` through `try_row_chunk` so operator-backed
     /// (Lazy) designs at large scale never densify the full `(n × p)` block.
     pub fn xt_projected_kernel_x_diagonal(&self, x: &DesignMatrix) -> Array1<f64> {
@@ -263,7 +263,7 @@ impl PenaltySubspaceTrace {
         self.sensitivity().apply(a)
     }
 
-    /// View this projected trace kernel as the unified [`FitSensitivity`]
+    /// View this projected trace kernel as the unified `FitSensitivity`
     /// (#935) over the rank-deficient LAML convention `K = U_S · H_proj⁻¹ ·
     /// U_Sᵀ`. The trace machinery stays here; the *inverse action* is the
     /// shared operator, so no site can disagree about what `H⁻¹` means.

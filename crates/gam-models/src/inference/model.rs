@@ -45,7 +45,7 @@ use std::path::Path;
 /// downstream library users) must set this as its `version` field, and every
 /// load path asserts equality via `validate_for_persistence`. Bump this when:
 ///   - A required field is added to `FittedModelPayload` and the set of
-///     Option<T> fields that must be `Some(...)` for a given `family_state`
+///     `Option<T>` fields that must be `Some(...)` for a given `family_state`
 ///     changes (otherwise the `#[serde(default)]` decode would silently fill
 ///     the new field with `None` when loading an older model and the CLI
 ///     predict path would run with stale metadata).
@@ -91,7 +91,7 @@ pub enum TransformationNormalParameterization {
 /// (Khatri-Rao factor) shape, and the response support the positivity cone was
 /// certified over. This is a REQUIRED v13 field for a transformation-normal
 /// model: loading a CTN payload that lacks it (a v12-or-older squared-γ model)
-/// is a typed rejection in [`FittedModelPayload::validate_for_persistence`],
+/// is a typed rejection in `FittedModelPayload::validate_for_persistence`,
 /// never a heuristic conversion.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedTransformationNormalGeometry {
@@ -4595,7 +4595,7 @@ impl FittedModel {
     /// out-of-vocabulary code and shrunk toward the population mean).
     ///
     /// This is the whitelist the predict/`check` encode paths pass to
-    /// [`UnseenCategoryPolicy::encode_unknown_for_columns`]. It intentionally
+    /// `UnseenCategoryPolicy::encode_unknown_for_columns`. It intentionally
     /// covers ONLY genuine random effects (`group(g)`/`re(g)`/`s(g, bs="re")`).
     /// A FIXED categorical factor — a bare `+ g` OR an explicit `factor(g)` —
     /// is auto-promoted to a penalized random block internally but is still a

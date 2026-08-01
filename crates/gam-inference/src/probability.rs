@@ -545,7 +545,7 @@ fn tweedie_cdf_at(y: f64, mu: f64, phi: f64, power: f64) -> f64 {
 /// lower-tail probability is at or below the zero atom `e^{−λ}` the quantile is
 /// exactly `0` (the common right-skewed lower-tail case). Otherwise a normal seed
 /// on the Tweedie moments brackets the root, which is then refined by bisection
-/// on [`tweedie_cdf_at`] — the continuous part above the atom is strictly
+/// on `tweedie_cdf_at` — the continuous part above the atom is strictly
 /// increasing, so the bracket converges.
 pub fn tweedie_quantile(q: f64, mu: f64, phi: f64, power: f64) -> f64 {
     if !(mu.is_finite()

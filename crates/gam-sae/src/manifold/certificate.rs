@@ -355,9 +355,9 @@ pub fn dictionary_incoherence_report(term: &SaeManifoldTerm) -> Result<Certifica
 /// term and an explicit Gaussian reconstruction dispersion.
 ///
 /// This is where the theory's abstract quantities get measured off the
-/// fitted term: `mu_hat` (via [`dictionary_frame_incoherence`]) is the
+/// fitted term: `mu_hat` (via `dictionary_frame_incoherence`) is the
 /// empirical cross-atom incoherence — the superposition coupling — and each
-/// `per_atom_kappa_hat` entry (via [`atom_curvature_bound`]) is the empirical
+/// `per_atom_kappa_hat` entry (via `atom_curvature_bound`) is the empirical
 /// second-fundamental-form curvature — the per-atom rigidity measure. Feeding
 /// the worst (largest) curvature and the weakest (support-floor) activity
 /// into [`curved_dictionary_global_optimality_verdict`] below is deliberately

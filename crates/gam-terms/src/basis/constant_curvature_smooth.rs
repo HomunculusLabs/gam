@@ -587,7 +587,7 @@ pub(crate) fn data_center_fill_partials(
 ///   L″  = −( g_LL·(L′)² + 2 g_Lκ·L′ + g_κκ ) / g_L .
 /// ```
 ///
-/// The partials come from [`data_center_fill_partials`] (exact, riding
+/// The partials come from `data_center_fill_partials` (exact, riding
 /// `distance_kappa_jet`); the returned jet feeds `constant_curvature_kernel_
 /// kappa_jets_scaled` through the quotient `q = d/L` chain rule.
 ///
@@ -810,7 +810,7 @@ pub fn build_constant_curvature_basis(
 /// Select constant-curvature centers.
 ///
 /// Upper bound on `max‖c‖²`, the largest squared chart radius among the centers
-/// [`select_constant_curvature_centers`] will return for `strategy` on `data` —
+/// `select_constant_curvature_centers` will return for `strategy` on `data` —
 /// computed WITHOUT materializing them.
 ///
 /// Every κ bound is denominated in a chart radius, and the set that radius must
@@ -821,7 +821,7 @@ pub fn build_constant_curvature_basis(
 /// (gam#2716). Two strategies break that:
 ///
 /// * [`CenterStrategy::UserProvided`] — left verbatim by
-///   [`select_constant_curvature_centers`], so a center may sit at any radius.
+///   `select_constant_curvature_centers`, so a center may sit at any radius.
 /// * [`CenterStrategy::UniformGrid`] — the Cartesian product of per-axis
 ///   linspaces over the data's *bounding box*, so a corner center sits at the
 ///   bounding box corner, radius up to `√d·max‖x‖`, outside the hull for `d ≥ 2`.
@@ -830,7 +830,7 @@ pub fn build_constant_curvature_basis(
 /// farthest point) or a convex combination of data rows (k-means centroids), so
 /// `max‖c‖ ≤ max‖x‖` and this returns exactly the data radius — which is what
 /// makes the κ box bit-identical to its pre-#2716 value on every data-driven
-/// strategy. The origin-snap in [`select_constant_curvature_centers`] only ever
+/// strategy. The origin-snap in `select_constant_curvature_centers` only ever
 /// moves a center toward the origin, so it cannot invalidate an upper bound.
 ///
 /// The match is exhaustive rather than wildcarded: a new strategy has to state

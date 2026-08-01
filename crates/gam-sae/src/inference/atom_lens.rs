@@ -1,5 +1,5 @@
 //! Two-score per-atom **lens** (#980, amended): an *additive* per-atom report on
-//! a fitted [`SaeManifoldTerm`](crate::manifold::SaeManifoldTerm).
+//! a fitted `SaeManifoldTerm`.
 //!
 //! # The amendment this file encodes
 //!
@@ -11,7 +11,7 @@
 //! optional and may be absent. The corrected paradigm:
 //!
 //! * **The SAE fit stays on activations.** The reconstruction likelihood
-//!   whitens through the [`RowMetric`](gam_problem::RowMetric)
+//!   whitens through the `RowMetric`
 //!   exactly as before; with the default Euclidean provenance that is the
 //!   bit-for-bit isotropic path. The Fisher metric **never** replaces the loss.
 //! * **The lens is an additive report.** It reads the *already-fitted* model and

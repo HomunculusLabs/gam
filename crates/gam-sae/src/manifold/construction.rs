@@ -77,7 +77,7 @@ pub struct StreamingRankInputs {
 /// eigenvalue below the MP edge is unresolved, not vanished, and is promoted to
 /// the minimum chargeable rank 1. Numerical disappearance is certified
 /// separately, before rank charging, by
-/// [`SaeManifoldTerm::vanished_atoms_from_signal_upper_bound`]. That certificate
+/// `SaeManifoldTerm::vanished_atoms_from_signal_upper_bound`. That certificate
 /// compares a rigorous upper bound on the atom's gated reconstruction energy
 /// with the explicit backward-error envelope of the residual-energy reduction;
 /// there is no corpus-independent `c·R` cutoff hidden in the rank classifier.
@@ -886,7 +886,7 @@ impl SaeManifoldTerm {
     /// Distributes the config to its two authorities: the barrier strength override
     /// onto the term (read by `separation_barrier_strength`), and the ordered Beta--Bernoulli-α
     /// override onto the assignment (read by
-    /// [`SaeAssignment::resolved_ordered_beta_bernoulli_alpha`]). A `None` field selects the canonical
+    /// `SaeAssignment::resolved_ordered_beta_bernoulli_alpha`). A `None` field selects the canonical
     /// data-derived or assignment-mode default. Call this after building the term
     /// and before fitting; distinct terms remain isolated by construction.
     pub fn set_fit_config(&mut self, config: SaeFitConfig) {
@@ -1606,7 +1606,7 @@ impl SaeManifoldTerm {
     }
 
     /// #2023 C4 — install a Tier-0 shared mean μ (the manifold analogue of
-    /// [`crate::tiered::Tier0Mean`]). Once set, [`Self::try_fitted_with_rho`] adds
+    /// [`crate::tiered::Tier0Mean`]). Once set, `Self::try_fitted_with_rho` adds
     /// μ back to the assembled per-atom reconstruction, so the atoms only ever
     /// need to explain the DE-MEANED target `Z − μ`. Pass a length-`p` vector;
     /// mismatched length is rejected. Passing the column-mean of the fit target
@@ -2090,7 +2090,7 @@ impl SaeManifoldTerm {
     /// Composition K=1 lane disarms it: a single atom never trips the guards, so
     /// disarming is a no-op on reconstruction while guaranteeing the per-atom and
     /// backfitting refits stay reseed-free (a mid-refit reseed would break the
-    /// block-coordinate monotonicity). See [`super::stagewise`].
+    /// block-coordinate monotonicity). See `super::stagewise`.
     pub fn set_guards_enabled(&mut self, enabled: bool) {
         self.guards_enabled = enabled;
     }
@@ -2178,7 +2178,7 @@ impl SaeManifoldTerm {
     /// certificate.
     ///
     /// Both reports are read through the same single metric
-    /// ([`Self::diagnostic_metric`]): under a Euclidean / no-harvest provenance
+    /// (`Self::diagnostic_metric`): under a Euclidean / no-harvest provenance
     /// the lens coupling is `None` and the gauge is certified under Euclidean
     /// provenance — never an error, never gated by a flag (magic-by-default,
     /// mirroring the metric selection itself).
@@ -2918,7 +2918,7 @@ impl SaeManifoldTerm {
     /// retained full-batch working-set estimate and the currently selected GPU
     /// memory budget when CUDA is usable, otherwise a conservative host budget.
     ///
-    /// #2532 — the host figure comes from [`Self::host_available_bytes`], the
+    /// #2532 — the host figure comes from `Self::host_available_bytes`, the
     /// reading this term was built with, NOT from a fresh sample. The shape
     /// below is recomputed every call because it legitimately moves during a fit
     /// (atoms rank-reduce, frames activate and change `border_dim`); the
@@ -3064,7 +3064,7 @@ impl SaeManifoldTerm {
     /// assembler dispatches them cleanly across mixed dims and the penalized quasi-Laplace
     /// evidence — itself a per-atom sum — stays exact with no padding or
     /// truncation (see
-    /// [`sae_row_block_penalty_composes_over_heterogeneous_coord_dims`]). The
+    /// `sae_row_block_penalty_composes_over_heterogeneous_coord_dims`). The
     /// structural penalties carry a fixed per-axis shape bound to one shared `d`
     /// (reshape to `(n_eff × d)`, per-axis thresholds, a `(n_eff × d × d)`
     /// precision stack) and cannot dispatch on mixed dims without silently
@@ -3073,7 +3073,7 @@ impl SaeManifoldTerm {
     /// The engine self-protects here so a genuine incompatibility surfaces as a
     /// direct, actionable error at the FFI boundary rather than as a deep
     /// `RemlConvergenceError` mid penalized quasi-Laplace solve (the failure mode
-    /// [`Self::validate_analytic_penalty_registry`] otherwise produces during
+    /// `Self::validate_analytic_penalty_registry` otherwise produces during
     /// `assemble_arrow_schur`).
     ///
     /// Native ARD rides the separate `native_ard_enabled` FFI flag rather than a
@@ -4294,7 +4294,7 @@ impl SaeManifoldTerm {
     /// `target`.
     ///
     /// `rho` selects the assignment-mass resolution (`Some` uses the ρ-keyed
-    /// gates, `None` the persisted gates), mirroring [`Self::try_fitted_with_rho`].
+    /// gates, `None` the persisted gates), mirroring `Self::try_fitted_with_rho`.
     /// This is the reconstruction path an OOS predict should call once the trained
     /// hybrid-linear images are attached via [`Self::set_hybrid_linear_images`].
     pub fn try_fitted_target_aware(
@@ -4769,12 +4769,12 @@ impl SaeManifoldTerm {
     }
 
     /// #1026 ladder item 2/3 — the AMORTIZED ENCODER, wired from the fitted
-    /// dictionary. Builds the offline certified [`EncodeAtlas`] over this term's
+    /// dictionary. Builds the offline certified `EncodeAtlas` over this term's
     /// frozen atoms and encodes a target corpus `targets` (`n × p`) through the
     /// per-chart distilled Jacobian predictor, with the Kantorovich certificate
     /// supplying chart-aware starts. Those starts are then refined together by
     /// the frozen dictionary's shared-residual objective. The returned
-    /// [`JointEncodeResult`] carries one coordinate block per atom plus a
+    /// `JointEncodeResult` carries one coordinate block per atom plus a
     /// numerical joint-stationarity mask; it does not mislabel a composition of
     /// per-atom certificates as a certificate for the multi-atom problem.
     ///
@@ -4958,7 +4958,7 @@ impl SaeManifoldTerm {
     /// #1026 — the fitted per-row assignment masses `a[i,k]` (the activation
     /// amplitudes `z_k` the amortized encode recovers `t` against), as an
     /// `n × K` matrix. These are the posterior assignment intensities `a_{ik}`
-    /// that [`Self::try_fitted_with_rho`] multiplies into each atom's decoded row.
+    /// that `Self::try_fitted_with_rho` multiplies into each atom's decoded row.
     pub fn fitted_assignment_amplitudes(&self) -> Result<Array2<f64>, String> {
         let n = self.n_obs();
         let k_atoms = self.k_atoms();

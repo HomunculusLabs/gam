@@ -71,7 +71,7 @@ pub struct InnerSolution<'dp> {
     /// links the observed c/d include residual-dependent corrections:
     ///   c_obs = c_Fisher + h'*B - (y-mu)*B_eta
     ///   d_obs = d_Fisher + h''*B + 2*h'*B_eta - (y-mu)*B_etaeta
-    /// These corrections matter for the outer gradient (C[v] correction) and
+    /// These corrections matter for the outer gradient (C\[v\] correction) and
     /// outer Hessian (Q[v_k, v_l] correction). See response.md Section 3.
     pub deriv_provider: Box<dyn HessianDerivativeProvider + 'dp>,
 
@@ -144,7 +144,7 @@ pub struct InnerSolution<'dp> {
     ///
     /// This is the per-observation Gaussian normalization constant that the
     /// `log_likelihood` (computed by
-    /// [`crate::pirls::pirls_data_log_kernel_from_eta`]) deliberately drops. The
+    /// `crate::pirls::pirls_data_log_kernel_from_eta`) deliberately drops. The
     /// full weighted-Gaussian negative log-likelihood normalization is
     ///   ½·Σᵢ log(2π·φ/wᵢ) = (n/2)·log(2πφ) − ½·Σᵢ log(wᵢ),
     /// because `Var(yᵢ) = φ/wᵢ` under inverse-variance prior weights.
@@ -164,7 +164,7 @@ pub struct InnerSolution<'dp> {
     pub gaussian_weight_log_sum_half: f64,
 
     /// Deviance scale `D₀` used as the *relative* reference for the smooth
-    /// penalized-deviance floor (see [`crate::estimate::smooth_floor_dp`]).
+    /// penalized-deviance floor (see `crate::estimate::smooth_floor_dp`).
     ///
     /// Set to the weighted null deviance of the Gaussian response,
     /// `D₀ = Σ wᵢ(yᵢ − ȳ_w)²`, which is the natural upper reference for
@@ -200,7 +200,7 @@ pub struct InnerSolution<'dp> {
     /// (rho_index, ext_index) → Result<HyperCoordPair, String>.
     pub rho_ext_pair_fn: Option<HyperCoordPairFn>,
 
-    /// M_i[u] = D_β B_i[u] callback for extended coordinates.
+    /// M_i\[u\] = D_β B_i\[u\] callback for extended coordinates.
     /// Arguments: (ext_index, direction) → correction matrix.
     ///
     /// `Arc`-backed ([`SharedFixedDriftDerivFn`]) so the tangent-projected

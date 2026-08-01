@@ -2032,7 +2032,7 @@ impl ConstructiveQuadratic {
     /// field doc). The frame is a carried certificate (#2427): the factory
     /// that BUILT the seminorm knows its null space as a theorem (Duchon's
     /// polynomial block), and consumers that decide topology
-    /// ([`crate::basis::rebuild_metric_consistent_ridge`]) consume the
+    /// (`crate::basis::rebuild_metric_consistent_ridge`) consume the
     /// declaration instead of re-deriving it from a rank test on a matrix
     /// that deliberately contains a conditioning term.
     pub fn with_structural_null_frame(
@@ -2474,7 +2474,7 @@ pub(crate) const SPATIAL_CENTER_CENTER_MAX_BYTES: usize = 512 * 1024 * 1024; // 
 pub(crate) const DESIGN_CROSS_CHUNK_SIZE: usize = 1024;
 
 /// Determine whether implicit operators should be used based on problem size
-/// and the supplied [`ResourcePolicy`].
+/// and the supplied `ResourcePolicy`.
 ///
 /// Returns `true` when the dense materialization of D first-derivative
 /// matrices would exceed `policy.max_single_materialization_bytes`.

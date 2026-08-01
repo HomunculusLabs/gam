@@ -628,7 +628,7 @@ impl RowSamplingMeasure {
     /// Design: inclusion probabilities are water-filled as
     /// `π_i = min(1, τ · w'_i)` with `τ` solved so `Σ π_i = budget`, where
     /// `w'` is the measure defensively mixed with
-    /// [`DESIGNED_SAMPLE_UNIFORM_MIX`] of uniform — the standard
+    /// `DESIGNED_SAMPLE_UNIFORM_MIX` of uniform — the standard
     /// defensive-mixture guard that keeps every row's `π_i > 0` (no row's loss
     /// is unreachable, so the estimator stays unbiased) and bounds the largest
     /// weight. Selection is Madow systematic sampling against the cumulative

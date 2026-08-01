@@ -732,7 +732,7 @@ fn failed_topology_summary(failed: &[TopologyAutoFailedCandidate]) -> String {
 pub struct TopologyRaceParallelCandidate<FitResult> {
     /// Original position in the input candidate vector.
     pub candidate_index: usize,
-    /// Diagnostic sizing metadata from [`TopologyRaceThreadPlan::for_budget`]
+    /// Diagnostic sizing metadata from `TopologyRaceThreadPlan::for_budget`
     /// (#2274 follow-up: no longer sizes a real per-candidate Rayon pool —
     /// each candidate runs on a plain OS thread and fans its own internal
     /// Rayon work into the shared global pool; see `run_one_topology_race_candidate`).
@@ -2416,7 +2416,7 @@ pub struct InsufficientRaceMargin {
     pub provisional_winner: usize,
     /// Index of the runner-up whose evidence is within margin of the winner.
     pub contender: usize,
-    /// The realized lead Δ = nle[contender] − nle[winner] (≥ 0).
+    /// The realized lead Δ = nle\[contender\] − nle\[winner\] (≥ 0).
     pub lead: f64,
     /// The margin the lead had to exceed (max of the two candidates'
     /// required margins).

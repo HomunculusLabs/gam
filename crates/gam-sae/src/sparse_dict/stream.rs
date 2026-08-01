@@ -215,7 +215,7 @@ impl SparseDictStreamState {
     /// fit_begin: seed the decoder from `seed` (a representative sample — one
     /// shard, or the whole corpus for small problems) and prime the epoch
     /// accumulators. The seed fixes `P` and the initial atom directions
-    /// (deterministic farthest-point, [`seed_decoder`]); the corpus itself is
+    /// (deterministic farthest-point, `seed_decoder`); the corpus itself is
     /// streamed later through [`Self::partial_fit`].
     pub fn new(seed: ArrayView2<'_, f32>, config: &SparseDictConfig) -> Result<Self, String> {
         validate_config(config)?;
@@ -265,7 +265,7 @@ impl SparseDictStreamState {
 
     /// partial_fit: route + sparse-code one shard against the current decoder and
     /// fold its contributions into this epoch's accumulators. Reuses the exact
-    /// minibatch router/coder of the one-shot lane ([`route_and_code_all`], GPU
+    /// minibatch router/coder of the one-shot lane (`route_and_code_all`, GPU
     /// -offloaded above break-even), so streaming the shards of a corpus yields
     /// the same normal equations as one full-batch pass over the concatenation.
     pub fn partial_fit(&mut self, shard: ArrayView2<'_, f32>) -> Result<ShardStats, String> {

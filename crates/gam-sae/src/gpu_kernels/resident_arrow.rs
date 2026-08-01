@@ -63,11 +63,11 @@
 //! gates the third logit derivative is the centered third moment
 //! `∂³f_c/∂ℓ_a∂ℓ_b∂ℓ_d = τ⁻³ · Σ …` built from the SAME `z`, `decoded`, and the
 //! centered deviations `decoded[a][c] − mean_c` that
-//! [`RowChannels::second`] already forms, and the coordinate channels need only a
+//! `RowChannels::second` already forms, and the coordinate channels need only a
 //! `d3` slot channel alongside `decoded_second`.
 //!
 //! The extension seam is exactly: add a `direction: Option<&[f64]>` (length
-//! `n_rows · q`) to [`DeviceRequest`], add one kernel `sae_arrow_third_dir` with
+//! `n_rows · q`) to `DeviceRequest`, add one kernel `sae_arrow_third_dir` with
 //! the same `(row, a, b)` thread mapping and the same `__dadd_rn` accumulation as
 //! `sae_arrow_htt`, and add a `t3: Vec<f64>` block (shape `[n_rows, q, q]`) to
 //! [`ArrowBlocks`]. No new tensor is materialized and no new transfer shape is
