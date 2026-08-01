@@ -22,6 +22,39 @@
 //! `--family gamma-log` (default link) and asserts stderr does NOT contain the
 //! bogus "Inferred gaussian-identity family" note. Before the fix the note is
 //! emitted; after the fix it is not.
+//!
+//! # The fixture must carry real dispersion — do not "tidy" it back to a curve
+//!
+//! `bug_hunt_explicit_family_gamma.csv` used to be `y = exp(0.3x + 0.5)`
+//! evaluated exactly on a regular grid: deterministic, zero residual
+//! dispersion, `y` strictly increasing across all 40 rows. A Gamma-distributed
+//! response cannot be monotone in 40 consecutive draws — that was a noiseless
+//! curve wearing a Gamma label.
+//!
+//! `s(x)` fits such data to essentially zero residual, and the Gamma shape MLE
+//! for zero dispersion is `+inf`: `gamma_shape_score` stays positive out to
+//! `GAMMA_SHAPE_MAX = 1e12`, so `pirls::dispersion` refuses with
+//!
+//!   Gamma shape MLE is not finite inside the declared profiling domain
+//!
+//! and the whole fit dies before reaching the line this test is about. **That
+//! refusal is correct behaviour, not a defect** — the fixture was asking the
+//! estimator for a quantity that does not exist on this data (gam#2665).
+//!
+//! The response is now drawn from the Gamma it claims to be, keeping the same
+//! mean curve and the same `x` grid:
+//!
+//!   y_i ~ Gamma(shape = 4, scale = mu_i / 4),  mu_i = exp(0.3 x_i + 0.5)
+//!
+//! numpy `default_rng(20260801)`, values rounded to 6 decimals, so the
+//! committed file is reproducible. Shape 4 is a coefficient of variation of
+//! `1/sqrt(4) = 0.5`; the profile target measured on the true mean is
+//! `1.2407e-1`, which recovers a shape of `4.03`. The response now rises on
+//! 21 of 39 consecutive steps rather than 39 of 39.
+//!
+//! Nothing here needs a well-conditioned Gamma fit — the assertion is about a
+//! stderr note — but the fit does have to REACH the point where the note would
+//! be printed, and a zero-dispersion response never gets there.
 
 use std::process::Command;
 
