@@ -1121,3 +1121,119 @@ fn zz_2691_bounded_sigma_witness_returns_an_answer_at_every_sigma() {
          {outside_face:?}"
     );
 }
+
+/// #2691 — is the residual gap a SCALE error or a dimensionless factor?
+///
+/// The installed face is `ln(observed GN curvature)` and it is measurably loose:
+/// on this fixture the face sits at `log α = 5.179` while the chart's recovery
+/// dies between `log α = 2.996` (α=20, R² 0.939) and `3.689` (α=40, R² 0.060) —
+/// `1.49` log units of slack. Before anyone proposes a tighter face, the shape
+/// of that slack has to be settled, and there are only two possibilities:
+///
+/// * the curvature is the WRONG denominator, and the transition scales
+///   differently from `‖∂z/∂t‖² ∝ scale²`; or
+/// * the curvature is the RIGHT denominator up to a dimensionless constant
+///   `c = curvature / α*`, in which case the transition moves by exactly the
+///   same `scale²` the face does and `c` is scale-invariant.
+///
+/// Those two have opposite consequences and the difference is one measurement:
+/// run the SAME absolute ladder at two cloud scales and compare the bracket on
+/// `c`. The ladder is deliberately NOT pre-scaled by `scale²`, because scaling
+/// it would assume the answer.
+///
+/// This test asserts the invariance rather than any particular value of `c`:
+/// naming a `c` from one fixture is exactly the laundered-literal failure this
+/// issue documented, and a bracket that holds across scales is the *input* a
+/// future derivation has to match, not the derivation.
+#[test]
+fn zz_2691_is_the_residual_gap_scale_invariant() {
+    let n: usize = 70;
+    let p: usize = 8;
+    // One absolute ladder for both scales, so the comparison cannot be circular.
+    // Quarter-octave steps: a factor-of-two bracket on `c` only CONSTRAINS the
+    // candidates (2*pi, e^2, 8, pi^2 all sit inside one), so the ladder is fine
+    // enough to leave a bracket that can SELECT. It still spans both scales'
+    // transitions without being re-centred on either.
+    let ladder: Vec<f64> = (0..57).map(|k| 2.0_f64.powf(k as f64 / 4.0)).collect();
+
+    let mut brackets: Vec<(f64, f64, f64, f64)> = Vec::new();
+    for &scale in &[1.0_f64, 2.0_f64] {
+        let radius = 2.086 * scale;
+        let sigma = 0.352 * scale;
+        let (face, _seed, _period) = ard_face_for(n, p, radius, sigma);
+        let curvature = face.exp();
+        let cloud = planted_circle_cloud(n, p, radius, sigma);
+        let z = &cloud.z;
+        let mut last_healthy = f64::NAN;
+        let mut first_dead = f64::NAN;
+        for &alpha in &ladder {
+            let log_ard = alpha.ln();
+            let (mut term, _disp) =
+                build_term(z.view(), 1, Topo::Circle, AssignmentMode::softmax(1.0));
+            let mut rho =
+                SaeManifoldRho::new(1.0e-3_f64.ln(), 1.0e-3_f64.ln(), vec![array![log_ard]; 1]);
+            if term
+                .run_joint_fit_arrow_schur(z.view(), &mut rho, None, 40, 1.0, 1.0e-6, 1.0e-6)
+                .is_err()
+            {
+                continue;
+            }
+            let coords = term.assignment.coords[0].as_matrix();
+            let coord: Array1<f64> = coords.column(0).to_owned();
+            let r2 = circular_recovery_r2(&coord, &cloud.theta);
+            eprintln!("[2691-scale] scale={scale} alpha={alpha:.3} recovery_R2={r2:.4}");
+            if r2 > 0.9 {
+                last_healthy = alpha;
+            } else if r2 < 0.5 && first_dead.is_nan() {
+                first_dead = alpha;
+            }
+        }
+        assert!(
+            last_healthy.is_finite() && first_dead.is_finite(),
+            "#2691: the ladder must bracket the transition at scale {scale}; got \
+             last_healthy={last_healthy} first_dead={first_dead}"
+        );
+        // `c` is bracketed from both sides: the transition lies in
+        // (last_healthy, first_dead], so c lies in [curv/first_dead, curv/last_healthy).
+        let c_lo = curvature / first_dead;
+        let c_hi = curvature / last_healthy;
+        eprintln!(
+            "[2691-scale] scale={scale} curvature={curvature:.4} face={face:.4} \
+             transition_in=({last_healthy:.3},{first_dead:.3}] c_in=[{c_lo:.4},{c_hi:.4})"
+        );
+        brackets.push((scale, curvature, last_healthy, first_dead));
+    }
+
+    let (s1, curv1, lh1, fd1) = brackets[0];
+    let (s2, curv2, lh2, fd2) = brackets[1];
+    let (c1_lo, c1_hi) = (curv1 / fd1, curv1 / lh1);
+    let (c2_lo, c2_hi) = (curv2 / fd2, curv2 / lh2);
+    eprintln!(
+        "[2691-scale-verdict] curvature {curv1:.4}->{curv2:.4} (ratio {:.4}, expected 4) \
+         transition ({lh1:.3},{fd1:.3}]->({lh2:.3},{fd2:.3}] (ratio {:.4}) \
+         c_bracket scale={s1}: [{c1_lo:.3},{c1_hi:.3})  scale={s2}: [{c2_lo:.3},{c2_hi:.3})",
+        curv2 / curv1,
+        fd2 / fd1
+    );
+
+    // The curvature itself must scale as `scale^2` — this is the same invariance
+    // `zz_2691_the_ard_domain_face_moves_with_the_data_not_with_binary64` pins,
+    // restated here so a failure below cannot be blamed on the face.
+    assert!(
+        (curv2 / curv1 - 4.0).abs() <= 1.0e-6 * 4.0,
+        "#2691: the observed curvature must scale as scale^2; got ratio {:.6}",
+        curv2 / curv1
+    );
+
+    // THE QUESTION. Overlapping brackets ⇒ `c` is scale-invariant ⇒ the
+    // curvature is the right denominator and the residual slack is one
+    // dimensionless number. Disjoint brackets ⇒ it is not, and any face built on
+    // `curvature / c` is wrong in a way this fixture can already see.
+    assert!(
+        c1_lo < c2_hi && c2_lo < c1_hi,
+        "#2691: the dimensionless gap c = curvature/alpha* is NOT scale-invariant — \
+         [{c1_lo:.3},{c1_hi:.3}) at scale {s1} does not overlap [{c2_lo:.3},{c2_hi:.3}) at \
+         scale {s2}. The observed Gauss--Newton curvature is then the WRONG denominator for \
+         the residual gap, and a tighter face must be derived from something else."
+    );
+}
