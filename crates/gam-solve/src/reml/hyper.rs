@@ -74,6 +74,12 @@ pub(crate) struct LinkBinomialAux {
     pub(crate) a1: f64,
     /// d²ℓ_i/dμ_i² = w_i (−y_i/μ_i² − (1−y_i)/(1−μ_i)²)
     pub(crate) a2: f64,
+    /// d³ℓ_i/dμ_i³ = w_i (2y_i/μ_i³ − 2(1−y_i)/(1−μ_i)³).
+    ///
+    /// Only the SECOND-order link-parameter block needs this: the score
+    /// `u = (dℓ/dμ)(dμ/dη)` differentiated twice in the link parameters picks
+    /// up `a3·(dμ/dθ_i)(dμ/dθ_j)·(dμ/dη)`.
+    pub(crate) a3: f64,
     /// μ(1−μ) — binomial variance function
     pub(crate) variance: f64,
     /// dVar/dμ = 1−2μ
@@ -128,18 +134,34 @@ pub(crate) fn link_binomial_aux(
         (1.0 - yi) / (omm * omm)
     };
     let lo2 = if yi <= 0.0 { 0.0 } else { yi / (mu * mu) };
+    let hi3 = if yi >= 1.0 {
+        0.0
+    } else {
+        (1.0 - yi) / (omm * omm * omm)
+    };
+    let lo3 = if yi <= 0.0 {
+        0.0
+    } else {
+        yi / (mu * mu * mu)
+    };
     let a1 = wi * (lo - hi);
     let a2 = wi * (-lo2 - hi2);
+    let a3 = wi * 2.0 * (lo3 - hi3);
     let out = LinkBinomialAux {
         a1,
         a2,
+        a3,
         variance: mu * omm,
         variancemu_scale: 1.0 - 2.0 * mu,
     };
     // A consistent saturated row keeps finite a1/a2 with `variance -> 0` (the row
     // is perfectly predicted); the caller contributes zero Fisher weight for it,
     // the analytic `eta -> ±inf` limit. An inconsistent one is refused here.
-    if !(out.a1.is_finite() && out.a2.is_finite() && out.variance.is_finite()) {
+    if !(out.a1.is_finite()
+        && out.a2.is_finite()
+        && out.a3.is_finite()
+        && out.variance.is_finite())
+    {
         return Err(EstimationError::PirlsRowGeometryUnrepresentable {
             row,
             quantity: "outer binomial likelihood jet",
@@ -3292,6 +3314,528 @@ impl<'a> RemlState<'a> {
 
         Ok(coords)
     }
+
+    /// The dense design in the SAME coefficient basis the link-ext
+    /// `HyperCoord`s occupy once `rotate_link_ext_coords_to_original` has run.
+    ///
+    /// The coord builders form `g_j = −X_tᵀ du_j` and `B_j = X_tᵀ diag(dw_j) X_t`
+    /// from `pirls_result.x_transformed`, and the caller then rotates them by
+    /// `g → Qs g`, `B → Qs B Qsᵀ` when the assembly reports in the original
+    /// basis.  Rotating the design once instead — `X_eff = X_t Qsᵀ` — makes
+    /// `−X_effᵀ d2u` and `X_effᵀ diag(d2w) X_eff` land in that basis by
+    /// construction, so the pair objects cannot end up in a different frame
+    /// from the coords they pair with.
+    pub(crate) fn link_ext_effective_design(
+        &self,
+        bundle: &EvalShared,
+    ) -> Result<Array2<f64>, EstimationError> {
+        let pirls_result = bundle.pirls_result.as_ref();
+        let free_basis_opt = self.active_constraint_free_basis(pirls_result);
+        let x_dense_arc = pirls_result
+            .x_transformed
+            .try_to_dense_arc("link-ext pair assembly requires dense transformed design")
+            .map_err(EstimationError::InvalidInput)?;
+        let mut x = match free_basis_opt.as_ref() {
+            Some(z) => DenseRightProductView::new(x_dense_arc.as_ref())
+                .with_factor(z)
+                .materialize(),
+            None => x_dense_arc.as_ref().clone(),
+        };
+        let needs_rotation = matches!(
+            pirls_result.coordinate_frame,
+            crate::pirls::PirlsCoordinateFrame::TransformedQs
+        ) && free_basis_opt.is_none();
+        if needs_rotation {
+            let qs = &pirls_result.reparam_result.qs;
+            if x.ncols() == qs.nrows() {
+                x = x.dot(&qs.t());
+            }
+        }
+        Ok(x)
+    }
+
+    /// Build the ext-ext (link-link) second-order pair callback and the
+    /// matching β-dependent drift derivative.
+    ///
+    /// This is the link-parameter analogue of `build_tau_tau_pair_callback`.
+    /// For a link-shape parameter pair `(θ_i, θ_j)` the unified Hessian builder
+    /// consumes three fixed-β second derivatives of the penalized objective
+    /// `F(β, θ) = −ℓ(β, θ) + ½ βᵀS(λ)β`:
+    ///
+    /// ```text
+    ///   pair.a     = ∂²F/∂θ_i∂θ_j |_β        = −∂²ℓ/∂θ_i∂θ_j
+    ///   pair.g     = ∂³F/∂β∂θ_i∂θ_j |_β      = −Xᵀ ∂²u/∂θ_i∂θ_j
+    ///   pair.b_mat = ∂²H/∂θ_i∂θ_j |_β        =  Xᵀ diag(∂²W_obs/∂θ_i∂θ_j) X
+    ///   pair.ld_s  = ∂²log|S(λ)|₊/∂θ_i∂θ_j   =  0
+    /// ```
+    ///
+    /// with `u_n = ∂ℓ_n/∂η_n` the per-observation score and `W_obs` the
+    /// observed-information working weight, matching the first-order
+    /// quantities `build_sas_link_ext_coords` /
+    /// `build_mixture_link_ext_coords` install on the coords themselves.
+    /// Only `ld_s` is zero, and it is zero for the reason the ρ-link block is
+    /// zero: the penalty matrices do not depend on the link parameters.
+    ///
+    /// The second returned value is the `fixed_drift_deriv` hook. The total
+    /// second Hessian drift is
+    ///
+    /// ```text
+    ///   d²H/dθ_i dθ_j = ∂²H/∂θ_i∂θ_j|_β  +  D_β B_i[β_j] + D_β B_j[β_i]  +  (IFT)
+    /// ```
+    ///
+    /// and the middle pair — the cross term between explicit θ-movement and β̂
+    /// movement — is exactly what `compute_drift_deriv_traces` asks this hook
+    /// for. `W_obs` depends on β only through `η = Xβ`, so
+    /// `D_β B_i[δ] = Xᵀ diag((∂²W_obs/∂θ_i∂η) ⊙ (Xδ)) X`. Leaving the hook at
+    /// `None` (as this path did) silently drops that term at every ρψ and ψψ
+    /// entry.
+    ///
+    /// Everything here is a likelihood quantity, and the chain to second order
+    /// runs through the exact parameter Hessians the link jets already carry
+    /// (`d2mu`, `d2d1`, `d2d2`) — no differencing.
+    pub(crate) fn build_link_ext_pair_objects(
+        &self,
+        bundle: &EvalShared,
+    ) -> Result<Option<LinkExtPairObjects>, EstimationError> {
+        let Some(jets) = self.build_link_param_jets2(bundle)? else {
+            return Ok(None);
+        };
+        let aux_dim = jets.aux_dim;
+        let x_eff = std::sync::Arc::new(self.link_ext_effective_design(bundle)?);
+        let p_dim = x_eff.ncols();
+        let nobs = jets.rows.len();
+
+        let mut a_pairs = Array2::<f64>::zeros((aux_dim, aux_dim));
+        let mut d2u: Vec<Array1<f64>> = (0..aux_dim * aux_dim)
+            .map(|_| Array1::<f64>::zeros(nobs))
+            .collect();
+        let mut d2w: Vec<Array1<f64>> = (0..aux_dim * aux_dim)
+            .map(|_| Array1::<f64>::zeros(nobs))
+            .collect();
+        let mut dw_deta: Vec<Array1<f64>> = (0..aux_dim)
+            .map(|_| Array1::<f64>::zeros(nobs))
+            .collect();
+
+        for (row_idx, row) in jets.rows.iter().enumerate() {
+            let Some(row) = row.as_ref() else {
+                // A saturated, perfectly-predicted row carries zero Fisher
+                // weight and contributes nothing at any order — the same
+                // `eta → ±inf` limit the first-order builders take.
+                continue;
+            };
+            for i in 0..aux_dim {
+                dw_deta[i][row_idx] = row.weight_eta_mixed(i);
+                for j in i..aux_dim {
+                    let terms = row.second_order(i, j);
+                    a_pairs[[i, j]] -= terms.log_likelihood;
+                    if i != j {
+                        a_pairs[[j, i]] -= terms.log_likelihood;
+                    }
+                    d2u[i * aux_dim + j][row_idx] = terms.score;
+                    d2w[i * aux_dim + j][row_idx] = terms.weight;
+                    if i != j {
+                        d2u[j * aux_dim + i][row_idx] = terms.score;
+                        d2w[j * aux_dim + i][row_idx] = terms.weight;
+                    }
+                }
+            }
+        }
+
+        let mut weighted_scratch = Array2::<f64>::zeros((0, 0));
+        let mut g_pairs: Vec<Array1<f64>> = Vec::with_capacity(aux_dim * aux_dim);
+        let mut b_pairs: Vec<Array2<f64>> = Vec::with_capacity(aux_dim * aux_dim);
+        for idx in 0..aux_dim * aux_dim {
+            if p_dim == 0 {
+                g_pairs.push(Array1::<f64>::zeros(0));
+                b_pairs.push(Array2::<f64>::zeros((0, 0)));
+                continue;
+            }
+            g_pairs.push(-x_eff.t().dot(&d2u[idx]));
+            b_pairs.push(super::assembly::xt_diag_x_dense_into(
+                &x_eff,
+                &d2w[idx],
+                &mut weighted_scratch,
+            ));
+        }
+
+        let a_pairs = std::sync::Arc::new(a_pairs);
+        let g_pairs = std::sync::Arc::new(g_pairs);
+        let b_pairs = std::sync::Arc::new(b_pairs);
+        let pair_fn: Box<
+            dyn Fn(usize, usize) -> super::reml_outer_engine::HyperCoordPairResult + Send + Sync,
+        > = Box::new(
+            move |i: usize, j: usize| -> super::reml_outer_engine::HyperCoordPairResult {
+                if i >= aux_dim || j >= aux_dim {
+                    return Err(format!(
+                        "link-ext pair index ({i},{j}) out of range for {aux_dim} link parameters"
+                    ));
+                }
+                let idx = i * aux_dim + j;
+                Ok(super::reml_outer_engine::HyperCoordPair {
+                    a: a_pairs[[i, j]],
+                    g: g_pairs[idx].clone(),
+                    b_mat: b_pairs[idx].clone(),
+                    b_operator: None,
+                    // The penalty matrices do not depend on the link-shape
+                    // parameters, so the penalty pseudo-logdet has no second
+                    // partial in them. This is the ONLY structurally-zero
+                    // ingredient of the link-link block.
+                    ld_s: 0.0,
+                })
+            },
+        );
+
+        let drift_x = std::sync::Arc::clone(&x_eff);
+        let dw_deta = std::sync::Arc::new(dw_deta);
+        let drift_fn: super::reml_outer_engine::FixedDriftDerivFn = Box::new(
+            move |i: usize,
+                  delta: &Array1<f64>|
+                  -> Result<Option<super::reml_outer_engine::DriftDerivResult>, String> {
+                let Some(mixed) = dw_deta.get(i) else {
+                    return Err(format!(
+                        "link-ext drift-derivative index {i} out of range for {} link parameters",
+                        dw_deta.len()
+                    ));
+                };
+                if drift_x.ncols() == 0 || drift_x.nrows() == 0 {
+                    return Ok(None);
+                }
+                if delta.len() != drift_x.ncols() {
+                    return Err(format!(
+                        "link-ext drift-derivative direction has length {} but the design has \
+                         {} columns",
+                        delta.len(),
+                        drift_x.ncols()
+                    ));
+                }
+                let eta_dir = drift_x.dot(delta);
+                let diag = mixed * &eta_dir;
+                let mut scratch = Array2::<f64>::zeros((0, 0));
+                Ok(Some(super::reml_outer_engine::DriftDerivResult::Dense(
+                    super::assembly::xt_diag_x_dense_into(&drift_x, &diag, &mut scratch),
+                )))
+            },
+        );
+
+        Ok(Some(LinkExtPairObjects {
+            pair_fn,
+            drift_fn,
+        }))
+    }
+
+    /// Per-observation link jets carried to second parameter order, for
+    /// whichever flexible-link family is active.
+    fn build_link_param_jets2(
+        &self,
+        bundle: &EvalShared,
+    ) -> Result<Option<LinkParamJets2>, EstimationError> {
+        use crate::mixture_link::{
+            beta_logistic_inverse_link_jetwith_param_partials,
+            mixture_inverse_link_jetwith_rho_partials, sas_inverse_link_jetwith_param_partials,
+        };
+
+        let pirls_result = bundle.pirls_result.as_ref();
+        let nobs = pirls_result.final_eta.len();
+
+        if let Some(sas_state) = &self.runtime_sas_link_state {
+            let is_beta_logistic = matches!(
+                self.config.link_function(),
+                gam_problem::LinkFunction::BetaLogistic
+            );
+            let mut rows = Vec::with_capacity(nobs);
+            for i in 0..nobs {
+                let eta_i = pirls_result.final_eta[i];
+                let jets = if is_beta_logistic {
+                    beta_logistic_inverse_link_jetwith_param_partials(
+                        eta_i,
+                        sas_state.log_delta,
+                        sas_state.epsilon,
+                    )
+                } else {
+                    sas_inverse_link_jetwith_param_partials(
+                        eta_i,
+                        sas_state.epsilon,
+                        sas_state.log_delta,
+                    )?
+                };
+                let mu = jets.jet.mu;
+                let omm = if is_beta_logistic {
+                    1.0 - mu
+                } else {
+                    crate::mixture_link::sas_link_complement(
+                        eta_i,
+                        sas_state.epsilon,
+                        sas_state.log_delta,
+                        mu,
+                    )
+                };
+                let aux = link_binomial_aux(i, eta_i, self.y[i], self.weights[i], mu, omm)?;
+                if !(aux.variance > 0.0) {
+                    rows.push(None);
+                    continue;
+                }
+                rows.push(Some(LinkParamJetRow::new(
+                    aux,
+                    self.y[i],
+                    self.weights[i],
+                    jets.jet,
+                    vec![jets.djet_depsilon, jets.djet_dlog_delta],
+                    jets.d2mu_dparams2,
+                    jets.d2d1_dparams2,
+                    jets.d2d2_dparams2,
+                )));
+            }
+            return Ok(Some(LinkParamJets2 { aux_dim: 2, rows }));
+        }
+
+        if let Some(mix_state) = &self.runtime_mixture_link_state {
+            let aux_dim = mix_state.rho.len();
+            if aux_dim == 0 {
+                return Ok(None);
+            }
+            let mut rows = Vec::with_capacity(nobs);
+            for i in 0..nobs {
+                let eta_i = pirls_result.final_eta[i];
+                let jets = mixture_inverse_link_jetwith_rho_partials(mix_state, eta_i);
+                let mu = jets.jet.mu;
+                let omm = 1.0 - mu;
+                let aux = link_binomial_aux(i, eta_i, self.y[i], self.weights[i], mu, omm)?;
+                if !(aux.variance > 0.0) {
+                    rows.push(None);
+                    continue;
+                }
+                rows.push(Some(LinkParamJetRow::new(
+                    aux,
+                    self.y[i],
+                    self.weights[i],
+                    jets.jet,
+                    jets.djet_drho,
+                    jets.d2mu_drho2,
+                    jets.d2d1_drho2,
+                    jets.d2d2_drho2,
+                )));
+            }
+            return Ok(Some(LinkParamJets2 { aux_dim, rows }));
+        }
+
+        Ok(None)
+    }
+}
+
+/// The ext-ext pair callback and its companion β-dependent drift derivative.
+///
+/// They are returned together because they are two halves of one second-order
+/// object: `pair.b_mat` is `∂²H/∂θ_i∂θ_j` at fixed β and `drift_fn` supplies
+/// `D_β B_i[·]`, and the Hessian entry needs both. Installing one without the
+/// other leaves the same class of silent omission this pair of functions
+/// exists to close (#2665).
+pub(crate) struct LinkExtPairObjects {
+    pub(crate) pair_fn:
+        Box<dyn Fn(usize, usize) -> super::reml_outer_engine::HyperCoordPairResult + Send + Sync>,
+    pub(crate) drift_fn: super::reml_outer_engine::FixedDriftDerivFn,
+}
+
+/// The observed working weight as a function of the link jet.
+///
+/// `W_obs = w·G(μ, h₁, h₂)` with
+///
+/// ```text
+///   G = h₁²/V − (y−μ)·B,     B = (h₂V − h₁²V')/V²
+/// ```
+///
+/// and, for the binomial, `V = μ(1−μ)`, `V' = 1−2μ`, `V'' = −2`, `V''' = 0`.
+/// Every parameter derivative of the weight — first, second, and the mixed
+/// `∂²/∂θ∂η` the drift derivative needs — is a contraction of this gradient
+/// and Hessian with the link jet's own derivatives, so the three consumers
+/// cannot drift apart.
+struct ObservedWeightJet {
+    /// `∂G/∂(μ, h₁, h₂)`.
+    g: [f64; 3],
+    /// `∂²G/∂(μ, h₁, h₂)²`.
+    h: [[f64; 3]; 3],
+}
+
+impl ObservedWeightJet {
+    fn new(yi: f64, mu: f64, h1: f64, h2: f64, variance: f64, v_prime: f64) -> Self {
+        let v = variance;
+        let vp = v_prime;
+        let vpp = -2.0_f64;
+        let v2 = v * v;
+        let v3 = v2 * v;
+        let v4 = v2 * v2;
+        let resid = yi - mu;
+
+        // P = h₁²/V.
+        let p_m = -h1 * h1 * vp / v2;
+        let p_1 = 2.0 * h1 / v;
+        let p_mm = -h1 * h1 * (vpp / v2 - 2.0 * vp * vp / v3);
+        let p_m1 = -2.0 * h1 * vp / v2;
+        let p_11 = 2.0 / v;
+
+        // N = h₂V − h₁²V',  B = N/V².
+        let n = h2 * v - h1 * h1 * vp;
+        let n_m = h2 * vp - h1 * h1 * vpp;
+        let n_mm = h2 * vpp; // V''' = 0
+        let b = n / v2;
+        let b_m = n_m / v2 - 2.0 * n * vp / v3;
+        let b_1 = -2.0 * h1 * vp / v2;
+        let b_2 = 1.0 / v;
+        let b_mm = n_mm / v2 - 4.0 * n_m * vp / v3 - 2.0 * n * vpp / v3 + 6.0 * n * vp * vp / v4;
+        let b_m1 = -2.0 * h1 * (vpp / v2 - 2.0 * vp * vp / v3);
+        let b_m2 = -vp / v2;
+        let b_11 = -2.0 * vp / v2;
+
+        // G = P − (y−μ)B, so ∂G/∂x = P_x − r B_x + [x=μ] B and
+        // ∂²G/∂x∂z = P_xz − r B_xz + [x=μ] B_z + [z=μ] B_x.
+        let g = [p_m + b - resid * b_m, p_1 - resid * b_1, -resid * b_2];
+        let g_mm = p_mm + 2.0 * b_m - resid * b_mm;
+        let g_m1 = p_m1 + b_1 - resid * b_m1;
+        let g_m2 = b_2 - resid * b_m2;
+        let g_11 = p_11 - resid * b_11;
+        let h = [
+            [g_mm, g_m1, g_m2],
+            [g_m1, g_11, 0.0],
+            [g_m2, 0.0, 0.0],
+        ];
+        Self { g, h }
+    }
+}
+
+#[inline]
+fn dot3(a: &[f64; 3], b: &[f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+#[inline]
+fn quad3(h: &[[f64; 3]; 3], a: &[f64; 3], b: &[f64; 3]) -> f64 {
+    let mut out = 0.0;
+    for i in 0..3 {
+        for j in 0..3 {
+            out += h[i][j] * a[i] * b[j];
+        }
+    }
+    out
+}
+
+/// One observation's link-parameter jet, carried to second parameter order.
+struct LinkParamJetRow {
+    aux: LinkBinomialAux,
+    wi: f64,
+    jet: crate::mixture_link::InverseLinkJet,
+    djet: Vec<crate::mixture_link::InverseLinkJet>,
+    d2mu: Array2<f64>,
+    d2d1: Array2<f64>,
+    d2d2: Array2<f64>,
+    weight_jet: ObservedWeightJet,
+}
+
+/// The three per-observation second-order link-parameter quantities.
+struct LinkParamSecondOrder {
+    /// `∂²ℓ_n/∂θ_i∂θ_j` at fixed `η` (prior weight already folded in).
+    log_likelihood: f64,
+    /// `∂²u_n/∂θ_i∂θ_j`.
+    score: f64,
+    /// `∂²W_obs,n/∂θ_i∂θ_j`.
+    weight: f64,
+}
+
+impl LinkParamJetRow {
+    fn new(
+        aux: LinkBinomialAux,
+        yi: f64,
+        wi: f64,
+        jet: crate::mixture_link::InverseLinkJet,
+        djet: Vec<crate::mixture_link::InverseLinkJet>,
+        d2mu: Array2<f64>,
+        d2d1: Array2<f64>,
+        d2d2: Array2<f64>,
+    ) -> Self {
+        let weight_jet = ObservedWeightJet::new(
+            yi,
+            jet.mu,
+            jet.d1,
+            jet.d2,
+            aux.variance,
+            aux.variancemu_scale,
+        );
+        Self {
+            aux,
+            wi,
+            jet,
+            djet,
+            d2mu,
+            d2d1,
+            d2d2,
+            weight_jet,
+        }
+    }
+
+    /// `∂(μ, h₁, h₂)/∂θ_i`.
+    #[inline]
+    fn p(&self, i: usize) -> [f64; 3] {
+        [self.djet[i].mu, self.djet[i].d1, self.djet[i].d2]
+    }
+
+    /// `∂²(μ, h₁, h₂)/∂θ_i∂θ_j`.
+    #[inline]
+    fn p_pair(&self, i: usize, j: usize) -> [f64; 3] {
+        [self.d2mu[[i, j]], self.d2d1[[i, j]], self.d2d2[[i, j]]]
+    }
+
+    /// `∂²(μ, h₁, h₂)/∂θ_i∂η` — one more `η` derivative of `p(i)`.
+    #[inline]
+    fn p_eta(&self, i: usize) -> [f64; 3] {
+        [self.djet[i].d1, self.djet[i].d2, self.djet[i].d3]
+    }
+
+    /// `∂(μ, h₁, h₂)/∂η`.
+    #[inline]
+    fn q(&self) -> [f64; 3] {
+        [self.jet.d1, self.jet.d2, self.jet.d3]
+    }
+
+    /// Second parameter derivatives of the likelihood, the score and the
+    /// observed working weight.
+    fn second_order(&self, i: usize, j: usize) -> LinkParamSecondOrder {
+        let p_i = self.p(i);
+        let p_j = self.p(j);
+        let p_ij = self.p_pair(i, j);
+        let h1 = self.jet.d1;
+
+        // ℓ as a function of μ alone at fixed η.
+        let log_likelihood = self.aux.a2 * p_i[0] * p_j[0] + self.aux.a1 * p_ij[0];
+
+        // u = (dℓ/dμ)·h₁.
+        let score = self.aux.a3 * p_i[0] * p_j[0] * h1
+            + self.aux.a2 * p_ij[0] * h1
+            + self.aux.a2 * p_i[0] * p_j[1]
+            + self.aux.a2 * p_j[0] * p_i[1]
+            + self.aux.a1 * p_ij[1];
+
+        let weight = self.wi
+            * (quad3(&self.weight_jet.h, &p_i, &p_j) + dot3(&self.weight_jet.g, &p_ij));
+
+        LinkParamSecondOrder {
+            log_likelihood,
+            score,
+            weight,
+        }
+    }
+
+    /// `∂²W_obs/∂θ_i∂η` — the ingredient of `D_β B_i[δ]`, since `W_obs`
+    /// depends on `β` only through `η = Xβ`.
+    fn weight_eta_mixed(&self, i: usize) -> f64 {
+        let p_i = self.p(i);
+        let q = self.q();
+        let p_i_eta = self.p_eta(i);
+        self.wi * (quad3(&self.weight_jet.h, &q, &p_i) + dot3(&self.weight_jet.g, &p_i_eta))
+    }
+}
+
+struct LinkParamJets2 {
+    aux_dim: usize,
+    /// `None` for a saturated, perfectly-predicted row (zero Fisher weight).
+    rows: Vec<Option<LinkParamJetRow>>,
 }
 
 #[cfg(test)]
@@ -3473,6 +4017,186 @@ mod tests {
                     fd[i],
                 );
             }
+        }
+    }
+}
+
+/// #2665 — the per-observation second-order link-parameter chain rule.
+///
+/// These sit below the block-level finite-difference gate
+/// (`estimate::link_ext_hessian_2665_tests`) and localize a failure: if the
+/// block gate is red and these are green, the defect is in the assembly, not
+/// in the derivatives. Each second derivative is differenced against the
+/// analytic FIRST derivative rather than against the raw value, and the first
+/// derivative is itself pinned to the expressions the shipping coord builders
+/// compute inline.
+#[cfg(test)]
+mod link_param_second_order_tests {
+    use super::*;
+
+    /// The first-order per-observation quantities the coord builders install.
+    ///
+    /// Test-only, and it lives here rather than beside the second-order terms
+    /// because production reads the first-order quantities off the coords the
+    /// builders already install. Its purpose is to give the second-order terms
+    /// a first derivative to be differenced against — one pinned, by
+    /// `first_order_helper_matches_the_shipping_coord_builder_expressions`, to
+    /// the expressions that actually ship.
+    struct LinkParamFirstOrder {
+        /// `∂ℓ_n/∂θ_i` at fixed `η`.
+        log_likelihood: f64,
+        /// `∂u_n/∂θ_i` with `u_n = ∂ℓ_n/∂η_n`.
+        score: f64,
+        /// `∂W_obs,n/∂θ_i`.
+        weight: f64,
+    }
+
+    impl LinkParamJetRow {
+        /// The first-order quantities, written as contractions of the same
+        /// gradient `second_order` differentiates.
+        fn first_order(&self, i: usize) -> LinkParamFirstOrder {
+            let p_i = self.p(i);
+            LinkParamFirstOrder {
+                log_likelihood: self.aux.a1 * p_i[0],
+                score: self.aux.a2 * p_i[0] * self.jet.d1 + self.aux.a1 * p_i[1],
+                weight: self.wi * dot3(&self.weight_jet.g, &p_i),
+            }
+        }
+    }
+
+    const ETA: f64 = 0.41;
+    const YI: f64 = 1.0;
+    const WI: f64 = 1.0;
+    const EPSILON: f64 = -0.23;
+    const LOG_DELTA: f64 = 0.17;
+
+    fn sas_row(eta: f64, epsilon: f64, log_delta: f64) -> LinkParamJetRow {
+        let jets = crate::mixture_link::sas_inverse_link_jetwith_param_partials(
+            eta, epsilon, log_delta,
+        )
+        .expect("finite SAS eta");
+        let mu = jets.jet.mu;
+        let omm = crate::mixture_link::sas_link_complement(eta, epsilon, log_delta, mu);
+        let aux = link_binomial_aux(0, eta, YI, WI, mu, omm).expect("representable row");
+        LinkParamJetRow::new(
+            aux,
+            YI,
+            WI,
+            jets.jet,
+            vec![jets.djet_depsilon, jets.djet_dlog_delta],
+            jets.d2mu_dparams2,
+            jets.d2d1_dparams2,
+            jets.d2d2_dparams2,
+        )
+    }
+
+    /// `first_order` must reproduce, bit for bit in the sense of a 1e-12
+    /// relative tolerance, the inline expressions
+    /// `build_sas_link_ext_coords` installs on the coords. Without this the
+    /// second-order terms could be differencing a helper that agrees with
+    /// nothing that ships.
+    #[test]
+    fn first_order_helper_matches_the_shipping_coord_builder_expressions() {
+        let row = sas_row(ETA, EPSILON, LOG_DELTA);
+        for j in 0..2 {
+            let aux = &row.aux;
+            let d1 = row.jet.d1;
+            let h2 = row.jet.d2;
+            let dmu = row.djet[j].mu;
+            let dd1 = row.djet[j].d1;
+            let dd2 = row.djet[j].d2;
+
+            // Verbatim from `build_sas_link_ext_coords`.
+            let direct_ll = aux.a1 * dmu;
+            let du = aux.a2 * dmu * d1 + aux.a1 * dd1;
+            let variance = aux.variance;
+            let variance_param = aux.variancemu_scale * dmu;
+            let numerator = d1 * d1;
+            let numerator_param = 2.0 * d1 * dd1;
+            let dw_fisher =
+                WI * (numerator_param * variance - numerator * variance_param)
+                    / (variance * variance);
+            let resid = YI - row.jet.mu;
+            let v_prime = aux.variancemu_scale;
+            let v_dprime = -2.0_f64;
+            let b_num = h2 * variance - numerator * v_prime;
+            let var_sq = variance * variance;
+            let b_val = b_num / var_sq;
+            let d_var = v_prime * dmu;
+            let d_vprime = v_dprime * dmu;
+            let db_num =
+                dd2 * variance + h2 * d_var - 2.0 * d1 * dd1 * v_prime - numerator * d_vprime;
+            let db_val = (db_num - 2.0 * b_val * d_var * variance) / var_sq;
+            let dw = dw_fisher + WI * (dmu * b_val - resid * db_val);
+
+            let got = row.first_order(j);
+            for (label, want, have) in [
+                ("log_likelihood", direct_ll, got.log_likelihood),
+                ("score", du, got.score),
+                ("weight", dw, got.weight),
+            ] {
+                assert!(
+                    (want - have).abs() <= 1e-12 * (1.0 + want.abs()),
+                    "{label}[{j}]: helper {have:e} vs shipping expression {want:e}"
+                );
+            }
+        }
+    }
+
+    /// Every second parameter derivative against a central difference of the
+    /// corresponding first derivative.
+    #[test]
+    fn second_order_terms_match_finite_differences_of_the_first_order_terms() {
+        let row = sas_row(ETA, EPSILON, LOG_DELTA);
+        let h = 1e-6;
+        let shifted = |k: usize, delta: f64| {
+            if k == 0 {
+                sas_row(ETA, EPSILON + delta, LOG_DELTA)
+            } else {
+                sas_row(ETA, EPSILON, LOG_DELTA + delta)
+            }
+        };
+        for i in 0..2 {
+            for k in 0..2 {
+                let plus = shifted(k, h).first_order(i);
+                let minus = shifted(k, -h).first_order(i);
+                let got = row.second_order(i, k);
+                for (label, want, have) in [
+                    (
+                        "log_likelihood",
+                        (plus.log_likelihood - minus.log_likelihood) / (2.0 * h),
+                        got.log_likelihood,
+                    ),
+                    ("score", (plus.score - minus.score) / (2.0 * h), got.score),
+                    (
+                        "weight",
+                        (plus.weight - minus.weight) / (2.0 * h),
+                        got.weight,
+                    ),
+                ] {
+                    assert!(
+                        (want - have).abs() <= 1e-5 * (1.0 + want.abs()),
+                        "d2 {label}/d th{i} d th{k}: analytic {have:e} vs FD {want:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The mixed `∂²W_obs/∂θ_i∂η` that `D_β B_i[·]` is built from.
+    #[test]
+    fn weight_eta_mixed_matches_a_finite_difference_in_eta() {
+        let row = sas_row(ETA, EPSILON, LOG_DELTA);
+        let h = 1e-6;
+        for i in 0..2 {
+            let plus = sas_row(ETA + h, EPSILON, LOG_DELTA).first_order(i).weight;
+            let minus = sas_row(ETA - h, EPSILON, LOG_DELTA).first_order(i).weight;
+            let want = (plus - minus) / (2.0 * h);
+            let have = row.weight_eta_mixed(i);
+            assert!(
+                (want - have).abs() <= 1e-5 * (1.0 + want.abs()),
+                "d2 W/d th{i} d eta: analytic {have:e} vs FD {want:e}"
+            );
         }
     }
 }

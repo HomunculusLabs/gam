@@ -690,6 +690,11 @@ pub struct MixtureJetWithRhoPartials {
     pub d2mu_drho2: Array2<f64>,
     /// Exact symmetric Hessian of `d1 = dmu/deta` in the free-logit coordinates.
     pub d2d1_drho2: Array2<f64>,
+    /// Exact symmetric Hessian of `d2 = d2mu/deta2` in the free-logit
+    /// coordinates. Required by the outer link-parameter Hessian: the observed
+    /// working weight `W_obs` depends on `d2`, so its second parameter
+    /// derivative cannot be formed without this block (#2665).
+    pub d2d2_drho2: Array2<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -703,6 +708,11 @@ pub struct SasJetWithParamPartials {
     pub d2mu_dparams2: Array2<f64>,
     /// Exact symmetric Hessian of `d1 = dmu/deta` in the same parameter order.
     pub d2d1_dparams2: Array2<f64>,
+    /// Exact symmetric Hessian of `d2 = d2mu/deta2` in the same parameter
+    /// order. Required by the outer link-parameter Hessian: the observed
+    /// working weight `W_obs` depends on `d2`, so its second parameter
+    /// derivative cannot be formed without this block (#2665).
+    pub d2d2_dparams2: Array2<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1901,6 +1911,7 @@ pub fn mixture_inverse_link_jetwith_rho_partials(
     // certification receives an exactly symmetric matrix.
     let mut d2mu_drho2 = Array2::<f64>::zeros((m, m));
     let mut d2d1_drho2 = Array2::<f64>::zeros((m, m));
+    let mut d2d2_drho2 = Array2::<f64>::zeros((m, m));
     for j in 0..m {
         for k in j..m {
             let diagonal = if j == k { 1.0 } else { 0.0 };
@@ -1908,10 +1919,14 @@ pub fn mixture_inverse_link_jetwith_rho_partials(
                 - state.pi[j] * djet_drho[k].mu;
             let d1 = (diagonal - state.pi[k]) * djet_drho[j].d1
                 - state.pi[j] * djet_drho[k].d1;
+            let d2 = (diagonal - state.pi[k]) * djet_drho[j].d2
+                - state.pi[j] * djet_drho[k].d2;
             d2mu_drho2[[j, k]] = mu;
             d2mu_drho2[[k, j]] = mu;
             d2d1_drho2[[j, k]] = d1;
             d2d1_drho2[[k, j]] = d1;
+            d2d2_drho2[[j, k]] = d2;
+            d2d2_drho2[[k, j]] = d2;
         }
     }
     MixtureJetWithRhoPartials {
@@ -1919,6 +1934,7 @@ pub fn mixture_inverse_link_jetwith_rho_partials(
         djet_drho,
         d2mu_drho2,
         d2d1_drho2,
+        d2d2_drho2,
     }
 }
 
@@ -2541,8 +2557,15 @@ pub fn beta_logistic_inverse_link_jetwith_param_partials(
     let la_b = trigamma_ab;
     let lb_a = trigamma_ab;
     let lb_b = trigamma_ab - trigamma(b);
+    // `t = a(1−u) − b u` is linear in the shapes, so its parameter jets follow
+    // the same first/second shape derivatives with no new special functions.
+    let t_first = [
+        a_first[0] * logistic.one_minus_u - b_first[0] * logistic.u,
+        a_first[1] * logistic.one_minus_u - b_first[1] * logistic.u,
+    ];
     let mut d2mu_dparams2 = Array2::<f64>::zeros((2, 2));
     let mut d2d1_dparams2 = Array2::<f64>::zeros((2, 2));
+    let mut d2d2_dparams2 = Array2::<f64>::zeros((2, 2));
     for j in 0..2 {
         for k in j..2 {
             let mu_jk = shape.daa * a_first[j] * a_first[k]
@@ -2558,10 +2581,19 @@ pub fn beta_logistic_inverse_link_jetwith_param_partials(
                 + la * a_second[j][k]
                 + lb * b_second[j][k];
             let d1_jk = d1 * (logd1_first[j] * logd1_first[k] + logd1_jk);
+            // d2 = d1·t  ⇒  d2_jk = d1_jk·t + d1_j·t_k + d1_k·t_j + d1·t_jk,
+            // with d1_j = d1·logd1_first[j] (#2665).
+            let t_jk = a_second[j][k] * logistic.one_minus_u - b_second[j][k] * logistic.u;
+            let d2_jk = d1_jk * t
+                + d1 * logd1_first[j] * t_first[k]
+                + d1 * logd1_first[k] * t_first[j]
+                + d1 * t_jk;
             d2mu_dparams2[[j, k]] = mu_jk;
             d2mu_dparams2[[k, j]] = mu_jk;
             d2d1_dparams2[[j, k]] = d1_jk;
             d2d1_dparams2[[k, j]] = d1_jk;
+            d2d2_dparams2[[j, k]] = d2_jk;
+            d2d2_dparams2[[k, j]] = d2_jk;
         }
     }
     SasJetWithParamPartials {
@@ -2570,6 +2602,7 @@ pub fn beta_logistic_inverse_link_jetwith_param_partials(
         djet_dlog_delta: djet_dlog_shape_center,
         d2mu_dparams2,
         d2d1_dparams2,
+        d2d2_dparams2,
     }
 }
 
@@ -2895,23 +2928,33 @@ pub fn sas_inverse_link_jetwith_param_partials(
         + g1 * r3t_ld;
     let djet_dlog_delta = param_partials(u_ld, u1_ld, u2_ld, u3_ld);
 
-    // Exact parameter Hessians needed by the profiled likelihood. Only `mu`
-    // and `d1` enter the scalar log-survival/log-density terms, so carry the
-    // two-variable chain to second parameter order without constructing unused
-    // Hessians for d2/d3. Parameter order is `(epsilon, raw_log_delta)`.
+    // Exact parameter Hessians. `mu` and `d1` enter the scalar
+    // log-survival/log-density terms; `d2` is carried as well because the
+    // observed working weight `W_obs` of the outer link-parameter Hessian
+    // depends on it (#2665, see `build_link_ext_pair_callback`). Parameter
+    // order is `(epsilon, raw_log_delta)`.
     let r_t = [rt_eps, rt_ld];
     let r1_t = [r1t_eps, r1t_ld];
+    let r2_t = [r2t_eps, r2t_ld];
     let r_tt = [[0.0, 0.0], [0.0, d2delta_draw2 * asinh.value]];
     let r1_tt = [[0.0, 0.0], [0.0, d2delta_draw2 * a1]];
+    let r2_tt = [[0.0, 0.0], [0.0, d2delta_draw2 * a2]];
     let u_t = [u_eps, u_ld];
     let u1_t = [u1_eps, u1_ld];
+    let u2_t = [u2_eps, u2_ld];
     let z_t = [c * u_t[0], c * u_t[1]];
     let z1_t = [
         s * u_t[0] * u1 + c * u1_t[0],
         s * u_t[1] * u1 + c * u1_t[1],
     ];
+    let z2_t = [
+        c * u_t[0] * u1 * u1 + 2.0 * s * u1 * u1_t[0] + s * u_t[0] * u2 + c * u2_t[0],
+        c * u_t[1] * u1 * u1 + 2.0 * s * u1 * u1_t[1] + s * u_t[1] * u2 + c * u2_t[1],
+    ];
+    let phi3 = probit_pdfthird_derivative(z);
     let mut d2mu_dparams2 = Array2::<f64>::zeros((2, 2));
     let mut d2d1_dparams2 = Array2::<f64>::zeros((2, 2));
+    let mut d2d2_dparams2 = Array2::<f64>::zeros((2, 2));
     for j in 0..2 {
         for k in j..2 {
             let u_jk = g2 * r_t[j] * r_t[k] + g1 * r_tt[j][k];
@@ -2920,22 +2963,58 @@ pub fn sas_inverse_link_jetwith_param_partials(
                 + g2 * r_t[j] * r1_t[k]
                 + g2 * r_t[k] * r1_t[j]
                 + g1 * r1_tt[j][k];
+            // u2 = g2 r1² + g1 r2, differentiated twice in the parameters.
+            let u2_jk = g4 * r_t[j] * r_t[k] * r1 * r1
+                + g3 * r_tt[j][k] * r1 * r1
+                + 2.0 * g3 * r_t[j] * r1 * r1_t[k]
+                + 2.0 * g3 * r_t[k] * r1 * r1_t[j]
+                + 2.0 * g2 * (r1_t[j] * r1_t[k] + r1 * r1_tt[j][k])
+                + g3 * r_t[j] * r_t[k] * r2
+                + g2 * r_tt[j][k] * r2
+                + g2 * r_t[j] * r2_t[k]
+                + g2 * r_t[k] * r2_t[j]
+                + g1 * r2_tt[j][k];
             let z_jk = s * u_t[j] * u_t[k] + c * u_jk;
             let z1_jk = c * u_t[j] * u_t[k] * u1
                 + s * u_jk * u1
                 + s * u_t[j] * u1_t[k]
                 + s * u_t[k] * u1_t[j]
                 + c * u1_jk;
+            // z2 = sinh(u) u1² + cosh(u) u2, differentiated twice.
+            let z2_jk = s * u_t[j] * u_t[k] * u1 * u1
+                + c * u_jk * u1 * u1
+                + 2.0 * c * u_t[j] * u1 * u1_t[k]
+                + 2.0 * c * u_t[k] * u1 * u1_t[j]
+                + 2.0 * s * (u1_t[j] * u1_t[k] + u1 * u1_jk)
+                + c * u_t[j] * u_t[k] * u2
+                + s * u_jk * u2
+                + s * u_t[j] * u2_t[k]
+                + s * u_t[k] * u2_t[j]
+                + c * u2_jk;
             let mu_jk = base.d2 * z_t[j] * z_t[k] + base.d1 * z_jk;
             let d1_jk = base.d3 * z_t[j] * z_t[k] * z1
                 + base.d2 * z_jk * z1
                 + base.d2 * z_t[j] * z1_t[k]
                 + base.d2 * z_t[k] * z1_t[j]
                 + base.d1 * z1_jk;
+            // d2 = Phi''(z) z1² + Phi'(z) z2, differentiated twice; `phi3` is
+            // the next probit derivative in the same ladder.
+            let d2_jk = phi3 * z_t[j] * z_t[k] * z1 * z1
+                + base.d3 * z_jk * z1 * z1
+                + 2.0 * base.d3 * z_t[j] * z1 * z1_t[k]
+                + 2.0 * base.d3 * z_t[k] * z1 * z1_t[j]
+                + 2.0 * base.d2 * (z1_t[j] * z1_t[k] + z1 * z1_jk)
+                + base.d3 * z_t[j] * z_t[k] * z2
+                + base.d2 * z_jk * z2
+                + base.d2 * z_t[j] * z2_t[k]
+                + base.d2 * z_t[k] * z2_t[j]
+                + base.d1 * z2_jk;
             d2mu_dparams2[[j, k]] = mu_jk;
             d2mu_dparams2[[k, j]] = mu_jk;
             d2d1_dparams2[[j, k]] = d1_jk;
             d2d1_dparams2[[k, j]] = d1_jk;
+            d2d2_dparams2[[j, k]] = d2_jk;
+            d2d2_dparams2[[k, j]] = d2_jk;
         }
     }
 
@@ -2945,6 +3024,7 @@ pub fn sas_inverse_link_jetwith_param_partials(
         djet_dlog_delta,
         d2mu_dparams2,
         d2d1_dparams2,
+        d2d2_dparams2,
     })
 }
 
@@ -3395,6 +3475,138 @@ mod tests {
             assert!((an.d1 - fd.d1).abs() < 1e-6);
             assert!((an.d2 - fd.d2).abs() < 1e-6);
             assert!((an.d3 - fd.d3).abs() < 1e-6);
+        }
+    }
+
+    /// #2665: `d2d2_*` is the parameter Hessian of `d2 = d²mu/deta²`, the
+    /// ingredient the observed working weight `W_obs` depends on. Each entry is
+    /// differenced against the *analytic first* partial `djet_*.d2` (itself
+    /// FD-gated by `sas_param_partials_matchfd` above), so a sign or chain
+    /// error in the new second-order ladder cannot hide behind the truncation
+    /// error of a second difference of the raw value.
+    #[test]
+    fn sas_d2d2_param_hessian_matchesfd_of_the_first_partial() {
+        let eta = 0.37;
+        let epsilon = -0.12;
+        let log_delta = 0.21;
+        let h = 1e-6;
+        let out = sas_inverse_link_jetwith_param_partials(eta, epsilon, log_delta)
+            .expect("finite SAS eta");
+        let at = |e: f64, l: f64| {
+            sas_inverse_link_jetwith_param_partials(eta, e, l).expect("finite SAS eta")
+        };
+        // Column 0 = d/d(epsilon), column 1 = d/d(raw log delta).
+        let d_eps = [
+            (at(epsilon + h, log_delta).djet_depsilon.d2
+                - at(epsilon - h, log_delta).djet_depsilon.d2)
+                / (2.0 * h),
+            (at(epsilon, log_delta + h).djet_depsilon.d2
+                - at(epsilon, log_delta - h).djet_depsilon.d2)
+                / (2.0 * h),
+        ];
+        let d_ld = [
+            (at(epsilon + h, log_delta).djet_dlog_delta.d2
+                - at(epsilon - h, log_delta).djet_dlog_delta.d2)
+                / (2.0 * h),
+            (at(epsilon, log_delta + h).djet_dlog_delta.d2
+                - at(epsilon, log_delta - h).djet_dlog_delta.d2)
+                / (2.0 * h),
+        ];
+        for (idx, reference) in [((0, 0), d_eps[0]), ((0, 1), d_eps[1])] {
+            let got = out.d2d2_dparams2[[idx.0, idx.1]];
+            assert!(
+                (got - reference).abs() < 1e-5 * (1.0 + reference.abs()),
+                "d2d2_dparams2{idx:?} = {got:e} against FD {reference:e}"
+            );
+        }
+        for (idx, reference) in [((1, 0), d_ld[0]), ((1, 1), d_ld[1])] {
+            let got = out.d2d2_dparams2[[idx.0, idx.1]];
+            assert!(
+                (got - reference).abs() < 1e-5 * (1.0 + reference.abs()),
+                "d2d2_dparams2{idx:?} = {got:e} against FD {reference:e}"
+            );
+        }
+        assert_eq!(out.d2d2_dparams2[[0, 1]], out.d2d2_dparams2[[1, 0]]);
+    }
+
+    /// Same gate for the beta-logistic flexible link, whose `d2 = d1·t` chain
+    /// is a different derivation from the SAS probit ladder.
+    #[test]
+    fn beta_logistic_d2d2_param_hessian_matchesfd_of_the_first_partial() {
+        let eta = -0.29;
+        let epsilon = 0.18;
+        let log_shape_center = 0.24;
+        let h = 1e-6;
+        let out =
+            beta_logistic_inverse_link_jetwith_param_partials(eta, log_shape_center, epsilon);
+        let at =
+            |e: f64, l: f64| beta_logistic_inverse_link_jetwith_param_partials(eta, l, e);
+        let reference = [
+            [
+                (at(epsilon + h, log_shape_center).djet_depsilon.d2
+                    - at(epsilon - h, log_shape_center).djet_depsilon.d2)
+                    / (2.0 * h),
+                (at(epsilon, log_shape_center + h).djet_depsilon.d2
+                    - at(epsilon, log_shape_center - h).djet_depsilon.d2)
+                    / (2.0 * h),
+            ],
+            [
+                (at(epsilon + h, log_shape_center).djet_dlog_delta.d2
+                    - at(epsilon - h, log_shape_center).djet_dlog_delta.d2)
+                    / (2.0 * h),
+                (at(epsilon, log_shape_center + h).djet_dlog_delta.d2
+                    - at(epsilon, log_shape_center - h).djet_dlog_delta.d2)
+                    / (2.0 * h),
+            ],
+        ];
+        for j in 0..2 {
+            for k in 0..2 {
+                let got = out.d2d2_dparams2[[j, k]];
+                let want = reference[j][k];
+                assert!(
+                    (got - want).abs() < 1e-4 * (1.0 + want.abs()),
+                    "beta-logistic d2d2_dparams2[{j},{k}] = {got:e} against FD {want:e}"
+                );
+            }
+        }
+    }
+
+    /// Same gate for the mixture link's free-logit coordinates.
+    #[test]
+    fn mixture_d2d2_rho_hessian_matchesfd_of_the_first_partial() {
+        let state = state_fromspec(&MixtureLinkSpec {
+            components: vec![
+                LinkComponent::Probit,
+                LinkComponent::Logit,
+                LinkComponent::CLogLog,
+            ],
+            initial_rho: Array1::from_vec(vec![0.31, -0.17]),
+        })
+        .expect("valid three-component mixture");
+        let eta = 0.42;
+        let h = 1e-6;
+        let out = mixture_inverse_link_jetwith_rho_partials(&state, eta);
+        let m = state.rho.len();
+        let shifted = |j: usize, delta: f64| {
+            let mut rho = state.rho.clone();
+            rho[j] += delta;
+            state_fromspec(&MixtureLinkSpec {
+                components: state.components.clone(),
+                initial_rho: rho,
+            })
+            .expect("valid shifted mixture")
+        };
+        for j in 0..m {
+            for k in 0..m {
+                let plus = mixture_inverse_link_jetwith_rho_partials(&shifted(k, h), eta);
+                let minus = mixture_inverse_link_jetwith_rho_partials(&shifted(k, -h), eta);
+                let want = (plus.djet_drho[j].d2 - minus.djet_drho[j].d2) / (2.0 * h);
+                let got = out.d2d2_drho2[[j, k]];
+                assert!(
+                    (got - want).abs() < 1e-5 * (1.0 + want.abs()),
+                    "mixture d2d2_drho2[{j},{k}] = {got:e} against FD {want:e}"
+                );
+            }
         }
     }
 

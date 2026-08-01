@@ -3080,11 +3080,19 @@ impl<'a> RemlState<'a> {
         let p_dim = ext_coords.first().map(|coord| coord.g.len()).unwrap_or(0);
         assembly.ext_coords = ext_coords;
         if mode == super::reml_outer_engine::EvalMode::ValueGradientHessian {
-            // Link-shape parameters do not directly differentiate the penalty
-            // matrices, so their explicit rho-link second partials are zero.
-            // Installing this callback is still required: the unified Hessian
-            // builder then evaluates the nonzero profiled cross terms from the
-            // first-order link drifts and IFT mode responses.
+            // ── rho–link block ──
+            //
+            // Every ingredient of this pair is a PENALTY quantity: `a` is
+            // `∂²(½βᵀS(λ)β)/∂ρ_k∂θ_i`, `g` is `∂(λ_k S_k β)/∂θ_i` and `b_mat` is
+            // `∂(λ_k S_k)/∂θ_i`. Link-shape parameters do not enter the penalty
+            // matrices at all, so all three really are zero here. Installing the
+            // callback is still required: the unified Hessian builder then
+            // evaluates the nonzero profiled cross terms from the first-order
+            // link drifts and IFT mode responses.
+            //
+            // This justification is specific to the rho–link block. It does NOT
+            // transfer to the link–link block below, whose second partials are
+            // LIKELIHOOD quantities (#2665).
             assembly.rho_ext_pair_fn = Some(Box::new(move |_, _| {
                 Ok(super::reml_outer_engine::HyperCoordPair {
                     a: 0.0,
@@ -3094,15 +3102,52 @@ impl<'a> RemlState<'a> {
                     ld_s: 0.0,
                 })
             }));
-            assembly.ext_coord_pair_fn = Some(Box::new(move |_, _| {
-                Ok(super::reml_outer_engine::HyperCoordPair {
-                    a: 0.0,
-                    g: Array1::zeros(p_dim),
-                    b_mat: Array2::zeros((p_dim, p_dim)),
-                    b_operator: None,
-                    ld_s: 0.0,
-                })
-            }));
+
+            // ── link–link block ──
+            //
+            // #2665: this install used to carry the same zeros as the rho–link
+            // one above, under the same comment. That asserted
+            // `−∂²ℓ/∂θ_i∂θ_j = 0`, i.e. that the log-likelihood has no second
+            // derivative in the link-shape parameters — not a penalty statement
+            // at all, and false. The analytic link–link Hessian block then
+            // reduced to first-order drifts plus the IFT correction, which on
+            // the SAS fixtures reads as a sign flip (`λ_min = −1721.5` where the
+            // true directional curvature is `+121.6`) and refuses otherwise
+            // sound fits on `hessian_psd=NO`.
+            //
+            // `build_link_ext_pair_callback` computes the genuine block. The
+            // callback must be REPLACED, never dropped: `ext_coord_pair_fn`
+            // being `Some` is what makes the unified builder evaluate the
+            // profiled cross terms at all.
+            let ext_pair_fn: Box<
+                dyn Fn(usize, usize) -> super::reml_outer_engine::HyperCoordPairResult
+                    + Send
+                    + Sync,
+            > = match self.build_link_ext_pair_objects(&bundle)? {
+                Some(objects) => {
+                    // `D_β B_i[·]`, the cross term between explicit link-parameter
+                    // movement and β̂ movement in the second Hessian drift. Left at
+                    // `None` it is silently dropped from every rho-link and
+                    // link-link entry, which is the same class of omission as the
+                    // zero pair above.
+                    assembly.fixed_drift_deriv = Some(objects.drift_fn);
+                    objects.pair_fn
+                }
+                // No flexible-link family is active, so there is no link–link
+                // likelihood curvature to install. Unreachable while
+                // `ext_coords` is non-empty (the same runtime link state builds
+                // both), and a structural zero rather than an assumed one.
+                None => Box::new(move |_, _| {
+                    Ok(super::reml_outer_engine::HyperCoordPair {
+                        a: 0.0,
+                        g: Array1::zeros(p_dim),
+                        b_mat: Array2::zeros((p_dim, p_dim)),
+                        b_operator: None,
+                        ld_s: 0.0,
+                    })
+                }),
+            };
+            assembly.ext_coord_pair_fn = Some(ext_pair_fn);
             assert!(ext_dim > 0);
         }
         self.assemble_and_evaluate(rho, &bundle, mode, assembly)

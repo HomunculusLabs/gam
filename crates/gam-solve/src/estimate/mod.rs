@@ -130,6 +130,8 @@ mod continuous_order_tests;
 #[cfg(test)]
 mod estimate_policy_tests;
 #[cfg(test)]
+mod link_ext_hessian_2665_tests;
+#[cfg(test)]
 mod mixture_sas_rho_guard_2629_tests;
 #[cfg(test)]
 mod gaussian_high_edf_scale_tests;
