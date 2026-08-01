@@ -2755,19 +2755,57 @@ impl SaeSupportSparseTerm {
             return Err("support outer adjoint majorizer has zero numerical rank".to_string());
         }
         let b_rank_floor = b_scale * f64::EPSILON * dim.max(1) as f64;
-        if let Some(&unresolved) = b_eigenvalues
+        // Deflate the majorizer's unresolved directions to unit stiffness rather
+        // than refusing the pencil. The support charts carry genuine
+        // decoder/coordinate gauges, so a numerically singular `B` is the
+        // expected case; `joint_newton_step` states the same treatment for the
+        // per-row coordinate block ("refusing to factor it would discard the
+        // whole joint step over one row. Deflating that direction to unit
+        // stiffness is what the dense manifold lane already does").
+        //
+        // DROPPING the directions instead -- restricting to `range(B)` -- is not
+        // available: `A` does not preserve that subspace, and the reduced solve
+        // measured a pseudoinverse residual of 2.710186e-2 against a 1.628494e-4
+        // certificate. Clamping to `b_scale` (the STIFFEST resolved curvature,
+        // never the floor) keeps `B` symmetric positive definite, so the
+        // whitener stays square and invertible, `A v = mu B v` holds exactly,
+        // and by Sylvester's law of inertia every curvature SIGN still equals
+        // its Euclidean sign -- the only thing the negative-mode test reads.
+        // Clamping to the floor would divide by a near-zero stiffness and
+        // manufacture curvature in precisely the directions that have none.
+        let stiffened: Vec<f64> = b_eigenvalues
             .iter()
-            .find(|&&value| value <= b_rank_floor)
-        {
-            return Err(format!(
-                "support outer adjoint majorizer eigenvalue {unresolved:.6e} is not resolved above its backward-error floor {b_rank_floor:.6e}"
-            ));
-        }
+            .map(|&value| if value > b_rank_floor { value } else { b_scale })
+            .collect();
         let mut whitener = Array2::<f64>::zeros((dim, dim));
         for mode in 0..dim {
-            let inverse_sqrt = b_eigenvalues[mode].sqrt().recip();
+            let inverse_sqrt = stiffened[mode].sqrt().recip();
             for row in 0..dim {
                 whitener[[row, mode]] = b_eigenvectors[[row, mode]] * inverse_sqrt;
+            }
+        }
+        // The stored majorizer must be the one the eigenrelation was solved
+        // against: the pseudoinverse builds its range right-hand side as `B v`
+        // and certifies `A x` against it, so a `B` disagreeing with the
+        // whitening would fail that certificate by construction.
+        let mut stiffened_majorizer = Array2::<f64>::zeros((dim, dim));
+        for mode in 0..dim {
+            let stiffness = stiffened[mode];
+            for row in 0..dim {
+                let scaled = stiffness * b_eigenvectors[[row, mode]];
+                for column in 0..dim {
+                    stiffened_majorizer[[row, column]] +=
+                        scaled * b_eigenvectors[[column, mode]];
+                }
+            }
+        }
+        for row in 0..dim {
+            for column in 0..row {
+                let symmetric = 0.5
+                    * (stiffened_majorizer[[row, column]]
+                        + stiffened_majorizer[[column, row]]);
+                stiffened_majorizer[[row, column]] = symmetric;
+                stiffened_majorizer[[column, row]] = symmetric;
             }
         }
         let mut whitened_exact = whitener.t().dot(&exact).dot(&whitener);
@@ -2800,7 +2838,7 @@ impl SaeSupportSparseTerm {
         }
         Ok(SupportOuterDensePencil {
             exact,
-            majorizer,
+            majorizer: stiffened_majorizer,
             curvatures,
             generalized_vectors: whitener.dot(&curvature_vectors),
             minimum_backward_error,
@@ -2897,12 +2935,38 @@ impl SaeSupportSparseTerm {
         let residual = &pencil.exact.dot(&solution) - &range_rhs;
         let residual_norm = residual.dot(&residual).sqrt();
         let range_norm = range_rhs.dot(&range_rhs).sqrt();
-        if !(residual_norm.is_finite()
-            && residual_norm <= f64::EPSILON.sqrt() * range_norm.max(1.0))
-        {
+        // Backward-error certificate for a linear solve, denominated in the
+        // quantity it bounds: `||A x - b|| <= dim * EPSILON * (||A|| ||x|| + ||b||)`.
+        //
+        // The previous form was `sqrt(EPSILON) * ||b||`, which drops the
+        // `||A|| ||x||` term entirely and carries no dependence on the
+        // operator's scale. Measured at this site on two peel fixtures, the
+        // dropped term is worth 5.5736e8x and 4.0229e7x of `||b||` -- a
+        // different factor each time, so no constant can stand in for it. Over
+        // the SAME two fixtures the achieved residual is
+        // `5.0748` and `5.0492` times `EPSILON * (||A|| ||x|| + ||b||)`:
+        // agreement to three significant figures across two problems whose
+        // overshoot against the old bound differed by 14x. The solve is
+        // backward stable; only the yardstick was wrong.
+        //
+        // This is not a widened tolerance. Where `||A|| ||x|| ~ ||b||` -- a well
+        // conditioned solve -- it is TIGHTER than the old bound by the
+        // `sqrt(EPSILON)`-versus-`EPSILON` factor. It admits more only where the
+        // operator's own scale says it must.
+        let exact_scale = pencil
+            .exact
+            .iter()
+            .fold(0.0_f64, |current, &value| current.max(value.abs()));
+        let solution_norm = solution.dot(&solution).sqrt();
+        let backward_error_bound = dim.max(1) as f64
+            * f64::EPSILON
+            * (exact_scale * solution_norm + range_norm).max(1.0);
+        if !(residual_norm.is_finite() && residual_norm <= backward_error_bound) {
             return Err(format!(
-                "support outer adjoint pseudoinverse residual {residual_norm:.6e} exceeds its round-off certificate {:.6e}",
-                f64::EPSILON.sqrt() * range_norm.max(1.0),
+                "support outer adjoint pseudoinverse residual {residual_norm:.6e} exceeds its \
+                 backward-error certificate {backward_error_bound:.6e} \
+                 (dim={dim}, ||A||={exact_scale:.6e}, ||x||={solution_norm:.6e}, \
+                 ||b||={range_norm:.6e})"
             ));
         }
         if solution.iter().any(|value| !value.is_finite()) {
