@@ -2222,6 +2222,9 @@ impl SaeManifoldTerm {
         let mut made_progress = false;
         let mut prev_grad_norm = f64::INFINITY;
         let mut prev_decrement_sq = f64::INFINITY;
+        // #2267 — the polish's own elapsed clock, one candidate denominator for the
+        // size predicate this route still lacks.
+        let polish_started = std::time::Instant::now();
         for step in 0..max_steps {
             let step_started = std::time::Instant::now();
             let mut sys = self
@@ -2302,6 +2305,31 @@ impl SaeManifoldTerm {
             prev_grad_norm = grad_norm.min(prev_grad_norm);
             prev_decrement_sq = decrement_sq.min(prev_decrement_sq);
             let cache = factor.cache;
+            // #2267 — FORECAST the dense exact-stationarity step before entering it,
+            // and state it next to the two quantities any bar would be denominated
+            // against: the assemble this step already paid, and the time this polish
+            // call has burned so far. Measured on the shipped ladder's K=8 rung, the
+            // materialization's column loop alone is 406.5 s of a step the loop is
+            // permitted to repeat 64 times; measured on the shipped 160-row demo the
+            // whole step is ~1.6 s. A predicate that refuses the first and admits the
+            // second has to be read off BOTH, which is what this line is for. No bar
+            // is applied here: choosing one from a single fixture is how a literal
+            // gets laundered into a threshold.
+            match self.exact_stationarity_materialization_forecast(rho_fixed, target, &cache) {
+                Ok((forecast_dim, forecast)) => log::info!(
+                    "[SAE-NEWTON] step {}/{max_steps} FORECAST: dim={forecast_dim}, \
+                     materialization >= {:.3} s (column loop only, eigendecomposition \
+                     NOT included), assemble={:.3} s, polish elapsed={:.3} s",
+                    step + 1,
+                    forecast.as_secs_f64(),
+                    assemble_seconds,
+                    polish_started.elapsed().as_secs_f64(),
+                ),
+                Err(err) => log::info!(
+                    "[SAE-NEWTON] step {}/{max_steps} FORECAST unavailable: {err}",
+                    step + 1,
+                ),
+            }
             // Newton step on the exact Hessian: A Δ = −g on the gauge quotient.
             let mut rhs_t = Array1::<f64>::zeros(cache.delta_t_len());
             let mut offset = 0usize;

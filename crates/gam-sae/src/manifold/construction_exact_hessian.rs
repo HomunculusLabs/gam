@@ -4229,6 +4229,67 @@ impl SaeManifoldTerm {
         })
     }
 
+    /// #2267 — price ONE step of the dense exact-stationarity route BEFORE paying
+    /// for it, by timing a single `apply_exact_hessian` and multiplying by the
+    /// column count the materialization will perform.
+    ///
+    /// This is a FORECAST, not a bar. It exists because the two candidate
+    /// denominations for a size predicate on this route were both unsupported:
+    /// memory cannot fire (the nearest existing admission compares against
+    /// `in_core_budget_bytes ~= 3/5 * available`, >20 GB on the node that
+    /// produced the measured wall, against 3.8 GB of resident blocks), and time
+    /// could not be forecast until the route's two halves were separated.
+    ///
+    /// They now have been. Measured at `6a9916325` on the shipped ladder's K=8
+    /// rung (`sae_ev_vs_k_olmo.py`, 508 train rows, p=32, K=8):
+    ///
+    ///   dim = 7692; 7692 applies + symmetrization = 406.546 s (52.853 ms/apply)
+    ///   the O(dim^3) eigendecomposition then ran >=495 s more, to the cap
+    ///
+    /// So the column loop alone is ~6m47s of a step the polish is permitted to
+    /// take 64 times, and it is LINEAR in `dim` at a per-apply cost this routine
+    /// measures directly. `dim * t_apply` is therefore a real prediction of the
+    /// cheaper half, obtained for 1/dim of its price (52.9 ms out of 406.5 s).
+    ///
+    /// The returned duration DELIBERATELY excludes the eigendecomposition: its
+    /// constant is not measured, and a forecast that invented one would be the
+    /// literal this route does not need. Consumers must read it as a LOWER BOUND
+    /// on the step's cost.
+    pub(crate) fn exact_stationarity_materialization_forecast(
+        &self,
+        rho: &SaeManifoldRho,
+        target: ArrayView2<'_, f64>,
+        cache: &ArrowFactorCache,
+    ) -> Result<(usize, std::time::Duration), String> {
+        let total_t = cache.delta_t_len();
+        let k = cache.k;
+        let dim = total_t + k;
+        let mut unit = SaeArrowVector {
+            t: Array1::<f64>::zeros(total_t),
+            beta: Array1::<f64>::zeros(k),
+        };
+        if total_t > 0 {
+            unit.t[0] = 1.0;
+        } else if k > 0 {
+            unit.beta[0] = 1.0;
+        } else {
+            return Ok((0, std::time::Duration::ZERO));
+        }
+        let probe_started = std::time::Instant::now();
+        let probe = self.apply_exact_hessian(rho, target, cache, &unit)?;
+        let per_apply = probe_started.elapsed();
+        // The probe column is a real column of the operator this route is about
+        // to build `dim` of. If it is already non-finite, the forecast is
+        // meaningless AND so is the materialization it prices.
+        if !probe.t.iter().chain(probe.beta.iter()).all(|value| value.is_finite()) {
+            return Err(
+                "exact_stationarity_materialization_forecast: non-finite Hessian-vector apply"
+                    .to_string(),
+            );
+        }
+        Ok((dim, per_apply.saturating_mul(dim.max(1) as u32)))
+    }
+
     /// PATH C / #2330 — dense symmetric materialization of the EXACT stationarity
     /// Hessian `A = ∇²_θθ L = B + ΔC` (`dim×dim`, `dim = total_t + k`), built
     /// column by column via [`Self::apply_exact_hessian`] and symmetrized. The
