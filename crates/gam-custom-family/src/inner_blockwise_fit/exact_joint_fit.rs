@@ -1187,7 +1187,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     lhs[[d, d]] += joint_solver_diagonal_ridge - trace_diagonal_ridge;
                 }
             }
-            check_linear_feasibility(&beta_joint, constraints, 1e-8)
+            check_linear_feasibility(&beta_joint, constraints)
                 .map_err(|e| format!("joint Newton constrained solve [cycle={cycle}]: {e}"))?;
             let warm_joint_active =
                 flatten_joint_active_set(&cached_active_sets, &block_constraints);
@@ -2695,9 +2695,9 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // which keeps the unconstrained step components and only corrects
             // the binding directions. Off the pathology the α-crush runs
             // exactly as before — a no-op when `α = 1` (healthy), the legacy
-            // scaling when `α ∈ [threshold, 1)` — so every converging arm is
-            // byte-identical. The α-crush `Err` (current iterate infeasible /
-            // no positive step) still triggers a radius shrink + retry.
+            // scaling when `α ∈ (0, 1)` — so every converging arm is
+            // byte-identical.
+            //
             // The alpha-crush refusal carries the ONLY statement of which block
             // refused and why -- which constraint row, and whether the current
             // iterate is infeasible or merely sits on a face with the ray
@@ -2705,32 +2705,77 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // class of stalls unattributable: the survival location-scale
             // linkwiggle fit (gam#2695) spends 379 rejections here, 379 of them
             // from one block, and the refusal message printed none of that.
-            // Every one of those rejections is answered by shrinking the radius,
-            // which is why the count is a multiple of JOINT_TRUST_MAX_ATTEMPTS:
-            // when the binding row has zero slack the fraction-to-boundary
-            // `slack / -drift` is zero at EVERY radius, so the attempt loop
-            // re-derives the same zero until the radius floor ends the cycle.
+            //
+            // `α = 0` IS NO LONGER A REFUSAL (gam#2719). It says a constraint
+            // row is active at β and the ray points out of it — a statement
+            // about the FACE, not about the step length. Answering it with a
+            // radius shrink cannot converge: `slack / -drift` is invariant
+            // under `δ ↦ cδ` once its numerator is zero, so the ladder spent
+            // all JOINT_TRUST_MAX_ATTEMPTS re-deriving the same zero, which is
+            // exactly why the measured count is 24 per cycle. The correct
+            // mechanism is the cone projection immediately below — it keeps the
+            // step's magnitude in every direction the face does not block —
+            // and it is available precisely when the blocking block's cone is
+            // REPRESENTED in `joint_constraints`. When it is not, the family
+            // declared a barrier it cannot express as linear rows, no
+            // projection exists, and the pre-#2719 shrink-and-retry is still
+            // the only tool.
             let alpha_crush_outcome = if qp_feasible_bypass {
-                Ok(false)
+                Ok(JointFeasibilityLimit::Unlimited)
             } else {
                 apply_joint_feasibility_limit(family, &states, &ranges, &mut trial_delta)
             };
-            if let Err(alpha_crush_reason) = alpha_crush_outcome.as_ref() {
-                log::info!(
-                    "[PIRLS/joint-Newton feasibility] cycle {} attempt {} rejected at radius {:.6e} (qp_feasible_bypass={}): {}",
+            let joint_feasibility_limit = match alpha_crush_outcome {
+                Ok(limit) => limit,
+                Err(alpha_crush_reason) => {
+                    log::info!(
+                        "[PIRLS/joint-Newton feasibility] cycle {} attempt {} rejected at radius {:.6e} (qp_feasible_bypass={}): {}",
+                        cycle,
+                        trust_attempt,
+                        joint_trust_radius,
+                        qp_feasible_bypass,
+                        alpha_crush_reason
+                    );
+                    feasibility_rejects += 1;
+                    joint_trust_radius = shrink_active_joint_block_trust_radii(
+                        &mut joint_block_trust_radii,
+                        &block_step_norms,
+                        0.25,
+                    );
+                    continue;
+                }
+            };
+            if let JointFeasibilityLimit::BlockedByActiveFace { block } = joint_feasibility_limit {
+                let face_is_projectable = block
+                    .and_then(|idx| block_constraints.get(idx))
+                    .is_some_and(Option::is_some)
+                    && joint_constraints.is_some();
+                if !face_is_projectable {
+                    log::info!(
+                        "[PIRLS/joint-Newton feasibility] cycle {} attempt {} rejected at radius {:.6e}: \
+                         block {:?} is blocked by an active face it does not represent as linear \
+                         constraints, so no projection can restore the step",
+                        cycle,
+                        trust_attempt,
+                        joint_trust_radius,
+                        block,
+                    );
+                    feasibility_rejects += 1;
+                    joint_trust_radius = shrink_active_joint_block_trust_radii(
+                        &mut joint_block_trust_radii,
+                        &block_step_norms,
+                        0.25,
+                    );
+                    continue;
+                }
+                log::debug!(
+                    "[PIRLS/joint-Newton feasibility] cycle {} attempt {}: block {:?} is blocked by \
+                     an active face; routing the step to the cone projection instead of scaling it \
+                     to zero",
                     cycle,
                     trust_attempt,
-                    joint_trust_radius,
-                    qp_feasible_bypass,
-                    alpha_crush_reason
+                    block,
                 );
-                feasibility_rejects += 1;
-                joint_trust_radius = shrink_active_joint_block_trust_radii(
-                    &mut joint_block_trust_radii,
-                    &block_step_norms,
-                    0.25,
-                );
-                continue;
             }
             // CONSTRAINED-PATH FEASIBILITY PROJECTION (gam#1108 / gam#979). The
             // trust-region trial step (Moré–Sorensen / dogleg / box-trunc) is
@@ -2752,7 +2797,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             let mut projection_moved_the_trial = false;
             if let Some(constraints) = joint_constraints.as_ref() {
                 let trial_beta = &beta_joint + &trial_delta;
-                if check_linear_feasibility(&trial_beta, constraints, 1e-8).is_err() {
+                if check_linear_feasibility(&trial_beta, constraints).is_err() {
                     match gam_solve::active_set::project_point_strictly_into_feasible_constraint_set(
                         &trial_beta,
                         constraints,

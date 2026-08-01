@@ -1875,6 +1875,164 @@ pub(crate) fn joint_feasibility_alpha_gate_discriminates_healthy_from_crush() {
     assert_eq!(limiting, Some(0), "the binding block must be reported");
 }
 
+/// gam#2719. `α = 0` — a constraint row ACTIVE at the current iterate with the
+/// proposed direction pointing strictly out of it — is an ANSWER about the
+/// face, not a solver error.
+///
+/// It used to be a hard `Err`, and the caller answered it by shrinking the
+/// trust radius. That cannot converge: the ratio `slack / −drift` is invariant
+/// under `δ ↦ cδ` once its numerator is exactly zero, so every rung of the
+/// ladder re-derives the same zero — which is why the survival location-scale
+/// linkwiggle witness spends exactly `JOINT_TRUST_MAX_ATTEMPTS` feasibility
+/// rejections per cycle. Worse, the two `alpha_would_crush` gates that route
+/// this pathology to the magnitude-preserving cone projection read
+/// `Err(_) => false`, so the most pathological case was the one DENIED the
+/// rescue built for it.
+#[test]
+pub(crate) fn a_blocked_active_face_is_an_answer_not_a_solver_error() {
+    use gam_problem::LinearInequalityConstraints;
+
+    /// A family whose single block carries a real `β ≥ 0` cone and answers the
+    /// barrier hook with the contract ratio test — so the fraction it reports
+    /// responds to the direction, exactly as a production family's does.
+    #[derive(Clone)]
+    struct FaceFamily {
+        cone: LinearInequalityConstraints,
+    }
+    impl CustomFamily for FaceFamily {
+        fn evaluate(
+            &self,
+            block_states: &[ParameterBlockState],
+        ) -> Result<FamilyEvaluation, String> {
+            assert_eq!(block_states.len(), 1);
+            Ok(FamilyEvaluation {
+                log_likelihood: 0.0,
+                blockworking_sets: vec![BlockWorkingSet::ExactNewton {
+                    gradient: array![0.0, 0.0],
+                    hessian: SymmetricMatrix::Dense(array![[1.0, 0.0], [0.0, 1.0]]),
+                }],
+            })
+        }
+        fn max_feasible_step_size(
+            &self,
+            block_states: &[ParameterBlockState],
+            idx: usize,
+            delta: &Array1<f64>,
+        ) -> Result<Option<f64>, String> {
+            let limit = self
+                .cone
+                .max_contract_feasible_step(block_states[idx].beta.view(), delta.view())
+                .map_err(|error| error.to_string())?;
+            Ok(Some(limit.fraction))
+        }
+    }
+
+    let family = FaceFamily {
+        cone: LinearInequalityConstraints::new(
+            array![[1.0_f64, 0.0], [0.0, 1.0]],
+            Array1::<f64>::zeros(2),
+        )
+        .expect("cone fixture"),
+    };
+    // β sits exactly on the first face; the step leaves it, and moves freely on
+    // the unconstrained coordinate.
+    let states = vec![ParameterBlockState {
+        beta: array![0.0, 1.0],
+        eta: array![0.0],
+    }];
+    let ranges = vec![(0usize, 2usize)];
+
+    // Walk the trust ladder the controller actually walks — quarter the step,
+    // JOINT_TRUST_MAX_ATTEMPTS times — and watch what the rule answers.
+    //
+    // The ratio is INVARIANT under `δ ↦ cδ` while it is a ratio at all: the
+    // drift falls geometrically, the slack stays exactly zero, and `0 / −drift`
+    // is zero at every rung. Nothing the radius does can change that. The
+    // ladder only ever terminates because the drift itself finally falls inside
+    // the primal-feasibility contract, at which point the step stops being a
+    // violation at all and is admitted whole. With `|drift| = 4^-k` that
+    // happens at the first `k` with `4^-k ≤ 1e-8`, i.e. `k = 14` — ten rungs
+    // AFTER the step became numerically indistinguishable from no step, and
+    // before gam#2719 it never happened at all, because the ratio never
+    // stopped being refused.
+    let mut step = array![-1.0_f64, 5.0];
+    let mut first_admitting_rung = None;
+    for attempt in 0..JOINT_TRUST_MAX_ATTEMPTS_FOR_TEST {
+        let (alpha, limiting) = compute_joint_feasibility_alpha(&family, &states, &ranges, &step)
+            .unwrap_or_else(|e| panic!("attempt {attempt} must be answered, not refused: {e}"));
+        if alpha == 0.0 {
+            assert!(
+                first_admitting_rung.is_none(),
+                "the answer must not oscillate: rung {attempt} blocks after rung {:?} admitted",
+                first_admitting_rung
+            );
+            assert_eq!(limiting, Some(0), "the blocking block must be reported");
+            assert!(
+                alpha < JOINT_FEASIBILITY_ALPHA_CRUSH_THRESHOLD,
+                "a blocked face must trip the crush gate that routes it to the projection"
+            );
+        } else {
+            assert_eq!(alpha, 1.0, "rung {attempt} must admit the step whole");
+            first_admitting_rung.get_or_insert(attempt);
+        }
+        step.mapv_inplace(|value| value * 0.25);
+    }
+    assert_eq!(
+        first_admitting_rung,
+        Some(14),
+        "the ladder must re-derive the same zero until the drift enters the \
+         contract band, and cross exactly where 4^-k reaches 1e-8"
+    );
+
+    // And the limiter must NOT scale the step to zero: everything the face does
+    // not block is the magnitude the cone projection exists to preserve.
+    let mut trial = array![-1.0_f64, 5.0];
+    let outcome = apply_joint_feasibility_limit(&family, &states, &ranges, &mut trial)
+        .expect("a blocked face is an answer");
+    assert_eq!(
+        outcome,
+        JointFeasibilityLimit::BlockedByActiveFace { block: Some(0) }
+    );
+    assert_eq!(
+        trial,
+        array![-1.0_f64, 5.0],
+        "a blocked step must be handed to the projection intact, not annihilated"
+    );
+
+    // Positive control on the same fixture: a drift below the feasibility
+    // contract off the SAME active face is admitted whole, and a healthy
+    // interior step is still scaled by the ordinary fraction-to-boundary.
+    let (in_band, _) = compute_joint_feasibility_alpha(
+        &family,
+        &states,
+        &ranges,
+        &array![-1.0e-18_f64, 5.0],
+    )
+    .expect("an in-band drift keeps a feasible origin");
+    assert_eq!(in_band, 1.0);
+
+    let interior = vec![ParameterBlockState {
+        beta: array![0.25_f64, 1.0],
+        eta: array![0.0],
+    }];
+    let mut healthy = array![-1.0_f64, 0.0];
+    let scaled = apply_joint_feasibility_limit(&family, &interior, &ranges, &mut healthy)
+        .expect("an interior iterate is answered");
+    assert_eq!(
+        scaled,
+        JointFeasibilityLimit::Scaled {
+            alpha: 0.25,
+            block: Some(0)
+        }
+    );
+    assert_eq!(healthy, array![-0.25_f64, 0.0]);
+}
+
+/// Mirror of `JOINT_TRUST_MAX_ATTEMPTS` in `exact_joint_fit`: the number of
+/// rungs the trust ladder spends per cycle, and therefore the number of times
+/// the witness fit re-derived the same zero.
+const JOINT_TRUST_MAX_ATTEMPTS_FOR_TEST: usize = 24;
+
 /// gam#979 (per-block exact-Newton arm; the bernoulli marginal-slope binary
 /// path). The per-block left-hand side is `lhs = H_data + S` with `S ⪰ 0` an
 /// over-smoothed block penalty. A naive Gershgorin bound on the *penalized*

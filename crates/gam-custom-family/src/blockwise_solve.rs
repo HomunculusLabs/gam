@@ -1338,7 +1338,7 @@ impl ParameterBlockUpdater for DiagonalBlockUpdater<'_> {
             })?;
 
         if let Some(constraints) = ctx.linear_constraints {
-            check_linear_feasibility(&ctx.states[ctx.block_idx].beta, constraints, 1e-8).map_err(
+            check_linear_feasibility(&ctx.states[ctx.block_idx].beta, constraints).map_err(
                 |e| {
                     format!(
                         "block {} ({}) constrained diagonal solve: {e}",
@@ -1479,7 +1479,7 @@ impl ParameterBlockUpdater for ExactNewtonBlockUpdater<'_> {
         );
 
         if let Some(constraints) = ctx.linear_constraints {
-            check_linear_feasibility(&ctx.states[ctx.block_idx].beta, constraints, 1e-8).map_err(
+            check_linear_feasibility(&ctx.states[ctx.block_idx].beta, constraints).map_err(
                 |e| {
                     format!(
                         "block {} ({}) constrained exact-newton solve: {e}",
@@ -1657,10 +1657,27 @@ impl BlockWorkingSetUpdaterExt for BlockWorkingSet {
     }
 }
 
+/// The QP entry gate: does `beta` satisfy `constraints` to the solver's
+/// primal-feasibility contract?
+///
+/// The verdict is [`ConstraintSet::max_scaled_violation`] against
+/// [`ACTIVE_SET_PRIMAL_FEASIBILITY_TOL`] — the same quantity and the same
+/// threshold the active-set solver certifies its own returned iterate against,
+/// referenced rather than re-spelled.
+///
+/// Both halves of that changed in gam#2719. The gate used to take a `tol`
+/// parameter that all four of its call sites passed as the literal `1e-8`, so
+/// the contract could drift out from under them silently; and it compared the
+/// RAW `b − Aβ` while the contract is stated on unit-normalized rows. The
+/// second is not cosmetic. The survival time-derivative guard rows are
+/// pre-normalized by `max(‖row‖, |rhs|, 1)`, so `‖a‖ ≤ 1` and
+/// `scaled ≥ raw`: a point could be infeasible to the solver's own scan yet
+/// pass this gate, and a step the repaired fraction-to-boundary rule now admits
+/// is exactly such a point. The gate that decides whether to project has to be
+/// the gate the step rule was sized against, or the projection never fires.
 pub(crate) fn check_linear_feasibility(
     beta: &Array1<f64>,
     constraints: &ConstraintSet,
-    tol: f64,
 ) -> Result<(), String> {
     if constraints.ncols() != beta.len() {
         return Err(CustomFamilyError::ConstraintViolation {
@@ -1668,39 +1685,21 @@ pub(crate) fn check_linear_feasibility(
         }
         .into());
     }
-    let values = constraints.values(beta.view()).map_err(|e| {
+    let (worst_scaled, worst_row) = constraints.max_scaled_violation(beta.view()).map_err(|e| {
         CustomFamilyError::ConstraintViolation {
             reason: format!("linear constraints: {e}"),
         }
         .to_string()
     })?;
-    let mut worst = 0.0_f64;
-    let mut worst_idx = 0usize;
-    for i in 0..constraints.nrows() {
-        let bound = constraints.bound(i).map_err(|e| {
-            CustomFamilyError::ConstraintViolation {
-                reason: format!("linear constraints: {e}"),
-            }
-            .to_string()
-        })?;
-        let v = (bound - values[i]).max(0.0);
-        if v > worst {
-            worst = v;
-            worst_idx = i;
-        }
-    }
-    if worst > tol {
+    if worst_scaled > gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
+        let worst_idx = worst_row.unwrap_or(0);
         // #1108 DIAGNOSTIC: pin down whether this infeasible β is PROJECTABLE
         // (→ a wiring bug: the seed bypassed projection) or genuinely outside a
-        // hard polytope. Report the worst row's ‖a‖, the scaled violation, the
+        // hard polytope. Report the worst row's ‖a‖, the raw violation, the
         // β magnitude, and the outcome of the exact active-set projection of
         // THIS β onto these constraints.
         let norm_worst = constraints.row_norm(worst_idx).unwrap_or(f64::NAN);
-        let scaled_worst = if norm_worst > 0.0 {
-            worst / norm_worst
-        } else {
-            worst
-        };
+        let raw_worst = worst_scaled * norm_worst;
         let beta_inf = beta.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
         let interior_outcome =
             match gam_solve::active_set::project_point_strictly_into_feasible_constraint_set(
@@ -1723,10 +1722,12 @@ pub(crate) fn check_linear_feasibility(
         };
         return Err(CustomFamilyError::ConstraintViolation {
             reason: format!(
-                "infeasible iterate: max(Aβ-b violation)={worst:.3e} at constraint row {worst_idx} \
+                "infeasible iterate: scaled violation={worst_scaled:.3e} exceeds the \
+                 primal-feasibility contract {:.3e} at constraint row {worst_idx} \
                  [#1108 diag: rows={}, ‖a_row‖={norm_worst:.3e}, \
-                 scaled_viol={scaled_worst:.3e}, |β|∞={beta_inf:.3e}, {interior_outcome}, \
+                 raw_viol={raw_worst:.3e}, |β|∞={beta_inf:.3e}, {interior_outcome}, \
                  {simple_bounds_path}]",
+                gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL,
                 constraints.nrows()
             ),
         }

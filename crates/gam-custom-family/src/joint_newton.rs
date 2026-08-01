@@ -2433,12 +2433,35 @@ pub(crate) fn shrink_active_joint_block_trust_radii(
     block_radii.iter().copied().fold(0.0_f64, f64::max)
 }
 
+/// What the joint fraction-to-boundary rule decided about a trial step.
+///
+/// The distinction that matters is between a fraction that is a *globalization*
+/// and one that is a *refusal in disguise*. Scaling by `α` is a globalization
+/// while `α` leaves the step recognizable; at `α = 0` it annihilates the step,
+/// and no trust-radius shrink can rescue it — `slack / -drift` is invariant
+/// under `δ ↦ cδ` once its numerator is zero, so the attempt ladder re-derives
+/// the same zero at every rung (gam#2719: 24 attempts per cycle, all of them).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum JointFeasibilityLimit {
+    /// `α = 1`: nothing limits the step; `trial_delta` is untouched.
+    Unlimited,
+    /// `α ∈ (0, 1)`: the whole joint step was scaled by `α`.
+    Scaled { alpha: f64, block: Option<usize> },
+    /// `α = 0`: a constraint row is ACTIVE at the current iterate and the
+    /// direction points strictly out of it. `trial_delta` is left UNCHANGED —
+    /// scaling it by zero would discard the step's components in every
+    /// direction the face does not block, which is exactly the magnitude the
+    /// cone projection exists to preserve. The caller must restore feasibility
+    /// by projecting onto the face.
+    BlockedByActiveFace { block: Option<usize> },
+}
+
 pub(crate) fn apply_joint_feasibility_limit<F: CustomFamily + ?Sized>(
     family: &F,
     states: &[ParameterBlockState],
     ranges: &[(usize, usize)],
     trial_delta: &mut Array1<f64>,
-) -> Result<bool, String> {
+) -> Result<JointFeasibilityLimit, String> {
     // Collect each block's feasibility α and apply the *minimum* to the
     // JOINT trial step, not to each block in isolation.
     //
@@ -2463,25 +2486,52 @@ pub(crate) fn apply_joint_feasibility_limit<F: CustomFamily + ?Sized>(
     // top of that direction.
     let (joint_alpha, limiting_block) =
         compute_joint_feasibility_alpha(family, states, ranges, trial_delta)?;
-    if joint_alpha < 1.0 {
-        trial_delta.mapv_inplace(|v| joint_alpha * v);
+    if joint_alpha >= 1.0 {
+        return Ok(JointFeasibilityLimit::Unlimited);
+    }
+    if joint_alpha <= 0.0 {
         log::debug!(
-            "[PIRLS/joint-Newton] feasibility scaled joint step by α={:.3e} (block {:?} binding)",
-            joint_alpha,
+            "[PIRLS/joint-Newton] feasibility blocked by an active face (block {:?}); \
+             leaving the step for the cone projection",
             limiting_block,
         );
-        Ok(true)
-    } else {
-        Ok(false)
+        return Ok(JointFeasibilityLimit::BlockedByActiveFace {
+            block: limiting_block,
+        });
     }
+    trial_delta.mapv_inplace(|v| joint_alpha * v);
+    log::debug!(
+        "[PIRLS/joint-Newton] feasibility scaled joint step by α={:.3e} (block {:?} binding)",
+        joint_alpha,
+        limiting_block,
+    );
+    Ok(JointFeasibilityLimit::Scaled {
+        alpha: joint_alpha,
+        block: limiting_block,
+    })
 }
 
-/// Compute the joint fraction-to-boundary feasibility scalar `α ∈ (0, 1]` that
+/// Compute the joint fraction-to-boundary feasibility scalar `α ∈ [0, 1]` that
 /// [`apply_joint_feasibility_limit`] would apply to `trial_delta`, WITHOUT
 /// mutating the step. Returns `(α, limiting_block)`. `α = 1.0` means the step is
 /// fully feasible (no binding constraint); `α < 1.0` is the min over blocks of
-/// each block's `max_feasible_step_size`. Returns `Err` iff a block has no
-/// positive feasible step (current iterate infeasible / degenerate).
+/// each block's `max_feasible_step_size`.
+///
+/// `α = 0.0` is an ANSWER, not an error: a constraint row is active at the
+/// current iterate and the proposed direction points strictly out of it. Until
+/// gam#2719 this arm returned `Err`, and the caller answered by shrinking the
+/// trust radius — which cannot change a ratio whose numerator is exactly zero,
+/// so the attempt ladder re-derived the same zero to its floor. Worse, the two
+/// `alpha_would_crush` gates that route this exact pathology to the
+/// magnitude-preserving cone projection read `Err(_) => false`, so the most
+/// pathological case was the one DENIED the rescue built for it. The answer is
+/// now reported and those gates fire.
+///
+/// `Err` is reserved for a malformed answer — non-finite, or outside `[0, 1]` —
+/// which is a family-implementation fault rather than a statement about the
+/// geometry. The genuine "current iterate is infeasible" condition is reported
+/// by the family's own hook (as `ContractFeasibleStepError::InfeasibleIterate`)
+/// and arrives here already rendered.
 ///
 /// Split out (gam#979) so the constrained joint-Newton path can DETECT the
 /// pathological α-collapse — a binding monotonicity row at slack≈0 driving
@@ -2501,9 +2551,10 @@ pub(crate) fn compute_joint_feasibility_alpha<F: CustomFamily + ?Sized>(
     for (block_idx, (start, end)) in ranges.iter().copied().enumerate() {
         let block_delta = trial_delta.slice(s![start..end]).to_owned();
         if let Some(alpha_max) = family.max_feasible_step_size(states, block_idx, &block_delta)? {
-            if !alpha_max.is_finite() || alpha_max <= 0.0 {
+            if !alpha_max.is_finite() || !(0.0..=1.0).contains(&alpha_max) {
                 return Err(format!(
-                    "joint Newton block {block_idx} has no positive feasible step"
+                    "joint Newton block {block_idx} reported a feasible step fraction of \
+                     {alpha_max:.6e}, which is not a fraction in [0, 1]"
                 ));
             }
             if alpha_max < joint_alpha {
