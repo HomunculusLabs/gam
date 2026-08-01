@@ -2302,6 +2302,46 @@ pub struct FitArtifacts {
     /// Serialized, because the reason has to survive to a consumer reading a
     /// saved model's standard errors; that consumer is exactly the one who
     /// would otherwise misread the absence.
+    ///
+    /// # This channel is ADVISORY, and that is only safe because absence is honest
+    ///
+    /// Nothing in the type system forces a consumer to read this field.
+    /// `covariance_conditional` is an `Option` whose `None` was already a
+    /// common, benign value long before this existed (the exact-interpolation
+    /// Gaussian boundary, saved models reconstructed without inference, any fit
+    /// that declined it), so a consumer looking only there still cannot tell
+    /// "never computed" from "computed and withheld". Making that distinction
+    /// structural would mean replacing the `Option` with a three-state enum
+    /// across ~185 references in 52 files.
+    ///
+    /// That was not done, and the reason it is safe not to have done it is a
+    /// MEASURED property rather than an assumption: **no consumer substitutes a
+    /// value for an absent covariance.** Every production read propagates the
+    /// absence — `.as_ref().map(..)`, `.filter(..)?`, `.and_then(..)`, `.clone()`
+    /// into another `Option`, or an outright `Err`. None defaults to a zero
+    /// matrix, an identity, or a zero standard error. Checked over
+    /// `covariance_conditional` (185 occurrences) and the paired
+    /// `beta_covariance` / `beta_standard_errors` /
+    /// `beta_covariance_corrected` / `beta_standard_errors_corrected` (114
+    /// production reads).
+    ///
+    /// The single fallback in the tree is
+    /// [`UnifiedFitResult::beta_covariance_corrected`], which returns `Vb` for
+    /// `Vp` when `lambdas.is_empty()`. It is guarded, documented, and exact —
+    /// with no smoothing coordinates the correction `J Var(rho) Jᵀ` is
+    /// identically zero — and it `.flatten()`s to `None` when the conditional
+    /// covariance is also absent, which is the state a declined fit is in.
+    ///
+    /// **If that ever stops being true, this field is no longer sufficient and
+    /// the `Option` must become an enum.** Re-check with:
+    ///
+    /// ```text
+    /// git grep -n -E '\.(covariance_conditional|beta_covariance|beta_standard_errors)' -- crates/ src/
+    /// ```
+    ///
+    /// and look for `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`,
+    /// `map_or`, or a `None =>` arm that yields a matrix or a zero SE rather
+    /// than propagating.
     #[serde(default)]
     pub covariance_declined: Option<CovarianceDeclined>,
 }
