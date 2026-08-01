@@ -7009,3 +7009,152 @@ pub(crate) fn criterion_lane_gap_is_exactly_the_evidence_logdet_gap_2509() {
         measured_gap - logdet_gap
     );
 }
+
+/// #2681 MEASUREMENT: the inner convergence gate is denominated in an EXTENSIVE
+/// quantity, and the intensive replacement already exists unwired in this path.
+///
+/// This test asserts nothing about whether the fixture converges. It reports the
+/// two certificates side by side at the state the refusal leaves the term in,
+/// because the whole #2681 question is whether the bar the witnesses fail is
+/// measuring the right thing.
+///
+/// The criterion's inner gate (`construction_quasi_laplace.rs:897/908`) judges
+///
+/// ```text
+///   ‖g‖₂                      vs   REL_TOL · (1 + ‖θ‖₂)
+/// ```
+///
+/// Both sides are EXTENSIVE. `system_grad_norm_sq` sums squared gradient
+/// components over every row and atom, and `inner_iterate_scale` sums squared
+/// parameters over every row's coordinates — so the bar's denominator grows like
+/// `sqrt(n)` while its numerator grows like `n`. That mismatch is exactly the
+/// trap #2681 records: across `n = 8..32` the raw residual is FLAT (drifting
+/// slightly up) while `‖g‖/tol` "improves", because the tolerance is rising to
+/// meet a stationary residual. A ratio whose denominator moves is not progress.
+///
+/// The repo already has the intensive pair, and `fit_entry.rs:351` already uses
+/// it under the name `SaeParameterSpaceKktAudit`:
+///
+/// ```text
+///   system_scaled_grad_max    vs   REL_TOL · inner_iterate_max
+/// ```
+///
+/// — each gradient component divided by its OWN block's diagonal curvature, so
+/// the ratio is a displacement in parameter space, compared against
+/// `1 + max|parameter|`. Both sides intensive; the documented contract is that
+/// this removes "row-count, atom-count, and basis-scale extensivity".
+///
+/// So one certificate has two implementations, and the criterion lane uses the
+/// extensive one while the fit entry uses the intensive one. This test pins the
+/// gap between them so the next reader does not have to re-derive it, and so a
+/// change to either is visible.
+#[test]
+pub(crate) fn inner_kkt_gate_is_extensive_while_the_intensive_certificate_exists_2681() {
+    let (mut term, target, rho) = small_two_atom_periodic_term();
+
+    // Drive the criterion the three #2509 witnesses drive. It is EXPECTED to
+    // refuse on this fixture; the refusal path restores the best-seen state, so
+    // the term is left exactly where the gate judged it.
+    let refusal = term.penalized_quasi_laplace_criterion_with_cache(
+        target.view(),
+        &rho,
+        None,
+        1,
+        0.25,
+        1.0e-4,
+        1.0e-4,
+    );
+    let error = match refusal {
+        Ok(_) => {
+            eprintln!(
+                "#2681: fixture now CONVERGES — the witnesses are unblocked, re-read the issue"
+            );
+            return;
+        }
+        Err(error) => error,
+    };
+    // Resolve the typed variant rather than matching text: the inner
+    // non-convergence refusal is the `Numerical` arm, and a `VanishedAtoms` or
+    // `IndefiniteObservedInformation` refusal would mean this fixture is failing
+    // for a different reason than #2681 describes.
+    let message = error.numerical_message().unwrap_or_else(|| {
+        panic!(
+            "#2681: expected the numerical (inner non-convergence) refusal, got a \
+             different typed variant: {error:?}"
+        )
+    });
+    assert!(
+        message.contains("met tolerance"),
+        "#2681: expected the inner non-convergence refusal, got: {message}"
+    );
+
+    // Both certificates on the SAME assembled system at that state.
+    let system = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("the best-seen state must still assemble");
+    let raw_sq = SaeManifoldTerm::system_grad_norm_sq(&system);
+    let raw = raw_sq.sqrt();
+    let extensive_bound = SAE_MANIFOLD_INNER_GRAD_REL_TOL * term.inner_iterate_scale();
+    let scaled_max = SaeManifoldTerm::system_scaled_grad_max(&system)
+        .expect("the parameter-space certificate must resolve on this fixture");
+    let intensive_bound = SAE_MANIFOLD_INNER_GRAD_REL_TOL
+        * term
+            .inner_iterate_max()
+            .expect("the intensive iterate scale must resolve on this fixture");
+
+    eprintln!(
+        "#2681 certificates at the refused state:\n  \
+         EXTENSIVE (the gate): ‖g‖₂ = {raw:.6e}  bound = {extensive_bound:.6e}  \
+         over = {:.3e}x\n  \
+         INTENSIVE (parameter space, unwired here): scaled_grad_max = {scaled_max:.6e}  \
+         bound = {intensive_bound:.6e}  over = {:.3e}x",
+        raw / extensive_bound,
+        scaled_max / intensive_bound,
+    );
+
+    // The standing fact, MEASURED — and it refuted the hypothesis this test was
+    // written to confirm.
+    //
+    // I expected the intensive certificate to be far closer to its bound, which
+    // would have made #2681 a units defect with a clean repair. It is 5.5x
+    // FURTHER away: extensive 4.760e2x, intensive 2.630e3x. `scaled_grad_max`
+    // of 4.23e-1 is a displacement of 0.42 in PARAMETER units — this state is
+    // not marginally outside a badly-chosen tolerance, it is nowhere near
+    // stationary under the most forgiving reading available.
+    //
+    // So the extensive/intensive mismatch documented above is a real code fact
+    // and is NOT why the three #2509 witnesses fail. Re-denominating the bar
+    // would refuse this state harder, not unblock it. The `n≥8` stall is
+    // #2653's cluster; the witnesses need a route that does not couple an
+    // operator-parity assertion to a solver contract it has no stake in.
+    let extensive_over = raw / extensive_bound;
+    let intensive_over = scaled_max / intensive_bound;
+
+    // Guard on the condition that would reopen the units reading: BOTH
+    // certificates presently refuse by orders of magnitude, and the interesting
+    // event is either of them coming within range.
+    //
+    // Stated as OVERAGES — each residual against its own bound — so both sides
+    // are dimensionless and in the same units. That matters here for a reason
+    // worth recording: #2681's original `n = 8..32` sweep appeared to show a
+    // flat residual with an "improving" ratio, and that reading was itself an
+    // absolute-vs-relative comparison. In relative units the residual FALLS
+    // (1.26e-2 → 3.27e-5 → 1.88e-5 across n = 5, 8, 32) because the iterate
+    // scale moves 3.03x over the span. Comparing a raw `‖g‖` across `n` in this
+    // family is meaningless in either direction, so this test never does it.
+    assert!(
+        extensive_over > 10.0 && intensive_over > 10.0,
+        "#2681: a certificate has come within range at the refused state \
+         (extensive {extensive_over:.3e}x, intensive {intensive_over:.3e}x). The \
+         measurement that routed this to #2653 — both certificates refusing by \
+         orders of magnitude, so the bar was not the defect — no longer holds and \
+         the three #2509 witnesses should be re-checked."
+    );
+    assert!(
+        scaled_max > 1.0e-2,
+        "#2681: the parameter-space displacement has dropped to {scaled_max:.6e}. \
+         The finding that this state is nowhere near stationary IN PARAMETER UNITS \
+         (measured 4.23e-1) is what ruled out re-denominating the bar; if the solve \
+         now lands this close, that conclusion needs re-taking."
+    );
+}
