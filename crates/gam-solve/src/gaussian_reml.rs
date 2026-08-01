@@ -9368,6 +9368,24 @@ pub fn dense_fisher_gaussian_fit(
 
 /// #2723 — the perfect-fit refusal must be a property of the DESIGN, not of the
 /// sign of the last rounding.
+///
+/// Positive control, MEASURED rather than argued: with the bar reverted to the
+/// bare `residual > 0.0` and nothing else changed, two of these three tests go
+/// red, and the failure names the two designs the issue measured as wrongly
+/// accepted —
+///
+/// ```text
+///   A irrational basis, constant response:      residual 1.776357e-15,
+///                                               ywy 5.880000e0,   resolution 4.177991e-13
+///   B integer basis, penalized mass present:    residual 3.743049e-13,
+///                                               ywy 1.650000e2,   resolution 9.379164e-12
+/// ```
+///
+/// while `a_genuine_residual_is_accepted_at_every_scale` stays green, so the
+/// reverted bar fails for the reason under test rather than by refusing (or
+/// accepting) everything. Both accepted residuals sit two to four orders BELOW
+/// their own resolution — the old predicate was reading debris, and the margin
+/// by which it was doing so is what these numbers record.
 #[cfg(test)]
 mod perfect_fit_refusal_tests {
     use super::*;
