@@ -5,14 +5,18 @@
 //! `h(y | x; θ₁)` and emits a latent score `z_i = Φ⁻¹(u_i)` from the
 //! finite-support PIT
 //!
-//!     u_i = [Φ(h_i) − Φ(L_i)] / [Φ(U_i) − Φ(L_i)],
+//! ```text
+//! u_i = [Φ(h_i) − Φ(L_i)] / [Φ(U_i) − Φ(L_i)],
+//! ```
 //!
 //! with (SCOP form, see `transformation_normal.rs`)
 //!
-//!     h_i = b(x_i) + ε·(y_i − median) + Σ_{k≥1} I_k(y_i)·γ_k(x_i)²
-//!     L_i = h(y_min | x_i),  U_i = h(y_max | x_i)
-//!     b(x_i)   = Xᶜᵒᵛ_i · θ_b           (location column, response basis col 0)
-//!     γ_k(x_i) = Xᶜᵒᵛ_i · θ_{γk}         (squared SCOP shape coeffs, cols k≥1).
+//! ```text
+//! h_i = b(x_i) + ε·(y_i − median) + Σ_{k≥1} I_k(y_i)·γ_k(x_i)²
+//! L_i = h(y_min | x_i),  U_i = h(y_max | x_i)
+//! b(x_i)   = Xᶜᵒᵛ_i · θ_b           (location column, response basis col 0)
+//! γ_k(x_i) = Xᶜᵒᵛ_i · θ_{γk}         (squared SCOP shape coeffs, cols k≥1).
+//! ```
 //!
 //! Stage 2 (marginal-slope) treats `z_i` as a **generated regressor**:
 //! `z_i` depends on the Stage-1 estimate θ̂₁, so the β estimating equation is

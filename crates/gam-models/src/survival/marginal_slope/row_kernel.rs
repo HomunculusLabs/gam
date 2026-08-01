@@ -1195,7 +1195,9 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
     ///
     /// Every coefficient block is the weighted cross-product
     ///
-    ///     Σᵢ wᵢ xᵢ yᵢᵀ = Xᵀ diag(w) Y.
+    /// ```text
+    /// Σᵢ wᵢ xᵢ yᵢᵀ = Xᵀ diag(w) Y.
+    /// ```
     ///
     /// Every pair whose dense row panels fit the fixed working-set budget uses
     /// bounded, row-chunked BLAS-3 Grams, irrespective of its source storage.

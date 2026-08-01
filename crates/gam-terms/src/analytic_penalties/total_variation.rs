@@ -428,8 +428,10 @@ impl AnalyticPenalty for TotalVariationPenalty {
 /// For each adjacent pair `(a, a+1)` along the leading axis and each output
 /// column `j`, the penalty contribution is
 ///
-///     softplus(-direction * (target[a+1, j] - target[a, j]) / smoothing_eps)
-///     * smoothing_eps
+/// ```text
+/// softplus(-direction * (target[a+1, j] - target[a, j]) / smoothing_eps)
+/// * smoothing_eps
+/// ```
 ///
 /// which is the smoothed hinge that hits zero when the slope agrees with
 /// `direction` (+1 ⇒ non-decreasing, -1 ⇒ non-increasing) and grows

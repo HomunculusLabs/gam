@@ -178,6 +178,52 @@ jobs:
           fi
           exit "$status"
 
+  # `cargo test --doc` ran in NO CI job either (#2732) -- a second surface dark
+  # by omission, and NOT covered by the rustdoc ratchet above. Different
+  # command, different surface: `cargo doc --no-deps` GENERATES docs,
+  # `cargo test --doc` COMPILES AND RUNS every doctest, and neither result
+  # predicts the other. The rustdoc job's green must not be read as covering
+  # this one, which is why they are two jobs with two names.
+  #
+  # It lands as a ZERO BAR rather than a ledger-ratchet because the debt it was
+  # designed against is gone. The workspace census (run 30696464338, 24 crates,
+  # 1h39m) measured 25 failing doctests across gam-solve (12), gam-terms (8),
+  # gam-models (3) and gam-sae (2); every one was an indented ASCII-math block
+  # in a `///` comment that rustdoc was compiling as Rust, and all 25 are fenced
+  # as text now. A ledger with nothing in it is not a ratchet.
+  #
+  # WHY ITS OWN JOB. Same reasoning that split the rustdoc ratchet out
+  # (`893cbc6aa`): `cargo test --doc` is the HEAVIER of the two, because it
+  # codegens and links where a `--no-deps` doc pass does not. It gates under its
+  # own name without adding latency to the compile verdict everyone waits on.
+  #
+  # The green here is a real verdict on a surface that today contains zero
+  # doctests -- "no doc comment in this tree compiles as broken Rust" -- and
+  # that is exactly why the script carries a per-crate coverage control. A scan
+  # that built nothing would print the same `0 passed; 0 failed`.
+  doctest-gate:
+    name: Doctests (cargo test --doc, workspace)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Doctest gate
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: "0"
+        run: |
+          set +e
+          scripts/doctest_gate.sh
+          status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "::error title=Doctest gate could not measure::The scan did not run to completion, so this run says nothing about the doctest surface. Treat it as a non-run, not as a pass."
+          fi
+          exit "$status"
+
   windows-gnu-check:
     name: Non-Linux cross (x86_64-pc-windows-gnu)
     runs-on: ubuntu-24.04

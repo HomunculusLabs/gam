@@ -2926,7 +2926,9 @@ fn outer_rho_gradient_error_does_not_scale_with_lambda_2454() {
 /// unit ρ, no matter how large λ becomes. If `−½log|S|₊` is taken on a penalty
 /// of a DIFFERENT rank `r`, the two halves saturate at different rates and
 ///
-///     ∂V/∂ρ → ½(rank(S̃) − r)   per unit ρ, forever,
+/// ```text
+/// ∂V/∂ρ → ½(rank(S̃) − r)   per unit ρ, forever,
+/// ```
 ///
 /// which for `r > rank(S̃)` is a criterion unbounded below: no interior
 /// optimum, no λ=∞ face, and an outer search that arrives at the box edge.

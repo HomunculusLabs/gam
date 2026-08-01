@@ -9,7 +9,9 @@ use super::*;
 ///
 /// For every row `r` and output column `j` the contribution is
 ///
-///     ½ · weight · row_weights[r mod period] · target[r, j]²
+/// ```text
+/// ½ · weight · row_weights[r mod period] · target[r, j]²
+/// ```
 ///
 /// summed over all rows and columns. This is exactly the diagonal periodic
 /// roughness Gram of a Fourier decoder: for the standard odd-`K` layout

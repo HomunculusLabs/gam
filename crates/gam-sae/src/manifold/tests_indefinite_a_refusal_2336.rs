@@ -244,7 +244,9 @@ const GENUINE_SADDLE_SPECIMEN: (f64, f64) = (1.0, -6.0);
 /// `scale ∈ {0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0}` ×
 /// `log λ_sparse ∈ {−8, −6, −4, −2, 0}` — 50 cells — exactly four still refuse:
 ///
-///     (0.01, −6)   (0.2, −2)   (1.0, −6)   (1.0, −4)
+/// ```text
+/// (0.01, −6)   (0.2, −2)   (1.0, −6)   (1.0, −4)
+/// ```
 ///
 /// They are isolated points, not a region, so the choice matters: `scale = 1.0`
 /// is the ONLY place two adjacent lifts both refuse, which is why the specimen

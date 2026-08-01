@@ -17,8 +17,10 @@
 //! response matrix the atom is responsible for reconstructing, namely its
 //! **leave-this-atom-out residual**
 //!
-//!     y_resp[i] = target[i] − ( Σ_j a[i,j]·γ_j(t_{ij}) − a[i,k]·γ_k(t_{ik}) )
-//!               = target[i] − without_k[i],
+//! ```text
+//! y_resp[i] = target[i] − ( Σ_j a[i,j]·γ_j(t_{ij}) − a[i,k]·γ_k(t_{ik}) )
+//!           = target[i] − without_k[i],
+//! ```
 //!
 //! the response with every OTHER atom's contribution subtracted. Over the rows
 //! assigned to atom `k` (assignment mass `a[i,k] = a_k`), the two candidates

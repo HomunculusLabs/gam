@@ -1440,7 +1440,9 @@ impl SaeManifoldOuterObjective {
     /// `√λ_ℓ = exp(½ log λ_ℓ)` per entry, `n·p_ℓ` entries). Summed over the
     /// `L-1` output blocks,
     ///
-    ///     block_jacobian(ρ) = −Σ_ℓ (n·p_ℓ/2)·log λ_ℓ.
+    /// ```text
+    /// block_jacobian(ρ) = −Σ_ℓ (n·p_ℓ/2)·log λ_ℓ.
+    /// ```
     ///
     /// With the scaled-block residual `R_ℓ` flowing through the half-SSE data
     /// term, `∂C/∂log λ_ℓ = ½·λ_ℓ·R_ℓ − n·p_ℓ/2`, stationary at

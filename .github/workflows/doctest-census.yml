@@ -23,6 +23,37 @@ name: Doctest census (#2732)
 # the marginal work is the passes alone" -- true, and never multiplied out
 # against the 5.2-minute baseline it was being added to.
 #
+# ===========================================================================
+# TRIGGER DISCHARGED -- the gate exists, and it is NOT the ratchet below.
+# ===========================================================================
+# Run 30696464338 executed this census over the whole workspace: 24 crates,
+# 1h39m, 19 passing, 5 "failing". Reading it produced two corrections to the
+# plan the trigger below was written under.
+#
+#   1. The debt was 25 doctests in FOUR crates -- gam-solve 12, gam-terms 8,
+#      gam-models 3, gam-sae 2 -- and all 25 were one defect, an indented
+#      ASCII-math block in a `///` comment that rustdoc compiles as Rust. That
+#      is small enough to FIX, and fixing it beats ledgering it: a ledger is
+#      how you gate a surface you cannot afford to clean, and this one cost 25
+#      fenced blocks. The workspace is green, so
+#      `scripts/doctest_red_crates.txt` was never written and condition (1)
+#      below is moot rather than met.
+#   2. The fifth "failing" crate, gam-cli, was an ARTIFACT: `no library targets
+#      found in package gam-cli`. It is binary-only and has no doctests to run.
+#      Both scripts now derive their crate list from lib targets, so the
+#      question is no longer asked of crates that cannot answer it.
+#
+# Condition (3) is still the one that decided placement, and it decided it the
+# same way: the gate is its OWN top-level job in `cross-check.yml`
+# (`doctest-gate`), never serialized ahead of the compile verdict, because
+# `cargo test --doc` codegens and links where the ~6-minute rustdoc pass does
+# not. It runs `scripts/doctest_gate.sh` -- ONE `--workspace` invocation, not
+# this per-crate loop, whose 1h39m is a triage cost.
+#
+# This workflow stays dispatch-only and keeps its original purpose: per-crate
+# attribution when doctest debt returns. The trigger text below is preserved
+# unedited because it is the reasoning the discharge was measured against.
+#
 # ---------------------------------------------------------------------------
 # PROMOTION TRIGGER -- a condition, not an intention. Anyone can check whether
 # it has been met without re-deriving any of the reasoning above.

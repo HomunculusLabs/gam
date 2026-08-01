@@ -2,6 +2,28 @@
 #
 # Does every crate whose doctests pass still pass them? (#2732)
 #
+# SUPERSEDED AS THE GATE -- SURVIVES AS THE CENSUS. Read this first.
+# ------------------------------------------------------------------
+# The ratchet below was designed for a workspace carrying doctest debt, on the
+# rule that you never enable a job that is red on arrival. The census this file
+# exists to produce (run 30696464338, 24 crates, 1h39m) measured that debt at
+# 25 failing doctests in four crates -- gam-solve 12, gam-terms 8, gam-models 3,
+# gam-sae 2 -- and every one of them was one defect: an indented ASCII-math
+# block in a `///` comment that rustdoc compiles as Rust. Fixing 25 blocks was
+# cheaper than carrying a ledger for them, so they were fixed and the workspace
+# went green.
+#
+# So `scripts/doctest_red_crates.txt` was never written: an empty ledger is not
+# a ratchet. The GATE is `scripts/doctest_gate.sh`, one `--workspace` pass, wired
+# into `cross-check.yml` on push. This file's gate mode is retained but unused,
+# and would need a measured ledger to run at all.
+#
+# What this file is still FOR is the per-crate census: `--census` mode is how
+# the numbers above were obtained, and it is the right instrument when doctest
+# debt returns and has to be attributed crate by crate. It is ~1h39m, which is
+# a triage cost, not a push-gate cost -- the second reason the gate is a single
+# workspace invocation instead of this loop.
+#
 # WHY THIS IS SEPARATE FROM scripts/rustdoc_ratchet.sh
 # ----------------------------------------------------
 # That one runs `cargo doc -p <crate> --no-deps` -- doc GENERATION. This runs
@@ -79,8 +101,18 @@ fi
 
 cd "${REPO_ROOT}" || die "cannot cd to ${REPO_ROOT}"
 
-mapfile -t ALL_CRATES < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sort)
-[ "${#ALL_CRATES[@]}" -gt 0 ] || die "cargo metadata returned no workspace packages"
+# Only crates with a LIB target can have doctests. Asking `cargo test --doc -p
+# <crate>` of a bin-only crate is a category error, not a finding: the first
+# census (run 30696464338) reported gam-cli as FAILING at rc=101 when the whole
+# message was `no library targets found in package gam-cli`. gam-cli is a
+# binary. It has no doctests and never had any; filtering on the lib target
+# removes the artifact at its source rather than special-casing the name.
+mapfile -t ALL_CRATES < <(
+  cargo metadata --no-deps --format-version 1 \
+    | jq -r '.packages[] | select([.targets[].kind[]] | any(. == "lib" or . == "rlib" or . == "proc-macro")) | .name' \
+    | sort
+)
+[ "${#ALL_CRATES[@]}" -gt 0 ] || die "cargo metadata returned no workspace lib packages"
 
 LEDGER_CRATES=()
 if [ -r "${LEDGER}" ]; then

@@ -16,11 +16,15 @@
 //! With latent `Z ∈ ℝ^{B×F}`, scalar gate `g ∈ ℝ^F`, decoder weights
 //! `W ∈ ℝ^{D×F}`, and optional bias `b ∈ ℝ^D`,
 //!
-//!     X̂[i, d] = Σ_f g[f] · Z[i, f] · W[d, f] + b[d]
+//! ```text
+//! X̂[i, d] = Σ_f g[f] · Z[i, f] · W[d, f] + b[d]
+//! ```
 //!
 //! Masked interchange-swap forward composes the latent first,
 //!
-//!     Z_eff[i, f] = mask[f] ? Z_a[i, f] : Z_b[i, f],
+//! ```text
+//! Z_eff[i, f] = mask[f] ? Z_a[i, f] : Z_b[i, f],
+//! ```
 //!
 //! then runs the plain decode on `Z_eff`. The gate `g` and the weights `W`
 //! are SHARED between the two source decodings — only the latent activations
@@ -32,10 +36,12 @@
 //! --------
 //! From upstream `Ȳ = ∂L/∂X̂ ∈ ℝ^{B×D}`,
 //!
-//!     ∂L/∂Z[i, f] = g[f] · Σ_d Ȳ[i, d] · W[d, f]
-//!     ∂L/∂g[f]   = Σ_i Z[i, f] · Σ_d Ȳ[i, d] · W[d, f]
-//!     ∂L/∂W[d, f] = g[f] · Σ_i Ȳ[i, d] · Z[i, f]
-//!     ∂L/∂b[d]   = Σ_i Ȳ[i, d]
+//! ```text
+//! ∂L/∂Z[i, f] = g[f] · Σ_d Ȳ[i, d] · W[d, f]
+//! ∂L/∂g[f]   = Σ_i Z[i, f] · Σ_d Ȳ[i, d] · W[d, f]
+//! ∂L/∂W[d, f] = g[f] · Σ_i Ȳ[i, d] · Z[i, f]
+//! ∂L/∂b[d]   = Σ_i Ȳ[i, d]
+//! ```
 //!
 //! For the masked-swap path, `∂L/∂Z_a` keeps the columns where `mask[f]`
 //! is true (the rest are zero) and `∂L/∂Z_b` keeps the columns where

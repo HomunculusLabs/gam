@@ -4,7 +4,9 @@
 //! `s_v ∈ R^{d_v}` and per-edge linear restriction maps
 //! `R_e^{(u→e)}: R^{d_u} → R^{d_e}`, the **coboundary**
 //!
-//!     δs[e] = R_e^{(u→e)}(s_{u_e}) − R_e^{(v→e)}(s_{v_e})
+//! ```text
+//! δs[e] = R_e^{(u→e)}(s_{u_e}) − R_e^{(v→e)}(s_{v_e})
+//! ```
 //!
 //! lifts each edge into a per-edge "discrepancy" vector. The
 //! **sheaf Laplacian** `L = δᵀ δ` is sparse PSD on the stacked stalk
@@ -14,7 +16,9 @@
 //!
 //! The penalty value is
 //!
-//!     P(s) = ½ · weight · sᵀ L s = ½ · weight · ∑_e ‖δs[e]‖².
+//! ```text
+//! P(s) = ½ · weight · sᵀ L s = ½ · weight · ∑_e ‖δs[e]‖².
+//! ```
 //!
 //! References:
 //!   * Hansen & Ghrist, "Toward a Spectral Theory of Cellular Sheaves",
