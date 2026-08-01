@@ -461,6 +461,9 @@ mod tests_crosscoder_olmo;
 mod tests_stall_diagnostic_2234;
 
 #[cfg(test)]
+mod tests_gauge_frame_roundtrip_2720;
+
+#[cfg(test)]
 mod tests_rho_structural_layout_2253;
 
 #[cfg(test)]
