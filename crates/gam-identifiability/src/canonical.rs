@@ -974,12 +974,14 @@ fn canonicalize_for_identifiability_inner(
     // first column dropped). The #933 reduction path wraps the callback in
     // `GaugeComposedJacobian` so the family captures the REDUCED design, which is
     // sound only when the family's effective geometry is DERIVED from that
-    // callback (multinomial softmax, marginal-slope logslope). It is NOT sound
+    // callback (marginal-slope logslope). It is NOT sound
     // for a family that materialises its own raw-width designs and merely exposes
     // an `AdditiveBlockJacobian` to declare its output channel to the audit — the
     // cause-specific competing-risks Royston-Parmar family, whose likelihood
     // reads internal `x_entry/x_exit/x_derivative` at the RAW width and asserts
-    // `beta.len() == p_raw`. A dead column carries NO effective-Jacobian signal
+    // `beta.len() == p_raw`; and the multinomial softmax family, whose every
+    // assembly reads the shared `X` it captured at construction and which now
+    // says so through `locks_raw_width_reduction()` (#2744). A dead column carries NO effective-Jacobian signal
     // for the gauge composition to map, so dropping it desynchronises that raw
     // design from the reduced β ("beta length mismatch: got p-1, expected p",
     // breaking EVERY competing-risks fit). Keeping a dead column at raw width is

@@ -185,11 +185,14 @@ pub trait BlockEffectiveJacobian: Send + Sync {
     /// The `#933` reduction path wraps a `jacobian_callback` block in a
     /// gauge-composed Jacobian so the family fits in a reduced section — sound
     /// only when the family's effective geometry is DERIVED from the callback
-    /// (multinomial softmax, marginal-slope logslope). It is NOT sound for a
-    /// callback whose effective Jacobian is a **fixed nonlinear functional
-    /// basis** recomputed at the raw coefficient width on every evaluation
-    /// (the survival marginal-slope monotone time-wiggle time block): its
-    /// downstream likelihood reads raw-width internal designs and asserts
+    /// (marginal-slope logslope). It is NOT sound for a callback whose
+    /// effective Jacobian is a **fixed nonlinear functional basis** recomputed
+    /// at the raw coefficient width on every evaluation (the survival
+    /// marginal-slope monotone time-wiggle time block), nor for one that merely
+    /// DECLARES an output channel for a family that materialises its own
+    /// raw-width design (the multinomial softmax, whose every assembly reads the
+    /// `X` it captured at construction — #2744): such a family's downstream
+    /// likelihood reads raw-width internal designs and asserts
     /// `beta.len() == p_raw`, so a reduced β desynchronises that layout — the
     /// same failure mode the competing-risks dead-column veto already guards.
     /// Such a block returns `true` so the canonicaliser keeps it at raw width

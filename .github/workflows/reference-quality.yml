@@ -160,6 +160,14 @@ jobs:
           RES="$OUT/quality_results.tsv"
           JSONL="$OUT/quality_results.jsonl"
           discovery_error=0
+          # MEASURED vs NOT MEASURED. `measured=1` means libtest ENUMERATED the
+          # suite from a real binary, so the rows below are observations of the
+          # quality tests. Both fallback paths (no binary, or a binary that lists
+          # zero cases) synthesise a ONE-ELEMENT pseudo-suite so the run still
+          # reports something readable -- but that single row is a report ABOUT
+          # the job, not a measurement OF the suite, and everything downstream
+          # that treats it as one is wrong. This flag is what tells them apart.
+          measured=1
           # gam#1082: the quality target is built under the `release-dev` profile
           # (see the build step), so its binary lands in target/release-dev/deps.
           bin=$(find target/release-dev/deps -maxdepth 1 -type f -perm -u+x -name "quality-*" ! -name '*.*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
@@ -167,9 +175,11 @@ jobs:
             mapfile -t tests < <("$bin" --list 2>/dev/null | sed -n 's/: test$//p')
             if [ "${#tests[@]}" -eq 0 ]; then
               discovery_error=1
+              measured=0
               tests=(quality_discovery)
             fi
           else
+            measured=0
             tests=(quality)
           fi
           N=${#tests[@]}; i=0
@@ -381,16 +391,35 @@ jobs:
           # so comparing it against rows actually written is an honest
           # self-report that survives into the published directory.
           #
-          # This does not gate anything. It only makes a partial run say so.
+          # `COMPLETE` is denominated in `N`, and `N` is the ENUMERATED count --
+          # so on the fallback paths, where `N` is the synthetic 1, one written
+          # row satisfies `rows_written == N` and the marker read `COMPLETE`.
+          # That is how a BUILDFAIL run (`enumerated=1 rows_written=1
+          # completeness=COMPLETE`, run 30702349083) published itself over a run
+          # that had measured 456 tests. A row count can only certify
+          # completeness RELATIVE to a real enumeration; when there was no
+          # enumeration there is nothing to be complete with respect to, and the
+          # marker must say NOT_MEASURED rather than borrow the vocabulary of a
+          # measured run (#2744).
           rows_written=$(( $(wc -l < "$RES") - 1 ))
-          if [ "$rows_written" -eq "$N" ]; then
+          if [ "$measured" -eq 0 ]; then
+            completeness=NOT_MEASURED
+          elif [ "$rows_written" -eq "$N" ]; then
             completeness=COMPLETE
           else
             completeness=PARTIAL
           fi
-          printf 'completeness\t%s\nenumerated\t%d\nrows_written\t%d\n' \
-            "$completeness" "$N" "$rows_written" > "$(dirname "$RES")/completeness.tsv"
+          printf 'completeness\t%s\nmeasured\t%s\nenumerated\t%d\nrows_written\t%d\n' \
+            "$completeness" "$( [ "$measured" -eq 1 ] && echo true || echo false )" \
+            "$N" "$rows_written" > "$(dirname "$RES")/completeness.tsv"
           echo "COMPLETENESS=$completeness enumerated=$N rows_written=$rows_written"
+          # Hand the verdict to later steps: the publish step must not overwrite
+          # the tracked in-tree record with a run that measured nothing.
+          if [ "$measured" -eq 1 ]; then
+            echo "QUALITY_MEASURED=true" >> "$GITHUB_ENV"
+          else
+            echo "QUALITY_MEASURED=false" >> "$GITHUB_ENV"
+          fi
           {
             echo ""
             echo "### Totals"
@@ -559,8 +588,22 @@ jobs:
       #
       # This job is `cancel-in-progress: false`, so the cancellations are the
       # 6-hourly schedule overlapping its own runtime rather than a newer push.
+      #
+      # #2744: the same wholesale replace also let a run that measured NOTHING
+      # overwrite one that had measured the suite. A BUILDFAIL run cannot
+      # enumerate the grouped binary, so the run step falls back to a synthetic
+      # one-element pseudo-suite and writes one `BUILDFAIL` row; that row is a
+      # non-empty, self-declared-COMPLETE TSV, so every guard downstream (the
+      # action's zero-byte filter, the completeness marker) passed it through and
+      # `2d4f1bbfc` replaced run 30691912146's 52-failure breakdown with it. Four
+      # consecutive reds each destroyed the previous red's evidence. So the
+      # publish is now gated on `QUALITY_MEASURED`, set by the run step from
+      # whether libtest actually ENUMERATED the suite: a run that measured
+      # nothing publishes nothing and the last measured record survives.
+      # `QUALITY_MEASURED` is unset if the run step never executed, and the
+      # comparison against 'true' then fails closed.
       - name: Publish results to bench/gha_results
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.QUALITY_MEASURED == 'true' }}
         uses: ./.github/actions/publish-gha-results
         with:
           name: reference-quality
@@ -569,3 +612,24 @@ jobs:
             /tmp/quality-report/quality_results.tsv
             /tmp/quality-report/quality_results.jsonl
             /tmp/quality-report/quality-aggregate.txt
+
+      # The counterpart of the gate above: a run that publishes nothing must SAY
+      # so, or "the tracked artifact did not change" is indistinguishable from
+      # "the publish silently failed". The artifact upload above still carries
+      # this run's own logs, so nothing is lost -- only the in-tree record is
+      # left alone.
+      - name: Report that nothing was published (run measured nothing)
+        if: ${{ !cancelled() && env.QUALITY_MEASURED != 'true' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          {
+            echo ""
+            echo "### NOT MEASURED — bench/gha_results/reference-quality left untouched"
+            echo ""
+            echo "libtest did not enumerate the grouped \`quality\` binary, so this run"
+            echo "produced no measurement of the suite (only a report about the job)."
+            echo "The tracked in-tree record still holds the last run that DID measure;"
+            echo "this run's own logs are in the \`quality-results\` artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "QUALITY_MEASURED=${QUALITY_MEASURED:-<unset>} — nothing published"

@@ -62,9 +62,10 @@
 
 use crate::block_layout::block_count::validate_block_count;
 use crate::custom_family::{
-    AdditiveBlockJacobian, BlockWorkingSet, CustomFamily, ExactNewtonJointGradientEvaluation,
-    ExactNewtonJointHessianWorkspace, FamilyEvaluation, JointHessianSourcePreference,
-    ParameterBlockSpec, ParameterBlockState, PenaltyMatrix,
+    AdditiveBlockJacobian, BlockEffectiveJacobian, BlockWorkingSet, CustomFamily,
+    ExactNewtonJointGradientEvaluation, ExactNewtonJointHessianWorkspace, FamilyEvaluation,
+    FamilyLinearizationState, JointHessianSourcePreference, ParameterBlockSpec,
+    ParameterBlockState, PenaltyMatrix,
 };
 use crate::vector_response::{
     MultinomialLogitLikelihood, VectorLikelihood, validate_multinomial_simplex,
@@ -808,6 +809,67 @@ pub(crate) fn centered_class_metric(m: usize, k: usize) -> Array2<f64> {
     metric
 }
 
+/// The multinomial's per-class output-channel declaration, LOCKED to the raw
+/// coefficient width.
+///
+/// [`MultinomialFamily`] materialises its own shared design `X` at construction
+/// and every quantity it serves — the per-block working sets, the stacked joint
+/// gradient and Hessian, the Jeffreys/Firth information and all of their
+/// directional derivatives — is assembled from that captured `X` at the RAW
+/// width `P`, with the flat layout `(K−1)·P` ([`MultinomialFamily::beta_flat_dim`])
+/// as its single definition. The [`AdditiveBlockJacobian`] wrapped here exists
+/// only to tell the identifiability audit WHICH softmax output channel a block
+/// drives, so the audit does not mistake the `K−1` copies of the shared `X` for
+/// aliases (#363); it is not the source of the family's geometry.
+///
+/// That distinction is exactly what [`BlockEffectiveJacobian::locks_raw_width_reduction`]
+/// exists to express. Without it the canonicaliser took the `#933`
+/// gauge-composed reduction path, which is sound only for a family whose
+/// geometry is DERIVED from its callback: it column-reduced each class block to
+/// a full-rank subset (a rank-deficient shared design — `s(x) + s(z) +
+/// te(x, z)`, where the tensor term re-spans its own marginals — reduces to
+/// `15` of `19` columns per class) while the family kept assembling at `P = 19`.
+/// The two layouts then disagreed at the family's own guard,
+///
+/// ```text
+/// MultinomialFamily joint gradient: 2 block specs carry 30 coefficients but the
+/// family's flat layout is 2 classes x 19 columns = 38
+/// ```
+///
+/// and the fit refused every trial point (#2744). Locking the width makes the
+/// family's design the ONE layout definition again: the specs, the assemblies
+/// and the guard all read `P`. The weak directions the audit finds are handled
+/// where every other raw-width family handles them — by the penalty nullspace
+/// and the Levenberg-damped / Firth inner solve — not by design surgery the
+/// family cannot see.
+struct MultinomialClassChannelJacobian {
+    inner: AdditiveBlockJacobian,
+}
+
+impl MultinomialClassChannelJacobian {
+    fn new(inner: AdditiveBlockJacobian) -> Self {
+        Self { inner }
+    }
+}
+
+impl BlockEffectiveJacobian for MultinomialClassChannelJacobian {
+    fn effective_jacobian_rows(
+        &self,
+        state: &FamilyLinearizationState<'_>,
+        rows: std::ops::Range<usize>,
+    ) -> Result<Array2<f64>, String> {
+        self.inner.effective_jacobian_rows(state, rows)
+    }
+
+    fn n_outputs(&self) -> usize {
+        self.inner.n_outputs()
+    }
+
+    fn locks_raw_width_reduction(&self) -> bool {
+        true
+    }
+}
+
 /// Joint-coupled multinomial-logit family with shared design and shared
 /// smoothing penalty across active classes.
 ///
@@ -1123,7 +1185,12 @@ impl MultinomialFamily {
                 // audit (one output per class). Without it the flat audit
                 // assembles `[X | X | … | X]` over the same N rows, mistakes the
                 // repeated columns for aliases, and strips every block past
-                // `class_0` to width 0 — the failure in #363.
+                // `class_0` to width 0 — the failure in #363. The declaration
+                // is wrapped in `MultinomialClassChannelJacobian` so it ALSO
+                // says the block owns its geometry at raw width: this family
+                // assembles from the `X` it captured, never from the callback,
+                // so a column-reduced block would denominate β in a width the
+                // family's flat layout does not know about (#2744).
                 //
                 // The per-class blocks attach NO smooth penalty: the sole
                 // smoothing carrier is the permutation-equivariant per-class
@@ -1147,11 +1214,14 @@ impl MultinomialFamily {
                     stacked_design: None,
                     stacked_offset: None,
                 };
-                spec.jacobian_callback = Some(Arc::new(AdditiveBlockJacobian {
-                    design: (*self.design).clone(),
-                    own_output: a,
-                    n_family_outputs: m,
-                }));
+                spec.jacobian_callback =
+                    Some(Arc::new(MultinomialClassChannelJacobian::new(
+                        AdditiveBlockJacobian {
+                            design: (*self.design).clone(),
+                            own_output: a,
+                            n_family_outputs: m,
+                        },
+                    )));
                 spec
             })
             .collect()
@@ -4526,6 +4596,46 @@ mod tests {
         )]);
         MultinomialFamily::new(y, weights, k, design, penalties)
             .expect("toy MultinomialFamily must construct")
+    }
+
+    /// #2744: every class block must declare that it owns its geometry at the
+    /// RAW coefficient width.
+    ///
+    /// The family assembles every joint quantity from the `X` it captured at
+    /// construction, so its flat layout `(K−1)·P` is only meaningful while the
+    /// block specs keep width `P`. If the canonicaliser column-reduces a block,
+    /// the specs and the family denominate the same vector in two different
+    /// widths and the family's own guard refuses the fit. The declaration is
+    /// what stops that, so it is asserted directly rather than inferred from a
+    /// fit that happens to have a full-rank design.
+    #[test]
+    fn class_blocks_lock_the_raw_coefficient_width_2744() {
+        let family = toy_family(9, 4, 3);
+        let specs = family.build_block_specs();
+        assert_eq!(specs.len(), family.active_classes(), "one block per class");
+        for spec in &specs {
+            let callback = spec
+                .jacobian_callback
+                .as_ref()
+                .unwrap_or_else(|| panic!("block '{}' must declare its output channel", spec.name));
+            assert!(
+                callback.locks_raw_width_reduction(),
+                "block '{}' must lock the raw width: the family assembles from its own \
+                 captured design, so a reduced block width desynchronises the flat layout",
+                spec.name,
+            );
+            assert_eq!(
+                spec.design.ncols(),
+                family.design.ncols(),
+                "block '{}' width must be the family's raw P",
+                spec.name,
+            );
+        }
+        // The guard the mismatch used to trip must accept the specs the family
+        // itself builds — that is the layout being single-sourced.
+        family
+            .check_spec_coefficient_width(&specs, "raw-width self-check")
+            .expect("the family's own specs must satisfy its flat-layout guard");
     }
 
     #[test]
