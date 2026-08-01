@@ -673,6 +673,34 @@ pub fn project_onto_linear_constraints(
     Ok(beta)
 }
 
+/// The ONE round-off allowance every post-update feasibility check in this
+/// family uses, given the scale of the quantity being thresholded.
+///
+/// A post-update sanity check must accept any β the DOWNSTREAM consumer gates
+/// (`check_linear_feasibility` / `project_onto_linear_constraints`, both at
+/// [`MONOTONE_CONE_FEASIBILITY_GATE_TOL`]) already certify as feasible, or it
+/// hard-errors a round-off-feasible iterate the rest of the pipeline treats as
+/// feasible (#1569: the survival-LS final-refit cone-projected β at slack
+/// ~-6.6e-9). So the relative allowance
+/// [`CONSTRAINT_NONNEGATIVITY_REL_TOL`]·scale is FLOORED at that gate.
+///
+/// This exists as a function rather than as an expression repeated at each call
+/// site because #1569 was landed on the time block's
+/// [`validate_linear_constraints`] alone while the link-wiggle arm of
+/// `post_update_block_beta` — the other half of the same `if`/`else if` — kept
+/// rejecting at the unfloored `1e-10`, two orders TIGHTER than the gate its own
+/// consumers certify to (#2722). Both arms now derive the tolerance here, so
+/// the asymmetry cannot be reintroduced by editing one of them.
+///
+/// `scale` is the caller's problem scale (a constraint row's magnitude, or the
+/// coefficient's own magnitude for the identity-row nonnegativity cone); it is
+/// floored at 1 so the allowance is never SMALLER than the absolute gate for a
+/// vanishing scale.
+#[inline]
+pub(crate) fn roundoff_feasible_slack_tol(scale: f64) -> f64 {
+    (CONSTRAINT_NONNEGATIVITY_REL_TOL * scale.max(1.0)).max(MONOTONE_CONE_FEASIBILITY_GATE_TOL)
+}
+
 pub(crate) fn validate_linear_constraints(
     label: &str,
     beta: &Array1<f64>,
@@ -707,16 +735,10 @@ pub(crate) fn validate_linear_constraints(
             .zip(beta.iter())
             .map(|(a, b)| (a * b).abs())
             .sum::<f64>()
-            .max(constraints.b[row].abs())
-            .max(1.0);
-        // Floor the relative tolerance at the absolute downstream feasibility
-        // gate (#1569): this post-update check must accept any β the consumer
-        // gates (`check_linear_feasibility` / `project_onto_linear_constraints`,
-        // both `1e-8`) accept, or it hard-errors a round-off-feasible iterate the
-        // rest of the pipeline treats as feasible (the survival-LS final-refit
-        // cone-projected β at slack ~-6.6e-9).
-        let tol =
-            (CONSTRAINT_NONNEGATIVITY_REL_TOL * scale).max(MONOTONE_CONE_FEASIBILITY_GATE_TOL);
+            .max(constraints.b[row].abs());
+        // #1569's floored allowance, derived in ONE place shared with the
+        // link-wiggle arm of `post_update_block_beta` (#2722).
+        let tol = roundoff_feasible_slack_tol(scale);
         if slack < -tol && (worst_row.is_none() || slack < worst_slack) {
             worst_row = Some(row);
             worst_slack = slack;

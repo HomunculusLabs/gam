@@ -1901,16 +1901,17 @@ impl CustomFamily for SurvivalLocationScaleFamily {
             validate_linear_constraints("time post-update", &beta, constraints)?;
         } else if block_idx == Self::BLOCK_LINK_WIGGLE && self.x_link_wiggle.is_some() {
             for j in 0..beta.len() {
-                // Floor the relative tolerance at the absolute downstream
-                // feasibility gate, exactly as the time block's
-                // `validate_linear_constraints` does (#1569): this post-update
-                // check must accept any beta the consumer gates accept. The
+                // The SAME derivation the time arm above uses, called rather
+                // than copied (#2722): #1569's floor was landed on
+                // `validate_linear_constraints` alone and this arm kept
+                // rejecting at the unfloored relative tolerance, two orders
+                // tighter than the gate its own consumers certify to. The
                 // link-wiggle cone's rows are the unit identity, so its scaled
-                // and raw slacks coincide and the contract band is `1e-8`
-                // outright — a coefficient the QP left at `-6e-9` is feasible
-                // to every downstream consumer and was a hard error here.
-                let tol = (CONSTRAINT_NONNEGATIVITY_REL_TOL * beta[j].abs().max(1.0))
-                    .max(MONOTONE_CONE_FEASIBILITY_GATE_TOL);
+                // and raw slacks coincide and the contract band is the absolute
+                // gate outright — a coefficient the QP left at `-6.6e-9` is
+                // feasible to every downstream consumer and was a hard error
+                // here.
+                let tol = roundoff_feasible_slack_tol(beta[j].abs());
                 if !beta[j].is_finite() || beta[j] < -tol {
                     return Err(SurvivalLocationScaleError::ConstraintViolation {
                         reason: format!(
@@ -2960,5 +2961,168 @@ impl ExactNewtonJointHessianWorkspace for SurvivalLocationScaleExactNewtonJointH
         Ok(self
             .second_directional_derivative(d_beta_u_flat, d_beta_v_flat)?
             .map(|matrix| Arc::new(DenseMatrixHyperOperator { matrix }) as Arc<dyn HyperOperator>))
+    }
+}
+
+/// #2722: the two arms of [`SurvivalLocationScaleFamily::post_update_block_beta`]
+/// must accept exactly the same round-off-feasible step.
+///
+/// #1569 floored the time arm's relative tolerance at the absolute gate the
+/// downstream consumers (`check_linear_feasibility` /
+/// `project_onto_linear_constraints`) certify to, and landed a regression test
+/// for that arm alone. The link-wiggle arm — the `else if` of the very same
+/// conditional — kept rejecting at the unfloored relative tolerance, two orders
+/// TIGHTER than those consumers, so a cone-projected coefficient at the exact
+/// slack #1569 measured for its sibling (`-6.6e-9`) was feasible to every
+/// consumer in the pipeline and a hard error here.
+///
+/// Both arms now derive their tolerance from the single
+/// [`roundoff_feasible_slack_tol`], and this test pins the symmetry: the same
+/// step value is fed to both arms and both must return the same verdict, for a
+/// round-off-feasible value AND for a genuine violation past the gate.
+#[cfg(test)]
+mod post_update_roundoff_floor_symmetry_2722_tests {
+    use super::*;
+    use ndarray::array;
+
+    /// Minimal family carrying BOTH a time nonnegativity constraint system and a
+    /// link-wiggle block, so a single instance can be asked for both arms'
+    /// verdicts on the same value. Each block is one coefficient wide, and the
+    /// time constraint system is the per-coordinate lower bound `β ≥ 0` — the
+    /// identity row, i.e. structurally the SAME cone the link-wiggle arm checks
+    /// coordinate-wise. Anything the two arms disagree about is therefore a
+    /// difference in the tolerance rule, not in the geometry.
+    fn family_with_both_arms_armed() -> SurvivalLocationScaleFamily {
+        let dense = |values: Array2<f64>| {
+            DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(values))
+        };
+        SurvivalLocationScaleFamily {
+            n: 3,
+            y: array![1.0, 0.0, 1.0],
+            w: array![1.0, 0.8, 1.2],
+            inverse_link: residual_distribution_inverse_link(ResidualDistribution::Gaussian),
+            derivative_guard: 1e-8,
+            x_time_entry: Arc::new(array![[1.0], [1.0], [1.0]]),
+            x_time_exit: Arc::new(array![[1.2], [0.9], [1.4]]),
+            x_time_deriv: Arc::new(array![[1.0], [1.0], [1.0]]),
+            time_wiggle_knots: None,
+            time_wiggle_degree: None,
+            time_wiggle_ncols: 0,
+            time_linear_constraints: lower_bound_constraints(&array![0.0]),
+            x_threshold: dense(array![[1.0], [0.4], [-0.6]]),
+            x_threshold_entry: None,
+            x_threshold_deriv: None,
+            x_log_sigma: dense(array![[1.0], [-0.3], [0.5]]),
+            x_log_sigma_entry: None,
+            x_log_sigma_deriv: None,
+            x_link_wiggle: Some(dense(array![[0.5], [0.25], [0.75]])),
+            wiggle_knots: None,
+            wiggle_degree: None,
+            location_log_time: None,
+            policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        }
+    }
+
+    fn one_wide_spec(name: &str) -> ParameterBlockSpec {
+        ParameterBlockSpec {
+            name: name.to_string(),
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+                Array2::<f64>::zeros((3, 1)),
+            )),
+            offset: Array1::zeros(3),
+            penalties: Vec::new(),
+            nullspace_dims: Vec::new(),
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta: None,
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        }
+    }
+
+    /// The four one-coefficient block states the family expects (time,
+    /// threshold, log-sigma, link-wiggle). Only the block widths matter to the
+    /// post-update hook, which validates the proposal it is handed.
+    fn one_wide_states() -> Vec<ParameterBlockState> {
+        (0..4)
+            .map(|_| ParameterBlockState {
+                beta: array![0.0],
+                eta: Array1::<f64>::zeros(9),
+            })
+            .collect()
+    }
+
+    /// Both arms' verdicts on the same proposed coefficient value.
+    fn verdicts(value: f64) -> (Result<Array1<f64>, String>, Result<Array1<f64>, String>) {
+        let family = family_with_both_arms_armed();
+        let states = one_wide_states();
+        let time = family.post_update_block_beta(
+            &states,
+            SurvivalLocationScaleFamily::BLOCK_TIME,
+            &one_wide_spec("time"),
+            array![value],
+        );
+        let link_wiggle = family.post_update_block_beta(
+            &states,
+            SurvivalLocationScaleFamily::BLOCK_LINK_WIGGLE,
+            &one_wide_spec("link_wiggle"),
+            array![value],
+        );
+        (time, link_wiggle)
+    }
+
+    #[test]
+    fn both_arms_accept_the_same_roundoff_feasible_step_2722() {
+        // The #1569 witness magnitude: inside the absolute downstream gate, so
+        // every consumer in the pipeline calls it feasible.
+        let (time, link_wiggle) = verdicts(-6.6e-9);
+        assert!(
+            time.is_ok(),
+            "time arm rejected a round-off-feasible step the downstream gate accepts: {:?}",
+            time.unwrap_err()
+        );
+        assert!(
+            link_wiggle.is_ok(),
+            "link-wiggle arm rejected the SAME step the time arm accepts (#2722): {:?}",
+            link_wiggle.unwrap_err()
+        );
+
+        // Strictly interior: trivially accepted by both.
+        let (time, link_wiggle) = verdicts(0.5);
+        assert!(time.is_ok() && link_wiggle.is_ok());
+    }
+
+    #[test]
+    fn both_arms_reject_the_same_genuine_violation_2722() {
+        // An order of magnitude PAST the gate: the shared floor relaxes
+        // round-off, not real violations, and it must do so symmetrically.
+        let (time, link_wiggle) = verdicts(-1e-7);
+        assert!(
+            time.is_err(),
+            "time arm accepted a genuine violation 10x past the downstream gate"
+        );
+        assert!(
+            link_wiggle.is_err(),
+            "link-wiggle arm accepted a genuine violation 10x past the downstream gate"
+        );
+    }
+
+    /// The floor itself: at every scale the shared derivation returns a
+    /// tolerance at least the absolute gate the consumers certify to, and grows
+    /// with the problem scale beyond it. No arm can be tighter than the gate.
+    #[test]
+    fn the_shared_floor_is_never_tighter_than_the_consumer_gate_2722() {
+        for scale in [0.0, 1e-12, 1.0, 1e3, 1e6] {
+            let tol = roundoff_feasible_slack_tol(scale);
+            assert!(
+                tol >= MONOTONE_CONE_FEASIBILITY_GATE_TOL,
+                "tolerance {tol:.3e} at scale {scale:.3e} is tighter than the downstream gate"
+            );
+        }
+        assert!(
+            roundoff_feasible_slack_tol(1e6) > MONOTONE_CONE_FEASIBILITY_GATE_TOL,
+            "the relative term must still dominate at large problem scale"
+        );
     }
 }
