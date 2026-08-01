@@ -982,12 +982,6 @@ mod tests {
                 smoothing_correction_method: Some(SmoothingCorrectionMethod::SigmaPointCubature {
                     rank: 1,
                     n_points: 2,
-                    rho_hessian_stabilization:
-                        gam_problem::StabilizationLedger::approximation_only(
-                            1.0e-8,
-                            gam_problem::StabilizationRule::FixedConstant,
-                        )
-                        .expect("valid test cubature ridge"),
                 }),
                 // RETAINED: the exact first-order correction computed before
                 // the escalation decision, never discarded (#946).

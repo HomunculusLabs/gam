@@ -2732,11 +2732,6 @@ mod smoothing_correction_outcome_tests {
         let outcome = SmoothingCorrectionOutcome::Cubature {
             correction: array![[2.0, 0.0], [0.0, 2.0]],
             rho_covariance: None,
-            rho_hessian_stabilization: gam_problem::StabilizationLedger::approximation_only(
-                1.0e-8,
-                gam_problem::StabilizationRule::FixedConstant,
-            )
-            .expect("valid test cubature ridge"),
             rank: 2,
             n_points: 4,
             near_boundary: true,
