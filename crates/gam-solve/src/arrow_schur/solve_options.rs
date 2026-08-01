@@ -72,11 +72,15 @@ pub enum PcgStopReason {
     /// Loop exhausted max_iterations without converging.
     MaxIter,
     /// Step hit the trust-region boundary (Steihaug boundary projection).
+    ///
+    /// This is also what a BOUNDED solve reports on negative curvature or a
+    /// non-positive preconditioned residual: Steihaug's answer to either is the
+    /// boundary step, so the boundary is the honest reason. In an UNBOUNDED
+    /// solve those two conditions do not produce a diagnostic at all -- they
+    /// return `ArrowSchurError::UnboundedNegativeCurvature` and
+    /// `ArrowSchurError::PcgFailed` respectively, so no `PcgStopReason` is
+    /// constructed on that path.
     TrustRegion,
-    /// Negative curvature detected in an unbounded solve.
-    Indefinite,
-    /// Non-positive or non-finite preconditioned residual after an update.
-    Stagnation,
 }
 
 /// Per-solve instrumentation counters returned alongside the PCG solution.
