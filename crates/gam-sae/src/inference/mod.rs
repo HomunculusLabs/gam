@@ -28,3 +28,8 @@ mod tests_dose_units_2249;
 
 #[cfg(test)]
 mod tests_dose_calibration_2249;
+
+// #2263 item 3 — requested-vs-realized chart DISPLACEMENT. The two modules
+// above pin requested-vs-realized nats; realized position had no reader at all.
+#[cfg(test)]
+mod tests_displacement_2263;
