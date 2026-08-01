@@ -138,7 +138,10 @@ pub(crate) const STRUCTURAL_GUESS_AGE_FLOOR: f64 = 1e-9;
 /// trailing columns into a dense buffer. The per-chunk row count is derived as
 /// `BUDGET / (p · sizeof(f64))`, so wide designs use proportionally fewer rows
 /// per chunk and the working set stays near this size regardless of `p`.
-pub(crate) const ROW_CHUNK_BYTE_BUDGET: usize = 8 * 1024 * 1024;
+/// Imported, not transcribed (#2704): the doc above describes exactly the
+/// library row-chunk target, so it takes that value by name.
+pub(crate) const ROW_CHUNK_BYTE_BUDGET: usize =
+    gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
 
 /// Relative floor on the monotonicity-guard round-off slack: the compensated
 /// subtraction's low-part residual is the primary slack estimate, but this

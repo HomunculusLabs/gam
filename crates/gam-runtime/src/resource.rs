@@ -7,6 +7,18 @@ pub use crate::cgroup_memory::{
 /// The library-default streamed row-chunk target (8 MiB), shared as a `const`
 /// so compile-time consumers (e.g. device tile geometry) stay in lockstep with
 /// [`ResourcePolicy::default_library`] without a runtime policy query.
+///
+/// **The 8 MiB value is unmeasured.** The paragraph above justifies there being
+/// ONE copy; it does not justify the number. No cache level, measured
+/// throughput, or consequence-for-being-wrong is recorded anywhere for it.
+/// Twelve transcribed copies across six crates were collapsed onto this
+/// definition (#2704) purely to remove duplication — that consolidation moved
+/// no value and measured nothing, and a single canonical copy of an arbitrary
+/// number must not be read as a decided one. Anyone retuning it is retuning an
+/// unsupported literal, not overriding a derived budget.
+///
+/// Consumers should size chunks with [`rows_for_target_bytes`], which performs
+/// the `target / (cols * 8)` division and floors the result at one row.
 pub const LIBRARY_ROW_CHUNK_TARGET_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug)]

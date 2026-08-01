@@ -931,7 +931,11 @@ const LEVERAGE_CHUNKS_PER_DEVICE: usize = 4;
 #[cfg(target_os = "linux")]
 #[inline]
 fn leverage_chunk_rows(cols: usize, n_rows: usize) -> usize {
-    const TARGET_BYTES: usize = 8 * 1024 * 1024;
+    // Imported, not transcribed (#2704): this was a byte-identical copy of
+    // `gam-solve`'s `byte_balanced_row_chunk`, differing only in the final
+    // `.min(n_rows.max(1))`. That tail difference is left alone here — it is
+    // a behaviour question, not a duplication one.
+    const TARGET_BYTES: usize = gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
     const MIN_CHUNK_ROWS: usize = 512;
     let bytes_per_row = cols.max(1) * std::mem::size_of::<f64>();
     (TARGET_BYTES / bytes_per_row)

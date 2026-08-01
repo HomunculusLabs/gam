@@ -335,7 +335,12 @@ pub(crate) fn hash_cf_design_matrix(
     hasher.write_usize(n);
     hasher.write_usize(p);
     let bytes_per_row = p.saturating_mul(std::mem::size_of::<f64>()).max(1);
-    let chunk_rows = ((8 * 1024 * 1024) / bytes_per_row).clamp(1, 4096);
+    // Imported, not transcribed (#2704). This rule was a byte-identical twin
+    // of `gam-solve`'s `hash_design_matrix`, one crate over and under a
+    // different name; the `[1, 4096]` band stays local for the same reason
+    // it does there.
+    let chunk_rows =
+        (gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES / bytes_per_row).clamp(1, 4096);
     for start in (0..n).step_by(chunk_rows) {
         let end = (start + chunk_rows).min(n);
         let chunk = design

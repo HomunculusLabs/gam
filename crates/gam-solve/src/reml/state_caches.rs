@@ -1220,7 +1220,12 @@ pub(crate) fn hash_design_matrix(
     // is never fully materialized just to fingerprint it. Target ~8 MiB of
     // working set per chunk, with a row-count floor of 1 (always make progress)
     // and a ceiling so a very narrow design does not request an unbounded chunk.
-    const HASH_CHUNK_TARGET_BYTES: usize = 8 * 1024 * 1024;
+    // Imported, not transcribed (#2704). The BYTE TARGET is the shared
+    // quantity; the `[1, 4096]` band below is NOT shared and must not be
+    // unified with the BLAS-3 tiling bands — a fingerprint pass wants a
+    // progress guarantee under `step_by` and a bounded buffer, not L2/L3
+    // residency.
+    const HASH_CHUNK_TARGET_BYTES: usize = gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
     const HASH_CHUNK_MIN_ROWS: usize = 1;
     const HASH_CHUNK_MAX_ROWS: usize = 4096;
     let n = design.nrows();

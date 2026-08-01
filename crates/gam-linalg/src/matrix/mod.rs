@@ -28,7 +28,10 @@ const MATRIX_FREE_PCG_REL_TOL: f64 = 1e-8;
 /// off zero so the factorization succeeds, small enough not to bias a
 /// well-conditioned solve. Acts as a floor on any caller-supplied `ridge_floor`.
 const MATRIX_FREE_PCG_MAX_ITER: usize = 2000;
-const CHUNKED_DENSE_MATERIALIZATION_BYTES: usize = 8 * 1024 * 1024;
+/// Dense-materialization row-chunk working-set target. The same quantity as
+/// the library row-chunk target, imported rather than transcribed (#2704).
+const CHUNKED_DENSE_MATERIALIZATION_BYTES: usize =
+    gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
 const OPERATOR_ROW_CHUNK_SIZE: usize = 256;
 /// Minimum n*p product for the dense-row parallel fold/reduce paths
 /// (`diag_gram`, `apply_weighted_normal`, dense transpose reductions).
@@ -1274,7 +1277,10 @@ pub trait DenseDesignOperator: LinearOperator + Send + Sync {
         let n = self.nrows();
         let mut out = Array1::<f64>::zeros(n);
         // Process in chunks to bound memory: ~8 MB working set.
-        let chunk_size = (8 * 1024 * 1024 / (self.ncols().max(1) * 8 * 2))
+        // Two live buffers per chunk (`x_chunk` and `xm_chunk`), so the byte
+        // target is split in half. Uses this module's own constant rather
+        // than re-typing the literal it already holds (#2704).
+        let chunk_size = (CHUNKED_DENSE_MATERIALIZATION_BYTES / (self.ncols().max(1) * 8 * 2))
             .max(16)
             .min(n.max(1));
         let mut start = 0;

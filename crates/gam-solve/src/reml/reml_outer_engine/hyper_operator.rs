@@ -985,7 +985,10 @@ impl HyperOperator for ImplicitHyperOperator {
 /// progress per block, capped at the total row count. Shared by the implicit
 /// operator's row-streaming kernels so they cannot drift apart.
 pub(crate) fn byte_balanced_row_chunk(cols: usize, n_rows: usize) -> usize {
-    const TARGET_BYTES: usize = 8 * 1024 * 1024;
+    // Imported, not transcribed (#2704). This function's doc claims its
+    // kernels "cannot drift apart"; that held within this crate while the
+    // target was a local literal that `gam-gpu` had also transcribed.
+    const TARGET_BYTES: usize = gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
     const MIN_CHUNK_ROWS: usize = 512;
     let bytes_per_row = cols.max(1) * std::mem::size_of::<f64>();
     (TARGET_BYTES / bytes_per_row)

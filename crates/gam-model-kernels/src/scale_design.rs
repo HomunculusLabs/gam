@@ -57,7 +57,13 @@ impl_reason_error_boilerplate! {
 // absorb has not been measured. Retuning it without that measurement would move
 // published column scales, so the value is left where it was found.
 const RESCALE_CENTERED_SS_FLOOR: f64 = 1e-12;
-const SCALE_DESIGN_TARGET_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+// Imported, not transcribed (#2704): the same streamed working-set budget,
+// used for a row chunk in `scale_design_row_chunk_size` and a column chunk in
+// the replay solve. Note `SCALE_OPERATOR_MATRIX_FREE_PCG_THRESHOLD` below is
+// derived from this value by matching it — i.e. derived from a literal that
+// is itself unmeasured.
+const SCALE_DESIGN_TARGET_CHUNK_BYTES: usize =
+    gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
 // Numerical conditioning floor for the SVD truncation tolerance: we drop any
 // singular direction below `RCOND_FLOOR * sigma_max`, which is the standard
 // machine-precision boundary for considering a direction resolvable. Above

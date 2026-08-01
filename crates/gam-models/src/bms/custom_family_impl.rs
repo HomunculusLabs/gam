@@ -327,7 +327,9 @@ impl BernoulliMarginalSlopeFamily {
             .map(|basis| (basis, &psi_primary_basis))
             .collect();
 
-        const TARGET_PANEL_BYTES: usize = 8 * 1024 * 1024;
+        // Imported, not transcribed (#2704): the same streamed row-chunk
+        // working-set budget, divided here by the panel width.
+        const TARGET_PANEL_BYTES: usize = gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
         let panel_width = 5usize
             .saturating_mul(total)
             .saturating_add(slices.marginal.len())
@@ -3308,7 +3310,9 @@ impl BernoulliMarginalSlopeFamily {
             return Ok(Array1::zeros(n_dirs));
         }
         let rows_per_chunk = {
-            const TARGET_BYTES: usize = 8 * 1024 * 1024;
+            // Imported, not transcribed (#2704). The `/ panels` below makes
+            // this a budget DERIVED from the shared base, not a different one.
+            const TARGET_BYTES: usize = gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
             let panels = 4usize;
             let width = rank + n_dirs;
             (TARGET_BYTES / (panels * width.max(1) * 8)).max(512).min(n)

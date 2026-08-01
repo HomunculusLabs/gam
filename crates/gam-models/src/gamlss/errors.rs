@@ -656,7 +656,8 @@ pub(crate) fn exact_design_row_chunks(
     n: usize,
     p: usize,
 ) -> impl Iterator<Item = std::ops::Range<usize>> {
-    const TARGET_BYTES: usize = 8 * 1024 * 1024;
+    // Imported, not transcribed (#2704).
+    const TARGET_BYTES: usize = gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
     const MIN_ROWS: usize = 512;
     const MAX_ROWS: usize = 131_072;
     let rows = (TARGET_BYTES / (p.max(1) * 8))

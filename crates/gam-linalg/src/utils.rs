@@ -148,7 +148,11 @@ pub fn stack_offsets(blocks: &[&Array1<f64>]) -> Array1<f64> {
 /// counting) and `terms/smooth` (linear-fit column conditioning). With `p == 0`
 /// there is no per-row footprint, so the whole design is one chunk.
 pub fn row_chunk_for_byte_budget(n: usize, p: usize) -> usize {
-    const TARGET_BYTES: usize = 8 * 1024 * 1024;
+    // Imported, not transcribed (#2704); the value itself is unmeasured, see
+    // the constant's own doc. The `[256, 65_536]` band below is local and
+    // deliberately NOT shared: sibling row-chunk rules use different bands
+    // for documented reasons, and no measurement separates them.
+    const TARGET_BYTES: usize = gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
     const MIN_ROWS: usize = 256;
     const MAX_ROWS: usize = 65_536;
     if p == 0 {
