@@ -1455,18 +1455,36 @@ impl SaeManifoldTerm {
                     };
                     // gam#2080/#2627: this refusal has two regimes that need different
                     // fixes, and the raw norms alone do not separate them. Measured over
-                    // the occurrences that print both: ~10/14 are "physical" (the gauge
-                    // projection removes <50% of ‖g‖, so the solve is genuinely far from
-                    // a KKT point) and ~4/14 are gauge-dominated (>50% removed, the
-                    // remainder within a few x of tolerance — close in the directions
-                    // that matter, held off by gauge content). Report the two ratios that
-                    // discriminate so any occurrence can be bucketed without parsing the
-                    // norms pairwise.
+                    // the occurrences that print both: ~10/14 sit at `gauge_share < 0.5`
+                    // (the solve is genuinely far from a KKT point in the directions it
+                    // can move) and ~4/14 at `gauge_share > 0.5` (the remainder within a
+                    // few x of tolerance — close in the directions that matter, held off
+                    // by gauge content). Report the ratios that discriminate so any
+                    // occurrence can be bucketed without parsing the norms pairwise.
+                    //
+                    // gam#2715 — WHAT `gauge_share` IS, AND WHAT IT IS NOT. It is
+                    // `1 − ‖Π⊥gauge g‖/‖g‖`, i.e. one minus the RETAINED fraction. It is
+                    // NOT the share of the gradient lying in the gauge: the two components
+                    // are orthogonal, so norms add in QUADRATURE and
+                    // `‖Π∥gauge g‖/‖g‖ = sqrt(1 − retained²)`, which is strictly larger.
+                    // MEASURED at one refusal state: `gauge_share = 0.4999` while the gauge
+                    // actually holds 0.8660 of the norm and 0.7500 of the energy — reading
+                    // the field as "about half the gradient is gauge" understates it badly,
+                    // and has already misled a reader. So emit the projected component
+                    // ITSELF next to the other two norms; then `‖g‖² = ‖Π∥‖² + ‖Π⊥‖²`
+                    // is checkable from the message and no ratio has to be inferred from a
+                    // field name. (`gauge_share` keeps its definition — other consumers
+                    // parse it — and note `retained + gauge_share = 1` is an identity, so
+                    // agreement between those two numbers is never evidence of anything.)
                     let gauge_share = if grad_norm > 0.0 {
                         1.0 - quotient_grad_norm / grad_norm
                     } else {
                         f64::NAN
                     };
+                    let gauge_component = (grad_norm * grad_norm
+                        - quotient_grad_norm * quotient_grad_norm)
+                        .max(0.0)
+                        .sqrt();
                     let quotient_over_tol = if grad_tolerance > 0.0 {
                         quotient_grad_norm / grad_tolerance
                     } else {
@@ -1478,7 +1496,8 @@ impl SaeManifoldTerm {
                          neither the KKT gradient ‖g‖={grad_norm:.6e} nor the quotient KKT gradient \
                          ‖Π⊥gauge g‖={quotient_grad_norm:.6e} met tolerance {grad_tolerance:.6e} \
                          after {total_inner_iter} inner iterations \
-                         (gauge_share={gauge_share:.4}, quotient_over_tol={quotient_over_tol:.3e}, \
+                         (‖Π∥gauge g‖={gauge_component:.6e}, gauge_share={gauge_share:.4}, \
+                         quotient_over_tol={quotient_over_tol:.3e}, \
                          {intensive}). \
                          Refusing to rank an off-optimum Laplace criterion.",
                         ProbeRefusalKind::inner_not_converged_marker()
@@ -1787,17 +1806,40 @@ impl SaeManifoldTerm {
                     // iteration-budget refusal above already reports
                     // `‖Π⊥gauge g‖` with `gauge_share` / `quotient_over_tol`;
                     // emit the identical fields here so the two terminal inner
-                    // refusals are read the same way. `gauge_share` is the share
-                    // of ‖g‖ the chart-gauge/decoder-null projection removes:
-                    // MEASURED at 0.87 and 0.93 on this path's own fixtures
-                    // (#2674), where the removed directions carry directional
-                    // derivatives 8x-210x the tolerance and are therefore not
-                    // flat. Diagnostic only: no gate, bound or trajectory moves.
+                    // refusals are read the same way. See the sibling site above
+                    // for what `gauge_share` is and is not (gam#2715): it is
+                    // `1 − retained`, NOT the gauge's share of the gradient, and
+                    // `‖Π∥gauge g‖` is emitted beside it so no ratio has to be
+                    // inferred from a field name.
+                    //
+                    // CORRECTION (gam#2715) to this comment as first landed: it
+                    // said `gauge_share` "is the share of ‖g‖ the projection
+                    // removes, MEASURED at 0.87 and 0.93". Those 0.87/0.93 are
+                    // `‖Π∥gauge g‖/‖g‖` from the #2674 solver-side probe, a
+                    // DIFFERENT quantity — at that same state `gauge_share` reads
+                    // 0.4999. The load-bearing part of that note survives and is
+                    // restated correctly here: the removed directions carry
+                    // directional derivatives 8x-10x the tolerance at this state
+                    // (#2674), so they are NOT flat, which is what makes a small
+                    // quotient an unsafe acceptance signal rather than a
+                    // stationarity certificate.
+                    //
+                    // Scope: on the one fixture where the projection's rank has
+                    // been measured (#2715, 332/332 calls) it is the rank-2
+                    // chart-gauge orbit ALONE — both decoder-null families
+                    // returned zero directions — so "chart-gauge/decoder-null"
+                    // overstates what is actually being removed there.
+                    //
+                    // Diagnostic only: no gate, bound or trajectory moves.
                     let gauge_share = if grad_norm > 0.0 {
                         1.0 - quotient_grad_norm / grad_norm
                     } else {
                         f64::NAN
                     };
+                    let gauge_component = (grad_norm * grad_norm
+                        - quotient_grad_norm * quotient_grad_norm)
+                        .max(0.0)
+                        .sqrt();
                     let quotient_over_tol = if grad_tolerance > 0.0 {
                         quotient_grad_norm / grad_tolerance
                     } else {
@@ -1809,7 +1851,8 @@ impl SaeManifoldTerm {
                          objective stalled for {consecutive_objective_stalls} consecutive refine \
                          rounds, but neither the raw KKT gradient ‖g‖={grad_norm:.6e} nor the \
                          quotient KKT gradient ‖Π⊥gauge g‖={quotient_grad_norm:.6e} met tolerance \
-                         {grad_tolerance:.6e} (gauge_share={gauge_share:.4}, \
+                         {grad_tolerance:.6e} (‖Π∥gauge g‖={gauge_component:.6e}, \
+                         gauge_share={gauge_share:.4}, \
                          quotient_over_tol={quotient_over_tol:.3e}, {intensive}). Objective \
                          stagnation and a finite deflated factor are diagnostic only; refusing to \
                          rank or differentiate an off-optimum Laplace criterion.",
