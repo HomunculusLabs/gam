@@ -2739,7 +2739,7 @@ pub fn gaussian_reml_multi_shared_dispersion_penalty_gradient_from_fit(
     }
 
     let inverse_hessian = gaussian_reml_inverse_hessian_from_cache(&fit.cache, fit.lambda)?;
-    let penalty_pseudoinverse = gaussian_reml_penalty_pseudoinverse_from_cache(&fit.cache);
+    let penalty_pseudoinverse = gaussian_reml_penalty_pseudoinverse_from_cache(&fit.cache)?;
     let mut gradient = Array2::<f64>::zeros((p, p));
     for row in 0..p {
         for col in 0..p {
@@ -2883,7 +2883,7 @@ pub fn gaussian_reml_free_b_score(
             .map_err(EstimationError::LinearSystemSolveFailed)?
             .solve_mat(&Array2::<f64>::eye(p))
     };
-    let penalty_pinv = gaussian_reml_penalty_pseudoinverse_from_cache(&cache);
+    let penalty_pinv = gaussian_reml_penalty_pseudoinverse_from_cache(&cache)?;
     let mut grad_penalty = Array2::<f64>::zeros((p, p));
     for row in 0..p {
         for col in 0..p {
@@ -3115,7 +3115,7 @@ fn gaussian_reml_multi_closed_form_backward_from_fit_with_inverse_hessian_impl(
             &mut grad_y,
             &mut grad_penalty,
             &mut grad_weights,
-        );
+        )?;
         lambda_adjoint += upstream_reml_score * fit.reml_grad_lambda;
     }
 
@@ -3593,10 +3593,10 @@ fn add_reml_score_vjp(
     grad_y: &mut Array2<f64>,
     grad_penalty: &mut Array2<f64>,
     grad_weights: &mut Array1<f64>,
-) {
+) -> Result<(), EstimationError> {
     let d = beta.ncols() as f64;
     let xp = dense_ab(x, inverse_hessian.view());
-    let penalty_pinv = gaussian_reml_penalty_pseudoinverse_from_cache(cache);
+    let penalty_pinv = gaussian_reml_penalty_pseudoinverse_from_cache(cache)?;
     for row in 0..grad_penalty.nrows() {
         for col in 0..grad_penalty.ncols() {
             grad_penalty[[row, col]] +=
@@ -3631,6 +3631,7 @@ fn add_reml_score_vjp(
         );
         add_rank_one_penalty_vjp(coef * lambda, beta.column(j), grad_penalty);
     }
+    Ok(())
 }
 
 /// VJP contribution from an upstream gradient on `edf`.
@@ -3828,7 +3829,9 @@ fn penalty_range_tolerance(eigenvalues: ArrayView1<'_, f64>) -> f64 {
     max_abs * EIGEN_REL_TOL
 }
 
-fn gaussian_reml_penalty_pseudoinverse_from_cache(cache: &GaussianRemlEigenCache) -> Array2<f64> {
+fn gaussian_reml_penalty_pseudoinverse_from_cache(
+    cache: &GaussianRemlEigenCache,
+) -> Result<Array2<f64>, EstimationError> {
     let p = cache.penalty_eigenvalues.len();
     // Ask the range/null question with the SAME predicate that defined
     // `cache.penalty_rank`.  `δ > 0.0` is a different question: the cache's
@@ -3841,17 +3844,44 @@ fn gaussian_reml_penalty_pseudoinverse_from_cache(cache: &GaussianRemlEigenCache
     // the returned penalty gradient as entries of `1.618287e15` — fifteen orders
     // above every legitimate term, on healthy and near-interpolating charts
     // alike.  See [`penalty_range_tolerance`].
+    // The shared predicate makes the selected count equal `penalty_rank` by
+    // construction only when `penalty_rank` was derived from THIS array.  A
+    // cache supplied through `GaussianRemlWarmStart` or `prepare_gaussian_reml`'s
+    // `Some(eigen_cache)` can carry a rank computed under another rule, and
+    // `validate_gaussian_reml_eigen_cache` checks only
+    // `penalty_rank + nullity == p` — never the rank against the spectrum.  So
+    // the agreement is checked rather than assumed.
+    //
+    // [`gaussian_penalty_positive_logdet`] reconciles the same disagreement by
+    // taking the `penalty_rank` largest, and this site deliberately does NOT
+    // copy that.  There the selected values are consumed as `ln(δ)`, which is
+    // bounded; here they are consumed as `1/δ`, so re-admitting a direction that
+    // failed the relative test reintroduces exactly the `1/roundoff` term this
+    // function was repaired to exclude — the reconciliation would restore the
+    // defect through its own fallback.  A dividing consumer has no safe
+    // reconstruction of a rank it cannot verify, so it refuses and says which
+    // two numbers disagreed.
     let tolerance = penalty_range_tolerance(cache.penalty_eigenvalues.view());
+    let selected: Vec<usize> = (0..p)
+        .filter(|eig| cache.penalty_eigenvalues[*eig] > tolerance)
+        .collect();
+    if selected.len() != cache.penalty_rank {
+        crate::bail_invalid_estim!(
+            "Gaussian REML penalty pseudoinverse: the cache reports penalty_rank={} but {} of its \
+             {p} eigenvalues exceed the range tolerance {tolerance:e}; the pseudoinverse divides by \
+             each selected eigenvalue, so it cannot reconcile a rank it did not derive",
+            cache.penalty_rank,
+            selected.len()
+        );
+    }
     let mut scaled_basis = Array2::<f64>::zeros((p, p));
-    for eig in 0..p {
+    for eig in selected {
         let delta = cache.penalty_eigenvalues[eig];
-        if delta > tolerance {
-            for row in 0..p {
-                scaled_basis[[row, eig]] = cache.coefficient_basis[[row, eig]] / delta;
-            }
+        for row in 0..p {
+            scaled_basis[[row, eig]] = cache.coefficient_basis[[row, eig]] / delta;
         }
     }
-    dense_ab(scaled_basis.view(), cache.coefficient_basis.t())
+    Ok(dense_ab(scaled_basis.view(), cache.coefficient_basis.t()))
 }
 
 fn add_deviance_profile_vjp(

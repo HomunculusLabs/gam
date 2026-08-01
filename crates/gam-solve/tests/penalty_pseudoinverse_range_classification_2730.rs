@@ -247,3 +247,90 @@ fn penalty_gradient_does_not_read_an_eigenvalue_the_cache_classified_as_null() {
         }
     }
 }
+
+/// #2739 follow-up. The shared predicate makes the selected count equal
+/// `penalty_rank` only when `penalty_rank` was derived from this same array. A
+/// cache supplied through `GaussianRemlWarmStart` or `prepare_gaussian_reml`'s
+/// `Some(eigen_cache)` can carry a rank computed under another rule, and
+/// `validate_gaussian_reml_eigen_cache` checks only `penalty_rank + nullity == p`
+/// — never the rank against the spectrum. Both cases below leave that shape
+/// invariant intact, so a refusal cannot come from the shape validator instead.
+///
+/// The demotion case is the isolated one: `penalty_rank` and `nullity` are both
+/// untouched, so `shared_nu`, the pooled deviance and `deviance_scale` are all
+/// unchanged and nothing but the range selection can move. Declaring a smaller
+/// rank would NOT be isolated — `nullity` has to rise with it to keep
+/// `penalty_rank + nullity == p`, which changes the residual degrees of freedom
+/// and moves the gradient through the deviance term for a reason that has
+/// nothing to do with the pseudoinverse.
+#[test]
+fn penalty_gradient_refuses_a_cache_whose_rank_disagrees_with_its_own_spectrum() {
+    let case = fixture();
+    let rank = case.fit.cache.penalty_rank;
+
+    // (a) Demote the smallest RETAINED eigenvalue to the smallest positive
+    // double. It stays positive, so the count under an absolute `> 0.0` test is
+    // unchanged, but it falls below any relative range tolerance — the selected
+    // count becomes `rank - 1` while the cache still claims `rank`.
+    let smallest_retained = *case
+        .retained
+        .last()
+        .expect("the fixture retains at least one direction");
+    let mut demoted = case.fit.clone();
+    demoted.cache.penalty_eigenvalues[smallest_retained] = f64::MIN_POSITIVE;
+    assert_eq!(
+        demoted.cache.penalty_rank, rank,
+        "the demotion must leave the declared rank untouched"
+    );
+    assert_eq!(
+        demoted.cache.nullity,
+        case.fit.cache.nullity,
+        "the demotion must leave nullity untouched, so the deviance term cannot move"
+    );
+    let demoted_result = gaussian_reml_multi_shared_dispersion_penalty_gradient_from_fit(
+        case.x.view(),
+        case.y.view(),
+        case.s.view(),
+        None,
+        &demoted,
+    );
+    assert!(
+        demoted_result.is_err(),
+        "a cache claiming rank {rank} while only {} of its eigenvalues clear the range \
+         tolerance was served a gradient instead of being refused; the pseudoinverse \
+         divides by each selected eigenvalue, so it must not silently build from a \
+         different number of directions than the cache reports",
+        rank - 1
+    );
+
+    // (b) Over-declare the rank past the number of positive eigenvalues. A
+    // distinct failure: here no selection rule could satisfy the claim, whereas
+    // in (a) an absolute `> 0.0` rule would have satisfied it and been wrong.
+    let positive = case
+        .fit
+        .cache
+        .penalty_eigenvalues
+        .iter()
+        .filter(|delta| **delta > 0.0)
+        .count();
+    assert!(
+        positive < COEFFICIENTS,
+        "precondition: the spectrum needs a non-positive entry for an over-declared \
+         rank to be unsatisfiable (positive={positive})"
+    );
+    let mut over = case.fit.clone();
+    over.cache.penalty_rank = COEFFICIENTS;
+    over.cache.nullity = 0;
+    let over_result = gaussian_reml_multi_shared_dispersion_penalty_gradient_from_fit(
+        case.x.view(),
+        case.y.view(),
+        case.s.view(),
+        None,
+        &over,
+    );
+    assert!(
+        over_result.is_err(),
+        "a cache declaring rank {COEFFICIENTS} against only {positive} positive \
+         eigenvalues must be refused"
+    );
+}
