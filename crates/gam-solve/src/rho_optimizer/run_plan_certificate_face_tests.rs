@@ -142,6 +142,109 @@ fn joint_rho_psi_optimum_certifies_when_only_the_psi_coordinate_rails_2425() {
     );
 }
 
+// ─── #2624 — the certificate's EVIDENCE must cover the same face ──────────
+//
+// `certificate_railed_coordinates` widened every certificate DECISION to the
+// whole theta box (#2425 above). The `railed_facts` evidence field — the
+// `#N theta=… box=[…] margin=…` detail a refusal prints — was still built from
+// the lambda-only index set, so on an exact-joint spatial route the one
+// coordinate whose rail status decides the fit was the one coordinate the
+// refusal could not print: `railed=[]` with no detail is indistinguishable from
+// nothing being railed at all. On #2624's arms psi carries the ENTIRE outer
+// gradient, and that thread nearly attributed the resulting `railed=[]` to a
+// gradient defect.
+//
+// `lambdas_railed` is the stable lambda-scoped REPORT and is asserted unchanged
+// here: this widens the evidence, it does not relabel the report.
+#[test]
+fn railed_psi_coordinate_is_in_the_certificates_evidence_not_only_on_its_face_2624() {
+    let config = OuterConfig::default();
+    let problem = OuterProblem::new(3)
+        .with_psi_dim(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_initial_rho(array![0.0, 0.0, config.rho_bound])
+        .with_screen_initial_rho(false)
+        .with_seed_config(gam_problem::SeedConfig {
+            max_seeds: 1,
+            seed_budget: 1,
+            ..Default::default()
+        });
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), theta: &Array1<f64>| Ok(psi_rail_cost(theta)),
+        |_: &mut (), theta: &Array1<f64>| Ok(psi_rail_eval(theta)),
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let result = audit_stationary_point(
+        &mut obj,
+        array![0.0, 0.0, config.rho_bound],
+        "railed-psi certificate evidence #2624",
+    )
+    .unwrap_or_else(|rejection| {
+        panic!(
+            "fixture precondition: this constrained minimum must certify before \
+             its evidence field can be read; refused with: {}",
+            rejection.source
+        )
+    });
+    let cert = result
+        .criterion_certificate
+        .as_ref()
+        .expect("a certified point records its certificate");
+
+    // The report is unchanged and stays lambda-scoped.
+    assert_eq!(
+        cert.lambdas_railed,
+        Vec::<usize>::new(),
+        "no SMOOTHING coordinate rails here, so the lambda report stays empty: {:?}",
+        cert.lambdas_railed
+    );
+    // Precondition: index 2 really is railed on the face the decisions use. If
+    // this fails the fixture stopped exercising the thing under test, and the
+    // assertion below would pass or fail for an unrelated reason.
+    assert_eq!(
+        certificate_railed_coordinates(&result.rho, &config),
+        vec![2],
+        "fixture precondition: the psi coordinate must be on the theta-wide face"
+    );
+
+    let psi_fact = cert
+        .railed_facts
+        .iter()
+        .find(|fact| fact.index == 2)
+        .unwrap_or_else(|| {
+            panic!(
+                "the psi coordinate is the ONLY active bound at this optimum, so \
+                 the certificate's evidence must carry it; railed_facts={:?} \
+                 summary={}",
+                cert.railed_facts,
+                cert.summary()
+            )
+        });
+    assert!(
+        (psi_fact.theta - config.rho_bound).abs() < 1e-9,
+        "the evidence must report the psi coordinate at the value it was judged \
+         at: theta={} bound={}",
+        psi_fact.theta,
+        config.rho_bound
+    );
+    assert!(
+        psi_fact.lower < psi_fact.upper,
+        "a fact is evidence only if it carries the interval it was judged \
+         against, got [{}, {}]",
+        psi_fact.lower,
+        psi_fact.upper
+    );
+    assert!(
+        cert.summary().contains("#2 theta="),
+        "the rendered summary must SHOW the psi coordinate's interval — a reader \
+         who sees only `railed=[]` is told the opposite of what was decided: {}",
+        cert.summary()
+    );
+}
+
 // ─── #2596: one stationarity standard for screening and mint ──────────────
 
 /// Build a one-coordinate flat-valley objective `c + ½·curvature·(ρ − ρ*)²`

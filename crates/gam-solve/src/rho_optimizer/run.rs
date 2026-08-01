@@ -3031,7 +3031,12 @@ fn certify_fixed_point_optimality(
         lambdas_railed: certificate_railed_lambdas(&result.rho, layout.rho_dim(), config),
         railed_facts: railed_coordinate_facts(
             &result.rho,
-            &certificate_railed_lambdas(&result.rho, layout.rho_dim(), config),
+            // #2624: the EVIDENCE field, unlike `lambdas_railed` above, is not
+            // lambda-scoped -- it states the interval and margin each
+            // coordinate was judged against, and the judgement is taken on the
+            // theta-wide face. A psi/log-kappa coordinate pinned on its own
+            // window was structurally absent from it.
+            &certificate_railed_coordinates(&result.rho, config),
             config,
         ),
         curvature_floor: None,
@@ -4125,7 +4130,8 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     lambdas_railed: railed_lambda_block.clone(),
                     railed_facts: railed_coordinate_facts(
                         &result.rho,
-                        &railed_lambda_block,
+                        // #2624: theta-wide, see `certificate_railed_coordinates`.
+                        &certificate_railed,
                         config,
                     ),
                     curvature_floor: None,
@@ -4290,7 +4296,14 @@ fn certify_outer_optimality_at_terminal_fidelity(
             None => CurvatureEvidence::NotAvailable,
         },
         lambdas_railed: railed_lambda_block.clone(),
-        railed_facts: railed_coordinate_facts(&result.rho, &railed_lambda_block, config),
+        // #2624: `lambdas_railed` above is the lambda-scoped REPORT and stays
+        // that way; `railed_facts` is the EVIDENCE for a decision taken on the
+        // theta-wide face (`certificate_railed`, used by the off-railed PSD
+        // test and the curvature floor immediately below), so it must carry the
+        // same coordinates that decision was taken on. On an exact-joint
+        // spatial route the psi coordinate is the only one carrying gradient,
+        // and it was the one coordinate the refusal could not print.
+        railed_facts: railed_coordinate_facts(&result.rho, &certificate_railed, config),
         // The floor's verdict on that same curvature, recorded beside it.
         curvature_floor: analytic_hessian.as_ref().and_then(|hessian| {
             interior_curvature_floor_clearance(hessian, &certificate_railed, &projected_gradient)
@@ -4388,7 +4401,8 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     lambdas_railed: railed_lambda_block.clone(),
                     railed_facts: railed_coordinate_facts(
                         &result.rho,
-                        &railed_lambda_block,
+                        // #2624: theta-wide, see `certificate_railed_coordinates`.
+                        &certificate_railed,
                         config,
                     ),
                     curvature_floor: None,
