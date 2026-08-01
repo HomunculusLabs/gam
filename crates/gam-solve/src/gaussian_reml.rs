@@ -1162,7 +1162,10 @@ fn gaussian_reml_logdet_term(
     // individually large and differenced, so the difference's absolute error is
     // set by the SUMMANDS' magnitudes, not by the (possibly tiny) difference.
     let mut logdet_magnitude = cache.logdet_xtwx.abs();
-    for &delta in &cache.penalty_eigenvalues {
+    // ONE predicate: `δ > 0.0` below is applied to the CLASSIFIED value, so the
+    // directions summed here are exactly the `penalty_rank` directions the
+    // offset below counts (see [`PenaltyRangeSpectrum`], #2740).
+    for delta in PenaltyRangeSpectrum::of(cache).iter() {
         let mode = modal_kernels(rho, delta);
         logdet_h += mode.log_one_plus_t;
         logdet_magnitude += mode.log_one_plus_t.abs();
@@ -1230,9 +1233,10 @@ fn dispersion_residual_parts(
     let mut penalized_residual = 0.0;
     let mut dp_grad = 0.0;
     let mut dp_hess = 0.0;
-    for eig in 0..cache.penalty_eigenvalues.len() {
+    let spectrum = PenaltyRangeSpectrum::of(cache);
+    for eig in 0..spectrum.len() {
         let c2 = projected_rhs_squared[[eig, output]];
-        let mode = modal_kernels(rho, cache.penalty_eigenvalues[eig]);
+        let mode = modal_kernels(rho, spectrum.get(eig));
         total_c2 += c2;
         penalized_residual += c2 * mode.u;
         dp_grad += c2 * mode.w;
@@ -1602,8 +1606,12 @@ pub fn gaussian_reml_multi_shared_dispersion_closed_form(
     let coefficients = prepared.coefficients(lambda);
     let fitted = dense_ab(x, coefficients.view());
     let mut fitted_quadratic = 0.0_f64;
-    for eig in 0..prepared.cache.penalty_eigenvalues.len() {
-        let denom = 1.0 + lambda * prepared.cache.penalty_eigenvalues[eig];
+    // Same classified spectrum the objective's `dp` uses — `σ̂²·ν` and `dp(ρ̂)`
+    // are the same quantity computed two ways and must not read the spectrum
+    // through two different range/null tests (#2740).
+    let spectrum = PenaltyRangeSpectrum::of(&prepared.cache);
+    for eig in 0..spectrum.len() {
+        let denom = 1.0 + lambda * spectrum.get(eig);
         fitted_quadratic += pooled_projected_rhs_squared[[eig, 0]] / denom;
     }
     let shared_sigma2 = (pooled_ywy[0] - fitted_quadratic) / shared_nu;
@@ -3006,7 +3014,9 @@ pub fn gaussian_reml_free_b_score(
     let mut logdet_h = cache.logdet_xtwx;
     let mut trace_h = 0.0;
     let mut edf = 0.0;
-    for &delta in &cache.penalty_eigenvalues {
+    // ONE predicate, as in `gaussian_reml_logdet_term` (#2740): the directions
+    // summed into `trace_h` are the `penalty_rank` directions subtracted from it.
+    for delta in PenaltyRangeSpectrum::of(&cache).iter() {
         let t = lambda * delta;
         logdet_h += (1.0 + t).ln();
         if delta > 0.0 {
@@ -3510,9 +3520,13 @@ fn gaussian_reml_inverse_hessian_from_cache(
         );
     }
     let p = cache.penalty_eigenvalues.len();
+    let spectrum = PenaltyRangeSpectrum::of(cache);
     let mut scaled_basis = cache.coefficient_basis.clone();
     for eig in 0..p {
-        let scale = 1.0 / (1.0 + lambda * cache.penalty_eigenvalues[eig]);
+        // `H = XᵀWX + λS` must be assembled from the same `S` the objective
+        // scores; a direction the range predicate calls null carries no `λδ`
+        // here either (#2740).
+        let scale = 1.0 / (1.0 + lambda * spectrum.get(eig));
         for row in 0..p {
             scaled_basis[[row, eig]] *= scale;
         }
@@ -3549,11 +3563,12 @@ fn batched_inverse_hessians_from_caches(
                 break;
             }
             let cache = &problem.fit.cache;
+            let spectrum = PenaltyRangeSpectrum::of(cache);
             basis
                 .slice_mut(s![idx, .., ..])
                 .assign(&cache.coefficient_basis);
             for eig in 0..p {
-                let scale = 1.0 / (1.0 + lambda * cache.penalty_eigenvalues[eig]);
+                let scale = 1.0 / (1.0 + lambda * spectrum.get(eig));
                 for row in 0..p {
                     scaled_basis[[idx, row, eig]] = cache.coefficient_basis[[row, eig]] * scale;
                 }
@@ -3973,6 +3988,76 @@ fn penalty_range_tolerance(eigenvalues: ArrayView1<'_, f64>) -> f64 {
     max_abs * EIGEN_REL_TOL
 }
 
+/// The cached penalty spectrum read through the ONE range/null predicate.
+///
+/// [`penalty_range_tolerance`] defines the threshold; this is the single place
+/// that APPLIES it, and every consumer of `cache.penalty_eigenvalues` goes
+/// through here. A direction that fails the test is reported as EXACTLY `0.0`,
+/// so a downstream `δ > 0.0` or `δ == 0.0` on a classified value re-reads that
+/// one predicate instead of introducing a second and a third.
+///
+/// #2740: before this existed the same array was partitioned three ways —
+/// `δ > EIGEN_REL_TOL·max|δ|` (which DEFINES `penalty_rank`), an absolute
+/// `δ > 0.0`, and an absolute `δ == 0.0`. A numerically null direction the
+/// eigensolver returns as a small POSITIVE number (measured at
+/// `3.20001575162645240e-18` on an ordinary second-difference penalty) was then
+/// simultaneously in the range set by one test and out of it by another. That
+/// is not a rounding difference but a POPULATION mismatch: `compactified_limit_costs`
+/// summed `ln δ` over `count(δ > 0.0)` directions and subtracted
+/// `logdet_penalty_positive`, which is reconciled to exactly `penalty_rank`
+/// directions, so the ρ→+∞ limit cost the profile search compares against was
+/// wrong by `ln(3.2e-18) = −40.3` per disputed direction — and the same
+/// mismatch offset `Σ t/(1+t)` by `penalty_rank` in the gradient and in its
+/// interval enclosure.
+///
+/// Classifying rather than only counting also removes the disputed direction
+/// from `log|H| = Σ log(1 + λδ)`: keeping it there while `log|S|₊` counts only
+/// `penalty_rank` directions makes `V(ρ)` diverge like `(count − rank)·ρ/2`
+/// instead of approaching the finite `ρ→+∞` limit the compactified endpoint
+/// claims. Value, gradient, enclosure, limit, coefficients and dispersion all
+/// therefore score the SAME matrix.
+#[derive(Clone, Copy)]
+struct PenaltyRangeSpectrum<'a> {
+    eigenvalues: &'a Array1<f64>,
+    tolerance: f64,
+}
+
+impl<'a> PenaltyRangeSpectrum<'a> {
+    fn of(cache: &'a GaussianRemlEigenCache) -> Self {
+        Self {
+            eigenvalues: &cache.penalty_eigenvalues,
+            tolerance: penalty_range_tolerance(cache.penalty_eigenvalues.view()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.eigenvalues.len()
+    }
+
+    /// `δ_i` when direction `i` is in the range of `S`, exactly `0.0` when it is
+    /// not.
+    #[inline]
+    fn get(&self, index: usize) -> f64 {
+        let delta = self.eigenvalues[index];
+        if delta > self.tolerance { delta } else { 0.0 }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = f64> + '_ {
+        (0..self.len()).map(move |index| self.get(index))
+    }
+
+    /// The number of range directions under this same predicate — the quantity
+    /// `GaussianRemlEigenCache::penalty_rank` is defined to be, recomputed here
+    /// so a sum and the count it is differenced against can never be populated
+    /// by two different rules.
+    fn rank(&self) -> usize {
+        self.eigenvalues
+            .iter()
+            .filter(|&&delta| delta > self.tolerance)
+            .count()
+    }
+}
+
 fn gaussian_reml_penalty_pseudoinverse_from_cache(
     cache: &GaussianRemlEigenCache,
 ) -> Result<Array2<f64>, EstimationError> {
@@ -4005,10 +4090,9 @@ fn gaussian_reml_penalty_pseudoinverse_from_cache(
     // defect through its own fallback.  A dividing consumer has no safe
     // reconstruction of a rank it cannot verify, so it refuses and says which
     // two numbers disagreed.
-    let tolerance = penalty_range_tolerance(cache.penalty_eigenvalues.view());
-    let selected: Vec<usize> = (0..p)
-        .filter(|eig| cache.penalty_eigenvalues[*eig] > tolerance)
-        .collect();
+    let spectrum = PenaltyRangeSpectrum::of(cache);
+    let tolerance = spectrum.tolerance;
+    let selected: Vec<usize> = (0..p).filter(|eig| spectrum.get(*eig) > 0.0).collect();
     if selected.len() != cache.penalty_rank {
         crate::bail_invalid_estim!(
             "Gaussian REML penalty pseudoinverse: the cache reports penalty_rank={} but {} of its \
@@ -4020,7 +4104,7 @@ fn gaussian_reml_penalty_pseudoinverse_from_cache(
     }
     let mut scaled_basis = Array2::<f64>::zeros((p, p));
     for eig in selected {
-        let delta = cache.penalty_eigenvalues[eig];
+        let delta = spectrum.get(eig);
         for row in 0..p {
             scaled_basis[[row, eig]] = cache.coefficient_basis[[row, eig]] / delta;
         }
@@ -4526,6 +4610,28 @@ fn validate_gaussian_reml_eigen_cache(
                 .to_string(),
         );
     }
+    // #2740: `penalty_rank` is DEFINED as the number of eigenvalues clearing
+    // `penalty_range_tolerance`, and `logdet_penalty_positive` is reconciled to
+    // exactly that many directions. Every consumer reads the spectrum through
+    // `PenaltyRangeSpectrum`, which applies the same test — but a cache handed in
+    // through `GaussianRemlWarmStart` or `prepare_gaussian_reml`'s
+    // `Some(eigen_cache)` can carry a rank counted under some other rule, and the
+    // shape check above never compares the rank against the spectrum. Then the
+    // objective's Σ over the range and the `penalty_rank` it is differenced
+    // against are populated by two different rules again, which is the whole
+    // defect. Check it here rather than assume it.
+    let spectrum = PenaltyRangeSpectrum::of(cache);
+    let classified_rank = spectrum.rank();
+    if classified_rank != cache.penalty_rank {
+        crate::bail_invalid_estim!(
+            "Gaussian REML eigen cache reports penalty_rank={} but {classified_rank} of its {p} \
+             eigenvalues clear the range tolerance {:e}; the log-determinant sums run over the \
+             directions that clear it while log|S|₊ and the gradient offset are denominated in \
+             penalty_rank, so the two must be the same count",
+            cache.penalty_rank,
+            spectrum.tolerance
+        );
+    }
     Ok::<(), _>(())
 }
 
@@ -4641,8 +4747,9 @@ impl GaussianRemlPrepared {
 
     fn coefficients(&self, lambda: f64) -> Array2<f64> {
         let mut scaled = self.projected_rhs.clone();
-        for i in 0..self.cache.penalty_eigenvalues.len() {
-            let scale = 1.0 / (1.0 + lambda * self.cache.penalty_eigenvalues[i]);
+        let spectrum = PenaltyRangeSpectrum::of(&self.cache);
+        for i in 0..spectrum.len() {
+            let scale = 1.0 / (1.0 + lambda * spectrum.get(i));
             for value in scaled.row_mut(i) {
                 *value *= scale;
             }
@@ -5087,6 +5194,7 @@ fn reml_deriv_enclosure_profile(
     b: f64,
 ) -> (Interval, Interval) {
     let d = logdet_output_count as f64;
+    let spectrum = PenaltyRangeSpectrum::of(cache);
     let rank = cache.penalty_rank as f64;
     let half_d = 0.5 * d;
     let half_nu = 0.5 * dispersion_dof;
@@ -5096,7 +5204,10 @@ fn reml_deriv_enclosure_profile(
     let mut sum_u_hi = 0.0;
     let mut sum_w_lo = 0.0;
     let mut sum_w_hi = 0.0;
-    for &delta in &cache.penalty_eigenvalues {
+    // The enclosure must bound the expression the evaluator computes, so it
+    // classifies through the same predicate `gaussian_reml_logdet_term` uses and
+    // the population of this sum is again exactly `rank` (#2740).
+    for delta in spectrum.iter() {
         if delta > 0.0 {
             let log_delta = delta.ln();
             let kr = kernel_ranges(a + log_delta, b + log_delta);
@@ -5127,8 +5238,8 @@ fn reml_deriv_enclosure_profile(
         let mut c2_point = 0.0;
         let mut dph_lo = 0.0; // Σ c² · k   (= dp″, sign-indefinite)
         let mut dph_hi = 0.0;
-        for eig in 0..cache.penalty_eigenvalues.len() {
-            let delta = cache.penalty_eigenvalues[eig];
+        for eig in 0..spectrum.len() {
+            let delta = spectrum.get(eig);
             let c2 = projected_rhs_squared[[eig, j]];
             let log_delta = if delta == 0.0 {
                 f64::NEG_INFINITY
@@ -5725,8 +5836,15 @@ fn compactified_limit_costs(
     n_outputs: usize,
     nu: f64,
 ) -> [f64; 2] {
+    // #2740: this sum is DIFFERENCED against `logdet_penalty_positive`, which is
+    // reconciled to exactly `penalty_rank` directions. Populating it by an
+    // absolute `δ > 0.0` made the two cover different sets and the limit wrong by
+    // `ln δ` for every disputed direction. Both the range sum and the null mass
+    // below therefore read the spectrum through the one classification, so they
+    // are exact complements of each other and of `penalty_rank`.
+    let spectrum = PenaltyRangeSpectrum::of(cache);
     let mut sum_log_delta_pos = 0.0;
-    for &delta in &cache.penalty_eigenvalues {
+    for delta in spectrum.iter() {
         if delta > 0.0 {
             sum_log_delta_pos += delta.ln();
         }
@@ -5735,8 +5853,8 @@ fn compactified_limit_costs(
     let mut plus_inf = 0.5 * (n_outputs as f64) * logdet_limit;
     for j in 0..ywy.len() {
         let mut null_mass = 0.0;
-        for i in 0..cache.penalty_eigenvalues.len() {
-            if cache.penalty_eigenvalues[i] == 0.0 {
+        for i in 0..spectrum.len() {
+            if spectrum.get(i) == 0.0 {
                 null_mass += projected_rhs_squared[[i, j]];
             }
         }
@@ -6071,8 +6189,9 @@ fn fill_coefficients_no_alloc(
 ) {
     let p = cache.penalty_eigenvalues.len();
     let d = workspace.ywy.len();
+    let spectrum = PenaltyRangeSpectrum::of(cache);
     for eig in 0..p {
-        let scale = 1.0 / (1.0 + lambda * cache.penalty_eigenvalues[eig]);
+        let scale = 1.0 / (1.0 + lambda * spectrum.get(eig));
         for output in 0..d {
             workspace.scaled_projected_rhs[[eig, output]] =
                 workspace.projected_rhs[[eig, output]] * scale;
@@ -6120,10 +6239,11 @@ fn fill_sigma2_no_alloc(
     mut sigma2: ArrayViewMut1<'_, f64>,
 ) {
     let nu = n_effective as f64 - cache.nullity as f64;
+    let spectrum = PenaltyRangeSpectrum::of(cache);
     for output in 0..n_outputs {
         let mut fitted_quadratic = 0.0;
-        for eig in 0..cache.penalty_eigenvalues.len() {
-            let denom = 1.0 + lambda * cache.penalty_eigenvalues[eig];
+        for eig in 0..spectrum.len() {
+            let denom = 1.0 + lambda * spectrum.get(eig);
             fitted_quadratic += projected_rhs_squared[[eig, output]] / denom;
         }
         sigma2[output] = (ywy[output] - fitted_quadratic) / nu;
@@ -8088,10 +8208,20 @@ mod tests {
         }
     }
 
+    /// #2740: this fixture used to declare `penalty_rank = 2` against the
+    /// spectrum `[5.243e-05, 8.173e+07]`, whose smaller eigenvalue is `6.4e-13`
+    /// of the larger and therefore falls BELOW the relative range tolerance that
+    /// defines `penalty_rank` — a hand-built cache no builder could produce, and
+    /// itself an instance of the one-array-three-predicates defect (its rank was
+    /// counted under `δ > 0.0`). The spectrum below keeps the two well-separated
+    /// modes this test exists for while placing both inside the range space
+    /// (`1.0 / 1.0e9 = 1e-9`, an order above the `1e-10` tolerance), so the
+    /// declared rank and the classified rank are the same number. The landscape
+    /// is unchanged in kind: two interior minima with the later one lower.
     #[test]
     fn scalar_rho_optimizer_chooses_lowest_cost_stationary_point() {
         let cache = GaussianRemlEigenCache {
-            penalty_eigenvalues: array![5.2430192311066924e-05, 81734184.18548436],
+            penalty_eigenvalues: array![1.0, 1.0e9],
             eigenvectors: Array2::eye(2),
             coefficient_basis: Array2::eye(2),
             xtwx_fingerprint: 0,
@@ -8125,7 +8255,7 @@ mod tests {
         .expect("no-alloc rho optimizer");
 
         assert!(
-            (rho - 4.3251059890).abs() < 1.0e-6,
+            (rho - (-5.5309235440)).abs() < 1.0e-6,
             "rho optimizer selected {rho}, expected the lower-cost later stationary point"
         );
         // Both paths reduce through `enumerate_and_select_rho` with identical
@@ -8135,7 +8265,7 @@ mod tests {
             no_alloc_rho, rho,
             "no-alloc optimizer selected {no_alloc_rho}, allocating selected {rho}"
         );
-        assert!(prepared.evaluate(rho).cost < prepared.evaluate(-18.9277503549).cost);
+        assert!(prepared.evaluate(rho).cost < prepared.evaluate(-21.4320334799).cost);
     }
 
     /// Deterministic linear-congruential generator (Knuth/MMIX constants) so the
@@ -8166,7 +8296,12 @@ mod tests {
     /// `reml_deriv_enclosure` directly from a spectrum.
     fn synthetic_cache(eigs: &[f64]) -> GaussianRemlEigenCache {
         let n = eigs.len();
-        let rank = eigs.iter().filter(|&&delta| delta > 0.0).count();
+        // The SAME range/null predicate the cache builder uses to define
+        // `penalty_rank` and every consumer uses to read the spectrum (#2740);
+        // a fixture that counted its own rank under `δ > 0.0` would hand the
+        // objective a sum and an offset populated by two different rules.
+        let tolerance = penalty_range_tolerance(ArrayView1::from(eigs));
+        let rank = eigs.iter().filter(|&&delta| delta > tolerance).count();
         GaussianRemlEigenCache {
             penalty_eigenvalues: Array1::from(eigs.to_vec()),
             eigenvectors: Array2::eye(n),
@@ -9425,5 +9560,223 @@ mod perfect_fit_refusal_tests {
                 );
             }
         }
+    }
+}
+
+/// #2740: one eigenvalue array, one range/null predicate.
+///
+/// `cache.penalty_eigenvalues` used to be partitioned three different ways in
+/// this file — the relative `δ > EIGEN_REL_TOL·max|δ|` that DEFINES
+/// `penalty_rank`, an absolute `δ > 0.0`, and an absolute `δ == 0.0`. The
+/// eigensolver returns a numerically null direction as a small POSITIVE number,
+/// so those three answers disagree on exactly that direction: it is in the range
+/// set by one test, out of the null set by another, and out of the range set by
+/// the third. A `ln`-sum taken over one population and then differenced against
+/// a count taken under another is wrong by precisely the terms the two
+/// populations disagree about.
+///
+/// Every test below is built on a spectrum that carries such a DISPUTED band —
+/// eigenvalues strictly positive and strictly below the range tolerance — so a
+/// green here cannot come from a fixture on which the predicates happen to
+/// agree; each test states its own non-vacuity control.
+#[cfg(test)]
+mod eigenvalue_range_predicate_agreement_2740_tests {
+    use super::*;
+    use ndarray::array;
+
+    const LARGEST: f64 = 4.0;
+
+    /// Range: `4.0` and `1.0`. Disputed (positive, below `4.0·1e-10 = 4e-10`):
+    /// `5.0e-11` and `3.2e-18` — the second is the magnitude #2739 MEASURED on an
+    /// ordinary second-difference penalty. Null: an exact `0.0`.
+    ///
+    /// `logdet_penalty_positive` is set to the log-determinant over the range
+    /// directions, which is what `gaussian_penalty_positive_logdet` reconciles it
+    /// to on a real cache: it is the quantity the compactified limit differences
+    /// the eigenvalue sum against, so the fixture must denominate it the same way.
+    fn disputed_band_cache() -> GaussianRemlEigenCache {
+        let eigenvalues = array![LARGEST, 1.0, 5.0e-11, 3.2e-18, 0.0];
+        let p = eigenvalues.len();
+        GaussianRemlEigenCache {
+            penalty_eigenvalues: eigenvalues,
+            eigenvectors: Array2::eye(p),
+            coefficient_basis: Array2::eye(p),
+            xtwx_fingerprint: 0,
+            penalty_fingerprint: 0,
+            logdet_xtwx: 0.0,
+            logdet_penalty_positive: LARGEST.ln() + 1.0_f64.ln(),
+            penalty_rank: 2,
+            nullity: 3,
+        }
+    }
+
+    fn projected() -> Array2<f64> {
+        array![[0.7], [0.5], [0.3], [0.2], [0.1]]
+    }
+
+    /// The classification and the rank are the same question asked once.
+    #[test]
+    fn the_range_count_the_null_count_and_penalty_rank_are_one_predicate() {
+        let cache = disputed_band_cache();
+        let spectrum = PenaltyRangeSpectrum::of(&cache);
+
+        // The threshold is derived from the spectrum and the file's relative
+        // rank constant, not chosen here.
+        assert_eq!(
+            spectrum.tolerance,
+            LARGEST * EIGEN_REL_TOL,
+            "the range threshold must be the relative one that defines penalty_rank"
+        );
+
+        // NON-VACUITY: without a disputed band `δ > 0.0` and the relative test
+        // coincide and every assertion below would pass on a fixture that could
+        // never have exhibited the defect.
+        let absolute_positive = cache
+            .penalty_eigenvalues
+            .iter()
+            .filter(|delta| **delta > 0.0)
+            .count();
+        assert!(
+            absolute_positive > cache.penalty_rank,
+            "precondition unmet: the fixture carries no positive-but-null direction \
+             (penalty_rank={}, eigenvalues passing `> 0.0`={absolute_positive})",
+            cache.penalty_rank
+        );
+
+        assert_eq!(
+            spectrum.rank(),
+            cache.penalty_rank,
+            "the classified range count must be the rank the cache reports"
+        );
+        assert_eq!(
+            spectrum.iter().filter(|delta| *delta > 0.0).count(),
+            cache.penalty_rank,
+            "a `δ > 0.0` read of the CLASSIFIED spectrum must select exactly the \
+             directions penalty_rank counted"
+        );
+        assert_eq!(
+            spectrum.iter().filter(|delta| *delta == 0.0).count(),
+            cache.nullity,
+            "the null set must be the exact complement of the range set"
+        );
+    }
+
+    /// The `ρ→+∞` limit cost sums `ln δ` over the directions its own subtracted
+    /// `logdet_penalty_positive` was reconciled to.
+    #[test]
+    fn compactified_limit_sums_the_logdet_over_the_directions_the_rank_counted() {
+        let cache = disputed_band_cache();
+        let spectrum = PenaltyRangeSpectrum::of(&cache);
+        let ywy = array![3.0];
+        let prs = projected();
+        let n_outputs = 1usize;
+        let nu = 40.0_f64;
+
+        let limits = compactified_limit_costs(&cache, ywy.view(), prs.view(), n_outputs, nu);
+
+        let reconstruct = |logdet_sum: f64, null_mass: f64| {
+            let dp_inf = ywy[0] - null_mass;
+            0.5 * (n_outputs as f64)
+                * (cache.logdet_xtwx + logdet_sum - cache.logdet_penalty_positive)
+                + 0.5 * nu * (1.0 + (2.0 * std::f64::consts::PI * dp_inf / nu).ln())
+        };
+
+        // The one predicate: sum and null mass are exact complements.
+        let range_logdet: f64 = spectrum
+            .iter()
+            .filter(|delta| *delta > 0.0)
+            .map(f64::ln)
+            .sum();
+        let range_null_mass: f64 = (0..spectrum.len())
+            .filter(|index| spectrum.get(*index) == 0.0)
+            .map(|index| prs[[index, 0]])
+            .sum();
+        let expected = reconstruct(range_logdet, range_null_mass);
+
+        // Standard `γ_m` accumulation bound for the way the value is formed: one
+        // `ln` and one add per eigendirection, plus the fixed tail. Derived from
+        // the machine epsilon and the problem size; nothing to tune.
+        let operations = (2 * spectrum.len() + 8) as f64;
+        let bound = operations * f64::EPSILON * (expected.abs() + 1.0);
+        assert!(
+            (limits[1] - expected).abs() <= bound,
+            "the compactified limit is {} but the range-populated reconstruction is \
+             {expected} (bound {bound:e})",
+            limits[1]
+        );
+
+        // NON-VACUITY: the abandoned `δ > 0.0` population is a materially
+        // different number, so the assertion above is not satisfied by both.
+        let absolute_logdet: f64 = cache
+            .penalty_eigenvalues
+            .iter()
+            .filter(|delta| **delta > 0.0)
+            .map(|delta| delta.ln())
+            .sum();
+        let absolute_null_mass: f64 = (0..spectrum.len())
+            .filter(|index| cache.penalty_eigenvalues[*index] == 0.0)
+            .map(|index| prs[[index, 0]])
+            .sum();
+        let absolute = reconstruct(absolute_logdet, absolute_null_mass);
+        assert!(
+            (limits[1] - absolute).abs() > 1.0,
+            "the two populations differ by less than a nat ({} vs {absolute}); this \
+             fixture cannot discriminate them",
+            limits[1]
+        );
+    }
+
+    /// `V′` from the log-determinant term is `½d·(Σ t/(1+t) − penalty_rank)`. The
+    /// sum and the offset are the same population, so as `λ→∞` the difference goes
+    /// to zero: `t/(1+t) = 1 − 1/(1+t)` leaves exactly `½d·Σ_range 1/(1+λδ)`.
+    /// Under the abandoned `δ > 0.0` the sum has more terms than the offset and
+    /// the residual saturates at half a mode per disputed direction instead.
+    #[test]
+    fn the_large_rho_logdet_gradient_vanishes_because_sum_and_offset_share_a_population() {
+        let cache = disputed_band_cache();
+        let spectrum = PenaltyRangeSpectrum::of(&cache);
+        let lambda = RHO_UPPER.exp();
+        let n_outputs = 1.0_f64;
+
+        let (term, _edf) = gaussian_reml_logdet_term(&cache, RHO_UPPER, n_outputs);
+
+        // The bound is the analytic residual of the SAME sum, not a chosen
+        // tolerance, widened by the accumulation of `rank` additions.
+        let residual: f64 = spectrum
+            .iter()
+            .filter(|delta| *delta > 0.0)
+            .map(|delta| 1.0 / (1.0 + lambda * delta))
+            .sum();
+        let bound = 0.5 * n_outputs * residual
+            + ((spectrum.len() + 4) as f64) * f64::EPSILON * (cache.penalty_rank as f64);
+        assert!(
+            term.grad.abs() <= bound,
+            "the large-λ log-determinant gradient is {} but the range-populated \
+             residual bounds it by {bound:e}",
+            term.grad
+        );
+
+        // NON-VACUITY: at ρ = RHO_UPPER the disputed band is saturated, so the
+        // `δ > 0.0` population would have left most of a whole mode in the
+        // gradient — the two predicates are separated here by far more than the
+        // bound above.
+        let disputed_trace: f64 = (0..spectrum.len())
+            .filter(|index| spectrum.get(*index) == 0.0)
+            .map(|index| {
+                let t = lambda * cache.penalty_eigenvalues[index];
+                t / (1.0 + t)
+            })
+            .sum();
+        assert!(
+            disputed_trace > 0.5,
+            "precondition unmet: the disputed band contributes only {disputed_trace} to \
+             the trace at rho={RHO_UPPER}, so an absolute `> 0.0` sum would barely differ \
+             from the classified one and this test would be mute"
+        );
+        assert!(
+            0.5 * n_outputs * disputed_trace > bound,
+            "the disputed band's contribution {disputed_trace} does not clear the bound \
+             {bound:e}; the assertion above cannot distinguish the two predicates"
+        );
     }
 }
