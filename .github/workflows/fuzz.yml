@@ -9,6 +9,14 @@ on:
         description: "gamfit solver log level for this run (empty = quiet default). Use 'info' to make budget spend attributable per scenario; the stream is uploaded as an artifact and is NOT committed."
         default: ""
         required: false
+      n_trials:
+        description: "Trial budget for THIS run. Empty = the nightly's 100. A smaller value makes this a probe: the harness itself is what is under test (does the mgcv reference arm come back with a number?), and a probe does NOT publish its ledger."
+        default: ""
+        required: false
+      max_total_seconds:
+        description: "Soft wall-clock budget for the trial loop, checked between trials. Empty = the nightly's 2400."
+        default: ""
+        required: false
 
 # #2443/#2437: a fuzz run's value IS the corpus/findings it produced, so the
 # scheduled run is keyed on `github.sha` and never cancelled — under ref-keying a
@@ -24,6 +32,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The nightly's values live here so a dispatch can lower them without the run
+  # step changing shape. A `schedule` event has no `inputs` context at all, so
+  # the fallbacks are what the scheduled run always uses.
+  FUZZ_N_TRIALS: ${{ github.event.inputs.n_trials || '100' }}
+  FUZZ_MAX_TOTAL_SECONDS: ${{ github.event.inputs.max_total_seconds || '2400' }}
 
 jobs:
   fuzz:
@@ -126,12 +139,12 @@ jobs:
           # run is exactly when the stderr tail below is worth having in-tree.
           set +e
           python bench/fuzz_vs_mgcv.py \
-            --n-trials 100 \
+            --n-trials "$FUZZ_N_TRIALS" \
             --top 30 \
             --rust-timeout 60 \
             --r-timeout 60 \
             --max-scenario-cost 200000 \
-            --max-total-seconds 2400 \
+            --max-total-seconds "$FUZZ_MAX_TOTAL_SECONDS" \
             "${level_args[@]}" \
             2> fuzz_solver.log | tee fuzz_output.txt
           status=${PIPESTATUS[0]}
@@ -161,8 +174,13 @@ jobs:
       # always() so a failed or timed-out run still publishes what it measured -
       # those numbers are usually the interesting ones. Publishes nothing when the
       # run produced no results, so a bad run never blanks the last good one.
+      #
+      # A reduced-trial probe run is excluded: its handful of rows would replace
+      # the in-tree ledger with a sample far too small to read as the nightly's
+      # numbers. The probe's evidence is its own log and its uploaded artifact,
+      # which the step above keeps unconditionally.
       - name: Publish results to bench/gha_results
-        if: always()
+        if: always() && env.FUZZ_N_TRIALS == '100'
         uses: ./.github/actions/publish-gha-results
         with:
           name: fuzz
