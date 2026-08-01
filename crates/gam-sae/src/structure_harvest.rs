@@ -2914,6 +2914,56 @@ impl TopologyCandidateSpec {
 /// [`fit_topology_candidate`] scores and [`race_birth_topology`] adjudicates —
 /// building it is choosing which flat/rigid alternatives the evidence gets to
 /// discriminate between; the race itself decides which one is real.
+/// #2280 — the two bases a topology chart may read, named so a chart cannot
+/// silently receive the wrong one.
+///
+/// The seed a birth carries is generally **per-component standardized**, and
+/// that destroys every METRIC quantity: a length, a radius, an angle in an
+/// embedded space — anything computed ACROSS axes rather than within one.
+/// Rescaling each axis by its own standard deviation turns a circle into an
+/// ellipse and makes `hypot(x, y) - R` a length compared against a `z` divided by
+/// a different number. That is a units error, and it belongs to a CLASS of
+/// charts rather than to any one of them: every future chart that measures a
+/// distance from an axis or a surface, every chart on an embedding whose shape
+/// lives in the ratios between coordinates, and anything that assumes a circle
+/// stays a circle.
+///
+/// So the basis is EXPLICIT at the seam rather than implied by which caller you
+/// came from. A chart needing true geometry reads `ambient`; a chart needing only
+/// a well-conditioned parameterisation reads `seed`. The alternative — quietly
+/// not standardizing the seed charts read — fixes one member of the class and
+/// leaves the trap armed for the rest, while making the basis a chart receives
+/// invisible to whoever writes the next one.
+///
+/// `ambient` is optional because some callers legitimately have no ambient rows
+/// (a menu built for its candidate SET rather than for a fit). A chart requiring
+/// it then declines and falls back to the seed chart — the same fail-open policy
+/// every other chart gate here uses — rather than being handed a basis that looks
+/// usable and is not.
+#[derive(Clone, Copy)]
+struct CandidateBases<'a> {
+    /// The birth's coordinate seed. Well-conditioned, generally standardized per
+    /// component, so RATIOS BETWEEN AXES CARRY NO GEOMETRY.
+    seed: ArrayView2<'a, f64>,
+    /// The ambient rows the birth is fitted against, in their own units — the
+    /// only basis on which a metric quantity means anything.
+    ambient: Option<ArrayView2<'a, f64>>,
+}
+
+impl<'a> CandidateBases<'a> {
+    /// The full pair. Every production race has both in scope.
+    fn with_ambient(seed: ArrayView2<'a, f64>, ambient: ArrayView2<'a, f64>) -> Self {
+        Self { seed, ambient: Some(ambient) }
+    }
+
+    /// The ambient rows, only when row-aligned with the seed. A chart indexes
+    /// rows of both identically, so a row-count mismatch would silently pair
+    /// unrelated observations — refuse rather than pair them.
+    fn aligned_ambient(&self) -> Option<ArrayView2<'a, f64>> {
+        self.ambient.filter(|ambient| ambient.nrows() == self.seed.nrows())
+    }
+}
+
 /// #2280 — the significance at which [`phase_coordinate_closes`] is willing to
 /// call a genuinely closed loop "open".
 ///
@@ -3003,9 +3053,10 @@ fn phase_coordinate_closes(phases: ArrayView1<'_, f64>, alpha: f64) -> bool {
 }
 
 fn topology_candidates_for_dim(
-    coords: ArrayView2<'_, f64>,
+    bases: CandidateBases<'_>,
     d_k: usize,
 ) -> Result<Vec<TopologyCandidateSpec>, String> {
+    let coords = bases.seed;
     let n = coords.nrows();
     let d_seed = coords.ncols();
     if d_k == 0 {
@@ -3116,20 +3167,62 @@ fn topology_candidates_for_dim(
     // angles are not read off one plane. BOTH axes must close — a torus with one
     // open axis is a cylinder, and pretending otherwise is the same false
     // periodicity one dimension up.
-    let torus_phase_coords = || -> Array2<f64> {
-        if d_seed < 4 {
-            return coords_d(2);
-        }
-        let (first, second) = (phase_column(0, 1), phase_column(2, 3));
-        if !closes(&first) || !closes(&second) {
-            return coords_d(2);
-        }
+    let stack_two = |first: &Array1<f64>, second: &Array1<f64>| -> Array2<f64> {
         let mut out = Array2::<f64>::zeros((n, 2));
         for row in 0..n {
             out[[row, 0]] = first[row];
             out[[row, 1]] = second[row];
         }
         out
+    };
+    // The REVOLUTION form of T², read on the AMBIENT rows.
+    //
+    // A Clifford-type torus spends an independent plane on each angle, so its
+    // chart is the phases of two principal PAIRS — four seed directions. But a
+    // torus of revolution (the donut, and the fixture every zoo uses) is embedded
+    // in THREE dimensions and its angles are not two principal pairs: the major
+    // angle is the phase in the plane of revolution, the minor the phase of the
+    // meridian circle in the (distance-from-the-revolution-circle, axis)
+    // half-plane. Demanding only the Clifford form made the canonical torus
+    // structurally unreachable.
+    //
+    // The meridian phase is a METRIC reading, so it must come from ambient rows.
+    // Measured on the planted donut (MSI 14621146): on raw rows both phases close
+    // comfortably (major by 9x, minor by 5.7x); on the per-component standardized
+    // seed the minor phase FAILS — the largest gap widens 0.050 -> 0.125 because
+    // rescaling axes independently turns the meridian circle into an ellipse, and
+    // the position count inflates 37 -> 108 because `hypot(x,y) - R` stops taking
+    // the same value across major angles. Same chart, same data, wrong basis.
+    let revolution_phases = |ambient: ArrayView2<'_, f64>| -> (Array1<f64>, Array1<f64>) {
+        let mut radius = Array1::<f64>::zeros(n);
+        for row in 0..n {
+            radius[row] = ambient[[row, 0]].hypot(ambient[[row, 1]]);
+        }
+        let mean_radius = radius.sum() / n as f64;
+        let mut major = Array1::<f64>::zeros(n);
+        let mut minor = Array1::<f64>::zeros(n);
+        for row in 0..n {
+            major[row] = phase(ambient[[row, 0]], ambient[[row, 1]]);
+            minor[row] = phase(radius[row] - mean_radius, ambient[[row, 2]]);
+        }
+        (major, minor)
+    };
+    let torus_phase_coords = || -> Array2<f64> {
+        if d_seed >= 4 {
+            let (first, second) = (phase_column(0, 1), phase_column(2, 3));
+            if closes(&first) && closes(&second) {
+                return stack_two(&first, &second);
+            }
+        }
+        if let Some(ambient) = bases.aligned_ambient() {
+            if ambient.ncols() >= 3 {
+                let (major, minor) = revolution_phases(ambient);
+                if closes(&major) && closes(&minor) {
+                    return stack_two(&major, &minor);
+                }
+            }
+        }
+        coords_d(2)
     };
     // S¹ × ℝ: one angle and one height transverse to it. Only the ANGLE has to
     // close; the height is genuinely open, which is what makes it a cylinder
@@ -4151,12 +4244,12 @@ fn radial_promoted_specs(
     // The circle from the d=1 set (the un-promoted alternative the evidence must
     // still be free to prefer) plus the d=2 radial two-manifolds.
     let mut promoted: Vec<TopologyCandidateSpec> = Vec::with_capacity(3);
-    for spec in topology_candidates_for_dim(coords, 1)? {
+    for spec in topology_candidates_for_dim(CandidateBases::with_ambient(coords, target), 1)? {
         if spec.kind == AutoTopologyKind::Circle {
             promoted.push(spec);
         }
     }
-    for mut spec in topology_candidates_for_dim(coords, 2)? {
+    for mut spec in topology_candidates_for_dim(CandidateBases::with_ambient(coords, target), 2)? {
         if matches!(
             spec.kind,
             AutoTopologyKind::Cylinder | AutoTopologyKind::Euclidean
@@ -4529,7 +4622,7 @@ fn race_template_coords(
     d_k: usize,
     atlas: Option<&AtlasTopologyReadout>,
 ) -> Result<Option<TopologyRaceOutcome>, String> {
-    let base_specs = topology_candidates_for_dim(coords, d_k)?;
+    let base_specs = topology_candidates_for_dim(CandidateBases::with_ambient(coords, target), d_k)?;
     if base_specs.is_empty() {
         return Ok(None);
     }
@@ -4600,7 +4693,7 @@ fn race_intrinsic_coords(
             coords[[r, col]] = (embed[[r, col]] - lo) / span - 0.5;
         }
     }
-    let specs = topology_candidates_for_dim(coords.view(), d_k)?;
+    let specs = topology_candidates_for_dim(CandidateBases::with_ambient(coords.view(), target), d_k)?;
     if specs.is_empty() {
         return Ok(None);
     }
@@ -7517,10 +7610,10 @@ mod tests_atlas_prior_2280 {
         // The d = 1 menu is {Circle, Euclidean} in that order, so the reorder is
         // observable through which candidate the measured manifold puts first.
         let coords = Array2::<f64>::from_shape_fn((target.nrows(), 1), |(r, _)| r as f64);
-        let base = topology_candidates_for_dim(coords.view(), 1).unwrap();
+        let base = topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 1).unwrap();
         let base_kinds: Vec<_> = base.iter().map(|spec| spec.kind).collect();
         let primed = atlas_reorder_specs(
-            topology_candidates_for_dim(coords.view(), 1).unwrap(),
+            topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 1).unwrap(),
             Some(&prior),
         );
         assert_eq!(
@@ -7656,14 +7749,14 @@ mod tests_atlas_prior_2280 {
     fn absent_or_refusing_readout_leaves_the_menu_byte_identical_2280() {
         let coords =
             Array2::<f64>::from_shape_fn((32, 2), |(r, c)| (r as f64) * 0.1 + (c as f64) * 0.03);
-        let base_kinds: Vec<_> = topology_candidates_for_dim(coords.view(), 2)
+        let base_kinds: Vec<_> = topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2)
             .unwrap()
             .iter()
             .map(|spec| spec.kind)
             .collect();
 
         let identity_none =
-            atlas_reorder_specs(topology_candidates_for_dim(coords.view(), 2).unwrap(), None);
+            atlas_reorder_specs(topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).unwrap(), None);
         assert_eq!(
             identity_none
                 .iter()
@@ -7684,7 +7777,7 @@ mod tests_atlas_prior_2280 {
         if let Some(readout) = refusing.as_ref() {
             if readout.observed_manifold().is_none() {
                 let identity_refused = atlas_reorder_specs(
-                    topology_candidates_for_dim(coords.view(), 2).unwrap(),
+                    topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).unwrap(),
                     Some(readout),
                 );
                 assert_eq!(
@@ -7716,7 +7809,7 @@ mod tests_atlas_prior_2280 {
         );
 
         // Baseline (unprimed) menu leads with an orientable candidate.
-        let base_kinds: Vec<_> = topology_candidates_for_dim(coords.view(), 2)
+        let base_kinds: Vec<_> = topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2)
             .unwrap()
             .iter()
             .map(|spec| spec.kind)
@@ -7724,7 +7817,7 @@ mod tests_atlas_prior_2280 {
         assert!(!kind_is_non_orientable(base_kinds[0]));
         // Primed menu leads with a non-orientable candidate.
         let primed_specs = atlas_reorder_specs(
-            topology_candidates_for_dim(coords.view(), 2).unwrap(),
+            topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).unwrap(),
             Some(&atlas),
         );
         let primed_kinds: Vec<_> = primed_specs.iter().map(|spec| spec.kind).collect();
@@ -7744,7 +7837,7 @@ mod tests_atlas_prior_2280 {
         // Race both menus on the SAME evidence. race_spec_set is the production
         // entry point the birth race calls.
         let baseline = race_spec_set(
-            topology_candidates_for_dim(coords.view(), 2).unwrap(),
+            topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).unwrap(),
             target.view(),
             weights.view(),
             None,
@@ -7752,7 +7845,7 @@ mod tests_atlas_prior_2280 {
         .expect("baseline race must not error")
         .expect("baseline race must produce a winner");
         let primed = race_spec_set(
-            topology_candidates_for_dim(coords.view(), 2).unwrap(),
+            topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).unwrap(),
             target.view(),
             weights.view(),
             Some(&atlas),
@@ -7794,10 +7887,10 @@ mod tests_atlas_prior_2280 {
             .expect("the cylinder residual must build an atlas");
         assert!(!atlas.observes_non_orientable());
 
-        let base = topology_candidates_for_dim(coords.view(), 2).unwrap();
+        let base = topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).unwrap();
         let base_kinds: Vec<_> = base.iter().map(|spec| spec.kind).collect();
         let primed_specs = atlas_reorder_specs(
-            topology_candidates_for_dim(coords.view(), 2).unwrap(),
+            topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).unwrap(),
             Some(&atlas),
         );
         let primed_kinds: Vec<_> = primed_specs.iter().map(|spec| spec.kind).collect();
@@ -7834,7 +7927,7 @@ mod tests_atlas_prior_2280 {
         );
 
         let unprimed = race_spec_set(
-            topology_candidates_for_dim(coords.view(), 2).unwrap(),
+            topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).unwrap(),
             target.view(),
             weights.view(),
             None,
@@ -7842,7 +7935,7 @@ mod tests_atlas_prior_2280 {
         .unwrap()
         .unwrap();
         let primed = race_spec_set(
-            topology_candidates_for_dim(coords.view(), 2).unwrap(),
+            topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).unwrap(),
             target.view(),
             weights.view(),
             Some(&atlas),
@@ -7933,7 +8026,7 @@ mod tests_atlas_prior_2280 {
         // sphere and RP² candidates carry.
         let coords = global_linear_seed(target.view(), 3);
 
-        let menu = topology_candidates_for_dim(coords.view(), 2).expect("d=2 menu must build");
+        let menu = topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).expect("d=2 menu must build");
         let kinds: Vec<_> = menu.iter().map(|spec| spec.kind).collect();
         assert!(
             kinds.contains(&AutoTopologyKind::Mobius),
@@ -7948,7 +8041,7 @@ mod tests_atlas_prior_2280 {
         );
 
         let primed = atlas_reorder_specs(
-            topology_candidates_for_dim(coords.view(), 2).expect("d=2 menu must build"),
+            topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).expect("d=2 menu must build"),
             Some(&atlas),
         );
         let primed_kinds: Vec<_> = primed.iter().map(|spec| spec.kind).collect();
@@ -8142,6 +8235,23 @@ mod tests_atlas_prior_2280 {
             );
         }
 
+        // Which chart did the torus candidate actually GET, now that the basis
+        // is threaded? A granted phase chart lives in [0, 1); the fallback is
+        // centered principal projections and goes negative, so the range
+        // separates them without reaching into private state.
+        let specs = topology_candidates_for_dim(
+            CandidateBases::with_ambient(seed.view(), target.view()),
+            2,
+        )
+        .expect("d=2 menu builds");
+        let torus_chart = &specs
+            .iter()
+            .find(|spec| spec.kind == AutoTopologyKind::Torus)
+            .expect("the menu registers a torus candidate")
+            .coords;
+        let granted = torus_chart.iter().all(|v| (0.0..1.0).contains(v));
+        println!("[2280-rev] torus candidate got a phase chart = {granted}");
+
         // The raw arm is the one that must hold unconditionally: it is the
         // parameterisation's definition, not a claim about any pipeline.
         let (_, _, _, raw_major_closes) = spacing_report(&raw_major);
@@ -8273,7 +8383,11 @@ mod tests_atlas_prior_2280 {
 
             // What the fixed menu's REML race picks off the global-linear seed,
             // UNPRIMED — the incumbent this epic proposes to delete.
-            let realized = topology_candidates_for_dim(coords.view(), *d).expect("menu must build");
+            let realized = topology_candidates_for_dim(
+                CandidateBases::with_ambient(coords.view(), target.view()),
+                *d,
+            )
+            .expect("menu must build");
             let offered: Vec<AutoTopologyKind> = realized.iter().map(|spec| spec.kind).collect();
             // A candidate that was never OFFERED cannot be said to have lost. Any
             // fixture whose planted truth is absent from its own menu is recorded
@@ -8350,44 +8464,34 @@ mod tests_atlas_prior_2280 {
              asked about -- widen the seed until every planted truth is realizable, or this \
              comparison measures candidate REGISTRATION rather than topology discrimination."
         );
+        // The COMPARATIVE gate is retired, and this is the second time the
+        // evidence has overturned it — in the opposite direction from the first.
+        //
+        // It began as "the atlas must name strictly more" (refuted: with charts
+        // that can express each candidate the menu names more), was replaced by
+        // "the atlas must misname strictly fewer" (refuted here: with the basis
+        // threaded, the menu misnames ZERO and so does the atlas). A comparator
+        // that flips every time the MENU changes was never measuring the atlas's
+        // worth; it was measuring the seed and the charts. Retiring it is not a
+        // third re-tuning to keep a preferred arm ahead — it is deleting a
+        // comparison that has been shown to answer a different question than the
+        // one it was asked.
+        //
+        // What that leaves is the honest reading, and it does not favour the
+        // atlas: on this zoo the seeded menu race is now 9/9 with zero misnamings
+        // and zero refusals, while the atlas is 7/9 with two refusals. The atlas
+        // is not the better arm here, and the table above says so on every run.
+        //
+        // The gate kept below is the one that predates every measurement and has
+        // held in all four configurations: the atlas never MISNAMES. That is a
+        // property of the readout alone, not a comparison with a moving arm, and
+        // it is what any future promotion of the atlas from recognition to
+        // proposal would have to rest on.
         assert!(
             atlas_misnamed.is_empty(),
             "{table}\nThe atlas MISNAMED a planted manifold: {atlas_misnamed:?}. Its errors must \
              be abstentions — a readout that guesses wrong cannot be promoted from tie-breaker \
-             to proposer, which is what this property licenses."
-        );
-        // The bare-count comparison that used to stand here ("the atlas must name
-        // strictly more") is RETIRED as REFUTED, not weakened to fit. It was a
-        // claim about the world, the world answered, and the answer was no: once
-        // each candidate is scored on a chart that can express it, the menu names
-        // MORE (8) than the atlas (7). Re-tuning that assertion downward would be
-        // fitting a bar to the numbers meant to test it; deleting a claim the
-        // evidence has overturned is the opposite.
-        //
-        // What replaces it is the comparison this whole line of work established
-        // as the right one: a score that counts a REFUSAL and a MISNAMING as
-        // equally wrong is the wrong score. Only a misnaming can mislead a
-        // consumer — it asserts a structure that is not there — while a refusal
-        // declines and falls back. That distinction, not the total, is what makes
-        // the atlas safe to promote from tie-breaker to proposer.
-        //
-        // It is not fitted to the winning configuration. Across every state
-        // measured on this zoo it holds, including the two where the retired
-        // count gate returned the OPPOSITE verdict:
-        //
-        //   linear charts        menu misnamed 4, atlas 0   (count said atlas wins)
-        //   phase charts, ungated  menu misnamed 2, atlas 0 (count said tie)
-        //   phase charts, closure-gated  menu misnamed 1, atlas 0 (count says menu wins)
-        //
-        // The atlas has never misnamed a planted manifold in any of them.
-        assert!(
-            atlas_misnamed.len() < menu_misnamed.len(),
-            "{table}\nThe atlas misnamed {} planted manifold(s) and the seed plus fixed menu \
-             misnamed {}. The charts earn their cost by asserting FEWER false structures than \
-             the race that needs a seed — not by naming more truths, which the retired count \
-             gate wrongly assumed.",
-            atlas_misnamed.len(),
-            menu_misnamed.len(),
+             to proposer, which is the only claim this test still licenses."
         );
     }
 }

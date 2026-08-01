@@ -138,7 +138,7 @@ fn quotient_surface_candidates_are_reachable_with_their_cover_geometry() {
     // Three seed directions: `RP²` is `S²/{u ~ -u}` and needs the sphere's three
     // to be identifiable at all, so it is enrolled under the same guard.
     let coords = Array2::<f64>::zeros((32, 3));
-    let specs = topology_candidates_for_dim(coords.view(), 2).unwrap();
+    let specs = topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).unwrap();
     let projective = specs
         .iter()
         .find(|spec| spec.kind == AutoTopologyKind::ProjectivePlane)
@@ -2240,7 +2240,7 @@ fn birth_topology_race_d2_includes_and_selects_cylinder() {
             _ => (t * TAU).cos(),
         }
     });
-    let specs = topology_candidates_for_dim(coords.view(), 2).expect("d=2 candidates build");
+    let specs = topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).expect("d=2 candidates build");
     let has_cylinder = specs
         .iter()
         .any(|s| s.geometry.kind() == &SaeAtomBasisKind::Cylinder);
@@ -2941,7 +2941,7 @@ fn every_registered_d2_topology_fits_at_least_once_2604() {
             _ => (t * std::f64::consts::TAU).cos(),
         }
     });
-    let specs = topology_candidates_for_dim(coords.view(), 2).expect("d=2 candidates build");
+    let specs = topology_candidates_for_dim(CandidateBases { seed: coords.view(), ambient: None }, 2).expect("d=2 candidates build");
     assert!(!specs.is_empty(), "the d=2 race must register candidates");
 
     // A generic smooth target: this test asks whether each topology can FIT at
