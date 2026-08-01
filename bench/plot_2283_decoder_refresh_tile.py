@@ -105,12 +105,16 @@ def main():
         )
         if len(line) < 2:
             continue
-        right.plot([r["p"] for r in line], [r["refresh_total_s"] for r in line],
+        # Mean seconds per refresh, not the fit total: the ladder's arms stop
+        # at different epoch counts, and a total would read that difference as
+        # a cost difference.
+        right.plot([r["p"] for r in line],
+                   [r["refresh_total_s"] / r["epochs_run"] for r in line],
                    marker="s", color=color, label=label)
     right.set_xscale("log", base=2)
     right.set_yscale("log")
     right.set_xlabel("ambient dimension P (decoder columns)")
-    right.set_ylabel("total refresh seconds over the fit")
+    right.set_ylabel("mean seconds per decoder refresh")
     right.set_title(f"refresh wall vs P\nn={target[0]} K={target[2]} s={target[3]}")
     right.legend(fontsize=9)
     right.grid(alpha=0.3, which="both")
