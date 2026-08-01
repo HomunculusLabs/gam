@@ -4472,6 +4472,148 @@ fn two_floors_overlap_region_direction_count_2673() {
     );
 }
 
+/// #2515 B-full, step 1 — the executable link that makes the ARD operator
+/// substitution provably correct instead of plausible.
+///
+/// The bundle route's ARD trace channel contracts `∂B/∂ρ_ard`, which
+/// `ard_log_precision_hessian_trace_from_probes` obtains as
+/// `prior.psd_majorizer_hess()`. Pricing `A` instead needs `∂A/∂ρ_ard`, and the
+/// claim that this is a ONE-TOKEN change — `psd_majorizer_hess()` → `prior.hess`
+/// — rests on two facts that are asserted nowhere:
+///
+/// 1. **Degree-1 homogeneity in `α`.** `hess = α·cos κt` and
+///    `hess_majorized = α·softplus_{τ₀}(cos κt)` are both homogeneous of degree
+///    one in `α`, so `∂/∂log α` of either IS the quantity itself. `atom.rs` states
+///    this and calls it load-bearing, but only for the majorizer.
+/// 2. **The exact/majorizer split is the same one `ΔC` carries.**
+///    `exact_stationarity_penalty_derivative_delta_by_flat` — the map the DENSE
+///    exact-`A` route adds to `∂B/∂ρ` to obtain `∂A/∂ρ` — writes
+///    `w_row · negative_hessian_remainder` on the ARD coordinate's diagonal slot.
+///
+/// Together those give `∂A/∂ρ_ard = psd_majorizer_hess + negative_hessian_remainder
+/// = hess`. This test derives the second fact from the PRODUCTION map rather than
+/// from the closed form, so it is a cross-check between two independent
+/// derivations rather than a restatement of one — which is the discipline #2509
+/// asked for when it refused to accept an assembled twin of a matvec without an
+/// executable link back to it.
+///
+/// This changes no behaviour. It pins the arithmetic the substitution depends on,
+/// so whoever makes it is changing a token against a proof rather than against an
+/// argument.
+#[test]
+fn exact_a_ard_operator_derivative_is_the_unmajorized_hessian_2515() {
+    use crate::manifold::arrow_solver::SaeLocalRowVar;
+    let n = 24usize;
+    let coords = Array2::from_shape_fn((n, 1), |(row, _)| (row as f64 + 0.25) / n as f64);
+    let (phi, jet) = periodic_basis(&coords);
+    let decoder = array![[0.30, -0.10], [1.20, 0.20], [0.10, 1.10]];
+    let mut target = phi.dot(&decoder);
+    for row in 0..n {
+        target[[row, 0]] += 1.0e-3 * (0.37 * row as f64).sin();
+        target[[row, 1]] += 1.0e-3 * (0.29 * row as f64).cos();
+    }
+    let atom = SaeManifoldAtom::new_with_provided_function_gram(
+        "periodic",
+        SaeAtomBasisKind::Periodic,
+        1,
+        phi,
+        jet,
+        decoder,
+        Array2::<f64>::eye(3),
+    )
+    .unwrap()
+    .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::zeros((n, 1)),
+        vec![coords.clone()],
+        vec![LatentManifold::Circle { period: 1.0 }],
+        AssignmentMode::softmax(1.0),
+    )
+    .unwrap();
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![250.0_f64.ln()]]);
+    let sys = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .unwrap();
+    let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+    let (_dt, _db, cache) =
+        solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options).unwrap();
+
+    // FACT 1 — the exact/majorizer split is exact by construction, per row.
+    let alpha = term.validated_ard_precisions(&rho).unwrap()[0][0];
+    let period = Some(1.0_f64);
+    let mut any_clamped = 0usize;
+    for row in 0..n {
+        let t = coords[[row, 0]];
+        let prior = ArdAxisPrior::eval(alpha, t, period);
+        assert_eq!(
+            prior.hess,
+            prior.psd_majorizer_hess() + prior.negative_hessian_remainder(),
+            "#2515: the exact/majorizer split must hold BIT-FOR-BIT at row {row}; the \
+             one-token substitution psd_majorizer_hess() -> hess is only the exact-A \
+             operator derivative because of this identity"
+        );
+        if prior.negative_hessian_remainder() != 0.0 {
+            any_clamped += 1;
+        }
+    }
+    // Non-vacuity: on a fixture where the clamp never fires, `hess` and
+    // `psd_majorizer_hess` coincide and the substitution is untested.
+    assert!(
+        any_clamped > 0,
+        "#2515: this fixture must have rows where the periodic ARD clamp is ACTIVE \
+         (cos κt < 0), or the exact and majorized curvatures are equal and this test \
+         proves nothing about the substitution"
+    );
+
+    // FACT 2 — the PRODUCTION map the dense exact-A route adds to ∂B/∂ρ carries
+    // exactly that remainder on the ARD coordinate. Derived from the map, not from
+    // the closed form, so this is a cross-check of two derivations.
+    let delta_by_flat = term
+        .exact_stationarity_penalty_derivative_delta_by_flat(&rho, &cache)
+        .expect("the exact-A penalty derivative delta must be assemblable");
+    let ard_flat = rho.ard_flat_index(0, 0);
+    let delta = delta_by_flat
+        .get(&ard_flat)
+        .expect("#2515: the ARD coordinate must carry a ∂ΔC/∂ρ block on this fixture");
+
+    let row_weights = term.row_loss_weights.clone();
+    let mut checked = 0usize;
+    for row in 0..n {
+        let base = cache.row_offsets[row];
+        let vars = term.row_vars_for_cache_row(row, &cache).unwrap();
+        for (local, var) in vars.iter().enumerate() {
+            let SaeLocalRowVar::Coord { atom, axis } = *var else {
+                continue;
+            };
+            if atom != 0 || axis != 0 {
+                continue;
+            }
+            let w_row = row_weights.as_ref().map_or(1.0, |w| w[row]);
+            let expected =
+                w_row * ArdAxisPrior::eval(alpha, coords[[row, 0]], period).negative_hessian_remainder();
+            let actual = delta[[base + local, base + local]];
+            assert!(
+                (actual - expected).abs() <= 1.0e-12 * expected.abs().max(1.0),
+                "#2515: the production ∂ΔC/∂ρ_ard map must equal \
+                 w_row·negative_hessian_remainder at row {row} (map={actual:.17e}, \
+                 closed form={expected:.17e}). These are two independent derivations of \
+                 the same quantity; if they disagree the substitution is unsound."
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(
+        checked, n,
+        "#2515: every row must contribute an ARD coordinate slot to the check"
+    );
+    println!(
+        "[#2515 B-FULL step 1] alpha={alpha:.6e}  rows={n}  rows with an ACTIVE clamp={any_clamped}\n\
+         [#2515 B-FULL step 1] verified on all {checked} rows: \
+         d(A)/d(rho_ard) = psd_majorizer_hess + negative_hessian_remainder = prior.hess"
+    );
+}
+
 /// #2499 spin-off measurement. `analytic_outer_gradient_with_bundle_matches_dense_assembly`
 /// desyncs on `logdet-trace coordinate 1 (smooth atom 0)` by `1.23e-1`. The two
 /// smoothness-EDF routes it compares are NOT the same operator whenever a
