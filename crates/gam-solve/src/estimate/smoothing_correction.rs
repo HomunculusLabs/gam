@@ -114,6 +114,16 @@ pub(crate) const RHO_SOFT_PRIOR_SHARPNESS: f64 = 4.0;
 // Adaptive cubature guardrails for bounded correction latency.
 pub(crate) const AUTO_CUBATURE_MAX_RHO_DIM: usize = 12;
 pub(crate) const AUTO_CUBATURE_MAX_EIGENVECTORS: usize = 4;
+/// Fraction of the CORRECTION's own variance the upgraded eigendirections must
+/// capture before the truncation stops.
+///
+/// The quantity being apportioned is `tr(J·V_ρ·Jᵀ) = Σ_j ‖Qs·J·u_j‖²/σ_j`, the
+/// first-order correction's trace, so this is a fraction of the estimand. It
+/// used to be applied to the eigenvalues of `V_ρ` — a fraction of the spread of
+/// `ρ` — which is a different quantity and ranks the directions differently:
+/// at a saturated smoothing parameter `1/σ_j` is largest precisely where
+/// `∂β̂/∂ρ → 0`, so the old rule spent the whole rank budget on the direction
+/// that contributes nothing and dropped every direction that does (#2728).
 pub(crate) const AUTO_CUBATURE_TARGET_VAR_FRAC: f64 = 0.95;
 pub(crate) const AUTO_CUBATURE_MAX_BETA_DIM: usize = 1600;
 pub(crate) const AUTO_CUBATURE_BOUNDARY_MARGIN: f64 = 2.0;

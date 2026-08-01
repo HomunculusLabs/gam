@@ -4358,6 +4358,25 @@ impl UnifiedFitResult {
     /// `Vb_raw = T H_active^{-1} Tᵀ * phi`. For an identity gauge this
     /// reduces to `H^{-1} * phi`. This is the Wood/mgcv `Vb`
     /// (Bayesian/conditional) covariance.
+    ///
+    /// # Which of the two published covariances to use
+    ///
+    /// This one treats `λ̂` as KNOWN. It is the right object when the
+    /// smoothing parameters are fixed by the caller rather than estimated, and
+    /// it is the reference against which
+    /// [`Self::beta_covariance_corrected`] is judged: for a Gaussian identity
+    /// fit with `W = I` the trace identity `E_x[xᵀVb x] = φ·edf/n` pins its
+    /// size exactly, with no Monte Carlo and no truth involved.
+    ///
+    /// It is NOT the same as the frequentist sampling covariance `Vf`: they
+    /// differ by `Vb − Vf = φ·H⁻¹SH⁻¹ ⪰ 0`, the smoothing bias term, which is
+    /// exactly why a Bayesian interval built from `Vb` attains its nominal
+    /// frequentist coverage across the function (Nychka 1988, Marra & Wood
+    /// 2012) while an interval built from `Vf` does not.
+    ///
+    /// When `λ̂` was ESTIMATED — the default — the interval a user wants is
+    /// [`Self::beta_covariance_corrected`], which additionally propagates the
+    /// uncertainty in `λ̂` itself. `predict()` defaults to that one.
     pub fn beta_covariance(&self) -> Option<&Array2<f64>> {
         self.covariance_conditional.as_ref()
     }
@@ -4486,6 +4505,28 @@ impl UnifiedFitResult {
     /// case the persisted conditional covariance is already `Vp`; requiring a
     /// duplicate corrected matrix would make ordinary parametric models lose
     /// posterior-mean intervals after serialization.
+    ///
+    /// # Which of the two published covariances to use
+    ///
+    /// **This one, whenever the smoothing parameters were estimated** — which
+    /// is the default, and what `predict()` uses. It is
+    /// [`Self::beta_covariance`] plus the propagated uncertainty in `λ̂`
+    /// itself, by the law of total covariance
+    ///
+    /// ```text
+    ///     Var(β|y) = E_ρ[φ·H(ρ)⁻¹] + Cov_ρ[β̂(ρ)],
+    /// ```
+    ///
+    /// so it is the wider of the two, and it is the one whose nominal coverage
+    /// is honest when `λ̂` is itself an estimate. Use
+    /// [`Self::beta_covariance`] instead only when `λ` is fixed by the caller,
+    /// or when you specifically want the conditional-on-`λ̂` object.
+    ///
+    /// How much wider is a property of the fit, not a constant: it is small
+    /// where the outer criterion is sharply determined and larger where it is
+    /// broad. A gap of ORDERS of magnitude is a defect, not a feature —
+    /// [`SmoothingCorrectionMethod::SigmaPointCubature::max_node_criterion_rise`]
+    /// is the published diagnostic for the one that produced #2728.
     pub fn beta_covariance_corrected(&self) -> Option<&Array2<f64>> {
         self.covariance_corrected
             .as_ref()
