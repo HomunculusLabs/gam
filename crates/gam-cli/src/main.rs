@@ -330,10 +330,18 @@ fn run() -> CliResult<()> {
     // a live `FaerSequentialScope` pins to `Par::Seq` for every thread. A line
     // that is false gets caught in review; a line that is true and incomplete in a
     // load-bearing way does not.
-    log::info!(
-        "[STAGE] runtime threads | {}",
-        gam::faer_ndarray::parallelism_snapshot(),
-    );
+    //
+    // The line is rendered FROM `ParallelismSnapshot`, the struct a test reads,
+    // so the two cannot drift: a field dropped from the log is a field dropped
+    // from the data, and `parallelism_snapshot_2738_tests` fails.
+    let threads = gam::faer_ndarray::ParallelismSnapshot::capture();
+    log::info!("[STAGE] runtime threads | {threads}");
+    if let Some(disagreement) = threads.inconsistency() {
+        // Not fatal — the run is still the run — but a perf number taken under a
+        // configuration that disagrees with itself is un-denominated, and that
+        // has to be said at the top of the log rather than inferred later.
+        log::warn!("[STAGE] runtime threads | INCONSISTENT: {disagreement}");
+    }
     match cli.command {
         Command::Fit(args) => run_fit(args).map_err(CliError::from),
         Command::Crosscoder(args) => run_crosscoder(args),

@@ -138,18 +138,32 @@ pub fn eigh_census() -> EighCensus {
     }
 }
 
-/// #2738 — the parallelism actually in force, read INSIDE the running process.
+/// One-line rendering of [`ParallelismSnapshot::capture`], for log sites.
+///
+/// A log line is not assertable: nothing in a test can read it, and under
+/// `cargo test` no logger is installed at all, so the line is byte-identical to
+/// a code path that never ran. The struct is therefore the primary artifact and
+/// this string is only its `Display`, so the two cannot drift apart.
+pub fn parallelism_snapshot() -> String {
+    ParallelismSnapshot::capture().to_string()
+}
+
+/// #2738 — the thread configuration actually in force, read INSIDE the running
+/// process and carried as DATA a test can read.
 ///
 /// A perf experiment that sweeps a thread count needs a manipulation check: proof
 /// the treatment took effect. A sweep whose treatment silently failed produces a
 /// perfectly flat curve, which is indistinguishable from saturation and points in
-/// whichever direction the experimenter expected. So this reports what the process
-/// observes, never what was exported.
+/// whichever direction the experimenter expected. So every field here is what the
+/// process OBSERVES, never what was exported: an exported variable proves an
+/// intention, not an effect. (Reading it is unavailable anyway — `env::var` is
+/// banned tree-wide.)
 ///
-/// Two quantities, and BOTH are needed because they can disagree:
+/// The fields are separate because they can disagree, and the disagreement is
+/// the finding:
 ///
-/// * `rayon::current_num_threads()` — the pool width. This is the one existing
-///   diagnostics already print.
+/// * `rayon::current_num_threads()` — the pool width, the one quantity the
+///   diagnostics already printed.
 /// * [`faer::get_global_parallelism`] — faer's PROCESS-GLOBAL policy, which is
 ///   what every high-level faer factorization (`self_adjoint_eigen`, `Llt::new`,
 ///   `Solve::solve`, SVD, col-pivoted QR) reads internally. A live
@@ -158,6 +172,9 @@ pub fn eigh_census() -> EighCensus {
 ///   reports 64. Reporting only the pool width would show a wide machine while
 ///   the numerics ran on one core, which is exactly the failure this exists to
 ///   make visible.
+/// * the live [`FaerSequentialScope`] depth, which says whether that pin is a
+///   scoped decision or a global left over from an earlier phase.
+/// * the cores available to THIS PROCESS, which is not the machine's core count.
 ///
 /// Deliberately NOT reported: [`effective_global_parallelism`]. That is
 /// thread-local and only governs the codebase's own `matmul` calls; it cannot
@@ -167,22 +184,115 @@ pub fn eigh_census() -> EighCensus {
 /// There is no BLAS term because this workspace links no CPU BLAS — the numerics
 /// are faer and `ndarray`, both parallelised through Rayon. `OPENBLAS_NUM_THREADS`
 /// and `OMP_NUM_THREADS` are inert here (they do bind the Python lanes, where
-/// numpy and torch link OpenBLAS).
-pub fn parallelism_snapshot() -> String {
-    // `{:?}` rather than a match on the variants: `Par`'s variant names are not
-    // spelled anywhere in this workspace (it is only ever constructed via
-    // `Par::rayon(..)` / `Par::Seq` and compared with `==`), so matching them here
-    // would be asserting a shape this crate has never depended on. Debug renders
-    // the distinction that matters — sequential versus a rayon width.
-    format!(
-        "rayon_current_num_threads={} | faer_global_parallelism={:?} | \
-         std_available_parallelism={}",
-        rayon::current_num_threads(),
-        get_global_parallelism(),
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(0),
-    )
+/// numpy and torch link OpenBLAS), so a BLAS thread count printed here would
+/// report a number that governs nothing — strictly worse than reporting none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParallelismSnapshot {
+    /// Width of the Rayon pool this thread belongs to. Every parallel loop in the
+    /// workspace, and faer's own `Par::Rayon` dispatch, fan out through it.
+    pub rayon_current_num_threads: usize,
+    /// `true` when faer's process-global policy is `Par::Seq`, i.e. every
+    /// high-level faer factorization (`self_adjoint_eigen`, `Llt::new`,
+    /// `Solve::solve`, SVD, col-pivoted QR) runs on ONE core regardless of how
+    /// wide the Rayon pool above reports.
+    pub faer_global_sequential: bool,
+    /// Threads faer's global policy would ideally use ([`Par::degree`]). `1` for
+    /// `Par::Seq`, and also `1` for a one-thread `Par::rayon(1)` — which is why
+    /// `faer_global_sequential` is carried separately rather than inferred.
+    pub faer_global_degree: usize,
+    /// How many [`FaerSequentialScope`] guards are alive process-wide. Non-zero
+    /// means the sequential pin above is deliberate and scoped, not a stale
+    /// global left behind by an earlier phase — a distinction the degree alone
+    /// cannot make.
+    pub faer_sequential_scope_depth: usize,
+    /// Cores available to THIS PROCESS, not cores present in the machine:
+    /// `std::thread::available_parallelism` honours the CPU affinity mask and
+    /// the cgroup quota, so a 4-CPU Slurm allocation on a 128-core node reports
+    /// 4. `None` only when the platform refuses to answer; a fabricated fallback
+    /// would be indistinguishable from a real reading.
+    pub process_available_parallelism: Option<usize>,
+}
+
+impl ParallelismSnapshot {
+    /// Read the live configuration.
+    pub fn capture() -> Self {
+        Self::from_parts(
+            get_global_parallelism(),
+            rayon::current_num_threads(),
+            faer_sequential_scope_depth(),
+            std::thread::available_parallelism().ok().map(|n| n.get()),
+        )
+    }
+
+    /// Assemble from explicit parts. Exists so the consistency rules below can be
+    /// exercised against configurations this process is not currently in —
+    /// including inconsistent ones, which is the only way to show
+    /// [`Self::inconsistency`] is capable of returning `Some`.
+    pub fn from_parts(
+        faer_global: Par,
+        rayon_current_num_threads: usize,
+        faer_sequential_scope_depth: usize,
+        process_available_parallelism: Option<usize>,
+    ) -> Self {
+        Self {
+            rayon_current_num_threads,
+            faer_global_sequential: faer_global == Par::Seq,
+            faer_global_degree: faer_global.degree(),
+            faer_sequential_scope_depth,
+            process_available_parallelism,
+        }
+    }
+
+    /// `None` when the fields agree with each other; otherwise the first
+    /// disagreement, named.
+    ///
+    /// These are cross-checks between INDEPENDENTLY SOURCED quantities — faer's
+    /// global policy, this crate's own scope-depth counter, Rayon's pool width —
+    /// so a snapshot that passes has had its three sources agree rather than
+    /// merely restated one of them three times.
+    pub fn inconsistency(&self) -> Option<String> {
+        if self.rayon_current_num_threads == 0 {
+            return Some("rayon reports a pool of zero threads".to_string());
+        }
+        if self.faer_global_degree == 0 {
+            return Some("faer's global parallelism has degree zero".to_string());
+        }
+        if self.faer_global_sequential && self.faer_global_degree != 1 {
+            return Some(format!(
+                "faer is sequential but reports degree {}",
+                self.faer_global_degree
+            ));
+        }
+        if self.faer_sequential_scope_depth > 0 && !self.faer_global_sequential {
+            return Some(format!(
+                "{} live FaerSequentialScope guard(s) but faer's global parallelism is not sequential",
+                self.faer_sequential_scope_depth
+            ));
+        }
+        if self.process_available_parallelism == Some(0) {
+            return Some("this process reports zero available cores".to_string());
+        }
+        None
+    }
+}
+
+impl std::fmt::Display for ParallelismSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "rayon_current_num_threads={} | faer_global_sequential={} | \
+             faer_global_degree={} | faer_sequential_scope_depth={} | \
+             process_available_parallelism={}",
+            self.rayon_current_num_threads,
+            self.faer_global_sequential,
+            self.faer_global_degree,
+            self.faer_sequential_scope_depth,
+            match self.process_available_parallelism {
+                Some(cores) => cores.to_string(),
+                None => "unavailable".to_string(),
+            },
+        )
+    }
 }
 
 /// faer parallelism policy that respects nested data-parallel regions: returns
@@ -272,6 +382,18 @@ impl Drop for FaerSequentialScope {
             }
         }
     }
+}
+
+/// #2738 — how many [`FaerSequentialScope`] guards are alive process-wide.
+///
+/// The depth is what distinguishes "faer is sequential because a solve here
+/// asked for it" from "faer is sequential and nobody knows who did it", and it
+/// is readable without a logger, which `log::info!` is not under `cargo test`.
+pub fn faer_sequential_scope_depth() -> usize {
+    FAER_SEQ_STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .depth
 }
 
 /// Run `body` with faer pinned to `Par::Seq` (see [`FaerSequentialScope`]). Use
@@ -3736,8 +3858,11 @@ mod tests {
     // would otherwise fan a nested `spindle` barrier pool and park at 0% CPU.
     //
     // These tests mutate the process-global faer setting, so they save/restore a
-    // known baseline and run serially under one `#[test]` to avoid racing the
-    // other global-parallelism tests in this binary.
+    // known baseline AND hold `test_support::with_global_parallelism_serialized`
+    // for the whole body. Saving and restoring alone is not enough: another
+    // `#[test]` in this binary writes the same cell from another thread, so an
+    // unlocked reader observes a state no test created (#2738 caught exactly
+    // that — a live sequential scope beside a `Par::rayon` global).
     /// #2267/#2738 — the census must be shown to MOVE, and to record the
     /// sequential arm, or it is a counter nobody has ever seen count.
     ///
@@ -3752,116 +3877,276 @@ mod tests {
     /// tally, and one INSIDE it must.
     #[test]
     fn eigh_census_counts_calls_and_separates_the_sequential_arm() {
-        let sym = Array2::<f64>::from_shape_fn((6, 6), |(i, j)| {
-            if i == j { 2.0 + i as f64 } else { 0.25 / (1.0 + (i as f64 - j as f64).abs()) }
+        crate::test_support::with_global_parallelism_serialized(|| {
+            let sym = Array2::<f64>::from_shape_fn((6, 6), |(i, j)| {
+                if i == j { 2.0 + i as f64 } else { 0.25 / (1.0 + (i as f64 - j as f64).abs()) }
+            });
+
+            // Establish a definitely-parallel baseline so the outside-the-scope arm
+            // is not vacuously sequential already.
+            let baseline = faer::get_global_parallelism();
+            faer::set_global_parallelism(Par::rayon(2));
+
+            let before = eigh_census();
+            sym.eigh(Side::Lower).expect("outside-scope eigh");
+            let outside = eigh_census();
+            assert_eq!(
+                outside.calls,
+                before.calls + 1,
+                "the census must count an eigh call",
+            );
+            assert_eq!(
+                outside.sequential_calls, before.sequential_calls,
+                "an eigh outside any FaerSequentialScope must NOT be tallied sequential",
+            );
+            assert!(
+                outside.max_dim >= 6,
+                "max_dim must record the shape actually decomposed, got {}",
+                outside.max_dim,
+            );
+
+            {
+                let scope = FaerSequentialScope::enter();
+                sym.eigh(Side::Lower).expect("inside-scope eigh");
+                drop(scope);
+            }
+            let inside = eigh_census();
+            assert_eq!(
+                inside.calls,
+                outside.calls + 1,
+                "the census must count the second call",
+            );
+            assert_eq!(
+                inside.sequential_calls,
+                outside.sequential_calls + 1,
+                "an eigh inside a FaerSequentialScope MUST be tallied sequential — this is \
+                 the property the #2267 read turns on",
+            );
+            assert!(
+                inside.nanos >= outside.nanos,
+                "cumulative time must be monotonic",
+            );
+
+            faer::set_global_parallelism(baseline);
         });
-
-        // Establish a definitely-parallel baseline so the outside-the-scope arm
-        // is not vacuously sequential already.
-        let baseline = faer::get_global_parallelism();
-        faer::set_global_parallelism(Par::rayon(2));
-
-        let before = eigh_census();
-        sym.eigh(Side::Lower).expect("outside-scope eigh");
-        let outside = eigh_census();
-        assert_eq!(
-            outside.calls,
-            before.calls + 1,
-            "the census must count an eigh call",
-        );
-        assert_eq!(
-            outside.sequential_calls, before.sequential_calls,
-            "an eigh outside any FaerSequentialScope must NOT be tallied sequential",
-        );
-        assert!(
-            outside.max_dim >= 6,
-            "max_dim must record the shape actually decomposed, got {}",
-            outside.max_dim,
-        );
-
-        {
-            let scope = FaerSequentialScope::enter();
-            sym.eigh(Side::Lower).expect("inside-scope eigh");
-            drop(scope);
-        }
-        let inside = eigh_census();
-        assert_eq!(
-            inside.calls,
-            outside.calls + 1,
-            "the census must count the second call",
-        );
-        assert_eq!(
-            inside.sequential_calls,
-            outside.sequential_calls + 1,
-            "an eigh inside a FaerSequentialScope MUST be tallied sequential — this is \
-             the property the #2267 read turns on",
-        );
-        assert!(
-            inside.nanos >= outside.nanos,
-            "cumulative time must be monotonic",
-        );
-
-        faer::set_global_parallelism(baseline);
     }
 
     #[test]
     fn faer_sequential_scope_sets_seq_inside_and_restores_after() {
-        let baseline = faer::get_global_parallelism();
-        // Establish a definitely-parallel baseline so the "restores" assertion is
-        // meaningful (not vacuously Seq already).
-        faer::set_global_parallelism(Par::rayon(4));
-        assert_eq!(
-            faer::get_global_parallelism(),
-            Par::rayon(4),
-            "baseline must be the parallel policy we just set",
-        );
-
-        {
-            let faer_seq_guard = FaerSequentialScope::enter();
+        crate::test_support::with_global_parallelism_serialized(|| {
+            let baseline = faer::get_global_parallelism();
+            // Establish a definitely-parallel baseline so the "restores" assertion is
+            // meaningful (not vacuously Seq already).
+            faer::set_global_parallelism(Par::rayon(4));
             assert_eq!(
                 faer::get_global_parallelism(),
-                Par::Seq,
-                "faer must be pinned to Par::Seq inside the scope",
+                Par::rayon(4),
+                "baseline must be the parallel policy we just set",
             );
 
-            // Nested guard: still Seq, and the inner drop must NOT restore early.
             {
-                let faer_seq_inner_guard = FaerSequentialScope::enter();
+                let faer_seq_guard = FaerSequentialScope::enter();
                 assert_eq!(
                     faer::get_global_parallelism(),
                     Par::Seq,
-                    "nested scope stays Par::Seq",
+                    "faer must be pinned to Par::Seq inside the scope",
                 );
-                drop(faer_seq_inner_guard);
+
+                // Nested guard: still Seq, and the inner drop must NOT restore early.
+                {
+                    let faer_seq_inner_guard = FaerSequentialScope::enter();
+                    assert_eq!(
+                        faer::get_global_parallelism(),
+                        Par::Seq,
+                        "nested scope stays Par::Seq",
+                    );
+                    drop(faer_seq_inner_guard);
+                }
+                assert_eq!(
+                    faer::get_global_parallelism(),
+                    Par::Seq,
+                    "inner drop must not restore while outer scope is still live",
+                );
+                drop(faer_seq_guard);
             }
+
             assert_eq!(
                 faer::get_global_parallelism(),
-                Par::Seq,
-                "inner drop must not restore while outer scope is still live",
+                Par::rayon(4),
+                "outermost drop must restore the pre-scope parallelism policy",
             );
-            drop(faer_seq_guard);
+
+            // The convenience wrapper behaves identically and returns the body value.
+            let observed = with_faer_sequential(|| faer::get_global_parallelism());
+            assert_eq!(
+                observed,
+                Par::Seq,
+                "with_faer_sequential runs body under Seq"
+            );
+            assert_eq!(
+                faer::get_global_parallelism(),
+                Par::rayon(4),
+                "with_faer_sequential restores after the body returns",
+            );
+
+            // Restore the binary-wide baseline.
+            faer::set_global_parallelism(baseline);
+        });
+    }
+}
+
+/// #2738 — the thread configuration must be readable and self-consistent, not
+/// merely printed. These tests never read a log line: no logger is installed
+/// under `cargo test`, so a probe that only logs is byte-identical to one that
+/// never ran.
+#[cfg(test)]
+mod parallelism_snapshot_2738_tests {
+    use super::*;
+
+    #[test]
+    fn captured_snapshot_is_self_consistent() {
+        // Under the shared lock: another `#[test]` in this binary writes faer's
+        // process-global cell, so an unlocked capture can observe a state no
+        // test created — a live sequential scope beside a `Par::rayon` global.
+        // That state is a genuine inconsistency (the checker was right to flag
+        // it), it is simply not one this process is in when nobody is racing.
+        let snapshot =
+            crate::test_support::with_global_parallelism_serialized(ParallelismSnapshot::capture);
+        assert!(
+            snapshot.inconsistency().is_none(),
+            "the live thread configuration disagrees with itself: {} ({snapshot})",
+            snapshot.inconsistency().unwrap_or_default(),
+        );
+    }
+
+    /// Positive control for the test above: the checker must be CAPABLE of
+    /// returning `Some`. A consistency check that can only answer `None` is
+    /// byte-identical to one that was never called. The consistent
+    /// configurations at the end are the matching negative control, so the
+    /// checker is not a constant `Some` either.
+    #[test]
+    fn inconsistent_configurations_are_reported() {
+        // A live sequential scope alongside a parallel faer policy: the two
+        // sources contradict each other, which is exactly the state that would
+        // make a perf reading un-interpretable.
+        let contradictory = ParallelismSnapshot::from_parts(Par::rayon(4), 4, 1, Some(4));
+        assert!(
+            contradictory.inconsistency().is_some(),
+            "a live FaerSequentialScope with non-sequential faer must be flagged: \
+             {contradictory}",
+        );
+
+        // A Rayon pool cannot be zero threads wide; nor can a process have zero
+        // cores available to it. Both would silently denominate a throughput
+        // number by zero.
+        assert!(
+            ParallelismSnapshot::from_parts(Par::Seq, 0, 0, Some(1))
+                .inconsistency()
+                .is_some(),
+            "a zero-wide rayon pool must be flagged",
+        );
+        assert!(
+            ParallelismSnapshot::from_parts(Par::Seq, 1, 0, Some(0))
+                .inconsistency()
+                .is_some(),
+            "zero cores available to the process must be flagged",
+        );
+
+        // And the honest configurations must pass, or the checker is just a
+        // constant `Some`.
+        assert!(
+            ParallelismSnapshot::from_parts(Par::rayon(4), 4, 0, Some(8))
+                .inconsistency()
+                .is_none(),
+            "a wide pool with no sequential scope is consistent",
+        );
+        assert!(
+            ParallelismSnapshot::from_parts(Par::Seq, 4, 2, None)
+                .inconsistency()
+                .is_none(),
+            "a pinned scope on a wide pool is consistent, and an unavailable core \
+             count is not itself an inconsistency",
+        );
+    }
+
+    /// The half-serial run this issue is about must be DISTINGUISHABLE from the
+    /// fully parallel one. Same rayon pool, opposite numerics parallelism.
+    #[test]
+    fn a_sequential_pin_changes_the_snapshot() {
+        let pinned = crate::test_support::with_global_parallelism_serialized(|| {
+            with_faer_sequential(ParallelismSnapshot::capture)
+        });
+        assert!(
+            pinned.faer_global_sequential,
+            "inside a FaerSequentialScope the snapshot must report faer sequential: \
+             {pinned}",
+        );
+        assert_eq!(
+            pinned.faer_global_degree, 1,
+            "a sequential pin is one thread of numerics: {pinned}",
+        );
+        assert!(
+            pinned.faer_sequential_scope_depth >= 1,
+            "the scope that did the pinning must be visible in the depth: {pinned}",
+        );
+        assert!(
+            pinned.inconsistency().is_none(),
+            "a pinned snapshot must still be self-consistent: {pinned}",
+        );
+        // The pool width is untouched by the pin: this is the pair of numbers
+        // whose disagreement the old single log line could not express.
+        assert_eq!(
+            pinned.rayon_current_num_threads,
+            rayon::current_num_threads(),
+            "the pin must not be mistaken for a narrower rayon pool",
+        );
+    }
+
+    /// The rendered line and the struct cannot drift apart, because the line IS
+    /// the struct. Asserting the values appear keeps a future edit from dropping
+    /// a field from the log while leaving it in the data.
+    #[test]
+    fn rendering_carries_every_field() {
+        let snapshot = ParallelismSnapshot::from_parts(Par::rayon(3), 5, 2, Some(7));
+        let rendered = snapshot.to_string();
+        for field in [
+            "rayon_current_num_threads=5",
+            "faer_global_sequential=false",
+            "faer_global_degree=3",
+            "faer_sequential_scope_depth=2",
+            "process_available_parallelism=7",
+        ] {
+            assert!(
+                rendered.contains(field),
+                "the rendered snapshot dropped `{field}`: {rendered}",
+            );
         }
 
-        assert_eq!(
-            faer::get_global_parallelism(),
-            Par::rayon(4),
-            "outermost drop must restore the pre-scope parallelism policy",
+        let unavailable = ParallelismSnapshot::from_parts(Par::Seq, 1, 0, None);
+        assert!(
+            unavailable.to_string().contains("unavailable"),
+            "a missing core count must say so rather than render as a number: \
+             {unavailable}",
         );
+    }
 
-        // The convenience wrapper behaves identically and returns the body value.
-        let observed = with_faer_sequential(|| faer::get_global_parallelism());
-        assert_eq!(
-            observed,
-            Par::Seq,
-            "with_faer_sequential runs body under Seq"
+    /// The string the CLI logs is the captured struct, not a parallel
+    /// hand-written format that could disagree with it.
+    #[test]
+    fn the_logged_line_is_the_captured_struct() {
+        let (logged, captured) = crate::test_support::with_global_parallelism_serialized(|| {
+            (parallelism_snapshot(), ParallelismSnapshot::capture())
+        });
+        assert!(
+            logged.contains(&format!(
+                "rayon_current_num_threads={}",
+                captured.rayon_current_num_threads
+            )),
+            "the log line must carry the captured pool width: {logged}",
         );
-        assert_eq!(
-            faer::get_global_parallelism(),
-            Par::rayon(4),
-            "with_faer_sequential restores after the body returns",
+        assert!(
+            logged.contains("process_available_parallelism="),
+            "the log line must carry the cores available to the process: {logged}",
         );
-
-        // Restore the binary-wide baseline.
-        faer::set_global_parallelism(baseline);
     }
 }
