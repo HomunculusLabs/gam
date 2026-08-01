@@ -2502,7 +2502,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod stacked_first_stage_sandwich_tests_2484 {
+mod stacked_first_stage_sandwich_2484_tests {
     use super::{stacked_first_stage_sandwich_cov, weighted_ridge_sandwich_cov};
     use ndarray::{Array1, Array2, array};
 
