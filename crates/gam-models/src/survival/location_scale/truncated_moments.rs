@@ -872,6 +872,8 @@ mod tests {
                 criterion_certificate: None,
                 outer_converged: true,
                 covariance_conditional: Some(sigma_pi.clone()),
+                covariance_corrected: None,
+                smoothing_correction: None,
                 geometry,
                 penalty_block_trace: Vec::new(),
                 edf_by_block: Vec::new(),
