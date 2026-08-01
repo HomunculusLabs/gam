@@ -1267,10 +1267,17 @@ pub enum CrossprodAccum {
 /// right needs a measurement nobody has taken.
 #[inline]
 fn streaming_chunk_rows(cols: usize, n: usize) -> usize {
-    const TARGET_BYTES: usize = 8 * 1024 * 1024;
+    // The library row-chunk target, IMPORTED rather than transcribed. Its own
+    // doc says it is shared as a `const` "so compile-time consumers stay in
+    // lockstep with `ResourcePolicy::default_library` without a runtime policy
+    // query" -- which is exactly this call site's situation. Same quantity, not
+    // merely the same number: this crate already consumes the runtime form of
+    // it (`row_chunk_target_bytes`, `matrix/mod.rs`), and `gam-gpu`'s tile
+    // geometry derives from the same const for the same reason.
+    const TARGET_BYTES: usize = gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
     const MIN_ROWS: usize = 512;
     const MAX_ROWS: usize = 131_072;
-    (TARGET_BYTES / (cols.max(1) * 8))
+    (TARGET_BYTES / (cols.max(1) * std::mem::size_of::<f64>()))
         .clamp(MIN_ROWS, MAX_ROWS)
         .min(n)
 }
