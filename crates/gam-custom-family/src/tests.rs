@@ -6017,6 +6017,8 @@ mod effective_df_floor_box_2370;
 
 mod anchored_continuation_2366;
 
+mod joint_hessian_drift_fd_979;
+
 /// gam#2360. `audit_converged_identifiability` handed the drift audit a bare
 /// `vec![0.0; n]` as the pilot β. The pilot the PRE-FIT audit linearized at is
 /// `spec.initial_beta` — `pre_fit_operating_scalars` builds it that way, and
