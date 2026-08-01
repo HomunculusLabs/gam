@@ -370,9 +370,19 @@ pub fn monotone_wiggle_basis_with_derivative_order(
         .map_err(|e| e.to_string())
 }
 
-pub(crate) fn monotone_wiggle_nonnegative_constraints(
+/// The `β ≥ 0` system a monotone-wiggle block is subject to, as an explicit
+/// dense system with unit rows.
+///
+/// This is the ONE definition of that cone. Both the constraint set the
+/// blockwise QP enforces ([`monotone_wiggle_nonnegative_constraints`]) and any
+/// line-search barrier that clips a step inside it are built from here, so the
+/// two cannot be constructed from different systems — a barrier hook that
+/// re-derives the cone by hand is how gam#2719's coordinate loop ended up with
+/// a `1e-10` tolerance on the iterate and none at all on the step, while the QP
+/// enforcing the identical rows worked to `1e-8`.
+pub(crate) fn monotone_wiggle_nonnegative_system(
     beta_dim: usize,
-) -> Option<gam_solve::pirls::ConstraintSet> {
+) -> Option<LinearInequalityConstraints> {
     if beta_dim == 0 {
         return None;
     }
@@ -380,12 +390,16 @@ pub(crate) fn monotone_wiggle_nonnegative_constraints(
     for i in 0..beta_dim {
         a[[i, i]] = 1.0;
     }
-    Some(gam_solve::pirls::ConstraintSet::Dense(
-        LinearInequalityConstraints {
-            a,
-            b: Array1::zeros(beta_dim),
-        },
-    ))
+    Some(LinearInequalityConstraints {
+        a,
+        b: Array1::zeros(beta_dim),
+    })
+}
+
+pub(crate) fn monotone_wiggle_nonnegative_constraints(
+    beta_dim: usize,
+) -> Option<gam_solve::pirls::ConstraintSet> {
+    monotone_wiggle_nonnegative_system(beta_dim).map(gam_solve::pirls::ConstraintSet::Dense)
 }
 
 pub(crate) fn validate_monotone_wiggle_beta_nonnegative<'a>(

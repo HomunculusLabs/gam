@@ -50,6 +50,86 @@ use std::sync::Arc;
 /// refused 314 steps that violated nothing at this tolerance).
 pub const PRIMAL_FEASIBILITY_TOL: f64 = 1e-8;
 
+/// The contract-feasible ratio test itself, over already-evaluated constraint
+/// values, so every carrier — the dense system, the factored cone, the
+/// block-diagonal composition — runs the SAME arithmetic without any of them
+/// having to be materialized as another.
+///
+/// `values[r]` is `a_r·β`, `directional[r]` is `a_r·δ` (the constraint
+/// functional is linear, so its value at `δ` IS the directional derivative).
+/// The rule is documented on [`ConstraintSet::max_contract_feasible_step`].
+pub(crate) fn contract_feasible_step_over_rows<B, N>(
+    values: &Array1<f64>,
+    directional: &Array1<f64>,
+    bound: B,
+    row_norm: N,
+) -> Result<ContractFeasibleStep, ContractFeasibleStepError>
+where
+    B: Fn(usize) -> Result<f64, String>,
+    N: Fn(usize) -> Result<f64, String>,
+{
+    let tol = PRIMAL_FEASIBILITY_TOL;
+    let mut limit = ContractFeasibleStep::UNLIMITED;
+    for row in 0..values.len() {
+        let norm = row_norm(row).map_err(ContractFeasibleStepError::Carrier)?;
+        let bound = bound(row).map_err(ContractFeasibleStepError::Carrier)?;
+        if !(norm.is_finite() && norm > 0.0) {
+            // A vacuous row constrains nothing unless its bound is positive,
+            // in which case the feasible set is empty and no step fraction
+            // exists. Same disposition as the solver's own violation scan.
+            if bound > 0.0 {
+                return Err(ContractFeasibleStepError::InfeasibleIterate {
+                    row,
+                    scaled_slack: f64::NEG_INFINITY,
+                });
+            }
+            continue;
+        }
+        let slack = (values[row] - bound) / norm;
+        let drift = directional[row] / norm;
+        // A NON-FINITE ROW IS NOT A FEASIBLE ROW (gam#2721). Every comparison
+        // below is FALSE for NaN, so a non-finite slack or drift would
+        // contribute nothing to the minimum and the rule would answer "take the
+        // whole step" for a step that is not a number — and the caller rejects
+        // only `!alpha.is_finite() || alpha <= 0.0`, neither of which `1.0` is.
+        // Refuse instead, and name the quantity: "this row is not a number" is
+        // a different condition from "the current iterate violates this row".
+        if !slack.is_finite() || !drift.is_finite() {
+            return Err(ContractFeasibleStepError::NonFinite {
+                row,
+                scaled_slack: slack,
+                scaled_drift: drift,
+            });
+        }
+        if slack < -tol {
+            return Err(ContractFeasibleStepError::InfeasibleIterate {
+                row,
+                scaled_slack: slack,
+            });
+        }
+        if drift >= 0.0 {
+            continue;
+        }
+        if slack + drift >= -tol {
+            // The endpoint of the FULL step is feasible on this row to the
+            // contract. Nothing to limit.
+            continue;
+        }
+        // `slack ≥ −tol` and `slack + drift < −tol` give `slack < −drift`, so
+        // this ratio is strictly below 1 and non-negative.
+        let fraction = (slack.max(0.0) / -drift).clamp(0.0, 1.0);
+        if fraction < limit.fraction {
+            limit = ContractFeasibleStep {
+                fraction,
+                blocking_row: Some(row),
+                blocking_scaled_slack: slack,
+                blocking_scaled_drift: drift,
+            };
+        }
+    }
+    Ok(limit)
+}
+
 /// Result of the contract-feasible ratio test
 /// ([`ConstraintSet::max_contract_feasible_step`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,7 +187,10 @@ pub enum ContractFeasibleStepError {
     /// step from. This is the genuine "infeasible iterate" condition and stays
     /// loud.
     InfeasibleIterate { row: usize, scaled_slack: f64 },
-    /// A row's slack or drift is NaN.
+    /// A row's scaled slack or scaled drift is not finite. Reported rather
+    /// than skipped: every comparison in the rule is false for NaN, so a
+    /// skipped row would silently certify a step that is not a number as fully
+    /// feasible (gam#2721).
     NonFinite {
         row: usize,
         scaled_slack: f64,
@@ -642,6 +725,15 @@ impl ConstraintSet {
     ///
     /// This is THE feasibility metric: `β` is feasible exactly when the value
     /// returned here is at or below [`PRIMAL_FEASIBILITY_TOL`].
+    ///
+    /// A vacuous row (`‖a‖ = 0`) with a bound at or below zero is `0 ≥ b`, true
+    /// for every `β`, and contributes nothing. A vacuous row with a POSITIVE
+    /// bound is `0 ≥ b > 0`: no `β` satisfies it, so its violation is infinite
+    /// and the feasible set is empty. Reporting that as `+∞` — rather than
+    /// skipping the row — is what makes this metric agree with
+    /// `ConstraintSetOps::scaled_slack`, which already answers `−∞` for exactly
+    /// this row, and keeps a gate built on this metric from silently admitting
+    /// an unsatisfiable system.
     pub fn max_scaled_violation(
         &self,
         beta: ArrayView1<'_, f64>,
@@ -652,6 +744,9 @@ impl ConstraintSet {
         for (row, &value) in values.iter().enumerate() {
             let norm = self.row_norm(row)?;
             if norm <= 0.0 {
+                if self.bound(row)? > 0.0 {
+                    return Ok((f64::INFINITY, Some(row)));
+                }
                 continue;
             }
             let violation = (self.bound(row)? - value) / norm;
@@ -761,60 +856,12 @@ impl ConstraintSet {
         let directional = self
             .values(direction)
             .map_err(ContractFeasibleStepError::Carrier)?;
-        let tol = PRIMAL_FEASIBILITY_TOL;
-        let mut limit = ContractFeasibleStep::UNLIMITED;
-        for row in 0..values.len() {
-            let norm = self.row_norm(row).map_err(ContractFeasibleStepError::Carrier)?;
-            let bound = self.bound(row).map_err(ContractFeasibleStepError::Carrier)?;
-            if !(norm.is_finite() && norm > 0.0) {
-                // A vacuous row constrains nothing unless its bound is
-                // positive, in which case the feasible set is empty and no
-                // step fraction exists. Same disposition as the solver's own
-                // violation scan.
-                if bound > 0.0 {
-                    return Err(ContractFeasibleStepError::InfeasibleIterate {
-                        row,
-                        scaled_slack: f64::NEG_INFINITY,
-                    });
-                }
-                continue;
-            }
-            let slack = (values[row] - bound) / norm;
-            let drift = directional[row] / norm;
-            if slack.is_nan() || drift.is_nan() {
-                return Err(ContractFeasibleStepError::NonFinite {
-                    row,
-                    scaled_slack: slack,
-                    scaled_drift: drift,
-                });
-            }
-            if slack < -tol {
-                return Err(ContractFeasibleStepError::InfeasibleIterate {
-                    row,
-                    scaled_slack: slack,
-                });
-            }
-            if drift >= 0.0 {
-                continue;
-            }
-            if slack + drift >= -tol {
-                // The endpoint of the FULL step is feasible on this row to the
-                // contract. Nothing to limit.
-                continue;
-            }
-            // `slack ≥ −tol` and `slack + drift < −tol` give `slack < −drift`,
-            // so this ratio is strictly below 1 and non-negative.
-            let fraction = (slack.max(0.0) / -drift).clamp(0.0, 1.0);
-            if fraction < limit.fraction {
-                limit = ContractFeasibleStep {
-                    fraction,
-                    blocking_row: Some(row),
-                    blocking_scaled_slack: slack,
-                    blocking_scaled_drift: drift,
-                };
-            }
-        }
-        Ok(limit)
+        contract_feasible_step_over_rows(
+            &values,
+            &directional,
+            |row| self.bound(row),
+            |row| self.row_norm(row),
+        )
     }
 
     /// Materialize the requested rows densely (KKT systems on the active set).

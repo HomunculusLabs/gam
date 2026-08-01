@@ -4,6 +4,19 @@
 
 use super::*;
 
+/// Render a shared barrier-step refusal into the marginal-slope error
+/// vocabulary. A width disagreement is a dimension fault; everything else is a
+/// statement about the derivative guard's geometry at the current iterate.
+fn map_time_barrier_step_error(error: gam_problem::ContractFeasibleStepError) -> String {
+    let reason = format!("survival marginal-slope time-block step: {error}");
+    match error {
+        gam_problem::ContractFeasibleStepError::Dimension { .. } => {
+            SurvivalMarginalSlopeError::IncompatibleDimensions { reason }.into()
+        }
+        _ => SurvivalMarginalSlopeError::MonotonicityViolation { reason }.into(),
+    }
+}
+
 impl SurvivalMarginalSlopeFamily {
     pub(crate) fn max_feasible_time_step(
         &self,
@@ -13,36 +26,9 @@ impl SurvivalMarginalSlopeFamily {
         let Some(constraints) = self.effective_time_linear_constraints()? else {
             return Ok(None);
         };
-        crate::marginal_slope_shared::feasible_step_fraction(
-            &constraints,
-            beta,
-            delta,
-            |beta_len, delta_len, expected| {
-                SurvivalMarginalSlopeError::IncompatibleDimensions {
-                    reason: format!(
-                        "survival marginal-slope time-step dimension mismatch: beta={beta_len}, delta={delta_len}, expected {expected}"
-                    ),
-                }
-                .into()
-            },
-            |row, slack| {
-                SurvivalMarginalSlopeError::MonotonicityViolation {
-                    reason: format!(
-                        "survival marginal-slope current time block violates derivative guard at row {row}: slack={slack:.3e}"
-                    ),
-                }
-                .into()
-            },
-            |row, quantity, value| {
-                SurvivalMarginalSlopeError::MonotonicityViolation {
-                    reason: format!(
-                        "survival marginal-slope time block has a non-finite {quantity} at derivative-guard row {row}: value={value:.3e}"
-                    ),
-                }
-                .into()
-            },
-        )
-        .map(Some)
+        crate::marginal_slope_shared::feasible_step_fraction(&constraints, beta, delta)
+            .map(Some)
+            .map_err(map_time_barrier_step_error)
     }
 
     pub(crate) fn effective_time_linear_constraints(

@@ -2674,6 +2674,88 @@ fn max_feasible_link_wiggle_step_refuses_a_non_finite_direction_2721() {
     );
 }
 
+/// gam#2719, the witness geometry. The link-wiggle seed sits at `beta == 0`,
+/// exactly on every face of its own cone, and the joint-Newton direction has a
+/// tiny negative component there. The measured drifts on
+/// `survival_location_scale_saved_fit_preserves_linkwiggle_metadata` run down
+/// to `-3.291437e-18`; the old coordinate loop answered `alpha = 0` for every
+/// one of them, and 314 of the 379 refusals it produced were of steps whose
+/// endpoint the solver's own `1e-8` contract calls feasible.
+#[test]
+fn linkwiggle_step_admits_a_sub_tolerance_drift_off_an_active_coefficient() {
+    let mut family = survival_exact_newton_test_family();
+    family.x_link_wiggle = Some(DesignMatrix::Dense(DenseDesignMatrix::from(array![
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [1.0, 1.0]
+    ])));
+    let on_the_face = array![0.0, 0.0];
+    let measured_drift = array![-3.291_437e-18, -5.808_407e-18];
+    let alpha = family
+        .max_feasible_link_wiggle_step(&on_the_face, &measured_drift)
+        .expect("an in-band drift keeps a feasible origin")
+        .expect("the linkwiggle step fraction is always reported");
+    assert_eq!(
+        alpha, 1.0,
+        "a drift ten orders below the feasibility contract must not limit the step"
+    );
+    // And the claim that relief rests on: the endpoint really is feasible.
+    let endpoint = &on_the_face + &measured_drift;
+    let cone = crate::wiggle::monotone_wiggle_nonnegative_constraints(endpoint.len())
+        .expect("the block declares its cone");
+    let (violation, _) = cone
+        .max_scaled_violation(endpoint.view())
+        .expect("violation sweep");
+    assert!(violation <= gam_solve::pirls::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL);
+
+    // Positive control on the same face: a drift ABOVE the contract still
+    // blocks, and reports `0.0` as an ANSWER rather than as an error — the
+    // caller must project onto the face, and no smaller step can help.
+    let real_drift = array![-3.961_401e-6, 0.0];
+    let blocked = family
+        .max_feasible_link_wiggle_step(&on_the_face, &real_drift)
+        .expect("a blocked face is an answer, not an error")
+        .expect("the linkwiggle step fraction is always reported");
+    assert_eq!(blocked, 0.0);
+}
+
+/// The barrier hook and the constraint set the blockwise QP enforces must be
+/// the same cone. They are built from one constructor now; this pins that a
+/// step the hook admits is a step the QP's own feasibility metric accepts, for
+/// a spread of directions including the pathological one.
+#[test]
+fn linkwiggle_barrier_hook_agrees_with_the_declared_cone() {
+    let mut family = survival_exact_newton_test_family();
+    family.x_link_wiggle = Some(DesignMatrix::Dense(DenseDesignMatrix::from(array![
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [1.0, 1.0]
+    ])));
+    let cone = crate::wiggle::monotone_wiggle_nonnegative_constraints(2).expect("cone");
+    let cases = [
+        (array![0.0_f64, 0.0], array![-1.0e-18_f64, -1.0e-18]),
+        (array![0.0_f64, 0.5], array![-1.0e-6_f64, -1.0]),
+        (array![0.25_f64, 0.5], array![-1.0_f64, 0.25]),
+        (array![2.0_f64, 3.0], array![0.5_f64, 0.5]),
+        (array![0.0_f64, 1.0], array![1.0_f64, -1.0e-12]),
+    ];
+    for (beta, direction) in cases {
+        let alpha = family
+            .max_feasible_link_wiggle_step(&beta, &direction)
+            .unwrap_or_else(|e| panic!("hook refused {beta:?} along {direction:?}: {e}"))
+            .expect("the linkwiggle step fraction is always reported");
+        let endpoint = &beta + &(&direction * alpha);
+        let (violation, row) = cone
+            .max_scaled_violation(endpoint.view())
+            .expect("violation sweep");
+        assert!(
+            violation <= gam_solve::pirls::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL,
+            "hook admitted alpha={alpha:.6e} from {beta:?} along {direction:?}, \
+             leaving scaled violation {violation:.3e} at row {row:?}"
+        );
+    }
+}
+
 #[test]
 fn linkwiggle_block_post_update_leaves_beta_unchanged() {
     let mut family = survival_exact_newton_test_family();

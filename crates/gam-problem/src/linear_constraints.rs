@@ -95,6 +95,40 @@ impl LinearInequalityConstraints {
         }
         Some(Self { a, b })
     }
+
+    /// The contract-feasible ratio test on the dense system — the identical
+    /// rule [`crate::ConstraintSet::max_contract_feasible_step`] applies,
+    /// reached without wrapping (and therefore cloning) `A` into a
+    /// [`crate::ConstraintSet`].
+    ///
+    /// A dense system a caller already holds and the `ConstraintSet::Dense`
+    /// that wraps it must give bit-identical answers, or the barrier hook and
+    /// the QP that enforce the same constraint would disagree about which
+    /// steps are admissible.
+    pub fn max_contract_feasible_step(
+        &self,
+        beta: ndarray::ArrayView1<'_, f64>,
+        direction: ndarray::ArrayView1<'_, f64>,
+    ) -> Result<crate::ContractFeasibleStep, crate::ContractFeasibleStepError> {
+        if beta.len() != self.a.ncols() || direction.len() != self.a.ncols() {
+            return Err(crate::ContractFeasibleStepError::Dimension {
+                beta: beta.len(),
+                direction: direction.len(),
+                expected: self.a.ncols(),
+            });
+        }
+        let values = self.a.dot(&beta);
+        let directional = self.a.dot(&direction);
+        crate::constraint_set::contract_feasible_step_over_rows(
+            &values,
+            &directional,
+            |row| Ok(self.b[row]),
+            |row| {
+                let r = self.a.row(row);
+                Ok(r.dot(&r).sqrt())
+            },
+        )
+    }
 }
 
 #[cfg(test)]

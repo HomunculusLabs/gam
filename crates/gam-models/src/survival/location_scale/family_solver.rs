@@ -1901,7 +1901,16 @@ impl CustomFamily for SurvivalLocationScaleFamily {
             validate_linear_constraints("time post-update", &beta, constraints)?;
         } else if block_idx == Self::BLOCK_LINK_WIGGLE && self.x_link_wiggle.is_some() {
             for j in 0..beta.len() {
-                let tol = CONSTRAINT_NONNEGATIVITY_REL_TOL * beta[j].abs().max(1.0);
+                // Floor the relative tolerance at the absolute downstream
+                // feasibility gate, exactly as the time block's
+                // `validate_linear_constraints` does (#1569): this post-update
+                // check must accept any beta the consumer gates accept. The
+                // link-wiggle cone's rows are the unit identity, so its scaled
+                // and raw slacks coincide and the contract band is `1e-8`
+                // outright — a coefficient the QP left at `-6e-9` is feasible
+                // to every downstream consumer and was a hard error here.
+                let tol = (CONSTRAINT_NONNEGATIVITY_REL_TOL * beta[j].abs().max(1.0))
+                    .max(MONOTONE_CONE_FEASIBILITY_GATE_TOL);
                 if !beta[j].is_finite() || beta[j] < -tol {
                     return Err(SurvivalLocationScaleError::ConstraintViolation {
                         reason: format!(

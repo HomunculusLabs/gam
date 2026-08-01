@@ -44,6 +44,23 @@ pub(crate) struct SurvivalExactRowKernel {
     pub(crate) d4_log_g: f64,
 }
 
+/// Render a shared barrier-step refusal into the location-scale error
+/// vocabulary, preserving the distinction the shared rule draws: a width
+/// disagreement is a dimension fault, everything else is a statement about the
+/// constraint geometry at the current iterate.
+fn map_barrier_step_error(
+    block: &str,
+    error: gam_problem::ContractFeasibleStepError,
+) -> String {
+    let reason = format!("survival location-scale {block} step: {error}");
+    match error {
+        gam_problem::ContractFeasibleStepError::Dimension { .. } => {
+            SurvivalLocationScaleError::DimensionMismatch { reason }.into()
+        }
+        _ => SurvivalLocationScaleError::ConstraintViolation { reason }.into(),
+    }
+}
+
 /// Mix event and censored contributions, avoiding `0 * Inf = NaN` when
 /// `d ∈ {0, 1}` and one branch is non-finite.
 #[inline]
@@ -3519,79 +3536,40 @@ impl SurvivalLocationScaleFamily {
             // empty block.)
             return Ok(None);
         };
-        crate::marginal_slope_shared::feasible_step_fraction(
-            constraints,
-            beta,
-            delta,
-            |beta_len, delta_len, expected| {
-                SurvivalLocationScaleError::DimensionMismatch { reason: format!(
-                    "survival location-scale time-step constraint dimension mismatch: beta={beta_len}, delta={delta_len}, constraints={expected}"
-                ) }.into()
-            },
-            |row, slack| {
-                SurvivalLocationScaleError::ConstraintViolation { reason: format!(
-                    "survival location-scale current time block violates linear constraint at row {row}: slack={slack:.3e}"
-                ) }.into()
-            },
-            |row, quantity, value| {
-                SurvivalLocationScaleError::ConstraintViolation { reason: format!(
-                    "survival location-scale time block has a non-finite {quantity} at linear constraint row {row}: value={value:.3e}"
-                ) }.into()
-            },
-        )
-        .map(Some)
+        crate::marginal_slope_shared::feasible_step_fraction(constraints, beta, delta)
+            .map(Some)
+            .map_err(|error| map_barrier_step_error("time block", error))
     }
 
+    /// Largest feasible fraction of `delta` inside the link-wiggle block's
+    /// `beta >= 0` cone.
+    ///
+    /// The cone is the block's DECLARED
+    /// [`block_linear_constraints`](gam_model_api::CustomFamily::block_linear_constraints)
+    /// — the very system the blockwise QP enforces — built from the one
+    /// constructor so the barrier hook and the QP cannot disagree about which
+    /// points are feasible. Until gam#2719 this was a hand-rolled coordinate
+    /// loop that re-derived the cone with its own rule: it rejected the iterate
+    /// at an ABSOLUTE `CONSTRAINT_NONNEGATIVITY_REL_TOL` (despite the `REL` in
+    /// the name), and gave the step no tolerance at all. On the linkwiggle
+    /// witness fit the seed sits at `beta ≡ 0`, exactly on every face, so a
+    /// Newton drift of `-3.3e-18` produced `alpha = 0` — 379 refusals across
+    /// six seeds, 314 of them of steps whose endpoint violated nothing at the
+    /// solver's declared `1e-8`.
     pub(crate) fn max_feasible_link_wiggle_step(
         &self,
         beta: &Array1<f64>,
         delta: &Array1<f64>,
     ) -> Result<Option<f64>, String> {
-        if beta.len() != delta.len() {
-            return Err(SurvivalLocationScaleError::DimensionMismatch {
-                reason: format!(
-                    "survival location-scale linkwiggle-step dimension mismatch: beta={}, delta={}",
-                    beta.len(),
-                    delta.len()
-                ),
-            }
-            .into());
-        }
-        let mut alpha = 1.0f64;
-        for j in 0..beta.len() {
-            let slack = beta[j];
-            // Same non-finite refusal as the shared `feasible_step_fraction`
-            // rule (gam#2721). These are two implementations of ONE rule and
-            // they had already diverged here: this one skipped a NaN silently
-            // (`slack < -tol` and `drift < 0.0` are both false for NaN) and
-            // returned `alpha = 1.0`, while the post-update validator for this
-            // very block (`post_update_block_beta`) rejects a non-finite
-            // coefficient outright. Unified onto the stricter behaviour.
-            if !slack.is_finite() {
-                return Err(SurvivalLocationScaleError::ConstraintViolation { reason: format!(
-                    "survival location-scale linkwiggle block has a non-finite coefficient {j}: beta={slack:.3e}"
-                ) }.into());
-            }
-            if slack < -CONSTRAINT_NONNEGATIVITY_REL_TOL {
-                return Err(SurvivalLocationScaleError::ConstraintViolation { reason: format!(
-                    "survival location-scale current linkwiggle block violates nonnegativity at coefficient {j}: beta={slack:.3e}"
-                ) }.into());
-            }
-            let drift = delta[j];
-            if !drift.is_finite() {
-                return Err(SurvivalLocationScaleError::ConstraintViolation { reason: format!(
-                    "survival location-scale linkwiggle step has a non-finite direction component {j}: delta={drift:.3e}"
-                ) }.into());
-            }
-            if drift < 0.0 {
-                alpha = alpha.min((slack / -drift).clamp(0.0, 1.0));
-            }
-        }
-        if alpha >= 1.0 {
-            Ok(Some(1.0))
-        } else {
-            Ok(Some((0.995 * alpha).clamp(0.0, 1.0)))
-        }
+        let Some(constraints) = crate::wiggle::monotone_wiggle_nonnegative_system(beta.len())
+        else {
+            // A zero-width link-wiggle block declares no constraints either, so
+            // there is no cone to step inside.
+            return Ok(None);
+        };
+        crate::marginal_slope_shared::feasible_step_fraction(&constraints, beta, delta)
+            .map(Some)
+            .map_err(|error| map_barrier_step_error("linkwiggle block", error))
     }
 
     #[inline]
