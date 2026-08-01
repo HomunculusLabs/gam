@@ -1,0 +1,61 @@
+name: Rustdoc ratchet
+
+# The rustdoc surface had NO job at all (#2711) -- not a job that ran without
+# gating, not a check scoped past its target: nothing in `.github/` ran
+# `cargo doc` or `rustdoc`. `docs.yml` is named `docs`, is green every night in
+# ~50s, and builds the mkdocs site; it never touches Rust. So "docs is green"
+# was true and carried no information about rustdoc, which exits 101.
+#
+# What this job asserts is deliberately NOT "zero rustdoc errors". Hundreds of
+# them exist across most of the workspace, so a zero bar would be red on
+# arrival, and a gate that is red the day it lands is ignored from the day it
+# lands -- the same non-instrument as the job that never ran. It asserts a
+# ratchet instead: no crate outside `scripts/rustdoc_red_crates.txt` may go red,
+# and no crate inside it may quietly come back clean. See the script header for
+# why the second direction is what makes a green run here distinguishable from a
+# run that measured nothing.
+#
+# Not on `push` yet. It runs nightly and on dispatch, which makes the count
+# visible and trending; promoting it to the push gate belongs with the commit
+# that can demonstrate it green there, not with the commit that introduces it.
+# `cross-check.yml`'s `linux-native-check` is the cheapest eventual home: it
+# already builds every dependency's rmeta with sccache, so the marginal cost is
+# the rustdoc passes alone.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Keyed on the commit: the verdict's subject is the commit, and superseding it
+  # destroys the only record of it (the reasoning cross-check.yml records).
+  group: rustdoc-ratchet-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  ratchet:
+    name: cargo doc --no-deps, per crate, against the debt ledger
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Rustdoc ratchet
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: "0"
+        run: |
+          set +e
+          scripts/rustdoc_ratchet.sh
+          status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "::error title=Rustdoc ratchet could not measure::The scan did not run to completion, so this run says nothing about the rustdoc surface. Treat it as a non-run, not as a pass."
+          fi
+          exit "$status"
