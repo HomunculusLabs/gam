@@ -596,7 +596,7 @@ fn declared_objective_scale_preserves_the_score_relative_magnitude_2613() {
     );
 }
 
-// ─── #2458 the derived standard reaches routes with no analytic Hessian ───────
+// ─── #2458 the derived standard, and the typed inability to reach it ─────────
 
 /// One second-order-stationary point, certified twice: once by a route that
 /// declares a Dense analytic Hessian, once by a route that declares none.
@@ -608,7 +608,7 @@ fn declared_objective_scale_preserves_the_score_relative_magnitude_2613() {
 /// the curvature-resolvability rung is exactly what exists to say so.
 ///
 /// `declares_hessian` is the ONLY difference between the two calls.
-fn certify_quadratic_without_declared_curvature_2458(
+fn certify_quadratic_at_declared_curvature_2458(
     declares_hessian: bool,
     theta: f64,
     search_iterations: usize,
@@ -653,87 +653,92 @@ fn certify_quadratic_without_declared_curvature_2458(
             hessian_source: HessianSource::BfgsApprox,
         },
     );
-    certify_outer_optimality(&mut obj, &config, "fd-curvature-rung-2458", &mut result)
+    certify_outer_optimality(&mut obj, &config, "curvature-rung-2458", &mut result)
 }
 
-/// #2458 — the curvature-resolvability rung is no longer gated on which
-/// derivative machinery a route happens to implement.
+/// #2458 — a route that supplies exact curvature reaches the derived standard,
+/// and one that supplies none is REFUSED and says so in its rung.
 ///
 /// The two certificates below judge the SAME point with the SAME criterion and
-/// differ only in `DeclaredHessianForm`. Before this, the second was held to
-/// the raw reproducibility band and refused — the route that knows the least
-/// judged the strictest, which is this issue's thesis. It now reaches the same
-/// standard by finite-differencing its own analytic gradient, and says so in
-/// its rung.
+/// differ only in `DeclaredHessianForm`. That is deliberately still a
+/// difference in outcome, and this test pins which difference is acceptable.
+///
+/// The rejected repair was to close the gap inside the certifier by
+/// forward-differencing the gradient-only route's analytic gradient. It closed
+/// the gap and it was wrong twice over: SPEC line 2 permits finite differences
+/// only outside production, and the distinction that makes that rule bite here
+/// is that the workspace's other production finite difference (the ψ audit in
+/// `run_plan.rs`, behind `outer_gradient_fd_capture_enabled`) is read by nothing
+/// outside tests — it RECORDS what happened, while a rung that overwrites
+/// `stationarity_bound` DECIDES what is true.
+///
+/// So the contract is: the derived standard is reached by supplying curvature,
+/// never by estimating it on the route's behalf, and a route that cannot supply
+/// it is refused **legibly** — `derived_standard = false` on the rung — rather
+/// than being handed the same label on weaker evidence. The fix for a route
+/// that deserves the standard is to give it a real second derivative, which is
+/// what the constant-curvature κ profile now does.
 #[test]
-fn a_route_without_declared_curvature_reaches_the_same_derived_standard_2458() {
+fn exact_curvature_reaches_the_derived_standard_and_its_absence_is_recorded_2458() {
     let theta = 2.0e-6;
-    let with_hessian = certify_quadratic_without_declared_curvature_2458(true, theta, 1)
+    let with_hessian = certify_quadratic_at_declared_curvature_2458(true, theta, 1)
         .expect("the declared-Hessian route certifies via the curvature rung");
-    let without_hessian = certify_quadratic_without_declared_curvature_2458(false, theta, 1)
-        .expect("and so must the route that declares none");
 
     assert!(with_hessian.certifies(), "{}", with_hessian.summary());
-    assert!(without_hessian.certifies(), "{}", without_hessian.summary());
-
-    // The test proves nothing unless the raw band really would have refused.
-    let arithmetic_floor = 80.0 * f64::EPSILON.sqrt();
-    assert!(
-        without_hessian.stationarity.projected_norm() > arithmetic_floor,
-        "|Pg| must sit ABOVE the un-widened band, else no widening was needed: {}",
-        without_hessian.summary(),
-    );
-
     assert_eq!(
         with_hessian.stationarity.rung().label,
         "curvature-resolvability",
         "the declared-Hessian route's rung changed: {}",
         with_hessian.summary(),
     );
-    assert_eq!(
-        without_hessian.stationarity.rung().label,
-        "curvature-resolvability(fd-gradient)",
-        "the gradient-only route must name its curvature's provenance: {}",
-        without_hessian.summary(),
-    );
     assert!(
-        without_hessian.stationarity.rung().derived_standard,
-        "a finite-differenced decrement test is still the derived standard: {}",
-        without_hessian.summary(),
+        with_hessian.stationarity.rung().derived_standard,
+        "the decrement test IS the derived standard: {}",
+        with_hessian.summary(),
     );
 
-    // `V = ½ρ²` has H ≡ 1, so the forward difference of its exact gradient is
-    // exact and the two bounds must agree to roundoff — not merely to the same
-    // order. That is the strongest available statement that the two routes are
-    // being held to one standard rather than to two that happen to be close.
-    let relative_gap = (without_hessian.stationarity.bound() - with_hessian.stationarity.bound())
-        .abs()
-        / with_hessian.stationarity.bound();
+    // The test proves nothing about the widening unless the raw band really
+    // would have refused this point.
+    let arithmetic_floor = 80.0 * f64::EPSILON.sqrt();
     assert!(
-        relative_gap <= 1.0e-9,
-        "one point, one standard: bounds {:.9e} (declared) vs {:.9e} (finite-differenced), \
-         relative gap {relative_gap:.3e}",
-        with_hessian.stationarity.bound(),
-        without_hessian.stationarity.bound(),
+        with_hessian.stationarity.projected_norm() > arithmetic_floor,
+        "|Pg| must sit ABOVE the un-widened band, else no widening was needed: {}",
+        with_hessian.summary(),
+    );
+
+    // Same point, same criterion, no declared curvature: refused, and the
+    // refusal names a rung that does NOT claim to be the derived standard.
+    let refusal = certify_quadratic_at_declared_curvature_2458(false, theta, 1)
+        .expect_err("a route with no curvature cannot run the decrement test");
+    let message = refusal.to_string();
+    assert!(
+        message.contains("NOT STATIONARY"),
+        "the refusal must be the ordinary non-stationarity one: {message}",
+    );
+    assert!(
+        message.contains("derived_standard=false"),
+        "a refusal on a rung that is not the derived standard must SAY so, which is \
+         what makes the remaining gap attributable instead of invisible: {message}",
+    );
+    assert!(
+        !message.contains("fd-gradient"),
+        "no rung may be produced by finite-differencing a gradient in production \
+         (SPEC line 2): {message}",
     );
 }
 
-/// #2458 — the rung is still a genuine test, not a blanket loosening for
-/// gradient-only routes.
+/// #2458 — the curvature rung is a genuine test, not a blanket loosening.
 ///
-/// This is the finite-difference twin of
-/// `curvature_widening_still_rejects_genuine_nonstationarity`, and it works for
-/// the same reason: the widened bound is `|Pg|·√(τ/Δpred)`, which exceeds `|Pg|`
-/// **iff** `Δpred ≤ τ`. At a point with real available descent `Δpred ≫ τ`, so
-/// the rung still wins the ladder's max — it is the largest available bound —
-/// and still lands orders BELOW the gradient it is judging. Widening is not
-/// rescuing.
+/// The widened bound is `|Pg|·√(τ/Δpred)`, which exceeds `|Pg|` **iff**
+/// `Δpred ≤ τ`. At a point with real available descent `Δpred ≫ τ`, so the rung
+/// still wins the ladder's max — it is the largest available bound — and still
+/// lands orders BELOW the gradient it is judging. Widening is not rescuing.
 #[test]
-fn finite_differenced_curvature_still_refuses_genuine_nonstationarity_2458() {
+fn the_curvature_rung_still_refuses_genuine_nonstationarity_2458() {
     // |Pg| = 1 against a unit Hessian gives Δpred = 0.5 against
     // τ = 1e-7·(1+0.5) = 1.5e-7, so the bound is √(3e-7) = 5.477e-4: the widest
     // rung on the ladder, and 1826x below the gradient.
-    let refusal = certify_quadratic_without_declared_curvature_2458(false, 1.0, 1)
+    let refusal = certify_quadratic_at_declared_curvature_2458(true, 1.0, 1)
         .expect_err("a point with a half-unit predicted decrease is not stationary");
     let message = refusal.to_string();
     assert!(
@@ -752,23 +757,47 @@ fn finite_differenced_curvature_still_refuses_genuine_nonstationarity_2458() {
     );
 }
 
-/// #2458 — and the escalation refuses to outspend the fit it is certifying.
+/// #2458 — exactly one rung may call itself the derived standard, and it is the
+/// one computed from the family's own exact curvature.
 ///
-/// Forming the Hessian costs `n_params` gradient evaluations. The certificate
-/// may spend that only when it does not exceed the outer iterations the search
-/// already spent: a search that has barely moved has not earned a certificate
-/// costing more than the search. With `search_iterations = 0` (clamped to 1)
-/// and one coordinate the gate is exactly at its boundary and admits; the
-/// negative side of the boundary is unreachable at `n_params = 1`, so this pins
-/// the admitting edge and the decline is pinned by the log at the call site.
+/// This is the invariant the reopened issue turned on. A second rung carrying
+/// `derived_standard = true` on `O(√ε)` evidence is how "which derivative
+/// machinery does this route implement" gets back into the answer to "which
+/// standard was this fit held to" — the exact substitution #2458 exists to
+/// remove. Enumerated rather than spot-checked so a new rung cannot claim the
+/// flag by being added below the ones a spot check happened to name.
 #[test]
-fn the_finite_difference_escalation_is_bounded_by_the_search_it_certifies_2458() {
-    let certificate = certify_quadratic_without_declared_curvature_2458(false, 2.0e-6, 0)
-        .expect("n_params = 1 <= max(iterations, 1) = 1 admits the rung");
+fn exactly_one_rung_is_the_derived_standard_2458() {
+    let rungs = [
+        StationarityBoundSource::SolverBand,
+        StationarityBoundSource::FlatValleyScore,
+        StationarityBoundSource::FlatValleyScoreCeiling,
+        StationarityBoundSource::ProbeNoiseFloor,
+        StationarityBoundSource::CurvatureResolvability,
+        StationarityBoundSource::GradientReproducibility,
+        StationarityBoundSource::FixedPointResidual,
+        StationarityBoundSource::CallerRequirement,
+    ];
+    let derived: Vec<&'static str> = rungs
+        .iter()
+        .filter(|rung| rung.is_derived_standard())
+        .map(|rung| rung.label())
+        .collect();
     assert_eq!(
-        certificate.stationarity.rung().label,
-        "curvature-resolvability(fd-gradient)",
-        "the boundary case must admit: {}",
-        certificate.summary(),
+        derived,
+        vec!["curvature-resolvability"],
+        "the derived standard must be the exact-curvature decrement test alone",
+    );
+    // And the enumeration above must be the whole enum: a rung added without
+    // being listed here would slip past the assertion. `label()` is total over
+    // the enum, so a distinct label per listed variant plus a count check is the
+    // available proof that nothing was dropped from the list.
+    let mut labels: Vec<&'static str> = rungs.iter().map(|rung| rung.label()).collect();
+    labels.sort_unstable();
+    labels.dedup();
+    assert_eq!(
+        labels.len(),
+        rungs.len(),
+        "two rungs share a label, so the enumeration above is not what it appears to be",
     );
 }

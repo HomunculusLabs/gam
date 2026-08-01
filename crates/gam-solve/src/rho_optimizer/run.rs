@@ -2224,135 +2224,6 @@ fn negative_curvature_escape_point(
 /// malformed, an entry is non-finite, the shifted factor is not PD, or the
 /// resulting quadratic form is negative (which a PD factor rules out; retained
 /// as a roundoff guard).
-/// Build the outer Hessian a route that declares none cannot supply, by
-/// forward-differencing its ANALYTIC gradient at the terminal point (#2458).
-///
-/// ## Why this exists
-///
-/// The curvature-resolvability rung — `|Pg|·√(τ/Δpred)`, the only rung with a
-/// derivation from the criterion's own resolution — is gated on having a
-/// Hessian. A route that declares `DeclaredHessianForm::Unavailable` can
-/// therefore never reach it and is held to the raw reproducibility band
-/// instead: **the route that knows the least is judged the strictest**, which
-/// is #2458's thesis and is anti-correlated with how much the fit should be
-/// trusted. The widening block's own doc says "the decrement test is the
-/// certificate"; a route that cannot run that test is judged by something the
-/// design does not regard as the certificate at all, and judged more harshly.
-///
-/// The fix is not a second standard for such routes. It is to give them the
-/// SAME one. A route here has an exact analytic gradient — that is what makes
-/// it a gradient-only route rather than a derivative-free one — and one forward
-/// difference of an exact gradient per coordinate is the Hessian, to `O(√ε)`
-/// relative accuracy. The rung then runs unchanged.
-///
-/// ## Accuracy, and why `O(√ε)` is enough here
-///
-/// The rung compares `Δpred = ½gᵀH⁻¹g` against an objective tolerance. A
-/// relative error `δ` in `H` gives `O(δ)` in `Δpred` and `O(δ/2)` in the bound,
-/// which against the eight-thousand-fold spread this issue measures across one
-/// test binary is not a consideration. What matters is definiteness, and that
-/// fails CLOSED: [`newton_predicted_decrease`] regularizes by `√ε·max|H_jj|`
-/// and returns `None` unless the shifted matrix factors, so a genuine saddle
-/// (whose negative eigenvalue dwarfs that shift) is rejected exactly as it is
-/// on the analytic path, and a direction flat enough for finite-difference
-/// noise to flip its sign is one where the criterion is flat anyway.
-///
-/// ## Step size
-///
-/// `h_j = √ε·max(|θ_j|, 1)` — the standard forward-difference optimum when the
-/// differentiated quantity is exact to roundoff, balancing the `O(h)` truncation
-/// term against the `O(ε/h)` cancellation term. The perturbed point is kept
-/// inside the model domain: when `θ_j + h_j` would leave the box the difference
-/// is taken BACKWARD instead, which is the same estimate to the same order and
-/// keeps every evaluation at a feasible ρ.
-///
-/// ## Failure is never a refusal
-///
-/// Every early return is `None`, which leaves the caller in exactly the state
-/// it was already in — the un-widened band. Like #2596's escalation this can
-/// only turn a refusal into a certification, never the reverse.
-fn finite_difference_outer_hessian(
-    obj: &mut dyn OuterObjective,
-    layout: OuterThetaLayout,
-    config: &OuterConfig,
-    theta: &Array1<f64>,
-    gradient_at_theta: &Array1<f64>,
-    context: &str,
-) -> Option<Array2<f64>> {
-    let n = layout.n_params;
-    if n == 0 || theta.len() != n || gradient_at_theta.len() != n {
-        return None;
-    }
-    if theta.iter().chain(gradient_at_theta.iter()).any(|v| !v.is_finite()) {
-        return None;
-    }
-    let (lower, upper) = outer_model_domain_bounds_template(config, n);
-    let mut columns: Vec<Array1<f64>> = Vec::with_capacity(n);
-    for j in 0..n {
-        let step = f64::EPSILON.sqrt() * theta[j].abs().max(1.0);
-        // Forward unless that leaves the box, in which case backward. `signed`
-        // carries the direction so the quotient below is always
-        // `(g(θ + signed·e_j) − g(θ)) / signed`.
-        let signed = if theta[j] + step <= upper[j] {
-            step
-        } else if theta[j] - step >= lower[j] {
-            -step
-        } else {
-            // The coordinate's own box is narrower than one difference step:
-            // no feasible probe exists, so this column cannot be formed.
-            log::info!(
-                "[CERTIFICATE] {context}: finite-difference curvature declined — \
-                 coordinate {j} has no feasible probe (θ={:.6e}, box=[{:.6e}, {:.6e}], \
-                 step={step:.3e})",
-                theta[j],
-                lower[j],
-                upper[j],
-            );
-            return None;
-        };
-        let mut probe = theta.clone();
-        probe[j] += signed;
-        // A step that rounds away entirely would divide by a difference the
-        // objective never saw.
-        let realized = probe[j] - theta[j];
-        if realized == 0.0 {
-            return None;
-        }
-        let probed = match obj.eval_with_order(&probe, OuterEvalOrder::ValueAndGradient) {
-            Ok(eval) => eval,
-            Err(error) => {
-                log::info!(
-                    "[CERTIFICATE] {context}: finite-difference curvature declined — \
-                     the probe at coordinate {j} failed ({error}); keeping the first-order bound"
-                );
-                return None;
-            }
-        };
-        if probed.gradient.len() != n || probed.gradient.iter().any(|v| !v.is_finite()) {
-            log::info!(
-                "[CERTIFICATE] {context}: finite-difference curvature declined — \
-                 the probe at coordinate {j} returned no usable gradient"
-            );
-            return None;
-        }
-        columns.push((&probed.gradient - gradient_at_theta) / realized);
-    }
-    // Symmetrize. The exact Hessian is symmetric; a finite-differenced one is
-    // not, and the asymmetry is pure truncation/roundoff error. Averaging is
-    // the least-squares symmetric fit to what was measured, and the Cholesky in
-    // `newton_predicted_decrease` requires symmetry to mean anything.
-    let mut hessian = Array2::<f64>::zeros((n, n));
-    for i in 0..n {
-        for j in 0..n {
-            hessian[[i, j]] = 0.5 * (columns[j][i] + columns[i][j]);
-        }
-    }
-    if hessian.iter().any(|v| !v.is_finite()) {
-        return None;
-    }
-    Some(hessian)
-}
-
 pub(crate) fn newton_predicted_decrease(hessian: &Array2<f64>, grad: &Array1<f64>) -> Option<f64> {
     let n = hessian.nrows();
     if n == 0 || hessian.ncols() != n || grad.len() != n {
@@ -2664,16 +2535,6 @@ pub(crate) enum StationarityBoundSource {
     /// `|Pg|·√(τ/Δpred)` = `√(2·h·τ)` (#2253/#2249/#2015/#2091) -- the only rung
     /// with a derivation from the criterion's own resolution.
     CurvatureResolvability,
-    /// The SAME derived standard, on a route that declares no analytic Hessian,
-    /// with the curvature obtained by forward-differencing the route's analytic
-    /// gradient at the terminal point (#2458).
-    ///
-    /// Split from [`Self::CurvatureResolvability`] because the derivation is
-    /// identical but the evidence is not: one is the family's exact curvature,
-    /// the other is `O(√ε)`-accurate. A reader auditing which fits were held to
-    /// which standard needs to be able to tell them apart, and #2458's closing
-    /// ask is precisely that the run record say which tier applied and why.
-    CurvatureResolvabilityFiniteDifference,
     /// Twice the same-ρ spread between the run-recorded and certificate-time
     /// gradients (#2299): the measuring instrument's demonstrated noise.
     GradientReproducibility,
@@ -2708,7 +2569,6 @@ impl StationarityBoundSource {
             Self::FlatValleyScoreCeiling => "flat-valley-score-ceiling",
             Self::ProbeNoiseFloor => "probe-noise-floor",
             Self::CurvatureResolvability => "curvature-resolvability",
-            Self::CurvatureResolvabilityFiniteDifference => "curvature-resolvability(fd-gradient)",
             Self::GradientReproducibility => "gradient-reproducibility",
             Self::FixedPointResidual => "fixed-point-residual",
             Self::CallerRequirement => "caller-requirement",
@@ -2718,13 +2578,14 @@ impl StationarityBoundSource {
     /// Whether this rung is the derived resolvability standard rather than a
     /// gradient-magnitude substitute adopted where that standard was unavailable.
     pub(crate) fn is_derived_standard(self) -> bool {
-        // Both curvature rungs qualify: the standard is the decrement test, and
-        // #2458's whole point is that WHICH derivative machinery produced the
-        // curvature must stop deciding which standard a fit is held to.
-        matches!(
-            self,
-            Self::CurvatureResolvability | Self::CurvatureResolvabilityFiniteDifference
-        )
+        // The standard is the decrement test, and #2458's whole point is that
+        // WHICH derivative machinery produced the curvature must stop deciding
+        // which standard a fit is held to. The answer is that every route
+        // supplies exact curvature or none: there is no second, approximate
+        // curvature rung, because a bound estimated by the code doing the
+        // judging is not the same evidence and pretending otherwise is what
+        // made the tiering invisible in the first place.
+        matches!(self, Self::CurvatureResolvability)
     }
 
     /// The neutral projection carried on the refusal, so a red states its own
@@ -3926,96 +3787,36 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // #2458 — the same escalation, for the routes that cannot take the one
     // above.
     //
-    // The block above closes a gap between two FIDELITIES of one route. This
-    // one closes a gap between two ROUTES: a route declaring
+    // The block above closes a gap between two FIDELITIES of one route. The
+    // remaining gap is between two ROUTES: a route declaring
     // `DeclaredHessianForm::Unavailable` has no order-four ladder to spend at
     // either fidelity, so it can never reach the curvature-resolvability rung
-    // and is held to the raw reproducibility band — the strictest tier in the
+    // and is held to the raw reproducibility band -- the strictest tier in the
     // subsystem, awarded to the route that knows the least. Measured across six
     // tests of one subsystem in one binary: bounds from 5.675e-6 to 4.771e-2, a
     // factor of 8,406, with one |Pg| = 4.637052e-7 graded against four of them.
     //
-    // A route here is gradient-ONLY, not derivative-free: it has an exact
-    // analytic gradient, and `n_params` forward differences of an exact
-    // gradient IS the Hessian. So it gets the same rung by the same derivation,
-    // with the provenance recorded
-    // (`StationarityBoundSource::CurvatureResolvabilityFiniteDifference`)
-    // because `O(√ε)` curvature and exact curvature are not the same evidence
-    // even when they license the same bound.
+    // That gap is #2458 and it is real. It is NOT closed here, and the attempt
+    // to close it here (`f2cae93ee`, reverted by `finite_difference_outer_hessian`'s
+    // removal) is the reason this comment exists rather than a code block.
+    // Forward-differencing the route's analytic gradient produces a number that
+    // decides which fits are certified, and SPEC line 2 permits finite
+    // differences only outside production. The workspace's one other production
+    // finite difference -- the psi audit in `run_plan.rs`, behind
+    // `outer_gradient_fd_capture_enabled` -- is read by nothing outside tests:
+    // it RECORDS what happened. A rung that overwrites `stationarity_bound`
+    // DECIDES what is true, and the precedent does not reach it.
     //
-    // The work bound is the search's own, not a constant: forming the Hessian
-    // costs `n_params` gradient evaluations, and the certificate is allowed to
-    // spend that only when it does not exceed the number of outer iterations
-    // the search being certified already spent. A fit that took twenty steps
-    // can afford twenty columns; one that stopped at iteration 1 with fifty
-    // coordinates cannot, and refusing there is right — a search that has
-    // barely moved has not earned a fifty-evaluation certificate. This can only
-    // ever turn a refusal into a certification: the escalated curvature feeds
-    // the BOUND alone, never `hessian_psd`, never the rail certificate, never
-    // the tail-snap.
-    let fd_bound_curvature = if analytic_hessian.is_none()
-        && screening_bound_curvature.is_none()
-        && !capability.hessian.is_analytic()
-        && matches!(capability.gradient, Derivative::Analytic)
-        && projected_grad_norm > stationarity_bound
-    {
-        let search_iterations = result.iterations.max(1);
-        if layout.n_params > search_iterations {
-            log::info!(
-                "[CERTIFICATE] {context}: first-order band would refuse \
-                 (|Pg|={projected_grad_norm:.3e} > bound={stationarity_bound:.3e}, rung={}) \
-                 and this route declares no analytic Hessian, but a finite-difference \
-                 one costs {} gradient evaluations against the {search_iterations} outer \
-                 iteration(s) the search spent; declining the rung rather than \
-                 outspending the fit (#2458)",
-                bound_source.label(),
-                layout.n_params,
-            );
-            None
-        } else {
-            log::info!(
-                "[CERTIFICATE] {context}: first-order band would refuse \
-                 (|Pg|={projected_grad_norm:.3e} > bound={stationarity_bound:.3e}, rung={}) \
-                 and this route declares no analytic Hessian; finite-differencing its \
-                 analytic gradient in {} coordinate(s) so the refusal is judged by the \
-                 SAME derived standard an analytic-Hessian route receives (#2458)",
-                bound_source.label(),
-                layout.n_params,
-            );
-            let measured = finite_difference_outer_hessian(
-                obj,
-                layout,
-                config,
-                &result.rho,
-                result
-                    .final_gradient
-                    .as_ref()
-                    .expect("first-order evidence is installed before this point"),
-                context,
-            );
-            // The probes above moved the objective's internal state off the
-            // terminal ρ. Put it back before anything else reads it, exactly as
-            // the order-four escalation's own evaluation leaves it.
-            if measured.is_some()
-                && let Err(error) = obj.eval_with_order(&result.rho, OuterEvalOrder::ValueAndGradient)
-            {
-                log::info!(
-                    "[CERTIFICATE] {context}: could not restore the terminal evaluation after \
-                     finite-difference curvature ({error}); keeping the first-order bound"
-                );
-                return Err(outer_nonconvergence_error(
-                    context,
-                    "terminal re-evaluation after finite-difference curvature failed",
-                    result,
-                    Some(projected_grad_norm),
-                    StationarityBound::from_ladder(stationarity_bound, bound_source),
-                ));
-            }
-            measured
-        }
-    } else {
-        None
-    };
+    // The correct fix is upstream and is being applied there: a route with no
+    // analytic Hessian should acquire one, not have one estimated on its behalf
+    // by the code judging it. The named producer -- the constant-curvature outer
+    // problem, a ONE-parameter profiled Gaussian REML -- now derives its single
+    // second derivative in closed form and declares `DeclaredHessianForm::Dense`
+    // (`gam-models/src/fit_orchestration/drivers/spatial_optimization.rs`), so it
+    // reaches `CurvatureResolvability` by the ordinary path with the family's own
+    // exact curvature. A route that still declares `Unavailable` is held to the
+    // raw band and the run record says so (`derived_standard=false`), which is a
+    // typed inability to certify rather than a silently different standard.
 
     // Curvature-scaled stationarity (#2253/#2249/#2015/#2091). The re-measured
     // projected gradient can sit modestly ABOVE the score-relative / probe-noise
@@ -4053,12 +3854,9 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // always `None` and this reads `analytic_hessian` exactly as before; at
     // `Screening` it is `Some` only on the would-refuse path, and it feeds THIS
     // rung and nothing else.
-    let curvature_is_finite_differenced =
-        analytic_hessian.is_none() && screening_bound_curvature.is_none();
     if let Some(hessian) = analytic_hessian
         .as_ref()
         .or(screening_bound_curvature.as_ref())
-        .or(fd_bound_curvature.as_ref())
         && let Some(predicted_decrease) = newton_predicted_decrease(hessian, &projected_gradient)
         && predicted_decrease.is_finite()
         && predicted_decrease > 0.0
@@ -4076,11 +3874,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                  widened from gradient-band {stationarity_bound:.3e}"
             );
             stationarity_bound = curvature_grad_bound;
-            bound_source = if curvature_is_finite_differenced {
-                StationarityBoundSource::CurvatureResolvabilityFiniteDifference
-            } else {
-                StationarityBoundSource::CurvatureResolvability
-            };
+            bound_source = StationarityBoundSource::CurvatureResolvability;
         }
     }
 
