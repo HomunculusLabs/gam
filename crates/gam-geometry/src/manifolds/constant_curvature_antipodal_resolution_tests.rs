@@ -16,7 +16,6 @@
 //! shipped route goes through `w = (−x) ⊕_κ y`, whose denominator `(1 − t)²`
 //! collapses at `t = 1`. Differencing the two isolates exactly what the margin
 //! is protecting.
-#![allow(clippy::print_stderr)]
 
 use super::constant_curvature::{ConstantCurvature, distance_kappa_jet};
 
@@ -58,11 +57,10 @@ fn probe_antipodal_resolution_law() {
         let d = m.distance(x.view(), y.view());
         let jet = distance_kappa_jet(&m, x.view(), y.view());
         match (d, jet) {
-            (Ok(dv), Ok((jv, jg, jh))) => {
+            (Ok(dv), Ok((_, jg, jh))) => {
                 let e0 = ((dv - dr) / dr).abs();
                 let e1 = ((jg - dkr) / dkr).abs();
                 let e2 = ((jh - dkkr) / dkkr).abs();
-                let _ = jv;
                 eprintln!(
                     "{t:<13.10} {:<14.4e} {e0:<13.3e} {e1:<13.3e} {e2:<13.3e}",
                     (1.0 - t) * (1.0 - t)
