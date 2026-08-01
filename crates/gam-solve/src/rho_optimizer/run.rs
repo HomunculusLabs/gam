@@ -136,6 +136,18 @@ pub(crate) struct OuterConfig {
     /// lattice these are supplied by the objective owner and survive the
     /// `max_seeds` truncation; the certified keep-best loop optimizes each one.
     pub(crate) initial_rho_candidates: Vec<Array1<f64>>,
+    /// Seed points an EARLIER round of this same [`run_outer`] call already
+    /// started and whose certification it already refused (#2569).
+    ///
+    /// Set only by the certify-resume loop, from
+    /// [`OuterResult::refused_seed_points`]. The plan runner drops these from
+    /// its cascade (never the caller's own `initial_rho`, which is the reseed
+    /// point the resume exists to explore), because re-running them from the
+    /// reset state they were refused in reproduces the recorded verdict digit
+    /// for digit — the same argument #2080 makes for replaying a recorded
+    /// cold-entry-leg refusal. Empty on every non-resume path, so the ordinary
+    /// cascade is unchanged.
+    pub(crate) previously_refused_seed_points: Vec<Array1<f64>>,
     pub(crate) initial_inner_seed: Option<BoundInnerSeed>,
     pub(crate) fallback_policy: FallbackPolicy,
     pub(crate) screening_cap: Option<Arc<AtomicUsize>>,
@@ -285,6 +297,7 @@ impl Default for OuterConfig {
             heuristic_lambdas: None,
             initial_rho: None,
             initial_rho_candidates: Vec::new(),
+            previously_refused_seed_points: Vec::new(),
             initial_inner_seed: None,
             fallback_policy: FallbackPolicy::Automatic,
             screening_cap: None,
@@ -738,6 +751,7 @@ impl OuterProblem {
             heuristic_lambdas: self.heuristic_lambdas.clone(),
             initial_rho: self.initial_rho.clone(),
             initial_rho_candidates: self.initial_rho_candidates.clone(),
+            previously_refused_seed_points: Vec::new(),
             initial_inner_seed: None,
             fallback_policy: self.fallback_policy,
             screening_cap: self.screening_cap.clone(),
@@ -1463,6 +1477,26 @@ pub struct OuterResult {
     pub cost_stall_probe_scale: Option<(f64, f64)>,
     /// Which lane produced this result. See [`OuterResultOrigin`].
     pub origin: OuterResultOrigin,
+    /// Seed start points this plan run STARTED and whose mandatory analytic
+    /// certificate then REFUSED (#2569).
+    ///
+    /// The certify-resume loop in [`run_outer`] re-runs the outer search seeded
+    /// at the refused checkpoint, and the seed cascade it re-enters is allowed
+    /// to fall through its `seed_budget` while nothing has certified
+    /// (`should_start_next_seed`). The fall-through lands on the SAME generated
+    /// lattice seed every round — a point that does not depend on the
+    /// checkpoint, reached from a state `obj.reset()` has restored — so the
+    /// cascade re-derives a verdict it already recorded. Measured on the #2569
+    /// grouped-binomial design: one cold seed re-run 17 times per fit, each
+    /// repetition terminating at the identical `|g|` after the identical outer
+    /// iteration count, for 18-48% of the fit's wall clock.
+    ///
+    /// Carrying the points forward lets the next resume skip exactly those
+    /// seeds, on the same grounds #2080's `cold_entry_leg_refusal` replays a
+    /// recorded cold-entry verdict: re-running them would reproduce the
+    /// recorded refusal digit for digit. A seed that has NOT been started and
+    /// refused is never suppressed, so no rescue path is closed.
+    pub refused_seed_points: Vec<Array1<f64>>,
 }
 
 /// An active-set reduction reseed (#2392): re-run the outer search with a set of
@@ -1508,6 +1542,7 @@ impl OuterResult {
             active_set_reseed: None,
             cost_stall_probe_scale: None,
             origin: OuterResultOrigin::Solver,
+            refused_seed_points: Vec::new(),
         }
     }
 
@@ -6922,6 +6957,15 @@ pub(crate) fn run_outer(
     // non-convergent bimodal-inner grind (#2155/#2363) is cut off well before it
     // exhausts the general resume budget (#2357).
     let mut saddle_escapes_remaining: usize = OUTER_SADDLE_ESCAPE_BUDGET;
+    // #2569 — seed points this loop has already started and already had refused.
+    // A resume changes `initial_rho` and nothing else the cascade reads, and it
+    // runs from a reset objective, so a NON-initial seed re-entered on a later
+    // round terminates exactly where it terminated before. Measured on the
+    // grouped-binomial design of #2569: 17 rounds re-ran one cold lattice seed
+    // to the identical `|g|` after the identical 42 outer iterations, 1628 s of
+    // a 9016 s fit. Accumulated across rounds and handed to the retry so the
+    // cascade replays the recorded verdict instead of re-deriving it.
+    let mut refused_seed_points: Vec<Array1<f64>> = Vec::new();
     let certificate = loop {
         let claimed_converged = result.solver_claimed_convergence();
         match certify_diagnose_and_install(obj, &mut result) {
@@ -7073,6 +7117,20 @@ pub(crate) fn run_outer(
                 retry_cfg.seed_config.max_seeds = 1;
                 retry_cfg.seed_config.seed_budget = 1;
                 retry_cfg.screen_initial_rho = false;
+                // `seed_budget = 1` above is NOT binding: `should_start_next_seed`
+                // lets the cascade continue past it while nothing has certified,
+                // and on a resume the reseeded slot-0 candidate is exactly what
+                // failed certification, so `best` is `None` and the fall-through
+                // fires every round on the same regenerated lattice seed (#2569).
+                // Suppress only seeds this loop has ALREADY started and had
+                // refused; a seed that has never run is still reachable, so the
+                // fall-through keeps its rescue role.
+                for point in result.refused_seed_points.iter() {
+                    if !refused_seed_points.contains(point) {
+                        refused_seed_points.push(point.clone());
+                    }
+                }
+                retry_cfg.previously_refused_seed_points = refused_seed_points.clone();
                 // Every reseed kind lands at a genuinely different point, so the
                 // refused checkpoint's metric (trust radius, outer Hessian)
                 // must not be transferred into the restart.
@@ -7159,6 +7217,11 @@ fn canonicalize_outer_config(config: &OuterConfig, perm: &[usize]) -> OuterConfi
     if let Some(initial) = config.initial_rho.as_ref() {
         canonical.initial_rho = Some(permute_arr(initial));
     }
+    canonical.previously_refused_seed_points = config
+        .previously_refused_seed_points
+        .iter()
+        .map(permute_arr)
+        .collect();
     canonical.initial_rho_candidates = config
         .initial_rho_candidates
         .iter()

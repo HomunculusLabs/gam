@@ -9,6 +9,62 @@ fn should_start_next_seed(
     started_seeds < seed_budget || !has_certified_candidate
 }
 
+/// Drop from `seeds` every point an earlier certify-resume round already
+/// STARTED and already had REFUSED (#2569).
+///
+/// Slot 0 is never dropped: it is the caller's `initial_rho`, which on a resume
+/// is the reseed point the retry exists to explore. Everything else in the
+/// cascade is regenerated identically each round from a state `obj.reset()` has
+/// restored, so a seed already in the record terminates exactly where it
+/// terminated before — measured on #2569 as one cold seed re-run 17 times to
+/// the identical `|g|` after the identical 42 outer iterations. Returns the
+/// surviving cascade and how many seeds were replayed rather than re-run.
+fn seeds_without_recorded_refusals(
+    seeds: Vec<Array1<f64>>,
+    previously_refused: &[Array1<f64>],
+) -> (Vec<Array1<f64>>, usize) {
+    if previously_refused.is_empty() || seeds.len() < 2 {
+        return (seeds, 0);
+    }
+    let mut kept: Vec<Array1<f64>> = Vec::with_capacity(seeds.len());
+    let mut replayed = 0usize;
+    for (seed_idx, seed) in seeds.into_iter().enumerate() {
+        if seed_idx > 0 && previously_refused.iter().any(|refused| refused == &seed) {
+            replayed += 1;
+            continue;
+        }
+        kept.push(seed);
+    }
+    (kept, replayed)
+}
+
+/// Seed start points this plan run STARTED and whose mandatory analytic
+/// certificate then REFUSED (#2569).
+///
+/// Derived in one place from the rejection ledger the seed loop already keeps,
+/// rather than recorded at each of its refusal sites, so the set cannot drift
+/// from what the ledger reports. Only the `"certificate"` phase qualifies: a
+/// seed rejected at screening, domain entry or validation never reached a
+/// solver, and its refusal carries no statement about where the search would
+/// have terminated.
+fn certificate_refused_seed_points(
+    seed_rejections: &[SeedRejection],
+    seeds: &[Array1<f64>],
+) -> Vec<Array1<f64>> {
+    let mut points: Vec<Array1<f64>> = Vec::new();
+    for rejection in seed_rejections
+        .iter()
+        .filter(|rejection| rejection.phase == "certificate")
+    {
+        if let Some(seed) = seeds.get(rejection.seed_idx)
+            && !points.contains(seed)
+        {
+            points.push(seed.clone());
+        }
+    }
+    points
+}
+
 /// Parsimonious screening has exactly two roles: the flexible slot-0 basin and
 /// the deliberately promoted, more-smoothed slot-1 basin. The remaining budget
 /// is failure recovery, not an instruction to solve extra certified basins.
@@ -738,6 +794,30 @@ pub(crate) fn run_outer_with_plan(
         return Err(EstimationError::RemlOptimizationFailed(format!(
             "no bounded seeds generated for outer optimization ({context})"
         )));
+    }
+
+    // #2569 — replay, rather than re-derive, a seed verdict this outer call
+    // already recorded. `config.previously_refused_seed_points` is non-empty
+    // only on a certify-resume round, and holds seeds an earlier round started
+    // and whose analytic certificate refused. The resume reseeds `initial_rho`
+    // and resets the objective; every OTHER seed in this cascade is therefore
+    // re-entered from the identical state that already refused it, and the
+    // trace shows it terminating at the identical gradient after the identical
+    // iteration count. Slot 0 is the caller's reseed point and is never
+    // dropped — the resume exists to explore it — and a seed that was never
+    // started is never in the list, so the `should_start_next_seed`
+    // fall-through keeps every rescue it could previously perform.
+    let generated_seed_count = seeds.len();
+    let (kept_seeds, replayed_seeds) =
+        seeds_without_recorded_refusals(seeds, &config.previously_refused_seed_points);
+    seeds = kept_seeds;
+    if replayed_seeds > 0 {
+        log::info!(
+            "[OUTER] {context}: replaying {replayed_seeds} recorded seed refusal(s) instead of \
+             re-running them ({}/{generated_seed_count} seeds kept); a resume re-enters a \
+             non-initial seed from the state that already refused it (#2569/#2080)",
+            seeds.len(),
+        );
     }
 
     let seed_budget =
@@ -2901,7 +2981,9 @@ pub(crate) fn run_outer_with_plan(
     }
 
     if let Some(certified) = best {
-        let result = certified.into_result();
+        let mut result = certified.into_result();
+        result.refused_seed_points =
+            certificate_refused_seed_points(&seed_rejections, &seeds);
         // NO mint audit here (#2359). Every candidate above was screened at
         // order three, and the winner's order-four audit is paid EXACTLY ONCE —
         // but it is paid by `run_outer`, not here.
@@ -3026,7 +3108,9 @@ pub(crate) fn run_outer_with_plan(
         }
     }
 
-    if let Some(checkpoint) = best_checkpoint {
+    if let Some(mut checkpoint) = best_checkpoint {
+        checkpoint.refused_seed_points =
+            certificate_refused_seed_points(&seed_rejections, &seeds);
         return Ok(PlanRunOutcome::Exhausted(checkpoint));
     }
 

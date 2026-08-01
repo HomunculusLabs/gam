@@ -1312,3 +1312,183 @@ fn run_bfgs_projects_seed_before_seed_validation_eval() {
         "BFGS must project the seed before validating the initial sample",
     );
 }
+
+/// #2569 — a seed the certify-resume loop has already started and already had
+/// refused must be REPLAYED from the record, never re-run, and the caller's own
+/// reseed point must survive that filter.
+///
+/// The production defect this gates: `should_start_next_seed` lets the cascade
+/// continue past `seed_budget` while nothing has certified, so every resume
+/// round re-entered the same regenerated lattice seed and re-derived the same
+/// refusal — measured at 18-48% of the wall clock on the #2569 grouped-binomial
+/// design.
+#[test]
+fn a_replayed_seed_refusal_never_drops_the_reseed_point_2569() {
+    let reseed = array![-2.0];
+    let recorded = array![3.140625];
+    let untried = array![7.0];
+
+    let (kept, replayed) = seeds_without_recorded_refusals(
+        vec![reseed.clone(), recorded.clone(), untried.clone()],
+        std::slice::from_ref(&recorded),
+    );
+    assert_eq!(replayed, 1, "the recorded seed must be replayed, not re-run");
+    assert_eq!(
+        kept,
+        vec![reseed.clone(), untried.clone()],
+        "a seed with no record must remain reachable, so the budget fall-through \
+         keeps every rescue it could previously perform"
+    );
+
+    // Slot 0 is the resume's reseed point: recorded or not, it is what the
+    // retry exists to explore and is never dropped.
+    let (kept_slot_zero, replayed_slot_zero) = seeds_without_recorded_refusals(
+        vec![reseed.clone(), untried.clone()],
+        std::slice::from_ref(&reseed),
+    );
+    assert_eq!(replayed_slot_zero, 0);
+    assert_eq!(kept_slot_zero, vec![reseed.clone(), untried.clone()]);
+
+    // Nothing recorded: the cascade is returned unchanged, which is every
+    // non-resume path in production.
+    let (kept_identity, replayed_identity) =
+        seeds_without_recorded_refusals(vec![reseed.clone(), recorded.clone()], &[]);
+    assert_eq!(replayed_identity, 0);
+    assert_eq!(kept_identity, vec![reseed, recorded]);
+}
+
+/// #2569 — only a `"certificate"` refusal states where a seed's search
+/// TERMINATED. A seed rejected at screening, domain entry or validation never
+/// reached a solver, so re-running it later is not redundant work and it must
+/// not be suppressed.
+#[test]
+fn only_certificate_phase_seed_refusals_are_recorded_2569() {
+    let error = EstimationError::RemlOptimizationFailed("refused".to_string());
+    let seeds = vec![array![-2.0], array![3.140625], array![7.0]];
+    let rejections = vec![
+        SeedRejection::from_estimation_error(1, "certificate", &error),
+        // A repeat of the same seed collapses: the list is a set of points.
+        SeedRejection::from_estimation_error(1, "certificate", &error),
+        // Never reached a solver — says nothing about where it would stop.
+        SeedRejection::from_estimation_error(2, "validation", &error),
+        // Out of range (a rejection recorded against a seed list this call does
+        // not own) is dropped rather than panicking.
+        SeedRejection::from_estimation_error(9, "certificate", &error),
+    ];
+
+    assert_eq!(
+        certificate_refused_seed_points(&rejections, &seeds),
+        vec![array![3.140625]],
+    );
+    assert!(certificate_refused_seed_points(&[], &seeds).is_empty());
+}
+
+/// #2569 end-to-end, with the positive control the claim needs: the cascade
+/// DOES fall through past its budget of 1 when nothing has certified (control
+/// arm), and does NOT re-run the fall-through seed once its refusal is on
+/// record (replay arm) — while still running the caller's reseed point in both.
+#[test]
+fn the_cascade_replays_a_recorded_seed_instead_of_falling_through_to_it_2569() {
+    // A minimum far outside the box: neither seed is stationary, so no seed can
+    // certify and `best` stays `None` — the state in which the budget is inert.
+    const MINIMUM: f64 = 40.0;
+    let reseed = array![-2.0];
+    let fall_through = array![3.140625];
+
+    fn run_arm(
+        reseed: &Array1<f64>,
+        fall_through: &Array1<f64>,
+        previously_refused: Vec<Array1<f64>>,
+    ) -> Vec<Array1<f64>> {
+        #[derive(Default)]
+        struct State {
+            seen: Vec<Array1<f64>>,
+        }
+        let problem = OuterProblem::new(1)
+            .with_gradient(Derivative::Analytic)
+            .with_hessian(DeclaredHessianForm::Unavailable)
+            .with_initial_rho(reseed.clone())
+            .with_initial_rho_candidates(vec![fall_through.clone()])
+            .with_bounds(array![-8.0], array![8.0])
+            .with_max_iter(1)
+            .with_seed_config(gam_problem::SeedConfig {
+                max_seeds: 1,
+                seed_budget: 1,
+                ..Default::default()
+            });
+        let mut obj = problem.build_objective(
+            State::default(),
+            move |state: &mut State, theta: &Array1<f64>| {
+                state.seen.push(theta.clone());
+                let delta = theta[0] - 40.0;
+                Ok(0.5 * delta * delta)
+            },
+            move |state: &mut State, theta: &Array1<f64>| {
+                state.seen.push(theta.clone());
+                let delta = theta[0] - 40.0;
+                Ok(OuterEval {
+                    cost: 0.5 * delta * delta,
+                    gradient: array![delta],
+                    hessian: HessianValue::Unavailable,
+                    inner_beta_hint: None,
+                })
+            },
+            None::<fn(&mut State)>,
+            None::<fn(&mut State, &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+        );
+        let mut config = problem.config();
+        config.previously_refused_seed_points = previously_refused;
+        let cap = obj.capability();
+        let the_plan = plan(&cap);
+        let outcome = run_outer_with_plan(
+            &mut obj,
+            &config,
+            "2569 recorded seed replay",
+            &cap,
+            &the_plan,
+            true,
+        );
+        // The minimum is outside the box, so nothing here can certify. That is
+        // the state in which `should_start_next_seed` ignores the budget, and
+        // it is the precondition both arms are measured under.
+        assert!(
+            !matches!(outcome, Ok(PlanRunOutcome::Converged(_))),
+            "fixture precondition: no seed may certify, or the cascade never \
+             reaches the budget fall-through this test is about"
+        );
+        obj.state.seen.clone()
+    }
+
+    let visited = |seen: &[Array1<f64>], point: &Array1<f64>| {
+        seen.iter()
+            .any(|theta| theta.len() == 1 && theta[0].to_bits() == point[0].to_bits())
+    };
+
+    let control = run_arm(&reseed, &fall_through, Vec::new());
+    assert!(
+        visited(&control, &reseed),
+        "control: the caller's own seed must be evaluated"
+    );
+    assert!(
+        visited(&control, &fall_through),
+        "positive control: with nothing on record the cascade falls through its \
+         budget of 1 onto the second seed — the very behaviour the replay must \
+         suppress. If this arm fails, the fixture cannot separate the arms and \
+         the assertion below proves nothing."
+    );
+    // The minimum is outside the box on purpose; assert it, so a fixture that
+    // silently starts certifying (and therefore never falls through) is caught
+    // here rather than passing the replay arm for the wrong reason.
+    assert!(MINIMUM > 8.0);
+
+    let replayed = run_arm(&reseed, &fall_through, vec![fall_through.clone()]);
+    assert!(
+        visited(&replayed, &reseed),
+        "the resume's reseed point must still run"
+    );
+    assert!(
+        !visited(&replayed, &fall_through),
+        "a seed whose certificate refusal is already on record must not be \
+         re-run: it terminates where it terminated before"
+    );
+}
