@@ -228,10 +228,16 @@ fn probe_2728_corrected_vs_conditional_width() {
     let k_centers = 80usize;
     let n_train = 4_000usize;
     let n_eval = 400usize;
-    // Compile-time constant rather than an environment lookup. The workspace
-    // bans reading process environment variables (build.rs:1454), and the ban
-    // scanner runs inside build.rs, so one hit aborts the build before
-    // compilation and blocks every crate depending on `gam`. Edit to sweep.
+    // This was an `env::var` read, which `build.rs` bans outright and which
+    // therefore made EVERY build of the workspace fail, not just this probe's.
+    // The value is the one every unset-environment run already took, so the
+    // observable behaviour of the probe is unchanged.
+    //
+    // NOTE FOR #2728: at 1 replicate the `n_replicates >= 3` Monte-Carlo arm
+    // below cannot fire. It could not fire before this commit either — nothing
+    // in the tree ever set the variable — so this makes an existing dead branch
+    // visible rather than creating one. Raising this constant is how that arm
+    // gets exercised; a re-added environment read is not.
     let n_replicates: usize = 1;
     let spec = duchon_aniso_pc_spec("duchon_pc_probe", pc_dim, k_centers);
 
