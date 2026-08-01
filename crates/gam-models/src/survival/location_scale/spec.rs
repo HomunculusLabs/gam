@@ -736,6 +736,41 @@ pub fn survival_fit_from_parts(
         .map_err(|reason| {
             format!("survival location-scale conditional standard errors are invalid: {reason}")
         })?;
+    // #2677 — when lambda was NOT selected, the smoothing correction
+    // `J V_rho Jᵀ` integrates over a zero-dimensional rho, so it is the zero
+    // matrix and `Vp = Vb` EXACTLY. Publishing the conditional covariance as
+    // the corrected one is then an identity of the definition, not a fallback
+    // to a narrower uncertainty object.
+    //
+    // Without this, `--survival-likelihood location-scale` published a typed
+    // absence on EVERY fit, so a saved model could never satisfy the default
+    // `gam predict --covariance-mode corrected`, and the CLI refused with
+    // "refit before requesting" -- an instruction no refit could satisfy,
+    // because this route never computes the term. The CLI's own
+    // `lambdas.is_empty()` carve-out could not catch it either: these fits DO
+    // carry smoothing coordinates (fixed ones), so `lambdas` is non-empty.
+    //
+    // The predicate is the sibling survival-transformation route's, verbatim
+    // (`fit_orchestration/fit.rs`): no outer iterations and no criterion
+    // certificate is exactly "no rho was selected" -- the field doc on
+    // `criterion_certificate` states `None` is valid only when
+    // `outer_iterations == 0`.
+    //
+    // A fit whose lambda WAS selected keeps the typed absence. There the
+    // correction is a real, non-zero term this route does not compute, and
+    // returning `Vb` under a corrected request would silently under-report
+    // every interval.
+    let lambda_is_fixed = outer_iterations == 0 && criterion_certificate.is_none();
+    let covariance_corrected = lambda_is_fixed
+        .then(|| covariance_conditional.clone())
+        .flatten();
+    let beta_standard_errors_corrected = covariance_corrected
+        .as_ref()
+        .map(gam_problem::se_from_covariance)
+        .transpose()
+        .map_err(|reason| {
+            format!("survival location-scale corrected standard errors are invalid: {reason}")
+        })?;
     let inference = geometry
         .as_ref()
         .map(|geom| gam_solve::estimate::FitInference {
@@ -751,8 +786,8 @@ pub fn survival_fit_from_parts(
             dispersion: gam_solve::estimate::Dispersion::UNIT,
             beta_covariance: covariance_conditional.clone().map(Into::into),
             beta_standard_errors,
-            beta_covariance_corrected: None,
-            beta_standard_errors_corrected: None,
+            beta_covariance_corrected: covariance_corrected.clone(),
+            beta_standard_errors_corrected: beta_standard_errors_corrected.clone(),
             beta_covariance_frequentist: None,
             coefficient_influence: None,
             weighted_gram: None,
@@ -780,7 +815,7 @@ pub fn survival_fit_from_parts(
         outer_gradient_norm,
         standard_deviation: 1.0,
         covariance_conditional,
-        covariance_corrected: None,
+        covariance_corrected,
         inference,
         fitted_link: FittedLinkState::Standard(None),
         geometry,
