@@ -7835,6 +7835,7 @@ mod tests_atlas_prior_2280 {
         let mut menu_only_wins: Vec<String> = Vec::new();
         let mut atlas_only_wins: Vec<String> = Vec::new();
         let mut atlas_misnamed: Vec<String> = Vec::new();
+        let mut truth_not_offered: Vec<String> = Vec::new();
         let mut atlas_right_total = 0usize;
         let mut menu_right_total = 0usize;
         let mut both = 0usize;
@@ -7846,7 +7847,16 @@ mod tests_atlas_prior_2280 {
 
         for (name, target, d, truth) in &zoo {
             let weights = Array1::<f64>::ones(target.nrows());
-            let coords = global_linear_seed(target.view(), *d);
+            // Seed WIDTH is not the candidate's intrinsic dimension. The birth
+            // race is handed the template coordinate block, which is as wide as
+            // the template atom carries; truncating it to `d` here would starve
+            // the menu of candidates that need extra directions to be REGISTERED
+            // at all -- the sphere and RP2 require `d_seed >= 3` and the Mobius
+            // double cover the same, so a 2-column seed silently removes three of
+            // the eight `d = 2` candidates before the race begins. Measuring the
+            // menu on a menu that is missing the planted manifold would price the
+            // wrong thing entirely.
+            let coords = global_linear_seed(target.view(), target.ncols().min(4).max(*d));
 
             // What the CHARTS measure, with no menu and no seed.
             let atlas = atlas_prior_for_coords(target.view(), *d);
@@ -7857,8 +7867,16 @@ mod tests_atlas_prior_2280 {
 
             // What the fixed menu's REML race picks off the global-linear seed,
             // UNPRIMED — the incumbent this epic proposes to delete.
+            let realized = topology_candidates_for_dim(coords.view(), *d).expect("menu must build");
+            let offered: Vec<AutoTopologyKind> = realized.iter().map(|spec| spec.kind).collect();
+            // A candidate that was never OFFERED cannot be said to have lost. Any
+            // fixture whose planted truth is absent from its own menu is recorded
+            // and asserted against below.
+            if !offered.iter().any(|kind| names_truth(*kind, *truth)) {
+                truth_not_offered.push(format!("{name}: planted {truth:?} absent from {offered:?}"));
+            }
             let menu_kind = race_spec_set(
-                topology_candidates_for_dim(coords.view(), *d).expect("menu must build"),
+                realized,
                 target.view(),
                 weights.view(),
                 None,
@@ -7903,6 +7921,13 @@ mod tests_atlas_prior_2280 {
         // gate must still publish the numbers it passed on.
         println!("{table}");
 
+        assert!(
+            truth_not_offered.is_empty(),
+            "{table}\nA fixture's planted manifold was never OFFERED as a candidate: \
+             {truth_not_offered:?}. The menu cannot be scored on a manifold it was not \
+             asked about -- widen the seed until every planted truth is realizable, or this \
+             comparison measures candidate REGISTRATION rather than topology discrimination."
+        );
         assert!(
             atlas_misnamed.is_empty(),
             "{table}\nThe atlas MISNAMED a planted manifold: {atlas_misnamed:?}. Its errors must \
