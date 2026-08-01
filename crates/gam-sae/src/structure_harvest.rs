@@ -8046,6 +8046,113 @@ mod tests_atlas_prior_2280 {
         );
     }
 
+    /// #2280 — the revolution chart's phases, reported INDEPENDENTLY of which
+    /// chart the menu ended up granting.
+    ///
+    /// The previous torus diagnostic asked whether the RETURNED chart closes,
+    /// which is circular: the fallback is returned precisely when closure fails,
+    /// so it can only ever report "did not close" and cannot separate "the
+    /// revolution phases failed closure" from "they closed and the candidate
+    /// still lost the evidence race". This computes the phases directly and
+    /// prints each one's spacing statistics, so the torus ranking becomes
+    /// evidence about the EMBEDDING rather than about the selector.
+    ///
+    /// Two-sided by construction. On the RAW donut the revolution
+    /// parameterisation is exact — `hypot(x, y) - R` is the signed meridian
+    /// radius and `z` its transverse partner — so both phases MUST close, and
+    /// that arm validates the formula rather than the data. The standardized
+    /// seed is the measurement. If raw closes and standardized does not, the
+    /// chart is right and is being fed the wrong basis, which is a different
+    /// repair from rewriting the chart.
+    #[test]
+    fn planted_donut_revolution_phases_close_2280() {
+        use crate::manifold::tests_topology_fixtures::torus as torus_fixture;
+
+        /// Largest circular spacing, distinct positions, and the bar the
+        /// predicate would apply — the predicate's own inputs, surfaced so a
+        /// verdict can be read rather than guessed at.
+        fn spacing_report(phases: &Array1<f64>) -> (f64, usize, f64, bool) {
+            let mut folded: Vec<f64> = phases.iter().map(|v| v - v.floor()).collect();
+            folded.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+            let n = folded.len();
+            let mut largest = 1.0 - (folded[n - 1] - folded[0]);
+            let mut positions = 1usize;
+            for w in folded.windows(2) {
+                let gap = w[1] - w[0];
+                if gap > 0.0 {
+                    positions += 1;
+                }
+                if gap > largest {
+                    largest = gap;
+                }
+            }
+            let bar = (positions as f64 / PHASE_CLOSURE_FALSE_REJECTION_RATE).ln() / positions as f64;
+            let closes =
+                phase_coordinate_closes(phases.view(), PHASE_CLOSURE_FALSE_REJECTION_RATE);
+            (largest, positions, bar, closes)
+        }
+
+        /// The revolution parameterisation, read off whichever basis is passed.
+        fn revolution(basis: ArrayView2<'_, f64>) -> (Array1<f64>, Array1<f64>) {
+            let n = basis.nrows();
+            let phase = |a: f64, b: f64| {
+                let f = b.atan2(a) / std::f64::consts::TAU;
+                f - f.floor()
+            };
+            let mut radius = Array1::<f64>::zeros(n);
+            for r in 0..n {
+                radius[r] = basis[[r, 0]].hypot(basis[[r, 1]]);
+            }
+            let mean_radius = radius.sum() / n as f64;
+            let mut major = Array1::<f64>::zeros(n);
+            let mut minor = Array1::<f64>::zeros(n);
+            for r in 0..n {
+                major[r] = phase(basis[[r, 0]], basis[[r, 1]]);
+                minor[r] = phase(radius[r] - mean_radius, basis[[r, 2]]);
+            }
+            (major, minor)
+        }
+
+        let target = torus_fixture(30, 20, 3.0, 1.0);
+
+        // ARM 1 — RAW ambient donut. The formula's own validation.
+        let (raw_major, raw_minor) = revolution(target.view());
+        for (name, column) in [("raw major", &raw_major), ("raw minor", &raw_minor)] {
+            let (gap, positions, bar, closes) = spacing_report(column);
+            println!(
+                "[2280-rev] {name:<16} gap={gap:.5} positions={positions:3} bar={bar:.5} closes={closes}"
+            );
+        }
+
+        // ARM 2 — the STANDARDIZED seed the menu actually receives.
+        let seed = global_linear_seed(target.view(), target.ncols().min(4).max(2));
+        for axis in 0..seed.ncols() {
+            let column = seed.column(axis);
+            let mean = column.sum() / column.len() as f64;
+            let sd = (column.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                / column.len() as f64)
+                .sqrt();
+            println!("[2280-rev] seed axis {axis}: mean={mean:.5} sd={sd:.5}");
+        }
+        let (seed_major, seed_minor) = revolution(seed.view());
+        for (name, column) in [("seed major", &seed_major), ("seed minor", &seed_minor)] {
+            let (gap, positions, bar, closes) = spacing_report(column);
+            println!(
+                "[2280-rev] {name:<16} gap={gap:.5} positions={positions:3} bar={bar:.5} closes={closes}"
+            );
+        }
+
+        // The raw arm is the one that must hold unconditionally: it is the
+        // parameterisation's definition, not a claim about any pipeline.
+        let (_, _, _, raw_major_closes) = spacing_report(&raw_major);
+        let (_, _, _, raw_minor_closes) = spacing_report(&raw_minor);
+        assert!(
+            raw_major_closes && raw_minor_closes,
+            "on the RAW donut both revolution phases must close; if this fails the \
+             parameterisation is wrong, not the seed"
+        );
+    }
+
     /// #2280 — CALIBRATION: the atlas's MEASURED manifold against the fixed menu's
     /// own REML verdict, on a planted zoo whose truth is known by construction.
     ///
