@@ -5752,7 +5752,42 @@ impl SaeSupportSparseTerm {
                 self.atoms[atom].set_decoder_coefficients(decoder)?;
             }
             let trial = self.penalized_objective(target, lambda_smooth, ard_precisions)?;
-            if trial.is_finite() && trial < objective {
+            // #2634 -- a strict decrease SMALLER THAN THE OBJECTIVE'S OWN
+            // ARITHMETIC RESOLUTION is not a measured descent, and installing
+            // the displacement that bought it is what makes this loop unable to
+            // certify. `penalized_objective` sums `n_obs * output_dim` residual
+            // cells plus the per-atom penalty blocks, so its resolution is
+            // `~sqrt(cells) * EPSILON * |f|`; below that, `trial < objective`
+            // is comparing two roundings of the same number.
+            //
+            // Measured on `tiered_returns_best_effort_open_certificate_at_k_gg_rank_2275`
+            // (base ea5c5e7d1 + instrumentation, release, acn112). The terminal
+            // cycles accepted a coupled step on all 256 coupled cycles for a
+            // decrease of `-5.204170e-17` on an objective of `2.202036583315e-2`
+            // -- fifteen ulps -- and that step displaced the state by
+            // `4.350617e-6`, 9.47x what BOTH sweeps moved and 185x the
+            // parameter-space Newton step the KKT limb certifies
+            // (`2.348286e-8 <= 2.975866e-8`). The recurrence conjunct then
+            // refused the fit for motion the loop had manufactured itself: the
+            // reconstruction moved `6.869948e-10` for that `4.350617e-6`, and
+            // the objective had been bit-identical for 28 cycles.
+            //
+            // Both ratios are CONSTANT across the tail -- `max_change` is
+            // `9.47 x` the sweeps and `185.2 x` the certified Newton step to
+            // four significant figures over two and a half decades of decay --
+            // which is what says the two quantities are one quantity in two
+            // metrics rather than two independent claims.
+            //
+            // This TIGHTENS acceptance; it relaxes no bound and exempts nothing.
+            // A refused step leaves the state exactly as found and doubles the
+            // caller's skip counter, which is the path this function already
+            // documents. With it, the same witness stops dead: `max_change`
+            // goes `2.085759e-6 -> 6.296042e-8 -> 0.000000e0` and certifies at
+            // cycle 333 of 512 with 73 accepted coupled steps instead of 256.
+            let objective_cells = (self.n_obs() * output_dim).max(1) as f64;
+            let objective_resolution =
+                objective_cells.sqrt() * f64::EPSILON * objective.abs();
+            if trial.is_finite() && objective - trial > objective_resolution {
                 self.reconstruct_into(fitted)?;
                 return Ok(Some(trial));
             }
