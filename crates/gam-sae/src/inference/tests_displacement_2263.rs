@@ -44,6 +44,46 @@
 //!
 //! Writing the three down first is what stops whichever one lands from being
 //! read as confirmation.
+//!
+//! ## MEASURED: the second outcome, and items 1 and 3 are one defect
+//!
+//! Requested `+1` month, written at intensity `alpha`, over 96 rows:
+//!
+//! | alpha | 1 | 2 | 4 | 8 | 16 |
+//! |---|---|---|---|---|---|
+//! | realized | +0.9997 | +1.7927 | +2.5642 | +3.0341 | +3.2712 |
+//!
+//! At the row's own intensity the steer is exact. At the `alpha = 16` item 1
+//! says the study needed for any behavioural effect, a one-month request
+//! realizes **+3.27 months, and the response SATURATES** — `1→2` nearly doubles
+//! the move, `8→16` barely changes it.
+//!
+//! That is item 3's signature. "Requested +1..+6 realizes a mode of +8" is an
+//! overshoot whose realized value is roughly *constant across requests*, which
+//! is what a flattened map produces: different requests compress onto the same
+//! displacement and a confusion matrix collapses onto a mode.
+//!
+//! The mechanism reads off the code. `steer_delta` computes
+//! `delta = amplitude · (g(t_to) − g(t_from))`, so `amplitude` is the row's
+//! **expression intensity** — the `a` in `a·g(t)` — not a magnitude control.
+//! Re-encoding `x + 16·(g_to − g_from)` lands wherever that off-manifold row
+//! projects back onto the chart, which is a bounded function of the chord and
+//! therefore saturates by construction.
+//!
+//! **The chart-arithmetic negative result is what makes this attributable.**
+//! The round trip being exact at `alpha = 1` — and wrapping rather than
+//! saturating out to `+18` — is what licenses assigning the whole overshoot to
+//! writing at the wrong intensity, instead of splitting it between the chart
+//! and the dose.
+//!
+//! Predicted and NOT yet measured: `steer_to_target_nats` should not overshoot,
+//! because it solves for the amplitude that lands a requested *dose* rather than
+//! assuming amplitude scales position. That API is landed; nobody has run it.
+//!
+//! (This paragraph is the one the landing commit `ca38dea1b` lost: backticks in
+//! its `-m` were command-substituted by the shell, so the sentence naming
+//! `amplitude` came out empty. The finding lives here, where a reader of the
+//! code will actually meet it.)
 
 #[cfg(test)]
 mod tests {
