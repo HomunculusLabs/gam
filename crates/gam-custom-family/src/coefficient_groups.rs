@@ -56,19 +56,23 @@ pub(crate) fn coefficient_group_block_index(
 pub(crate) fn validate_group_rho_prior_coordinate(
     prior: &gam_problem::RhoPrior,
     context: &str,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     match prior {
         gam_problem::RhoPrior::Flat => Ok(()),
         gam_problem::RhoPrior::Normal { mean, sd } => {
             if !mean.is_finite() {
-                return Err(format!(
-                    "{context} Normal log-precision prior requires finite mean, got {mean}"
-                ));
+                return Err(CustomFamilyError::DimensionMismatch {
+                    reason: format!(
+                        "{context} Normal log-precision prior requires finite mean, got {mean}"
+                    ),
+                });
             }
             if !sd.is_finite() || *sd <= 0.0 {
-                return Err(format!(
-                    "{context} Normal log-precision prior requires sd > 0, got {sd}"
-                ));
+                return Err(CustomFamilyError::DimensionMismatch {
+                    reason: format!(
+                        "{context} Normal log-precision prior requires sd > 0, got {sd}"
+                    ),
+                });
             }
             Ok(())
         }
@@ -78,13 +82,14 @@ pub(crate) fn validate_group_rho_prior_coordinate(
                     reason: format!(
                         "{context} Gamma precision prior requires shape > 0, got {shape}"
                     ),
-                }
-                .into());
+                });
             }
             if !rate.is_finite() || *rate < 0.0 {
-                return Err(format!(
-                    "{context} Gamma precision prior requires rate >= 0, got {rate}"
-                ));
+                return Err(CustomFamilyError::DimensionMismatch {
+                    reason: format!(
+                        "{context} Gamma precision prior requires rate >= 0, got {rate}"
+                    ),
+                });
             }
             Ok(())
         }
@@ -93,8 +98,7 @@ pub(crate) fn validate_group_rho_prior_coordinate(
         }
         gam_problem::RhoPrior::Independent(_) => Err(CustomFamilyError::ConstraintViolation {
             reason: format!("{context} must be a scalar rho prior, not a nested Independent prior"),
-        }
-        .into()),
+        }),
     }
 }
 
@@ -104,16 +108,18 @@ pub(crate) fn validate_penalized_complexity_prior(
     context: &str,
     upper: f64,
     tail_prob: f64,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     if !upper.is_finite() || upper <= 0.0 {
-        return Err(format!(
-            "{context} penalized-complexity prior requires upper > 0, got {upper}"
-        ));
+        return Err(CustomFamilyError::DimensionMismatch {
+            reason: format!(
+                "{context} penalized-complexity prior requires upper > 0, got {upper}"
+            ),
+        });
     }
     if !tail_prob.is_finite() || tail_prob <= 0.0 || tail_prob >= 1.0 {
-        return Err(format!(
+        return Err(CustomFamilyError::DimensionMismatch { reason: format!(
             "{context} penalized-complexity prior requires tail probability in (0, 1), got {tail_prob}"
-        ));
+        ) });
     }
     Ok(())
 }
@@ -122,14 +128,14 @@ pub(crate) fn expand_custom_group_base_prior(
     base_prior: &gam_problem::RhoPrior,
     base_outer_count: usize,
     context: &str,
-) -> Result<Vec<gam_problem::RhoPrior>, String> {
+) -> Result<Vec<gam_problem::RhoPrior>, CustomFamilyError> {
     match base_prior {
         gam_problem::RhoPrior::Independent(priors) => {
             if priors.len() != base_outer_count {
                 return Err(CustomFamilyError::DimensionMismatch { reason: format!(
                     "{context} base Independent rho prior length mismatch: got {}, expected {base_outer_count}",
                     priors.len()
-                ) }.into());
+                ) });
             }
             for (idx, prior) in priors.iter().enumerate() {
                 validate_group_rho_prior_coordinate(prior, &format!("{context} base prior {idx}"))?;
@@ -147,7 +153,7 @@ pub fn realize_coefficient_groups_for_custom_family(
     specs: &[ParameterBlockSpec],
     groups: &[CoefficientGroupSpec],
     base_prior: gam_problem::RhoPrior,
-) -> Result<RealizedCoefficientGroupSpecs, String> {
+) -> Result<RealizedCoefficientGroupSpecs, CustomFamilyError> {
     use gam_terms::structure::coefficient_group_resolver::{ResolvedGroup, ResolvedGroupHierarchy};
 
     let base_penalty_counts = validate_blockspecs(specs)?;
@@ -167,8 +173,7 @@ pub fn realize_coefficient_groups_for_custom_family(
                     "coefficient group '{}' initial log precision must be finite, got {initial}",
                     group.label
                 ),
-            }
-            .into());
+            });
         }
     }
 
@@ -235,8 +240,7 @@ pub fn realize_coefficient_groups_for_custom_family(
                     spec.penalties.len(),
                     spec.nullspace_dims.len()
                 ),
-            }
-            .into());
+            });
         }
         let infer_nullity = !spec.penalties.is_empty() && spec.nullspace_dims.is_empty();
         infer_nullity_by_block.push(infer_nullity);
@@ -270,8 +274,7 @@ pub fn realize_coefficient_groups_for_custom_family(
                     "coefficient group label '{}' collides with an existing base penalty label",
                     group.label
                 ),
-            }
-            .into());
+            });
         }
     }
 
@@ -283,7 +286,7 @@ pub fn realize_coefficient_groups_for_custom_family(
                     return Err(CustomFamilyError::ConstraintViolation { reason: format!(
                         "coefficient group '{}' must declare a prior when base_prior is Independent",
                         group.label
-                    ) }.into());
+                    ) });
                 }
                 prior => prior.clone(),
             },
@@ -393,8 +396,7 @@ pub fn realize_coefficient_groups_for_custom_family(
                             "precision label '{}' carries inconsistent rho priors across physical penalty pieces",
                             emission.label
                         ),
-                    }
-                    .into());
+                    });
                 }
                 let first = outer_initial_log_lambdas[outer_idx];
                 if (first - emission.initial_log_lambda).abs() > 1e-10 {
@@ -403,8 +405,7 @@ pub fn realize_coefficient_groups_for_custom_family(
                             "precision label '{}' has inconsistent initial log-precisions: {first} and {}",
                             emission.label, emission.initial_log_lambda
                         ),
-                    }
-                    .into());
+                    });
                 }
                 continue;
             }
@@ -649,7 +650,7 @@ mod tests {
             )
             .expect_err("group and base penalty labels must have distinct owners");
             assert!(
-                error.contains("collides with an existing base penalty label"),
+                error.to_string().contains("collides with an existing base penalty label"),
                 "unexpected collision error: {error}"
             );
         }

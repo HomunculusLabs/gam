@@ -405,7 +405,7 @@ fn custom_family_nested_group_rejects_uncovered_parent_coefficients() {
     )
     .expect_err("parent coefficients outside child concatenation must fail");
 
-    assert!(err.contains("union of its child groups"));
+    assert!(err.to_string().contains("union of its child groups"));
 }
 
 #[test]

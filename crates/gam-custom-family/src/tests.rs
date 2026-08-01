@@ -455,17 +455,18 @@ pub(crate) fn solve_blockweighted_system(
     s_lambda: &Array2<f64>,
     ridge_floor: f64,
     ridge_policy: RidgePolicy,
-) -> Result<Array1<f64>, String> {
+) -> Result<Array1<f64>, CustomFamilyError> {
     let n = x.nrows();
     if y_star.len() != n || w.len() != n {
         return Err(CustomFamilyError::DimensionMismatch {
             reason: "weighted-system dimension mismatch".to_string(),
-        }
-        .into());
+        });
     }
     let xtwy = x.compute_xtwy(w, y_star)?;
     x.solve_systemwith_policy(w, &xtwy, Some(s_lambda), ridge_floor, ridge_policy)
-        .map_err(|_| "block solve failed after ridge retries".to_string())
+        .map_err(|_| CustomFamilyError::NumericalFailure {
+            reason: "block solve failed after ridge retries".to_string(),
+        })
 }
 
 #[test]
