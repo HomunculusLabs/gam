@@ -2771,11 +2771,29 @@ pub(crate) const KKT_REFUSAL_RANK_TOL: f64 = 1e-10;
 /// numerically resolvable curvature and must remain in the step and in the KKT
 /// residual, even when a much wider conditioning diagnostic such as
 /// [`KKT_REFUSAL_RANK_TOL`] would label it near-singular.
+///
+/// # Which curvature law this is (#2690)
+///
+/// `H_pen` is assembled ANALYTICALLY, so the applicable law is Weyl's: the
+/// resolution of an eigenvalue is `‖δH‖₂`, the matrix's own error, with no
+/// propagation constant. `‖H‖₂·√n·ε` is this site's measurement of that
+/// `‖δH‖₂` — the backward error of a symmetric eigensolve on an `n`-wide
+/// matrix. It is stated through
+/// [`gam_linalg::curvature_resolution::CurvatureResolution::analytic_weyl`] so
+/// the law is recorded at the construction site and cannot be confused with the
+/// **finite-difference** law `(2/√3)·√(ε_f·M₄)`, which governs a curvature
+/// differenced from criterion VALUES and is orders larger on the same problem.
+/// `ε_f` does not enter here at all.
 pub(crate) fn joint_hessian_numerical_eigenvalue_floor(
     lambda_max_abs: f64,
     dimension: usize,
 ) -> f64 {
-    lambda_max_abs * (dimension as f64).sqrt() * f64::EPSILON
+    let backward_error = lambda_max_abs * (dimension as f64).sqrt() * f64::EPSILON;
+    // A non-finite `lambda_max_abs` cannot carry a resolution; propagating NaN
+    // is what the bare arithmetic already did, and a floor that silently became
+    // zero would admit every direction.
+    gam_linalg::curvature_resolution::CurvatureResolution::analytic_weyl(backward_error)
+        .map_or(f64::NAN, |resolution| resolution.resolution())
 }
 
 /// Residual band (as a multiple of the KKT residual tolerance) inside which

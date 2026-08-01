@@ -443,11 +443,36 @@ fn smoothing_correction_gram(
     correction
 }
 
+/// The eigensolver's own backward error, expressed as a **curvature
+/// resolution** under Weyl's law (#2690).
+///
+/// `matrix` here is an ANALYTICALLY formed symmetric matrix, so the applicable
+/// law is [`gam_linalg::curvature_resolution::CurvatureLaw::AnalyticWeyl`]:
+/// there is no step and no `1/h²` amplification, and the resolution of an
+/// eigenvalue is `‖δH‖₂`, the perturbation the returned eigenpairs are exact
+/// for. The finite-difference law `(2/√3)·√(ε_f·M₄)` — the other half of #2690
+/// — governs a curvature differenced from criterion VALUES and must never be
+/// applied here; routing this through the shared constructor is what records
+/// that choice at every comparison site.
+///
+/// Two measured components, whichever is larger:
+///
+/// * `max_i ‖H v_i − σ_i v_i‖₂`, a certified `‖δH‖₂` for the eigenpairs as
+///   returned — exactly Weyl's perturbation, computed rather than assumed;
+/// * `64·n·ε·max|H_jk|`, a floor for the case where that residual rounds to
+///   zero (a diagonal input, say). **This coefficient is chosen, not derived**,
+///   and predates #2690; it is recorded as such rather than laundered, and it
+///   is not moved here because moving it moves a live bar.
+///
+/// ⚠ This bounds *"given this matrix, how wrong is σ?"*. It says nothing about
+/// *"how wrong is this matrix?"* — the assembly error of `H` itself, which is
+/// the `‖δH‖₂` a criterion-level resolution question needs and which is nine
+/// orders larger on the fixtures #2690 measured. Do not read one for the other.
 fn eigenpair_backward_error_bound(
     matrix: &Array2<f64>,
     eigenvalues: &Array1<f64>,
     eigenvectors: &Array2<f64>,
-) -> Result<f64, String> {
+) -> Result<gam_linalg::curvature_resolution::CurvatureResolution, String> {
     let n = matrix.nrows();
     if matrix.ncols() != n || eigenvalues.len() != n || eigenvectors.dim() != (n, n) {
         return Err("eigendecomposition dimensions do not match the symmetric matrix".into());
@@ -470,7 +495,10 @@ fn eigenpair_backward_error_bound(
         max_residual_norm = max_residual_norm.max(residual.dot(&residual).sqrt());
     }
     let arithmetic_bound = 64.0 * n.max(1) as f64 * f64::EPSILON * matrix_scale;
-    Ok(max_residual_norm.max(arithmetic_bound))
+    gam_linalg::curvature_resolution::CurvatureResolution::analytic_weyl(
+        max_residual_norm.max(arithmetic_bound),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn penalty_map_structural_nullity(
@@ -521,7 +549,10 @@ fn penalty_map_structural_nullity(
     let (eigenvalues, eigenvectors) = gram
         .eigh(faer::Side::Lower)
         .map_err(|error| format!("penalty-map Gram eigendecomposition failed: {error}"))?;
-    let zero_bound = eigenpair_backward_error_bound(&gram, &eigenvalues, &eigenvectors)?;
+    // The Gram is assembled analytically, so its rank boundary is judged by the
+    // Weyl law (#2690), never by the finite-difference one.
+    let gram_resolution = eigenpair_backward_error_bound(&gram, &eigenvalues, &eigenvectors)?;
+    let zero_bound = gram_resolution.resolution();
     let minimum = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
     if minimum < -zero_bound {
         let neg_zero_bound = -zero_bound;
@@ -643,7 +674,14 @@ pub(crate) fn invert_identified_rho_hessian(
     let (eigenvalues, eigenvectors) = hessian_rho
         .eigh(faer::Side::Lower)
         .map_err(|error| format!("rho-Hessian eigendecomposition failed: {error}"))?;
-    let zero_bound = eigenpair_backward_error_bound(hessian_rho, &eigenvalues, &eigenvectors)?;
+    // `hessian_rho` is an ANALYTIC Hessian, so the applicable curvature law is
+    // Weyl's `‖δH‖₂` (#2690), not the finite-difference `(2/√3)·√(ε_f·M₄)`.
+    // The distinction is load-bearing: the two are orders apart on this
+    // criterion, and `ε_f` — the value-level evaluation error the FD law needs
+    // — bounds the error of a separately-coded second derivative not at all.
+    let curvature_resolution =
+        eigenpair_backward_error_bound(hessian_rho, &eigenvalues, &eigenvectors)?;
+    let zero_bound = curvature_resolution.resolution();
 
     // Per-direction resolution floor: the eigensolver's own backward error, or
     // the outer certificate's gradient floor along this eigenvector, whichever
@@ -666,9 +704,13 @@ pub(crate) fn invert_identified_rho_hessian(
         if sigma < -floor {
             return Err(format!(
                 "rho Hessian has negative curvature {sigma:.3e} below the outer certificate's own \
-                 resolution floor {floor:.3e} on that direction (eigensolver backward error \
-                 {zero_bound:.3e}); the outer loop certified this point as a minimum, so this is a \
-                 genuine contradiction rather than an unresolvable direction"
+                 chain-rule gradient floor {floor:.3e} on that direction (that floor is an EXACT \
+                 chain-rule term of `H_rho = diag(lambda) H_lambda diag(lambda) + diag(g_rho)`, \
+                 not a resolution; the curvature resolution of an analytically-formed eigenvalue \
+                 is Weyl's ||dH||_2, of which the eigensolver backward error {} is one measured \
+                 component -- #2690); the outer loop certified this point as a minimum, so this \
+                 is a genuine contradiction rather than an unresolvable direction",
+                curvature_resolution
             ));
         }
     }

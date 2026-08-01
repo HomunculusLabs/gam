@@ -23,6 +23,7 @@ macro_rules! impl_reason_error_boilerplate {
 }
 
 pub mod anderson;
+pub mod curvature_resolution;
 pub mod decision;
 pub mod dense;
 mod error;
