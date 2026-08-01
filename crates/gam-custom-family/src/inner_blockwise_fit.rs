@@ -2224,10 +2224,24 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
                 continue;
             }
             let scaled_slack = (values_beta[row] - bound) / norm;
+            let scaled_rate = values_direction[row] / norm;
+            // Decide the row only if it CAN be decided (gam#2721). A `NaN`
+            // fails `scaled_slack < 0.0`, `scaled_rate < 0.0` AND
+            // `scaled_rate > 0.0`, so the row would drop out of BOTH sign
+            // folds and leave the feasible cap at `+INFINITY` — the escape
+            // chord would be truncated by nothing at all. Refuse instead; the
+            // predicate is the constraint carrier's own.
+            if !gam_problem::feasibility_quantities_are_finite(&[scaled_slack, scaled_rate]) {
+                return Err(format!(
+                    "saddle-escape feasibility row {row} cannot be decided: \
+                     scaled slack={scaled_slack:.3e}, scaled rate={scaled_rate:.3e}; \
+                     every comparison in the chord truncation is false for NaN, so \
+                     skipping the row would leave the chord untruncated (gam#2721)"
+                ));
+            }
             if scaled_slack < 0.0 {
                 continue;
             }
-            let scaled_rate = values_direction[row] / norm;
             if scaled_rate < 0.0 {
                 let step = scaled_slack / -scaled_rate;
                 if step < feasible_positive {

@@ -50,6 +50,46 @@ use std::sync::Arc;
 /// refused 314 steps that violated nothing at this tolerance).
 pub const PRIMAL_FEASIBILITY_TOL: f64 = 1e-8;
 
+/// Can this row's feasibility be DECIDED by comparison at all?
+///
+/// EVERY feasibility rule in this module decides with an ordering predicate on
+/// per-row quantities — `slack < −tol`, `drift ≥ 0`, `t < step`,
+/// `violation > worst` — and EVERY one of those is `false` for `NaN`. A row
+/// carrying a `NaN` therefore contributes NOTHING to any of those minima and
+/// maxima, and the rule answers with its neutral element: "take the whole
+/// step", "nothing is violated". That is the exact opposite of the truth, and
+/// it is gam#2721: a step with a `NaN` component was certified at `α = 1.0`,
+/// and its caller rejects only `!α.is_finite() || α ≤ 0.0`, neither of which
+/// `1.0` is.
+///
+/// The quantities are therefore tested BEFORE they are compared, and a row that
+/// cannot be decided is refused by name rather than skipped. The predicate is
+/// exported — rather than re-written at each site — because the defect WAS the
+/// rule existing in several copies and being repaired in one of them: the two
+/// fraction-to-boundary rules here, the violation sweep here, the saddle-escape
+/// chord truncation in `gam-custom-family`, and the Bernoulli marginal-slope
+/// segment cap in `gam-models` all decide with the same comparisons.
+///
+/// `NaN` is the value that cannot be compared, but it is not the only value
+/// that must be refused. An infinite drift passes `drift ≥ 0` and an infinite
+/// iterate value drives the violation to `−∞`, both of which read as "this row
+/// does not object" for an argument that is not a point. And the carrier's own
+/// constructor already holds the same line —
+/// `LinearInequalityConstraints::new` rejects a non-finite `A` or `b` with the
+/// identical reason — so requiring finiteness here keeps the row descriptors
+/// and the per-iterate quantities under ONE rule rather than two.
+///
+/// A `NaN` `row_norm` additionally defeats the `norm <= 0.0` vacuity test that
+/// would otherwise be the branch to catch it, which is why the norm is checked
+/// here and not left to that branch.
+///
+/// This does NOT collide with the legitimately-vacuous row: `‖a‖ = 0` with a
+/// bound at or below zero is finite, passes here, and keeps its own
+/// disposition in each rule.
+pub fn feasibility_quantities_are_finite(quantities: &[f64]) -> bool {
+    quantities.iter().all(|q| q.is_finite())
+}
+
 /// The contract-feasible ratio test itself, over already-evaluated constraint
 /// values, so every carrier — the dense system, the factored cone, the
 /// block-diagonal composition — runs the SAME arithmetic without any of them
@@ -73,6 +113,19 @@ where
     for row in 0..values.len() {
         let norm = row_norm(row).map_err(ContractFeasibleStepError::Carrier)?;
         let bound = bound(row).map_err(ContractFeasibleStepError::Carrier)?;
+        // A ROW THAT CANNOT BE COMPARED IS NOT A FEASIBLE ROW (gam#2721) — see
+        // [`feasibility_quantities_are_finite`] for why skipping it certifies
+        // the whole step. Refuse instead, and name the condition: "this row is
+        // not a number" is a different condition from "the current iterate
+        // violates this row", so it gets its own variant rather than being
+        // reported through `InfeasibleIterate`.
+        if !feasibility_quantities_are_finite(&[norm, bound, values[row], directional[row]]) {
+            return Err(ContractFeasibleStepError::NonFinite {
+                row,
+                scaled_slack: (values[row] - bound) / norm,
+                scaled_drift: directional[row] / norm,
+            });
+        }
         if !(norm.is_finite() && norm > 0.0) {
             // A vacuous row constrains nothing unless its bound is positive,
             // in which case the feasible set is empty and no step fraction
@@ -87,20 +140,6 @@ where
         }
         let slack = (values[row] - bound) / norm;
         let drift = directional[row] / norm;
-        // A NON-FINITE ROW IS NOT A FEASIBLE ROW (gam#2721). Every comparison
-        // below is FALSE for NaN, so a non-finite slack or drift would
-        // contribute nothing to the minimum and the rule would answer "take the
-        // whole step" for a step that is not a number — and the caller rejects
-        // only `!alpha.is_finite() || alpha <= 0.0`, neither of which `1.0` is.
-        // Refuse instead, and name the quantity: "this row is not a number" is
-        // a different condition from "the current iterate violates this row".
-        if !slack.is_finite() || !drift.is_finite() {
-            return Err(ContractFeasibleStepError::NonFinite {
-                row,
-                scaled_slack: slack,
-                scaled_drift: drift,
-            });
-        }
         if slack < -tol {
             return Err(ContractFeasibleStepError::InfeasibleIterate {
                 row,
@@ -187,10 +226,12 @@ pub enum ContractFeasibleStepError {
     /// step from. This is the genuine "infeasible iterate" condition and stays
     /// loud.
     InfeasibleIterate { row: usize, scaled_slack: f64 },
-    /// A row's scaled slack or scaled drift is not finite. Reported rather
-    /// than skipped: every comparison in the rule is false for NaN, so a
-    /// skipped row would silently certify a step that is not a number as fully
-    /// feasible (gam#2721).
+    /// A row cannot be DECIDED by comparison: a non-finite row norm, bound,
+    /// `a·β` or `a·δ`. Reported rather than skipped: every comparison in the
+    /// rule is false for NaN, so a skipped row would silently certify a step
+    /// that is not a number as fully feasible (gam#2721). The reported slack
+    /// and drift are the scaled quantities as computed, so the offending one is
+    /// visible.
     NonFinite {
         row: usize,
         scaled_slack: f64,
@@ -734,6 +775,12 @@ impl ConstraintSet {
     /// `ConstraintSetOps::scaled_slack`, which already answers `−∞` for exactly
     /// this row, and keeps a gate built on this metric from silently admitting
     /// an unsatisfiable system.
+    ///
+    /// A row that cannot be decided by comparison — a non-finite row norm,
+    /// bound or `a·β` — is refused rather than skipped (gam#2721): feasibility
+    /// of an iterate that is not a number is undefined, and `violation > worst`
+    /// being false for `NaN` would report the neutral `0.0` — "nothing is
+    /// violated" — for exactly the iterate this metric exists to catch.
     pub fn max_scaled_violation(
         &self,
         beta: ArrayView1<'_, f64>,
@@ -743,13 +790,29 @@ impl ConstraintSet {
         let mut worst_row = None;
         for (row, &value) in values.iter().enumerate() {
             let norm = self.row_norm(row)?;
+            let bound = self.bound(row)?;
+            // Decidability before comparison (gam#2721): `violation > worst` is
+            // FALSE for `NaN`, so an undecidable row would leave `worst` at
+            // `0.0` and this metric — THE feasibility verdict — would call an
+            // iterate that is not a number feasible. `norm <= 0.0` is false for
+            // a `NaN` norm too, so the vacuous-row branch below cannot be the
+            // one that catches it. Refuse, naming the row and the quantities.
+            if !feasibility_quantities_are_finite(&[norm, bound, value]) {
+                return Err(format!(
+                    "ConstraintSet::max_scaled_violation: row {row} cannot be decided \
+                     (row norm {norm:.3e}, bound {bound:.3e}, value {value:.3e}); \
+                     feasibility of a non-finite iterate is undefined and every \
+                     comparison in the sweep is false for NaN, so the row cannot \
+                     be skipped (gam#2721)"
+                ));
+            }
             if norm <= 0.0 {
-                if self.bound(row)? > 0.0 {
+                if bound > 0.0 {
                     return Ok((f64::INFINITY, Some(row)));
                 }
                 continue;
             }
-            let violation = (self.bound(row)? - value) / norm;
+            let violation = (bound - value) / norm;
             if violation > worst {
                 worst = violation;
                 worst_row = Some(row);
@@ -769,6 +832,12 @@ impl ConstraintSet {
     /// — a globalization that demands exact feasibility rejects steps this
     /// carrier's own contract calls feasible. Use
     /// [`ConstraintSet::max_contract_feasible_step`] for that.
+    ///
+    /// Like the contract rule, this one is TOTAL (gam#2721): a row that cannot
+    /// be decided by comparison — a non-finite row norm, bound, `a·β` or `a·δ`
+    /// — and that was not explicitly skipped is refused, because every
+    /// comparison it would otherwise feed is false for `NaN` and the answer
+    /// would be an unlimited `t = 1`.
     pub fn max_feasible_step(
         &self,
         beta: ArrayView1<'_, f64>,
@@ -790,15 +859,31 @@ impl ConstraintSet {
                 continue;
             }
             let norm = self.row_norm(row)?;
+            let bound = self.bound(row)?;
+            let value = values[row];
+            let rate = directional[row];
+            // Same decidability requirement as the contract rule (gam#2721): a
+            // `NaN` fails `rate >= 0.0` AND `t < step`, so the row would be
+            // skipped twice over and this exact ratio test would answer
+            // `step = 1.0` — "the whole chord is feasible" — for a chord that
+            // is not a point. The clipper built on it would then accept the
+            // endpoint. Refuse before comparing.
+            if !feasibility_quantities_are_finite(&[norm, bound, value, rate]) {
+                return Err(format!(
+                    "ConstraintSet::max_feasible_step: row {row} cannot be decided \
+                     (row norm {norm:.3e}, bound {bound:.3e}, value {value:.3e}, \
+                     drift {rate:.3e}); every comparison in the ratio test is false \
+                     for NaN, so skipping the row would report the whole step \
+                     feasible (gam#2721)"
+                ));
+            }
             if norm <= 0.0 {
                 continue;
             }
-            let slack = values[row] - self.bound(row)?;
-            let rate = directional[row];
             if rate >= 0.0 {
                 continue;
             }
-            let t = slack / (-rate);
+            let t = (value - bound) / (-rate);
             if t < step {
                 step = t.max(0.0);
                 blocking = Some(row);
@@ -1298,6 +1383,109 @@ mod tests {
             .max_feasible_step(beta.view(), direction.view(), &[])
             .expect("exact ratio test");
         assert!((contract.fraction - exact).abs() < 1e-15);
+    }
+
+    /// gam#2721, asked of all three rules at once: hand each of them the
+    /// MAXIMALLY bad argument — every component `NaN` — and require a refusal.
+    ///
+    /// Each arm carries a positive control on the same fixture first, so a
+    /// green cannot come from the fixture never reaching the rule: the finite
+    /// direction must be evaluated and clipped, and the finite violating
+    /// iterate must be measured as violating.
+    #[test]
+    fn every_feasibility_rule_refuses_an_argument_that_is_not_a_number() {
+        let set = scaled_box();
+        let interior = array![1.0_f64, 1.0];
+        let nan = array![f64::NAN, f64::NAN];
+
+        // --- the contract ratio test ---
+        let clipped = set
+            .max_contract_feasible_step(interior.view(), array![0.0_f64, -2.0].view())
+            .expect("a finite binding direction must be evaluated");
+        assert!(
+            clipped.fraction > 0.0 && clipped.fraction < 1.0,
+            "positive control: a binding finite direction must clip, got {}",
+            clipped.fraction
+        );
+        match set.max_contract_feasible_step(interior.view(), nan.view()) {
+            Err(ContractFeasibleStepError::NonFinite { row, .. }) => {
+                assert_eq!(row, 0, "the refusal must name the offending row");
+            }
+            other => panic!("a NaN step must be refused, got {other:?}"),
+        }
+
+        // --- the exact ratio test (the feasible-chord clipper's rule) ---
+        let (exact, blocking) = set
+            .max_feasible_step(interior.view(), array![0.0_f64, -2.0].view(), &[])
+            .expect("a finite binding direction must be evaluated");
+        assert!(
+            exact > 0.0 && exact < 1.0,
+            "positive control: a binding finite direction must clip, got {exact}"
+        );
+        assert_eq!(blocking, Some(1));
+        let refusal = set
+            .max_feasible_step(interior.view(), nan.view(), &[])
+            .expect_err("a NaN chord must be refused, not reported as fully feasible");
+        assert!(
+            refusal.contains("max_feasible_step") && refusal.contains("cannot be decided"),
+            "the refusal must name the rule and the condition, got: {refusal}"
+        );
+
+        // --- the violation sweep (THE feasibility verdict on an iterate) ---
+        let (violation, row) = set
+            .max_scaled_violation(array![-1.0_f64, -0.5].view())
+            .expect("a finite iterate must be measured");
+        assert!(
+            violation > 0.0 && row.is_some(),
+            "positive control: a violating finite iterate must be seen as violating"
+        );
+        let refusal = set
+            .max_scaled_violation(nan.view())
+            .expect_err("a NaN iterate must be refused, not reported as feasible");
+        assert!(
+            refusal.contains("max_scaled_violation") && refusal.contains("cannot be decided"),
+            "the refusal must name the rule and the condition, got: {refusal}"
+        );
+    }
+
+    /// The disposition the refusal must NOT swallow: a VACUOUS row (`‖a‖ = 0`
+    /// with a non-positive bound) is `0 ≥ b`, true for every `β`. It is
+    /// perfectly decidable and each rule already has its own answer for it —
+    /// skip. A refusal placed at the wrong point, or written over the wrong
+    /// quantity, turns that row into a hard error, so the `NaN` arms above are
+    /// paired with this one.
+    #[test]
+    fn a_vacuous_row_keeps_its_own_disposition_and_is_not_refused() {
+        // Row 0: 0ᵀβ ≥ 0 (vacuous). Row 1: β₁ ≥ 0.
+        let set = ConstraintSet::Dense(
+            LinearInequalityConstraints::new(
+                array![[0.0_f64, 0.0], [0.0, 1.0]],
+                Array1::<f64>::zeros(2),
+            )
+            .expect("vacuous-row system"),
+        );
+        let beta = array![-1.0e9_f64, 1.0];
+
+        let (violation, row) = set
+            .max_scaled_violation(beta.view())
+            .expect("a vacuous row must be decided, not refused");
+        assert_eq!(violation, 0.0, "a vacuous row cannot be violated");
+        assert_eq!(row, None);
+
+        // The vacuous row must not limit the step either; the real one still
+        // does, at its exact ratio.
+        let direction = array![-1.0e12_f64, -2.0];
+        let (exact, blocking) = set
+            .max_feasible_step(beta.view(), direction.view(), &[])
+            .expect("a vacuous row must be decided, not refused");
+        assert!((exact - 0.5).abs() < 1e-15, "expected 0.5, got {exact}");
+        assert_eq!(blocking, Some(1));
+
+        let contract = set
+            .max_contract_feasible_step(beta.view(), direction.view())
+            .expect("a vacuous row must be decided, not refused");
+        assert!((contract.fraction - 0.5).abs() < 1e-15);
+        assert_eq!(contract.blocking_row, Some(1));
     }
 
     /// The tolerance is a SCALED one. Row 0 has ‖a‖ = 1e-3, so a raw drift of

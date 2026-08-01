@@ -617,12 +617,27 @@ pub(crate) fn max_linear_constraint_segment_alpha(
     for row in 0..constraints.a.nrows() {
         let a_row = constraints.a.row(row);
         let slack = a_row.dot(current) - constraints.b[row];
+        let drift = a_row.dot(&direction);
+        // Decide the row only if it CAN be decided (gam#2721). `NaN` fails
+        // `slack < MONOTONICITY_SLACK_TOL` and fails `drift < 0.0`, so a
+        // non-finite iterate or segment would pass the violation check and then
+        // contribute nothing to the minimum — this cap would return the
+        // maximal `alpha = 1.0`, "take the whole segment", for a segment that
+        // is not a segment. The predicate is the one the constraint carrier
+        // itself uses, so the two cannot drift apart.
+        if !gam_problem::feasibility_quantities_are_finite(&[slack, drift]) {
+            return Err(format!(
+                "{label} linear-constraint segment row {row} cannot be decided: \
+                 slack={slack:.3e}, drift={drift:.3e}; every comparison in the \
+                 fraction-to-boundary rule is false for NaN, so skipping the row \
+                 would report the whole segment feasible (gam#2721)"
+            ));
+        }
         if slack < MONOTONICITY_SLACK_TOL {
             return Err(format!(
                 "{label} current beta violates structural monotonicity row {row}: slack={slack:.3e}"
             ));
         }
-        let drift = a_row.dot(&direction);
         if drift < 0.0 {
             alpha = alpha.min((slack / -drift).clamp(0.0, 1.0));
         }
@@ -698,4 +713,56 @@ pub(super) fn validate_spec(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod segment_alpha_2721_tests {
+    use super::max_linear_constraint_segment_alpha;
+    use gam_problem::LinearInequalityConstraints;
+    use ndarray::{Array1, array};
+
+    fn unit_box() -> LinearInequalityConstraints {
+        LinearInequalityConstraints::new(array![[1.0_f64, 0.0], [0.0, 1.0]], Array1::zeros(2))
+            .expect("unit box")
+    }
+
+    /// gam#2721 on the fourth copy of the fraction-to-boundary rule: a segment
+    /// that is not a number must be refused, not capped at the maximal
+    /// `alpha = 1.0`.
+    ///
+    /// The positive control comes first, so a green cannot come from the
+    /// fixture never reaching the rule: a finite BINDING segment must still be
+    /// evaluated and clipped, at its exact ratio.
+    #[test]
+    fn a_segment_that_is_not_a_number_is_refused_not_capped_at_one() {
+        let constraints = unit_box();
+        let current = array![1.0_f64, 1.0];
+
+        let clipped = max_linear_constraint_segment_alpha(
+            &current,
+            &array![-1.0_f64, 1.0],
+            &constraints,
+            "control",
+        )
+        .expect("a finite binding segment must be evaluated");
+        assert!(
+            (clipped - 0.5).abs() < 1e-15,
+            "positive control: expected the exact ratio 0.5, got {clipped}"
+        );
+
+        // The defect: `drift < 0.0` is false for NaN, so the row contributed
+        // nothing to the minimum and this returned Ok(1.0) — "take the whole
+        // segment" — for a segment that is not a segment.
+        let refusal = max_linear_constraint_segment_alpha(
+            &current,
+            &array![f64::NAN, f64::NAN],
+            &constraints,
+            "witness",
+        )
+        .expect_err("a non-finite segment must be refused");
+        assert!(
+            refusal.contains("cannot be decided") && refusal.contains("witness"),
+            "the refusal must name the condition and the segment, got: {refusal}"
+        );
+    }
 }
