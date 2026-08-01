@@ -2,8 +2,9 @@
 """Figure for gam#2234 E1/E2: chart-coordinate steering on TWO chart topologies.
 
 Reads the `e1_records.jsonl` / `e2_collateral.json` ledgers produced by
-`run_e1.py` (cyclic: day-of-week circle) and `run_e1_ordinal.py` (non-cyclic:
-ordinal interval) and draws, per structure:
+`run_e1.py --structure weekday` (cyclic: the day-of-week circle) and
+`run_e1.py --structure ordinal` (NON-cyclic: the ordinal number-word line) and
+draws, per structure:
 
   top row     dose-response — mean full-softmax probability mass moved onto the
               intended target token vs the fractional chart dose, on-manifold
@@ -16,7 +17,7 @@ Pure numpy/matplotlib over the recorded ledgers — no model, no fit, so it
 re-runs anywhere in a second.
 
     python3 experiments/steering_e1/fig_e1_2234.py \
-        --cyclic-dir experiments/steering_e1/out_cyclic \
+        --weekday-dir experiments/steering_e1/out_weekday \
         --ordinal-dir experiments/steering_e1/out_ordinal \
         --out experiments/steering_e1/plots/issue_2234_e1_e2.png
 """
@@ -81,7 +82,7 @@ def style(ax) -> None:
     ax.tick_params(colors=INK, labelsize=9, length=3, color=GRID)
 
 
-def panel_dose(ax, records, title: str, dose_unit: str) -> None:
+def panel_dose(ax, records, title: str, dose_unit: str, recovery: float) -> None:
     for arm in ARMS:
         d, m, s = dose_curve(records, arm)
         ax.plot(d, m, marker="o", markersize=4.5, linewidth=2.0,
@@ -92,6 +93,12 @@ def panel_dose(ax, records, title: str, dose_unit: str) -> None:
     ax.set_title(title, fontsize=11, color=INK, loc="left", pad=8)
     ax.set_xlabel(f"dose (fraction of the target move, {dose_unit})", fontsize=9, color=INK)
     ax.set_ylabel("target probability mass moved", fontsize=9, color=INK)
+    # The standing correction on gam#2234: no E1 number means anything without
+    # the fitted coordinate's structure-recovery R^2 printed beside it.
+    ax.text(0.02, 0.97, f"fitted-chart structure recovery R\u00b2 = {recovery:.3f}",
+            transform=ax.transAxes, va="top", ha="left", fontsize=8.5, color=INK,
+            family="monospace",
+            bbox={"facecolor": "white", "edgecolor": GRID, "boxstyle": "round,pad=0.35"})
 
 
 def panel_frontier(ax, e2: dict[str, Any], title: str) -> None:
@@ -123,7 +130,7 @@ def panel_frontier(ax, e2: dict[str, Any], title: str) -> None:
     ax.set_ylabel("min collateral KL to reach $\\geq e$", fontsize=9, color=INK)
 
 
-def build(cyclic_dir: Path, ordinal_dir: Path, out_path: Path, model: str) -> None:
+def build(weekday_dir: Path, ordinal_dir: Path, out_path: Path, model: str) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -131,7 +138,7 @@ def build(cyclic_dir: Path, ordinal_dir: Path, out_path: Path, model: str) -> No
 
     panels = []
     for label, directory, unit in (
-        ("cyclic — day-of-week circle", cyclic_dir, "days round the circle"),
+        ("cyclic — day-of-week circle", weekday_dir, "days round the circle"),
         ("non-cyclic — ordinal interval", ordinal_dir, "ranks along the line"),
     ):
         records = load_records(directory / "e1_records.jsonl")
@@ -142,7 +149,8 @@ def build(cyclic_dir: Path, ordinal_dir: Path, out_path: Path, model: str) -> No
     fig, axes = plt.subplots(2, len(panels), figsize=(6.4 * len(panels), 8.4))
     fig.patch.set_facecolor("white")
     for col, (label, records, e2, meta, unit) in enumerate(panels):
-        panel_dose(axes[0][col], records, f"({'ab'[col]}) dose-response — {label}", unit)
+        panel_dose(axes[0][col], records, f"({'ab'[col]}) dose-response — {label}", unit,
+                   float(meta.get("structure_recovery_r2", float("nan"))))
         panel_frontier(axes[1][col], e2, f"({'cd'[col]}) E2 collateral frontier — {label}")
 
     handles, labels = axes[0][0].get_legend_handles_labels()
@@ -162,12 +170,12 @@ def build(cyclic_dir: Path, ordinal_dir: Path, out_path: Path, model: str) -> No
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--cyclic-dir", default="experiments/steering_e1/out_cyclic")
+    ap.add_argument("--weekday-dir", default="experiments/steering_e1/out_weekday")
     ap.add_argument("--ordinal-dir", default="experiments/steering_e1/out_ordinal")
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B-Base")
     ap.add_argument("--out", default="experiments/steering_e1/plots/issue_2234_e1_e2.png")
     args = ap.parse_args()
-    build(Path(args.cyclic_dir), Path(args.ordinal_dir), Path(args.out), args.model)
+    build(Path(args.weekday_dir), Path(args.ordinal_dir), Path(args.out), args.model)
     return 0
 
 
