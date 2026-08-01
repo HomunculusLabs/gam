@@ -175,7 +175,7 @@ pub fn reml_laml_evaluate(
             // is `2 · penalty_quad_value`.
             let dp_raw = -2.0 * solution.log_likelihood + 2.0 * penalty_quad_value;
             let (dp_c, dp_cgrad, dp_cgrad2) = smooth_floor_dp(dp_raw, solution.dp_floor_scale);
-            let denom = (solution.n_observations as f64 - solution.nullspace_dim).max(DENOM_RIDGE);
+            let denom = profiled_gaussian_residual_dof(solution);
             let phi = dp_c / denom;
 
             let cost = dp_c / (2.0 * phi)

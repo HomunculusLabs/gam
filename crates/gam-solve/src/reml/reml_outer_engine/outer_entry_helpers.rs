@@ -72,6 +72,37 @@ use crate::estimate::smooth_floor_dp;
 /// Ridge floor for denominator safety.
 pub(crate) const DENOM_RIDGE: f64 = 1e-8;
 
+/// #2669 instrumentation: the smallest `n − M_p` any profiled-Gaussian
+/// evaluation in this process has produced, in milli-units, and the number of
+/// evaluations that reached the site. Together they answer the question three
+/// external fixtures could not: does `n − M_p ≤ 0` occur, and did the site run
+/// at all (non-vacuity control for a null result).
+static RESIDUAL_DOF_MIN_MILLI_2669: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(i64::MAX);
+static RESIDUAL_DOF_CALLS_2669: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Profiled-Gaussian residual degrees of freedom `n − M_p`, floored by
+/// [`DENOM_RIDGE`]. Single definition shared by the REML criterion, both
+/// outer-derivative backends, and EFS, so #2669's instrument sits AT the
+/// clamp instead of around it.
+pub(crate) fn profiled_gaussian_residual_dof(solution: &InnerSolution<'_>) -> f64 {
+    let n = solution.n_observations as f64;
+    let m_p = solution.nullspace_dim;
+    let dof = n - m_p;
+    let calls = RESIDUAL_DOF_CALLS_2669.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let milli = (dof * 1000.0).round().clamp(i64::MIN as f64, i64::MAX as f64) as i64;
+    let previous_min =
+        RESIDUAL_DOF_MIN_MILLI_2669.fetch_min(milli, std::sync::atomic::Ordering::Relaxed);
+    if milli < previous_min {
+        eprintln!(
+            "[#2669-dof] call {calls} n={n} M_p={m_p} n-M_p={dof} clamp_binds={}",
+            if dof < DENOM_RIDGE { "YES" } else { "no" }
+        );
+    }
+    dof.max(DENOM_RIDGE)
+}
+
 /// Apply the curvature-conditioning scale `s = rho_curvature_scale` to a
 /// raw ρ-coordinate `λ_k = exp(ρ_k)`.
 ///
@@ -411,7 +442,7 @@ pub(crate) fn efs_profiling(solution: &InnerSolution<'_>) -> (f64, f64) {
         DispersionHandling::ProfiledGaussian => {
             let dp_raw = -2.0 * solution.log_likelihood + solution.penalty_quadratic;
             let (dp_c, dp_cgrad, _) = smooth_floor_dp(dp_raw, solution.dp_floor_scale);
-            let denom = (solution.n_observations as f64 - solution.nullspace_dim).max(DENOM_RIDGE);
+            let denom = profiled_gaussian_residual_dof(solution);
             (dp_c / denom, dp_cgrad)
         }
         DispersionHandling::Fixed { phi, .. } => (*phi, 0.0),
