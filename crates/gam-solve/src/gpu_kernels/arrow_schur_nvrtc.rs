@@ -6,14 +6,16 @@
 //! accumulation) with a single NVRTC launch per p-group. Each CUDA block owns
 //! one row block `i`:
 //!
-//!     1. cooperative load of `D_i` (`P × P`) and `B_i` (`P × R`) into shared
-//!        memory, with `ridge_t` added to the diagonal during the load;
-//!     2. scalar lower Cholesky `D_i + ρ_t I = L_i L_i^T` in shared memory;
-//!     3. forward solve `u_i = L_i^{-1} g_i` (single warp, in registers);
-//!     4. forward solve `Y_i = L_i^{-1} B_i` (`P × R` shared tile);
-//!     5. partial reductions emitted in column-major form:
-//!           `partial_S[i] = Y_i^T Y_i`   (R × R, contributes `-1` to S_β)
-//!           `partial_r[i] = Y_i^T u_i`   (R)
+//! ```text
+//! 1. cooperative load of `D_i` (`P × P`) and `B_i` (`P × R`) into shared
+//!    memory, with `ridge_t` added to the diagonal during the load;
+//! 2. scalar lower Cholesky `D_i + ρ_t I = L_i L_i^T` in shared memory;
+//! 3. forward solve `u_i = L_i^{-1} g_i` (single warp, in registers);
+//! 4. forward solve `Y_i = L_i^{-1} B_i` (`P × R` shared tile);
+//! 5. partial reductions emitted in column-major form:
+//!       `partial_S[i] = Y_i^T Y_i`   (R × R, contributes `-1` to S_β)
+//!       `partial_r[i] = Y_i^T u_i`   (R)
+//! ```
 //!
 //! The dispatch host then either reduces the per-block partials with a single
 //! `cub::DeviceReduce` (Layer D fast path) or, for very small `n`, performs the
@@ -25,7 +27,9 @@
 //! Schur factor `R_β` has been formed on host or via cuSOLVER and `δβ`
 //! downloaded back, each block computes
 //!
-//!     `δt_i = -L_i^{-T} (u_i + Y_i δβ)`
+//! ```text
+//! δt_i = -L_i^{-T} (u_i + Y_i δβ)
+//! ```
 //!
 //! in a single launch, returning the n·P vector. The Layer C cuBLAS GEMV +
 //! batched TRSM step is replaced by one shared-memory matvec + one back-solve

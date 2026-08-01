@@ -1121,14 +1121,18 @@ const PREARRAY_COLUMNS: usize = 2 * MAX_ORDER;
 /// With `P⁻ = L Lᵀ` and `L` lower triangular, `Lᵀe₀` has a single nonzero, so
 /// the whole Kalman update is one column scaling:
 ///
-///     L⁺ = L · diag(β, 1, …, 1),      β = √(R/F),
+/// ```text
+/// L⁺ = L · diag(β, 1, …, 1),      β = √(R/F),
+/// ```
 ///
 /// and `P⁺ = L⁺L⁺ᵀ` is EXACTLY `P⁻ − M Mᵀ/F`. The check: `P[i][0] = L[i][0]L₀₀`
 /// because `L[0][k] = 0` for `k ≥ 1`, so
 ///
-///     (L⁺L⁺ᵀ)[i][j] = P[i][j] − (1 − β²)L[i][0]L[j][0]
-///                   = P[i][j] − (P₀₀/F)·M[i]M[j]/P₀₀
-///                   = P[i][j] − M[i]M[j]/F.
+/// ```text
+/// (L⁺L⁺ᵀ)[i][j] = P[i][j] − (1 − β²)L[i][0]L[j][0]
+///               = P[i][j] − (P₀₀/F)·M[i]M[j]/P₀₀
+///               = P[i][j] − M[i]M[j]/F.
+/// ```
 ///
 /// CARRIED is the load-bearing word. Recomputing the factorization per node
 /// from the componentwise covariance was measured and is INERT — bit-identical
@@ -1375,7 +1379,9 @@ fn intersect_first_order_accumulator_exact_ranges(
 ///
 /// At the observed coordinate the Kalman update is the scalar map
 ///
-///     P⁺₀₀ = P₀₀·R/(P₀₀ + R),
+/// ```text
+/// P⁺₀₀ = P₀₀·R/(P₀₀ + R),
+/// ```
 ///
 /// whose partial derivatives `(R/F)²` and `(P₀₀/F)²` are both strictly positive
 /// on `P₀₀ ≥ 0 < R`. A function monotone in each argument attains its range over
@@ -1390,7 +1396,9 @@ fn intersect_first_order_accumulator_exact_ranges(
 /// `F = 0.173`): the map's true width factor is `(R/F)² = 0.41`, while the
 /// componentwise width factor is
 ///
-///     (R/F)² + 4·P₀₀·R²/F³ = 0.41 + 0.59 = 1.00,
+/// ```text
+/// (R/F)² + 4·P₀₀·R²/F³ = 0.41 + 0.59 = 1.00,
+/// ```
 ///
 /// so the contraction is cancelled EXACTLY and the per-node rounding then
 /// accumulates without ever being pulled back — the measured 1.28× per node
@@ -1434,7 +1442,9 @@ fn intersect_observed_covariance_exact_range(
 /// observed coordinate, where the map collapses to one scalar variable. The
 /// general entry is
 ///
-///     P⁺[i][j] = P[i][j] − P[i][0]·P[0][j] / (P[0][0] + R),
+/// ```text
+/// P⁺[i][j] = P[i][j] − P[i][0]·P[0][j] / (P[0][0] + R),
+/// ```
 ///
 /// whose partials with respect to `(a, b, c, d) = (P[i][j], P[i][0], P[0][j],
 /// P[0][0])` are `1`, `−c/F`, `−b/F` and `bc/F²`. Whenever `b` and `c` have
@@ -1520,7 +1530,9 @@ fn intersect_updated_covariance_exact_range(
 /// [`intersect_proper_covariance_psd`] uses the 1×1 minors — `P[i][i] ≥ 0` —
 /// and stops there. The 2×2 minors are equally exact and two-sided:
 ///
-///     P[i][i]·P[j][j] − P[i][j]² ≥ 0   ⇒   |P[i][j]| ≤ √(P[i][i]·P[j][j]),
+/// ```text
+/// P[i][i]·P[j][j] − P[i][j]² ≥ 0   ⇒   |P[i][j]| ≤ √(P[i][i]·P[j][j]),
+/// ```
 ///
 /// which bounds every off-diagonal by the diagonals rather than letting it
 /// drift on its own. This matters because only the OBSERVED direction is
@@ -2381,13 +2393,17 @@ fn zonotope_to_matrix(state: &Zonotope<COVARIANCE_D1_DIM>, order: usize) -> Ball
 /// innovation `f`, `k = c/f`, covariance perturbation `E`, observation-variance
 /// perturbation `dr`, `d = E₀₀ + dr`, and
 ///
-///     u = E e₀ - k d,
+/// ```text
+/// u = E e₀ - k d,
+/// ```
 ///
 /// direct expansion gives the IDENTITY
 ///
-///     U(C + E, r + dr)
-///       = A (C + E) Aᵀ + (r + dr) k kᵀ - u uᵀ / (f + d),
-///       A = I - k e₀ᵀ.
+/// ```text
+/// U(C + E, r + dr)
+///   = A (C + E) Aᵀ + (r + dr) k kᵀ - u uᵀ / (f + d),
+///   A = I - k e₀ᵀ.
+/// ```
 ///
 /// Thus every existing generator follows the contracting derivative map
 /// `E ↦ AEAᵀ`; only the genuinely quadratic remainder becomes fresh interval

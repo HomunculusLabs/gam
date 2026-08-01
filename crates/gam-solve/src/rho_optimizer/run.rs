@@ -2213,7 +2213,9 @@ fn negative_curvature_escape_point(
 /// available descent is a SECOND-ORDER question. The improvement a safeguarded
 /// Newton step buys is the Newton decrement over two:
 ///
-///     Δpred = ½ · gᵀ H⁻¹ g,
+/// ```text
+/// Δpred = ½ · gᵀ H⁻¹ g,
+/// ```
 ///
 /// the textbook Newton stopping quantity (Boyd–Vandenberghe §9.5). When `Δpred`
 /// is below the outer objective tolerance, no step can reduce the criterion by
@@ -8018,7 +8020,9 @@ fn outer_arithmetic_gradient_floor(config: &OuterConfig) -> f64 {
 /// an eighteen-order spread across the seeds of ONE fit: a generated lattice
 /// seed at `ρ = 1.0`, where the criterion is `1.79e13`, gave
 ///
-///     termination=gradient_tolerance(|g|=1.522998e-4 < 1.792397e8)
+/// ```text
+/// termination=gradient_tolerance(|g|=1.522998e-4 < 1.792397e8)
+/// ```
 ///
 /// i.e. the solver claimed convergence on the wrong rail against a threshold no
 /// gradient can fail. A stationarity test that depends on the starting point is
