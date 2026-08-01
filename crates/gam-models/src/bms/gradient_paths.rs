@@ -653,7 +653,7 @@ pub(crate) fn signed_probit_neglog_derivatives_up_to_fourth(
 ///
 /// This is the single-source replacement for the two-call pattern
 ///
-/// ```ignore
+/// ```text
 /// let (logcdf, _) = signed_probit_logcdf_and_mills_ratio(m);
 /// let (k1, k2, k3, k4) = signed_probit_neglog_derivatives_up_to_fourth(m, w)?;
 /// // → [-w*logcdf, k1, k2, k3, k4]
