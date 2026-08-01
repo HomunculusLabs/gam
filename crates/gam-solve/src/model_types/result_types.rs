@@ -2332,16 +2332,55 @@ pub struct FitArtifacts {
     /// identically zero — and it `.flatten()`s to `None` when the conditional
     /// covariance is also absent, which is the state a declined fit is in.
     ///
-    /// **If that ever stops being true, this field is no longer sufficient and
-    /// the `Option` must become an enum.** Re-check with:
+    /// # The trigger, as a checkable condition
+    ///
+    /// Run:
     ///
     /// ```text
     /// git grep -n -E '\.(covariance_conditional|beta_covariance|beta_standard_errors)' -- crates/ src/
     /// ```
     ///
-    /// and look for `unwrap_or`, `unwrap_or_default`, `unwrap_or_else`,
-    /// `map_or`, or a `None =>` arm that yields a matrix or a zero SE rather
-    /// than propagating.
+    /// and count the sites that meet an absence with `unwrap_or`,
+    /// `unwrap_or_default`, `unwrap_or_else`, `map_or`, or a `None =>` arm
+    /// yielding a matrix or a zero SE, rather than propagating.
+    ///
+    /// **Today that count is 0**, out of 25 machine-flagged candidates, out of
+    /// 185 references in 52 files (plus 114 production reads of the paired
+    /// `beta_*` fields, also 0). **If it is ever greater than 0, this field is
+    /// insufficient and the `Option` must become an enum.** One command, two
+    /// integers; no re-derivation of the judgement above.
+    ///
+    /// # What this does NOT establish: the quantity is still RECONSTRUCTIBLE
+    ///
+    /// The sweep above is over consumers of the fields that get cleared. It
+    /// says nothing about what else on the artifact PRODUCES the same quantity,
+    /// and something does:
+    ///
+    /// * [`UnifiedFitResult::penalized_hessian`] returns `H`, and it is
+    ///   **non-`Option`** on both `FitInference` and `FitGeometry` — neither of
+    ///   which this seam clears — so it survives every declined fit and is
+    ///   persisted onto the saved model;
+    /// * `FitInference::dispersion` supplies `phi`.
+    ///
+    /// `Vb_naive = phi * H^-1` is therefore one Cholesky away, and
+    /// `beta_covariance_frequentist`, `coefficient_influence` and
+    /// `weighted_gram` are further optional producers this seam also leaves
+    /// alone. **A consumer can obtain a coefficient covariance without ever
+    /// reading this field.**
+    ///
+    /// That is accepted rather than fixed, for a stated reason: what is
+    /// reconstructible is the NAIVE covariance — exactly the object the BMS
+    /// seam refuses to publish, because it omits the first-stage
+    /// generated-regressor uncertainty and is therefore too narrow. Withholding
+    /// it means not SHIPPING it under the name `beta_covariance`, where it would
+    /// be indistinguishable from a corrected one. It does not mean, and cannot
+    /// mean, destroying the curvature every other consumer of the fit needs:
+    /// `penalized_hessian` is what EDF accounting, posterior whitening and
+    /// prediction all read, and it is not `Option`, so it cannot be withheld
+    /// without dropping `inference` and `geometry` wholesale.
+    ///
+    /// The route that removes this residual entirely is implementing the
+    /// correction (`G_measure`, gam#2484), after which nothing is withheld.
     #[serde(default)]
     pub covariance_declined: Option<CovarianceDeclined>,
 }
