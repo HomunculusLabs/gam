@@ -965,3 +965,165 @@ fn applied_dose_probe_payload_fails_closed() {
         assert!(matches!(error, TargetDoseError::Probe(_)));
     }
 }
+
+/// gh#2263 items 1+3 — the target-dose API varies ONE knob, and it is the same
+/// knob whose realized displacement saturates. It therefore cannot repair the
+/// month overshoot, by construction rather than by numerics.
+///
+/// `tests_displacement_2263.rs` measured the realized chart displacement of a
+/// `+1`-month request written at intensity `alpha`: `+1.00 / +1.79 / +2.56 /
+/// +3.03 / +3.27` at `alpha = 1 / 2 / 4 / 8 / 16` — exact at the row's own
+/// intensity and saturating above it. It closed with a prediction it marked NOT
+/// MEASURED: that `steer_to_target_nats` "should not overshoot, because it
+/// solves for the amplitude that lands a requested *dose* rather than assuming
+/// amplitude scales position". That prediction was retracted in `87e1e5e03`;
+/// this test is the executable form of the retraction, so the contract cannot
+/// drift back to it silently.
+///
+/// The prediction is false, and the reason is structural. `steer_to_target_nats`
+/// destructures `t_from`/`t_to` out of the request once and passes them
+/// UNCHANGED into both of its `steer_delta` call sites — the unit-amplitude
+/// reference and the `plan_at` closure the secant loop drives. Nothing ever
+/// re-solves `t_to`. Since `steer_delta` is `δ = a · (g(t_to) − g(t_from))`,
+/// every plan the API can return — seed, secant-corrected, or exhausted — lies
+/// on the single ray `{a · dg : a > 0}` spanned by the unit chord. The realized
+/// displacement of such a plan is a function of `a` alone, so the target-dose
+/// response IS the amplitude response already measured, re-parameterised by
+/// `a = sqrt(q*/unit_nats)`: the alpha column `{1, 2, 4, 8, 16}` is the same
+/// experiment at `q* = {1, 4, 16, 64, 256} · unit_nats`.
+///
+/// **Dose and displacement are two demands on one scalar.** Closing the loop on
+/// the dose selects `a` for the dose; the displacement is then whatever `a · dg`
+/// re-encodes to, which is the requested displacement only at `a == 1` — i.e.
+/// only when the requested dose happens to be the unit-amplitude dose. A fix
+/// has to solve jointly for `(t_to, a)`, and this gate is written so that it
+/// goes RED the moment such a solve is implemented: at that point the contract
+/// genuinely changes and the test must be updated rather than quietly continue
+/// to pass.
+///
+/// The colinearity property is asserted BEFORE the non-vacuity preconditions on
+/// purpose: a fixture that drifted to `a == 1` or to a degenerate chord would
+/// satisfy colinearity for free, so the preconditions must fail loudly instead
+/// of aborting ahead of the property they qualify.
+#[test]
+fn target_dose_only_rescales_the_unit_chord_and_cannot_correct_a_displacement_2263() {
+    let t0 = 0.0;
+    let (term, metric) = planted_circle(t0);
+    let step = 0.02_f64;
+
+    let t_from: [f64; 1] = [t0];
+    let t_to: [f64; 1] = [t0 + step];
+
+    let unit = steer_delta(&term, &metric, 0, 0, 1.0, &t_from[..], &t_to[..]).expect("unit");
+    let unit_nats = unit.predicted_nats.expect("unit dose");
+    // Nine times the unit dose. The planted metric is F = I₂, so the dose is
+    // exactly quadratic in the amplitude and the closed-form seed is a0 = 3
+    // exactly — a request that is unambiguously off the row's own intensity.
+    let target = 9.0 * unit_nats;
+
+    let request = || TargetDoseRequest {
+        atom_k: 0,
+        metric_row: 0,
+        t_from: &t_from[..],
+        t_to: &t_to[..],
+        target_nats: target,
+        config: TargetDoseConfig::default(),
+    };
+
+    // Arm A: no model in the loop — the unvalidated closed-form seed.
+    let seed_plan =
+        steer_to_target_nats(&term, &metric, request(), None).expect("closed-form seed plan");
+
+    // Arm B: the closed loop, driven by an exact-quadratic patched forward (the
+    // planted readout IS a quadratic, so the measured KL is the endpoint dose).
+    let mut probe = |plan: &SteerPlan| -> Result<AppliedDoseObservation, String> {
+        let exact = plan.predicted_nats.expect("dose");
+        Ok(AppliedDoseObservation {
+            effective_delta: plan.delta.clone(),
+            exact_directional_nats: exact,
+            measured_nats: exact,
+            certified_attainable_upper_nats: None,
+        })
+    };
+    let loop_plan = steer_to_target_nats(
+        &term,
+        &metric,
+        request(),
+        Some(&mut probe as &mut AppliedDoseProbe<'_>),
+    )
+    .expect("closed-loop plan");
+
+    for (arm, plan) in [
+        ("closed-form seed", &seed_plan),
+        ("closed loop", &loop_plan),
+    ] {
+        // The API succeeds at the job it advertises: it lands the requested DOSE.
+        // That is what makes the displacement result a contract statement rather
+        // than a bug report about a broken call.
+        let landed = plan.steer.predicted_nats.expect("applied dose");
+        assert!(
+            (landed - target).abs() / target < 1e-9,
+            "{arm}: the target-dose API must land the requested dose: {landed} vs {target}"
+        );
+
+        // PROPERTY 1 — the requested chord endpoints come back unmodified. No
+        // coordinate is re-solved to absorb the amplitude the dose demanded.
+        assert_eq!(
+            plan.steer.t_from,
+            t_from.to_vec(),
+            "{arm}: t_from must be returned exactly as requested"
+        );
+        assert_eq!(
+            plan.steer.t_to,
+            t_to.to_vec(),
+            "{arm}: t_to must be returned exactly as requested — a joint (t_to, a) \
+             solve would break this assertion, and SHOULD: the contract changes there"
+        );
+
+        // PROPERTY 2 — the applied delta is exactly `amplitude · unit chord`,
+        // elementwise and bit for bit (both are the same `a * (g_to - g_from)`
+        // expression over the same deterministic decoder evaluation). So the
+        // reachable set is one ray, and the realized displacement depends on the
+        // request only through the scalar `amplitude`.
+        let amplitude = plan.steer.amplitude;
+        assert_eq!(
+            plan.steer.delta.len(),
+            unit.delta.len(),
+            "{arm}: applied delta must have the unit chord's length"
+        );
+        for (i, (&applied, &chord)) in plan.steer.delta.iter().zip(unit.delta.iter()).enumerate() {
+            assert_eq!(
+                applied,
+                amplitude * chord,
+                "{arm}: delta[{i}] must be exactly amplitude {amplitude} times the unit \
+                 chord component {chord}; the target-dose loop rescales the chord and \
+                 changes nothing else"
+            );
+        }
+    }
+
+    // --- non-vacuity preconditions, asserted AFTER the property they qualify ---
+    let chord_norm = unit.delta.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(
+        chord_norm > 1e-6,
+        "precondition: the unit chord must be non-degenerate or colinearity is \
+         vacuous; got ‖dg‖ = {chord_norm}"
+    );
+    assert!(
+        (seed_plan.seed_amplitude - 3.0).abs() < 1e-12,
+        "precondition: a 9× unit dose must imply the closed-form seed a0 = 3; got {}",
+        seed_plan.seed_amplitude
+    );
+    for (arm, plan) in [
+        ("closed-form seed", &seed_plan),
+        ("closed loop", &loop_plan),
+    ] {
+        assert!(
+            (plan.steer.amplitude - 1.0).abs() > 1.0,
+            "precondition: {arm} must terminate at an amplitude far from the row's own \
+             intensity (a = 1), otherwise this test cannot tell a rescaled chord from a \
+             corrected coordinate; got {}",
+            plan.steer.amplitude
+        );
+    }
+}
