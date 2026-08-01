@@ -3805,12 +3805,47 @@ fn add_rank_one_penalty_vjp(
     }
 }
 
+/// The one range/null threshold for a cached penalty spectrum.
+///
+/// `GaussianRemlEigenCache::penalty_rank` is *defined* as the number of
+/// eigenvalues strictly above this value, so any consumer that asks "is this
+/// direction in the range of `S`?" with a different predicate is answering a
+/// different question about the same matrix, and the two answers disagree on
+/// exactly the directions whose reciprocal is `1/roundoff`.
+///
+/// The threshold is relative to `max|δ|` and never floored at an absolute
+/// value, for the reason documented at the cache builder: an absolute floor
+/// breaks REML's invariance under `S → c·S`.
+///
+/// Evaluating this on the STORED eigenvalues gives the same number the cache
+/// builder computed before its sign cleanup: that loop only zeroes eigenvalues
+/// that are negative AND within tolerance, and such a value cannot have carried
+/// `max|δ|`.
+fn penalty_range_tolerance(eigenvalues: ArrayView1<'_, f64>) -> f64 {
+    let max_abs = eigenvalues
+        .iter()
+        .fold(0.0_f64, |acc, &value| acc.max(value.abs()));
+    max_abs * EIGEN_REL_TOL
+}
+
 fn gaussian_reml_penalty_pseudoinverse_from_cache(cache: &GaussianRemlEigenCache) -> Array2<f64> {
     let p = cache.penalty_eigenvalues.len();
+    // Ask the range/null question with the SAME predicate that defined
+    // `cache.penalty_rank`.  `δ > 0.0` is a different question: the cache's
+    // cleanup loop zeroes only NEGATIVE eigenvalues inside the tolerance, so a
+    // numerically null direction the eigensolver returned as `+3.2e-18` is
+    // classified null by `penalty_rank` and positive here — and this is the one
+    // consumer that divides by it.  Measured at `p = 8` on a second-difference
+    // penalty: `penalty_rank = 6`, seven eigenvalues pass `δ > 0.0`, and the
+    // seventh contributes `1/3.20001575162645240e-18 = 3.125e17`, which lands in
+    // the returned penalty gradient as entries of `1.618287e15` — fifteen orders
+    // above every legitimate term, on healthy and near-interpolating charts
+    // alike.  See [`penalty_range_tolerance`].
+    let tolerance = penalty_range_tolerance(cache.penalty_eigenvalues.view());
     let mut scaled_basis = Array2::<f64>::zeros((p, p));
     for eig in 0..p {
         let delta = cache.penalty_eigenvalues[eig];
-        if delta > 0.0 {
+        if delta > tolerance {
             for row in 0..p {
                 scaled_basis[[row, eig]] = cache.coefficient_basis[[row, eig]] / delta;
             }
@@ -4140,10 +4175,7 @@ fn gaussian_reml_eigen_cache_from_lower_with_transform(
     // diverges from the true marginal likelihood, and the smooth
     // contribution collapsed to ~0 on smooth truths.
     // Fully scale-invariant form: `safety · max|eig| · eps`.
-    let max_abs_eig = penalty_eigenvalues
-        .iter()
-        .fold(0.0_f64, |acc, &value| acc.max(value.abs()));
-    let eig_tol = max_abs_eig * EIGEN_REL_TOL;
+    let eig_tol = penalty_range_tolerance(penalty_eigenvalues.view());
     for value in &mut penalty_eigenvalues {
         if *value < 0.0 && value.abs() <= eig_tol {
             *value = 0.0;
