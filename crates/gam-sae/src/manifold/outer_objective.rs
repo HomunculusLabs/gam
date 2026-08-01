@@ -4068,6 +4068,113 @@ fn reactive_rho_domain_upper(
     }
 }
 
+/// #2691 — the chart-resolution domain face for a PERIODIC ARD axis, in log
+/// precision, one entry per `(atom, axis)` that carries a period.
+///
+/// [`reactive_ard_curvature_scale`] declines a periodic axis, and its reason is
+/// a CONTINUATION argument: raising `alpha` cannot convexify a full circle, so
+/// there is no legal heavy-entry value above the literal target. That answers
+/// whether `alpha` may be RAISED as a reactive entry point. It does not answer
+/// what the coordinate's admissible DOMAIN is, and declining to answer is how
+/// the coordinate inherited `gam_problem::log_strength::LOG_STRENGTH_MAX` — a
+/// binary64 normal-range / overflow-margin policy, by its own module doc. A
+/// number about floating-point representability was serving as the admissible
+/// set of a quantity about chart geometry.
+///
+/// The geometric face, derived from quantities this system already owns:
+///
+/// * the per-axis prior is `V(t) = (alpha / kappa^2) * (1 - cos(kappa t))`
+///   with `kappa = TAU / P` (`atom::ArdAxisPrior`), whose
+///   curvature at its unique minimum `t = 0` is exactly `alpha`. A precision
+///   `alpha` is a concentration of scale `sigma_t = alpha^(-1/2)` — the
+///   precision-to-scale relation of the prior itself, not a calibration;
+/// * the chart coordinate the occupancy adjudicator reads is the UNIT-PERIOD
+///   fold `u = t / P` (`coordinate_fidelity::fold_for_occupancy_weighted`), so
+///   that same prior scale is `sigma_u = 1 / (P * sqrt(alpha))`;
+/// * `coordinate_fidelity::classify_occupancy` returns
+///   `coordinate_fidelity::OccupancyLaw::Collapsed` once the
+///   occupied extent falls below its own data-derived resolution floor
+///   `sigma_floor = 1 / (2n)` — half the mean spacing of `n` points on the unit
+///   circle. That is this system's own statement of when a chart stops being a
+///   chart.
+///
+/// Requiring the prior's own scale to remain representable by the chart:
+///
+/// ```text
+///   sigma_u(alpha) >= sigma_floor
+///     <=>  1 / (P * sqrt(alpha)) >= 1 / (2n)
+///     <=>  alpha <= (2n / P)^2
+///     <=>  log alpha <= 2 * (ln(2n) - ln P)
+/// ```
+///
+/// Past that face the prior asks for structure finer than anything the
+/// coordinate can resolve, so `Collapsed` is forced no matter what the data
+/// says. Every input is a dimension or a geometry the system already knows:
+/// `n` is the row count, `P` is the axis period
+/// (`SaeCoordinates::effective_axis_periods`), the `2n` denominator is
+/// `sigma_floor`'s own, and the `-1/2` exponent is the prior's precision-scale
+/// relation. No literal is introduced, and nothing here is calibrated.
+///
+/// `n` is deliberately the full row count rather than the per-atom support
+/// effective sample size the weighted adjudicator uses: `ess <= n`, so this is
+/// the MOST PERMISSIVE form of the rule — the face below is the largest
+/// precision at which any support weighting could still resolve the chart.
+///
+/// SCOPE, because this face is NECESSARY and not sufficient and the difference
+/// is measured. `Collapsed` is a weaker condition than "the chart still recovers
+/// the planted structure": on the #2691 circle fixture (n=70, p=8, sigma=0.352)
+/// circular recovery R^2 falls 0.969 -> 0.037 between `alpha = 1e1` and
+/// `alpha = 1e2`, TWO ORDERS below this face, while the occupied extent does not
+/// fall under `sigma_floor` until `alpha ~ 1e4`. So the face removes the region
+/// where collapse is FORCED; it does not certify that everything it admits is a
+/// usable chart. It is denominated in `Collapsed` because that is the threshold
+/// this system owns — a tighter one would be a number nobody derived.
+///
+/// A Euclidean axis is absent on purpose. Its `u` fold is normalized by the
+/// OBSERVED span, so `sigma_floor` carries no absolute length there and this
+/// derivation has no content; that axis already has an evidence-derived face
+/// from [`reactive_ard_curvature_scale`].
+fn periodic_ard_chart_resolution_upper(
+    term: &SaeManifoldTerm,
+    rho: &SaeManifoldRho,
+) -> Result<Vec<(usize, f64)>, String> {
+    let n_rows = term.n_obs();
+    let mut faces = Vec::new();
+    if n_rows < 2 {
+        return Ok(faces);
+    }
+    for atom_idx in 0..rho.k_atoms() {
+        if atom_idx >= term.assignment.coords.len() {
+            return Err(format!(
+                "periodic ARD chart-resolution domain: atom {atom_idx} has no assignment \
+                 coordinates ({} present)",
+                term.assignment.coords.len()
+            ));
+        }
+        let periods = term.assignment.coords[atom_idx].effective_axis_periods();
+        for axis in 0..rho.log_ard[atom_idx].len() {
+            let Some(period) = periods.get(axis).copied().flatten() else {
+                continue;
+            };
+            if !(period.is_finite() && period > 0.0) {
+                return Err(format!(
+                    "periodic ARD chart-resolution domain: atom {atom_idx} axis {axis} has \
+                     non-positive period {period}"
+                ));
+            }
+            let face = 2.0 * ((2.0 * n_rows as f64) / period).ln();
+            if !face.is_finite() {
+                return Err(format!(
+                    "periodic ARD chart-resolution domain: atom {atom_idx} axis {axis} produced a \
+                     non-finite face from n={n_rows} period={period}"
+                ));
+            }
+            faces.push((rho.ard_flat_index(atom_idx, axis), face));
+        }
+    }
+    Ok(faces)
+}
+
 impl OuterObjective for SaeManifoldOuterObjective {
     fn capability(&self) -> OuterCapability {
         let gradient = sae_outer_gradient_capability();
@@ -4602,8 +4709,25 @@ impl OuterObjective for SaeManifoldOuterObjective {
             bounds[index] = bounds[index].min(alpha_upper);
         }
         let curvature_bounds = self.curvature_domain_bounds()?;
+        // #2691 — the periodic ARD chart-resolution face, applied on BOTH exits
+        // of this function. The reactive construction below never runs at all
+        // for K < 2, and declines periodic axes even when it does, so without
+        // this the chart-coordinate precision keeps the generic binary64
+        // representability face and the outer search is free to drive the prior
+        // past the point where the chart stops being a chart.
+        let chart_faces =
+            periodic_ard_chart_resolution_upper(&self.baseline_term, &self.baseline_rho)
+                .map_err(EstimationError::RemlOptimizationFailed)?;
+        // Every other face in this function keeps the literal target strength
+        // inside the box (`target_strength.max(scale)`); this one does the same,
+        // so a caller-installed ARD entry can never be made infeasible by a
+        // domain query.
+        let target = self.baseline_rho.to_flat();
         let Some(contract) = self.reactive_domain_scalar_contract()? else {
             if let Some(bounds) = log_strength_upper.as_mut() {
+                for &(index, face) in &chart_faces {
+                    bounds[index] = bounds[index].min(face.max(target[index]));
+                }
                 for &(index, _, upper) in &curvature_bounds {
                     bounds[index] = upper;
                 }
@@ -4640,6 +4764,12 @@ impl OuterObjective for SaeManifoldOuterObjective {
             for index in 0..reactive_upper.len() {
                 reactive_upper[index] = reactive_upper[index].min(log_strength_upper[index]);
             }
+        }
+        // #2691 — the same chart-resolution face on the reactive exit. The
+        // reactive construction leaves a periodic ARD coordinate at its literal
+        // target, which is not a claim about the domain.
+        for &(index, face) in &chart_faces {
+            reactive_upper[index] = reactive_upper[index].min(face.max(target[index]));
         }
         // Reactive-domain construction knows only log-strength coordinates.
         // Curvature is a raw, scale-dependent coordinate, so its typed geometry
