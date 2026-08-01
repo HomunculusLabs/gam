@@ -540,3 +540,135 @@ fn kappa_jets_match_central_differences_of_the_value_path() {
     }
     assert!(verified > 0, "no kappa jet was differenced");
 }
+
+/// #2687: the κ > 0 branch is **not** unconstrained, and its singular locus sits
+/// at the same `|κ| = 1/R²` as the hyperbolic one.
+///
+/// The per-point chart gauge `1 + κ‖x‖²` really is vacuous for `κ ≥ 0` — but it
+/// is not the condition the kernel evaluates. Every distance goes through
+/// `w = (−x) ⊕_κ y`, whose Möbius denominator is
+///
+/// ```text
+///   D(κ) = 1 + 2κ⟨x,y⟩ + κ²‖x‖²‖y‖²
+/// ```
+///
+/// For an anti-aligned pair (`⟨x,y⟩ = −‖x‖‖y‖`) that is `(1 − κ‖x‖‖y‖)²`, which
+/// vanishes at `κ = +1/(‖x‖‖y‖)`. There the two points are exactly ANTIPODAL on
+/// the sphere of radius `1/√κ` and the chart coordinate `w` passes through
+/// infinity — the exact spherical mirror of `1 + κ‖x‖² = 0` on the hyperbolic
+/// side. Worst case over a cloud of maximum chart radius `R` is `κ = +1/R²`, so
+/// a κ window symmetric about zero at a fraction of `1/R²` is a genuine margin
+/// on BOTH sides rather than one branch's constraint mirrored onto the other.
+///
+/// Past the fold the chart is not merely inaccurate, it is **folded**: the
+/// normalized separation `d_κ(x,y)·√κ/π` (the pair's fraction of the antipodal
+/// maximum, the only scale-free thing κ can be read off) is exactly invariant
+/// under the involution `κ ↦ 1/(κ‖x‖²‖y‖²)`, so every κ past the fold is an
+/// exact reflection of one before it.
+///
+/// Every number below was pinned from `d = (2/√κ)·arctan(√κ‖w‖)`,
+/// `‖w‖ = 2R/(1 − κR²)` BEFORE this test was first run.
+#[test]
+fn spherical_branch_folds_at_kappa_r2_one_so_the_kappa_window_is_symmetric_2687() {
+    const R: f64 = 0.6;
+    let r2 = R * R;
+    let x = ndarray::array![R, 0.0];
+    let y = ndarray::array![-R, 0.0];
+
+    // (a) The shipped window's cap, κ = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION/R²
+    // with the fraction 0.5. Interior, and 78.4% of the way to the antipode.
+    let cap = 0.5 / r2;
+    let manifold = ConstantCurvature::new(2, cap);
+    let d_cap = manifold
+        .distance(x.view(), y.view())
+        .expect("the shipped κ cap must be strictly inside the chart");
+    assert!(
+        (d_cap - 2.089_007_403_281_048).abs() <= 1.0e-12,
+        "κ = 0.5/R²: d = {d_cap}, predicted 2.089007403281048"
+    );
+    let frac_cap = d_cap * cap.sqrt() / std::f64::consts::PI;
+    assert!(
+        (frac_cap - 0.783_653_104_061_214_8).abs() <= 1.0e-12,
+        "κ = 0.5/R²: antipodal fraction = {frac_cap}, predicted 0.7836531040612148"
+    );
+
+    // (b) κ = 1/R² is the fold itself: D = (1 − κR²)² collapses and the shipped
+    // guard refuses. This is the number the ±0.5 fraction is half of.
+    let fold = 1.0 / r2;
+    let refused = ConstantCurvature::new(2, fold).distance(x.view(), y.view());
+    assert!(
+        refused.is_err(),
+        "κ = 1/R² = {fold} is the κ>0 antipodal fold and must be refused; got {refused:?}"
+    );
+
+    // (c) The same fold with an exactly representable denominator, so the
+    // refusal cannot be an artifact of a near-miss: κ‖x‖‖y‖ = 4·0.25 = 1 in f64.
+    let exact = ConstantCurvature::new(2, 4.0);
+    let exact_refused = exact.distance(
+        ndarray::array![0.5, 0.0].view(),
+        ndarray::array![-0.5, 0.0].view(),
+    );
+    assert!(
+        exact_refused.is_err(),
+        "κ‖x‖‖y‖ = 1 exactly must be refused; got {exact_refused:?}"
+    );
+
+    // (d) The involution. `κ_wide = 9.5/R²` is the widening proposed on #2687;
+    // it is the EXACT reflection of `κ_twin = (1/9.5)/R²`, which is interior to
+    // the shipped window. Widening the box to 9.5/R² would therefore admit an
+    // exact duplicate of a κ the box already contains.
+    let kappa_wide = 9.5 / r2;
+    let kappa_twin = (1.0 / 9.5) / r2;
+    let d_wide = ConstantCurvature::new(2, kappa_wide)
+        .distance(x.view(), y.view())
+        .expect("past the fold the chart still evaluates — that is the problem");
+    let d_twin = ConstantCurvature::new(2, kappa_twin)
+        .distance(x.view(), y.view())
+        .expect("the twin is interior");
+    let frac_wide = d_wide * kappa_wide.sqrt() / std::f64::consts::PI;
+    let frac_twin = d_twin * kappa_twin.sqrt() / std::f64::consts::PI;
+    assert!(
+        (frac_wide - 0.399_450_751_329_086_6).abs() <= 1.0e-12,
+        "κ = 9.5/R²: antipodal fraction = {frac_wide}, predicted 0.3994507513290866"
+    );
+    assert!(
+        (frac_wide - frac_twin).abs() <= 1.0e-14,
+        "κ = 9.5/R² and κ = (1/9.5)/R² must be indistinguishable in the pair's \
+         scale-free geometry: {frac_wide} vs {frac_twin}"
+    );
+    assert!(
+        kappa_twin < cap && cap < fold && fold < kappa_wide,
+        "the ordering this test is about: twin {kappa_twin} < cap {cap} < fold \
+         {fold} < proposed {kappa_wide}"
+    );
+
+    // (e) The involution is not special to the anti-aligned pair — it is a
+    // property of the chart. Over general pairs the reflected κ reproduces the
+    // scale-free separation to machine precision.
+    let mut rng = Rng::new(0x2687);
+    let mut verified = 0usize;
+    for _ in 0..64 {
+        let p = chart_point(&mut rng, 2);
+        let q = chart_point(&mut rng, 2);
+        let ab2 = p.dot(&p) * q.dot(&q);
+        for s in [0.25_f64, 0.75, 3.0] {
+            let k_lo = s / ab2.sqrt();
+            let k_hi = 1.0 / (k_lo * ab2);
+            let (Ok(d_lo), Ok(d_hi)) = (
+                ConstantCurvature::new(2, k_lo).distance(p.view(), q.view()),
+                ConstantCurvature::new(2, k_hi).distance(p.view(), q.view()),
+            ) else {
+                continue;
+            };
+            let f_lo = d_lo * k_lo.sqrt() / std::f64::consts::PI;
+            let f_hi = d_hi * k_hi.sqrt() / std::f64::consts::PI;
+            assert!(
+                (f_lo - f_hi).abs() <= 1.0e-12,
+                "κ ↦ 1/(κ‖x‖²‖y‖²) must fix the scale-free separation: \
+                 κ={k_lo} gives {f_lo}, κ={k_hi} gives {f_hi}"
+            );
+            verified += 1;
+        }
+    }
+    assert!(verified > 0, "no reflected pair was evaluated");
+}

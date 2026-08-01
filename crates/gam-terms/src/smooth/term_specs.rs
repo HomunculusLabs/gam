@@ -3651,12 +3651,30 @@ pub fn constant_curvature_term_spec(
 }
 
 /// Hard positive cap on |κ| relative to the data's inverse squared chart
-/// radius. The κ-stereographic chart is valid for `1 + κ‖x‖² > 0`; at
-/// `|κ| = 1/R²` (R² = max squared chart radius) the gauge `1 + κ‖x‖²` reaches
-/// the chart edge for the farthest data point, so the optimizer is boxed to a
-/// safe fraction of that scale on both sides. κ = 0 (flat) is the centre of
-/// the window, an interior point of the `S^d ← ℝ^d → H^d` family — exactly the
-/// reachability the raw-κ (not log-κ) coordinate exists to preserve.
+/// radius. `|κ| = 1/R²` (R² = max squared chart radius) is the singular scale
+/// on **both** branches, for two different reasons, and the optimizer is boxed
+/// to a safe fraction of it on each side (#2687):
+///
+/// * **κ < 0.** The per-point chart gauge `1 + κ‖x‖²` reaches the chart edge for
+///   the farthest data point at `κ = −1/R²`.
+/// * **κ > 0.** That per-point gauge is vacuous (`‖x‖² ≥ 0`), so it is not what
+///   binds here — but it is also not what the kernel evaluates. Every distance
+///   goes through `w = (−x) ⊕_κ y`, whose Möbius denominator
+///   `1 + 2κ⟨x,y⟩ + κ²‖x‖²‖y‖²` is `(1 − κ‖x‖‖y‖)²` for an anti-aligned pair and
+///   **vanishes at `κ = +1/(‖x‖‖y‖)`**, worst case `+1/R²` over the cloud: the
+///   two points are then exactly antipodal and `w` passes through infinity.
+///   Past that fold the chart is not merely inaccurate but folded — the pair's
+///   scale-free geodesic separation is exactly invariant under
+///   `κ ↦ 1/(κ‖x‖²‖y‖²)`, so every κ beyond the fold duplicates one before it.
+///
+/// The two reasons land on the same `1/R²`, which is why the window is
+/// symmetric; it is not one branch's constraint mirrored onto the other. Gated
+/// by `spherical_branch_folds_at_kappa_r2_one_so_the_kappa_window_is_symmetric_2687`
+/// in `gam-geometry`, which pins the fold, the refusal, and the involution.
+///
+/// κ = 0 (flat) is the centre of the window, an interior point of the
+/// `S^d ← ℝ^d → H^d` family — exactly the reachability the raw-κ (not log-κ)
+/// coordinate exists to preserve.
 pub const CONSTANT_CURVATURE_KAPPA_CHART_FRACTION: f64 = 0.5;
 
 /// Floor on the data's squared chart radius used to scale the κ window, so a
@@ -3667,7 +3685,9 @@ pub const CONSTANT_CURVATURE_MIN_CHART_RADIUS2: f64 = 1e-8;
 /// `(κ_min, κ_max)` outer-optimization window for a constant-curvature term,
 /// derived from the data's maximum squared chart radius `R²` so the κ-jets
 /// never leave the κ-stereographic chart. Symmetric about κ = 0:
-/// `±CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / R²`.
+/// `±CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / R²`. The symmetry is derived,
+/// not mirrored — see the constant's docs for the separate κ<0 (chart-gauge)
+/// and κ>0 (antipodal-fold) arguments that both land on `|κ| = 1/R²`.
 pub fn constant_curvature_kappa_bounds(
     data: ArrayView2<'_, f64>,
     spec: &TermCollectionSpec,
