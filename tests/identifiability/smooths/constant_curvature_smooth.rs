@@ -508,6 +508,20 @@ fn kappa_zero_fit_recovers_planted_flat_signal() {
 /// (b) fit level: at κ = 1 on sphere-distributed planted data, the term
 /// recovers the truth; the intrinsic-S² Wahba smooth is the match-or-beat
 /// baseline (exact agreement is NOT expected — different RKHS).
+///
+/// **This test is NOT a κ-search-box victim** (gam#2687 listed it as one). The
+/// `kappa=1` here is a PIN: `constant_curvature_kappa_is_fixed` filters the term
+/// out of the κ optimization, so `constant_curvature_kappa_bounds` is never
+/// consulted and the `0.5/0.81 = 0.617` cap quoted on that issue does not act on
+/// this fit. What fails is the R² bar, at 0.8937 against 0.9.
+///
+/// `measure_2687_kappa_one_spherical_recovery_against_capacity_and_baselines`
+/// above records what actually limits it: the basis is capacity-starved at 30
+/// centers (0.9402 at 60, 0.9550 at 120), the auto length scale is ~6× broader
+/// than the sweep's optimum (0.9523 at ℓ = 0.3 with the same 30 centers), and
+/// `matern` at the same budget reaches 0.99988 — 885× less residual — on data
+/// generated on the very sphere this basis models. The baseline named in the
+/// line above is still not the one this assertion makes.
 #[test]
 fn kappa_one_fit_recovers_planted_spherical_signal() {
     use rand::RngExt;
@@ -536,6 +550,105 @@ fn kappa_one_fit_recovers_planted_spherical_signal() {
     assert!(
         r2_curv > 0.9,
         "kappa=1 curvature smooth failed spherical truth recovery: R² = {r2_curv}"
+    );
+}
+
+/// gam#2687 MEASUREMENT: what limits `kappa_one_fit_recovers_planted_spherical_
+/// signal`, recorded so the next reader does not have to re-derive it.
+///
+/// #2687 listed that test as a victim of the κ search box, at "the production
+/// cap `0.5/0.81 = 0.617` against a planted κ⋆ = 1.0, 62% outside the interval
+/// the estimator is boxed to". **That attribution is wrong**, and this
+/// measurement is why. The fixture PINS `kappa=1`, so
+/// `constant_curvature_kappa_is_fixed` filters the term out of the κ
+/// optimization entirely and `constant_curvature_kappa_bounds` is never
+/// consulted; the geometry really is built at κ = 1. What fails is a bare
+/// R² bar, by 0.6%.
+///
+/// The measured picture (400 rows on a radius-0.9 disk, planted `pz + 0.5·px`):
+///
+/// | fit | R² |
+/// |---|---|
+/// | `curv(kappa=1, centers=15)` | 0.7875 |
+/// | `curv(kappa=1, centers=30)` — **the fixture** | 0.8937 |
+/// | `curv(kappa=1, centers=60)` | 0.9402 |
+/// | `curv(kappa=1, centers=120)` | 0.9550 |
+/// | `curv(kappa=1, centers=30, length_scale=0.3)` | 0.9523 |
+/// | `curv(kappa=0, centers=30)` | 0.8744 |
+/// | `curv(kappa=2, centers=30)` | 0.9348 |
+/// | **`matern(centers=30)`** | **0.99988** |
+/// | **`thinplate(...)`** | **0.99987** |
+///
+/// Three things the fixture's 0.6% miss was hiding:
+///
+/// 1. **The Euclidean baselines nail it.** `matern` at the SAME center budget
+///    leaves 885× less residual than `curv` does at the CORRECT curvature, on
+///    data generated on the very sphere `curv` models. The fixture's own doc
+///    names the intrinsic-S² Wahba smooth as its "match-or-beat baseline" and
+///    then asserts a bare `> 0.9` instead — so the comparison that would have
+///    shown this was documented and never computed. Its κ = 0 sibling
+///    (`kappa_zero_fit_recovers_planted_flat_signal`) does compute one.
+/// 2. **The auto length scale is ~6× too broad.** `realized_constant_curvature_
+///    length_scale` is the median pairwise CHART distance among centers, doubled
+///    — ≈ 1.8 here — and the sweep peaks at ℓ ≈ 0.3, which recovers 0.9523 at the
+///    fixture's own 30 centers. The median heuristic is sized to the cloud
+///    DIAMETER while the exponential kernel `exp(−d/ℓ)` wants something nearer
+///    the center SPACING.
+/// 3. **κ = 2 fits data generated at κ = 1 better than κ = 1 does** (0.9348 vs
+///    0.8937), which is the same monotone-in-κ preference the coverage fixture
+///    rails on, showing up in pure fit quality at a PINNED κ.
+///
+/// None of the three is the κ box. This test asserts only that the measurement
+/// ran, so it records the numbers without adding a bar nobody derived.
+#[test]
+fn measure_2687_kappa_one_spherical_recovery_against_capacity_and_baselines() {
+    use rand::RngExt;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    gam::init_parallelism();
+    let mut rng = StdRng::seed_from_u64(945);
+    let rows: Vec<(f64, f64, f64, f64)> = (0..400)
+        .map(|_| {
+            let r = 0.9 * rng.random::<f64>().sqrt();
+            let th = std::f64::consts::TAU * rng.random::<f64>();
+            let x1 = r * th.cos();
+            let x2 = r * th.sin();
+            let r2 = x1 * x1 + x2 * x2;
+            let pz = (1.0 - r2) / (1.0 + r2);
+            let px = 2.0 * x1 / (1.0 + r2);
+            let truth = pz + 0.5 * px;
+            let y = truth + 0.05 * (rng.random::<f64>() - 0.5);
+            (x1, x2, truth, y)
+        })
+        .collect();
+    let mut scored = Vec::new();
+    for f in [
+        "y ~ curv(x1, x2, kappa=1, centers=15)",
+        "y ~ curv(x1, x2, kappa=1, centers=30)",
+        "y ~ curv(x1, x2, kappa=1, centers=60)",
+        "y ~ curv(x1, x2, kappa=1, centers=30, length_scale=0.3)",
+        "y ~ curv(x1, x2, kappa=0, centers=30)",
+        "y ~ curv(x1, x2, kappa=2, centers=30)",
+        "y ~ matern(x1, x2, centers=30)",
+        "y ~ thinplate(x1, x2)",
+    ] {
+        let r2 = fit_and_score(f, &rows);
+        eprintln!("[2687-measure] {f:<52} R2 = {r2:.6}");
+        assert!(r2.is_finite(), "{f}: R² must be finite to be a measurement");
+        scored.push((f, r2));
+    }
+    // The one relation worth pinning, because it is the finding and it is not a
+    // tuning choice: the Euclidean baseline beats the constant-curvature smooth
+    // at the CORRECT curvature and the SAME center budget, by a wide margin. If
+    // that ever stops being true, the constant-curvature basis has been repaired
+    // and this measurement should be re-read rather than trusted.
+    let curv30 = scored[1].1;
+    let matern30 = scored[6].1;
+    assert!(
+        matern30 > curv30,
+        "the finding this records: matern at 30 centers ({matern30:.6}) must be \
+         compared against curv at 30 centers ({curv30:.6}); if curv now wins, the \
+         basis changed and the surrounding docs are stale"
     );
 }
 
