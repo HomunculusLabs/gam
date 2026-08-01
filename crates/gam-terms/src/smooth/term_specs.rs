@@ -3714,30 +3714,57 @@ pub const CONSTANT_CURVATURE_MIN_CHART_RADIUS2: f64 = 1e-8;
 /// `(κ_min, κ_max)` outer-optimization window for a constant-curvature term,
 /// derived over the configuration the basis actually EVALUATES.
 ///
-/// The kernel is `K_κ(data, centers)`: `validate_chart_points` checks the chart
-/// gauge on data **and** centers, and `ConstantCurvature::distance` is called
-/// once per (data row, center) PAIR. So the two walls are taken over two
-/// different sets, and neither of them is `data` alone (gam#2716):
+/// Let `R = max‖p‖` over every point the basis touches — the term's feature
+/// columns AND the centers. Then
 ///
 /// ```text
-///   κ_min = −F / max(R_x², R_c²)        per-point chart gauge, over data ∪ centers
-///   κ_max = +F / (R_x · R_c)            antipodal fold,        over data × centers
+///   (κ_min, κ_max) = ( −F/R² , +F/R² )
 /// ```
 ///
-/// with `R_x = max‖x‖` over the term's feature columns and `R_c = max‖c‖` over
-/// the centers, bounded by
-/// [`constant_curvature_center_chart_radius2`](crate::basis::constant_curvature_center_chart_radius2)
-/// without materializing them. Every data-driven strategy selects data rows or
-/// convex combinations of them, so there `R_c = R_x` and both ends reduce to the
-/// pre-#2716 `±F/R_x²` **bit for bit**. Only `UserProvided` (verbatim, any
-/// radius) and `UniformGrid` (bounding-box corners, up to `√d·R_x`) move, and
-/// they move in the direction that was previously wrong:
+/// which is the pre-#2716 formula with `R` taken over the right set. `R_c` comes
+/// from [`constant_curvature_center_chart_radius2`](crate::basis::constant_curvature_center_chart_radius2),
+/// which bounds `max‖c‖²` per strategy WITHOUT materializing the centers.
 ///
-/// * the OLD upper end passed the fold once `R_c ≥ 2·R_x`, admitting two κ that
-///   produce an identical scale-free geometry for the extreme pair;
-/// * the OLD lower end let the search reach a κ at which a center is outside the
-///   chart, which `validate_chart_points` refuses — turning a box excursion into
+/// ## Why `R` and not the two walls separately
+///
+/// The two walls really are different objects — the κ<0 wall is the per-POINT
+/// chart gauge `1 + κ‖p‖²`, the κ>0 wall is the per-PAIR antipodal fold at
+/// `κ‖p‖‖q‖ = 1` — and taking each over its own set would give
+/// `κ_max = F/(R_x·R_c)`, wider than `F/R²` whenever the centers sit inside the
+/// data hull. That is mathematically the tighter statement and it is the wrong
+/// bound to ship, for a reason that is not visible from the geometry:
+///
+/// **the box has to be freeze-invariant.** `freeze_term_collection_from_design`
+/// rewrites a fitted term's `CenterStrategy` as `UserProvided(realized centers)`,
+/// so the SAME configuration is described data-driven before the fit and
+/// user-provided after it. A `κ_max` that reads the realized center radius moves
+/// between those two descriptions — measured: on the #944 coverage fixture the
+/// fit railed at `1.412031543260163` (its data-driven `F/R_x²`) and inference
+/// then computed `1.4127975943783915` from the frozen centers, so κ̂ was no
+/// longer at its own bound, was classified interior, and the whole fit was
+/// refused as a non-stationary point estimate. A bound that changes when the
+/// same geometry is re-described is not a bound on the geometry.
+///
+/// `max(R_x, R_c)` is the smallest radius that survives the re-description, and
+/// it is conservative against the true evaluated-pair maximum: the RKHS penalty
+/// Gram evaluates `K_κ(centers, centers)` as well as `K_κ(data, centers)`, so the
+/// evaluated products run up to `R_c·max(R_x, R_c) ≤ R²`.
+///
+/// ## What moves, and what does not
+///
+/// Every data-driven strategy selects data rows verbatim or convex combinations
+/// of them, so `R_c ≤ R_x`, `R = R_x`, and the box is **bit-identical** to its
+/// pre-#2716 value. Two strategies move, both in the direction that was wrong:
+///
+/// * `UserProvided` — verbatim, any radius. The old upper end passed the fold
+///   once `R_c ≥ 2·R_x`, admitting two κ that produce an identical scale-free
+///   geometry for the extreme pair (the doubly-covered box #2716 measured), and
+///   the old lower end let the search reach a κ at which a center is outside the
+///   chart, where `validate_chart_points` refuses — turning a box excursion into
 ///   a hard basis-build error mid-optimization rather than a rail.
+/// * `UniformGrid` — the Cartesian product of per-axis linspaces over the data's
+///   BOUNDING BOX, so a corner center sits at up to `√d·R_x`, crossing the same
+///   threshold at `d ≥ 4` with no user input at all.
 ///
 /// See [`CONSTANT_CURVATURE_KAPPA_CHART_FRACTION`] for the two gauges and for
 /// what its `0.5` buys, measured.
@@ -3752,28 +3779,17 @@ pub fn constant_curvature_kappa_bounds(
         }) => (feature_cols, spec),
         _ => return (-1.0, 1.0),
     };
-    let data_r2 = crate::basis::constant_curvature_data_chart_radius2(data, feature_cols)
+    let data_r2 = crate::basis::constant_curvature_data_chart_radius2(data, feature_cols);
+    let center_r2 = crate::basis::constant_curvature_center_chart_radius2(
+        data,
+        feature_cols,
+        &cc.center_strategy,
+    );
+    let max_r2 = data_r2
+        .max(center_r2)
         .max(CONSTANT_CURVATURE_MIN_CHART_RADIUS2);
-    let center_r2 =
-        crate::basis::constant_curvature_center_chart_radius2(data, feature_cols, &cc.center_strategy)
-            .max(CONSTANT_CURVATURE_MIN_CHART_RADIUS2);
-    // κ<0: the chart gauge is per POINT, so it is the larger of the two radii
-    // that reaches the ball boundary first — data or center, whichever is worse.
-    let kappa_min = -CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / data_r2.max(center_r2);
-    // κ>0: the fold is per PAIR, and the nearest one over `data × centers` is at
-    // `κ = 1/(R_x·R_c)`, i.e. `1/√(R_x²·R_c²)`. That product is `R_x²` whenever
-    // the centers come from the cloud — but only *mathematically*: `(a·a).sqrt()`
-    // is not bitwise `a` for every `a`, and a 2-ulp drift in the box would move
-    // every rail comparison in the tree for no reason. Take the product only
-    // when the two radii genuinely differ, so every data-driven strategy keeps
-    // its pre-#2716 endpoint bit for bit.
-    let pair_r2 = if center_r2 < data_r2 || center_r2 > data_r2 {
-        (data_r2 * center_r2).sqrt()
-    } else {
-        data_r2
-    };
-    let kappa_max = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / pair_r2;
-    (kappa_min, kappa_max)
+    let half = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / max_r2;
+    (-half, half)
 }
 
 /// Write the optimized κ back into a constant-curvature term spec. Returns

@@ -160,14 +160,87 @@ fn fit_and_infer(feats: &Array2<f64>, y: &Array1<f64>) -> CurvatureInference {
     .expect("curvature inference")
 }
 
-/// Number of replicate datasets per arm. Small (CI cost) but enough to expose a
-/// badly-biased estimator or a grossly mis-covering CI; bars are binomial-aware.
-/// Fixed CI-affordable count: the pass bars below are expressed as functions of
-/// `R` ("at most one miss", "minority rejects"), so they stay genuine,
-/// un-weakened assertions at this count. A larger cluster-scale replicate sweep
-/// is a separate MSI artifact, not an env/cfg branch here.
+/// Number of replicate datasets per arm, and the miss bar that goes with it.
+///
+/// The count is DERIVED, not chosen (gam#2687). A "at most one miss out of `n`"
+/// bar is unfalsifiable at `n = 3`: exact binomial arithmetic gives
+/// `P(pass | true coverage 0.50) = 0.5000` and `P(pass | 0.83) = 0.9231`, so an
+/// estimator with half the nominal coverage passes as often as it fails, and
+/// tightening the bar does not help — at `n = 3` with ZERO misses allowed a
+/// 0.83-coverage estimator still passes 0.5718 of the time while a correct one
+/// already fails 0.1426 of the time. It is the COUNT, not the bar, that makes
+/// the claim unresolvable.
+///
+/// Taking the bar as the smallest `k` holding false alarm ≤ 1% at true coverage
+/// 0.95:
+///
+/// | n | bar `k` | P(pass \| 0.95) | power vs 0.50 | power vs 0.83 |
+/// |---|---|---|---|---|
+/// | 3 | 1 | 0.9928 | 0.5000 | 0.0769 |
+/// | **9** | **2** | 0.9916 | **0.9102** | 0.1861 |
+/// | 25 | 4 | 0.9928 | 0.9995 | 0.4241 |
+/// | 60 | 7 | 0.9902 | 1.0000 | 0.8222 |
+///
+/// `n = 9, k = 2` is the smallest count that catches a GROSSLY broken estimator
+/// (coverage ≈ 0.5) at ≥ 90% power while false-alarming under 1% on a correct
+/// one. Catching a mildly miscalibrated one (0.83) needs `n ≈ 60`, which is a
+/// cluster-scale sweep and is deliberately out of scope here — so this gate's
+/// stated job is "grossly broken", and the table says so rather than leaving the
+/// reader to assume more.
+///
+/// The bar must move with the count: at `n = 50`, "at most one miss" would
+/// reject a perfectly calibrated estimator 72% of the time. Any change to
+/// `REPLICATE_COUNT` has to re-derive `MAX_MISSES` from the same binomial.
+const REPLICATE_COUNT: usize = 9;
+
+/// Maximum number of missed replicates the coverage/size bars tolerate. Derived
+/// with [`REPLICATE_COUNT`]; see its table.
+const MAX_MISSES: usize = 2;
+
 fn replicate_count() -> usize {
-    3
+    REPLICATE_COUNT
+}
+
+/// How one replicate's profile CI resolved against a target κ.
+///
+/// The middle arm is the one this file was missing (gam#2687). `KappaProfileCi`
+/// carries `lo_at_bound` / `hi_at_bound` — documented as *"CI is left/right-open
+/// at the bound"* — and `kappa_hat_support`, which says whether κ̂ is itself a
+/// box endpoint. A railed κ̂ is not a profile minimiser, so the Wilks region
+/// `2[V_p(κ) − V_p(κ̂)] ≤ χ²₁` anchored at it is not a 95% interval at all; and a
+/// bound-open interval does not EXCLUDE a κ beyond it, so counting such a
+/// replicate as a miss reports an exclusion the data never made. Both are
+/// UNRESOLVED, which is neither coverage nor a miss, and a gate that silently
+/// folds them into either number is measuring something other than coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resolution {
+    Covered,
+    Missed,
+    /// The interval carries no coverage claim about this target: κ̂ is railed, or
+    /// the interval is open on the side the target lies.
+    Unresolved,
+}
+
+fn resolve(inf: &CurvatureInference, target: f64) -> Resolution {
+    if inf.ci.kappa_hat_support.is_railed() {
+        return Resolution::Unresolved;
+    }
+    if target < inf.ci.ci_lo {
+        // Below the interval: only a genuine (closed) lower endpoint excludes it.
+        return if inf.ci.lo_at_bound {
+            Resolution::Unresolved
+        } else {
+            Resolution::Missed
+        };
+    }
+    if target > inf.ci.ci_hi {
+        return if inf.ci.hi_at_bound {
+            Resolution::Unresolved
+        } else {
+            Resolution::Missed
+        };
+    }
+    Resolution::Covered
 }
 
 /// CI COVERAGE + κ̂ RECOVERY on CURVED truth. Across `R` independent M_κ
@@ -179,6 +252,8 @@ fn profile_ci_covers_planted_curvature_across_replicates() {
     let reps = replicate_count();
     let kappa_star = 1.5_f64;
     let mut covered = 0usize;
+    let mut missed = 0usize;
+    let mut railed = 0usize;
     let mut sign_correct = 0usize;
     let mut sum_khat = 0.0_f64;
     let mut khats = Vec::with_capacity(reps);
@@ -186,9 +261,13 @@ fn profile_ci_covers_planted_curvature_across_replicates() {
         let seed = 0x5EED_0944_0000_0000 ^ ((r as u64) << 8);
         let (feats, y) = dataset_on_m_kappa(120, kappa_star, 0.6, 0.10, seed);
         let inf = fit_and_infer(&feats, &y);
-        let covers = inf.ci.ci_lo <= kappa_star && kappa_star <= inf.ci.ci_hi;
-        if covers {
-            covered += 1;
+        match resolve(&inf, kappa_star) {
+            Resolution::Covered => covered += 1,
+            Resolution::Missed => missed += 1,
+            Resolution::Unresolved => {}
+        }
+        if inf.ci.kappa_hat_support.is_railed() {
+            railed += 1;
         }
         if inf.kappa_hat > 0.0 {
             sign_correct += 1;
@@ -196,30 +275,55 @@ fn profile_ci_covers_planted_curvature_across_replicates() {
         sum_khat += inf.kappa_hat;
         khats.push(inf.kappa_hat);
         eprintln!(
-            "[cov κ⋆=+{kappa_star}] r={r} κ̂={:+.3} CI=[{:+.3},{:+.3}] covers={covers}",
-            inf.kappa_hat, inf.ci.ci_lo, inf.ci.ci_hi
+            "[cov κ⋆=+{kappa_star}] r={r} κ̂={:+.3} support={} CI=[{:+.3},{:+.3}] \
+             open=[{},{}] -> {:?}",
+            inf.kappa_hat,
+            inf.ci.kappa_hat_support.label(),
+            inf.ci.ci_lo,
+            inf.ci.ci_hi,
+            inf.ci.lo_at_bound,
+            inf.ci.hi_at_bound,
+            resolve(&inf, kappa_star)
         );
     }
     let mean_khat = sum_khat / reps as f64;
+    let resolved = covered + missed;
     eprintln!(
-        "[cov κ⋆=+{kappa_star}] covered {covered}/{reps}  sign_correct {sign_correct}/{reps}  \
-         mean κ̂={mean_khat:+.3}  κ̂={khats:?}"
+        "[cov κ⋆=+{kappa_star}] covered {covered} / missed {missed} / unresolved {} of {reps}  \
+         railed κ̂ {railed}/{reps}  sign_correct {sign_correct}/{reps}  \
+         mean κ̂={mean_khat:+.3}  κ̂={khats:?}",
+        reps - resolved
     );
 
-    // (1) COVERAGE: a 95% profile CI must cover the truth in all but at most one
-    // replicate. At nominal 0.95 the expected miss count is tiny (≈0.05·reps); a
-    // CI that systematically excludes the truth (wrong width or off-center) drops
-    // far below. Requiring ≥ reps−1 covers tolerates the small-sample binomial
-    // slack (a correctly-calibrated CI essentially never fails) while still
-    // failing a grossly mis-covering interval, at either replicate count.
+    // (0) THE ESTIMATE MUST BE AN ESTIMATE. `κ̂` is the argmin of `V_p` over the
+    // chart-feasible box; when the box constraint is active, `κ̂` is a readout of
+    // the BOX and moves with it, and the Wilks region anchored at it is not a
+    // 95% interval. Coverage is then unmeasured — not 0%, not 100% — so this has
+    // to be asserted BEFORE any coverage number is read, or the gate reports a
+    // rate for a quantity that does not exist. Before #2687 this file computed
+    // `covers` as a closed containment and reported `covers=false`, which read
+    // as a mis-covering interval when the true state was "no interval".
     assert!(
-        covered >= reps - 1,
-        "profile CI covered the planted κ⋆=+{kappa_star} in only {covered}/{reps} replicates \
-         (expected all but ~1 at nominal 95%)"
+        railed == 0,
+        "κ̂ was RAILED at a κ-box endpoint in {railed}/{reps} replicates ({khats:?}); \
+         the profile criterion has no interior optimum there, so the profile CI is \
+         not a 95% interval and coverage is UNMEASURED. Widening the box does not \
+         fix this — it moves the rail (#2687 measured κ̂ = 2.78 against κ⋆ = 1.5 at \
+         the resolution-derived box end). The defect is in the criterion or in \
+         this fixture's identifiability, not in the bound."
     );
-    // (2) SIGN RECOVERY: spherical truth ⇒ κ̂ > 0 in all but at most one replicate.
+    // (1) COVERAGE, among the replicates that carry a coverage claim. The bar is
+    // derived with `REPLICATE_COUNT`; see its table.
     assert!(
-        sign_correct >= reps - 1,
+        resolved == reps && covered + MAX_MISSES >= reps,
+        "profile CI covered the planted κ⋆=+{kappa_star} in {covered}/{resolved} resolved \
+         replicates ({} unresolved of {reps}); the derived bar at n={reps} is at most \
+         {MAX_MISSES} misses",
+        reps - resolved
+    );
+    // (2) SIGN RECOVERY: spherical truth ⇒ κ̂ > 0 in all but the derived bar.
+    assert!(
+        sign_correct + MAX_MISSES >= reps,
         "κ̂ sign recovered (>0) in only {sign_correct}/{reps} replicates for κ⋆=+{kappa_star}"
     );
     // (3) LOW BIAS: the mean estimate tracks the truth within a tolerance honest
@@ -242,6 +346,7 @@ fn flatness_test_holds_size_across_flat_replicates() {
     let alpha = 0.05_f64;
     let mut rejections = 0usize;
     let mut ci_covers_zero = 0usize;
+    let mut unresolved = 0usize;
     let mut pvals = Vec::with_capacity(reps);
     for r in 0..reps {
         let seed = 0x71A7_0944_0000_0000 ^ ((r as u64) << 8);
@@ -250,18 +355,25 @@ fn flatness_test_holds_size_across_flat_replicates() {
         if inf.flatness.p_value < alpha {
             rejections += 1;
         }
-        if inf.ci.ci_lo <= 0.0 && 0.0 <= inf.ci.ci_hi {
-            ci_covers_zero += 1;
+        match resolve(&inf, 0.0) {
+            Resolution::Covered => ci_covers_zero += 1,
+            Resolution::Missed => {}
+            Resolution::Unresolved => unresolved += 1,
         }
         pvals.push(inf.flatness.p_value);
         eprintln!(
-            "[size κ⋆=0] r={r} κ̂={:+.3} p={:.4} CI=[{:+.3},{:+.3}]",
-            inf.kappa_hat, inf.flatness.p_value, inf.ci.ci_lo, inf.ci.ci_hi
+            "[size κ⋆=0] r={r} κ̂={:+.3} support={} p={:.4} CI=[{:+.3},{:+.3}] -> {:?}",
+            inf.kappa_hat,
+            inf.ci.kappa_hat_support.label(),
+            inf.flatness.p_value,
+            inf.ci.ci_lo,
+            inf.ci.ci_hi,
+            resolve(&inf, 0.0)
         );
     }
     eprintln!(
         "[size κ⋆=0] rejected {rejections}/{reps} at α={alpha}  CI⊇0 in {ci_covers_zero}/{reps}  \
-         p-values={pvals:?}"
+         unresolved {unresolved}/{reps}  p-values={pvals:?}"
     );
 
     // SIZE CONTROL: a level-α interior χ²₁ test on truly flat data rejects ~α of
@@ -274,10 +386,19 @@ fn flatness_test_holds_size_across_flat_replicates() {
         "κ=0 flatness test rejected truly-flat data in {rejections}/{reps} replicates at α={alpha} \
          (size-inflated): p-values {pvals:?}"
     );
-    // The profile CI must straddle 0 (verdict Flat) for flat data in all but at
-    // most one replicate — the CI-side mirror of the size claim.
+    // The profile CI must straddle 0 (verdict Flat) for flat data in all but the
+    // derived bar — the CI-side mirror of the size claim. Unresolved replicates
+    // are named separately: a bound-open interval or a railed κ̂ carries no claim
+    // about κ=0 either way, and folding them into the covered count would let a
+    // fit that never resolved report perfect coverage.
     assert!(
-        ci_covers_zero >= reps - 1,
+        unresolved == 0,
+        "the profile CI carried no coverage claim about κ=0 in {unresolved}/{reps} flat \
+         replicates (railed κ̂ or a bound-open interval on the side of 0); size is \
+         UNMEASURED there, not passing"
+    );
+    assert!(
+        ci_covers_zero + MAX_MISSES >= reps,
         "profile CI failed to cover κ=0 on flat data in {}/{reps} replicates",
         reps - ci_covers_zero
     );

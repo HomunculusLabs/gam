@@ -8479,10 +8479,20 @@ where
         score_hat.abs() <= score_tolerance
     };
     if !stationary {
+        // Name what was refused AGAINST, not just that something was refused.
+        // A κ̂ that failed this check is either a genuine interior non-optimum or
+        // a rail the `x_tolerance` did not recognise, and the two need opposite
+        // repairs — so the message has to carry the box, both gaps, and the rail
+        // tolerance that classified it (#2687).
         return Err(format!(
             "curvature inference rejected a non-stationary point estimate: \
              kappa_hat={kappa_hat}, score={score_hat:.6e}, \
-             stationarity_bound={score_tolerance:.6e}"
+             stationarity_bound={score_tolerance:.6e}; \
+             box=[{kappa_min}, {kappa_max}], gap_to_lower={:.6e}, gap_to_upper={:.6e}, \
+             rail_tolerance={x_tolerance:.6e}, classified={}",
+            kappa_hat - kappa_min,
+            kappa_max - kappa_hat,
+            kappa_hat_support.label()
         ));
     }
 

@@ -1,11 +1,11 @@
 //! gam#2716 / gam#2687: the κ search box is derived over the configuration the
 //! constant-curvature basis EVALUATES, not over `data` alone.
 //!
-//! The kernel is `K_κ(data, centers)`. `validate_chart_points` checks the chart
-//! gauge on data **and** centers; `ConstantCurvature::distance` is called once
-//! per (data row, center) pair. So the κ<0 wall (a point leaving the chart) is
-//! taken over `data ∪ centers` and the κ>0 wall (the antipodal fold) over
-//! `data × centers`. Before #2716 both were taken over `data`.
+//! The kernel is `K_κ(data, centers)`, and the RKHS penalty adds
+//! `K_κ(centers, centers)`. `validate_chart_points` checks the chart gauge on
+//! data **and** centers; `ConstantCurvature::distance` is called once per
+//! evaluated pair. So the radius the box is denominated in is
+//! `R = max‖p‖` over `data ∪ centers`. Before #2716 it was taken over `data`.
 //!
 //! Every assertion below is stated against the *geometry* — the shipped
 //! `ConstantCurvature` distance and chart gauge at the box's own endpoints —
@@ -111,12 +111,19 @@ fn user_provided_centers_beyond_twice_the_data_radius_no_longer_put_the_box_past
         "the configuration this test is about: the pre-#2716 upper end {old_hi} \
          must be past the fold {fold}"
     );
+    // The box is denominated in `R = max(R_x, R_c) = 0.8`, so it is strictly
+    // inside the data × center fold (1/0.24) and is exactly the half-margin to
+    // the center × center fold (1/0.64) the penalty Gram also evaluates.
     assert!(
-        (hi - CONSTANT_CURVATURE_KAPPA_CHART_FRACTION * fold).abs() <= 1e-12,
-        "the upper end must be the half-margin to the fold over data × centers: \
-         got {hi}, expected {}",
-        CONSTANT_CURVATURE_KAPPA_CHART_FRACTION * fold
+        (hi - CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / 0.64).abs() <= 1e-12,
+        "the upper end must be F/max(R_x, R_c)²: got {hi}, expected {}",
+        CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / 0.64
     );
+    assert!(
+        hi < fold,
+        "and it must be strictly inside the data × center fold {fold}"
+    );
+    assert_eq!(lo, -hi, "the window stays symmetric: one radius, two walls");
 
     // Stated against the geometry, not the formula. Note that `D` itself cannot
     // witness the fold from one side: for an exactly anti-aligned pair it is the
@@ -225,21 +232,27 @@ fn uniform_grid_corner_centers_leave_the_hull_and_move_the_box_2716() {
     let spec = spec_with(CenterStrategy::UniformGrid { points_per_dim: 3 }, dim);
     let (lo, hi) = constant_curvature_kappa_bounds(data.view(), &spec, 0);
 
-    let corner_r = (dim as f64).sqrt();
-    let fold = 1.0 / (1.0 * corner_r);
+    let corner_r2 = dim as f64;
+    // The nearest fold over the pairs the basis evaluates: a data point against
+    // a corner center (1/(1·√d)), and — via the RKHS penalty Gram — a corner
+    // center against the opposite corner (1/d, the binding one).
+    let data_center_fold = 1.0 / corner_r2.sqrt();
+    let center_center_fold = 1.0 / corner_r2;
     let old_hi = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / 1.0;
     assert!(
-        old_hi > fold,
-        "d = {dim}: the pre-#2716 upper end {old_hi} must be past the corner fold {fold}"
+        old_hi > data_center_fold && old_hi > center_center_fold,
+        "d = {dim}: the pre-#2716 upper end {old_hi} must be past BOTH corner \
+         folds ({data_center_fold}, {center_center_fold})"
+    );
+    let expected = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / corner_r2;
+    assert!(
+        (hi - expected).abs() <= 1e-12 && (lo + expected).abs() <= 1e-12,
+        "the box must be denominated in the CORNER radius, the largest evaluated \
+         point: got [{lo}, {hi}], expected ±{expected}"
     );
     assert!(
-        (hi - CONSTANT_CURVATURE_KAPPA_CHART_FRACTION * fold).abs() <= 1e-12,
-        "upper end {hi} must be the half-margin to the corner fold"
-    );
-    assert!(
-        (lo + CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / (corner_r * corner_r)).abs() <= 1e-12,
-        "lower end {lo} must be denominated in the CORNER radius, the largest \
-         evaluated point"
+        hi < center_center_fold,
+        "and it must be strictly inside the binding fold {center_center_fold}"
     );
 }
 
@@ -270,26 +283,62 @@ fn degenerate_radii_still_yield_a_finite_bracket() {
 }
 
 /// Data far from the origin with centers near it (the mirror of #2716's
-/// configuration) must ALSO be handled: the fold is `1/(R_x·R_c)`, which is
-/// larger — the box legitimately widens — while the chart gauge stays pinned to
-/// the larger radius, so the lower end does not move.
+/// configuration). The evaluated-pair fold is then at `1/(R_x·R_c)`, which is
+/// *larger* than `1/R_x²` — so a bound taken pair-wise would legitimately WIDEN
+/// here. It must not, because the box has to be freeze-invariant: this exact
+/// configuration is what a frozen data-driven center set looks like.
 #[test]
-fn centers_inside_a_far_data_cloud_widen_only_the_fold_end() {
+fn centers_inside_the_data_hull_never_widen_the_box() {
     let data = ring(16, 2.0, 2);
     let centers = array![[0.5, 0.0], [-0.5, 0.0], [0.0, 0.0]];
     let spec = spec_with(CenterStrategy::UserProvided(centers), 2);
     let (lo, hi) = constant_curvature_kappa_bounds(data.view(), &spec, 0);
+    let data_only = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / 4.0;
     assert!(
-        (lo + CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / 4.0).abs() <= 1e-12,
-        "the chart gauge is per point, so the lower end stays at the DATA radius: {lo}"
+        (hi - data_only).abs() <= 1e-12 && (lo + data_only).abs() <= 1e-12,
+        "centers inside the hull must leave the box at the data radius, got [{lo}, {hi}]"
     );
     assert!(
-        (hi - CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / (2.0 * 0.5)).abs() <= 1e-12,
-        "the fold is per pair, so the upper end is 1/(R_x·R_c) halved: {hi}"
+        hi < CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / (2.0 * 0.5),
+        "and it must stay strictly inside the wider data × center fold, which a \
+         pair-wise bound would have handed the optimizer"
     );
-    assert!(
-        hi > CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / 4.0,
-        "and it is wider than the pre-#2716 value, because no evaluated pair \
-         reaches the fold as early as data × data would"
-    );
+}
+
+/// The regression this file exists to prevent, and the one that made the
+/// pair-wise bound untenable: `freeze_term_collection_from_design` rewrites a
+/// fitted term's strategy as `UserProvided(realized centers)`, so the SAME
+/// geometry is described data-driven before the fit and user-provided after it.
+/// The box must not move across that re-description — measured on the #944
+/// coverage fixture, a `κ_max` that read the realized center radius moved from
+/// 1.412031543260163 (fit) to 1.4127975943783915 (inference), which put κ̂ off
+/// its own bound, had it classified interior, and refused the fit as a
+/// non-stationary point estimate.
+#[test]
+fn freezing_a_data_driven_center_set_to_user_provided_does_not_move_the_box() {
+    let data = ring(40, 0.6, 2);
+    // Whatever a data-driven strategy selects is a subset of the rows, and its
+    // radius is at most the data radius. Take the extreme case (a center AT the
+    // data radius) and a typical one (all centers well inside), and a set that
+    // deliberately misses the outermost ring point.
+    for realized in [
+        array![[0.6, 0.0], [-0.6, 0.0], [0.0, 0.0]],
+        array![[0.3, 0.1], [-0.2, 0.25], [0.0, 0.0]],
+        array![[0.05, 0.0], [-0.05, 0.0], [0.0, 0.0]],
+    ] {
+        let before = constant_curvature_kappa_bounds(
+            data.view(),
+            &spec_with(CenterStrategy::FarthestPoint { num_centers: 3 }, 2),
+            0,
+        );
+        let after = constant_curvature_kappa_bounds(
+            data.view(),
+            &spec_with(CenterStrategy::UserProvided(realized.clone()), 2),
+            0,
+        );
+        assert_eq!(
+            before, after,
+            "freezing {realized:?} must not move the κ box: {before:?} -> {after:?}"
+        );
+    }
 }
