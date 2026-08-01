@@ -876,11 +876,13 @@ def main() -> int:
     log("collecting disjoint fit and held-out clouds")
     fit_examples = collect_cloud(model_lm, tok, layer, structure.fit_templates(),
                                  structure.labels, args.capture_at, candidate_ids)
-    base_examples = [
-        ex for ex in collect_cloud(model_lm, tok, layer, structure.base_templates(),
-                                   structure.labels, args.capture_at, candidate_ids)
-        if ex.label_index in base_label_indices
-    ]
+    # Every label is collected on the held-out side so the per-head centering
+    # below sees the same label set the fit side did; sources for which the
+    # shift grid would leave the ladder are skipped inside the steering loop,
+    # not dropped here (dropping them first would make the two splits' head
+    # means incomparable).
+    base_examples = collect_cloud(model_lm, tok, layer, structure.base_templates(),
+                                  structure.labels, args.capture_at, candidate_ids)
     X_fit_ambient = np.ascontiguousarray(
         np.stack([ex.activation.numpy().astype(np.float64) for ex in fit_examples]))
     X_base_ambient = np.ascontiguousarray(

@@ -105,6 +105,87 @@ def structure_recovery(coord: np.ndarray, label_idx: np.ndarray, cyclic: bool,
     return E1.linear_recovery(coord, label_idx)[0]
 
 
+def reference(args) -> int:
+    """FIT-FREE geometry report — is the generator in the cloud at all?
+
+    Pure numpy, seconds, no `gamfit`. A fitted chart that scores below these
+    numbers is a deficit of the fitter; a cloud whose numbers are all near zero
+    cannot support ANY steering measurement, fitted or not, and the honest move
+    is to change the capture site rather than the solver.
+
+    Reported per centering:
+      * `label_variance_fraction` — between-label variance / total variance. The
+        activation at the label position depends only on the CONTEXT HEAD (the
+        model is causal), so head identity competes directly with label identity
+        for the leading singular directions; this says who wins.
+      * `plane_r2` — recovery from the top-2 plane's angle (cyclic) or PC1
+        (ordinal), the chart E1 would actually fit in.
+      * `best_pair_r2` — the best recovery over ALL pairs drawn from the top
+        `--pc-scan` PCs. If this is high while `plane_r2` is low, the generator
+        is present but not leading, and the chart needs a different subspace,
+        not a different solver.
+      * `centroid_r2` — the same read-off on the per-label CENTROIDS, i.e. with
+        all within-label (context) variance averaged away. This is the upper
+        bound any chart of this cloud can reach.
+    """
+    E1 = _sibling("run_e1")
+    structure = E1.STRUCTURES[args.structure]
+    data = np.load(args.npz, allow_pickle=False)
+    X0, label_idx, template_idx = data["X"], data["label_index"], data["template_index"]
+    n_labels = int(label_idx.max()) + 1
+
+    out = []
+    for center in (False, True):
+        X = X0.copy()
+        if center:
+            for ti in np.unique(template_idx):
+                rows = np.flatnonzero(template_idx == ti)
+                X[rows] -= X[rows].mean(0, keepdims=True)
+        Xc = X - X.mean(0, keepdims=True)
+        total = float(np.sum(Xc ** 2))
+        centroids = np.stack([Xc[label_idx == li].mean(0) for li in range(n_labels)])
+        between = float(sum(int(np.sum(label_idx == li)) * float(np.sum(centroids[li] ** 2))
+                            for li in range(n_labels)))
+        _, svals, vt = np.linalg.svd(Xc, full_matrices=False)
+        scores = Xc @ vt[: args.pc_scan].T
+
+        def read(vec_a, vec_b, idx):
+            if structure.cyclic:
+                return structure_recovery(np.arctan2(vec_b, vec_a), idx, True, n_labels)
+            return structure_recovery(vec_a, idx, False, n_labels)
+
+        plane = read(scores[:, 0], scores[:, 1], label_idx)
+        best_pair, best_ij = -1.0, (0, 1)
+        for i in range(min(args.pc_scan, scores.shape[1])):
+            for j in range(i + 1, min(args.pc_scan, scores.shape[1])):
+                r2 = read(scores[:, i], scores[:, j], label_idx)
+                if r2 > best_pair:
+                    best_pair, best_ij = r2, (i, j)
+
+        cc = centroids - centroids.mean(0, keepdims=True)
+        _, _, cvt = np.linalg.svd(cc, full_matrices=False)
+        cs = cc @ cvt[:2].T
+        centroid_r2 = read(cs[:, 0], cs[:, 1], np.arange(n_labels))
+
+        row = {
+            "per_template_center": center,
+            "label_variance_fraction": between / max(total, 1e-30),
+            "plane_r2": float(plane),
+            "best_pair_r2": float(best_pair),
+            "best_pair": list(best_ij),
+            "centroid_r2": float(centroid_r2),
+            "top_singular_values": [float(v) for v in svals[:6]],
+        }
+        out.append(row)
+        print(f"center={int(center)} label_var_frac={row['label_variance_fraction']:.4f} "
+              f"plane_r2={plane:.4f} best_pair_r2={best_pair:.4f} pcs={best_ij} "
+              f"centroid_r2={centroid_r2:.4f} svals={[round(v, 1) for v in svals[:6]]}",
+              flush=True)
+    if args.out:
+        Path(args.out).write_text(json.dumps(out, indent=2) + "\n")
+    return 0
+
+
 def sweep(args) -> int:
     import gamfit
 
@@ -116,9 +197,10 @@ def sweep(args) -> int:
     topology = structure.topology
     dims = [int(v) for v in args.pca_dims.split(",") if v.strip()]
     k_atoms = [int(v) for v in args.k_atoms.split(",") if v.strip()]
+    centerings = [bool(int(v)) for v in args.centerings.split(",") if v.strip()]
 
     results = []
-    for center in (False, True):
+    for center in centerings:
         X = X0.copy()
         if center:
             for ti in np.unique(template_idx):
@@ -216,11 +298,23 @@ def main() -> int:
     h.add_argument("--out", required=True)
     h.set_defaults(func=harvest)
 
+    f = sub.add_parser("reference")
+    f.add_argument("--npz", required=True)
+    f.add_argument("--structure", choices=("weekday", "ordinal"), default="weekday")
+    f.add_argument("--pc-scan", type=int, default=12)
+    f.add_argument("--out", default="")
+    f.set_defaults(func=reference)
+
     s = sub.add_parser("sweep")
     s.add_argument("--npz", required=True)
     s.add_argument("--structure", choices=("weekday", "ordinal"), default="weekday")
     s.add_argument("--pca-dims", default="2,3,4,6,8,12,16")
     s.add_argument("--k-atoms", default="1,2")
+    s.add_argument("--centerings", default="0,1",
+                   help="which per-head-centering modes to sweep; measured 2026-07-31 on "
+                        "Qwen3.5-4B-Base L16, the UNcentered cloud's best pair of the top 16 PCs "
+                        "reaches only R2 0.56 while the centered top-2 plane reaches 0.93, so "
+                        "'1' alone is usually the whole useful sweep")
     s.add_argument("--n-iter", type=int, default=60)
     s.add_argument("--seed", type=int, default=20260731)
     s.add_argument("--out", default="")
