@@ -474,3 +474,58 @@ fn bms_standard_normal_latent_measure_declares_nothing_2718() {
         out.fit.artifacts.covariance_declined
     );
 }
+
+#[test]
+fn bms_declination_travels_with_the_curvature_it_is_about_2718() {
+    // The declaration is only worth having if it crosses the persistence
+    // boundary WITH the curvature it describes. A consumer that loads a saved
+    // fit gets the penalized Hessian `H` and the dispersion `phi`, from which
+    // `Vb_naive = phi * H^-1` is one Cholesky away; if the declaration did not
+    // travel alongside, that consumer would not have ignored a warning, they
+    // would never have received one.
+    //
+    // The BMS saved-model route stores the whole `UnifiedFitResult`
+    // (`model_payload_builders.rs:802-803`), after a narrowing that carries
+    // `artifacts` forward (`:606`), so the link this test pins is the wire
+    // itself: `covariance_declined` is `#[serde(default)]`, NOT
+    // `skip_serializing`, and must survive a round trip.
+    //
+    // Both halves are asserted together on purpose. A future change that keeps
+    // the Hessian and drops the declaration is exactly the silent-consumption
+    // case, and it would pass either assertion alone.
+    gam::init_parallelism();
+    let data = prs_pc_confounded_dataset();
+    let out = fit_bms(
+        &data,
+        MARGINAL_FORMULA_CENTERS6,
+        LOGSLOPE_FORMULA_CENTERS6,
+        "prs/pc-confounded BMS fit (persistence arm)",
+    );
+
+    let declared = out.fit.artifacts.covariance_declined.clone();
+    assert!(
+        declared.is_some(),
+        "gam#2718: fixture must reach the declining seam for this arm to mean anything"
+    );
+
+    // The curvature the declaration is about is present ...
+    assert!(
+        out.fit.penalized_hessian().is_some(),
+        "gam#2718: a declined fit still publishes the penalized Hessian — EDF accounting, \
+         posterior whitening and prediction all read it. This assertion is here so that the \
+         NEXT one is load-bearing: shipping H is exactly why the declaration has to ship too."
+    );
+
+    // ... and the declaration survives the wire beside it.
+    let encoded = serde_json::to_string(&out.fit.artifacts)
+        .expect("gam#2718: fit artifacts must serialize");
+    let decoded: gam::estimate::FitArtifacts = serde_json::from_str(&encoded)
+        .expect("gam#2718: fit artifacts must deserialize");
+    assert_eq!(
+        decoded.covariance_declined, declared,
+        "gam#2718: the declination must survive serialization. If this field ever becomes \
+         `skip_serializing`, or a persistence route reassembles the fit without carrying \
+         `artifacts`, a consumer loading the saved model gets H and phi with NO warning — \
+         which is the silent consumption this channel exists to prevent."
+    );
+}
