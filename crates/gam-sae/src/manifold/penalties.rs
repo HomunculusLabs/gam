@@ -2129,7 +2129,7 @@ impl SaeManifoldTerm {
                         reason: format!(
                             "IsometryPenalty requested for SAE atom '{}' (basis kind {:?}) but \
                              this evaluator does not expose an analytic second jet; use \
-                             AffineCoordinateEvaluator, SphereChartEvaluator, \
+                             AffineCoordinateEvaluator, AmbientSphereHarmonics, \
                              PeriodicHarmonicEvaluator, or TorusHarmonicEvaluator for \
                              SAE-Isometry",
                             atom.name,
