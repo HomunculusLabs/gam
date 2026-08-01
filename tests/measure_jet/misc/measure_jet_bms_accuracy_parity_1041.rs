@@ -222,3 +222,102 @@ fn measure_jet_bms_accuracy_is_competitive_with_matern_and_duchon() {
          — a real regression, not the duchon-class gap"
     );
 }
+
+/// #2754: the WITHIN-METHOD noise floor this issue's bar was never checked against.
+///
+/// The `1.10x` bar above, and every argument for or against widening it, has
+/// been debated using the BETWEEN-method spread (matern vs duchon, `1.42x`) as
+/// if it were a noise estimate. It is not: two different estimators differing
+/// by `1.42x` says nothing about how much ONE estimator moves when only the
+/// draw changes. A bar is finer than its fixture's resolution when the
+/// statistic it reads has a sd comparable to the margin it polices, and that sd
+/// has never been measured here -- the fixture pins three seeds and fits once.
+///
+/// So this replicates the identical fit over independent draws of the SAME
+/// generator and reports the sd of `mjs_rmse / matern_rmse`. It asserts
+/// nothing about the ratio's LEVEL -- that is the parity test's job, above --
+/// only that the replication actually varied the data and produced finite
+/// ratios, so a silent degenerate run cannot be read as a noise estimate.
+///
+/// Reading the output:
+///   * sd small against `|ratio - 1.10|`  -> the `1.10x` bar is resolvable and
+///     a miss is a real accuracy gap (#2761 territory).
+///   * sd comparable to that margin       -> the bar IS finer than the fixture
+///     can resolve, and #2754's conclusion 1 wins after all.
+///
+/// Printed, not asserted, because the decision it informs belongs on the issue.
+#[test]
+fn measure_jet_bms_within_method_replication_noise_2754() {
+    gam::init_parallelism();
+
+    const REPLICATES: usize = 7;
+    let mut ratios: Vec<f64> = Vec::with_capacity(REPLICATES);
+
+    for rep in 0..REPLICATES {
+        // Vary ONLY the draw: same generator, same truth, same bases, same
+        // center count. The offset is the replicate index so the arms are
+        // fixed before the run rather than chosen after it.
+        let off = (rep as u64) * 0x9E37_79B9_7F4A_7C15;
+        let mut rng = SplitMix64::new(0x1041_2026_0613_0001u64.wrapping_add(off));
+        let mut x1 = vec![0.0; N_TRAIN];
+        let mut x2 = vec![0.0; N_TRAIN];
+        let mut z = vec![0.0; N_TRAIN];
+        for i in 0..N_TRAIN {
+            x1[i] = rng.next_unit();
+            x2[i] = rng.next_unit();
+            z[i] = rng.next_normal();
+        }
+        let mut rng_y = SplitMix64::new(0x1041_2026_0613_0002u64.wrapping_add(off));
+        let mut y = vec![0.0; N_TRAIN];
+        for i in 0..N_TRAIN {
+            let eta = alpha_true(x1[i], x2[i]) + beta_true(x1[i]) * z[i];
+            let p = normal_cdf(eta).clamp(1e-9, 1.0 - 1e-9);
+            y[i] = if rng_y.next_unit() < p { 1.0 } else { 0.0 };
+        }
+        let ds = build_dataset(&x1, &x2, &y, &z);
+
+        let mut rng_g = SplitMix64::new(0x1041_2026_0613_0003u64.wrapping_add(off));
+        let grid: Vec<(f64, f64)> = (0..N_TEST)
+            .map(|_| (rng_g.next_unit(), rng_g.next_unit()))
+            .collect();
+
+        let mjs_body = format!("mjs(x1, x2, centers={CENTERS})");
+        let matern_body = format!("matern(x1, x2, k={CENTERS})");
+        let mjs_fit = fit_bms(&mjs_body, &ds);
+        let matern_fit = fit_bms(&matern_body, &ds);
+        let mjs_rmse = marginal_prob_rmse(&mjs_fit, &grid, "mjs");
+        let matern_rmse = marginal_prob_rmse(&matern_fit, &grid, "matern");
+        let ratio = mjs_rmse / matern_rmse;
+        println!(
+            "[#2754 replication] rep={rep} mjs={mjs_rmse:.6} matern={matern_rmse:.6} ratio={ratio:.6}"
+        );
+        ratios.push(ratio);
+    }
+
+    let n = ratios.len() as f64;
+    let mean = ratios.iter().sum::<f64>() / n;
+    let var = ratios.iter().map(|r| (r - mean) * (r - mean)).sum::<f64>() / (n - 1.0);
+    let sd = var.sqrt();
+    let lo = ratios.iter().cloned().fold(f64::INFINITY, f64::min);
+    let hi = ratios.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    println!(
+        "[#2754 replication] n={REPLICATES} mean_ratio={mean:.6} sd={sd:.6} min={lo:.6} max={hi:.6} \
+         margin_to_bar={:.6}",
+        (mean - 1.10).abs()
+    );
+
+    // Non-vacuity: the replication must actually have varied the data, and every
+    // ratio must be a finite positive number. Without this, a degenerate run
+    // that produced seven identical (or NaN) ratios would print sd=0 and be read
+    // as "the bar is perfectly resolvable" -- a noise estimate from a scan that
+    // measured no noise.
+    assert!(
+        ratios.iter().all(|r| r.is_finite() && *r > 0.0),
+        "#2754: every replicate ratio must be finite and positive; got {ratios:?}"
+    );
+    assert!(
+        hi > lo,
+        "#2754: the replicates produced an identical ratio {lo} every time — the draw did not \
+         vary, so this is not a noise estimate"
+    );
+}
