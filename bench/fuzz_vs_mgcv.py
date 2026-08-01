@@ -39,6 +39,8 @@ from bench.run_suite import (  # noqa: E402
     _rust_formula_for_scenario,
     _scenario_fit_mapping,
     _sigma_feature_terms,
+    _workspace_tempdir,
+    build_shared_fold_artifacts,
     dataset_for_scenario,
     folds_for_dataset,
     run_external_mgcv_cv,
@@ -74,6 +76,22 @@ class FuzzScenario:
         return self.trial_id
 
 
+# Status of the mgcv *reference* arm, recorded on the mgcv payload itself.
+MGCV_STATUS_OK = "ok"
+MGCV_STATUS_ERROR = "error"
+MGCV_STATUS_SKIPPED = "skipped"
+
+# Status of the gamfit-vs-mgcv *comparison*. Only COMPARISON_MADE says anything
+# about the fit under test; every other value means the reference never produced
+# a number, so the row is silent about gam quality and must not be read as red.
+COMPARISON_MADE = "compared"
+COMPARISON_NO_REFERENCE = "no_reference:mgcv_error"
+COMPARISON_REFERENCE_SKIPPED = "no_reference:mgcv_skipped"
+COMPARISON_NO_REFERENCE_METRIC = "no_reference:mgcv_metric_missing"
+COMPARISON_GAMFIT_FAILED = "gamfit_failed"
+COMPARISON_NO_GAMFIT_METRIC = "gamfit_metric_missing"
+
+
 @dataclass
 class FuzzResult:
     scenario: dict[str, typing.Any]
@@ -90,6 +108,48 @@ class FuzzResult:
             self.primary_gap = float(mv) - float(rv)
         elif mv is not None and rv is None:
             self.primary_gap = float(mv) + 1.0
+
+    def mgcv_status(self) -> str:
+        """Reference-arm status, derived so rows written before the status field
+        existed classify the same way as freshly written ones."""
+        recorded = self.mgcv.get("status")
+        if recorded in {MGCV_STATUS_OK, MGCV_STATUS_ERROR, MGCV_STATUS_SKIPPED}:
+            return str(recorded)
+        if self.mgcv.get("skipped"):
+            return MGCV_STATUS_SKIPPED
+        if self.mgcv.get("error"):
+            return MGCV_STATUS_ERROR
+        return MGCV_STATUS_OK
+
+    def comparison_status(self) -> str:
+        """Why this row does or does not carry a gamfit-vs-mgcv comparison.
+
+        A row whose reference errored and a row whose comparison ran and blew
+        past the gap threshold both used to surface as `FAIL`; only the latter
+        is evidence about gam. Keeping them apart is the point of this value.
+        """
+        metric = self.primary_metric or ("r2" if self.scenario.get("family") == "gaussian" else "auc")
+        mgcv_status = self.mgcv_status()
+        if mgcv_status == MGCV_STATUS_SKIPPED:
+            return COMPARISON_REFERENCE_SKIPPED
+        if mgcv_status == MGCV_STATUS_ERROR:
+            return COMPARISON_NO_REFERENCE
+        if self.mgcv.get(metric) is None:
+            return COMPARISON_NO_REFERENCE_METRIC
+        if self.rust.get("error"):
+            return COMPARISON_GAMFIT_FAILED
+        if self.rust.get(metric) is None:
+            return COMPARISON_NO_GAMFIT_METRIC
+        return COMPARISON_MADE
+
+    def reference_unavailable(self) -> bool:
+        """True when no comparison was possible because the reference arm did
+        not produce a number (errored, or returned no primary metric). RAM
+        skips are a deliberate harness decision and are excluded."""
+        return self.comparison_status() in {
+            COMPARISON_NO_REFERENCE,
+            COMPARISON_NO_REFERENCE_METRIC,
+        }
 
 
 ABS_GAP_WARN_THRESHOLD = 0.05
@@ -436,15 +496,29 @@ def run_mgcv(
     del r_timeout
     try:
         scenario_cfg = {"name": sc.name}
-        row = (
-            run_external_mgcv_gaulss_cv(scenario_cfg, ds=ds, folds=[fold])
-            if sc.model_type == "gamlss"
-            else run_external_mgcv_cv(scenario_cfg, ds=ds, folds=[fold])
-        )
+        if sc.model_type == "gamlss":
+            row = run_external_mgcv_gaulss_cv(scenario_cfg, ds=ds, folds=[fold])
+        else:
+            # `run_external_mgcv_cv` hands the per-fold scaled CSVs to an Rscript
+            # child and reads them for the whole duration of the call, so the
+            # temp dir holding them must outlive the build and stay alive across
+            # the call itself. Keeping the `with` wrapped around the call (rather
+            # than around only `build_shared_fold_artifacts`) is what ties the
+            # artifacts' lifetime to their use; closing it early would delete the
+            # CSVs out from under R and fail inside the reference arm instead of
+            # here, i.e. a different silent failure.
+            with _workspace_tempdir(prefix="gam_fuzz_shared_folds_") as shared_td:
+                shared_fold_artifacts = build_shared_fold_artifacts(ds, [fold], Path(shared_td))
+                row = run_external_mgcv_cv(
+                    scenario_cfg,
+                    ds=ds,
+                    folds=[fold],
+                    shared_fold_artifacts=shared_fold_artifacts,
+                )
         if row is None:
-            return {"error": "mgcv runner did not produce a result"}
+            return {"status": MGCV_STATUS_ERROR, "error": "mgcv runner did not produce a result"}
         if row.get("status") == "failed":
-            return {"error": row.get("error", "mgcv failed")}
+            return {"status": MGCV_STATUS_ERROR, "error": row.get("error", "mgcv failed")}
         out = {k: row.get(k) for k in ("r2", "rmse", "mae", "mse", "logloss", "auc", "brier", "nagelkerke_r2")}
         out = {k: v for k, v in out.items() if v is not None}
         fit_sec = float(row.get("fit_sec") or 0.0)
@@ -454,9 +528,14 @@ def run_mgcv(
         out["time"] = fit_sec + predict_sec
         if row.get("model_spec"):
             out["model_spec"] = row["model_spec"]
+        out["status"] = MGCV_STATUS_OK
         return out
     except Exception as exc:
-        return {"error": str(exc), "traceback": traceback.format_exc()}
+        return {
+            "status": MGCV_STATUS_ERROR,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
 
 
 def run_trial(sc: FuzzScenario, rust_timeout: int, r_timeout: int) -> FuzzResult:
@@ -491,7 +570,11 @@ def run_trial(sc: FuzzScenario, rust_timeout: int, r_timeout: int) -> FuzzResult
             f"  [ram-skip] {sc.name}: skipping mgcv CV arm — {mgcv_reason}",
             flush=True,
         )
-        mgcv_out = {"skipped": True, "skip_reason": mgcv_reason}
+        mgcv_out = {
+            "status": MGCV_STATUS_SKIPPED,
+            "skipped": True,
+            "skip_reason": mgcv_reason,
+        }
     result = FuzzResult(scenario=asdict(sc), rust=rust_out, mgcv=mgcv_out)
     result.compute_gap()
     return result
@@ -637,7 +720,12 @@ def compute_ci_gates(
     # and would otherwise drag down `valid_count`. They are a harness resource
     # decision, not a gam failure or a missing comparison we could have run, so
     # exclude them from the coverage denominator — exactly like cost-cap skips.
-    ram_skipped_count = sum(1 for r in results if r.mgcv.get("skipped"))
+    ram_skipped_count = sum(1 for r in results if r.mgcv_status() == MGCV_STATUS_SKIPPED)
+    # Trials where the reference arm was *supposed* to run and did not produce a
+    # number. Unlike a RAM skip these stay in the denominator — a dead reference
+    # is a missing comparison we could have run — but they are reported on their
+    # own line so a coverage failure is never mistaken for a gam regression.
+    reference_unavailable_count = sum(1 for r in results if r.reference_unavailable())
     comparable_trials = max(0, requested_trials - ram_skipped_count)
     min_required = max(1, int(math.ceil(MIN_VALID_TRIAL_FRACTION * comparable_trials)))
     if valid_count < min_required:
@@ -646,7 +734,8 @@ def compute_ci_gates(
             "message": (
                 f"only {valid_count}/{comparable_trials} comparable trial(s) produced a valid "
                 f"comparison (skipped above cost cap: {skipped_count}; ram-skipped mgcv arm: "
-                f"{ram_skipped_count}); minimum required: {min_required}"
+                f"{ram_skipped_count}; mgcv reference unavailable: {reference_unavailable_count}); "
+                f"minimum required: {min_required}"
             ),
             "offenders": [],
         })
@@ -687,8 +776,25 @@ def compute_ci_gates(
         "requested_trials": requested_trials,
         "skipped_count": skipped_count,
         "ram_skipped_count": ram_skipped_count,
+        "reference_unavailable_count": reference_unavailable_count,
         "min_required": min_required,
     }
+
+
+def _metric_cell(value: typing.Any, absent_label: str) -> str:
+    """Render a metric, or say WHY it is absent. A blank cell labelled `FAIL`
+    reads as a verdict on the arm; `ERR`/`SKIP`/`n/a` say no number was ever
+    produced, which is a different statement."""
+    return f"{value:.4f}" if value is not None else absent_label
+
+
+def _mgcv_absent_label(result: FuzzResult) -> str:
+    status = result.mgcv_status()
+    if status == MGCV_STATUS_SKIPPED:
+        return " SKIP"
+    if status == MGCV_STATUS_ERROR:
+        return "  ERR"
+    return "  n/a"
 
 
 def print_leaderboard(results: typing.Any, top_n: int = 25) -> None:
@@ -714,8 +820,8 @@ def print_leaderboard(results: typing.Any, top_n: int = 25) -> None:
             s = r.scenario
             rv = r.rust.get(metric)
             mv = r.mgcv.get(metric)
-            rs = f"{rv:.4f}" if rv is not None else "  FAIL"
-            ms = f"{mv:.4f}" if mv is not None else "  FAIL"
+            rs = _metric_cell(rv, "   ERR" if r.rust.get("error") else "   n/a")
+            ms = _metric_cell(mv, _mgcv_absent_label(r))
             gap_s = f"{r.primary_gap:+.4f}" if r.primary_gap is not None else "  N/A "
             print(
                 f"{i + 1:3d}  {gap_s}  {rs:>9}  {ms:>9}  "
@@ -729,12 +835,15 @@ def print_leaderboard(results: typing.Any, top_n: int = 25) -> None:
         print(f"\n  mgcv wins: {mgcv_w} | gamfit wins: {rust_w} | ties: {ties} | median gap: {median_gap:+.4f}")
 
     rust_fails = [r for r in results if r.rust.get("error")]
-    mgcv_fails = [r for r in results if r.mgcv.get("error")]
+    mgcv_fails = [r for r in results if r.mgcv_status() == MGCV_STATUS_ERROR]
     if rust_fails or mgcv_fails:
         print(f"\n{'=' * 120}")
-        print(f"  FAILURES - gamfit: {len(rust_fails)} | mgcv: {len(mgcv_fails)}")
+        print(
+            f"  gamfit fit failures: {len(rust_fails)} | mgcv REFERENCE UNAVAILABLE "
+            f"(no comparison made, says nothing about gamfit): {len(mgcv_fails)}"
+        )
         print("=" * 120)
-        for label, fails in [("GAMFIT", rust_fails), ("MGCV", mgcv_fails)]:
+        for label, fails in [("GAMFIT", rust_fails), ("MGCV-REFERENCE", mgcv_fails)]:
             for r in fails[:10]:
                 s = r.scenario
                 out = r.rust if label == "GAMFIT" else r.mgcv
@@ -914,6 +1023,11 @@ def main() -> None:
                         "mgcv": result.mgcv,
                         "primary_gap": result.primary_gap,
                         "primary_metric": result.primary_metric,
+                        # The JSONL is what gets committed and read back later,
+                        # so the reason a row carries no comparison has to live
+                        # here too, not only in the console line.
+                        "mgcv_status": result.mgcv_status(),
+                        "comparison_status": result.comparison_status(),
                     },
                     default=str,
                 )
@@ -924,11 +1038,12 @@ def main() -> None:
             metric = result.primary_metric or "?"
             rv = result.rust.get(metric)
             mv = result.mgcv.get(metric)
-            rs = f"{rv:.4f}" if rv is not None else " FAIL"
-            ms = f"{mv:.4f}" if mv is not None else " FAIL"
+            rs = _metric_cell(rv, "  ERR" if result.rust.get("error") else "  n/a")
+            ms = _metric_cell(mv, _mgcv_absent_label(result))
             gap_s = f"{result.primary_gap:+.4f}" if result.primary_gap is not None else " N/A "
             err_r = " [G:ERR]" if result.rust.get("error") else ""
-            err_m = " [M:ERR]" if result.mgcv.get("error") else ""
+            comparison = result.comparison_status()
+            status_s = "" if comparison == COMPARISON_MADE else f" [{comparison}]"
             divergence_level, _ = classify_primary_divergence(result)
             flag = " !!!" if divergence_level == "fail" else (" !!" if divergence_level == "warn" else "")
             if result.primary_gap is not None and result.primary_gap > PER_TRIAL_FAIL_GAP:
@@ -944,7 +1059,7 @@ def main() -> None:
                 f"  [{i + 1:3d}/{len(scenarios)}] {sc.name[:30]:30s} "
                 f"{sc.family[:4]}/{sc.model_type[:5]}/{sc.basis_type[:5]:5s} "
                 f"{metric}:gamfit={rs} {metric}:mgcv={ms} gap={gap_s} "
-                f"n={sc.n_obs:6d} p={sc.n_features:3d}{err_r}{err_m}{flag}{time_s}",
+                f"n={sc.n_obs:6d} p={sc.n_features:3d}{err_r}{status_s}{flag}{time_s}",
                 flush=True,
             )
 
@@ -974,6 +1089,16 @@ def main() -> None:
         baseline=baseline,
     )
     any_failure = bool(rust_only_failures) or gates["failed"]
+
+    # Print this whether or not a gate fired: a run whose reference arm never
+    # came back produced no comparisons at all, and that has to be visible
+    # without reading it out of a coverage message.
+    print(
+        f"\n  comparisons: {gates['valid_count']} made | "
+        f"mgcv reference unavailable: {gates['reference_unavailable_count']} | "
+        f"mgcv arm ram-skipped: {gates['ram_skipped_count']} "
+        f"(of {gates['requested_trials']} requested trial(s))"
+    )
 
     if rust_only_failures:
         print(f"\n{'=' * 120}")
