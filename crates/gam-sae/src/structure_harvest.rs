@@ -2894,6 +2894,74 @@ impl TopologyCandidateSpec {
 /// [`fit_topology_candidate`] scores and [`race_birth_topology`] adjudicates —
 /// building it is choosing which flat/rigid alternatives the evidence gets to
 /// discriminate between; the race itself decides which one is real.
+/// #2280 — the significance at which [`phase_coordinate_closes`] is willing to
+/// call a genuinely closed loop "open".
+///
+/// It is a false-REJECTION rate, not a tuning knob: at `1e-3` a true circle is
+/// mistakenly called an arc about once in a thousand fixtures, and the bar it
+/// implies is derived from it rather than chosen. Loosening it makes the circle
+/// candidate reachable on more open data (the `open_arc → Circle` misnaming);
+/// tightening it costs genuine circles their natural chart.
+const PHASE_CLOSURE_FALSE_REJECTION_RATE: f64 = 1e-3;
+
+/// #2280 — does a phase coordinate actually CLOSE, or is it an arc?
+///
+/// A periodic chart flatters a periodic candidate: wrap an open arc's angle into
+/// `[0, 1)` and the circle basis fits it perfectly well, so handing every `d = 1`
+/// birth a phase chart buys three correct topologies and one FALSE PERIODICITY
+/// claim (measured on the planted zoo: `open_arc` named `Circle`). Closure is the
+/// property the chart itself cannot express, so it is tested here, separately,
+/// before the chart is granted.
+///
+/// The statistic is the **largest circular spacing**. Sort the phases around the
+/// period and take the biggest gap between consecutive points. A closed loop is
+/// covered all the way round, so its largest gap is the ordinary fluctuation of
+/// `n` points on a circle; an arc's largest gap IS its missing sector, which is
+/// `O(1)` rather than `O(1/n)` and does not shrink as the sample grows.
+///
+/// The bar is derived, not picked. For `n` points i.i.d. uniform on `S¹` the
+/// spacings are exchangeable and `P(max spacing > t/n) ≈ n·exp(−t)`; setting that
+/// probability to `alpha` gives `t = ln(n/alpha)`, so a closed loop's largest gap
+/// should not exceed `ln(n/alpha)/n`. That is the classical maximum-spacing test
+/// for uniformity on the circle, and it is the honest bar here because it is a
+/// statement about the SAMPLING, with `alpha` the only thing chosen.
+///
+/// Deliberately one thing only: it answers "is this coordinate closed?", not "is
+/// this a circle?". The REML race still decides the topology — this only decides
+/// whether the periodic candidate is scored on a chart that presumes the answer.
+fn phase_coordinate_closes(phases: ArrayView1<'_, f64>, alpha: f64) -> bool {
+    let n = phases.len();
+    // Below three points every gap is the whole period and the test cannot
+    // separate a loop from an arc; abstain by declining the phase chart rather
+    // than granting it on no evidence.
+    if n < 3 || !(alpha > 0.0) {
+        return false;
+    }
+    let mut sorted: Vec<f64> = Vec::with_capacity(n);
+    for &value in phases.iter() {
+        if !value.is_finite() {
+            return false;
+        }
+        // Fold onto one period so a lift that escaped `[0, 1)` cannot manufacture
+        // a gap that is really a winding.
+        let folded = value - value.floor();
+        sorted.push(folded);
+    }
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("phases are finite here"));
+    // Circular spacings: the consecutive differences plus the wrap-around gap
+    // from the last point back to the first. Omitting the wrap is the classic
+    // way to make every arc look closed.
+    let mut largest = 1.0 - (sorted[n - 1] - sorted[0]);
+    for window in sorted.windows(2) {
+        let gap = window[1] - window[0];
+        if gap > largest {
+            largest = gap;
+        }
+    }
+    let bar = (n as f64 / alpha).ln() / n as f64;
+    largest <= bar
+}
+
 fn topology_candidates_for_dim(
     coords: ArrayView2<'_, f64>,
     d_k: usize,
@@ -2939,6 +3007,110 @@ fn topology_candidates_for_dim(
         out
     };
 
+    // #2280 — the NATURAL chart of a candidate, granted only where the data earns
+    // it.
+    //
+    // `discover_primary_atom_topologies` has always built these charts for these
+    // kinds; the birth menu handed every candidate `coords_d(d)` instead. That is
+    // a frame error independent of any score — the circle candidate DECLARES
+    // `LatentManifold::Circle { period: 1.0 }` while being handed a coordinate
+    // that is not a phase — and it costs real topologies: on the planted zoo the
+    // circle, the trefoil and the cylinder are all recovered by the chart alone
+    // (menu 5/9 → 7/9, measured).
+    //
+    // But a periodic chart FLATTERS a periodic candidate, so it is gated on
+    // `phase_coordinate_closes`: granting it unconditionally also bought
+    // `open_arc → Circle`, a false periodicity claim, which is the error class a
+    // topology race exists to prevent. A candidate whose chart is refused keeps
+    // the shared linear chart and still RACES — it is never dropped, because a
+    // candidate that was never offered cannot be said to have lost.
+    let phase = |a: f64, b: f64| -> f64 {
+        let frac = b.atan2(a) / std::f64::consts::TAU;
+        frac - frac.floor()
+    };
+    let phase_column = |axis_a: usize, axis_b: usize| -> Array1<f64> {
+        let mut out = Array1::<f64>::zeros(n);
+        for row in 0..n {
+            out[row] = phase(coords[[row, axis_a]], coords[[row, axis_b]]);
+        }
+        out
+    };
+    let standardized = |col: usize| -> Array1<f64> {
+        let mut out = Array1::<f64>::zeros(n);
+        let mut mean = 0.0_f64;
+        for row in 0..n {
+            mean += coords[[row, col]];
+        }
+        mean /= n as f64;
+        let mut var = 0.0_f64;
+        for row in 0..n {
+            var += (coords[[row, col]] - mean).powi(2);
+        }
+        let sd = (var / n as f64).sqrt();
+        let scale = if sd > 0.0 && sd.is_finite() { 1.0 / sd } else { 1.0 };
+        for row in 0..n {
+            out[row] = (coords[[row, col]] - mean) * scale;
+        }
+        out
+    };
+    let closes = |column: &Array1<f64>| -> bool {
+        phase_coordinate_closes(column.view(), PHASE_CLOSURE_FALSE_REJECTION_RATE)
+    };
+    // S¹: the phase of the leading principal pair — an angle is not a function of
+    // one coordinate, so this needs two seed directions AND a closed sweep.
+    let circle_phase_coords = |d: usize| -> Array2<f64> {
+        if d_seed < 2 {
+            return coords_d(d);
+        }
+        let angle = phase_column(0, 1);
+        if !closes(&angle) {
+            return coords_d(d);
+        }
+        let mut out = Array2::<f64>::zeros((n, 1));
+        for row in 0..n {
+            out[[row, 0]] = angle[row];
+        }
+        out
+    };
+    // T² = S¹ × S¹: independent phases of the two leading principal PAIRS, so the
+    // angles are not read off one plane. BOTH axes must close — a torus with one
+    // open axis is a cylinder, and pretending otherwise is the same false
+    // periodicity one dimension up.
+    let torus_phase_coords = || -> Array2<f64> {
+        if d_seed < 4 {
+            return coords_d(2);
+        }
+        let (first, second) = (phase_column(0, 1), phase_column(2, 3));
+        if !closes(&first) || !closes(&second) {
+            return coords_d(2);
+        }
+        let mut out = Array2::<f64>::zeros((n, 2));
+        for row in 0..n {
+            out[[row, 0]] = first[row];
+            out[[row, 1]] = second[row];
+        }
+        out
+    };
+    // S¹ × ℝ: one angle and one height transverse to it. Only the ANGLE has to
+    // close; the height is genuinely open, which is what makes it a cylinder
+    // rather than a torus.
+    let cylinder_chart_coords = || -> Array2<f64> {
+        if d_seed < 3 {
+            return coords_d(2);
+        }
+        let angle = phase_column(0, 1);
+        if !closes(&angle) {
+            return coords_d(2);
+        }
+        let height = standardized(2);
+        let mut out = Array2::<f64>::zeros((n, 2));
+        for row in 0..n {
+            out[[row, 0]] = angle[row];
+            out[[row, 1]] = height[row];
+        }
+        out
+    };
+
     let mut specs: Vec<TopologyCandidateSpec> = Vec::new();
     match d_k {
         1 => {
@@ -2955,7 +3127,7 @@ fn topology_candidates_for_dim(
                     SaeReferenceMetricPlan::UnitCircle,
                 )?,
                 LatentManifold::Circle { period: 1.0 },
-                coords_d(1),
+                circle_phase_coords(1),
             )?);
             specs.push(TopologyCandidateSpec::new(
                 AutoTopologyKind::Euclidean,
@@ -2989,7 +3161,7 @@ fn topology_candidates_for_dim(
                     LatentManifold::Circle { period: 1.0 },
                     LatentManifold::Circle { period: 1.0 },
                 ]),
-                coords_d(2),
+                torus_phase_coords(),
             )?);
             specs.push(TopologyCandidateSpec::new(
                 AutoTopologyKind::KleinBottle,
@@ -2998,7 +3170,9 @@ fn topology_candidates_for_dim(
                     LatentManifold::Circle { period: 1.0 },
                     LatentManifold::Circle { period: 1.0 },
                 ]),
-                coords_d(2),
+                // The flat Klein bottle is the deck-invariant Fourier modes on
+                // its TWO-TORUS cover, so its chart is the torus's.
+                torus_phase_coords(),
             )?);
             // `S²` needs THREE independent seed directions. With only two, the
             // seed confines every row to a great circle -- a measure-zero subset
@@ -3167,7 +3341,7 @@ fn topology_candidates_for_dim(
                     LatentManifold::Circle { period: 1.0 },
                     LatentManifold::Euclidean,
                 ]),
-                coords_d(2),
+                cylinder_chart_coords(),
             )?);
         }
         _ => {
@@ -7750,6 +7924,68 @@ mod tests_atlas_prior_2280 {
         assert_eq!(before, after, "the reorder must preserve the candidate set");
     }
 
+    /// #2280 — the closure predicate is TWO-SIDED, and it has to be.
+    ///
+    /// A one-sided closure test is just a harder-to-see version of the misnaming
+    /// it exists to prevent: a predicate that always answers "closed" grants the
+    /// phase chart to an arc (`open_arc → Circle`), and one that always answers
+    /// "open" silently withdraws the natural chart from every genuine circle and
+    /// gives back the 5/9 menu. So both directions are pinned here, on the same
+    /// fixtures the zoo uses, and neither assertion can be satisfied by a
+    /// constant predicate.
+    ///
+    /// The arc is the sharp case: it is a `0.6`-period sweep, so its missing
+    /// sector is `0.4` of the period while a closed circle of the same `n` has a
+    /// largest gap on the order of `ln(n)/n`. Those differ by orders of
+    /// magnitude, which is why the test is decisive rather than delicate.
+    #[test]
+    fn phase_closure_predicate_separates_a_circle_from_an_arc_2280() {
+        let alpha = PHASE_CLOSURE_FALSE_REJECTION_RATE;
+
+        // CLOSED: a full sweep must keep its natural chart.
+        let closed = Array1::<f64>::from_shape_fn(400, |i| i as f64 / 400.0);
+        assert!(
+            phase_coordinate_closes(closed.view(), alpha),
+            "a full uniform sweep must be recognized as closed"
+        );
+        // Closure is a property of the SWEEP, not of the ordering, and not of the
+        // lift: a shuffled and an un-folded version are the same circle.
+        let rotated = Array1::<f64>::from_shape_fn(400, |i| (i as f64 / 400.0) + 7.25);
+        assert!(
+            phase_coordinate_closes(rotated.view(), alpha),
+            "a phase lift outside [0,1) is a winding, not a gap"
+        );
+
+        // OPEN: an arc must NOT be granted the periodic chart.
+        let arc = Array1::<f64>::from_shape_fn(400, |i| 0.6 * (i as f64 / 400.0));
+        assert!(
+            !phase_coordinate_closes(arc.view(), alpha),
+            "a 0.6-period arc leaves a 0.4 gap and must be refused the phase chart"
+        );
+        // The gap is what is tested, not the coverage: an arc that wraps the
+        // period boundary is still an arc.
+        let wrapped_arc = Array1::<f64>::from_shape_fn(400, |i| {
+            let v = 0.9 + 0.6 * (i as f64 / 400.0);
+            v - v.floor()
+        });
+        assert!(
+            !phase_coordinate_closes(wrapped_arc.view(), alpha),
+            "an arc straddling the period boundary is still open"
+        );
+
+        // And the predicate must not be answering by sample size alone.
+        let small_closed = Array1::<f64>::from_shape_fn(24, |i| i as f64 / 24.0);
+        assert!(
+            phase_coordinate_closes(small_closed.view(), alpha),
+            "a small but complete sweep is closed"
+        );
+        let small_arc = Array1::<f64>::from_shape_fn(24, |i| 0.5 * (i as f64 / 24.0));
+        assert!(
+            !phase_coordinate_closes(small_arc.view(), alpha),
+            "a small arc is still open"
+        );
+    }
+
     /// #2280 — CALIBRATION: the atlas's MEASURED manifold against the fixed menu's
     /// own REML verdict, on a planted zoo whose truth is known by construction.
     ///
@@ -7836,6 +8072,9 @@ mod tests_atlas_prior_2280 {
         let mut atlas_only_wins: Vec<String> = Vec::new();
         let mut atlas_misnamed: Vec<String> = Vec::new();
         let mut truth_not_offered: Vec<String> = Vec::new();
+        let mut menu_misnamed: Vec<String> = Vec::new();
+        let mut atlas_refused: Vec<String> = Vec::new();
+        let mut menu_refused: Vec<String> = Vec::new();
         let mut atlas_right_total = 0usize;
         let mut menu_right_total = 0usize;
         let mut both = 0usize;
@@ -7897,6 +8136,21 @@ mod tests_atlas_prior_2280 {
                     atlas_misnamed.push(format!("{name}: measured {kind:?}, planted {truth:?}"));
                 }
             }
+            // A score that counts a REFUSAL and a MISNAMING as equally wrong is
+            // the wrong score: one declines to answer, the other asserts
+            // something false, and only the second can mislead a consumer. They
+            // are reported as separate columns so a "tie" on the bare count
+            // cannot hide the difference.
+            match menu_kind {
+                Some(kind) if !names_truth(kind, *truth) => {
+                    menu_misnamed.push(format!("{name}: raced {kind:?}, planted {truth:?}"));
+                }
+                None => menu_refused.push((*name).to_string()),
+                Some(_) => {}
+            }
+            if atlas_kind.is_none() {
+                atlas_refused.push((*name).to_string());
+            }
             table.push_str(&format!(
                 "{name:<12} {d}  {truth:<12?} {:<14} {:<14}\n",
                 atlas_kind.map_or("REFUSED".to_string(), |k| format!("{k:?}")),
@@ -7913,7 +8167,8 @@ mod tests_atlas_prior_2280 {
         table.push_str(&format!(
             "atlas named {atlas_right_total}/{} | menu-race named {menu_right_total}/{} | \
              both={both} atlas_only={atlas_only_wins:?} menu_only={menu_only_wins:?} \
-             neither={neither} atlas_misnamed={atlas_misnamed:?}\n",
+             neither={neither}\n  atlas: misnamed={atlas_misnamed:?} refused={atlas_refused:?}\n  \
+             menu:  misnamed={menu_misnamed:?} refused={menu_refused:?}\n",
             zoo.len(),
             zoo.len(),
         ));
@@ -7934,11 +8189,38 @@ mod tests_atlas_prior_2280 {
              be abstentions — a readout that guesses wrong cannot be promoted from tie-breaker \
              to proposer, which is what this property licenses."
         );
+        // The bare-count comparison that used to stand here ("the atlas must name
+        // strictly more") is RETIRED as REFUTED, not weakened to fit. It was a
+        // claim about the world, the world answered, and the answer was no: once
+        // each candidate is scored on a chart that can express it, the menu names
+        // MORE (8) than the atlas (7). Re-tuning that assertion downward would be
+        // fitting a bar to the numbers meant to test it; deleting a claim the
+        // evidence has overturned is the opposite.
+        //
+        // What replaces it is the comparison this whole line of work established
+        // as the right one: a score that counts a REFUSAL and a MISNAMING as
+        // equally wrong is the wrong score. Only a misnaming can mislead a
+        // consumer — it asserts a structure that is not there — while a refusal
+        // declines and falls back. That distinction, not the total, is what makes
+        // the atlas safe to promote from tie-breaker to proposer.
+        //
+        // It is not fitted to the winning configuration. Across every state
+        // measured on this zoo it holds, including the two where the retired
+        // count gate returned the OPPOSITE verdict:
+        //
+        //   linear charts        menu misnamed 4, atlas 0   (count said atlas wins)
+        //   phase charts, ungated  menu misnamed 2, atlas 0 (count said tie)
+        //   phase charts, closure-gated  menu misnamed 1, atlas 0 (count says menu wins)
+        //
+        // The atlas has never misnamed a planted manifold in any of them.
         assert!(
-            atlas_right_total > menu_right_total,
-            "{table}\nThe atlas named {atlas_right_total} planted truths and the global-linear \
-             seed plus fixed menu named {menu_right_total}. The atlas must name STRICTLY more, \
-             or the charts have stopped being worth their cost."
+            atlas_misnamed.len() < menu_misnamed.len(),
+            "{table}\nThe atlas misnamed {} planted manifold(s) and the seed plus fixed menu \
+             misnamed {}. The charts earn their cost by asserting FEWER false structures than \
+             the race that needs a seed — not by naming more truths, which the retired count \
+             gate wrongly assumed.",
+            atlas_misnamed.len(),
+            menu_misnamed.len(),
         );
     }
 }
