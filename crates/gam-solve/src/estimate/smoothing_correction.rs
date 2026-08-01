@@ -227,9 +227,60 @@ pub(crate) fn smooth_floor_dp(dp: f64, scale: f64) -> (f64, f64, f64) {
 ///   smoothing/heat operator `exp(0.5 * Delta_Sigma)` (equivalently Wick/Isserlis
 ///   contractions of high-order derivatives).
 /// - Those infinite-series corrections are not expanded in this routine.
+/// The certified ρ-spectrum and coefficient sensitivities the first-order
+/// correction was assembled from.
+///
+/// Retained so the sigma-point cubature upgrade
+/// ([`crate::reml::eval::RemlState::compute_smoothing_correction_auto`]) can
+/// reuse the SAME `V_ρ` this path certified instead of deriving a second,
+/// differently-regularized one. Two objects called `V_ρ` inside one routine is
+/// how the cubature came to need a blanket bail-out whenever the certified
+/// inverse was rank-deficient: its own ridged inverse turns each dropped
+/// direction into a `1/ridge` eigenvalue and would place a sigma point along
+/// it. With the certified spectrum in hand there is nothing to bail out of — a
+/// direction that is not `Active` is simply not a candidate node.
+pub(crate) struct RhoSensitivitySpectrum {
+    /// `Qs · J` — the coefficient sensitivities `∂β̂/∂ρ` in the ORIGINAL
+    /// coefficient basis, `p_orig × n_rho`.
+    pub sensitivity_orig: Array2<f64>,
+    /// Eigenvalues of the ρ-space LAML Hessian, in eigensolver order.
+    pub eigenvalues: Array1<f64>,
+    /// Matching eigenvectors, `n_rho × n_rho`.
+    pub eigenvectors: Array2<f64>,
+    /// Per-direction verdict from [`invert_identified_rho_hessian`].
+    pub classifications: Vec<EigenClassification>,
+}
+
+impl RhoSensitivitySpectrum {
+    /// First-order variance direction `index` contributes to the correction:
+    /// `‖Qs·J·u_j‖² / σ_j`, the squared norm of the column
+    /// [`smoothing_correction_gram`] builds for it, i.e. its share of
+    /// `tr(J·V_ρ·Jᵀ)`.
+    ///
+    /// Ranking directions by THIS ranks them by their share of the estimand.
+    /// Ranking them by `1/σ_j` — the spread of `ρ` — ranks them by a quantity
+    /// the correction does not depend on alone, and puts a saturated direction
+    /// (where `1/σ_j` is huge precisely because `∂β̂/∂ρ → 0`) first (#2728).
+    pub fn first_order_variance(&self, index: usize) -> f64 {
+        let column = self.sensitivity_orig.dot(&self.eigenvectors.column(index));
+        column.dot(&column) / self.eigenvalues[index]
+    }
+
+    /// Indices of the directions the certified inversion admitted, i.e. those
+    /// with strictly positive resolved curvature.
+    pub fn active_directions(&self) -> Vec<usize> {
+        self.classifications
+            .iter()
+            .enumerate()
+            .filter_map(|(index, class)| {
+                matches!(class, EigenClassification::Active).then_some(index)
+            })
+            .collect()
+    }
+}
+
 pub(crate) struct SmoothingCorrectionComputation {
     pub correction: Option<Array2<f64>>,
-    pub hessian_rho: Option<Array2<f64>>,
     /// Regularized inverse outer Hessian `Cov(rho_hat)` in the same rho ordering
     /// as the fitted smoothing-parameter vector. This exposes the #740 quantity
     /// to LR Bartlett inference without changing the production algebra that
@@ -243,6 +294,9 @@ pub(crate) struct SmoothingCorrectionComputation {
     /// use this to decide whether higher-order corrections are even
     /// meaningful — they aren't when V_ρ is rank-deficient.
     pub active_rank: Option<usize>,
+    /// Certified ρ-spectrum + coefficient sensitivities, when the computation
+    /// got far enough to produce them. `None` on every early return.
+    pub spectrum: Option<RhoSensitivitySpectrum>,
     pub status: SmoothingCorrectionStatus,
 }
 
@@ -1065,9 +1119,9 @@ pub(crate) fn compute_smoothing_correction(
     if n_rho == 0 {
         return SmoothingCorrectionComputation {
             correction: None,
-            hessian_rho: None,
             rho_covariance: None,
             active_rank: None,
+            spectrum: None,
             status: SmoothingCorrectionStatus::NotApplicableNoSmoothingParameters,
         };
     }
@@ -1077,9 +1131,9 @@ pub(crate) fn compute_smoothing_correction(
     if lambdas.len() != n_rho || ct.len() != n_rho {
         return SmoothingCorrectionComputation {
             correction: None,
-            hessian_rho: None,
             rho_covariance: None,
             active_rank: None,
+            spectrum: None,
             status: SmoothingCorrectionStatus::Unavailable(
                 SmoothingCorrectionUnavailable::PenaltyDimension {
                     rho: n_rho,
@@ -1094,9 +1148,9 @@ pub(crate) fn compute_smoothing_correction(
         Err(error) => {
             return SmoothingCorrectionComputation {
                 correction: None,
-                hessian_rho: None,
                 rho_covariance: None,
                 active_rank: None,
+                spectrum: None,
                 status: SmoothingCorrectionStatus::Unavailable(
                     SmoothingCorrectionUnavailable::PenaltyStructure { error },
                 ),
@@ -1127,9 +1181,9 @@ pub(crate) fn compute_smoothing_correction(
         Err(error) => {
             return SmoothingCorrectionComputation {
                 correction: None,
-                hessian_rho: None,
                 rho_covariance: None,
                 active_rank: None,
+                spectrum: None,
                 status: SmoothingCorrectionStatus::Unavailable(
                     SmoothingCorrectionUnavailable::ObjectiveInnerHessian {
                         error: error.to_string(),
@@ -1153,9 +1207,9 @@ pub(crate) fn compute_smoothing_correction(
         );
         return SmoothingCorrectionComputation {
             correction: None,
-            hessian_rho: None,
             rho_covariance: None,
             active_rank: None,
+            spectrum: None,
             status: SmoothingCorrectionStatus::Unavailable(
                 SmoothingCorrectionUnavailable::InnerHessianDimension {
                     rows: h_trans.nrows(),
@@ -1173,9 +1227,9 @@ pub(crate) fn compute_smoothing_correction(
             log::warn!("Cholesky decomposition failed for smoothing correction; skipping.");
             return SmoothingCorrectionComputation {
                 correction: None,
-                hessian_rho: None,
                 rho_covariance: None,
                 active_rank: None,
+                spectrum: None,
                 status: SmoothingCorrectionStatus::Unavailable(
                     SmoothingCorrectionUnavailable::InnerHessianNotPositiveDefinite,
                 ),
@@ -1230,9 +1284,9 @@ pub(crate) fn compute_smoothing_correction(
                 );
                 return SmoothingCorrectionComputation {
                     correction: None,
-                    hessian_rho: None,
                     rho_covariance: None,
                     active_rank: None,
+                    spectrum: None,
                     status: SmoothingCorrectionStatus::Unavailable(
                         SmoothingCorrectionUnavailable::SensitivitySolve,
                     ),
@@ -1254,9 +1308,9 @@ pub(crate) fn compute_smoothing_correction(
             );
             return SmoothingCorrectionComputation {
                 correction: None,
-                hessian_rho: None,
                 rho_covariance: None,
                 active_rank: None,
+                spectrum: None,
                 status: SmoothingCorrectionStatus::Unavailable(
                     SmoothingCorrectionUnavailable::OuterHessian {
                         error: err.to_string(),
@@ -1286,9 +1340,9 @@ pub(crate) fn compute_smoothing_correction(
             );
             return SmoothingCorrectionComputation {
                 correction: None,
-                hessian_rho: Some(hessian_rho),
                 rho_covariance: None,
                 active_rank: None,
+                spectrum: None,
                 status: SmoothingCorrectionStatus::Unavailable(
                     SmoothingCorrectionUnavailable::OuterHessianInverse { error },
                 ),
@@ -1315,9 +1369,9 @@ pub(crate) fn compute_smoothing_correction(
         );
         return SmoothingCorrectionComputation {
             correction: None,
-            hessian_rho: Some(hessian_rho),
             rho_covariance: Some(inverted.inverse),
             active_rank: Some(0),
+            spectrum: None,
             status: SmoothingCorrectionStatus::ZeroNoIdentifiedOuterDirections,
         };
     }
@@ -1364,6 +1418,15 @@ pub(crate) fn compute_smoothing_correction(
         &inverted.eigenvectors,
         &inverted.classifications,
     );
+    // Retain what the cubature upgrade needs to reuse THIS V_rho rather than
+    // build a second one: the sensitivities in the original basis and the
+    // certified spectrum with its per-direction verdicts (#2728).
+    let spectrum = RhoSensitivitySpectrum {
+        sensitivity_orig: qs.dot(&jacobian_trans),
+        eigenvalues: inverted.eigenvalues,
+        eigenvectors: inverted.eigenvectors,
+        classifications: inverted.classifications,
+    };
     let rho_covariance = inverted.inverse;
 
     // Validate the result
@@ -1371,9 +1434,9 @@ pub(crate) fn compute_smoothing_correction(
         log::warn!("Non-finite values in smoothing correction matrix; skipping.");
         return SmoothingCorrectionComputation {
             correction: None,
-            hessian_rho: Some(hessian_rho),
             rho_covariance: Some(rho_covariance),
             active_rank: Some(active_rank_used),
+            spectrum: Some(spectrum),
             status: SmoothingCorrectionStatus::Unavailable(
                 SmoothingCorrectionUnavailable::NonFiniteCorrection,
             ),
@@ -1381,9 +1444,9 @@ pub(crate) fn compute_smoothing_correction(
     }
     SmoothingCorrectionComputation {
         correction: Some(v_corr_orig),
-        hessian_rho: Some(hessian_rho),
         rho_covariance: Some(rho_covariance),
         active_rank: Some(active_rank_used),
+        spectrum: Some(spectrum),
         status: SmoothingCorrectionStatus::Computed,
     }
 }

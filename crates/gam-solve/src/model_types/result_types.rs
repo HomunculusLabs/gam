@@ -8,7 +8,7 @@ use gam_linalg::utils::stack_offsets;
 use gam_problem::{
     GlmLikelihoodSpec, InverseLink, LatentCLogLogState, LikelihoodScaleMetadata, LikelihoodSpec,
     LogLikelihoodNormalization, MixtureLinkSpec, MixtureLinkState, ResponseFamily, SasLinkSpec,
-    FitStationarityEvidence, SasLinkState, StabilizationLedger, StandardLink,
+    FitStationarityEvidence, SasLinkState, StandardLink,
     StationarityRung,
 };
 
@@ -2427,13 +2427,16 @@ pub enum SmoothingCorrectionMethod {
         active_rank: usize,
         rho_dimension: usize,
     },
-    /// Sigma-point integration is a named approximation. Its explicit rho-
-    /// Hessian perturbation is retained so it cannot be reported as exact WPS.
-    SigmaPointCubature {
-        rank: usize,
-        n_points: usize,
-        rho_hessian_stabilization: StabilizationLedger,
-    },
+    /// Sigma-point integration is a named approximation: it integrates the
+    /// smoothing-parameter posterior over a finite node set rather than in
+    /// closed form, so it must never be reported as exact WPS.
+    ///
+    /// It no longer carries a `rho_hessian_stabilization` ledger. That field
+    /// recorded a relative ridge this branch used to add to the rho-Hessian
+    /// before inverting it for its own copy of `V_rho`; the branch now reuses
+    /// the certified, UNPERTURBED inverse the first-order path produces, so
+    /// there is no perturbation left to record (#2728).
+    SigmaPointCubature { rank: usize, n_points: usize },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

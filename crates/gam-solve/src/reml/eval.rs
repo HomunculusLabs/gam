@@ -5,15 +5,7 @@ use crate::model_types::SmoothingCorrectionMethod;
 use gam_linalg::matrix::symmetrize_in_place;
 use std::sync::atomic::Ordering;
 
-// Relative scale of the diagonal ridge added to the ρ-Hessian before
-// inverting it for sigma-point construction. Matches the analogous IFT
-// regularisation: tiny enough to leave well-conditioned Hessians intact,
-// large enough that a near-singular Hessian still yields a usable V_ρ.
-pub(crate) const AUTO_CUBATURE_HESSIAN_RIDGE_REL: f64 = 1e-8;
-// Absolute floor for the diagonal ridge (prevents zero ridge when the
-// Hessian diagonal is degenerate / all-zero).
-pub(crate) const AUTO_CUBATURE_HESSIAN_RIDGE_ABS: f64 = 1e-8;
-// Inset from RHO_BOUND when clamping sigma points so the inner PIRLS
+// Inset from RHO_BOUND when scaling a sigma-point step so the inner PIRLS
 // fit at a sigma point is strictly interior to the box constraint
 // (the box edge is unreachable by IRLS without barrier intervention).
 pub(crate) const AUTO_CUBATURE_RHO_CLAMP_INSET: f64 = 1e-8;
@@ -60,7 +52,6 @@ pub enum SmoothingCorrectionOutcome {
     Cubature {
         correction: Array2<f64>,
         rho_covariance: Option<Array2<f64>>,
-        rho_hessian_stabilization: gam_problem::StabilizationLedger,
         rank: usize,
         n_points: usize,
         near_boundary: bool,
@@ -126,17 +117,12 @@ impl SmoothingCorrectionOutcome {
                 correction,
                 rank,
                 n_points,
-                rho_hessian_stabilization,
                 first_order_correction,
                 first_order_method,
                 ..
             } => (
                 Some(correction),
-                Some(SmoothingCorrectionMethod::SigmaPointCubature {
-                    rank,
-                    n_points,
-                    rho_hessian_stabilization,
-                }),
+                Some(SmoothingCorrectionMethod::SigmaPointCubature { rank, n_points }),
                 first_order_correction,
                 first_order_method,
             ),
@@ -465,47 +451,305 @@ pub(crate) fn sigma_cubature_evaluate_cpu_rayon(
     rows.into_iter().collect()
 }
 
-/// Accumulate the sigma-point cubature total covariance `V̂_p` from per-point
-/// `(A_m, b_m)` pairs.
+/// Accumulate the sigma-point cubature total covariance `V̂_p`.
 ///
-/// Math: with equal weights `w_m = 1/M`,
-///   `mean_hinv = Σ w_m A_m`
-///   `mean_beta = Σ w_m b_m`
-///   `second_beta = Σ w_m b_m b_mᵀ`
-///   `var_beta = second_beta − mean_beta · mean_betaᵀ`
-///   `V̂_p = mean_hinv + var_beta`
+/// Math. The estimand is the law of total covariance for the
+/// smoothing-parameter-marginalised posterior,
 ///
-/// This is the law of total covariance applied to the per-sigma Laplace
-/// approximation: `V_p = φ[E_ρ H(ρ)⁻¹ + Cov_ρ β̂(ρ)]`. Returned matrix is
-/// not yet symmetry-enforced; the caller does that.
+/// ```text
+///     V_p = E_ρ[Cov(β|ρ)] + Cov_ρ[β̂(ρ)] = φ̂·E_ρ[H(ρ)⁻¹] + Cov_ρ[β̂(ρ)].
+/// ```
 ///
-/// Pulled out as a free function so the sigma-cubature math has a single,
-/// directly-testable implementation, independent of the (CPU Rayon / future
-/// GPU stream-pool) execution model that produced `points`.
+/// `paired[j]` holds the `(H(ρ)⁻¹, β̂(ρ))` pair at the `+` and `−` node of
+/// upgraded ρ-eigendirection `j` (the inverse-Hessian blocks already carrying
+/// their `φ̂`). The two terms are accumulated as
+///
+/// ```text
+///     φ̂·Ê_ρ[H(ρ)⁻¹] = mean over all 2r nodes of the per-node block
+///     Ĉov_ρ[β̂]      = Σ_j c_j c_jᵀ + Σ_k f_k f_kᵀ,
+///     c_j = (β̂(ρ_j⁺) − β̂(ρ_j⁻))/2,     f_k = Qs·J·u_k/√σ_k.
+/// ```
+///
+/// # Why the covariance term is a PER-DIRECTION chord and not a joint moment
+///
+/// The previous form took the empirical covariance of `β̂` over the whole node
+/// set. That reproduces `J·V_ρ·Jᵀ` for a linear `β̂` only through a conspiracy
+/// between the `√rank` node radius and the `1/(2·rank)` weight, and it breaks
+/// the moment as soon as the two sides of a direction are not at the same
+/// distance — which is exactly what criterion-calibrated nodes produce, and
+/// what an asymmetric criterion (flat one way, a cliff the other) requires.
+///
+/// The per-direction chord has no such conspiracy: with `β̂` linear and the
+/// nodes at `±t_j` it gives `c_j = t_j·Qs·J·u_j`, so at the uncalibrated step
+/// `t_j = σ_j^{-1/2}` the sum is `Σ_j (Qs·J·u_j)(Qs·J·u_j)ᵀ/σ_j = J·V_ρ·Jᵀ`
+/// restricted to the upgraded subspace — *identically*, for any node scaling.
+///
+/// `fallback_columns` carries the first-order column of every ACTIVE direction
+/// that was not upgraded, so the assembled correction covers the same subspace
+/// the first-order correction does and the cubature is a strict upgrade rather
+/// than a differently-truncated estimate (#2728).
+///
+/// The result is PSD by construction: a mean of PSD inverse-Hessian blocks plus
+/// a sum of rank-one Grams. Since the caller forms the additive correction as
+/// `total − φ̂·H(ρ̂)⁻¹`, the corrected covariance `Vb + correction` telescopes
+/// back to this PSD matrix.
 pub(crate) fn accumulate_sigma_cubature_total_covariance(
-    points: &[(Array2<f64>, Array1<f64>)],
+    paired: &[(SigmaPointResult, SigmaPointResult)],
+    fallback_columns: &[Array1<f64>],
     p: usize,
 ) -> Array2<f64> {
-    let w = 1.0 / (points.len() as f64);
-    let mut mean_hinv = Array2::<f64>::zeros((p, p));
-    let mut mean_beta = Array1::<f64>::zeros(p);
-    let mut second_beta = Array2::<f64>::zeros((p, p));
-    for (cov_point, beta_point) in points {
-        // scaled_add avoids allocating intermediate scaled arrays per sigma
-        // point; numerically equivalent to `mean += &arr.mapv(|v| w * v)`.
-        mean_hinv.scaled_add(w, cov_point);
-        mean_beta.scaled_add(w, beta_point);
-        let beta_col = beta_point.view().insert_axis(ndarray::Axis(1));
-        let beta_row = beta_point.view().insert_axis(ndarray::Axis(0));
-        let outer = beta_col.dot(&beta_row);
-        second_beta.scaled_add(w, &outer);
+    let mut total = Array2::<f64>::zeros((p, p));
+    let node_count = 2 * paired.len();
+    if node_count > 0 {
+        let weight = 1.0 / node_count as f64;
+        for ((cov_plus, _), (cov_minus, _)) in paired {
+            total.scaled_add(weight, cov_plus);
+            total.scaled_add(weight, cov_minus);
+        }
     }
-    let mean_outer = mean_beta
-        .view()
-        .insert_axis(ndarray::Axis(1))
-        .dot(&mean_beta.view().insert_axis(ndarray::Axis(0)));
-    let var_beta = second_beta - mean_outer;
-    mean_hinv + var_beta
+    let accumulate_gram = |column: &Array1<f64>, total: &mut Array2<f64>| {
+        for row in 0..p {
+            let scaled = column[row];
+            if scaled == 0.0 {
+                continue;
+            }
+            for col in 0..p {
+                total[[row, col]] += scaled * column[col];
+            }
+        }
+    };
+    for ((_, beta_plus), (_, beta_minus)) in paired {
+        let chord = (beta_plus - beta_minus).mapv(|value| 0.5 * value);
+        accumulate_gram(&chord, &mut total);
+    }
+    for column in fallback_columns {
+        accumulate_gram(column, &mut total);
+    }
+    total
+}
+
+/// Criterion level a one-sigma sigma-point node sits at.
+///
+/// The cubature is a symmetric two-point rule for `ρ ~ N(ρ̂, V_ρ)` with each
+/// node one posterior sd out along a ρ-Hessian eigendirection. Under the
+/// QUADRATIC model that defines `V_ρ` in the first place, the criterion at that
+/// node is above the optimum by exactly
+///
+/// ```text
+///     V(ρ̂ + σ^{-1/2}·u) − V(ρ̂) = ½·σ·(σ^{-1/2})² = ½.
+/// ```
+///
+/// So `½` is not a tuning parameter: it is the criterion level the rule already
+/// assumes its node occupies. Measuring it instead of assuming it changes
+/// nothing wherever the quadratic model holds, and moves the node wherever it
+/// does not (#2728).
+const PROFILE_SIGMA_RISE: f64 = 0.5;
+
+/// Factor within which an achieved criterion rise counts as agreeing with
+/// [`PROFILE_SIGMA_RISE`].
+///
+/// Under the quadratic model this acceptance certifies, `ΔV ∝ t²`, so admitting
+/// `ΔV ∈ [rise/κ, rise·κ]` bounds the node's relative position error by
+/// `√κ − 1` above and `1 − κ^{-1/2}` below — at `κ = 1.5`, +22% / −18% — on a
+/// quantity that is itself a refinement to `Vb`. It also makes the common case,
+/// a criterion that really is quadratic, cost exactly one criterion evaluation
+/// per node.
+const PROFILE_SIGMA_ACCEPT_FACTOR: f64 = 1.5;
+
+/// Criterion evaluations one node's calibration may spend after the first.
+///
+/// Each is a single inner solve at fixed ρ. The bracketed power-law secant
+/// below contracts geometrically and lands a quadratic criterion on the first
+/// step, so this budget only binds on a criterion that is neither quadratic nor
+/// a clean power law over the searched interval; there the best bracket
+/// endpoint is returned and the achieved level is reported alongside it.
+const PROFILE_SIGMA_MAX_EVALS: usize = 12;
+
+/// A sigma-point node whose position was calibrated against the criterion.
+pub(crate) struct CalibratedSigmaNode {
+    /// The node itself, `ρ̂ + step·direction`.
+    pub rho: Array1<f64>,
+    /// Step length actually taken along `direction`.
+    pub step: f64,
+    /// Step length the quadratic model asked for, `σ^{-1/2}`.
+    pub wald_step: f64,
+    /// `V(node) − V(ρ̂)` at the returned step.
+    pub achieved_rise: f64,
+    /// Criterion evaluations this node's calibration spent.
+    pub evaluations: usize,
+    /// The step ran into the ρ box before reaching [`PROFILE_SIGMA_RISE`].
+    pub box_limited: bool,
+}
+
+/// Largest `t ≥ 0` keeping `rho + t·direction` inside the ρ box on every
+/// coordinate.
+///
+/// The previous code clamped each COORDINATE of the displaced point
+/// independently, which silently rotates the ray being sampled away from the
+/// eigendirection it was supposed to sample. Scaling the whole step instead
+/// keeps the node on its own direction, so the two-point rule stays a rule
+/// about that eigendirection.
+fn sigma_step_to_rho_box(rho: &Array1<f64>, direction: &Array1<f64>) -> f64 {
+    let lo = -RHO_BOUND + AUTO_CUBATURE_RHO_CLAMP_INSET;
+    let hi = RHO_BOUND - AUTO_CUBATURE_RHO_CLAMP_INSET;
+    let mut limit = f64::INFINITY;
+    for (centre, component) in rho.iter().zip(direction.iter()) {
+        if *component > 0.0 {
+            limit = limit.min((hi - centre) / component);
+        } else if *component < 0.0 {
+            limit = limit.min((lo - centre) / component);
+        }
+    }
+    if limit.is_finite() { limit.max(0.0) } else { f64::INFINITY }
+}
+
+impl<'a> RemlState<'a> {
+    /// Place one sigma-point node at the criterion level the cubature rule
+    /// assumes it occupies, rather than at the step a possibly-inapplicable
+    /// quadratic model implies.
+    ///
+    /// `direction` is a unit ρ-vector carrying its own sign; `wald_step` is
+    /// `σ^{-1/2}` for that eigendirection. The returned node satisfies
+    /// `V(ρ̂ + step·direction) − V(ρ̂) ≈ PROFILE_SIGMA_RISE`, except where the ρ
+    /// box is reached first (`box_limited`) — which is the honest statement
+    /// that the criterion never rises to that level inside the fit's own λ
+    /// range — or where the evaluation budget runs out, in which case the
+    /// bracket endpoint closest to the target level is returned and
+    /// `achieved_rise` reports where it actually landed.
+    ///
+    /// Exact reduction: if the criterion is quadratic along `direction`, the
+    /// very first evaluation lands on `PROFILE_SIGMA_RISE` and `step ==
+    /// wald_step`, so the node — and therefore the whole correction — is
+    /// identical to what the uncalibrated rule produced.
+    pub(crate) fn calibrate_sigma_node(
+        &self,
+        rho_hat: &Array1<f64>,
+        centre_cost: f64,
+        direction: &Array1<f64>,
+        wald_step: f64,
+    ) -> Result<CalibratedSigmaNode, EstimationError> {
+        let box_limit = sigma_step_to_rho_box(rho_hat, direction);
+        let at = |step: f64| -> Array1<f64> {
+            let mut point = rho_hat.clone();
+            point
+                .iter_mut()
+                .zip(direction.iter())
+                .for_each(|(coordinate, component)| *coordinate += step * component);
+            point
+        };
+        let centre_node = |evaluations: usize| CalibratedSigmaNode {
+            rho: rho_hat.clone(),
+            step: 0.0,
+            wald_step,
+            achieved_rise: 0.0,
+            evaluations,
+            box_limited: true,
+        };
+        if !wald_step.is_finite() || wald_step <= 0.0 || box_limit <= 0.0 {
+            // Either the direction has no resolvable width, or ρ̂ already sits
+            // on the box face along it. Both mean the node is the centre and
+            // this side of the chord is zero-length.
+            return Ok(centre_node(0));
+        }
+
+        let target = PROFILE_SIGMA_RISE;
+        let mut step = wald_step.min(box_limit);
+        let mut rise = self.compute_cost(&at(step))? - centre_cost;
+        let mut evaluations = 1usize;
+        // Bracket: `lo` is the largest step known to undershoot the target,
+        // `hi` the smallest known to overshoot it. `V(ρ̂) − V(ρ̂) = 0` seeds
+        // `lo` for free.
+        let (mut lo, mut lo_rise) = (0.0_f64, 0.0_f64);
+        let (mut hi, mut hi_rise) = (f64::INFINITY, f64::INFINITY);
+        let mut best = (step, rise);
+        let accepts = |value: f64| {
+            value.is_finite()
+                && value >= target / PROFILE_SIGMA_ACCEPT_FACTOR
+                && value <= target * PROFILE_SIGMA_ACCEPT_FACTOR
+        };
+        // Closeness in log-ratio to the target, so an overshoot and an
+        // undershoot by the same factor rank equally.
+        let closeness = |value: f64| {
+            if value.is_finite() && value > 0.0 {
+                (value / target).ln().abs()
+            } else {
+                f64::INFINITY
+            }
+        };
+
+        while !accepts(rise) && evaluations <= PROFILE_SIGMA_MAX_EVALS {
+            if closeness(rise) < closeness(best.1) {
+                best = (step, rise);
+            }
+            if rise.is_finite() && rise > target {
+                hi = step;
+                hi_rise = rise;
+            } else {
+                if step >= box_limit {
+                    // The criterion never reaches one sigma inside the fit's
+                    // own λ range along this direction. The box face IS the
+                    // node; nothing further out exists to sample.
+                    return Ok(CalibratedSigmaNode {
+                        rho: at(step),
+                        step,
+                        wald_step,
+                        achieved_rise: rise,
+                        evaluations,
+                        box_limited: true,
+                    });
+                }
+                lo = step;
+                lo_rise = if rise.is_finite() { rise.max(0.0) } else { 0.0 };
+            }
+
+            // Propose the next step from the power law `ΔV = c·t^q` implied by
+            // the bracket. With only an overshoot in hand the exponent is the
+            // quadratic model's `q = 2`, which lands a genuinely quadratic
+            // criterion on the target in ONE step.
+            let proposal = if hi.is_finite() && lo > 0.0 && lo_rise > 0.0 && hi_rise > lo_rise {
+                let exponent = (hi_rise / lo_rise).ln() / (hi / lo).ln();
+                if exponent.is_finite() && exponent > 0.0 {
+                    lo * (target / lo_rise).powf(exponent.recip())
+                } else {
+                    (lo * hi).sqrt()
+                }
+            } else if hi.is_finite() && hi_rise > 0.0 {
+                hi * (target / hi_rise).sqrt()
+            } else if lo_rise > 0.0 {
+                (lo * (target / lo_rise).sqrt()).min(box_limit)
+            } else {
+                // Perfectly flat so far: the only information is that the
+                // criterion has not moved, so jump to the box face.
+                box_limit
+            };
+            let bracket_hi = if hi.is_finite() { hi } else { box_limit };
+            let next = if proposal.is_finite() && proposal > lo && proposal < bracket_hi {
+                proposal
+            } else if lo > 0.0 {
+                (lo * bracket_hi).sqrt()
+            } else {
+                0.5 * bracket_hi
+            };
+            if !(next > 0.0) || (next - step).abs() <= f64::EPSILON * step.abs() {
+                break;
+            }
+            step = next;
+            rise = self.compute_cost(&at(step))? - centre_cost;
+            evaluations += 1;
+        }
+        if closeness(rise) < closeness(best.1) {
+            best = (step, rise);
+        }
+        let (step, rise) = if accepts(rise) { (step, rise) } else { best };
+        Ok(CalibratedSigmaNode {
+            rho: at(step),
+            step,
+            wald_step,
+            achieved_rise: rise,
+            evaluations,
+            box_limited: step >= box_limit,
+        })
+    }
 }
 
 /// Process-wide count of cubature upgrades that succeeded inside
@@ -948,146 +1192,41 @@ impl<'a> RemlState<'a> {
         // rho-Hessian inversion below so `max_rhovar` can trigger cubature for
         // those broad-but-well-converged posteriors.
 
-        // If the first-order path used a rank-deficient pseudo-inverse, the
-        // ρ-Hessian was indefinite or near-singular and the matrix-free ridged
-        // inverse used below would silently impute spurious variance along the
-        // dropped (unidentified) directions. Cubature sigma points propagated
-        // through that spurious V_ρ would manufacture higher-order corrections
-        // that are not supported by the data. The principled response is to
-        // honor the rank deficiency: return the first-order correction (which
-        // is already the correct rank-deficient inflation on the identified
-        // subspace) and skip cubature entirely.
-        if let Some(rank) = first_order.active_rank
-            && rank < n_rho
-        {
+        // Reuse the certified `V_ρ` the first-order path already produced.
+        //
+        // This site used to build its OWN `V_ρ`, by adding a relative ridge to
+        // the ρ-Hessian and inverting that. Two objects called `V_ρ` inside one
+        // routine forced a blanket bail-out whenever the certified inverse was
+        // rank-deficient, because the ridged inverse turns every dropped
+        // direction into a `1/ridge` eigenvalue and the eigen-truncation below
+        // would then have selected exactly those. With the certified spectrum
+        // in hand there is nothing to bail out of: a direction that is not
+        // `Active` is simply not a candidate node (#2728).
+        let Some(spectrum) = first_order.spectrum.as_ref() else {
             return self.finalize_smoothing_outcome(first_order_routine(
                 first_order_correction,
-                "first-order V_rho rank-deficient: cubature would impute spurious variance".into(),
+                "certified rho spectrum unavailable: nothing for cubature to reuse".into(),
+            ));
+        };
+        let active_directions = spectrum.active_directions();
+        if active_directions.is_empty() {
+            return self.finalize_smoothing_outcome(first_order_routine(
+                first_order_correction,
+                "no active rho directions: the correction is already exactly zero".into(),
             ));
         }
 
-        // Build V_rho from the outer Hessian around rho_hat.
-        let mut hessian_rho = if let Some(h) = first_order.hessian_rho {
-            h
-        } else {
-            match self.compute_lamlhessian_consistent(final_rho) {
-                Ok(h) => h,
-                Err(_) => {
-                    return self.finalize_smoothing_outcome(first_order_numerical(
-                        first_order_correction,
-                        "rho Hessian compute_lamlhessian_consistent failed".into(),
-                    ));
-                }
-            }
-        };
-        symmetrize_in_place(&mut hessian_rho);
-        let ridge = AUTO_CUBATURE_HESSIAN_RIDGE_REL
-            * hessian_rho
-                .diag()
-                .iter()
-                .map(|&v| v.abs())
-                .fold(0.0, f64::max)
-                .max(AUTO_CUBATURE_HESSIAN_RIDGE_ABS);
-        let cubature_ridge = match gam_problem::StabilizationLedger::approximation_only(
-            ridge,
-            gam_problem::StabilizationRule::FixedConstant,
-        ) {
-            Ok(ledger) => ledger,
-            Err(error) => {
-                log::warn!("sigma cubature refused invalid ridge metadata: {error}");
-                return self.finalize_smoothing_outcome(first_order_numerical(
-                    first_order_correction,
-                    "rho Hessian produced invalid cubature-ridge metadata".into(),
-                ));
-            }
-        };
-        for i in 0..n_rho {
-            hessian_rho[[i, i]] += cubature_ridge.delta();
-        }
-        let hessian_rho_inv = match gam_linalg::utils::certified_spd_inverse(
-            &hessian_rho,
-            "auto cubature explicitly ridged rho Hessian",
-        ) {
-            Ok(inverse) => inverse.into_inverse(),
-            Err(error) => {
-                log::warn!("sigma cubature refused explicitly ridged rho Hessian: {error}");
-                return self.finalize_smoothing_outcome(first_order_numerical(
-                    first_order_correction,
-                    "explicitly ridged rho Hessian failed exact SPD inversion".into(),
-                ));
-            }
-        };
-
-        let max_rhovar = hessian_rho_inv
-            .diag()
+        // Trigger. `max_rhovar` is the widest resolved ρ-posterior variance
+        // `1/σ_j` over the ACTIVE directions — the certified ones, so a
+        // structural or saturation null can no longer set it.
+        let max_rhovar = active_directions
             .iter()
-            .fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+            .map(|&index| spectrum.eigenvalues[index].recip())
+            .fold(0.0_f64, f64::max);
         if !near_boundary && !highgrad && max_rhovar < AUTO_CUBATURE_RHOVAR_TRIGGER {
             return self.finalize_smoothing_outcome(first_order_routine(
                 first_order_correction,
-                "post-inversion rho posterior variance below trigger threshold".into(),
-            ));
-        }
-
-        use faer::Side;
-        use gam_linalg::faer_ndarray::FaerEigh;
-        let (evals, evecs) = match hessian_rho_inv.eigh(Side::Lower) {
-            Ok(x) => x,
-            Err(_) => {
-                return self.finalize_smoothing_outcome(first_order_numerical(
-                    first_order_correction,
-                    "eigendecomposition of inverse rho-Hessian failed".into(),
-                ));
-            }
-        };
-        let max_eval = evals
-            .iter()
-            .copied()
-            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
-        let eigenvalue_floor = max_eval * (n_rho.max(1) as f64) * f64::EPSILON;
-        let mut eig_pairs: Vec<(usize, f64)> = evals
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, v)| v.is_finite() && *v > eigenvalue_floor)
-            .collect();
-        if eig_pairs.is_empty() {
-            return self.finalize_smoothing_outcome(first_order_numerical(
-                first_order_correction,
-                "inverse rho-Hessian has no positive eigenvalues above numerical floor".into(),
-            ));
-        }
-        eig_pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let totalvar: f64 = eig_pairs.iter().map(|(_, v)| *v).sum();
-        if !totalvar.is_finite() || totalvar <= 0.0 {
-            return self.finalize_smoothing_outcome(first_order_numerical(
-                first_order_correction,
-                "positive-eigenvalue total mass non-finite or non-positive".into(),
-            ));
-        }
-
-        let mut rank = 0usize;
-        let mut captured = 0.0_f64;
-        for (_, eig) in eig_pairs
-            .iter()
-            .take(AUTO_CUBATURE_MAX_EIGENVECTORS.min(eig_pairs.len()))
-        {
-            captured += *eig;
-            rank += 1;
-            if captured / totalvar >= AUTO_CUBATURE_TARGET_VAR_FRAC {
-                break;
-            }
-        }
-        // `rank == 0` would require the truncation loop to not execute
-        // despite a non-empty `eig_pairs`. The loop always runs at least
-        // once when there is at least one positive eigenvalue, so this
-        // branch is unreachable in practice. Treat as a
-        // NumericalFailure guard rather than a routine fallback so any
-        // future regression surfaces visibly.
-        if rank == 0 {
-            return self.finalize_smoothing_outcome(first_order_numerical(
-                first_order_correction,
-                "variance-truncation produced rank 0 (unreachable guard)".into(),
+                "resolved rho posterior variance below trigger threshold".into(),
             ));
         }
 
@@ -1102,24 +1241,96 @@ impl<'a> RemlState<'a> {
             ));
         };
         let p = base_cov.nrows();
-        let radius = (rank as f64).sqrt();
-        let mut sigma_points: Vec<Array1<f64>> = Vec::with_capacity(2 * rank);
-        for (eig_idx, eigval) in eig_pairs.iter().take(rank) {
-            let axis = evecs.column(*eig_idx).to_owned();
-            let scale = radius * eigval.sqrt();
-            let delta = axis.mapv(|v| v * scale);
+        if spectrum.sensitivity_orig.nrows() != p {
+            return self.finalize_smoothing_outcome(first_order_numerical(
+                first_order_correction,
+                "certified sensitivities do not match the base covariance dimension".into(),
+            ));
+        }
 
-            let lo = -RHO_BOUND + AUTO_CUBATURE_RHO_CLAMP_INSET;
-            let hi = RHO_BOUND - AUTO_CUBATURE_RHO_CLAMP_INSET;
-            for sign in [1.0_f64, -1.0_f64] {
-                let mut rho_point = final_rho.clone();
-                rho_point
-                    .iter_mut()
-                    .zip(delta.iter())
-                    .for_each(|(r, &d)| *r = (*r + sign * d).clamp(lo, hi));
-                sigma_points.push(rho_point);
+        // Rank the active directions by the variance each one contributes to
+        // the correction, `‖Qs·J·u_j‖²/σ_j`, and upgrade the largest.
+        //
+        // The previous rule ranked by `1/σ_j` — the spread of ρ — and kept
+        // whichever direction the outer surface was flattest along. That is
+        // exactly backwards: at a SATURATED smoothing parameter `1/σ_j` is
+        // huge *because* `∂β̂/∂ρ → 0` there, so the old rule spent the whole
+        // rank budget on the one direction that contributes nothing and
+        // dropped every direction that does (#2728: rank=1 retained
+        // `λ = 7.2e-9` and discarded the other six).
+        let mut ranked: Vec<(usize, f64)> = active_directions
+            .iter()
+            .map(|&index| (index, spectrum.first_order_variance(index)))
+            .filter(|(_, variance)| variance.is_finite() && *variance > 0.0)
+            .collect();
+        if ranked.is_empty() {
+            return self.finalize_smoothing_outcome(first_order_routine(
+                first_order_correction,
+                "every active direction contributes zero first-order variance".into(),
+            ));
+        }
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let total_variance: f64 = ranked.iter().map(|(_, variance)| *variance).sum();
+        let mut rank = 0usize;
+        let mut captured = 0.0_f64;
+        for (_, variance) in ranked
+            .iter()
+            .take(AUTO_CUBATURE_MAX_EIGENVECTORS.min(ranked.len()))
+        {
+            captured += *variance;
+            rank += 1;
+            if captured / total_variance >= AUTO_CUBATURE_TARGET_VAR_FRAC {
+                break;
             }
         }
+        let upgraded: Vec<usize> = ranked[..rank].iter().map(|(index, _)| *index).collect();
+        if rank < ranked.len() {
+            log::info!(
+                "[sigma-cubature] upgrading {rank} of {} active rho direction(s), capturing \
+                 {:.4} of the first-order correction variance; the remainder keeps its \
+                 first-order column",
+                ranked.len(),
+                captured / total_variance,
+            );
+        }
+
+        // Place each node where the criterion says one sigma is, not where the
+        // curvature guessed it was.
+        //
+        // The rule this branch implements is a symmetric two-point quadrature
+        // for `ρ ~ N(ρ̂, V_ρ)`: put the node one posterior sd out and read the
+        // integrand there. `σ_j^{-1/2}` is the sd the QUADRATIC model of the
+        // criterion implies, and by construction the quadratic model predicts
+        // the criterion to rise by exactly `PROFILE_SIGMA_RISE` at that node.
+        // That prediction is checkable — one criterion evaluation — and where
+        // it fails, the node, not the prediction, is what has to move.
+        //
+        // #2728 is the failure: at `λ = 7.2e-9` the ρ-curvature is ~0 by the
+        // chain-rule identity `H_ρ = diag(λ)H_λdiag(λ) + diag(g_ρ)` rather
+        // than because the profile is flat, so `σ^{-1/2} = 308` in log-λ and
+        // the node landed at `ΔV = 3309` — posterior weight `e^-3309` — while
+        // carrying weight ½. Calibrating to the criterion also lets the two
+        // sides differ, which that fixture needs and a `±` step cannot express:
+        // the profile there is flat downwards and a cliff upwards.
+        let centre_cost = self.compute_cost(final_rho)?;
+        let mut nodes: Vec<CalibratedSigmaNode> = Vec::with_capacity(2 * rank);
+        for &index in &upgraded {
+            let axis = spectrum.eigenvectors.column(index).to_owned();
+            let wald_step = spectrum.eigenvalues[index].sqrt().recip();
+            for sign in [1.0_f64, -1.0_f64] {
+                let direction = axis.mapv(|value| value * sign);
+                match self.calibrate_sigma_node(final_rho, centre_cost, &direction, wald_step) {
+                    Ok(node) => nodes.push(node),
+                    Err(error) => {
+                        return self.finalize_smoothing_outcome(first_order_numerical(
+                            first_order_correction,
+                            format!("sigma-node calibration failed: {error}").into(),
+                        ));
+                    }
+                }
+            }
+        }
+        let sigma_points: Vec<Array1<f64>> = nodes.iter().map(|node| node.rho.clone()).collect();
         // Unreachable: `rank >= 1` ensures at least two sigma points
         // (one positive, one negative) per eigenvector. Treat as a
         // NumericalFailure guard so any future regression surfaces.
@@ -1190,44 +1401,63 @@ impl<'a> RemlState<'a> {
         // estimate.rs builds `Vb = φ̂·H_opt⁻¹` and adds the first-order
         // `J·V_ρ·Jᵀ` (itself ∝ c², dispersion-free) directly. Applying φ̂ a
         // second time anywhere would make the curvature block scale as c⁴ (#582).
-        let scaled_pairs: Vec<(Array2<f64>, Array1<f64>)> = point_results
+        let scaled_pairs: Vec<SigmaPointResult> = point_results
             .into_iter()
             .map(|(cov_point, beta_point)| (cov_point.mapv(|v| dispersion_phi * v), beta_point))
             .collect();
-        // Per-sigma-point attribution. The two terms of the law of total
-        // covariance behave very differently off the optimum: `Cov_ρ[β̂]` is
-        // bounded by the range of β̂, but `E_ρ[φ̂·H(ρ)⁻¹]` is an average of
-        // inverse Hessians and diverges as a penalty switches off. Recording
-        // both, per point, is the only way to attribute a wide `Vp` to one of
-        // them after the fact (#2728).
+        if scaled_pairs.len() != nodes.len() {
+            return self.finalize_smoothing_outcome(first_order_numerical(
+                first_order_correction,
+                "sigma-point executor returned a different number of results than nodes".into(),
+            ));
+        }
+        // Per-node attribution. The two terms of the law of total covariance
+        // behave very differently off the optimum: `Cov_ρ[β̂]` is bounded by the
+        // range of β̂, but `E_ρ[φ̂·H(ρ)⁻¹]` is an average of inverse Hessians and
+        // diverges as a penalty switches off. Recording both — together with
+        // where the node was ASKED to sit and where the criterion actually put
+        // it — is what makes a wide `Vp` attributable after the fact (#2728).
         if log::log_enabled!(log::Level::Info) {
-            let centre_cost = match self.compute_cost(final_rho) {
-                Ok(cost) => cost,
-                Err(_) => f64::NAN,
-            };
             for (index, (cov_point, _)) in scaled_pairs.iter().enumerate() {
-                let requested: f64 = sigma_points[index]
-                    .iter()
-                    .zip(final_rho.iter())
-                    .map(|(point, centre)| (point - centre).abs())
-                    .fold(0.0_f64, f64::max);
-                // The quadratic model that PLACED this node predicts a
-                // criterion rise of exactly `rank/2` there (the node sits at
-                // `sqrt(rank·σ⁻¹)` along an eigendirection of curvature `σ`).
-                let rise = match self.compute_cost(&sigma_points[index]) {
-                    Ok(point_cost) => point_cost - centre_cost,
-                    Err(_) => f64::NAN,
-                };
+                let node = &nodes[index];
                 log::info!(
-                    "[sigma-cubature] point={index} max|Δρ|(post-clamp)={requested:.4e} \
-                     tr(φ̂·H(ρ)⁻¹)={:.6e} tr(φ̂·H(ρ̂)⁻¹)={:.6e} ΔV={rise:.6e} ΔV_quad={:.3}",
+                    "[sigma-cubature] node={index} step={:.4e} wald_step={:.4e} ΔV={:.6e} \
+                     target={PROFILE_SIGMA_RISE} evals={} box_limited={} \
+                     tr(φ̂·H(ρ)⁻¹)={:.6e} tr(φ̂·H(ρ̂)⁻¹)={:.6e}",
+                    node.step,
+                    node.wald_step,
+                    node.achieved_rise,
+                    node.evaluations,
+                    node.box_limited,
                     cov_point.diag().iter().sum::<f64>(),
                     dispersion_phi * base_cov.diag().iter().sum::<f64>(),
-                    rank as f64 / 2.0,
                 );
             }
         }
-        let mut total_cov = accumulate_sigma_cubature_total_covariance(&scaled_pairs, p);
+        // The executor returns results in node order, and nodes were pushed as
+        // consecutive (+, −) pairs, one pair per upgraded direction.
+        let mut paired: Vec<(SigmaPointResult, SigmaPointResult)> = Vec::with_capacity(rank);
+        let mut remaining = scaled_pairs.into_iter();
+        while let (Some(plus), Some(minus)) = (remaining.next(), remaining.next()) {
+            paired.push((plus, minus));
+        }
+        // Every ACTIVE direction that was not upgraded keeps the first-order
+        // column `Qs·J·u_k/√σ_k` it would have contributed to `J·V_ρ·Jᵀ`, so
+        // the cubature covers the same subspace the first-order correction
+        // does. Without this the truncation would silently SHRINK the
+        // correction relative to the term it is supposed to upgrade.
+        let fallback_columns: Vec<Array1<f64>> = ranked[rank..]
+            .iter()
+            .map(|&(index, _)| {
+                let scale = spectrum.eigenvalues[index].sqrt().recip();
+                spectrum
+                    .sensitivity_orig
+                    .dot(&spectrum.eigenvectors.column(index))
+                    .mapv(|value| value * scale)
+            })
+            .collect();
+        let mut total_cov =
+            accumulate_sigma_cubature_total_covariance(&paired, &fallback_columns, p);
         if !total_cov.iter().all(|v| v.is_finite()) {
             return self.finalize_smoothing_outcome(first_order_numerical(
                 first_order_correction,
@@ -1255,8 +1485,7 @@ impl<'a> RemlState<'a> {
 
         self.finalize_smoothing_outcome(SmoothingCorrectionOutcome::Cubature {
             correction: corr,
-            rho_covariance: Some(hessian_rho_inv),
-            rho_hessian_stabilization: cubature_ridge,
+            rho_covariance: first_order_rho_covariance.clone(),
             rank,
             n_points: sigma_points.len(),
             near_boundary,
