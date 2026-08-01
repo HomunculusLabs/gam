@@ -982,6 +982,10 @@ mod tests {
                 smoothing_correction_method: Some(SmoothingCorrectionMethod::SigmaPointCubature {
                     rank: 1,
                     n_points: 2,
+                    // The nodes this correction was built from sat at the
+                    // criterion level a one-sigma node is asserted to occupy
+                    // (#2728). A fixture value, since nothing here integrates.
+                    max_node_criterion_rise: 0.5,
                 }),
                 // RETAINED: the exact first-order correction computed before
                 // the escalation decision, never discarded (#946).
