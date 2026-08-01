@@ -5745,6 +5745,21 @@ mod tests_route_forced_classification_2673 {
 /// route prices the spectrum GLOBALLY, the arrow route prices deflation PER
 /// BLOCK) is decided by arithmetic instead of argued.
 ///
+/// MEASURED: that hypothesis is REFUTED. `d_tt` is `0` exactly, the five per-row
+/// `H_tt` spectra are element-for-element the dense coordinate block's spectrum,
+/// and every near-null direction is kept on BOTH sides — not one direction is
+/// classified differently anywhere. The whole `0.172123874993943105` sat in the
+/// JOINT block, because the dense route removed the analytic chart-gauge orbit
+/// from `log|A|` and not from the `log|A_tt|` it was differenced against.
+/// `a386c1e8b` (#2674) deleted that structural quotient, which is the same line
+/// and the same defect from the other side.
+///
+/// TWO ARMS OF THIS MODULE WERE WRITTEN AGAINST THE PRE-`a386c1e8b` TREE and one
+/// of them degenerated silently in the green direction when it landed; both are
+/// dealt with at their site below, with the surviving check's failure polarity
+/// stated on the line it prints. A measurement instrument outlives the tree it
+/// was written for only if that is re-derived rather than assumed.
+///
 /// It asserts nothing about the gap; it asserts only that every quantity it
 /// reports is finite, so a silent `NaN` cannot be read as agreement.
 #[cfg(test)]
@@ -5846,34 +5861,56 @@ mod tests_lane_split_2755 {
             );
         }
 
-        // ---- is the joint block's CHART-GAUGE QUOTIENT the whole gap? -------
-        // It WAS: the dense joint block used to be diagonalized on the physical
-        // complement of the analytic chart-gauge orbit while the `log|A_tt|` it
-        // is differenced against removed none, so the difference was not the
-        // Schur identity `log|A| − log|A_tt| = log|S|` the streaming lane
-        // computes. #2674 removed that structural quotient — the joint block IS
-        // the ungauged one now — so this arm is retained as a STANDING CHECK
-        // that the identity holds, not as a hypothesis about a gap.
-        let ungauged = &joint;
-        let mut log_a_ungauged = 0.0_f64;
-        for &lambda in ungauged.eigenvalues.iter() {
-            if lambda > ungauged.rank_floor {
-                log_a_ungauged += lambda.ln();
+        // ---- what #2674 changed under this instrument, and what still checks -
+        //
+        // ORIGINAL ARM, RETIRED. This module was written when the dense joint
+        // block was diagonalized on the physical complement of the analytic
+        // chart-gauge orbit while the `log|A_tt|` it is differenced against
+        // removed nothing. Two arms verified that: an `UNGAUGED` arm re-priced
+        // the same `A` with an EMPTY gauge basis and compared the honest Schur
+        // identity against the streaming lane, and a `GAUGE-QUOTIENT` arm
+        // checked the rank-`g` bridge `log|ZᵀAZ| = log|A| + log det(GᵀA⁻¹G)`
+        // against the production `log|A|`.
+        //
+        // `a386c1e8b` (#2674) DELETED the gauge argument from
+        // `exact_hessian_spectral_block`, so production no longer forms `ZᵀAZ`
+        // at all. Both arms then degenerated, and the second degenerated
+        // SILENTLY IN THE GREEN DIRECTION: with `log_a` itself ungauged, its
+        // printed `residual = log_a_ungauged + log_det_gram − log_a` collapses
+        // to `log_det_gram`, so a line labelled as a discrepancy was re-printing
+        // an operator magnitude, and a near-zero there would have been the
+        // FAILURE signal rather than the pass. That is a predicate whose verdict
+        // is independent of what it claims to measure — the same defect class as
+        // #2756 — so it is removed rather than re-tuned. There is no gauged
+        // quantity left in the tree for it to bridge to.
+        //
+        // WHAT SURVIVES AS A CHECK, with its polarity stated. Re-summing the
+        // kept spectrum by the plain rule must reproduce the production
+        // `quotient_log_det`. That is NOT a tautology: it is exactly what was
+        // FALSE before `a386c1e8b`, where the two differed by the removed
+        // quotient, and it is what would break again if any pricing rule
+        // (gauge reduction, clamp attribution, floor band) were reintroduced on
+        // one side of the pair only. A NONZERO residual here is the failure.
+        let mut log_a_resummed = 0.0_f64;
+        for &lambda in joint.eigenvalues.iter() {
+            if lambda > joint.rank_floor {
+                log_a_resummed += lambda.ln();
             }
         }
         println!(
-            "#2755 UNGAUGED log|A|_full={log_a_ungauged:.17e} schur_identity={:.17e} \
-             stream_log|S|={:.17e} residual={:.6e}",
-            log_a_ungauged - log_a_tt,
-            log_b - log_b_tt,
-            (log_a_ungauged - log_a_tt) - (log_b - log_b_tt)
+            "#2755 PRICING-RULE resummed_log|A|={log_a_resummed:.17e} \
+             production_log|A|={log_a:.17e} residual={:.6e} (expect 0; NONZERO = a pricing rule \
+             applied to one side of the log|A|/log|A_tt| pair only)",
+            log_a_resummed - log_a
         );
 
-        // And the rank-`g` quotient correction that connects the two, exactly:
-        // with `[Z G]` orthogonal, `det(A) = det(ZᵀAZ) / det(GᵀA⁻¹G)`, so
-        // `log|ZᵀAZ| = log|A| + log det(GᵀA⁻¹G)`. `A⁻¹` is taken on the SAME
-        // retained quotient the log-det is (directions inside the floor band are
-        // dropped, not amplified), so this is the dense lane's own pricing rule.
+        // MEASUREMENT ONLY, NOT A CHECK. `log det(GᵀA⁻¹G)` is the amount the
+        // pre-`a386c1e8b` structural quotient displaced the joint log-determinant
+        // by, i.e. the size of the defect #2674 removed, and it remains a
+        // property of `A` and the declared orbit rather than of any code path.
+        // Nothing compares it to anything, and nothing should until some route
+        // prices a gauged operator again — printing it beside a "residual" is
+        // what made the retired arm unfalsifiable.
         let gauge_basis = dense
             .exact_joint_chart_gauge_basis(&cache)
             .expect("#2755: joint chart gauge basis");
@@ -5882,11 +5919,11 @@ mod tests_lane_split_2755 {
         for i in 0..gauge_rank {
             for j in 0..gauge_rank {
                 let mut acc = 0.0_f64;
-                for (idx, &lambda) in ungauged.eigenvalues.iter().enumerate() {
-                    if lambda.abs() <= ungauged.rank_floor {
+                for (idx, &lambda) in joint.eigenvalues.iter().enumerate() {
+                    if lambda.abs() <= joint.rank_floor {
                         continue;
                     }
-                    let v = ungauged.eigenvectors.column(idx);
+                    let v = joint.eigenvectors.column(idx);
                     acc += gauge_basis[i].dot(&v) * gauge_basis[j].dot(&v) / lambda;
                 }
                 gram[[i, j]] = acc;
@@ -5897,11 +5934,10 @@ mod tests_lane_split_2755 {
             .expect("#2755: gauge quotient Gram spectrum");
         let log_det_gram: f64 = gram_eigs.iter().map(|value| value.ln()).sum();
         println!(
-            "#2755 GAUGE-QUOTIENT rank={gauge_rank} eigs(GᵀA⁻¹G)={:?} logdet={log_det_gram:.17e} \
-             predicted_log|ZᵀAZ|={:.17e} measured_log|A|={log_a:.17e} residual={:.6e}",
+            "#2755 REMOVED-QUOTIENT rank={gauge_rank} eigs(GᵀA⁻¹G)={:?} \
+             logdet={log_det_gram:.17e} (the displacement the pre-a386c1e8b structural quotient \
+             applied to log|A|; MEASUREMENT, no assertion, no comparison)",
             gram_eigs.iter().copied().collect::<Vec<f64>>(),
-            log_a_ungauged + log_det_gram,
-            log_a_ungauged + log_det_gram - log_a
         );
 
         // ---- streaming side: the blocks the per-row rule classifies ---------
@@ -5949,7 +5985,7 @@ mod tests_lane_split_2755 {
             ("log_b_tt", log_b_tt),
             ("replay_log_det_tt", replay_log_det_tt),
             ("replay_log_det_schur", replay_log_det_schur),
-            ("log_a_ungauged", log_a_ungauged),
+            ("log_a_resummed", log_a_resummed),
             ("log_det_gram", log_det_gram),
         ] {
             assert!(
