@@ -2085,12 +2085,13 @@ fn harvest_glue_proposals(
         }
     }
 
-    // --- Sphere POLE-seam pass (#1890 Increment 2, the d=2 register emitter) ---
-    // Two `SphereChartEvaluator` charts whose poles sit in each other's interior
-    // are an irreducible atlas; the transition is an ambient rotation the 1-D
-    // lane cannot see. Screened with the SAME disjoint-support gate (over-tiling
-    // charts anti-correlate), certified by the ambient-rotation pole e-value, and
-    // always REGISTERED (a pole seam is never single-chart-coverable).
+    // --- Sphere POLE-seam pass (#1890 Increment 2, the register emitter) ---
+    // Two ambient sphere atoms whose frame axes sit in each other's active
+    // interior are an irreducible atlas; the transition is an ambient rotation
+    // the 1-D lane cannot see. Screened with the SAME disjoint-support gate
+    // (over-tiling atoms anti-correlate), certified by the ambient-rotation pole
+    // e-value, and always REGISTERED (neither atom's own fit carries the other's
+    // frame axis, so there is nothing to destructively fuse into).
     let mut sphere_candidates: Vec<(usize, usize)> = Vec::new();
     for a in 0..k {
         if support_sizes[a] == 0 || !matches!(term.atoms[a].basis_kind(), SaeAtomBasisKind::Sphere)
@@ -2226,10 +2227,10 @@ pub fn apply_structure_move(
             Ok((child, rho.clone()))
         }
         StructureMove::Glue { a, b, outcome } => {
-            // Sphere pole seam (d=2): the transition is an ambient rotation, not a
-            // 1-D affine map. Register it (keep both charts) — a pole seam has no
-            // destructive fuse outcome, since neither lat/lon chart covers both
-            // poles alone.
+            // Sphere pole seam: the transition is an ambient rotation, not a 1-D
+            // affine map. Register it (keep both atoms) — a pole seam has no
+            // destructive fuse outcome, since each atom's decoder was fitted on
+            // its own support and neither carries the other's frame axis alone.
             if is_sphere_pair(term, *a, *b) {
                 let mut child = term.clone();
                 match outcome {

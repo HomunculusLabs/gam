@@ -25,10 +25,12 @@
 //! future glue variant demotes-without-removing a genuinely covered atom.
 
 use gam_sae::assignment::{AssignmentMode, SaeAssignment};
-use gam_sae::basis::{AmbientSphereHarmonicEvaluator, PeriodicHarmonicEvaluator, SaeBasisEvaluator};
+use gam_sae::basis::{
+    AmbientSphereHarmonicEvaluator, PeriodicHarmonicEvaluator, SaeBasisEvaluator,
+};
 use gam_sae::manifold::{
-    AtlasOrientability, AtlasSeamKind, SaeAtomBasisKind, SaeManifoldAtom, SaeManifoldRho,
-    SaeManifoldTerm, UnitSpeedChartTransition,
+    AtlasOrientability, AtlasSeamKind, SAE_AMBIENT_SPHERE_DEFAULT_DEGREE, SaeAtomBasisKind,
+    SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm, UnitSpeedChartTransition,
 };
 use gam_sae::structure_harvest::{
     HarvestParams, ProductionRefitParams, RoundDriverConfig, run_production_structure_search,
@@ -41,6 +43,12 @@ use std::sync::Arc;
 
 const ON: f64 = 6.0;
 const OFF: f64 = -6.0;
+
+/// Coordinate width of an ambient sphere atom: `S²` carries THREE ambient
+/// coordinates for its two intrinsic dimensions, which is exactly what buys it a
+/// global chart. This is the `latent_dim` `SaeAtomGeometryPlan::new` accepts for
+/// `(Sphere, AmbientSphereHarmonics, RoundSphere)` and refuses anything else at.
+const AMBIENT_SPHERE_LATENT_DIM: usize = 3;
 
 /// Support floor for "active" atom counting — mirrors the harvest lane's
 /// `ACTIVE_SUPPORT_REL_FLOOR / k` (structure_harvest.rs). A demoted atom
@@ -473,61 +481,86 @@ fn orientation_reversing_pair_registers_atlas_end_to_end() {
     }
 }
 
-/// Build a TWO-sphere-chart term over `n` rows that cover ONE ambient unit
-/// sphere (in ambient dims `0,1,2`) with mutually-interior poles. Chart A uses
-/// the identity ambient frame; chart B is the SAME sphere reparametrized with its
-/// pole along A's `x`-axis (a 90° ambient rotation), so A's pole is a regular
-/// interior point of B and vice versa — the defining sphere pole seam. Rows
-/// `0..n/2` are chart A's disjoint support, `n/2..n` chart B's.
+/// The ambient rotation carrying B's unit vector into A's (`u_a = R u_b`) for
+/// the POLE fixture: B is the same sphere framed with its axis along A's
+/// `x`-axis (a 90° rotation about `y`), so B's axis sits on A's equator and A's
+/// on B's — each atom's frame axis is interior to the OTHER's active band, which
+/// is the defining pole seam. `det R = +1`, a proper rotation.
+const POLE_FRAME_ROTATION: [[f64; 3]; 3] = [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]];
+
+/// The identity ambient frame — atom A's frame, and, used as B's frame too, the
+/// NEGATIVE control: both atoms then carry the SAME frame, so each atom's axis
+/// lands at the other's pole (`lat = π/2`), far OUTSIDE the other's active band.
+/// That overlap is regular, not a pole seam, and must not certify.
+const IDENTITY_FRAME: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+/// Build a TWO-sphere-atom term over `n` rows that cover ONE ambient unit sphere
+/// (in ambient dims `0,1,2`) through two frames related by `rotation`
+/// (`u_a = R u_b`). Atom A uses the identity ambient frame; atom B's frame is
+/// `R`. Rows `0..n/2` are A's disjoint support, `n/2..n` B's, and each group sits
+/// in a narrow band around ITS OWN frame's equator — so the two active bands, and
+/// therefore whether each frame axis is interior to the other, are decided
+/// entirely by `R`.
 ///
-/// Each physical point `q = [q0, q1, q2]` on the sphere is parametrized in BOTH
-/// frames by its own UNIT VECTOR (`A`: `u_a = [q0, q1, q2]`; `B`:
-/// `u_b = [-q2, q1, q0]`), and BOTH decoders map that unit vector back to the
-/// SAME ambient `q` — so the two charts are an exact over-tiling whose transition
-/// is the ambient rotation `R = [[0,0,1],[0,1,0],[-1,0,0]]` (`det R = +1`, a
-/// proper rotation).
+/// Each physical point `q` on the sphere is parametrized in BOTH frames by its
+/// own UNIT VECTOR (`A`: `u_a = q`; `B`: `u_b = Rᵀ q`), and BOTH decoders map
+/// that unit vector back to the SAME ambient `q` — so the two atoms are an exact
+/// over-tiling whose transition is `R`.
 ///
-/// ⚠ #2698 — THE DECLARATIONS BELOW STILL DESCRIBE THE DELETED `(lat, lon)`
-/// CHART AND THE DATA DOES NOT. The coordinates are ambient unit vectors and the
-/// evaluator is `AmbientSphereHarmonicEvaluator` (this doc comment said
-/// `lat = asin q2, lon = atan2(q1, q0)` long after that round trip was removed),
-/// while `SaeAtomBasisKind::Sphere` is declared at `latent_dim = 2`, the latent
-/// manifold is the `Interval × Circle` product, and the ARD block is 2 wide. The
-/// construction-time refusal ("basis Jacobian latent dimension 3 != declared 2")
-/// is CORRECT and is catching that mismatch. Repairing the declarations alone
-/// does not make this test pass: the #1890 pole-seam emitter in
-/// `structure_harvest.rs` is itself written against the deleted chart
-/// (`latent_dim == 2`, a 7-row `[1, x, y, z, xy, yz, xz]` decoder), so it screens
-/// out every ambient sphere pair and no glue can be certified. Both halves have
-/// to move to the ambient form together.
-fn build_sphere_pair_term(n: usize) -> (SaeManifoldTerm, Array2<f64>) {
+/// #2698 — every declaration below is the AMBIENT form, because that is the only
+/// sphere the engine can build: `SaeAtomGeometryPlan::new` accepts
+/// `(Sphere, latent_dim = 3, AmbientSphereHarmonics, RoundSphere)` and refuses
+/// `(Sphere, 2, ..)`, and `SphereChartEvaluator` — the `(lat, lon)` chart this
+/// fixture used to declare while already building ambient data — no longer
+/// exists. So `SaeAtomBasisKind::Sphere` is declared at `latent_dim = 3`, the
+/// latent manifold is `LatentManifold::Sphere { dim: 3 }`, and the ARD block is
+/// 3 wide, all matching the ambient unit-vector coordinates and the
+/// `AmbientSphereHarmonicEvaluator` this builder actually uses. The seam under
+/// test is unchanged by that: the transition between two ambient frames is still
+/// a rotation in `SO(3)`, which is exactly what `SphereChartTransition` stores.
+fn build_sphere_pair_term(n: usize, rotation: [[f64; 3]; 3]) -> (SaeManifoldTerm, Array2<f64>) {
     assert!(n % 2 == 0 && n >= 8);
     let p = 4usize;
-    let evaluator = Arc::new(AmbientSphereHarmonicEvaluator::new(2).unwrap());
+    let evaluator =
+        Arc::new(AmbientSphereHarmonicEvaluator::new(SAE_AMBIENT_SPHERE_DEFAULT_DEGREE).unwrap());
     let half = n / 2;
-
-    // Physical points on the unit sphere (ambient dims 0,1,2). Group A near A's
-    // equator (lat = ±0.3 straddling 0); group B near B's equator (lat_B = ±0.3).
-    let mut q = Array2::<f64>::zeros((n, p));
-    for j in 0..half {
+    let apply = |m: [[f64; 3]; 3], u: [f64; 3]| -> [f64; 3] {
+        [
+            m[0][0] * u[0] + m[0][1] * u[1] + m[0][2] * u[2],
+            m[1][0] * u[0] + m[1][1] * u[1] + m[1][2] * u[2],
+            m[2][0] * u[0] + m[2][1] * u[1] + m[2][2] * u[2],
+        ]
+    };
+    let mut inverse = [[0.0_f64; 3]; 3];
+    for row in 0..3 {
+        for column in 0..3 {
+            inverse[row][column] = rotation[column][row];
+        }
+    }
+    // A band around a frame's own equator: latitudes straddle zero, longitudes
+    // sweep the full circle, so the band is a genuine annulus and its latitude
+    // span excludes the frame's own axis.
+    let band_unit = |j: usize| -> [f64; 3] {
         let lon = -std::f64::consts::PI + std::f64::consts::TAU * (j as f64 + 0.5) / half as f64;
         let lat: f64 = if j % 2 == 0 { 0.3 } else { -0.3 };
-        // A's frame: ambient = [x, y, z].
-        q[[j, 0]] = lat.cos() * lon.cos();
-        q[[j, 1]] = lat.cos() * lon.sin();
-        q[[j, 2]] = lat.sin();
+        [lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin()]
+    };
+
+    // Physical points on the unit sphere (ambient dims 0,1,2). Group A is a band
+    // around A's equator, group B a band around B's — the latter written in B's
+    // frame and carried into the ambient by `R`.
+    let mut q = Array2::<f64>::zeros((n, p));
+    for j in 0..half {
+        let u = band_unit(j);
+        for axis in 0..3 {
+            q[[j, axis]] = u[axis];
+        }
     }
     for j in 0..half {
-        let row = half + j;
-        let lon_b = -std::f64::consts::PI + std::f64::consts::TAU * (j as f64 + 0.5) / half as f64;
-        let lat_b: f64 = if j % 2 == 0 { 0.3 } else { -0.3 };
-        let xb = lat_b.cos() * lon_b.cos();
-        let yb = lat_b.cos() * lon_b.sin();
-        let zb = lat_b.sin();
-        // B's embedding: ambient = [zb, yb, -xb].
-        q[[row, 0]] = zb;
-        q[[row, 1]] = yb;
-        q[[row, 2]] = -xb;
+        let u = apply(rotation, band_unit(j));
+        for axis in 0..3 {
+            q[[half + j, axis]] = u[axis];
+        }
     }
 
     // Per-atom AMBIENT coordinates of every physical point in each frame. The
@@ -536,14 +569,12 @@ fn build_sphere_pair_term(n: usize) -> (SaeManifoldTerm, Array2<f64>) {
     let mut coords_a = Array2::<f64>::zeros((n, 3));
     let mut coords_b = Array2::<f64>::zeros((n, 3));
     for r in 0..n {
-        let (q0, q1, q2) = (q[[r, 0]], q[[r, 1]], q[[r, 2]]);
-        coords_a[[r, 0]] = q0;
-        coords_a[[r, 1]] = q1;
-        coords_a[[r, 2]] = q2;
-        // B-unit-vector of the same physical point: u_b = [-q2, q1, q0].
-        coords_b[[r, 0]] = -q2;
-        coords_b[[r, 1]] = q1;
-        coords_b[[r, 2]] = q0;
+        let point = [q[[r, 0]], q[[r, 1]], q[[r, 2]]];
+        let u_b = apply(inverse, point);
+        for axis in 0..3 {
+            coords_a[[r, axis]] = point[axis];
+            coords_b[[r, axis]] = u_b[axis];
+        }
     }
 
     let (phi_a, jet_a) = evaluator.evaluate(coords_a.view()).unwrap();
@@ -552,36 +583,48 @@ fn build_sphere_pair_term(n: usize) -> (SaeManifoldTerm, Array2<f64>) {
     // Pure linear sphere embeddings: only the degree-1 (dipole) block is used,
     // every higher harmonic row left at zero. The columns are located by their
     // (degree, order) rather than by a hardcoded layout, so this cannot silently
-    // decode the wrong harmonic if the column order ever changes. Each degree-1
-    // column is `N_{1,m}` times one ambient coordinate, with the SAME norm
-    // `sqrt(3/4π)` for all three orders, so dividing by it recovers `x, y, z`
-    // exactly:  m = +1 -> Re[w] = x,  m = 0 -> z,  m = -1 -> Im[w] = y.
-    let modes = AmbientSphereHarmonicEvaluator::new(2).unwrap().spectral_modes();
+    // decode the wrong harmonic if the column order ever changes. Column `(1, m)`
+    // is `N_{1,m}` times ONE ambient coordinate (`m = +1 -> Re[w] = x`,
+    // `m = -1 -> Im[w] = y`, `m = 0 -> z`), and each `N_{1,m}` is read back OUT
+    // of the evaluator as `Φ(e_axis)` on that column rather than restated as a
+    // literal here — so a decoder row of `frame[out][axis] / N_axis` decodes the
+    // unit vector to exactly `frame · u`.
+    let modes = evaluator.spectral_modes();
     let dipole = |order: i64| -> usize {
         modes
             .iter()
             .position(|mode| mode.degree == 1 && mode.order == order)
-            .expect("the degree-1 block is present at degree 2")
+            .expect("the degree-1 block is present at every degree >= 1")
     };
-    let (col_x, col_y, col_z) = (dipole(1), dipole(-1), dipole(0));
+    let dipole_column = [dipole(1), dipole(-1), dipole(0)];
     let width = modes.len();
-    let inverse_norm = 1.0 / (3.0 / (4.0 * std::f64::consts::PI)).sqrt();
+    let (phi_axes, _) = evaluator.evaluate(Array2::<f64>::eye(3).view()).unwrap();
+    let dipole_norm: Vec<f64> = (0..3)
+        .map(|axis| phi_axes[[axis, dipole_column[axis]]])
+        .collect();
 
-    let mut decoder_a = Array2::<f64>::zeros((width, p));
-    decoder_a[[col_x, 0]] = inverse_norm; // x -> dim0
-    decoder_a[[col_y, 1]] = inverse_norm; // y -> dim1
-    decoder_a[[col_z, 2]] = inverse_norm; // z -> dim2
-    let mut decoder_b = Array2::<f64>::zeros((width, p));
-    decoder_b[[col_z, 0]] = inverse_norm; // z_b -> dim0
-    decoder_b[[col_y, 1]] = inverse_norm; // y_b -> dim1
-    decoder_b[[col_x, 2]] = -inverse_norm; // x_b -> dim2 (negated)
+    // A decoder whose degree-1 block realizes the linear map `frame`: the atom
+    // decodes its unit vector `u` to the ambient point `frame · u`.
+    let linear_decoder = |frame: [[f64; 3]; 3]| -> Array2<f64> {
+        let mut decoder = Array2::<f64>::zeros((width, p));
+        for axis in 0..3 {
+            for output in 0..3 {
+                decoder[[dipole_column[axis], output]] = frame[output][axis] / dipole_norm[axis];
+            }
+        }
+        decoder
+    };
+    // A's frame is the identity embedding; B's is `R`, so both decode the SAME
+    // physical point from their own unit vector.
+    let decoder_a = linear_decoder(IDENTITY_FRAME);
+    let decoder_b = linear_decoder(rotation);
 
     let mut penalty = Array2::<f64>::eye(width);
     penalty *= 1.0e-4;
     let atom_a = SaeManifoldAtom::new_with_provided_function_gram(
         "sphere_a",
         SaeAtomBasisKind::Sphere,
-        2,
+        AMBIENT_SPHERE_LATENT_DIM,
         phi_a,
         jet_a,
         decoder_a,
@@ -592,7 +635,7 @@ fn build_sphere_pair_term(n: usize) -> (SaeManifoldTerm, Array2<f64>) {
     let atom_b = SaeManifoldAtom::new_with_provided_function_gram(
         "sphere_b",
         SaeAtomBasisKind::Sphere,
-        2,
+        AMBIENT_SPHERE_LATENT_DIM,
         phi_b,
         jet_b,
         decoder_b,
@@ -612,16 +655,11 @@ fn build_sphere_pair_term(n: usize) -> (SaeManifoldTerm, Array2<f64>) {
             logits[[r, 1]] = ON;
         }
     }
-    let sphere_manifold = || {
-        LatentManifold::Product(vec![
-            LatentManifold::Interval {
-                lo: -std::f64::consts::FRAC_PI_2,
-                hi: std::f64::consts::FRAC_PI_2,
-            },
-            LatentManifold::Circle {
-                period: std::f64::consts::TAU,
-            },
-        ])
+    // The coordinate is the ambient unit vector, so the manifold that owns its
+    // retraction and its tangent projection is the embedded sphere itself — not
+    // the `Interval × Circle` product a `(lat, lon)` chart would need.
+    let sphere_manifold = || LatentManifold::Sphere {
+        dim: AMBIENT_SPHERE_LATENT_DIM,
     };
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         logits,
@@ -635,21 +673,26 @@ fn build_sphere_pair_term(n: usize) -> (SaeManifoldTerm, Array2<f64>) {
 }
 
 fn sphere_rho() -> SaeManifoldRho {
-    // Per-axis ARD: one log-precision per sphere axis (dim = 2).
-    SaeManifoldRho::new(0.0, -4.0, vec![Array1::<f64>::zeros(2); 2])
+    // Per-axis ARD: one log-precision per AMBIENT sphere axis, so the block is as
+    // wide as the atom's coordinate (#2698).
+    SaeManifoldRho::new(
+        0.0,
+        -4.0,
+        vec![Array1::<f64>::zeros(AMBIENT_SPHERE_LATENT_DIM); 2],
+    )
 }
 
 #[test]
 fn sphere_pole_pair_registers_atlas_end_to_end() {
-    // Increment 2 — the d=2 POLE-seam register emitter. Two sphere charts cover
-    // ONE ambient sphere with mutually-interior poles: the transition is an
+    // Increment 2 — the POLE-seam register emitter. Two AMBIENT sphere atoms
+    // (`latent_dim = 3`) cover ONE sphere with mutually-interior frame axes: the transition is an
     // ambient rotation `R ∈ SO(3)`, not a 1-D affine map, so neither the fusion
     // lane nor the 1-D glue lane can see it. The sphere pole lane must fit the
     // rotation, classify the overlap as a POLE seam, certify equivalence, and
     // REGISTER (keep both charts as one partition-of-unity atlas atom) end-to-end
     // through the production driver.
     let n = 48;
-    let (term, q) = build_sphere_pair_term(n);
+    let (term, q) = build_sphere_pair_term(n, POLE_FRAME_ROTATION);
     let p = q.ncols();
     let rho = sphere_rho();
 
@@ -698,9 +741,10 @@ fn sphere_pole_pair_registers_atlas_end_to_end() {
         "a glue applied but structure_changed() is false"
     );
 
-    // REGISTER, not FUSE: both sphere charts survive and keep routing mass — a
-    // pole seam has no destructive fuse outcome (neither lat/lon chart alone
-    // covers both poles).
+    // REGISTER, not FUSE: both sphere atoms survive and keep routing mass — a
+    // pole seam has no destructive fuse outcome, because each atom's decoder was
+    // fitted on its own support only and neither alone carries the other's
+    // frame axis.
     assert_eq!(
         result.term.k_atoms(),
         2,
@@ -789,6 +833,60 @@ fn sphere_pole_pair_registers_atlas_end_to_end() {
             );
         }
     }
+}
+
+#[test]
+fn sphere_regular_overlap_does_not_register_atlas_end_to_end() {
+    // The NEGATIVE half of the pole-seam gate, on the SAME builder and the SAME
+    // driver: the only thing that changes is B's frame. With both atoms framed
+    // identically, each atom's frame axis lands at the other's pole — OUTSIDE the
+    // other's active latitude band — so the overlap classifies Regular. This lane
+    // wires no register/fuse outcome for a regular sphere overlap, so it must
+    // certify nothing. Without this arm, a screen that accepted every sphere pair
+    // would pass the positive test unchanged.
+    let n = 48;
+    let (term, q) = build_sphere_pair_term(n, IDENTITY_FRAME);
+    let p = q.ncols();
+    let rho = sphere_rho();
+
+    let mut target = term.try_fitted().unwrap();
+    for r in 0..n {
+        for c in 0..p {
+            target[[r, c]] += 0.01 * ((r * 7 + c * 3) as f64).sin();
+        }
+    }
+
+    let mut ledger = StructureLedger::new();
+    let result = run_production_structure_search(
+        term,
+        rho,
+        target.view(),
+        glue_only_config(),
+        refit_params(),
+        &mut ledger,
+    )
+    .unwrap();
+
+    let glues = accepted_glues(&result);
+    eprintln!(
+        "[1890-e2e-regular] accepted_glues={glues} k_atoms={} semantic_atoms={} atlases={}",
+        result.term.k_atoms(),
+        result.term.semantic_atom_count(),
+        result.term.chart_atlases().len(),
+    );
+    assert_eq!(
+        glues, 0,
+        "a regular sphere overlap has no certified pole seam; the register lane must not fire"
+    );
+    assert!(
+        result.term.chart_atlases().is_empty(),
+        "no atlas may be registered from a regular sphere overlap"
+    );
+    assert_eq!(
+        result.term.semantic_atom_count(),
+        2,
+        "both sphere atoms stay separate semantic atoms"
+    );
 }
 
 #[test]
