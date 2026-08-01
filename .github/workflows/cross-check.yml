@@ -131,25 +131,40 @@ jobs:
           # would fail the cross-compile arm for a reason that has nothing to do
           # with the target it exists to check.
           cargo check --locked --workspace --exclude gam-pyffi --all-targets
-      # Rustdoc had no CI job at all (#2711): nothing in `.github/` ran
-      # `cargo doc` or `rustdoc`, so a surface that exits 101 was dark by
-      # omission while `docs.yml` -- mkdocs, ~50s, nightly -- was green and said
-      # nothing about it.
-      #
-      # This runs here, last, for two reasons. Cost: the step above has already
-      # built every dependency's rmeta under sccache, and `--no-deps` means the
-      # marginal work is the rustdoc passes alone -- a standalone workflow pays
-      # for the whole dependency build again (measured: 10m17s standalone, of
-      # which ~4m20s was dependency build before the first crate's pass). Order:
-      # a compile break must report as a compile break, so the doc pass runs
-      # after the thing it depends on.
-      #
-      # It is a RATCHET, not a zero bar -- see scripts/rustdoc_ratchet.sh. It is
-      # on the push gate because it was DEMONSTRATED green on a normal commit
-      # first: run 30690710961 on 407d66f16 scanned 24 crates, 9 clean, and all
-      # 15 ledger crates still red. That run is the evidence; this step is not
-      # promoted on an expectation.
-      - name: Rustdoc ratchet (no crate outside the ledger may go red)
+
+  # Rustdoc had no CI job at all (#2711): nothing in `.github/` ran `cargo doc`
+  # or `rustdoc`, so a surface that exits 101 was dark by omission while
+  # `docs.yml` -- mkdocs, ~50s, nightly -- was green and said nothing about it.
+  # It is a RATCHET, not a zero bar; see scripts/rustdoc_ratchet.sh.
+  #
+  # WHY ITS OWN JOB, AND NOT A STEP IN `linux-native-check`.
+  # It was first added as a step there, on the reasoning that the workspace
+  # check has already built every dependency's rmeta under sccache so the
+  # marginal work is the rustdoc passes alone. That reasoning was right and the
+  # conclusion drawn from it was not: the passes alone are ~6 minutes, on a job
+  # whose baseline is ~5.2. Measured, step-level, on the two runs that carried
+  # it (30691263775, 30691295632): everything BEFORE the rustdoc step still took
+  # its baseline time -- 4m07s and 4m56s to reach it -- so queue contention is
+  # not the explanation; the step itself was >=6m11s and >=4m26s when sampled,
+  # against a standalone per-crate measurement of 5m54s. Three measurements, one
+  # answer: ~6 minutes for 24 rustdoc passes.
+  #
+  # Doubling the latency of the compile verdict everyone waits on is too high a
+  # price for a doc check, and the fix is not to drop the check. As its own job
+  # it still GATES -- the workflow fails, under its own name, attributable to
+  # whoever broke it -- while `linux-native-check` returns to answering "does
+  # this commit compile" in ~5 minutes. It pays for its own dependency build,
+  # which costs runner minutes but not verdict latency.
+  rustdoc-ratchet:
+    name: Rustdoc ratchet (no crate outside the ledger may go red)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Rustdoc ratchet
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: sccache
