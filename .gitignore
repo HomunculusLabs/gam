@@ -10,7 +10,6 @@ tests/**/__pycache__/
 tests/bench_tools/*.joblib
 benchmarks/results.cv_*.json
 AGENTS.md
-oversized_history.txt
 rustfmt.toml
 
 
