@@ -310,12 +310,20 @@ pub(crate) const FLAT_VALLEY_STALL_ESCAPE_MARGIN: f64 = 1.5;
 /// large-score fit is never certified.
 pub const FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP: f64 = 1.0;
 
-/// Score-relative flat-valley stationarity bound used by both the in-loop ARC
-/// cost-stall guard and the post-fit authoritative-gradient reconciliation.
+/// Score-relative flat-valley stationarity bound used by the in-loop ARC
+/// cost-stall guard.
 ///
-/// Keeping the formula centralized prevents the shipped-fit certificate from
-/// drifting away from the guard that originally decides whether a stalled ARC
-/// trajectory is a genuine weakly-identified valley.
+/// It had a second consumer — the post-fit certificate applied it through a rung
+/// gated on `CostStallFlatValley` — until `9dd9b0842` deleted that rung (#2458:
+/// an exit reason must not select the standard a point is judged by, and the
+/// constant overruled the probe-noise measurement exactly where that measurement
+/// declined). **The certificate does not call this function, and must not.**
+///
+/// Said plainly because the previous wording here — that centralizing the
+/// formula "prevents the shipped-fit certificate from drifting away from the
+/// guard" — outlived the consumer it named, and a reader who found the
+/// certificate applying a different band reasonably concluded drift rather than
+/// deletion (#2736).
 ///
 /// PUBLIC so that tests asserting outer stationarity consume THIS value rather
 /// than restating it. Three integration tests previously hand-copied

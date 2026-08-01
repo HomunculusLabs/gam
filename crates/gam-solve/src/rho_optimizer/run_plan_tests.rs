@@ -3969,18 +3969,34 @@ fn collapsed_probe_radius_declines_the_noise_rung_instead_of_certifying_at_the_c
     );
 }
 
-/// #1689 — a criterion-flat ARC halt that the guard certified through the
-/// score-relative band must retain that halt provenance through the mandatory
-/// analytic final-point certificate. The old runner marked only NON-converged
-/// stalls as `CostStallFlatValley`; a converged stall lost the marker and the
-/// final certificate incorrectly reverted to the raw absolute bound.
+/// #2458 — a criterion-flat ARC halt must NOT be rescued by a constant.
+///
+/// This fixture was written for #1689, when the certificate opened with a rung
+/// gated on `operator_stop_reason == CostStallFlatValley` that installed
+/// `flat_valley_converged_grad_bound(cost)`. `9dd9b0842` deleted that rung
+/// (`run.rs`, the #2458 block): the gate was an EXIT REASON selecting a bound
+/// that is a pure function of the criterion value, and the constant overruled
+/// the probe-noise MEASUREMENT taken in the same regime exactly where that
+/// measurement had declined.
+///
+/// The fixture survives the contract that was removed, inverted, because it is
+/// a sharp witness for the contract that replaced it: a LINEAR objective —
+/// constant gradient, identically zero Hessian, stationary nowhere by
+/// construction — carrying `CostStallFlatValley`. Under the old rung this was
+/// certified. It must now be refused, and refused by the ladder rather than by
+/// the constant.
+///
+/// #2519: the bound the fixture must NOT be graded against is expressed by
+/// CALLING `flat_valley_converged_grad_bound`, never by restating
+/// `1e-3·(1 + |score|)` as a literal.
 #[test]
-fn criterion_flat_provenance_preserves_score_relative_certificate_1689() {
+fn criterion_flat_halt_is_refused_by_the_ladder_not_rescued_by_a_constant_2458() {
     let score = -982.0_f64;
     let residual = 0.042_f64;
     assert!(
         residual > 1.0e-6 && residual < flat_valley_converged_grad_bound(score),
-        "fixture must require the criterion-flat band rather than raw tolerance"
+        "fixture must sit INSIDE the deleted rung's band, or the old constant \
+         would not have certified it either and this test discriminates nothing"
     );
     let problem = OuterProblem::new(1)
         .with_gradient(Derivative::Analytic)
@@ -4023,19 +4039,43 @@ fn criterion_flat_provenance_preserves_score_relative_certificate_1689() {
     );
     result.operator_stop_reason = Some(OperatorTrustRegionStopReason::CostStallFlatValley);
 
-    let certificate = certify_outer_optimality(
+    // The band the certificate will apply, and the rung that produced it. Read
+    // from the helper rather than from the refusal string so this asserts a
+    // value and not a message format.
+    let band = outer_stationarity_band_and_rung_at(&config, score);
+    assert!(
+        matches!(band.source, StationarityBoundSource::SolverBand),
+        "the ladder, not the flat-valley constant, must decide this point; got rung {}",
+        band.source.label()
+    );
+    // The whole point: the applied band is far BELOW the constant the deleted
+    // rung would have installed. Asserted by calling the shared function, per
+    // #2519 — no literal restates it.
+    let deleted_rung_bound = flat_valley_converged_grad_bound(score);
+    assert!(
+        band.bound < deleted_rung_bound,
+        "fixture no longer discriminates: the applied band {:.6e} is not below the \
+         constant {deleted_rung_bound:.6e} the #2458 rung would have installed, so \
+         restoring that rung would not change this test's verdict",
+        band.bound
+    );
+    // A linear objective is stationary nowhere, so the refusal is the correct
+    // answer and the pre-#2458 certification was the defect.
+    let refusal = certify_outer_optimality(
         &mut obj,
         &config,
-        "#1689 criterion-flat provenance regression",
+        "#2458 criterion-flat must not be rescued by a constant",
         &mut result,
     )
-    .expect("score-relative flat certificate must survive final remeasurement");
-    assert!(certificate.certifies());
-    assert!(certificate.stationarity.bound() >= flat_valley_converged_grad_bound(score));
-    assert!(matches!(
-        result.converged_via(),
-        Some(OuterConvergedVia::CriterionFlat { .. })
-    ));
+    .expect_err(
+        "a constant-gradient objective carrying CostStallFlatValley must be refused, \
+         not certified through a score-relative constant",
+    );
+    let message = refusal.to_string();
+    assert!(
+        message.contains("rung=solver-band"),
+        "the refusal must name the rung that decided it (#2688); got: {message}"
+    );
 }
 
 /// #2241 companion — the noise certificate must be un-gameable by collapsed
