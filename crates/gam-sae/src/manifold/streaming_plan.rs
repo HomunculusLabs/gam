@@ -52,6 +52,70 @@ pub(crate) const SAE_MIN_DEVICE_POOL_IN_CORE_BUDGET_BYTES: usize = 64 * 1024 * 1
 /// this much available, so admitting it can never reintroduce the OOM the reserve
 /// guards against; it only removes the spurious starved-box rejection (#1026).
 pub(crate) const SAE_DIRECT_ALWAYS_ADMIT_BYTES: usize = 16 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// #2724 — the exact-stationarity (dense exact-`A`) route's resident footprint.
+//
+// The three functions below are the ONE size expression shared by the code that
+// ALLOCATES the dense route's blocks (`materialize_exact_hessian_dense`,
+// `materialize_exact_hessian_quotient_geometry`, `dense_exact_a_logdet_channels`
+// in `construction_exact_hessian.rs`) and by the code that PRICES it here. They
+// exist because those two drifted: the plan priced `border_dim²` (40.5 KiB on
+// the measured `dim = 7692` witness) for a route whose real resident set is
+// `dim × dim` blocks at 451.4 MiB EACH — four orders of magnitude of allocation
+// the admission never counted.
+//
+// This prices MEMORY only. The same admission still prices no TIME, and the
+// route it gates is an `O(dim³)` symmetric eigendecomposition; a byte-denominated
+// bar cannot close that gap at any calibration (memory is `O(dim²)`, so the two
+// curves separate with `dim`). See #2724 for the separated claim.
+// ---------------------------------------------------------------------------
+
+/// Joint dimension of the exact stationarity Hessian: the coordinate block plus
+/// the β border. Called with the EXACT `(cache.delta_t_len(), cache.k)` at the
+/// allocation sites and with a shape-derived upper bound on the coordinate
+/// block in [`sae_streaming_plan_from_budget`], so the plan and the allocator
+/// cannot describe two different matrices.
+pub(crate) const fn sae_exact_stationarity_dim(coord_dim: usize, border_dim: usize) -> usize {
+    coord_dim.saturating_add(border_dim)
+}
+
+/// Bytes in ONE `dim × dim` f64 block of the exact stationarity route.
+pub(crate) const fn sae_exact_stationarity_block_bytes(dim: usize) -> usize {
+    dim.saturating_mul(dim).saturating_mul(SAE_BYTES_PER_F64)
+}
+
+/// How many `dim × dim`-scale f64 blocks the exact route holds live at once.
+///
+/// This is an ENUMERATION of named bindings read off the allocating code, not a
+/// fitted multiplier. At the peak — the `coordinate` spectral block being built
+/// inside `materialize_exact_hessian_quotient_geometry`, the heavier of the two
+/// consumers — the following are simultaneously live:
+///
+///   1. `joint.operator`            — the materialized `A` (dim × dim)
+///   2. `joint.eigenvectors`        — its eigenbasis (dim × dim)
+///   3. `priced_joint_inverse`      — the priced pseudo-inverse (dim × dim)
+///   4. the `coordinate` block's own `operator` (`a_tt_block`, total_t × total_t)
+///   5. the `coordinate` block's `eigenvectors` (total_t × total_t)
+///   6. `cluster_stable_eigh`'s `e_operator`, allocated at the FULL operator
+///      shape even though only the diagonal is written
+///   7. `eigh`'s own eigenvector output / LAPACK working copy of the operator
+///   8. `priced_coordinate_inverse` (dim × dim), plus its `_small` source
+///
+/// The gauge-reduced branch of `exact_hessian_spectral_block` holds a comparable
+/// count (`complement`, `reduced_operator`, `e_times_complement`, `reduced_e`,
+/// `reduced_eigenvectors`, `complement.dot(&reduced_eigenvectors)` alongside
+/// `operator`), so 8 bounds neither branch loosely nor either one falsely: it is
+/// still a LOWER bound on LAPACK's internal workspace, which `dsyevd` sizes at
+/// its own discretion.
+pub(crate) const SAE_EXACT_STATIONARITY_LIVE_DIM_BLOCKS: usize = 8;
+
+/// Resident bytes of the exact stationarity route at its peak.
+pub(crate) const fn sae_exact_stationarity_resident_bytes(dim: usize) -> usize {
+    sae_exact_stationarity_block_bytes(dim)
+        .saturating_mul(SAE_EXACT_STATIONARITY_LIVE_DIM_BLOCKS)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SaeStreamingPlan {
     pub streaming: bool,
@@ -61,9 +125,26 @@ pub struct SaeStreamingPlan {
     pub estimated_row_cross_bytes: usize,
     pub estimated_direct_peak_bytes: usize,
     pub estimated_matrix_free_peak_bytes: usize,
+    /// #2724 — joint dimension of the exact stationarity Hessian the dense
+    /// exact-`A` route materializes, as bounded from this shape.
+    pub estimated_exact_stationarity_dim: usize,
+    /// #2724 — resident bytes of that route at its peak
+    /// (`SAE_EXACT_STATIONARITY_LIVE_DIM_BLOCKS · dim² · 8`). This is a SEPARATE
+    /// question from `estimated_direct_peak_bytes`, which prices the full-batch
+    /// evidence assembly the inner solve and the chunking depend on; the exact
+    /// route's blocks are allocated by a different consumer and only when the
+    /// exact-`A` log-determinant lane runs. Two costs, two fields, two gates —
+    /// folding them into one scalar would make a chunk-size decision hostage to
+    /// an eigendecomposition's working set.
+    pub estimated_exact_stationarity_bytes: usize,
     pub in_core_budget_bytes: usize,
     pub process_available_bytes: usize,
     pub direct_admitted: bool,
+    /// #2724 — true when the dense exact-stationarity route's resident blocks
+    /// fit the same budget. [`SaeStreamingPlan::direct_logdet_admitted`] — the
+    /// predicate that dispatches to that route — requires BOTH this and
+    /// `direct_admitted`.
+    pub exact_stationarity_admitted: bool,
     pub matrix_free_admitted: bool,
 }
 
@@ -151,6 +232,33 @@ pub(crate) fn sae_streaming_plan_from_budget(
     let direct_fits_tiny = direct_peak_bytes <= SAE_DIRECT_ALWAYS_ADMIT_BYTES
         && direct_peak_bytes <= process_available_bytes;
     let direct_admitted = direct_peak_bytes <= in_core_budget_bytes || direct_fits_tiny;
+    // #2724 — the dense exact-`A` route's own ledger. `total_t = Σ_rows row_dim`
+    // and `row_dim = Σ_{k active in that row} d_k ≤ k_atoms · d_max`, so the
+    // shape this function already receives bounds the joint dimension the
+    // allocator will build. The bound is exact when every atom is active in
+    // every row (the dense-softmax regime that produced the measured witness)
+    // and conservative under a compact TopK layout — the direction a memory
+    // admission must err in.
+    let exact_stationarity_dim = sae_exact_stationarity_dim(
+        n_obs.saturating_mul(k_atoms).saturating_mul(d_max),
+        border_dim,
+    );
+    let exact_stationarity_bytes = sae_exact_stationarity_resident_bytes(exact_stationarity_dim);
+    // Denominated in the HOST budget, deliberately, and not in the
+    // possibly-device-derived `in_core_budget_bytes` this function is handed:
+    // every block enumerated above is a host `Array2<f64>` handed to a host
+    // LAPACK symmetric eigendecomposition. There is no device arm of this route,
+    // so a pooled device budget is the wrong ceiling for it. Both figures derive
+    // from the ONE carried host reading (#2532), so this stays a pure function
+    // of `(shape, carried reading)` and never resamples ambient memory.
+    let host_budget_for_exact = sae_host_in_core_budget_from_available(process_available_bytes);
+    // Same starved-box relaxation as the direct plan (#1026): a working set too
+    // small to OOM a box that reports it available is admitted even when the
+    // headroom-reserved budget has underflowed to ~0.
+    let exact_stationarity_fits_tiny = exact_stationarity_bytes <= SAE_DIRECT_ALWAYS_ADMIT_BYTES
+        && exact_stationarity_bytes <= process_available_bytes;
+    let exact_stationarity_admitted =
+        exact_stationarity_bytes <= host_budget_for_exact || exact_stationarity_fits_tiny;
     // Matrix-free streaming bounds its peak to the chunk, row-cross and border
     // workspaces, but it is still a real allocation. Admit it against the same
     // authoritative process budget: a genuine zero means exhausted memory,
@@ -169,9 +277,12 @@ pub(crate) fn sae_streaming_plan_from_budget(
         estimated_row_cross_bytes: row_cross_bytes,
         estimated_direct_peak_bytes: direct_peak_bytes,
         estimated_matrix_free_peak_bytes: matrix_free_peak_bytes,
+        estimated_exact_stationarity_dim: exact_stationarity_dim,
+        estimated_exact_stationarity_bytes: exact_stationarity_bytes,
         in_core_budget_bytes,
         process_available_bytes,
         direct_admitted,
+        exact_stationarity_admitted,
         matrix_free_admitted,
     }
 }
@@ -263,6 +374,11 @@ pub fn sae_streaming_plan_for_shape_with_available(
         // (dense-vs-SLQ evidence routing) on the same branch a probed budget
         // would have chosen — on a starved host whose budget collapsed below
         // even a tiny Schur, fall through to the exact probed logic.
+        //
+        // #2724's `exact_stationarity_admitted` is unaffected by this early
+        // return by construction: it is denominated in the HOST budget derived
+        // from the carried reading, which both branches pass through unchanged,
+        // so no probed device budget can move it either way.
         return Ok(sae_streaming_plan_from_budget(
             n_obs,
             total_basis,
@@ -368,8 +484,22 @@ impl SaeStreamingPlan {
         options
     }
 
+    /// The predicate that dispatches the exact-`A` log-determinant and the
+    /// ρ-gradient adjoint onto the DENSE exact-stationarity route (versus the
+    /// streaming / matrix-free implementation).
+    ///
+    /// #2724 — it must therefore clear BOTH ledgers. Before the fix it returned
+    /// `direct_admitted` alone, i.e. it admitted a route on a budget check that
+    /// had counted `border_dim² · 8` and never counted the `dim × dim` blocks
+    /// the route actually allocates. On the measured witness that omitted term
+    /// was 8.0 × 10⁴ times the entire quantity being compared against the
+    /// budget. Both consumers of a `false` here have a real streaming
+    /// implementation to fall back to
+    /// (`penalized_quasi_laplace_criterion_streaming_exact_with_cache`,
+    /// `solve_exact_stationarity_matrix_free`), so refusing is a route change,
+    /// not an error.
     pub(crate) fn direct_logdet_admitted(self) -> bool {
-        self.direct_admitted
+        self.direct_admitted && self.exact_stationarity_admitted
     }
 }
 
@@ -850,6 +980,180 @@ mod host_in_core_budget_tests {
             !large.direct_admitted,
             "a large dense plan must stay gated on the (collapsed) budget and stream, \
              not be admitted by the tiny-plan relaxation"
+        );
+    }
+}
+
+#[cfg(test)]
+mod exact_stationarity_admission_tests {
+    //! #2724 — the admission must price the `dim × dim` blocks the route it
+    //! admits actually allocates.
+    //!
+    //! The witness is the shipped K=8 rung of `sae_ev_vs_k_olmo.py` (508 train
+    //! rows, p=32, K=8), whose `[SAE-EXACT-DENSE]` line reports `dim = 7692`,
+    //! `border = 72`, 451.4 MiB per `dim × dim` f64 block. Against that, the
+    //! only quadratic term the plan used to price was `border_dim² · 8` —
+    //! 40.5 KiB, four orders of magnitude below one block and five below the
+    //! resident set.
+    //!
+    //! SCOPE, stated so a green here is not read as more than it is: this
+    //! prices MEMORY. The admission still prices no TIME, and the route it
+    //! gates is an `O(dim³)` eigendecomposition. On the node that produced the
+    //! measured wall the honest memory figure (~3.1 GiB) sits ~6.5× INSIDE the
+    //! budget, so nothing below claims to refuse that run — it claims the
+    //! estimate is no longer blind to its own dominant allocation, and that the
+    //! bar therefore binds on smaller boxes and at larger `dim`.
+    use super::*;
+
+    /// `(n_obs, total_basis, k_atoms, d_max, border_dim)`.
+    ///
+    /// `n_obs = 508`, `k_atoms = 8` and `border_dim = 72` are read off the
+    /// shipped `[SAE-EXACT-DENSE]` line for that fit (`border=72`). `d_max = 2`
+    /// is the issue's INFERENCE, not a measurement — `coords/rows = 7620/508 =
+    /// 15` over 8 atoms forces `d_max ≥ 2`, and 2 is the smallest value
+    /// consistent with it; a larger true `d_max` only makes the priced bound
+    /// larger, so the assertion below is the conservative side of that
+    /// uncertainty. `total_basis` is not pinned by the log line; it enters only
+    /// the full-batch slab, and this value keeps that slab at ~8 MB — which is
+    /// the whole point, since it is the ledger that used to stand alone.
+    const WITNESS: (usize, usize, usize, usize, usize) = (508, 96, 8, 2, 72);
+
+    /// `dim` from the shipped `[SAE-EXACT-DENSE]` line for that fit. The plan's
+    /// shape-derived bound must not fall below it, or the ledger would price a
+    /// smaller matrix than the allocator builds.
+    const WITNESS_MEASURED_DIM: usize = 7692;
+
+    fn plan_at(available: usize) -> SaeStreamingPlan {
+        let (n_obs, total_basis, k_atoms, d_max, border_dim) = WITNESS;
+        sae_streaming_plan_from_budget(
+            n_obs,
+            total_basis,
+            k_atoms,
+            d_max,
+            border_dim,
+            sae_host_in_core_budget_from_available(available),
+            SAE_CPU_L2_CACHE_BYTES * SAE_CHUNK_CACHE_MULTIPLE,
+            available,
+        )
+    }
+
+    /// The shape-derived bound covers the dimension the allocator really built,
+    /// and it is computed by the SAME function the allocator calls.
+    #[test]
+    fn the_priced_dimension_covers_the_measured_one() {
+        let plan = plan_at(64 * 1024 * 1024 * 1024);
+        let (n_obs, _, k_atoms, d_max, border_dim) = WITNESS;
+        assert_eq!(
+            plan.estimated_exact_stationarity_dim,
+            sae_exact_stationarity_dim(n_obs * k_atoms * d_max, border_dim),
+            "the plan must price the joint dimension through the shared expression"
+        );
+        assert!(
+            plan.estimated_exact_stationarity_dim >= WITNESS_MEASURED_DIM,
+            "priced dim {} is below the {WITNESS_MEASURED_DIM} the shipped \
+             [SAE-EXACT-DENSE] line reports for this shape; a memory bound that \
+             under-describes its own matrix is not a bound",
+            plan.estimated_exact_stationarity_dim
+        );
+        assert_eq!(
+            plan.estimated_exact_stationarity_bytes,
+            sae_exact_stationarity_resident_bytes(plan.estimated_exact_stationarity_dim)
+        );
+    }
+
+    /// THE DEFECT: a budget below the route's true requirement must REFUSE it.
+    ///
+    /// Both budgets below admit the direct plan itself — its full-batch peak is
+    /// a few MiB — so the only thing that can move the verdict is the
+    /// `dim × dim` ledger. Before the fix `direct_logdet_admitted()` was
+    /// `direct_admitted` alone and was therefore `true` on BOTH sides: a route
+    /// needing gigabytes admitted by a check that had looked at megabytes.
+    #[test]
+    fn a_budget_below_the_dense_route_requirement_refuses_it() {
+        // The requirement is a function of the SHAPE, not of the environment,
+        // so read it once at a budget that cannot bind.
+        let required = plan_at(usize::MAX / 4).estimated_exact_stationarity_bytes;
+        assert!(
+            required > SAE_HOST_IN_CORE_USEFUL_WORK_FLOOR_BYTES,
+            "the witness's dense requirement ({required} B) must exceed the in-core \
+             floor, or the budget arithmetic below cannot straddle it"
+        );
+
+        // Straddle it from the ONE input a host budget derives from, by
+        // inverting the budget rule's fraction leg: `budget = 3/5 · available`
+        // in this regime, so an availability of `5/3 · (required − 1)` puts the
+        // budget one byte below the requirement (integer division only ever
+        // rounds it further down). Both sides are then CHECKED against the
+        // budget rule itself rather than transcribed, so neither is a fitted
+        // constant.
+        let starved_available = (required.saturating_sub(1)
+            * SAE_HOST_MEMORY_BUDGET_FRACTION_DENOMINATOR)
+            / SAE_HOST_MEMORY_BUDGET_FRACTION_NUMERATOR;
+        let roomy_available = required.saturating_mul(2);
+        assert!(
+            sae_host_in_core_budget_from_available(starved_available) < required,
+            "the starved side must genuinely be below the requirement"
+        );
+        assert!(
+            sae_host_in_core_budget_from_available(roomy_available) >= required,
+            "the roomy side must genuinely be at or above the requirement"
+        );
+
+        let starved = plan_at(starved_available);
+        let roomy = plan_at(roomy_available);
+
+        // Non-vacuity / positive control: the DIRECT plan is admitted on both
+        // sides, so the pre-fix predicate would have said `true` twice and this
+        // test could not have distinguished them.
+        assert!(
+            starved.direct_admitted && roomy.direct_admitted,
+            "the full-batch direct plan ({} B) must be admitted on both sides, or the \
+             exact-Hessian ledger is not what moves the verdict",
+            starved.estimated_direct_peak_bytes
+        );
+        assert!(
+            starved.estimated_exact_stationarity_bytes > starved.estimated_direct_peak_bytes,
+            "the omitted term ({} B) must dominate the ledger that used to stand in for it \
+             ({} B); if it did not, this issue would be a rounding correction",
+            starved.estimated_exact_stationarity_bytes,
+            starved.estimated_direct_peak_bytes
+        );
+
+        assert!(
+            !starved.exact_stationarity_admitted,
+            "a {required}-byte dense exact-stationarity route was admitted against a \
+             {}-byte budget",
+            sae_host_in_core_budget_from_available(starved_available)
+        );
+        assert!(
+            !starved.direct_logdet_admitted(),
+            "the predicate that dispatches to the dense exact route must refuse when the \
+             route does not fit; admitting an over-budget route is the defect (#2724)"
+        );
+        assert!(
+            roomy.exact_stationarity_admitted && roomy.direct_logdet_admitted(),
+            "and it must still admit the same route when the budget does cover it, or the \
+             bar refuses everything and proves nothing"
+        );
+    }
+
+    /// A starved box must not lose a toy fit: the #1026 relaxation applies to
+    /// this ledger too, because a working set too small to OOM a box cannot be
+    /// the reason to route away from the exact route.
+    #[test]
+    fn a_toy_shape_survives_a_collapsed_budget() {
+        let available = 200 * 1024 * 1024usize; // below the 256 MiB reserve floor.
+        let plan =
+            sae_streaming_plan_from_budget(120, 3, 1, 1, 6, 0, SAE_CPU_L2_CACHE_BYTES, available);
+        assert!(
+            plan.estimated_exact_stationarity_bytes <= SAE_DIRECT_ALWAYS_ADMIT_BYTES,
+            "the toy shape's exact route ({} B) should be far below the always-admit size",
+            plan.estimated_exact_stationarity_bytes
+        );
+        assert!(
+            plan.direct_logdet_admitted(),
+            "a few-KiB exact route must survive a collapsed budget on a box that reports \
+             {available} bytes available (#1026)"
         );
     }
 }

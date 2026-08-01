@@ -3641,7 +3641,8 @@ impl SaeManifoldTerm {
     ) -> Result<Array2<f64>, String> {
         self.assignment.validate_rho_domain(rho)?;
         let n_params = rho.to_flat().len();
-        let dim = cache.delta_t_len() + cache.k;
+        // #2724 - the shared exact-stationarity size expression (streaming_plan.rs).
+        let dim = sae_exact_stationarity_dim(cache.delta_t_len(), cache.k);
         let solver = DeflatedArrowSolver::plain(cache);
         // The full joint inverse `G = H⁻¹` and the block-diagonal row-local
         // t-inverse `H_bd⁻¹` are the two shared helpers whose own docs already say
@@ -4193,7 +4194,8 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
     ) -> Result<ExactHessianQuotientGeometry, String> {
         let total_t = cache.delta_t_len();
-        let dim = total_t + cache.k;
+        // #2724 - same shared size expression as the admission ledger.
+        let dim = sae_exact_stationarity_dim(total_t, cache.k);
         let a = self.materialize_exact_hessian_dense(rho, target, cache)?;
         // #2336 — mirror the value-side E-attributability pricing into the quotient
         // pseudo-inverse so the θ-adjoint is DEFINED (finite) at a wrinkle-priced
@@ -4306,7 +4308,11 @@ impl SaeManifoldTerm {
     ) -> Result<Array2<f64>, String> {
         let total_t = cache.delta_t_len();
         let k = cache.k;
-        let dim = total_t + k;
+        // #2724 - ONE size expression, shared with the admission that decides
+        // whether this route may run at all (streaming_plan.rs). The planner
+        // evaluates the same function on a shape-derived bound for total_t, so
+        // the ledger and the allocation cannot describe two different matrices.
+        let dim = sae_exact_stationarity_dim(total_t, k);
         // #2267 — the same reason the Krylov sibling logs `[SAE-DEFLATE]`: this
         // route is silent for as long as it takes, and on #2267 that silence has
         // been read as a hang, as a hardware ceiling, and as an example
@@ -4321,8 +4327,11 @@ impl SaeManifoldTerm {
         log::info!(
             "[SAE-EXACT-DENSE] materializing the exact stationarity Hessian: dim={dim} \
              (coords={total_t} + border={k}), {:.1} MiB per dim x dim f64 block, \
+             {:.1} MiB resident across {} live blocks, \
              O(dim^3) symmetric eigendecomposition to follow",
-            (dim as f64) * (dim as f64) * 8.0 / (1024.0 * 1024.0),
+            sae_exact_stationarity_block_bytes(dim) as f64 / (1024.0 * 1024.0),
+            sae_exact_stationarity_resident_bytes(dim) as f64 / (1024.0 * 1024.0),
+            SAE_EXACT_STATIONARITY_LIVE_DIM_BLOCKS,
         );
         // #2267 — the `[SAE-EXACT-DENSE]` line above states the SIZE of the bill;
         // these two stopwatches state which HALF of it is being paid. Measured at
