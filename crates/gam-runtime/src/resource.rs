@@ -44,17 +44,20 @@ pub const OWNED_DATA_CACHE_MAX_ENTRIES: usize = 2;
 // Process-wide memory governor
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Fraction of the *detected available* memory the governor is allowed to hand
-/// out as reservations: 3/4.
+/// Fraction of this process's memory **capacity** the governor is allowed to
+/// hand out as reservations: 3/4.
 ///
 /// The ledger only accounts for the large, planned allocations that route
 /// through [`MemoryGovernor::try_reserve`] (dense design materializations,
 /// covariance blocks, sampler design assemblies). Everything else — allocator
-/// slack, thread stacks, code, and small per-iteration temporaries, plus
-/// whatever the rest of the machine does concurrently — lives in the remaining
-/// quarter. The base quantity is *available* (not total) memory, so memory
-/// already committed by other processes is excluded before the fraction is
-/// applied.
+/// slack, thread stacks, code, and small per-iteration temporaries — lives in
+/// the remaining quarter.
+///
+/// The base quantity is *capacity* (`min(host total, binding cgroup hard
+/// limit)`), not free space, and that is the same separation #2684 established
+/// for the materialization ceiling — see
+/// [`governor_budget_from_availability`] for why the ledger cannot be an
+/// exception to it (#2702).
 const GOVERNOR_BUDGET_NUMERATOR: u128 = 3;
 const GOVERNOR_BUDGET_DENOMINATOR: u128 = 4;
 
@@ -303,20 +306,58 @@ pub fn process_available_memory_bytes() -> usize {
 }
 
 /// Convert one provenance-preserving availability observation to the process
-/// budget. Zero is an authoritative exhausted-memory signal and deliberately
-/// yields a zero budget.
+/// ledger budget: 3/4 of the observation's stationary **capacity**. A probe
+/// that failed closed reports zero capacity and therefore admits nothing, which
+/// is the authoritative exhausted-memory signal.
+///
+/// gam#2702. This used to read `available_bytes` — free space — and that made
+/// every reservation verdict in the process a function of what the rest of the
+/// box happened to be doing, in exactly the way #2684 removed one layer up:
+///
+/// * the observation behind it is taken **once**, in the [`MemoryGovernor`]'s
+///   `OnceLock`, so it never tracked exhaustion in the first place. It froze
+///   whatever free memory existed at the instant of first governed allocation
+///   and used that number for the rest of the process's life. A frozen sample
+///   of a moving quantity is neither a live guard nor a reproducible
+///   threshold;
+/// * two processes launched from one job cgroup therefore derived different
+///   budgets from the same configuration, because page cache and sibling
+///   processes charge that cgroup continuously. Measured consequence: three
+///   `gam` inference tests passed in a 71-test run and failed in a 6-test
+///   subset of the same binary at the same commit, with
+///   `resource policy refused exact coefficient-SE columns 0..1` — a refusal of
+///   a few kilobytes.
+///
+/// The ledger's job is to bound **this process's own** jointly-live governed
+/// allocations against the ceiling this process could ever address. Memory
+/// already committed elsewhere on the box is not memory this ledger can account
+/// for, release, or route around; reading it only makes a fit's verdict a
+/// function of its neighbours, which SPEC-20 forbids (see
+/// [`process_memory_availability`]). Under a job scheduler the cgroup hard
+/// limit *is* the per-job ceiling, so capacity is the bound that actually binds.
 fn governor_budget_from_availability(availability: &MemoryAvailability) -> usize {
-    let scaled = u128::from(availability.available_bytes()) * GOVERNOR_BUDGET_NUMERATOR
-        / GOVERNOR_BUDGET_DENOMINATOR;
-    usize::try_from(scaled).unwrap_or(usize::MAX)
+    stationary_headroom_of_capacity(availability)
 }
 
 /// Convert the same observation to the process's **stationary** materialization
-/// ceiling. Same headroom fraction, different base quantity: capacity rather
-/// than free space, so the ceiling answers "could a dense footprint this large
-/// ever live here?" without moving when a sibling allocates (#2684). A probe
-/// that failed closed reports zero capacity and therefore admits nothing.
+/// ceiling: the answer to "could a dense footprint this large ever live here?",
+/// which must not move when a sibling allocates (#2684). A probe that failed
+/// closed reports zero capacity and therefore admits nothing.
 fn governor_materialization_cap_from_availability(availability: &MemoryAvailability) -> usize {
+    stationary_headroom_of_capacity(availability)
+}
+
+/// The one arithmetic both process-wide ceilings are derived from: the headroom
+/// fraction applied to stationary capacity.
+///
+/// The ledger budget and the materialization cap are therefore equal by
+/// construction rather than by coincidence, and that equality is the point:
+/// they are two questions about the same ceiling ("does this fit alongside what
+/// this process already has live" and "could this ever fit here at all"), so a
+/// routing decision taken from the cap can never be contradicted by the ledger
+/// for a reason that is not another live reservation. Keeping the arithmetic in
+/// one place is what stops the two from drifting back apart (#2684, #2702).
+fn stationary_headroom_of_capacity(availability: &MemoryAvailability) -> usize {
     let scaled = u128::from(availability.capacity_bytes()) * GOVERNOR_BUDGET_NUMERATOR
         / GOVERNOR_BUDGET_DENOMINATOR;
     usize::try_from(scaled).unwrap_or(usize::MAX)
@@ -374,9 +415,11 @@ struct GovernorLedger {
 /// continuous function of predicted live bytes vs remaining budget, not of
 /// row/column thresholds.
 ///
-/// The global budget is sized once from actually-available memory (host
-/// `available_memory`, clamped by cgroup limits inside containers) — see
-/// [`GOVERNOR_BUDGET_NUMERATOR`] for the headroom rationale.
+/// The global budget is sized once from this process's stationary capacity
+/// (host total memory, clamped by the binding cgroup's hard limit inside
+/// containers or under a job scheduler) — see [`GOVERNOR_BUDGET_NUMERATOR`] for
+/// the headroom rationale and [`governor_budget_from_availability`] for why it
+/// is not denominated in free memory (#2702).
 #[derive(Debug, Clone)]
 pub struct MemoryGovernor {
     ledger: Arc<GovernorLedger>,
@@ -409,6 +452,9 @@ impl MemoryGovernor {
         }
     }
 
+    /// Total bytes this process's ledger may ever have reserved at once: 3/4 of
+    /// its stationary capacity. Two processes launched the same way on the same
+    /// box derive the same number, whatever else is resident (#2702).
     pub fn budget_bytes(&self) -> usize {
         self.ledger.budget_bytes
     }
@@ -423,6 +469,10 @@ impl MemoryGovernor {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Bytes still admissible: the budget less what is reserved *by this
+    /// process* right now. The only quantity here that moves is this process's
+    /// own live governed footprint — which is the one thing a caller can
+    /// actually route around.
     pub fn remaining_bytes(&self) -> usize {
         self.ledger
             .budget_bytes
@@ -437,9 +487,10 @@ impl MemoryGovernor {
     /// deliberately stationary. It is **not** the live budget: whether an
     /// allocation fits *right now* is decided by [`Self::try_reserve`] against
     /// the joint ledger, which returns a typed, routable refusal instead of an
-    /// abort.
+    /// abort. Since #2702 both are denominated in the same capacity, so the two
+    /// can only disagree because of a live reservation.
     ///
-    /// Returning the live budget here was gam#2684: the budget is 3/4 of
+    /// Returning the live budget here was gam#2684: the budget was 3/4 of
     /// *available* memory, so a cgroup sitting at its limit drove this ceiling
     /// continuously to zero (measured at 53,248 bytes available with 448 GB
     /// free on the host), and every caller comparing a request against it —
@@ -1511,13 +1562,13 @@ mod resource_policy_tests {
             governor.single_materialization_cap_bytes(),
             governor_materialization_cap_from_availability(&governor.availability())
         );
-        // The routing ceiling is denominated in capacity, the ledger budget in
-        // free space, so the ceiling is never the tighter of the two (#2684).
-        assert!(
-            governor.single_materialization_cap_bytes() >= governor.budget_bytes(),
-            "capacity-denominated cap {} must not sit below the availability-denominated budget {}",
+        // Both ceilings are denominated in the same stationary capacity since
+        // #2702, so they are equal by construction; a divergence here would mean
+        // one of them had picked up a second base quantity again.
+        assert_eq!(
             governor.single_materialization_cap_bytes(),
-            governor.budget_bytes()
+            governor.budget_bytes(),
+            "the routing cap and the ledger budget are one ceiling asked two questions"
         );
         let policy = ResourcePolicy::default_library();
         assert_eq!(
@@ -1545,18 +1596,27 @@ mod resource_policy_tests {
         assert_eq!(governor.reserved_bytes(), 0);
     }
 
+    /// The `available_bytes` assertions here are the availability derivation.
+    /// The budget assertions alongside them are deliberately denominated in
+    /// CAPACITY (#2702): free space decides whether an allocation fits *now*,
+    /// which is the ledger's live `reserved_bytes` question, not the size of the
+    /// ceiling the ledger measures against.
     #[test]
     fn memory_availability_distinguishes_host_cgroup_and_exhaustion() {
         let host_only =
             MemoryAvailability::from_observation(1_000, 4_000, CgroupMemoryObservation::NotPresent);
         assert_eq!(host_only.available_bytes(), 1_000);
         assert_eq!(host_only.limiting_source(), MemoryAvailabilitySource::Host);
-        assert_eq!(governor_budget_from_availability(&host_only), 750);
+        assert_eq!(host_only.capacity_bytes(), 4_000);
+        assert_eq!(governor_budget_from_availability(&host_only), 3_000);
 
+        // Free space at zero with the box's capacity unchanged: the budget is
+        // the same 3/4 of 4,000, because a host that is momentarily full has not
+        // become a smaller host.
         let exhausted_host =
             MemoryAvailability::from_observation(0, 4_000, CgroupMemoryObservation::NotPresent);
         assert_eq!(exhausted_host.available_bytes(), 0);
-        assert_eq!(governor_budget_from_availability(&exhausted_host), 0);
+        assert_eq!(governor_budget_from_availability(&exhausted_host), 3_000);
 
         let finite_cgroup = MemoryAvailability::from_observation(
             1_000,
@@ -1574,7 +1634,9 @@ mod resource_policy_tests {
             finite_cgroup.limiting_source(),
             MemoryAvailabilitySource::Cgroup
         );
-        assert_eq!(governor_budget_from_availability(&finite_cgroup), 300);
+        // Capacity is the cgroup's 600-byte hard limit, not its 400 free bytes.
+        assert_eq!(finite_cgroup.capacity_bytes(), 600);
+        assert_eq!(governor_budget_from_availability(&finite_cgroup), 450);
 
         let exhausted_cgroup = MemoryAvailability::from_observation(
             1_000,
@@ -1592,7 +1654,10 @@ mod resource_policy_tests {
             exhausted_cgroup.limiting_source(),
             MemoryAvailabilitySource::Cgroup
         );
-        assert_eq!(governor_budget_from_availability(&exhausted_cgroup), 0);
+        // Same cgroup, charged to its limit: same ceiling, so same budget as the
+        // headroom-having reading above. That equality IS the #2702 property.
+        assert_eq!(exhausted_cgroup.capacity_bytes(), 600);
+        assert_eq!(governor_budget_from_availability(&exhausted_cgroup), 450);
 
         // A finite cgroup with more headroom than the host remains visible as
         // provenance, but the host is the binding observation.
@@ -1679,7 +1744,10 @@ mod resource_policy_tests {
         );
         assert_eq!(unlimited.available_bytes(), 2_430_926_848);
         assert_eq!(unlimited.limiting_source(), MemoryAvailabilitySource::Host);
-        assert_eq!(governor_budget_from_availability(&unlimited), 1_823_195_136);
+        // An unbounded controller defers to the host for capacity too, so the
+        // budget is 3/4 of the host's 4 GB total (#2702).
+        assert_eq!(unlimited.capacity_bytes(), 4_000_000_000);
+        assert_eq!(governor_budget_from_availability(&unlimited), 3_000_000_000);
         assert!(format!("{unlimited}").contains("unbounded cgroup-v2"));
     }
 
@@ -1701,7 +1769,10 @@ mod resource_policy_tests {
             availability.limiting_source(),
             MemoryAvailabilitySource::Cgroup
         );
-        assert_eq!(governor_budget_from_availability(&availability), 2_250);
+        // The v1 controller's 4,000-byte hard limit is the capacity, and the
+        // budget is 3/4 of it regardless of the 1,500 bytes charged to it.
+        assert_eq!(availability.capacity_bytes(), 4_000);
+        assert_eq!(governor_budget_from_availability(&availability), 3_000);
         let evidence = format!("{availability}");
         assert!(evidence.contains("cgroup-v1"));
         assert!(evidence.contains("available=3000"));
@@ -1712,11 +1783,16 @@ mod resource_policy_tests {
     /// measured on an MSI compute node (`--mem=6g`, host with 448 GB free):
     /// the shipped probe reported `available=53_248` while the job's ceiling was
     /// still 6 GiB. The routing cap must come from the ceiling — otherwise a
-    /// 300x12 f64 design (28,800 bytes) is refused — while the ledger budget
-    /// must keep tracking the exhaustion, because that is what makes a large
-    /// reservation route instead of allocate.
+    /// 300x12 f64 design (28,800 bytes) is refused.
+    ///
+    /// #2702 extended that to the ledger budget, which this test used to assert
+    /// shrank to 39,936 bytes here: the observation is taken once per process
+    /// and never refreshed, so a free-denominated budget did not track
+    /// exhaustion — it froze one process's view of the schedule. A large
+    /// reservation still routes instead of allocating, but because the ledger
+    /// accounts THIS process's live footprint, not because the ceiling moved.
     #[test]
-    fn a_cgroup_at_its_limit_shrinks_the_budget_but_not_the_materialization_cap_2684() {
+    fn a_cgroup_at_its_limit_moves_neither_the_budget_nor_the_materialization_cap_2684_2702() {
         const DESIGN_300X12_BYTES: usize = 300 * 12 * 8;
         let limit_bytes = 6 * 1024 * 1024 * 1024_u64;
         let at_the_limit = MemoryAvailability::from_observation(
@@ -1733,10 +1809,20 @@ mod resource_policy_tests {
         assert_eq!(at_the_limit.available_bytes(), 53_248);
         assert_eq!(at_the_limit.capacity_bytes(), limit_bytes);
         let governor = MemoryGovernor::with_detected_availability(at_the_limit);
-        // The ledger still sees the exhaustion: a large reservation is refused.
-        assert_eq!(governor.budget_bytes(), 39_936);
-        assert!(governor.try_reserve(1 << 30, "at-the-limit").is_err());
-        // The routing ceiling does not move with it.
+        // The budget is the job's ceiling, not the 53,248 bytes that happened to
+        // be free when the probe ran.
+        assert_eq!(governor.budget_bytes(), (limit_bytes as usize) / 4 * 3);
+        // It still refuses what cannot fit: 8 GiB does not fit a 6 GiB job.
+        assert!(governor.try_reserve(8 << 30, "larger-than-the-job").is_err());
+        // And the few-kilobyte reservation #2702 was filed for is admitted at
+        // exactly the reading that refused it — the SE path asks for two dense
+        // f64 copies of one column of a p=64 transformed Hessian.
+        let se_chunk = governor
+            .try_reserve_dense_f64_copies(64, 1, 2, "coefficient-SE solve chunk")
+            .expect("a 1,024-byte SE chunk must be admissible in a 6 GiB job");
+        assert_eq!(se_chunk.bytes(), 1_024);
+        drop(se_chunk);
+        // The routing ceiling does not move either.
         assert_eq!(
             governor.single_materialization_cap_bytes(),
             (limit_bytes as usize) / 4 * 3
@@ -1827,9 +1913,179 @@ mod resource_policy_tests {
             CgroupMemoryObservation::NotPresent,
         );
         assert_eq!(availability.available_bytes(), xnu_available);
+        // Capacity is the host's 8 GiB, so the budget is 6 GiB (#2702); the
+        // 2.43 GB free figure decides nothing but the availability provenance.
+        assert_eq!(availability.capacity_bytes(), 8 * 1024 * 1024 * 1024);
         assert_eq!(
             governor_budget_from_availability(&availability),
-            1_823_195_136
+            6 * 1024 * 1024 * 1024
         );
+    }
+}
+
+/// gam#2702: a reservation verdict is a function of the request and this
+/// process's own live footprint — never of what else was on the box, and never
+/// of what this process happened to do earlier.
+///
+/// The filed incident: three `gam` inference tests passed in a 71-test run of
+/// the `inference` binary and failed in a 6-test subset of that same binary at
+/// that same commit, all three with
+/// `resource policy refused exact coefficient-SE columns 0..1`. The refused
+/// allocation was two dense f64 copies of one column — kilobytes. The ledger
+/// budget was `3/4 x FREE memory` sampled once, at whichever moment this
+/// process first touched the governor, so processes launched from one job
+/// cgroup derived different budgets according to how much page cache and how
+/// many sibling test processes were charged to that cgroup at their own instant
+/// of first touch.
+///
+/// #2684 had already removed exactly this mechanism from the materialization
+/// ceiling. What follows asserts the ledger is not an exception, on the shipped
+/// derivation, with the pre-fix arithmetic spelled out as the falsification
+/// control.
+#[cfg(test)]
+mod governor_budget_is_capacity_determined_2702_tests {
+    use super::*;
+
+    /// The MSI compute node the incident was measured on: a `--mem=8g` job on a
+    /// box with hundreds of GB free.
+    const HOST_AVAILABLE_BYTES: u64 = 448_648_040_448;
+    const HOST_TOTAL_BYTES: u64 = 527_799_400 * 1024;
+    const JOB_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+    /// The refused allocation, restated from the failing path
+    /// (`gam-solve` `optimizer.rs`): the exact factorized coefficient-SE solve
+    /// reserves two dense `p_t x chunk` f64 workspaces at once. `p_t = 512` and
+    /// `chunk = 1` is the smallest request that path can ever make on a model of
+    /// this width — one column at a time.
+    const SE_TRANSFORMED_ROWS: usize = 512;
+    /// One column, two copies, eight bytes per f64.
+    const SE_CHUNK_BYTES: usize = SE_TRANSFORMED_ROWS * 8 * 2;
+
+    /// One cgroup read at load `charged`, everything else held fixed.
+    fn one_job_cgroup_at_load(charged: u64) -> MemoryAvailability {
+        crate::test_support::simulated_cgroup_memory_environment(
+            HOST_AVAILABLE_BYTES,
+            HOST_TOTAL_BYTES,
+            JOB_LIMIT_BYTES,
+            charged,
+        )
+    }
+
+    /// The derivation this fix replaced, kept here as the control: 3/4 of FREE
+    /// memory. A test that never evaluates it cannot show that the assertions
+    /// below had a way to fail.
+    fn pre_2702_free_denominated_budget(availability: &MemoryAvailability) -> usize {
+        let scaled = u128::from(availability.available_bytes()) * GOVERNOR_BUDGET_NUMERATOR
+            / GOVERNOR_BUDGET_DENOMINATOR;
+        usize::try_from(scaled).unwrap_or(usize::MAX)
+    }
+
+    #[test]
+    fn one_job_observed_at_two_load_levels_yields_one_budget_and_one_verdict() {
+        // The two readings the incident's two runs took: a cgroup with room, and
+        // the same cgroup four kilobytes from its limit — the state any cgroup
+        // settles into once its job has read a few gigabytes of build artifacts.
+        let roomy = one_job_cgroup_at_load(92_827_648);
+        let pinned = one_job_cgroup_at_load(JOB_LIMIT_BYTES - 4_096);
+
+        // The arms are genuinely different observations, or nothing below is
+        // being tested.
+        assert!(roomy.available_bytes() > 7_000_000_000);
+        assert_eq!(pinned.available_bytes(), 4_096);
+        // ... and they are genuinely the same job.
+        assert_eq!(roomy.capacity_bytes(), JOB_LIMIT_BYTES);
+        assert_eq!(pinned.capacity_bytes(), JOB_LIMIT_BYTES);
+
+        // FALSIFICATION CONTROL. Under the pre-#2702 derivation the pinned arm's
+        // budget was 3,072 bytes: below the SE chunk, so that arm refused and the
+        // roomy arm admitted. The assertions that follow therefore had a way to
+        // fail, and this is the exact inversion the issue reported.
+        assert_eq!(pre_2702_free_denominated_budget(&pinned), 3_072);
+        assert!(pre_2702_free_denominated_budget(&pinned) < SE_CHUNK_BYTES);
+        assert!(pre_2702_free_denominated_budget(&roomy) > SE_CHUNK_BYTES);
+
+        let roomy_governor = MemoryGovernor::with_detected_availability(roomy);
+        let pinned_governor = MemoryGovernor::with_detected_availability(pinned);
+
+        assert_eq!(roomy_governor.budget_bytes(), pinned_governor.budget_bytes());
+        assert_eq!(
+            pinned_governor.budget_bytes(),
+            (JOB_LIMIT_BYTES as usize) / 4 * 3
+        );
+        assert_eq!(
+            roomy_governor.remaining_bytes(),
+            pinned_governor.remaining_bytes()
+        );
+
+        // The verdict itself, taken through the shipped reservation call on both
+        // arms: the same request, the same answer.
+        for governor in [&roomy_governor, &pinned_governor] {
+            let reservation = governor
+                .try_reserve_dense_f64_copies(
+                    SE_TRANSFORMED_ROWS,
+                    1,
+                    2,
+                    "factorized coefficient-SE solve chunk",
+                )
+                .expect("an 8 KiB SE chunk is admissible in an 8 GiB job at any load");
+            assert_eq!(reservation.bytes(), SE_CHUNK_BYTES);
+        }
+    }
+
+    #[test]
+    fn a_request_larger_than_the_job_is_still_refused_at_every_load() {
+        // The ceiling must keep saying no, or the test above is satisfied by a
+        // governor that admits everything.
+        for charged in [0, JOB_LIMIT_BYTES / 2, JOB_LIMIT_BYTES - 4_096] {
+            let governor = MemoryGovernor::with_detected_availability(one_job_cgroup_at_load(charged));
+            let refusal = governor
+                .try_reserve(16 * 1024 * 1024 * 1024, "twice the job's ceiling")
+                .expect_err("16 GiB cannot be admitted in an 8 GiB job");
+            match refusal {
+                MemoryReservationError::BudgetExceeded { budget_bytes, .. } => {
+                    assert_eq!(budget_bytes, (JOB_LIMIT_BYTES as usize) / 4 * 3);
+                }
+                other => panic!("expected a budget refusal naming the ceiling, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_verdict_does_not_depend_on_what_this_process_did_earlier() {
+        // The property the issue asks for, stated as history-independence: a
+        // request's verdict must be the same whether or not the process has
+        // already built and dropped something large. Reservations are the only
+        // process state the ledger has, and a released one must leave no trace.
+        let governor = MemoryGovernor::with_detected_availability(one_job_cgroup_at_load(0));
+        let request = || {
+            governor
+                .try_reserve_dense_f64_copies(
+                    SE_TRANSFORMED_ROWS,
+                    1,
+                    2,
+                    "factorized coefficient-SE solve chunk",
+                )
+                .map(|reservation| reservation.bytes())
+        };
+
+        let before = request().expect("admissible on a fresh ledger");
+        {
+            // Something big enough that a free-denominated ledger would have
+            // been left visibly poorer by it: all but one SE chunk of the budget.
+            let bulk = governor
+                .try_reserve(
+                    governor.remaining_bytes() - SE_CHUNK_BYTES,
+                    "prior work in this process",
+                )
+                .expect("the bulk reservation is exactly the remaining budget");
+            assert_eq!(governor.remaining_bytes(), SE_CHUNK_BYTES);
+            // While it is live the ledger honestly reports the pressure: this is
+            // the one thing that MAY change a verdict, and the next request still
+            // fits because the bulk left exactly one chunk.
+            assert!(request().is_ok());
+            drop(bulk);
+        }
+        assert_eq!(governor.reserved_bytes(), 0);
+        assert_eq!(request().expect("admissible again"), before);
     }
 }

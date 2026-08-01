@@ -3103,9 +3103,18 @@ where
                         2,
                         "factorized coefficient-SE solve chunk",
                     )
-                    .map_err(|_| {
+                    // The typed refusal carries the budget, what was already
+                    // reserved, and the availability observation the budget was
+                    // derived from. Discarding it left two runs that refused for
+                    // different reasons indistinguishable in the log, which is
+                    // half of why #2702 took a filed issue to diagnose: state the
+                    // measured quantities, not just the verdict.
+                    .map_err(|refusal| {
                         EstimationError::RemlOptimizationFailed(format!(
-                            "resource policy refused exact coefficient-SE columns {col_start}..{col_end}"
+                            "resource policy refused exact coefficient-SE columns \
+                             {col_start}..{col_end} ({chunk} of {p_cov} columns, \
+                             {p_t} transformed rows): {refusal}",
+                            p_t = qs.ncols(),
                         ))
                     })?;
                 // qs.t() has shape (p_t, p_cov); slice to (p_t, chunk). The
