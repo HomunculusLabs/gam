@@ -2102,78 +2102,25 @@ pub fn fixed_kappa_profiled_reml_score(
     Ok(score)
 }
 
-/// Evaluate a Gaussian REML profile and its exact envelope derivative along one
-/// signed-curvature direction. The smoothing parameter is selected by the
-/// closed-form stationary-root enumerator; no lattice participates in either
-/// the value or the derivative.
-fn profiled_gaussian_reml_value_kappa_gradient(
-    design: &Array2<f64>,
-    design_kappa: &Array2<f64>,
-    penalty: &Array2<f64>,
-    penalty_kappa: &Array2<f64>,
-    response: ArrayView1<'_, f64>,
-) -> Result<(f64, f64), EstimationError> {
-    if design.dim() != design_kappa.dim()
-        || penalty.dim() != penalty_kappa.dim()
-        || penalty.dim() != (design.ncols(), design.ncols())
-        || response.len() != design.nrows()
-    {
-        crate::bail_invalid_estim!("constant-curvature profile value/gradient shape mismatch");
-    }
-
-    let response_2d = response.insert_axis(ndarray::Axis(1));
-    let fit = gam_solve::gaussian_reml::gaussian_reml_multi_closed_form(
-        design.view(),
-        response_2d.view(),
-        penalty.view(),
-        None,
-        None,
-    )?;
-    let backward = gam_solve::gaussian_reml::gaussian_reml_multi_closed_form_backward_from_fit(
-        design.view(),
-        response_2d.view(),
-        penalty.view(),
-        None,
-        &fit,
-        0.0,
-        None,
-        None,
-        1.0,
-        0.0,
-    )?;
-    let derivative = backward
-        .grad_x
-        .iter()
-        .zip(design_kappa.iter())
-        .map(|(&adjoint, &direction)| adjoint * direction)
-        .sum::<f64>()
-        + backward
-            .grad_penalty
-            .iter()
-            .zip(penalty_kappa.iter())
-            .map(|(&adjoint, &direction)| adjoint * direction)
-            .sum::<f64>();
-    if !(fit.reml_score.is_finite() && derivative.is_finite()) {
-        crate::bail_invalid_estim!(
-            "constant-curvature analytic profile returned a non-finite value or derivative"
-        );
-    }
-    Ok((fit.reml_score, derivative))
-}
-
-/// Value and exact first derivative of the continuously smoothing-profiled
-/// Gaussian REML negative log evidence used for curvature inference.
+/// Value and exact first AND second derivatives of the continuously
+/// smoothing-profiled Gaussian REML negative log evidence used for curvature
+/// inference.
 ///
 /// The likelihood-ratio statistic must compare values of this one likelihood.
 /// Subtracting a second REML fit to a response-dependent radial smoother would
 /// produce neither a likelihood nor a calibrated likelihood ratio: the
 /// subtraction can manufacture curvature signal even when the response is
 /// constant plus noise.
-fn constant_curvature_kappa_profile_value_gradient(
+///
+/// The second derivative is what lets this route run the SAME stationarity
+/// certificate every other route runs (#2458). The basis bundle already shipped
+/// `∂²X/∂κ²` / `∂²S/∂κ²`; this path used to request `derivatives.first` and drop
+/// the rest, so the route "had no Hessian" only because it never asked.
+fn constant_curvature_kappa_profile_value_jet(
     data: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
     spec: &gam_terms::basis::ConstantCurvatureBasisSpec,
-) -> Result<(f64, f64), EstimationError> {
+) -> Result<(f64, f64, f64), EstimationError> {
     if y.len() != data.nrows() || y.is_empty() {
         crate::bail_invalid_estim!(
             "constant-curvature profile needs one non-empty response per row: data={}, response={}",
@@ -2189,50 +2136,77 @@ fn constant_curvature_kappa_profile_value_gradient(
     let derivatives =
         gam_terms::basis::build_constant_curvature_basis_kappa_derivatives(data, &profile_spec)
             .map_err(EstimationError::from)?;
-    if basis.active_penalties.len() != 1 || derivatives.first.penalties_derivative.len() != 1 {
+    if basis.active_penalties.len() != 1
+        || derivatives.first.penalties_derivative.len() != 1
+        || derivatives.second.penaltiessecond_derivative.len() != 1
+    {
         crate::bail_invalid_estim!(
-            "constant-curvature profile expected one primary penalty; value blocks={}, derivative blocks={}",
+            "constant-curvature profile expected one primary penalty; value blocks={}, first-derivative blocks={}, second-derivative blocks={}",
             basis.active_penalties.len(),
             derivatives.first.penalties_derivative.len(),
+            derivatives.second.penaltiessecond_derivative.len(),
         );
     }
 
     let smooth_design = basis.design.to_dense();
     let smooth_design_kappa = &derivatives.first.design_derivative;
+    let smooth_design_kappa2 = &derivatives.second.designsecond_derivative;
     let smooth_penalty = &basis.active_penalties[0].matrix;
     let smooth_penalty_kappa = &derivatives.first.penalties_derivative[0];
+    let smooth_penalty_kappa2 = &derivatives.second.penaltiessecond_derivative[0];
     let n = smooth_design.nrows();
     let p = smooth_design.ncols();
     if smooth_design_kappa.dim() != (n, p)
+        || smooth_design_kappa2.dim() != (n, p)
         || smooth_penalty.dim() != (p, p)
         || smooth_penalty_kappa.dim() != (p, p)
+        || smooth_penalty_kappa2.dim() != (p, p)
     {
         crate::bail_invalid_estim!(
             "constant-curvature kappa derivative bundle does not match its value basis"
         );
     }
 
+    // The unpenalized intercept column is κ-independent, so it contributes zero
+    // to every κ-derivative and its coordinate stays in the penalty null space
+    // at all κ — the κ-fixed-null-space premise the jet verifies.
     let mut design = Array2::<f64>::ones((n, p + 1));
     design.slice_mut(s![.., 1..]).assign(&smooth_design);
     let mut design_kappa = Array2::<f64>::zeros((n, p + 1));
     design_kappa
         .slice_mut(s![.., 1..])
         .assign(smooth_design_kappa);
+    let mut design_kappa2 = Array2::<f64>::zeros((n, p + 1));
+    design_kappa2
+        .slice_mut(s![.., 1..])
+        .assign(smooth_design_kappa2);
     let mut penalty = Array2::<f64>::zeros((p + 1, p + 1));
     penalty.slice_mut(s![1.., 1..]).assign(smooth_penalty);
     let mut penalty_kappa = Array2::<f64>::zeros((p + 1, p + 1));
     penalty_kappa
         .slice_mut(s![1.., 1..])
         .assign(smooth_penalty_kappa);
+    let mut penalty_kappa2 = Array2::<f64>::zeros((p + 1, p + 1));
+    penalty_kappa2
+        .slice_mut(s![1.., 1..])
+        .assign(smooth_penalty_kappa2);
 
-    profiled_gaussian_reml_value_kappa_gradient(&design, &design_kappa, &penalty, &penalty_kappa, y)
+    profiled_gaussian_reml_value_kappa_jet(
+        &design,
+        &design_kappa,
+        &design_kappa2,
+        &penalty,
+        &penalty_kappa,
+        &penalty_kappa2,
+        y,
+    )
 }
 
 struct ConstantCurvatureProfile<'a> {
     data: ArrayView2<'a, f64>,
     response: ArrayView1<'a, f64>,
     spec: gam_terms::basis::ConstantCurvatureBasisSpec,
-    cache: std::cell::RefCell<std::collections::HashMap<u64, (f64, f64)>>,
+    cache: std::cell::RefCell<std::collections::HashMap<u64, (f64, f64, f64)>>,
 }
 
 impl<'a> ConstantCurvatureProfile<'a> {
@@ -2268,7 +2242,7 @@ impl<'a> ConstantCurvatureProfile<'a> {
         })
     }
 
-    fn evaluate(&self, kappa: f64) -> Result<(f64, f64), EstimationError> {
+    fn evaluate(&self, kappa: f64) -> Result<(f64, f64, f64), EstimationError> {
         if !kappa.is_finite() {
             crate::bail_invalid_estim!("constant-curvature profile probed a non-finite kappa");
         }
@@ -2279,7 +2253,7 @@ impl<'a> ConstantCurvatureProfile<'a> {
         let mut probe_spec = self.spec.clone();
         probe_spec.kappa = kappa;
         let sample =
-            constant_curvature_kappa_profile_value_gradient(self.data, self.response, &probe_spec)?;
+            constant_curvature_kappa_profile_value_jet(self.data, self.response, &probe_spec)?;
         self.cache.borrow_mut().insert(key, sample);
         Ok(sample)
     }
@@ -2353,7 +2327,19 @@ fn constant_curvature_kappa_profile_optimum(
     let initial_kappa = profile.spec.kappa.clamp(kappa_min, kappa_max);
     let problem = gam_solve::rho_optimizer::OuterProblem::new(1)
         .with_gradient(gam_problem::Derivative::Analytic)
-        .with_hessian(gam_problem::DeclaredHessianForm::Unavailable)
+        // #2458: the κ profile supplies an EXACT d²V/dκ², so this route runs
+        // the same curvature-denominated stationarity certificate every other
+        // route runs. It previously declared `Unavailable` — not because the
+        // curvature was unavailable, but because this call site never asked the
+        // basis bundle for the `.second` it already ships.
+        .with_hessian(gam_problem::DeclaredHessianForm::Dense)
+        // Gradient-only SEARCH is retained deliberately: the change this makes
+        // is the terminal certification, not the trajectory. Declaring the
+        // Hessian while preferring gradient-only routes the planner through the
+        // `(Analytic, Analytic) if prefer_gradient_only` arm to the same BFGS it
+        // used before, so kappa-hat is selected by the same solve -- but the
+        // terminal mint can now MEASURE curvature and run the derived criterion
+        // instead of the un-derived gradient band.
         .with_prefer_gradient_only(true)
         .with_disable_fixed_point(true)
         .with_fallback_policy(gam_solve::rho_optimizer::FallbackPolicy::Disabled)
@@ -2369,14 +2355,16 @@ fn constant_curvature_kappa_profile_optimum(
     let mut objective = problem.build_objective(
         profile,
         |profile: &mut ConstantCurvatureProfile<'_>, theta: &Array1<f64>| {
-            profile.evaluate(theta[0]).map(|(value, _)| value)
+            profile.evaluate(theta[0]).map(|(value, _, _)| value)
         },
         |profile: &mut ConstantCurvatureProfile<'_>, theta: &Array1<f64>| {
-            let (cost, derivative) = profile.evaluate(theta[0])?;
+            let (cost, derivative, curvature) = profile.evaluate(theta[0])?;
             Ok(gam_problem::OuterEval {
                 cost,
                 gradient: Array1::from_vec(vec![derivative]),
-                hessian: gam_problem::HessianValue::Unavailable,
+                hessian: gam_problem::HessianValue::Dense(
+                    Array2::from_shape_vec((1, 1), vec![curvature]).expect("1x1 from one element"),
+                ),
                 inner_beta_hint: None,
             })
         },
@@ -8496,10 +8484,10 @@ pub fn curvature_inference_forspec(
         if !kappa.is_finite() {
             return Err(format!("V_p probed a non-finite κ = {kappa}"));
         }
-        let sample = profile.evaluate(kappa).map_err(|error| {
+        let (value, score, _curvature) = profile.evaluate(kappa).map_err(|error| {
             format!("analytic curvature profile at kappa={kappa} failed: {error}")
         })?;
-        Ok(sample)
+        Ok((value, score))
     };
     let ci = curvature_profile_ci_from_analytic_score(
         &mut v_p,

@@ -136,6 +136,8 @@ pub struct FittedTermCollectionWithSpec {
 
 include!("design_construction.rs");
 include!("spatial_optimization.rs");
+// #2458: the κ-profile derivative jet, kept out of the 9k-line driver file.
+include!("constant_curvature_kappa_jet.rs");
 
 #[cfg(test)]
 mod test_support {
@@ -233,6 +235,11 @@ include!("adaptive_bounded_duchon_tests.rs");
 // assert only that the measurement completed), kept in-tree so the next lane
 // does not have to rebuild this crate to re-derive them. Self-contained
 // `#[cfg(test)] mod`, so it adds nothing to the non-test build.
+// #2458: FD gates for the constant-curvature κ profile derivative jet. The
+// second derivative feeds a stationarity CERTIFICATE, so a wrong one is silent
+// — it moves the bound rather than the fit. Self-contained `#[cfg(test)] mod`.
+include!("constant_curvature_kappa_jet_fd_tests.rs");
+
 include!("zz_measure_2425_kappa_tests.rs");
 
 // #2450 criterion-identity instrumentation. A PAIRED A/B over `rho_prior` at

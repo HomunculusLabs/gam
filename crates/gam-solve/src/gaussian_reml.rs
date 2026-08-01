@@ -47,8 +47,13 @@ fn zero_backward_result(n: usize, p: usize, d: usize) -> GaussianRemlBackwardRes
     }
 }
 
-const RHO_LOWER: f64 = -30.0;
-const RHO_UPPER: f64 = 30.0;
+/// Smoothing-parameter search box in log strength. Public because a caller that
+/// differentiates the λ̂ ROOT (the implicit-function channel) must apply the same
+/// interior test this file's own backward VJP applies — an interior premise
+/// checked against a privately duplicated bound is the desync this crate exists
+/// to prevent.
+pub const RHO_LOWER: f64 = -30.0;
+pub const RHO_UPPER: f64 = 30.0;
 const EIGEN_REL_TOL: f64 = 1.0e-10;
 const MIN_DEVIANCE: f64 = 1.0e-300;
 /// Relative first-order convergence certificate for the block-orthogonal
