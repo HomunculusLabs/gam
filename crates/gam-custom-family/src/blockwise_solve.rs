@@ -2040,102 +2040,56 @@ pub(crate) fn stable_logdet_with_ridge_policy(
         a[[i, i]] += ridge;
     }
 
-    match ridge_policy.determinant_mode() {
-        RidgeDeterminantMode::Full => match a.cholesky(Side::Lower) {
-            Ok(chol) => Ok(2.0 * chol.diag().mapv(f64::ln).sum()),
-            Err(_) => {
-                // Cholesky failed. Separate a genuinely INDEFINITE Hessian — a real
-                // SPD-contract violation, no Laplace mode exists — from a PD-but-
-                // ILL-CONDITIONED one (cond > 1/ε: every true eigenvalue is
-                // positive, but a rounding-negative pivot aborts the
-                // factorization). The latter is exactly what a competing-risks
-                // joint Hessian produces from its near-duplicate cross-cause time
-                // columns (fit_orchestration comment on the K block-pairs of
-                // near-identical columns): min_eig ≫ 0 yet cond > 1/ε.
-                //
-                // For a PD matrix the exact SPD log-determinant still exists and
-                // equals `Σ log σ_j` over the symmetric spectrum — the SAME
-                // estimand as `2·Σ log L_ii`, computed stably — so return it rather
-                // than failing the whole ρ evaluation, which otherwise strands the
-                // outer REML search at a non-stationary point (the joint Hessian
-                // logdet is unavailable at that ρ, so no gradient/value is
-                // produced). Only a certified-negative eigenvalue propagates the
-                // error. This is byte-identical on every input where Cholesky
-                // already succeeds.
-                let (evals, _) = gam_linalg::faer_ndarray::FaerEigh::eigh(&a, Side::Lower)
-                    .map_err(|_| {
-                        format!(
-                            "cholesky failed and the eigendecomposition also failed while computing full ridge-aware logdet (p={p}, ridge={ridge:.3e})"
-                        )
-                    })?;
-                let min_eig = evals.iter().copied().fold(f64::INFINITY, f64::min);
-                let max_eig = evals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                // Negative-eigenvalue tolerance, relative to the spectrum scale.
-                let neg_tol = CUSTOM_FAMILY_CONDITION_RELATIVE_FLOOR * max_eig.abs().max(1.0);
-                if min_eig <= -neg_tol {
-                    return Err(format!(
-                        "cholesky failed while computing full ridge-aware logdet and the symmetric spectrum is genuinely indefinite (p={p}, ridge={ridge:.3e}, min_eig={min_eig:.6e}, max_eig={max_eig:.6e}); an indefinite Hessian has no SPD log-determinant and defines no Laplace mode"
-                    ));
-                }
-                // PD but ill-conditioned: exact logdet from the positive spectrum,
-                // flooring round-off-nonpositive eigenvalues at the ridge-relative
-                // floor so a numerically-singular direction contributes a bounded
-                // (not `-inf`) term.
-                let floor = ridge.max(neg_tol);
-                Ok(evals.iter().map(|&e| e.max(floor).ln()).sum())
+    // #2670 — one determinant semantics, so no dispatch. The deleted
+    // `RidgeDeterminantMode::PositivePartApproximation` arm evaluated a smooth
+    // positive-part spectral surrogate, which is a DIFFERENT estimand from the
+    // exact SPD log-determinant this function's callers consume; no production
+    // path ever selected it (every construction of the policy that reached it
+    // lived under `#[cfg(test)]`). The surrogate itself is untouched and still
+    // live in the REML outer engine's `DenseSpectralOperator`, which is where a
+    // caller that wants it can get it together with its matching gradient.
+    match a.cholesky(Side::Lower) {
+        Ok(chol) => Ok(2.0 * chol.diag().mapv(f64::ln).sum()),
+        Err(_) => {
+            // Cholesky failed. Separate a genuinely INDEFINITE Hessian — a real
+            // SPD-contract violation, no Laplace mode exists — from a PD-but-
+            // ILL-CONDITIONED one (cond > 1/ε: every true eigenvalue is
+            // positive, but a rounding-negative pivot aborts the
+            // factorization). The latter is exactly what a competing-risks
+            // joint Hessian produces from its near-duplicate cross-cause time
+            // columns (fit_orchestration comment on the K block-pairs of
+            // near-identical columns): min_eig ≫ 0 yet cond > 1/ε.
+            //
+            // For a PD matrix the exact SPD log-determinant still exists and
+            // equals `Σ log σ_j` over the symmetric spectrum — the SAME
+            // estimand as `2·Σ log L_ii`, computed stably — so return it rather
+            // than failing the whole ρ evaluation, which otherwise strands the
+            // outer REML search at a non-stationary point (the joint Hessian
+            // logdet is unavailable at that ρ, so no gradient/value is
+            // produced). Only a certified-negative eigenvalue propagates the
+            // error. This is byte-identical on every input where Cholesky
+            // already succeeds.
+            let (evals, _) = gam_linalg::faer_ndarray::FaerEigh::eigh(&a, Side::Lower)
+                .map_err(|_| {
+                    format!(
+                        "cholesky failed and the eigendecomposition also failed while computing full ridge-aware logdet (p={p}, ridge={ridge:.3e})"
+                    )
+                })?;
+            let min_eig = evals.iter().copied().fold(f64::INFINITY, f64::min);
+            let max_eig = evals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            // Negative-eigenvalue tolerance, relative to the spectrum scale.
+            let neg_tol = CUSTOM_FAMILY_CONDITION_RELATIVE_FLOOR * max_eig.abs().max(1.0);
+            if min_eig <= -neg_tol {
+                return Err(format!(
+                    "cholesky failed while computing full ridge-aware logdet and the symmetric spectrum is genuinely indefinite (p={p}, ridge={ridge:.3e}, min_eig={min_eig:.6e}, max_eig={max_eig:.6e}); an indefinite Hessian has no SPD log-determinant and defines no Laplace mode"
+                ));
             }
-        },
-        RidgeDeterminantMode::PositivePartApproximation => {
-            smooth_regularized_logdet_hessian_finite_check(&a, None)?;
-            // Smooth-regularized logdet objective, aligned with the gradient
-            // operator (`DenseSpectralOperator` in `Smooth` mode):
-            //
-            //   log |A|_reg = Σ_j log r_ε(σ_j),   r_ε(σ) = ½(σ + √(σ² + 4ε²))
-            //
-            // Every eigenvalue contributes; none are silently dropped.  The
-            // regularizer r_ε is C∞, strictly positive for all real σ, and
-            // numerically agrees with plain log σ when σ ≫ ε.  Negative
-            // eigenvalues contribute ≈ log(ε²/|σ|) (quadratic damping) so
-            // indefinite Hessians produce a finite, differentiable cost
-            // rather than a discontinuous positive-part pseudo-determinant.
-            //
-            // This matches exactly what the downstream
-            // `trace_logdet_gradient = Σ φ'(σ) u^T (dH/dρ) u` computes as the
-            // analytic gradient — eliminating the cost/gradient mismatch
-            // that previously broke BFGS line search on indefinite outer
-            // Hessians.
-            //
-            match gam_linalg::faer_ndarray::FaerEigh::eigh(&a, Side::Lower) {
-                Ok((evals, _)) => {
-                    let eval_vec: Vec<f64> = evals
-                        .as_slice()
-                        .map(|sl| sl.to_vec())
-                        .unwrap_or_else(|| evals.iter().copied().collect());
-                    let eps = spectral_epsilon(&eval_vec)
-                        .max(ridge.max(CUSTOM_FAMILY_CONDITION_RELATIVE_FLOOR));
-                    let n_negative = eval_vec.iter().filter(|&&ev| ev < -eps).count();
-                    if n_negative > 0 {
-                        // Diagnostic only: indefiniteness is now handled
-                        // correctly by the smooth regularizer, not ignored.
-                        log::debug!(
-                            "[SmoothRegularizedLogdet] Hessian has {n_negative} \
-                             eigenvalue(s) below -eps={eps:.2e}; r_ε damps them \
-                             smoothly instead of dropping them."
-                        );
-                    }
-                    let logdet: f64 = eval_vec
-                        .iter()
-                        .map(|&sigma| spectral_regularize(sigma, eps).ln())
-                        .sum();
-                    Ok(logdet)
-                }
-                Err(eigh_err) => Err(CustomFamilyError::BasisDecompositionFailed {
-                    reason: format!(
-                        "smooth-regularized logdet eigendecomposition failed: {eigh_err}"
-                    ),
-                }
-                .into()),
-            }
+            // PD but ill-conditioned: exact logdet from the positive spectrum,
+            // flooring round-off-nonpositive eigenvalues at the ridge-relative
+            // floor so a numerically-singular direction contributes a bounded
+            // (not `-inf`) term.
+            let floor = ridge.max(neg_tol);
+            Ok(evals.iter().map(|&e| e.max(floor).ln()).sum())
         }
     }
 }

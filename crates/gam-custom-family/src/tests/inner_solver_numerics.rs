@@ -661,7 +661,7 @@ pub(crate) fn objective_includes_solverridge_quadratic_term() {
         outer_rel_cost_tol: None,
         rho_lower_bound: -10.0,
         ridge_floor: 1e-4,
-        ridge_policy: RidgePolicy::positive_part_approximate_objective(),
+        ridge_policy: RidgePolicy::exact_full_objective(),
         use_remlobjective: false,
         compute_covariance: false,
         use_outer_hessian: false,
@@ -717,7 +717,7 @@ pub(crate) fn inner_block_accepts_penalty_improving_step_even_if_loglik_drops() 
         outer_rel_cost_tol: None,
         rho_lower_bound: -10.0,
         ridge_floor: 0.0,
-        ridge_policy: RidgePolicy::positive_part_approximate_objective(),
+        ridge_policy: RidgePolicy::exact_full_objective(),
         use_remlobjective: false,
         compute_covariance: false,
         use_outer_hessian: false,
@@ -776,7 +776,7 @@ pub(crate) fn exact_newton_backtracking_descent_includes_explicit_ridge() {
         outer_rel_cost_tol: None,
         rho_lower_bound: -10.0,
         ridge_floor: 1.0,
-        ridge_policy: RidgePolicy::positive_part_approximate_objective(),
+        ridge_policy: RidgePolicy::exact_full_objective(),
         use_remlobjective: false,
         compute_covariance: false,
         use_outer_hessian: false,
@@ -2328,46 +2328,6 @@ pub(crate) fn active_face_logdet_indefinite_tangent_is_infeasible_not_fatal() {
 }
 
 #[test]
-pub(crate) fn indefinite_hessian_uses_smooth_regularized_logdet() {
-    // Indefinite Hessian: eigenvalues {-1, 2}.
-    //
-    // Old behaviour: silently drop the -1 direction from logdet, warn,
-    // and after enough repeats escalate to an EFS abort (first-order
-    // fallback marker).
-    //
-    // New behaviour: every eigenvalue contributes via the smooth
-    // regularizer r_ε(σ) = ½(σ + √(σ² + 4ε²)).  No direction is ignored,
-    // no escalation, and the logdet matches what the downstream
-    // `DenseSpectralOperator` gradient computes — eliminating the
-    // cost/gradient mismatch that broke BFGS line search.
-    let h = array![[-1.0, 0.0], [0.0, 2.0]];
-    let logdet = stable_logdet_with_ridge_policy(
-        &h,
-        1e-12,
-        RidgePolicy::positive_part_approximate_objective(),
-    )
-    .expect("smooth-regularized logdet must be finite for indefinite H");
-    assert!(
-        logdet.is_finite(),
-        "smooth-regularized logdet should be finite, got {logdet}"
-    );
-    // Reference value using the same formula directly on the eigenvalues
-    // of H + ridge·I (ridge = 1e-12 here).  Since ε ≫ ridge (spectral_epsilon
-    // floors at √(eps_mach) ≈ 1.5e-8 for p=2), the ridge contribution is
-    // absorbed into ε and the expected value is Σ log r_ε(σ_j).
-    let eps = spectral_epsilon(&[-1.0_f64, 2.0]).max(1e-12_f64.max(1e-14));
-    // A + ridge·I has eigenvalues shifted by 1e-12, negligible relative to ε.
-    let expected: f64 = [-1.0_f64 + 1e-12, 2.0 + 1e-12]
-        .iter()
-        .map(|&s| spectral_regularize(s, eps).ln())
-        .sum();
-    assert!(
-        (logdet - expected).abs() < 1e-10,
-        "logdet={logdet}, expected={expected}"
-    );
-}
-
-#[test]
 pub(crate) fn pseudo_laplace_exact_newton_symmetrizes_nearly_symmetrichessian() {
     let spec = ParameterBlockSpec {
         name: "nearly_symmetric".to_string(),
@@ -2432,7 +2392,7 @@ pub(crate) fn block_solve_sparse_matches_dense() {
         &w,
         &s_lambda,
         1e-12,
-        RidgePolicy::positive_part_approximate_objective(),
+        RidgePolicy::exact_full_objective(),
     )
     .expect("dense solve should succeed");
 
@@ -2442,7 +2402,7 @@ pub(crate) fn block_solve_sparse_matches_dense() {
         &w,
         &s_lambda,
         1e-12,
-        RidgePolicy::positive_part_approximate_objective(),
+        RidgePolicy::exact_full_objective(),
     )
     .expect("sparse solve should succeed");
 
@@ -2484,7 +2444,7 @@ pub(crate) fn block_solve_falls_backwhen_llt_rejects_indefinite_system() {
         &w,
         &s_lambda,
         1e-12,
-        RidgePolicy::positive_part_approximate_objective(),
+        RidgePolicy::exact_full_objective(),
     )
     .expect("fallback solve should succeed");
 
@@ -5479,7 +5439,7 @@ pub(crate) fn blockwise_trust_region_uses_penalized_metric_not_raw_coefficient_s
         raw_delta,
         radius,
         0.0,
-        RidgePolicy::positive_part_approximate_objective(),
+        RidgePolicy::exact_full_objective(),
     )
     .expect("block metric truncation should succeed");
     assert!(
@@ -5533,7 +5493,7 @@ pub(crate) fn blockwise_trust_region_never_reverts_to_raw_beta_norm_on_indefinit
         raw_delta,
         radius,
         0.0,
-        RidgePolicy::positive_part_approximate_objective(),
+        RidgePolicy::exact_full_objective(),
     )
     .expect("block metric truncation should succeed");
     assert!(

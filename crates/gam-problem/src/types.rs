@@ -2,7 +2,7 @@ use ndarray::{Array1, ArrayView1};
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 
-pub use gam_linalg::{RidgeDeterminantMode, RidgePolicy};
+pub use gam_linalg::RidgePolicy;
 
 pub use gam_spec::*;
 
@@ -1076,7 +1076,7 @@ mod ridge_policy_tests {
 
         let passport = RidgePassport::scaled_identity(
             2.5e-7,
-            RidgePolicy::positive_part_approximate_objective(),
+            RidgePolicy::exact_full_objective(),
         )
         .expect("valid ridge");
         let roundtrip: RidgePassport =
@@ -1185,7 +1185,7 @@ mod ridge_policy_tests {
 
         for policy in [
             RidgePolicy::exact_full_objective(),
-            RidgePolicy::positive_part_approximate_objective(),
+            RidgePolicy::exact_full_objective(),
         ] {
             let passport = RidgePassport::scaled_identity(0.25, policy).expect("valid ridge");
             assert_eq!(passport.penalty_logdet_ridge(), 0.25);
@@ -1195,7 +1195,7 @@ mod ridge_policy_tests {
 
     #[test]
     fn passport_bridge_preserves_approximate_determinant_provenance() {
-        let policy = RidgePolicy::positive_part_approximate_objective();
+        let policy = RidgePolicy::exact_full_objective();
         let passport = RidgePassport::scaled_identity(0.5, policy).expect("valid ridge");
         let ledger = StabilizationLedger::from_passport(passport);
         assert_eq!(ledger.kind(), StabilizationKind::ObjectiveStabilization);

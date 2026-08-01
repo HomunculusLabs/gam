@@ -45,7 +45,7 @@ pub mod types;
 pub mod utils;
 
 pub use error::LinalgError;
-pub use types::{RidgeDeterminantMode, RidgePolicy};
+pub use types::RidgePolicy;
 
 /// Assert that a central difference of an array-producing function matches the
 /// analytical derivative.
