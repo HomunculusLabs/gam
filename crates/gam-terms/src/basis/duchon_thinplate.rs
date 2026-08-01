@@ -2197,9 +2197,36 @@ fn select_thin_plate_knot_rows(
         });
     }
 
-    if selected.len() < num_knots {
+    // A request for more knots than the data has geometrically distinct points
+    // is not a malformed request — it is arithmetically unsatisfiable, and the
+    // largest satisfiable answer is every distinct point there is. Refusing here
+    // made a duplicate-heavy covariate a hard failure at BASIS CONSTRUCTION,
+    // before the rank-reduction machinery that exists precisely to handle it
+    // could see the design: `binary_outcome_shape_bms_matern_centers60_are_rank_reduced`
+    // asks for 60 centers from a fixture whose PC cloud is 4 points cycled over
+    // 160 rows, and its contract is that redundant centers are "rank-reduced
+    // before the joint audit" — its error arm explicitly excludes the joint
+    // audit's own `joint rank` / `dropped column` text.
+    //
+    // Clamping is what the surrounding code already assumes: `select_thin_plate_knots`
+    // sizes its returned matrix by `selected.len()`, never by `num_knots`. It is
+    // also the established convention for this family of libraries — mgcv reduces
+    // `k` to the number of unique covariate values and warns rather than erroring.
+    //
+    // The diagnostic is kept, as a warning: silently handing back a smaller basis
+    // than asked for would hide a genuine `centers=` typo, which is the one thing
+    // the old refusal was good at.
+    if selected.is_empty() {
         crate::bail_invalid_basis!(
-            "requested {num_knots} distinct thin-plate knots but the data contain only {} geometrically distinct selectable points",
+            "thin-plate knot selection found no geometrically distinct selectable points in {} rows",
+            data.nrows()
+        );
+    }
+    if selected.len() < num_knots {
+        log::warn!(
+            "[thin-plate] requested {num_knots} distinct knots but the data contain only {} \
+             geometrically distinct selectable points; reducing the basis to {} knots",
+            selected.len(),
             selected.len()
         );
     }
