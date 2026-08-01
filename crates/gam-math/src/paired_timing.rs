@@ -49,6 +49,42 @@
 //!   across iterations; `black_box` alone permits both, and one of the replaced
 //!   harnesses relied on `black_box` with no data dependence.
 //!
+//! # The arm must be large relative to one closure call
+//!
+//! This harness costs a closure call plus a `black_box` per iteration, and it
+//! calls the arm through a `&mut F`. That cost lands in **both** arms, so it
+//! cannot manufacture a winner on its own — with an equal per-call overhead
+//! `c`, a true ratio `b / a` is measured as `(b + c) / (a + c)`, which is
+//! monotone toward 1 and **never crosses it**.
+//!
+//! What it can do is let a *difference* in that overhead decide a small margin.
+//! The two arms are distinct closures wrapping distinct callees, so they need
+//! not inline identically, and the residual asymmetry is a fixed number of
+//! nanoseconds rather than a fraction of the arm.
+//!
+//! Measured: an SLS value/gradient/Hessian gate whose arm was **one row**
+//! (~43 ns) read `42.77 / 44.17 ns` under the old min-of-N harness and
+//! `90.25 / 87.50 ns` here — both arms roughly doubled, and the verdict changed
+//! sign. Solving `(44.17 + c) / (42.77 + c) = 0.9668` needs `c = -85 ns`, so a
+//! symmetric overhead cannot explain it; a ~4 ns asymmetry between the two
+//! closures can, because the quantity under test was only 1.4 ns.
+//!
+//! Batching that same gate to 64 rows per call (arm ~2685 ns, overhead under
+//! 2%) settles it in the opposite direction and unanimously:
+//! `median_ratio = 1.045250, wins = 1.00, resolution = 0.0092` — generated is
+//! 4.5% faster, a margin 4.9x its own resolution. The one-row reading was
+//! measuring the harness.
+//!
+//! **So make one arm call do a batch.** Every other gate migrated to this
+//! harness already did without anyone choosing it — a 512-row pass, a full
+//! Fisher sweep, a bundle — which is why they were unaffected. A single-row
+//! arm is the case that needs an explicit inner loop, sized so the per-call
+//! cost is under ~1% of the arm.
+//!
+//! [`PairedTiming::summary`] prints the per-arm `ns/iter` precisely so this is
+//! checkable: if those numbers are of the same order as a function call, the
+//! ratio is not measuring what it claims to.
+//!
 //! # Why not measure the arms separately and normalise afterwards
 //!
 //! Because it does not work, and it fails in **both** directions. `iperf2`

@@ -1,7 +1,19 @@
+use gam_math::paired_timing::paired_interleaved;
 use gam_row_macros::row_program;
-use std::time::Instant;
 
 const K: usize = 9;
+
+/// Rows evaluated inside ONE timed arm call.
+///
+/// `paired_interleaved` costs a closure call and a `black_box` per iteration.
+/// A single SLS row is ~43 ns, so timing one row per call puts a fixed
+/// overhead of the same order as the quantity being compared into BOTH arms.
+/// Equal overhead can only compress a ratio toward 1, never flip it -- but it
+/// also lets a small difference in how the two arms inline into the closure
+/// dominate a few-percent codegen margin. Batching amortises the per-call cost
+/// to under 1% of the arm, which is the regime the 512-row cause-specific
+/// gate already measures in.
+const ROWS_PER_ARM: usize = 64;
 
 #[derive(Clone, Copy)]
 struct Kernel {
@@ -896,45 +908,45 @@ fn assert_matrix_close(got: [[f64; K]; K], want: [[f64; K]; K]) {
     }
 }
 
-fn best_ns(evaluate: impl Fn(&[f64; K], &Kernel) -> Channels) -> f64 {
-    let (p, kernel) = fixture();
-    let iterations = 2_000_000;
-    let mut best = f64::INFINITY;
-    for _ in 0..5 {
-        let mut checksum = 0.0;
-        let started = Instant::now();
-        for _ in 0..iterations {
-            let mut perturbed = p;
-            perturbed[7] += checksum * 1e-18;
-            let (value, gradient, hessian) = std::hint::black_box(evaluate(&perturbed, &kernel));
-            checksum += value + gradient[4] + hessian[4][4] + hessian[4][7];
-        }
-        assert!(checksum.is_finite());
-        best = best.min(started.elapsed().as_secs_f64());
-    }
-    best * 1e9 / iterations as f64
-}
-
-fn matrix_sample_ns(
-    iterations: usize,
+/// Times `ROWS_PER_ARM` value/gradient/Hessian rows per call, feeding the
+/// running checksum back into the input so the batch cannot be hoisted.
+fn channels_batch(
     p: &[f64; K],
     kernel: &Kernel,
-    mut evaluate: impl FnMut(&[f64; K], &Kernel) -> [[f64; K]; K],
+    nudge: f64,
+    evaluate: impl Fn(&[f64; K], &Kernel) -> Channels,
 ) -> f64 {
-    let mut checksum = 0.0;
-    let started = Instant::now();
-    for _ in 0..iterations {
-        let mut perturbed = *p;
-        perturbed[7] += checksum * 1e-20;
-        let matrix = std::hint::black_box(evaluate(&perturbed, kernel));
-        checksum += matrix
-            .iter()
-            .flat_map(|row| row.iter())
-            .copied()
-            .sum::<f64>();
+    let mut accumulated = 0.0;
+    let mut perturbed = *p;
+    perturbed[7] += nudge;
+    for _ in 0..ROWS_PER_ARM {
+        perturbed[3] += accumulated * 1e-18;
+        let (value, gradient, hessian) = std::hint::black_box(evaluate(&perturbed, kernel));
+        accumulated += value + gradient[4] + hessian[4][4] + hessian[4][7];
     }
-    assert!(checksum.is_finite());
-    started.elapsed().as_secs_f64() * 1e9 / iterations as f64
+    accumulated
+}
+
+/// Adapts one matrix-valued row evaluation into the `FnMut(f64) -> f64` arm the
+/// paired harness times: the nudge keeps consecutive iterations from being
+/// folded into one another, and the returned checksum is what the harness
+/// accumulates and asserts finite.
+fn matrix_arm<'a>(
+    p: &'a [f64; K],
+    kernel: &'a Kernel,
+    mut evaluate: impl FnMut(&[f64; K], &Kernel) -> [[f64; K]; K] + 'a,
+) -> impl FnMut(f64) -> f64 + 'a {
+    move |nudge| {
+        let mut accumulated = 0.0;
+        let mut perturbed = *p;
+        perturbed[7] += nudge;
+        for _ in 0..ROWS_PER_ARM {
+            perturbed[3] += accumulated * 1e-20;
+            let matrix = std::hint::black_box(evaluate(&perturbed, kernel));
+            accumulated += matrix.iter().flat_map(|row| row.iter()).copied().sum::<f64>();
+        }
+        accumulated
+    }
 }
 
 #[test]
@@ -960,16 +972,27 @@ fn generated_sls_vgh_matches_and_beats_inlined_strongest_hand_932() {
         hand(&nonfinite, &inactive),
     );
 
-    let generated_ns = best_ns(generated);
-    let hand_ns = best_ns(hand);
+    // #932: the arms are timed adjacent in time with a randomised order per
+    // repetition, so drift slower than one repetition divides out of the ratio
+    // instead of landing in it. `median_ratio` is hand / generated, so above 1
+    // means generated is the faster arm; `wins_fraction` is the share of
+    // repetitions in which it won, which settles the verdict without depending
+    // on the resolution estimate at all.
+    let timing = paired_interleaved(
+        15,
+        5_000,
+        0x5153_9320_5647,
+        |nudge| channels_batch(&p, &kernel, nudge, generated),
+        |nudge| channels_batch(&p, &kernel, nudge, hand),
+    );
     eprintln!(
-        "SLS-MACRO-CODEGEN-932 generated={generated_ns:.2} ns/row \
-         strongest_hand={hand_ns:.2} ns/row hand_over_production={:.6}",
-        hand_ns / generated_ns,
+        "SLS-MACRO-CODEGEN-932 {}",
+        timing.summary("generated", "strongest_hand"),
     );
     assert!(
-        generated_ns < hand_ns,
-        "generated {generated_ns:.2} ns/row must beat strongest hand {hand_ns:.2} ns/row"
+        timing.median_ratio() > 1.0 && timing.wins_fraction() >= 0.75,
+        "generated must beat strongest hand: {}",
+        timing.summary("generated", "strongest_hand"),
     );
 }
 
@@ -1003,92 +1026,88 @@ fn release_measure_generated_sls_contractions_vs_strongest_hand_932() {
     let (p, kernel) = fixture();
     let direction_u = [0.7, -1.3, 0.4, 0.6, -0.5, 0.9, -0.2, 0.3, -0.8];
     let direction_v = [-0.4, 0.6, 1.1, -0.2, 0.8, -0.7, 0.5, -0.9, 0.1];
-    let iterations = 100_000;
-    let mut third_generated_ns = f64::INFINITY;
-    let mut third_hand_ns = f64::INFINITY;
-    let mut fourth_generated_ns = f64::INFINITY;
-    let mut fourth_hand_ns = f64::INFINITY;
-
-    for round in 0..7 {
-        if round % 2 == 0 {
-            third_generated_ns =
-                third_generated_ns.min(matrix_sample_ns(iterations, &p, &kernel, |values, row| {
+    // #932: the previous form compared a min-of-7 `generated` against
+    // `min(hand_analytic, specialized_jet)` -- a minimum taken over TWO
+    // independently minimised opponents. A minimum biases every arm downward,
+    // but the opponent side took that minimum twice, so the bar was biased
+    // against `generated` by construction and the size of the bias depended on
+    // how dispersed the two opponents happened to be. Contesting each opponent
+    // separately removes the second minimum, and each pairing reports its own
+    // `wins_fraction` and `ratio_resolution` rather than collapsing into one
+    // aggregate that cannot say whether it resolved anything.
+    let mut losses: Vec<String> = Vec::new();
+    for (label, timing) in [
+        (
+            "order=3 opponent=hand_analytic",
+            paired_interleaved(
+                15,
+                700,
+                0x5153_9320_0003,
+                matrix_arm(&p, &kernel, |values, row| {
                     generated_third(values, row, &direction_u)
-                }));
-            third_hand_ns =
-                third_hand_ns.min(matrix_sample_ns(iterations, &p, &kernel, |values, row| {
+                }),
+                matrix_arm(&p, &kernel, |values, row| {
                     hand_analytic_contracted::<3>(values, row, &direction_u, &direction_v)
-                }));
-            fourth_generated_ns = fourth_generated_ns.min(matrix_sample_ns(
-                iterations,
-                &p,
-                &kernel,
-                |values, row| generated_fourth(values, row, &direction_u, &direction_v),
-            ));
-            fourth_hand_ns =
-                fourth_hand_ns.min(matrix_sample_ns(iterations, &p, &kernel, |values, row| {
-                    hand_analytic_contracted::<4>(values, row, &direction_u, &direction_v)
-                }));
-        } else {
-            fourth_hand_ns =
-                fourth_hand_ns.min(matrix_sample_ns(iterations, &p, &kernel, |values, row| {
-                    hand_analytic_contracted::<4>(values, row, &direction_u, &direction_v)
-                }));
-            fourth_generated_ns = fourth_generated_ns.min(matrix_sample_ns(
-                iterations,
-                &p,
-                &kernel,
-                |values, row| generated_fourth(values, row, &direction_u, &direction_v),
-            ));
-            third_hand_ns =
-                third_hand_ns.min(matrix_sample_ns(iterations, &p, &kernel, |values, row| {
-                    hand_analytic_contracted::<3>(values, row, &direction_u, &direction_v)
-                }));
-            third_generated_ns =
-                third_generated_ns.min(matrix_sample_ns(iterations, &p, &kernel, |values, row| {
+                }),
+            ),
+        ),
+        (
+            "order=3 opponent=specialized_jet",
+            paired_interleaved(
+                15,
+                700,
+                0x5153_9320_0013,
+                matrix_arm(&p, &kernel, |values, row| {
                     generated_third(values, row, &direction_u)
-                }));
+                }),
+                matrix_arm(&p, &kernel, |values, row| {
+                    jet_third(values, row, &direction_u)
+                }),
+            ),
+        ),
+        (
+            "order=4 opponent=hand_analytic",
+            paired_interleaved(
+                15,
+                700,
+                0x5153_9320_0004,
+                matrix_arm(&p, &kernel, |values, row| {
+                    generated_fourth(values, row, &direction_u, &direction_v)
+                }),
+                matrix_arm(&p, &kernel, |values, row| {
+                    hand_analytic_contracted::<4>(values, row, &direction_u, &direction_v)
+                }),
+            ),
+        ),
+        (
+            "order=4 opponent=specialized_jet",
+            paired_interleaved(
+                15,
+                700,
+                0x5153_9320_0014,
+                matrix_arm(&p, &kernel, |values, row| {
+                    generated_fourth(values, row, &direction_u, &direction_v)
+                }),
+                matrix_arm(&p, &kernel, |values, row| {
+                    jet_fourth(values, row, &direction_u, &direction_v)
+                }),
+            ),
+        ),
+    ] {
+        eprintln!(
+            "SLS-CONTRACTED-HAND-932 {label} {}",
+            timing.summary("generated", "opponent"),
+        );
+        if !(timing.median_ratio() > 1.0 && timing.wins_fraction() >= 0.75) {
+            losses.push(format!(
+                "{label}: {}",
+                timing.summary("generated", "opponent")
+            ));
         }
     }
-
-    let mut third_specialized_jet_ns = f64::INFINITY;
-    let mut fourth_specialized_jet_ns = f64::INFINITY;
-    for _ in 0..5 {
-        third_specialized_jet_ns = third_specialized_jet_ns.min(matrix_sample_ns(
-            iterations,
-            &p,
-            &kernel,
-            |values, row| jet_third(values, row, &direction_u),
-        ));
-        fourth_specialized_jet_ns = fourth_specialized_jet_ns.min(matrix_sample_ns(
-            iterations,
-            &p,
-            &kernel,
-            |values, row| jet_fourth(values, row, &direction_u, &direction_v),
-        ));
-    }
-    let third_strongest_ns = third_hand_ns.min(third_specialized_jet_ns);
-    let fourth_strongest_ns = fourth_hand_ns.min(fourth_specialized_jet_ns);
-    eprintln!(
-        "SLS-CONTRACTED-HAND-932 order=3 generated={third_generated_ns:.2} ns/row \
-         hand_analytic={third_hand_ns:.2} ns/row specialized_jet={third_specialized_jet_ns:.2} ns/row \
-         strongest_opponent={third_strongest_ns:.2} ns/row opponent_over_generated={:.6}",
-        third_strongest_ns / third_generated_ns,
-    );
-    eprintln!(
-        "SLS-CONTRACTED-HAND-932 order=4 generated={fourth_generated_ns:.2} ns/row \
-         hand_analytic={fourth_hand_ns:.2} ns/row specialized_jet={fourth_specialized_jet_ns:.2} ns/row \
-         strongest_opponent={fourth_strongest_ns:.2} ns/row opponent_over_generated={:.6}",
-        fourth_strongest_ns / fourth_generated_ns,
-    );
     assert!(
-        third_generated_ns < third_strongest_ns,
-        "generated third {third_generated_ns:.2} ns/row must beat strongest hand \
-         {third_strongest_ns:.2} ns/row",
-    );
-    assert!(
-        fourth_generated_ns < fourth_strongest_ns,
-        "generated fourth {fourth_generated_ns:.2} ns/row must beat strongest hand \
-         {fourth_strongest_ns:.2} ns/row",
+        losses.is_empty(),
+        "generated contraction must beat every opponent it is measured against:\n{}",
+        losses.join("\n"),
     );
 }
