@@ -1,5 +1,5 @@
 use gam_row_macros::row_atom;
-use std::time::Instant;
+use gam_math::paired_timing::paired_interleaved;
 
 row_atom! {
     fn generated_cause_specific [order2, third, fourth](
@@ -193,38 +193,39 @@ fn assert_matrix(got: [[f64; 3]; 3], want: [[f64; 3]; 3]) {
     }
 }
 
-fn sample_channels(rows: &[Row], evaluate: impl Fn(Row) -> Channels) -> f64 {
-    let started = Instant::now();
-    let mut checksum = 0.0;
-    for iteration in 0..4096 {
-        for row in rows {
-            let mut perturbed = *row;
-            perturbed.eta_exit += checksum * 1e-24;
-            let channels = std::hint::black_box(evaluate(perturbed));
-            checksum += channels.0
-                + channels.1.iter().sum::<f64>()
-                + channels.2.iter().flat_map(|line| line.iter()).sum::<f64>();
-        }
-        checksum *= 1e-3 + iteration as f64 * 1e-12;
+/// One pass over every row, folded to a scalar the paired harness can chain.
+///
+/// The old `sample_channels`/`sample_matrix` pair timed a whole 4096-iteration
+/// block per arm and the caller kept a running MINIMUM per arm across seven
+/// rounds. Alternating the order between rounds -- which this test did, and did
+/// correctly -- creates a pairing that taking two independent minima then throws
+/// away. A minimum is the most favourable draw for each arm SEPARATELY, so the
+/// arm whose timing is more dispersed is flattered, and the alternation cannot
+/// undo that because it never reaches the statistic (#932).
+fn channels_pass(rows: &[Row], nudge: f64, evaluate: impl Fn(Row) -> Channels) -> f64 {
+    let mut fold = 0.0;
+    for row in rows {
+        let mut perturbed = *row;
+        perturbed.eta_exit += nudge;
+        let channels = evaluate(perturbed);
+        fold += channels.0
+            + channels.1.iter().sum::<f64>()
+            + channels.2.iter().flat_map(|line| line.iter()).sum::<f64>();
     }
-    assert!(checksum.is_finite());
-    started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
+    fold
 }
 
-fn sample_matrix(rows: &[Row], evaluate: impl Fn(Row) -> [[f64; 3]; 3]) -> f64 {
-    let started = Instant::now();
-    let mut checksum = 0.0;
-    for iteration in 0..4096 {
-        for row in rows {
-            let mut perturbed = *row;
-            perturbed.eta_exit += checksum * 1e-24;
-            let matrix = std::hint::black_box(evaluate(perturbed));
-            checksum += matrix.iter().flat_map(|line| line.iter()).sum::<f64>();
-        }
-        checksum *= 1e-3 + iteration as f64 * 1e-12;
+fn matrix_pass(rows: &[Row], nudge: f64, evaluate: impl Fn(Row) -> [[f64; 3]; 3]) -> f64 {
+    let mut fold = 0.0;
+    for row in rows {
+        let mut perturbed = *row;
+        perturbed.eta_exit += nudge;
+        fold += evaluate(perturbed)
+            .iter()
+            .flat_map(|line| line.iter())
+            .sum::<f64>();
     }
-    assert!(checksum.is_finite());
-    started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
+    fold
 }
 
 #[test]
@@ -236,44 +237,78 @@ fn generated_cause_specific_matches_strongest_hand_932() {
         assert_matrix(generated_fourth(*row), hand_fourth(*row));
     }
 
-    let mut generated_order2_ns = f64::INFINITY;
-    let mut hand_order2_ns = f64::INFINITY;
-    let mut generated_third_ns = f64::INFINITY;
-    let mut hand_third_ns = f64::INFINITY;
-    let mut generated_fourth_ns = f64::INFINITY;
-    let mut hand_fourth_ns = f64::INFINITY;
-    for round in 0..7 {
-        if round % 2 == 0 {
-            generated_order2_ns = generated_order2_ns.min(sample_channels(&rows, generated_order2));
-            hand_order2_ns = hand_order2_ns.min(sample_channels(&rows, hand_order2));
-            generated_third_ns = generated_third_ns.min(sample_matrix(&rows, generated_third));
-            hand_third_ns = hand_third_ns.min(sample_matrix(&rows, hand_third));
-            generated_fourth_ns = generated_fourth_ns.min(sample_matrix(&rows, generated_fourth));
-            hand_fourth_ns = hand_fourth_ns.min(sample_matrix(&rows, hand_fourth));
-        } else {
-            hand_order2_ns = hand_order2_ns.min(sample_channels(&rows, hand_order2));
-            generated_order2_ns = generated_order2_ns.min(sample_channels(&rows, generated_order2));
-            hand_third_ns = hand_third_ns.min(sample_matrix(&rows, hand_third));
-            generated_third_ns = generated_third_ns.min(sample_matrix(&rows, generated_third));
-            hand_fourth_ns = hand_fourth_ns.min(sample_matrix(&rows, hand_fourth));
-            generated_fourth_ns = generated_fourth_ns.min(sample_matrix(&rows, generated_fourth));
+    // One paired, interleaved, order-RANDOMISED measurement per channel. The
+    // arms are timed adjacent within each repetition and the per-repetition
+    // ratios are kept, so the pairing the old alternation created survives all
+    // the way to the statistic.
+    let reps = 15usize;
+    let passes = 256usize;
+    let mut losses: Vec<String> = Vec::new();
+    for (channel, timing) in [
+        (
+            "order2",
+            paired_interleaved(
+                reps,
+                passes,
+                0x932_0_C502,
+                |nudge| channels_pass(&rows, nudge, generated_order2),
+                |nudge| channels_pass(&rows, nudge, hand_order2),
+            ),
+        ),
+        (
+            "third",
+            paired_interleaved(
+                reps,
+                passes,
+                0x932_0_C503,
+                |nudge| matrix_pass(&rows, nudge, generated_third),
+                |nudge| matrix_pass(&rows, nudge, hand_third),
+            ),
+        ),
+        (
+            "fourth",
+            paired_interleaved(
+                reps,
+                passes,
+                0x932_0_C504,
+                |nudge| matrix_pass(&rows, nudge, generated_fourth),
+                |nudge| matrix_pass(&rows, nudge, hand_fourth),
+            ),
+        ),
+    ] {
+        // `ns/iter` here is nanoseconds per PASS over `rows.len()` rows, not the
+        // historical `ns/row`; the ratio the verdict rests on is unit-free
+        // either way. `median_ratio` is hand / generated, so above 1 means the
+        // generated kernel is faster -- the same orientation as the
+        // `hand_over_generated` token this test has always printed.
+        eprintln!(
+            "CAUSE-SPECIFIC-HAND-932 channel={channel} rows={} {}",
+            rows.len(),
+            timing.summary("generated", "strongest_hand"),
+        );
+        // CONTRACT UNCHANGED: still a bare "generated must be faster", with no
+        // margin. That bar is the open question on this test -- two semantically
+        // identical kernels compared by `<` decide a coin flip when the true
+        // difference is near zero -- and `ratio_resolution` in the line above is
+        // the quantity a margin would have to be derived from. Deriving it in
+        // the same commit that first measures it would fit the tolerance to the
+        // numbers meant to validate it, so that is a separate change (#2469).
+        if timing.median_ratio() <= 1.0 {
+            losses.push(format!(
+                "{channel}: {}",
+                timing.summary("generated", "strongest_hand")
+            ));
         }
     }
 
-    for (channel, generated_ns, hand_ns) in [
-        ("order2", generated_order2_ns, hand_order2_ns),
-        ("third", generated_third_ns, hand_third_ns),
-        ("fourth", generated_fourth_ns, hand_fourth_ns),
-    ] {
-        eprintln!(
-            "CAUSE-SPECIFIC-HAND-932 channel={channel} generated={generated_ns:.3} ns/row \
-             strongest_hand={hand_ns:.3} ns/row hand_over_generated={:.6}",
-            hand_ns / generated_ns,
-        );
-        assert!(
-            generated_ns < hand_ns,
-            "generated {channel} must beat the strongest semantically identical hand kernel: \
-             generated={generated_ns:.3} ns/row hand={hand_ns:.3} ns/row",
-        );
-    }
+    // Collect every channel, THEN assert. Asserting inside the loop meant the
+    // first failing channel aborted the test and the remaining two were never
+    // measured -- so a report of "order2 is slower" could not say whether third
+    // and fourth were fine, and a fix for one channel would surface the next as
+    // a fresh surprise. A gate should say everything it objected to in one run.
+    assert!(
+        losses.is_empty(),
+        "generated kernels must beat the strongest semantically identical hand kernel:\n{}",
+        losses.join("\n"),
+    );
 }
