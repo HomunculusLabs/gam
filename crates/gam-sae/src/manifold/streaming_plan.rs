@@ -102,12 +102,21 @@ pub(crate) const fn sae_exact_stationarity_block_bytes(dim: usize) -> usize {
 ///   7. `eigh`'s own eigenvector output / LAPACK working copy of the operator
 ///   8. `priced_coordinate_inverse` (dim × dim), plus its `_small` source
 ///
-/// The gauge-reduced branch of `exact_hessian_spectral_block` holds a comparable
-/// count (`complement`, `reduced_operator`, `e_times_complement`, `reduced_e`,
-/// `reduced_eigenvectors`, `complement.dot(&reduced_eigenvectors)` alongside
-/// `operator`), so 8 bounds neither branch loosely nor either one falsely: it is
-/// still a LOWER bound on LAPACK's internal workspace, which `dsyevd` sizes at
-/// its own discretion.
+/// There is no longer a second branch to compare against. `a386c1e8b` (#2674)
+/// deleted the gauge-reduced path of `exact_hessian_spectral_block` entirely --
+/// it had been diagonalising `ZᵀAZ` on the complement of a declared chart-gauge
+/// orbit that the penalized objective is *not* flat along, so the deletion was
+/// the fix, not a refactor. The locals this comment used to cite as the
+/// comparable count (`reduced_operator`, `e_times_complement`, `reduced_e`,
+/// `reduced_eigenvectors`) no longer exist anywhere in that file.
+///
+/// The enumeration above is therefore the whole population, and 8 stands on it
+/// alone: it is still a LOWER bound on LAPACK's internal workspace, which
+/// `dsyevd` sizes at its own discretion.
+///
+/// Kept as an enumeration rather than a measured peak deliberately (#2724): the
+/// count is auditable against the code, where a measured number would drift
+/// silently the next time an allocation is added.
 pub(crate) const SAE_EXACT_STATIONARITY_LIVE_DIM_BLOCKS: usize = 8;
 
 /// Resident bytes of the exact stationarity route at its peak.
