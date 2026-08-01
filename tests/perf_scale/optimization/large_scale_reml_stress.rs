@@ -82,6 +82,54 @@ const MAIN_MAX_ITER: usize = 40;
 const COVERAGE_MAX_ITER: usize = 30;
 const NORMAL_95_TWO_SIDED_Z: f64 = 1.959_963_984_540_054;
 
+/// Held-out reconstruction bar, and gam#2735 — WHERE THIS NUMBER COMES FROM.
+///
+/// The value is unchanged at `0.10`. What it lacked was provenance: it entered
+/// in `6a4b4728c`, the commit that created the test, and per #2709 the fixture
+/// could not build until `da1228e1c`, so it had never once been evaluated. This
+/// comment is the missing derivation, so it cannot be re-litigated from scratch
+/// or "relaxed to wherever the code landed".
+///
+/// `relative_l2` normalises by the truth's SD, so this is `sqrt(1 - R²)`
+/// against the NOISELESS truth; `0.10` is `R² > 0.99`. Measured references on
+/// THIS design (n = `N_TRAIN`, `K_CENTERS` centres, `PC_DIM` dims,
+/// `NOISE_SD` noise), 3–8 replicates each, hyper-parameters tuned on a
+/// held-out split and verified to select an INTERIOR optimum:
+///
+/// | reference                                            | held-out `rel_l2` |
+/// |------------------------------------------------------|-------------------|
+/// | oracle OLS on the exact generating features           | 0.0043 ± 0.0007   |
+/// | 500-centre kernel ridge, ANISOTROPIC per-axis scales  | **0.0616 ± 0.0007** |
+/// | floor for any purely ADDITIVE smoother (closed form)  | 0.0821            |
+/// | 500-centre kernel ridge, ISOTROPIC                    | 0.2290 ± 0.0014   |
+/// | least-squares linear-only (this fixture's reference)  | 0.3521 ± 0.0042   |
+///
+/// The decisive row is the second: a 500-centre radial smoother with **learned
+/// per-axis scales** — exactly what `aniso_log_scales` configures — reaches
+/// `0.0616` on this data. So `0.10` is achievable by this fixture's own model
+/// class with ~1.6x headroom, and it is NOT a bar that needs relaxing.
+///
+/// The isotropic row is why the diagnostic reports the fitted scales: an
+/// isotropic 500-centre smoother in six dimensions can only reach `0.2290`, and
+/// no bar near `0.10` is reachable from there. A fit landing near or above that
+/// value has not earned its `K_CENTERS` basis functions — it has lost its
+/// anisotropy.
+///
+/// The additive row is a floor, not an attainment: `truth()` contains
+/// `exp(-|x-m|²/1.28) = Π_j exp(-(x_j-m_j)²/1.28)`, a product and therefore not
+/// additive. With independent coordinates the additive projection is
+/// `Σ_j E[f|x_j] - (d-1)E[f]`; the residual variance is `5.043e-3` against
+/// `Var(truth) = 0.7477`, i.e. `rel_l2 ≥ 0.0821` for ANY additive smoother.
+/// The Duchon smooth here is a full `PC_DIM`-dimensional smooth, so it is not
+/// bound by that floor — it is quoted to show `0.10` is not below one.
+const RECONSTRUCTION_REL_L2_MAX: f64 = 0.10;
+
+/// The best measured held-out `rel_l2` from a smoother matched to this
+/// fixture's OWN budget — 500 centres, learned per-axis scales — quoted in the
+/// failure message so the reader sees the achievable number next to the miss
+/// rather than having to trust the bar. See [`RECONSTRUCTION_REL_L2_MAX`].
+const ANISO_REFERENCE_REL_L2: f64 = 0.0616;
+
 fn gaussian_identity_likelihood() -> LikelihoodSpec {
     LikelihoodSpec::new(
         ResponseFamily::Gaussian,
@@ -455,6 +503,27 @@ fn large_scale_reml_stress_main() {
     // number is re-derived from the data on every run and cannot drift or age.
     let linear_only_rel_l2 = linear_only_reference(x_holdout.view(), &y_true_holdout);
 
+    // gam#2735 — THE FITTED ANISOTROPIC LOG-SCALES, read off the TRAINED spec.
+    //
+    // The spec seeds `aniso_log_scales: Some(vec![0.0; PC_DIM])` — isotropic —
+    // and the fit is supposed to learn per-axis scales from there. Whether it
+    // does is the single discriminator between the two explanations of a missed
+    // reconstruction bar on this design, because the achievable error differs by
+    // ~3.7x between them (see `RECONSTRUCTION_REL_L2_MAX`). `frozenspec` is the
+    // trained spec — the same object the CLI's anisotropic report reads — so
+    // this costs nothing and needs no new plumbing.
+    //
+    // All-zero means the scales never moved off their seed and the smooth is
+    // still isotropic in six dimensions whatever the spec asked for.
+    let aniso_report = match gam::smooth::get_spatial_aniso_log_scales(&frozenspec, 0) {
+        Some(eta) if !eta.is_empty() => {
+            let moved = eta.iter().any(|v| v.abs() > 1e-8);
+            let parts: Vec<String> = eta.iter().map(|v| format!("{v:+.4}")).collect();
+            format!("aniso_log_scales=[{}] moved_off_seed={moved}", parts.join(","))
+        }
+        _ => "aniso_log_scales=<absent>".to_string(),
+    };
+
     // Emitted BEFORE any quality assertion, and this ordering is the point.
     // The convergence check and the summary line used to sit *after* the bar,
     // so a fit that missed the bar aborted before reporting whether it had
@@ -465,8 +534,9 @@ fn large_scale_reml_stress_main() {
     eprintln!(
         "[large_scale_reml_stress_main] n={N_TRAIN}, K={K_CENTERS}, pc_dim={PC_DIM} \
          | wall_clock={:.2}s, outer_iter={} (cap {MAIN_MAX_ITER}), \
-         rel_l2_holdout={rel_l2:.4}, linear_only_rel_l2={linear_only_rel_l2:.4}, \
-         nonlinear_variance_captured={:.1}%",
+         rel_l2_holdout={rel_l2:.4} (bar {RECONSTRUCTION_REL_L2_MAX:.2}), \
+         linear_only_rel_l2={linear_only_rel_l2:.4}, \
+         nonlinear_variance_captured={:.1}%, {aniso_report}",
         elapsed.as_secs_f64(),
         fitted.fit.outer_iterations,
         // What fraction of the structure a straight line CANNOT express did
@@ -479,11 +549,15 @@ fn large_scale_reml_stress_main() {
     );
 
     assert!(
-        rel_l2 < 0.10,
-        "held-out relative L2 reconstruction error too high: {rel_l2:.4} (>= 0.10). \
-         Linear-only reference on the same rows: {linear_only_rel_l2:.4} — see the \
-         diagnostic line above for the share of non-linear structure recovered, which \
-         is the bar-free reading of this failure.",
+        rel_l2 < RECONSTRUCTION_REL_L2_MAX,
+        "held-out relative L2 reconstruction error too high: {rel_l2:.4} \
+         (>= {RECONSTRUCTION_REL_L2_MAX:.2}). Linear-only reference on the same rows: \
+         {linear_only_rel_l2:.4}. The bar is NOT the suspect here — see \
+         `RECONSTRUCTION_REL_L2_MAX` for the measured references that establish \
+         {ANISO_REFERENCE_REL_L2:.4} as achievable on this exact design, and see the \
+         `aniso_log_scales=` field of the diagnostic line above: if those are all zero \
+         the smooth never left its isotropic seed, which is the only configuration in \
+         which this bar is out of reach.",
     );
 
     // (3) Bias-corrected predictions: FitInference must carry a finite
