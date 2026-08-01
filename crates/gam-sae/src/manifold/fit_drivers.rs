@@ -394,11 +394,29 @@ impl SaeManifoldTerm {
         // that span captures `reach = ||Q^T T_c||_F^2 / ss_tot`. A dictionary
         // whose atoms have piled into `R_dec < K` directions no more informative
         // than a random output subspace of that rank is structurally collapsed.
+        //
+        // #2756 — `R_dec` is a rank in the OUTPUT space, so its ceiling is
+        // `min(K, p)`, not `K`. When `p < K` a healthy dictionary saturates at
+        // `R_dec = p` and can never reach `K`, so the `R_dec >= K` exemption
+        // never fires; and at `R_dec == p` the rank-matched random-subspace null
+        // is `R_dec/p = 1`, which `reach = ||QᵀT_c||_F²/ss_tot ≤ 1` meets
+        // IDENTICALLY — `Q` spans the whole output space, so there is no subspace
+        // for the dictionary to be worse than. The comparison has zero
+        // discriminating power there and fires on every state, which is how the
+        // #2756 witness (`p = 1`, `K = 2`, decoders spanning all of R¹) was
+        // certified "structurally collapsed" at `decoder_span_rank = 1,
+        // target_reach = 1.0000, null = 1.0000` — the MAXIMUM span its output
+        // dimension admits. Exempt the saturated case for the same reason
+        // `R_dec >= K` is exempt: the evidence is unobtainable, not absent. The
+        // discriminating regime `R_dec < min(K, p)` — where a rank-matched random
+        // subspace really does leave energy outside the span — is untouched, and
+        // `decoder_norm_guard_reseeds_all_atoms_on_total_co_collapse_k3`
+        // (`p = 3`, `K = 3`, `R_dec = 1`) still refuses.
         let frames_sc = (0..k)
             .map(|atom| crate::manifold::certificate::certificate_output_frame(self, atom))
             .collect::<Result<Vec<_>, String>>()?;
         let r_dec_sc = union_output_frame_rank(&frames_sc, p);
-        let structural_collapse = if r_dec_sc == 0 || r_dec_sc >= k || p == 0 {
+        let structural_collapse = if r_dec_sc == 0 || r_dec_sc >= k || p == 0 || r_dec_sc >= p {
             None
         } else {
             let owned_stats;
@@ -8897,7 +8915,11 @@ fn leading_direction_above_noise_floor(energies: &[f64]) -> bool {
     peak > floor
 }
 
-fn union_output_frame_rank(frames: &[Array2<f64>], p: usize) -> usize {
+/// Numerical rank of the union of the per-atom decoder output frames inside the
+/// `p`-dimensional output space. `pub(crate)` since #2756 so a witness can state
+/// the saturation `R_dec == p` that makes the structural-collapse comparison
+/// vacuous, instead of inferring it from the verdict it is testing.
+pub(crate) fn union_output_frame_rank(frames: &[Array2<f64>], p: usize) -> usize {
     let total_cols: usize = frames.iter().map(|q| q.ncols()).sum();
     if p == 0 || total_cols == 0 {
         return 0;

@@ -2532,3 +2532,89 @@ pub(crate) fn same_state_gated_signal_separates_live_and_vanished_decoders_2253(
         .unwrap();
     assert!(signal_boundary.is_finite() && signal_boundary >= 0.0);
 }
+
+/// #2756 — the structural co-collapse arm must not fire on a dictionary that has
+/// SATURATED its output space.
+///
+/// `R_dec` (the union decoder output-span rank) is a rank in the `p`-dimensional
+/// output space, so its ceiling is `min(K, p)`. The #2362 rule exempted
+/// `R_dec >= K` but not `R_dec >= p`, and the two are different whenever `p < K`.
+/// At `R_dec == p` the union frame `Q` spans the WHOLE output space, so
+/// `reach = ||QᵀT_c||²_F / ss_tot` is 1 by construction and the rank-matched
+/// random-subspace null `R_dec/p` is 1 as well: the comparison
+/// `reach <= null` holds identically, on every state, for every target. That is a
+/// vacuous test, not evidence — and it fired on this fixture, which carries
+/// `p = 1` against `K = 2` atoms.
+///
+/// MEASURED at `origin/main = d3024293d` (#2756): the 2-iteration joint drive on
+/// exactly this fixture refused with
+/// `decoder_span_rank=1, target_reach=1.0000, rank-matched random-subspace
+/// null=1.0000` after 3 reseed multi-starts, in 0.14 s — the reseeds could not
+/// have helped, because no dictionary of any quality can raise a rank-1 output
+/// span above the ambient dimension 1.
+///
+/// This is a NEGATIVE control paired with an existing positive one:
+/// `decoder_norm_guard_reseeds_all_atoms_on_total_co_collapse_k3` holds
+/// `p = 3`, `K = 3`, `R_dec = 1` — genuinely rank-deficient inside its output
+/// space — and still refuses, so the discriminating regime `R_dec < min(K, p)`
+/// is untouched by the exemption this test pins.
+#[test]
+pub(crate) fn output_span_saturated_dictionary_is_not_structurally_collapsed_2756() {
+    let (term, target, rho) = small_two_atom_periodic_term();
+    let p = target.ncols();
+    let k = term.k_atoms();
+    // Non-vacuity of the REGIME: this fixture is in the `p < K` corner where the
+    // `R_dec >= K` exemption can never fire, and its decoders do span the whole
+    // output space, so the null the old rule compared against was exactly 1.
+    assert!(
+        p < k,
+        "#2756: the witness must sit in the p < K corner where R_dec cannot reach K; got p={p}, K={k}"
+    );
+    let frames = (0..k)
+        .map(|atom| crate::manifold::certificate::certificate_output_frame(&term, atom))
+        .collect::<Result<Vec<_>, String>>()
+        .expect("#2756: per-atom decoder output frames");
+    let r_dec = crate::manifold::fit_drivers::union_output_frame_rank(&frames, p);
+    assert_eq!(
+        r_dec, p,
+        "#2756: the witness must SATURATE its output space (R_dec == p), or the vacuous \
+         branch it pins is not the branch under test; got R_dec={r_dec}, p={p}"
+    );
+
+    let verdict = term
+        .dictionary_collapse_verdict(target.view(), &rho, None)
+        .expect("#2756: same-state dictionary collapse verdict");
+    assert!(
+        !verdict.structurally_collapsed(),
+        "#2756: a dictionary spanning ALL {p} output dimensions is at the maximum rank its \
+         output space admits; declaring it structurally collapsed prices the healthiest \
+         reachable configuration as the most degenerate one"
+    );
+    assert!(
+        !verdict.degenerate(k),
+        "#2756: with the structural arm exempt and no decoder vanished, the dictionary is not \
+         degenerate; the numerical arm must not be standing in for the retracted structural one"
+    );
+
+    // The refusal the witness actually died on: the 2-iteration joint drive.
+    // Its verdict is not asserted — #2681 records that this fixture's inner solve
+    // does not reach the KKT bar, and that refusal is a different one — but it
+    // must no longer be the total-co-collapse marker.
+    let mut driven = term.clone();
+    let outcome = driven.penalized_quasi_laplace_criterion_with_cache(
+        target.view(),
+        &rho,
+        None,
+        2,
+        0.25,
+        1.0e-4,
+        1.0e-4,
+    );
+    if let Err(error) = &outcome {
+        let rendered = format!("{error:?}");
+        assert!(
+            !rendered.contains(ProbeRefusalKind::total_co_collapse_marker()),
+            "#2756: the 2-iteration drive must no longer refuse on total co-collapse; got {rendered}"
+        );
+    }
+}
