@@ -354,7 +354,7 @@ pub(crate) fn set_states_from_flat_beta(
     states: &mut [ParameterBlockState],
     specs: &[ParameterBlockSpec],
     beta_flat: &Array1<f64>,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     let ranges = block_param_ranges(specs);
     let total = ranges.last().map(|(_, e)| *e).unwrap_or(0);
     if beta_flat.len() != total {
@@ -364,8 +364,7 @@ pub(crate) fn set_states_from_flat_beta(
                 beta_flat.len(),
                 total
             ),
-        }
-        .into());
+        });
     }
     for (b, (start, end)) in ranges.into_iter().enumerate() {
         states[b]
@@ -588,18 +587,16 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm<F: CustomFamily + ?Sized>
     ridge: f64,
     ridge_policy: RidgePolicy,
     block_active_sets: Option<&[Option<Vec<usize>>]>,
-) -> Result<Option<f64>, String> {
+) -> Result<Option<f64>, CustomFamilyError> {
     if eval.blockworking_sets.len() != states.len() || states.len() != s_lambdas.len() {
         return Err(CustomFamilyError::DimensionMismatch {
             reason: "exact-newton joint stationarity check: block dimension mismatch".to_string(),
-        }
-        .into());
+        });
     }
     if specs.len() != states.len() {
         return Err(CustomFamilyError::DimensionMismatch {
             reason: "exact-newton joint stationarity check: spec/state count mismatch".to_string(),
-        }
-        .into());
+        });
     }
     if let Some(sets) = block_active_sets
         && sets.len() != states.len()
@@ -608,7 +605,7 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm<F: CustomFamily + ?Sized>
             "exact-newton joint stationarity check: active-set count mismatch, got {}, expected {}",
             sets.len(),
             states.len()
-        ) }.into());
+        ) });
     }
 
     let block_constraints = collect_block_linear_constraints(family, states, specs)?;
@@ -665,20 +662,20 @@ pub(crate) fn exact_newton_joint_gradient_from_eval(
     eval: &FamilyEvaluation,
     specs: &[ParameterBlockSpec],
     states: &[ParameterBlockState],
-) -> Result<Option<Array1<f64>>, String> {
+) -> Result<Option<Array1<f64>>, CustomFamilyError> {
     if eval.blockworking_sets.len() != specs.len() {
-        return Err(format!(
+        return Err(CustomFamilyError::DimensionMismatch { reason: format!(
             "exact-newton joint gradient extraction: family returned {} block working sets, expected {}",
             eval.blockworking_sets.len(),
             specs.len()
-        ));
+        ) });
     }
     if states.len() != specs.len() {
         return Err(CustomFamilyError::DimensionMismatch { reason: format!(
             "exact-newton joint gradient extraction: state count {} does not match spec count {}",
             states.len(),
             specs.len()
-        ) }.into());
+        ) });
     }
     let total_p = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
     let mut gradient = Array1::<f64>::zeros(total_p);
@@ -699,7 +696,7 @@ pub(crate) fn exact_newton_joint_gradient_from_eval(
                         "exact-newton joint gradient extraction: block gradient length mismatch, got {}, expected {}",
                         block_gradient.len(),
                         width
-                    ) }.into());
+                    ) });
                 }
                 gradient
                     .slice_mut(ndarray::s![offset..offset + width])
@@ -733,7 +730,7 @@ pub(crate) fn exact_newton_joint_gradient_from_eval(
                         working_weights.len(),
                         state.eta.len(),
                         spec.design.nrows()
-                    ) }.into());
+                    ) });
                 }
                 let mut weighted = Array1::<f64>::zeros(n);
                 for i in 0..n {
@@ -746,7 +743,7 @@ pub(crate) fn exact_newton_joint_gradient_from_eval(
                         "exact-newton joint gradient extraction: diagonal block transpose length mismatch, got {}, expected {}",
                         block_gradient.len(),
                         width
-                    ) }.into());
+                    ) });
                 }
                 gradient
                     .slice_mut(ndarray::s![offset..offset + width])
@@ -793,19 +790,19 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm_from_gradient(
     // fixes for the Jeffreys term. `None` ⇒ no joint penalty, byte-identical for
     // every per-block-only family.
     joint_penalty_score: Option<&Array1<f64>>,
-) -> Result<f64, String> {
+) -> Result<f64, CustomFamilyError> {
     if states.len() != specs.len() || states.len() != s_lambdas.len() {
-        return Err(
-            "exact-newton joint stationarity check from gradient: block dimension mismatch"
+        return Err(CustomFamilyError::DimensionMismatch {
+            reason: "exact-newton joint stationarity check from gradient: block dimension mismatch"
                 .to_string(),
-        );
+        });
     }
     if block_constraints.len() != states.len() {
         return Err(CustomFamilyError::DimensionMismatch { reason: format!(
             "exact-newton joint stationarity check from gradient: constraint count mismatch, got {}, expected {}",
             block_constraints.len(),
             states.len()
-        ) }.into());
+        ) });
     }
     if let Some(sets) = block_active_sets
         && sets.len() != states.len()
@@ -814,7 +811,7 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm_from_gradient(
             "exact-newton joint stationarity check from gradient: active-set count mismatch, got {}, expected {}",
             sets.len(),
             states.len()
-        ) }.into());
+        ) });
     }
     let total_p = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
     if gradient.len() != total_p {
@@ -822,7 +819,7 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm_from_gradient(
             "exact-newton joint stationarity check from gradient: joint gradient length mismatch, got {}, expected {}",
             gradient.len(),
             total_p
-        ) }.into());
+        ) });
     }
     if let Some(js) = joint_penalty_score
         && js.len() != total_p
@@ -831,7 +828,7 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm_from_gradient(
             "exact-newton joint stationarity check from gradient: joint penalty score length mismatch, got {}, expected {}",
             js.len(),
             total_p
-        ) }.into());
+        ) });
     }
 
     // Same KKT projection as `exact_newton_joint_stationarity_inf_norm`:
@@ -911,12 +908,12 @@ pub(crate) fn exact_newton_joint_stationarity_vector_from_gradient(
     s_lambdas: &[Array2<f64>],
     ridge: f64,
     ridge_policy: RidgePolicy,
-) -> Result<Array1<f64>, String> {
+) -> Result<Array1<f64>, CustomFamilyError> {
     if states.len() != specs.len() || states.len() != s_lambdas.len() {
-        return Err(
-            "exact-newton joint stationarity vector from gradient: block dimension mismatch"
+        return Err(CustomFamilyError::DimensionMismatch {
+            reason: "exact-newton joint stationarity vector from gradient: block dimension mismatch"
                 .to_string(),
-        );
+        });
     }
     let total_p = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
     if gradient.len() != total_p {
@@ -924,7 +921,7 @@ pub(crate) fn exact_newton_joint_stationarity_vector_from_gradient(
             "exact-newton joint stationarity vector from gradient: joint gradient length mismatch, got {}, expected {}",
             gradient.len(),
             total_p
-        ) }.into());
+        ) });
     }
 
     let mut residual = Array1::<f64>::zeros(total_p);
@@ -998,15 +995,15 @@ pub(crate) fn exact_newton_joint_projected_stationarity_vector_from_gradient(
     // `∇penalized(β̂)`. `None` (no joint penalty) keeps every per-block-only
     // family byte-identical.
     joint_penalty_score: Option<&Array1<f64>>,
-) -> Result<Array1<f64>, String> {
+) -> Result<Array1<f64>, CustomFamilyError> {
     if states.len() != specs.len()
         || states.len() != s_lambdas.len()
         || states.len() != block_constraints.len()
     {
-        return Err(
-            "exact-newton projected stationarity vector from gradient: block dimension mismatch"
+        return Err(CustomFamilyError::DimensionMismatch {
+            reason: "exact-newton projected stationarity vector from gradient: block dimension mismatch"
                 .to_string(),
-        );
+        });
     }
     if let Some(sets) = block_active_sets
         && sets.len() != states.len()
@@ -1015,7 +1012,7 @@ pub(crate) fn exact_newton_joint_projected_stationarity_vector_from_gradient(
             "exact-newton projected stationarity vector from gradient: active-set count mismatch, got {}, expected {}",
             sets.len(),
             states.len()
-        ) }.into());
+        ) });
     }
     let total_p = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
     if gradient.len() != total_p {
@@ -1023,7 +1020,7 @@ pub(crate) fn exact_newton_joint_projected_stationarity_vector_from_gradient(
             "exact-newton projected stationarity vector from gradient: joint gradient length mismatch, got {}, expected {}",
             gradient.len(),
             total_p
-        ) }.into());
+        ) });
     }
     if let Some(js) = joint_penalty_score
         && js.len() != total_p
@@ -1032,7 +1029,7 @@ pub(crate) fn exact_newton_joint_projected_stationarity_vector_from_gradient(
             "exact-newton projected stationarity vector from gradient: joint penalty score length mismatch, got {}, expected {}",
             js.len(),
             total_p
-        ) }.into());
+        ) });
     }
 
     let mut residual = Array1::<f64>::zeros(total_p);
@@ -1217,24 +1214,28 @@ pub(crate) fn penalized_hessian_from_owned_mode(
     per_block_log_lambdas: &[Array1<f64>],
     options: &BlockwiseFitOptions,
     unpenalized_hessian: &Array2<f64>,
-) -> Result<Array2<f64>, String> {
+) -> Result<Array2<f64>, CustomFamilyError> {
     let ranges = block_param_ranges(specs);
     let total = ranges.last().map(|(_, e)| *e).unwrap_or(0);
     if unpenalized_hessian.dim() != (total, total)
         || unpenalized_hessian.iter().any(|value| !value.is_finite())
     {
-        return Err(format!(
-            "owned returned-beta Hessian must be finite with shape {total}x{total}, got {}x{}",
-            unpenalized_hessian.nrows(),
-            unpenalized_hessian.ncols(),
-        ));
+        return Err(CustomFamilyError::DimensionMismatch {
+            reason: format!(
+                "owned returned-beta Hessian must be finite with shape {total}x{total}, got {}x{}",
+                unpenalized_hessian.nrows(),
+                unpenalized_hessian.ncols(),
+            ),
+        });
     }
     if per_block_log_lambdas.len() != specs.len() {
-        return Err(format!(
-            "owned returned-beta penalty layout has {} blocks, expected {}",
-            per_block_log_lambdas.len(),
-            specs.len(),
-        ));
+        return Err(CustomFamilyError::DimensionMismatch {
+            reason: format!(
+                "owned returned-beta penalty layout has {} blocks, expected {}",
+                per_block_log_lambdas.len(),
+                specs.len(),
+            ),
+        });
     }
     let mut h = unpenalized_hessian.clone();
     for (b, spec) in specs.iter().enumerate() {
@@ -1244,11 +1245,13 @@ pub(crate) fn penalized_hessian_from_owned_mode(
             &format!("owned returned-beta block {b} log strength"),
         )?;
         if lambdas.len() != spec.penalties.len() {
-            return Err(format!(
-                "owned returned-beta block {b} has {} smoothing strengths, expected {}",
-                lambdas.len(),
-                spec.penalties.len(),
-            ));
+            return Err(CustomFamilyError::DimensionMismatch {
+                reason: format!(
+                    "owned returned-beta block {b} has {} smoothing strengths, expected {}",
+                    lambdas.len(),
+                    spec.penalties.len(),
+                ),
+            });
         }
         let mut s_lambda = Array2::<f64>::zeros((end - start, end - start));
         for (k, s) in spec.penalties.iter().enumerate() {
