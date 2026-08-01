@@ -2381,6 +2381,30 @@ pub struct FitArtifacts {
     ///
     /// The route that removes this residual entirely is implementing the
     /// correction (`G_measure`, gam#2484), after which nothing is withheld.
+    ///
+    /// # The producer-set trigger, also checkable
+    ///
+    /// One persistence route drops this field: the compact saved-fit
+    /// constructors in `gam-cli` (`model_build.rs`) take `beta_covariance` and
+    /// assign `inf.penalized_hessian` from the geometry, but have no parameter
+    /// that could carry a declination — so a fit persisted through them would
+    /// ship curvature with the warning stripped off. No parameter was threaded,
+    /// because nothing reaches them: this field has exactly ONE producer, and
+    /// that producer persists whole-`UnifiedFitResult` through
+    /// `assemble_bernoulli_marginal_slope_payload` instead.
+    ///
+    /// That defence is only as good as the producer count, so count it. Run:
+    ///
+    /// ```text
+    /// git grep -n 'covariance_declined' -- crates/ src/ | grep -E 'covariance_declined\s*='
+    /// ```
+    ///
+    /// **Today that returns exactly 1** — `bms/block_specs.rs`, the BMS
+    /// Murphy-Topel seam. **If a second producer ever appears, check whether it
+    /// persists through a compact constructor; if it does, the parameter must be
+    /// threaded and `tests/bms_covariance_declined_2718.rs` extended to cover
+    /// that route.** The round-trip test there pins the wire, not the routing,
+    /// so it will not catch a new producer on its own.
     #[serde(default)]
     pub covariance_declined: Option<CovarianceDeclined>,
 }
