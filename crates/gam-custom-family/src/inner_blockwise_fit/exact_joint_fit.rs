@@ -2698,10 +2698,32 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // scaling when `α ∈ [threshold, 1)` — so every converging arm is
             // byte-identical. The α-crush `Err` (current iterate infeasible /
             // no positive step) still triggers a radius shrink + retry.
-            if !qp_feasible_bypass
-                && apply_joint_feasibility_limit(family, &states, &ranges, &mut trial_delta)
-                    .is_err()
-            {
+            // The alpha-crush refusal carries the ONLY statement of which block
+            // refused and why -- which constraint row, and whether the current
+            // iterate is infeasible or merely sits on a face with the ray
+            // pointing out of it. Discarding it with `.is_err()` made a whole
+            // class of stalls unattributable: the survival location-scale
+            // linkwiggle fit (gam#2695) spends 379 rejections here, 379 of them
+            // from one block, and the refusal message printed none of that.
+            // Every one of those rejections is answered by shrinking the radius,
+            // which is why the count is a multiple of JOINT_TRUST_MAX_ATTEMPTS:
+            // when the binding row has zero slack the fraction-to-boundary
+            // `slack / -drift` is zero at EVERY radius, so the attempt loop
+            // re-derives the same zero until the radius floor ends the cycle.
+            let alpha_crush_outcome = if qp_feasible_bypass {
+                Ok(false)
+            } else {
+                apply_joint_feasibility_limit(family, &states, &ranges, &mut trial_delta)
+            };
+            if let Err(alpha_crush_reason) = alpha_crush_outcome.as_ref() {
+                log::info!(
+                    "[PIRLS/joint-Newton feasibility] cycle {} attempt {} rejected at radius {:.6e} (qp_feasible_bypass={}): {}",
+                    cycle,
+                    trust_attempt,
+                    joint_trust_radius,
+                    qp_feasible_bypass,
+                    alpha_crush_reason
+                );
                 feasibility_rejects += 1;
                 joint_trust_radius = shrink_active_joint_block_trust_radii(
                     &mut joint_block_trust_radii,
@@ -2749,6 +2771,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                             // (gam#979). Without this an infeasible trial would
                             // reach the next cycle's `check_linear_feasibility`
                             // QP gate and hard-error.
+                            log::info!(
+                                "[PIRLS/joint-Newton feasibility] cycle {} attempt {} rejected at radius {:.6e}: cone projection found no strictly-interior point",
+                                cycle,
+                                trust_attempt,
+                                joint_trust_radius
+                            );
                             feasibility_rejects += 1;
                             joint_trust_radius = shrink_active_joint_block_trust_radii(
                                 &mut joint_block_trust_radii,
