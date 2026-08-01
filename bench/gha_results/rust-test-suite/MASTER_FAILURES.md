@@ -2,15 +2,19 @@
 
 - Compile failures: **0**
 - Runtime test failures (FAIL/TIMEOUT/TERMINATING/LEAK): **430**
-- Python API test failures: **6**
+- Python test failures: **NOT MEASURED — at least 6** (LOWER BOUND, not a count: Python API tests (job `cancelled`); Python populations, slow + torch (job `cancelled`) did not run to completion, so the tests they never reached are unmeasured, not passing)
 - Forbidden runtime signatures seen: **1**
 - Slow/timeout notices (#1393): **208**
 
 Coverage:
 - workspace shards: **MEASURED** (build `success`, matrix `failure`)
 - gam-pyffi unit tests: **MEASURED** (job `failure`)
-- Python API tests: **MEASURED** (job `cancelled`)
+- Python API tests: **NOT MEASURED** (job `cancelled`)
 - Python populations (slow + torch): **NOT MEASURED** (job `cancelled`)
+
+> NOTE: the Python failure count above is a LOWER BOUND, not a total — it sums over jobs and these did not run to completion: Python API tests (job `cancelled`); Python populations, slow + torch (job `cancelled`). Everything those jobs had not reached when they stopped is unmeasured; do not read the number as "that is how many Python tests are red".
+
+> NOTE: the Python surface was NOT measured — the Python job reported `cancelled`. The Python counter above is not a result.
 
 ## Compile failures
 
@@ -449,7 +453,9 @@ _None._
 - **FAIL** `gam-pyffi` :: `tests::manifold_sae_structured_metric_without_behavior_shard_is_loadable`
 - **FAIL** `gam-pyffi` :: `tests::shared_tangent_fit_is_output_rotation_equivariant`
 
-## Python API test failures
+## Python test failures
+
+_Lower bound: 6 recorded before the run stopped. Unmeasured: Python API tests (job `cancelled`); Python populations, slow + torch (job `cancelled`)._
 
 - **FAIL** `python::tests/test_python_api` :: `test_transformation_normal_pgs_conditional_mean_tracks_response`
 - **FAIL** `python::tests/test_python_api` :: `test_transformation_normal_predicts_without_raw_pgs`
