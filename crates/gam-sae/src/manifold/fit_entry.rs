@@ -43,7 +43,8 @@ use crate::structure_harvest;
 use crate::tiered::Tier0Mean;
 
 use super::{
-    AmortizedEncoderConsistency, AssignmentMode, CoordinateFidelityCertificate, CrossFitConfig,
+    AmortizedEncoderConsistency, AssignmentMode, ChartDegeneracyReport,
+    ChartNondegeneracyCertificate, CoordinateFidelityCertificate, CrossFitConfig,
     CrossFitReport, SaeManifoldFitDiagnostics, SaeManifoldLoss, SaeManifoldOuterObjective,
     SaeInnerKktScaleError, SaeManifoldRho, SaeManifoldTerm, SaeOuterTermination,
     SaeShapeUncertainty,
@@ -238,6 +239,15 @@ pub struct SaeFitReport {
     pub fit_diagnostics: SaeManifoldFitDiagnostics,
     /// Consistency of the fitted native encoder with the converged latent solve.
     pub amortized_encoder_consistency: AmortizedEncoderConsistency,
+    /// #2691 — every chart axis's dispersion measured in its OWN manifold
+    /// (circular variance on a periodic axis, standard deviation on a Euclidean
+    /// one), so a caller can see a degenerate chart without recomputing it and
+    /// without going through `reconstruction_r2`, which provably cannot order
+    /// these states. An atom whose every axis is degenerate is refused before
+    /// this report is built; the field is here so PARTIAL collapse — one axis of
+    /// a `d_atom >= 2` chart, or a chart compressed but not yet extinguished — is
+    /// visible rather than silent.
+    pub chart_degeneracy: ChartDegeneracyReport,
     /// Unified conservative certificate ledger assembled from this fit's reports.
     pub certificate_ledger: CertificateLedger,
     /// Serialized per-round structure-search ledger (#997) as a JSON string;
@@ -469,6 +479,15 @@ pub enum SaeFitError {
         stage: SaeFitStage,
         result: Box<OuterResult>,
     },
+    /// #2691 — every atom's chart collapsed to a single point of its own
+    /// manifold. The dictionary would decode to a constant, and any consumer
+    /// reading a displacement out of it measures an exact zero. Refused rather
+    /// than returned with a healthy-looking trajectory.
+    DegenerateChart {
+        atoms: Vec<usize>,
+        evidence: String,
+        report: Box<ChartDegeneracyReport>,
+    },
 }
 
 impl From<String> for SaeFitError {
@@ -481,6 +500,14 @@ impl std::fmt::Display for SaeFitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidRequest(message) | Self::Fit(message) => f.write_str(message),
+            Self::DegenerateChart {
+                atoms, evidence, ..
+            } => write!(
+                f,
+                "SAE manifold fit produced a DEGENERATE CHART on atom(s) {atoms:?}: every chart \
+                 axis collapsed to one point of its own manifold, so the dictionary decodes to a \
+                 constant and carries no displacements; refusing to mint a fit [{evidence}]"
+            ),
             Self::OuterRun { stage, source } => {
                 write!(f, "SAE manifold {stage} outer search failed: {source}")
             }
@@ -510,7 +537,10 @@ impl std::error::Error for SaeFitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::OuterRun { source, .. } => Some(source),
-            Self::InvalidRequest(_) | Self::Fit(_) | Self::OuterDidNotConverge { .. } => None,
+            Self::InvalidRequest(_)
+            | Self::Fit(_)
+            | Self::OuterDidNotConverge { .. }
+            | Self::DegenerateChart { .. } => None,
         }
     }
 }
@@ -1386,7 +1416,24 @@ fn finalize_sae_fit_report(
         Some(assignments.view()),
     )?;
     let amortized_encoder_consistency = term.amortized_encoder_consistency(z.view(), &rho)?;
+    // #2691 — a chart that has collapsed to a single point of its own manifold
+    // is not a fit with a poor score; it is an object with no coordinate in it,
+    // and every downstream consumer that reads a displacement out of it measures
+    // an exact zero. Decide it HERE, on the coordinate alone, before any
+    // reconstruction-denominated quantity is consulted: the #2691 ledger
+    // measured the fully collapsed arm's EV BELOW a partially collapsed arm's,
+    // so no EV-denominated gate can order these states.
+    let chart_degeneracy = term.chart_degeneracy_report();
+    let collapsed_atoms = chart_degeneracy.atoms_without_a_chart();
+    if !collapsed_atoms.is_empty() && collapsed_atoms.len() == chart_degeneracy.atom_count {
+        return Err(SaeFitError::DegenerateChart {
+            atoms: collapsed_atoms,
+            evidence: chart_degeneracy.collapsed_atom_evidence(),
+            report: Box::new(chart_degeneracy),
+        });
+    }
     let mut certificate_ledger = CertificateLedger::new();
+    certificate_ledger.record(&ChartNondegeneracyCertificate::new(&chart_degeneracy));
     certificate_ledger.record(&fit_diagnostics.residual_gauge);
     certificate_ledger.record(&CoordinateFidelityCertificate::new(
         &fit_diagnostics.coordinate_fidelity,
@@ -1498,6 +1545,7 @@ fn finalize_sae_fit_report(
         trust_diagnostics,
         fit_diagnostics,
         amortized_encoder_consistency,
+        chart_degeneracy,
         certificate_ledger,
         structure_search_json,
         structure_certificate_json,

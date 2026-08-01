@@ -2236,6 +2236,66 @@ fn sae_fit_report_into_dict<'py>(
     out.set_item("atom_active_mask", active_mask)?;
     out.set_item("fitted", fitted.into_pyarray(py))?;
     out.set_item("reconstruction_r2", reconstruction_r2)?;
+    // #2691 — the CHART's own health, per atom and axis, measured in the axis's
+    // own manifold and never through the reconstruction. A caller that wants to
+    // know whether the returned coordinate is a coordinate reads this; it must
+    // not read `reconstruction_r2`, which orders these states wrongly (#2691
+    // measured a fully collapsed chart at a HIGHER explained variance than a
+    // partially collapsed one).
+    {
+        let chart = term.chart_degeneracy_report();
+        let block = PyDict::new(py);
+        block.set_item(
+            "atom",
+            chart.axes.iter().map(|axis| axis.atom).collect::<Vec<_>>(),
+        )?;
+        block.set_item(
+            "axis",
+            chart.axes.iter().map(|axis| axis.axis).collect::<Vec<_>>(),
+        )?;
+        block.set_item(
+            "period",
+            chart
+                .axes
+                .iter()
+                .map(|axis| axis.period)
+                .collect::<Vec<_>>(),
+        )?;
+        block.set_item(
+            "dispersion",
+            chart
+                .axes
+                .iter()
+                .map(|axis| axis.dispersion)
+                .collect::<Vec<_>>(),
+        )?;
+        block.set_item(
+            "floor",
+            chart.axes.iter().map(|axis| axis.floor).collect::<Vec<_>>(),
+        )?;
+        block.set_item(
+            "resolved_points",
+            chart
+                .axes
+                .iter()
+                .map(|axis| axis.resolved_points)
+                .collect::<Vec<_>>(),
+        )?;
+        block.set_item(
+            "degenerate",
+            chart
+                .axes
+                .iter()
+                .map(|axis| axis.degenerate())
+                .collect::<Vec<_>>(),
+        )?;
+        block.set_item("atoms_without_a_chart", chart.atoms_without_a_chart())?;
+        block.set_item(
+            "measure",
+            "periodic axis: circular variance 1 - |mean exp(i*2*pi*t/P)|;              euclidean axis: standard deviation. Floor = the dispersion rows              that are the same point up to f64 representation would show.",
+        )?;
+        out.set_item("chart_degeneracy", block)?;
+    }
     // The optimism reference travels as its own dict so the three numbers stay
     // together: a `cross_fit` without the `naive` it is compared against, or an
     // `optimism` without the fold count behind it, is not interpretable.

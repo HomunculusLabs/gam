@@ -10,6 +10,36 @@ fn sae_fit_error_to_pyerr(py: Python<'_>, err: gam::terms::sae::manifold::SaeFit
     let message = err.to_string();
     match err {
         SaeFitError::InvalidRequest(_) | SaeFitError::Fit(_) => py_value_error(message),
+        // #2691 — a chart that collapsed to one point of its own manifold is a
+        // typed refusal, not a poorly scoring fit. Surface the per-axis evidence
+        // on the exception so a caller can see WHICH axis went and by how much
+        // without re-deriving it from a returned object it will never get.
+        SaeFitError::DegenerateChart {
+            ref atoms,
+            ref report,
+            ..
+        } => {
+            let atoms = atoms.clone();
+            let dispersions: Vec<f64> =
+                report.axes.iter().map(|axis| axis.dispersion).collect();
+            let floors: Vec<f64> = report.axes.iter().map(|axis| axis.floor).collect();
+            let resolved: Vec<usize> =
+                report.axes.iter().map(|axis| axis.resolved_points).collect();
+            let exc = py_value_error(message);
+            let bound = exc.value(py);
+            let attach: PyResult<()> = (|| {
+                bound.setattr("degenerate_chart", true)?;
+                bound.setattr("collapsed_atoms", atoms)?;
+                bound.setattr("chart_axis_dispersion", dispersions)?;
+                bound.setattr("chart_axis_floor", floors)?;
+                bound.setattr("chart_axis_resolved_points", resolved)?;
+                Ok(())
+            })();
+            if let Err(attach_err) = attach {
+                attach_err.write_unraisable(py, Some(&bound));
+            }
+            exc
+        }
         SaeFitError::OuterRun { stage, source } => {
             let exc = estimation_error_to_pyerr(source);
             let bound = exc.value(py);

@@ -190,6 +190,7 @@ mod behavior_fit;
 mod behavior_isometry;
 mod certificate;
 mod chart_atlas;
+mod chart_degeneracy;
 mod checkpoint;
 mod construction;
 mod construction_ard;
@@ -296,6 +297,9 @@ mod tests_termination_2235;
 
 #[cfg(test)]
 mod tests_steering_e4;
+
+#[cfg(test)]
+mod tests_chart_collapse_2691;
 
 #[cfg(test)]
 mod tests_steering_crosscoder_2234;
@@ -506,6 +510,7 @@ pub use behavior_fit::*;
 pub use behavior_isometry::*;
 pub use certificate::*;
 pub use chart_atlas::*;
+pub use chart_degeneracy::*;
 pub use construction_aux_types::*;
 pub use construction_cache_refresh::*;
 pub use construction_padded_blocks::*;
