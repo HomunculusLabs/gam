@@ -30,7 +30,17 @@
 /// value path and the gradient path respectively, and they can disagree: see
 /// the overlap-region note on that constant for the exact crossing conditions
 /// and for the pencil-spectrum measurement that would let the two be replaced
-/// by one quantity. Deliberately left as two numbers until that is measured.
+/// by one quantity.
+///
+/// "for the value path and the gradient path respectively" is LOAD-BEARING and
+/// was, for a while, the only correct statement of it in the tree: a comment on
+/// `tests_route_forced_classification_2673` claimed the two floors never coexist
+/// at a fixed state. They do — on the streaming route the value path's terminal
+/// Newton polish reaches the dense floor through an ungated
+/// `solve_exact_stationarity` while the gradient adjoint uses this one. The call
+/// chain is on that test. Still deliberately two numbers, because they measure
+/// two different quantities; what changed is that the overlap is now measured
+/// rather than assumed.
 fn sae_ift_min_curvature_fraction() -> f64 {
     f64::EPSILON.sqrt()
 }
@@ -3862,7 +3872,18 @@ impl SaeManifoldTerm {
     ///   ratio, not an eigenvalue of anything. It asks "did `1/mu` amplify an
     ///   unidentified near-null into `theta_rho`?"
     ///
-    /// THE OVERLAP REGION IS REAL AND UNMEASURED. A direction `v` with
+    /// THE OVERLAP REGION IS REAL. It has now been measured twice (#2673): a
+    /// direct crossing count on the #2515 fixture, and a run of both PRODUCTION
+    /// solves on one state. Read
+    /// `tests::two_floors_overlap_region_direction_count_2673` for the count and
+    /// the population each counter can fire on — a zero crossing count on an
+    /// EMPTY population is an artefact, not agreement, which is why that test now
+    /// reports the population at risk alongside the count and is paired with
+    /// `two_floor_overlap_predicate_detects_both_crossings_2673`, a synthetic
+    /// control that drives this same predicate through a deliberately disputed
+    /// band and asserts both crossings fire.
+    ///
+    /// The crossing conditions themselves are unchanged. A direction `v` with
     /// `lambda(v)` in `(-1e-9*lambda_max, 0)` sits inside THIS band and is
     /// priced as the radial-gauge null (`log 1 = 0`), while its `mu` can sit far
     /// ABOVE `sqrt(eps)` whenever `v'Bv << |lambda|/sqrt(eps)` - the value calls
@@ -3870,7 +3891,9 @@ impl SaeManifoldTerm {
     /// direction and keeps its `A^-1` response. The converse exists too:
     /// `|lambda| >> floor` with `mu` below `sqrt(eps)` when `v'Bv` is large, so
     /// the value prices a direction the gradient has projected out. Neither
-    /// crossing is detected today and neither has been measured.
+    /// crossing is DETECTED in production today; both are now measured in tests,
+    /// and both floors can run on the same `A` in one evaluation (see the call
+    /// chain on `tests_route_forced_classification_2673`).
     ///
     /// UNIFYING THEM IS A MEASUREMENT, NOT AN EDIT, which is why this commit
     /// changes no number. The two collapse into one quantity only under a common
@@ -5672,18 +5695,46 @@ mod tests_route_forced_classification_2673 {
 
     /// #2673 — FORCE both classification routes on ONE state and compare.
     ///
-    /// Two floors classify directions of the same `A = B + ΔC`, and `i2644`'s
-    /// call-site enumeration established that **exactly one runs per evaluation**:
+    /// Two floors classify directions of the same `A = B + ΔC`:
     /// `SAE_EXACT_A_PD_FLOOR_REL` on the dense spectral path, and
     /// `sae_ift_min_curvature_fraction()` (`sqrt(EPSILON)`) inside
-    /// `solve_exact_stationarity_preconditioned`, reached only when
-    /// `matrix_free_system = Some(..)`. They never coexist at a fixed state.
+    /// `solve_exact_stationarity_preconditioned`.
     ///
-    /// So the hazard is NOT an internal contradiction within one solve — it is
-    /// that **the same statistical state is classified by different rules
-    /// depending on which route its `K` selects**, and a fit can change character
-    /// as `K` crosses the massive-`K` threshold. That is the #2509/#2515
-    /// route-dependence family.
+    /// AN EARLIER VERSION OF THIS COMMENT CLAIMED "exactly one runs per
+    /// evaluation ... they never coexist at a fixed state", and concluded the
+    /// hazard was route-dependence (#2509/#2515) rather than the
+    /// value↔gradient contradiction #2673 was filed about. **That claim is
+    /// false, and it made a live hazard look structurally impossible.** It is
+    /// true only within one GRADIENT assembly; an evaluation is value AND
+    /// gradient, and on the streaming route both floors run on the same `A`:
+    ///
+    /// * VALUE, when `direct_logdet_admitted == false`:
+    ///   `penalized_quasi_laplace_criterion_streaming_exact_with_cache`
+    ///   (`construction_quasi_laplace.rs:263`) →
+    ///   `..._lane_and_system` (`:2971`) →
+    ///   `converge_inner_for_undamped_logdet` (`:3039`) →
+    ///   `..._gate_frozen` (`:698`) →
+    ///   `terminal_exact_newton_polish` (`:1317`, `:1748`) →
+    ///   `solve_exact_stationarity` (`:2346`, **with no route gate**) →
+    ///   `materialize_exact_stationarity_geometry` →
+    ///   `exact_hessian_spectral_block` → `SAE_EXACT_A_PD_FLOOR_REL`.
+    /// * GRADIENT, same evaluation: `matrix_free_system = Some(..)` →
+    ///   `solve_exact_stationarity_matrix_free` →
+    ///   `solve_exact_stationarity_preconditioned` →
+    ///   `sae_ift_min_curvature_fraction()`.
+    ///
+    /// So the ORIGINAL framing on the constant's own doc block stands: the value
+    /// can call a direction gauge while the gradient keeps its `A⁻¹` response,
+    /// **within one evaluation**. Note the counterpart-floor comment on
+    /// [`sae_ift_min_curvature_fraction`] never stopped saying so ("for the value
+    /// path and the gradient path respectively") — the two doc sites disagreed,
+    /// which is this issue's own shape one level up.
+    ///
+    /// There is also no "massive-`K` threshold" to cross. The route predicate is
+    /// a working-set comparison in `streaming_plan.rs:151` —
+    /// `direct_peak_bytes <= in_core_budget_bytes || direct_fits_tiny` — so which
+    /// floor classifies the value path is a function of AMBIENT FREE MEMORY, not
+    /// of `K`. `K` enters only through `row_block_dim`.
     ///
     /// My earlier probe (`two_floors_overlap_region_direction_count_2673`)
     /// reconstructed both rules in a test and found zero directions changing

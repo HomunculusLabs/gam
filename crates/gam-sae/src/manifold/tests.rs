@@ -4475,6 +4475,165 @@ fn exact_a_route_gap_is_two_coordinates_with_two_causes_2515() {
     );
 }
 
+/// The #2673 overlap classification, as ONE predicate.
+///
+/// Both the real-fixture probe and the synthetic control below run through this,
+/// so the control demonstrates the same code the probe reports a count from. It
+/// also carries the POPULATION each counter can fire on, because a zero count on
+/// an empty population is an artefact rather than a measurement.
+pub(crate) struct TwoFloorOverlap2673 {
+    /// `|λ| ≤ floor` (value calls it gauge) but `|μ| ≥ μ_floor` (gradient keeps it).
+    pub value_gauge_gradient_resolved: usize,
+    /// `|λ| > floor` (value prices it) but `|μ| < μ_floor` (gradient projects it out).
+    pub value_priced_gradient_projected: usize,
+    /// Directions inside the gauge band — the only ones the first counter can fire on.
+    pub gauge_band_population: usize,
+    /// Directions outside it — the only ones the second counter can fire on.
+    pub priced_population: usize,
+    pub min_abs_lambda: f64,
+    pub max_abs_lambda: f64,
+    /// Smallest `|λ|` among PRICED directions; the second counter's easiest target.
+    pub min_abs_lambda_priced: f64,
+    pub min_vbv: f64,
+    pub max_vbv: f64,
+    pub rows: Vec<String>,
+}
+
+/// Classify every direction of `A` under BOTH floors and count the crossings.
+///
+/// `μ = vᵀAv / vᵀBv` is evaluated on `A`'s OWN eigenvectors, so "the same
+/// direction" is literal and the two classifications cannot be comparing
+/// different bases.
+pub(crate) fn classify_two_floor_overlap_2673(
+    a_eigs: ndarray::ArrayView1<'_, f64>,
+    a_vecs: ndarray::ArrayView2<'_, f64>,
+    b: &Array2<f64>,
+    floor: f64,
+    mu_floor: f64,
+) -> TwoFloorOverlap2673 {
+    let mut out = TwoFloorOverlap2673 {
+        value_gauge_gradient_resolved: 0,
+        value_priced_gradient_projected: 0,
+        gauge_band_population: 0,
+        priced_population: 0,
+        min_abs_lambda: f64::INFINITY,
+        max_abs_lambda: 0.0,
+        min_abs_lambda_priced: f64::INFINITY,
+        min_vbv: f64::INFINITY,
+        max_vbv: f64::NEG_INFINITY,
+        rows: Vec::new(),
+    };
+    for idx in 0..a_eigs.len() {
+        let v = a_vecs.column(idx);
+        let vav = a_eigs[idx];
+        let vbv = v.dot(&b.dot(&v));
+        let mu = if vbv.abs() > 0.0 { vav / vbv } else { f64::NAN };
+        let value_calls_gauge = vav.abs() <= floor;
+        let gradient_calls_resolved = mu.is_finite() && mu.abs() >= mu_floor;
+
+        out.min_abs_lambda = out.min_abs_lambda.min(vav.abs());
+        out.max_abs_lambda = out.max_abs_lambda.max(vav.abs());
+        out.min_vbv = out.min_vbv.min(vbv);
+        out.max_vbv = out.max_vbv.max(vbv);
+        if value_calls_gauge {
+            out.gauge_band_population += 1;
+        } else {
+            out.priced_population += 1;
+            out.min_abs_lambda_priced = out.min_abs_lambda_priced.min(vav.abs());
+        }
+
+        if value_calls_gauge && gradient_calls_resolved {
+            out.value_gauge_gradient_resolved += 1;
+            out.rows.push(format!(
+                "  direction {idx}: VALUE=gauge (|λ|={:.6e} <= floor {floor:.6e}) but \
+                 GRADIENT=resolved (|μ|={:.6e} >= {mu_floor:.6e})",
+                vav.abs(),
+                mu.abs()
+            ));
+        }
+        if !value_calls_gauge && mu.is_finite() && mu.abs() < mu_floor {
+            out.value_priced_gradient_projected += 1;
+            out.rows.push(format!(
+                "  direction {idx}: VALUE=priced (|λ|={:.6e} > floor {floor:.6e}) but \
+                 GRADIENT=projected out (|μ|={:.6e} < {mu_floor:.6e})",
+                vav.abs(),
+                mu.abs()
+            ));
+        }
+    }
+    out
+}
+
+/// #2673 POSITIVE CONTROL for the overlap predicate.
+///
+/// The real-fixture probe reports a crossing count, and a zero there is only
+/// meaningful if a nonzero is reachable. This drives
+/// [`classify_two_floor_overlap_2673`] with a spectrum built to sit in the
+/// DISPUTED band — the same shape #2740 used to settle its own
+/// one-array/three-predicates question — and asserts BOTH crossings fire.
+///
+/// Without this, a probe that silently lost its ability to detect a crossing
+/// (an inverted comparison, a floor that swallowed the band) would keep
+/// reporting zero and read exactly like agreement.
+#[test]
+fn two_floor_overlap_predicate_detects_both_crossings_2673() {
+    let mu_floor = f64::EPSILON.sqrt();
+    // λ_max = 1.0, so floor = 1e-9 · max(1, 1) = 1e-9 exactly as production forms it.
+    let lambdas = [5.0e-10_f64, 1.0, 0.5];
+    let max_eig = lambdas.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let floor = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
+    assert!(
+        (floor - 1.0e-9).abs() <= 1.0e-24,
+        "#2673 control: floor must be 1e-9 here, got {floor:.6e}"
+    );
+
+    // Direction 0: inside the gauge band, and vᵀBv small enough that μ clears
+    //   μ_floor  -> value=gauge, gradient=resolved.
+    // Direction 1: priced, but vᵀBv enormous so μ falls under μ_floor
+    //   -> value=priced, gradient=projected.
+    // Direction 2: priced and resolved -> no crossing, so the counters are not
+    //   simply counting every direction.
+    let vbvs = [1.0e-2_f64, 1.0e10, 1.0];
+    let a_eigs = Array1::from_vec(lambdas.to_vec());
+    let a_vecs = Array2::<f64>::eye(3);
+    let b = Array2::from_diag(&Array1::from_vec(vbvs.to_vec()));
+
+    let report = classify_two_floor_overlap_2673(a_eigs.view(), a_vecs.view(), &b, floor, mu_floor);
+    println!(
+        "[#2673 CONTROL] gauge&resolved={} priced&projected={} band_pop={} priced_pop={}",
+        report.value_gauge_gradient_resolved,
+        report.value_priced_gradient_projected,
+        report.gauge_band_population,
+        report.priced_population
+    );
+    for row in report.rows.iter() {
+        println!("[#2673 CONTROL]{row}");
+    }
+
+    assert_eq!(
+        report.gauge_band_population, 1,
+        "#2673 control: exactly one direction must sit inside the gauge band"
+    );
+    assert_eq!(
+        report.priced_population, 2,
+        "#2673 control: the other two directions must be priced"
+    );
+    assert_eq!(
+        report.value_gauge_gradient_resolved, 1,
+        "#2673 control: the predicate must DETECT a gauge direction the gradient resolves \
+         (λ={:.3e} inside floor {floor:.3e}, μ={:.3e} above {mu_floor:.3e})",
+        lambdas[0],
+        lambdas[0] / vbvs[0]
+    );
+    assert_eq!(
+        report.value_priced_gradient_projected, 1,
+        "#2673 control: the predicate must DETECT a priced direction the gradient projects \
+         out (λ={:.3e} above floor {floor:.3e}, μ={:.3e} below {mu_floor:.3e})",
+        lambdas[1],
+        lambdas[1] / vbvs[1]
+    );
+}
+
 /// #2673 — the measurement `SAE_EXACT_A_PD_FLOOR_REL`'s own doc block asks for and
 /// says has never been taken.
 ///
@@ -4586,51 +4745,67 @@ fn two_floors_overlap_region_direction_count_2673() {
     let (a_eigs, a_vecs) = strict_symmetric_eigh(&a, Side::Lower).expect("A spectrum");
     let max_eig = a_eigs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let floor = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
-
-    // Site 2: the same directions' generalized Rayleigh quotient `μ = vᵀAv / vᵀBv`.
-    // Evaluated on `A`'s OWN eigenvectors, so "the same direction" is literal and
-    // the two classifications cannot be comparing different bases.
     let mu_floor = f64::EPSILON.sqrt();
-    let mut value_gauge_gradient_resolved = 0usize;
-    let mut value_priced_gradient_projected = 0usize;
-    let mut rows: Vec<String> = Vec::new();
-    for idx in 0..dim {
-        let v = a_vecs.column(idx);
-        let vav = a_eigs[idx];
-        let vbv = v.dot(&b.dot(&v));
-        let mu = if vbv.abs() > 0.0 { vav / vbv } else { f64::NAN };
-        let value_calls_gauge = vav.abs() <= floor;
-        let gradient_calls_resolved = mu.is_finite() && mu.abs() >= mu_floor;
-        if value_calls_gauge && gradient_calls_resolved {
-            value_gauge_gradient_resolved += 1;
-            rows.push(format!(
-                "  direction {idx}: VALUE=gauge (|λ|={:.6e} <= floor {floor:.6e}) but \
-                 GRADIENT=resolved (|μ|={:.6e} >= {mu_floor:.6e})",
-                vav.abs(),
-                mu.abs()
-            ));
-        }
-        if !value_calls_gauge && mu.is_finite() && mu.abs() < mu_floor {
-            value_priced_gradient_projected += 1;
-            rows.push(format!(
-                "  direction {idx}: VALUE=priced (|λ|={:.6e} > floor {floor:.6e}) but \
-                 GRADIENT=projected out (|μ|={:.6e} < {mu_floor:.6e})",
-                vav.abs(),
-                mu.abs()
-            ));
-        }
-    }
+
+    // Site 2 and the crossing count now go through ONE predicate
+    // (`classify_two_floor_overlap_2673`), shared with the synthetic control
+    // below, so the thing this fixture exercises is the same code the control
+    // proves can fire.
+    let report = classify_two_floor_overlap_2673(a_eigs.view(), a_vecs.view(), &b, floor, mu_floor);
     let min_eig = a_eigs.iter().cloned().fold(f64::INFINITY, f64::min);
     println!(
         "[#2673 PENCIL] dim={dim} λ_max={max_eig:.6e} λ_min={min_eig:.6e} \
          floor={floor:.6e} μ_floor={mu_floor:.6e}\n\
-         [#2673 PENCIL] value=gauge & gradient=resolved : {value_gauge_gradient_resolved}\n\
-         [#2673 PENCIL] value=priced & gradient=projected: {value_priced_gradient_projected}\n\
+         [#2673 PENCIL] value=gauge  & gradient=resolved : {}\n\
+         [#2673 PENCIL] value=priced & gradient=projected: {}\n\
          [#2673 PENCIL] directions that change class TOTAL: {}",
-        value_gauge_gradient_resolved + value_priced_gradient_projected
+        report.value_gauge_gradient_resolved,
+        report.value_priced_gradient_projected,
+        report.value_gauge_gradient_resolved + report.value_priced_gradient_projected,
     );
-    for row in rows.iter().take(20) {
+    // THE POPULATION AT RISK, which is what decides whether the count above is
+    // evidence or an artefact. Each counter can only ever fire on its own
+    // population: `value=gauge & gradient=resolved` needs a direction INSIDE the
+    // gauge band `|λ| ≤ floor`, and `value=priced & gradient=projected` needs one
+    // outside it whose `vᵀBv` is large enough to push `μ` under `μ_floor`. A zero
+    // count on an empty population says nothing about whether the two rules agree.
+    println!(
+        "[#2673 RISK] gauge-band population (|λ| ≤ floor)   : {} of {dim}\n\
+         [#2673 RISK] priced population    (|λ| > floor)   : {} of {dim}\n\
+         [#2673 RISK] |λ| range   : [{:.6e}, {:.6e}]  (floor={floor:.6e}, min|λ|/floor={:.6e})\n\
+         [#2673 RISK] vᵀBv range : [{:.6e}, {:.6e}]\n\
+         [#2673 RISK] a gauge direction crosses iff vᵀBv ≤ |λ|/μ_floor ≤ {:.6e}\n\
+         [#2673 RISK] a priced direction crosses iff vᵀBv ≥ |λ|/μ_floor ≥ {:.6e}",
+        report.gauge_band_population,
+        report.priced_population,
+        report.min_abs_lambda,
+        report.max_abs_lambda,
+        report.min_abs_lambda / floor,
+        report.min_vbv,
+        report.max_vbv,
+        floor / mu_floor,
+        report.min_abs_lambda_priced / mu_floor,
+    );
+    for row in report.rows.iter().take(20) {
         println!("[#2673 PENCIL]{row}");
+    }
+    if report.gauge_band_population == 0 {
+        println!(
+            "[#2673 VACUOUS] no direction lies in the gauge band, so \
+             `value=gauge & gradient=resolved` = {} is STRUCTURALLY zero here and is \
+             NOT evidence that the two rules agree",
+            report.value_gauge_gradient_resolved
+        );
+    }
+    if report.max_vbv < report.min_abs_lambda_priced / mu_floor {
+        println!(
+            "[#2673 VACUOUS] max vᵀBv = {:.6e} is below the {:.6e} any priced direction \
+             would need, so `value=priced & gradient=projected` = {} is STRUCTURALLY zero \
+             here and is NOT evidence that the two rules agree",
+            report.max_vbv,
+            report.min_abs_lambda_priced / mu_floor,
+            report.value_priced_gradient_projected
+        );
     }
 
     // The comparison must be WELL POSED, which is what this test owns. The count
@@ -4645,13 +4820,25 @@ fn two_floors_overlap_region_direction_count_2673() {
         floor > 0.0 && floor.is_finite(),
         "#2673: the absolute floor must be a real positive band, got {floor}"
     );
-    // Non-vacuity: this fixture must actually put directions on BOTH sides of the
-    // A floor, or it cannot exercise the overlap region at all.
+    // The two populations must partition the directions, or "population at risk"
+    // is not a well-defined denominator for either counter.
+    assert_eq!(
+        report.gauge_band_population + report.priced_population,
+        dim,
+        "#2673: the gauge band and its complement must partition the {dim} directions"
+    );
+    // Non-vacuity. The previous form of this control was
+    //     min_eig < -floor || a_eigs.iter().any(|v| v.abs() <= floor)
+    // and it passed on its FIRST disjunct on this fixture (λ_min ≈ -1.9e2 against
+    // floor ≈ 3.1e-7). But indefiniteness is not the population either counter
+    // fires on: `value=gauge & gradient=resolved` fires only INSIDE the gauge band,
+    // which the first disjunct never requires to be non-empty. An OR whose cheap
+    // arm is always true licenses neither counter, so the disjunction is replaced
+    // by the statement it was standing in for.
     assert!(
-        min_eig < -floor || a_eigs.iter().any(|v| v.abs() <= floor),
-        "#2673: the fixture must carry at least one non-positive-definite direction \
-         (λ_min={min_eig:.6e}, floor={floor:.6e}), or the two classifications trivially \
-         agree and the count is vacuous"
+        min_eig < -floor,
+        "#2673: the fixture must be decisively indefinite to be the adversarial \
+         population this issue is about (λ_min={min_eig:.6e}, floor={floor:.6e})"
     );
 }
 
