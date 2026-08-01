@@ -543,7 +543,8 @@ fn main() {
     if !cfg_test_pub_offenders.is_empty() {
         sections.push(Section {
             title:
-                "#[cfg(test)] on src/ item (move into a private `#[cfg(test)] mod tests { ... }` / `mod test_support` / `mod tests_*` / `mod *_tests`, or delete the unused item — `#[cfg(test)]` is not a dead_code-lint escape hatch, regardless of visibility)"
+                "#[cfg(test)] on src/ item (move into a private `#[cfg(test)] mod tests { ... }` / `mod test_support` / `mod tests_*` / `mod *_tests`, or delete the unused item — `#[cfg(test)]` is not a dead_code-lint escape hatch, regardless of visibility). \
+                 The accepted names are a PREFIX (`tests_...`) or a SUFFIX (`..._tests`) — `tests` in the MIDDLE does not match, so an issue number tacked on the end (`foo_tests_2333`) is rejected: write `foo_2333_tests`"
                     .to_string(),
             rows: cfg_test_pub_offenders
                 .iter()
