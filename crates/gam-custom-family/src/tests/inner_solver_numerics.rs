@@ -4808,7 +4808,7 @@ pub(crate) fn mismatched_implicit_x_psi_operator_cannot_be_reinterpreted_as_zero
         Ok(_) => panic!("a raw-width implicit operator must not disappear in a reduced frame"),
     };
     assert!(
-        error.contains("implicit x_psi operator shape (5, 4) does not match (5, 3)"),
+        error.to_string().contains("implicit x_psi operator shape (5, 4) does not match (5, 3)"),
         "unexpected error: {error}",
     );
 }

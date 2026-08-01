@@ -61,7 +61,7 @@ pub(crate) fn mxtwx_psi(
     weights: ArrayView1<'_, f64>,
     right: crate::custom_family::CustomFamilyPsiLinearMapRef<'_>,
     mask: Option<&Array1<f64>>,
-) -> Result<Array2<f64>, String> {
+) -> Result<Array2<f64>, gam_problem::CustomFamilyError> {
     match mask {
         Some(m) => {
             let masked = &weights * m;

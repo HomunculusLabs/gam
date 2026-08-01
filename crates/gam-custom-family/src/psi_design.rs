@@ -29,7 +29,7 @@ impl EmbeddedImplicitPsiDerivativeOperator {
         base: Arc<gam_terms::basis::ImplicitDesignPsiDerivative>,
         global_range: Range<usize>,
         total_p: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CustomFamilyError> {
         if base.p_out() != global_range.len() {
             return Err(CustomFamilyError::DimensionMismatch {
                 reason: format!(
@@ -37,8 +37,7 @@ impl EmbeddedImplicitPsiDerivativeOperator {
                     base.p_out(),
                     global_range.len()
                 ),
-            }
-            .into());
+            });
         }
         if global_range.end > total_p {
             return Err(CustomFamilyError::DimensionMismatch {
@@ -46,8 +45,7 @@ impl EmbeddedImplicitPsiDerivativeOperator {
                     "embedded implicit psi operator range {}..{} exceeds total width {total_p}",
                     global_range.start, global_range.end
                 ),
-            }
-            .into());
+            });
         }
         Ok(Self {
             base,
@@ -430,26 +428,26 @@ impl EmbeddedDensePsiDerivativeOperator {
         first_local: Array2<f64>,
         second_diag_local: Array2<f64>,
         second_cross_local: HashMap<usize, Array2<f64>>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CustomFamilyError> {
         let local_p = global_range.len();
         if first_local.ncols() != local_p {
             return Err(CustomFamilyError::DimensionMismatch { reason: format!(
                 "embedded dense psi operator first-derivative width mismatch: got {}, expected {local_p}",
                 first_local.ncols()
-            ) }.into());
+            ) });
         }
         if second_diag_local.ncols() != local_p {
             return Err(CustomFamilyError::DimensionMismatch { reason: format!(
                 "embedded dense psi operator second-diag width mismatch: got {}, expected {local_p}",
                 second_diag_local.ncols()
-            ) }.into());
+            ) });
         }
         for (cross_axis, local) in &second_cross_local {
             if local.ncols() != local_p {
                 return Err(CustomFamilyError::DimensionMismatch { reason: format!(
                     "embedded dense psi operator cross axis {cross_axis} width mismatch: got {}, expected {local_p}",
                     local.ncols()
-                ) }.into());
+                ) });
             }
         }
         Ok(Self {
@@ -728,7 +726,7 @@ impl RowwiseKroneckerPsiDerivativeOperator {
     pub fn new(
         base: Arc<dyn CustomFamilyPsiDerivativeOperator>,
         time_bases: Vec<Arc<Array2<f64>>>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CustomFamilyError> {
         let first = time_bases.first().ok_or_else(|| {
             "rowwise kronecker psi operator needs at least one time basis".to_string()
         })?;
@@ -742,14 +740,14 @@ impl RowwiseKroneckerPsiDerivativeOperator {
                     basis.ncols(),
                     n_per_block,
                     p_time
-                ) }.into());
+                ) });
             }
         }
         if base.n_data() != n_per_block {
             return Err(CustomFamilyError::DimensionMismatch { reason: format!(
                 "rowwise kronecker psi operator base row mismatch: got {}, expected {n_per_block}",
                 base.n_data()
-            ) }.into());
+            ) });
         }
         Ok(Self {
             p_out: base.p_out() * p_time,
@@ -1016,15 +1014,14 @@ impl CustomFamilyPsiDesignAction {
         p: usize,
         row_range: Range<usize>,
         label: &str,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CustomFamilyError> {
         if row_range.end > total_rows {
             return Err(CustomFamilyError::DimensionMismatch {
                 reason: format!(
                     "{label} row range {}..{} exceeds total rows {total_rows}",
                     row_range.start, row_range.end
                 ),
-            }
-            .into());
+            });
         }
         if let Some(op) = deriv.implicit_operator.as_ref()
             && op.n_data() == total_rows
@@ -1043,7 +1040,7 @@ impl CustomFamilyPsiDesignAction {
             p,
             deriv.x_psi.nrows(),
             deriv.x_psi.ncols(),
-        ) }.into())
+        ) })
     }
 
     pub fn is_implicit(&self) -> bool {
@@ -1054,7 +1051,7 @@ impl CustomFamilyPsiDesignAction {
         self.row_range.end - self.row_range.start
     }
 
-    pub fn slice_rows(&self, row_range: Range<usize>) -> Result<Self, String> {
+    pub fn slice_rows(&self, row_range: Range<usize>) -> Result<Self, CustomFamilyError> {
         if row_range.end > self.nrows() {
             return Err(CustomFamilyError::DimensionMismatch {
                 reason: format!(
@@ -1063,8 +1060,7 @@ impl CustomFamilyPsiDesignAction {
                     row_range.end,
                     self.nrows()
                 ),
-            }
-            .into());
+            });
         }
         Ok(Self {
             operator: Arc::clone(&self.operator),
@@ -1105,7 +1101,7 @@ impl CustomFamilyPsiDesignAction {
         (self.row_range.start + rows.start)..(self.row_range.start + rows.end)
     }
 
-    pub fn row_chunk(&self, rows: Range<usize>) -> Result<Array2<f64>, String> {
+    pub fn row_chunk(&self, rows: Range<usize>) -> Result<Array2<f64>, CustomFamilyError> {
         if rows.end > self.nrows() {
             return Err(CustomFamilyError::DimensionMismatch {
                 reason: format!(
@@ -1114,29 +1110,27 @@ impl CustomFamilyPsiDesignAction {
                     rows.end,
                     self.nrows()
                 ),
-            }
-            .into());
+            });
         }
         self.operator
             .row_chunk_first(self.axis, self.absolute_rows(rows))
-            .map_err(|e| e.to_string())
+            .map_err(|e| CustomFamilyError::BasisDecompositionFailed { reason: e.to_string() })
     }
 
-    pub fn row_vector(&self, row: usize) -> Result<Array1<f64>, String> {
+    pub fn row_vector(&self, row: usize) -> Result<Array1<f64>, CustomFamilyError> {
         if row >= self.nrows() {
             return Err(CustomFamilyError::DimensionMismatch {
                 reason: format!(
                     "psi design row {row} exceeds available rows {}",
                     self.nrows()
                 ),
-            }
-            .into());
+            });
         }
         let absolute_row = self.row_range.start + row;
         let mut out = Array1::<f64>::zeros(self.p);
         self.operator
             .row_vector_first_into(self.axis, absolute_row, out.view_mut())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CustomFamilyError::BasisDecompositionFailed { reason: e.to_string() })?;
         Ok(out)
     }
 }
@@ -1163,15 +1157,14 @@ impl CustomFamilyPsiSecondDesignAction {
         p: usize,
         row_range: Range<usize>,
         label: &str,
-    ) -> Result<Option<Self>, String> {
+    ) -> Result<Option<Self>, CustomFamilyError> {
         if row_range.end > total_rows {
             return Err(CustomFamilyError::DimensionMismatch {
                 reason: format!(
                     "{label} row range {}..{} exceeds total rows {total_rows}",
                     row_range.start, row_range.end
                 ),
-            }
-            .into());
+            });
         }
         let Some(op) = deriv_i.implicit_operator.as_ref() else {
             return Ok(None);
@@ -1182,8 +1175,7 @@ impl CustomFamilyPsiSecondDesignAction {
                     "{label} is missing an implicit x_psi_psi operator with shape {}x{}",
                     total_rows, p
                 ),
-            }
-            .into());
+            });
         }
         // The implicit second-design derivative `∂²X/∂ψ_i∂ψ_j` is nonzero when
         // the two ψ axes act on the SAME implicit operator. That is either (a) an
@@ -1263,7 +1255,7 @@ impl CustomFamilyPsiSecondDesignAction {
         (self.row_range.start + rows.start)..(self.row_range.start + rows.end)
     }
 
-    pub fn row_chunk(&self, rows: Range<usize>) -> Result<Array2<f64>, String> {
+    pub fn row_chunk(&self, rows: Range<usize>) -> Result<Array2<f64>, CustomFamilyError> {
         if rows.end > self.nrows() {
             return Err(CustomFamilyError::DimensionMismatch {
                 reason: format!(
@@ -1272,22 +1264,21 @@ impl CustomFamilyPsiSecondDesignAction {
                     rows.end,
                     self.nrows()
                 ),
-            }
-            .into());
+            });
         }
         match self.level {
             CustomFamilyPsiSecondDesignLevel::Diag(axis) => self
                 .operator
                 .row_chunk_second_diag(axis, self.absolute_rows(rows))
-                .map_err(|e| e.to_string()),
+                .map_err(|e| CustomFamilyError::BasisDecompositionFailed { reason: e.to_string() }),
             CustomFamilyPsiSecondDesignLevel::Cross(axis_d, axis_e) => self
                 .operator
                 .row_chunk_second_cross(axis_d, axis_e, self.absolute_rows(rows))
-                .map_err(|e| e.to_string()),
+                .map_err(|e| CustomFamilyError::BasisDecompositionFailed { reason: e.to_string() }),
         }
     }
 
-    pub fn row_vector(&self, row: usize) -> Result<Array1<f64>, String> {
+    pub fn row_vector(&self, row: usize) -> Result<Array1<f64>, CustomFamilyError> {
         self.row_chunk(row..row + 1).map(|m| m.row(0).to_owned())
     }
 }
@@ -1337,15 +1328,14 @@ impl CustomFamilyPsiLinearMapRef<'_> {
         }
     }
 
-    pub fn row_vector(&self, row: usize) -> Result<Array1<f64>, String> {
+    pub fn row_vector(&self, row: usize) -> Result<Array1<f64>, CustomFamilyError> {
         if row >= self.nrows() {
             return Err(CustomFamilyError::DimensionMismatch {
                 reason: format!(
                     "psi linear-map row {row} out of bounds for {} rows",
                     self.nrows()
                 ),
-            }
-            .into());
+            });
         }
         Ok(match self {
             Self::Dense(mat) => mat.row(row).to_owned(),
@@ -1355,7 +1345,7 @@ impl CustomFamilyPsiLinearMapRef<'_> {
         })
     }
 
-    pub fn row_chunk(&self, rows: Range<usize>) -> Result<Array2<f64>, String> {
+    pub fn row_chunk(&self, rows: Range<usize>) -> Result<Array2<f64>, CustomFamilyError> {
         if rows.end > self.nrows() {
             return Err(CustomFamilyError::DimensionMismatch {
                 reason: format!(
@@ -1364,8 +1354,7 @@ impl CustomFamilyPsiLinearMapRef<'_> {
                     rows.end,
                     self.nrows()
                 ),
-            }
-            .into());
+            });
         }
         Ok(match self {
             Self::Dense(mat) => mat.slice(ndarray::s![rows, ..]).to_owned(),
@@ -1412,7 +1401,7 @@ impl PsiDesignMap {
         }
     }
 
-    pub fn row_chunk(&self, rows: Range<usize>) -> Result<Array2<f64>, String> {
+    pub fn row_chunk(&self, rows: Range<usize>) -> Result<Array2<f64>, CustomFamilyError> {
         let ncols = self.ncols();
         match self {
             Self::Zero { .. } => Ok(Array2::<f64>::zeros((rows.end - rows.start, ncols))),
@@ -1422,7 +1411,7 @@ impl PsiDesignMap {
         }
     }
 
-    pub fn row_vector(&self, row: usize) -> Result<Array1<f64>, String> {
+    pub fn row_vector(&self, row: usize) -> Result<Array1<f64>, CustomFamilyError> {
         match self {
             Self::Zero { ncols, .. } => Ok(Array1::<f64>::zeros(*ncols)),
             Self::Dense { matrix } => Ok(matrix.row(row).to_owned()),
@@ -1470,7 +1459,7 @@ pub fn weighted_crossprod_psi_maps(
     left: CustomFamilyPsiLinearMapRef<'_>,
     weights: ArrayView1<'_, f64>,
     right: CustomFamilyPsiLinearMapRef<'_>,
-) -> Result<Array2<f64>, String> {
+) -> Result<Array2<f64>, CustomFamilyError> {
     if left.nrows() != weights.len() || right.nrows() != weights.len() {
         return Err(CustomFamilyError::DimensionMismatch {
             reason: format!(
@@ -1479,8 +1468,7 @@ pub fn weighted_crossprod_psi_maps(
                 weights.len(),
                 right.nrows()
             ),
-        }
-        .into());
+        });
     }
     let p_left = left.ncols();
     let p_right = right.ncols();
@@ -1835,15 +1823,14 @@ pub fn resolve_custom_family_x_psi_map(
     row_range: Range<usize>,
     label: &str,
     policy: &ResourcePolicy,
-) -> Result<PsiDesignMap, String> {
+) -> Result<PsiDesignMap, CustomFamilyError> {
     if row_range.end > n {
         return Err(CustomFamilyError::DimensionMismatch {
             reason: format!(
                 "{label}: row range {}..{} exceeds total rows {n}",
                 row_range.start, row_range.end
             ),
-        }
-        .into());
+        });
     }
 
     // An explicitly supplied operator is authoritative. A width mismatch is a
@@ -1857,8 +1844,7 @@ pub fn resolve_custom_family_x_psi_map(
                     op.n_data(),
                     op.p_out(),
                 ),
-            }
-            .into());
+            });
         }
         return Ok(PsiDesignMap::First {
             action: CustomFamilyPsiDesignAction::from_first_derivative(
@@ -1881,8 +1867,7 @@ pub fn resolve_custom_family_x_psi_map(
                     reason: format!(
                         "{label}: dense x_psi fallback disabled by AnalyticOperatorRequired"
                     ),
-                }
-                .into());
+                });
             }
             DerivativeStorageMode::MaterializeIfSmall | DerivativeStorageMode::DiagnosticsOnly => {
                 let matrix = if row_range.start == 0 && row_range.end == n {
@@ -1913,8 +1898,7 @@ pub fn resolve_custom_family_x_psi_map(
             "{label}: x_psi shape {:?} does not match ({n}, {p})",
             deriv.x_psi.dim()
         ),
-    }
-    .into())
+    })
 }
 
 pub fn resolve_custom_family_x_psi_psi_map(
@@ -1926,15 +1910,14 @@ pub fn resolve_custom_family_x_psi_psi_map(
     row_range: Range<usize>,
     label: &str,
     policy: &ResourcePolicy,
-) -> Result<PsiDesignMap, String> {
+) -> Result<PsiDesignMap, CustomFamilyError> {
     if row_range.end > n {
         return Err(CustomFamilyError::DimensionMismatch {
             reason: format!(
                 "{label}: row range {}..{} exceeds total rows {n}",
                 row_range.start, row_range.end
             ),
-        }
-        .into());
+        });
     }
 
     // Prefer operator action when dimensions match.
@@ -1993,8 +1976,7 @@ pub fn resolve_custom_family_x_psi_psi_map(
                         reason: format!(
                             "{label}: dense x_psi_psi fallback disabled by AnalyticOperatorRequired"
                         ),
-                    }
-                    .into());
+                    });
                 }
                 DerivativeStorageMode::MaterializeIfSmall
                 | DerivativeStorageMode::DiagnosticsOnly => {
@@ -2018,8 +2000,7 @@ pub fn resolve_custom_family_x_psi_psi_map(
                 "{label}: x_psi_psi shape {:?} does not match ({n}, {p})",
                 x_ab.dim()
             ),
-        }
-        .into());
+        });
     }
 
     // No operator, no dense slot: treat as zero.

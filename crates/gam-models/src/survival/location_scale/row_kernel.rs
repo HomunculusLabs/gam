@@ -222,7 +222,11 @@ impl SurvivalJointPsiDirection {
         }
     }
 
-    fn channel_row(&self, channel: usize, row: usize) -> Result<Option<Array1<f64>>, String> {
+    fn channel_row(
+        &self,
+        channel: usize,
+        row: usize,
+    ) -> Result<Option<Array1<f64>>, gam_problem::CustomFamilyError> {
         if let Some(action) = self.channel_action(channel) {
             return action.row_vector(row).map(Some);
         }
@@ -2800,7 +2804,7 @@ pub(crate) fn survival_ls_joint_psi_hessian_directional_derivative_dense(
                         .channel_row(channel, row)
                         .map(|row| row.map(|design_row| (offsets[block], design_row)))
                 })
-                .collect::<Result<_, String>>()?;
+                .collect::<Result<_, gam_problem::CustomFamilyError>>()?;
 
             for a in 0..SLS_ROW_K {
                 if let Some((psi_offset, psi_row)) = psi_rows[a].as_ref() {
