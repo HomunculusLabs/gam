@@ -194,10 +194,34 @@ pub fn panic_or_error_if_large_scale_mode_and_to_dense_called_with_policy(
     let dense_bytes = checked_dense_nbytes(n, p, context)?;
     let limit = policy.max_single_materialization_bytes;
     if dense_bytes > limit {
+        // Report BOTH operands, in exact bytes as well as GiB. The comparison
+        // that produced this refusal is `dense_bytes > limit`, and the old
+        // message printed only `dense_bytes` — the innocent half. A reader who
+        // saw `300x12 (~0.00 GiB); use matrix-free or chunked code` could not
+        // tell whether a real ceiling had been reached or the ceiling was
+        // itself ~0, which are opposite problems with opposite fixes (gam#2684).
+        //
+        // The GiB rendering is kept because it is what makes a genuinely large
+        // refusal readable, but it is no longer alone: at 28,800 bytes it
+        // rounds to `0.00 GiB` and hides the very number that would have made
+        // the refusal obviously wrong.
+        //
+        // A `limit` at or near zero is not necessarily a defect here. The
+        // governor deliberately fails closed to a zero budget when an active
+        // cgroup controller cannot be parsed exactly — "it never silently
+        // inherits host capacity" — so a zero ceiling is a correct, typed
+        // outcome of an unreadable environment, and the fix for it lives at the
+        // probe, not at this call site. Naming the limit is what lets the next
+        // reader tell those cases apart instead of guessing.
         let gib = dense_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let limit_gib = limit as f64 / (1024.0 * 1024.0 * 1024.0);
         return Err(MatrixError::DensificationRefused {
             reason: format!(
-                "{context}: refusing to densify operator-backed design {n}x{p} (~{gib:.2} GiB); use matrix-free or chunked code"
+                "{context}: refusing to densify operator-backed design {n}x{p} \
+                 (~{gib:.2} GiB, {dense_bytes} bytes) because it exceeds the single-materialization \
+                 cap (~{limit_gib:.2} GiB, {limit} bytes); use matrix-free or chunked code. \
+                 A cap at or near zero means the process could not size a memory budget — \
+                 check the governor's detected availability rather than this allocation"
             ),
         }
         .into());
@@ -7592,5 +7616,83 @@ mod tests {
         let local = Array2::<f64>::zeros((0, 0));
         let out = EmbeddedColumnBlock::new(&local, 2..5, 7).materialize();
         assert_eq!(out.dim(), (0, 7));
+    }
+
+    /// gam#2684: a densification refusal must name the cap it compared against.
+    ///
+    /// The refusal is `dense_bytes > limit`, and the message used to print only
+    /// `dense_bytes`. On a 300x12 design that reads
+    /// `300x12 (~0.00 GiB); use matrix-free or chunked code` — a size that is
+    /// obviously innocent (28,800 bytes) next to a limit that is not shown at
+    /// all. The reader cannot tell a real ceiling from a ceiling of ~0, and
+    /// those are opposite problems: the first is a genuine size refusal, the
+    /// second means the process could not size a budget and the fix lives at
+    /// the memory probe.
+    ///
+    /// This pins the operands rather than the prose, so a future reword is free
+    /// but dropping either number is not.
+    #[test]
+    fn densification_refusal_names_both_operands_not_just_the_size() {
+        // A deliberately near-zero cap, which is exactly the state a cgroup
+        // probe failure produces (the governor fails closed to a zero budget by
+        // design and "never silently inherits host capacity").
+        let starved = ResourcePolicy {
+            max_single_materialization_bytes: 0,
+            ..ResourcePolicy::default_library()
+        };
+        let reason = super::panic_or_error_if_large_scale_mode_and_to_dense_called_with_policy(
+            "unit_test", 300, 12, &starved,
+        )
+        .expect_err("a zero cap must refuse a 28,800-byte design");
+
+        // The exact byte counts of BOTH operands, so neither can be hidden by
+        // GiB rounding — 28,800 bytes renders as `0.00 GiB`, which is what made
+        // the original message unreadable.
+        assert!(
+            reason.contains("28800"),
+            "refusal must state the exact size in bytes: {reason}"
+        );
+        assert!(
+            reason.contains("cap"),
+            "refusal must name the cap it compared against: {reason}"
+        );
+
+        // Falsification guard for the assertions above: they must be capable of
+        // failing. A cap comfortably above the request must NOT refuse at all,
+        // so a message that always contained these substrings — or a predicate
+        // that always refused — would be caught here.
+        let roomy = ResourcePolicy {
+            max_single_materialization_bytes: 1 << 30,
+            ..ResourcePolicy::default_library()
+        };
+        super::panic_or_error_if_large_scale_mode_and_to_dense_called_with_policy(
+            "unit_test", 300, 12, &roomy,
+        )
+        .expect("a 28,800-byte design must be admitted under a 1 GiB cap");
+
+        // And the boundary is the comparison itself, not a rounded proxy: a cap
+        // one byte below the request refuses, exactly at the request admits.
+        // Without this, a limit compared in GiB would pass every assertion above
+        // while still refusing 28,800 bytes against a 1 GiB ceiling.
+        super::panic_or_error_if_large_scale_mode_and_to_dense_called_with_policy(
+            "unit_test",
+            300,
+            12,
+            &ResourcePolicy {
+                max_single_materialization_bytes: 28_799,
+                ..ResourcePolicy::default_library()
+            },
+        )
+        .expect_err("one byte below the request must refuse");
+        super::panic_or_error_if_large_scale_mode_and_to_dense_called_with_policy(
+            "unit_test",
+            300,
+            12,
+            &ResourcePolicy {
+                max_single_materialization_bytes: 28_800,
+                ..ResourcePolicy::default_library()
+            },
+        )
+        .expect("exactly the request must be admitted");
     }
 }
