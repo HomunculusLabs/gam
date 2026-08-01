@@ -129,25 +129,34 @@ def panel_planted(ax, ledger_dir):
     x = np.arange(len(groups))
     any_row = False
     for i, arm in enumerate(ARMS):
-        vals, free = [], []
+        # Three states, kept distinct: a number, a REFUSAL (the fit ran and
+        # declined), and NOT RUN (no ledger). Rendering the third as the second
+        # would be a claim the data does not support.
+        vals, labels = [], []
         for structure in groups:
             path = ledger_dir / f"planted_{structure}.json"
             row = None
             if path.exists():
-                rows = {r["arm"]: r for r in json.loads(path.read_text())}
-                row = rows.get(arm)
-            vals.append(float(row["structure_recovery_r2"])
-                        if row and row["structure_recovery_r2"] is not None
-                        and np.isfinite(row["structure_recovery_r2"]) else np.nan)
-            free.append(float(row["fit_free_r2"]) if row else np.nan)
+                row = {r["arm"]: r for r in json.loads(path.read_text())}.get(arm)
+            if row is None:
+                vals.append(np.nan)
+                labels.append("not run")
+            elif row["structure_recovery_r2"] is None or not np.isfinite(
+                    row["structure_recovery_r2"]):
+                vals.append(np.nan)
+                labels.append("REFUSED")
+            else:
+                vals.append(float(row["structure_recovery_r2"]))
+                labels.append(f"{vals[-1]:.3f}")
         any_row = any_row or np.any(np.isfinite(vals))
         off = (i - 1) * width
         bars = ax.bar(x + off, np.nan_to_num(vals), width=width, color=ARM_COLOR[arm],
                       label=arm, zorder=3)
-        for b, v in zip(bars, vals):
+        for b, v, lab in zip(bars, vals, labels):
             ax.text(b.get_x() + b.get_width() / 2, (0 if not np.isfinite(v) else v) + 0.02,
-                    "REFUSED" if not np.isfinite(v) else f"{v:.3f}",
-                    ha="center", fontsize=7.5, color=INK, rotation=90 if not np.isfinite(v) else 0)
+                    lab, ha="center", fontsize=7.5,
+                    color=REFUSED if not np.isfinite(v) else INK,
+                    rotation=90 if not np.isfinite(v) else 0)
     style(ax)
     ax.set_xticks(x)
     ax.set_xticklabels(groups, fontsize=9.5, color=INK)
@@ -167,7 +176,7 @@ def build(ledger_dir: Path, out_path: Path, model: str, layer: int, rows: str) -
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(2, 2, figsize=(12.6, 9.6))
+    fig, axes = plt.subplots(2, 2, figsize=(12.6, 10.0))
     fig.patch.set_facecolor("white")
     panel_scan(axes[0][0], "weekday",
                "(a) weekday — the day-of-week CIRCLE", ledger_dir)
@@ -177,10 +186,10 @@ def build(ledger_dir: Path, out_path: Path, model: str, layer: int, rows: str) -
     panel_planted(axes[1][1], ledger_dir)
     fig.suptitle(
         "gam#2234 — the chart is in the cloud; the fitted chart does not find it\n"
-        f"{model}, block {layer}, {rows}, K=1, d_atom=1, softmax assignment, "
-        "per-head-centered chart",
-        fontsize=13, color=INK, y=0.985)
-    fig.tight_layout(rect=(0, 0, 1, 0.935))
+        f"{model}, block {layer}, {rows}\n"
+        "K=1, d_atom=1, softmax assignment, per-head-centered chart",
+        fontsize=12.5, color=INK, y=0.99)
+    fig.tight_layout(rect=(0, 0, 1, 0.915))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=170, facecolor="white")
     print(f"wrote {out_path}")
