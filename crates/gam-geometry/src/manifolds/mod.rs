@@ -16,8 +16,8 @@ pub mod circle;
 #[cfg(test)]
 mod conformance_tests;
 pub mod constant_curvature;
-/// PROBE (#2687): resolution of the shipped distance/κ-jet near the antipodal
-/// fold, measured against a cancellation-free closed form.
+/// gam#2687: what the κ box's half-margin to the antipodal fold buys, measured
+/// against a cancellation-free closed form rather than asserted.
 #[cfg(test)]
 mod constant_curvature_antipodal_resolution_tests;
 /// Independent-oracle checks for the κ-stereographic family, which carries a
