@@ -11,10 +11,39 @@
 //! geometry — no centers/masses/band/per-cell affine projection), so it is both
 //! exceptionally cheap and an exact interpolant. Demanding measure-jet's
 //! empirical-geometry estimator stay within 2x Duchon's analytic penalty (or
-//! 1.10x its exact-interpolant accuracy) is ill-posed by design; measure-jet
-//! BEATS Matern on both axes (≈4x faster, lower RMSE). The 2.0x-vs-Matern speed
-//! bound still guards against the prior 12x regression returning; the
-//! match-or-beat-Matern RMSE bound (small CI flake guard) guards conditioning.
+//! 1.10x its exact-interpolant accuracy) is ill-posed by design.
+//!
+//! ## This header used to claim measure-jet BEATS Matern on accuracy. It does not (#2761).
+//!
+//! Measured on THIS fixture at both ends of the interval #2697 suspected of
+//! carrying a regression, with each basis fitted and scored INDEPENDENTLY so that
+//! one basis refusing cannot abort the arm and suppress the others:
+//!
+//! ```text
+//!                    mjs         matern      duchon
+//!   7b0776e15^      0.155576     REFUSED    0.010521
+//!   665dce521       0.155584    0.011639    0.010521
+//! ```
+//!
+//! At `665dce521` mjs is 13.4x Matern's held-out RMSE and 14.8x Duchon's, so the
+//! `mjs_rmse <= 1.10 * matern_rmse` assertion below misses by more than an order of
+//! magnitude. At `7b0776e15^` Matern refuses (outer non-convergence), so no
+//! mjs/matern ratio exists at that commit and the assertion cannot be evaluated
+//! there at all.
+//!
+//! It is NOT failing because of a regression. mjs agrees across the interval to
+//! 5.1e-5 relative and duchon to five significant figures, so nothing about
+//! measure-jet's accuracy on this fixture changed and `7b0776e15` is exonerated.
+//! Duchon fitting at BOTH ends is the control proving the fixture is fittable at
+//! the earlier commit, so the mjs number there is not an artifact of a broken tree.
+//! What remains is a basis-design question about measure-jet on a 1-D curve
+//! embedded in 3-D at matched `p`; it is tracked in #2761 and must not be closed by
+//! widening the 1.10x bound.
+//!
+//! The SPEED half of the old claim is untouched by that measurement -- the probe
+//! scored accuracy only -- so the 2.0x-vs-Matern speed bound is neither confirmed
+//! nor challenged here, and still guards against the prior 12x regression
+//! returning.
 
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
