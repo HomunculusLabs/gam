@@ -3072,11 +3072,15 @@ fn every_registered_d2_topology_fits_at_least_once_2604() {
         fitted.len(),
         specs.len()
     );
-    // MOBIUS is not registered by `topology_candidates_for_dim` at all — it is
-    // built by `discover_primary_atom_topologies`, off a >=3-PC projection, via
-    // `mobius_double_cover_coords_from_projection`. So the loop above cannot
-    // reach it, and a "d=2 candidates all fit" claim would silently exclude the
-    // one non-orientable band. Fit it the way that builder does.
+    // MOBIUS is registered by `topology_candidates_for_dim` since #2280 (this
+    // test's 3-column seed clears the `d_seed >= 3` double-cover gate), so the
+    // loop above DOES reach it. It used to be built only by
+    // `discover_primary_atom_topologies`, which is why the explicit fit below
+    // exists; that fit is kept deliberately. The menu's own Möbius chart comes
+    // from whatever seed the caller passes, so it proves the candidate fits on a
+    // GENERIC seed, while this block proves it fits on a band that actually
+    // closes with a half-twist — the structure the double-cover routine is for.
+    // The two are different claims and neither implies the other.
     let n_pcs = 3usize;
     let proj = Array2::<f64>::from_shape_fn((n, n_pcs), |(row, axis)| {
         // A band that closes with a half-twist: the angular coordinate runs

@@ -3048,6 +3048,56 @@ fn topology_candidates_for_dim(
                     sphere_coords_ambient(),
                 )?);
             }
+            // #2280 — the Möbius band. It belongs here for a reason that is not
+            // "one more shape": ORIENTATION HOLONOMY is the atlas's single most
+            // reliable primitive — the composed transition Jacobian's determinant
+            // sign around a nerve cycle is local, needs no good-cover certificate,
+            // and separates Möbius from cylinder where every homotopy invariant
+            // (χ, b₁) reports the identical answer. So the birth atlas MEASURES a
+            // Möbius band confidently, `observed_kind_to_auto_topology` names it,
+            // and until now this menu realized no candidate for it: the reorder
+            // fell through to its "menu realizes no twisted candidate" branch and
+            // the strongest measurement the charts can make was DISCARDED.
+            //
+            // The band is also not reachable as a coarsening of anything already
+            // here. `KleinBottle` and `ProjectivePlane` are closed; the Möbius band
+            // has a boundary, and its deck-invariant basis is what carries
+            // width-odd structure onto half-period angular factors — the
+            // non-orientable signature no other candidate in this menu can express.
+            //
+            // `discover_primary_atom_topologies` has raced exactly this candidate
+            // all along (same basis kind, same resolution, same double-cover
+            // chart). The two menus were simply out of step, so a topology the
+            // PRIMARY race could name was unnameable at a BIRTH. Gated on
+            // `d_seed >= 3` like the sphere and `RP²` above, because the double
+            // cover reads a radial/transverse half-angle vector out of three
+            // independent seed directions, and fail-open on the chart because a
+            // seed that cannot carry that vector must leave the rest of the menu
+            // untouched rather than fail the whole race.
+            if d_seed >= 3 {
+                let all_rows: Vec<usize> = (0..n).collect();
+                if let Ok(mobius_coords) =
+                    crate::manifold::mobius_double_cover_coords_from_projection(coords, &all_rows)
+                {
+                    specs.push(TopologyCandidateSpec::new(
+                        AutoTopologyKind::Mobius,
+                        SaeAtomGeometryPlan::new(
+                            SaeAtomBasisKind::Mobius,
+                            2,
+                            SaeBasisResolution::MobiusHarmonics {
+                                circle_order: 3,
+                                width_degree: 2,
+                            },
+                            SaeReferenceMetricPlan::MobiusQuotient,
+                        )?,
+                        LatentManifold::Product(vec![
+                            LatentManifold::Circle { period: 2.0 },
+                            LatentManifold::Interval { lo: -1.0, hi: 1.0 },
+                        ]),
+                        mobius_coords,
+                    )?);
+                }
+            }
             specs.push(TopologyCandidateSpec::new(
                 AutoTopologyKind::Euclidean,
                 SaeAtomGeometryPlan::new(
@@ -4228,7 +4278,9 @@ fn race_birth_topology(
     // flexible flat/patch fit override that true topology. Only a flat verdict — the
     // least-bad chart for a folded plane — can be a fold worth unrolling.
     let template_is_sheet = matches!(
-        template_winner.as_ref().map(|(fit, _)| fit.geometry.kind()),
+        template_winner
+            .as_ref()
+            .map(|outcome| outcome.fit.geometry.kind()),
         Some(SaeAtomBasisKind::EuclideanPatch)
     );
     let intrinsic_winner = if template_is_sheet {
@@ -4239,18 +4291,18 @@ fn race_birth_topology(
     // Lower TK/REML cost wins (issue #396 sign convention); the template keeps
     // ties, so PCA stays default and intrinsic only supplants it by evidence.
     let winner = match (template_winner, intrinsic_winner) {
-        (Some((t_fit, t_score)), Some((i_fit, i_score))) => {
-            if i_score < t_score {
-                Some(i_fit)
+        (Some(template), Some(intrinsic)) => {
+            if intrinsic.tk_score < template.tk_score {
+                Some(intrinsic)
             } else {
-                Some(t_fit)
+                Some(template)
             }
         }
-        (Some((t_fit, _)), None) => Some(t_fit),
-        (None, Some((i_fit, _))) => Some(i_fit),
+        (Some(template), None) => Some(template),
+        (None, Some(intrinsic)) => Some(intrinsic),
         (None, None) => None,
     };
-    Ok(winner)
+    Ok(winner.map(|outcome| outcome.fit))
 }
 
 /// The PCA/template-coordinate topology race: the historical born-atom path,
@@ -4262,7 +4314,7 @@ fn race_template_coords(
     weights: ArrayView1<'_, f64>,
     d_k: usize,
     atlas: Option<&AtlasTopologyReadout>,
-) -> Result<Option<(TopologyRaceFit, f64)>, String> {
+) -> Result<Option<TopologyRaceOutcome>, String> {
     let base_specs = topology_candidates_for_dim(coords, d_k)?;
     if base_specs.is_empty() {
         return Ok(None);
@@ -4303,7 +4355,7 @@ fn race_intrinsic_coords(
     weights: ArrayView1<'_, f64>,
     d_k: usize,
     atlas: Option<&AtlasTopologyReadout>,
-) -> Result<Option<(TopologyRaceFit, f64)>, String> {
+) -> Result<Option<TopologyRaceOutcome>, String> {
     // Folds are a d ≥ 2 story: a 1-D manifold has no ambient fold a geodesic
     // embedding could unroll that a line/circle basis does not already capture,
     // and the geodesic 1-D embedding of a closed loop is degenerate. Restricting
@@ -4343,12 +4395,36 @@ fn race_intrinsic_coords(
 
 /// Race one realized candidate spec set against the birth target and return the
 /// evidence-winning fit. Shared by the base and the F1 radial-promoted races.
+/// #2280 — the topology race's full verdict, not just its winner.
+///
+/// The race has always known how it ranked every candidate; it used to discard
+/// that and return the winner alone. Keeping the losers is what makes the atlas
+/// prior MEASURABLE: "the charts measured a Möbius band and the evidence put it
+/// second by 0.004 TK" is a calibration datum, while "the race picked a cylinder"
+/// is not. The ranking is carried as typed [`AutoTopologyKind`]s, best (lowest
+/// `tk_score`) first, so no consumer has to re-parse a display string.
+struct TopologyRaceOutcome {
+    /// Every candidate that produced selectable evidence, best first.
+    ranking: Vec<(AutoTopologyKind, f64)>,
+    fit: TopologyRaceFit,
+    tk_score: f64,
+}
+
+impl TopologyRaceOutcome {
+    /// The topology the evidence ranked first. Present whenever the outcome is,
+    /// because an empty ranking is an error in [`race_spec_set`] rather than a
+    /// winner-less success.
+    fn winner_kind(&self) -> Option<AutoTopologyKind> {
+        self.ranking.first().map(|(kind, _)| *kind)
+    }
+}
+
 fn race_spec_set(
     specs: Vec<TopologyCandidateSpec>,
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
     atlas: Option<&AtlasTopologyReadout>,
-) -> Result<Option<(TopologyRaceFit, f64)>, String> {
+) -> Result<Option<TopologyRaceOutcome>, String> {
     if specs.is_empty() {
         return Ok(None);
     }
@@ -4431,7 +4507,83 @@ fn race_spec_set(
     let winner = ranked
         .winner()
         .ok_or_else(|| "race_birth_topology: empty ranking".to_string())?;
-    Ok(Some((winner.fit_handle.clone(), winner.tk_score)))
+    // Resolve each ranked entry's name back to its TYPED kind through
+    // `AutoTopologyKind::parse` — the selector's own inverse of `display_name`,
+    // so the ranking is carried as kinds and never compared as text. A name the
+    // selector emits that its own parser cannot read is a contract break in
+    // gam-solve, not something to paper over with a string match, so it is
+    // returned as an error rather than silently dropped from the ranking.
+    let mut ranking: Vec<(AutoTopologyKind, f64)> = Vec::with_capacity(ranked.ranked.len());
+    for entry in &ranked.ranked {
+        let kind = AutoTopologyKind::parse(&entry.topology_name).map_err(|error| {
+            format!(
+                "race_birth_topology: the selector ranked a topology named {:?} that \
+                 AutoTopologyKind::parse cannot resolve: {error}",
+                entry.topology_name
+            )
+        })?;
+        ranking.push((kind, entry.tk_score));
+    }
+    log_atlas_evidence_agreement(atlas, &ranking);
+    Ok(Some(TopologyRaceOutcome {
+        ranking,
+        fit: winner.fit_handle.clone(),
+        tk_score: winner.tk_score,
+    }))
+}
+
+/// #2280 — log the atlas's MEASURED manifold against the REML race's INDEPENDENT
+/// verdict, per race.
+///
+/// This is the calibration channel the atlas-consumer design owes: the prior may
+/// only reorder, so the only way to learn whether it is worth its cost is to
+/// record, every time both speak, whether they agreed and by what evidence margin
+/// the race preferred its own answer. It is pure observation — it reads the race's
+/// finished ranking and changes nothing.
+///
+/// The margin is quoted in the race's own TK units and is the gap between the
+/// winner and the atlas-named candidate, so `0.0` means the atlas named the
+/// winner and a large value means the evidence positively rejected what the
+/// charts measured. A disagreement is logged at `info` precisely because it is
+/// the interesting case: it is either a defect in the readout or a topology the
+/// evidence cannot see.
+fn log_atlas_evidence_agreement(
+    atlas: Option<&AtlasTopologyReadout>,
+    ranking: &[(AutoTopologyKind, f64)],
+) {
+    let Some(atlas) = atlas else {
+        return;
+    };
+    let Some(measured) = atlas.observed_manifold().and_then(observed_kind_to_auto_topology) else {
+        return;
+    };
+    let Some((winner_kind, winner_score)) = ranking.first().copied() else {
+        return;
+    };
+    if measured == winner_kind {
+        log::debug!(
+            "#2280 atlas/evidence AGREE: the charts measured {measured:?} and the REML race \
+             independently ranked it first (tk {winner_score:.6})"
+        );
+        return;
+    }
+    match ranking
+        .iter()
+        .find(|(kind, _)| *kind == measured)
+        .map(|(_, score)| *score)
+    {
+        Some(measured_score) => log::info!(
+            "#2280 atlas/evidence DISAGREE: the charts measured {measured:?} (tk \
+             {measured_score:.6}) but the REML race ranked {winner_kind:?} first (tk \
+             {winner_score:.6}); evidence margin {:.6} against the measured manifold",
+            measured_score - winner_score
+        ),
+        None => log::info!(
+            "#2280 atlas/evidence DISAGREE: the charts measured {measured:?}, which this race \
+             did not realize as a candidate at all; the race ranked {winner_kind:?} first (tk \
+             {winner_score:.6})"
+        ),
+    }
 }
 
 /// A primary-atom topology choice discovered by the fit-entry evidence race
@@ -4827,15 +4979,15 @@ pub fn discover_primary_atom_topologies(
             // flag; that split allowed a Duchon kind verdict to survive while
             // its intrinsic chart was discarded and rebuilt from PCA.
             let fit = match (pca_winner, intrinsic_challenger) {
-                (Some((p_fit, p_score)), Some((i_fit, i_score))) => {
-                    if i_score < p_score {
-                        i_fit
+                (Some(pca), Some(intrinsic)) => {
+                    if intrinsic.tk_score < pca.tk_score {
+                        intrinsic.fit
                     } else {
-                        p_fit
+                        pca.fit
                     }
                 }
-                (Some((p_fit, _)), None) => p_fit,
-                (None, Some((i_fit, _))) => i_fit,
+                (Some(pca), None) => pca.fit,
+                (None, Some(intrinsic)) => intrinsic.fit,
                 (None, None) => {
                     return Err(format!(
                         "discover_primary_atom_topologies: evidence race returned no winner for auto atom {atom_idx}"
@@ -7403,10 +7555,10 @@ mod tests_atlas_prior_2280 {
         // only ever changes an EXACT tie, so the primed cost never exceeds the
         // baseline cost.
         assert!(
-            primed.1 <= baseline.1 + 1e-9,
+            primed.tk_score <= baseline.tk_score + 1e-9,
             "primed race cost {} must be unchanged-or-better vs baseline {} (REML-arbiter preserved)",
-            primed.1,
-            baseline.1
+            primed.tk_score,
+            baseline.tk_score
         );
     }
 
@@ -7476,10 +7628,232 @@ mod tests_atlas_prior_2280 {
         .unwrap()
         .unwrap();
         assert!(
-            primed.1 <= unprimed.1 + 1e-9,
+            primed.tk_score <= unprimed.tk_score + 1e-9,
             "primed race cost {} must be unchanged-or-better vs unprimed {}",
-            primed.1,
-            unprimed.1
+            primed.tk_score,
+            unprimed.tk_score
+        );
+    }
+
+    /// Standardized leading principal projections — the GLOBAL-LINEAR SEED the
+    /// production template race runs on, reproduced here so the menu is measured
+    /// against the atlas on the coordinates it actually gets in service. Each
+    /// retained component is divided by its own standard deviation so the flat
+    /// patch sees `O(1)` coordinates, exactly as `discover_primary_atom_topologies`
+    /// standardizes its cluster projections.
+    fn global_linear_seed(target: ArrayView2<'_, f64>, d: usize) -> Array2<f64> {
+        let (n, p) = target.dim();
+        let mut mean = vec![0.0_f64; p];
+        for row in 0..n {
+            for col in 0..p {
+                mean[col] += target[[row, col]];
+            }
+        }
+        for value in &mut mean {
+            *value /= n as f64;
+        }
+        let centered = Array2::<f64>::from_shape_fn((n, p), |(r, c)| target[[r, c]] - mean[c]);
+        let (_u, _s, vt) = centered.svd(false, true).expect("planted fixture SVD must succeed");
+        let vt = vt.expect("planted fixture SVD must return a right frame");
+        let keep = d.min(vt.nrows());
+        let mut coords = Array2::<f64>::zeros((n, keep));
+        for row in 0..n {
+            for pc in 0..keep {
+                let mut acc = 0.0_f64;
+                for col in 0..p {
+                    acc += centered[[row, col]] * vt[[pc, col]];
+                }
+                coords[[row, pc]] = acc;
+            }
+        }
+        for pc in 0..keep {
+            let column = coords.column(pc);
+            let mean_pc = column.sum() / n as f64;
+            let var = column.iter().map(|v| (v - mean_pc).powi(2)).sum::<f64>() / n as f64;
+            let sd = var.sqrt();
+            if sd > 0.0 && sd.is_finite() {
+                for row in 0..n {
+                    coords[[row, pc]] /= sd;
+                }
+            }
+        }
+        coords
+    }
+
+    /// Does a race verdict NAME the planted truth? `ConstantCurvature` counts as
+    /// naming `Euclidean` because the #944 fusion deliberately subsumes the flat
+    /// patch into the fitted-κ candidate (`curvature_fusion_subsumes`), so a flat
+    /// truth can only ever surface under the fused name — treating them as
+    /// different would score the race wrong for a reason that is not about
+    /// topology.
+    fn names_truth(verdict: AutoTopologyKind, truth: AutoTopologyKind) -> bool {
+        if verdict == truth {
+            return true;
+        }
+        truth == AutoTopologyKind::Euclidean && verdict == AutoTopologyKind::ConstantCurvature
+    }
+
+    /// #2280 — the atlas's strongest measurement now reaches a candidate that can
+    /// REALIZE it, instead of falling through to a coarser one.
+    ///
+    /// Orientation holonomy separates the Möbius band from the cylinder where no
+    /// homotopy invariant can, so a measured Möbius band is the most confident
+    /// verdict the charts produce. Before this, the `d = 2` birth menu registered
+    /// no Möbius candidate, so `atlas_reorder_specs` took its "menu realizes no
+    /// twisted candidate" branch and the measurement was discarded — the race
+    /// could not fit the manifold the atlas had just named. This pins both halves:
+    /// the candidate is registered, and the measured band floats it to the head.
+    #[test]
+    fn measured_mobius_band_reaches_a_mobius_candidate_2280() {
+        let (target, _) = mobius_with_coords(60, 5);
+        // A 3-column seed: the double cover reads a radial/transverse half-angle
+        // vector, so it needs three independent directions — the same gate the
+        // sphere and RP² candidates carry.
+        let coords = global_linear_seed(target.view(), 3);
+
+        let menu = topology_candidates_for_dim(coords.view(), 2).expect("d=2 menu must build");
+        let kinds: Vec<_> = menu.iter().map(|spec| spec.kind).collect();
+        assert!(
+            kinds.contains(&AutoTopologyKind::Mobius),
+            "the d=2 birth menu must register a Möbius candidate off a 3-column seed; got {kinds:?}"
+        );
+
+        let atlas = atlas_prior_for_coords(target.view(), 2)
+            .expect("the Möbius residual must build an atlas");
+        assert!(
+            atlas.observes_non_orientable(),
+            "the Möbius residual must be measured non-orientable: {atlas}"
+        );
+
+        let primed = atlas_reorder_specs(
+            topology_candidates_for_dim(coords.view(), 2).expect("d=2 menu must build"),
+            Some(&atlas),
+        );
+        let primed_kinds: Vec<_> = primed.iter().map(|spec| spec.kind).collect();
+        assert!(
+            kind_is_non_orientable(primed_kinds[0]),
+            "the measured non-orientable band must lead the menu; got {primed_kinds:?}"
+        );
+        // The candidate set is preserved — the prior reorders and never drops.
+        let mut before = kinds;
+        let mut after = primed_kinds;
+        before.sort_by_key(|kind| format!("{kind:?}"));
+        after.sort_by_key(|kind| format!("{kind:?}"));
+        assert_eq!(before, after, "the reorder must preserve the candidate set");
+    }
+
+    /// #2280 — CALIBRATION: the atlas's MEASURED manifold against the fixed menu's
+    /// own REML verdict, on a planted zoo whose truth is known by construction.
+    ///
+    /// The epic's mandate is that local charts + transition holonomy REPLACE the
+    /// global-linear seed and the fixed topology menu. Replacing the menu is only
+    /// defensible if the menu carries no discriminating information the atlas
+    /// lacks — and that is a measurement, not an opinion. This is that
+    /// measurement, and its three outcomes are pre-registered so the answer cannot
+    /// be chosen after the fact:
+    ///
+    /// 1. **The menu is redundant** — the atlas names the truth everywhere the
+    ///    menu's race does. The candidate set can then be DERIVED from the charts
+    ///    and the literal menu deleted.
+    /// 2. **The atlas is strictly better** — it names truths the race misses. The
+    ///    prior should then be promoted from a tie-break to a real proposer.
+    /// 3. **The menu is load-bearing** — there is a planted manifold the race
+    ///    names and the atlas does not. Deleting the menu would then be a
+    ///    REGRESSION, and this test is what says so.
+    ///
+    /// The gate asserted is outcome 3's negation: no fixture may exist where the
+    /// global-linear seed plus the fixed menu names the planted truth while the
+    /// atlas does not. A failure here is a real finding about the atlas, not a
+    /// flaky bar — it says the charts cannot yet carry the race alone.
+    #[test]
+    fn atlas_versus_fixed_menu_on_the_planted_zoo_2280() {
+        use crate::manifold::tests_topology_fixtures::{
+            embedded_plane, open_arc, sphere, swiss_roll, torus,
+        };
+
+        // (name, planted residual, intrinsic d, the manifold it IS by construction)
+        let zoo: Vec<(&str, Array2<f64>, usize, AutoTopologyKind)> = vec![
+            ("circle", circle(400, 2.0), 1, AutoTopologyKind::Circle),
+            ("trefoil", trefoil_knot(600, 1.0), 1, AutoTopologyKind::Circle),
+            ("open_arc", open_arc(400, 2.0), 1, AutoTopologyKind::Euclidean),
+            (
+                "plane",
+                embedded_plane(20, 20),
+                2,
+                AutoTopologyKind::Euclidean,
+            ),
+            ("swiss_roll", swiss_roll(30, 12), 2, AutoTopologyKind::Euclidean),
+            (
+                "cylinder",
+                cylinder_strip(60, 5),
+                2,
+                AutoTopologyKind::Cylinder,
+            ),
+            ("mobius", mobius_strip(60, 5), 2, AutoTopologyKind::Mobius),
+            ("torus", torus(30, 20, 3.0, 1.0), 2, AutoTopologyKind::Torus),
+            ("sphere", sphere(500), 2, AutoTopologyKind::Sphere),
+        ];
+
+        let mut menu_only_wins: Vec<String> = Vec::new();
+        let mut atlas_only_wins: Vec<String> = Vec::new();
+        let mut both = 0usize;
+        let mut neither = 0usize;
+        let mut table = String::from(
+            "\n#2280 atlas-vs-menu calibration on the planted zoo\n\
+             fixture      d  truth        atlas          menu-race\n",
+        );
+
+        for (name, target, d, truth) in &zoo {
+            let weights = Array1::<f64>::ones(target.nrows());
+            let coords = global_linear_seed(target.view(), *d);
+
+            // What the CHARTS measure, with no menu and no seed.
+            let atlas = atlas_prior_for_coords(target.view(), *d);
+            let atlas_kind = atlas
+                .as_ref()
+                .and_then(|readout| readout.observed_manifold())
+                .and_then(observed_kind_to_auto_topology);
+
+            // What the fixed menu's REML race picks off the global-linear seed,
+            // UNPRIMED — the incumbent this epic proposes to delete.
+            let menu_kind = race_spec_set(
+                topology_candidates_for_dim(coords.view(), *d).expect("menu must build"),
+                target.view(),
+                weights.view(),
+                None,
+            )
+            .expect("the planted zoo must not error the race")
+            .and_then(|outcome| outcome.winner_kind());
+
+            let atlas_right = atlas_kind.is_some_and(|kind| names_truth(kind, *truth));
+            let menu_right = menu_kind.is_some_and(|kind| names_truth(kind, *truth));
+            table.push_str(&format!(
+                "{name:<12} {d}  {truth:<12?} {:<14} {:<14}\n",
+                atlas_kind.map_or("REFUSED".to_string(), |k| format!("{k:?}")),
+                menu_kind.map_or("REFUSED".to_string(), |k| format!("{k:?}")),
+            ));
+            match (atlas_right, menu_right) {
+                (true, true) => both += 1,
+                (true, false) => atlas_only_wins.push((*name).to_string()),
+                (false, true) => menu_only_wins.push((*name).to_string()),
+                (false, false) => neither += 1,
+            }
+        }
+
+        table.push_str(&format!(
+            "both={both} atlas_only={atlas_only_wins:?} menu_only={menu_only_wins:?} \
+             neither={neither}\n"
+        ));
+        // Printed unconditionally: the table IS the deliverable, and a passing
+        // gate must still publish the numbers it passed on.
+        println!("{table}");
+
+        assert!(
+            menu_only_wins.is_empty(),
+            "{table}\nThe fixed menu named the planted truth where the atlas did not, on {:?}. \
+             That is pre-registered outcome 3: the menu is LOAD-BEARING and deleting it would \
+             be a regression. Do not weaken this assertion — fix the readout or keep the menu.",
+            menu_only_wins
         );
     }
 }
