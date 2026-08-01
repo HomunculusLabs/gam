@@ -132,8 +132,16 @@ pub const FISSION_MAX_INTERACTION_FRACTION: f64 = 1e-4;
 /// phantom edge. Auto-applied — no knob.
 const INTERACTION_NUMERICAL_FLOOR: f64 = 1e-12;
 
-/// Which binding notion a carve report speaks about (see module docs; the
-/// two are independent and a complete adjudication runs both).
+/// Which binding notion a carve report speaks about (see module docs).
+///
+/// The two are independent, and which of them a given adjudication ran is
+/// carried in the answer rather than assumed: `fission_decision` returns
+/// [`FissionDecision::SplitReconstructionOnly`] exactly when only the
+/// representational carve was supplied, and
+/// [`FissionDecision::SplitCertifiedJoint`] only when both ran and both
+/// allow the split. So a caller that has no pulled-back readout coefficients
+/// still gets a correct, self-describing verdict — it just is not the joint
+/// one, and the enum says so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BindingNotion {
     /// Decoder non-additivity: does the surface EMBED as two atoms?
