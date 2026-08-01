@@ -428,6 +428,19 @@ pub enum OccupancyLaw {
     /// The coordinate is non-uniform but continuously spread (a concentrated arc,
     /// a unimodal density) — neither uniform nor a finite anchor set.
     Continuous,
+    /// #2691 — the coordinate does not resolve AT ALL: every row lies inside an
+    /// arc narrower than the resolution floor `1/(2n)` this classifier already
+    /// derives, so the chart assigns the rows one value and encodes nothing.
+    ///
+    /// This is NOT [`Self::Continuous`]. A collapsed coordinate is fit perfectly
+    /// by a single wrapped Gaussian at the floor width, so on BIC alone it WINS
+    /// the continuous rung and gets reported as "a concentrated arc" — a benign
+    /// reading of a chart that carries no information. Measured on
+    /// `sae_manifold_fit` (#2691): an exact planted circle returned a coordinate
+    /// with std `1.06e-14`, one distinct value across 70 rows, and the fit
+    /// certified. Reconstruction EV cannot discriminate it either — the collapsed
+    /// arm's EV (0.0883) exceeded the recovering arm's on the same fixture.
+    Collapsed,
     /// Too few / degenerate coordinates to classify.
     Indeterminate,
 }
@@ -439,6 +452,7 @@ impl OccupancyLaw {
             OccupancyLaw::Uniform => "uniform",
             OccupancyLaw::Discrete { .. } => "discrete",
             OccupancyLaw::Continuous => "continuous",
+            OccupancyLaw::Collapsed => "collapsed",
             OccupancyLaw::Indeterminate => "indeterminate",
         }
     }
@@ -505,6 +519,29 @@ pub fn classify_occupancy_interval_weighted(
 /// onto the unit circle (wrapped distances, ±1 Gaussian images), `false` treats
 /// `[0, 1]` as a line (linear distances, no wrap). The model race and BIC are
 /// identical; only the metric differs.
+/// #2691 — the extent of the smallest arc (circle) or interval (line) containing
+/// every coordinate, with `pts` already folded into `[0, 1]` and SORTED.
+///
+/// On the circle this is `1 − (largest gap between cyclically adjacent points)`:
+/// a coordinate concentrated near the wrap point occupies a short arc even though
+/// its raw `min`/`max` span nearly the whole period, so a plain range would
+/// mistake it for a spread-out coordinate.
+fn occupied_extent(pts: &[f64], circular: bool) -> f64 {
+    match (pts.first(), pts.last()) {
+        (Some(&first), Some(&last)) if pts.len() >= 2 => {
+            if !circular {
+                return last - first;
+            }
+            let mut largest_gap = (first + 1.0) - last; // the wrap-around gap
+            for pair in pts.windows(2) {
+                largest_gap = largest_gap.max(pair[1] - pair[0]);
+            }
+            (1.0 - largest_gap).max(0.0)
+        }
+        _ => 0.0,
+    }
+}
+
 fn classify_occupancy_impl(u: &[f64], circular: bool) -> OccupancyLaw {
     let n = u.len();
     if n < 4 {
@@ -537,6 +574,16 @@ fn classify_occupancy_impl(u: &[f64], circular: bool) -> OccupancyLaw {
     // the mean spacing `1/n`, so the Gaussian width is floored at half that (a
     // Nyquist-like, data-derived floor — not a knob).
     let sigma_floor = 1.0 / (2.0 * nf);
+
+    // #2691 — collapse guard, BEFORE the BIC race. A coordinate whose every row
+    // fits inside less than one resolution width is not a narrow density, it is
+    // one value: the race below would hand it to the single-Gaussian rung at the
+    // floor width and report `Continuous`. Denominated in `sigma_floor`, the
+    // module's OWN data-derived floor, so this introduces no new constant and
+    // scales with `n` exactly as the rung it protects.
+    if occupied_extent(&pts, circular) < sigma_floor {
+        return OccupancyLaw::Collapsed;
+    }
 
     // Single Gaussian: the continuous unimodal alternative. Two free params.
     let single = wrapped_gaussian_mixture_bic(&pts, 1, sigma_floor, ln_n, circular);
@@ -607,6 +654,12 @@ fn classify_occupancy_weighted_impl(
     let ln_n = ess.ln();
     let bic_uniform = 0.0_f64;
     let sigma_floor = 1.0 / (2.0 * ess);
+
+    // #2691 — the same collapse guard on the weighted path, against the
+    // effective-sample resolution floor (`pts` is already sorted and folded).
+    if occupied_extent(&pts, circular) < sigma_floor {
+        return OccupancyLaw::Collapsed;
+    }
 
     let single =
         wrapped_gaussian_mixture_bic_weighted(&pts, &w, 1, sigma_floor, ln_n, circular, mass);
@@ -2342,5 +2395,117 @@ mod coordinate_fidelity_tests {
         // d_eff of a 3-anchor discrete measure is 2 (three categories → two
         // contrasts).
         assert_eq!(law.d_eff(), 2);
+    }
+
+    // ======================================================================
+    // #2691 — the collapse guard. Three mechanisms in this crate LOOK like they
+    // cover "the fitted chart coordinate encodes nothing" and none can express
+    // it: `AngleFidelityVerdict::Degenerate` is a property of the chart MAP on a
+    // uniform latent grid (blind to where the rows land), reconstruction EV is
+    // measured non-discriminating on this exact defect, and the occupancy race
+    // hands a constant to the single-Gaussian rung and calls it `Continuous`.
+    // These tests pin the guard from BOTH sides: it must name the collapse, and
+    // it must NOT swallow a genuinely narrow-but-resolvable arc — a guard that
+    // rejected every concentrated coordinate would pass a one-sided test while
+    // destroying the `Continuous` rung.
+    // ======================================================================
+
+    /// The exact shape #2691 measured: a chart coordinate that is one value to
+    /// fourteen decimal places. Before the guard this was reported `Continuous`.
+    #[test]
+    fn a_constant_coordinate_is_collapsed_not_continuous_2691() {
+        let constant: Vec<f64> = vec![0.37; 70];
+        let law = classify_occupancy(&constant);
+        assert_eq!(
+            law,
+            OccupancyLaw::Collapsed,
+            "a constant coordinate must be named collapsed, got {law:?}"
+        );
+        assert_ne!(
+            law,
+            OccupancyLaw::Continuous,
+            "reporting a constant coordinate as a concentrated arc is the #2691 defect"
+        );
+        assert_eq!(law.label(), "collapsed");
+        assert_eq!(law.d_eff(), 0, "a collapsed coordinate carries no rank");
+        assert_eq!(law.anchors(), 0);
+
+        // The measured #2691 spread (std 1.06e-14), not just an exact constant.
+        let near: Vec<f64> = (0..70).map(|i| 0.37 + (i as f64) * 1.0e-15).collect();
+        assert_eq!(classify_occupancy(&near), OccupancyLaw::Collapsed);
+    }
+
+    /// The ACCEPT half. A concentrated arc that is still RESOLVABLE — width well
+    /// above the `1/(2n)` floor — must stay `Continuous`. Without this, a guard
+    /// that returned `Collapsed` unconditionally would pass the test above.
+    #[test]
+    fn a_narrow_but_resolvable_arc_is_still_continuous_2691() {
+        // n = 70 ⇒ floor = 1/140 ≈ 0.0071. Spread this over ~0.12, i.e. ~17x the
+        // floor: unambiguously narrow, unambiguously resolvable.
+        let n = 70;
+        let arc: Vec<f64> = (0..n).map(|i| 0.40 + 0.12 * (i as f64) / (n as f64 - 1.0)).collect();
+        let law = classify_occupancy(&arc);
+        assert_ne!(
+            law,
+            OccupancyLaw::Collapsed,
+            "a resolvable narrow arc must survive the collapse guard, got {law:?}"
+        );
+        // Deliberately NOT asserting which rung wins. Whether a narrow arc reads
+        // `Continuous` or `Discrete` is the BIC race's business and depends on its
+        // internals; this guard's whole contract is that it does not FIRE on a
+        // resolvable coordinate. Pinning the rung here would make the guard's test
+        // fail whenever the race was retuned, for a reason unrelated to the guard.
+        assert!(
+            matches!(
+                law,
+                OccupancyLaw::Uniform | OccupancyLaw::Continuous | OccupancyLaw::Discrete { .. }
+            ),
+            "a resolvable coordinate must reach a real occupancy rung, got {law:?}"
+        );
+    }
+
+    /// The other two rungs must be untouched: the guard fires only on collapse.
+    #[test]
+    fn uniform_and_discrete_occupancy_survive_the_collapse_guard_2691() {
+        let n = 84;
+        let uniform: Vec<f64> = (0..n).map(|i| (i as f64) / (n as f64)).collect();
+        assert_ne!(classify_occupancy(&uniform), OccupancyLaw::Collapsed);
+
+        // Weekday-shaped discrete measure: seven tight anchors, twelve rows each.
+        let weekdays: Vec<f64> = (0..84)
+            .map(|i| (i % 7) as f64 / 7.0 + 0.0005 * ((i / 7) as f64 - 5.5))
+            .collect();
+        let law = classify_occupancy(&weekdays);
+        assert_ne!(
+            law,
+            OccupancyLaw::Collapsed,
+            "seven separated anchors are a discrete measure, not a collapse"
+        );
+    }
+
+    /// The guard measures the CIRCULAR arc, not the raw range. A coordinate piled
+    /// up on both sides of the wrap point occupies a tiny arc while its `min`/`max`
+    /// span almost the whole period — a plain `max - min` test would call it
+    /// spread out and miss the collapse entirely.
+    #[test]
+    fn collapse_across_the_wrap_point_is_caught_on_the_circle_2691() {
+        let mut wrapped: Vec<f64> = (0..35).map(|i| 0.9995 + 0.00001 * i as f64).collect();
+        wrapped.extend((0..35).map(|i| 0.00001 * i as f64));
+        let raw_range = wrapped.iter().cloned().fold(f64::MIN, f64::max)
+            - wrapped.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(
+            raw_range > 0.99,
+            "fixture must have a near-full RAW range ({raw_range}) so the circular \
+             arc is the only thing that can catch it"
+        );
+        assert_eq!(
+            classify_occupancy(&wrapped),
+            OccupancyLaw::Collapsed,
+            "a coordinate collapsed across the wrap point must still be collapsed"
+        );
+        // On the LINE the same points genuinely span the range, so the interval
+        // classifier must NOT call them collapsed — the two topologies disagree
+        // here, and that disagreement is the point of having both.
+        assert_ne!(classify_occupancy_interval(&wrapped), OccupancyLaw::Collapsed);
     }
 }
