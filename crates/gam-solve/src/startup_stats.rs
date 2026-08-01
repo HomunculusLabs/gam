@@ -851,6 +851,8 @@ mod tests {
             cycle: 47,
             stationarity_residual: 6.950377e-1,
             residual_tol: 1.677281e-11,
+            // Consistent with the tol above: `tol = 1e-11 · (1 + scale)`.
+            stationarity_scale: 0.677281,
             step_inf: 1.734422,
             step_tol: 1.026406e-10,
             resolvable_negative_curvature: false,

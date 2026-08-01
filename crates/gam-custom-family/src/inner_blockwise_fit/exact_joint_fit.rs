@@ -2058,7 +2058,16 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             .iter()
             .map(|x: &f64| x.abs())
             .fold(0.0_f64, f64::max);
-        let residual_tol = inner_tol * (1.0 + grad_inf.max(penalty_inf));
+        // Name the denominator. `residual_tol` alone is not enough to READ the
+        // residual: `R/residual_tol` also divides by `inner_tol`, which takes
+        // two values in this code (the `1e-6` default and the derivative
+        // lane's `1e-11` floor), so it is not comparable across lanes and is
+        // anti-correlated with convergence across part of its range
+        // (gam#2713). Every diagnostic that prints `R` here prints
+        // `R/(1+scale)` beside it, which is exactly what this gate tests
+        // against `inner_tol`.
+        let stationarity_scale = grad_inf.max(penalty_inf);
+        let residual_tol = inner_tol * (1.0 + stationarity_scale);
         last_residual_tol = residual_tol;
         let current_stationarity_residual = current_kkt_norm;
         // Local-mode certificate: first-order KKT and a small Newton
@@ -2096,6 +2105,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 cycle,
                 stationarity_residual: current_stationarity_residual,
                 residual_tol,
+                stationarity_scale,
                 step_inf,
                 step_tol,
                 resolvable_negative_curvature: has_resolvable_negative_curvature,
@@ -2152,9 +2162,14 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 log::info!(
                     "[PIRLS/joint-Newton mode certificate] tentative convergence revoked: \
                      negative_curvature={has_resolvable_negative_curvature}, \
-                     residual={current_stationarity_residual:.3e}/{residual_tol:.3e}, \
+                     residual={current_stationarity_residual:.3e}/{residual_tol:.3e} \
+                     (relative_stationarity={:.3e} vs inner_tol={inner_tol:.3e}), \
                      decrement={returned_decrement:.3e}, weak={returned_weak_decrement:.3e}, \
-                     null_score={returned_null_stationarity:.3e}, correction={step_inf:.3e}/{step_tol:.3e}"
+                     null_score={returned_null_stationarity:.3e}, correction={step_inf:.3e}/{step_tol:.3e}",
+                    gam_problem::relative_stationarity(
+                        current_stationarity_residual,
+                        stationarity_scale
+                    ),
                 );
                 if head_jeffreys_term.is_some() {
                     jeffreys_completion_endgame = true;
@@ -2192,12 +2207,18 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             && !has_resolvable_negative_curvature
         {
             log::info!(
-                "[PIRLS/joint-Newton convergence] cycle {:>3} | pre-line-search converged: proposal_inf={:.3e} (tol={:.3e}) | residual={:.3e} (tol={:.3e})",
+                "[PIRLS/joint-Newton convergence] cycle {:>3} | pre-line-search converged: proposal_inf={:.3e} (tol={:.3e}) | residual={:.3e} (tol={:.3e}) | relative_stationarity={:.3e} (scale={:.3e}, inner_tol={:.3e})",
                 cycle,
                 step_inf,
                 step_tol,
                 current_stationarity_residual,
                 residual_tol,
+                gam_problem::relative_stationarity(
+                    current_stationarity_residual,
+                    stationarity_scale
+                ),
+                stationarity_scale,
+                inner_tol,
             );
             // Pre-line-search convergence: β did not move this cycle (the
             // proposal was at the step-tolerance floor), so the cycle
@@ -4274,7 +4295,10 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             .as_ref()
             .map(|(grad_phi, _hphi)| grad_phi.iter().map(|v| v.abs()).fold(0.0_f64, f64::max))
             .unwrap_or(0.0);
-        let residual_tol = inner_tol * (1.0 + grad_inf.max(pen_inf).max(firth_score_inf));
+        // See the head-of-cycle site for why the denominator is named rather
+        // than folded straight into the tolerance (gam#2713).
+        let stationarity_scale = grad_inf.max(pen_inf).max(firth_score_inf);
+        let residual_tol = inner_tol * (1.0 + stationarity_scale);
         // Arm the Jeffreys second-order endgame completion (gam#979) once
         // the residual enters the convergence band; latched (never
         // un-armed) so the endgame model cannot oscillate between the
@@ -4389,13 +4413,16 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             .collect::<Vec<_>>()
             .join(",");
         log::info!(
-            "[PIRLS/joint-Newton convergence] cycle {:>3} | step_inf={:.3e} (tol={:.3e}) | accepted_step_inf={:.3e} | residual={:.3e} (tol={:.3e}) | per_block_resid=[{}] | obj_change={:.3e} (tol={:.3e}) | beta_inf={:.3e} | per_block_beta_inf=[{}]",
+            "[PIRLS/joint-Newton convergence] cycle {:>3} | step_inf={:.3e} (tol={:.3e}) | accepted_step_inf={:.3e} | residual={:.3e} (tol={:.3e}) | relative_stationarity={:.3e} (scale={:.3e}, inner_tol={:.3e}) | per_block_resid=[{}] | obj_change={:.3e} (tol={:.3e}) | beta_inf={:.3e} | per_block_beta_inf=[{}]",
             cycle,
             step_inf,
             step_tol,
             accepted_step_inf,
             residual,
             residual_tol,
+            gam_problem::relative_stationarity(residual, stationarity_scale),
+            stationarity_scale,
+            inner_tol,
             block_resid_sig,
             objective_change,
             objective_tol,
@@ -4421,7 +4448,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
 
         if verbose_cycle || near_convergence {
             log::info!(
-                "[PIRLS/JN] cyc={:>3}/{} obj={:.6e} -loglik={:.6e} pen={:.3e} Δobj={:+.3e} |δ|∞={:.3e} accepted_|δ|∞={:.3e} resid={:.3e} (tol={:.3e}) obj_tol={:.3e} step_tol={:.3e} |β|∞={:.3e} attempts={} t={:.3}s",
+                "[PIRLS/JN] cyc={:>3}/{} obj={:.6e} -loglik={:.6e} pen={:.3e} Δobj={:+.3e} |δ|∞={:.3e} accepted_|δ|∞={:.3e} resid={:.3e} (tol={:.3e}) rel_stat={:.3e} (scale={:.3e}) obj_tol={:.3e} step_tol={:.3e} |β|∞={:.3e} attempts={} t={:.3}s",
                 cycle,
                 inner_max_cycles,
                 lastobjective,
@@ -4432,6 +4459,8 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 accepted_step_inf,
                 residual,
                 residual_tol,
+                gam_problem::relative_stationarity(residual, stationarity_scale),
+                stationarity_scale,
                 objective_tol,
                 step_tol,
                 beta_inf,
@@ -5377,9 +5406,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 })
                 .unwrap_or_else(|| "last_newton_math=<none>".to_string());
             log::warn!(
-                "[PIRLS/joint-Newton convergence] cycle {:>3} | residual-stall early-exit: residual={:.3e} best_seen={:.3e} no_improve_cycles={} accepted_step_inf={:.3e} trust_radius={:.3e} block_stationarity_inf={:?} {}; returning unconverged with finite β so the outer optimizer rejects this ρ evaluation before inner_max_cycles.",
+                "[PIRLS/joint-Newton convergence] cycle {:>3} | residual-stall early-exit: residual={:.3e} relative_stationarity={:.3e} (scale={:.3e}, inner_tol={:.3e}) best_seen={:.3e} no_improve_cycles={} accepted_step_inf={:.3e} trust_radius={:.3e} block_stationarity_inf={:?} {}; returning unconverged with finite β so the outer optimizer rejects this ρ evaluation before inner_max_cycles.",
                 cycle,
                 residual,
+                gam_problem::relative_stationarity(residual, stationarity_scale),
+                stationarity_scale,
+                inner_tol,
                 best_residual_seen,
                 cycles_since_residual_improved,
                 accepted_step_inf,

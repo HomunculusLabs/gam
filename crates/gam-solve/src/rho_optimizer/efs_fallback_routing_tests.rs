@@ -108,6 +108,8 @@ fn post_seed_custom_family_refusal_retains_typed_terminal_state_2658() {
         cycle: 11,
         stationarity_residual: 2.5e-3,
         residual_tol: 1.0e-8,
+        // Consistent with the tol above: `tol = 1e-11 · (1 + scale)`.
+        stationarity_scale: 999.0,
         step_inf: 4.0e-4,
         step_tol: 1.0e-9,
         resolvable_negative_curvature: false,

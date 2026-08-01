@@ -63,6 +63,42 @@ impl std::fmt::Display for JointNewtonTerminalReason {
 /// purpose, because no caller may trust an IFT correction there, so the honest
 /// diagnostic is the decision variables themselves rather than a residual
 /// recomputed at a non-KKT point.
+/// The stationarity residual denominated the way its own gate denominates it.
+///
+/// The inner joint-Newton gate is `R ≤ inner_tol · (1 + scale)` with
+/// `scale = max(‖∇L‖∞, ‖Sβ‖∞, ‖∇Φ‖∞)`, so dividing through by `(1 + scale)`
+/// gives the single scalar the gate actually tests against one fixed number:
+///
+/// ```text
+/// relative_stationarity(R, scale) = R / (1 + scale) ≤ inner_tol   ⟺   gate accepts
+/// ```
+///
+/// Two properties make this — and not `R`, and not `R/residual_tol` — the
+/// column to rank a population of refusals on (gam#2713):
+///
+/// * It is comparable across solves. `R` alone is not: a single suite spans a
+///   `1.18e10` range of `scale`, so an absolute `R = 5.3` at `scale = 5.3e6` is
+///   stationary to one part in a million while `R = 5.3` at `scale = 1` is not
+///   stationary at all. `R/residual_tol` is not either: it divides by
+///   `inner_tol` as well, and `inner_tol` takes two different values in this
+///   code (the `1e-6` default and the `1e-11` derivative-lane floor), so rows
+///   from the two lanes are on axes that differ by five orders of magnitude.
+/// * It handles the scale-free end explicitly rather than by accident. The
+///   `1 +` is not cosmetic: at `scale → 0` there is no relative scale to speak
+///   of and the criterion must degrade to the ABSOLUTE `R ≤ inner_tol`, which
+///   is exactly what this expression does. A bare `R/scale` would instead
+///   divide by zero and rank a perfectly-converged small-scale solve at
+///   infinity. For `scale ≫ 1` the two agree to within `1/scale`.
+///
+/// Deliberately NOT applied to `best_stationarity_residual`: that value was
+/// computed at a different iterate, whose `scale` this state does not carry.
+/// Rescaling it by the terminal `scale` would produce a number that is neither
+/// the best relative stationarity nor anything else.
+#[must_use]
+pub fn relative_stationarity(stationarity_residual: f64, stationarity_scale: f64) -> f64 {
+    stationarity_residual / (1.0 + stationarity_scale)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InnerConvergenceTerminalState {
     /// The blockwise Gauss-Seidel route's terminal cycle.
@@ -86,6 +122,28 @@ pub enum InnerConvergenceTerminalState {
         cycle: usize,
         stationarity_residual: f64,
         residual_tol: f64,
+        /// The magnitude the stationarity residual is denominated against:
+        /// `max(‖∇L‖∞, ‖Sβ‖∞, ‖∇Φ‖∞)` at the terminal iterate, i.e. the `scale`
+        /// in `residual_tol = inner_tol · (1 + scale)`.
+        ///
+        /// Carried because WITHOUT it the message cannot be ranked (gam#2713).
+        /// The natural thing to do with a printed `residual (tol=…)` pair is to
+        /// form `R/T` and read it as "N× over tolerance"; that ratio is
+        /// `≈ (R/scale)/inner_tol`, so it mixes two different tolerances (the
+        /// `1e-6` default and the derivative lane's `1e-11`
+        /// `JOINT_LAML_DERIV_INNER_TOL_FLOOR`) and it is ANTI-correlated with
+        /// convergence across part of the range. Measured over 41 refusal pairs
+        /// from one survival sweep: a row printing `R/T = 238×` was stationary
+        /// to `R/scale = 2.4e-9` — converged to nine digits — while a row
+        /// printing `R/T = 1.4e3×` sat at `R/scale = 1.4e-3`, a million times
+        /// less converged. Ranking on `R/T` sends triage to the first row.
+        ///
+        /// The comparable column is [`relative_stationarity`], printed below,
+        /// which is the gate's own quantity: the gate accepts exactly when it
+        /// is `≤ inner_tol`, so it is `0` at the optimum, `~1` where the
+        /// residual has collapsed onto one of its own terms, and directly
+        /// comparable across both `inner_tol` regimes.
+        stationarity_scale: f64,
         step_inf: f64,
         step_tol: f64,
         resolvable_negative_curvature: bool,
@@ -130,6 +188,7 @@ impl std::fmt::Display for InnerConvergenceTerminalState {
                 cycle,
                 stationarity_residual,
                 residual_tol,
+                stationarity_scale,
                 step_inf,
                 step_tol,
                 resolvable_negative_curvature,
@@ -140,11 +199,15 @@ impl std::fmt::Display for InnerConvergenceTerminalState {
                 f,
                 "joint-Newton terminal cycle {cycle}: \
                  stationarity_residual={stationarity_residual:.6e} (tol={residual_tol:.6e}), \
+                 relative_stationarity={:.6e} \
+                 (= residual/(1+scale), scale={stationarity_scale:.6e}; \
+                 THIS is the comparable column, not residual/tol), \
                  step_inf={step_inf:.6e} (tol={step_tol:.6e}), \
                  resolvable_negative_curvature={resolvable_negative_curvature}, \
                  best_stationarity_residual={best_stationarity_residual:.6e} \
                  (last improved {cycles_since_best_residual} cycle(s) before this one), \
-                 termination={termination_reason}"
+                 termination={termination_reason}",
+                relative_stationarity(*stationarity_residual, *stationarity_scale),
             ),
         }
     }
@@ -491,6 +554,8 @@ mod tests {
             cycle: 52,
             stationarity_residual: 1.906428e0,
             residual_tol: 8.307952e-4,
+            // Consistent with the pair above: `tol = 1e-6 · (1 + scale)`.
+            stationarity_scale: 829.7952,
             step_inf: 4.958893e0,
             step_tol: 8.493315e-5,
             resolvable_negative_curvature: true,
@@ -510,6 +575,109 @@ mod tests {
         assert!(
             msg.contains("27 cycle(s) before this one"),
             "message: {msg}"
+        );
+    }
+
+    #[test]
+    fn joint_newton_terminal_state_carries_the_column_that_ranks_correctly_2713() {
+        // gam#2713: two refusals from one survival sweep, one per `inner_tol`
+        // lane. Read as "N x over tolerance" — the only ratio the message used
+        // to permit — they are ordered BACKWARDS relative to how converged they
+        // are, so triage goes to the wrong row. The message must therefore
+        // carry the denominator that fixes the ordering.
+        //
+        // A: derivative lane, `inner_tol = 1e-11`, scale = 43.807. Stationary
+        //    to nine digits — converged — and it prints `R/T = 238x`.
+        let converged = InnerConvergenceTerminalState::JointNewton {
+            cycle: 12,
+            stationarity_residual: 1.065281e-7,
+            residual_tol: 1e-11 * (1.0 + 43.807),
+            stationarity_scale: 43.807,
+            step_inf: 1.0e-9,
+            step_tol: 1.0e-10,
+            resolvable_negative_curvature: false,
+            best_stationarity_residual: 1.065281e-7,
+            cycles_since_best_residual: 0,
+            termination_reason: JointNewtonTerminalReason::CycleBudget,
+        };
+        // B: default lane, `inner_tol = 1e-6`, scale = 3.3392. A MILLION times
+        //    less converged than A, and it prints the larger `R/T`.
+        let far = InnerConvergenceTerminalState::JointNewton {
+            cycle: 12,
+            stationarity_residual: 1.4e-3 * (1.0 + 3.3392),
+            residual_tol: 1e-6 * (1.0 + 3.3392),
+            stationarity_scale: 3.3392,
+            step_inf: 1.0e-3,
+            step_tol: 1.0e-6,
+            resolvable_negative_curvature: false,
+            best_stationarity_residual: 1.4e-3 * (1.0 + 3.3392),
+            cycles_since_best_residual: 0,
+            termination_reason: JointNewtonTerminalReason::CycleBudget,
+        };
+
+        let (r_a, t_a, s_a) = (1.065281e-7, 1e-11 * (1.0 + 43.807), 43.807);
+        let (r_b, t_b, s_b) = (1.4e-3 * (1.0 + 3.3392), 1e-6 * (1.0 + 3.3392), 3.3392);
+
+        // The ratio a reader forms from the printed pair ranks A ABOVE B.
+        assert!(
+            r_a / t_a > 200.0 && r_b / t_b > 1000.0,
+            "the two rows must reproduce the measured N x over tolerance values"
+        );
+        assert!(
+            r_a / t_a < r_b / t_b,
+            "sanity: both rows are 'over tolerance', and by that ratio they are \
+             only ~6x apart"
+        );
+
+        // The comparable column ranks them the other way round, by six orders
+        // of magnitude: A is converged, B is not.
+        let rel_a = relative_stationarity(r_a, s_a);
+        let rel_b = relative_stationarity(r_b, s_b);
+        assert!(
+            rel_a < 1e-8 && rel_b > 1e-4,
+            "relative stationarity: A={rel_a:.3e} must be the converged row, \
+             B={rel_b:.3e} the unconverged one"
+        );
+        assert!(
+            rel_b / rel_a > 1e5,
+            "the two rows differ by five-plus orders in relative stationarity \
+             ({rel_a:.3e} vs {rel_b:.3e}) while their printed R/T differ by ~6x"
+        );
+
+        // ...and it is IN the message, for both, so no reader has to recover a
+        // scale by inverting the tolerance formula.
+        for (state, expected) in [(converged, rel_a), (far, rel_b)] {
+            let msg = state.to_string();
+            assert!(
+                msg.contains(&format!("relative_stationarity={expected:.6e}")),
+                "message must print the comparable column: {msg}"
+            );
+            assert!(
+                msg.contains("scale="),
+                "message must print the denominator it used: {msg}"
+            );
+        }
+    }
+
+    /// The scale-free end of [`relative_stationarity`]: with no scale to be
+    /// relative to, the criterion is the absolute residual against `inner_tol`,
+    /// NOT a division by zero.
+    #[test]
+    fn relative_stationarity_degrades_to_the_absolute_residual_at_zero_scale_2713() {
+        let absolute = relative_stationarity(3.7e-9, 0.0);
+        assert!(
+            absolute.to_bits() == 3.7e-9_f64.to_bits(),
+            "with no scale the criterion is the absolute residual, got {absolute:.6e}"
+        );
+        // And it agrees with the bare `R/scale` to within `1/scale` once there
+        // IS a scale, so nothing is lost at the end where the relative reading
+        // is the meaningful one.
+        let (residual, scale) = (5.275447e0, 5.2754e6);
+        let mixed = relative_stationarity(residual, scale);
+        let bare = residual / scale;
+        assert!(
+            ((mixed - bare) / bare).abs() < 1e-5,
+            "mixed={mixed:.6e} bare={bare:.6e}"
         );
     }
 

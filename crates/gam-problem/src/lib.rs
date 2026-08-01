@@ -91,6 +91,7 @@ pub use custom_family_blockwise::{
 };
 pub use custom_family_error::{
     CustomFamilyError, InnerConvergenceTerminalState, JointNewtonTerminalReason,
+    relative_stationarity,
 };
 pub use dispersion::{Dispersion, DispersionError};
 pub use dispersion_cov::{
