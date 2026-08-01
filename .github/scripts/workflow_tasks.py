@@ -2,6 +2,7 @@ import argparse
 import glob
 import importlib.util
 import json
+import math
 import os
 import pathlib
 import shutil
@@ -13,10 +14,97 @@ import zipfile
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _RUN_SUITE_PATH = _REPO_ROOT / "bench" / "run_suite.py"
 _SCENARIOS_PATH = _REPO_ROOT / "bench" / "scenarios.json"
+_WALL_BUDGETS_PATH = _REPO_ROOT / "bench" / "ci_wall_budgets.json"
+
+# #2737: the marker every bench shard writes next to (or instead of) its result
+# JSON, so the aggregate can tell a shard that was CUT SHORT from one that ran
+# to a verdict. A censored shard measured nothing; counting it as a failure is
+# as wrong as counting it as a pass.
+SHARD_OUTCOME_SCHEMA = "benchmark-shard-outcome/v1"
+SHARD_OUTCOME_MEASURED = "measured"
+SHARD_OUTCOME_CENSORED = "censored"
+SHARD_OUTCOME_ERRORED = "errored"
 
 
 def _load_scenario_config():
     return json.loads(_SCENARIOS_PATH.read_text())
+
+
+def _load_wall_budgets():
+    return json.loads(_WALL_BUDGETS_PATH.read_text())
+
+
+def scenario_wall_budgets():
+    """Per-scenario CI wall budgets derived from each scenario's OWN history.
+
+    #2737: the budget used to be a hand-maintained shell `case` that named one
+    scenario at 145m and left every other cell of a 110-scenario matrix on a
+    flat 42m. A flat number applied to a heterogeneous matrix goes stale the
+    moment the matrix grows, and it did: 22 shards were cut short at 42m and
+    reported as ordinary failures.
+
+    The replacement is data, not a formula over scenario shape: each scenario is
+    budgeted from its own measured `job_seconds` (see bench/ci_wall_budgets.json
+    for the measurements, the provenance, and why a shape-based cost model was
+    rejected). Scenarios with no completed measurement get the largest budget
+    any measured scenario earns.
+
+    Returns {scenario: {"budget_seconds", "timeout_minutes", "basis"}} for every
+    CONFIGURED scenario, so a scenario added since the last calibration is
+    covered by construction rather than by remembering to edit a table.
+    """
+
+    table = _load_wall_budgets()
+    policy = table["policy"]
+    safety_factor = float(policy["safety_factor"])
+    # The GitHub job ceiling must clear the GNU-timeout budget by everything the
+    # budget does NOT cover (checkout, Python/R setup, runtime download, smoke
+    # imports, upload). Same headroom policy as the budget, applied to the
+    # largest such gap ever measured -- see the rationale in the table.
+    overhead_minutes = int(
+        math.ceil(safety_factor * float(policy["job_overhead_seconds_observed_max"]) / 60.0)
+    )
+    measurements = table["measurements"]
+
+    def budget_minutes_for(job_seconds):
+        return int(math.ceil(safety_factor * float(job_seconds) / 60.0))
+
+    completed = [
+        entry["job_seconds"]
+        for entry in measurements.values()
+        if entry.get("outcome") == "completed"
+    ]
+    if not completed:
+        raise SystemExit(
+            f"{_WALL_BUDGETS_PATH} records no completed scenario, so no budget can be "
+            "derived from measured history."
+        )
+    unmeasured_minutes = max(budget_minutes_for(seconds) for seconds in completed)
+
+    budgets = {}
+    for scenario in _load_scenario_config().get("scenarios", []):
+        name = scenario.get("name")
+        if not name:
+            continue
+        entry = measurements.get(name)
+        if entry is not None and entry.get("outcome") == "completed":
+            minutes = budget_minutes_for(entry["job_seconds"])
+            basis = (
+                f"{safety_factor}x its own measured {entry['job_seconds']}s completed run"
+            )
+        else:
+            minutes = unmeasured_minutes
+            observed = "no measurement on record" if entry is None else entry["outcome"]
+            basis = (
+                f"no completed measurement ({observed}); granted the largest budget any "
+                "measured scenario earns"
+            )
+        budgets[name] = {
+            "budget_seconds": minutes * 60,
+            "timeout_minutes": minutes + overhead_minutes,
+            "basis": basis,
+        }
+    return budgets
 
 
 def validate_schemas():
@@ -95,10 +183,35 @@ def build_matrix(requested_scenarios=None):
     # shard jobs ran zero scenarios — the suite went green while benchmarking
     # nothing (#1560). Split `selected` into the serial and parallel buckets and
     # emit exactly the four outputs the workflow consumes.
+    #
+    # #2737: each matrix entry now CARRIES its own wall budget and its own GitHub
+    # job ceiling, replacing the shell `case` statement that was duplicated
+    # verbatim in both shard jobs. Two copies of a hand-maintained budget list is
+    # two places for it to go stale; this is one place, derived from measured
+    # history (see `scenario_wall_budgets`).
     serial = [s for s in selected if s in SERIAL_SCENARIOS]
     parallel = [s for s in selected if s not in SERIAL_SCENARIOS]
-    parallel_matrix = {"scenario": parallel}
-    serial_matrix = {"scenario": serial}
+    budgets = scenario_wall_budgets()
+
+    def matrix_for(names):
+        include = []
+        for name in names:
+            budget = budgets[name]
+            include.append(
+                {
+                    "scenario": name,
+                    "wall_budget_seconds": budget["budget_seconds"],
+                    "timeout_minutes": budget["timeout_minutes"],
+                }
+            )
+            print(
+                f"budget {name}: {budget['budget_seconds']}s shard / "
+                f"{budget['timeout_minutes']}m job ceiling -- {budget['basis']}"
+            )
+        return {"include": include}
+
+    parallel_matrix = matrix_for(parallel)
+    serial_matrix = matrix_for(serial)
     with open(os.environ["GITHUB_OUTPUT"], "a") as f:
         f.write(f"parallel_matrix={json.dumps(parallel_matrix)}\n")
         f.write(f"parallel_count={len(parallel)}\n")
@@ -176,6 +289,50 @@ def download_artifacts(target_name, out_dir_arg):
             zf.extractall(out_dir)
         os.remove("artifact.zip")
         print(f"extracted {a['name']} to {out_dir}")
+
+def record_shard_outcome(scenario, exit_code, budget_seconds, out_path):
+    """Write the machine-readable outcome marker for one bench shard (#2737).
+
+    The shard step already KNEW the difference -- GNU `timeout` reports 124 (TERM
+    honoured) or 137 (KILL after the grace period) for an over-budget command,
+    and anything else for a command that ran to its own conclusion -- and then
+    collapsed both onto a bare `exit 1` and one indistinguishable red. 22 of the
+    42 failing shards in run 30687540475 were censored at the 42m wall and 20 had
+    already failed well under it; nothing downstream could separate them, so a
+    real cluster of sub-budget failures hid inside a budget headline.
+
+    A censored shard is NOT a failed measurement. It is an ABSENT one, and the
+    aggregate must say so rather than fold it into a total (the rule 5d40cf900
+    landed for #2743).
+    """
+
+    exit_code = int(exit_code)
+    if exit_code == 0:
+        outcome = SHARD_OUTCOME_MEASURED
+    elif exit_code in (124, 137):
+        outcome = SHARD_OUTCOME_CENSORED
+    else:
+        outcome = SHARD_OUTCOME_ERRORED
+    marker = {
+        "schema": SHARD_OUTCOME_SCHEMA,
+        "scenario_name": scenario,
+        "outcome": outcome,
+        "exit_code": exit_code,
+        "wall_budget_seconds": int(budget_seconds),
+        "measured": outcome == SHARD_OUTCOME_MEASURED,
+        "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+        "job_url": (
+            f"https://github.com/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/"
+            f"{os.environ.get('GITHUB_RUN_ID')}"
+        ),
+    }
+    path = pathlib.Path(out_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(marker, indent=2) + "\n")
+    print(f"shard outcome: {scenario} -> {outcome} (exit {exit_code}) written to {path}")
+    return marker
+
 
 def check_python_deps():
     scenario_name = os.environ.get("SCENARIO_NAME", "unknown")
@@ -284,8 +441,18 @@ def _finite_number(value):
     return number if number == number and number not in (float("inf"), float("-inf")) else None
 
 
-def matched_benchmark_verdict(rows, *, maximum_slowdown=1.2):
-    """Strict #2623 performance/accuracy verdict for genuinely matched arms."""
+def matched_benchmark_verdict(rows, *, maximum_slowdown=1.2, shard_outcomes=None):
+    """Strict #2623 performance/accuracy verdict for genuinely matched arms.
+
+    `shard_outcomes` is the list of per-scenario markers written by
+    `record_shard_outcome` (#2737). They partition the scenarios that produced no
+    result rows into ones that were CUT SHORT at their wall budget (censored:
+    measured nothing, so they are an absence and never a verdict) and ones that
+    FAILED under their budget (errored: a real defect that must not hide inside a
+    budget headline). Without them every such scenario is one undifferentiated
+    "missing", which is exactly how 20 sub-budget failures stayed invisible
+    behind 22 budget-censored ones in run 30687540475.
+    """
 
     by_scenario_contender = {}
     observed_scenarios = set()
@@ -299,6 +466,35 @@ def matched_benchmark_verdict(rows, *, maximum_slowdown=1.2):
     configured = _load_scenario_config().get("scenarios", [])
     expected_scenarios = {str(s["name"]) for s in configured if s.get("name")}
     missing_scenarios = sorted(expected_scenarios - observed_scenarios)
+
+    outcome_by_scenario = {}
+    for marker in shard_outcomes or []:
+        name = str(marker.get("scenario_name", ""))
+        if name:
+            outcome_by_scenario[name] = str(marker.get("outcome", ""))
+    censored_scenarios = sorted(
+        name
+        for name, outcome in outcome_by_scenario.items()
+        if outcome == SHARD_OUTCOME_CENSORED
+    )
+    errored_scenarios = sorted(
+        name
+        for name, outcome in outcome_by_scenario.items()
+        if outcome == SHARD_OUTCOME_ERRORED
+    )
+    # A censored shard is cut short before it can write its result file, so it
+    # must not also be reporting rows. If it does, the marker and the rows
+    # disagree about what happened and neither may be quietly preferred.
+    censored_with_results = sorted(set(censored_scenarios) & observed_scenarios)
+    # Neither a marker nor rows: the job never reached the shard step at all
+    # (setup failure, cancellation, lost artifact). Also not measured, and also
+    # not a failed measurement.
+    unreported_scenarios = sorted(
+        name
+        for name in missing_scenarios
+        if name not in outcome_by_scenario
+    )
+    not_measured_scenarios = sorted(set(censored_scenarios) | set(unreported_scenarios))
     comparisons = []
 
     for scenario in sorted(observed_scenarios):
@@ -414,6 +610,19 @@ def matched_benchmark_verdict(rows, *, maximum_slowdown=1.2):
     observed_scope_certified = bool(comparisons) and all(c["passed"] for c in comparisons)
     certified = complete and observed_scope_certified
     return {
+        # #2737: the coverage denominator, split by WHY a scenario is absent.
+        # `not_measured_scenarios` are absences (cut short at the wall budget, or
+        # never reported at all): they are neither passes nor failures and no
+        # total may sum over them silently. `errored_scenarios` are failures that
+        # ran to their own conclusion inside their budget -- a defect population,
+        # not a budget one.
+        "shard_outcome_schema": SHARD_OUTCOME_SCHEMA,
+        "shard_outcomes_seen": len(outcome_by_scenario),
+        "censored_scenarios": censored_scenarios,
+        "errored_scenarios": errored_scenarios,
+        "unreported_scenarios": unreported_scenarios,
+        "not_measured_scenarios": not_measured_scenarios,
+        "censored_with_results": censored_with_results,
         "contract": {
             "maximum_slowdown": maximum_slowdown,
             "accuracy": (
@@ -511,15 +720,44 @@ def benchmark_verdict_enforcement(verdict, *, require_full_suite=False):
                     f"{measure.get('failure', 'did not pass')}"
                 )
 
+    # #2737: absence has causes, and they are not interchangeable.
+    censored = verdict.get("censored_scenarios") or []
+    errored = verdict.get("errored_scenarios") or []
+    unreported = verdict.get("unreported_scenarios") or []
+    not_measured = verdict.get("not_measured_scenarios") or []
+    conflicted = verdict.get("censored_with_results") or []
     missing = verdict.get("missing_scenarios") or []
-    if require_full_suite and missing:
+
+    def _name_list(names, limit=10):
+        return ", ".join(names[:limit]) + (" ..." if len(names) > limit else "")
+
+    # A shard that ran to its own conclusion and failed INSIDE its wall budget is
+    # a defect, not a budget case, and it fails the gate whatever the requested
+    # scope is. Previously it was reported only as one more "missing" scenario,
+    # so a cluster of sub-budget failures could be read off as a budget headline.
+    if errored:
         failures.append(
-            f"{len(missing)} configured scenario(s) produced no artifact, so the "
-            "full-suite contract is unmet: " + ", ".join(missing[:10])
-            + (" ..." if len(missing) > 10 else "")
+            f"{len(errored)} scenario(s) FAILED inside their own wall budget "
+            "(a defect population, not a budget one): " + _name_list(errored)
+        )
+    if conflicted:
+        failures.append(
+            f"{len(conflicted)} scenario(s) reported result rows AND a censored "
+            "shard marker, so the marker and the rows disagree about whether the "
+            "shard finished: " + _name_list(conflicted)
+        )
+    if require_full_suite and not_measured:
+        failures.append(
+            f"{len(not_measured)} configured scenario(s) were NOT MEASURED "
+            f"({len(censored)} cut short at their wall budget, {len(unreported)} "
+            "never reported), so the full-suite contract is unmet -- this is a "
+            "coverage gap, not a verdict on those scenarios: "
+            + _name_list(not_measured)
         )
 
     worst = verdict.get("worst_performance_measure")
+    configured_count = verdict.get("configured_scenario_count", 0)
+    measured_count = verdict.get("observed_scenario_count", 0)
     lines = [
         "",
         "### #2623 benchmark regression gate",
@@ -530,10 +768,31 @@ def benchmark_verdict_enforcement(verdict, *, require_full_suite=False):
         ),
         (
             f"Measured: {len(comparisons)} matched comparison(s) over "
-            f"{verdict.get('observed_scenario_count', 0)}/"
-            f"{verdict.get('configured_scenario_count', 0)} configured scenarios."
+            f"{measured_count}/{configured_count} configured scenarios."
+        ),
+        (
+            # #2737 / #2743: a total that sums over a scenario which was cut short
+            # must say so. Silent truncation reads as coverage.
+            f"NOT MEASURED: {len(not_measured)}/{configured_count} scenarios "
+            f"({len(censored)} censored at their wall budget, {len(unreported)} "
+            "never reported). These are absences: they are neither passes nor "
+            "failures and no count above includes them."
+        ),
+        (
+            f"Failed inside budget: {len(errored)}/{configured_count} scenarios. "
+            "These ran to their own conclusion and are real defects."
         ),
     ]
+    if censored:
+        lines.append(f"Censored: {_name_list(censored, limit=len(censored))}")
+    if errored:
+        lines.append(f"Errored: {_name_list(errored, limit=len(errored))}")
+    if missing and not verdict.get("shard_outcomes_seen"):
+        lines.append(
+            f"No shard outcome markers were published, so the {len(missing)} absent "
+            "scenario(s) could not be split into censored vs errored: "
+            + _name_list(missing)
+        )
     if worst is not None:
         lines.append(
             f"Worst performance ratio: {worst['gam_over_reference']:.4f}x on "
@@ -612,6 +871,50 @@ def _fit_sec_ratio_summary_lines(pairs):
     return lines
 
 
+def _shard_outcome_summary_lines(verdict):
+    """#2737: report coverage with its causes, so no absence reads as a verdict."""
+
+    configured = verdict.get("configured_scenario_count", 0)
+    measured = verdict.get("observed_scenario_count", 0)
+    censored = verdict.get("censored_scenarios") or []
+    errored = verdict.get("errored_scenarios") or []
+    unreported = verdict.get("unreported_scenarios") or []
+    lines = [
+        "",
+        "### Scenario coverage",
+        "",
+        (
+            f"**{measured} of {configured} configured scenarios were MEASURED.** "
+            f"{len(censored) + len(unreported)} were NOT MEASURED and "
+            f"{len(errored)} failed inside their own wall budget."
+        ),
+        "",
+        "| Outcome | Count | Meaning |",
+        "|---------|------:|---------|",
+        f"| measured | {measured} | Ran to a verdict; its rows are in the table above. |",
+        (
+            f"| censored | {len(censored)} | Cut short at its wall budget (GNU `timeout` "
+            "124/137). **Measured nothing** -- neither a pass nor a fail. |"
+        ),
+        (
+            f"| errored | {len(errored)} | Failed INSIDE its budget. A real defect, and "
+            "not a budget case. |"
+        ),
+        (
+            f"| unreported | {len(unreported)} | Published neither rows nor an outcome "
+            "marker (the job never reached the shard step). Also not measured. |"
+        ),
+    ]
+    for label, names in (
+        ("Censored (not measured)", censored),
+        ("Errored inside budget (defects)", errored),
+        ("Unreported (not measured)", unreported),
+    ):
+        if names:
+            lines.extend(["", f"{label}: `" + "`, `".join(names) + "`"])
+    return lines
+
+
 def format_results():
     from datetime import datetime, timezone
 
@@ -649,19 +952,30 @@ def format_results():
     root = pathlib.Path("bench/artifacts")
     rows = []
     shard_files = 0
+    shard_outcomes = []
     for p in sorted(root.rglob("*.json")):
         try:
             payload = json.loads(p.read_text())
         except Exception as e:
             print(f"Failed to load {p}: {e}")
             continue
-        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        if not isinstance(payload, dict):
+            continue
+        # #2737: every shard publishes an outcome marker whether it finished, was
+        # censored at its wall budget, or failed inside it. The marker is the only
+        # thing a censored shard publishes at all -- its result JSON was never
+        # written -- so it is what keeps a cut-short scenario from being counted
+        # as an ordinary red.
+        if payload.get("schema") == SHARD_OUTCOME_SCHEMA:
+            shard_outcomes.append(payload)
+            continue
+        if not isinstance(payload.get("results"), list):
             continue
         rows.extend(payload["results"])
         shard_files += 1
 
     ratio_pairs = fit_sec_ratio_rows(rows)
-    benchmark_verdict = matched_benchmark_verdict(rows)
+    benchmark_verdict = matched_benchmark_verdict(rows, shard_outcomes=shard_outcomes)
     merged = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "results": rows,
@@ -670,6 +984,10 @@ def format_results():
         # artifact, not only in a step summary that expires with the run.
         "fit_sec_ratios": ratio_pairs,
         "benchmark_verdict": benchmark_verdict,
+        # #2737: carried into the published artifact so a later reader can tell
+        # which scenarios this run actually measured without re-deriving it from
+        # job durations.
+        "shard_outcomes": shard_outcomes,
     }
     with open("bench/results.nightly.json", "w") as f:
         json.dump(merged, f, indent=2)
@@ -703,6 +1021,7 @@ def format_results():
         pred_s = fmt_num(r.get("predict_sec"), digits=2)
         lines.append(f"| {scen} | {contender} | {stat} | {fit_s} | {pred_s} |")
 
+    lines.extend(_shard_outcome_summary_lines(benchmark_verdict))
     lines.extend(_fit_sec_ratio_summary_lines(ratio_pairs))
     lines.extend(
         [
@@ -763,6 +1082,20 @@ if __name__ == "__main__":
         download_artifacts(sys.argv[2], sys.argv[3])
     elif task == "check_python_deps":
         check_python_deps()
+    elif task == "record_shard_outcome":
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--scenario", required=True)
+        parser.add_argument("--exit-code", required=True, type=int)
+        parser.add_argument("--budget-seconds", required=True, type=int)
+        parser.add_argument("--out", required=True)
+        args = parser.parse_args(sys.argv[2:])
+        record_shard_outcome(args.scenario, args.exit_code, args.budget_seconds, args.out)
+    elif task == "print_wall_budgets":
+        for name, budget in sorted(scenario_wall_budgets().items()):
+            print(
+                f"{name}\t{budget['budget_seconds']}s\t{budget['timeout_minutes']}m\t"
+                f"{budget['basis']}"
+            )
     elif task == "format_results":
         format_results()
     elif task == "enforce_verdict":

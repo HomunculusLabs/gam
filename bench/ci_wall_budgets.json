@@ -1,0 +1,507 @@
+{
+  "schema": "benchmark-wall-budget/v1",
+  "policy": {
+    "base": "job_seconds of the scenario's own most recent COMPLETED run, as recorded in `measurements` below",
+    "safety_factor": 2.0,
+    "safety_factor_rationale": "The base is the whole GitHub job's wall time -- checkout, Python/R setup, artifact download and the smoke imports included -- while the budget caps only the `python3 bench/run_suite.py` invocation. The base is therefore already a strict upper bound on the quantity being capped, and doubling it leaves at least 2x headroom on the shard itself (much more on the short scenarios, whose job time is mostly setup). It is a headroom policy, NOT a fitted cost law: see `rejected_models`.",
+    "unmeasured_budget_rule": "A scenario with no `completed` measurement has nothing to calibrate against. It receives the largest budget that any measured scenario earns under the rule above, so no scenario is ever capped below the most expensive scenario that has ever been observed to finish.",
+    "ceiling_overhead_rationale": "`timeout-minutes` (the GitHub job ceiling) must sit ABOVE the GNU-timeout budget, or a censored shard is CANCELLED by GitHub instead of exiting 124 and the run loses the ability to tell censored from failed. The gap it must cover is everything outside the bench command -- checkout, Python/R setup, artifact download, smoke imports, upload. That is measured, not guessed: `job_overhead_seconds_observed_max` is the largest gap between job wall time and shard budget across the 22 censored jobs of run 30687540475 (heart_failure_survival), and the ceiling adds `safety_factor` times it, rounded up to the whole minute -- the SAME headroom policy the budget itself uses, applied to the same kind of measured upper bound.",
+    "rejected_models": [
+      "work = n*p^2 + p^3 with p = n_pcs*k (a matrix-shape cost model). Refuted by these same measurements: us48_demand_5day completes in 2634 s at work ~ 1e5 while geo_disease_eas3_psperpc_k24 completes in 1376 s at work ~ 3e7. The driver of wall time on this matrix is the CONTENDER MIX (the brms MCMC folds in particular), not the design-matrix shape, so a shape-derived budget formula would be a fitted law on the wrong axis. Each scenario is budgeted from its OWN measured history instead."
+    ],
+    "job_overhead_seconds_observed_max": 203
+  },
+  "provenance": {
+    "run_id": 30687540475,
+    "run_url": "https://github.com/SauersML/gam/actions/runs/30687540475",
+    "issue": 2737,
+    "measured_at_utc": "2026-08-01",
+    "source": "gh run view 30687540475 --json jobs -q '.jobs[] | select(.name|startswith(\"Bench \")) | [.conclusion, ((.completedAt|fromdate)-(.startedAt|fromdate)), .name] | @tsv'",
+    "outcome_classification": "`completed` = the GitHub job concluded success. `censored` = the job failed having run at least as long as the budget then in force (`budget_seconds_at_measurement`), i.e. the shard was cut short and measured NOTHING. `errored` = the job failed strictly under that budget, i.e. it is a real defect and not a budget case at all.",
+    "population": "110 scenarios: 68 completed, 22 censored, 20 errored."
+  },
+  "measurements": {
+    "bone_gamair": {
+      "job_seconds": 196,
+      "outcome": "completed"
+    },
+    "cirrhosis_survival": {
+      "job_seconds": 2626,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "continuous_order_boundary_rough": {
+      "job_seconds": 182,
+      "outcome": "completed"
+    },
+    "continuous_order_boundary_smooth": {
+      "job_seconds": 148,
+      "outcome": "completed"
+    },
+    "continuous_order_fractional_spde_nu18": {
+      "job_seconds": 133,
+      "outcome": "completed"
+    },
+    "geo_disease_duchon": {
+      "job_seconds": 210,
+      "outcome": "completed"
+    },
+    "geo_disease_eas3_duchon_k12": {
+      "job_seconds": 376,
+      "outcome": "completed"
+    },
+    "geo_disease_eas3_duchon_k24": {
+      "job_seconds": 276,
+      "outcome": "completed"
+    },
+    "geo_disease_eas3_duchon_k6": {
+      "job_seconds": 197,
+      "outcome": "completed"
+    },
+    "geo_disease_eas3_matern_k12": {
+      "job_seconds": 2649,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_disease_eas3_matern_k24": {
+      "job_seconds": 2632,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_disease_eas3_matern_k6": {
+      "job_seconds": 2632,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_disease_eas3_psperpc_k12": {
+      "job_seconds": 559,
+      "outcome": "completed"
+    },
+    "geo_disease_eas3_psperpc_k24": {
+      "job_seconds": 1376,
+      "outcome": "completed"
+    },
+    "geo_disease_eas3_psperpc_k6": {
+      "job_seconds": 587,
+      "outcome": "completed"
+    },
+    "geo_disease_eas3_tp_k12": {
+      "job_seconds": 259,
+      "outcome": "completed"
+    },
+    "geo_disease_eas3_tp_k24": {
+      "job_seconds": 272,
+      "outcome": "completed"
+    },
+    "geo_disease_eas3_tp_k6": {
+      "job_seconds": 175,
+      "outcome": "completed"
+    },
+    "geo_disease_eas_duchon_k12": {
+      "job_seconds": 213,
+      "outcome": "completed"
+    },
+    "geo_disease_eas_duchon_k24": {
+      "job_seconds": 321,
+      "outcome": "completed"
+    },
+    "geo_disease_eas_duchon_k4_downsample150x": {
+      "job_seconds": 182,
+      "outcome": "completed"
+    },
+    "geo_disease_eas_duchon_k4_downsample300x": {
+      "job_seconds": 124,
+      "outcome": "completed"
+    },
+    "geo_disease_eas_duchon_k4_downsample500x": {
+      "job_seconds": 173,
+      "outcome": "completed"
+    },
+    "geo_disease_eas_duchon_k6": {
+      "job_seconds": 209,
+      "outcome": "completed"
+    },
+    "geo_disease_eas_duchon_k6_downsample100x": {
+      "job_seconds": 134,
+      "outcome": "completed"
+    },
+    "geo_disease_eas_duchon_k6_downsample10x": {
+      "job_seconds": 192,
+      "outcome": "completed"
+    },
+    "geo_disease_eas_duchon_k6_downsample50x": {
+      "job_seconds": 165,
+      "outcome": "completed"
+    },
+    "geo_disease_eas_matern_k12": {
+      "job_seconds": 232,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_disease_eas_matern_k24": {
+      "job_seconds": 1927,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_disease_eas_matern_k6": {
+      "job_seconds": 2590,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_disease_eas_psperpc_k12": {
+      "job_seconds": 2664,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_disease_eas_psperpc_k24": {
+      "job_seconds": 2621,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_disease_eas_psperpc_k6": {
+      "job_seconds": 2620,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_disease_eas_tp_k12": {
+      "job_seconds": 193,
+      "outcome": "completed"
+    },
+    "geo_disease_eas_tp_k24": {
+      "job_seconds": 434,
+      "outcome": "completed"
+    },
+    "geo_disease_eas_tp_k6": {
+      "job_seconds": 170,
+      "outcome": "completed"
+    },
+    "geo_disease_matern": {
+      "job_seconds": 267,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_disease_ps_per_pc": {
+      "job_seconds": 184,
+      "outcome": "completed"
+    },
+    "geo_disease_shrinkage": {
+      "job_seconds": 175,
+      "outcome": "completed"
+    },
+    "geo_disease_tp": {
+      "job_seconds": 162,
+      "outcome": "completed"
+    },
+    "geo_latlon_equatornoise_duchon_k12": {
+      "job_seconds": 121,
+      "outcome": "completed"
+    },
+    "geo_latlon_equatornoise_duchon_k24": {
+      "job_seconds": 130,
+      "outcome": "completed"
+    },
+    "geo_latlon_equatornoise_duchon_k6": {
+      "job_seconds": 139,
+      "outcome": "completed"
+    },
+    "geo_latlon_equatornoise_matern_k12": {
+      "job_seconds": 220,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_equatornoise_matern_k24": {
+      "job_seconds": 302,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_equatornoise_matern_k6": {
+      "job_seconds": 266,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_equatornoise_psperpc_k12": {
+      "job_seconds": 2638,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_equatornoise_psperpc_k24": {
+      "job_seconds": 1379,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_equatornoise_psperpc_k6": {
+      "job_seconds": 2396,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_equatornoise_tp_k12": {
+      "job_seconds": 225,
+      "outcome": "completed"
+    },
+    "geo_latlon_equatornoise_tp_k24": {
+      "job_seconds": 254,
+      "outcome": "completed"
+    },
+    "geo_latlon_equatornoise_tp_k6": {
+      "job_seconds": 160,
+      "outcome": "completed"
+    },
+    "geo_latlon_superpopnoise_duchon_k12": {
+      "job_seconds": 134,
+      "outcome": "completed"
+    },
+    "geo_latlon_superpopnoise_duchon_k24": {
+      "job_seconds": 135,
+      "outcome": "completed"
+    },
+    "geo_latlon_superpopnoise_duchon_k6": {
+      "job_seconds": 196,
+      "outcome": "completed"
+    },
+    "geo_latlon_superpopnoise_matern_k12": {
+      "job_seconds": 250,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_superpopnoise_matern_k24": {
+      "job_seconds": 2688,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_superpopnoise_matern_k6": {
+      "job_seconds": 214,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_superpopnoise_psperpc_k12": {
+      "job_seconds": 2685,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_superpopnoise_psperpc_k24": {
+      "job_seconds": 866,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_superpopnoise_psperpc_k6": {
+      "job_seconds": 1948,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_superpopnoise_tp_k12": {
+      "job_seconds": 221,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_latlon_superpopnoise_tp_k24": {
+      "job_seconds": 276,
+      "outcome": "completed"
+    },
+    "geo_latlon_superpopnoise_tp_k6": {
+      "job_seconds": 134,
+      "outcome": "completed"
+    },
+    "geo_subpop16_duchon_k12": {
+      "job_seconds": 338,
+      "outcome": "completed"
+    },
+    "geo_subpop16_duchon_k24": {
+      "job_seconds": 193,
+      "outcome": "completed"
+    },
+    "geo_subpop16_duchon_k6": {
+      "job_seconds": 133,
+      "outcome": "completed"
+    },
+    "geo_subpop16_margslope_aniso_duchon16d_k50": {
+      "job_seconds": 148,
+      "outcome": "completed"
+    },
+    "geo_subpop16_matern_k12": {
+      "job_seconds": 1253,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_subpop16_matern_k24": {
+      "job_seconds": 2644,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_subpop16_matern_k6": {
+      "job_seconds": 1352,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_subpop16_psperpc_k12": {
+      "job_seconds": 2628,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_subpop16_psperpc_k24": {
+      "job_seconds": 2649,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_subpop16_psperpc_k6": {
+      "job_seconds": 1790,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "geo_subpop16_randomprev_randomscale_duchonfull_k50": {
+      "job_seconds": 169,
+      "outcome": "completed"
+    },
+    "geo_subpop16_tp_k12": {
+      "job_seconds": 187,
+      "outcome": "completed"
+    },
+    "geo_subpop16_tp_k24": {
+      "job_seconds": 162,
+      "outcome": "completed"
+    },
+    "geo_subpop16_tp_k6": {
+      "job_seconds": 203,
+      "outcome": "completed"
+    },
+    "haberman_5yr": {
+      "job_seconds": 293,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "heart_failure_survival": {
+      "job_seconds": 2710,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "horse_colic": {
+      "job_seconds": 181,
+      "outcome": "completed"
+    },
+    "icu_survival_death": {
+      "job_seconds": 2723,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "icu_survival_los": {
+      "job_seconds": 2676,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "lidar_semipar": {
+      "job_seconds": 421,
+      "outcome": "completed"
+    },
+    "medium": {
+      "job_seconds": 539,
+      "outcome": "completed"
+    },
+    "papuan_oce4_duchon_k12": {
+      "job_seconds": 1529,
+      "outcome": "completed"
+    },
+    "papuan_oce4_duchon_k24": {
+      "job_seconds": 253,
+      "outcome": "completed"
+    },
+    "papuan_oce4_duchon_k6": {
+      "job_seconds": 317,
+      "outcome": "completed"
+    },
+    "papuan_oce4_matern_k12": {
+      "job_seconds": 240,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "papuan_oce4_matern_k24": {
+      "job_seconds": 1137,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "papuan_oce4_matern_k6": {
+      "job_seconds": 290,
+      "outcome": "errored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "papuan_oce4_psperpc_k12": {
+      "job_seconds": 1233,
+      "outcome": "completed"
+    },
+    "papuan_oce4_psperpc_k24": {
+      "job_seconds": 2634,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "papuan_oce4_psperpc_k6": {
+      "job_seconds": 559,
+      "outcome": "completed"
+    },
+    "papuan_oce4_tp_k12": {
+      "job_seconds": 562,
+      "outcome": "completed"
+    },
+    "papuan_oce4_tp_k24": {
+      "job_seconds": 373,
+      "outcome": "completed"
+    },
+    "papuan_oce4_tp_k6": {
+      "job_seconds": 670,
+      "outcome": "completed"
+    },
+    "papuan_oce_duchon_k12": {
+      "job_seconds": 369,
+      "outcome": "completed"
+    },
+    "papuan_oce_matern_k12": {
+      "job_seconds": 2630,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "papuan_oce_psperpc_k12": {
+      "job_seconds": 2634,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "papuan_oce_tp_k12": {
+      "job_seconds": 378,
+      "outcome": "completed"
+    },
+    "pathological_ill_conditioned": {
+      "job_seconds": 512,
+      "outcome": "completed"
+    },
+    "prostate_gamair": {
+      "job_seconds": 161,
+      "outcome": "completed"
+    },
+    "small_dense": {
+      "job_seconds": 187,
+      "outcome": "completed"
+    },
+    "thread3_admixture_cliff": {
+      "job_seconds": 2676,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 2520
+    },
+    "us48_demand_31day": {
+      "job_seconds": 8847,
+      "outcome": "censored",
+      "budget_seconds_at_measurement": 8700
+    },
+    "us48_demand_5day": {
+      "job_seconds": 2634,
+      "outcome": "completed"
+    },
+    "wine_gamair": {
+      "job_seconds": 1971,
+      "outcome": "completed"
+    },
+    "wine_price_vs_temp": {
+      "job_seconds": 457,
+      "outcome": "completed"
+    },
+    "wine_temp_vs_year": {
+      "job_seconds": 323,
+      "outcome": "completed"
+    }
+  }
+}

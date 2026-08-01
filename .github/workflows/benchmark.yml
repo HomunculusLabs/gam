@@ -341,20 +341,24 @@ jobs:
     if: ${{ needs.prepare.outputs.parallel_count != '0' }}
     runs-on: ubuntu-latest
     # GH ceiling is a safety net only — the bench command is wrapped in
-    # GNU `timeout` set a few minutes shorter so a timeout produces a
-    # workflow `failure` (not `cancelled`). See "running benchmark shard"
-    # below.
+    # GNU `timeout` set below it so an over-budget shard produces a workflow
+    # `failure` with exit 124/137 (not a `cancelled` job, which carries no exit
+    # code and would erase the censored-vs-failed distinction).
     #
     # #1390: a few nightly scenarios run the brms MCMC contender (full
     # Bayesian sampling, 4 chains x 2000 iter per CV fold). On the larger
     # daily-demand panels the five serial folds alone overran the default 42m
     # budget, so the GNU `timeout` killed the whole shard (exit 124) AFTER gam
-    # had finished — discarding every result with no per-fold attribution. The
-    # GH ceiling is therefore set high enough to cover the heavy-MCMC path; the
-    # actual per-scenario budget is enforced by the scenario-aware GNU
-    # `timeout` computed in "Run scenario shard" below, so light scenarios
-    # still fail fast at ~42m.
-    timeout-minutes: 150
+    # had finished — discarding every result with no per-fold attribution.
+    #
+    # #2737: both numbers are now PER SCENARIO and both come from the same
+    # place. A flat 42m applied to a 110-scenario matrix cut 22 shards short and
+    # reported them as ordinary failures, which buried 20 scenarios that were
+    # failing well INSIDE the budget. Each matrix entry carries
+    # `wall_budget_seconds` (the GNU `timeout`) and `timeout_minutes` (this
+    # ceiling, always the larger), derived by `workflow_tasks.py build_matrix`
+    # from that scenario's own measured history in bench/ci_wall_budgets.json.
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       max-parallel: 8
@@ -364,8 +368,6 @@ jobs:
       BENCH_RAYON_THREADS: "4"
       BENCH_BLAS_THREADS: "1"
       BENCH_CMD_TIMEOUT_SEC: "10800"
-      BENCH_CONTENDER_FILTER: ${{ inputs.contenders }}
-      BENCH_CV_SPLITS: ${{ inputs.cv_splits }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -382,138 +384,14 @@ jobs:
         with:
           r-version: ${{ env.BENCH_R_VERSION }}
 
-      - name: Download shared runtime
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/workflow_tasks.py download_artifacts bench-runtime bench/runtime
-
-      - name: Install gamfit Rust extension into source tree
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          installed=0
-          for so in bench/runtime/_rust*.so; do
-            cp "$so" "gamfit/$(basename "$so")"
-            installed=$((installed + 1))
-          done
-          if [ "${installed}" -eq 0 ]; then
-            echo "::error title=Missing gamfit extension::No _rust*.so in bench-runtime artifact (bootstrap-runtime did not build gamfit._rust)"
-            exit 1
-          fi
-          ls -l gamfit/_rust*.so
-
       - name: Run scenario shard
-        shell: bash
-        env:
-          # Executing `python3 bench/run_suite.py` makes `bench/`, not the
-          # repository root, `sys.path[0]`. Keep the source-tree `gamfit`
-          # package importable alongside the staged third-party dependencies.
-          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/bench/runtime/pydeps
-          R_LIBS_USER: ${{ github.workspace }}/bench/runtime/r-lib
-          BENCH_GAM_BIN: ${{ github.workspace }}/bench/runtime/gam
-        run: |
-          set -euo pipefail
-          echo "== Benchmark shard diagnostics =="
-          echo "pwd: $(pwd)"
-          echo "scenario: ${{ matrix.scenario }}"
-          echo "python: $(command -v python3)"
-          python3 --version
-          echo "Rscript: $(command -v Rscript)"
-          Rscript --version
-          echo "BENCH_GAM_BIN=${BENCH_GAM_BIN}"
-          echo "BENCH_CI_PROFILE=${BENCH_CI_PROFILE}"
-          echo "BENCH_RAYON_THREADS=${BENCH_RAYON_THREADS}"
-          echo "BENCH_BLAS_THREADS=${BENCH_BLAS_THREADS}"
-          echo "BENCH_CMD_TIMEOUT_SEC=${BENCH_CMD_TIMEOUT_SEC}"
-          echo "PYTHONPATH=${PYTHONPATH}"
-          echo "R_LIBS_USER=${R_LIBS_USER}"
-          echo "bench/runtime tree:"
-          ls -la bench/runtime || true
-          ls -la bench/runtime/pydeps | sed -n '1,40p' || true
-          ls -la bench/runtime/r-lib | sed -n '1,40p' || true
-          echo "gam binary before chmod:"
-          ls -l "${BENCH_GAM_BIN}" || true
-          file "${BENCH_GAM_BIN}" || true
-          chmod +x "${BENCH_GAM_BIN}" || true
-          echo "gam binary after chmod:"
-          ls -l "${BENCH_GAM_BIN}" || true
-          file "${BENCH_GAM_BIN}" || true
-          test -x "${BENCH_GAM_BIN}"
-          echo "smoke-import python deps"
-          python3 .github/scripts/workflow_tasks.py check_python_deps
-          echo "smoke-import gamfit extension"
-          python3 -c 'import gamfit, gamfit._rust; print(gamfit._rust.__file__)'
-          echo "smoke-load R deps"
-          Rscript -e 'library(mgcv); library(jsonlite); library(survival); library(glmnet); library(gamlss); library(gamlss.dist); library(gamboostLSS); library(mboost); library(bamlss); library(brms); cat("R deps ok\n")'
-          mkdir -p bench/results-shards
-          echo "running benchmark shard..."
-          # Wrap the bench command in GNU timeout so an over-budget shard
-          # FAILS (exit 124 / 137) rather than being cancelled by the GH
-          # job-level timeout-minutes ceiling. We set the GNU timeout
-          # several minutes shorter than that ceiling so the shard exits
-          # cleanly before GH would auto-cancel; the explicit `exit 1`
-          # below ensures the conclusion is `failure`, not `cancelled`.
-          #
-          # #1390: the budget is scenario-aware. Most scenarios keep the 42m
-          # default so a genuinely slow/hung shard still fails fast. The
-          # heavy-MCMC scenarios below run the brms contender (full Bayesian
-          # sampling, 4 chains x 2000 iter per CV fold) on large daily-demand
-          # panels, whose five serial folds alone exceed 42m; they get a larger
-          # explicit budget (paired with the higher GH `timeout-minutes` and
-          # the per-fold BENCH_BRMS_FOLD_TIMEOUT_SEC cap in
-          # bench/_run_suite_external.py) so the full CV completes within budget
-          # instead of being killed mid-MCMC. This raises coverage for those
-          # scenarios; it does not drop any.
-          case "${{ matrix.scenario }}" in
-            us48_demand_31day)
-              BENCH_SHARD_TIMEOUT="${BENCH_SHARD_TIMEOUT:-145m}"
-              ;;
-            *)
-              BENCH_SHARD_TIMEOUT="${BENCH_SHARD_TIMEOUT:-42m}"
-              ;;
-          esac
-          bench_args=()
-          if [ -n "${BENCH_CONTENDER_FILTER}" ]; then
-            IFS=',' read -r -a selected_contenders <<< "${BENCH_CONTENDER_FILTER}"
-            for contender in "${selected_contenders[@]}"; do
-              bench_args+=(--contender "${contender}")
-            done
-          fi
-          if [ -n "${BENCH_CV_SPLITS}" ]; then
-            bench_args+=(--cv-splits "${BENCH_CV_SPLITS}")
-          fi
-          set +e
-          timeout --signal=TERM --kill-after=30s "${BENCH_SHARD_TIMEOUT}" \
-            python3 bench/run_suite.py \
-              --scenarios bench/scenarios.json \
-              --scenario-name "${{ matrix.scenario }}" \
-              "${bench_args[@]}" \
-              --out "bench/results-shards/${{ matrix.scenario }}.json"
-          rc=$?
-          set -e
-          if [ "${rc}" -ne 0 ]; then
-            if [ "${rc}" = "124" ] || [ "${rc}" = "137" ]; then
-              echo "::error title=Benchmark shard timeout::Scenario ${{ matrix.scenario }} exceeded ${BENCH_SHARD_TIMEOUT} wall budget (exit ${rc}); failing the job rather than being cancelled by the GH job-level ceiling."
-            else
-              echo "::error title=Benchmark shard error::Scenario ${{ matrix.scenario }} failed with exit ${rc}."
-            fi
-            exit 1
-          fi
-          echo "shard output:"
-          ls -l "bench/results-shards/${{ matrix.scenario }}.json"
-
-      - name: Upload shard artifact
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/run-bench-shard
         with:
-          name: bench-${{ matrix.scenario }}
-          path: |
-            bench/results-shards/${{ matrix.scenario }}.json
-            bench/results-shards/figures/${{ matrix.scenario }}.png
-          if-no-files-found: error
+          scenario: ${{ matrix.scenario }}
+          wall-budget-seconds: ${{ matrix.wall_budget_seconds }}
+          contender-filter: ${{ inputs.contenders }}
+          cv-splits: ${{ inputs.cv_splits }}
+          github-token: ${{ github.token }}
 
   bench-shard-serial:
     name: Bench ${{ matrix.scenario }} (serial)
@@ -523,10 +401,13 @@ jobs:
     if: ${{ needs.prepare.outputs.serial_count != '0' }}
     runs-on: ubuntu-24.04
     # GH ceiling is a safety net only — the bench command is wrapped in
-    # GNU `timeout` set a few minutes shorter so a timeout produces a
-    # workflow `failure` (not `cancelled`). See "running benchmark shard"
-    # below.
-    timeout-minutes: 47
+    # GNU `timeout` set below it so an over-budget shard produces a workflow
+    # `failure` with exit 124/137, not a `cancelled` job.
+    #
+    # #2737: per scenario, from bench/ci_wall_budgets.json — see `bench-shard`.
+    # The flat 47m ceiling here sat BELOW several scenarios' real cost, so
+    # `cirrhosis_survival` and `icu_survival_death` could only ever be censored.
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -536,8 +417,6 @@ jobs:
       BENCH_RAYON_THREADS: "4"
       BENCH_BLAS_THREADS: "1"
       BENCH_CMD_TIMEOUT_SEC: "10800"
-      BENCH_CONTENDER_FILTER: ${{ inputs.contenders }}
-      BENCH_CV_SPLITS: ${{ inputs.cv_splits }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -554,138 +433,14 @@ jobs:
         with:
           r-version: ${{ env.BENCH_R_VERSION }}
 
-      - name: Download shared runtime
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/workflow_tasks.py download_artifacts bench-runtime bench/runtime
-
-      - name: Install gamfit Rust extension into source tree
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          installed=0
-          for so in bench/runtime/_rust*.so; do
-            cp "$so" "gamfit/$(basename "$so")"
-            installed=$((installed + 1))
-          done
-          if [ "${installed}" -eq 0 ]; then
-            echo "::error title=Missing gamfit extension::No _rust*.so in bench-runtime artifact (bootstrap-runtime did not build gamfit._rust)"
-            exit 1
-          fi
-          ls -l gamfit/_rust*.so
-
       - name: Run scenario shard
-        shell: bash
-        env:
-          # Executing `python3 bench/run_suite.py` makes `bench/`, not the
-          # repository root, `sys.path[0]`. Keep the source-tree `gamfit`
-          # package importable alongside the staged third-party dependencies.
-          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/bench/runtime/pydeps
-          R_LIBS_USER: ${{ github.workspace }}/bench/runtime/r-lib
-          BENCH_GAM_BIN: ${{ github.workspace }}/bench/runtime/gam
-        run: |
-          set -euo pipefail
-          echo "== Benchmark shard diagnostics =="
-          echo "pwd: $(pwd)"
-          echo "scenario: ${{ matrix.scenario }}"
-          echo "python: $(command -v python3)"
-          python3 --version
-          echo "Rscript: $(command -v Rscript)"
-          Rscript --version
-          echo "BENCH_GAM_BIN=${BENCH_GAM_BIN}"
-          echo "BENCH_CI_PROFILE=${BENCH_CI_PROFILE}"
-          echo "BENCH_RAYON_THREADS=${BENCH_RAYON_THREADS}"
-          echo "BENCH_BLAS_THREADS=${BENCH_BLAS_THREADS}"
-          echo "BENCH_CMD_TIMEOUT_SEC=${BENCH_CMD_TIMEOUT_SEC}"
-          echo "PYTHONPATH=${PYTHONPATH}"
-          echo "R_LIBS_USER=${R_LIBS_USER}"
-          echo "bench/runtime tree:"
-          ls -la bench/runtime || true
-          ls -la bench/runtime/pydeps | sed -n '1,40p' || true
-          ls -la bench/runtime/r-lib | sed -n '1,40p' || true
-          echo "gam binary before chmod:"
-          ls -l "${BENCH_GAM_BIN}" || true
-          file "${BENCH_GAM_BIN}" || true
-          chmod +x "${BENCH_GAM_BIN}" || true
-          echo "gam binary after chmod:"
-          ls -l "${BENCH_GAM_BIN}" || true
-          file "${BENCH_GAM_BIN}" || true
-          test -x "${BENCH_GAM_BIN}"
-          echo "smoke-import python deps"
-          python3 .github/scripts/workflow_tasks.py check_python_deps
-          echo "smoke-import gamfit extension"
-          python3 -c 'import gamfit, gamfit._rust; print(gamfit._rust.__file__)'
-          echo "smoke-load R deps"
-          Rscript -e 'library(mgcv); library(jsonlite); library(survival); library(glmnet); library(gamlss); library(gamlss.dist); library(gamboostLSS); library(mboost); library(bamlss); library(brms); cat("R deps ok\n")'
-          mkdir -p bench/results-shards
-          echo "running benchmark shard..."
-          # Wrap the bench command in GNU timeout so an over-budget shard
-          # FAILS (exit 124 / 137) rather than being cancelled by the GH
-          # job-level timeout-minutes ceiling. We set the GNU timeout
-          # several minutes shorter than that ceiling so the shard exits
-          # cleanly before GH would auto-cancel; the explicit `exit 1`
-          # below ensures the conclusion is `failure`, not `cancelled`.
-          #
-          # #1390: the budget is scenario-aware. Most scenarios keep the 42m
-          # default so a genuinely slow/hung shard still fails fast. The
-          # heavy-MCMC scenarios below run the brms contender (full Bayesian
-          # sampling, 4 chains x 2000 iter per CV fold) on large daily-demand
-          # panels, whose five serial folds alone exceed 42m; they get a larger
-          # explicit budget (paired with the higher GH `timeout-minutes` and
-          # the per-fold BENCH_BRMS_FOLD_TIMEOUT_SEC cap in
-          # bench/_run_suite_external.py) so the full CV completes within budget
-          # instead of being killed mid-MCMC. This raises coverage for those
-          # scenarios; it does not drop any.
-          case "${{ matrix.scenario }}" in
-            us48_demand_31day)
-              BENCH_SHARD_TIMEOUT="${BENCH_SHARD_TIMEOUT:-145m}"
-              ;;
-            *)
-              BENCH_SHARD_TIMEOUT="${BENCH_SHARD_TIMEOUT:-42m}"
-              ;;
-          esac
-          bench_args=()
-          if [ -n "${BENCH_CONTENDER_FILTER}" ]; then
-            IFS=',' read -r -a selected_contenders <<< "${BENCH_CONTENDER_FILTER}"
-            for contender in "${selected_contenders[@]}"; do
-              bench_args+=(--contender "${contender}")
-            done
-          fi
-          if [ -n "${BENCH_CV_SPLITS}" ]; then
-            bench_args+=(--cv-splits "${BENCH_CV_SPLITS}")
-          fi
-          set +e
-          timeout --signal=TERM --kill-after=30s "${BENCH_SHARD_TIMEOUT}" \
-            python3 bench/run_suite.py \
-              --scenarios bench/scenarios.json \
-              --scenario-name "${{ matrix.scenario }}" \
-              "${bench_args[@]}" \
-              --out "bench/results-shards/${{ matrix.scenario }}.json"
-          rc=$?
-          set -e
-          if [ "${rc}" -ne 0 ]; then
-            if [ "${rc}" = "124" ] || [ "${rc}" = "137" ]; then
-              echo "::error title=Benchmark shard timeout::Scenario ${{ matrix.scenario }} exceeded ${BENCH_SHARD_TIMEOUT} wall budget (exit ${rc}); failing the job rather than being cancelled by the GH job-level ceiling."
-            else
-              echo "::error title=Benchmark shard error::Scenario ${{ matrix.scenario }} failed with exit ${rc}."
-            fi
-            exit 1
-          fi
-          echo "shard output:"
-          ls -l "bench/results-shards/${{ matrix.scenario }}.json"
-
-      - name: Upload shard artifact
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/run-bench-shard
         with:
-          name: bench-${{ matrix.scenario }}
-          path: |
-            bench/results-shards/${{ matrix.scenario }}.json
-            bench/results-shards/figures/${{ matrix.scenario }}.png
-          if-no-files-found: error
+          scenario: ${{ matrix.scenario }}
+          wall-budget-seconds: ${{ matrix.wall_budget_seconds }}
+          contender-filter: ${{ inputs.contenders }}
+          cv-splits: ${{ inputs.cv_splits }}
+          github-token: ${{ github.token }}
 
   aggregate:
     permissions:

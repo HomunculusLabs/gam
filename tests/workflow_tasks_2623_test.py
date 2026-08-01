@@ -59,8 +59,14 @@ class WorkflowTasks2623Tests(unittest.TestCase):
                 line.split("=", 1)
                 for line in output.read_text().splitlines()
             )
+            # #2737: matrix entries are `include` objects now -- each carries its
+            # own wall budget and job ceiling alongside the scenario name -- so
+            # order is read off the entries rather than off a bare name list.
             self.assertEqual(
-                json.loads(values["parallel_matrix"])["scenario"],
+                [
+                    entry["scenario"]
+                    for entry in json.loads(values["parallel_matrix"])["include"]
+                ],
                 ["wine_temp_vs_year", "papuan_oce4_psperpc_k6"],
             )
             with patch.dict(

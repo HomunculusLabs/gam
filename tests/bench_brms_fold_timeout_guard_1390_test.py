@@ -19,10 +19,21 @@ them and re-open the bulk-shard-kill:
      (waits with that deadline, then terminates/kills the child).
   2. the brms CV driver reads `BENCH_BRMS_FOLD_TIMEOUT_SEC` and passes the
      resulting per-fold cap into `run_cmd(..., timeout_sec=...)`.
-  3. the benchmark workflow gives `us48_demand_31day` an explicit (larger)
-     shard budget and the brms-fold cap is referenced in the workflow rationale.
+  3. the benchmark CI gives `us48_demand_31day` a larger shard budget than a
+     light scenario, and the brms-fold cap is referenced where that shard budget
+     is applied.
+
+#2737 moved (3) without weakening it. The heavy scenario's budget no longer
+lives in a hand-maintained shell `case` in `.github/workflows/benchmark.yml`; it
+is derived per scenario from measured history in `bench/ci_wall_budgets.json` and
+carried on the matrix entry, and the shard body itself now lives once in
+`.github/actions/run-bench-shard/action.yml` instead of twice in the workflow.
+The assertions below therefore check the PROPERTY (this scenario gets more wall
+time than a light one; the outer budget still names the inner per-fold cap)
+rather than the string that used to express it.
 """
 
+import importlib.util
 import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -86,12 +97,33 @@ def test_brms_r_script_caps_mcmc_sampling_budget():
     assert "warmup = brms_warmup" in src, "brms warmup no longer overridable (#1390)"
 
 
-def test_benchmark_workflow_gives_heavy_shard_an_explicit_budget():
-    wf = _read(".github/workflows/benchmark.yml")
-    # The scenario that triggered the bug must carry its own (larger) budget.
-    assert "us48_demand_31day" in wf, "heavy demand shard scenario missing from workflow"
-    assert "BENCH_SHARD_TIMEOUT" in wf, "per-shard budget knob removed from workflow (#1390)"
-    # The workflow rationale references the per-fold cap so the two stay coupled.
-    assert "BENCH_BRMS_FOLD_TIMEOUT_SEC" in wf, (
-        "workflow no longer references the brms per-fold cap (#1390)"
+def test_benchmark_ci_gives_heavy_shard_a_larger_budget_than_a_light_one():
+    spec = importlib.util.spec_from_file_location(
+        "workflow_tasks", ROOT / ".github" / "scripts" / "workflow_tasks.py"
+    )
+    tasks = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tasks)
+    budgets = tasks.scenario_wall_budgets()
+
+    heavy = "us48_demand_31day"
+    assert heavy in budgets, "heavy demand shard scenario missing from the budget table"
+    # The scenario that triggered #1390 must still get more wall time than the
+    # cheapest scenario in the suite -- that is the whole content of "explicit
+    # (larger) budget", and it survives the budget moving out of the workflow.
+    lightest = min(b["budget_seconds"] for b in budgets.values())
+    assert budgets[heavy]["budget_seconds"] > lightest, (
+        f"{heavy} no longer gets a larger shard budget than the lightest scenario (#1390)"
+    )
+    # And the per-shard budget knob must still reach the GNU timeout.
+    action = _read(".github/actions/run-bench-shard/action.yml")
+    assert "BENCH_SHARD_TIMEOUT_SEC" in action, (
+        "per-shard budget knob removed from the shard runner (#1390)"
+    )
+    assert 'timeout --signal=TERM --kill-after=30s "${BENCH_SHARD_TIMEOUT_SEC}s"' in action, (
+        "the per-shard budget no longer bounds the bench command (#1390)"
+    )
+    # The rationale where the OUTER budget is applied references the INNER
+    # per-fold cap, so the two cannot drift apart unnoticed.
+    assert "BENCH_BRMS_FOLD_TIMEOUT_SEC" in action, (
+        "shard runner no longer references the brms per-fold cap (#1390)"
     )
