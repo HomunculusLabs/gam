@@ -2972,13 +2972,33 @@ fn phase_coordinate_closes(phases: ArrayView1<'_, f64>, alpha: f64) -> bool {
     // from the last point back to the first. Omitting the wrap is the classic
     // way to make every arc look closed.
     let mut largest = 1.0 - (sorted[n - 1] - sorted[0]);
+    // DISTINCT angular positions, not rows. The null is `m` independent draws on
+    // the circle, and replicated rows are not independent draws — they are one
+    // position observed many times. A gridded sweep is the case that exposes the
+    // difference, and it is not a corner case: a product chart (a torus lattice,
+    // any regularly sampled sweep) has few distinct angles observed many times
+    // each. A 30 x 20 torus lattice has 600 rows but only 30 distinct major
+    // angles, so its largest spacing is pinned at 1/30 = 0.033 while a
+    // ROW-denominated bar shrinks to ln(600/alpha)/600 = 0.022 and rejects a
+    // perfectly closed loop. Denominating in rows made the false-REJECTION rate
+    // exceed its own nominal `alpha` by orders of magnitude on exactly the data a
+    // product chart produces.
+    let mut positions = 1usize;
     for window in sorted.windows(2) {
         let gap = window[1] - window[0];
+        if gap > 0.0 {
+            positions += 1;
+        }
         if gap > largest {
             largest = gap;
         }
     }
-    let bar = (n as f64 / alpha).ln() / n as f64;
+    // Below three distinct positions the spacings carry no information about
+    // closure, however many rows repeat them.
+    if positions < 3 {
+        return false;
+    }
+    let bar = (positions as f64 / alpha).ln() / positions as f64;
     largest <= bar
 }
 
@@ -7991,6 +8011,26 @@ mod tests_atlas_prior_2280 {
         assert!(
             !phase_coordinate_closes(wrapped_arc.view(), alpha),
             "an arc straddling the period boundary is still open"
+        );
+
+        // REPLICATED GRID: the case that exposed a real bug in this predicate. A
+        // product chart observes few distinct angles many times each, and it is
+        // maximally closed. A bar denominated in ROWS rejects it — 600 rows over
+        // 30 distinct positions have a fixed 1/30 spacing while the row bar
+        // shrinks like ln(600/alpha)/600 — so the null has to be denominated in
+        // distinct POSITIONS.
+        let grid = Array1::<f64>::from_shape_fn(600, |i| (i / 20) as f64 / 30.0);
+        assert!(
+            phase_coordinate_closes(grid.view(), alpha),
+            "a 30-position lattice observed 20 times each is closed; a bar denominated in \
+             rows rather than distinct positions rejects it"
+        );
+        // ...and replication must not rescue a genuinely open sweep either, or
+        // the repair would have traded a false rejection for a false acceptance.
+        let replicated_arc = Array1::<f64>::from_shape_fn(600, |i| 0.6 * ((i / 20) as f64 / 30.0));
+        assert!(
+            !phase_coordinate_closes(replicated_arc.view(), alpha),
+            "replicating an arc's positions must not make it look closed"
         );
 
         // And the predicate must not be answering by sample size alone.
