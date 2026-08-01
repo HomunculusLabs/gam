@@ -5397,19 +5397,27 @@ mod test_support {
     #[test]
     fn assembled_exact_hessian_delta_contracts_like_the_applier_2509() {
         use ndarray::Array1;
-        let (term0, target, rho) = crate::manifold::tests::small_two_atom_periodic_term();
+        // #2681 — the assembled/applied parity below is a statement about two
+        // readers of ONE derivation, evaluated at whatever `(t, β)` and cache
+        // they are handed; it has no stake in the inner solve reaching a KKT
+        // point. This fixture's inner solve does not reach it (#2681), so
+        // demanding convergence here only prevented the parity from ever being
+        // checked. Take the pinned shared state and factor once at it through
+        // the production `FROZEN_INNER_STATE` freeze lane.
+        let (term0, target, rho) =
+            crate::manifold::tests::small_two_atom_periodic_term_at_shared_inner_state();
         let mut term = term0;
         let (_cost, _loss, cache) = term
             .penalized_quasi_laplace_criterion_with_cache(
                 target.view(),
                 &rho,
                 None,
-                1,
+                crate::manifold::tests::FROZEN_INNER_STATE,
                 0.25,
                 1.0e-4,
                 1.0e-4,
             )
-            .expect("dense criterion must evaluate on the #2509 witness");
+            .expect("dense criterion must evaluate at the pinned #2509 witness state");
 
         let blocks = term
             .assemble_exact_hessian_minus_b_rows(&rho, target.view(), &cache.row_dims, cache.k)

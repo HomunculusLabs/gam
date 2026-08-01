@@ -2194,6 +2194,86 @@ pub(crate) fn small_two_atom_periodic_term() -> (SaeManifoldTerm, Array2<f64>, S
     (term, target, rho)
 }
 
+/// The `inner_max_iter` that PINS the inner `(t, β)` state instead of solving
+/// it. `converge_inner_for_undamped_logdet` treats `0` as a verbatim
+/// warm-start FREEZE (gam#577/#579/#850): it factors exactly once at the
+/// iterate it is handed and returns that undamped cache "without invoking the
+/// stationarity gate". Named because #2681 depends on the value being `0` for
+/// that reason, not as an "as few iterations as possible" knob.
+pub(crate) const FROZEN_INNER_STATE: usize = 0;
+
+/// #2681 — the #2509 witnesses' SHARED inner state, obtained WITHOUT requiring
+/// the inner KKT contract to be met at it.
+///
+/// The three #2509 witnesses assert operator parity: dense-vs-streaming
+/// evidence log-dets (`criterion_lane_gap_is_exactly_the_evidence_logdet_gap_2509`),
+/// assembled-vs-applied `ΔC`
+/// (`assembled_exact_hessian_delta_contracts_like_the_applier_2509`), and
+/// dense-vs-streaming cost
+/// (`reml_retries_refinement_after_non_pd_undamped_evidence_factor`). Two
+/// operators agree or disagree at whatever state they are handed; none of the
+/// three is a statement about the inner solve reaching a KKT point. All three
+/// nonetheless died BEFORE their own assertions, because this fixture's inner
+/// solve refuses (#2681 — measured at `‖g‖/tol ≈ 4.8e2` extensive and
+/// `2.6e3` in parameter units, i.e. genuinely non-stationary in BOTH
+/// currencies, which is why nothing here relaxes a bar) and the criterion
+/// returns `Err` instead of a value. The `Err` was coupling an operator-parity
+/// assertion to a solver contract it has no stake in.
+///
+/// This helper decouples them. It drives the criterion once — the very call
+/// the witnesses used to make — and KEEPS whatever state that drive leaves
+/// behind. `converge_inner_for_undamped_logdet` has THREE `Err` exits, and two
+/// of them — the budget-exhaustion and the persistent-objective-stall branches,
+/// which are the ones this fixture takes — explicitly `restore_mutable_state`
+/// to the best-seen inner iterate before returning (both are commented
+/// "terminal give-up path, so the restore has no downstream state to
+/// corrupt"). The third, the non-idempotent-inner-map refusal raised when KKT
+/// entered its admission band but an evidence-only re-entry still moved,
+/// returns without restoring. So the contract this helper offers is exactly
+/// "whatever state the drive left", not "the best-seen state unconditionally":
+/// on this fixture that is the best-seen iterate, and if the drive ever exits
+/// by the third branch it is the excursion's. Nothing downstream depends on
+/// which — a parity claim is evaluated at the state it is handed. Each witness
+/// then prices from a CLONE of that one term through the production
+/// [`FROZEN_INNER_STATE`] lane.
+///
+/// That makes the shared-state precondition the parity claims need STRUCTURAL —
+/// both lanes are clones of one pinned state — rather than an inference from
+/// "both lanes drive the same driver, so both must have stopped in the same
+/// place". The witnesses that carry a loss-agreement assertion keep it; it is
+/// now a check on the freeze lane rather than on two independent solves.
+///
+/// This is NOT a route to accepting a non-stationary fit: no criterion value
+/// reaches production from here, the outer lanes still see the refusal, and the
+/// residual this fixture stalls at stays pinned by
+/// `inner_kkt_gate_is_extensive_while_the_intensive_certificate_exists_2681`.
+pub(crate) fn small_two_atom_periodic_term_at_shared_inner_state()
+-> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
+    let (mut term, target, rho) = small_two_atom_periodic_term();
+    // The drive is the point; its verdict is not. #2681 records that it refuses
+    // on this fixture, and a repair that later makes it converge must not
+    // change what this helper returns. The verdict is RECORDED rather than
+    // discarded — a `let _` here would both trip the repository's ban on
+    // silently dropped results and leave whoever debugs a failure downstream
+    // with no trace of which refusal produced the pinned state.
+    let drive_verdict = term.penalized_quasi_laplace_criterion_with_cache(
+        target.view(),
+        &rho,
+        None,
+        1,
+        0.25,
+        1.0e-4,
+        1.0e-4,
+    );
+    if let Err(err) = drive_verdict {
+        log::debug!(
+            "small_two_atom_periodic_term_at_shared_inner_state: the drive refused, as #2681 \
+             records it does on this fixture; the pinned state is whatever it left behind: {err:?}"
+        );
+    }
+    (term, target, rho)
+}
+
 /// #Bug4 — the ThresholdGate θ-adjoint prior THIRD derivative
 /// (`assignment_prior_hdiag_derivative_entry`) must be ZERO for a FIXED
 /// (ungated / frozen) logit, matching the zeroed assembled `htt` diagonal entry.
@@ -3462,6 +3542,38 @@ pub(crate) fn reml_retries_refinement_after_non_pd_undamped_evidence_factor() {
         cold_cache.gauge_deflated_directions,
     );
 
+    let cold_grad_norm = SaeManifoldTerm::system_grad_norm_sq(&cold_sys).sqrt();
+
+    // #2681 — the RETRY and the AGREEMENT are two claims, and only the first
+    // needs the solve to make progress. Drive the criterion once and keep the
+    // state it leaves behind (on this fixture the best-seen iterate, which the
+    // budget and stall exits restore before refusing — see
+    // `small_two_atom_periodic_term_at_shared_inner_state` for the third exit
+    // that does not), then price both lanes at THAT pinned state through the
+    // `FROZEN_INNER_STATE` freeze lane. This fixture's inner solve does not
+    // reach the KKT bar (#2681, ~4.8e2x extensive and ~2.6e3x in parameter
+    // units — non-stationary in both currencies, so no bar is being relaxed
+    // here), and the cost-agreement claim never depended on it: two evidence
+    // operators agree or disagree at whatever state they are handed.
+    let (term0, target, rho) = small_two_atom_periodic_term_at_shared_inner_state();
+
+    // The RETRY, asserted directly rather than inferred from the criterion
+    // returning `Ok`: the drive got PAST the cold non-PD undamped factor and
+    // refined the inner state to a strictly better KKT residual. Before #1117
+    // the cold factor refused outright and this recovery is what the test is
+    // named for; it is a statement about the drive, not about where it stops.
+    let mut driven = term0.clone();
+    let driven_sys = driven
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("the driven state must assemble");
+    let driven_grad_norm = SaeManifoldTerm::system_grad_norm_sq(&driven_sys).sqrt();
+    assert!(
+        driven_grad_norm < cold_grad_norm,
+        "REML must refine PAST the cold non-PD undamped evidence factor: the driven state's KKT \
+         residual ‖g‖={driven_grad_norm:.6e} is not below the cold seed's {cold_grad_norm:.6e}, \
+         so no refinement survived the retry"
+    );
+
     let mut full = term0.clone();
     let mut streaming = term0;
     let (full_cost, full_loss, cache) = full
@@ -3469,12 +3581,12 @@ pub(crate) fn reml_retries_refinement_after_non_pd_undamped_evidence_factor() {
             target.view(),
             &rho,
             None,
-            1,
+            FROZEN_INNER_STATE,
             0.25,
             1.0e-4,
             1.0e-4,
         )
-        .expect("dense REML must refine through the cold non-PD criterion factor");
+        .expect("dense REML must price the refined post-retry state");
     let log_det = arrow_log_det_from_cache(&cache).expect("refined cache must carry log-det");
     assert!(full_cost.is_finite());
     assert!(full_loss.total().is_finite());
@@ -3485,12 +3597,12 @@ pub(crate) fn reml_retries_refinement_after_non_pd_undamped_evidence_factor() {
             target.view(),
             &rho,
             None,
-            1,
+            FROZEN_INNER_STATE,
             0.25,
             1.0e-4,
             1.0e-4,
         )
-        .expect("streaming REML must share the dense refinement retry");
+        .expect("streaming REML must price the same refined post-retry state");
     assert_abs_diff_eq!(stream_cost, full_cost, epsilon = 1.0e-8);
     assert_abs_diff_eq!(stream_loss.total(), full_loss.total(), epsilon = 1.0e-8);
 }
@@ -7082,7 +7194,12 @@ impl SaeBasisEvaluator for TestPeriodicEvaluator {
 pub(crate) fn criterion_lane_gap_is_exactly_the_evidence_logdet_gap_2509() {
     use crate::manifold::construction::StreamingRankInputs;
 
-    let (term0, target, rho) = small_two_atom_periodic_term();
+    // #2681 — ONE inner state, pinned, priced by both lanes. See
+    // `small_two_atom_periodic_term_at_shared_inner_state`: the identity below
+    // is parameter-free and holds at ANY state, and this fixture's inner solve
+    // does not converge, so requiring convergence here only prevented the
+    // identity from ever being checked.
+    let (term0, target, rho) = small_two_atom_periodic_term_at_shared_inner_state();
     let mut dense = term0.clone();
     let mut streaming = term0;
 
@@ -7091,12 +7208,12 @@ pub(crate) fn criterion_lane_gap_is_exactly_the_evidence_logdet_gap_2509() {
             target.view(),
             &rho,
             None,
-            1,
+            FROZEN_INNER_STATE,
             0.25,
             1.0e-4,
             1.0e-4,
         )
-        .expect("dense criterion must evaluate on the #2509 witness");
+        .expect("dense criterion must evaluate at the pinned #2509 witness state");
     // The SAME call the dense criterion makes internally, off the SAME returned
     // cache — so these are the log-dets that priced `dense_cost`, not a re-derivation.
     let (log_a, log_a_tt) = dense
@@ -7108,12 +7225,12 @@ pub(crate) fn criterion_lane_gap_is_exactly_the_evidence_logdet_gap_2509() {
             target.view(),
             &rho,
             None,
-            1,
+            FROZEN_INNER_STATE,
             0.25,
             1.0e-4,
             1.0e-4,
         )
-        .expect("streaming criterion must evaluate on the #2509 witness");
+        .expect("streaming criterion must evaluate at the pinned #2509 witness state");
     let mut rank_inputs = StreamingRankInputs::default();
     let log_b = streaming
         .streaming_exact_arrow_log_det(target.view(), &rho, None, Some(&mut rank_inputs))
@@ -7140,11 +7257,12 @@ pub(crate) fn criterion_lane_gap_is_exactly_the_evidence_logdet_gap_2509() {
     .fold(1.0_f64, f64::max);
     let tolerance = 4096.0 * f64::EPSILON * scale;
 
-    // The converged inner state must be shared: both lanes drive the SAME
-    // `converge_inner_for_undamped_logdet` with the refinement extension on, so a
-    // loss split would mean the two inner solves stopped in different places —
-    // the (refuted) refinement-policy diagnosis — and the identity below would be
-    // measuring two things at once.
+    // The inner state must be shared. #2681 made that STRUCTURAL — both lanes
+    // are clones of one pinned term driven through the `FROZEN_INNER_STATE`
+    // lane — so this assertion is no longer inferring a shared stopping point
+    // from two independent solves; it now checks that the freeze lane itself
+    // prices the pinned state identically on both sides. A loss split here
+    // would mean the identity below is measuring two things at once.
     assert!(
         (dense_loss.total() - stream_loss.total()).abs() <= tolerance,
         "#2509: the two lanes' converged losses must agree before any log-det \
