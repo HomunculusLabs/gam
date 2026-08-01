@@ -1596,6 +1596,26 @@ fn seam_equivalence_log_e(
 // lane uses. A pole seam always REGISTERS (keeps both charts as one
 // partition-of-unity atlas atom); a sphere is orientable, so its proper-rotation
 // transition carries `sign = +1` in the cocycle.
+//
+// ⚠ THIS WHOLE LANE IS CURRENTLY UNREACHABLE — it is written against the
+// `(lat, lon)` `SphereChartEvaluator` that was DELETED when every chart consumer
+// moved to ambient coordinates, and nothing here was ported with it (#2698).
+// Four independent places encode the deleted geometry: `is_sphere_pair` requires
+// `latent_dim == 2`, `sphere_linear_block` requires a 7-row decoder,
+// `sphere_row_unit` reads `basis_values[[row, 1..4]]` as `(x, y, z)`, and
+// `sphere_decoded_points_at_units` hardcodes the `[1, x, y, z, xy, yz, xz]`
+// monomial layout. The only sphere atom the geometry-plan authority can build is
+// `(Sphere, latent_dim = 3, AmbientSphereHarmonics, RoundSphere)` — width 9 real
+// spherical harmonics, and `SaeAtomGeometryPlan::new` REFUSES `(Sphere, 2, ..)`
+// — so `is_sphere_pair` is false for every producible pair and none of the code
+// below runs. The lane has no unit-test caller either; its only exercise is the
+// `chart_gluing_1890_e2e` pole-seam e2e, which is red at construction for the
+// same reason. Porting it means: screening on `latent_dim == 3`, taking the
+// ambient frame from the decoder's degree-1 (dipole) block, reading each row's
+// unit vector from the assignment coordinate instead of `basis_values`, and
+// decoding through the atom's own `basis_second_jet` rather than a hardcoded
+// monomial list. Do not read the paragraphs above as a description of shipped,
+// exercised behaviour until that port lands.
 // ===========================================================================
 
 /// The linear `[x, y, z]` decoder block of a `SphereChartEvaluator` atom: rows

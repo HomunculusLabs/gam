@@ -475,16 +475,31 @@ fn orientation_reversing_pair_registers_atlas_end_to_end() {
 
 /// Build a TWO-sphere-chart term over `n` rows that cover ONE ambient unit
 /// sphere (in ambient dims `0,1,2`) with mutually-interior poles. Chart A uses
-/// the identity lat/lon frame; chart B is the SAME sphere reparametrized with its
+/// the identity ambient frame; chart B is the SAME sphere reparametrized with its
 /// pole along A's `x`-axis (a 90° ambient rotation), so A's pole is a regular
 /// interior point of B and vice versa — the defining sphere pole seam. Rows
 /// `0..n/2` are chart A's disjoint support, `n/2..n` chart B's.
 ///
 /// Each physical point `q = [q0, q1, q2]` on the sphere is parametrized in BOTH
-/// charts (`A`: `lat = asin q2, lon = atan2(q1, q0)`; `B`: `u_b = [-q2, q1, q0]`),
-/// and BOTH decoders map their unit vector back to the SAME ambient `q` — so the
-/// two charts are an exact over-tiling whose transition is the ambient rotation
-/// `R = [[0,0,1],[0,1,0],[-1,0,0]]` (`det R = +1`, a proper rotation).
+/// frames by its own UNIT VECTOR (`A`: `u_a = [q0, q1, q2]`; `B`:
+/// `u_b = [-q2, q1, q0]`), and BOTH decoders map that unit vector back to the
+/// SAME ambient `q` — so the two charts are an exact over-tiling whose transition
+/// is the ambient rotation `R = [[0,0,1],[0,1,0],[-1,0,0]]` (`det R = +1`, a
+/// proper rotation).
+///
+/// ⚠ #2698 — THE DECLARATIONS BELOW STILL DESCRIBE THE DELETED `(lat, lon)`
+/// CHART AND THE DATA DOES NOT. The coordinates are ambient unit vectors and the
+/// evaluator is `AmbientSphereHarmonicEvaluator` (this doc comment said
+/// `lat = asin q2, lon = atan2(q1, q0)` long after that round trip was removed),
+/// while `SaeAtomBasisKind::Sphere` is declared at `latent_dim = 2`, the latent
+/// manifold is the `Interval × Circle` product, and the ARD block is 2 wide. The
+/// construction-time refusal ("basis Jacobian latent dimension 3 != declared 2")
+/// is CORRECT and is catching that mismatch. Repairing the declarations alone
+/// does not make this test pass: the #1890 pole-seam emitter in
+/// `structure_harvest.rs` is itself written against the deleted chart
+/// (`latent_dim == 2`, a 7-row `[1, x, y, z, xy, yz, xz]` decoder), so it screens
+/// out every ambient sphere pair and no glue can be certified. Both halves have
+/// to move to the ambient form together.
 fn build_sphere_pair_term(n: usize) -> (SaeManifoldTerm, Array2<f64>) {
     assert!(n % 2 == 0 && n >= 8);
     let p = 4usize;

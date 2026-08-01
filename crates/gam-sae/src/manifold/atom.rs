@@ -170,37 +170,29 @@ impl SaeAtomBasisKind {
                     )
                 }
             }
-            // `Sphere` is parameterised via a (lat, lon) *product* chart, NOT an
-            // intrinsic / rotation-invariant `S²` parametrisation: the latent
-            // optimiser sees a 2-D product manifold whose cos/sin terms (in
-            // radians) embed the chart, where lat is a bounded interval
-            // `[-π/2, π/2]` (enforced here by the `Interval` retraction — its
-            // clamp + active-bound tangent projection — NOT by truncating the
-            // chart jet) and lon is an `S^1` angle wrapped modulo `2π`. This chart
-            // carries pole gauge singularities: at the poles `cos(lat) = 0`, all
-            // longitudes collapse to the same physical point, so longitude is a
-            // gauge coordinate there and the longitude jet vanishes; and the
-            // `[xy, yz, xz]` quadratic block is not a rotation-invariant spherical-
-            // harmonic basis (rotating `xy` yields `x² − y²`, outside its span).
-            // Both caveats are documented in full at
-            // `gam_sae::basis::sphere_chart_basis_jet`; do not read this chart as
-            // artefact-free spherical geometry.
-            // At `latent_dim == 3` the atom is instead parameterised by the
-            // AMBIENT unit vector, and every caveat above evaporates:
-            // `LatentManifold::Sphere { dim: 3 }` retracts by `(u+xi)/||u+xi||`
-            // with no cut and no boundary, projects tangentially by
-            // `v - (u.v)u`, and its uniform ambient metric restricted to the
-            // tangent space IS the round metric — so the trust region finally
-            // measures geodesic distance. Three ambient coordinates for two
-            // intrinsic dimensions is exactly the price of a global chart, and
-            // `S^2` admits no 2-D one.
+            // `Sphere` has exactly ONE parameterisation: the AMBIENT unit vector
+            // at `latent_dim == 3`. `LatentManifold::Sphere { dim: 3 }` retracts
+            // by `(u+xi)/||u+xi||` with no cut and no boundary, projects
+            // tangentially by `v - (u.v)u`, and its uniform ambient metric
+            // restricted to the tangent space IS the round metric — so the trust
+            // region measures geodesic distance. Three ambient coordinates for
+            // two intrinsic dimensions is exactly the price of a global chart,
+            // and `S^2` admits no 2-D one.
             //
-            // The width is the discriminator, matching
-            // `SaeAtomGeometryPlan`'s (kind, latent_dim, resolution, metric)
-            // matrix: `latent_dim == 3` pairs with
-            // `SaeBasisResolution::AmbientSphereHarmonics`, `latent_dim == 2`
-            // with `SphereChart`. Both forms therefore coexist and a persisted
-            // atom is never ambiguous about which geometry it was fitted under.
+            // ⚠ The `(lat, lon)` product chart this arm's fallback branch builds
+            // is NOT a second sphere form. `SphereChartEvaluator` and its
+            // `sphere_chart_basis_jet` documentation were DELETED with the chart
+            // itself; `SaeBasisResolution` has no `SphereChart` variant, its
+            // `AmbientSphereHarmonics` doc calls itself "the only sphere
+            // parameterisation", and `SaeAtomGeometryPlan::new` REFUSES
+            // `(Sphere, 2, ..)` outright (asserted in `geometry_plan.rs`). An
+            // earlier revision of this comment claimed the two forms "coexist"
+            // and pointed at `gam_sae::basis::sphere_chart_basis_jet`; both
+            // statements were false and one fixture was written against them
+            // (#2698). The fallback branch survives for `ProjectivePlane`, whose
+            // charted `ProjectivePlaneHarmonics` resolution IS live alongside the
+            // ambient cover — for `Sphere` it is unreachable through the geometry
+            // plan.
             //
             // (`LatentManifold::Sphere { dim: 2 }` would be `S^1` in `R^2` — a
             // circle, not a sphere. The ambient width is 3.)
