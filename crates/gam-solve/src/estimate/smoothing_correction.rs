@@ -496,6 +496,63 @@ fn penalty_map_structural_nullity(
 /// regularized. That is the correct limit, not a convenience: they arise when a
 /// smoothing parameter saturates, and there `∂β̂/∂ρ → 0`, so the direction
 /// contributes nothing to `J·V_ρ·Jᵀ` however large `1/σ` would have been.
+///
+/// # ⚠ The floor is an EXACT IDENTITY on these directions, not a noise floor (#2676)
+///
+/// `ρ = log λ` is a nonlinear reparameterisation, so for any smooth criterion
+///
+/// ```text
+///     H_ρ = diag(λ)·H_λ·diag(λ) + diag(g_ρ)
+/// ```
+///
+/// holds exactly. The second term is pure chain rule. So for any direction `t`
+/// on which the λ-space curvature vanishes — a saturated rail (`∂β̂/∂ρ → 0`,
+/// which is the case this floor was written for) or a penalty-map structural
+/// null (`S_i ∝ S_j` ⟹ `H_λ·diag(λ)t = 0`) — the ρ-curvature is
+///
+/// ```text
+///     t'H_ρ t = Σ_k g_k t_k²        EXACTLY
+/// ```
+///
+/// and `Σ_k |g_k| t_k²` is `direction_floor` verbatim. Such a direction
+/// therefore does not sit *near* the boundary of the tests below; it sits **on
+/// it, by identity**, and which side it lands on is decided by the disagreement
+/// between the gradient evaluation and the Hessian evaluation. This is measured:
+/// `geo_disease_eas_matern` refuses at `|σ|/floor = 1.005540`, i.e. the identity
+/// holding to 0.55%, and the sign of that 0.55% residual is the whole verdict.
+///
+/// Every branch below has its boundary there:
+///
+/// * `σ < −floor` fires when the residual is negative and `g < 0`;
+/// * `σ > floor` (⟹ `Active`) fires when the residual is positive and `g > 0`,
+///   which drops `identified_null` and then trips the nullity check instead —
+///   the `geo_disease_matern` refusal.
+///
+/// **Do not respond by widening `floor`.** The quantity is not under-resolved;
+/// it is being compared against itself. The repair is to excuse such a direction
+/// by STRUCTURE — deflate the penalty map's certified null subspace, lifted to
+/// ρ by `diag(λ)⁻¹`, before any of these tests run — so that no direction is
+/// judged by a test whose boundary it occupies identically. That needs the Gram
+/// eigenvectors `penalty_map_structural_nullity` already computes and discards.
+///
+/// # ⚠ This is NOT literally the same standard the certificate applied
+///
+/// The doc above says this mirrors `run.rs`'s certificate. Two differences,
+/// recorded so nobody re-derives the equivalence:
+///
+/// 1. the certificate tests PSD on the **interior sub-block with the railed
+///    coordinates removed** (`excluded`, from
+///    `OuterCriterionCertificate::lambdas_railed`), precisely because "a
+///    rail-caused indefiniteness in the saturated direction is expected and
+///    excluded". This site receives no exclusion set and judges every
+///    coordinate. (Not established as the cause of the #2676 refusals: Path 1
+///    reports `railed = []`.)
+/// 2. `σ_i + Σ_k|g_k|v_k² ≥ 0` on `H`'s own eigenvectors is the Rayleigh
+///    quotient of `H + diag(|g|)` at particular vectors — it is IMPLIED by that
+///    matrix being PSD, not equivalent to it. So with an empty exclusion set,
+///    and given the SAME `H` and `g`, this test cannot fail in exact arithmetic
+///    on a point the certificate passed. When it does, what disagreed is the two
+///    subsystems' evaluations, not the fit.
 pub(crate) fn invert_identified_rho_hessian(
     hessian_rho: &Array2<f64>,
     expected_structural_nullity: usize,
@@ -686,11 +743,44 @@ const INDEF_HESS_PAIR_DUMP_TOP_N: usize = 3;
 /// highest-cosine pairs are dumped instead of the full O(k²) grid. When the
 /// structural-redundancy signature is detected, a single headline line is
 /// emitted with the offending pair, cosine, and antisymmetric projection.
+///
+/// # The reparameterisation split (#2676)
+///
+/// `rho = log(lambda)` is a nonlinear reparameterisation, so for ANY smooth
+/// criterion `V`,
+///
+/// ```text
+///     H_rho = diag(lambda) * H_lambda * diag(lambda) + diag(g_rho)
+/// ```
+///
+/// exactly, where `g_rho = dV/drho`. The second term is pure chain rule and
+/// carries no curvature information. Consequently a direction `t` that the
+/// penalty map certifies as structurally null — i.e. `H_lambda w = 0` for
+/// `w = diag(lambda) t`, which is what `S_i ∝ S_j` produces — has
+///
+/// ```text
+///     t' H_rho t = sum_k g_k t_k^2      (EXACTLY, not approximately)
+/// ```
+///
+/// and `sum_k |g_k| t_k^2` is precisely the per-direction gradient floor this
+/// gate compares against. So the certified null direction sits ON the decision
+/// boundary of every test in `invert_identified_rho_hessian` by identity, and
+/// which side it lands on is decided by the disagreement between the gradient
+/// evaluation and the Hessian evaluation — not by any property of the fit.
+///
+/// `outer_gradient` (empty when unavailable) is therefore dumped alongside the
+/// spectrum as the split `sigma_i` vs `reparam_i = sum_k g_k v_k^2` vs
+/// `intrinsic_i = sigma_i - reparam_i`. `intrinsic_i` is the Rayleigh quotient
+/// of `diag(lambda) H_lambda diag(lambda)`, the only part whose sign is a
+/// statement about the criterion. A direction whose `intrinsic_i` is a
+/// vanishing fraction of `|sigma_i|` is on the identity, and a refusal decided
+/// there is measuring the two evaluations against each other.
 fn dump_indefinite_rho_hessian_diagnostic(
     hessian_rho: &Array2<f64>,
     final_rho: &Array1<f64>,
     canonical: &[gam_terms::construction::CanonicalPenalty],
     inverted: Option<&InvertedRhoHessian>,
+    outer_gradient: &Array1<f64>,
 ) {
     let k = hessian_rho.nrows();
     if k == 0 {
@@ -760,11 +850,58 @@ fn dump_indefinite_rho_hessian_diagnostic(
         }
     }
     let v_neg = eigenvectors_ref.column(neg_idx);
+    // `.to_vec()` not `.as_slice()`: an eigenvector is a COLUMN of a row-major
+    // `Array2`, so it is never contiguous for k > 1 and `as_slice()` returns
+    // `None` — every `[INDEF-HESS]` line ever logged printed `eigenvector=[]`
+    // for exactly that reason. And the field is the MINIMUM eigenvalue, which
+    // is routinely positive (measured `+9.56e-2` on `geo_disease_matern`);
+    // naming it `negative_eigenvalue` asserted a sign it does not carry.
     log::warn!(
-        "[INDEF-HESS] negative_eigenvalue={:.4e} eigenvector={:?}",
+        "[INDEF-HESS] min_eigenvalue={:.4e} min_eigenvector={:?}",
         min_eig,
-        v_neg.as_slice().unwrap_or(&[]),
+        v_neg.to_vec(),
     );
+
+    // Split each eigenvalue into the chain-rule term and the intrinsic
+    // curvature (see this function's doc, #2676). Without the gradient the
+    // split cannot be formed, and the gate's decision boundary is invisible.
+    if outer_gradient.len() == k {
+        let mut sigma = Vec::with_capacity(k);
+        let mut reparam = Vec::with_capacity(k);
+        let mut intrinsic = Vec::with_capacity(k);
+        let mut floor = Vec::with_capacity(k);
+        for i in 0..k {
+            let v = eigenvectors_ref.column(i);
+            let mut signed = 0.0_f64;
+            let mut absolute = 0.0_f64;
+            for c in 0..k {
+                let w = v[c] * v[c];
+                signed += outer_gradient[c] * w;
+                absolute += outer_gradient[c].abs() * w;
+            }
+            sigma.push(eigenvalues_ref[i]);
+            reparam.push(signed);
+            intrinsic.push(eigenvalues_ref[i] - signed);
+            floor.push(absolute);
+        }
+        log::warn!(
+            "[INDEF-HESS] outer_gradient={:?}",
+            outer_gradient.to_vec(),
+        );
+        log::warn!(
+            "[INDEF-HESS] reparam_split sigma={sigma:?} reparam=sum_k g_k v_k^2={reparam:?} \
+             intrinsic=sigma-reparam={intrinsic:?} gradient_floor=sum_k |g_k| v_k^2={floor:?} \
+             (a certified-null direction has intrinsic == 0 EXACTLY, so |sigma| == floor and \
+             the gate's boundary runs through it; see #2676)"
+        );
+    } else {
+        log::warn!(
+            "[INDEF-HESS] outer_gradient unavailable ({} of {k} coordinate(s)); the \
+             reparameterisation split sigma = intrinsic + sum_k g_k v_k^2 cannot be formed, \
+             and every per-direction floor collapsed to the eigensolver backward error (#2676)",
+            outer_gradient.len(),
+        );
+    }
 
     let n_pen = canonical.len();
     let mut tr_aa = vec![0.0_f64; n_pen];
@@ -1145,6 +1282,7 @@ pub(crate) fn compute_smoothing_correction(
                 final_rho,
                 &final_fit.reparam_result.canonical_transformed,
                 None,
+                outer_gradient,
             );
             return SmoothingCorrectionComputation {
                 correction: None,
@@ -1173,6 +1311,7 @@ pub(crate) fn compute_smoothing_correction(
             final_rho,
             &final_fit.reparam_result.canonical_transformed,
             Some(&inverted),
+            outer_gradient,
         );
         return SmoothingCorrectionComputation {
             correction: None,
@@ -1197,6 +1336,7 @@ pub(crate) fn compute_smoothing_correction(
             final_rho,
             &final_fit.reparam_result.canonical_transformed,
             Some(&inverted),
+            outer_gradient,
         );
     }
 
