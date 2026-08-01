@@ -781,7 +781,8 @@ pub(super) fn run(
              support_saturated={} refresh_s={:.2} route_s={:.2} elapsed_s={:.1} \
              mean_degree={:.1} giant_fraction={:.4} max_component={} \
              max_component_nnz={} operator_build_s={:.3} \
-             cg_columns={} cg_iterations={} recycled_rank={} device_cols={} \
+             cg_columns={} cg_iterations={} recycled_rank={} tile_columns={} \
+             device_cols={} \
              cg_nonconverged={} cg_kappa_bound={:?} cg_relative_residual={:.3e}",
             epochs_run,
             config.max_epochs,
@@ -807,6 +808,7 @@ pub(super) fn run(
             decoder_solve_stats.cg_columns,
             decoder_solve_stats.cg_iterations,
             decoder_solve_stats.cg_recycled_rank,
+            decoder_solve_stats.cg_min_tile_columns,
             decoder_solve_stats.device_refresh_columns,
             decoder_solve_stats.cg_nonconverged_columns,
             decoder_solve_stats.cg_kappa_bound,
@@ -2194,6 +2196,18 @@ pub struct DecoderSolveStats {
     /// finite-termination bound because this Jacobi bound no longer describes
     /// their low-rank-corrected operator.
     pub cg_kappa_bound: Option<f64>,
+    /// Narrowest block-CG column tile any component of this refresh solved on.
+    ///
+    /// This is the width that decides whether the refresh is running the BLOCK
+    /// recurrence #1017 landed or the per-column one it replaced: the tile is
+    /// what the operator traversal and the three inner products are amortized
+    /// over, and it is not a constant — [`solve_component`] derives it from what
+    /// the recycled history left of the `K×P` envelope. A refresh whose tile has
+    /// collapsed toward 1 pays the per-column price with the block solve's name
+    /// on it, which is invisible on every other field of this struct
+    /// (#2283/#2441: 5.4×-26× refresh inflation at flat `nnz` and flat
+    /// iteration count). `0` means no component reached the CG path.
+    pub cg_min_tile_columns: usize,
 }
 
 impl Default for DecoderSolveStats {
@@ -2215,6 +2229,7 @@ impl Default for DecoderSolveStats {
             dense_cholesky_declines: 0,
             device_refresh_columns: 0,
             cg_kappa_bound: None,
+            cg_min_tile_columns: 0,
         }
     }
 }
@@ -2588,7 +2603,8 @@ fn solve_decoder_recycled(
         "[SAE percolation] K={k} mean_degree={:.4} giant_fraction={:.4} \
          components={} max_component={} max_component_nnz={} operator_build_s={:.3} \
          direct_threshold={direct_threshold} \
-         cg_columns={} cg_iterations={} recycled_rank={} cg_kappa_hat={:?} cg_kappa_bound={:?} \
+         cg_columns={} cg_iterations={} recycled_rank={} tile_columns={} \
+         cg_kappa_hat={:?} cg_kappa_bound={:?} \
          cg_nonconverged_columns={} cg_relative_residual={:.3e} cg_residual_stop={:.3e}",
         stats.mean_cofiring_degree,
         stats.giant_component_fraction,
@@ -2599,6 +2615,7 @@ fn solve_decoder_recycled(
         stats.cg_columns,
         stats.cg_iterations,
         stats.cg_recycled_rank,
+        stats.cg_min_tile_columns,
         stats.cg_kappa_hat,
         stats.cg_kappa_bound,
         stats.cg_nonconverged_columns,
@@ -2622,18 +2639,43 @@ fn solve_decoder_recycled(
 /// history is accumulated while solving and is independently bounded by the
 /// same `r≤P` contract; at refresh completion it replaces, rather than joins,
 /// the prior history.
+///
+/// # The history is budgeted BESIDE the block tile, never out of it
+///
+/// The `K×P` envelope above used to be a single pot that the history drew from
+/// first and the block-CG column tile got the remainder of ([`solve_component`]
+/// subtracted the history from the same `K·P` before dividing by the per-column
+/// tile state). That ordering is the defect, because the tile width is not a
+/// performance dial — it is the thing that makes this a BLOCK solve.
+/// [`pcg_multi_core`]'s three inner products per iteration parallelize by
+/// splitting the tile-wide output into fixed-width column chunks, so a narrow
+/// tile runs every reduction on one thread; and at `tile = 1` the elementwise
+/// row updates degrade to one rayon task per scalar. That is exactly the
+/// per-column solve #1017 removed, reinstated from inside it.
+///
+/// Measured by the `sae_decoder_refresh_scaling` bench, same node, same binary,
+/// only this bound changed: the shared pot drove `tile_columns` from 12 at the
+/// first (rank-zero) refresh to **1** at every refresh after it, and the refresh
+/// inflated **5.8×-29.8×** across the epochs of a single fit while the CG
+/// iteration count rose only 1.1×-2.1× and the co-firing graph's `nnz` stayed
+/// flat to 5%. The inflation was never the graph and never the Krylov work; it
+/// was the block collapsing to a column.
+///
+/// So the two allocations are separated: the tile keeps the whole `K·P`
+/// envelope and the history gets its own, `r ≤ K·P / (K + 2m + 1)`. The sum is
+/// still `Θ(K·P)` — the no-OOM scale contract is about the ORDER, and both
+/// terms are far under their bounds in practice — but the tile is no longer a
+/// remainder, so it cannot be squeezed to nothing by an accelerator that is
+/// optional in the first place. `r` is unchanged or larger at every shape,
+/// including the production decoder (`K = 32672, P = 2048`), where it stays at
+/// its work bound of 190 while the tile widens from 295 back to 409 columns.
 fn decoder_recycle_rank_bound(k_total: usize, p: usize, m: usize, nnz: usize) -> usize {
     if m == 0 {
         return 0;
     }
     let work_bound = ((m as u128 + nnz as u128) / (2u128 * m as u128)) as usize;
     let rhs_values = k_total as u128 * p as u128;
-    let one_column_state = 5 * m as u128;
-    let memory_bound = if rhs_values > one_column_state {
-        ((rhs_values - one_column_state) / (k_total as u128 + 2 * m as u128 + 1)) as usize
-    } else {
-        0
-    };
+    let memory_bound = (rhs_values / (k_total as u128 + 2 * m as u128 + 1)) as usize;
     work_bound.min(memory_bound).min(m).min(p)
 }
 
@@ -2936,20 +2978,31 @@ fn solve_component(
     };
 
     // Column-tile width: PCG owns five `m × tile` blocks (`X`, `R`, `Z`, `P`,
-    // `AP`). Recycling additionally retains `K × rank` history, two
-    // `m × rank` current factors, and `rank × tile` coarse coefficients. Their
-    // combined f64 count is bounded by the already-materialized `K × P`
-    // normal-equation RHS. The concurrently accumulated next history is itself
-    // at most `K × rank ≤ K × P` and replaces the prior history at refresh end,
-    // so recycling adds a bounded constant multiple of an allocation the caller
-    // has already proved feasible rather than an unbounded cache.
+    // `AP`) plus `rank × tile` coarse coefficients, and the tile is sized
+    // against the already-materialized `K × P` normal-equation RHS — an
+    // allocation the caller has already proved feasible.
+    //
+    // The recycled history (`K × rank` retained directions plus two `m × rank`
+    // current factors) is NOT subtracted here. It is bounded separately, by
+    // `decoder_recycle_rank_bound`, against its own `K × P` envelope. Charging
+    // it to the tile's budget instead is what collapsed `tile_columns` to 1
+    // from the second refresh of every fit onward and turned this block solve
+    // back into the per-column solve #1017 removed — measured at 5.8×-29.8×
+    // refresh inflation over the epochs of one fit (#2283/#2441). Both terms
+    // remain `Θ(K·P)`, so the no-OOM scale contract is unchanged in order; what
+    // changes is that the mandatory structure no longer funds the optional
+    // accelerator out of its own width.
     let rhs_values = k_total.saturating_mul(p);
-    let recycle_values = k_total
-        .saturating_add(2usize.saturating_mul(m))
-        .saturating_mul(recycled_rank);
     let tile_state_per_column = 5usize.saturating_mul(m).saturating_add(recycled_rank);
-    let tile_columns = (rhs_values.saturating_sub(recycle_values) / tile_state_per_column).max(1);
+    let tile_columns = (rhs_values / tile_state_per_column).max(1);
 
+    stats.cg_min_tile_columns = if stats.cg_min_tile_columns == 0 {
+        tile_columns.min(live_columns.len())
+    } else {
+        stats
+            .cg_min_tile_columns
+            .min(tile_columns.min(live_columns.len()))
+    };
     for tile in live_columns.chunks(tile_columns) {
         let t = tile.len();
         let mut rhs_block = Array2::<f64>::zeros((m, t));

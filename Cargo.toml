@@ -242,6 +242,11 @@ name = "sae_arrow_schur_bench"
 path = "bench/cargo_benches/sae_arrow_schur_bench.rs"
 harness = false
 
+[[bench]]
+name = "sae_decoder_refresh_scaling"
+path = "bench/cargo_benches/sae_decoder_refresh_scaling.rs"
+harness = false
+
 [[example]]
 name = "arrow_schur_hill_climb"
 path = "examples/perf/arrow_schur_hill_climb.rs"
