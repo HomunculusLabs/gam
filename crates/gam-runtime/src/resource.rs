@@ -418,7 +418,7 @@ struct GovernorLedger {
 /// The global budget is sized once from this process's stationary capacity
 /// (host total memory, clamped by the binding cgroup's hard limit inside
 /// containers or under a job scheduler) — see `GOVERNOR_BUDGET_NUMERATOR` for
-/// the headroom rationale and [`governor_budget_from_availability`] for why it
+/// the headroom rationale and `governor_budget_from_availability` for why it
 /// is not denominated in free memory (#2702).
 #[derive(Debug, Clone)]
 pub struct MemoryGovernor {

@@ -150,7 +150,7 @@ pub struct SaeStreamingPlan {
     pub process_available_bytes: usize,
     pub direct_admitted: bool,
     /// #2724 — true when the dense exact-stationarity route's resident blocks
-    /// fit the same budget. [`SaeStreamingPlan::direct_logdet_admitted`] — the
+    /// fit the same budget. `SaeStreamingPlan::direct_logdet_admitted` — the
     /// predicate that dispatches to that route — requires BOTH this and
     /// `direct_admitted`.
     pub exact_stationarity_admitted: bool,
