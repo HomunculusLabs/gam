@@ -4079,6 +4079,9 @@ impl SaeManifoldTerm {
                 e_diag.len()
             ));
         }
+        // #2267 — the other half of the split; see `materialize_exact_hessian_dense`.
+        let eigh_started = std::time::Instant::now();
+        let gauge_reduced = !gauge_basis.is_empty();
         let (eigenvalues, eigenvectors) = if gauge_basis.is_empty() {
             Self::cluster_stable_eigh(&operator, e_diag, total_t)?
         } else {
@@ -4099,6 +4102,12 @@ impl SaeManifoldTerm {
                 complement.dot(&reduced_eigenvectors),
             )
         };
+        let eigh_elapsed = eigh_started.elapsed();
+        log::info!(
+            "[SAE-EXACT-DENSE] eigendecomposition DONE: dim={dimension}, \
+             gauge_reduced={gauge_reduced}, {:.3} s",
+            eigh_elapsed.as_secs_f64(),
+        );
         let max_eigenvalue = eigenvalues
             .iter()
             .copied()
@@ -4254,6 +4263,15 @@ impl SaeManifoldTerm {
              O(dim^3) symmetric eigendecomposition to follow",
             (dim as f64) * (dim as f64) * 8.0 / (1024.0 * 1024.0),
         );
+        // #2267 — the `[SAE-EXACT-DENSE]` line above states the SIZE of the bill;
+        // these two stopwatches state which HALF of it is being paid. Measured at
+        // `55c56d6f4`, the K=8 rung of the shipped ladder spends >=37 minutes
+        // between that line and this routine's return, and nothing distinguishes
+        // the O(dim) column loop from the O(dim^3) eigendecomposition that follows
+        // it. Any size predicate that would refuse this route BEFORE paying has to
+        // be denominated in whichever half dominates, so the split is the
+        // prerequisite for the guard, not decoration.
+        let build_started = std::time::Instant::now();
         let mut a = Array2::<f64>::zeros((dim, dim));
         let mut unit = SaeArrowVector {
             t: Array1::<f64>::zeros(total_t),
@@ -4288,6 +4306,14 @@ impl SaeManifoldTerm {
                 a[[c, r]] = avg;
             }
         }
+        let build_elapsed = build_started.elapsed();
+        log::info!(
+            "[SAE-EXACT-DENSE] operator BUILT: dim={dim}, {dim} Hessian-vector applies \
+             + symmetrization in {:.3} s ({:.3} ms per apply); \
+             the O(dim^3) symmetric eigendecomposition has NOT started yet",
+            build_elapsed.as_secs_f64(),
+            build_elapsed.as_secs_f64() * 1.0e3 / (dim.max(1) as f64),
+        );
         Ok(a)
     }
 
