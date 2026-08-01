@@ -1763,22 +1763,54 @@ impl SaeManifoldTerm {
                     // #2228 — recompute the raw ‖g‖ at the best-seen state so the
                     // reported residual is the best-seen iterate's, not the
                     // excursion's. Terminal give-up path; restore is safe.
-                    let grad_norm = match best_seen.as_ref() {
+                    let (grad_norm, quotient_grad_norm) = match best_seen.as_ref() {
                         Some((_, _, best_state)) => {
                             self.restore_mutable_state(best_state)?;
                             match self.assemble_arrow_schur(target, rho, registry) {
-                                Ok(best_sys) => Self::system_grad_norm_sq(&best_sys).sqrt(),
-                                Err(_) => grad_norm,
+                                Ok(best_sys) => {
+                                    let g2 = Self::system_grad_norm_sq(&best_sys);
+                                    let q = self.quotient_gradient_norm_from_system(
+                                        &best_sys,
+                                        g2,
+                                        &lambda_smooth,
+                                    );
+                                    (g2.sqrt(), q)
+                                }
+                                Err(_) => (grad_norm, quotient_grad_norm),
                             }
                         }
-                        None => grad_norm,
+                        None => (grad_norm, quotient_grad_norm),
+                    };
+                    // gam#2674 — this message NAMED the quotient gradient and never
+                    // emitted its value, so an occurrence could not be bucketed
+                    // without re-running it under instrumentation. The sibling
+                    // iteration-budget refusal above already reports
+                    // `‖Π⊥gauge g‖` with `gauge_share` / `quotient_over_tol`;
+                    // emit the identical fields here so the two terminal inner
+                    // refusals are read the same way. `gauge_share` is the share
+                    // of ‖g‖ the chart-gauge/decoder-null projection removes:
+                    // MEASURED at 0.87 and 0.93 on this path's own fixtures
+                    // (#2674), where the removed directions carry directional
+                    // derivatives 8x-210x the tolerance and are therefore not
+                    // flat. Diagnostic only: no gate, bound or trajectory moves.
+                    let gauge_share = if grad_norm > 0.0 {
+                        1.0 - quotient_grad_norm / grad_norm
+                    } else {
+                        f64::NAN
+                    };
+                    let quotient_over_tol = if grad_tolerance > 0.0 {
+                        quotient_grad_norm / grad_tolerance
+                    } else {
+                        f64::INFINITY
                     };
                     let intensive = self.intensive_kkt_diagnostic(target, rho, registry);
                     return Err(format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
                          objective stalled for {consecutive_objective_stalls} consecutive refine \
-                         rounds, but neither the raw KKT gradient ‖g‖={grad_norm:.6e} nor its \
-                         quotient met tolerance {grad_tolerance:.6e} ({intensive}). Objective \
+                         rounds, but neither the raw KKT gradient ‖g‖={grad_norm:.6e} nor the \
+                         quotient KKT gradient ‖Π⊥gauge g‖={quotient_grad_norm:.6e} met tolerance \
+                         {grad_tolerance:.6e} (gauge_share={gauge_share:.4}, \
+                         quotient_over_tol={quotient_over_tol:.3e}, {intensive}). Objective \
                          stagnation and a finite deflated factor are diagnostic only; refusing to \
                          rank or differentiate an off-optimum Laplace criterion.",
                         ProbeRefusalKind::inner_not_converged_marker()
