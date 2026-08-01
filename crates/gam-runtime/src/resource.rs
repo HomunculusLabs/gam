@@ -62,24 +62,65 @@ impl std::fmt::Display for MemoryAvailabilitySource {
 
 /// Provenance-preserving memory availability for the current process.
 ///
-/// A finite cgroup-v1 or cgroup-v2 ceiling admits exactly `min(host available,
-/// reclaim-aware cgroup available)`. A v2 literal `memory.max = max` remains
-/// typed as unbounded and therefore defers to the host; v1's numeric unlimited
-/// sentinel participates exactly and likewise loses to a tighter host value.
+/// Two quantities live here and they answer different questions.
+///
+/// * **Available** (`available_bytes`) is *free space right now*: a finite
+///   cgroup-v1 or cgroup-v2 ceiling admits exactly `min(host available,
+///   reclaim-aware cgroup available)`. A v2 literal `memory.max = max` remains
+///   typed as unbounded and therefore defers to the host; v1's numeric
+///   unlimited sentinel participates exactly and likewise loses to a tighter
+///   host value. This quantity *moves*, and under pressure it goes to zero.
+/// * **Capacity** (`capacity_bytes`) is *how much memory this process could
+///   ever address*: `min(host total, the binding cgroup's hard limit)`. It is
+///   a property of the box and the cgroup configuration, not of the schedule,
+///   so it does not move when a sibling allocates.
+///
+/// The distinction is load-bearing (#2684). "Does this dense footprint fit
+/// here at all?" is a *capacity* question and its answer must be stationary —
+/// see [`process_memory_availability`] on why a route derived from a moving
+/// quantity is a defect. "Does this allocation fit *right now*?" is an
+/// availability question, and the joint ledger
+/// ([`MemoryGovernor::try_reserve`]) is the instrument for it. Reading the
+/// second where the first was meant is what let a cgroup a few pages from its
+/// limit refuse a 28,800-byte design on a host with 448 GB free.
+///
 /// If an active controller cannot be parsed exactly, admission fails closed
-/// with zero bytes while retaining the typed probe failure; it never silently
-/// inherits host capacity.
+/// with zero bytes — both available *and* capacity — while retaining the typed
+/// probe failure; it never silently inherits host capacity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryAvailability {
     host_available_bytes: u64,
+    host_total_bytes: u64,
     cgroup: CgroupMemoryObservation,
     available_bytes: u64,
+    capacity_bytes: u64,
     limiting_source: MemoryAvailabilitySource,
 }
 
 impl MemoryAvailability {
-    fn from_observation(host_available_bytes: u64, cgroup: CgroupMemoryObservation) -> Self {
+    fn from_observation(
+        host_available_bytes: u64,
+        host_total_bytes: u64,
+        cgroup: CgroupMemoryObservation,
+    ) -> Self {
         use std::cmp::Ordering;
+
+        // Capacity never depends on what is currently resident: a finite
+        // cgroup ceiling clamps the host's total, an unbounded or absent
+        // controller defers to it, and a probe that failed closed admits
+        // nothing at all. A host whose reported available exceeds its reported
+        // total (a torn /proc/meminfo read) must not shrink capacity below
+        // what is demonstrably reachable, hence the max.
+        let capacity_bytes = match &cgroup {
+            CgroupMemoryObservation::NotPresent | CgroupMemoryObservation::V2Unbounded { .. } => {
+                host_total_bytes.max(host_available_bytes)
+            }
+            CgroupMemoryObservation::V2Limited(observation)
+            | CgroupMemoryObservation::V1Limited(observation) => host_total_bytes
+                .max(host_available_bytes)
+                .min(observation.limit_bytes()),
+            CgroupMemoryObservation::ProbeFailed(_) => 0,
+        };
 
         let (available_bytes, limiting_source) = match &cgroup {
             CgroupMemoryObservation::NotPresent | CgroupMemoryObservation::V2Unbounded { .. } => {
@@ -105,14 +146,33 @@ impl MemoryAvailability {
         };
         Self {
             host_available_bytes,
+            host_total_bytes,
             cgroup,
             available_bytes,
+            capacity_bytes,
             limiting_source,
         }
     }
 
     pub const fn host_available_bytes(&self) -> u64 {
         self.host_available_bytes
+    }
+
+    pub const fn host_total_bytes(&self) -> u64 {
+        self.host_total_bytes
+    }
+
+    /// The stationary ceiling on memory this process could ever address:
+    /// `min(host total, binding cgroup hard limit)`, or zero when the cgroup
+    /// probe failed closed. Unlike [`Self::available_bytes`] this does not move
+    /// when other work allocates, which is what makes it usable as a *routing*
+    /// threshold (#2684).
+    pub const fn capacity_bytes(&self) -> u64 {
+        self.capacity_bytes
+    }
+
+    pub fn capacity_bytes_usize(&self) -> usize {
+        usize::try_from(self.capacity_bytes).unwrap_or(usize::MAX)
     }
 
     pub const fn cgroup(&self) -> &CgroupMemoryObservation {
@@ -142,8 +202,13 @@ impl std::fmt::Display for MemoryAvailability {
             ),
             observation => write!(
                 formatter,
-                "{} bytes limited by {} (host_available={}, {})",
-                self.available_bytes, self.limiting_source, self.host_available_bytes, observation,
+                "{} bytes limited by {} (capacity={}, host_available={}, host_total={}, {})",
+                self.available_bytes,
+                self.limiting_source,
+                self.capacity_bytes,
+                self.host_available_bytes,
+                self.host_total_bytes,
+                observation,
             ),
         }
     }
@@ -184,7 +249,11 @@ pub fn resample_memory_availability() -> MemoryAvailability {
     system.refresh_memory();
     let cgroup = detect_cgroup_memory();
     MEMORY_AVAILABILITY_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    MemoryAvailability::from_observation(system.available_memory(), cgroup)
+    MemoryAvailability::from_observation(
+        system.available_memory(),
+        system.total_memory(),
+        cgroup,
+    )
 }
 
 /// The process's memory availability: **one** observation, taken once, shared
@@ -223,6 +292,17 @@ fn governor_budget_from_availability(availability: &MemoryAvailability) -> usize
     usize::try_from(scaled).unwrap_or(usize::MAX)
 }
 
+/// Convert the same observation to the process's **stationary** materialization
+/// ceiling. Same headroom fraction, different base quantity: capacity rather
+/// than free space, so the ceiling answers "could a dense footprint this large
+/// ever live here?" without moving when a sibling allocates (#2684). A probe
+/// that failed closed reports zero capacity and therefore admits nothing.
+fn governor_materialization_cap_from_availability(availability: &MemoryAvailability) -> usize {
+    let scaled = u128::from(availability.capacity_bytes()) * GOVERNOR_BUDGET_NUMERATOR
+        / GOVERNOR_BUDGET_DENOMINATOR;
+    usize::try_from(scaled).unwrap_or(usize::MAX)
+}
+
 /// Typed refusal from [`MemoryGovernor::try_reserve`].
 ///
 /// Carries the full ledger evidence so callers can route to a chunked or
@@ -257,6 +337,7 @@ pub enum MemoryReservationError {
 #[derive(Debug)]
 struct GovernorLedger {
     budget_bytes: usize,
+    materialization_cap_bytes: usize,
     availability: MemoryAvailability,
     reserved_bytes: std::sync::atomic::AtomicUsize,
 }
@@ -298,9 +379,11 @@ impl MemoryGovernor {
 
     fn with_detected_availability(availability: MemoryAvailability) -> Self {
         let budget_bytes = governor_budget_from_availability(&availability);
+        let materialization_cap_bytes = governor_materialization_cap_from_availability(&availability);
         Self {
             ledger: Arc::new(GovernorLedger {
                 budget_bytes,
+                materialization_cap_bytes,
                 availability,
                 reserved_bytes: std::sync::atomic::AtomicUsize::new(0),
             }),
@@ -327,11 +410,28 @@ impl MemoryGovernor {
             .saturating_sub(self.reserved_bytes())
     }
 
-    /// Absolute ceiling for one governed operation. Consumers reserve the
-    /// operation's complete predicted live set (matrix plus simultaneous
-    /// workspaces/copies), so the shared ledger itself is the policy.
+    /// Absolute ceiling for one governed operation: 3/4 of this process's
+    /// memory **capacity** (`min(host total, binding cgroup limit)`).
+    ///
+    /// This is a *routing* threshold — the question it answers is "could a
+    /// dense footprint this large ever live in this process?" — so it is
+    /// deliberately stationary. It is **not** the live budget: whether an
+    /// allocation fits *right now* is decided by [`Self::try_reserve`] against
+    /// the joint ledger, which returns a typed, routable refusal instead of an
+    /// abort.
+    ///
+    /// Returning the live budget here was gam#2684: the budget is 3/4 of
+    /// *available* memory, so a cgroup sitting at its limit drove this ceiling
+    /// continuously to zero (measured at 53,248 bytes available with 448 GB
+    /// free on the host), and every caller comparing a request against it —
+    /// including `DenseDesignMatrix::to_dense`, which panics on refusal —
+    /// refused allocations as small as a 300x12 design. Threshold-shaped
+    /// routing decisions taken from a moving quantity also make the chosen
+    /// route depend on what else the box was doing, which SPEC-20 forbids
+    /// (see [`process_memory_availability`]); one consumer even hashes this
+    /// cap into a basis cache key.
     pub fn single_materialization_cap_bytes(&self) -> usize {
-        self.ledger.budget_bytes
+        self.ledger.materialization_cap_bytes
     }
 
     /// Reserve `bytes` against the joint ledger.
@@ -570,10 +670,12 @@ impl ResourcePolicy {
     /// `derivative_storage_mode = AnalyticOperatorRequired` explicitly to
     /// reject all dense fallback.
     ///
-    /// Scalar caps expose the governor's full allowance; they are admission
-    /// hints, not independent budgets. Actual materializations and caches must
-    /// reserve their complete live footprint against the shared governor, so
-    /// any combination of categories is bounded by one ledger.
+    /// Scalar caps expose the governor's stationary capacity ceiling; they are
+    /// routing thresholds, not independent budgets, and they do not move with
+    /// load. Actual materializations and caches must reserve their complete
+    /// live footprint against the shared governor, so any combination of
+    /// categories is bounded by one ledger — that reservation, not these caps,
+    /// is what enforces "fits right now" (#2684).
     pub fn default_library() -> Self {
         let governor = MemoryGovernor::global();
         let single_cap = governor.single_materialization_cap_bytes();
@@ -1046,8 +1148,11 @@ mod byte_lru_tests {
     fn cache_test_governor(budget_bytes: usize) -> MemoryGovernor {
         let available_bytes = (budget_bytes as u128 * GOVERNOR_BUDGET_DENOMINATOR)
             .div_ceil(GOVERNOR_BUDGET_NUMERATOR);
+        let available_bytes =
+            u64::try_from(available_bytes).expect("test cache budget must fit in u64");
         MemoryGovernor::with_detected_availability(MemoryAvailability::from_observation(
-            u64::try_from(available_bytes).expect("test cache budget must fit in u64"),
+            available_bytes,
+            available_bytes,
             CgroupMemoryObservation::NotPresent,
         ))
     }
@@ -1127,8 +1232,11 @@ mod resource_policy_tests {
     fn test_governor(budget_bytes: usize) -> MemoryGovernor {
         let available_bytes = (budget_bytes as u128 * GOVERNOR_BUDGET_DENOMINATOR)
             .div_ceil(GOVERNOR_BUDGET_NUMERATOR);
+        let available_bytes =
+            u64::try_from(available_bytes).expect("test budget has a representable observation");
         let availability = MemoryAvailability::from_observation(
-            u64::try_from(available_bytes).expect("test budget has a representable observation"),
+            available_bytes,
+            available_bytes,
             CgroupMemoryObservation::NotPresent,
         );
         let governor = MemoryGovernor::with_detected_availability(availability);
@@ -1360,6 +1468,14 @@ mod resource_policy_tests {
         let governor = MemoryGovernor::global();
         assert_eq!(
             governor.single_materialization_cap_bytes(),
+            governor_materialization_cap_from_availability(&governor.availability())
+        );
+        // The routing ceiling is denominated in capacity, the ledger budget in
+        // free space, so the ceiling is never the tighter of the two (#2684).
+        assert!(
+            governor.single_materialization_cap_bytes() >= governor.budget_bytes(),
+            "capacity-denominated cap {} must not sit below the availability-denominated budget {}",
+            governor.single_materialization_cap_bytes(),
             governor.budget_bytes()
         );
         let policy = ResourcePolicy::default_library();
@@ -1391,18 +1507,19 @@ mod resource_policy_tests {
     #[test]
     fn memory_availability_distinguishes_host_cgroup_and_exhaustion() {
         let host_only =
-            MemoryAvailability::from_observation(1_000, CgroupMemoryObservation::NotPresent);
+            MemoryAvailability::from_observation(1_000, 4_000, CgroupMemoryObservation::NotPresent);
         assert_eq!(host_only.available_bytes(), 1_000);
         assert_eq!(host_only.limiting_source(), MemoryAvailabilitySource::Host);
         assert_eq!(governor_budget_from_availability(&host_only), 750);
 
         let exhausted_host =
-            MemoryAvailability::from_observation(0, CgroupMemoryObservation::NotPresent);
+            MemoryAvailability::from_observation(0, 4_000, CgroupMemoryObservation::NotPresent);
         assert_eq!(exhausted_host.available_bytes(), 0);
         assert_eq!(governor_budget_from_availability(&exhausted_host), 0);
 
         let finite_cgroup = MemoryAvailability::from_observation(
             1_000,
+            4_000_000_000,
             CgroupMemoryObservation::V2Limited(CgroupMemoryAvailability::fixture(
                 "/fixture/leaf",
                 600,
@@ -1420,6 +1537,7 @@ mod resource_policy_tests {
 
         let exhausted_cgroup = MemoryAvailability::from_observation(
             1_000,
+            4_000_000_000,
             CgroupMemoryObservation::V2Limited(CgroupMemoryAvailability::fixture(
                 "/fixture/leaf",
                 600,
@@ -1439,6 +1557,7 @@ mod resource_policy_tests {
         // provenance, but the host is the binding observation.
         let host_is_tighter = MemoryAvailability::from_observation(
             1_000,
+            4_000_000_000,
             CgroupMemoryObservation::V2Limited(CgroupMemoryAvailability::fixture(
                 "/fixture/leaf",
                 8_000,
@@ -1455,6 +1574,7 @@ mod resource_policy_tests {
 
         let equal_cgroup_ceiling = MemoryAvailability::from_observation(
             1_000,
+            4_000_000_000,
             CgroupMemoryObservation::V2Limited(CgroupMemoryAvailability::fixture(
                 "/fixture/leaf",
                 1_200,
@@ -1471,6 +1591,7 @@ mod resource_policy_tests {
 
         let both_exhausted = MemoryAvailability::from_observation(
             0,
+            4_000_000_000,
             CgroupMemoryObservation::V2Limited(CgroupMemoryAvailability::fixture(
                 "/fixture/leaf",
                 600,
@@ -1488,6 +1609,7 @@ mod resource_policy_tests {
         // `max` token and remains an authoritative hard-zero ceiling.
         let zero_ceiling = MemoryAvailability::from_observation(
             8_000,
+            4_000_000_000,
             CgroupMemoryObservation::V2Limited(CgroupMemoryAvailability::fixture(
                 "/fixture/leaf",
                 0,
@@ -1508,6 +1630,7 @@ mod resource_policy_tests {
     fn literal_unlimited_cgroup_defers_to_host_available_memory_2317() {
         let unlimited = MemoryAvailability::from_observation(
             2_430_926_848,
+            4_000_000_000,
             CgroupMemoryObservation::V2Unbounded {
                 cgroup_path: "/fixture/leaf".into(),
                 inspected_levels: 3,
@@ -1523,6 +1646,7 @@ mod resource_policy_tests {
     fn finite_cgroup_v1_headroom_participates_in_the_same_exact_minimum() {
         let availability = MemoryAvailability::from_observation(
             8_000,
+            4_000_000_000,
             CgroupMemoryObservation::V1Limited(CgroupMemoryAvailability::fixture(
                 "/sys/fs/cgroup/memory/slurm/job",
                 4_000,
@@ -1542,10 +1666,88 @@ mod resource_policy_tests {
         assert!(evidence.contains("available=3000"));
     }
 
+    /// gam#2684. A cgroup pinned at its hard limit reports almost no *available*
+    /// memory while its *capacity* is unchanged. The numbers below are the ones
+    /// measured on an MSI compute node (`--mem=6g`, host with 448 GB free):
+    /// the shipped probe reported `available=53_248` while the job's ceiling was
+    /// still 6 GiB. The routing cap must come from the ceiling — otherwise a
+    /// 300x12 f64 design (28,800 bytes) is refused — while the ledger budget
+    /// must keep tracking the exhaustion, because that is what makes a large
+    /// reservation route instead of allocate.
+    #[test]
+    fn a_cgroup_at_its_limit_shrinks_the_budget_but_not_the_materialization_cap_2684() {
+        const DESIGN_300X12_BYTES: usize = 300 * 12 * 8;
+        let limit_bytes = 6 * 1024 * 1024 * 1024_u64;
+        let at_the_limit = MemoryAvailability::from_observation(
+            448_648_040_448,
+            527_799_400 * 1024,
+            CgroupMemoryObservation::V1Limited(CgroupMemoryAvailability::fixture(
+                "/sys/fs/cgroup/memory/slurm/uid_81060/job_14615476",
+                limit_bytes,
+                limit_bytes - 53_248,
+                0,
+                6,
+            )),
+        );
+        assert_eq!(at_the_limit.available_bytes(), 53_248);
+        assert_eq!(at_the_limit.capacity_bytes(), limit_bytes);
+        let governor = MemoryGovernor::with_detected_availability(at_the_limit);
+        // The ledger still sees the exhaustion: a large reservation is refused.
+        assert_eq!(governor.budget_bytes(), 39_936);
+        assert!(governor.try_reserve(1 << 30, "at-the-limit").is_err());
+        // The routing ceiling does not move with it.
+        assert_eq!(
+            governor.single_materialization_cap_bytes(),
+            (limit_bytes as usize) / 4 * 3
+        );
+        assert!(governor.single_materialization_cap_bytes() > DESIGN_300X12_BYTES);
+
+        // Falsification guard: the cap must still be able to say no. A cgroup
+        // whose whole ceiling is smaller than the design refuses it, so the
+        // assertion above cannot be satisfied by a cap that always admits.
+        let tiny_ceiling = MemoryAvailability::from_observation(
+            448_648_040_448,
+            527_799_400 * 1024,
+            CgroupMemoryObservation::V1Limited(CgroupMemoryAvailability::fixture(
+                "/fixture/tiny",
+                1_024,
+                0,
+                0,
+                1,
+            )),
+        );
+        assert_eq!(tiny_ceiling.capacity_bytes(), 1_024);
+        assert_eq!(
+            MemoryGovernor::with_detected_availability(tiny_ceiling)
+                .single_materialization_cap_bytes(),
+            768
+        );
+
+        // Second falsification guard: an idle cgroup with the same ceiling must
+        // report the same cap, or the cap is still tracking the schedule.
+        let idle = MemoryAvailability::from_observation(
+            448_648_040_448,
+            527_799_400 * 1024,
+            CgroupMemoryObservation::V1Limited(CgroupMemoryAvailability::fixture(
+                "/sys/fs/cgroup/memory/slurm/uid_81060/job_14615476",
+                limit_bytes,
+                92_827_648,
+                28_672,
+                6,
+            )),
+        );
+        assert!(idle.available_bytes() > 6_000_000_000);
+        assert_eq!(
+            MemoryGovernor::with_detected_availability(idle).single_materialization_cap_bytes(),
+            (limit_bytes as usize) / 4 * 3
+        );
+    }
+
     #[test]
     fn malformed_active_cgroup_fails_closed_with_typed_evidence() {
         let availability = MemoryAvailability::from_observation(
             8_000,
+            4_000_000_000,
             CgroupMemoryObservation::ProbeFailed(CgroupMemoryProbeFailure::fixture(
                 CgroupMemoryProbeFailureKind::InvalidCounter,
                 "/fixture/leaf/memory.current",
@@ -1553,11 +1755,18 @@ mod resource_policy_tests {
             )),
         );
         assert_eq!(availability.available_bytes(), 0);
+        // Fail-closed covers capacity too: an unreadable controller must not
+        // hand out a routing ceiling either (#2684 keeps this policy intact).
+        assert_eq!(availability.capacity_bytes(), 0);
         assert_eq!(
             availability.limiting_source(),
             MemoryAvailabilitySource::CgroupProbeFailure
         );
         assert_eq!(governor_budget_from_availability(&availability), 0);
+        assert_eq!(
+            governor_materialization_cap_from_availability(&availability),
+            0
+        );
         let evidence = format!("{availability}");
         assert!(evidence.contains("failed closed"));
         assert!(evidence.contains("invalid-counter"));
@@ -1573,6 +1782,7 @@ mod resource_policy_tests {
         assert_eq!(xnu_available, 2_430_926_848);
         let availability = MemoryAvailability::from_observation(
             xnu_available,
+            8 * 1024 * 1024 * 1024,
             CgroupMemoryObservation::NotPresent,
         );
         assert_eq!(availability.available_bytes(), xnu_available);
