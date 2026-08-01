@@ -2186,6 +2186,13 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
                 )
                 .with_gpu_matvec(gpu_matvec);
                 let matvec = |v: ArrayView1<f64>| -> Array1<f64> { op.apply(v) };
+                // #2576: the EXACT diag(S) is available here and cheap
+                // (`reduced_schur_shifted_preconditioner_resident`), and it was
+                // MEASURED not to help — 5189 iterations against this shared
+                // block's 5138, because the elimination term carries the same
+                // firing-count structure as `H_ββ` and the two very nearly
+                // cancel to a uniform rescaling, which CG is invariant to. See
+                // `exact_schur_diagonal_is_a_near_uniform_rescaling_of_the_shared_block_2576`.
                 let precond = reduced_schur_shifted_preconditioner(sys, ridge_beta);
                 let eval = plan
                     .evaluate_preconditioned(
@@ -2405,6 +2412,8 @@ pub fn rational_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
     let op = ReducedSchurOperator::new(sys, htt_factors, ridge_beta, backend, resident)
         .with_gpu_matvec(gpu_matvec);
     let matvec = |v: ArrayView1<f64>| -> Array1<f64> { op.apply(v) };
+    // #2576: the exact diag(S) is reachable from `resident` and measured NOT to
+    // reduce iterations — see the refutation note at the surrogate-core call site.
     let precond = reduced_schur_shifted_preconditioner(sys, ridge_beta);
     let eval = plan.evaluate_preconditioned(&matvec, &precond, cg_rel_tol, cg_max_iters)?;
     Some((plan, eval))
@@ -2478,7 +2487,8 @@ pub fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
     let matvec = |v: ArrayView1<f64>| -> Array1<f64> { op.apply(v) };
     // The SAME shared-block diagonal every evaluation of this plan will use, so
     // the rank-derivation ladder is not measuring a differently-conditioned
-    // iteration from the one production runs.
+    // iteration from the one production runs. (#2576: the exact diag(S) was
+    // measured here and does not help — see the surrogate-core call site.)
     let precond = reduced_schur_shifted_preconditioner(sys, ridge_beta);
     // Rank-0 pilot: fixes the |log|S|| scale and is the answer outright when no
     // deflation is requested or the bare bar already clears the target.
@@ -2600,7 +2610,7 @@ pub fn reduced_schur_logdet_preconditioner_study<B: BatchedBlockSolver + Sync>(
     let op = ReducedSchurOperator::new(sys, htt_factors, ridge_beta, backend, None);
     let matvec = |v: ArrayView1<f64>| -> Array1<f64> { op.apply(v) };
     let shared_block = reduced_schur_shifted_preconditioner(sys, ridge_beta);
-    let tiers = [
+    let mut tiers = vec![
         (
             ReducedSchurCgPreconditioner::Identity,
             ShiftedDiagonalPreconditioner::identity(),
@@ -2610,6 +2620,21 @@ pub fn reduced_schur_logdet_preconditioner_study<B: BatchedBlockSolver + Sync>(
             shared_block,
         ),
     ];
+    // The operator is the SAME across tiers (built above with no residency); the
+    // residency here serves only the exact-diagonal tier's preconditioner build,
+    // so the study still compares every tier against ONE iteration.
+    //
+    // Emitted only when a residency exists. Without one
+    // `reduced_schur_shifted_preconditioner_resident` returns the shared-block
+    // diagonal itself, and a tier that is a verbatim duplicate of the row above
+    // it would report a second measurement of the same thing under a name that
+    // claims otherwise.
+    if let Some(resident) = SaeResidentReducedSchur::build(sys, htt_factors, backend) {
+        tiers.push((
+            ReducedSchurCgPreconditioner::SchurDiagonal,
+            reduced_schur_shifted_preconditioner_resident(sys, ridge_beta, Some(&resident)),
+        ));
+    }
     let mut out = Vec::with_capacity(tiers.len());
     for (kind, preconditioner) in tiers {
         let eval = plan.evaluate_preconditioned(&matvec, &preconditioner, cg_rel_tol, cg_max_iters)?;
@@ -2690,6 +2715,12 @@ pub enum ReducedSchurCgPreconditioner {
     /// `diag(H_ββ + ridge)` — the shared block's own diagonal, read straight
     /// off the assembled system at zero build cost.
     SharedBlockDiagonal,
+    /// The EXACT reduced-Schur diagonal
+    /// `diag(H_ββ) + ridge − Σ_i diag(H_βt^(i)(H_tt^(i))⁻¹H_tβ^(i))`, built from
+    /// the SAE resident factors. See `resident_schur_elimination_diagonal` for
+    /// why this is affordable here when the generic column probe is not
+    /// (#2576).
+    SchurDiagonal,
 }
 
 /// Diagonal preconditioner for the matrix-free reduced-Schur CG.
@@ -2705,14 +2736,28 @@ pub enum ReducedSchurCgPreconditioner {
 /// 4096-iteration cap, tolerance-insensitive because the tolerance was never
 /// the binding constraint).
 ///
-/// The exact reduced-Schur diagonal would need the point-elimination quotient
-/// `Σ_i (H_tβ^(i)e_a)ᵀ(H_tt^(i))⁻¹(H_tβ^(i)e_a)` per column — the `O(n·K)`
-/// probe build the Newton-side scalar Jacobi pays, which at the massive-K
-/// border costs orders of magnitude more than the solve it would precondition.
-/// The SHARED-BLOCK diagonal is already assembled (`hbb_diag` / `penalty_op`),
-/// so it is free, and it carries the whole firing-count spread. It is an upper
-/// bound on the true diagonal (the eliminated term is PSD), hence strictly
-/// positive whenever the assembled diagonal is, and it needs no factorization.
+/// Against a GENERIC cross-block operator the exact reduced-Schur diagonal needs
+/// the point-elimination quotient `Σ_i (H_tβ^(i)e_a)ᵀ(H_tt^(i))⁻¹(H_tβ^(i)e_a)`
+/// per column — the `O(n·K)` probe build the Newton-side scalar Jacobi pays,
+/// which at the massive-K border costs orders of magnitude more than the solve
+/// it would precondition. The SHARED-BLOCK diagonal is already assembled
+/// (`hbb_diag` / `penalty_op`), so it is free, and it carries the whole
+/// firing-count spread. It is an upper bound on the true diagonal (the
+/// eliminated term is PSD), hence strictly positive whenever the assembled
+/// diagonal is, and it needs no factorization.
+///
+/// On the SAE support lane that generic argument does NOT bind —
+/// [`resident_schur_elimination_diagonal`] takes the exact diagonal for less
+/// than the cost of one matvec. **It was measured and it does not help**: 5189
+/// shifted-CG iterations against this shared block's 5138, all tiers agreeing on
+/// `log|S|` to 10 significant figures. The reason is structural, not a tuning
+/// accident — `diag(H_ββ)` and the eliminated term are sums over the SAME rows
+/// with the SAME `φ²` weights, so the firing-count spread appears in both and
+/// cancels, leaving a near-uniform rescaling that CG is invariant to. This
+/// shared block is therefore the RIGHT preconditioner, not a cheap stand-in for
+/// one. See
+/// `exact_schur_diagonal_is_a_near_uniform_rescaling_of_the_shared_block_2576`,
+/// which guards the cancellation and will fail if it ever stops holding.
 ///
 /// This is a preconditioner, not a change of operator: PCG converges to the
 /// same `S⁻¹b` as CG, only faster, so every downstream criterion value is
@@ -2746,6 +2791,147 @@ pub(crate) fn reduced_schur_shifted_preconditioner(
         Some(diagonal) => ShiftedDiagonalPreconditioner::from_operator_diagonal(&diagonal),
         None => ShiftedDiagonalPreconditioner::identity(),
     }
+}
+
+/// The EXACT diagonal of the eliminated term
+/// `Σ_i H_βt^(i)(H_tt^(i)+ρ_t I)⁻¹H_tβ^(i)`, read off the staged SAE residency.
+///
+/// # Why this is affordable when the generic column probe is not (#2576)
+///
+/// The generic route materializes `H_tβ^(i)` column by column against `K` basis
+/// vectors, which is what makes an exact diagonal cost `O(n·K)` and is why
+/// [`ReducedSchurDiagonalPreconditioner`] settles for the shared block alone.
+/// The SAE cross-block is not generic. It factors as `H_tβ^(i) = L_i P_i` with
+/// `P_i` the support projector `(P_i)[c, base_s + c] = φ_s` and `L_i` the row's
+/// `di × p` local Jacobian — exactly the decomposition
+/// [`SaeResidentReducedSchur::row_into`] already applies, `S_i = P_iᵀ L_iᵀ Y_i P_i`
+/// with `Y_i = (H_tt^(i)+ρ_t I)⁻¹L_i` ALREADY STAGED. So
+///
+/// ```text
+/// diag(S_i)[base_s + c] = φ_s² · G_i[c, c],   G_i[c, c] = Σ_r L_i[r, c]·Y_i[r, c]
+/// ```
+///
+/// — a column dot of two resident slabs plus a sparse scatter. The cost is
+/// `di·p + support_i·p` per row against the matvec's `2·support_i·p + 2·di·p`:
+/// this build is CHEAPER THAN A SINGLE MATVEC, and it is amortized over the
+/// whole shift ladder (the quadrature's node count times every probe, each of
+/// which runs to thousands of iterations). No factorization is added — `Y_i` is
+/// the solve the residency already paid for.
+///
+/// The result is the exact diagonal, not an approximation or a bound.
+///
+/// Determinism: rows are accumulated in increasing index order, serially. This
+/// is the fixed-order accumulation the #1211 exact-no-move contract wants, and
+/// at one-matvec cost per plan build there is nothing to gain from fanning it
+/// out.
+///
+/// `None` when the residency does not describe this system (degenerate `p`,
+/// slab length mismatch, or a support base that would run off the border), in
+/// which case the caller keeps the shared-block diagonal it already had.
+pub(crate) fn resident_schur_elimination_diagonal(
+    resident: &SaeResidentReducedSchur,
+    k: usize,
+) -> Option<Array1<f64>> {
+    let p = resident.p;
+    if p == 0 || k == 0 || resident.rows.len() != resident.a_phi.len() {
+        return None;
+    }
+    let mut elimination = Array1::<f64>::zeros(k);
+    let out = elimination.as_slice_mut()?;
+    let mut g_diag = vec![0.0_f64; p];
+    // Per-row `(base, Σφ)` with equal bases COMBINED BEFORE squaring: the
+    // projector's coefficient on column `base + c` is the sum of every support
+    // entry carrying that base, and it is that sum which gets squared. Summing
+    // `φ²` instead would price a different projector than the matvec applies.
+    let mut combined: Vec<(usize, f64)> = Vec::new();
+    for (row, factor) in resident.rows.iter().enumerate() {
+        let di = factor.di;
+        let support = &resident.a_phi[row];
+        if di == 0 || support.is_empty() {
+            continue;
+        }
+        let l_i = &resident.local_jac[row];
+        if l_i.len() != di * p || factor.y.len() != di * p {
+            return None;
+        }
+        // G_i[c, c] = Σ_r L_i[r, c] · Y_i[r, c]  (the diagonal of L_iᵀ Y_i,
+        // never the dense p×p product).
+        for value in g_diag.iter_mut() {
+            *value = 0.0;
+        }
+        for r in 0..di {
+            let l_row = &l_i[r * p..r * p + p];
+            let y_row = &factor.y[r * p..r * p + p];
+            for ((value, &l), &y) in g_diag.iter_mut().zip(l_row).zip(y_row) {
+                *value += l * y;
+            }
+        }
+        combined.clear();
+        for &(base, phi) in support.iter() {
+            if phi == 0.0 {
+                continue;
+            }
+            if base + p > k {
+                return None;
+            }
+            match combined.iter_mut().find(|(seen, _)| *seen == base) {
+                Some(entry) => entry.1 += phi,
+                None => combined.push((base, phi)),
+            }
+        }
+        for &(base, phi) in combined.iter() {
+            let scale = phi * phi;
+            for (value, &g) in out[base..base + p].iter_mut().zip(g_diag.iter()) {
+                *value += scale * g;
+            }
+        }
+    }
+    Some(elimination)
+}
+
+/// The shifted-ladder preconditioner built from the EXACT reduced-Schur diagonal
+/// when an SAE residency is in hand, falling back to
+/// [`reduced_schur_shifted_preconditioner`]'s shared-block diagonal otherwise.
+///
+/// **Not on any production path, deliberately.** #2576's standing thesis was
+/// that preconditioning a reduced Schur with only its penalty block discards the
+/// structure that makes it a Schur complement. That thesis is measurably wrong
+/// on this lane: this exact diagonal costs 5189 shifted-CG iterations against
+/// the shared block's 5138 (identity: 29236), because the two differ by very
+/// nearly a uniform rescaling. It is retained as the instrument that establishes
+/// that — the third tier of
+/// [`reduced_schur_logdet_preconditioner_study`] — so the refutation can be
+/// re-measured rather than re-argued.
+///
+/// Safeguard, per entry: `S` is SPD so its true diagonal is positive, but the
+/// subtraction is a cancellation and a column whose curvature is almost entirely
+/// eliminated can round to zero or below. Such an entry keeps the shared-block
+/// value it would have had before this function existed. That is never worse
+/// than the status quo — a preconditioner needs only to be SPD, and a per-entry
+/// fallback keeps the whole diagonal rather than discarding it over one column.
+pub(crate) fn reduced_schur_shifted_preconditioner_resident(
+    sys: &ArrowSchurSystem,
+    ridge_beta: f64,
+    resident: Option<&SaeResidentReducedSchur>,
+) -> ShiftedDiagonalPreconditioner {
+    let Some(mut diagonal) =
+        ReducedSchurDiagonalPreconditioner::shared_block_diagonal(sys, ridge_beta)
+    else {
+        return ShiftedDiagonalPreconditioner::identity();
+    };
+    let elimination = resident.and_then(|resident| {
+        resident_schur_elimination_diagonal(resident, sys.k)
+            .filter(|elimination| elimination.len() == diagonal.len())
+    });
+    if let Some(elimination) = elimination {
+        for (value, &eliminated) in diagonal.iter_mut().zip(elimination.iter()) {
+            let exact = *value - eliminated;
+            if exact.is_finite() && exact > 0.0 {
+                *value = exact;
+            }
+        }
+    }
+    ShiftedDiagonalPreconditioner::from_operator_diagonal(&diagonal)
 }
 
 impl ReducedSchurDiagonalPreconditioner {
