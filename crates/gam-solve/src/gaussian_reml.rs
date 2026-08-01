@@ -5753,8 +5753,19 @@ fn compactified_limit_costs(
 /// Certified topology of the profiled-REML ρ-landscape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RhoLandscape {
-    /// No interior stationary point: `V` is monotone and the optimum is the
-    /// `ρ→+∞` (large-λ) compactified boundary.
+    /// No interior stationary point: `V` is monotone on the window and the
+    /// optimum is a BOUNDARY of the compactified search, not an interior one.
+    ///
+    /// WHICH boundary is not implied by this variant and must be read from
+    /// `selected_rho` against `rho_window`, or from `window_costs` /
+    /// `limit_costs`. This doc used to name the `ρ→+∞` (large-λ) end. The search
+    /// certifies only that no INTERIOR stationary point exists; the end that
+    /// wins is decided by the costs, and #2703 measured both signs of `V′` at
+    /// the lower rail on four fixtures of one family (`+4.5`, `+12`, `−5.0`,
+    /// `−5.0`) — so neither end is implied by the regime either. A variant
+    /// asserting a direction the search never certified is the same species of
+    /// defect as the refusal #2703 was filed on: machinery described instead of
+    /// the fit.
     NoInteriorOptimum,
     /// Exactly one interior stationary point — a unique interior optimum.
     UniqueInterior,
@@ -6438,6 +6449,308 @@ mod tests {
              change first.\n\
              witness ywy={ywy:.9e} unpenalized_residual={unpenalized_residual:.9e} \
              penalized_residual={penalized_residual:.9e}\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// #2703 — the ρ enumerator must RESOLVE an objective that is flat toward the
+    /// small-λ box endpoint, and must still REFUSE structure it genuinely cannot
+    /// resolve at its own resolution.
+    ///
+    /// The six `gam-sae inference::` failures this issue was filed on all carried
+    /// ONE byte-identical refusal — "stationary structure remained non-monotone on
+    /// `[-30, -29.999999999972715]` … deepest bisection 41" — and `60/2^41` is
+    /// exactly that interval's width, so the search descended a SINGLE branch to
+    /// the resolution floor at the lower rail: at every level the right half was
+    /// pruned and the left half could not be.
+    ///
+    /// The cause was not a missing corner case in the enumerator. It was an
+    /// enclosure that could not tighten. `r0 = ywy − Σc²` was BRACKETED over the
+    /// digits its cancellation destroys; `r0` is ρ-INDEPENDENT, so that width
+    /// survived every bisection — it was present at ZERO cell width — `dp_lo`
+    /// collapsed onto the ratio numerator's own scale, `num_hi/dp_lo` read `1.0`
+    /// whatever the data, and `V′`'s enclosure came out `half_nu` wide. An
+    /// enclosure wider than the value it encloses can never satisfy
+    /// `dv.lo > 0 || dv.hi < 0`, at any depth, so nothing could prune and the
+    /// walk to the floor was structurally forced. The repair carries `r0` as the
+    /// point the evaluator itself uses (see the comment at `r0` in
+    /// `reml_deriv_enclosure_profile`).
+    ///
+    /// The gate beside this one pins the enclosure's sharpness directly. This one
+    /// pins the CONSEQUENCE, at the enumerator, because that is where #2703 was
+    /// observed and where a future regression would surface:
+    ///
+    /// * WITNESS — an interpolating design in the same regime as the six fixtures:
+    ///   a constant response lying in the span of the basis AND in the null space
+    ///   of the penalty, on an irrational (periodic-harmonic) basis so the
+    ///   cancellation is INEXACT rather than bit-exact. The full production
+    ///   branch-and-bound must return a SELECTION on it rather than the
+    ///   unresolvable-structure refusal. A regime clause asserts the design still
+    ///   interpolates, so a fixture that drifts out of the regime fails loudly
+    ///   instead of going silently green. Measured: it selects `ρ = RHO_UPPER`,
+    ///   a RAIL answer — reached rather than refused, which is the whole verdict
+    ///   #2703 was denied. The clause does not assert WHICH rail: the search
+    ///   certifies no interior stationary point, not a direction.
+    /// * POSITIVE CONTROL — the refusal must survive. A guard that can no longer
+    ///   fire is the defect one level up, and the enclosure repair is only safe
+    ///   because it changes the enclosure's TIGHTNESS and not when the enumerator
+    ///   returns `Ok`. An objective whose stationary points are spaced BELOW the
+    ///   search's own bracket resolution genuinely cannot be enumerated at that
+    ///   resolution, and must still be refused with that verdict.
+    /// * NEGATIVE CONTROL — the same synthetic family with the oscillation removed
+    ///   is smooth and unimodal, and must be ACCEPTED at its analytic root. Without
+    ///   it, a harness that refused everything would read as a passing positive
+    ///   control.
+    ///
+    /// Nothing here is a wall-clock budget or an invented tolerance: the positive
+    /// control's frequency is derived from `RHO_BRACKET_RESOLUTION` — the search's
+    /// own certified resolution — its amplitude from that frequency, and the
+    /// negative control's admissible offset from the search's own bracket-width
+    /// acceptance rule.
+    #[test]
+    fn rho_enumeration_resolves_the_small_lambda_rail_and_still_refuses_unresolvable_structure_2703()
+    {
+        let mut failures: Vec<String> = Vec::new();
+
+        // ---- WITNESS: the #2703 interpolating regime, at the ENUMERATOR ------
+        let n = 12usize;
+        let witness_x = Array2::<f64>::from_shape_fn((n, 3), |(row, col)| {
+            let t = 2.0 * std::f64::consts::PI * (row as f64) / (n as f64);
+            match col {
+                0 => 1.0,
+                1 => t.sin(),
+                _ => t.cos(),
+            }
+        });
+        let witness_y = Array2::<f64>::from_elem((n, 1), 0.7);
+        let witness_penalty = array![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let witness = prepare_gaussian_reml(
+            witness_x.view(),
+            witness_y.view(),
+            witness_penalty.view(),
+            None,
+            None,
+            None,
+        )
+        .expect("the witness design is finite and full rank");
+
+        // Regime clause, reported through the evaluator's own decomposition: the
+        // ρ-dependent part of the deviance must be vanishing against `ywy`, which
+        // is what drives `ywy − Σc²` into cancellation in the first place.
+        let DispersionResidualParts {
+            unpenalized_residual,
+            penalized_residual,
+            ..
+        } = dispersion_residual_parts(
+            &witness.cache,
+            witness.ywy.view(),
+            witness.projected_rhs_squared.view(),
+            0,
+            RHO_LOWER,
+        );
+        let ywy = witness.ywy[0];
+        if !(penalized_residual >= 0.0 && penalized_residual < 1.0e-25 * ywy) {
+            failures.push(format!(
+                "WITNESS regime: the rho-dependent deviance at rho={RHO_LOWER} is \
+                 {penalized_residual:.9e} against ywy={ywy:.9e}; this design does not \
+                 interpolate its response, so `ywy − Σc²` never cancels and the \
+                 fixture has drifted OUT of the regime under test — a pass below \
+                 would mean nothing"
+            ));
+        }
+
+        let witness_eval = |rho: f64| witness.evaluate(rho);
+        let witness_enclose = |a: f64, b: f64| {
+            reml_deriv_enclosure(
+                &witness.cache,
+                witness.ywy.view(),
+                witness.projected_rhs_squared.view(),
+                witness.n_effective,
+                witness.n_outputs,
+                a,
+                b,
+            )
+        };
+        let mut witness_rho = f64::NAN;
+        match enumerate_and_select_rho_with_controls(
+            &witness_eval,
+            &witness_enclose,
+            None,
+            ProfileSearchControls::PRODUCTION,
+            None,
+        ) {
+            Ok(selection) => {
+                witness_rho = selection.rho;
+                let at_selected = witness_eval(selection.rho).cost;
+                let at_lower = witness_eval(RHO_LOWER).cost;
+                let at_upper = witness_eval(RHO_UPPER).cost;
+                if !(selection.rho.is_finite()
+                    && selection.rho >= RHO_LOWER
+                    && selection.rho <= RHO_UPPER)
+                {
+                    failures.push(format!(
+                        "WITNESS: the selected rho={} is not inside the search window \
+                         [{RHO_LOWER}, {RHO_UPPER}]",
+                        selection.rho
+                    ));
+                }
+                if !(at_selected <= at_lower && at_selected <= at_upper) {
+                    failures.push(format!(
+                        "WITNESS: the selection is not the best candidate the search \
+                         saw — cost {at_selected:.9e} at rho={} against {at_lower:.9e} \
+                         at the lower rail and {at_upper:.9e} at the upper rail",
+                        selection.rho
+                    ));
+                }
+            }
+            Err(error) => failures.push(format!(
+                "WITNESS: the production branch-and-bound REFUSED an interpolating \
+                 design — this is the #2703 symptom itself: {error}"
+            )),
+        }
+
+        // ---- the synthetic family shared by both controls -------------------
+        // `V(ρ) = ½(ρ − CENTRE)² + amplitude·sin(wavenumber·ρ)` with SOUND
+        // (superset) enclosures of `V′` and `V″` over any cell: `V′` is bounded by
+        // its linear part over `[a, b]` widened by the oscillation's own swing
+        // `|amplitude·wavenumber|`, and `V″` by `1 ± |amplitude·wavenumber²|`.
+        // Passing the enumerator an objective directly is what lets the controls
+        // state the STRUCTURE under test rather than hunt for a design that
+        // happens to have it.
+        const CENTRE: f64 = 0.5;
+        let objective = |amplitude: f64, wavenumber: f64| {
+            move |rho: f64| {
+                let phase = wavenumber * rho;
+                ObjectiveEval {
+                    cost: 0.5 * (rho - CENTRE) * (rho - CENTRE) + amplitude * phase.sin(),
+                    grad: (rho - CENTRE) + amplitude * wavenumber * phase.cos(),
+                    hess: 1.0 - amplitude * wavenumber * wavenumber * phase.sin(),
+                    edf: 0.0,
+                    // The synthetic objective is closed-form and exactly
+                    // representable, so its cost carries no accumulated
+                    // forward error to declare (#2729).
+                    cost_roundoff: 0.0,
+                }
+            }
+        };
+        let enclosure = |amplitude: f64, wavenumber: f64| {
+            move |a: f64, b: f64| {
+                let grad_swing = (amplitude * wavenumber).abs();
+                let hess_swing = (amplitude * wavenumber * wavenumber).abs();
+                (
+                    Interval {
+                        lo: (a - CENTRE) - grad_swing,
+                        hi: (b - CENTRE) + grad_swing,
+                    },
+                    Interval {
+                        lo: 1.0 - hess_swing,
+                        hi: 1.0 + hess_swing,
+                    },
+                )
+            }
+        };
+
+        // ---- POSITIVE CONTROL: the refusal must still fire -------------------
+        // One oscillation per QUARTER of the search's own bracket resolution, so
+        // consecutive stationary points are closer together than the finest
+        // bracket the search is permitted to certify — "unresolvable" stated in
+        // the search's own units. The amplitude then follows from
+        // `amplitude·wavenumber = 1`: an order-one swing in `V′`, so the cells
+        // near `CENTRE` genuinely cannot be signed.
+        let unresolvable_wavenumber = std::f64::consts::TAU / (0.25 * RHO_BRACKET_RESOLUTION);
+        let unresolvable_amplitude = 1.0 / unresolvable_wavenumber;
+        let mut positive_control_verdict = String::new();
+        match enumerate_and_select_rho_with_controls(
+            objective(unresolvable_amplitude, unresolvable_wavenumber),
+            enclosure(unresolvable_amplitude, unresolvable_wavenumber),
+            None,
+            ProfileSearchControls::PRODUCTION,
+            None,
+        ) {
+            Ok(selection) => failures.push(format!(
+                "POSITIVE CONTROL: the enumerator MINTED rho={} on an objective whose \
+                 stationary points are spaced below its own bracket resolution \
+                 ({RHO_BRACKET_RESOLUTION:e}). The unresolvable-structure refusal can \
+                 no longer fire, which is a worse defect than the one #2703 reported",
+                selection.rho
+            )),
+            Err(error) => {
+                positive_control_verdict = error.to_string();
+                if !positive_control_verdict.contains("remained non-monotone") {
+                    failures.push(format!(
+                        "POSITIVE CONTROL: refused, but not with the \
+                         unresolvable-structure verdict: {positive_control_verdict}"
+                    ));
+                }
+            }
+        }
+
+        // ---- NEGATIVE CONTROL: the same harness must be able to accept -------
+        let mut negative_control_rho = f64::NAN;
+        match enumerate_and_select_rho_with_controls(
+            objective(0.0, unresolvable_wavenumber),
+            enclosure(0.0, unresolvable_wavenumber),
+            None,
+            ProfileSearchControls::PRODUCTION,
+            None,
+        ) {
+            Ok(selection) => {
+                negative_control_rho = selection.rho;
+                // The search's OWN acceptance rule: it stops when the bracket is
+                // narrower than `resolution · (1 + max|endpoint|)` and returns a
+                // point of that bracket, which also contains the analytic root.
+                // The bracket's endpoints exceed the two points it contains by at
+                // most its own width, hence the `+ RHO_BRACKET_RESOLUTION`.
+                let scale =
+                    1.0 + selection.rho.abs().max(CENTRE.abs()) + RHO_BRACKET_RESOLUTION;
+                let admissible = RHO_BRACKET_RESOLUTION * scale;
+                if (selection.rho - CENTRE).abs() > admissible {
+                    failures.push(format!(
+                        "NEGATIVE CONTROL: selected rho={} against the analytic root \
+                         {CENTRE}, off by {:e} which exceeds the search's own bracket \
+                         acceptance {admissible:e}",
+                        selection.rho,
+                        (selection.rho - CENTRE).abs()
+                    ));
+                }
+            }
+            Err(error) => failures.push(format!(
+                "NEGATIVE CONTROL: the enumerator refused a smooth unimodal objective \
+                 with an interior root at {CENTRE}, so the positive control's refusal \
+                 above is attributable to the harness rather than to the structure: \
+                 {error}"
+            )),
+        }
+
+        // Engagement report: a green is only readable if each arm actually reached
+        // its verdict, so the verdicts are printed rather than inferred from the
+        // absence of a panic.
+        println!(
+            "[2703-gate] WITNESS selected rho={witness_rho:.9e} \
+             (ywy={ywy:.9e} unpenalized_residual={unpenalized_residual:.9e} \
+             penalized_residual={penalized_residual:.9e}), \
+             POSITIVE CONTROL refusal={:?}, NEGATIVE CONTROL rho={negative_control_rho:.9e}, \
+             failed clauses {}",
+            positive_control_verdict
+                .split(':')
+                .next_back()
+                .unwrap_or("")
+                .trim(),
+            failures.len()
+        );
+
+        assert!(
+            failures.is_empty(),
+            "#2703 REGRESSION — the 1-D REML rho enumerator no longer resolves a \
+             small-lambda-flat objective, or no longer refuses one it cannot \
+             resolve.\n\
+             The six `gam-sae inference::` failures this gate stands for were ONE \
+             cause: `r0` entered the derivative enclosure as a BRACKET over the \
+             digits its cancellation destroys, the width was rho-INDEPENDENT and so \
+             survived every bisection, and no cell could ever be pruned. If the \
+             WITNESS clause is red, check `reml_deriv_enclosure_profile`'s `r0` \
+             first. If a CONTROL clause is red, the guard's ability to fire has \
+             moved, which is the more serious direction.\n{}",
             failures.join("\n")
         );
     }
