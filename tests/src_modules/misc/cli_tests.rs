@@ -621,6 +621,7 @@ fn location_scale_fit_args(
     noise_formula: &str,
 ) -> FitArgs {
     FitArgs {
+        inference: true,
         expectile_tau: None,
         data,
         request: None,
@@ -1335,6 +1336,7 @@ fn issue_2116_cli_standard_fit_gates_duchon_operator_penalties_for_poisson() {
     fs::write(&train_path, csv).unwrap_or_else(|e| panic!("{} failed: {:?}", "write csv", e));
 
     run_fit(FitArgs {
+        inference: true,
         expectile_tau: None,
         data: train_path,
         request: None,
@@ -1482,6 +1484,7 @@ fn cli_and_engine_agree_on_the_left_truncated_survival_anchor_2631() {
 
     // ── CLI arm: the same request through `run_fit` -> `run_survival`.
     run_fit(FitArgs {
+        inference: true,
         expectile_tau: None,
         data: train_path.clone(),
         request: None,
@@ -1594,6 +1597,7 @@ fn cli_survival_time_anchor_is_honored_on_the_default_transformation_route_2631(
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "write survival csv", e));
 
     run_fit(FitArgs {
+        inference: true,
         expectile_tau: None,
         data: train_path.clone(),
         request: None,
@@ -1694,6 +1698,7 @@ fn cli_weibull_route_anchors_left_truncated_data_and_honors_the_override_2631() 
             None => "weibull_default.model.json",
         });
         run_fit(FitArgs {
+        inference: true,
             expectile_tau: None,
             data: train_path.clone(),
             request: None,
@@ -1849,6 +1854,7 @@ fn cli_surv_predict_noise_routes_to_survival_location_scale() {
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "write survival training csv", e));
 
     run_fit(FitArgs {
+        inference: true,
         expectile_tau: None,
         data: train_path.clone(),
         request: None,
@@ -2268,6 +2274,7 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_main_formula() {
     write_bernoulli_marginal_slope_train_csv(&train_path);
 
     let err = run_fit(FitArgs {
+        inference: true,
         expectile_tau: None,
         data: train_path,
         request: None,
@@ -2326,6 +2333,7 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_logslope_formula() {
     write_bernoulli_marginal_slope_train_csv(&train_path);
 
     let err = run_fit(FitArgs {
+        inference: true,
         expectile_tau: None,
         data: train_path,
         request: None,
@@ -3107,6 +3115,7 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "write training csv", e));
 
     let fit_args = FitArgs {
+        inference: true,
         expectile_tau: None,
         data: train_path.clone(),
         // Firth bias-reduction is only implemented for the binomial logit
