@@ -1,7 +1,7 @@
 //! Order-specific Taylor-jet SCALAR algebras (#932 cutover, doc §A).
 //!
 //! [`crate::jet_tower::Tower4`] carries the full value/gradient/Hessian/`t3`/`t4`
-//! tensor stack: it answers EVERY channel a [`super::row_kernel::RowKernel`]
+//! tensor stack: it answers EVERY channel a `gam_models::row_kernel::RowKernel`
 //! consumer can ask for, but at `K = 9` that is a ~50 KiB per-row object whose
 //! by-value copies overflowed the stack and timed out the location-scale fit.
 //! The cutover therefore does NOT instantiate the dense `Tower4<9>` per row; it
@@ -505,7 +505,7 @@ pub trait JetScalar<const K: usize>: crate::nested_dual::JetField + Copy {
     /// Compose with a unary special-function whose derivative stack is built from
     /// the scalar base value through `stack_fn`. This evaluates
     /// `stack_fn(self.value())` once and forwards to
-    /// [`compose_unary`](Self::compose_unary), so it is bit-identical to the
+    /// [`compose_unary`](crate::nested_dual::JetField::compose_unary), so it is bit-identical to the
     /// explicit `self.compose_unary(stack_fn(self.value()))` form.
     fn compose_unary_with(&self, stack_fn: impl Fn(f64) -> [f64; 5]) -> Self {
         self.compose_unary(stack_fn(self.value()))
@@ -4307,13 +4307,13 @@ impl<L: Lane, const K: usize> Order2Lane<L, K> {
     }
 
     /// Lane-wise `self - o`, expressed as `self + o·(-1)` exactly as
-    /// [`Order2::sub`] / `Tower4::sub` do, so signed-zero handling matches.
+    /// [`Order2::sub`](crate::nested_dual::JetField::sub) / `Tower4::sub` do, so signed-zero handling matches.
     #[inline]
     pub fn sub(&self, o: &Self) -> Self {
         self.add(&o.scale(-1.0))
     }
 
-    /// Negate every channel (= `scale(-1.0)`, matching [`Order2::neg`]).
+    /// Negate every channel (= `scale(-1.0)`, matching [`Order2::neg`](crate::nested_dual::JetField::neg)).
     #[inline]
     pub fn neg(&self) -> Self {
         self.scale(-1.0)
@@ -4791,7 +4791,7 @@ impl<L: Lane, const K: usize> OneSeedLane<L, K> {
         self.eps.h
     }
 
-    /// Lane-wise `self + o` (mirrors [`OneSeed::add`]).
+    /// Lane-wise `self + o` (mirrors [`OneSeed::add`](crate::nested_dual::JetField::add)).
     #[inline]
     pub fn add(&self, o: &Self) -> Self {
         OneSeedLane {
@@ -4800,7 +4800,7 @@ impl<L: Lane, const K: usize> OneSeedLane<L, K> {
         }
     }
 
-    /// Lane-wise `self - o` (mirrors [`OneSeed::sub`]).
+    /// Lane-wise `self - o` (mirrors [`OneSeed::sub`](crate::nested_dual::JetField::sub)).
     #[inline]
     pub fn sub(&self, o: &Self) -> Self {
         OneSeedLane {
@@ -4809,7 +4809,7 @@ impl<L: Lane, const K: usize> OneSeedLane<L, K> {
         }
     }
 
-    /// Lane-wise `self · o`, ε² = 0 truncation (mirrors [`OneSeed::mul`]).
+    /// Lane-wise `self · o`, ε² = 0 truncation (mirrors [`OneSeed::mul`](crate::nested_dual::JetField::mul)).
     #[inline]
     pub fn mul(&self, o: &Self) -> Self {
         let ab = &self.base;
@@ -4845,7 +4845,7 @@ impl<L: Lane, const K: usize> OneSeedLane<L, K> {
         }
     }
 
-    /// Negate every part (mirrors [`OneSeed::neg`]).
+    /// Negate every part (mirrors [`OneSeed::neg`](crate::nested_dual::JetField::neg)).
     #[inline]
     pub fn neg(&self) -> Self {
         OneSeedLane {
@@ -4854,7 +4854,7 @@ impl<L: Lane, const K: usize> OneSeedLane<L, K> {
         }
     }
 
-    /// Multiply every part by the plain scalar `s` (mirrors [`OneSeed::scale`]).
+    /// Multiply every part by the plain scalar `s` (mirrors [`OneSeed::scale`](crate::nested_dual::JetField::scale)).
     #[inline]
     pub fn scale(&self, s: f64) -> Self {
         OneSeedLane {
@@ -4865,7 +4865,7 @@ impl<L: Lane, const K: usize> OneSeedLane<L, K> {
 
     /// Exact order-≤2-per-part Faà di Bruno composition `f ∘ self`, given the
     /// per-lane outer-derivative stack `d = [f, f′, f″, f‴, f⁗]`. Term-for-term
-    /// identical to the fused [`OneSeed::compose_unary`] channels: the base reads
+    /// identical to the fused [`OneSeed::compose_unary`](crate::nested_dual::JetField::compose_unary) channels: the base reads
     /// `d[0..=2]`, while the ε-coefficient directly evaluates
     /// `f′(base)·eps` from `d[1..=3]` without an intermediate jet.
     #[inline]
@@ -5221,7 +5221,7 @@ impl<L: Lane, const K: usize> TwoSeedLane<L, K> {
         self.eps_del.h
     }
 
-    /// Lane-wise `self + o` (mirrors [`TwoSeed::add`]).
+    /// Lane-wise `self + o` (mirrors [`TwoSeed::add`](crate::nested_dual::JetField::add)).
     #[inline]
     pub fn add(&self, o: &Self) -> Self {
         TwoSeedLane {
@@ -5232,7 +5232,7 @@ impl<L: Lane, const K: usize> TwoSeedLane<L, K> {
         }
     }
 
-    /// Lane-wise `self - o` (mirrors [`TwoSeed::sub`]).
+    /// Lane-wise `self - o` (mirrors [`TwoSeed::sub`](crate::nested_dual::JetField::sub)).
     #[inline]
     pub fn sub(&self, o: &Self) -> Self {
         TwoSeedLane {
@@ -5243,7 +5243,7 @@ impl<L: Lane, const K: usize> TwoSeedLane<L, K> {
         }
     }
 
-    /// Lane-wise `self · o`, ε² = δ² = 0 truncation (mirrors [`TwoSeed::mul`]).
+    /// Lane-wise `self · o`, ε² = δ² = 0 truncation (mirrors [`TwoSeed::mul`](crate::nested_dual::JetField::mul)).
     #[inline]
     pub fn mul(&self, o: &Self) -> Self {
         let a = self;
@@ -5265,7 +5265,7 @@ impl<L: Lane, const K: usize> TwoSeedLane<L, K> {
         }
     }
 
-    /// Negate every part (mirrors [`TwoSeed::neg`]).
+    /// Negate every part (mirrors [`TwoSeed::neg`](crate::nested_dual::JetField::neg)).
     #[inline]
     pub fn neg(&self) -> Self {
         TwoSeedLane {
@@ -5276,7 +5276,7 @@ impl<L: Lane, const K: usize> TwoSeedLane<L, K> {
         }
     }
 
-    /// Multiply every part by the plain scalar `s` (mirrors [`TwoSeed::scale`]).
+    /// Multiply every part by the plain scalar `s` (mirrors [`TwoSeed::scale`](crate::nested_dual::JetField::scale)).
     #[inline]
     pub fn scale(&self, s: f64) -> Self {
         TwoSeedLane {
@@ -5289,7 +5289,7 @@ impl<L: Lane, const K: usize> TwoSeedLane<L, K> {
 
     /// Exact composition `f ∘ self`, given the per-lane outer-derivative stack
     /// `d = [f, f′, f″, f‴, f⁗]`. Term-for-term identical to
-    /// [`TwoSeed::compose_unary`]: base reads `d[0..=2]`, `f′(base)` reads
+    /// [`TwoSeed::compose_unary`](crate::nested_dual::JetField::compose_unary): base reads `d[0..=2]`, `f′(base)` reads
     /// `d[1..=3]`, `f″(base)` reads `d[2..=4]`, and the cross part carries
     /// `f″·eps·del + f′·eps_del`.
     #[inline]

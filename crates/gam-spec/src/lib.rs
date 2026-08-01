@@ -689,7 +689,7 @@ impl ResponseFamily {
     /// whole real line (Gaussian) or has its support enforced downstream
     /// (Royston–Parmar), and the predictive band is passed through unclamped.
     ///
-    /// The match arms mirror [`Self::response_support_contains`]: a new family
+    /// The match arms mirror `Self::response_support_contains`: a new family
     /// must update both together so the support a value is validated against and
     /// the support a predictive band is clamped to stay consistent.
     #[inline]

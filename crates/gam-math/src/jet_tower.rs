@@ -23,7 +23,7 @@
 //! fully compatible with the exact-REML-only policy.
 //!
 //! One evaluation of a row NLL program at seeded variables yields, in a
-//! single pass, every channel the [`super::row_kernel::RowKernel`] trait
+//! single pass, every channel the `gam_models::row_kernel::RowKernel` trait
 //! demands: `row_kernel` (value/∇/H), `row_third_contracted(dir)` (contract
 //! `t3` with `dir`), and `row_fourth_contracted(u, v)` (contract `t4` with
 //! `u` and `v`). The directional cross-channels that hand-written towers
@@ -172,7 +172,7 @@ impl<const K: usize> Tower4<K> {
     /// # Codegen
     ///
     /// Each output entry's `2^m` subset sum is written as a compact straight-line
-    /// expression instead of the shared [`jet_algebra::leibniz_product`] subset
+    /// expression instead of the shared `jet_algebra::leibniz_product` subset
     /// walker (which, per entry, builds `SlotBuf`s and `match`-dispatches the
     /// `deriv` closure across all `2^m` subsets). The loop nest over `(i,j,k,l)`
     /// is unchanged — only the inner per-entry sum is unrolled — so this does NOT
@@ -969,7 +969,7 @@ impl<const K: usize> Tower3<K> {
     /// # Codegen
     ///
     /// Straight-line per-entry subset sums instead of the
-    /// [`jet_algebra::leibniz_product`] walker — the order-≤3 sibling of
+    /// `jet_algebra::leibniz_product` walker — the order-≤3 sibling of
     /// [`Tower4::mul`] (no `t4`). Loop nest unchanged, no unroll over `K`, no
     /// code bloat; auto-vectorises. BIT-IDENTICAL: terms in the walker's exact
     /// subset order with an `acc = 0.0` accumulator start (load-bearing for the

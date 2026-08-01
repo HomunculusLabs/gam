@@ -176,7 +176,7 @@ impl MultiDirJet {
 
     /// Subset-convolution product `out[mask] = Σ_{sub ⊆ mask} a[sub]·b[mask^sub]`.
     ///
-    /// Bit-identical to the shared [`crate::jet_algebra::leibniz_product`] walker
+    /// Bit-identical to the shared `crate::jet_algebra::leibniz_product` walker
     /// (the submasks are enumerated in the same ascending order — the walker's
     /// compacted subset index is a monotone bit-deposit of the submask) while
     /// dropping its per-subset `SlotBuf`/closure/`mask_of` overhead. The scalar

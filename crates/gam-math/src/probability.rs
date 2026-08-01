@@ -248,7 +248,7 @@ fn square_residual(x: f64, rounded_square: f64) -> f64 {
 
 /// Standard normal PDF phi(x).
 ///
-/// The squared argument is carried exactly (see [`square_residual`]); without
+/// The squared argument is carried exactly (see `square_residual`); without
 /// that, `exp(-½·fl(x*x))` degrades like `x²·ε/2` and reaches `5.7e-14`
 /// relative before `φ` underflows, against the `3.3e-16` it holds with.
 #[inline]
@@ -417,7 +417,7 @@ pub fn fisher_snedecor_sf(
 /// representable subnormal tail. At the switch, the first omitted term is
 /// below `2e-17` relative to the leading term.
 ///
-/// The direct branch carries `x²` exactly (see [`square_residual`]). Without
+/// The direct branch carries `x²` exactly (see `square_residual`). Without
 /// that correction the branch degraded like `x²·ε/2` — `1.4e-14` at `x = 10`,
 /// `5.7e-14` by the top of its range — while the asymptotic branch that takes
 /// over at `26` was already delivering `3e-16`. The seam was therefore a
@@ -1283,7 +1283,7 @@ pub fn cone_boundary_log_factor(mu_over_sqrt_h: f64, slack_times_sqrt_h: f64) ->
 /// re-derived from a `λ` that has already lost the digits.
 ///
 /// So on the active branch the correction is taken directly from the Laplace
-/// continued fraction ([`mills_correction_continued_fraction`]), the same one
+/// continued fraction (`mills_correction_continued_fraction`), the same one
 /// the left-tail log-CDF derivatives use, under the substitution
 ///
 /// ```text

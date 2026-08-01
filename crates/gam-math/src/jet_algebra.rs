@@ -16,7 +16,7 @@
 //! What is identical is the *combinatorics*: for a group of differentiation
 //! slots, the Leibniz rule sums over subsets of those slots and the Faà di
 //! Bruno rule sums over their set-partitions. This module owns that
-//! combinatorics once, as a layout-agnostic [`JetAlgebra`] trait plus walkers
+//! combinatorics once, as a layout-agnostic `JetAlgebra` trait plus walkers
 //! parameterised by closures that read each representation's own derivative
 //! for a slot-group. Both
 //! `Tower4` and `MultiDirJet` route their `mul` / `compose_unary` through
@@ -43,8 +43,8 @@
 //! kernel rebuilt that structure from scratch on every call — the Faà di Bruno
 //! walk via a recursive `&mut dyn FnMut` "assign each element to a block"
 //! enumeration whose leaf and every block read went through a vtable that never
-//! inlined, plus a freshly cleared [`SlotBuf`] per block; the Leibniz walk via a
-//! per-bit branch building two [`SlotBuf`]s for every one of the `2^m` subsets.
+//! inlined, plus a freshly cleared `SlotBuf` per block; the Leibniz walk via a
+//! per-bit branch building two `SlotBuf`s for every one of the `2^m` subsets.
 //!
 //! Both structures are now built ONCE per slot-count `m` (lazily, into a
 //! process-wide cache keyed by `m ∈ 0..=8`) and stored as flat, packed bitmask
@@ -126,10 +126,10 @@ where
 /// # Performance
 ///
 /// The set partitions of `m` slots depend only on `m`, so the full partition
-/// list is built once per `m` (see [`partition_table`]) and cached as packed
+/// list is built once per `m` (see `partition_table`) and cached as packed
 /// per-block bitmasks. This walk iterates that flat table directly — no
 /// recursive enumeration, no `&mut dyn FnMut` leaf dispatch, no per-block
-/// [`SlotBuf`] churn beyond translating a block's bitmask to labelled positions.
+/// `SlotBuf` churn beyond translating a block's bitmask to labelled positions.
 /// BIT-IDENTICAL to the former recursive walker: partitions are emitted in the
 /// same order, each partition's blocks are in the same first-appearance order,
 /// each block's positions are in the same increasing order, every block product

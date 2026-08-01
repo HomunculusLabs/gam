@@ -365,7 +365,7 @@ pub fn bessel_i0_centered_terms_from_log_abs(log_abs_eta: f64) -> (f64, f64, f64
 /// Three regimes, each chosen so that nothing cancels in it:
 ///
 /// * `η ≥ 20`: read `c''(s) = η(N′S0 − N S0′)/S0²` straight off the asymptotic
-///   expansion ([`BesselAsymptotic`]). Its two products are `3/16` and `1/16` at
+///   expansion (`BesselAsymptotic`). Its two products are `3/16` and `1/16` at
 ///   leading order — a benign ratio, where the `−η(2d1+1)` and `d1²` of the
 ///   closed form both approach `¼` and cancel down to `1/(8η)`.
 /// * `1 ≤ η < 20`: the closed form, with that `¼` removed symbolically. Writing
