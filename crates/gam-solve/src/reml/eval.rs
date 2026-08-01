@@ -1684,7 +1684,7 @@ mod sigma_cubature_accumulation_tests {
         let jvjt = jacobian.dot(&v_rho_r).dot(&jacobian.t());
         let expected = &a0 + &jvjt;
 
-        let actual = accumulate_sigma_cubature_total_covariance(&points, p);
+        let actual = accumulate_sigma_cubature_total_covariance(&points, &[], p);
 
         // f64 round-off bound: every entry is a sum of <= 32 products
         // of single-digit magnitudes, so 1e-12 relative is very safe.
@@ -1716,7 +1716,7 @@ mod sigma_cubature_accumulation_tests {
         let a0: Array2<f64> = ndarray::array![[2.0, 0.5, 0.0], [0.5, 1.5, 0.25], [0.0, 0.25, 1.0]];
         let b0: Array1<f64> = ndarray::array![0.1, -0.2, 0.3];
         let points = vec![(a0.clone(), b0.clone())];
-        let actual = accumulate_sigma_cubature_total_covariance(&points, p);
+        let actual = accumulate_sigma_cubature_total_covariance(&points, &[], p);
         // With M=1: mean_beta = b0, second_beta = b0 b0ᵀ,
         //          var_beta = b0 b0ᵀ - b0 b0ᵀ = 0,
         //          mean_hinv = a0  ⇒ total = a0.
@@ -1784,7 +1784,7 @@ mod sigma_cubature_accumulation_tests {
             .map(|drho| (a0.clone(), &b0 + &j.dot(drho)))
             .collect();
 
-        let actual = accumulate_sigma_cubature_total_covariance(&points, p);
+        let actual = accumulate_sigma_cubature_total_covariance(&points, &[], p);
 
         // Manually compute mean_beta and verify it equals b_0 (the
         // conservation law). Since A_m = A_0 the cubature output is
@@ -1848,7 +1848,7 @@ mod sigma_cubature_accumulation_tests {
         for m in [1usize, 2, 4, 6, 8, 16] {
             let points: Vec<(Array2<f64>, Array1<f64>)> =
                 (0..m).map(|_| (a0.clone(), zero_b.clone())).collect();
-            let actual = accumulate_sigma_cubature_total_covariance(&points, p);
+            let actual = accumulate_sigma_cubature_total_covariance(&points, &[], p);
             for i in 0..p {
                 for j in 0..p {
                     let diff = (actual[[i, j]] - a0[[i, j]]).abs();
@@ -1923,8 +1923,8 @@ mod sigma_cubature_accumulation_tests {
             permuted.push(interleaved[2 * k + 1].clone()); // − axis k
         }
 
-        let v_interleaved = accumulate_sigma_cubature_total_covariance(&interleaved, p);
-        let v_permuted = accumulate_sigma_cubature_total_covariance(&permuted, p);
+        let v_interleaved = accumulate_sigma_cubature_total_covariance(&interleaved, &[], p);
+        let v_permuted = accumulate_sigma_cubature_total_covariance(&permuted, &[], p);
 
         let mut max_abs_dev = 0.0_f64;
         for i in 0..p {
@@ -1991,8 +1991,8 @@ mod sigma_cubature_accumulation_tests {
                 points.push((a.clone(), bm));
             }
         }
-        let first = accumulate_sigma_cubature_total_covariance(&points, p);
-        let second = accumulate_sigma_cubature_total_covariance(&points, p);
+        let first = accumulate_sigma_cubature_total_covariance(&points, &[], p);
+        let second = accumulate_sigma_cubature_total_covariance(&points, &[], p);
         for i in 0..p {
             for j in 0..p {
                 assert_eq!(
@@ -2068,7 +2068,7 @@ mod sigma_cubature_accumulation_tests {
         second.scaled_add(w, &outer(&b2));
         let expected = &mean_a + &(&second - &outer(&mean_b));
 
-        let actual = accumulate_sigma_cubature_total_covariance(&points, p);
+        let actual = accumulate_sigma_cubature_total_covariance(&points, &[], p);
         let mut max_abs = 0.0_f64;
         for i in 0..p {
             for j in 0..p {
@@ -2101,14 +2101,14 @@ mod sigma_cubature_accumulation_tests {
 
         let unscaled: Vec<(Array2<f64>, Array1<f64>)> =
             raw_betas.iter().map(|b| (a0.clone(), b.clone())).collect();
-        let v_unscaled = accumulate_sigma_cubature_total_covariance(&unscaled, p);
+        let v_unscaled = accumulate_sigma_cubature_total_covariance(&unscaled, &[], p);
 
         let alpha = 2.5_f64;
         let scaled: Vec<(Array2<f64>, Array1<f64>)> = raw_betas
             .iter()
             .map(|b| (a0.clone(), b.mapv(|x| x * alpha)))
             .collect();
-        let v_scaled = accumulate_sigma_cubature_total_covariance(&scaled, p);
+        let v_scaled = accumulate_sigma_cubature_total_covariance(&scaled, &[], p);
 
         // var(α·b) = α² var(b), and the A-side is unchanged. So
         // V_scaled = A_0 + α² · (V_unscaled − A_0).
@@ -2150,8 +2150,8 @@ mod sigma_cubature_accumulation_tests {
         }
         let reversed: Vec<(Array2<f64>, Array1<f64>)> = points.iter().rev().cloned().collect();
 
-        let v_forward = accumulate_sigma_cubature_total_covariance(&points, p);
-        let v_reverse = accumulate_sigma_cubature_total_covariance(&reversed, p);
+        let v_forward = accumulate_sigma_cubature_total_covariance(&points, &[], p);
+        let v_reverse = accumulate_sigma_cubature_total_covariance(&reversed, &[], p);
         let mut max_abs = 0.0_f64;
         for i in 0..p {
             for j in 0..p {
@@ -2196,8 +2196,8 @@ mod sigma_cubature_accumulation_tests {
             doubled.push(pt.clone());
         }
 
-        let v_orig = accumulate_sigma_cubature_total_covariance(&original, p);
-        let v_doub = accumulate_sigma_cubature_total_covariance(&doubled, p);
+        let v_orig = accumulate_sigma_cubature_total_covariance(&original, &[], p);
+        let v_doub = accumulate_sigma_cubature_total_covariance(&doubled, &[], p);
         let mut max_abs = 0.0_f64;
         for i in 0..p {
             for j in 0..p {
@@ -2235,7 +2235,7 @@ mod sigma_cubature_accumulation_tests {
             .iter()
             .map(|a| (a.clone(), b_const.clone()))
             .collect();
-        let actual = accumulate_sigma_cubature_total_covariance(&points, p);
+        let actual = accumulate_sigma_cubature_total_covariance(&points, &[], p);
 
         let w = 1.0 / (a_list.len() as f64);
         let mut mean_a = Array2::<f64>::zeros((p, p));
@@ -2323,7 +2323,7 @@ mod sigma_cubature_accumulation_tests {
         let t0 = std::time::Instant::now();
         let mut last_trace = 0.0_f64;
         for _ in 0..reps {
-            let v = accumulate_sigma_cubature_total_covariance(&points, p);
+            let v = accumulate_sigma_cubature_total_covariance(&points, &[], p);
             // Touch the result so the optimiser cannot elide the call.
             // Use the trace (a single f64) as the live-out — this is a
             // real use of the matrix, not a `black_box` silencer per
@@ -2439,9 +2439,9 @@ mod sigma_cubature_accumulation_tests {
             .map(|(a, b)| (a.clone(), b.clone()))
             .collect();
 
-        let v1 = accumulate_sigma_cubature_total_covariance(&pts1, p);
-        let v2 = accumulate_sigma_cubature_total_covariance(&pts2, p);
-        let vmix = accumulate_sigma_cubature_total_covariance(&pts_mix, p);
+        let v1 = accumulate_sigma_cubature_total_covariance(&pts1, &[], p);
+        let v2 = accumulate_sigma_cubature_total_covariance(&pts2, &[], p);
+        let vmix = accumulate_sigma_cubature_total_covariance(&pts_mix, &[], p);
 
         // With α+β = 1 the var(b) terms cancel, so
         // V[α·A + β·A'] = α·V[A] + β·V[A'].
@@ -2488,8 +2488,8 @@ mod sigma_cubature_accumulation_tests {
             .map(|b| (a_const.clone(), b + &shift))
             .collect();
 
-        let v_raw = accumulate_sigma_cubature_total_covariance(&pts_raw, p);
-        let v_shifted = accumulate_sigma_cubature_total_covariance(&pts_shifted, p);
+        let v_raw = accumulate_sigma_cubature_total_covariance(&pts_raw, &[], p);
+        let v_shifted = accumulate_sigma_cubature_total_covariance(&pts_shifted, &[], p);
         let mut max_abs = 0.0_f64;
         for i in 0..p {
             for j in 0..p {
@@ -2560,7 +2560,7 @@ mod sigma_cubature_accumulation_tests {
             }
             points.push((a_full.clone(), b));
         }
-        let v = accumulate_sigma_cubature_total_covariance(&points, p);
+        let v = accumulate_sigma_cubature_total_covariance(&points, &[], p);
         let mut max_cross_abs = 0.0_f64;
         for i in 0..p_top {
             for j in 0..p_bot {
@@ -2610,7 +2610,7 @@ mod sigma_cubature_accumulation_tests {
                 (a, b)
             })
             .collect();
-        let v = accumulate_sigma_cubature_total_covariance(&points, p);
+        let v = accumulate_sigma_cubature_total_covariance(&points, &[], p);
         let mut max_asym = 0.0_f64;
         for i in 0..p {
             for j in (i + 1)..p {
@@ -2661,8 +2661,8 @@ mod sigma_cubature_accumulation_tests {
             .map(|&i| (a_set[i].clone(), b_const.clone()))
             .collect();
 
-        let v_orig = accumulate_sigma_cubature_total_covariance(&original, p);
-        let v_perm = accumulate_sigma_cubature_total_covariance(&permuted_a, p);
+        let v_orig = accumulate_sigma_cubature_total_covariance(&original, &[], p);
+        let v_perm = accumulate_sigma_cubature_total_covariance(&permuted_a, &[], p);
         let w = 1.0 / m as f64;
         let mut mean_a = Array2::<f64>::zeros((p, p));
         for a in &a_set {
