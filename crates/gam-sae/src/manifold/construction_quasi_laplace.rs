@@ -1304,9 +1304,11 @@ impl SaeManifoldTerm {
                     // tier-0: ‖g‖ = 8.0e-5 against a 6.1e-5 band after 128,
                     // one Newton step from the band) refused here without the
                     // phase ever running. Try it before refusing: a committed
-                    // step strictly contracts ‖g‖ (its no-contraction bail
-                    // exits cheaply on genuinely hopeless states), and on
-                    // progress the loop resumes with fresh accounting — the
+                    // step strictly contracts ‖g‖ OR the exact Newton decrement
+                    // (the accept test is `obj_ok && (grad_ok || decrement_ok)`;
+                    // its no-contraction bail exits cheaply on genuinely
+                    // hopeless states), and on progress the loop resumes with
+                    // fresh accounting — the
                     // loop-top KKT gate and the idempotence certificate remain
                     // the sole acceptance authority, exactly as at the stall
                     // branch.
@@ -1737,8 +1739,9 @@ impl SaeManifoldTerm {
                 // unmet: this is exactly the linear-rate crawl regime where the
                 // MM/GN phase needs ~10³ more iterations it does not have. Hand
                 // the iterate to the exact-Hessian terminal Newton phase; a
-                // committed step strictly contracts ‖g‖, so the refine loop
-                // resumes with fresh progress instead of refusing. The phase
+                // committed step strictly contracts ‖g‖ or the exact Newton
+                // decrement, so the refine loop resumes with fresh progress
+                // instead of refusing. The phase
                 // mints nothing — acceptance stays with the loop-top KKT gate
                 // and the idempotence certificate (the state moved, so
                 // `criterion_fixed_point` is cleared and one evidence re-entry
@@ -1754,8 +1757,16 @@ impl SaeManifoldTerm {
                         objective_scale,
                         options,
                         // Anti-runaway cap ONLY — the polish's acceptance gate
-                        // already requires strict ‖g‖ contraction per step, so
-                        // the loop terminates numerically on its own. Measured
+                        // requires strict contraction of ‖g‖ OR of the exact
+                        // Newton decrement λ² per step, and its bail fires the
+                        // first step that contracts NEITHER, so the loop
+                        // terminates numerically on its own. The termination
+                        // therefore rests on the decrement arm wherever raw ‖g‖
+                        // is non-monotone, which is exactly the indefinite /
+                        // stiff regime this phase exists for; reading this
+                        // sentence as a single-currency ‖g‖ contract is wrong,
+                        // and gam#2715 read the resulting trace as a defect in
+                        // the gate rather than as the design it is. Measured
                         // (tier-0 fixtures, host lane): at 12 the polish
                         // silently expired at ‖g‖ = 6.48e-5 against a 6.11e-5
                         // band — refused 1.07× from convergence purely by cap.
@@ -2191,7 +2202,12 @@ impl SaeManifoldTerm {
     /// uses). Indefiniteness of `A` (measured K=1-circle μ = −1.66e-3) is
     /// handled by the acceptance test, not the solve: GMRES does not require
     /// SPD, and a step is committed ONLY when it strictly contracts the joint
-    /// KKT residual while holding the penalized objective within the same
+    /// KKT residual OR the exact Newton decrement `λ² = gᵀH⁻¹g` — raw `‖g‖` is
+    /// non-monotone under the exact-Newton step at the indefinite inner Hessian
+    /// these over-parametrized charts produce, so the decrement is the monotone
+    /// currency there, and the disjunction aligns this phase's merit with the
+    /// `½λ²` currency of the stall-accept it feeds — while holding the
+    /// penalized objective within the same
     /// no-meaningful-change band the stall detector just certified
     /// (`SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL × objective_scale`). A step
     /// failing that after backtracking restores the snapshot bit-for-bit, so
