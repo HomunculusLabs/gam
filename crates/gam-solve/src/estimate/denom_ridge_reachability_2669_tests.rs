@@ -38,6 +38,18 @@
 //! criterion still separates at O(n) nats across the whole ladder, the
 //! conclusion is that this entry does not exercise the clamp at all and the
 //! next instrument has to go at the clamp site itself.
+//!
+//! SECOND RUN (p=24 ladder, `n-M_p = -15,-12,-8,2,6`) ALSO came back healthy:
+//! separations `3.299e1, 3.299e1, 3.298e1, 3.130e1, 3.130e1` — two tight
+//! clusters, not five values, i.e. the criterion did NOT track the `from`
+//! sweep at all. That localizes the error: `penalty_rank` is not the rank of
+//! the block ridge I built, it follows the CALLER-DECLARED `nullspace_dims`,
+//! which both earlier runs pinned at `vec![0]` — forcing `M_p ~ 0` and
+//! `denom ~ n` on every rung. This run declares the block's TRUE nullity
+//! within the p-dimensional space (`nullspace_dims = vec![from]`), so
+//! `M_p = from` and `n - M_p` finally sweeps as intended. A REFUSED rung is
+//! just as informative: it would mean upstream validation blocks the
+//! declaration and the clamp is unreachable through this entry.
 
 use super::*;
 use gam_problem::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -69,6 +81,7 @@ fn cost_at(
     x: &Array2<f64>,
     y: &Array1<f64>,
     penalized_from: usize,
+    declared_nullspace: usize,
     label: &str,
 ) -> Option<f64> {
     let weights = Array1::<f64>::ones(N);
@@ -88,7 +101,7 @@ fn cost_at(
         skip_rho_posterior_inference: true,
         max_iter: 100,
         tol: 1e-9,
-        nullspace_dims: vec![0],
+        nullspace_dims: vec![declared_nullspace],
         linear_constraints: None,
         firth_bias_reduction: None,
         rho_prior: Default::default(),
@@ -138,8 +151,8 @@ fn denom_ridge_reachability_probe_2669() {
         eprintln!(
             "[#2669] --- penalized {from}..{P}: M_p={from}, n-M_p={denom}, clamp predicted to bind = {clamped} ---"
         );
-        let c1 = cost_at(&x, &y1, from, "y1");
-        let c2 = cost_at(&x, &y2, from, "y2");
+        let c1 = cost_at(&x, &y1, from, from, "y1");
+        let c2 = cost_at(&x, &y2, from, from, "y2");
         match (c1, c2) {
             (Some(a), Some(b)) => eprintln!(
                 "[#2669] M_p={from} n-M_p={denom} clamp_predicted={clamped} SEPARATION={:.6e}",
