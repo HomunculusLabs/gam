@@ -98,7 +98,8 @@ runs:
         cat > "$STAGE/_run.json" <<PROVENANCE
         {
           "workflow": "${GITHUB_WORKFLOW:-}",
-          "job_status": "${JOB_STATUS:-}",
+          "publish_job_status": "${JOB_STATUS:-}",
+          "publish_job_status_note": "status of the job that PUBLISHED these results, not the conclusion of run_id -- this job is part of that run, so the run has not concluded here",
           "run_id": "${GITHUB_RUN_ID:-}",
           "run_number": "${GITHUB_RUN_NUMBER:-}",
           "run_attempt": "${GITHUB_RUN_ATTEMPT:-}",

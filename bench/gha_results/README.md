@@ -31,7 +31,7 @@ bench/gha_results/<workflow>/` is the history of that measurement, and a regular
 Written by `.github/actions/publish-gha-results`, invoked with `if: always()`.
 
 - **Failures and timeouts publish too.** A failed run's numbers are usually the
-  interesting ones, and `_run.json` records `job_status` so a partial set is
+  interesting ones, and `_run.json` records `publish_job_status` (the PUBLISHING job's status, not `run_id`'s conclusion -- see the key's own note field) so a partial set is
   never mistaken for a clean one.
 - **No results means no commit.** If a run produced nothing, the previous good
   results stay exactly as they are. An empty or missing set never overwrites
