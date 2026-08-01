@@ -145,7 +145,7 @@ pub trait ExactNewtonJointHessianWorkspace: Send + Sync {
                             out.len()
                         ),
                     }
-                    .into());
+                    .to_string());
                 }
                 out.assign(&result);
                 Ok(true)
@@ -186,7 +186,7 @@ pub trait ExactNewtonJointHessianWorkspace: Send + Sync {
                     out.ncols()
                 ),
             }
-            .into());
+            .to_string());
         }
         let total = v_cols.nrows();
         let mut col_in = Array1::<f64>::zeros(total);

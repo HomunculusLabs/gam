@@ -130,7 +130,9 @@ pub(crate) fn custom_family_block_role(
     }
 }
 
-pub fn validate_blockspecs(specs: &[ParameterBlockSpec]) -> Result<Vec<usize>, String> {
+pub fn validate_blockspecs(
+    specs: &[ParameterBlockSpec],
+) -> Result<Vec<usize>, CustomFamilyError> {
     // `fit_custom_family` is a fit entry point and genuinely requires at least
     // one parameter block — an empty model has nothing to estimate. This is a
     // *fit-level precondition*, distinct from the *consistency* of the block
@@ -138,8 +140,7 @@ pub fn validate_blockspecs(specs: &[ParameterBlockSpec]) -> Result<Vec<usize>, S
     if specs.is_empty() {
         return Err(CustomFamilyError::UnsupportedConfiguration {
             reason: "fit_custom_family requires at least one parameter block".to_string(),
-        }
-        .into());
+        });
     }
     validate_blockspec_consistency(specs)
 }

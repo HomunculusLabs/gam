@@ -78,7 +78,7 @@ pub(crate) fn exact_newton_joint_hessian_from_exact_blocks<F: CustomFamily + ?Si
                     "exact_newton_joint_hessian default: block {block_idx} working set is not ExactNewton after filter"
                 ),
             }
-            .into());
+            .to_string());
         };
         let dense = hessian.to_dense();
         if dense.nrows() != p_block || dense.ncols() != p_block {
@@ -86,7 +86,7 @@ pub(crate) fn exact_newton_joint_hessian_from_exact_blocks<F: CustomFamily + ?Si
                 "exact_newton_joint_hessian default: block {block_idx} Hessian shape {}x{} != expected {p_block}x{p_block}",
                 dense.nrows(),
                 dense.ncols()
-            ) }.into());
+            ) }.to_string());
         }
         joint.slice_mut(s![start..end, start..end]).assign(&dense);
         start = end;
@@ -129,7 +129,7 @@ pub(crate) fn exact_newton_joint_hessian_from_working_sets<F: CustomFamily + ?Si
             return Err(CustomFamilyError::DimensionMismatch { reason: format!(
                 "exact_newton_joint_hessian_with_specs default: block {block_idx} beta length {} != design cols {p_block}",
                 state.beta.len()
-            ) }.into());
+            ) }.to_string());
         }
         let end = start + p_block;
         let dense = match working_set {
@@ -145,7 +145,7 @@ pub(crate) fn exact_newton_joint_hessian_from_working_sets<F: CustomFamily + ?Si
                 "exact_newton_joint_hessian_with_specs default: block {block_idx} Hessian shape {}x{} != expected {p_block}x{p_block}",
                 dense.nrows(),
                 dense.ncols()
-            ) }.into());
+            ) }.to_string());
         }
         joint.slice_mut(s![start..end, start..end]).assign(&dense);
         start = end;
@@ -192,7 +192,7 @@ pub(crate) fn exact_newton_joint_hessian_directional_derivative_from_blocks<
                 "exact_newton_joint_hessian_directional_derivative default: block {block_idx} dH shape {}x{} != expected {p_block}x{p_block}",
                 local.nrows(),
                 local.ncols()
-            ) }.into());
+            ) }.to_string());
         }
         joint.slice_mut(s![start..end, start..end]).assign(&local);
         start = end;
@@ -254,7 +254,7 @@ pub(crate) fn exact_newton_joint_hessiansecond_directional_derivative_from_block
                 "exact_newton_joint_hessiansecond_directional_derivative default: block {block_idx} d2H shape {}x{} != expected {p_block}x{p_block}",
                 local.nrows(),
                 local.ncols()
-            ) }.into());
+            ) }.to_string());
         }
         joint.slice_mut(s![start..end, start..end]).assign(&local);
         start = end;
@@ -331,7 +331,7 @@ pub(crate) fn exact_newton_joint_hessian_directional_derivative_from_working_set
                             "exact_newton_joint_hessian_directional_derivative_with_specs default: block {block_idx} geometry offset derivative length {} != eta length {}",
                             geometry.d_offset.len(),
                             d_eta.len()
-                        ) }.into());
+                        ) }.to_string());
                     }
                     d_eta += &geometry.d_offset;
                     if let Some(d_design) = geometry.d_design {
@@ -343,7 +343,7 @@ pub(crate) fn exact_newton_joint_hessian_directional_derivative_from_working_set
                                 d_design.ncols(),
                                 solver_design.nrows(),
                                 p_block
-                            ) }.into());
+                            ) }.to_string());
                         }
                         d_eta += &d_design.dot(&state.beta);
 
@@ -384,7 +384,7 @@ pub(crate) fn exact_newton_joint_hessian_directional_derivative_from_working_set
                 "exact_newton_joint_hessian_directional_derivative_with_specs default: block {block_idx} dH shape {}x{} != expected {p_block}x{p_block}",
                 local.nrows(),
                 local.ncols()
-            ) }.into());
+            ) }.to_string());
         }
         joint.slice_mut(s![start..end, start..end]).assign(&local);
         start = end;
@@ -403,7 +403,7 @@ pub(crate) fn validate_flat_direction_length(
                 direction.len()
             ),
         }
-        .into());
+        .to_string());
     }
     Ok::<(), _>(())
 }
