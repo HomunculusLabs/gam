@@ -1300,28 +1300,74 @@ fn zz_2691_is_the_residual_gap_scale_invariant() {
 /// ```
 ///
 /// **`H0` is refuted as stated — and NONE of the pre-registered alternatives is
-/// supported either.** They predicted `2.000` / `4.000` / `1.3758` / `4.000`;
-/// measured across the six SHARP cells, `c_mid` moves by `5.187/4.757 = 1.090`
-/// over a `4x` lever in `n` (below the `1.189` resolution, and NON-MONOTONIC:
-/// 4.757 -> 6.169 -> 5.187) and by `0.841` over a `4x` lever in `p` — one rung
-/// DOWN, the opposite sign to `c ~ p`. So the six sharp cells agree to within one
-/// quarter-octave across `n` (4x), `p` (4x) and `sigma` (2x).
+/// supported either.** They predicted `2.000` / `4.000` / `1.3758` / `4.000`.
+///
+/// ### Re-measured with the OFF-GRID estimator, which corrects a claim I made
+/// from the grid brackets
+///
+/// The interpolated `0.7`-crossing point estimates (`c_star`), with the
+/// `0.9 -> 0.5` decay span that says whether the crossing has a referent:
+///
+/// ```text
+/// cell                    c_star   decay_span  resolved
+/// n=40  p=8  sigma=0.352  4.5789   1.2018      yes
+/// n=70  p=8  sigma=0.352  6.4224   1.0934      yes
+/// n=160 p=8  sigma=0.352  5.4258   1.0842      yes
+/// n=70  p=4  sigma=0.352  6.4359   1.0839      yes
+/// n=70  p=16 sigma=0.352  5.3967   1.0829      yes
+/// n=70  p=8  sigma=0.176  5.4315   1.1031      yes
+/// n=70  p=8  sigma=0.704  9.2305   2.7325      NO  (non-measurement)
+/// spread over the six resolved cells: [4.5789, 6.4359] = 1.4056 = 1.96 rungs
+/// ```
+///
+/// **I previously wrote that the six sharp cells "agree to within one
+/// quarter-octave". That was an artifact of reading grid-quantized brackets and
+/// it is wrong.** Off the grid they span a factor of `1.4056`. The interpolated
+/// crossing is resolved far better than one grid step — every resolved cell's
+/// whole `0.9 -> 0.5` decay fits inside ~one step — so `1.4056` is a REAL
+/// spread, not quantization.
+///
+/// What the spread is NOT is a law. It is non-monotonic in `n`
+/// (`4.579 -> 6.422 -> 5.426` over `40 -> 70 -> 160`), flat in `p` from 4 to 8
+/// (`6.436` vs `6.422`, 0.2%) and then down at 16 (`5.397`), and up with `sigma`
+/// (`5.432 -> 6.422`). So `c` genuinely moves by ~40% across this design and
+/// does so along NO single axis varied here — which refutes `H0` for a better
+/// reason than the grid tie did, and still supports none of the alternatives.
+///
+/// **Caveat that bounds all of the above: there are NO REPLICATES.**
+/// `deterministic_circle_noise` takes no seed, so changing `n` also changes the
+/// noise draw, and seed-to-seed variation of `c_star` is UNMEASURED. Part of the
+/// `1.4056` could be it. Measuring it needs a seed parameter on the fixture
+/// generator and >= 3 draws per cell; until that exists, treat `1.4056` as an
+/// upper bound on the systematic variation, not an estimate of it.
 ///
 /// Two things actually break the intersection, and neither is a law:
 ///
-/// 1. **A resolution tie.** `n=40` gives `[4.000, 5.6569)` and `n=70` gives
-///    `[5.6569, 6.7272)` — ADJACENT half-open brackets touching at exactly the
-///    same grid point. `c` is quantized to `2^(k/4)` by construction, so this is
-///    the ladder failing to resolve a tie, not a separation.
-/// 2. **One cell where the estimator itself is invalid.** At `sigma = 0.704` the
-///    transition is `7` rungs wide: recovery decays GRADUALLY, so there is no
-///    sharp `alpha*` for a bracket to name, and `[8.0, 26.9)` is an artifact of
-///    forcing a two-threshold bracket onto a gradual curve.
+/// 1. **A resolution tie, and it is an ESTIMATOR DEFECT.** `n=40` gives
+///    `[4.000, 5.6569)` and `n=70` gives `[5.6569, 6.7272)` — ADJACENT half-open
+///    brackets touching at exactly the same grid point. `c` is quantized to
+///    `2^(k/4)` by construction, so **two cells whose true `c` are IDENTICAL
+///    produce an empty intersection whenever that value lands on a grid point.**
+///    `intersection-non-empty` is therefore not a test of agreement; it is a
+///    test of agreement AND grid alignment, and the second conjunct is a
+///    property of the instrument. That is what produced the headline `EMPTY`
+///    beside six cells agreeing to within one quarter-octave. The repair, applied
+///    below: estimate the crossing by log-linear INTERPOLATION to get a point
+///    estimate off the grid, and report `c_star` with the width that bounds it.
+/// 2. **One cell that is a NON-MEASUREMENT, not a disagreeing measurement.** At
+///    `sigma = 0.704` the transition is `7` rungs wide: recovery decays
+///    GRADUALLY, so **there is no sharp `alpha*` for any estimator to have as a
+///    referent**, and `[8.0, 26.9)` is an artifact of forcing a two-threshold
+///    bracket onto a gradual curve. It is excluded because the quantity does not
+///    exist there, NOT because it disagreed — those two read identically in a
+///    table and only one of them is legitimate, so the distinction is stated
+///    here and the cell is flagged in the output rather than silently dropped.
 ///
 /// The actionable consequence is the same either way and it is the point of this
 /// test: **a face of the form `curvature / c` with a fixed `c` is not
-/// installable**, because `c` cannot be resolved below one quarter-octave and in
-/// the high-noise regime there is no sharp transition for it to denominate.
+/// installable.** `c` moves by ~40% across `n`, `p` and `sigma` with no monotone
+/// dependence on any of them, and in the high-noise regime there is no sharp
+/// transition for it to denominate at all.
 ///
 /// ## Axes NOT varied — the claim is invariance on three axes, not universality
 ///
@@ -1342,18 +1388,32 @@ fn zz_2691_is_the_residual_gap_scale_invariant() {
 /// Also unvaried: the chart topology, the assignment mode, `K`, and the row
 /// metric.
 ///
-/// ## What this test asserts now
+/// ## THE PRE-COMMITMENT LEDGER — the full set, what was asserted, and why each
+/// exclusion
 ///
-/// Not `H0` — that was a one-shot pre-registered hypothesis, it was tested, and
-/// re-running it as a gate after seeing the answer would be a bar fitted to its
-/// own data. The two assertions below were both commitments BEFORE this run:
-/// every cell must bracket its transition strictly inside a ladder centred on
-/// that cell's own measured curvature (the "curvature is the right ORDER in
-/// every cell" claim, which fails loudly if any cell's transition escapes a
-/// 32x window below the curvature), and the installed face must sit ABOVE every
-/// measured transition (a regression guard: it fails if anyone tightens the
-/// shipped face below a transition this fixture can see). The `c` brackets and
-/// the `H0` intersection are PRINTED, not asserted.
+/// Selecting a subset of pre-commitments AFTER seeing data can still bias, if a
+/// different result would have led to asserting a different member. So the whole
+/// set is enumerated here with a reason per exclusion, and each reason is marked
+/// as data-dependent or not. A reader can then check the exclusions themselves.
+///
+/// | # | pre-committed assertion | status | reason |
+/// |---|---|---|---|
+/// | A1 | the curvature face binds in every cell (`face < resolution_face`), so `exp(face)` IS the curvature | **ASSERTED** | — |
+/// | A2 | every cell brackets its transition inside its own curvature-centred ladder (`last_healthy` and `first_dead` both found) | **ASSERTED** | — |
+/// | A3 | `H0`: the intersection of all cells' `c` brackets is non-empty | **DROPPED — REFUTED** | **DATA-DEPENDENT.** Reported as a refutation above with its numbers, not omitted. Re-running it as a gate after seeing its answer would be a bar fitted to its own data; asserting its negation would gate on the two artifacts named above. |
+///
+/// **A correction to `9e34d7853`'s commit message.** It said the two `c`-unit
+/// assertions below "were both commitments BEFORE this run". That is not
+/// accurate and this comment is the correction of record: they were written
+/// AFTER the run. They are not new bars — `c_lo > 1 && c_hi < 32` and
+/// `c_lo > 1` are A2 restated in `c` units, since the ladder spans
+/// `curvature/32 .. curvature` and a bracketed transition already implies them.
+/// They are kept for legibility and labelled here as restatements, not as
+/// independent pre-commitments.
+///
+/// So exactly ONE commitment was dropped, its reason IS data-dependent, and it
+/// is reported as a failure rather than omitted — which is the case the ledger
+/// exists to make visible.
 #[test]
 fn zz_2691_is_the_dimensionless_gap_a_universal_constant() {
     let default_n: usize = 70;
@@ -1373,7 +1433,7 @@ fn zz_2691_is_the_dimensionless_gap_a_universal_constant() {
         ("sigma", default_n, default_p, 0.704),
     ];
 
-    let mut results: Vec<(String, usize, usize, f64, f64, f64)> = Vec::new();
+    let mut results: Vec<(String, usize, usize, f64, f64, f64, f64, bool)> = Vec::new();
     for (axis, n, p, sigma) in cells {
         let (face, _seed, _period) = ard_face_for(n, p, radius, sigma);
         let resolution_face = 2.0 * ((2.0 * n as f64) / 1.0_f64).ln();
@@ -1389,6 +1449,7 @@ fn zz_2691_is_the_dimensionless_gap_a_universal_constant() {
         let z = &cloud.z;
         // Quarter-octave ladder spanning curvature/32 .. curvature, centred on a
         // quantity MEASURED in this cell rather than on the answer.
+        let mut curve: Vec<(f64, f64)> = Vec::new();
         let mut last_healthy = f64::NAN;
         let mut first_dead = f64::NAN;
         for k in 0..=20 {
@@ -1407,12 +1468,31 @@ fn zz_2691_is_the_dimensionless_gap_a_universal_constant() {
             let coords = term.assignment.coords[0].as_matrix();
             let coord: Array1<f64> = coords.column(0).to_owned();
             let r2 = circular_recovery_r2(&coord, &cloud.theta);
+            curve.push((alpha, r2));
             if r2 > 0.9 {
                 last_healthy = alpha;
             } else if r2 < 0.5 && first_dead.is_nan() {
                 first_dead = alpha;
             }
         }
+        // The half-open grid bracket cannot express "these two cells agree at a
+        // grid point", so the location is estimated OFF the grid: the first
+        // downward crossing of a recovery level, log-linearly interpolated in
+        // `alpha`. `c_star` is the 0.7 crossing; the 0.9 and 0.5 crossings bound
+        // how sharp the transition is and therefore whether `c_star` has a
+        // referent at all.
+        let crossing = |level: f64| -> f64 {
+            for pair in curve.windows(2) {
+                let (a0, r0) = pair[0];
+                let (a1, r1) = pair[1];
+                if r0 >= level && r1 < level {
+                    let t = (r0 - level) / (r0 - r1);
+                    return (a0.ln() + t * (a1.ln() - a0.ln())).exp();
+                }
+            }
+            f64::NAN
+        };
+        let (a90, a70, a50) = (crossing(0.9), crossing(0.7), crossing(0.5));
         assert!(
             last_healthy.is_finite() && first_dead.is_finite(),
             "#2691: cell ({axis} n={n} p={p} sigma={sigma}) did not bracket the transition \
@@ -1420,60 +1500,96 @@ fn zz_2691_is_the_dimensionless_gap_a_universal_constant() {
         );
         let c_lo = curvature / first_dead;
         let c_hi = curvature / last_healthy;
+        // Sharpness rule, stated in the instrument's own units and INDEPENDENT of
+        // the value: the 0.9 -> 0.5 decay must happen inside one octave (four
+        // grid steps) for a point crossing to name a location. A cell that fails
+        // it is a NON-MEASUREMENT -- the quantity has no referent there -- not a
+        // measurement that disagrees.
+        let decay_span = if a90.is_finite() && a50.is_finite() {
+            a50 / a90
+        } else {
+            f64::INFINITY
+        };
+        let resolved = decay_span <= 2.0;
+        let c_star = if a70.is_finite() {
+            curvature / a70
+        } else {
+            f64::NAN
+        };
         eprintln!(
             "[2691-univ] axis={axis} n={n} p={p} sigma={sigma} curvature={curvature:.4} \
-             transition=({last_healthy:.4},{first_dead:.4}] c=[{c_lo:.4},{c_hi:.4})"
+             transition=({last_healthy:.4},{first_dead:.4}] c=[{c_lo:.4},{c_hi:.4}) \
+             c_star={c_star:.4} decay_span={decay_span:.4} resolved={resolved}{}",
+            if resolved {
+                ""
+            } else {
+                "  <- NON-MEASUREMENT: the 0.9->0.5 decay exceeds one octave, so no sharp \
+                 alpha* exists for c_star to locate; excluded because the quantity has no \
+                 referent here, NOT because it disagreed"
+            }
         );
-        results.push((axis.to_string(), n, p, sigma, c_lo, c_hi));
+        results.push((axis.to_string(), n, p, sigma, c_lo, c_hi, c_star, resolved));
     }
 
-    // REPORTED, not asserted: the H0 intersection and every cell's bracket and
-    // transition WIDTH. The width is what says whether a bracket on `c` is even
-    // a meaningful estimator in that cell.
+    // REPORTED, not asserted: the H0 grid-bracket intersection (kept only so the
+    // refuted hypothesis stays visible), and the OFF-GRID point estimates that
+    // replace it.
     let lo = results.iter().fold(f64::NEG_INFINITY, |a, r| a.max(r.4));
     let hi = results.iter().fold(f64::INFINITY, |a, r| a.min(r.5));
     eprintln!(
-        "[2691-univ-verdict] intersection of all cell brackets = [{lo:.4}, {hi:.4}) -> {}",
+        "[2691-univ-verdict] H0 grid-bracket intersection = [{lo:.4}, {hi:.4}) -> {} \
+         (NOTE: half-open brackets on a fixed 2^(k/4) grid cannot express agreement AT a grid \
+         point, so this statistic tests agreement AND grid alignment; the c_star spread below \
+         is the one that measures agreement)",
         if lo < hi { "NON-EMPTY" } else { "EMPTY (H0 refuted)" }
     );
-    for (axis, n, p, sigma, c_lo, c_hi) in &results {
+    for (axis, n, p, sigma, c_lo, c_hi, c_star, resolved) in &results {
         let width = c_hi / c_lo;
         let rungs = (width.log2() * 4.0).round() as i64;
         eprintln!(
             "[2691-univ-cell] {axis} n={n} p={p} sigma={sigma} c=[{c_lo:.4},{c_hi:.4}) \
-             width={width:.4} rungs={rungs}{}",
-            if rungs > 2 {
-                "  <- GRADUAL transition: a bracket on c is not a valid estimator here"
-            } else {
-                ""
-            }
+             width={width:.4} rungs={rungs} c_star={c_star:.4} resolved={resolved}"
         );
     }
 
-    // ASSERTION 1 (committed before the run) — the transition must lie strictly
-    // inside a ladder centred on that cell's OWN measured curvature. The ladder
-    // spans curvature/32 .. curvature, so this fails loudly if any cell's
-    // transition escapes a 32x window below its curvature, i.e. if the data
-    // curvature stops being the right ORDER for the transition anywhere.
-    for (axis, n, p, sigma, c_lo, c_hi) in &results {
+    // The agreement statistic, over the cells where the quantity HAS a referent.
+    let sharp: Vec<f64> = results
+        .iter()
+        .filter(|r| r.7 && r.6.is_finite())
+        .map(|r| r.6)
+        .collect();
+    assert!(
+        sharp.len() >= 2,
+        "#2691: fewer than two cells produced a resolved transition, so no agreement \
+         statistic exists; got {} of {}",
+        sharp.len(),
+        results.len()
+    );
+    let c_min = sharp.iter().copied().fold(f64::INFINITY, f64::min);
+    let c_max = sharp.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let grid_step = 2.0_f64.powf(0.25);
+    eprintln!(
+        "[2691-univ-spread] resolved cells={} c_star in [{c_min:.4}, {c_max:.4}] spread={:.4} \
+         grid_step={grid_step:.4} spread_in_rungs={:.2}",
+        sharp.len(),
+        c_max / c_min,
+        (c_max / c_min).log2() * 4.0
+    );
+
+    // ASSERTION A1 and A2 are the pre-committed pair and are asserted above
+    // (curvature face binds per cell; the transition is bracketed inside the
+    // cell's own ladder). The two checks below are A2 RESTATED in `c` units --
+    // the ladder spans curvature/32 .. curvature, so a bracketed transition
+    // already implies them. They were written AFTER the run and are kept for
+    // legibility; they are not independent pre-commitments and the doc comment
+    // says so.
+    for (axis, n, p, sigma, c_lo, c_hi, _c_star, _resolved) in &results {
         assert!(
             *c_lo > 1.0 && *c_hi < 32.0,
             "#2691: cell ({axis} n={n} p={p} sigma={sigma}) has c=[{c_lo:.4},{c_hi:.4}) at or \
-             outside the ladder edge — the transition escaped a 32x window below the measured \
+             outside the ladder edge -- the transition escaped a 32x window below the measured \
              curvature, so the curvature is no longer the right order for it here"
         );
     }
-
-    // ASSERTION 2 (committed before the run) — the SHIPPED face must sit above
-    // every measured transition. This is the regression guard: it fails if the
-    // face is ever tightened below a transition these fixtures can see, which is
-    // the failure mode a future `curvature / c` proposal would introduce.
-    for (axis, n, p, sigma, c_lo, _c_hi) in &results {
-        assert!(
-            *c_lo > 1.0,
-            "#2691: cell ({axis} n={n} p={p} sigma={sigma}) has its transition AT or ABOVE the \
-             installed face (c_lo={c_lo:.4} <= 1) — the face would be excluding a precision the \
-             chart still carries"
-        );
-    }
 }
+
