@@ -98,10 +98,10 @@ fn cost_at(
     );
     match &out {
         Ok((cost, ridge)) => {
-            println!("[#2669] {label}: cost={cost:.17e} ridge={ridge:.6e}");
+            eprintln!("[#2669] {label}: cost={cost:.17e} ridge={ridge:.6e}");
         }
         Err(error) => {
-            println!("[#2669] {label}: REFUSED: {error}");
+            eprintln!("[#2669] {label}: REFUSED: {error}");
         }
     }
     out
