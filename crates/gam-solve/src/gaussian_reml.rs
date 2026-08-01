@@ -5902,6 +5902,220 @@ mod tests {
     use super::*;
     use ndarray::array;
 
+    /// #2694 / #2703 — a ZERO-WIDTH enclosure must SIGN an order-one `V′`.
+    ///
+    /// `enumerate_and_select_rho_with_controls` anchors its mean-value tightening
+    /// on `enclose(x, x)` and states, at the `lower_point` / `upper_point`
+    /// bindings, that such a point enclosure "has no cell-width looseness at all,
+    /// only the roundoff budget". Both witnesses measure that false: at ZERO cell
+    /// width the enclosure of a `V′` whose exact value is `-4.0` comes back
+    /// `[-4.0, +18.0]`.
+    ///
+    /// Cause. `dp = max(ywy − Σc², 0) + Σc²·u` (see `dispersion_residual_parts`).
+    /// On a design that reproduces its response exactly the subtraction cancels,
+    /// the `r0` term's LOWER bound clamps to `0`, and `dp_lo` collapses onto
+    /// `Σc²·u` — which is the ratio NUMERATOR's own scale. `num_hi / dp_lo` then
+    /// reads `1.0` regardless of the data, so `V′`'s upper bound sits at
+    /// `g1 + half_nu`. `r0` is ρ-INDEPENDENT, so that width survives every
+    /// bisection and is present at zero width; this is a formula defect, not a
+    /// tightening one, and no amount of subdivision can remove it.
+    ///
+    /// Two fixtures, bounding the regime from BOTH sides:
+    ///
+    /// * CONTROL — a perfect fit whose cancellation is EXACT (small integer
+    ///   design, response exactly in the column span). `r0` is then `[0, 0]`:
+    ///   zero WIDTH, `dp_hi` collapses together with `dp_lo`, and the enclosure
+    ///   stays sharp. This side is measured green on #2703 and must keep passing;
+    ///   if it ever fails, the gate is broken rather than the code.
+    /// * WITNESS — the #2694 harvest regime rebuilt without gam-sae: a CONSTANT
+    ///   response, lying in the span of the basis AND in the null space of the
+    ///   penalty, on an irrational (periodic-harmonic) basis so the cancellation
+    ///   is INEXACT. This is the side that fails today.
+    ///
+    /// What the sharpness clause asserts carries no invented constant: an
+    /// enclosure whose WIDTH exceeds the magnitude of the value it encloses
+    /// cannot sign that value, and `dv.lo > 0 || dv.hi < 0` is precisely what the
+    /// branch-and-bound prunes on. `ORDER_ONE_DERIVATIVE` selects WHICH ρ the
+    /// property is asserted at — near a genuine stationary point straddling zero
+    /// is the correct answer — it is not a looseness allowance.
+    ///
+    /// NOT asserted: `r0_hi > 0` numerically. `r0_lo` / `r0_hi` are locals of
+    /// `reml_deriv_enclosure_profile`, and recomputing them here would make the
+    /// gate a copy of the rule it guards. The regime is pinned instead by the
+    /// perfect fit itself — reported through the evaluator's own
+    /// `dispersion_residual_parts` — together with the exact-cancellation CONTROL
+    /// carried as the other side of the cliff. A fixture that drifts to a
+    /// non-interpolating design trips the regime clause rather than going green.
+    #[test]
+    fn point_enclosure_must_sign_an_order_one_derivative_2694_2703() {
+        // The smallest `|V′|` at which the gate demands a SIGN. It selects which
+        // ρ the sharpness property is asserted at — near a genuine stationary
+        // point an enclosure straddling zero is the correct answer — and it is
+        // not a looseness allowance: the property itself compares the enclosure's
+        // width against `|V′|` and carries no constant. Sits well above the
+        // roundoff floor and well below every `|V′|` either fixture produces
+        // (CONTROL ≈ 0.5, WITNESS ≈ 1.0).
+        const ORDER_ONE_DERIVATIVE: f64 = 0.25;
+
+        fn point_check(
+            tag: &str,
+            prepared: &GaussianRemlPrepared,
+            rho: f64,
+            failures: &mut Vec<String>,
+        ) -> bool {
+            let exact = prepared.evaluate(rho);
+            let (dv, _) = reml_deriv_enclosure(
+                &prepared.cache,
+                prepared.ywy.view(),
+                prepared.projected_rhs_squared.view(),
+                prepared.n_effective,
+                prepared.n_outputs,
+                rho,
+                rho,
+            );
+            // Soundness first: a bound that does not contain the value it bounds
+            // is a different defect and would make the sharpness reading
+            // meaningless.
+            if !(dv.lo <= exact.grad && exact.grad <= dv.hi) {
+                failures.push(format!(
+                    "{tag} rho={rho}: SOUNDNESS — the zero-width enclosure \
+                     [{:.9e}, {:.9e}] does not contain the evaluator's own \
+                     V'={:.9e}",
+                    dv.lo, dv.hi, exact.grad
+                ));
+                return false;
+            }
+            if exact.grad.abs() < ORDER_ONE_DERIVATIVE {
+                return false;
+            }
+            if dv.hi - dv.lo > exact.grad.abs() {
+                failures.push(format!(
+                    "{tag} rho={rho}: SHARPNESS — V'={:.9e} but the ZERO-WIDTH \
+                     enclosure is [{:.9e}, {:.9e}], width {:.9e}. A width larger \
+                     than the value it encloses cannot sign that value, so no \
+                     cell containing this point can ever satisfy the \
+                     branch-and-bound's `dv.lo > 0 || dv.hi < 0` prune test, at \
+                     any subdivision depth.",
+                    exact.grad,
+                    dv.lo,
+                    dv.hi,
+                    dv.hi - dv.lo
+                ));
+            }
+            true
+        }
+
+        let mut failures: Vec<String> = Vec::new();
+
+        // ---- CONTROL: a perfect fit whose cancellation is EXACT -------------
+        // `y` is exactly `x · [1, 2]` in integers, so `ywy` and `Σc²` agree to
+        // the bit, `r0 = [0, 0]` has zero WIDTH, and the enclosure is tight.
+        // This is the neighbouring regime in which the defect provably cannot
+        // appear, and it is what makes a green on the witness meaningful.
+        let control_x = array![[1.0, 0.0], [1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0]];
+        let control_y = array![[1.0], [3.0], [5.0], [7.0], [9.0]];
+        let control_penalty = array![[0.0, 0.0], [0.0, 1.0]];
+        let control = prepare_gaussian_reml(
+            control_x.view(),
+            control_y.view(),
+            control_penalty.view(),
+            None,
+            None,
+            None,
+        )
+        .expect("the control design is finite and full rank");
+        let mut control_asserted = 0usize;
+        for rho in [RHO_LOWER, -10.0, 0.0, 10.0] {
+            if point_check("CONTROL", &control, rho, &mut failures) {
+                control_asserted += 1;
+            }
+        }
+        if control_asserted == 0 {
+            failures.push(
+                "CONTROL: no rho carried an order-one V', so the sharpness \
+                 property was never asserted on the passing side — the gate's \
+                 instrument did not engage"
+                    .to_string(),
+            );
+        }
+
+        // ---- WITNESS: the #2694 harvest regime ------------------------------
+        // A constant response on a periodic-harmonic basis. The constant is the
+        // basis's own first column (so the fit is exact) AND spans the penalty's
+        // null space (so no penalized direction carries any mass). The basis
+        // values are irrational, so `Σc²` reaches `ywy` through a different
+        // rounding path than the direct `ywy` sum and the cancellation is
+        // INEXACT — which is the part a small integer design cannot produce.
+        let n = 12usize;
+        let witness_x = Array2::<f64>::from_shape_fn((n, 3), |(row, col)| {
+            let t = 2.0 * std::f64::consts::PI * (row as f64) / (n as f64);
+            match col {
+                0 => 1.0,
+                1 => t.sin(),
+                _ => t.cos(),
+            }
+        });
+        let witness_y = Array2::<f64>::from_elem((n, 1), 0.7);
+        let witness_penalty = array![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let witness = prepare_gaussian_reml(
+            witness_x.view(),
+            witness_y.view(),
+            witness_penalty.view(),
+            None,
+            None,
+            None,
+        )
+        .expect("the witness design is finite and full rank");
+
+        // Regime clause. The necessary condition is the PERFECT FIT: the
+        // rho-dependent part of the deviance must be vanishing relative to
+        // `ywy`, which is what drives `ywy − Σc²` into cancellation. Reported
+        // through the evaluator's own decomposition rather than recomputed.
+        let (unpenalized_residual, penalized_residual, _, _) = dispersion_residual_parts(
+            &witness.cache,
+            witness.ywy.view(),
+            witness.projected_rhs_squared.view(),
+            0,
+            RHO_LOWER,
+        );
+        let ywy = witness.ywy[0];
+        if !(penalized_residual >= 0.0 && penalized_residual < 1.0e-25 * ywy) {
+            failures.push(format!(
+                "WITNESS regime: the rho-dependent deviance at rho={RHO_LOWER} is \
+                 {penalized_residual:.9e} against ywy={ywy:.9e}; this design does \
+                 not interpolate its response, so `ywy − Σc²` never cancels and \
+                 the fixture has drifted OUT of the regime under test — a pass \
+                 below would mean nothing"
+            ));
+        }
+        let mut witness_asserted = 0usize;
+        for rho in [RHO_LOWER, -25.0, -20.0] {
+            if point_check("WITNESS", &witness, rho, &mut failures) {
+                witness_asserted += 1;
+            }
+        }
+        if witness_asserted == 0 {
+            failures.push(
+                "WITNESS: no rho carried an order-one V', so the sharpness \
+                 property was never asserted on the failing side — the gate's \
+                 instrument did not engage"
+                    .to_string(),
+            );
+        }
+
+        assert!(
+            failures.is_empty(),
+            "KNOWN DEFECT #2703/#2694 — not a regression from your change.\n\
+             The profiled-REML derivative enclosure carries O(1) width at ZERO \
+             cell width on an exactly-interpolating design, because the `r0` \
+             term of `dp = max(ywy − Σc², 0) + Σc²·u` clamps its lower bound to \
+             zero and `dp_lo` collapses onto the ratio's own numerator.\n\
+             witness ywy={ywy:.9e} unpenalized_residual={unpenalized_residual:.9e} \
+             penalized_residual={penalized_residual:.9e}\n{}",
+            failures.join("\n")
+        );
+    }
+
     #[test]
     fn edf_does_not_double_count_penalty_nullspace() {
         let x = array![[1.0, 0.0], [1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0],];
