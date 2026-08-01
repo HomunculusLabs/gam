@@ -7073,7 +7073,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod cloglog_gumbel_quad_node_ladder_2469 {
+mod cloglog_gumbel_quad_node_ladder_2469_tests {
     use super::{
         CLOGLOG_GUMBEL_QUAD_MAX_NODES, CLOGLOG_GUMBEL_QUAD_MIN_NODES,
         CLOGLOG_GUMBEL_QUAD_NODE_SCALE, cloglog_gumbel_quad_nodes,
