@@ -7790,22 +7790,22 @@ fn conditional_latent_gate_handles_rank_deficient_conditioning_basis() {
         })
         .expect("conditional Rao gate must fire on a clear conditional mean shift");
 
+    // gam#2484: the two per-stage sandwiches became one joint `theta1_cov`, so
+    // these assertions now cover the whole first-stage covariance -- including
+    // the cross-block, which the block-diagonal pair could not express. Same
+    // properties, strictly wider subject.
     assert!(
-        cal.mean_cov.iter().all(|v| v.is_finite()),
-        "mean sandwich covariance must be finite on rank-deficient conditioning"
-    );
-    assert!(
-        cal.var_cov.iter().all(|v| v.is_finite()),
-        "variance sandwich covariance must be finite on rank-deficient conditioning"
+        cal.theta1_cov.iter().all(|v| v.is_finite()),
+        "joint first-stage sandwich covariance must be finite on rank-deficient conditioning"
     );
 
     // The covariance is a valid PSD matrix in the identifiable subspace — its
     // diagonal entries must be non-negative.
-    for j in 0..cal.mean_cov.nrows() {
+    for j in 0..cal.theta1_cov.nrows() {
         assert!(
-            cal.mean_cov[[j, j]] >= -1.0e-12,
-            "mean sandwich diagonal must be PSD: cov[{j},{j}]={}",
-            cal.mean_cov[[j, j]]
+            cal.theta1_cov[[j, j]] >= -1.0e-12,
+            "joint first-stage sandwich diagonal must be PSD: cov[{j},{j}]={}",
+            cal.theta1_cov[[j, j]]
         );
     }
 

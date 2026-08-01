@@ -976,19 +976,23 @@ pub struct LatentZConditionalCalibration {
     pub post_mean: f64,
     /// Weighted SD of the calibrated training sample (sanity-check, ≈ 1).
     pub post_sd: f64,
-    /// First-stage (generated-regressor) sandwich covariance of `mean_coeffs`,
-    /// `V₁ᵐ = M⁻¹ (Σ_i w_i² û_i² A_i A_iᵀ) M⁻¹` with `A = [1 | a(C)]`,
-    /// `M = AᵀWA + λR` (the same weighted-ridge normal matrix that produced
-    /// `mean_coeffs`), `û_i = z_i − m̂(C_i)` the HC0 mean residual, and
-    /// `W = diag(w_i)`. Shape `(1+basis_ncols) × (1+basis_ncols)`. This is the
-    /// closed-form estimation uncertainty of `m(C)` that the second stage
-    /// (Murphy–Topel) needs; see [`Self::generated_regressor_term`].
-    pub mean_cov: Array2<f64>,
-    /// First-stage sandwich covariance of `var_coeffs`, computed identically on
-    /// the squared-mean-residual response. Empty (`0 × 0`) exactly when
-    /// `var_coeffs` is empty (mean-only correction; `v(C) ≡ global_var` is a
-    /// constant carrying no first-stage slope uncertainty).
-    pub var_cov: Array2<f64>,
+    /// Joint first-stage (generated-regressor) sandwich covariance of
+    /// `θ₁ = (mean_coeffs, var_coeffs)`, shape `dim θ₁ × dim θ₁`.
+    ///
+    /// Replaced a stored PAIR of per-stage sandwiches that
+    /// [`Self::theta1_covariance`] assembled block-diagonally -- i.e. that
+    /// asserted `Cov(mean_coeffs, var_coeffs) = 0`. The stages are not
+    /// independent: stage B regresses the squared MEAN residual on the same
+    /// basis, so the stacked bread is block lower-triangular and the meat has a
+    /// cross-block proportional to the residual's third moment. Both vanish
+    /// under a Gaussian residual, and neither vanishes on the branch this
+    /// covariance serves (gam#2484). Built by
+    /// [`stacked_first_stage_sandwich_cov`]; the two retired fields were its
+    /// diagonal blocks.
+    ///
+    /// Fit-time only: predict applies the map from `mean_coeffs`/`var_coeffs`
+    /// and never reads their uncertainty.
+    pub theta1_cov: Array2<f64>,
 }
 
 impl LatentZConditionalCalibration {
@@ -1118,7 +1122,7 @@ impl LatentZConditionalCalibration {
         out
     }
 
-    /// Block-diagonal first-stage covariance `V₁ = blkdiag(mean_cov, var_cov)`
+    /// Joint first-stage covariance `V₁` of `θ₁ = (mean_coeffs, var_coeffs)`
     /// of `θ₁`, ordered to match [`Self::zeta_theta1_jacobian_row`]. The two
     /// stages are fit on (asymptotically) uncorrelated estimating equations
     /// (the mean score `Σ w û A` and the Breusch–Pagan variance score
@@ -1126,14 +1130,7 @@ impl LatentZConditionalCalibration {
     /// joint first-stage covariance is block-diagonal to first order — the same
     /// approximation the Rao gate above uses.
     pub fn theta1_covariance(&self) -> Array2<f64> {
-        let dm = self.mean_coeffs.len();
-        let dv = self.var_coeffs.len();
-        let mut v1 = Array2::<f64>::zeros((dm + dv, dm + dv));
-        v1.slice_mut(s![..dm, ..dm]).assign(&self.mean_cov);
-        if dv > 0 {
-            v1.slice_mut(s![dm.., dm..]).assign(&self.var_cov);
-        }
-        v1
+        self.theta1_cov.clone()
     }
 
     /// Murphy–Topel generated-regressor correction term for the second-stage
@@ -1304,6 +1301,155 @@ impl LatentZConditionalCalibration {
 /// fused-multiply GEMM is the same SIMD path used everywhere else in the
 /// codebase, instead of a hand-rolled triple loop whose partial sums could
 /// overflow on a single pathological row of the basis.
+/// `M⁺` for a weighted-ridge normal matrix, in RAW coordinates, computed on the
+/// Jacobi-preconditioned matrix for the conditioning reasons spelled out in
+/// [`weighted_ridge_sandwich_cov`].
+///
+/// `M̃ = S·M·S` with `S = diag(1/√M_jj)`, so `M⁻¹ = S·M̃⁻¹·S`. Returned rather
+/// than folded into a sandwich because the stacked system needs the SAME `M⁺`
+/// in three different products.
+///
+/// `weighted_ridge_sandwich_cov` deliberately keeps its own inlined copy of this
+/// arithmetic: extracting it there would regroup its floating-point operations
+/// and move numbers on a currently-passing path for no benefit.
+pub(crate) fn preconditioned_normal_pseudoinverse(
+    normal_matrix: &Array2<f64>,
+) -> Result<Array2<f64>, String> {
+    let p = normal_matrix.nrows();
+    if normal_matrix.ncols() != p {
+        return Err(format!(
+            "stacked first-stage sandwich needs a square normal matrix, got {}x{}",
+            normal_matrix.nrows(),
+            normal_matrix.ncols()
+        ));
+    }
+    let mut m_sym = normal_matrix.clone();
+    gam_linalg::matrix::symmetrize_in_place(&mut m_sym);
+    let scale: Vec<f64> = (0..p)
+        .map(|j| 1.0 / m_sym[[j, j]].max(f64::MIN_POSITIVE).sqrt())
+        .collect();
+    let mut m_scaled = m_sym;
+    for i in 0..p {
+        for j in 0..p {
+            m_scaled[[i, j]] *= scale[i] * scale[j];
+        }
+    }
+    let mut pinv = gam_linalg::utils::rank_certified_psd_pseudoinverse(&m_scaled, 1.0e-10)
+        .map_err(|e| format!("stacked first-stage sandwich pseudo-inverse failed: {e}"))?
+        .into_pseudoinverse();
+    for i in 0..p {
+        for j in 0..p {
+            pinv[[i, j]] *= scale[i] * scale[j];
+        }
+    }
+    Ok(pinv)
+}
+
+/// Weighted Gram `Σ_i s_i · A_i A_iᵀ` for SIGNED per-row scalars `s`.
+///
+/// Not expressible as `BᵀB` (that forces a non-negative weight), so this is the
+/// explicit `Aᵀ diag(s) A`.
+fn signed_weighted_gram(basis: ArrayView2<'_, f64>, s: &[f64]) -> Array2<f64> {
+    let mut scaled = basis.to_owned();
+    for (mut row, &value) in scaled.rows_mut().into_iter().zip(s.iter()) {
+        row.iter_mut().for_each(|entry| *entry *= value);
+    }
+    basis.t().dot(&scaled)
+}
+
+/// The joint first-stage covariance `V₁` of `θ₁ = (mean_coeffs, var_coeffs)`,
+/// as the sandwich of the STACKED estimating system (gam#2484).
+///
+/// With `A = [1 | a(C)]`, `W = diag(w)`, `M = AᵀWA + λR`,
+/// `û_i = z_i − A_iᵀβ_m` and `r_i = û_i² − A_iᵀβ_v`:
+///
+/// ```text
+/// ψ^m_i = w_i A_i û_i          ψ^v_i = w_i A_i r_i
+///
+/// B = [ M      0 ]   with  M_vm = ∂ψ^v/∂β_m = −2·Σ_i w_i û_i A_i A_iᵀ
+///     [ M_vm   M ]
+///
+/// Ω = Σ_i w_i² [A_i û_i ; A_i r_i][·]ᵀ      V₁ = B⁻¹ Ω B⁻ᵀ
+/// ```
+///
+/// The previous form kept only `blkdiag(M⁻¹Ω_mm M⁻¹, M⁻¹Ω_vv M⁻¹)`, which is
+/// this expression with `M_vm` and `Ω_mv` set to zero. Both are zero in
+/// expectation for a Gaussian residual (`E[û|A] = 0` and `E[û³] = 0`) and
+/// neither is zero on the branch this covariance serves.
+///
+/// `B⁻¹ = [[M⁻¹, 0], [K, M⁻¹]]` with `K = −M⁻¹·M_vm·M⁻¹`, so no `2p × 2p`
+/// factorization is formed: one `M⁺` is reused. `V₁` stays PSD -- it is a
+/// congruence of the PSD Gram `Ω` -- so the caller's PSD guarantee on the
+/// generated-regressor term is untouched.
+pub(crate) fn stacked_first_stage_sandwich_cov(
+    basis: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+    mean_residuals: &[f64],
+    var_residuals: &[f64],
+    normal_matrix: &Array2<f64>,
+) -> Result<Array2<f64>, String> {
+    let n = basis.nrows();
+    let p = basis.ncols();
+    if mean_residuals.len() != n || var_residuals.len() != n || weights.len() != n {
+        return Err(format!(
+            "stacked first-stage sandwich length mismatch: rows={n}, mean_residuals={}, \
+             var_residuals={}, weights={}",
+            mean_residuals.len(),
+            var_residuals.len(),
+            weights.len()
+        ));
+    }
+    let m_pinv = preconditioned_normal_pseudoinverse(normal_matrix)?;
+    if m_pinv.nrows() != p {
+        return Err(format!(
+            "stacked first-stage sandwich normal-matrix shape mismatch: basis cols={p}, normal {}",
+            m_pinv.nrows()
+        ));
+    }
+
+    // Meat blocks as Grams of the score-scaled basis.
+    let scaled = |values: &[f64]| -> Array2<f64> {
+        let mut b = basis.to_owned();
+        for (i, mut row) in b.rows_mut().into_iter().enumerate() {
+            let scale = weights[i] * values[i];
+            if scale == 0.0 {
+                row.fill(0.0);
+            } else {
+                row.iter_mut().for_each(|entry| *entry *= scale);
+            }
+        }
+        b
+    };
+    let bm = scaled(mean_residuals);
+    let bv = scaled(var_residuals);
+    let omega_mm = gam_linalg::faer_ndarray::fast_ata(&bm);
+    let omega_vv = gam_linalg::faer_ndarray::fast_ata(&bv);
+    let omega_mv = bm.t().dot(&bv);
+
+    // Bread cross-block and the resulting inverse-bread row.
+    let wu: Vec<f64> = (0..n).map(|i| weights[i] * mean_residuals[i]).collect();
+    let m_vm = signed_weighted_gram(basis, &wu).mapv(|value| -2.0 * value);
+    let k = m_pinv.dot(&m_vm).dot(&m_pinv).mapv(|value| -value);
+
+    let v11 = m_pinv.dot(&omega_mm).dot(&m_pinv);
+    let v12 = m_pinv.dot(&omega_mm).dot(&k.t()) + m_pinv.dot(&omega_mv).dot(&m_pinv);
+    let v22 = k.dot(&omega_mm).dot(&k.t())
+        + k.dot(&omega_mv).dot(&m_pinv)
+        + m_pinv.dot(&omega_mv.t()).dot(&k.t())
+        + m_pinv.dot(&omega_vv).dot(&m_pinv);
+
+    let mut v1 = Array2::<f64>::zeros((2 * p, 2 * p));
+    v1.slice_mut(s![..p, ..p]).assign(&v11);
+    v1.slice_mut(s![..p, p..]).assign(&v12);
+    v1.slice_mut(s![p.., ..p]).assign(&v12.t());
+    v1.slice_mut(s![p.., p..]).assign(&v22);
+    gam_linalg::matrix::symmetrize_in_place(&mut v1);
+    if v1.iter().any(|value| !value.is_finite()) {
+        return Err("stacked first-stage sandwich covariance is non-finite".to_string());
+    }
+    Ok(v1)
+}
+
 pub(crate) fn weighted_ridge_sandwich_cov(
     basis: ArrayView2<'_, f64>,
     residuals: &[f64],
@@ -1625,7 +1771,12 @@ pub(crate) fn fit_conditional_latent_calibration_if_needed(
     )?;
 
     let var_floor = (AUTO_Z_CONDITIONAL_VAR_FLOOR_FRAC * global_var).max(f64::MIN_POSITIVE);
-    let (var_coeffs, var_cov): (Vec<f64>, Array2<f64>) = if var_fires {
+    // gam#2484: the per-stage variance sandwich is gone -- it was one diagonal
+    // block of a matrix that is now built jointly, and computing it here only to
+    // discard it would be dead work. Its Breusch-Pagan residual is kept, because
+    // the stacked meat's cross-block needs it.
+    let mut var_residuals: Option<Vec<f64>> = None;
+    let var_coeffs: Vec<f64> = if var_fires {
         // Conditional-variance correction: regress the squared mean-residual on
         // the same basis. Fitted values are floored at `var_floor` when applied.
         let resid_sq: Array1<f64> = mean_residuals.iter().map(|&e| e * e).collect();
@@ -1637,26 +1788,32 @@ pub(crate) fn fit_conditional_latent_calibration_if_needed(
             weights.view(),
             AUTO_Z_CONDITIONAL_RIDGE_REL,
         )?;
-        // First-stage sandwich for the variance coefficients on the same ridge
-        // normal matrix `M` (the basis and weights are identical; only the
-        // response — and hence the residual — differs). `û_i = (z−m̂)²_i − v̂_i`
-        // is the Breusch–Pagan residual.
-        let var_residuals: Vec<f64> = resid_sq
-            .iter()
-            .zip(var_fitted.column(0).iter())
-            .map(|(&si, &vi)| si - vi)
-            .collect();
-        let cov = weighted_ridge_sandwich_cov(
-            basis.view(),
-            &var_residuals,
-            weights.view(),
-            &normal_matrix,
-        )?;
-        (var_coeffs_mat.column(0).to_vec(), cov)
+        // `r_i = (z−m̂)²_i − v̂_i`, the Breusch-Pagan residual of stage B.
+        var_residuals = Some(
+            resid_sq
+                .iter()
+                .zip(var_fitted.column(0).iter())
+                .map(|(&si, &vi)| si - vi)
+                .collect(),
+        );
+        var_coeffs_mat.column(0).to_vec()
     } else {
-        (Vec::new(), Array2::<f64>::zeros((0, 0)))
+        Vec::new()
     };
 
+    // gam#2484: the joint sandwich when the variance stage fired, otherwise the
+    // mean-only sandwich -- with no variance coefficients there is no second
+    // block and no cross-term to get wrong.
+    let theta1_cov = match var_residuals.as_ref() {
+        Some(residuals) => stacked_first_stage_sandwich_cov(
+            basis.view(),
+            weights.view(),
+            &mean_residuals,
+            residuals,
+            &normal_matrix,
+        )?,
+        None => mean_cov,
+    };
     let mut calibration = LatentZConditionalCalibration {
         mean_coeffs,
         var_coeffs,
@@ -1665,8 +1822,7 @@ pub(crate) fn fit_conditional_latent_calibration_if_needed(
         global_var,
         post_mean: 0.0,
         post_sd: 1.0,
-        mean_cov,
-        var_cov,
+        theta1_cov,
     };
 
     // Sanity-check post-correction moments on the training sample.
@@ -2344,6 +2500,167 @@ mod tests {
         assert!(err.contains("nodes must be sorted ascending"), "{err}");
     }
 }
+
+#[cfg(test)]
+mod stacked_first_stage_sandwich_tests_2484 {
+    use super::{stacked_first_stage_sandwich_cov, weighted_ridge_sandwich_cov};
+    use ndarray::{Array1, Array2, array};
+
+    /// `A`, weights, and a normal matrix `M = AᵀWA + λR` built exactly the way
+    /// the calibration builds it, so the sandwich is exercised on a realistic
+    /// bread rather than on an identity.
+    fn system(
+        basis: &Array2<f64>,
+        weights: &Array1<f64>,
+    ) -> Array2<f64> {
+        let mut wa = basis.clone();
+        for (mut row, &w) in wa.rows_mut().into_iter().zip(weights.iter()) {
+            row.iter_mut().for_each(|value| *value *= w);
+        }
+        let mut m = basis.t().dot(&wa);
+        let diag: Vec<f64> = (0..m.nrows()).map(|j| m[[j, j]]).collect();
+        for (j, value) in diag.iter().enumerate() {
+            m[[j, j]] += value * 1.0e-8;
+        }
+        m
+    }
+
+    /// PAIRED fixture: every conditioning row appears twice with equal weight
+    /// and mean residuals `+c` / `−c`.
+    ///
+    /// That makes both cross-terms cancel EXACTLY rather than approximately —
+    /// the bread's `Σ w·û·A Aᵀ` cancels because `û` flips sign while `A Aᵀ`
+    /// does not, and the meat's `Σ w²·û·r·A Aᵀ` cancels because `r` depends on
+    /// `û²` and is therefore equal across the pair. So this arm asserts an
+    /// identity, not a tolerance: with no third moment, the joint sandwich must
+    /// reproduce the block-diagonal form the code used to assume.
+    #[test]
+    fn symmetric_residuals_reproduce_the_block_diagonal_form_2484() {
+        let basis = array![
+            [1.0, 0.4],
+            [1.0, 0.4],
+            [1.0, -0.7],
+            [1.0, -0.7],
+            [1.0, 1.3],
+            [1.0, 1.3],
+        ];
+        let weights = Array1::from(vec![1.0, 1.0, 0.5, 0.5, 2.0, 2.0]);
+        let mean_residuals = vec![0.6, -0.6, 0.9, -0.9, 0.3, -0.3];
+        // r depends on û only through û², so it is equal within each pair.
+        let var_residuals: Vec<f64> = mean_residuals
+            .iter()
+            .map(|&u| u * u - 0.5)
+            .collect();
+        let m = system(&basis, &weights);
+
+        let joint = stacked_first_stage_sandwich_cov(
+            basis.view(),
+            weights.view(),
+            &mean_residuals,
+            &var_residuals,
+            &m,
+        )
+        .expect("joint sandwich");
+        let mean_block =
+            weighted_ridge_sandwich_cov(basis.view(), &mean_residuals, weights.view(), &m)
+                .expect("mean sandwich");
+        let var_block =
+            weighted_ridge_sandwich_cov(basis.view(), &var_residuals, weights.view(), &m)
+                .expect("var sandwich");
+
+        let p = basis.ncols();
+        for i in 0..p {
+            for j in 0..p {
+                let tol = 1.0e-9 * (1.0 + mean_block[[i, j]].abs());
+                assert!(
+                    (joint[[i, j]] - mean_block[[i, j]]).abs() <= tol,
+                    "gam#2484: with no third moment the (mean,mean) block must reproduce the \
+                     standalone sandwich; got {} vs {}",
+                    joint[[i, j]],
+                    mean_block[[i, j]]
+                );
+                let tol_v = 1.0e-9 * (1.0 + var_block[[i, j]].abs());
+                assert!(
+                    (joint[[p + i, p + j]] - var_block[[i, j]]).abs() <= tol_v,
+                    "gam#2484: with no third moment the (var,var) block must reproduce the \
+                     standalone sandwich; got {} vs {}",
+                    joint[[p + i, p + j]],
+                    var_block[[i, j]]
+                );
+                assert!(
+                    joint[[i, p + j]].abs() <= 1.0e-9,
+                    "gam#2484: the cross-block must vanish when the residual third moment does; \
+                     got {}",
+                    joint[[i, p + j]]
+                );
+            }
+        }
+    }
+
+    /// The arm that asserts the change DOES something. Break the pairing so the
+    /// residual carries a third moment, and the cross-block must be measurably
+    /// non-zero — otherwise an implementation that quietly returns the old
+    /// block-diagonal form passes the test above and ships.
+    #[test]
+    fn skewed_residuals_make_the_cross_block_nonzero_2484() {
+        let basis = array![
+            [1.0, 0.4],
+            [1.0, 0.9],
+            [1.0, -0.7],
+            [1.0, 0.2],
+            [1.0, 1.3],
+            [1.0, -1.1],
+        ];
+        let weights = Array1::from(vec![1.0, 1.0, 0.5, 0.5, 2.0, 2.0]);
+        // Strongly right-skewed mean residuals: one large positive, the rest
+        // small negative. This is the shape the adequacy gate rejects.
+        let mean_residuals = vec![-0.2, -0.3, -0.25, -0.15, 2.4, -0.35];
+        let var_residuals: Vec<f64> = mean_residuals.iter().map(|&u| u * u - 0.5).collect();
+        let m = system(&basis, &weights);
+
+        let joint = stacked_first_stage_sandwich_cov(
+            basis.view(),
+            weights.view(),
+            &mean_residuals,
+            &var_residuals,
+            &m,
+        )
+        .expect("joint sandwich");
+        let var_block =
+            weighted_ridge_sandwich_cov(basis.view(), &var_residuals, weights.view(), &m)
+                .expect("var sandwich");
+
+        let p = basis.ncols();
+        let cross = (0..p)
+            .flat_map(|i| (0..p).map(move |j| (i, j)))
+            .map(|(i, j)| joint[[i, p + j]].abs())
+            .fold(0.0_f64, f64::max);
+        let scale = (0..p)
+            .map(|i| joint[[i, i]].abs().max(joint[[p + i, p + i]].abs()))
+            .fold(0.0_f64, f64::max);
+        assert!(
+            cross > 1.0e-6 * scale.max(1.0e-12),
+            "gam#2484: a skewed residual must produce a NON-ZERO first-stage cross-block. \
+             max|cross|={cross:e} against block scale {scale:e}. If this fails, the \
+             implementation is still returning a block-diagonal V1 and the whole change is \
+             inert."
+        );
+
+        // And the (var,var) block must differ from the standalone sandwich: the
+        // triangular bread feeds the mean-stage uncertainty into it.
+        let var_shift = (0..p)
+            .flat_map(|i| (0..p).map(move |j| (i, j)))
+            .map(|(i, j)| (joint[[p + i, p + j]] - var_block[[i, j]]).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            var_shift > 1.0e-6 * scale.max(1.0e-12),
+            "gam#2484: the (var,var) block must absorb the mean-stage uncertainty through the \
+             lower-triangular bread; max shift {var_shift:e} is indistinguishable from the old \
+             standalone block"
+        );
+    }
+}
+
 pub(crate) mod axis_direction_search;
 pub(crate) mod cell_moment_assembly;
 // #932 BMS flex single-source jet substrate (runtime-dimension `Jet2` + IFT

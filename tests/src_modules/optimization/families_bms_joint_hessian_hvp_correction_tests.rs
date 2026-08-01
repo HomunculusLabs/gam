@@ -2834,8 +2834,16 @@ fn murphy_topel_test_calibration() -> LatentZConditionalCalibration {
         post_mean: 0.0,
         post_sd: 1.0,
         // Diagonal first-stage covariances; PSD, distinct scales per block.
-        mean_cov: ndarray::array![[0.02, 0.0], [0.0, 0.05]],
-        var_cov: ndarray::array![[0.03, 0.0], [0.0, 0.01]],
+        // gam#2484: the fixture used to pass the two diagonal blocks and let
+        // `theta1_covariance` assemble them. It now passes that same
+        // block-diagonal matrix directly, so every assertion below is
+        // unchanged -- this fixture is not exercising the cross-block.
+        theta1_cov: ndarray::array![
+            [0.02, 0.0, 0.0, 0.0],
+            [0.0, 0.05, 0.0, 0.0],
+            [0.0, 0.0, 0.03, 0.0],
+            [0.0, 0.0, 0.0, 0.01]
+        ],
     }
 }
 
@@ -3160,8 +3168,12 @@ fn murphy_topel_test_calibration_basis2() -> LatentZConditionalCalibration {
         global_var: 1.0,
         post_mean: 0.0,
         post_sd: 1.0,
-        mean_cov: ndarray::array![[0.02, 0.0], [0.0, 0.04]],
-        var_cov: ndarray::array![[0.03, 0.0], [0.0, 0.015]],
+        theta1_cov: ndarray::array![
+            [0.02, 0.0, 0.0, 0.0],
+            [0.0, 0.04, 0.0, 0.0],
+            [0.0, 0.0, 0.03, 0.0],
+            [0.0, 0.0, 0.0, 0.015]
+        ],
     }
 }
 
