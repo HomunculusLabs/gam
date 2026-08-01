@@ -476,6 +476,11 @@ impl TopologyAutoSelector {
 pub struct TopologyAutoFitEvidence<FitHandle> {
     pub topology_name: String,
     pub raw_reml: f64,
+    /// Forward-error bound on `raw_reml`, accumulated by whatever computed it
+    /// (#2729). `None` states that the producer established no bound, and the
+    /// selector then refuses to certify any margin against this candidate
+    /// rather than treating the absence as an exact zero.
+    pub raw_reml_roundoff: Option<f64>,
     pub null_dim: f64,
     pub null_space_logdet: Option<f64>,
     pub effective_dim: f64,
@@ -487,6 +492,14 @@ pub struct TopologyAutoFitEvidence<FitHandle> {
 pub struct TopologyAutoRankedFit<FitHandle> {
     pub topology_name: String,
     pub tk_score: f64,
+    /// The RESOLUTION of `tk_score`: the forward-error bound on `raw_reml`
+    /// carried through exactly the normalization that produced `tk_score`
+    /// (#2729). Two candidates whose scores differ by less than the sum of
+    /// their resolutions are INDISTINGUISHABLE — the comparison between them is
+    /// arithmetic debris, not evidence. `None` when the producer established no
+    /// bound at all, which is a stronger statement than a large one: nothing is
+    /// known about how many digits the comparison has.
+    pub tk_score_resolution: Option<f64>,
     pub raw_reml: f64,
     pub effective_dim: f64,
     pub n_obs: usize,
@@ -507,6 +520,60 @@ impl<FitHandle> TopologyAutoSelectorResult<FitHandle> {
     pub fn winner(&self) -> Option<&TopologyAutoRankedFit<FitHandle>> {
         self.ranked.get(self.winner_index)
     }
+
+    /// Indices of every ranked candidate the winner is NOT resolvably better
+    /// than (#2729), excluding the winner itself.
+    ///
+    /// A non-empty result means the race did not decide: the winner's margin
+    /// over those candidates lies inside the criterion's own numerical
+    /// resolution, so which of them came first is set by the last rounding of
+    /// the score, not by the data. Callers still receive a deterministic
+    /// `winner()` — the pipeline downstream of a race needs one fit — but any
+    /// channel that REPORTS the outcome as evidence must read this first and
+    /// say TIE, because agreement at the floor is absence of resolution, not
+    /// agreement.
+    pub fn tied_with_winner(&self) -> Vec<usize> {
+        let Some(winner) = self.winner() else {
+            return Vec::new();
+        };
+        self.ranked
+            .iter()
+            .enumerate()
+            .filter(|(index, candidate)| {
+                *index != self.winner_index
+                    && !topology_scores_are_resolvably_ordered(winner, candidate)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// `true` when the winner is resolvably better than every other ranked
+    /// candidate — i.e. the race actually decided something.
+    pub fn winner_is_resolved(&self) -> bool {
+        self.tied_with_winner().is_empty()
+    }
+}
+
+/// Is `better`'s score separated from `other`'s by more than the resolution of
+/// the two scores COMBINED (#2729)?
+///
+/// The band is not a chosen tolerance: each side carries the accumulated
+/// forward error of its own evaluation, and a difference of two numbers is
+/// resolvable exactly when it exceeds the sum of their absolute errors. A
+/// candidate that established no bound is never resolvable against anything —
+/// the unknown is not zero.
+pub fn topology_scores_are_resolvably_ordered<FitHandle>(
+    better: &TopologyAutoRankedFit<FitHandle>,
+    other: &TopologyAutoRankedFit<FitHandle>,
+) -> bool {
+    let (Some(better_resolution), Some(other_resolution)) =
+        (better.tk_score_resolution, other.tk_score_resolution)
+    else {
+        return false;
+    };
+    let band = better_resolution + other_resolution;
+    let margin = other.tk_score - better.tk_score;
+    band.is_finite() && margin.is_finite() && margin > band
 }
 
 /// Stage at which a topology candidate became non-selectable.
@@ -966,15 +1033,16 @@ where
     for candidate in &fused {
         match fit_one(*candidate) {
             Ok(evidence) => {
-                let tk_score = match tk_normalized_score(
+                let (tk_score, tk_score_resolution) = match tk_normalized_score_with_resolution(
                     evidence.raw_reml,
+                    evidence.raw_reml_roundoff,
                     evidence.null_dim,
                     evidence.null_space_logdet,
                     evidence.effective_dim,
                     evidence.n_obs,
                     selector.score_scale,
                 ) {
-                    Ok(score) => score,
+                    Ok(scored) => scored,
                     Err(message) => {
                         failed.push(TopologyAutoFailedCandidate {
                             candidate: *candidate,
@@ -992,6 +1060,7 @@ where
                 ranked.push(TopologyAutoRankedFit {
                     topology_name: evidence.topology_name,
                     tk_score,
+                    tk_score_resolution,
                     raw_reml: evidence.raw_reml,
                     effective_dim: evidence.effective_dim,
                     n_obs: evidence.n_obs,
@@ -1081,15 +1150,16 @@ where
         let (candidate, fit_result) = entry.result;
         match fit_result {
             Ok(evidence) => {
-                let tk_score = match tk_normalized_score(
+                let (tk_score, tk_score_resolution) = match tk_normalized_score_with_resolution(
                     evidence.raw_reml,
+                    evidence.raw_reml_roundoff,
                     evidence.null_dim,
                     evidence.null_space_logdet,
                     evidence.effective_dim,
                     evidence.n_obs,
                     selector.score_scale,
                 ) {
-                    Ok(score) => score,
+                    Ok(scored) => scored,
                     Err(message) => {
                         failed.push(TopologyAutoFailedCandidate {
                             candidate,
@@ -1107,6 +1177,7 @@ where
                 ranked.push(TopologyAutoRankedFit {
                     topology_name: evidence.topology_name,
                     tk_score,
+                    tk_score_resolution,
                     raw_reml: evidence.raw_reml,
                     effective_dim: evidence.effective_dim,
                     n_obs: evidence.n_obs,
@@ -1163,23 +1234,62 @@ pub fn tk_normalized_score(
     n_obs: usize,
     score_scale: TopologyScoreScale,
 ) -> Result<f64, String> {
-    let tk = raw_reml + topology_tk_normalizer(Some(null_dim), null_space_logdet)?;
-    match score_scale {
+    tk_normalized_score_with_resolution(
+        raw_reml,
+        None,
+        null_dim,
+        null_space_logdet,
+        effective_dim,
+        n_obs,
+        score_scale,
+    )
+    .map(|(score, _)| score)
+}
+
+/// [`tk_normalized_score`] carrying the score's own numerical RESOLUTION
+/// through the same normalization (#2729).
+///
+/// `raw_reml_roundoff` is the forward-error bound the evidence producer
+/// accumulated for `raw_reml`. It is a bound on an ABSOLUTE error, so the TK
+/// normalizer's own rounding is added to it in absolute terms and the common
+/// divisor scales it exactly as it scales the score — no tolerance is chosen
+/// anywhere. `None` in propagates to `None` out: an unmeasured resolution must
+/// not become a zero one.
+pub fn tk_normalized_score_with_resolution(
+    raw_reml: f64,
+    raw_reml_roundoff: Option<f64>,
+    null_dim: f64,
+    null_space_logdet: Option<f64>,
+    effective_dim: f64,
+    n_obs: usize,
+    score_scale: TopologyScoreScale,
+) -> Result<(f64, Option<f64>), String> {
+    let normalizer = topology_tk_normalizer(Some(null_dim), null_space_logdet)?;
+    let tk = raw_reml + normalizer;
+    // The normalizer is itself a rounded sum of two products; the addition that
+    // folds it into `raw_reml` rounds on the magnitude of the result.
+    let unit_roundoff = 0.5 * f64::EPSILON;
+    let tk_roundoff = raw_reml_roundoff
+        .map(|bound| bound + unit_roundoff * (3.0 * normalizer.abs() + tk.abs()));
+    let scale = match score_scale {
         TopologyScoreScale::PerObservation => {
             if n_obs == 0 {
-                Err("TopologyAutoSelector requires n_obs > 0".to_string())
-            } else {
-                Ok(tk / n_obs as f64)
+                return Err("TopologyAutoSelector requires n_obs > 0".to_string());
             }
+            n_obs as f64
         }
         TopologyScoreScale::PerEffectiveDim => {
             if !(effective_dim.is_finite() && effective_dim > 0.0) {
-                Err("TopologyAutoSelector requires finite positive effective_dim".to_string())
-            } else {
-                Ok(tk / effective_dim)
+                return Err(
+                    "TopologyAutoSelector requires finite positive effective_dim".to_string()
+                );
             }
+            effective_dim
         }
-    }
+    };
+    let score = tk / scale;
+    let resolution = tk_roundoff.map(|bound| bound / scale + unit_roundoff * score.abs());
+    Ok((score, resolution))
 }
 
 fn topology_tk_normalizer(
@@ -3715,6 +3825,7 @@ mod tests {
             AutoTopologyKind::Torus => Ok(TopologyAutoFitEvidence {
                 topology_name: "torus".to_string(),
                 raw_reml: 3.0,
+                raw_reml_roundoff: None,
                 null_dim: 0.0,
                 null_space_logdet: None,
                 effective_dim: 2.0,
@@ -3928,5 +4039,203 @@ mod tests {
         ];
         let fused = AutoTopologyKind::fuse_constant_curvature_family(&input, true, FUSE_BOTH);
         assert_eq!(fused, input);
+    }
+}
+
+/// #2729 — the topology race must refuse to decide when the margin between two
+/// candidates is inside the resolution of the criterion that produced it.
+///
+/// The measured incident: two candidates that were the SAME MODEL (a constant
+/// birth target lies in the null space of both penalties, so both collapse onto
+/// the constant, `edf = 1.0` and a bit-identical `σ̂²`) were separated by
+/// `2.4e-13` on scores of magnitude `63.6` — about 17 ulps — and the selector
+/// reported a winner, which the atlas-agreement channel then republished as a
+/// calibration datum.
+///
+/// The fixture below reproduces the structure without needing the SAE stack: two
+/// designs that span the SAME column space (`X` and `X·Q` for an orthogonal `Q`)
+/// fitted with the same closed-form REML. They are the same model, so their
+/// evidence is equal in exact arithmetic and differs only by the roundoff of two
+/// different orderings of the same arithmetic.
+#[cfg(test)]
+mod topology_race_tie_2729_tests {
+    use super::*;
+    use crate::gaussian_reml::gaussian_reml_multi_shared_dispersion_closed_form;
+    use ndarray::Array2;
+
+    /// Deterministic, well-conditioned, not reproduced exactly by the design, so
+    /// the profiled dispersion stays resolvably positive.
+    fn fixture_response(x: &Array2<f64>) -> Array2<f64> {
+        let n = x.nrows();
+        let mut y = Array2::<f64>::zeros((n, 2));
+        for row in 0..n {
+            let t = row as f64 / n as f64;
+            y[[row, 0]] = 1.0 + 2.0 * t + 0.25 * (7.0 * t).sin();
+            y[[row, 1]] = 0.5 - 1.5 * t + 0.10 * (11.0 * t).cos();
+        }
+        y
+    }
+
+    fn design(n: usize) -> Array2<f64> {
+        let mut x = Array2::<f64>::zeros((n, 3));
+        for row in 0..n {
+            let t = row as f64 / n as f64;
+            x[[row, 0]] = 1.0;
+            x[[row, 1]] = t;
+            x[[row, 2]] = t * t;
+        }
+        x
+    }
+
+    /// `X · Q` for a Givens rotation at an irrational angle: the same column
+    /// space, reached by a different sequence of floating-point operations.
+    fn rotated(x: &Array2<f64>) -> Array2<f64> {
+        let theta = 0.7_f64;
+        let (s, c) = theta.sin_cos();
+        let mut rotated = x.clone();
+        for row in 0..x.nrows() {
+            let a = x[[row, 0]];
+            let b = x[[row, 2]];
+            rotated[[row, 0]] = c * a - s * b;
+            rotated[[row, 2]] = s * a + c * b;
+        }
+        rotated
+    }
+
+    fn evidence(
+        name: &str,
+        x: &Array2<f64>,
+        y: &Array2<f64>,
+    ) -> TopologyAutoFitEvidence<&'static str> {
+        let penalty = Array2::<f64>::zeros((x.ncols(), x.ncols()));
+        let fit = gaussian_reml_multi_shared_dispersion_closed_form(
+            x.view(),
+            y.view(),
+            penalty.view(),
+            None,
+            None,
+        )
+        .expect("the fixture design is finite, full rank and not interpolating");
+        TopologyAutoFitEvidence {
+            topology_name: name.to_string(),
+            raw_reml: fit.reml_score,
+            raw_reml_roundoff: fit.reml_score_roundoff,
+            null_dim: 0.0,
+            null_space_logdet: None,
+            effective_dim: fit.edf,
+            n_obs: x.nrows(),
+            fit_handle: if name == "euclidean" {
+                "euclidean"
+            } else {
+                "circle"
+            },
+        }
+    }
+
+    fn race(y: &Array2<f64>, second: &Array2<f64>) -> TopologyAutoSelectorResult<&'static str> {
+        let first = design(24);
+        let selector = TopologyAutoSelector {
+            candidates: vec![AutoTopologyKind::Euclidean, AutoTopologyKind::Circle],
+            curvature_is_estimable: false,
+            curvature_fusion_subsumes: &[],
+            score_scale: TopologyScoreScale::PerObservation,
+        };
+        select_topology_with_fit(&selector, |kind| match kind {
+            AutoTopologyKind::Euclidean => {
+                Ok::<_, String>(evidence("euclidean", &first, y))
+            }
+            AutoTopologyKind::Circle => Ok::<_, String>(evidence("circle", second, y)),
+            other => panic!("the fixture races exactly two candidates, not {other:?}"),
+        })
+        .expect("both fixture candidates are selectable")
+    }
+
+    #[test]
+    fn two_bit_comparable_models_tie_instead_of_producing_a_winner() {
+        let x = design(24);
+        let y = fixture_response(&x);
+        let result = race(&y, &rotated(&x));
+        assert_eq!(result.ranked.len(), 2, "both candidates must be ranked");
+
+        let winner = result.winner().expect("a ranked race has a first entry");
+        let runner_up = &result.ranked[1];
+        let gap = runner_up.tk_score - winner.tk_score;
+        let scale = winner.tk_score.abs().max(runner_up.tk_score.abs());
+
+        // NON-VACUITY: the two candidates really are the same model, i.e. the
+        // scores agree to nearly the full mantissa. A tie verdict on scores that
+        // were free to differ would prove nothing.
+        assert!(
+            gap.abs() <= 1.0e-12 * scale,
+            "the fixture must present two numerically indistinguishable models: gap {gap:e} \
+             on scores of magnitude {scale:e} ({:.17e} vs {:.17e})",
+            winner.tk_score,
+            runner_up.tk_score
+        );
+
+        // The resolutions must be REAL numbers: a `None` or an infinity would
+        // make the tie verdict vacuous.
+        let winner_resolution = winner
+            .tk_score_resolution
+            .expect("the closed-form evaluator must accumulate the score's roundoff");
+        let runner_up_resolution = runner_up
+            .tk_score_resolution
+            .expect("the closed-form evaluator must accumulate the score's roundoff");
+        assert!(
+            winner_resolution.is_finite()
+                && runner_up_resolution.is_finite()
+                && winner_resolution > 0.0
+                && runner_up_resolution > 0.0,
+            "both resolutions must be finite and positive: {winner_resolution:e}, \
+             {runner_up_resolution:e}"
+        );
+
+        // THE VERDICT: a tie, not a winner.
+        assert!(
+            !result.winner_is_resolved(),
+            "the race must not certify a winner between two indistinguishable models: gap \
+             {gap:e} against a combined resolution of {:e}",
+            winner_resolution + runner_up_resolution
+        );
+        assert_eq!(
+            result.tied_with_winner(),
+            vec![1],
+            "the runner-up must be reported as tied with the winner"
+        );
+        assert!(
+            !topology_scores_are_resolvably_ordered(winner, runner_up),
+            "the ordering predicate must refuse this pair directly, not only through the \
+             aggregate"
+        );
+
+        // POSITIVE CONTROL, on the SAME measured resolutions: the band is not
+        // so wide that nothing can ever be decided. Displace the runner-up by a
+        // full TK unit — far outside any roundoff of a score of this magnitude —
+        // and the same predicate must now resolve the ordering.
+        let mut separated = runner_up.clone();
+        separated.tk_score = winner.tk_score + 1.0;
+        assert!(
+            topology_scores_are_resolvably_ordered(winner, &separated),
+            "a 1.0 TK margin must be resolvable against a combined resolution of {:e}",
+            winner_resolution + runner_up_resolution
+        );
+    }
+
+    #[test]
+    fn an_unmeasured_resolution_is_never_treated_as_an_exact_zero() {
+        let x = design(24);
+        let y = fixture_response(&x);
+        let result = race(&y, &rotated(&x));
+        let mut winner = result.winner().expect("a ranked race has a winner").clone();
+        let mut other = result.ranked[1].clone();
+        // A producer that established no bound (e.g. a fit rebuilt from a wire
+        // format that does not carry one) must not be silently promoted to
+        // "resolved to the last bit".
+        winner.tk_score_resolution = None;
+        other.tk_score = winner.tk_score + 1.0e6;
+        assert!(
+            !topology_scores_are_resolvably_ordered(&winner, &other),
+            "an unmeasured resolution must forbid certifying any margin, however large"
+        );
     }
 }

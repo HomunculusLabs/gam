@@ -898,6 +898,16 @@ pub struct GaussianRemlMultiResult {
     pub coefficients: Array2<f64>,
     pub fitted: Array2<f64>,
     pub reml_score: f64,
+    /// Forward-error bound on `reml_score`, accumulated by the evaluator that
+    /// produced it from the magnitudes of the log-determinants it differenced
+    /// and the cancellation that formed each profiled deviance (#2729).
+    ///
+    /// `None` means NO bound was accumulated — the only producer of `Some` is
+    /// the closed-form evaluator itself, so a result rebuilt from a serialized
+    /// wire format (which does not carry it) says so rather than inventing one.
+    /// A consumer that compares two REML scores must treat `None` as "this
+    /// comparison has no established resolution", never as zero.
+    pub reml_score_roundoff: Option<f64>,
     pub reml_grad_lambda: f64,
     pub reml_hess_lambda: f64,
     pub reml_grad_rho: f64,
@@ -1023,6 +1033,28 @@ struct ObjectiveEval {
     grad: f64,
     hess: f64,
     edf: f64,
+    /// Forward-error bound on `cost`: the accumulated floating-point roundoff of
+    /// the very additions and cancellations that produced it (#2729). Carried
+    /// alongside the cost for the same reason `pairwise_mean_with_roundoff`
+    /// carries one — a score compared against another score is only a decision
+    /// above this magnitude; below it the comparison has no digits left.
+    cost_roundoff: f64,
+}
+
+/// Unit roundoff `u = ½·eps`, the per-operation relative error bound every
+/// forward-error accumulation in this file is denominated in.
+const UNIT_ROUNDOFF: f64 = 0.5 * f64::EPSILON;
+
+/// Standard `gamma_m = m·u / (1 − m·u)` forward-error growth factor for a
+/// deterministic chain of `m` rounded operations. Returns infinity once `m·u`
+/// reaches 1, where no finite bound exists.
+fn roundoff_growth(operation_count: usize) -> f64 {
+    let accumulated = operation_count as f64 * UNIT_ROUNDOFF;
+    if accumulated < 1.0 {
+        accumulated / (1.0 - accumulated)
+    } else {
+        f64::INFINITY
+    }
 }
 
 /// A single Gaussian closed-form REML objective term, carrying its analytic
@@ -1040,6 +1072,11 @@ struct TermDerivs {
     value: f64,
     grad: f64,
     hess: f64,
+    /// Forward-error bound on `value`, accumulated from the SAME intermediates
+    /// the value is built from (#2729). Single-sourced with the value for the
+    /// same reason the derivatives are: a bound derived anywhere else is a
+    /// guess about an expression nobody evaluated.
+    roundoff: f64,
 }
 
 /// Boundary-stable kernels for one nonnegative affine mode
@@ -1099,6 +1136,9 @@ impl std::ops::AddAssign<TermDerivs> for ObjectiveEval {
         self.cost += rhs.value;
         self.grad += rhs.grad;
         self.hess += rhs.hess;
+        // The term's own bound plus the rounding of THIS addition, priced on the
+        // running total it just produced.
+        self.cost_roundoff += rhs.roundoff + UNIT_ROUNDOFF * self.cost.abs();
     }
 }
 
@@ -1116,9 +1156,16 @@ fn gaussian_reml_logdet_term(
     let mut trace_h = 0.0;
     let mut trace_h_deriv = 0.0;
     let mut edf = 0.0;
+    // #2729: magnitude of every term summed into the log-determinant difference,
+    // accumulated in the SAME loop that sums the terms themselves. It is what the
+    // forward-error bound below is denominated in — `log|H|` and `log|S|₊` are
+    // individually large and differenced, so the difference's absolute error is
+    // set by the SUMMANDS' magnitudes, not by the (possibly tiny) difference.
+    let mut logdet_magnitude = cache.logdet_xtwx.abs();
     for &delta in &cache.penalty_eigenvalues {
         let mode = modal_kernels(rho, delta);
         logdet_h += mode.log_one_plus_t;
+        logdet_magnitude += mode.log_one_plus_t.abs();
         if delta > 0.0 {
             trace_h += mode.u;
             trace_h_deriv += mode.w;
@@ -1126,10 +1173,20 @@ fn gaussian_reml_logdet_term(
         edf += mode.v;
     }
     let logdet_s = cache.logdet_penalty_positive + (cache.penalty_rank as f64) * rho;
+    logdet_magnitude += cache.logdet_penalty_positive.abs() + logdet_s.abs();
+    let value = 0.5 * n_outputs * (logdet_h - logdet_s);
+    // One `log1p` and one accumulation per penalty eigendirection, the two
+    // additions forming `log|S|₊`, the difference, and the two outer multiplies.
+    let operation_count = cache
+        .penalty_eigenvalues
+        .len()
+        .saturating_mul(2)
+        .saturating_add(5);
     let term = TermDerivs {
-        value: 0.5 * n_outputs * (logdet_h - logdet_s),
+        value,
         grad: 0.5 * n_outputs * (trace_h - cache.penalty_rank as f64),
         hess: 0.5 * n_outputs * trace_h_deriv,
+        roundoff: 0.5 * n_outputs * roundoff_growth(operation_count) * logdet_magnitude,
     };
     (term, edf)
 }
@@ -1168,7 +1225,7 @@ fn dispersion_residual_parts(
     projected_rhs_squared: ArrayView2<'_, f64>,
     output: usize,
     rho: f64,
-) -> (f64, f64, f64, f64) {
+) -> DispersionResidualParts {
     let mut total_c2 = 0.0;
     let mut penalized_residual = 0.0;
     let mut dp_grad = 0.0;
@@ -1185,7 +1242,29 @@ fn dispersion_residual_parts(
     // weighted least-squares fit), so clamping at zero only removes roundoff
     // that has no sign information left in it.
     let unpenalized_residual = (ywy[output] - total_c2).max(0.0);
-    (unpenalized_residual, penalized_residual, dp_grad, dp_hess)
+    DispersionResidualParts {
+        unpenalized_residual,
+        penalized_residual,
+        dp_grad,
+        dp_hess,
+        total_c2,
+    }
+}
+
+/// The `dp = r0 + Σ c²·u` decomposition of one output's profiled residual
+/// deviance, plus the `Σ c²` whose cancellation against `ywy` produced `r0`.
+///
+/// `total_c2` is not an extra output for convenience: `r0` is a DIFFERENCE of
+/// two same-signed accumulations, so the only honest scale for its absolute
+/// error is `|ywy| + Σ c²` — the magnitudes that cancelled — and that scale is
+/// unrecoverable once the difference has been taken (#2729).
+#[derive(Clone, Copy)]
+struct DispersionResidualParts {
+    unpenalized_residual: f64,
+    penalized_residual: f64,
+    dp_grad: f64,
+    dp_hess: f64,
+    total_c2: f64,
 }
 
 /// Per-output dispersion-prior term `½ν·(1 + log(2π·dp/ν))` with its analytic
@@ -1202,13 +1281,29 @@ fn gaussian_reml_dispersion_term(
     nu: f64,
     rho: f64,
 ) -> TermDerivs {
-    let (unpenalized_residual, penalized_residual, dp_grad, dp_hess) =
-        dispersion_residual_parts(cache, ywy, projected_rhs_squared, output, rho);
-    let dp = unpenalized_residual + penalized_residual;
+    let parts = dispersion_residual_parts(cache, ywy, projected_rhs_squared, output, rho);
+    let dp = parts.unpenalized_residual + parts.penalized_residual;
+    let value = 0.5 * nu * (1.0 + (2.0 * std::f64::consts::PI * dp / nu).ln());
+    // #2729. `dp` is formed by cancelling `Σ c²` against `ywy` and then adding a
+    // sum of non-negatives, so its ABSOLUTE error is set by the magnitudes that
+    // cancelled, not by `dp` itself. Two multiplies and one accumulation per
+    // eigendirection, the final subtraction, the clamp and one addition.
+    let operation_count = cache
+        .penalty_eigenvalues
+        .len()
+        .saturating_mul(3)
+        .saturating_add(3);
+    let dp_magnitude = ywy[output].abs() + parts.total_c2.abs() + parts.penalized_residual.abs();
+    let dp_roundoff = roundoff_growth(operation_count) * dp_magnitude;
+    // `d/d(dp) of ½ν·log(dp) = ½ν/dp`: the logarithm converts `dp`'s RELATIVE
+    // error into the value's absolute error, which is why a deviance sitting at
+    // its own cancellation floor leaves this term with no significant digits.
+    // Plus the rounding of the log, the division and the two multiplies.
     TermDerivs {
-        value: 0.5 * nu * (1.0 + (2.0 * std::f64::consts::PI * dp / nu).ln()),
-        grad: 0.5 * nu * dp_grad / dp,
-        hess: 0.5 * nu * (dp_hess / dp - (dp_grad * dp_grad) / (dp * dp)),
+        value,
+        grad: 0.5 * nu * parts.dp_grad / dp,
+        hess: 0.5 * nu * (parts.dp_hess / dp - (parts.dp_grad * parts.dp_grad) / (dp * dp)),
+        roundoff: 0.5 * nu * (dp_roundoff / dp) + roundoff_growth(4) * value.abs(),
     }
 }
 
@@ -1520,6 +1615,7 @@ pub fn gaussian_reml_multi_shared_dispersion_closed_form(
         coefficients,
         fitted,
         reml_score: objective.cost,
+        reml_score_roundoff: Some(objective.cost_roundoff),
         reml_grad_lambda,
         reml_hess_lambda,
         reml_grad_rho: objective.grad,
@@ -2847,6 +2943,7 @@ fn gaussian_reml_multi_closed_form_from_parts(
         coefficients,
         fitted,
         reml_score: eval.cost,
+        reml_score_roundoff: Some(eval.cost_roundoff),
         reml_grad_lambda,
         reml_hess_lambda,
         reml_grad_rho: eval.grad,
@@ -4561,7 +4658,11 @@ impl GaussianRemlPrepared {
     fn sigma2(&self, rho: f64) -> Array1<f64> {
         let nu = self.nu();
         Array1::from_iter((0..self.n_outputs).map(|j| {
-            let (unpenalized_residual, penalized_residual, _, _) = dispersion_residual_parts(
+            let DispersionResidualParts {
+                unpenalized_residual,
+                penalized_residual,
+                ..
+            } = dispersion_residual_parts(
                 &self.cache,
                 self.ywy.view(),
                 self.projected_rhs_squared.view(),
@@ -4573,12 +4674,68 @@ impl GaussianRemlPrepared {
     }
 }
 
-/// Certify that every profiled residual is strictly positive at `rho`.
+/// Roundoff resolution of the profiled residual deviance `dp_j` for one output:
+/// the magnitude at or below which `dp_j` carries no significant digit and is
+/// indistinguishable from exactly zero.
+///
+/// `dp_j = (ywy_j − Σ_i c²_ij) + Σ_i c²_ij·u_i` is accumulated in
+/// nearest-rounded arithmetic. The absolute sum of its contributing terms is
+/// `ywy_j + Σ_i c²_ij ≤ 2·ywy_j`, because `Σ_i c²_ij ≤ ywy_j` — the discarded
+/// remainder `r0_j` is a squared weighted residual norm and therefore
+/// non-negative (see [`dispersion_residual_parts`]). Under the standard
+/// `γ_m = m·eps/(1 − m·eps)` model the accumulated error is bounded by
+/// `γ_m · 2·ywy_j`, so that product is the resolution.
+///
+/// Both inputs are derived, not chosen: `eps` is a machine constant and the
+/// operation count is this file's own convention, single-sourced with
+/// `reml_deriv_enclosure_profile` (`64 + 32·(n_eig · n_out)`, here at
+/// `n_out = 1` because the check is per output) and consumed by
+/// [`conservative_interval`] under the same error model. The result is
+/// proportional to `ywy_j`, so the derived bar is scale-invariant: rescaling
+/// `y` by `α` scales both `dp_j` and the resolution by `α²`.
+fn profile_residual_resolution(cache: &GaussianRemlEigenCache, ywy_output: f64) -> f64 {
+    let operations =
+        64usize.saturating_add(32usize.saturating_mul(cache.penalty_eigenvalues.len()));
+    let n_eps = (operations as f64) * f64::EPSILON;
+    if !(ywy_output.is_finite() && ywy_output >= 0.0) || n_eps >= 1.0 {
+        return f64::INFINITY;
+    }
+    (n_eps / (1.0 - n_eps)) * 2.0 * ywy_output
+}
+
+/// Certify that every profiled residual is RESOLVABLY positive at `rho`.
 /// Residual deviance is monotone increasing in rho, so validating the lower
 /// search boundary certifies the log-dispersion domain on the entire window.
 /// A zero/perfect-fit residual has no finite profiled Gaussian scale and must be
 /// refused; replacing it with a tiny constant would change both the objective
 /// and its derivatives.
+///
+/// #2723: the bar used to be the absolute `residual > 0.0`, and on a perfect fit
+/// that predicate reads the sign of the last rounding rather than the design.
+/// `dp = max(ywy − Σc², 0) + Σc²·u` is a sum of clamped non-negatives, so it can
+/// only reach exactly `0.0` when the cancellation `ywy − Σc²` happens to land
+/// non-positive AND no penalized direction carries any mass. Measured on four
+/// designs whose true residual is EXACTLY zero, that bar refused two and
+/// accepted two — the discriminator being whether the debris landed at `+1.8e-15`
+/// or at `−3.6e-15`, and whether the basis was irrational or integral. Evidence
+/// about one rounding, generalised to the design.
+///
+/// The verdict a perfect fit must get is REFUSAL, and the accepted side is the
+/// wrong one: a profiled Gaussian likelihood genuinely cannot score an
+/// exactly-interpolated response — `σ̂² → 0`, `V = ½ν·log(2π·dp/ν) → −∞`, and
+/// every smoothing candidate ties at `−∞`. Accepting instead carries a `σ̂²` of
+/// pure roundoff (measured at `1.6e-16` and `6.8e-14`) into the dominant term of
+/// the score that model selection then ranks by, so the ranking is decided by
+/// debris. Abstention is the only defensible outcome, and it is the one the two
+/// already-refusing designs get.
+///
+/// So the bar is re-denominated in the quantity it means to test: refuse unless
+/// `dp` exceeds its own arithmetic resolution, [`profile_residual_resolution`]
+/// (`γ_m·2·ywy_j`, derived from `eps` and the measured response scale). All four
+/// designs then agree on refusal, and the verdict is a property of the design
+/// rather than of the last rounding. Note this bar answers RESOLVABILITY of
+/// `dp` — not reliability of the score built on it, which is a wider band
+/// (`≈ ½ν·eps/τ`) and a separate question.
 fn validate_reml_profile_residuals(
     cache: &GaussianRemlEigenCache,
     ywy: ArrayView1<'_, f64>,
@@ -4590,12 +4747,17 @@ fn validate_reml_profile_residuals(
         // Checking the domain through the cancelling form while the search
         // evaluates the stable one lets a fit be refused for a residual that is
         // strictly positive, or admitted for one that is not.
-        let (unpenalized_residual, penalized_residual, _, _) =
-            dispersion_residual_parts(cache, ywy, projected_rhs_squared, output, rho);
+        let DispersionResidualParts {
+            unpenalized_residual,
+            penalized_residual,
+            ..
+        } = dispersion_residual_parts(cache, ywy, projected_rhs_squared, output, rho);
         let residual = unpenalized_residual + penalized_residual;
-        if !(residual.is_finite() && residual > 0.0) {
+        let resolution = profile_residual_resolution(cache, ywy[output]);
+        if !(residual.is_finite() && residual > resolution) {
             return Err(EstimationError::InvalidInput(format!(
-                "Gaussian REML profiled residual {output} is not strictly positive at rho={rho}: {residual}; the profiled dispersion has no finite value"
+                "Gaussian REML profiled residual {output} is not resolvably positive at rho={rho}: {residual} against its own arithmetic resolution {resolution} (gamma_m * 2 * ywy, ywy={}); the design interpolates its response, so the profiled dispersion has no finite value",
+                ywy[output]
             )));
         }
     }
@@ -5833,6 +5995,7 @@ fn evaluate_reml_profile(
         grad: 0.0,
         hess: 0.0,
         edf,
+        cost_roundoff: 0.0,
     };
     eval += logdet_term;
     for output in 0..ywy.len() {
@@ -6214,7 +6377,11 @@ mod tests {
         // rho-dependent part of the deviance must be vanishing relative to
         // `ywy`, which is what drives `ywy − Σc²` into cancellation. Reported
         // through the evaluator's own decomposition rather than recomputed.
-        let (unpenalized_residual, penalized_residual, _, _) = dispersion_residual_parts(
+        let DispersionResidualParts {
+                unpenalized_residual,
+                penalized_residual,
+                ..
+            } = dispersion_residual_parts(
             &witness.cache,
             witness.ywy.view(),
             witness.projected_rhs_squared.view(),
@@ -7761,6 +7928,8 @@ mod tests {
             grad: 2.0 * rho,
             hess: 2.0,
             edf: 0.0,
+            // An analytic fixture: its cost is exact by construction.
+            cost_roundoff: 0.0,
         };
         // Deliberately uninformative but endpoint-valid enclosures force the
         // resolution-floor branch without an expensive production-depth tree.
@@ -8747,4 +8916,201 @@ pub fn dense_fisher_gaussian_fit(
         sigma2,
         objective,
     })
+}
+
+/// #2723 — the perfect-fit refusal must be a property of the DESIGN, not of the
+/// sign of the last rounding.
+#[cfg(test)]
+mod perfect_fit_refusal_tests {
+    use super::*;
+    use ndarray::array;
+
+    /// Build the four designs of #2723. Every one of them has a residual that is
+    /// EXACTLY zero: each response lies exactly in its design's column span.
+    /// They differ only in how the floating-point debris of `ywy − Σc²` lands
+    /// and in whether any penalized direction carries mass — the two accidents
+    /// the old `residual > 0.0` bar was actually reading.
+    fn zero_residual_designs() -> Vec<(&'static str, Array2<f64>, Array2<f64>, Array2<f64>)> {
+        // A: constant response on an irrational (periodic-harmonic) basis. The
+        // cancellation is INEXACT and landed POSITIVE (+1.776e-15), which is the
+        // only reason the old bar accepted it.
+        let n = 12usize;
+        let a_x = Array2::<f64>::from_shape_fn((n, 3), |(row, col)| {
+            let t = 2.0 * std::f64::consts::PI * (row as f64) / (n as f64);
+            match col {
+                0 => 1.0,
+                1 => t.sin(),
+                _ => t.cos(),
+            }
+        });
+        let a_y = Array2::<f64>::from_elem((n, 1), 0.7);
+        let a_penalty = array![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+        // B: `y = X·[1, 2]` in integers, with mass on the penalized direction.
+        // The cancellation landed negative and was clamped to `0`, but
+        // `Σc²·u(RHO_LOWER)` is strictly positive for ANY design carrying
+        // penalized mass — the generic case — so the old bar accepted it too.
+        let b_x = array![[1.0, 0.0], [1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0]];
+        let b_y = array![[1.0], [3.0], [5.0], [7.0], [9.0]];
+        let b_penalty = array![[0.0, 0.0], [0.0, 1.0]];
+
+        // C: constant response on an exact integer basis, all mass in `null(S)`.
+        // Statistically identical to A; the old bar refused it purely because the
+        // integer basis put the debris on the other side and left `Σc²·u = 0`.
+        let c_x = array![[1.0, 0.0], [1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0]];
+        let c_y = array![[1.0], [1.0], [1.0], [1.0], [1.0]];
+        let c_penalty = array![[0.0, 0.0], [0.0, 1.0]];
+
+        // D: identically zero response. Every term is exactly `0`; refused.
+        let d_x = c_x.clone();
+        let d_y = Array2::<f64>::zeros((5, 1));
+        let d_penalty = c_penalty.clone();
+
+        vec![
+            ("A irrational basis, constant response", a_x, a_y, a_penalty),
+            ("B integer basis, penalized mass present", b_x, b_y, b_penalty),
+            ("C integer basis, all mass in null(S)", c_x, c_y, c_penalty),
+            ("D identically zero response", d_x, d_y, d_penalty),
+        ]
+    }
+
+    /// All four zero-residual designs must reach the SAME verdict, and that
+    /// verdict must be refusal: a profiled Gaussian likelihood has no finite
+    /// scale for an exactly-interpolated response, so every candidate ties at
+    /// `−∞` and abstention is the only defensible outcome.
+    #[test]
+    fn every_zero_residual_design_is_refused_alike() {
+        let mut failures: Vec<String> = Vec::new();
+        let mut verdicts: Vec<(&'static str, bool)> = Vec::new();
+
+        for (name, x, y, penalty) in zero_residual_designs() {
+            let prepared =
+                prepare_gaussian_reml(x.view(), y.view(), penalty.view(), None, None, None)
+                    .unwrap_or_else(|error| panic!("{name}: preparation failed: {error}"));
+
+            // Regime clause. A pass below is meaningless unless the design is
+            // actually in the perfect-fit regime, so report the decomposition
+            // the validator itself reads rather than trusting the construction.
+            let DispersionResidualParts {
+                unpenalized_residual,
+                penalized_residual,
+                ..
+            } = dispersion_residual_parts(
+                &prepared.cache,
+                prepared.ywy.view(),
+                prepared.projected_rhs_squared.view(),
+                0,
+                RHO_LOWER,
+            );
+            let residual = unpenalized_residual + penalized_residual;
+            let ywy = prepared.ywy[0];
+            let resolution = profile_residual_resolution(&prepared.cache, ywy);
+            if !(residual <= f64::EPSILON.sqrt() * ywy.max(1.0)) {
+                failures.push(format!(
+                    "{name}: REGIME — residual {residual:.6e} against ywy {ywy:.6e} is far above \
+                     the cancellation scale, so this design does NOT interpolate its response and \
+                     the fixture has drifted out of the regime under test"
+                ));
+            }
+
+            let verdict = validate_reml_profile_residuals(
+                &prepared.cache,
+                prepared.ywy.view(),
+                prepared.projected_rhs_squared.view(),
+                RHO_LOWER,
+            );
+            verdicts.push((name, verdict.is_ok()));
+            if verdict.is_ok() {
+                failures.push(format!(
+                    "{name}: ACCEPTED a residual of {residual:.6e} (ywy {ywy:.6e}, resolution \
+                     {resolution:.6e}) whose true value is exactly zero; the profiled dispersion \
+                     it carries is pure roundoff"
+                ));
+            }
+        }
+
+        let accepted: Vec<&str> = verdicts
+            .iter()
+            .filter(|(_, ok)| *ok)
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "#2723: the four exactly-zero-residual designs did not agree on refusal. \
+             Accepted: {accepted:?}. Details:\n  - {}",
+            failures.join("\n  - ")
+        );
+    }
+
+    /// Non-vacuity control: the same bar must ACCEPT a design with a genuine
+    /// residual, at both a small and a large response scale. Without this, a
+    /// validator that refuses everything would pass the test above.
+    #[test]
+    fn a_genuine_residual_is_accepted_at_every_scale() {
+        let x = array![[1.0, 0.0], [1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0]];
+        let base_y = array![[1.1], [2.9], [5.2], [6.8], [9.1]];
+        let penalty = array![[0.0, 0.0], [0.0, 1.0]];
+
+        for scale in [1.0e-6, 1.0, 1.0e6] {
+            let y = base_y.mapv(|value| value * scale);
+            let prepared =
+                prepare_gaussian_reml(x.view(), y.view(), penalty.view(), None, None, None)
+                    .expect("the control design is finite and full rank");
+            let DispersionResidualParts {
+                unpenalized_residual,
+                penalized_residual,
+                ..
+            } = dispersion_residual_parts(
+                &prepared.cache,
+                prepared.ywy.view(),
+                prepared.projected_rhs_squared.view(),
+                0,
+                RHO_LOWER,
+            );
+            let residual = unpenalized_residual + penalized_residual;
+            let ywy = prepared.ywy[0];
+            assert!(
+                residual > f64::EPSILON.sqrt() * ywy,
+                "control at scale {scale:e}: residual {residual:.6e} is at cancellation scale \
+                 against ywy {ywy:.6e}, so this is not a genuine-residual control"
+            );
+            let verdict = validate_reml_profile_residuals(
+                &prepared.cache,
+                prepared.ywy.view(),
+                prepared.projected_rhs_squared.view(),
+                RHO_LOWER,
+            );
+            assert!(
+                verdict.is_ok(),
+                "control at scale {scale:e}: a genuine residual {residual:.6e} (ywy {ywy:.6e}) was \
+                 refused: {:?}",
+                verdict.err()
+            );
+        }
+    }
+
+    /// The bar is scale-invariant by construction (it is proportional to `ywy`),
+    /// so rescaling a zero-residual response must not move the verdict.
+    #[test]
+    fn the_refusal_is_invariant_to_the_response_scale() {
+        for (name, x, y, penalty) in zero_residual_designs() {
+            for scale in [1.0e-8, 1.0, 1.0e8] {
+                let scaled = y.mapv(|value| value * scale);
+                let prepared =
+                    prepare_gaussian_reml(x.view(), scaled.view(), penalty.view(), None, None, None)
+                        .unwrap_or_else(|error| panic!("{name} at {scale:e}: {error}"));
+                let verdict = validate_reml_profile_residuals(
+                    &prepared.cache,
+                    prepared.ywy.view(),
+                    prepared.projected_rhs_squared.view(),
+                    RHO_LOWER,
+                );
+                assert!(
+                    verdict.is_err(),
+                    "{name}: rescaling the response by {scale:e} flipped the perfect-fit verdict \
+                     to ACCEPTED; the bar is not scale-invariant"
+                );
+            }
+        }
+    }
 }

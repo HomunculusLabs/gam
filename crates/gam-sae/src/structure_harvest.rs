@@ -81,7 +81,7 @@ use std::sync::Arc;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 use crate::atom_codes::SparseAtomCodes;
-use crate::basis::SaeBasisSecondJet;
+use crate::basis::{AmbientSphereHarmonicEvaluator, SaeBasisEvaluator, SaeBasisSecondJet};
 use crate::description_length::{BirthMdlPrescreen, predicted_birth_dl_bits};
 use crate::frames::GrassmannFrame;
 use crate::manifold::{
@@ -1581,52 +1581,117 @@ fn seam_equivalence_log_e(
 // ===========================================================================
 // #1890 Increment 2 — SPHERE POLE seams (the d=2 register emitter).
 //
-// A sphere pole seam is TWO `SphereChartEvaluator` (lat/lon, `latent_dim = 2`)
-// charts covering ONE ambient sphere with their poles in each other's INTERIOR:
-// neither lat/lon chart alone covers both poles (`cos(lat) → 0` gauge collapse),
-// so the cover is irreducibly an atlas — a single chart cannot represent it.
-// The transition relating two such charts is an ambient rotation `R ∈ SO(3)` on
-// the intrinsic unit vector `u = [x, y, z]`, NOT a 1-D affine map; the 1-D seam
-// fit ([`fit_seam_transition`]) is structurally blind to it (it short-circuits
-// on non-`Periodic`, `latent_dim ≠ 1` atoms). This lane fits that rotation by
-// exact orthogonal Procrustes on the two decoders' linear `[x, y, z]` blocks,
-// classifies pole-vs-regular by whether each chart's pole falls strictly inside
-// the OTHER chart's active latitude span (data-driven, no magic angle), and
-// certifies the overlap with the SAME sample-split equivalence e-value the 1-D
-// lane uses. A pole seam always REGISTERS (keeps both charts as one
+// A sphere pole seam is TWO sphere atoms covering ONE ambient sphere with their
+// FRAME AXES in each other's active interior. Each atom carries the ambient
+// parameterisation (`SaeAtomBasisKind::Sphere` at `latent_dim = 3`, real
+// spherical harmonics in `u = [x, y, z]`, the only sphere resolution
+// `SaeAtomGeometryPlan::new` accepts), so neither atom is charted and neither
+// has a coordinate singularity of its own. What still makes the cover
+// irreducibly an atlas is the DATA: each atom's decoder is fitted on its own
+// support only, so atom A's frame axis is a point A never saw and B did, and
+// vice versa. Registering the pair is what lets one semantic atom carry the
+// whole sphere; a single atom's local fit does not.
+//
+// The transition relating two such atoms is an ambient rotation `R ∈ SO(3)` on
+// the unit vector `u`, NOT a 1-D affine map; the 1-D seam fit
+// ([`fit_seam_transition`]) is structurally blind to it (it short-circuits on
+// non-`Periodic`, `latent_dim ≠ 1` atoms). This lane fits that rotation by exact
+// orthogonal Procrustes on the two decoders' degree-1 (dipole) ambient frames,
+// classifies pole-vs-regular by whether each atom's frame axis falls strictly
+// inside the OTHER atom's active latitude span (data-driven, no magic angle),
+// and certifies the overlap with the SAME sample-split equivalence e-value the
+// 1-D lane uses. A pole seam always REGISTERS (keeps both atoms as one
 // partition-of-unity atlas atom); a sphere is orientable, so its proper-rotation
 // transition carries `sign = +1` in the cocycle.
 //
-// ⚠ THIS WHOLE LANE IS CURRENTLY UNREACHABLE — it is written against the
-// `(lat, lon)` `SphereChartEvaluator` that was DELETED when every chart consumer
-// moved to ambient coordinates, and nothing here was ported with it (#2698).
-// Four independent places encode the deleted geometry: `is_sphere_pair` requires
-// `latent_dim == 2`, `sphere_linear_block` requires a 7-row decoder,
-// `sphere_row_unit` reads `basis_values[[row, 1..4]]` as `(x, y, z)`, and
-// `sphere_decoded_points_at_units` hardcodes the `[1, x, y, z, xy, yz, xz]`
-// monomial layout. The only sphere atom the geometry-plan authority can build is
-// `(Sphere, latent_dim = 3, AmbientSphereHarmonics, RoundSphere)` — width 9 real
-// spherical harmonics, and `SaeAtomGeometryPlan::new` REFUSES `(Sphere, 2, ..)`
-// — so `is_sphere_pair` is false for every producible pair and none of the code
-// below runs. The lane has no unit-test caller either; its only exercise is the
-// `chart_gluing_1890_e2e` pole-seam e2e, which is red at construction for the
-// same reason. Porting it means: screening on `latent_dim == 3`, taking the
-// ambient frame from the decoder's degree-1 (dipole) block, reading each row's
-// unit vector from the assignment coordinate instead of `basis_values`, and
-// decoding through the atom's own `basis_second_jet` rather than a hardcoded
-// monomial list. Do not read the paragraphs above as a description of shipped,
-// exercised behaviour until that port lands.
+// #2698 — this lane was written against the `(lat, lon)` `SphereChartEvaluator`
+// that was DELETED when every chart consumer moved to ambient coordinates, and
+// was not ported with it: it screened on `latent_dim == 2`, took the frame from
+// rows `1..4` of a 7-row decoder, read each row's unit vector out of
+// `basis_values`, and decoded through a hardcoded `[1, x, y, z, xy, yz, xz]`
+// monomial list. Every one of those is false of a producible sphere atom, so the
+// lane could not fire on any pair the engine can build. All four now read the
+// ambient form, from the atom's OWN declaration: the geometry plan's degree
+// where an atom carries one, else the realized basis width `(degree + 1)²`, with
+// the evaluator rebuilt exactly as `SaeAtomGeometryPlan::build_evaluator` builds
+// it. Nothing about the seam's geometry changed — the transition between two
+// ambient frames is still the `SO(3)` element `SphereChartTransition` stores.
 // ===========================================================================
 
-/// The linear `[x, y, z]` decoder block of a `SphereChartEvaluator` atom: rows
-/// `1..4` of the `(7, p)` decoder (`[1, x, y, z, xy, yz, xz]`), returned as the
-/// `3 × p` ambient frame the sphere's unit vector maps through.
-fn sphere_linear_block(atom: &SaeManifoldAtom) -> Option<Array2<f64>> {
-    let decoder = atom.full_width_decoder();
-    if decoder.nrows() != 7 {
+/// The ambient real-spherical-harmonic degree this atom's basis carries, or
+/// `None` when the atom is not an ambient sphere atom at all.
+///
+/// The atom's own declaration is the authority, in the same order the rest of
+/// the engine trusts it: the persisted [`SaeAtomGeometryPlan`] when the atom was
+/// built by the native lifecycle, otherwise the realized full basis width, which
+/// pins the degree exactly because an ambient sphere basis is `(degree + 1)²`
+/// wide. Either way the degree is accepted only if it reproduces that width, so
+/// a non-sphere basis width that happens to be a perfect square cannot slip
+/// through as a sphere.
+fn ambient_sphere_degree(atom: &SaeManifoldAtom) -> Option<usize> {
+    if atom.latent_dim() != 3 || !matches!(atom.basis_kind(), SaeAtomBasisKind::Sphere) {
         return None;
     }
-    Some(decoder.slice(ndarray::s![1..4, ..]).to_owned())
+    let width = atom.full_basis_size();
+    let degree = match atom.geometry_plan().map(SaeAtomGeometryPlan::resolution) {
+        Some(SaeBasisResolution::AmbientSphereHarmonics { degree }) => *degree,
+        // A plan that declares any OTHER resolution is not this geometry, and a
+        // plan is never overridden by an inference from the width.
+        Some(_) => return None,
+        None => {
+            let side = (width as f64).sqrt().round() as usize;
+            side.checked_sub(1)?
+        }
+    };
+    let evaluator = AmbientSphereHarmonicEvaluator::new(degree).ok()?;
+    (evaluator.basis_size() == width).then_some(degree)
+}
+
+/// The one analytic evaluator an ambient sphere atom of this degree declares —
+/// the same construction [`SaeAtomGeometryPlan::build_evaluator`] performs, so
+/// this is the atom's own basis and not a re-derivation of it.
+fn ambient_sphere_evaluator(atom: &SaeManifoldAtom) -> Option<AmbientSphereHarmonicEvaluator> {
+    AmbientSphereHarmonicEvaluator::new(ambient_sphere_degree(atom)?).ok()
+}
+
+/// The `3 × p` ambient frame of a sphere atom: the linear map its decoder
+/// applies to the unit-vector coordinate, read off the degree-1 (dipole)
+/// harmonic block.
+///
+/// Column `(1, m)` of the basis is `N_{1,m}` times one ambient coordinate, so
+/// the block's coefficients are read out of the evaluator itself by evaluating
+/// `Φ` at the three standard directions: `Φ(e_axis)` is `N` on the degree-1
+/// column carrying `axis` and zero on every other degree-1 column. No column
+/// order and no normalisation constant is assumed here, and the extraction is
+/// unchanged at any degree.
+fn sphere_linear_block(atom: &SaeManifoldAtom) -> Option<Array2<f64>> {
+    let evaluator = ambient_sphere_evaluator(atom)?;
+    let decoder = atom.full_width_decoder();
+    if decoder.nrows() != evaluator.basis_size() {
+        return None;
+    }
+    let axes = Array2::<f64>::eye(3);
+    let (phi_axes, _) = evaluator.evaluate(axes.view()).ok()?;
+    let modes = evaluator.spectral_modes();
+    let mut frame = Array2::<f64>::zeros((3, decoder.ncols()));
+    for axis in 0..3 {
+        for (column, mode) in modes.iter().enumerate() {
+            if mode.degree != 1 {
+                continue;
+            }
+            let coefficient = phi_axes[[axis, column]];
+            if coefficient == 0.0 {
+                continue;
+            }
+            for output in 0..decoder.ncols() {
+                frame[[axis, output]] += coefficient * decoder[[column, output]];
+            }
+        }
+    }
+    if frame.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    Some(frame)
 }
 
 /// Nearest orthogonal matrix to `m` (the orthogonal polar factor `U Vᵀ` of its
@@ -1667,29 +1732,25 @@ fn nearest_orthogonal_3x3(m: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
     Some(result)
 }
 
-/// Decode a sphere chart's `(7, p)` decoder at explicit intrinsic unit vectors
-/// `u = [x, y, z]` (on `S²`), evaluating the analytic basis
-/// `[1, x, y, z, xy, yz, xz]` — no sampled-grid nearest-point proxy.
+/// Decode a sphere atom at explicit ambient unit vectors `u = [x, y, z]` (on
+/// `S²`), through the atom's OWN analytic basis — no sampled-grid nearest-point
+/// proxy and no hardcoded basis layout.
 fn sphere_decoded_points_at_units(
-    decoder: ArrayView2<'_, f64>,
+    atom: &SaeManifoldAtom,
     units: &[[f64; 3]],
 ) -> Option<Array2<f64>> {
-    if decoder.nrows() != 7 {
+    let evaluator = ambient_sphere_evaluator(atom)?;
+    let decoder = atom.full_width_decoder();
+    if decoder.nrows() != evaluator.basis_size() {
         return None;
     }
-    let p = decoder.ncols();
-    let mut points = Array2::<f64>::zeros((units.len(), p));
-    for (row, &[x, y, z]) in units.iter().enumerate() {
-        let phi = [1.0, x, y, z, x * y, y * z, x * z];
-        for output in 0..p {
-            let mut value = 0.0;
-            for (basis, &phi_b) in phi.iter().enumerate() {
-                value += phi_b * decoder[[basis, output]];
-            }
-            points[[row, output]] = value;
-        }
-    }
-    Some(points)
+    let coords = Array2::<f64>::from_shape_fn((units.len(), 3), |(row, axis)| units[row][axis]);
+    let (phi, _) = evaluator.evaluate(coords.view()).ok()?;
+    let points = phi.dot(&decoder);
+    points
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(points)
 }
 
 /// A fitted sphere pole-seam transition: the ambient rotation `R` (`b -> a`, so
@@ -1708,14 +1769,25 @@ struct SphereSeamTransition {
     mapped_a_to_b: Array2<f64>,
 }
 
-/// The intrinsic unit vector `[x, y, z]` of a sphere atom's active row, read from
-/// its already-evaluated basis values (`phi = [1, x, y, z, ...]`).
-fn sphere_row_unit(atom: &SaeManifoldAtom, row: usize) -> [f64; 3] {
-    [
-        atom.basis_values[[row, 1]],
-        atom.basis_values[[row, 2]],
-        atom.basis_values[[row, 3]],
-    ]
+/// The ambient unit vector `[x, y, z]` of a sphere atom's row: its assignment
+/// COORDINATE, which under the ambient parameterisation is the point itself.
+///
+/// The coordinate is carried back onto `S²` by the latent manifold's own
+/// `project_point` — the single authority the retraction and the seed path use —
+/// rather than by a local renormalisation, so a line-search trial that left the
+/// sphere by roundoff reads the same unit vector every other consumer reads.
+/// `None` if the block is missing, too narrow, or not on the sphere at all.
+fn sphere_row_unit(term: &SaeManifoldTerm, atom: usize, row: usize) -> Option<[f64; 3]> {
+    let block = term.assignment.coords.get(atom)?;
+    if block.latent_dim() != 3 || row >= block.n_obs() {
+        return None;
+    }
+    let raw = ArrayView1::from(block.row(row));
+    let projected = block.manifold().project_point(raw);
+    if projected.len() != 3 || projected.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    Some([projected[0], projected[1], projected[2]])
 }
 
 /// Apply a `3×3` rotation to a unit vector.
@@ -1727,24 +1799,32 @@ fn rotate_unit(r: &[[f64; 3]; 3], u: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-/// Whether two atoms are both `SphereChartEvaluator` local charts.
+/// Whether two atoms are both ambient sphere atoms — the basis DECLARES the
+/// ambient harmonic geometry (`Sphere` at `latent_dim = 3`, a width that is a
+/// realizable harmonic degree) and the routing coordinate DECLARES the same
+/// sphere it is a point on. Both halves are required: an atom whose basis says
+/// sphere while its coordinate block says something else is exactly the
+/// mis-declaration #2698 was filed for, and it is refused here rather than
+/// silently read as a unit vector.
 fn is_sphere_pair(term: &SaeManifoldTerm, a: usize, b: usize) -> bool {
     let k = term.k_atoms();
     if a >= k || b >= k || a == b {
         return false;
     }
-    let sa = &term.atoms[a];
-    let sb = &term.atoms[b];
-    sa.latent_dim() == 2
-        && sb.latent_dim() == 2
-        && matches!(sa.basis_kind(), SaeAtomBasisKind::Sphere)
-        && matches!(sb.basis_kind(), SaeAtomBasisKind::Sphere)
+    let ambient_sphere = |atom: usize| -> bool {
+        ambient_sphere_degree(&term.atoms[atom]).is_some()
+            && matches!(
+                term.assignment.coords.get(atom).map(|block| block.manifold()),
+                Some(LatentManifold::Sphere { dim: 3 })
+            )
+    };
+    ambient_sphere(a) && ambient_sphere(b)
 }
 
-/// Fit the ambient-rotation seam transition between two sphere charts and
-/// classify pole-vs-regular. `None` unless both atoms are `latent_dim = 2` sphere
-/// charts with a shared ambient dim, non-empty active supports, and an invertible
-/// frame product.
+/// Fit the ambient-rotation seam transition between two sphere atoms and
+/// classify pole-vs-regular. `None` unless both atoms are ambient sphere atoms
+/// (`latent_dim = 3`) with a shared ambient dim, non-empty active supports, and
+/// an invertible frame product.
 fn fit_sphere_seam_transition(
     term: &SaeManifoldTerm,
     a: usize,
@@ -1776,23 +1856,35 @@ fn fit_sphere_seam_transition(
     if rows_a.is_empty() || rows_b.is_empty() {
         return None;
     }
-    // Active latitudes (asin z) of each chart, and each chart's pole mapped into
-    // the OTHER chart's coordinate: pole-vs-regular is decided by whether the
-    // mapped pole falls strictly inside the other chart's active latitude span.
+    // Active latitudes (asin z) of each atom, and each atom's own frame axis
+    // mapped into the OTHER atom's coordinate: pole-vs-regular is decided by
+    // whether the mapped axis falls strictly inside the other atom's active
+    // latitude span. Under the ambient parameterisation the axis is not a
+    // coordinate singularity — it is the point the atom's frame is built around
+    // and, when it is interior to the other's support and vice versa, the point
+    // neither atom's own fit covers alone.
+    let units_a: Vec<[f64; 3]> = rows_a
+        .iter()
+        .map(|&r| sphere_row_unit(term, a, r))
+        .collect::<Option<Vec<_>>>()?;
+    let units_b: Vec<[f64; 3]> = rows_b
+        .iter()
+        .map(|&r| sphere_row_unit(term, b, r))
+        .collect::<Option<Vec<_>>>()?;
     let lat_of = |u: [f64; 3]| -> f64 { u[2].clamp(-1.0, 1.0).asin() };
     let (mut a_lat_lo, mut a_lat_hi) = (f64::INFINITY, f64::NEG_INFINITY);
-    for &r in &rows_a {
-        let lat = lat_of(sphere_row_unit(atom_a, r));
+    for &u in &units_a {
+        let lat = lat_of(u);
         a_lat_lo = a_lat_lo.min(lat);
         a_lat_hi = a_lat_hi.max(lat);
     }
     let (mut b_lat_lo, mut b_lat_hi) = (f64::INFINITY, f64::NEG_INFINITY);
-    for &r in &rows_b {
-        let lat = lat_of(sphere_row_unit(atom_b, r));
+    for &u in &units_b {
+        let lat = lat_of(u);
         b_lat_lo = b_lat_lo.min(lat);
         b_lat_hi = b_lat_hi.max(lat);
     }
-    // B's north pole u_b = [0,0,1] into A's coordinate; A's north pole into B's.
+    // B's frame axis u_b = [0,0,1] into A's coordinate; A's axis into B's.
     let b_pole_in_a = lat_of(rotate_unit(&rotation, [0.0, 0.0, 1.0]));
     // The polar factor is orthogonal by construction, so its exact algebraic
     // inverse is its transpose; no determinant cutoff or second solve exists.
@@ -1811,22 +1903,18 @@ fn fit_sphere_seam_transition(
         AtlasSeamKind::Regular
     };
     // Decoded clouds + rotation-mapped clouds for the equivalence e-value.
-    let units_a: Vec<[f64; 3]> = rows_a.iter().map(|&r| sphere_row_unit(atom_a, r)).collect();
-    let units_b: Vec<[f64; 3]> = rows_b.iter().map(|&r| sphere_row_unit(atom_b, r)).collect();
-    let points_a = sphere_decoded_points_at_units(atom_a.full_width_decoder().view(), &units_a)?;
-    let points_b = sphere_decoded_points_at_units(atom_b.full_width_decoder().view(), &units_b)?;
+    let points_a = sphere_decoded_points_at_units(atom_a, &units_a)?;
+    let points_b = sphere_decoded_points_at_units(atom_b, &units_b)?;
     // B's rows carried into A: rotate u_b -> u_a, decode through A.
     let mapped_b_units: Vec<[f64; 3]> =
         units_b.iter().map(|&u| rotate_unit(&rotation, u)).collect();
-    let mapped_b_to_a =
-        sphere_decoded_points_at_units(atom_a.full_width_decoder().view(), &mapped_b_units)?;
+    let mapped_b_to_a = sphere_decoded_points_at_units(atom_a, &mapped_b_units)?;
     // A's rows carried into B: rotate u_a by R⁻¹ -> u_b, decode through B.
     let mapped_a_units: Vec<[f64; 3]> = units_a
         .iter()
         .map(|&u| rotate_unit(&inv_rotation, u))
         .collect();
-    let mapped_a_to_b =
-        sphere_decoded_points_at_units(atom_b.full_width_decoder().view(), &mapped_a_units)?;
+    let mapped_a_to_b = sphere_decoded_points_at_units(atom_b, &mapped_a_units)?;
     Some(SphereSeamTransition {
         rotation,
         seam_kind,
@@ -4125,6 +4213,11 @@ fn fit_topology_candidate_at_fixed_metric(
     Ok(TopologyAutoFitEvidence {
         topology_name: spec.kind.display_name(),
         raw_reml,
+        // #2729 — the score's own resolution, accumulated by the closed-form
+        // evaluator that built it (log-determinant magnitudes differenced, and
+        // the cancellation that formed the profiled deviance), NOT retro-fitted
+        // here. Carried so the race can tell a decision from arithmetic debris.
+        raw_reml_roundoff: reml_fit.reml_score_roundoff,
         // The closed-form REML score is ALREADY restricted to the penalty's range
         // complement (rank-aware: `log|λS|₊` over the non-null directions, the null
         // space integrated out), so the TK null-space normalizer must NOT fire
@@ -4712,9 +4805,40 @@ fn race_intrinsic_coords(
 /// `tk_score`) first, so no consumer has to re-parse a display string.
 struct TopologyRaceOutcome {
     /// Every candidate that produced selectable evidence, best first.
-    ranking: Vec<(AutoTopologyKind, f64)>,
+    ranking: Vec<RankedTopology>,
     fit: TopologyRaceFit,
     tk_score: f64,
+}
+
+/// One ranked candidate: its kind, its evidence score, and the RESOLUTION of
+/// that score (#2729).
+///
+/// Score and resolution travel together for the same reason a measurement and
+/// its error bar do: a consumer holding only the score cannot tell a margin
+/// from the roundoff of the arithmetic that produced it, and will report the
+/// latter as the former.
+#[derive(Clone, Copy, Debug)]
+struct RankedTopology {
+    kind: AutoTopologyKind,
+    tk_score: f64,
+    /// Forward-error bound on `tk_score`; `None` when its producer established
+    /// none, which forbids certifying ANY margin involving this candidate.
+    tk_score_resolution: Option<f64>,
+}
+
+impl RankedTopology {
+    /// Is this candidate resolvably better than `other`? The band is the SUM of
+    /// the two resolutions — the error of a difference is the sum of the errors
+    /// of what is differenced — so no tolerance is chosen anywhere.
+    fn is_resolvably_better_than(&self, other: &Self) -> bool {
+        let (Some(mine), Some(theirs)) = (self.tk_score_resolution, other.tk_score_resolution)
+        else {
+            return false;
+        };
+        let band = mine + theirs;
+        let margin = other.tk_score - self.tk_score;
+        band.is_finite() && margin.is_finite() && margin > band
+    }
 }
 
 fn race_spec_set(
@@ -4811,7 +4935,7 @@ fn race_spec_set(
     // selector emits that its own parser cannot read is a contract break in
     // gam-solve, not something to paper over with a string match, so it is
     // returned as an error rather than silently dropped from the ranking.
-    let mut ranking: Vec<(AutoTopologyKind, f64)> = Vec::with_capacity(ranked.ranked.len());
+    let mut ranking: Vec<RankedTopology> = Vec::with_capacity(ranked.ranked.len());
     for entry in &ranked.ranked {
         let kind = AutoTopologyKind::parse(&entry.topology_name).map_err(|error| {
             format!(
@@ -4820,13 +4944,22 @@ fn race_spec_set(
                 entry.topology_name
             )
         })?;
-        ranking.push((kind, entry.tk_score));
+        ranking.push(RankedTopology {
+            kind,
+            tk_score: entry.tk_score,
+            tk_score_resolution: entry.tk_score_resolution,
+        });
     }
     let outcome = TopologyRaceOutcome {
         ranking,
         fit: winner.fit_handle.clone(),
         tk_score: winner.tk_score,
     };
+    // #2729 — say out loud when the race did NOT decide. The pipeline still gets
+    // a deterministic fit (something downstream must be seeded), but a margin
+    // inside the criterion's own resolution is arithmetic debris, and a channel
+    // that only ever reports a winner turns that debris into a verdict.
+    log_unresolved_topology_race(&outcome.ranking);
     // Read the RETAINED ranking, not the local, so the field the outcome carries
     // is the one the agreement log prices -- a retained copy no production path
     // reads is dead by construction (#2280 landed it without its consumer).
@@ -4849,36 +4982,71 @@ fn race_spec_set(
 /// charts measured. A disagreement is logged at `info` precisely because it is
 /// the interesting case: it is either a defect in the readout or a topology the
 /// evidence cannot see.
-fn log_atlas_evidence_agreement(
-    atlas: Option<&AtlasTopologyReadout>,
-    ranking: &[(AutoTopologyKind, f64)],
-) {
+/// #2729 — the third verdict this channel used to be unable to express: TIE.
+///
+/// AGREE and DISAGREE both assert that the evidence RESOLVED an ordering. When
+/// the winner's margin over the atlas-named candidate is inside the combined
+/// resolution of the two scores, neither assertion is available: the charts and
+/// the evidence did not agree, and the evidence did not reject the charts — the
+/// race simply could not tell the two candidates apart. Reporting that as
+/// agreement (margin `0.0`, "the atlas named the winner") or as disagreement
+/// (a non-zero margin quoted to six places) publishes roundoff as calibration
+/// data, which is worse than publishing nothing.
+fn log_atlas_evidence_agreement(atlas: Option<&AtlasTopologyReadout>, ranking: &[RankedTopology]) {
     let Some(atlas) = atlas else {
         return;
     };
     let Some(measured) = atlas.observed_manifold().and_then(observed_kind_to_auto_topology) else {
         return;
     };
-    let Some((winner_kind, winner_score)) = ranking.first().copied() else {
+    let Some(winner) = ranking.first().copied() else {
         return;
     };
+    let winner_kind = winner.kind;
+    let winner_score = winner.tk_score;
+    let measured_entry = ranking.iter().copied().find(|entry| entry.kind == measured);
+    // Resolution first: a verdict is only reportable once the comparison that
+    // produced it is known to have digits. This ordering is the fix — the old
+    // channel branched on kind equality and therefore could not reach the
+    // question at all.
+    if let Some(measured_entry) = measured_entry
+        && measured_entry.kind != winner_kind
+        && !winner.is_resolvably_better_than(&measured_entry)
+    {
+        log::info!(
+            "#2729 atlas/evidence TIE: the charts measured {measured:?} (tk \
+             {:.17e}, resolution {:?}) and the race ranked {winner_kind:?} first (tk \
+             {winner_score:.17e}, resolution {:?}); the {:.6e} gap is INSIDE the combined \
+             resolution of the two scores, so the race did not decide between them and this \
+             race contributes NO calibration datum either way",
+            measured_entry.tk_score,
+            measured_entry.tk_score_resolution,
+            winner.tk_score_resolution,
+            measured_entry.tk_score - winner_score
+        );
+        return;
+    }
     if measured == winner_kind {
+        // Even a kind-identical winner is only an agreement if the race
+        // resolved it against the field; `log_unresolved_topology_race` has
+        // already reported the unresolved case, and a tie between OTHER
+        // candidates does not weaken this datum, so the AGREE branch stands.
         log::debug!(
             "#2280 atlas/evidence AGREE: the charts measured {measured:?} and the REML race \
              independently ranked it first (tk {winner_score:.6})"
         );
         return;
     }
-    match ranking
-        .iter()
-        .find(|(kind, _)| *kind == measured)
-        .map(|(_, score)| *score)
-    {
-        Some(measured_score) => log::info!(
+    match measured_entry {
+        Some(measured_entry) => log::info!(
             "#2280 atlas/evidence DISAGREE: the charts measured {measured:?} (tk \
-             {measured_score:.6}) but the REML race ranked {winner_kind:?} first (tk \
-             {winner_score:.6}); evidence margin {:.6} against the measured manifold",
-            measured_score - winner_score
+             {:.6}) but the REML race ranked {winner_kind:?} first (tk \
+             {winner_score:.6}); evidence margin {:.6} against the measured manifold, \
+             resolved above the {:.6e} combined resolution of the two scores",
+            measured_entry.tk_score,
+            measured_entry.tk_score - winner_score,
+            measured_entry.tk_score_resolution.unwrap_or(f64::NAN)
+                + winner.tk_score_resolution.unwrap_or(f64::NAN)
         ),
         None => log::info!(
             "#2280 atlas/evidence DISAGREE: the charts measured {measured:?}, which this race \
@@ -4886,6 +5054,46 @@ fn log_atlas_evidence_agreement(
              {winner_score:.6})"
         ),
     }
+}
+
+/// #2729 — report, per race, every candidate the winner is NOT resolvably
+/// better than.
+///
+/// The selector still returns a deterministic winner because something
+/// downstream must be seeded with one fit; what it must never do is let that
+/// determinism be mistaken for a decision. A birth target lying in the null
+/// space of every candidate's penalty collapses them all onto the same model,
+/// and the scores then differ by the last few bits of their own summation.
+fn log_unresolved_topology_race(ranking: &[RankedTopology]) {
+    let Some(winner) = ranking.first().copied() else {
+        return;
+    };
+    let tied: Vec<&RankedTopology> = ranking[1..]
+        .iter()
+        .filter(|entry| !winner.is_resolvably_better_than(entry))
+        .collect();
+    if tied.is_empty() {
+        return;
+    }
+    log::info!(
+        "#2729 topology race UNRESOLVED: {:?} (tk {:.17e}, resolution {:?}) is not resolvably \
+         better than {:?}; every listed gap is inside the combined resolution of the two scores, \
+         so the ordering among them is set by floating-point roundoff, not by the data. The \
+         returned fit is a deterministic pick among indistinguishable candidates, NOT an \
+         evidence verdict.",
+        winner.kind,
+        winner.tk_score,
+        winner.tk_score_resolution,
+        tied.iter()
+            .map(|entry| format!(
+                "{:?} (tk {:.17e}, resolution {:?}, gap {:.6e})",
+                entry.kind,
+                entry.tk_score,
+                entry.tk_score_resolution,
+                entry.tk_score - winner.tk_score
+            ))
+            .collect::<Vec<_>>()
+    );
 }
 
 /// A primary-atom topology choice discovered by the fit-entry evidence race
@@ -8402,7 +8610,7 @@ mod tests_atlas_prior_2280 {
                 None,
             )
             .expect("the planted zoo must not error the race")
-            .and_then(|outcome| outcome.ranking.first().map(|(kind, _)| *kind));
+            .and_then(|outcome| outcome.ranking.first().map(|entry| entry.kind));
 
             let atlas_right = atlas_kind.is_some_and(|kind| names_truth(kind, *truth));
             let menu_right = menu_kind.is_some_and(|kind| names_truth(kind, *truth));

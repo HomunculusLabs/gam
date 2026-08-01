@@ -1244,6 +1244,10 @@ fn gaussian_reml_fit_state_from_pydict(
         reml_score: get(state, "reml_score")?
             .extract::<f64>()
             .map_err(|err| err.to_string())?,
+        // #2729: the serialized forward state does not carry the evaluator's
+        // accumulated score roundoff, so this reconstruction says so rather
+        // than fabricating a bound it never measured.
+        reml_score_roundoff: None,
         reml_grad_lambda: get(state, "reml_grad_lambda")?
             .extract::<f64>()
             .map_err(|err| err.to_string())?,
@@ -1419,6 +1423,8 @@ fn batched_gaussian_reml_fits_from_pydict(
             coefficients: coefficients.slice(s![b, .., ..]).to_owned(),
             fitted: fitted.slice(s![start..end, ..]).to_owned(),
             reml_score: reml_scores[b],
+            // #2729: not carried across the FFI boundary; see above.
+            reml_score_roundoff: None,
             reml_grad_lambda: reml_grad_lambdas[b],
             reml_hess_lambda: reml_hess_lambdas[b],
             reml_grad_rho: reml_grad_rhos[b],

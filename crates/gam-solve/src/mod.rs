@@ -101,7 +101,8 @@ pub use topology_selector::{
     fit_free_cluster_rung, fit_mixture_rung, fit_ring_of_clusters_rung, fit_union_candidate,
     fit_union_rung, mixture_density_provider, parse_union_name, ring_of_clusters_density_provider,
     run_topology_race_parallel, select_topology_candidate_lifecycle, select_topology_with_fit,
-    select_topology_with_fit_parallel, tk_normalized_score, union_density_provider,
+    select_topology_with_fit_parallel, tk_normalized_score, tk_normalized_score_with_resolution,
+    topology_scores_are_resolvably_ordered, union_density_provider,
 };
 
 /// Process-wide counter of smoothing-corrections that took the sigma-cubature
