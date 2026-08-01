@@ -1391,13 +1391,18 @@ pub fn outer_row_weights_by_index(
 /// `map_dim_err` is called with `(beta_len, delta_len, expected_ncols)` when the
 /// step dimensions disagree with the constraint matrix. `map_violation_err` is
 /// called with `(row, slack)` when the current `beta` already violates a
-/// constraint row (slack below `-1e-10`).
+/// constraint row (slack below `-FEASIBLE_STEP_VIOLATION_TOL`).
+/// `map_nonfinite_err` is called with `(row, quantity, value)` when a row's
+/// slack or drift is not finite; naming the quantity keeps that refusal from
+/// being reported as the violation refusal, which is a different condition
+/// (gam#2721).
 pub fn feasible_step_fraction<E>(
     constraints: &gam_problem::LinearInequalityConstraints,
     beta: &Array1<f64>,
     direction: &Array1<f64>,
     map_dim_err: impl Fn(usize, usize, usize) -> E,
     map_violation_err: impl Fn(usize, f64) -> E,
+    map_nonfinite_err: impl Fn(usize, &str, f64) -> E,
 ) -> Result<f64, E> {
     if beta.len() != constraints.a.ncols() || direction.len() != constraints.a.ncols() {
         return Err(map_dim_err(
@@ -1426,6 +1431,30 @@ pub fn feasible_step_fraction<E>(
     for row in 0..constraints.a.nrows() {
         let a_row = constraints.a.row(row);
         let raw_slack = a_row.dot(beta) - constraints.b[row];
+        // A NON-FINITE ROW IS NOT A FEASIBLE ROW (gam#2721). Both of the tests
+        // that follow are FALSE for NaN -- `raw_slack < -tol` and `drift < 0.0`
+        // -- so a non-finite slack or direction component contributed nothing to
+        // the minimum and this function returned `alpha = 1.0`, i.e. "take the
+        // whole step", for a step that is not a number. The caller
+        // (`compute_joint_feasibility_alpha`) rejects only
+        // `!alpha.is_finite() || alpha <= 0.0`, and `1.0` is neither, so the step
+        // was accepted at full length and the poison surfaced later as a
+        // degenerate Hessian or a non-finite objective, attributed to whatever
+        // touched it next rather than to the step that carried it.
+        //
+        // The finiteness checks elsewhere on this path -- `qp_step_norm.is_finite()`,
+        // `alpha_trust.is_finite()`, the `.filter(|n| n.is_finite())` folds over the
+        // block metric norms -- do NOT protect this: every one of them FILTERS,
+        // removing the non-finite value from its own computation and passing it
+        // downstream unchanged. Filtering is local hygiene; only a refusal is a
+        // barrier, and this is the last one before the step is accepted.
+        //
+        // Refusing is strictly conservative: it can only turn an unchecked full
+        // step into a diagnosable error, and there is no regime in which
+        // certifying a non-finite step is preferable.
+        if !raw_slack.is_finite() {
+            return Err(map_nonfinite_err(row, "slack", raw_slack));
+        }
         if raw_slack < -FEASIBLE_STEP_VIOLATION_TOL {
             return Err(map_violation_err(row, raw_slack));
         }
@@ -1433,6 +1462,9 @@ pub fn feasible_step_fraction<E>(
         // produce a spurious negative/zero step fraction below.
         let slack = raw_slack.max(0.0);
         let drift = a_row.dot(direction);
+        if !drift.is_finite() {
+            return Err(map_nonfinite_err(row, "drift", drift));
+        }
         if drift < 0.0 {
             alpha = alpha.min((slack / -drift).clamp(0.0, 1.0));
         }
@@ -1755,6 +1787,52 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feasible_step_fraction_refuses_a_non_finite_direction_2721() {
+        let constraints = gam_problem::LinearInequalityConstraints::new(
+            ndarray::array![[1.0, 0.0], [0.0, 1.0]],
+            ndarray::array![0.0, 0.0],
+        )
+        .expect("constraint construction");
+        let beta = ndarray::array![1.0, 1.0];
+        // Positive control: a finite BINDING direction is evaluated and clipped,
+        // so the refusal below is about finiteness and not about this fixture
+        // failing to reach the rule at all.
+        let bounded = feasible_step_fraction(
+            &constraints,
+            &beta,
+            &ndarray::array![-2.0, 0.0],
+            |beta_len, delta_len, expected| {
+                format!("dimension {beta_len} {delta_len} {expected}")
+            },
+            |row, slack| format!("violation at row {row}: slack={slack}"),
+            |row, quantity, value| format!("nonfinite at row {row}: {quantity}={value}"),
+        )
+        .expect("a finite direction must be evaluated");
+        assert!(
+            bounded > 0.0 && bounded < 1.0,
+            "a binding finite direction should clip the step, got {bounded}"
+        );
+        // The defect (gam#2721): `drift < 0.0` is false for NaN, so the row
+        // contributed nothing to the minimum and this returned Ok(1.0) -- a
+        // non-finite step certified as fully feasible.
+        let message = feasible_step_fraction(
+            &constraints,
+            &beta,
+            &ndarray::array![f64::NAN, 0.0],
+            |beta_len, delta_len, expected| {
+                format!("dimension {beta_len} {delta_len} {expected}")
+            },
+            |row, slack| format!("violation at row {row}: slack={slack}"),
+            |row, quantity, value| format!("nonfinite at row {row}: {quantity}={value}"),
+        )
+        .expect_err("a non-finite direction component must be refused");
+        assert!(
+            message.contains("nonfinite") && message.contains("drift"),
+            "the refusal must name the non-finite quantity, got: {message}"
+        );
+    }
 
     #[test]
     fn auto_outer_score_subsample_skips_small_problems() {

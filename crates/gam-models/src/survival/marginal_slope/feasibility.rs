@@ -33,6 +33,14 @@ impl SurvivalMarginalSlopeFamily {
                 }
                 .into()
             },
+            |row, quantity, value| {
+                SurvivalMarginalSlopeError::MonotonicityViolation {
+                    reason: format!(
+                        "survival marginal-slope time block has a non-finite {quantity} at derivative-guard row {row}: value={value:.3e}"
+                    ),
+                }
+                .into()
+            },
         )
         .map(Some)
     }

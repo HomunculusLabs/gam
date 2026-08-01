@@ -2646,6 +2646,35 @@ fn time_block_feasible_step_accepts_zero_beta_when_offset_encodes_guard() {
 }
 
 #[test]
+fn max_feasible_link_wiggle_step_refuses_a_non_finite_direction_2721() {
+    let mut family = survival_exact_newton_test_family();
+    family.x_link_wiggle = Some(DesignMatrix::Dense(DenseDesignMatrix::from(array![
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [1.0, 1.0]
+    ])));
+    let beta = array![1.0, 1.0];
+    // Positive control: a finite BINDING direction is evaluated and clipped.
+    let bounded = family
+        .max_feasible_link_wiggle_step(&beta, &array![-2.0, 0.0])
+        .expect("a finite direction must be evaluated")
+        .expect("the linkwiggle step fraction is always reported");
+    assert!(
+        bounded > 0.0 && bounded < 1.0,
+        "a binding finite direction should clip the step, got {bounded}"
+    );
+    // The defect (gam#2721): NaN fails `drift < 0.0`, so this returned Ok(1.0)
+    // -- a step that is not a number, certified as fully feasible.
+    let message = family
+        .max_feasible_link_wiggle_step(&beta, &array![f64::NAN, 0.0])
+        .expect_err("a non-finite direction component must be refused");
+    assert!(
+        message.contains("non-finite"),
+        "the refusal must name the non-finite component, got: {message}"
+    );
+}
+
+#[test]
 fn linkwiggle_block_post_update_leaves_beta_unchanged() {
     let mut family = survival_exact_newton_test_family();
     family.x_link_wiggle = Some(DesignMatrix::Dense(DenseDesignMatrix::from(array![

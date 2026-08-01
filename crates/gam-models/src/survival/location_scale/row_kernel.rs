@@ -3533,6 +3533,11 @@ impl SurvivalLocationScaleFamily {
                     "survival location-scale current time block violates linear constraint at row {row}: slack={slack:.3e}"
                 ) }.into()
             },
+            |row, quantity, value| {
+                SurvivalLocationScaleError::ConstraintViolation { reason: format!(
+                    "survival location-scale time block has a non-finite {quantity} at linear constraint row {row}: value={value:.3e}"
+                ) }.into()
+            },
         )
         .map(Some)
     }
@@ -3555,12 +3560,29 @@ impl SurvivalLocationScaleFamily {
         let mut alpha = 1.0f64;
         for j in 0..beta.len() {
             let slack = beta[j];
+            // Same non-finite refusal as the shared `feasible_step_fraction`
+            // rule (gam#2721). These are two implementations of ONE rule and
+            // they had already diverged here: this one skipped a NaN silently
+            // (`slack < -tol` and `drift < 0.0` are both false for NaN) and
+            // returned `alpha = 1.0`, while the post-update validator for this
+            // very block (`post_update_block_beta`) rejects a non-finite
+            // coefficient outright. Unified onto the stricter behaviour.
+            if !slack.is_finite() {
+                return Err(SurvivalLocationScaleError::ConstraintViolation { reason: format!(
+                    "survival location-scale linkwiggle block has a non-finite coefficient {j}: beta={slack:.3e}"
+                ) }.into());
+            }
             if slack < -CONSTRAINT_NONNEGATIVITY_REL_TOL {
                 return Err(SurvivalLocationScaleError::ConstraintViolation { reason: format!(
                     "survival location-scale current linkwiggle block violates nonnegativity at coefficient {j}: beta={slack:.3e}"
                 ) }.into());
             }
             let drift = delta[j];
+            if !drift.is_finite() {
+                return Err(SurvivalLocationScaleError::ConstraintViolation { reason: format!(
+                    "survival location-scale linkwiggle step has a non-finite direction component {j}: delta={drift:.3e}"
+                ) }.into());
+            }
             if drift < 0.0 {
                 alpha = alpha.min((slack / -drift).clamp(0.0, 1.0));
             }
