@@ -786,49 +786,281 @@ fn zz_2691_collapsed_chart_is_refused_by_the_production_entry() {
 // `outer_objective::periodic_ard_chart_resolution_upper`, installed on BOTH
 // exits of `outer_domain_upper_bound`, which IS the hook the SAE outer search
 // consults (`fit_outer_stage_to_boundary` → `OuterProblem::run` →
-// `rho_optimizer::run::install_objective_domain`). The two tests below gate it:
-// the first on the MECHANISM (the face's value and where its inputs come from),
-// the second on the PROPERTY, measured: every precision the face excludes has a
-// measurably unresolvable chart, and the seeded entry's does not.
+// `rho_optimizer::run::install_objective_domain`). Three tests below gate it:
+// the MECHANISM (the face's value moves with the data geometry it is derived
+// from), the PROPERTY (the face separates precisions this fixture measurably
+// survives from ones it does not), and a BOUNDED σ witness that returns an
+// answer at every σ instead of nothing at the σ that matters.
 
-/// #2691 MECHANISM — the ARD chart coordinate's domain face must be the CHART's
-/// own resolution limit, not binary64's normal range.
-///
-/// At the parent commit `SaeManifoldRho::flat_domain_upper_bound` handed
-/// `gam_problem::LOG_STRENGTH_MAX = 700` to every outer
-/// coordinate — a floating-point representability policy by that module's own
-/// doc — and the generic `RHO_BOUND = 30` box was the only thing standing
-/// between the ρ search and `α = e^700` on a quantity that deletes the chart
-/// nine orders lower.
-///
-/// The face installed instead is `log α ≤ 2·(ln 2n − ln P)`, i.e. the precision
-/// whose own concentration scale `σ_u = 1/(P√α)` equals the occupancy
-/// adjudicator's resolution floor `σ_floor = 1/(2n)`
-/// (`coordinate_fidelity::classify_occupancy`). This test pins BOTH halves:
-///
-/// * REJECT — the face is finite, strictly below `RHO_BOUND` and below
-///   `LOG_STRENGTH_MAX`, so it actually binds and the nine orders are gone;
-/// * ACCEPT — the box is not degenerate (it still admits the seeded entry), and
-///   the face MOVES WITH `n` by exactly the `σ_floor` law: doubling the row
-///   count raises it by `2·ln 2`. A hand-picked constant cannot do that, so
-///   this half is what distinguishes a derived face from a laundered literal.
-#[test]
-fn zz_2691_the_ard_domain_face_is_the_chart_resolution_not_binary64() {
+/// Build the #2691 K=1 periodic objective for a planted circle and return
+/// `(installed ARD face, seeded ARD entry, chart period)`. The face is READ BACK
+/// OUT of `outer_domain_upper_bound()`, so it is what the search is handed, not
+/// a number recomputed alongside it.
+fn ard_face_for(n: usize, p: usize, radius: f64, sigma: f64) -> (f64, f64, f64) {
     use gam_solve::rho_optimizer::OuterObjective;
+    let cloud = planted_circle_cloud(n, p, radius, sigma);
+    let z = &cloud.z;
+    let (term, _disp) = build_term(z.view(), 1, Topo::Circle, AssignmentMode::softmax(1.0));
+    let period = term.assignment.coords[0].effective_axis_periods()[0]
+        .expect("the circle chart axis must carry a period");
+    // Canonicalize the flat layout against the term's assignment family FIRST —
+    // exactly as `fit_outer_stage_to_boundary` does — so the flat index read here
+    // is the one the objective uses (a K=1 softmax dictionary has no
+    // sparse/router coordinate, which shifts the layout).
+    let rho = SaeManifoldRho::new(
+        1.0e-3_f64.ln(),
+        1.0e-3_f64.ln(),
+        vec![array![1.0e-3_f64.ln()]; 1],
+    )
+    .for_assignment(term.assignment.mode);
+    let ard_index = rho.ard_flat_index(0, 0);
+    let seed = rho.to_flat()[ard_index];
+    let objective =
+        SaeManifoldOuterObjective::new(term, z.clone(), None, rho, 40, 1.0, 1.0e-6, 1.0e-6);
+    let upper = objective
+        .outer_domain_upper_bound()
+        .expect("the SAE outer domain face must be constructible")
+        .expect("the SAE outer objective declares a typed upper face");
+    (upper[ard_index], seed, period)
+}
 
-    // The period of the canonical `d=1` circle chart, read off the term rather
-    // than assumed, so the assertion below is the derivation and not a copy of
-    // one number into two places.
-    let face_at = |n: usize| -> (f64, f64, f64) {
-        let cloud = planted_circle_cloud(n, 8, 2.086, 1.5);
+/// #2691 MECHANISM — the ARD chart coordinate's domain face must be denominated
+/// in this fixture's own geometry, not in binary64's normal range.
+///
+/// At the parent of `669d59532` the face was
+/// `gam_problem::LOG_STRENGTH_MAX = 700`, a floating-point representability
+/// policy by its own module doc, and the generic `RHO_BOUND = 30` was the only
+/// thing standing between the ρ search and `α = e^700`. The installed face is
+/// the MINIMUM of two derived quantities: the chart-resolution limit
+/// `2·(ln 2n − ln P)` and the data-curvature-matching precision
+/// `ln(max_row w·‖∂(gated decode)/∂t‖²)`.
+///
+/// The half of this that cannot be faked is the INVARIANCE. The binding face on
+/// this fixture is the curvature one, and the observed latent curvature scales
+/// as `‖∂z/∂t‖² ∝ scale²` — so **doubling the planted cloud must raise the face
+/// by exactly `2·ln 2`**, and nothing else about the call changes. A hand-picked constant cannot move; a constant "derived" from
+/// another constant cannot move with the DATA. That assertion is the one that
+/// would fail first if anyone replaced this with a literal.
+///
+/// Both one-sided halves are pinned too: the face must bind (strictly below
+/// `RHO_BOUND` and `LOG_STRENGTH_MAX`) and must still admit the seeded entry.
+#[test]
+fn zz_2691_the_ard_domain_face_moves_with_the_data_not_with_binary64() {
+    let n: usize = 70;
+    let (face_r1, seed, period) = ard_face_for(n, 8, 2.086, 0.352);
+    // The WHOLE cloud is scaled, signal and noise together: the decoder is a
+    // ridge-LSQ fit of `z`, linear in `z` at fixed basis, and the PCA-seeded
+    // chart coordinate is scale-invariant — so doubling `z` doubles the decoder
+    // exactly. Scaling the radius alone would not double `z` and the invariance
+    // below would be approximate for a reason that has nothing to do with the
+    // face.
+    let (face_r2, _, period_2) = ard_face_for(n, 8, 2.0 * 2.086, 2.0 * 0.352);
+    assert_eq!(period, period_2, "the chart period must not depend on scale");
+
+    let resolution_face = 2.0 * ((2.0 * n as f64) / period).ln();
+    eprintln!(
+        "[2691-face] period={period} seed_log_ard={seed:.4} face(r=2.086)={face_r1:.6} \
+         face(r=4.172)={face_r2:.6} resolution_face={resolution_face:.6} RHO_BOUND={} \
+         LOG_STRENGTH_MAX={}",
+        gam_solve::estimate::RHO_BOUND,
+        gam_problem::LOG_STRENGTH_MAX,
+    );
+
+    // REJECT half — it binds, and the representability constant is gone.
+    assert!(
+        face_r1 < gam_solve::estimate::RHO_BOUND,
+        "#2691: a face at or above the generic ρ box ({}) constrains nothing; got {face_r1:.6}",
+        gam_solve::estimate::RHO_BOUND
+    );
+    assert!(
+        face_r1 < gam_problem::LOG_STRENGTH_MAX,
+        "#2691: the ARD face must not be the binary64 representability policy ({}); got {face_r1:.6}",
+        gam_problem::LOG_STRENGTH_MAX
+    );
+    // The face is the MINIMUM of the two derived faces, so it can never exceed
+    // the resolution one.
+    assert!(
+        face_r1 <= resolution_face + 1.0e-12,
+        "#2691: the installed face {face_r1:.6} must not exceed the chart-resolution face {resolution_face:.6}"
+    );
+
+    // ACCEPT half — the box is not degenerate at the seeded entry.
+    assert!(
+        seed < face_r1,
+        "#2691: the face must still admit the seeded ARD entry {seed:.6}; got {face_r1:.6}"
+    );
+
+    // THE INVARIANCE. Observed latent curvature ∝ radius², so log-face moves by
+    // exactly 2·ln 2 when the planted radius doubles.
+    let delta = face_r2 - face_r1;
+    let expected = 2.0 * std::f64::consts::LN_2;
+    assert!(
+        (delta - expected).abs() <= 1.0e-6 * expected,
+        "#2691: doubling the planted cloud must raise the data-curvature face by 2·ln 2 = {expected:.6}; got {delta:.6}. A face that does not move with the data is a constant, not a derivation (and a face still pinned to the chart-resolution limit would not move either — resolution_face={resolution_face:.6})"
+    );
+}
+
+/// #2691 PROPERTY — every precision the face EXCLUDES must be one this
+/// fixture's chart measurably cannot carry, and the healthiest precision must be
+/// ADMITTED. Plus the residual gap, located rather than asserted away.
+///
+/// This is deliberately the bar a NECESSARY face can carry, and no more. The
+/// first version of this fix used only the chart-resolution face and the
+/// fixture's ladder refuted it — circular recovery R² fell `0.969 → 0.037`
+/// between `α = 1e1` and `α = 1e2`, two orders below that face. The
+/// data-curvature face added since is strictly tighter, and this test pins the
+/// two directions that are actually claimable:
+///
+/// * REJECT — no rung OUTSIDE the face may be healthy (`R² > 0.9`). A face that
+///   excludes a working precision is too tight and this catches it.
+/// * ACCEPT — the healthiest rung on the ladder must be INSIDE the face.
+///
+/// It does NOT assert that everything inside is healthy, because measured, it is
+/// not: see the printed `[2691-gap]` line, which locates the transition on a
+/// fine ladder and reports how far the installed face sits above it. That gap is
+/// recorded as a number in the test output rather than hidden behind a bar
+/// chosen to pass, and closing it needs a quantity the system owns and that
+/// nobody has identified yet — inventing one is the laundered-literal failure
+/// this issue already documented.
+///
+/// Note on instrument choice, which #2691 is itself about: `distinct_wrapped`
+/// stays `70/70` out to `α = 1e4` while circular variance is `6.4e-4`, so a
+/// "more than one resolved point" bar passes a dead chart. A COUNT is not a
+/// resolution measure. Recovery R² is.
+#[test]
+fn zz_2691_the_face_excludes_every_precision_this_chart_cannot_carry() {
+    let n: usize = 70;
+    let (face, seed, period) = ard_face_for(n, 8, 2.086, 0.352);
+    let resolution_face = 2.0 * ((2.0 * n as f64) / period).ln();
+    let cloud = planted_circle_cloud(n, 8, 2.086, 0.352);
+    let z = &cloud.z;
+
+    let recovery_at = |log_ard: f64| -> Option<f64> {
+        let (mut term, _disp) = build_term(z.view(), 1, Topo::Circle, AssignmentMode::softmax(1.0));
+        let mut rho =
+            SaeManifoldRho::new(1.0e-3_f64.ln(), 1.0e-3_f64.ln(), vec![array![log_ard]; 1]);
+        term.run_joint_fit_arrow_schur(z.view(), &mut rho, None, 40, 1.0, 1.0e-6, 1.0e-6)
+            .ok()?;
+        let coords = term.assignment.coords[0].as_matrix();
+        let coord: Array1<f64> = coords.column(0).to_owned();
+        Some(circular_recovery_r2(&coord, &cloud.theta))
+    };
+
+    // A FINE ladder through the measured transition, so the gap is located
+    // rather than bracketed by two decades.
+    let ladder: Vec<f64> = vec![
+        1.0e-3, 1.0e0, 1.0e1, 2.0e1, 4.0e1, 8.0e1, 1.6e2, 3.2e2, 1.0e3, 1.0e4, 1.0e6, 1.0e9,
+    ];
+    let mut healthy_outside: Vec<f64> = Vec::new();
+    let mut best: Option<(f64, f64)> = None;
+    let mut last_healthy: Option<f64> = None;
+    let mut first_dead: Option<f64> = None;
+    eprintln!(
+        "[2691-sep] face={face:.4} resolution_face={resolution_face:.4} seed={seed:.4}"
+    );
+    for alpha in ladder {
+        let log_ard = alpha.ln();
+        let Some(r2) = recovery_at(log_ard) else {
+            eprintln!("[2691-sep] alpha={alpha:.3e} log_ard={log_ard:.3} REFUSED");
+            continue;
+        };
+        let inside = log_ard <= face;
+        eprintln!(
+            "[2691-sep] alpha={alpha:.3e} log_ard={log_ard:.3} inside={inside} recovery_R2={r2:.4}"
+        );
+        if best.is_none_or(|(_, b)| r2 > b) {
+            best = Some((log_ard, r2));
+        }
+        if r2 > 0.9 {
+            last_healthy = Some(log_ard);
+            if !inside {
+                healthy_outside.push(log_ard);
+            }
+        } else if r2 < 0.5 && first_dead.is_none() {
+            first_dead = Some(log_ard);
+        }
+    }
+
+    let (best_log_ard, best_r2) = best.expect("the ladder must fit at least one rung");
+    let transition = first_dead.expect(
+        "the ladder must reach a dead rung (R² < 0.5) or it cannot say where the chart fails",
+    );
+    eprintln!(
+        "[2691-gap] last_healthy_log_ard={:?} first_dead_log_ard={transition:.4} \
+         installed_face={face:.4} face_minus_first_dead={:.4} \
+         resolution_face_minus_first_dead={:.4}",
+        last_healthy,
+        face - transition,
+        resolution_face - transition
+    );
+
+    // ACCEPT — the healthiest precision must be reachable.
+    assert!(
+        best_log_ard <= face,
+        "#2691 ACCEPT half: the face {face:.4} excludes the healthiest precision on the ladder \
+         (log_ard {best_log_ard:.4}, recovery R² {best_r2:.4}) — the face is too tight"
+    );
+    assert!(
+        seed < face,
+        "#2691: the face must still admit the seeded ARD entry {seed:.6}; got {face:.6}"
+    );
+
+    // REJECT — nothing the face throws away may be a working chart.
+    assert!(
+        healthy_outside.is_empty(),
+        "#2691 REJECT half: the face {face:.4} excludes precisions this chart SURVIVES \
+         (recovery R² > 0.9) at log_ard {healthy_outside:?} — the face is too tight"
+    );
+
+    // The installed face must be strictly tighter than the chart-resolution face
+    // alone, which the ladder measured admitting three dead rungs. This is the
+    // part of the gap the data-curvature face actually closes; the rest is
+    // reported on the `[2691-gap]` line above and is NOT claimed here.
+    assert!(
+        face < resolution_face,
+        "#2691: the data-curvature face must bind on this fixture — installed {face:.4} is not \
+         below the chart-resolution face {resolution_face:.4}, so the two-order gap the ladder \
+         measured is untouched"
+    );
+}
+
+/// #2691 — the σ witness, BOUNDED BY ITERATIONS rather than by the clock.
+///
+/// The first attempt at this drove the full production entry at σ = 1.5 with an
+/// unbounded outer budget. Measured: base refused `DegenerateChart` at 659 s;
+/// with the box corrected it was still running at 3600 s and was killed with no
+/// `test result:` line. **A timeout measured nothing**, and leaving it there
+/// would mean the regime with the worst behaviour is the one with no instrument
+/// — a fix and a hang produce the same absence.
+///
+/// So the budget is `with_max_iter`, not a wall clock: every σ returns a
+/// terminal ρ whether or not the search converged, and the row is printed either
+/// way. `OuterProblem::run` is the same seam that installs the objective domain
+/// (`rho_optimizer::run::install_objective_domain`), so the face under test is
+/// the one in force.
+///
+/// The assertion is the one this issue was filed on and it is now checkable at
+/// every σ: the terminal ARD log-precision must lie inside the installed face,
+/// and must NOT sit on the generic `RHO_BOUND = 30` the issue measured it
+/// railing to. The printed `moved` column is the mute-fixture guard: if the
+/// search never left the seed at any σ, the run proved nothing and the test says
+/// so rather than passing quietly.
+#[test]
+fn zz_2691_bounded_sigma_witness_returns_an_answer_at_every_sigma() {
+    let n: usize = 70;
+    let p: usize = 8;
+    let radius: f64 = 2.086;
+    let sigmas: Vec<f64> = vec![0.352, 1.0, 1.5];
+    let mut any_moved = false;
+    let mut on_generic_box: Vec<f64> = Vec::new();
+    let mut outside_face: Vec<(f64, f64, f64)> = Vec::new();
+
+    eprintln!("[2691-sigma] sigma\tface\tseed\tterminal_log_ard\tmoved\tconverged\tsecs");
+    for &sigma in &sigmas {
+        let (face, seed, _period) = ard_face_for(n, p, radius, sigma);
+        let cloud = planted_circle_cloud(n, p, radius, sigma);
         let z = &cloud.z;
         let (term, _disp) = build_term(z.view(), 1, Topo::Circle, AssignmentMode::softmax(1.0));
-        let period = term.assignment.coords[0].effective_axis_periods()[0]
-            .expect("the circle chart axis must carry a period");
-        // Canonicalize the flat layout against the term's assignment family
-        // FIRST — exactly as `fit_outer_stage_to_boundary` does — so the flat
-        // index read here is the one the objective will use (a K=1 softmax
-        // dictionary has no sparse/router coordinate, which shifts the layout).
         let rho = SaeManifoldRho::new(
             1.0e-3_f64.ln(),
             1.0e-3_f64.ln(),
@@ -836,180 +1068,56 @@ fn zz_2691_the_ard_domain_face_is_the_chart_resolution_not_binary64() {
         )
         .for_assignment(term.assignment.mode);
         let ard_index = rho.ard_flat_index(0, 0);
-        let seed = rho.to_flat()[ard_index];
-        let objective =
+        let rho_flat = rho.to_flat();
+        let n_params = rho_flat.len();
+        let mut objective =
             SaeManifoldOuterObjective::new(term, z.clone(), None, rho, 40, 1.0, 1.0e-6, 1.0e-6);
-        let upper = objective
-            .outer_domain_upper_bound()
-            .expect("the SAE outer domain face must be constructible")
-            .expect("the SAE outer objective declares a typed upper face");
-        (upper[ard_index], period, seed)
-    };
+        let start = std::time::Instant::now();
+        // The BUDGET, and the whole point of this test: an iteration cap returns
+        // a terminal ρ at every σ. A clock cap returns nothing at the σ that
+        // matters.
+        let result = gam_solve::rho_optimizer::OuterProblem::new(n_params)
+            .with_initial_rho(rho_flat.clone())
+            .with_max_iter(8)
+            .run(&mut objective, "SAE #2691 bounded σ witness");
+        let secs = start.elapsed().as_secs_f64();
+        let (terminal, converged) = match &result {
+            Ok(outcome) => (outcome.rho[ard_index], outcome.converged()),
+            Err(error) => {
+                eprintln!(
+                    "[2691-sigma] {sigma:.3}\t{face:.4}\t{seed:.4}\t-\t-\t-\t{secs:.1}\tREFUSED: {}",
+                    format!("{error}").replace('\n', " ")
+                );
+                continue;
+            }
+        };
+        let moved = (terminal - seed).abs() > 1.0e-9;
+        any_moved |= moved;
+        eprintln!(
+            "[2691-sigma] {sigma:.3}\t{face:.4}\t{seed:.4}\t{terminal:.4}\t{moved}\t{converged}\t{secs:.1}"
+        );
+        if (terminal - gam_solve::estimate::RHO_BOUND).abs() <= 1.0e-6 {
+            on_generic_box.push(sigma);
+        }
+        if terminal > face + 1.0e-9 {
+            outside_face.push((sigma, terminal, face));
+        }
+    }
 
-    let (face_70, period, seed) = face_at(70);
-    let (face_140, period_140, _) = face_at(140);
-    assert_eq!(period, period_140, "the chart period must not depend on n");
-
-    // The derivation, evaluated here from `n` and `P` alone.
-    let expected_70 = 2.0 * ((2.0 * 70.0) / period).ln();
-    eprintln!(
-        "[2691-face] period={period} seed_log_ard={seed:.4} face(n=70)={face_70:.6} \
-         expected={expected_70:.6} face(n=140)={face_140:.6} RHO_BOUND={} \
-         LOG_STRENGTH_MAX={}",
-        gam_solve::estimate::RHO_BOUND,
-        gam_problem::LOG_STRENGTH_MAX,
+    assert!(
+        any_moved,
+        "#2691: the bounded σ witness never moved the ARD coordinate off its seed at any σ, so \
+         it cannot say anything about railing — raise the iteration budget or the fixture is mute"
     );
     assert!(
-        (face_70 - expected_70).abs() <= 1.0e-12 * expected_70.abs(),
-        "#2691: the ARD face must be the chart-resolution limit 2·(ln 2n − ln P) = {expected_70:.6}; got {face_70:.6}"
-    );
-
-    // REJECT half — it binds, and the representability constant is gone.
-    assert!(
-        face_70 < gam_solve::estimate::RHO_BOUND,
-        "#2691: a face at or above the generic ρ box ({}) constrains nothing; got {face_70:.6}",
+        on_generic_box.is_empty(),
+        "#2691: the terminal ARD log-precision sat on the generic ρ box ({}) at σ {on_generic_box:?} \
+         — that is the rail this issue was filed on",
         gam_solve::estimate::RHO_BOUND
     );
     assert!(
-        face_70 < gam_problem::LOG_STRENGTH_MAX,
-        "#2691: the ARD face must not be the binary64 representability policy ({}); got {face_70:.6}",
-        gam_problem::LOG_STRENGTH_MAX
-    );
-
-    // ACCEPT half — the box is not degenerate at the seeded entry.
-    assert!(
-        seed < face_70,
-        "#2691: the face must still admit the seeded ARD entry {seed:.6}; got {face_70:.6}"
-    );
-
-    // ACCEPT half — the face is denominated in the data resolution. Doubling
-    // `n` halves `σ_floor` and must raise the face by exactly `2·ln 2`; a
-    // literal (however derived-sounding) cannot move at all.
-    let delta = face_140 - face_70;
-    let expected_delta = 2.0 * std::f64::consts::LN_2;
-    assert!(
-        (delta - expected_delta).abs() <= 1.0e-12 * expected_delta,
-        "#2691: doubling n must raise the chart-resolution face by 2·ln 2 = {expected_delta:.6}; got {delta:.6} (a face that does not move with n is a constant, not a derivation)"
+        outside_face.is_empty(),
+        "#2691: the terminal ARD log-precision escaped its installed face at (σ, terminal, face) \
+         {outside_face:?}"
     );
 }
-
-
-/// #2691 PROPERTY — every ARD precision the face EXCLUDES must be one this
-/// fixture's own chart measurably cannot survive, and the face must still admit
-/// the precisions it survives.
-///
-/// This is the half of the claim that can be checked against data rather than
-/// against the algebra. The face says: past `alpha = (2n/P)^2` the von-Mises
-/// prior's own concentration scale is finer than the occupancy adjudicator's
-/// resolution floor `sigma_floor = 1/(2n)`, so `OccupancyLaw::Collapsed` is
-/// FORCED whatever the likelihood wants. That is a claim about the fitted
-/// chart's occupied extent, and the extent is measurable: drive the inner joint
-/// fit at fixed `alpha` and measure the smallest containing arc of the folded
-/// coordinate — `1 - largest cyclic gap`, exactly `coordinate_fidelity::
-/// occupied_extent`.
-///
-/// Two-sided, and both halves would break if the face went back to the generic
-/// box:
-///
-/// * REJECT — every rung ABOVE the face has measured extent BELOW `sigma_floor`.
-///   At `RHO_BOUND = 30` or `LOG_STRENGTH_MAX = 700` those rungs are inside the
-///   domain, which is the #2691 defect.
-/// * ACCEPT — the seeded entry's own precision has extent far above
-///   `sigma_floor`, so the face has not swallowed the working regime.
-///
-/// What this test deliberately does NOT claim: that everything inside the face
-/// is a good chart. Measured on this fixture (see
-/// `zz_2691_ard_precision_ladder_collapses_the_chart`), circular recovery R²
-/// falls from 0.969 at `alpha = 1e1` to 0.037 at `alpha = 1e2` — two orders
-/// BELOW the face. `Collapsed` is a weaker condition than "recovers the planted
-/// structure", the face is denominated in `Collapsed` because that is the
-/// threshold the system owns, and so this face is NECESSARY, not sufficient.
-/// Stating it as sufficient would be the overclaim.
-#[test]
-fn zz_2691_every_precision_outside_the_face_measurably_collapses_the_chart() {
-    let n: usize = 70;
-    let cloud = planted_circle_cloud(n, 8, 2.086, 0.352);
-    let z = &cloud.z;
-    let period = 1.0_f64;
-    let face = 2.0 * ((2.0 * n as f64) / period).ln();
-    let sigma_floor = 1.0 / (2.0 * n as f64);
-
-    // `coordinate_fidelity::occupied_extent` on the circle: the smallest arc
-    // containing every row, i.e. one minus the largest cyclic gap. A raw std
-    // cannot stand in for this — a chart piled onto the wrap point reads 0.5.
-    let extent_at = |log_ard: f64| -> f64 {
-        let (mut term, _disp) = build_term(z.view(), 1, Topo::Circle, AssignmentMode::softmax(1.0));
-        let mut rho =
-            SaeManifoldRho::new(1.0e-3_f64.ln(), 1.0e-3_f64.ln(), vec![array![log_ard]; 1]);
-        term.run_joint_fit_arrow_schur(z.view(), &mut rho, None, 40, 1.0, 1.0e-6, 1.0e-6)
-            .unwrap_or_else(|error| {
-                panic!("#2691: the fixed-α inner fit must succeed at log_ard={log_ard:.3}: {error}")
-            });
-        let coords = term.assignment.coords[0].as_matrix();
-        let mut pts: Vec<f64> = coords
-            .column(0)
-            .iter()
-            .map(|&t| {
-                let f = t.rem_euclid(period) / period;
-                if f >= 1.0 { 0.0 } else { f }
-            })
-            .collect();
-        pts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let mut largest_gap = (pts[0] + 1.0) - pts[pts.len() - 1];
-        for pair in pts.windows(2) {
-            largest_gap = largest_gap.max(pair[1] - pair[0]);
-        }
-        (1.0 - largest_gap).max(0.0)
-    };
-
-    // The seeded entry, and two decade rungs strictly ABOVE the face. Decades of
-    // the fixture's own ladder, not values chosen to make the bar pass.
-    let seed_log_ard = 1.0e-3_f64.ln();
-    let outside: Vec<f64> = vec![1.0e6_f64.ln(), 1.0e9_f64.ln()];
-    let seed_extent = extent_at(seed_log_ard);
-    eprintln!(
-        "[2691-extent] face={face:.4} sigma_floor={sigma_floor:.6e} \
-         seed log_ard={seed_log_ard:.3} extent={seed_extent:.6e}"
-    );
-    assert!(
-        seed_log_ard < face,
-        "#2691: the face must admit the seeded entry {seed_log_ard:.4}; face={face:.4}"
-    );
-    assert!(
-        seed_extent > sigma_floor,
-        "#2691 ACCEPT half: the seeded entry's chart must be resolvable — extent \
-         {seed_extent:.6e} must exceed sigma_floor {sigma_floor:.6e}"
-    );
-
-    for log_ard in outside {
-        assert!(
-            log_ard > face,
-            "#2691: rung {log_ard:.4} was meant to be OUTSIDE the face {face:.4}"
-        );
-        let extent = extent_at(log_ard);
-        eprintln!("[2691-extent] outside log_ard={log_ard:.3} extent={extent:.6e}");
-        assert!(
-            extent < sigma_floor,
-            "#2691 REJECT half: log_ard={log_ard:.4} lies outside the chart-resolution face \
-             {face:.4}, so the chart there must be unresolvable — measured extent \
-             {extent:.6e} is not below sigma_floor {sigma_floor:.6e}. A face that excludes \
-             a precision the chart survives is too tight; a face that admits one it does not \
-             is the #2691 defect."
-        );
-    }
-}
-
-// #2691 — the σ=1.5 outer witness (n=70, p=8, full production entry,
-// `run_outer_rho_search: true`) is NOT a test here, and the reason is a
-// measurement, not a preference. Both arms were run at the pinned base
-// `2b3029dc6` on one host, one variable (this fix reverted / applied), same
-// test source:
-//
-//   base    659.0 s  -> refused `DegenerateChart` (circular variance 0.000e0,
-//                       the landed `6235c387b` guard firing correctly)
-//   patched 3600   s  -> TIMEOUT, no `test result:` line, no verdict
-//
-// A timeout is not a pass and not a fail; it measured nothing about the chart,
-// and a fix and a hang produce the same absence. It is recorded here rather
-// than shipped so nobody reads its silence as green. The property this commit
-// DOES gate is the extent test above, which terminates in seconds.

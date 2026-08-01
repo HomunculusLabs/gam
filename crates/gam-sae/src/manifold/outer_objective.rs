@@ -3929,6 +3929,35 @@ fn reactive_ard_curvature_scale(
     atom_idx: usize,
     axis: usize,
 ) -> Result<Option<f64>, String> {
+    let periods = term.assignment.coords[atom_idx].effective_axis_periods();
+    if periods.get(axis).copied().flatten().is_some() {
+        return Ok(None);
+    }
+    observed_ard_curvature_scale(term, assignments, atom_idx, axis).map(Some)
+}
+
+/// The observed latent Gauss--Newton curvature of one ARD axis, with NO geometry
+/// policy attached: `max_row  w_row * ||d(gated decode)/dt||^2` in the row metric.
+///
+/// This is the whole body [`reactive_ard_curvature_scale`] used to have. It is
+/// split out because that function answers a CONTINUATION question and this
+/// quantity answers a DOMAIN one, and #2691 is the case where conflating them
+/// cost the coordinate its upper face. Nothing in this loop reads the axis
+/// period — the tangent norms come from the basis Jacobian and the decoder — so
+/// the periodic decline was never a statement that the number does not exist for
+/// a circle. It exists, and `periodic_ard_domain_upper` consumes it.
+///
+/// Native Gaussian ARD curvature has unit coefficient before multiplying by
+/// `alpha`, so this IS the data-curvature-matching precision for the axis: at
+/// `alpha` equal to this value the prior's curvature equals the strongest
+/// curvature the data puts on the coordinate, and above it the prior owns the
+/// coordinate outright.
+fn observed_ard_curvature_scale(
+    term: &SaeManifoldTerm,
+    assignments: &Array2<f64>,
+    atom_idx: usize,
+    axis: usize,
+) -> Result<f64, String> {
     let atom = &term.atoms[atom_idx];
     let p = atom.decoder_coefficients().ncols();
     let m = atom.decoder_coefficients().nrows();
@@ -3938,10 +3967,6 @@ fn reactive_ard_curvature_scale(
             atom.basis_jacobian.dim(),
             atom.decoder_coefficients().dim()
         ));
-    }
-    let periods = term.assignment.coords[atom_idx].effective_axis_periods();
-    if periods.get(axis).copied().flatten().is_some() {
-        return Ok(None);
     }
     let whitens = term
         .row_metric
@@ -3978,7 +4003,7 @@ fn reactive_ard_curvature_scale(
         }
         maximum = maximum.max(curvature);
     }
-    Ok(Some(maximum))
+    Ok(maximum)
 }
 
 /// Objective-owned legal rho upper face for dense reactive SAE fits.
@@ -4068,8 +4093,10 @@ fn reactive_rho_domain_upper(
     }
 }
 
-/// #2691 — the chart-resolution domain face for a PERIODIC ARD axis, in log
-/// precision, one entry per `(atom, axis)` that carries a period.
+/// #2691 — the domain face for a PERIODIC ARD axis, in log precision, one entry
+/// per `(atom, axis)` that carries a period. It is the MINIMUM of two derived
+/// faces: the chart-resolution face below, and the data-curvature-matching
+/// precision `observed_ard_curvature_scale`. Neither is a chosen number.
 ///
 /// [`reactive_ard_curvature_scale`] declines a periodic axis, and its reason is
 /// a CONTINUATION argument: raising `alpha` cannot convexify a full circle, so
@@ -4120,23 +4147,24 @@ fn reactive_rho_domain_upper(
 /// the MOST PERMISSIVE form of the rule — the face below is the largest
 /// precision at which any support weighting could still resolve the chart.
 ///
-/// SCOPE, because this face is NECESSARY and not sufficient and the difference
-/// is measured. `Collapsed` is a weaker condition than "the chart still recovers
-/// the planted structure": on the #2691 circle fixture (n=70, p=8, sigma=0.352)
-/// circular recovery R^2 falls 0.969 -> 0.037 between `alpha = 1e1` and
-/// `alpha = 1e2`, TWO ORDERS below this face, while the occupied extent does not
-/// fall under `sigma_floor` until `alpha ~ 1e4`. So the face removes the region
-/// where collapse is FORCED; it does not certify that everything it admits is a
-/// usable chart. It is denominated in `Collapsed` because that is the threshold
-/// this system owns — a tighter one would be a number nobody derived.
+/// The resolution face ALONE is necessary and not sufficient, and the gap was
+/// measured rather than reasoned: on the #2691 circle fixture (n=70, p=8,
+/// sigma=0.352) circular recovery R^2 falls 0.969 -> 0.037 between `alpha = 1e1`
+/// and `alpha = 1e2`, TWO ORDERS below the resolution face at `alpha = 1.96e4`,
+/// because `Collapsed` is a strictly weaker condition than "the chart still
+/// carries the structure". That gap is what the second face closes, and the
+/// second face is not a tightened version of the first -- it is a different
+/// quantity, the largest curvature the DATA puts on the coordinate, which the
+/// objective already computes for every Euclidean axis.
 ///
 /// A Euclidean axis is absent on purpose. Its `u` fold is normalized by the
 /// OBSERVED span, so `sigma_floor` carries no absolute length there and this
-/// derivation has no content; that axis already has an evidence-derived face
-/// from [`reactive_ard_curvature_scale`].
-fn periodic_ard_chart_resolution_upper(
+/// derivation has no content; that axis already receives the curvature face
+/// through [`reactive_ard_curvature_scale`] on the reactive path.
+pub(crate) fn periodic_ard_domain_upper(
     term: &SaeManifoldTerm,
     rho: &SaeManifoldRho,
+    assignments: &Array2<f64>,
 ) -> Result<Vec<(usize, f64)>, String> {
     let n_rows = term.n_obs();
     let mut faces = Vec::new();
@@ -4162,11 +4190,39 @@ fn periodic_ard_chart_resolution_upper(
                      non-positive period {period}"
                 ));
             }
-            let face = 2.0 * ((2.0 * n_rows as f64) / period).ln();
-            if !face.is_finite() {
+            let resolution_face = 2.0 * ((2.0 * n_rows as f64) / period).ln();
+            if !resolution_face.is_finite() {
                 return Err(format!(
                     "periodic ARD chart-resolution domain: atom {atom_idx} axis {axis} produced a \
                      non-finite face from n={n_rows} period={period}"
+                ));
+            }
+            // #2691 second face — the DATA-CURVATURE-MATCHING precision. The
+            // resolution face alone was measured too loose by two orders on this
+            // issue's own fixture (circular recovery R^2 fell 0.969 -> 0.037
+            // between alpha = 1e1 and 1e2, while the resolution face sits at
+            // alpha = 1.96e4), because `Collapsed` is a strictly weaker condition
+            // than "the chart still carries the structure". The binding quantity
+            // is the one the objective already computes for EUCLIDEAN axes and
+            // then declines to compute here: `observed_ard_curvature_scale`, the
+            // largest curvature the data puts on this coordinate. Native Gaussian
+            // ARD curvature has unit coefficient before `alpha`, so `alpha` equal
+            // to it is exactly where the prior's curvature matches the data's;
+            // above it the prior owns the coordinate. Same derivation discipline
+            // as the resolution face: the number is read off the fitted operator,
+            // not chosen.
+            let curvature = observed_ard_curvature_scale(term, assignments, atom_idx, axis)?;
+            let face = if curvature > 0.0 {
+                resolution_face.min(curvature.ln())
+            } else {
+                // A coordinate the data puts NO curvature on has no evidence face;
+                // the resolution face is then the only derived statement available.
+                resolution_face
+            };
+            if !face.is_finite() {
+                return Err(format!(
+                    "periodic ARD domain: atom {atom_idx} axis {axis} produced a non-finite face \
+                     from resolution={resolution_face} curvature={curvature}"
                 ));
             }
             faces.push((rho.ard_flat_index(atom_idx, axis), face));
@@ -4709,15 +4765,26 @@ impl OuterObjective for SaeManifoldOuterObjective {
             bounds[index] = bounds[index].min(alpha_upper);
         }
         let curvature_bounds = self.curvature_domain_bounds()?;
-        // #2691 — the periodic ARD chart-resolution face, applied on BOTH exits
-        // of this function. The reactive construction below never runs at all
-        // for K < 2, and declines periodic axes even when it does, so without
-        // this the chart-coordinate precision keeps the generic binary64
-        // representability face and the outer search is free to drive the prior
-        // past the point where the chart stops being a chart.
-        let chart_faces =
-            periodic_ard_chart_resolution_upper(&self.baseline_term, &self.baseline_rho)
-                .map_err(EstimationError::RemlOptimizationFailed)?;
+        // #2691 — the periodic ARD face, applied on BOTH exits of this function.
+        // The reactive construction below never runs at all for K < 2, and
+        // declines periodic axes even when it does, so without this the
+        // chart-coordinate precision keeps the generic binary64 representability
+        // face and the outer search is free to drive the prior past the point
+        // where the chart stops carrying structure. The gate reads the baseline
+        // term's own assignments because the data-curvature half of the face is
+        // a gated quantity; a domain query that cannot read them is a real
+        // failure and is reported rather than degraded to the looser face.
+        let baseline_assignments = self
+            .baseline_term
+            .assignment
+            .try_assignments()
+            .map_err(EstimationError::RemlOptimizationFailed)?;
+        let chart_faces = periodic_ard_domain_upper(
+            &self.baseline_term,
+            &self.baseline_rho,
+            &baseline_assignments,
+        )
+        .map_err(EstimationError::RemlOptimizationFailed)?;
         // Every other face in this function keeps the literal target strength
         // inside the box (`target_strength.max(scale)`); this one does the same,
         // so a caller-installed ARD entry can never be made infeasible by a
