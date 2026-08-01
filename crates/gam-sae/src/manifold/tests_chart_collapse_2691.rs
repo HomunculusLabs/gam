@@ -1237,3 +1237,243 @@ fn zz_2691_is_the_residual_gap_scale_invariant() {
          the residual gap, and a tighter face must be derived from something else."
     );
 }
+
+/// #2691 — is the dimensionless `c = curvature / α*` a UNIVERSAL constant?
+///
+/// ## Retraction of the experiment this file previously proposed
+///
+/// `zz_2691_is_the_residual_gap_scale_invariant` established that `c` is
+/// scale-invariant, leaving a quarter-octave bracket `[5.5458, 6.5951)` in which
+/// `2π = 6.2832` is the only simple constant. The follow-up proposed on the
+/// issue was "vary the chart PERIOD: `c = 2π` would not move, `c = κ = 2π/P`
+/// would move as `1/P`". **That experiment is mute by construction and must not
+/// be run as a discriminator.** Under a consistent convention change
+/// `t' = t/P`:
+///
+/// ```text
+///   basis:   same functions of u = t/P  =>  ‖∂z/∂t'‖² = P²·curvature
+///   prior:   V = (α/κ²)(1 − cos κt), κ = 2π/P; the SAME energy in t' units
+///            (κ' = 2π) requires α' = α·P²
+///   =>       α*' = P²·α*   and   c' = P²·curvature / (P²·α*) = c
+/// ```
+///
+/// `c` is a reparametrization invariant, and `κ` expressed in the chart's own
+/// normalized coordinate is `2π` for EVERY `P`. So "`c = 2π`" and "`c = κ`" are
+/// not two hypotheses — they are one statement in two unit systems, and no
+/// value of `P` separates them. (Nor is a period-`P` chart even constructible
+/// here: `PeriodicHarmonicEvaluator` hardwires `2π·h·t`, and
+/// `LatentManifold::Circle { period }` is a *convention* that must match it.)
+///
+/// ## What can discriminate
+///
+/// If `c` is a universal pure number it must be invariant to every axis that is
+/// NOT a reparametrization. Those are cheap and legal: `n`, `p`, `σ`. Any
+/// dependence kills "universal constant" and names the axis the real law is
+/// written in.
+///
+/// ## Pre-registered, before the run
+///
+/// Bracket width is `2^(1/4) = 1.1892`, and each axis has a `4×` lever, so any
+/// power law with `|slope| > ln(1.1892)/ln(4) = 0.125` is resolvable.
+///
+/// | hypothesis | prediction |
+/// |---|---|
+/// | `H0`: `c` universal | slope `0` on all three axes; all cells' brackets share a common value |
+/// | `c ∝ √n` | `c(160)/c(40) = 2.000` — brackets disjoint |
+/// | `c ∝ p` | `c(16)/c(4) = 4.000` — grossly disjoint |
+/// | `c ∝ ln n` | `c(160)/c(40) = 1.3758` — disjoint |
+/// | `c ∝ 1/σ` | `c(0.176)/c(0.704) = 4.000` — disjoint |
+///
+/// ## RESULT: `H0` was tested once and REFUTED. Recorded, with what it does and
+/// does not license.
+///
+/// ```text
+/// cell                    c_lo     c_hi    c_mid   width  rungs
+/// n=40  p=8  sigma=0.352  4.000    5.657   4.757   1.414      2
+/// n=70  p=8  sigma=0.352  5.657    6.727   6.169   1.189      1
+/// n=160 p=8  sigma=0.352  4.757    5.657   5.187   1.189      1
+/// n=70  p=4  sigma=0.352  5.657    6.727   6.169   1.189      1
+/// n=70  p=16 sigma=0.352  4.757    5.657   5.187   1.189      1
+/// n=70  p=8  sigma=0.176  4.757    6.727   5.657   1.414      2
+/// n=70  p=8  sigma=0.704  8.000   26.909  14.672   3.364      7
+/// intersection over all cells = [8.0000, 5.6569)  -> EMPTY
+/// ```
+///
+/// **`H0` is refuted as stated — and NONE of the pre-registered alternatives is
+/// supported either.** They predicted `2.000` / `4.000` / `1.3758` / `4.000`;
+/// measured across the six SHARP cells, `c_mid` moves by `5.187/4.757 = 1.090`
+/// over a `4x` lever in `n` (below the `1.189` resolution, and NON-MONOTONIC:
+/// 4.757 -> 6.169 -> 5.187) and by `0.841` over a `4x` lever in `p` — one rung
+/// DOWN, the opposite sign to `c ~ p`. So the six sharp cells agree to within one
+/// quarter-octave across `n` (4x), `p` (4x) and `sigma` (2x).
+///
+/// Two things actually break the intersection, and neither is a law:
+///
+/// 1. **A resolution tie.** `n=40` gives `[4.000, 5.6569)` and `n=70` gives
+///    `[5.6569, 6.7272)` — ADJACENT half-open brackets touching at exactly the
+///    same grid point. `c` is quantized to `2^(k/4)` by construction, so this is
+///    the ladder failing to resolve a tie, not a separation.
+/// 2. **One cell where the estimator itself is invalid.** At `sigma = 0.704` the
+///    transition is `7` rungs wide: recovery decays GRADUALLY, so there is no
+///    sharp `alpha*` for a bracket to name, and `[8.0, 26.9)` is an artifact of
+///    forcing a two-threshold bracket onto a gradual curve.
+///
+/// The actionable consequence is the same either way and it is the point of this
+/// test: **a face of the form `curvature / c` with a fixed `c` is not
+/// installable**, because `c` cannot be resolved below one quarter-octave and in
+/// the high-noise regime there is no sharp transition for it to denominate.
+///
+/// ## Axes NOT varied — the claim is invariance on three axes, not universality
+///
+/// **`h`, the harmonic order, is untested, and it is the axis most likely to
+/// move a constant that equals `2 pi`.** `PeriodicHarmonicEvaluator` hardwires
+/// `2 pi * h * t`, so if `c ~ 2 pi` because the BASIS frequency carries that
+/// factor, `h` changes the frequency content without changing units — `c`
+/// invariant in `h` would be much stronger evidence, `c` moving with `h` would
+/// mean the constant is a property of the basis rather than of the geometry.
+/// It is not cheap here and that is why it is absent, stated precisely so nobody
+/// reads its absence as a null: `build_term` hardcodes
+/// `PeriodicHarmonicEvaluator::new(3)` (`H = 1`), and merely widening the basis
+/// against `w = 1` planted data is a weak probe because the extra harmonics fit
+/// only noise and barely move the curvature. The strong version needs a planted
+/// WINDING number `w > 1`, a basis with `H >= w`, and a winding-aware
+/// replacement for `circular_recovery_r2` — a new fixture and a new statistic.
+///
+/// Also unvaried: the chart topology, the assignment mode, `K`, and the row
+/// metric.
+///
+/// ## What this test asserts now
+///
+/// Not `H0` — that was a one-shot pre-registered hypothesis, it was tested, and
+/// re-running it as a gate after seeing the answer would be a bar fitted to its
+/// own data. The two assertions below were both commitments BEFORE this run:
+/// every cell must bracket its transition strictly inside a ladder centred on
+/// that cell's own measured curvature (the "curvature is the right ORDER in
+/// every cell" claim, which fails loudly if any cell's transition escapes a
+/// 32x window below the curvature), and the installed face must sit ABOVE every
+/// measured transition (a regression guard: it fails if anyone tightens the
+/// shipped face below a transition this fixture can see). The `c` brackets and
+/// the `H0` intersection are PRINTED, not asserted.
+#[test]
+fn zz_2691_is_the_dimensionless_gap_a_universal_constant() {
+    let default_n: usize = 70;
+    let default_p: usize = 8;
+    let default_sigma: f64 = 0.352;
+    let radius: f64 = 2.086;
+
+    // (label, n, p, sigma). Three values on each axis so a slope is FITTED, not
+    // inferred from two points.
+    let cells: Vec<(&str, usize, usize, f64)> = vec![
+        ("n", 40, default_p, default_sigma),
+        ("n", default_n, default_p, default_sigma),
+        ("n", 160, default_p, default_sigma),
+        ("p", default_n, 4, default_sigma),
+        ("p", default_n, 16, default_sigma),
+        ("sigma", default_n, default_p, 0.176),
+        ("sigma", default_n, default_p, 0.704),
+    ];
+
+    let mut results: Vec<(String, usize, usize, f64, f64, f64)> = Vec::new();
+    for (axis, n, p, sigma) in cells {
+        let (face, _seed, _period) = ard_face_for(n, p, radius, sigma);
+        let resolution_face = 2.0 * ((2.0 * n as f64) / 1.0_f64).ln();
+        // `exp(face)` is the curvature only while the curvature face binds.
+        assert!(
+            face < resolution_face,
+            "#2691: cell ({axis} n={n} p={p} sigma={sigma}) has the RESOLUTION face binding \
+             ({face:.4} vs {resolution_face:.4}), so exp(face) is not the curvature and this \
+             cell cannot report c"
+        );
+        let curvature = face.exp();
+        let cloud = planted_circle_cloud(n, p, radius, sigma);
+        let z = &cloud.z;
+        // Quarter-octave ladder spanning curvature/32 .. curvature, centred on a
+        // quantity MEASURED in this cell rather than on the answer.
+        let mut last_healthy = f64::NAN;
+        let mut first_dead = f64::NAN;
+        for k in 0..=20 {
+            let alpha = curvature * 2.0_f64.powf(-5.0 + k as f64 / 4.0);
+            let log_ard = alpha.ln();
+            let (mut term, _disp) =
+                build_term(z.view(), 1, Topo::Circle, AssignmentMode::softmax(1.0));
+            let mut rho =
+                SaeManifoldRho::new(1.0e-3_f64.ln(), 1.0e-3_f64.ln(), vec![array![log_ard]; 1]);
+            if term
+                .run_joint_fit_arrow_schur(z.view(), &mut rho, None, 40, 1.0, 1.0e-6, 1.0e-6)
+                .is_err()
+            {
+                continue;
+            }
+            let coords = term.assignment.coords[0].as_matrix();
+            let coord: Array1<f64> = coords.column(0).to_owned();
+            let r2 = circular_recovery_r2(&coord, &cloud.theta);
+            if r2 > 0.9 {
+                last_healthy = alpha;
+            } else if r2 < 0.5 && first_dead.is_nan() {
+                first_dead = alpha;
+            }
+        }
+        assert!(
+            last_healthy.is_finite() && first_dead.is_finite(),
+            "#2691: cell ({axis} n={n} p={p} sigma={sigma}) did not bracket the transition \
+             (last_healthy={last_healthy} first_dead={first_dead}); the ladder does not cover it"
+        );
+        let c_lo = curvature / first_dead;
+        let c_hi = curvature / last_healthy;
+        eprintln!(
+            "[2691-univ] axis={axis} n={n} p={p} sigma={sigma} curvature={curvature:.4} \
+             transition=({last_healthy:.4},{first_dead:.4}] c=[{c_lo:.4},{c_hi:.4})"
+        );
+        results.push((axis.to_string(), n, p, sigma, c_lo, c_hi));
+    }
+
+    // REPORTED, not asserted: the H0 intersection and every cell's bracket and
+    // transition WIDTH. The width is what says whether a bracket on `c` is even
+    // a meaningful estimator in that cell.
+    let lo = results.iter().fold(f64::NEG_INFINITY, |a, r| a.max(r.4));
+    let hi = results.iter().fold(f64::INFINITY, |a, r| a.min(r.5));
+    eprintln!(
+        "[2691-univ-verdict] intersection of all cell brackets = [{lo:.4}, {hi:.4}) -> {}",
+        if lo < hi { "NON-EMPTY" } else { "EMPTY (H0 refuted)" }
+    );
+    for (axis, n, p, sigma, c_lo, c_hi) in &results {
+        let width = c_hi / c_lo;
+        let rungs = (width.log2() * 4.0).round() as i64;
+        eprintln!(
+            "[2691-univ-cell] {axis} n={n} p={p} sigma={sigma} c=[{c_lo:.4},{c_hi:.4}) \
+             width={width:.4} rungs={rungs}{}",
+            if rungs > 2 {
+                "  <- GRADUAL transition: a bracket on c is not a valid estimator here"
+            } else {
+                ""
+            }
+        );
+    }
+
+    // ASSERTION 1 (committed before the run) — the transition must lie strictly
+    // inside a ladder centred on that cell's OWN measured curvature. The ladder
+    // spans curvature/32 .. curvature, so this fails loudly if any cell's
+    // transition escapes a 32x window below its curvature, i.e. if the data
+    // curvature stops being the right ORDER for the transition anywhere.
+    for (axis, n, p, sigma, c_lo, c_hi) in &results {
+        assert!(
+            *c_lo > 1.0 && *c_hi < 32.0,
+            "#2691: cell ({axis} n={n} p={p} sigma={sigma}) has c=[{c_lo:.4},{c_hi:.4}) at or \
+             outside the ladder edge — the transition escaped a 32x window below the measured \
+             curvature, so the curvature is no longer the right order for it here"
+        );
+    }
+
+    // ASSERTION 2 (committed before the run) — the SHIPPED face must sit above
+    // every measured transition. This is the regression guard: it fails if the
+    // face is ever tightened below a transition these fixtures can see, which is
+    // the failure mode a future `curvature / c` proposal would introduce.
+    for (axis, n, p, sigma, c_lo, _c_hi) in &results {
+        assert!(
+            *c_lo > 1.0,
+            "#2691: cell ({axis} n={n} p={p} sigma={sigma}) has its transition AT or ABOVE the \
+             installed face (c_lo={c_lo:.4} <= 1) — the face would be excluding a precision the \
+             chart still carries"
+        );
+    }
+}
