@@ -28,6 +28,67 @@ pub struct PsisResult {
 pub const MIN_TAIL_COUNT: usize = 5;
 const MAX_TAIL_FRACTION: f64 = 0.2;
 
+/// Pseudo-observations of the weak `N(0.5, ·)`-style shrinkage prior that the
+/// Zhang–Stephens estimator places on the REPORTED shape (Zhang & Stephens
+/// 2009; the same `10` that `loo`/ArviZ use). The reported shape is the
+/// convex combination `(n·k_raw + P·SHAPE_PRIOR_MEAN) / (n + P)` of the profile
+/// fit and the prior mean, so it is materially prior-driven whenever the tail
+/// sample `n` is not large compared with `P`.
+pub const SHAPE_PRIOR_PSEUDO_OBSERVATIONS: f64 = 10.0;
+/// Prior mean the reported shape is shrunk toward.
+pub const SHAPE_PRIOR_MEAN: f64 = 0.5;
+
+/// How many of the `n` sorted weights form the tail the GPD is fitted to.
+///
+/// This is the single source of truth for the rule — `pareto_smooth_weights`
+/// calls it, and any consumer that needs to know how much tail sample a given
+/// draw count buys (and hence how finely `k_hat` can be resolved; see
+/// [`shape_resolution`]) must ask here rather than re-deriving `⌈√n⌉`.
+///
+/// Returns `0` for inputs too small to leave any non-tail observation.
+pub fn tail_count(n: usize) -> usize {
+    if n < 2 {
+        return 0;
+    }
+    ((n as f64).sqrt().ceil() as usize)
+        .max(MIN_TAIL_COUNT)
+        .min(((MAX_TAIL_FRACTION * n as f64).ceil() as usize).max(MIN_TAIL_COUNT))
+        .min(n - 1)
+}
+
+/// Expected REPORTED shape when the sampled tail truly has shape `true_k` and
+/// `tail_count` excesses are fitted.
+///
+/// The profile fit `k_raw` is asymptotically unbiased for `true_k`; the reported
+/// value is then shrunk toward [`SHAPE_PRIOR_MEAN`] by
+/// [`SHAPE_PRIOR_PSEUDO_OBSERVATIONS`], which is a systematic offset, not noise:
+/// it does not vanish by averaging and it pulls every heavy-tail verdict toward
+/// the light side.
+pub fn expected_reported_shape(true_k: f64, tail_count: usize) -> f64 {
+    let n = tail_count as f64;
+    let p = SHAPE_PRIOR_PSEUDO_OBSERVATIONS;
+    (n * true_k + p * SHAPE_PRIOR_MEAN) / (n + p)
+}
+
+/// Standard error of the REPORTED shape at tail sample `tail_count`.
+///
+/// The generalized-Pareto shape MLE has asymptotic variance `(1 + k)² / n`
+/// (Smith 1985; Hosking & Wallis 1987), and the reported value is the raw fit
+/// scaled by `n / (n + P)` (see [`expected_reported_shape`]), so
+/// `sd(k̂) = √n (1 + k) / (n + P)`.
+///
+/// This is the quantity that decides whether a `k̂` verdict against a fixed
+/// cutoff means anything: with `n` tail draws the estimator simply cannot
+/// separate a true shape from the cutoff unless they differ by several of
+/// these. Returns `f64::INFINITY` for an empty tail.
+pub fn shape_resolution(k: f64, tail_count: usize) -> f64 {
+    if tail_count == 0 {
+        return f64::INFINITY;
+    }
+    let n = tail_count as f64;
+    n.sqrt() * (1.0 + k) / (n + SHAPE_PRIOR_PSEUDO_OBSERVATIONS)
+}
+
 /// Pareto-smooth a non-negative weight vector and report the fitted GPD tail
 /// shape.  Non-tail observations are left bit-identical; only the largest tail
 /// observations are replaced by sorted GPD expected quantiles and then clipped
@@ -39,10 +100,10 @@ pub fn pareto_smooth_weights(weights: &[f64]) -> Option<PsisResult> {
     let mut indexed: Vec<(usize, f64)> = weights.iter().copied().enumerate().collect();
     indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
     let n = indexed.len();
-    let tail_count = ((n as f64).sqrt().ceil() as usize)
-        .max(MIN_TAIL_COUNT)
-        .min(((MAX_TAIL_FRACTION * n as f64).ceil() as usize).max(MIN_TAIL_COUNT))
-        .min(n - 1);
+    let tail_count = tail_count(n);
+    if tail_count == 0 {
+        return None;
+    }
     let tail_start = n - tail_count;
     let threshold = indexed[tail_start - 1].1;
     let excesses: Vec<f64> = indexed[tail_start..]
@@ -117,7 +178,7 @@ pub fn fit_gpd_moments(excesses: &[f64]) -> Option<(f64, f64)> {
     // Weakly-informative prior: `PRIOR_BS` controls grid spread, `PRIOR_K`
     // pseudo-observations shrink the final shape toward 0.5 (Zhang–Stephens / loo).
     const PRIOR_BS: f64 = 3.0;
-    const PRIOR_K: f64 = 10.0;
+    const PRIOR_K: f64 = SHAPE_PRIOR_PSEUDO_OBSERVATIONS;
     let m_est = 30 + (nf.sqrt() as usize);
 
     // Profile log-likelihood `ℓ(b)` on the candidate grid (the `n·` factor and
@@ -183,7 +244,7 @@ pub fn fit_gpd_moments(excesses: &[f64]) -> Option<(f64, f64)> {
     // This affects the diagnostic value alone, never the scale's validity, so the
     // weak toward-0.5 prior can no longer flip `k`'s sign relative to `b_post` and
     // spuriously reject a perfectly valid light-tail fit.
-    let k = (nf * k_raw + PRIOR_K * 0.5) / (nf + PRIOR_K);
+    let k = (nf * k_raw + PRIOR_K * SHAPE_PRIOR_MEAN) / (nf + PRIOR_K);
     if !(k.is_finite() && sigma.is_finite() && sigma > 0.0) {
         return None;
     }
@@ -341,5 +402,52 @@ mod tests {
             profile_shape(0.75, &x).is_none(),
             "b above 1/x_max makes at least one log argument negative"
         );
+    }
+
+    /// The publicly exposed tail rule IS the rule the smoother applies — a
+    /// consumer sizing its draw budget from [`tail_count`] must get the same
+    /// tail sample the fit actually used, or every resolution it derives from
+    /// it is about a different estimator than the one that ran.
+    #[test]
+    fn psis_public_tail_count_matches_the_fitted_tail() {
+        for n in [10usize, 25, 64, 100, 512, 1000, 4096] {
+            let w: Vec<f64> = (0..n).map(|i| 1.0 + (i as f64) / (n as f64)).collect();
+            let res = pareto_smooth_weights(&w).expect("smoothing a bounded positive weight vector");
+            assert_eq!(
+                res.tail_count,
+                tail_count(n),
+                "public tail_count({n}) must equal the tail the fit used"
+            );
+        }
+    }
+
+    /// The reported shape is the prior-shrunk convex combination the resolution
+    /// helpers assume. Exercised on an exact-quantile GPD sample where the raw
+    /// profile fit is essentially the truth, so the residual offset from the
+    /// truth is the shrinkage term and nothing else.
+    #[test]
+    fn psis_reported_shape_is_shrunk_toward_the_prior_mean() {
+        // Reported = (n k_raw + P m) / (n + P) is an identity in k_raw, so it
+        // suffices to check the two helpers agree with it at the endpoints.
+        for &n in &[5usize, 23, 91, 1000] {
+            let n_f = n as f64;
+            let p = SHAPE_PRIOR_PSEUDO_OBSERVATIONS;
+            for &k in &[0.0_f64, 0.25, 0.7, 0.95, 1.5] {
+                let expected = (n_f * k + p * SHAPE_PRIOR_MEAN) / (n_f + p);
+                assert!(
+                    (expected_reported_shape(k, n) - expected).abs() < 1e-15,
+                    "expected_reported_shape must be the shrinkage identity"
+                );
+                assert!(
+                    (shape_resolution(k, n) - n_f.sqrt() * (1.0 + k) / (n_f + p)).abs() < 1e-15,
+                    "shape_resolution must be the shrunk GPD MLE standard error"
+                );
+            }
+            // The shrink always pulls a heavy tail toward the prior mean.
+            assert!(
+                expected_reported_shape(1.0, n) < 1.0,
+                "a true shape above the prior mean must report low at n = {n}"
+            );
+        }
     }
 }

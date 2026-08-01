@@ -29,11 +29,27 @@ pub enum RhoCertificate {
     Escalate,
 }
 
+/// `k̂` above which the self-normalized importance estimator's central limit
+/// theorem no longer applies and the proposal must be replaced rather than
+/// reweighted (Vehtari, Simpson, Gelman, Yao & Gabry, *Pareto smoothed
+/// importance sampling*, JMLR 25(72), 2024, §3): for `k > 0.7` the practical
+/// pre-asymptotic convergence rate of PSIS collapses and the estimate is
+/// declared unreliable. How finely a given draw count can resolve this
+/// boundary is NOT a property of the cutoff: `gam_solve::psis::shape_resolution`
+/// reports the standard error of the fitted shape, and a verdict against this
+/// cutoff only means something when the truth sits several such standard errors
+/// away from it.
+pub const ESCALATE_K_HAT: f64 = 0.7;
+/// `k̂` below which the proposal's importance weights have finite variance
+/// (`k < 1/2` ⇒ the generalized-Pareto tail has a second moment), so the
+/// plug-in answer plus the first-order correction needs no reweighting.
+pub const PLUG_IN_CERTIFIED_K_HAT: f64 = 0.5;
+
 impl RhoCertificate {
     pub fn from_k_hat(k_hat: f64) -> Self {
-        if !k_hat.is_finite() || k_hat > 0.7 {
+        if !k_hat.is_finite() || k_hat > ESCALATE_K_HAT {
             RhoCertificate::Escalate
-        } else if k_hat < 0.5 {
+        } else if k_hat < PLUG_IN_CERTIFIED_K_HAT {
             RhoCertificate::PlugInCertified
         } else {
             RhoCertificate::ImportanceCorrect
