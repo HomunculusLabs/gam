@@ -498,6 +498,125 @@ fn evidence_assembly_row_fingerprint_sources_2515() {
     assert_ne!(chunked_fp, 0, "#2515: the chunked assembly must publish a real row fingerprint");
 }
 
+/// #2515 — the row-Hessian fingerprint must be a function of the OPERATOR:
+/// invariant under rebuild, sensitive to every field that defines it.
+///
+/// `60feddc2e` replaced an `Arc` POINTER ADDRESS proxy, which made the fingerprint
+/// an identity of the ALLOCATION — every rebuild of an unchanged operator produced
+/// a different value, so `validate_matrix_free_arrow_pair` refused every
+/// system/cache pair on the matrix-free path (which is every SAE fit).
+///
+/// The two failure modes are NOT symmetric, and that asymmetry is why this test
+/// has a negative arm at all. The address identity failed LOUDLY AND ALWAYS. A
+/// content identity that omits a field fails SILENTLY: two genuinely different
+/// operators hash equal and the guard ACCEPTS a stale pair. A fingerprint function
+/// that simply returned a constant would satisfy the invariance arm perfectly, so
+/// invariance alone is not evidence of anything.
+///
+/// POSITIVE: two independent assemblies of one state agree.
+/// NEGATIVE: perturbing the state disagrees — once per field of
+/// `SaeKroneckerRows`, so the completeness claim is checked field by field rather
+/// than asserted. (`SaeKroneckerRows::content_fingerprint` also destructures
+/// exhaustively, so a NEW field breaks the build; these arms cover the fields that
+/// exist.)
+#[test]
+fn row_hessian_fingerprint_is_a_function_of_the_operator_2515() {
+    use super::kronecker::SaeKroneckerRows;
+
+    let target = planted_circle_embedded(32, 4, 0.02);
+    let mut term = planted_circle_seed_term(target.view(), PlantedCircleAssignmentMode::Softmax).0;
+    term.atoms[0].basis_second_jet = Some(Arc::new(
+        PeriodicHarmonicEvaluator::new(3).expect("periodic evaluator"),
+    ));
+    let rho = SaeManifoldRho::new(0.0, 0.05_f64.ln(), vec![Array1::<f64>::zeros(1)]);
+    term.refresh_decoder_repulsion_gate();
+    term.refresh_barrier_coactivation_gate();
+    term.refresh_amplitude_barrier_gate();
+    term.streaming_gates_frozen = true;
+
+    // POSITIVE — two independent assemblies of ONE state, through the two
+    // different assemblers, must agree.
+    let direct = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("direct arrow-Schur assembly");
+    let (chunked, _chunk_term) = term
+        .assemble_full_matrix_free_evidence_system(target.view(), &rho, None, None)
+        .expect("matrix-free evidence assembly");
+    assert!(
+        direct.htbeta_matvec.is_some() && chunked.htbeta_matvec.is_some(),
+        "#2515: both assemblies must install the matrix-free cross-block operator, \
+         or this test does not exercise the path the fingerprint defect lived on"
+    );
+    assert_eq!(
+        direct.current_row_hessian_fingerprint(),
+        chunked.current_row_hessian_fingerprint(),
+        "#2515: two assemblies of the same state must produce the same row-Hessian \
+         fingerprint. A guard that cannot be satisfied by an unchanged operator is \
+         not strict, it is inoperative — that was the defect, and the pointer \
+         address is what made it unsatisfiable."
+    );
+
+    // NEGATIVE — per field of `SaeKroneckerRows`. Without these the invariance
+    // above is satisfied by any constant.
+    let p = 4usize;
+    let a_phi: Arc<[Vec<(usize, f64)>]> =
+        Arc::from(vec![vec![(0usize, 1.0_f64), (3, -0.5)], vec![(1, 0.25)]].into_boxed_slice());
+    let local_jac: Arc<[Vec<f64>]> =
+        Arc::from(vec![vec![0.5_f64; p], vec![-0.25_f64; p]].into_boxed_slice());
+    let base = SaeKroneckerRows::new(p, Arc::clone(&a_phi), Arc::clone(&local_jac));
+    let base_fp = base.content_fingerprint();
+
+    let mut a_phi_moved = a_phi.to_vec();
+    a_phi_moved[0][0].1 += 1.0e-9;
+    let changed_a_phi = SaeKroneckerRows::new(
+        p,
+        Arc::from(a_phi_moved.into_boxed_slice()),
+        Arc::clone(&local_jac),
+    );
+    assert_ne!(
+        base_fp,
+        changed_a_phi.content_fingerprint(),
+        "#2515: a change to the sparse support weights must move the operator \
+         fingerprint (perturbation 1e-9 on one weight)"
+    );
+
+    let mut jac_moved = local_jac.to_vec();
+    jac_moved[1][0] += 1.0e-9;
+    let changed_jac = SaeKroneckerRows::new(
+        p,
+        Arc::clone(&a_phi),
+        Arc::from(jac_moved.into_boxed_slice()),
+    );
+    assert_ne!(
+        base_fp,
+        changed_jac.content_fingerprint(),
+        "#2515: a change to the local Jacobian must move the operator fingerprint"
+    );
+
+    let wider_jac: Arc<[Vec<f64>]> =
+        Arc::from(vec![vec![0.5_f64; p + 1], vec![-0.25_f64; p + 1]].into_boxed_slice());
+    let changed_p = SaeKroneckerRows::new(p + 1, Arc::clone(&a_phi), wider_jac);
+    assert_ne!(
+        base_fp,
+        changed_p.content_fingerprint(),
+        "#2515: a change to the decoder output dimension must move the operator \
+         fingerprint"
+    );
+
+    // The metric field: presence is what this fingerprint carries (its CONTENT
+    // also enters `htt`, which the row fingerprint hashes directly), so presence
+    // is what must move the value.
+    let identity_metric = gam_problem::RowMetric::euclidean(p, p)
+        .expect("a p-dimensional Euclidean row metric is constructible");
+    let changed_metric =
+        SaeKroneckerRows::new(p, a_phi, local_jac).with_output_metric(Some(identity_metric));
+    assert_ne!(
+        base_fp,
+        changed_metric.content_fingerprint(),
+        "#2515: installing an output metric must move the operator fingerprint"
+    );
+}
+
 /// Hybrid-EFS must replace the former held-zero non-ordered Beta--Bernoulli assignment coordinate
 /// with the exact penalized quasi-Laplace derivative and expose that same root-equivalent update to
 /// the final fixed-point proof hook. This dense fixture exercises the exact dense

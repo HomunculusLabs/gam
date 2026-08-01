@@ -122,6 +122,56 @@ impl SaeKroneckerRows {
         }
     }
 
+    /// CONTENT identity of this operator (#2515).
+    ///
+    /// The row-Hessian fingerprint used to hash this operator's `Arc` POINTER
+    /// ADDRESS, which is an identity of the allocation: every rebuild of an
+    /// unchanged operator produced a different value, so
+    /// `validate_matrix_free_arrow_pair` refused every system/cache pair on the
+    /// matrix-free path. Hashing the operator's DEFINING DATA instead makes a
+    /// rebuild from unchanged state reproduce the same fingerprint.
+    ///
+    /// ⚠ THE TWO FAILURE MODES ARE NOT SYMMETRIC, WHICH IS WHY THIS DESTRUCTURES
+    /// EXHAUSTIVELY. The address identity failed LOUDLY AND ALWAYS — every pair
+    /// refused, impossible to miss. A content identity that omits a field fails
+    /// SILENTLY: two genuinely different operators hash equal and the guard
+    /// ACCEPTS a stale pair, which is strictly worse. The `let Self { .. }`
+    /// binding below names every field with no `..` rest pattern, so adding a
+    /// field to [`SaeKroneckerRows`] fails to COMPILE here rather than quietly
+    /// dropping out of the hash.
+    pub(crate) fn content_fingerprint(&self) -> u64 {
+        let Self {
+            p,
+            a_phi,
+            local_jac,
+            output_metric,
+        } = self;
+        let mut hasher = gam_runtime::warm_start::Fingerprinter::new();
+        hasher.write_str("sae-kronecker-rows-content-v1");
+        hasher.write_usize(*p);
+        hasher.write_usize(a_phi.len());
+        for support in a_phi.iter() {
+            hasher.write_usize(support.len());
+            for &(column, weight) in support.iter() {
+                hasher.write_usize(column);
+                hasher.write_f64(weight);
+            }
+        }
+        hasher.write_usize(local_jac.len());
+        for jac_row in local_jac.iter() {
+            hasher.write_usize(jac_row.len());
+            hasher.write_f64_slice(jac_row);
+        }
+        // The metric is applied to the p-space intermediate, so it is part of the
+        // operator — but its CONTENT also enters `htt` (`htt = J M Jᵀ`), which the
+        // row-Hessian fingerprint hashes directly alongside this value. Presence
+        // is therefore enough to separate the two operators without duplicating a
+        // metric hash the system already carries, and a metric whose content
+        // changed moves `htt` and so moves the combined fingerprint.
+        hasher.write_bool(output_metric.is_some());
+        hasher.finish_u64()
+    }
+
     /// Install the per-row likelihood-whitening output metric `M_n = U_n U_nᵀ`
     /// (#974). `None` leaves the operator on the isotropic `M_n = I_p` path
     /// (bit-for-bit identical applies). Builder form so the isotropic

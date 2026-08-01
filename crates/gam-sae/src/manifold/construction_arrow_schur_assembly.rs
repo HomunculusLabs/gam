@@ -1768,41 +1768,6 @@ impl SaeManifoldTerm {
             let (a_phi_shared, jac_shared) = device_rows
                 .clone()
                 .expect("non-frames path always populates device_rows");
-            // #2515 — the operator's CONTENT identity, so a rebuild from an
-            // unchanged state reproduces an unchanged row-Hessian fingerprint.
-            // Without it `row_hessian_fingerprint_for_system` hashes this
-            // closure's `Arc` ADDRESS, which is freshly allocated per assembly, so
-            // two assemblies of a bit-identical system disagree and
-            // `validate_matrix_free_arrow_pair` refuses a valid system/cache pair.
-            //
-            // `SaeKroneckerRows` is defined by exactly `(p, a_phi, jac, metric)`
-            // — the same three inputs its constructor takes plus the output
-            // metric — so hashing those IS hashing the operator. Anything that
-            // changes what the cross-block applies changes one of them.
-            let htbeta_fingerprint = {
-                let mut hasher = gam_runtime::warm_start::Fingerprinter::new();
-                hasher.write_str("sae-kronecker-htbeta-v1");
-                hasher.write_usize(p);
-                hasher.write_usize(a_phi_shared.len());
-                for support in a_phi_shared.iter() {
-                    hasher.write_usize(support.len());
-                    for &(column, value) in support.iter() {
-                        hasher.write_usize(column);
-                        hasher.write_f64(value);
-                    }
-                }
-                hasher.write_usize(jac_shared.len());
-                for jac_row in jac_shared.iter() {
-                    hasher.write_f64_slice(jac_row);
-                }
-                // The output metric is applied to the p-space intermediate inside
-                // the closure, so it is part of the operator. Its CONTENT also
-                // enters `htt` (`htt = J M Jᵀ`), which this fingerprint already
-                // hashes, so presence is enough to separate the two operators
-                // without duplicating a metric hash the system carries elsewhere.
-                hasher.write_bool(output_metric.is_some());
-                hasher.finish_u64()
-            };
             let kron = Arc::new(
                 SaeKroneckerRows::new(p, a_phi_shared, jac_shared)
                     .with_output_metric(output_metric.clone()),
@@ -1812,6 +1777,12 @@ impl SaeManifoldTerm {
             }
             let kron_t = Arc::clone(&kron);
             let p_dim = p;
+            // #2515 — the operator's CONTENT identity, so a rebuild from an
+            // unchanged state reproduces an unchanged row-Hessian fingerprint.
+            // `SaeKroneckerRows::content_fingerprint` destructures exhaustively,
+            // so this cannot silently stop covering the operator if a field is
+            // added to it.
+            let htbeta_fingerprint = kron.content_fingerprint();
             sys.set_row_htbeta_operator_with_fingerprint(
                 move |row_idx, x, out| {
                     // out = L_i · M_n · (J_β · x). Allocate a length-p scratch
