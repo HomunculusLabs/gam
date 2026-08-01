@@ -228,10 +228,11 @@ fn probe_2728_corrected_vs_conditional_width() {
     let k_centers = 80usize;
     let n_train = 4_000usize;
     let n_eval = 400usize;
-    let n_replicates: usize = std::env::var("PROBE_2728_REPLICATES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1);
+    // Compile-time constant rather than an environment lookup. The workspace
+    // bans reading process environment variables (build.rs:1454), and the ban
+    // scanner runs inside build.rs, so one hit aborts the build before
+    // compilation and blocks every crate depending on `gam`. Edit to sweep.
+    let n_replicates: usize = 1;
     let spec = duchon_aniso_pc_spec("duchon_pc_probe", pc_dim, k_centers);
 
     let (x_eval, _) = simulate_x(n_eval, pc_dim, 0x0EFA_1000_0000_0001);
