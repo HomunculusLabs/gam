@@ -6693,6 +6693,14 @@ fn compute_rho_uncertainty_diagnostic_at_terminal_fidelity(
     diagnostic
 }
 
+/// Why the operator trust-region outer loop stopped.
+///
+/// The inhabitants of this enum are exactly the image of
+/// `bridges::stop_reason_from`, which is its ONE producer: a value only ever
+/// reaches a `RhoOptimizerResult` by mapping an `opt::TerminationReason`.
+/// Adding a variant that map cannot emit adds a label, not a state — that is
+/// how `RoutingMismatch` ("family returned a non-operator Hessian mid-flight")
+/// came to sit here unreachable, and it was deleted for it (#2670).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperatorTrustRegionStopReason {
     Converged,
@@ -6704,11 +6712,6 @@ pub enum OperatorTrustRegionStopReason {
     /// certificate needs this provenance to reproduce the guard's derived
     /// stationarity band exactly.
     CostStallFlatValley,
-    /// Family returned a non-operator Hessian mid-flight after routing into
-    /// the operator path. Best-effort `x_k` returned with this reason; the
-    /// caller should consider re-fitting under a different solver class
-    /// (e.g. BFGS gradient-only) instead of trusting the partial result.
-    RoutingMismatch,
     /// The solver stopped because something failed, not because a test it
     /// stands behind was satisfied: the line search gave up, an objective
     /// evaluation failed, or the arithmetic went non-finite.

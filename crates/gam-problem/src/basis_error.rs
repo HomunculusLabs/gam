@@ -120,9 +120,6 @@ pub enum BasisError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
-    #[error("{0}")]
-    DenseDerivativeMaterializationRefused(String),
-
     #[error(
         "Radial basis derivative is undefined at center collision (r = 0) for {kernel} \
          with dim = {dim}, m = {m}: {message}. The first/second derivative of the \
@@ -135,15 +132,6 @@ pub enum BasisError {
         m: f64,
         message: &'static str,
     },
-
-    #[error(
-        "Periodic radial basis derivative is undefined at the wrap branch cut \
-         (signed displacement = ±period/2) for raw delta = {raw}, period = {period}: \
-         the wrapped displacement jumps between ±period/2 and the first derivative \
-         w.r.t. the input has a one-sided discontinuity. Move the evaluation point \
-         off the branch cut or define a one-sided convention."
-    )]
-    PeriodicWrapBranchCut { raw: f64, period: f64 },
 
     #[error("{0}")]
     Other(String),

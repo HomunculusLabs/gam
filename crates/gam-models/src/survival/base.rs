@@ -44,8 +44,6 @@ pub enum SurvivalError {
     NumericalFailure { reason: String },
     #[error("{reason}")]
     EventCodeInvalid { reason: String },
-    #[error("{reason}")]
-    EventDegenerate { reason: String },
     #[error("cause-specific survival block {block}: {source}")]
     CauseSpecificBlock {
         block: usize,
