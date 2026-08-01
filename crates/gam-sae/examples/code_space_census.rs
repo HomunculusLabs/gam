@@ -94,7 +94,7 @@ fn main() -> Result<(), String> {
     for v in accepted.iter().take(200) {
         let pr = &v.proposal;
         println!(
-            "{{\"pair\":[{},{}],\"bits_saved\":{:.1},\"radius\":{:.4},\"kappa\":{:.3},\"span\":{:.3},\"firings\":{:.0},\"prescreen\":{:.1},\"null_p_hat\":{:.4},\"null_exceedances\":{},\"topology\":{:?},\"topology_dim\":{:?},\"topology_err\":{:?}}}",
+            "{{\"pair\":[{},{}],\"bits_saved\":{:.1},\"radius\":{:.4},\"kappa\":{:.3},\"span\":{:.3},\"firings\":{:.0},\"prescreen\":{:.1},\"null_p_hat\":{:.4},\"null_exceedances\":{},\"topology\":{},\"topology_dim\":{},\"topology_err\":{}}}",
             v.atom_a,
             v.atom_b,
             pr.dl_old - pr.dl_new,
@@ -105,9 +105,17 @@ fn main() -> Result<(), String> {
             pr.crossover_prescreen_bits,
             v.null_p_hat,
             v.null_exceedances,
-            v.topology_kind,
-            v.topology_dim,
+            v.topology_kind
+                .as_deref()
+                .map(|k| format!("\"{k}\""))
+                .unwrap_or_else(|| "null".to_string()),
+            v.topology_dim
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "null".to_string()),
             v.topology_error
+                .as_deref()
+                .map(|e| format!("{:?}", e))
+                .unwrap_or_else(|| "null".to_string())
         );
     }
     // Full REML chart fits on the top accepted pairs: rebuild each pair's
