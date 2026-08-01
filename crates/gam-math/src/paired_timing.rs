@@ -49,6 +49,57 @@
 //!   across iterations; `black_box` alone permits both, and one of the replaced
 //!   harnesses relied on `black_box` with no data dependence.
 //!
+//! # Why not measure the arms separately and normalise afterwards
+//!
+//! Because it does not work, and it fails in **both** directions. `iperf2`
+//! measured this directly on `gam-solve::inner_fit_core_scaling`, a gate whose
+//! two arms genuinely cannot be interleaved — one fans out over the whole Rayon
+//! pool and the other is held serial by a guard, so external load hurts them
+//! unequally. They divided the ratio by the parallel headroom the machine was
+//! delivering at that moment, measured on an embarrassingly parallel kernel:
+//!
+//! * **Normaliser sampled once.** Headroom on four saturated cores bounced
+//!   `2.36 / 1.28 / 2.81` across three consecutive repetitions. At the `1.28`
+//!   sample a genuinely serial solve scores `1.0 / 1.28 = 0.78` and **passes** a
+//!   `0.5` bar — a false green in which the gate certifies the exact defect it
+//!   exists to catch.
+//! * **Normaliser as max over five repetitions** (the right estimator for a
+//!   capability, since interference only pushes an observed speedup down). Fixes
+//!   the false green, and then loaded runs score `0.44` and `0.52` against the
+//!   same `0.5` bar — red on working code.
+//!
+//! The underlying reason generalises past that one gate:
+//!
+//! > **A ratio whose two arms are measured at different times, on a machine
+//! > whose load moves on that timescale, cannot be normalised after the fact.**
+//! > Interleaving per repetition is not tidiness — it is what makes the arms
+//! > share machine state instead of sampling it twice.
+//!
+//! The same lane's control is the cleanest demonstration that the *measurement*
+//! rather than the *code* is what breaks: on one node, same four cores, back to
+//! back, the identical solve scored `2.91` / `3.43` idle and `1.94` under four
+//! spinners — straddling its own bar with nothing about the solver changed. A
+//! width sweep at 2/4/8/16/32 cores on dedicated allocations tracked the pool
+//! width at every width.
+//!
+//! # When the arms cannot be interleaved at all
+//!
+//! Some comparisons are between configurations that *want different machines* —
+//! different core counts, different memory pressure — and no amount of
+//! interleaving makes them share state. For those, take the confound away from
+//! the measurement instead of modelling it: `.config/nextest.toml` supports
+//!
+//! ```toml
+//! [[profile.default.overrides]]
+//! threads-required = 'num-test-threads'
+//! ```
+//!
+//! which reserves every runner slot so the test runs alone. It is already in use
+//! in this repository for exactly this reason. The general rule, which is worth
+//! more than the mechanism: **before building something to cancel an
+//! environmental confound, check whether the runner can remove the confound
+//! instead.**
+//!
 //! # Using it as a gate
 //!
 //! Assert on [`PairedTiming::median_ratio`] together with
