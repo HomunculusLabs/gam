@@ -1608,7 +1608,13 @@ fn into_line_search_value_probe_error(
     err: EstimationError,
 ) -> ObjectiveEvalError {
     match err {
-        err @ EstimationError::HessianNotPositiveDefinite { .. } => {
+        // #2685: a saturated row, or an eta outside an inverse link's domain, is
+        // a statement about the trial point's own linear predictor — the
+        // incumbent evaluated fine and this probe asks only whether one
+        // different theta is in the criterion's domain. Shorten the step.
+        err @ EstimationError::HessianNotPositiveDefinite { .. }
+        | err @ EstimationError::PirlsRowGeometryUnrepresentable { .. }
+        | err @ EstimationError::InverseLinkDomainViolation { .. } => {
             ObjectiveEvalError::recoverable_from(err).with_context(context)
         }
         err => into_objective_error(context, err),
@@ -1618,6 +1624,41 @@ fn into_line_search_value_probe_error(
 #[cfg(test)]
 mod line_search_value_probe_error_tests {
     use super::*;
+
+    /// #2685: a saturated row at one value-only line-search trial rejects that
+    /// trial. The row geometry's own payload is the trial point's `eta`, so the
+    /// refusal is a statement about this theta, not about the problem.
+    #[test]
+    fn trial_row_geometry_refusal_is_local_to_the_value_probe_boundary_2685() {
+        let trial_error = EstimationError::PirlsRowGeometryUnrepresentable {
+            row: 0,
+            quantity: "saturated Bernoulli row inconsistent with response",
+            eta: 745.133_219_101_941_2,
+            value: 0.0,
+        };
+        assert!(
+            !trial_error.is_trial_point_infeasible(),
+            "the row-geometry error remains fatal outside a proven line-search probe"
+        );
+        assert!(
+            into_line_search_value_probe_error("outer eval_cost failed", trial_error)
+                .is_recoverable(),
+            "one saturated trial row must shorten the step, not abort the fit"
+        );
+        assert!(
+            into_objective_error(
+                "terminal outer evaluation failed",
+                EstimationError::PirlsRowGeometryUnrepresentable {
+                    row: 0,
+                    quantity: "saturated Bernoulli row inconsistent with response",
+                    eta: 745.133_219_101_941_2,
+                    value: 0.0,
+                },
+            )
+            .is_fatal(),
+            "seed, gradient, and terminal row-geometry failures must stay fatal"
+        );
+    }
 
     /// #2273: an indefinite inner Hessian at one value-only line-search trial
     /// rejects that trial without weakening the type's general classification.

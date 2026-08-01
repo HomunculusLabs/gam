@@ -30,6 +30,35 @@ pub const LOG_LINK_SOLVER_ETA_MAX: f64 = 700.0;
 /// hard-code the same `12.0` with a "must match" comment.
 pub(crate) const SAS_LOG_DELTA_BOUND: f64 = 12.0;
 
+/// Bound `B` on each beta-logistic log-shape: `a = exp(g(log δ − ε))` and
+/// `b = exp(g(log δ + ε))` with `g = smooth_bound_jet(·, B)`, so the two beta
+/// shapes are confined to `[e^−B, e^B]`.
+///
+/// # Why the beta-logistic shapes need a bound at all (#2685)
+///
+/// Every other parameterized inverse link already confines its state: SAS
+/// bounds `log_delta` inside the kernel with this same map
+/// ([`SAS_LOG_DELTA_BOUND`]) and bounds `epsilon` at the outer boundary
+/// (`sas_effective_epsilon`'s tanh box). The beta-logistic kernel exponentiated
+/// BOTH raw optimization parameters, and the outer arm turns the SAS ridge, the
+/// SAS edge barrier and the SAS epsilon box off for it — so the block
+/// `[ε, log δ]` had no bound and no counter-term anywhere.
+///
+/// Measured consequence on the committed parametric-only fixture (`y ~ x +
+/// link(type=beta-logistic)`, k = 0 penalty blocks, so the criterion carries no
+/// `log|S|` term either): the outer BFGS drives `log δ` monotonically down —
+/// `0 → −5.2 → −12.1` — because the criterion decreases the whole way. Beta
+/// shapes that small put essentially all mass at `u ∈ {0, 1}`, so `μ(η)` is
+/// nearly constant in `η`; the inner P-IRLS compensates by pushing `β` until
+/// `η` hits `1075·ln 2 = 745.1332191019412`, the first `f64` at which the
+/// logistic tail complement `exp(−η)` underflows to exactly `0.0`. That is a
+/// representability rail, not an optimum: it is bit-identical at every `θ` the
+/// search visits. The row geometry then (correctly) refuses the saturated row.
+///
+/// The map is the exact identity on `|x| ≤ 0.8·B`, so every fit whose shapes
+/// are in that range is bitwise unchanged.
+pub(crate) const BETA_LOGISTIC_LOG_SHAPE_BOUND: f64 = 1.5;
+
 #[inline]
 fn latent_cloglog_quadctx() -> &'static crate::quadrature::QuadratureContext {
     static QUADCTX: OnceLock<crate::quadrature::QuadratureContext> = OnceLock::new();
@@ -1412,8 +1441,7 @@ fn beta_logistic_link_complement(eta: f64, log_delta: f64, epsilon: f64, mu: f64
     if logistic.ln_one_minus_u == f64::NEG_INFINITY {
         return 0.0;
     }
-    let a = (log_delta - epsilon).exp();
-    let b = (log_delta + epsilon).exp();
+    let (a, b) = beta_logistic_shapes(log_delta, epsilon);
     if logistic.use_upper_tail {
         beta_reg(b, a, logistic.one_minus_u)
     } else {
@@ -1605,8 +1633,7 @@ fn sas_inverse_link_mu_d1(
 
 fn beta_logistic_inverse_link_mu_d1(eta: f64, delta: f64, epsilon: f64) -> (f64, f64) {
     let logistic = logistic_uwith_derivatives(eta);
-    let a = (delta - epsilon).exp();
-    let b = (delta + epsilon).exp();
+    let (a, b) = beta_logistic_shapes(delta, epsilon);
     let mu = beta_reg_logistic(a, b, logistic);
     let log_d1 = beta_logistic_log_d1(a, b, logistic);
     (mu, log_d1.exp())
@@ -2334,14 +2361,52 @@ fn beta_reg_with_shape_partials(a0: f64, b0: f64, x0: f64) -> BetaShapePartials 
 /// beta shape (so a·b = exp(2·log_shape_center)). Callers must pass the raw
 /// optimization parameter `SasLinkState::log_delta`, NOT the derived positive
 /// `SasLinkState::delta = exp(log_shape_center)`.
+/// Bounded beta shapes and the first two derivatives of each with respect to
+/// its own log-shape argument.
+///
+/// `log a = g(s)` with `s = log_shape_center − epsilon`, `log b = g(t)` with
+/// `t = log_shape_center + epsilon`, `g = smooth_bound_jet(·,
+/// BETA_LOGISTIC_LOG_SHAPE_BOUND)`. Returns `(a, b, ∂a/∂s, ∂b/∂t, ∂²a/∂s²,
+/// ∂²b/∂t²)`. Because `s` and `t` are affine in the two optimization
+/// parameters with unit coefficients, those are the only chain factors any
+/// caller needs — every existing `a`/`b` in a derivative expression becomes
+/// the corresponding derivative entry here.
+///
+/// On the interior `g` is the exact identity (`g′ = 1`, `g″ = 0`), so all six
+/// returned values are bitwise what the unbounded form produced.
+#[inline]
+fn beta_logistic_shape_jets(
+    log_shape_center: f64,
+    epsilon: f64,
+) -> (f64, f64, f64, f64, f64, f64) {
+    let gs = smooth_bound_jet(log_shape_center - epsilon, BETA_LOGISTIC_LOG_SHAPE_BOUND);
+    let gt = smooth_bound_jet(log_shape_center + epsilon, BETA_LOGISTIC_LOG_SHAPE_BOUND);
+    let a = gs.g.exp();
+    let b = gt.g.exp();
+    (
+        a,
+        b,
+        a * gs.d1,
+        b * gt.d1,
+        a * (gs.d1 * gs.d1 + gs.d2),
+        b * (gt.d1 * gt.d1 + gt.d2),
+    )
+}
+
+/// Value-only form of [`beta_logistic_shape_jets`].
+#[inline]
+fn beta_logistic_shapes(log_shape_center: f64, epsilon: f64) -> (f64, f64) {
+    let (a, b, ..) = beta_logistic_shape_jets(log_shape_center, epsilon);
+    (a, b)
+}
+
 pub fn beta_logistic_inverse_link_jet(
     eta: f64,
     log_shape_center: f64,
     epsilon: f64,
 ) -> InverseLinkJet {
     let logistic = logistic_uwith_derivatives(eta);
-    let a = (log_shape_center - epsilon).exp();
-    let b = (log_shape_center + epsilon).exp();
+    let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
     let mu = beta_reg_logistic(a, b, logistic);
     let log_d1 = beta_logistic_log_d1(a, b, logistic);
     let d1 = log_d1.exp();
@@ -2379,8 +2444,7 @@ pub fn beta_logistic_inverse_link_pdfthird_derivative(
     //
     // since `t' = -c u'`.
     let logistic = logistic_uwith_derivatives(eta);
-    let a = (log_shape_center - epsilon).exp();
-    let b = (log_shape_center + epsilon).exp();
+    let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
     let log_d1 = beta_logistic_log_d1(a, b, logistic);
     let d1 = log_d1.exp();
     let c = a + b;
@@ -2402,8 +2466,7 @@ pub fn beta_logistic_inverse_link_pdffourth_derivative(
     epsilon: f64,
 ) -> f64 {
     let logistic = logistic_uwith_derivatives(eta);
-    let a = (log_shape_center - epsilon).exp();
-    let b = (log_shape_center + epsilon).exp();
+    let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
     let log_d1 = beta_logistic_log_d1(a, b, logistic);
     let d1 = log_d1.exp();
     let c = a + b;
@@ -2422,12 +2485,14 @@ pub fn beta_logistic_inverse_link_jetwith_param_partials(
     epsilon: f64,
 ) -> SasJetWithParamPartials {
     let logistic = logistic_uwith_derivatives(eta);
-    let a = (log_shape_center - epsilon).exp();
-    let b = (log_shape_center + epsilon).exp();
+    // `da`/`db` are `∂a/∂s`, `∂b/∂t`; `daa`/`dbb` the second derivatives. On the
+    // interior they equal `a`, `b`, `a`, `b`, which is what the unbounded form
+    // used directly.
+    let (a, b, da, db, daa, dbb) = beta_logistic_shape_jets(log_shape_center, epsilon);
     let shape = beta_reg_with_shape_partials_logistic(a, b, logistic);
     let mu = shape.value;
-    let dmu_dlog_shape_center = a * shape.da + b * shape.db;
-    let dmu_depsilon = -a * shape.da + b * shape.db;
+    let dmu_dlog_shape_center = da * shape.da + db * shape.db;
+    let dmu_depsilon = -da * shape.da + db * shape.db;
     let log_d1 = beta_logistic_log_d1(a, b, logistic);
     let d1 = log_d1.exp();
     let t = a * logistic.one_minus_u - b * logistic.u;
@@ -2456,17 +2521,17 @@ pub fn beta_logistic_inverse_link_jetwith_param_partials(
             d3: d3_p,
         }
     };
-    let djet_dlog_shape_center = partials_for(a, b, dmu_dlog_shape_center);
-    let djet_depsilon = partials_for(-a, b, dmu_depsilon);
+    let djet_dlog_shape_center = partials_for(da, db, dmu_dlog_shape_center);
+    let djet_depsilon = partials_for(-da, db, dmu_depsilon);
     // Parameter order is `(epsilon, log_shape_center)`. The beta shapes obey
     // `a=exp(l-e)`, `b=exp(l+e)`, so their first and second parameter jets are
     // closed form. Contract those jets with the exact `(a,b)` Hessian of the
     // regularized beta CDF for `mu`, and with the exact log-density Hessian for
     // `d1`. No numerical differencing or profile replay enters this path.
-    let a_first = [-a, a];
-    let b_first = [b, b];
-    let a_second = [[a, -a], [-a, a]];
-    let b_second = [[b, b], [b, b]];
+    let a_first = [-da, da];
+    let b_first = [db, db];
+    let a_second = [[daa, -daa], [-daa, daa]];
+    let b_second = [[dbb, dbb], [dbb, dbb]];
     let logd1_first = [
         a_first[0] * la + b_first[0] * lb,
         a_first[1] * la + b_first[1] * lb,
@@ -3993,6 +4058,113 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// #2685: the beta-logistic shapes must live in a compact set, and the
+    /// bound must be the interior-exact map — not a clamp bolted onto `eta`.
+    ///
+    /// The measured runaway point is the outer BFGS checkpoint the CLI reports
+    /// on the committed parametric fixture: `theta = [-0.4584861947563609,
+    /// -5.246934642530043]`. Unbounded, that is `a = 8.2e-3`, `b = 3.3e-3` —
+    /// shapes that put essentially all beta mass at `u in {0, 1}`, so `mu(eta)`
+    /// is nearly flat in the interior and the inner P-IRLS answers by pushing
+    /// `eta` to `1075*ln 2 = 745.1332191019412`, the smallest `f64` at which
+    /// `exp(-eta)` underflows to exactly `0.0`.
+    #[test]
+    fn beta_logistic_shapes_are_bounded_and_interior_exact_2685() {
+        // Interior: bitwise identity with the unbounded form it replaced.
+        for &(center, epsilon) in &[(0.0, 0.0), (0.5, -0.25), (-0.7, 0.3)] {
+            let (a, b) = beta_logistic_shapes(center, epsilon);
+            assert_eq!(a.to_bits(), (center - epsilon).exp().to_bits());
+            assert_eq!(b.to_bits(), (center + epsilon).exp().to_bits());
+        }
+
+        let floor = (-BETA_LOGISTIC_LOG_SHAPE_BOUND).exp();
+        let ceiling = BETA_LOGISTIC_LOG_SHAPE_BOUND.exp();
+        // The measured runaway theta, and its mirror image on the large-shape side.
+        for &(center, epsilon) in &[
+            (-5.246_934_642_530_043_f64, -0.458_486_194_756_360_9_f64),
+            (5.246_934_642_530_043, 0.458_486_194_756_360_9),
+            (-40.0, 12.0),
+            (40.0, -12.0),
+        ] {
+            let (a, b) = beta_logistic_shapes(center, epsilon);
+            assert!(
+                (floor..=ceiling).contains(&a) && (floor..=ceiling).contains(&b),
+                "beta-logistic shapes escaped [{floor:e}, {ceiling:e}] at                  (center={center}, epsilon={epsilon}): a={a:e} b={b:e}"
+            );
+        }
+
+        // The point of the bound is that the link keeps its sensitivity: at the
+        // runaway theta the unbounded link's slope at eta=0 was 2.4e-3 (a ~100x
+        // collapse from the canonical logit's 0.25), which is what forced the
+        // inner solve out to the eta rail. Bounded, it cannot collapse.
+        let jet = beta_logistic_inverse_link_jet(
+            0.0,
+            -5.246_934_642_530_043,
+            -0.458_486_194_756_360_9,
+        );
+        assert!(
+            jet.d1 > 1.0e-2,
+            "bounded beta-logistic link sensitivity collapsed at the runaway              theta: d1={} (canonical logit is 0.25)",
+            jet.d1
+        );
+    }
+
+    /// #2685: the bounded map's chain rule reaches the analytic parameter
+    /// partials. Evaluated strictly inside the splice — where `g' != 1` and
+    /// `g'' != 0`, so a missing chain factor cannot cancel — unlike
+    /// `beta_logistic_param_partials_matchfd`, which sits on the interior where
+    /// the bound is the identity and the test is blind to it by construction.
+    #[test]
+    fn beta_logistic_param_partials_matchfd_inside_the_shape_splice_2685() {
+        let bound = BETA_LOGISTIC_LOG_SHAPE_BOUND;
+        let eta = -0.41;
+        // s = center - epsilon = 0.85*B and t = center + epsilon = 1.15*B, both
+        // strictly between the splice endpoints 0.8*B and 1.2*B.
+        let center = bound;
+        let epsilon = 0.15 * bound;
+        assert!((0.8 * bound..1.2 * bound).contains(&(center - epsilon)));
+        assert!((0.8 * bound..1.2 * bound).contains(&(center + epsilon)));
+
+        let out = beta_logistic_inverse_link_jetwith_param_partials(eta, center, epsilon);
+        let h = 1e-6;
+        let fd = |plus: InverseLinkJet, minus: InverseLinkJet| InverseLinkJet {
+            mu: (plus.mu - minus.mu) / (2.0 * h),
+            d1: (plus.d1 - minus.d1) / (2.0 * h),
+            d2: (plus.d2 - minus.d2) / (2.0 * h),
+            d3: (plus.d3 - minus.d3) / (2.0 * h),
+        };
+        let fd_center = fd(
+            beta_logistic_inverse_link_jet(eta, center + h, epsilon),
+            beta_logistic_inverse_link_jet(eta, center - h, epsilon),
+        );
+        let fd_epsilon = fd(
+            beta_logistic_inverse_link_jet(eta, center, epsilon + h),
+            beta_logistic_inverse_link_jet(eta, center, epsilon - h),
+        );
+        // The central difference of a C5 map at h=1e-6 resolves to ~1e-10
+        // absolute plus a 1e-10 relative rounding floor on each component.
+        let close = |analytic: f64, numeric: f64, what: &str| {
+            let tol = 1.0e-7 + 1.0e-5 * analytic.abs().max(numeric.abs());
+            assert!(
+                (analytic - numeric).abs() <= tol,
+                "{what}: analytic={analytic:e} fd={numeric:e} tol={tol:e}"
+            );
+        };
+        close(out.djet_dlog_delta.mu, fd_center.mu, "dmu/dcenter");
+        close(out.djet_dlog_delta.d1, fd_center.d1, "dd1/dcenter");
+        close(out.djet_dlog_delta.d2, fd_center.d2, "dd2/dcenter");
+        close(out.djet_dlog_delta.d3, fd_center.d3, "dd3/dcenter");
+        close(out.djet_depsilon.mu, fd_epsilon.mu, "dmu/depsilon");
+        close(out.djet_depsilon.d1, fd_epsilon.d1, "dd1/depsilon");
+        close(out.djet_depsilon.d2, fd_epsilon.d2, "dd2/depsilon");
+        close(out.djet_depsilon.d3, fd_epsilon.d3, "dd3/depsilon");
+
+        // And the derivatives are not trivially zero here, so the comparison
+        // above was free to disagree.
+        assert!(out.djet_dlog_delta.mu.abs() > 1.0e-6);
+        assert!(out.djet_depsilon.mu.abs() > 1.0e-6);
     }
 
     #[test]

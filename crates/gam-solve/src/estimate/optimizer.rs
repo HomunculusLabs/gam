@@ -1447,16 +1447,24 @@ where
             };
 
             // SAS ridge/barrier cost correction (shared between cost_fn, eval_fn, efs_fn).
+            // #2685: the beta-logistic block used to be excluded from this
+            // entirely, leaving `[ε, log δ]` with no counter-term at all — and
+            // with k = 0 penalty blocks the criterion carries no `log|S|` term
+            // either, so nothing opposed the measured monotone drift of `log δ`
+            // toward −∞. It now carries the same weak ridge as the SAS block, on
+            // BOTH coordinates (for beta-logistic they are symmetric: the shapes
+            // are `exp(log δ ∓ ε)`, so ε is a log-shape too, not the bounded
+            // skew SAS reparameterizes). The tanh edge barrier stays SAS-only:
+            // it is denominated in `sas_log_delta_bound()`, which is not the
+            // beta-logistic shape bound.
             let sas_ridge_cost = |theta: &Array1<f64>| -> f64 {
-                let sasridge = if use_sas && !use_beta_logistic {
-                    sasridgeweight
-                } else {
-                    0.0
-                };
-                if use_sas && sasridge > 0.0 {
+                if use_sas && sasridgeweight > 0.0 {
                     let log_delta = theta[k + 1];
-                    let mut extra = 0.5 * sasridge * log_delta * log_delta;
-                    if !use_beta_logistic {
+                    let mut extra = 0.5 * sasridgeweight * log_delta * log_delta;
+                    if use_beta_logistic {
+                        let eps = theta[k];
+                        extra += 0.5 * sasridgeweight * eps * eps;
+                    } else {
                         let (barriercost, _) = sas_log_delta_edge_barriercostgrad(log_delta);
                         extra += barriercost;
                     }
@@ -1525,15 +1533,21 @@ where
                     hessian[[k, k]] += grad_effective[k] * d2_eps_d_raw2;
                     grad[k] *= d_eps_d_raw;
                 }
-                // SAS log_delta ridge + barrier gradient/Hessian.
-                if use_sas && !use_beta_logistic && sasridgeweight > 0.0 {
+                // Link-block ridge (+ the SAS-only edge barrier) gradient and
+                // Hessian, matching `sas_ridge_cost` term for term (#2685).
+                if use_sas && sasridgeweight > 0.0 {
                     let log_delta = theta[k + 1];
                     grad[k + 1] += sasridgeweight * log_delta;
                     hessian[[k + 1, k + 1]] += sasridgeweight;
-                    let (_, barriergrad, barrierhess) =
-                        sas_log_delta_edge_barriercostgradhess(log_delta);
-                    grad[k + 1] += barriergrad;
-                    hessian[[k + 1, k + 1]] += barrierhess;
+                    if use_beta_logistic {
+                        grad[k] += sasridgeweight * theta[k];
+                        hessian[[k, k]] += sasridgeweight;
+                    } else {
+                        let (_, barriergrad, barrierhess) =
+                            sas_log_delta_edge_barriercostgradhess(log_delta);
+                        grad[k + 1] += barriergrad;
+                        hessian[[k + 1, k + 1]] += barrierhess;
+                    }
                 }
 
                 let cost_sec = tcost.elapsed().as_secs_f64();
