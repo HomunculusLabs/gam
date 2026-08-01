@@ -82,7 +82,7 @@ pub(crate) fn exact_joint_hessian_dense_bytes(total: usize) -> Result<usize, Str
 pub(crate) fn ensure_exact_joint_hessian_dense_budget(
     total: usize,
     context: &str,
-) -> Result<(), String> {
+) -> Result<(), CustomFamilyError> {
     let bytes = exact_joint_hessian_dense_bytes(total)?;
     if bytes > EXACT_JOINT_HESSIAN_DENSE_MAX_BYTES {
         return Err(CustomFamilyError::UnsupportedConfiguration {
@@ -92,8 +92,7 @@ pub(crate) fn ensure_exact_joint_hessian_dense_budget(
                 bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                 EXACT_JOINT_HESSIAN_DENSE_MAX_BYTES as f64 / (1024.0 * 1024.0 * 1024.0),
             ),
-        }
-        .into());
+        });
     }
     Ok(())
 }
@@ -191,7 +190,7 @@ pub(crate) fn joint_hessian_source_curvature_is_finite(source: &JointHessianSour
 /// point is a genuine ρ-degeneracy and stays a graceful non-converged exit;
 /// gam#1088.) The `Operator` variant probes its assembled `diagonal`, exactly
 /// as the boolean twin does, since the full operator is never materialized here.
-pub(crate) fn joint_hessian_source_finite_check(source: &JointHessianSource) -> Result<(), String> {
+pub(crate) fn joint_hessian_source_finite_check(source: &JointHessianSource) -> Result<(), CustomFamilyError> {
     let offender = match source {
         JointHessianSource::Dense(h_joint) => h_joint
             .indexed_iter()
@@ -207,8 +206,7 @@ pub(crate) fn joint_hessian_source_finite_check(source: &JointHessianSource) -> 
             reason: format!(
                 "smooth-regularized logdet Hessian contains non-finite entry at ({row}, {col}): {value}"
             ),
-        }
-        .into()),
+        }),
     }
 }
 
@@ -508,21 +506,20 @@ pub(crate) fn symmetrized_square_matrix(
     mut matrix: Array2<f64>,
     expected: usize,
     context: &str,
-) -> Result<Array2<f64>, String> {
+) -> Result<Array2<f64>, CustomFamilyError> {
     if matrix.nrows() != expected || matrix.ncols() != expected {
-        return Err(format!(
+        return Err(CustomFamilyError::DimensionMismatch { reason: format!(
             "{context}: got {}x{}, expected {}x{}",
             matrix.nrows(),
             matrix.ncols(),
             expected,
             expected
-        ));
+        ) });
     }
     if matrix.iter().any(|value| !value.is_finite()) {
         return Err(CustomFamilyError::NumericalFailure {
             reason: format!("{context}: matrix contains non-finite values"),
-        }
-        .into());
+        });
     }
     symmetrize_dense_in_place(&mut matrix);
     Ok(matrix)
@@ -1333,7 +1330,7 @@ pub(crate) fn active_face_penalty_logdet(
     block_log_lambdas: &[Array1<f64>],
     active_constraints: &ActiveLinearConstraintBlock,
     ridge: f64,
-) -> Result<Option<f64>, String> {
+) -> Result<Option<f64>, CustomFamilyError> {
     let ActiveConstraintTangentGeometry::Tangent(z) =
         active_constraint_tangent_geometry(&active_constraints.a)?
     else {
@@ -1372,7 +1369,7 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
     preferred_workspace: Option<Arc<dyn ExactNewtonJointHessianWorkspace>>,
     cached_jeffreys_hphi: Option<&Array2<f64>>,
     active_constraints: Option<&ActiveLinearConstraintBlock>,
-) -> Result<(f64, f64), String> {
+) -> Result<(f64, f64), CustomFamilyError> {
     let include_logdet_h = include_exact_newton_logdet_h(family, options);
     let include_logdet_s = include_exact_newton_logdet_s(family, options);
     if !include_logdet_h && !include_logdet_s {
@@ -1466,10 +1463,10 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
             None
         } else if let Some(hphi) = cached_jeffreys_hphi {
             if hphi.dim() != (total, total) {
-                return Err(format!(
+                return Err(CustomFamilyError::DimensionMismatch { reason: format!(
                     "cached joint Jeffreys H_phi has shape {:?}, expected ({total}, {total})",
                     hphi.dim()
-                ));
+                ) });
             }
             // The caller supplies this only after an exact, bitwise beta-key match.
             // Reusing the already-authoritative H_phi keeps the outer logdet on the
@@ -1733,11 +1730,11 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
 
     let eval = family.evaluate(states)?;
     if eval.blockworking_sets.len() != specs.len() {
-        return Err(format!(
+        return Err(CustomFamilyError::DimensionMismatch { reason: format!(
             "family returned {} block working sets, expected {}",
             eval.blockworking_sets.len(),
             specs.len()
-        ));
+        ) });
     }
 
     let mut logdet_h_total = 0.0;
@@ -1769,7 +1766,7 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
                         hessian.ncols(),
                         p,
                         p
-                    ) }.into());
+                    ) });
                 }
                 hessian.to_dense()
             }
@@ -4905,13 +4902,13 @@ pub(crate) fn load_joint_gradient_evaluation<F: CustomFamily + Clone + Send + Sy
 pub(crate) fn require_projected_kkt_residual(
     residual: Option<ProjectedKktResidual>,
     context: &str,
-) -> Result<ProjectedKktResidual, String> {
+) -> Result<ProjectedKktResidual, CustomFamilyError> {
     match residual {
         Some(residual) => Ok(residual),
         None => Err(CustomFamilyError::UnsupportedConfiguration { reason: format!(
             "{context}: converged joint-Newton exact inner solve did not produce a projected KKT \
              residual; refusing to assemble REML/LAML derivatives without the IFT correction input"
-        ) }.into()),
+        ) }),
     }
 }
 
