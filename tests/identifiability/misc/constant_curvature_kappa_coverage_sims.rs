@@ -79,6 +79,19 @@ fn termspec_for(formula: &str, frame: &Array2<f64>) -> gam::smooth::TermCollecti
 /// response that is a smooth function of the `M_κ` geodesic distance to the
 /// origin — a κ⋆-dependent signal the constant-curvature kernel can represent,
 /// so curvature is identified.
+///
+/// **Flat truth (`κ⋆ = 0`) is a CONSTANT mean, not the κ = 0 member of the
+/// curved family** (gam#2687). A flat space has no preferred geodesic-distance
+/// shape, so there is no curvature to plant; but `2·exp(−d₀) − 1` is still a
+/// centre-peaked radial signal, and a renormalized kernel at `κ ≠ 0` fits that
+/// shape better even at matched effective degrees of freedom — a residual lean
+/// that spuriously rejects flatness. The sibling `constant_curvature_kappa_
+/// inference_e2e` generator of the same name reached this conclusion and carries
+/// the fix in its own doc comment; this copy did not, and the lean is measured:
+/// with the centre-peaked plant, `κ̂` railed at the box's upper end (`≈ +1.41`,
+/// spherical) in **6 of 9** genuinely flat replicates, at a residual sum of
+/// squares that falls monotonically in κ while `edf` stays pinned at 5.978 —
+/// i.e. the improvement is the plant's shape, not curvature.
 fn dataset_on_m_kappa(
     n: usize,
     kappa_star: f64,
@@ -89,6 +102,7 @@ fn dataset_on_m_kappa(
     let mut st = seed;
     let manifold = ConstantCurvature::new(2, kappa_star);
     let reference = ndarray::array![0.0_f64, 0.0_f64];
+    let flat_truth = kappa_star == 0.0;
     let mut feats = Array2::<f64>::zeros((n, 2));
     let mut y = Array1::<f64>::zeros(n);
     for i in 0..n {
@@ -99,11 +113,17 @@ fn dataset_on_m_kappa(
                 break (a * radius, b * radius);
             }
         };
-        let pt = ndarray::array![x1, x2];
-        let d = manifold
-            .distance(pt.view(), reference.view())
-            .expect("in-chart geodesic distance");
-        let mu = 2.0 * (-d).exp() - 1.0;
+        // Curved truth: a curvature-shaped signal of the M_{κ⋆} geodesic
+        // distance. Flat truth: a κ-neutral constant mean (no curvature signal).
+        let mu = if flat_truth {
+            0.0
+        } else {
+            let pt = ndarray::array![x1, x2];
+            let d = manifold
+                .distance(pt.view(), reference.view())
+                .expect("in-chart geodesic distance");
+            2.0 * (-d).exp() - 1.0
+        };
         feats[(i, 0)] = x1;
         feats[(i, 1)] = x2;
         y[i] = mu + noise_sd * next_gauss(&mut st);
@@ -203,44 +223,54 @@ fn replicate_count() -> usize {
 
 /// How one replicate's profile CI resolved against a target κ.
 ///
-/// The middle arm is the one this file was missing (gam#2687). `KappaProfileCi`
-/// carries `lo_at_bound` / `hi_at_bound` — documented as *"CI is left/right-open
-/// at the bound"* — and `kappa_hat_support`, which says whether κ̂ is itself a
-/// box endpoint. A railed κ̂ is not a profile minimiser, so the Wilks region
-/// `2[V_p(κ) − V_p(κ̂)] ≤ χ²₁` anchored at it is not a 95% interval at all; and a
-/// bound-open interval does not EXCLUDE a κ beyond it, so counting such a
-/// replicate as a miss reports an exclusion the data never made. Both are
-/// UNRESOLVED, which is neither coverage nor a miss, and a gate that silently
-/// folds them into either number is measuring something other than coverage.
+/// The middle arm is the one this file was missing (gam#2687), and the asymmetry
+/// between the two directions is the point. `KappaProfileCi` carries
+/// `lo_at_bound` / `hi_at_bound` — *"CI is left/right-open at the bound"* — and
+/// `kappa_hat_support`, which says whether κ̂ is itself a box endpoint. Both
+/// defects make the REPORTED set a truncation of the set the data actually
+/// support:
+///
+/// * a bound-open endpoint is where the walk ran out of box, not where the
+///   profile crossed χ²₁, so the true set extends past it;
+/// * a railed κ̂ anchors the Wilks drop at a boundary value of `V_p` rather than
+///   at its minimum, so `2[V_p(κ) − V_p(κ̂)]` understates the drop everywhere.
+///
+/// Truncation only ever removes κ from the reported interval. So **containment
+/// survives it and exclusion does not**: a target INSIDE the reported interval is
+/// inside the true one too and is genuinely covered, while a target outside is
+/// only excluded if that endpoint is a real χ²₁ crossing AND κ̂ is a genuine
+/// interior optimum. Everything else is UNRESOLVED — neither coverage nor a
+/// miss — and a gate that folds it into either number is measuring something
+/// other than coverage. Before #2687 this file tested closed containment and
+/// reported `covers=false` for a right-open interval, which reads as a
+/// mis-covering CI when the true state was "no exclusion was ever claimed".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Resolution {
     Covered,
     Missed,
-    /// The interval carries no coverage claim about this target: κ̂ is railed, or
-    /// the interval is open on the side the target lies.
     Unresolved,
 }
 
 fn resolve(inf: &CurvatureInference, target: f64) -> Resolution {
+    if inf.ci.ci_lo <= target && target <= inf.ci.ci_hi {
+        // Inside the REPORTED set, hence inside the (weakly larger) true one.
+        return Resolution::Covered;
+    }
+    // Outside: an exclusion, which is only real on an un-truncated interval
+    // anchored at an interior optimum.
     if inf.ci.kappa_hat_support.is_railed() {
         return Resolution::Unresolved;
     }
-    if target < inf.ci.ci_lo {
-        // Below the interval: only a genuine (closed) lower endpoint excludes it.
-        return if inf.ci.lo_at_bound {
-            Resolution::Unresolved
-        } else {
-            Resolution::Missed
-        };
+    let endpoint_is_real = if target < inf.ci.ci_lo {
+        !inf.ci.lo_at_bound
+    } else {
+        !inf.ci.hi_at_bound
+    };
+    if endpoint_is_real {
+        Resolution::Missed
+    } else {
+        Resolution::Unresolved
     }
-    if target > inf.ci.ci_hi {
-        return if inf.ci.hi_at_bound {
-            Resolution::Unresolved
-        } else {
-            Resolution::Missed
-        };
-    }
-    Resolution::Covered
 }
 
 /// CI COVERAGE + κ̂ RECOVERY on CURVED truth. Across `R` independent M_κ
@@ -347,6 +377,7 @@ fn flatness_test_holds_size_across_flat_replicates() {
     let mut rejections = 0usize;
     let mut ci_covers_zero = 0usize;
     let mut unresolved = 0usize;
+    let mut railed = 0usize;
     let mut pvals = Vec::with_capacity(reps);
     for r in 0..reps {
         let seed = 0x71A7_0944_0000_0000 ^ ((r as u64) << 8);
@@ -359,6 +390,9 @@ fn flatness_test_holds_size_across_flat_replicates() {
             Resolution::Covered => ci_covers_zero += 1,
             Resolution::Missed => {}
             Resolution::Unresolved => unresolved += 1,
+        }
+        if inf.ci.kappa_hat_support.is_railed() {
+            railed += 1;
         }
         pvals.push(inf.flatness.p_value);
         eprintln!(
@@ -373,7 +407,7 @@ fn flatness_test_holds_size_across_flat_replicates() {
     }
     eprintln!(
         "[size κ⋆=0] rejected {rejections}/{reps} at α={alpha}  CI⊇0 in {ci_covers_zero}/{reps}  \
-         unresolved {unresolved}/{reps}  p-values={pvals:?}"
+         unresolved {unresolved}/{reps}  railed κ̂ {railed}/{reps}  p-values={pvals:?}"
     );
 
     // SIZE CONTROL: a level-α interior χ²₁ test on truly flat data rejects ~α of
@@ -391,11 +425,16 @@ fn flatness_test_holds_size_across_flat_replicates() {
     // are named separately: a bound-open interval or a railed κ̂ carries no claim
     // about κ=0 either way, and folding them into the covered count would let a
     // fit that never resolved report perfect coverage.
+    // Unlike the curved arm below, this one does NOT gate on a railed κ̂. The
+    // claim here is "flat data are not called curved", and a railed κ̂ whose
+    // profile is flat enough that the CI spans the whole box still supports it —
+    // the interval contains 0, the LR does not reject, and the point estimate's
+    // provenance is now declared rather than hidden. What must not happen is a
+    // real EXCLUSION of 0, which is what `Missed` counts.
     assert!(
         unresolved == 0,
         "the profile CI carried no coverage claim about κ=0 in {unresolved}/{reps} flat \
-         replicates (railed κ̂ or a bound-open interval on the side of 0); size is \
-         UNMEASURED there, not passing"
+         replicates; size is UNMEASURED there, not passing"
     );
     assert!(
         ci_covers_zero + MAX_MISSES >= reps,

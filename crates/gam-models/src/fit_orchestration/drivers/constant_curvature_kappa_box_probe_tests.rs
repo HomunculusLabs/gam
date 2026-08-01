@@ -74,6 +74,88 @@ mod constant_curvature_kappa_box_probe_tests {
     /// Is the monotone descent a property of the BOX's endpoint, or of the
     /// criterion? Sweep far past the fold (where the geometry is still
     /// evaluable, just non-injective) and across three planted truths.
+    /// WHICH TERM of the REML criterion is monotone in kappa? The value is
+    ///
+    ///   V = 0.5*(log|H| - log|S|+ - rank*rho) + 0.5*nu*(1 + ln(2*pi*Dp/nu))
+    ///
+    /// with H = X'X + lambda*S profiled over rho. If the fill-invariant
+    /// effective length L(kappa) is doing its job — holding the basis'
+    /// flexibility fixed so only the distance-matrix SHAPE moves — then the
+    /// determinant block should be roughly kappa-flat and any descent should be
+    /// the deviance actually fitting better.
+    #[test]
+    fn probe_which_reml_term_is_monotone_in_kappa() {
+        for (label, kappa_star, centers) in [
+            ("spherical k*=+1.5", 1.5_f64, 6usize),
+            ("flat      k*= 0.0", 0.0, 6),
+        ] {
+            let (feats, y) = dataset_on_m_kappa(120, kappa_star, 0.6, 0.10, 0x5EED_0944_0000_0000);
+            eprintln!("\n### {label}");
+            eprintln!(
+                "kappa      L(kappa)   lambda      rho       edf      Dp         \
+                 logdetH    logdetS+   det_block   dev_block   V"
+            );
+            for &kappa in &[
+                -1.35_f64, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.2, 1.35, 1.40,
+            ] {
+                let mut spec = spec_at(kappa, centers);
+                spec.double_penalty = false;
+                let Ok(basis) = gam_terms::basis::build_constant_curvature_basis(feats.view(), &spec)
+                else {
+                    eprintln!("  k={kappa:<9} basis refused");
+                    continue;
+                };
+                let ell = match &basis.metadata {
+                    gam_terms::basis::BasisMetadata::ConstantCurvature { length_scale, .. } => {
+                        *length_scale
+                    }
+                    _ => f64::NAN,
+                };
+                let xs = basis.design.to_dense();
+                let (n, p) = xs.dim();
+                let mut design = Array2::<f64>::ones((n, p + 1));
+                design.slice_mut(ndarray::s![.., 1..]).assign(&xs);
+                let mut penalty = Array2::<f64>::zeros((p + 1, p + 1));
+                penalty
+                    .slice_mut(ndarray::s![1.., 1..])
+                    .assign(&basis.active_penalties[0].matrix);
+                let y2 = y.view().insert_axis(ndarray::Axis(1));
+                let Ok(fit) = gam_solve::gaussian_reml::gaussian_reml_multi_closed_form(
+                    design.view(),
+                    y2,
+                    penalty.view(),
+                    None,
+                    None,
+                ) else {
+                    eprintln!("  k={kappa:<9} reml refused");
+                    continue;
+                };
+                let (v, _, _) = constant_curvature_kappa_profile_value_jet(
+                    feats.view(),
+                    y.view(),
+                    &spec_at(kappa, centers),
+                )
+                .expect("profile value");
+                // The residual sum of squares the criterion's deviance block is
+                // built from, and the log|H| / log|S|+ determinant block, both
+                // recomputed here so the descent can be attributed to a term.
+                let resid: f64 = y
+                    .iter()
+                    .zip(fit.fitted.column(0).iter())
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum();
+                eprintln!(
+                    "  k={kappa:<8.3} L={ell:<9.5} lam={:<11.4e} rho={:<9.4} edf={:<8.4} \
+                     rss={resid:<10.6} sig2={:<10.6} V={v:<12.6}",
+                    fit.lambda,
+                    fit.rho,
+                    fit.edf,
+                    fit.sigma2[0],
+                );
+            }
+        }
+    }
+
     #[test]
     fn probe_criterion_far_past_the_fold_and_across_planted_truths() {
         for (label, kappa_star, centers) in [
