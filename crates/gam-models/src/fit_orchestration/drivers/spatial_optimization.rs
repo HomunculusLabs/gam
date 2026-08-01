@@ -6524,7 +6524,36 @@ pub(crate) fn exact_joint_multistart_outer_problem(
         // at the actual outer-problem construction boundary, so a raw-negative
         // terminal Hessian enters saddle recovery instead of surviving the
         // generic gradient-residue floor and failing later in fit assembly.
-        .with_require_measured_psd(true)
+        //
+        // BUT ONLY WHERE A HESSIAN WAS DECLARED. This used to be an unconditional
+        // `true`, while the Hessian's availability arrives as a caller-supplied
+        // parameter — so a caller passing `DeclaredHessianForm::Unavailable` built
+        // a problem that both suppressed the analytic Hessian and required a
+        // measured one. `run.rs` detects exactly that and refuses the mint by its
+        // own words: "CONFIGURATION CONTRADICTION: the same outer problem both
+        // suppressed the analytic Hessian and required a measured one. No
+        // optimizer result can satisfy this — fix the construction ... rather than
+        // the search". This is that fix.
+        //
+        // The caller in question is the #1033 n-free Gaussian ψ-lane
+        // (`suppress_outer_hessian_for_nfree`), which declares `Unavailable`
+        // BECAUSE the planner routes on the pair `(Analytic, Unavailable) ->
+        // S::Bfgs` — that declaration is how the lane forces gradient-only search
+        // and keeps every in-window κ-trial on the n-free design-realization skip.
+        // So the suppression cannot simply be removed; the requirement is what has
+        // to become conditional. One flag was answering two different questions —
+        // "how should the SEARCH route?" and "must the MINT measure curvature?" —
+        // and they have different answers on this lane.
+        //
+        // This cannot weaken any fit that mints today: a problem that never
+        // declared a Hessian could never have had a measured one, so every fit
+        // currently reaching the PSD requirement declared `Either` or `Analytic`
+        // and is unaffected. What changes is only that a lane which today cannot
+        // produce a fit at all can produce one.
+        .with_require_measured_psd(!matches!(
+            hessian,
+            gam_problem::DeclaredHessianForm::Unavailable
+        ))
         .with_disable_fixed_point(disable_fixed_point)
         // Re-enable the automatic fallback ladder for exact joint spatial
         // problems. It was previously `Disabled` to suppress a geo-bench
