@@ -1148,18 +1148,31 @@ fn per_kind_crossover_table_splits_code_vs_support_classes_2233() {
     let log2_n = n_tokens.log2();
     let log2_g_over_l0 = (g_dict as f64 / l0).log2();
 
-    // (label, span s, intrinsic d, basis m): circle/sphere/torus use the
-    // production `curved_topology_for_span` geometry (2H+1 harmonics, sphere
-    // chart 7, torus (2H+1)² at H=2); Möbius and the swiss sheet share the
-    // sphere-chart budget at their common (s=3, d=2); the helix is a d=1
-    // closed curve winding through 3 ambient directions on the circle basis.
+    // (label, span s, intrinsic d, basis m): circle/sphere/torus READ the
+    // production span→topology map rather than transcribing it. #2749 — the
+    // transcription that used to live here outlived the `(lat, lon)` chart it
+    // copied, and went on asserting the class structure at a sphere width (7) no
+    // constructor could build. Möbius and the swiss sheet share the sphere
+    // band's budget at their common (s=3, d=2); the helix is a d=1 closed curve
+    // winding through 3 ambient directions on the circle basis.
+    let priced = |span: f64| -> (usize, usize) {
+        let plan = crate::manifold::SaeAtomGeometryPlan::curved_prescreen_atom_for_span(span)
+            .expect("the production pre-screen map must build its atom");
+        (
+            plan.intrinsic_dim(),
+            plan.basis_size().expect("a built plan has a width"),
+        )
+    };
+    let (circle_d, circle_m) = priced(2.0);
+    let (sphere_d, sphere_m) = priced(3.0);
+    let (torus_d, torus_m) = priced(4.0);
     let kinds: [(&str, f64, usize, usize); 6] = [
-        ("circle", 2.0, 1, 3),
-        ("sphere", 3.0, 2, 7),
-        ("mobius", 3.0, 2, 7),
-        ("swiss_sheet", 3.0, 2, 7),
-        ("torus", 4.0, 2, 25),
-        ("helix", 3.0, 1, 3),
+        ("circle", 2.0, circle_d, circle_m),
+        ("sphere", 3.0, sphere_d, sphere_m),
+        ("mobius", 3.0, sphere_d, sphere_m),
+        ("swiss_sheet", 3.0, sphere_d, sphere_m),
+        ("torus", 4.0, torus_d, torus_m),
+        ("helix", 3.0, 1, circle_m),
     ];
 
     let prescreen = |span: f64, d: usize, m: usize, signal_var: f64| BirthMdlPrescreen {

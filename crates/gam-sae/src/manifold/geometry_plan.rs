@@ -18,6 +18,22 @@ use serde::{Deserialize, Serialize};
 /// default rather than a tuned constant.
 pub const SAE_AMBIENT_SPHERE_DEFAULT_DEGREE: usize = 2;
 
+/// Harmonic order of the circle atom the #2233 pre-screen prices a span-`≤2`
+/// residual against.
+///
+/// Not a tuning knob: it is the order the birth topology race itself builds at
+/// `d_k = 1`, where `n_harmonics = max(2·d_k + 1, 3) | 1 = 3` and
+/// `order = (n_harmonics − 1) / 2`. Written here so the pre-screen and the race
+/// read one value; `curved_prescreen_matches_birth_race_2749` fails if they ever
+/// stop agreeing.
+pub const SAE_PRESCREEN_CIRCLE_HARMONIC_ORDER: usize = 1;
+
+/// Per-axis harmonic order of the torus atom the #2233 pre-screen prices a
+/// span-`≥4` residual against — the order the birth topology race builds at
+/// `d_k = 2`, giving `(2·order + 1)² = 25` columns. Same anti-drift contract as
+/// [`SAE_PRESCREEN_CIRCLE_HARMONIC_ORDER`].
+pub const SAE_PRESCREEN_TORUS_PER_AXIS_ORDER: usize = 2;
+
 /// Basis-native resolution of one analytic atom family.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -320,6 +336,53 @@ impl SaeAtomGeometryPlan {
             SaeBasisResolution::KleinBottleHarmonics { per_axis_order },
             SaeReferenceMetricPlan::FlatKleinBottle,
         )
+    }
+
+    /// The curved atom the #2233 description-length pre-screen prices an
+    /// estimated ambient span `ŝ` against — the plan the birth topology race
+    /// (`structure_harvest::topology_candidates_for_dim`) would actually build
+    /// for a residual of that span.
+    ///
+    /// `ŝ ≤ 2` is a circle, `ŝ ≈ 3` a sphere, `ŝ ≥ 4` the torus (the curved
+    /// families top out at intrinsic `d = 2`, so the richest one prices every
+    /// larger span). The e-gate, never this map, owns acceptance.
+    ///
+    /// This returns a PLAN rather than a `(d, m)` pair on purpose. Both numbers
+    /// the pre-screen needs are theorems of the plan — [`Self::intrinsic_dim`]
+    /// and [`Self::basis_size`] — so building the plan is what makes them
+    /// unforgeable. The predecessor of this function transcribed them as
+    /// literals and priced the sphere at basis width **7**, the width of the
+    /// `(lat, lon)` chart deleted in `1dfa70140`; because [`Self::new`] refuses
+    /// `(Sphere, latent_dim = 2, ..)`, that was a price on an atom no
+    /// constructor could build (#2749). A transcription cannot fail to notice
+    /// that. A constructor can, and this one does.
+    pub fn curved_prescreen_atom_for_span(span: f64) -> Result<Self, String> {
+        match span.round().max(1.0) as usize {
+            0 | 1 | 2 => Self::new(
+                SaeAtomBasisKind::Periodic,
+                1,
+                SaeBasisResolution::PeriodicHarmonics {
+                    order: SAE_PRESCREEN_CIRCLE_HARMONIC_ORDER,
+                },
+                SaeReferenceMetricPlan::UnitCircle,
+            ),
+            3 => Self::new(
+                SaeAtomBasisKind::Sphere,
+                3,
+                SaeBasisResolution::AmbientSphereHarmonics {
+                    degree: SAE_AMBIENT_SPHERE_DEFAULT_DEGREE,
+                },
+                SaeReferenceMetricPlan::RoundSphere,
+            ),
+            _ => Self::new(
+                SaeAtomBasisKind::Torus,
+                2,
+                SaeBasisResolution::TorusHarmonics {
+                    per_axis_order: SAE_PRESCREEN_TORUS_PER_AXIS_ORDER,
+                },
+                SaeReferenceMetricPlan::FlatRectangularTorus { tau: 0.0 },
+            ),
+        }
     }
 
     pub fn kind(&self) -> &SaeAtomBasisKind {

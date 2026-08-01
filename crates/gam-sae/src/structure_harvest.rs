@@ -276,28 +276,26 @@ fn participation_ratio(spectrum: &[f64]) -> f64 {
 
 /// The curved topology `(d, m)` the #2233 pre-screen matches to an estimated
 /// ambient span `ŝ`, so the dictionary surcharge is priced against the realizable
-/// curved atom a span-`ŝ` residual would be raced into. The basis budgets mirror
-/// [`topology_candidates_for_dim`] (the downstream birth topology race), not a new
-/// menu: circle `2·1+1 = 3`, sphere chart `7`, torus `(2·2+1)² = 25`. The curved
-/// families top out at `d = 2`, so a span `≥ 4` residual is priced against the
-/// richest curved atom (the torus); the e-gate, never this map, owns acceptance.
-fn curved_topology_for_span(span: f64) -> (usize, usize) {
-    match span.round().max(1.0) as usize {
-        0 | 1 | 2 => (1, 3), // circle (PeriodicHarmonicEvaluator, 2·d+1 harmonics)
-        // ⚠ STALE WIDTH, TRACKED AS #2749 -- do not read `7` as current.
-        // `SphereChartEvaluator` and the `(lat, lon)` chart it evaluated were
-        // DELETED in `1dfa70140`; `SaeAtomGeometryPlan::new` now REFUSES
-        // `(Sphere, 2, ..)` outright. The realizable sphere is the ambient
-        // harmonic one at width `(degree+1)^2`, so this arm prices a candidate
-        // the constructor cannot build. It is a LIVE number in the #2233
-        // description-length pre-screen, not a comment, so correcting it moves
-        // an acceptance boundary and needs the measurement #2749 owns
-        // (reprice -87.73 bits of 824.55 vs -789.54 for deleting the branch,
-        // i.e. repricing beats deletion). Left here deliberately rather than
-        // edited in passing.
-        3 => (2, 7),
-        _ => (2, 25),        // torus (TorusHarmonicEvaluator, (2H+1)² at H=2)
-    }
+/// curved atom a span-`ŝ` residual would be raced into. The curved families top
+/// out at `d = 2`, so a span `≥ 4` residual is priced against the richest curved
+/// atom (the torus); the e-gate, never this map, owns acceptance.
+///
+/// Both numbers are READ OFF the [`SaeAtomGeometryPlan`] that
+/// [`topology_candidates_for_dim`] (the downstream birth topology race) would
+/// construct for that span, never transcribed from it: `d` is the plan's
+/// [`SaeAtomGeometryPlan::intrinsic_dim`] — the pricing dimension, `2` for the
+/// ambient sphere, which carries three coordinates for two degrees of freedom —
+/// and `m` its [`SaeAtomGeometryPlan::basis_size`]. Circle `2·1+1 = 3`, sphere
+/// `(degree+1)² = 9` at the default degree 2, torus `(2·2+1)² = 25`.
+///
+/// #2749: the transcribed predecessor priced the sphere at width **7**, the
+/// width of the `(lat, lon)` chart deleted in `1dfa70140`. Deriving from the
+/// plan is what makes that unrepeatable — `SaeAtomGeometryPlan::new` refuses the
+/// chart form `(Sphere, latent_dim = 2, ..)` outright, so a price on an
+/// unbuildable atom is now a hard error here instead of a silent literal.
+fn curved_topology_for_span(span: f64) -> Result<(usize, usize), String> {
+    let plan = SaeAtomGeometryPlan::curved_prescreen_atom_for_span(span)?;
+    Ok((plan.intrinsic_dim(), plan.basis_size()?))
 }
 
 /// Mean active atoms per token `L0` — the support-budget denominator for the
@@ -846,7 +844,7 @@ pub fn harvest_move_proposals(
                     // linear). (d_j, m_j) follow from ŝ_j, so the dictionary/support
                     // terms are matched to the atom this candidate would actually race.
                     let span = participation_ratio(&local_energy);
-                    let (intrinsic_dim, basis_size) = curved_topology_for_span(span);
+                    let (intrinsic_dim, basis_size) = curved_topology_for_span(span)?;
                     let predicted = predicted_birth_dl_bits(&BirthMdlPrescreen {
                         rho,
                         span,
@@ -7761,6 +7759,161 @@ pub fn rounds_to_json(rounds: &[SearchLedger]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests;
+
+/// #2749 — the #2233 pre-screen must price the atom the birth race actually
+/// builds, and must be structurally unable to price one it cannot.
+#[cfg(test)]
+mod tests_prescreen_geometry_2749 {
+    use super::*;
+    use ndarray::Array2;
+
+    /// A seed wide enough that the `d_k = 2` menu offers the sphere: the menu
+    /// gates it on `d_seed >= 3`, because `S²` needs three independent seed
+    /// directions to be identifiable from a great circle at all.
+    fn wide_seed() -> Array2<f64> {
+        Array2::<f64>::from_shape_fn((64, 3), |(r, c)| {
+            let t = r as f64 * 0.1 + c as f64;
+            t.sin() + 0.5 * (t * 2.0).cos() + c as f64 * 0.25
+        })
+    }
+
+    /// Every span band's pre-screen atom is a plan the birth race BUILDS, matched
+    /// on its full geometry (kind, latent dim, resolution, reference metric) —
+    /// not on width, which two different atoms can share.
+    ///
+    /// This is the guard #2749 was missing: the map used to be a table of
+    /// literals, so when `1dfa70140` deleted the `(lat, lon)` sphere chart the
+    /// pre-screen went on charging its width 7 and nothing anywhere disagreed.
+    #[test]
+    fn curved_prescreen_matches_birth_race_2749() {
+        let seed = wide_seed();
+        // (span representative, the menu dimension `d_k` its atom is offered at)
+        for &(span, d_k) in &[(1.0_f64, 1usize), (2.0, 1), (3.0, 2), (4.0, 2), (9.0, 2)] {
+            let plan = SaeAtomGeometryPlan::curved_prescreen_atom_for_span(span)
+                .unwrap_or_else(|e| panic!("span {span} must price a buildable atom: {e}"));
+            let menu = topology_candidates_for_dim(
+                CandidateBases {
+                    seed: seed.view(),
+                    ambient: None,
+                },
+                d_k,
+            )
+            .unwrap_or_else(|e| panic!("d_k={d_k} menu must build: {e}"));
+            let offered: Vec<String> = menu
+                .iter()
+                .map(|spec| {
+                    format!(
+                        "{:?}/latent{}/{:?}",
+                        spec.geometry.kind(),
+                        spec.geometry.latent_dim(),
+                        spec.geometry.resolution()
+                    )
+                })
+                .collect();
+            assert!(
+                menu.iter().any(|spec| spec.geometry == plan),
+                "span {span}: the pre-screen prices {:?}/latent{}/{:?}, which the \
+                 d_k={d_k} birth menu does not offer: {offered:?}",
+                plan.kind(),
+                plan.latent_dim(),
+                plan.resolution(),
+            );
+        }
+    }
+
+    /// The two numbers the pre-screen consumes are theorems of that plan, and the
+    /// sphere's are `(d = 2, m = (degree+1)² = 9)` — NOT the deleted chart's
+    /// `(2, 7)`. The sphere is the one atom whose coordinate is wider than the
+    /// manifold it parameterises, so this also pins that the price uses
+    /// `intrinsic_dim` (2) and never `latent_dim` (3).
+    #[test]
+    fn sphere_is_priced_at_its_realizable_ambient_width_2749() {
+        let (d, m) = curved_topology_for_span(3.0).expect("the sphere band must price");
+        let degree = SAE_AMBIENT_SPHERE_DEFAULT_DEGREE;
+        assert_eq!(d, 2, "S² is intrinsically 2-D whatever its coordinate width");
+        assert_eq!(
+            m,
+            (degree + 1) * (degree + 1),
+            "the ambient sphere carries every harmonic through degree {degree}"
+        );
+        assert_ne!(m, 7, "7 was the width of the chart deleted in 1dfa70140");
+
+        // The neighbouring bands are untouched by #2749 — the reprice moves
+        // exactly one band, which is what bounds the acceptance-boundary move.
+        assert_eq!(curved_topology_for_span(2.0).expect("circle band"), (1, 3));
+        assert_eq!(curved_topology_for_span(4.0).expect("torus band"), (2, 25));
+    }
+
+    /// POSITIVE CONTROL for the whole mechanism: the reason a literal `7` could
+    /// survive is that nothing ever tried to BUILD the atom it named. Building it
+    /// is now the only way to obtain a width, and the chart form is refused — so
+    /// the #2749 defect can no longer be expressed here.
+    #[test]
+    fn the_deleted_sphere_chart_form_is_unbuildable_2749() {
+        let refused = SaeAtomGeometryPlan::new(
+            SaeAtomBasisKind::Sphere,
+            2,
+            SaeBasisResolution::AmbientSphereHarmonics {
+                degree: SAE_AMBIENT_SPHERE_DEFAULT_DEGREE,
+            },
+            SaeReferenceMetricPlan::RoundSphere,
+        );
+        assert!(
+            refused.is_err(),
+            "a 2-coordinate sphere is the deleted chart; the constructor must refuse it"
+        );
+        // ... while the form the pre-screen actually asks for does build, or the
+        // control above would pass for the wrong reason.
+        assert!(
+            SaeAtomGeometryPlan::curved_prescreen_atom_for_span(3.0).is_ok(),
+            "the ambient sphere must remain buildable, or this control is vacuous"
+        );
+    }
+
+    /// The reprice is MONOTONE and its size is closed-form: widening `m` by `Δm`
+    /// lowers the predicted birth saving by exactly `Δm·P·½log₂N` bits and
+    /// changes nothing else, so a span-3 birth can only be DEFERRED by #2749,
+    /// never newly admitted. That is the pre-screen's own contract — it may
+    /// defer, never accept; the e-process gate is the sole arbiter.
+    #[test]
+    fn repricing_the_sphere_only_defers_2749() {
+        let (d, m) = curved_topology_for_span(3.0).expect("the sphere band must price");
+        let base = BirthMdlPrescreen {
+            rho: 0.05,
+            span: 3.0,
+            intrinsic_dim: d,
+            basis_size: m,
+            signal_var: 12.0,
+            noise_floor: 1.0,
+            n_tokens: 2000.0,
+            p_out: 8,
+            g_dict: 1024,
+            l0: 32.0,
+        };
+        let deleted_chart_width = 7usize;
+        let at_chart_width = predicted_birth_dl_bits(&BirthMdlPrescreen {
+            basis_size: deleted_chart_width,
+            ..base
+        });
+        let at_realizable_width = predicted_birth_dl_bits(&base);
+        assert!(
+            at_realizable_width < at_chart_width,
+            "pricing the realizable atom must be the more conservative of the two \
+             (chart {at_chart_width}, realizable {at_realizable_width})"
+        );
+        let expected_drop = (m as f64 - deleted_chart_width as f64)
+            * base.p_out as f64
+            * 0.5
+            * base.n_tokens.log2();
+        let observed_drop = at_chart_width - at_realizable_width;
+        assert!(
+            (observed_drop - expected_drop).abs()
+                <= expected_drop.abs() * 8.0 * f64::EPSILON + f64::EPSILON,
+            "the reprice must move the pre-screen by exactly the BIC decoder-column \
+             delta: expected {expected_drop}, observed {observed_drop}"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests_atlas_prior_2280 {

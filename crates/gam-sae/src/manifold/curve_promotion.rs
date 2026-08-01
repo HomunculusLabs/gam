@@ -80,6 +80,7 @@
 use ndarray::{Array1, Array2, ArrayView2};
 
 use super::curl::{CircleSeed, CurlVerdict, curl_seed, curl_verdict};
+use super::geometry_plan::SaeAtomGeometryPlan;
 use crate::description_length::{
     BirthMdlPrescreen, circle_coding_gain_bits, predicted_birth_dl_bits, scalar_rate_bits,
 };
@@ -259,7 +260,7 @@ pub fn propose_curve_promotion(
     let verdict = curl_verdict(alpha.view(), beta.view(), ctx.tolerance, f as f64, 0.0)?;
 
     // Curved topology matched to the ambient span (circle ŝ≈2 ⇒ (d,m)=(1,3)).
-    let (d, m) = curved_topology_for_span(span);
+    let (d, m) = curved_topology_for_span(span)?;
     let harmonics = (m.max(1) - 1) / 2;
 
     // ---- Ambient plane frame e1,e2 (orthonormal — Q is orthonormal and ψ are
@@ -382,14 +383,17 @@ fn participation_ratio(spectrum: &[f64]) -> f64 {
 
 /// The curved topology `(intrinsic_dim d, basis_size m)` matched to an ambient
 /// span. A 2-plane span promotes to a circle (`d=1`, `m=2·d+1=3` harmonic rows);
-/// higher spans to the sphere/torus charts. Mirrors the structured-birth path's
-/// span→topology map so the pre-screen prices the atom that would actually race.
-fn curved_topology_for_span(span: f64) -> (usize, usize) {
-    match span.round().max(1.0) as usize {
-        0 | 1 | 2 => (1, 3), // circle (PeriodicHarmonicEvaluator, 2·d+1 rows)
-        3 => (2, 7),         // sphere chart
-        _ => (2, 25),        // torus (H=2)
-    }
+/// higher spans to the sphere/torus atoms.
+///
+/// #2749: this was a SECOND transcription of the structured-birth path's
+/// span→topology map, and both copies priced the sphere at the basis width of
+/// the `(lat, lon)` chart deleted in `1dfa70140`. There is now one definition —
+/// [`SaeAtomGeometryPlan::curved_prescreen_atom_for_span`] — and both call sites
+/// read `d` and `m` off the plan it builds, so this pre-screen and the one in
+/// `structure_harvest` cannot drift apart, or away from the birth race, again.
+fn curved_topology_for_span(span: f64) -> Result<(usize, usize), String> {
+    let plan = SaeAtomGeometryPlan::curved_prescreen_atom_for_span(span)?;
+    Ok((plan.intrinsic_dim(), plan.basis_size()?))
 }
 
 /// Cyclic Jacobi eigendecomposition of a small symmetric `r × r` matrix. Returns
