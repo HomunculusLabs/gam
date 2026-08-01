@@ -28,6 +28,38 @@
 
 pub mod fd_checker;
 
+/// Assert that a central difference of an array-producing function matches the
+/// analytical derivative.
+///
+/// Expands `approx::assert_abs_diff_eq!` at the call site, so the caller needs
+/// `approx` in scope; it deliberately does not force that dependency on this
+/// crate's non-test build.
+///
+/// `#[macro_export]` puts this at the crate root regardless of the module it is
+/// written in, so the call path stays `gam_linalg::assert_central_difference_array!`.
+/// It lives beside [`fd_checker`] in `test_support` rather than in `lib.rs`
+/// because it is a TEST assertion — its only callers are `#[cfg(test)]` code —
+/// and the #1440 production-FD ban rightly reads a central-difference macro
+/// sitting in `lib.rs` as production finite differencing.
+#[macro_export]
+macro_rules! assert_central_difference_array {
+    ($x:expr, $h:expr, |$var:ident| $eval:expr, $analytical:expr, $tol:expr) => {
+        let f_plus = {
+            let $var = $x + $h;
+            $eval
+        };
+        let f_minus = {
+            let $var = $x - $h;
+            $eval
+        };
+        assert_eq!(f_plus.len(), $analytical.len());
+        for j in 0..$analytical.len() {
+            let fd = (f_plus[j] - f_minus[j]) / (2.0 * $h);
+            approx::assert_abs_diff_eq!(fd, $analytical[j], epsilon = $tol);
+        }
+    };
+}
+
 use crate::matrix::{DenseDesignMatrix, DenseDesignOperator, DesignMatrix, LinearOperator};
 use gam_runtime::resource::MatrixMaterializationError;
 use ndarray::{Array1, Array2, Axis, s};

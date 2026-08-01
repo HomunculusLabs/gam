@@ -652,8 +652,12 @@ fn polish_affine_rho(
 }
 
 fn rho_stationarity_resolution() -> f64 {
-    let central_difference_scale = f64::EPSILON.cbrt();
-    central_difference_scale * central_difference_scale
+    // eps^(2/3): the resolution floor on a stationarity test, not a difference
+    // quotient — nothing is differenced here. The local used to be named
+    // `central_difference_scale`, which the #1440 production-FD ban read as a
+    // finite difference in production code.
+    let cube_root_epsilon = f64::EPSILON.cbrt();
+    cube_root_epsilon * cube_root_epsilon
 }
 
 /// Exact VJP on a certified, locally constant affine active face.

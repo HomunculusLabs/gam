@@ -26,10 +26,6 @@ const BANNED_PRODUCTION_MARKERS: &[&str] = &[
     "central-diff",
     "central_diff",
     "fd-vs",
-    "fd_",
-    "_fd",
-    "fd-",
-    "-fd",
     "numdiff",
     "numerical gradient",
     "numerical_gradient",
@@ -37,6 +33,48 @@ const BANNED_PRODUCTION_MARKERS: &[&str] = &[
     "numeric_gradient",
     "richardson",
 ];
+
+/// True when `source` contains the identifier token `fd` used as a piece of a
+/// compound identifier (`fd_grad`, `grad_fd`, `fd-vs`).
+///
+/// This replaces the four bare substrings `fd_` / `_fd` / `fd-` / `-fd` that
+/// [`BANNED_PRODUCTION_MARKERS`] used to carry. The scan is a plain
+/// `production.contains(marker)`, so those substrings fired INSIDE longer
+/// alphanumeric tokens that have nothing to do with finite differences:
+/// `empirical_fdr`, `split_lr_fdr` and `family_fdr_certificate` (FDR = false
+/// discovery rate, a multiple-testing statistic) and the hex seed constant
+/// `0xd6e8_feb8_6659_fd93` were all reported as production finite differences.
+///
+/// The rule those markers were reaching for is token-aware:
+///
+/// * the maximal run of ASCII-alphanumeric characters around the `fd` must be
+///   exactly `fd`, so `fdr` / `fd93` / `feb8` can never match, AND
+/// * at least one immediately adjacent character must be `_` or `-`, so a bare
+///   file-descriptor variable (`let fd = 3;`) is not treated as an FD marker.
+///   That adjacency is precisely what the original markers were encoding.
+fn contains_fd_identifier_token(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut i = 0usize;
+    while i + 1 < bytes.len() {
+        if !(bytes[i].eq_ignore_ascii_case(&b'f') && bytes[i + 1].eq_ignore_ascii_case(&b'd')) {
+            i += 1;
+            continue;
+        }
+        let before = i.checked_sub(1).map(|prev| bytes[prev]);
+        let after = bytes.get(i + 2).copied();
+        // The maximal alphanumeric run must be exactly `fd`.
+        let token_is_exactly_fd = !before.is_some_and(|byte| byte.is_ascii_alphanumeric())
+            && !after.is_some_and(|byte| byte.is_ascii_alphanumeric());
+        // …and it must be joined to something by `_`/`-`, i.e. a compound name.
+        let has_adjacent_separator =
+            matches!(before, Some(b'_' | b'-')) || matches!(after, Some(b'_' | b'-'));
+        if token_is_exactly_fd && has_adjacent_separator {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
 
 /// Files that are PERMITTED to use `FD-OK:` / `END-FD-OK` / `fd-ok:` audit
 /// markers to exempt regions from the production-FD ban.
@@ -780,6 +818,52 @@ fn every_fd_ok_marker_in_the_tree_carries_a_justification() {
 }
 
 #[test]
+fn fd_identifier_token_accepts_real_finite_difference_names() {
+    // `fd` joined to something by `_`/`-` is what the four deleted substring
+    // markers (`fd_`, `_fd`, `fd-`, `-fd`) were reaching for.
+    for accepted in [
+        "let grad_fd_check = 1.0;",
+        "fd_vs analytic",
+        "assert_eq!(check_fd, analytic);",
+        "let fd_grad = 1.0;",
+        "fd-vs-analytic",
+        // The two names this file's own strip tests plant in synthetic sources
+        // MUST stay catchable: `fd` delimited by `_` on both sides.
+        "fn production_fd_grad() {}",
+        "fn production_visible_fd_grad() {}",
+    ] {
+        assert!(
+            contains_fd_identifier_token(accepted),
+            "should be an FD marker: {accepted}"
+        );
+    }
+}
+
+#[test]
+fn fd_identifier_token_rejects_fdr_statistics_hex_seeds_and_file_descriptors() {
+    // The measured false positives on main: FDR (false discovery rate) names in
+    // `crates/gam-sae/src/sparse_dict/*` and a hex seed constant in
+    // `crates/gam-sae/src/manifold/support_seed.rs`. Plus a bare file-descriptor
+    // binding, which has no adjacent `_`/`-` and so was never matched even by
+    // the old markers.
+    for rejected in [
+        "fdr",
+        "let empirical_fdr = 0.05;",
+        "split_lr_fdr",
+        "family_fdr_certificate",
+        "null_battery_rank1_shell_fdr_controlled",
+        "let seed = 0xd6e8_feb8_6659_fd93;",
+        "let fd = 3;",
+        "fn open() -> Fd { }",
+    ] {
+        assert!(
+            !contains_fd_identifier_token(&rejected.to_lowercase()),
+            "should NOT be an FD marker: {rejected}"
+        );
+    }
+}
+
+#[test]
 fn production_code_has_no_finite_difference_markers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let files = collect_workspace_production_files(root);
@@ -802,6 +886,12 @@ fn production_code_has_no_finite_difference_markers() {
             if production.contains(marker) {
                 violations.push(format!("{} contains `{}`", path.display(), marker));
             }
+        }
+        if contains_fd_identifier_token(&production) {
+            violations.push(format!(
+                "{} contains an `fd` identifier token (e.g. `fd_grad` / `grad_fd`)",
+                path.display()
+            ));
         }
     }
 
