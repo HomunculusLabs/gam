@@ -426,3 +426,51 @@ default-filter = 'package(gam-sae) and not test(/(^|::)zz/) and test(/^manifold:
 [[profile.default.overrides]]
 filter = 'test(/large_scale_dense_logit_regression_guard/)'
 threads-required = 'num-test-threads'
+
+# ── `inner_fit_core_scaling`: the same defect as the guard above, and the same
+#    fix, on a gate whose two arms want DIFFERENT numbers of cores ─────────────
+#
+# The test asserts `effective = t_nested / t_serial > clamp(cores/2, 1.25, 2.0)`,
+# where the serial-context arm fans out over the whole Rayon pool and the nested
+# arm is held serial by the nesting guard. Load therefore hurts the two arms
+# UNEQUALLY — it hurts the pool-wide arm ~`cores` times harder — so contention
+# drives the ratio toward 1 with the solver untouched.
+#
+# THE ROW-PARALLEL PATH IS HEALTHY. One dedicated allocation per width, three
+# reps each, `RAYON_NUM_THREADS` pinned to the cgroup:
+#
+#     2 cores   1.58x 1.61x 1.64x        8 cores   4.73x 4.95x 5.23x
+#     4 cores   3.06x 3.47x 3.61x       16 cores   8.76x 8.81x 8.83x
+#                                       32 cores  10.72x 11.29x 11.59x
+#
+# `effective` tracks the pool width at every width, and 4 cores clears the 2.0
+# floor with ~1.7x margin. The reported CI failure is `1.74x` on a 4-core runner.
+#
+# THE CONTENDED ARM REPRODUCES IT, same node, same 4 cores, back to back:
+#
+#     idle           2.91x  3.43x     -> pass
+#     4 spinners     1.94x  2.30x     -> 1.94 FAILS the 2.0 floor
+#
+# so the failure is the runner's spare capacity, not the code.
+#
+# NORMALIZING THE BAR DOES NOT WORK, AND THIS IS THE PART WORTH KEEPING. The
+# obvious repair is to divide by the parallel speedup the machine is delivering
+# right now, measured on an embarrassingly parallel kernel, and require a fixed
+# fraction of it. Implemented and measured, it fails in BOTH directions: sampled
+# once, the observed headroom on four saturated cores bounced 2.36x/1.28x/2.81x,
+# and at the 1.28x sample a genuinely SERIAL solve would score 1.0/1.28 = 0.78
+# and PASS — a false green. Taking the max over five reps fixes that, and then
+# the loaded runs score 0.44 and 0.52 against a 0.5 bar — red again. The two
+# quantities are measured minutes apart on a machine whose load moves on that
+# timescale, so no normalization of non-simultaneous timings can separate them.
+#
+# Reserving the slots is the only repair that makes the measurement mean what it
+# says. Cost is one ~16s test that cannot overlap. Raising the floor is excluded
+# for the same reason as the guard above: the regression this exists to catch is
+# "the row loop went serial" (effective -> 1.0), which is the same order as the
+# load penalty, so any floor that tolerates a loaded run also tolerates the
+# regression.
+[[profile.default.overrides]]
+filter = 'test(/^inner_fit_core_scaling$/)'
+threads-required = 'num-test-threads'
+
