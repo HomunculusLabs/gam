@@ -88,6 +88,13 @@ struct EpochRow {
     operator_build_s: f64,
     kappa_bound: f64,
     ev: f64,
+    /// `2mr/(m+nnz)`, the operator-equivalents the recycled correction charges
+    /// every sweep — the gate's own numerator (`529bf5e2f`).
+    precond_cost_ratio: f64,
+    /// The gate's decision on this refresh. Both of these ride the heartbeat
+    /// already; without them on the CSV the gate's input and its verdict were
+    /// unreadable from the bench that exists to measure it.
+    recycling_admitted: bool,
 }
 
 /// Captured heartbeat lines. The fit logs on `log::warn!`, so a bench-local
@@ -158,6 +165,15 @@ fn count(line: &str, key: &str) -> usize {
         })
 }
 
+/// A `key=true|false` heartbeat field. Total for the same reason [`number`] is:
+/// a missing key is a trace-contract change and must fail loudly.
+fn flag(line: &str, key: &str) -> bool {
+    let raw = field(line, key)
+        .unwrap_or_else(|| panic!("heartbeat lost the `{key}` field; line was: {line}"));
+    raw.parse::<bool>()
+        .unwrap_or_else(|error| panic!("heartbeat field `{key}` was not a bool ({error}): {raw}"))
+}
+
 fn parse_epochs(lines: &[String]) -> Vec<EpochRow> {
     lines
         .iter()
@@ -186,6 +202,8 @@ fn parse_epochs(lines: &[String]) -> Vec<EpochRow> {
             operator_build_s: number(line, "operator_build_s"),
             kappa_bound: number(line, "cg_kappa_bound"),
             ev: number(line, "ev"),
+            precond_cost_ratio: number(line, "precond_cost_ratio"),
+            recycling_admitted: flag(line, "recycling_admitted"),
         })
         .collect()
 }
@@ -470,7 +488,7 @@ fn main() {
         "[refresh-epoch] n,p,k,s,epoch,refresh_s,route_s,refresh_over_route,births,\
          cg_columns,cg_iterations,recycled_rank,tile_columns,max_component,max_component_nnz,\
          operator_build_s,accumulate_s,sigma_s,graph_build_s,precond_s,cg_solve_s,\
-         block_sweeps,kappa_bound,ev"
+         block_sweeps,kappa_bound,ev,precond_cost_ratio,recycling_admitted"
     );
     println!(
         "[refresh-config] n,p,k,s,epochs_run,fit_s,refresh_total_s,route_total_s,\
@@ -524,7 +542,7 @@ fn main() {
         for row in &rows {
             println!(
                 "[refresh-epoch] {n},{p},{k},{s},{},{:.4},{:.4},{:.3},{},{},{},{},{},{},{},{:.4},\
-                 {:.4},{:.4},{:.4},{:.4},{:.4},{},{:.6e},{:.6}",
+                 {:.4},{:.4},{:.4},{:.4},{:.4},{},{:.6e},{:.6},{:.4},{}",
                 row.epoch,
                 row.refresh_s,
                 row.route_s,
@@ -549,6 +567,8 @@ fn main() {
                 row.block_sweeps,
                 row.kappa_bound,
                 row.ev,
+                row.precond_cost_ratio,
+                row.recycling_admitted,
             );
         }
 
