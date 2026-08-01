@@ -33,6 +33,8 @@ mod workspace;
 #[cfg(test)]
 mod firth_noncanonical_curvature_2273_tests;
 #[cfg(test)]
+mod sas_saturated_row_2733_tests;
+#[cfg(test)]
 mod sparse_fixed_ridge_2657_tests;
 #[cfg(test)]
 mod tests;

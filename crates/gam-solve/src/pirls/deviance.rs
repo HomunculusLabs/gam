@@ -44,6 +44,28 @@ fn probit_binomial_geometry(y: f64, eta: f64) -> (f64, f64, f64) {
 
 /// Stable Bernoulli log-probabilities and negative-log-likelihood score for
 /// the complementary-log-log link.
+/// Stable Bernoulli log-probabilities and negative-log-likelihood score for the
+/// sinh-arcsinh (SAS) link, from its latent probit argument.
+///
+/// The SAS link *is* the probit CDF composed with a smooth, strictly increasing
+/// reparameterization `z(eta)` (see
+/// [`crate::mixture_link::sas_latent_probit_argument`]), so its log-space
+/// geometry is [`probit_binomial_geometry`] evaluated at `z` with the score
+/// chained through `dz = dz/deta`. Routing SAS through the mean instead — the
+/// only route it had — costs the whole saturating tail: at `eta = -59.45` the
+/// mean is exactly `0.0` in f64 while `ln mu = -1774.6` is an entirely ordinary
+/// number, so the row was refused as unrepresentable when nothing about it is.
+///
+/// `dz` is exactly `1.0` at the SAS identity parameters `(epsilon = 0,
+/// delta = 1)`, where this reduces bitwise to the standard probit geometry.
+#[inline]
+fn sas_binomial_geometry(y: f64, z: f64, dz: f64) -> (f64, f64, f64) {
+    let (log_mu, log_one_minus_mu, negative_score_z) = probit_binomial_geometry(y, z);
+    // `z` is bounded by `sinh(SAS_U_CLAMP)`, so the probit Mills ratios are
+    // finite and this product is a plain chain rule, never `inf * 0`.
+    (log_mu, log_one_minus_mu, negative_score_z * dz)
+}
+
 #[inline]
 fn cloglog_binomial_geometry(y: f64, eta: f64) -> (f64, f64, f64) {
     let t = eta.exp();
@@ -956,7 +978,7 @@ pub(crate) fn deviance_eta_row_with_log_measure_scale(
                 return Err(deviance_row_error(row, "binomial response", eta, y));
             }
             let is_logit = matches!(inverse_link, InverseLink::Standard(StandardLink::Logit));
-            let standard_geometry = match inverse_link {
+            let log_space_geometry = match inverse_link {
                 InverseLink::Standard(StandardLink::Probit) => {
                     Some(probit_binomial_geometry(y, eta))
                 }
@@ -969,9 +991,17 @@ pub(crate) fn deviance_eta_row_with_log_measure_scale(
                 InverseLink::Standard(StandardLink::Cauchit) => {
                     Some(cauchit_binomial_geometry(y, eta))
                 }
+                InverseLink::Sas(state) => {
+                    let (z, dz) = crate::mixture_link::sas_latent_probit_argument(
+                        eta,
+                        state.epsilon,
+                        state.log_delta,
+                    )?;
+                    Some(sas_binomial_geometry(y, z, dz))
+                }
                 _ => None,
             };
-            let jet = if is_logit || standard_geometry.is_some() {
+            let jet = if is_logit || log_space_geometry.is_some() {
                 None
             } else {
                 let jet =
@@ -996,7 +1026,7 @@ pub(crate) fn deviance_eta_row_with_log_measure_scale(
             };
             let (log_mu, log_one_minus_mu) = if is_logit {
                 (-softplus(-eta), -softplus(eta))
-            } else if let Some((log_mu, log_one_minus_mu, _)) = standard_geometry {
+            } else if let Some((log_mu, log_one_minus_mu, _)) = log_space_geometry {
                 (log_mu, log_one_minus_mu)
             } else {
                 let jet = jet.expect("non-logit binomial branch has an inverse-link jet");
@@ -1054,7 +1084,7 @@ pub(crate) fn deviance_eta_row_with_log_measure_scale(
                 } else {
                     (score_unit.signum(), log_weight + score_unit.abs().ln())
                 }
-            } else if let Some((_, _, score_unit)) = standard_geometry {
+            } else if let Some((_, _, score_unit)) = log_space_geometry {
                 if !score_unit.is_finite() {
                     return Err(deviance_row_error(
                         row,

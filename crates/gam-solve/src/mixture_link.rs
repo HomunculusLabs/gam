@@ -1523,6 +1523,49 @@ pub(crate) fn sas_link_complement(eta: f64, epsilon: f64, log_delta: f64, mu: f6
     normal_cdf(-u.sinh())
 }
 
+/// The SAS link's latent probit argument `z` and its first `eta` derivative.
+///
+/// `mu = Phi(z)` with `z = sinh(smooth_bound(delta·asinh(eta) + epsilon,
+/// SAS_U_CLAMP))`, exactly as [`sas_inverse_link_mu_d1`] evaluates it — this
+/// returns the *pre-probit* pair instead of applying `Phi`.
+///
+/// A consumer that needs `ln mu` or `ln(1 - mu)` must have this pair, not `mu`:
+/// past `z ≈ -38` the mean underflows to exactly `0.0` and past `z ≈ +8.3` the
+/// complement does, so `mu.ln()` / `(1 - mu).ln()` are `-inf` on a row whose
+/// true log-probability is a perfectly ordinary finite number (`ln Phi(-59.45)
+/// = -1774.6`). Evaluating `ln Phi(±z)` from `z` keeps the whole saturating
+/// band representable, which is what the standard probit link already does
+/// through `signed_probit_logcdf_and_mills_ratio` and what SAS — the *same*
+/// probit CDF, reparameterized — had no route to.
+///
+/// The derivative is the chain factor `dz/deta`; a consumer converts a
+/// `d/dz` score into a `d/deta` score by multiplying by it. Inside the
+/// `smooth_bound` saturation band `dz/deta` is exactly `0`, which is the
+/// correct value: `mu` is genuinely constant in `eta` there.
+///
+/// At `epsilon = 0, delta = 1` this returns `(eta, 1.0)` bitwise, so a SAS link
+/// at its identity parameters and the standard probit link produce the *same*
+/// geometry rather than two numerically different ones.
+pub(crate) fn sas_latent_probit_argument(
+    eta: f64,
+    epsilon: f64,
+    log_delta: f64,
+) -> Result<(f64, f64), EstimationError> {
+    let eta = finite_inverse_link_eta("SAS inverse link", eta)?;
+    let delta = sas_delta_from_raw_log_delta(log_delta);
+    if epsilon.abs() < 1e-12 && (delta - 1.0).abs() < 1e-12 {
+        return Ok((eta, 1.0));
+    }
+    let asinh = asinh_jet5(eta);
+    let u_raw = delta * asinh.value + epsilon;
+    let sb = smooth_bound_jet(u_raw, SAS_U_CLAMP);
+    let u = sb.g;
+    let c = u.cosh();
+    let r1 = delta * asinh.d1;
+    let u1 = sb.d1 * r1;
+    Ok((u.sinh(), c * u1))
+}
+
 fn link_function_mu_d1(link: LinkFunction, eta: f64) -> Result<(f64, f64), EstimationError> {
     match link {
         LinkFunction::Identity => Ok((eta, 1.0)),
