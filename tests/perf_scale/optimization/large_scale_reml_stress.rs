@@ -28,6 +28,7 @@
 
 use gam::basis::{
     CenterStrategy, DuchonBasisSpec, DuchonNullspaceOrder, DuchonOperatorPenaltySpec,
+    duchon_max_active_operator_derivative_order, resolve_duchon_orders,
 };
 use gam::estimate::{FitOptions, UnifiedFitResult};
 use gam::smooth::{
@@ -147,9 +148,49 @@ fn simulate(n: usize, pc_dim: usize, seed: u64) -> (Array2<f64>, Array1<f64>, Ar
     (x, y, y_true)
 }
 
+/// Length scale of the hybrid (Matérn-blended) Duchon kernel. Bound to a
+/// constant because the SAME value has to reach both the order resolution
+/// below and the spec: `resolve_duchon_orders` branches on
+/// `length_scale.is_none()` (the pure-mode CPD constraint `2s < d` applies
+/// only there), so resolving for one mode and building the other would resolve
+/// against constraints the built kernel does not have.
+const HYBRID_LENGTH_SCALE: f64 = 1.0;
+
 /// Build the anisotropic-hybrid Duchon term spec used throughout the
 /// test.
 fn duchon_aniso_pc_spec(name: &str, pc_dim: usize, k_centers: usize) -> TermCollectionSpec {
+    let operator_penalties = DuchonOperatorPenaltySpec::default();
+    // The Duchon orders are RESOLVED from `pc_dim`, not written down (#2709).
+    //
+    // The pointwise kernel is the inverse Fourier of `1/|ξ|^{2(p+s)}`, finite
+    // at the origin iff `2(p+s) > d` — a condition on the dimension. This
+    // fixture hardcoded `power: 1.0` with a `Linear` nullspace (`p = 2`), i.e.
+    // `2(p+s) = 6`, which holds at the sibling coverage test's `PC_DIM_COVERAGE
+    // = 4` and fails at `PC_DIM = 6` on the equality `6 > 6`. So the main test
+    // died in 0.21 s inside basis construction and never ran a single one of
+    // its large-scale assertions, while the coverage test using the same
+    // builder ran fine — a constant that was correct for one caller and
+    // inadmissible for the other.
+    //
+    // `resolve_duchon_orders` is the library's own answer to that question: the
+    // smallest admissible `(nullspace, s)` at this dimension, also clearing the
+    // D1 collocation margin `2(p+s) > d+1` that the active tension penalty
+    // needs. Deriving it here means the fixture follows `PC_DIM` instead of
+    // being re-broken by the next edit to it, and it is the SAME resolution the
+    // production paths use rather than a fixture-local rule that could agree
+    // with nothing.
+    //
+    // At the two dimensions this test uses, and with the default penalties
+    // (mass + tension active, stiffness disabled ⇒ max operator order 1):
+    //   pc_dim = 4 → (Linear, s = 1), 2(p+s) = 6 > 5 — what the coverage test
+    //                already built, so its behaviour is unchanged.
+    //   pc_dim = 6 → (Linear, s = 2), 2(p+s) = 8 > 7 — the main test's repair.
+    let (nullspace_order, power) = resolve_duchon_orders(
+        pc_dim,
+        DuchonNullspaceOrder::Linear,
+        duchon_max_active_operator_derivative_order(&operator_penalties),
+        Some(HYBRID_LENGTH_SCALE),
+    );
     TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
@@ -163,12 +204,12 @@ fn duchon_aniso_pc_spec(name: &str, pc_dim: usize, k_centers: usize) -> TermColl
                         num_centers: k_centers,
                     },
                     // Hybrid Duchon — required for aniso_log_scales.
-                    length_scale: Some(1.0),
-                    power: 1.0,
-                    nullspace_order: DuchonNullspaceOrder::Linear,
+                    length_scale: Some(HYBRID_LENGTH_SCALE),
+                    power: power as f64,
+                    nullspace_order,
                     identifiability: gam::basis::SpatialIdentifiability::default(),
                     aniso_log_scales: Some(vec![0.0; pc_dim]),
-                    operator_penalties: DuchonOperatorPenaltySpec::default(),
+                    operator_penalties,
 
                     periodic: None,
                     boundary: gam::basis::OneDimensionalBoundary::Open,
