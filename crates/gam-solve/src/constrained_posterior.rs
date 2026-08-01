@@ -804,6 +804,160 @@ pub fn constrained_projection_law(
     })
 }
 
+/// One point of the JOINT rule over an inequality-truncated Gaussian posterior:
+/// a feasible constraint-normal coordinate and the tangent coordinates drawn
+/// from the same low-discrepancy point.
+#[derive(Clone, Debug)]
+pub struct ConstrainedPosteriorJointPoint {
+    /// `u = Aβ − b` on the retained rows. Inside the retained region by
+    /// construction — the separation-of-variables map only ever produces points
+    /// of `[0, upper]`, so a consumer integrating against these points puts
+    /// exactly zero mass on coefficient vectors the fit excluded.
+    pub normal_coordinates: Array1<f64>,
+    /// Independent standard-normal coordinates for the tangent block, length
+    /// `tangent_dimension`. The tangent of an inequality-truncated Gaussian is
+    /// exactly Gaussian and exactly independent of `u`: conditioning on `Aβ`
+    /// leaves `N(β_unc + G(u − E_untrunc[u]), Σ − GAΣ)` whatever the truncation
+    /// does to `u`, which is what lets one rule carry both blocks.
+    pub tangent: Array1<f64>,
+    /// Normalized weight. The weights sum to one.
+    pub weight: f64,
+}
+
+/// A single low-discrepancy rule over the constraint-normal AND tangent
+/// coordinates of an inequality-truncated Gaussian.
+///
+/// Why this exists (#2679). A consumer that integrates a nonlinear functional
+/// of `β` over this posterior has, until now, had two options, and both are
+/// wrong for a different reason:
+///
+/// * Integrate the moment-matched NORMAL. Its error is a FLOOR — the
+///   pushforward of a cone-truncated joint is not normal for `q > 1`, so
+///   matching two moments cannot be improved by any amount of extra work — and
+///   it puts a measurable fraction of its mass outside the cone.
+/// * Nest a Gaussian tensor rule inside every node of the truncated cubature.
+///   That is exact, and it costs `nodes × outer × inner` evaluations per
+///   evaluation point, which is not a production integration rule.
+///
+/// This is the third option: `points` points of ONE rule in dimension
+/// `q + tangent_dimension`. The first `q` lattice coordinates run the same
+/// separation-of-variables map, tilt and weighting the module's own cubature
+/// uses — so the `u`-marginal is bit-identical to it at equal point counts —
+/// and the remaining coordinates carry standard normals for the tangent. The
+/// per-evaluation-point cost is `points`, with no factor of the cubature's node
+/// count in it.
+///
+/// The price is real and is the caller's to gate: a lattice rule on the smooth
+/// tangent block does not have the spectral accuracy of the Gauss-Hermite
+/// tensor rule it replaces. A consumer must measure itself against a reference
+/// built from the DENSITY rather than from this rule before using it.
+pub fn constrained_posterior_joint_cubature(
+    normal_center: &Array1<f64>,
+    normal_covariance: &Array2<f64>,
+    upper_limits: &[f64],
+    tangent_dimension: usize,
+    points: usize,
+) -> Result<Vec<ConstrainedPosteriorJointPoint>, String> {
+    let q = normal_center.len();
+    if q == 0 {
+        return Err("joint constrained cubature needs at least one constraint normal".to_string());
+    }
+    if normal_covariance.dim() != (q, q) || upper_limits.len() != q {
+        return Err(format!(
+            "joint constrained cubature geometry mismatch: centre={q}, covariance={:?}, \
+             upper limits={}",
+            normal_covariance.dim(),
+            upper_limits.len()
+        ));
+    }
+    if points == 0 {
+        return Err("joint constrained cubature needs a positive point count".to_string());
+    }
+    if upper_limits.iter().any(|limit| !(*limit > 0.0)) {
+        return Err(format!(
+            "joint constrained cubature: every upper limit must sit strictly above its wall, \
+             got {upper_limits:?}"
+        ));
+    }
+    let factor = gam_linalg::triangular::cholesky_factor_in_place(
+        normal_covariance.view(),
+        gam_linalg::triangular::CholeskyGuard::FiniteStrict,
+    )
+    .ok_or_else(|| {
+        "joint constrained cubature: the constraint-normal covariance is not numerically \
+         positive definite"
+            .to_string()
+    })?;
+    let generator = kronecker_generator(q + tangent_dimension);
+    let tilt = minimax_tilt(normal_center, upper_limits, factor.view());
+    let mut accumulator = JointCubatureAccumulator {
+        points: Vec::with_capacity(points),
+    };
+    accumulate_orthant_nodes(
+        &mut accumulator,
+        normal_center,
+        upper_limits,
+        None,
+        factor.view(),
+        &generator,
+        tilt.as_ref(),
+        tangent_dimension,
+        0,
+        points,
+    )?;
+    accumulator.normalized()
+}
+
+/// Sink that keeps whole joint points rather than accumulating their moments.
+struct JointCubatureAccumulator {
+    /// `weight` carries the UNNORMALIZED log weight until [`Self::normalized`]
+    /// rescales it: the log scale spans hundreds of decades on a deeply pinned
+    /// face, so no weight is exponentiated before the maximum is known.
+    points: Vec<ConstrainedPosteriorJointPoint>,
+}
+
+impl JointCubatureAccumulator {
+    fn normalized(self) -> Result<Vec<ConstrainedPosteriorJointPoint>, String> {
+        let max_log_weight = self
+            .points
+            .iter()
+            .map(|point| point.weight)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if !max_log_weight.is_finite() {
+            return Err("joint constrained cubature accumulated no finite node weight".to_string());
+        }
+        let weight_sum = self
+            .points
+            .iter()
+            .map(|point| (point.weight - max_log_weight).exp())
+            .sum::<f64>();
+        if !(weight_sum.is_finite() && weight_sum > 0.0) {
+            return Err(format!(
+                "joint constrained cubature has invalid normalized weight sum {weight_sum:?}"
+            ));
+        }
+        let mut points = self.points;
+        for point in points.iter_mut() {
+            point.weight = (point.weight - max_log_weight).exp() / weight_sum;
+        }
+        Ok(points)
+    }
+}
+
+impl OrthantNodeSink for JointCubatureAccumulator {
+    fn push(&mut self, log_weight: f64, point: &Array1<f64>) {
+        self.push_joint(log_weight, point, &[]);
+    }
+
+    fn push_joint(&mut self, log_weight: f64, point: &Array1<f64>, tangent: &[f64]) {
+        self.points.push(ConstrainedPosteriorJointPoint {
+            normal_coordinates: point.clone(),
+            tangent: Array1::from_vec(tangent.to_vec()),
+            weight: log_weight,
+        });
+    }
+}
+
 /// Equal-tailed interval for one linear projection of an inequality-truncated
 /// Gaussian posterior.
 ///
@@ -1572,6 +1726,7 @@ fn box_truncated_moments(
             factor,
             &generator,
             tilt.as_ref(),
+            0,
             evaluated,
             target,
         )?;
@@ -1644,6 +1799,29 @@ struct OrthantAccumulator {
 
 trait OrthantNodeSink {
     fn push(&mut self, log_weight: f64, point: &Array1<f64>);
+
+    /// Same node, with the TANGENT block of the joint rule attached.
+    ///
+    /// `tangent` holds the standard-normal coordinates drawn from the lattice
+    /// dimensions past the constraint-normal block, and is empty whenever the
+    /// caller asked for none. The default drops them, so every sink that only
+    /// wants the truncated marginal is unaffected — and with
+    /// `tangent_dimension = 0` the arithmetic reaching [`Self::push`] is
+    /// bit-identical to the rule before the joint block existed, because the
+    /// Kronecker generator of a larger dimension has the smaller one as its
+    /// exact prefix.
+    fn push_joint(&mut self, log_weight: f64, point: &Array1<f64>, tangent: &[f64]) {
+        // A sink that never asked for a tangent block must never be handed
+        // one. Dropping the coordinates instead would make a joint rule read as
+        // a marginal rule with the same node count, which is a wrong answer
+        // that looks exactly like a right one.
+        assert!(
+            tangent.is_empty(),
+            "a sink with no joint tangent block was handed {} tangent coordinates",
+            tangent.len()
+        );
+        self.push(log_weight, point);
+    }
 }
 
 impl OrthantAccumulator {
@@ -1955,12 +2133,28 @@ fn accumulate_orthant_nodes<S: OrthantNodeSink>(
     // before. Any tilt leaves the estimator unbiased; it changes only how
     // evenly the node weights are spread.
     tilt: Option<&Array1<f64>>,
+    // `tangent_dimension`: how many extra STANDARD-NORMAL coordinates each node
+    // carries, drawn from lattice dimensions `q..q + tangent_dimension` of the
+    // SAME point. This is what makes the joint rule one rule: the truncated
+    // constraint-normal block and the Gaussian tangent block share a single
+    // low-discrepancy point, so a consumer integrating over both pays one
+    // evaluation per point instead of the product of two rules.
+    tangent_dimension: usize,
     first: usize,
     last: usize,
 ) -> Result<(), String> {
     let q = mean.len();
+    if generator.len() < q + tangent_dimension {
+        return Err(format!(
+            "orthant cubature needs a {}-dimensional generator for {q} constraint normals and \
+             {tangent_dimension} tangent coordinates, got {}",
+            q + tangent_dimension,
+            generator.len()
+        ));
+    }
     let mut z = Array1::<f64>::zeros(q);
     let mut point = Array1::<f64>::zeros(q);
+    let mut tangent = vec![0.0f64; tangent_dimension];
     for node in first..last {
         let offset = node as f64 + 0.5;
         let mut log_weight = 0.0f64;
@@ -2109,7 +2303,26 @@ fn accumulate_orthant_nodes<S: OrthantNodeSink>(
             }
             point[i] = value;
         }
-        accumulator.push(log_weight, &point);
+        // Tangent block. The tent fold `x ↦ 1 − |2·frac − 1|` is measure
+        // preserving on the unit interval, so the folded coordinate is still
+        // uniform and `Φ⁻¹` of it is still standard normal. Both tails are
+        // inverted from the SMALL side's own logarithm — `1 − lattice` is
+        // `|2·frac − 1|` exactly, formed without a subtraction — so a
+        // coordinate at either end of the cell never goes through `1 − Φ`.
+        for (slot, tangent_value) in tangent.iter_mut().enumerate() {
+            let raw = offset * generator[q + slot];
+            let fractional = raw - raw.floor();
+            let upper_side = (2.0 * fractional - 1.0).abs();
+            let lattice = 1.0 - upper_side;
+            *tangent_value = if lattice <= 0.5 {
+                standard_normal_quantile_from_log_cdf(lattice.max(f64::MIN_POSITIVE).ln())
+                    .map_err(|error| format!("joint cubature tangent coordinate {slot}: {error}"))?
+            } else {
+                -standard_normal_quantile_from_log_cdf(upper_side.max(f64::MIN_POSITIVE).ln())
+                    .map_err(|error| format!("joint cubature tangent coordinate {slot}: {error}"))?
+            };
+        }
+        accumulator.push_joint(log_weight, &point, &tangent);
     }
     Ok(())
 }
@@ -2233,6 +2446,7 @@ fn converged_projection_nodes(
             factor.view(),
             &generator,
             tilt.as_ref(),
+            0,
             evaluated,
             target,
         )?;
@@ -3828,7 +4042,7 @@ mod orthant_tilt_2601_tests {
             log_weights: Vec::new(),
         };
         accumulate_orthant_nodes(
-            &mut spy, mean, upper, None, factor, &generator, tilt, 0, nodes,
+            &mut spy, mean, upper, None, factor, &generator, tilt, 0, 0, nodes,
         )
         .expect("orthant nodes");
         let finite: Vec<f64> = spy
@@ -3946,6 +4160,7 @@ mod orthant_tilt_2601_tests {
             factor.view(),
             &generator,
             None,
+            0,
             0,
             1 << 20,
         )
@@ -4493,6 +4708,7 @@ mod affine_ceiling_tests {
             &generator,
             None,
             0,
+            0,
             nodes,
         )
         .expect("cubature");
@@ -4712,6 +4928,16 @@ mod projection_law_2446_tests {
         covariance: &Array2<f64>,
         contrast: &Array1<f64>,
     ) -> f64 {
+        exact_orthant_expectation_of(center, covariance, contrast, integrand)
+    }
+
+    /// Same reference for an arbitrary scalar functional of `cᵀβ`.
+    fn exact_orthant_expectation_of<F: Fn(f64) -> f64>(
+        center: &Array1<f64>,
+        covariance: &Array2<f64>,
+        contrast: &Array1<f64>,
+        functional: F,
+    ) -> f64 {
         let det = covariance[[0, 0]] * covariance[[1, 1]] - covariance[[0, 1]] * covariance[[1, 0]];
         let inverse = array![
             [covariance[[1, 1]] / det, -covariance[[0, 1]] / det],
@@ -4736,7 +4962,7 @@ mod projection_law_2446_tests {
         });
         let weighted = simpson(0.0, upper0, points, |b0| {
             simpson(0.0, upper1, points, |b1| {
-                density(b0, b1) * integrand(contrast[0] * b0 + contrast[1] * b1)
+                density(b0, b1) * functional(contrast[0] * b0 + contrast[1] * b1)
             })
         });
         weighted / mass
@@ -4900,6 +5126,187 @@ mod projection_law_2446_tests {
              {reference:.12e}, node sum {node_sum:.12e} (error {node_error:.3e}); the \
              moment-matched normal is at {normal_value:.12e} (error {normal_error:.3e}) with \
              {infeasible_mass:.3e} of its mass on w < 0"
+        );
+    }
+
+    /// #2679: the same claim for the JOINT rule, on a fixture whose contrast is
+    /// NOT carried entirely by the constraint normals.
+    ///
+    /// The law is `x = cᵀu + s·t` with `u` the two-row truncated cone above and
+    /// `t` an independent standard normal — the exact structure a response
+    /// moment sees, where the cone moves the whole coefficient vector and the
+    /// tangent adds the part of the predictor's variance the constraint normals
+    /// do not carry.
+    ///
+    /// The reference folds the tangent into the functional analytically-in-form
+    /// (`g(x) = E_t[f(x + s·t)]`, a 1-D Gaussian Simpson) and then integrates
+    /// `g` against the exact truncated density by the SAME tensor Simpson rule
+    /// the #2446 test uses. Neither half calls the cubature under test.
+    ///
+    /// Three separate properties are asserted, because the rule has to have all
+    /// three before it can price a moment on a predict path:
+    ///
+    /// * **support** — every point is feasible, exactly, not to a tolerance;
+    /// * **tangent measure** — the tangent block really is standard normal
+    ///   under the SOV importance weights, which is free to fail (the weights
+    ///   are a function of the constraint-normal coordinates of the same
+    ///   lattice point, so an aliased generator would correlate them);
+    /// * **accuracy** — against the density reference, and by a wide margin
+    ///   over the moment-matched normal that is what ships today.
+    #[test]
+    fn joint_cubature_carries_the_tangent_block_at_a_bounded_point_count_2679() {
+        let ambient = array![[0.40, 0.24], [0.24, 0.36]];
+        let center = array![0.05, -0.10];
+        let contrast = array![0.70, 0.30];
+        // Tangent share of the predictor. Large enough that a rule which simply
+        // dropped the tangent would miss by far more than the bound below.
+        let tangent_sd = 0.6_f64;
+        let constraints =
+            LinearInequalityConstraints::new(array![[1.0, 0.0], [0.0, 1.0]], array![0.0, 0.0])
+                .expect("build the two-row non-negativity cone");
+        let correction =
+            constrained_posterior_correction_from_covariance(&ambient, &center, &constraints)
+                .expect("the correction is computable on this face")
+                .expect("a centre straddling both walls must retain the face");
+        let mut retained = correction.rows.clone();
+        retained.sort_unstable();
+        assert_eq!(
+            retained,
+            vec![0, 1],
+            "the fixture must retain BOTH rows or the pushforward is the closed-form case"
+        );
+
+        // `A = I`, so the constraint-normal coordinate IS the coefficient
+        // vector and `W = Σ`, `E_untrunc[u] = centre`.
+        let upper_limits = correction.upper_limits();
+        let normal_center = Array1::from_vec(
+            correction
+                .rows
+                .iter()
+                .map(|&row| center[row])
+                .collect::<Vec<_>>(),
+        );
+        let normal_covariance = {
+            let mut out = Array2::<f64>::zeros((2, 2));
+            for (i, &row_i) in correction.rows.iter().enumerate() {
+                for (j, &row_j) in correction.rows.iter().enumerate() {
+                    out[[i, j]] = ambient[[row_i, row_j]];
+                }
+            }
+            out
+        };
+        let lift_contrast = Array1::from_vec(
+            correction
+                .rows
+                .iter()
+                .map(|&row| contrast[row])
+                .collect::<Vec<_>>(),
+        );
+
+        const POINTS: usize = 1 << 13;
+        let joint = constrained_posterior_joint_cubature(
+            &normal_center,
+            &normal_covariance,
+            &upper_limits,
+            1,
+            POINTS,
+        )
+        .expect("joint cubature on a retained two-row face");
+        assert_eq!(
+            joint.len(),
+            POINTS,
+            "the joint rule's cost is the point count it was asked for and nothing else"
+        );
+
+        // (a) support. Exact, not to a tolerance: the SOV map cannot produce an
+        // infeasible point, so any tolerance here would be hiding a bug.
+        let infeasible_points = joint
+            .iter()
+            .filter(|point| point.normal_coordinates.iter().any(|&value| value < 0.0))
+            .count();
+        assert_eq!(
+            infeasible_points, 0,
+            "every joint point must lie in the retained cone; {infeasible_points} of {POINTS} did \
+             not"
+        );
+
+        let weight_sum = joint.iter().map(|point| point.weight).sum::<f64>();
+        assert!(
+            (weight_sum - 1.0).abs() < 1e-9,
+            "joint weights must be normalized, got {weight_sum:.12e}"
+        );
+
+        // (b) the tangent block is standard normal under the SAME weights.
+        let tangent_mean = joint
+            .iter()
+            .map(|point| point.weight * point.tangent[0])
+            .sum::<f64>();
+        let tangent_second = joint
+            .iter()
+            .map(|point| point.weight * point.tangent[0] * point.tangent[0])
+            .sum::<f64>();
+        eprintln!(
+            "[2679] points={POINTS} tangent_mean={tangent_mean:.6e} \
+             tangent_second={tangent_second:.6e}"
+        );
+        assert!(
+            tangent_mean.abs() < 2.0e-2,
+            "the tangent block must integrate to a zero mean under the SOV weights, got \
+             {tangent_mean:.6e}"
+        );
+        assert!(
+            (tangent_second - 1.0).abs() < 5.0e-2,
+            "the tangent block must integrate to unit variance under the SOV weights, got \
+             {tangent_second:.6e}"
+        );
+
+        let joint_value = joint
+            .iter()
+            .map(|point| {
+                let normal_part = lift_contrast.dot(&point.normal_coordinates);
+                point.weight * integrand(normal_part + tangent_sd * point.tangent[0])
+            })
+            .sum::<f64>();
+
+        // (c) accuracy against a reference built from the density.
+        let convolved = |x: f64| -> f64 {
+            simpson(
+                x - 12.0 * tangent_sd,
+                x + 12.0 * tangent_sd,
+                4001,
+                |value| {
+                    let z = (value - x) / tangent_sd;
+                    (-0.5 * z * z).exp() * integrand(value)
+                },
+            ) / (tangent_sd * (2.0 * std::f64::consts::PI).sqrt())
+        };
+        let reference = exact_orthant_expectation_of(&center, &ambient, &contrast, convolved);
+
+        // What ships today: the moment-matched normal, with the tangent's
+        // variance folded into it — which is exactly how the locscale rule
+        // treats the same decomposition.
+        let posterior_mean = contrast.dot(&correction.posterior_mean(&center));
+        let corrected = correction.apply_to_covariance(&ambient);
+        let posterior_variance =
+            contrast.dot(&corrected.dot(&contrast)) + tangent_sd * tangent_sd;
+        let normal_value = normal_expectation(posterior_mean, posterior_variance);
+
+        let joint_error = (joint_value - reference).abs();
+        let normal_error = (normal_value - reference).abs();
+        eprintln!(
+            "[2679] reference={reference:.12e} joint={joint_value:.12e} (err {joint_error:.3e}) \
+             normal={normal_value:.12e} (err {normal_error:.3e})"
+        );
+        assert!(
+            normal_error > 1.0e-4,
+            "the fixture must leave the moment-matched normal measurably wrong, or the \
+             comparison below is vacuous; got {normal_error:.3e}"
+        );
+        assert!(
+            joint_error < 0.2 * normal_error,
+            "the joint rule must be decisively closer to the exact pushforward than the \
+             moment-matched normal: joint error {joint_error:.3e} vs normal error \
+             {normal_error:.3e} against reference {reference:.12e}"
         );
     }
 }

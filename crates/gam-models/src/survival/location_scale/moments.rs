@@ -521,6 +521,27 @@ pub(crate) fn exact_survival_response_moments(
 
     let x_threshold_dense = input.x_threshold.to_dense_arc();
     let x_log_sigma_dense = input.x_log_sigma.to_dense_arc();
+
+    // #2679: when the fit carries an inequality cone, the posterior this rule
+    // must integrate is NOT the Gaussian below. The Gaussian below is the
+    // moment-matched normal of a cone-truncated law, which is wrong in kind:
+    // its error is a floor rather than a rate, and it puts mass on coefficient
+    // vectors the fit excluded. `truncated_survival_response_moments` prices
+    // the truncated law itself, on a single joint low-discrepancy rule over the
+    // constraint-normal and tangent coordinates whose per-row cost carries no
+    // factor of the cubature's node count. `None` means there is no cone the
+    // reported covariance was truncated against, and then the Gaussian rule
+    // below is not an approximation of the posterior but IS the posterior.
+    if let Some((first, second)) = truncated_survival_response_moments(
+        input,
+        fit,
+        covariance,
+        &x_threshold_dense,
+        &x_log_sigma_dense,
+    )? {
+        return Ok((first, second));
+    }
+
     let mut first = Array1::<f64>::zeros(n);
     let mut second = Array1::<f64>::zeros(n);
     // Build a single QuadratureContext up front and share it across all

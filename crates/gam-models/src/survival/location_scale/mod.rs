@@ -147,6 +147,7 @@ mod residual_dist;
 mod row_kernel;
 mod spec;
 mod time_block;
+mod truncated_moments;
 mod wiggle_geometry;
 
 #[cfg(test)]
@@ -171,6 +172,7 @@ pub use residual_dist::*;
 pub use row_kernel::*;
 pub use spec::*;
 pub use time_block::*;
+pub(crate) use truncated_moments::*;
 pub use wiggle_geometry::*;
 // `family_solver` carries the public effective-jacobian entry point
 // (`survival_location_scale_block_effective_jacobian`,
