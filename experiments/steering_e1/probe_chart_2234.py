@@ -23,10 +23,10 @@ evidence rather than guessed at 10 minutes per guess:
              measure anything at all.
 
     python3 experiments/steering_e1/probe_chart_2234.py harvest \
-        --structure cyclic --model Qwen/Qwen3.5-4B-Base --layer-index 16 \
+        --structure weekday --model Qwen/Qwen3.5-4B-Base --layer-index 16 \
         --out cloud_cyclic.npz
     python3 experiments/steering_e1/probe_chart_2234.py sweep \
-        --npz cloud_cyclic.npz --structure cyclic --pca-dims 2,3,4,8,16,64
+        --npz cloud_weekday.npz --structure weekday --pca-dims 2,3,4,6,8,12
 """
 from __future__ import annotations
 
@@ -57,20 +57,22 @@ def _sibling(name: str):
 
 def harvest(args) -> int:
     E1 = _sibling("run_e1")
-    ORD = _sibling("run_e1_ordinal")
+    structure = E1.STRUCTURES[args.structure]
     model, tok = E1.load_model_and_tokenizer(args.model, args.cache_dir, args.dtype)
     layers = E1.resolve_layers(model)
     layer = layers[args.layer_index]
 
-    if args.structure == "cyclic":
-        templates, labels = E1.FIT_TEMPLATES, E1.WEEKDAYS
-    else:
-        templates, labels = ORD.FIT_TEMPLATES, ORD.ORDINALS
+    templates, labels = structure.fit_templates(), structure.labels
+    label_ids = E1.label_token_ids(tok, labels, args.candidate_prefix)
 
     rows, label_idx, template_idx = [], [], []
     for ti, template in enumerate(templates):
         for li, label in enumerate(labels):
-            act, _ = E1.run_clean(model, tok, layer, template.format(label=label))
+            if args.capture_at == "label":
+                ids, pos = E1.build_label_prompt(tok, template, label_ids[li])
+                act, _ = E1.run_clean_at(model, layer, ids, pos)
+            else:
+                act, _ = E1.run_clean(model, tok, layer, template.format(label=label))
             rows.append(act.numpy().astype(np.float64))
             label_idx.append(li)
             template_idx.append(ti)
@@ -85,20 +87,22 @@ def harvest(args) -> int:
     return 0
 
 
-def structure_recovery(coord: np.ndarray, label_idx: np.ndarray, structure: str,
+def structure_recovery(coord: np.ndarray, label_idx: np.ndarray, cyclic: bool,
                        n_labels: int) -> float:
-    """How much of the KNOWN generator the fitted 1-D coordinate recovers."""
-    if structure == "cyclic":
-        truth = np.exp(1j * TAU * label_idx.astype(np.float64) / n_labels)
-        chart = np.exp(1j * TAU * coord)
-        forward = abs(np.mean(truth * np.conj(chart)))
-        reverse = abs(np.mean(truth * chart))
-        return float(max(forward, reverse) ** 2)
-    d = np.column_stack([np.ones(len(label_idx)), label_idx.astype(np.float64)])
-    coef, *_ = np.linalg.lstsq(d, coord, rcond=None)
-    resid = coord - d @ coef
-    tss = float(np.sum((coord - coord.mean()) ** 2))
-    return 1.0 - float(np.sum(resid**2)) / max(tss, 1e-30)
+    """How much of the KNOWN generator the fitted 1-D coordinate recovers.
+
+    Delegates to `run_e1` so the probe and the harness can never disagree about
+    what "recovery" means. The chart PERIOD is a property of the fitted object,
+    not of this script, so both the period-one and the period-2*pi conventions
+    are scored and the better is kept: reading a good chart in the wrong unit
+    winds the phase 2*pi times too fast and returns R^2 == 0, which is
+    indistinguishable from "the fit found nothing".
+    """
+    E1 = _sibling("run_e1")
+    if cyclic:
+        return max(E1.circular_recovery(coord, label_idx, n_labels, p)[0]
+                   for p in (1.0, TAU))
+    return E1.linear_recovery(coord, label_idx)[0]
 
 
 def sweep(args) -> int:
@@ -106,9 +110,12 @@ def sweep(args) -> int:
 
     data = np.load(args.npz, allow_pickle=False)
     X0, label_idx, template_idx = data["X"], data["label_index"], data["template_index"]
+    E1 = _sibling("run_e1")
+    structure = E1.STRUCTURES[args.structure]
     n_labels = int(label_idx.max()) + 1
-    topology = "circle" if args.structure == "cyclic" else "euclidean"
+    topology = structure.topology
     dims = [int(v) for v in args.pca_dims.split(",") if v.strip()]
+    k_atoms = [int(v) for v in args.k_atoms.split(",") if v.strip()]
 
     results = []
     for center in (False, True):
@@ -124,37 +131,42 @@ def sweep(args) -> int:
             r = int(min(dim, vt.shape[0]))
             Xr = np.ascontiguousarray(Xc @ vt[:r].T)
             evr = float((svals[:r] ** 2).sum() / max((svals**2).sum(), 1e-30))
-            try:
-                fit = gamfit.sae_manifold_fit(
-                    Xr, K=1, d_atom=1, atom_topology=topology, assignment="softmax",
-                    n_iter=args.n_iter, random_state=args.seed)
-                fit_ev = float(
-                    1.0 - np.sum((Xr - np.asarray(fit.fitted)) ** 2)
-                    / max(np.sum((Xr - Xr.mean(0)) ** 2), 1e-30))
-                c = np.asarray(fit.coords[0], dtype=float)
-                coord = c[:, 0] if c.ndim == 2 else c
-                recovery = structure_recovery(coord, label_idx, args.structure, n_labels)
-                status = "ok"
-            except Exception as error:  # a refusal is a datum, not a crash
-                fit_ev, recovery, status = float("nan"), float("nan"), f"{type(error).__name__}: {error}"
-            row = {
-                "per_template_center": center, "pca_dim": r,
-                "pca_explained_variance": evr, "fit_ev": fit_ev,
-                "structure_recovery_r2": recovery, "status": status[:200],
-            }
-            results.append(row)
-            print(
-                f"center={int(center)} dim={r:3d} pca_evr={evr:.4f} "
-                f"fit_ev={fit_ev:.4f} recovery_r2={recovery:.4f} {row['status']}",
-                flush=True)
+            for K in k_atoms:
+                try:
+                    fit = gamfit.sae_manifold_fit(
+                        Xr, K=K, d_atom=1, atom_topology=topology, assignment="softmax",
+                        n_iter=args.n_iter, random_state=args.seed)
+                    fit_ev = float(
+                        1.0 - np.sum((Xr - np.asarray(fit.fitted)) ** 2)
+                        / max(np.sum((Xr - Xr.mean(0)) ** 2), 1e-30))
+                    recovery = -1.0
+                    for k in range(K):
+                        c = np.asarray(fit.coords[k], dtype=float)
+                        coord = c[:, 0] if c.ndim == 2 else c
+                        recovery = max(recovery, structure_recovery(
+                            coord, label_idx, structure.cyclic, n_labels))
+                    status = "ok"
+                except Exception as error:  # a refusal is a datum, not a crash
+                    fit_ev, recovery = float("nan"), float("nan")
+                    status = f"{type(error).__name__}: {error}"
+                row = {
+                    "per_template_center": center, "pca_dim": r, "k_atoms": K,
+                    "pca_explained_variance": evr, "fit_ev": fit_ev,
+                    "structure_recovery_r2": recovery, "status": status[:200],
+                }
+                results.append(row)
+                print(
+                    f"center={int(center)} dim={r:3d} K={K} pca_evr={evr:.4f} "
+                    f"fit_ev={fit_ev:.4f} recovery_r2={recovery:.4f} {row['status']}",
+                    flush=True)
     if args.out:
         Path(args.out).write_text(json.dumps(results, indent=2) + "\n")
     ok = [r for r in results if np.isfinite(r["structure_recovery_r2"])]
     if ok:
         best = max(ok, key=lambda r: r["structure_recovery_r2"])
         print(f"BEST center={int(best['per_template_center'])} dim={best['pca_dim']} "
-              f"recovery_r2={best['structure_recovery_r2']:.4f} fit_ev={best['fit_ev']:.4f}",
-              flush=True)
+              f"K={best['k_atoms']} recovery_r2={best['structure_recovery_r2']:.4f} "
+              f"fit_ev={best['fit_ev']:.4f}", flush=True)
     return 0
 
 
@@ -166,15 +178,21 @@ def main() -> int:
     h.add_argument("--model", default="Qwen/Qwen3.5-4B-Base")
     h.add_argument("--cache-dir", default="")
     h.add_argument("--layer-index", type=int, default=16)
-    h.add_argument("--structure", choices=("cyclic", "ordinal"), default="cyclic")
+    h.add_argument("--structure", choices=("weekday", "ordinal"), default="weekday")
     h.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="fp32")
+    h.add_argument("--capture-at", choices=("last", "label"), default="label",
+                   help="'label' captures at the label token's own position (the representation); "
+                        "'last' captures at the final token (a downstream trace, measured to carry "
+                        "0.91%% of the cloud variance on Qwen3.5-4B-Base L16)")
+    h.add_argument("--candidate-prefix", default=" ")
     h.add_argument("--out", required=True)
     h.set_defaults(func=harvest)
 
     s = sub.add_parser("sweep")
     s.add_argument("--npz", required=True)
-    s.add_argument("--structure", choices=("cyclic", "ordinal"), default="cyclic")
-    s.add_argument("--pca-dims", default="2,3,4,8,16,64")
+    s.add_argument("--structure", choices=("weekday", "ordinal"), default="weekday")
+    s.add_argument("--pca-dims", default="2,3,4,6,8,12,16")
+    s.add_argument("--k-atoms", default="1,2")
     s.add_argument("--n-iter", type=int, default=60)
     s.add_argument("--seed", type=int, default=20260731)
     s.add_argument("--out", default="")

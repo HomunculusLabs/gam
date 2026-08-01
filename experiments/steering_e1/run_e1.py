@@ -1,42 +1,67 @@
 #!/usr/bin/env python3
-"""E1 — on-manifold calendar-circle steering (gam#2234).
+"""E1 — chart-coordinate causal steering on a real LM (gam#2234).
 
 The gam#2234 thesis: a manifold SAE steers by moving the CODE, not the ambient
-vector — x' = x + a·(Φ(t⊕δ) − Φ(t))·B_k, where ⊕ rotates the day-of-week circle
-phase. E1 tests the headline prediction on calendar features: moving the fitted
-coordinate toward a target weekday by fractional doses up to k·(2π/7) should
-move FULL-SOFTMAX next-token mass smoothly toward that target, while a
-matched-norm flat-direction addition — the flat-SAE control — degrades off the
-feature's circle.
+vector — ``x' = x + a·(Φ(t ⊕ δ) − Φ(t))·B_k`` — so the dose is a displacement in
+the chart's own coordinate and the intervention stays on the feature's manifold.
+E1 tests that causally on a real model: edit ONE token's residual stream, read
+the full-softmax next-token distribution, and compare against a matched-L2-norm
+flat-SAE control.
 
-Pipeline (all reused, provenance inline):
-  1. GPT-2 calendar-activation capture + residual patching — the exact hook path
-     from experiments/interchange/qwen_calendar_interchange.py (run_clean /
-     run_patched register a forward hook on the transformer block, read/patch the
-     last-position hidden state). The day-of-week circle features are the ones
-     pinned by crates/gam-sae/tests/data/engels_gpt2_calendar_sae_indices.json
-     (Engels et al. 2024, GPT-2 layer 7) and exercised by the calendar
-     ground-truth benchmark (crates/gam-sae/tests/calendar_ground_truth_benchmark.rs).
-  2. Fit gamfit.sae_manifold_fit on the weekday activation cloud (one periodic
-     circle atom, d_atom=1, assignment='softmax' so the steer path is routed).
-  3. Steer day-of-week phase by k·(2π/7) via model.steer(atom, t_from, t_to)
-     (Rust sae_steer_delta / SaeManifoldTerm::steer_rows, landed f8d70743a).
-  4. Patch the steered residual back into the model. Every prompt asks for the
-     day AFTER its source label, so a k-day coordinate move targets weekday
-     `(source + k + 1) mod 7`. Measure its full-softmax token probability and
-     collateral `KL(patched_non_target || base_non_target)`, conditioning both
-     distributions on every token except the intended target.
-  5. Flat-SAE control: gamfit.sparse_dictionary_fit weekday latent, its decoder
-     direction added at the SAME L2 norm as the on-manifold delta (fixed
-     direction, no periodic structure — the thesis says it cannot cycle).
+TWO STRUCTURES, ONE CODE PATH
+-----------------------------
+The owner's standing direction on this issue is *"do not overfit to cyclic"*, so
+this harness runs the identical protocol on
 
-This needs a wheel + a GPT-2 checkout, so it runs on a GPU/CPU node, not in the
-authoring sandbox. Everything is argparse-driven (no hardcoded homes).
+  * ``--structure weekday`` — the day-of-week CIRCLE (``atom_topology="circle"``),
+    seven labels, the classic periodic chart; and
+  * ``--structure ordinal`` — the number words ` one` … ` twelve` on an ORDINAL
+    LINE (``atom_topology="euclidean"``), twelve labels, **no periodicity
+    anywhere**: base ranks and shifts are chosen so the target never wraps past
+    ` twelve`, so a wrap can never smuggle cyclic structure back in.
 
-MSI launch:
-    python3 experiments/steering_e1/run_e1.py \
-        --model gpt2 --layer-index 7 --k-atoms 1 \
-        --out-dir experiments/steering_e1/out --seed 20260709
+Both structures share every downstream definition (effect, collateral, control,
+chart construction, dose grid), which is the only way the two numbers are
+comparable. A previous revision kept a separate ``run_e1_ordinal.py``; it was
+deleted in favour of this single path.
+
+MEASUREMENT CONTRACT (corrected 74d13b82d, pinned by
+tests/test_steering_e1_measurement_contract.py)
+  * every prompt asks for the label AFTER its source label, so moving the source
+    by ``k`` targets ``source + k + 1``;
+  * effect = FULL-VOCABULARY softmax probability mass moved onto that target
+    token (never a seven-way renormalization);
+  * collateral = target-conditioned-out ``KL(patched ‖ base)``;
+  * the dose grid contains 0, at least one fractional dose, and 1.
+
+WHAT THE 2026-07-31 NULL TAUGHT THIS HARNESS (three fixes, all measured)
+  1. **Capture site.** The original harness captured and patched the FINAL token
+     ("Today is Monday. Tomorrow is" → ` is`). At that site the day-of-week phase
+     carried **0.91%** of the cloud's variance on Qwen3.5-4B-Base L16 (15.4%
+     after per-template centering) — it is a downstream trace, not the
+     representation. ``--capture-at label`` (the default) reads and patches the
+     LABEL token's own position while still reading logits at the last position.
+  2. **Cloud size and rank.** 10 templates × 7 labels = 70 rows in a PCA-64 chart
+     is the noise floor; ``pca_explained_variance = 0.9997`` at r=64 with n=70 is
+     vacuous and was being read as evidence the chart was good. The prompt bank
+     is now ~40 distinct CONTEXT HEADS per structure (the activation at the label
+     position depends on the head only — the model is causal — so head diversity
+     is the only diversity that reaches the cloud), and ``--pca-dim`` defaults to
+     a small chart.
+  3. **Dose units are measured, not assumed.** The chart's coordinate period is
+     a convention of the fitted object, not of this script. The dose for a
+     source→target move is now read off the fitted chart's OWN empirical
+     label→coordinate map, so it cannot be wrong by a factor of 2π.
+
+**Any E1 result must be reported next to its structure-recovery R²** — the
+fitted coordinate's agreement with the known generator. ``fit_ev`` and
+``pca_explained_variance`` were both reported in the null run and both were
+consistent with a chart that recovered literally nothing.
+
+Launch (MSI, wheel-installed gamfit):
+    python3 experiments/steering_e1/run_e1.py --structure weekday \
+        --model Qwen/Qwen3.5-4B-Base --layer-index 16 --pca-dim 8 \
+        --out-dir out_weekday
 """
 from __future__ import annotations
 
@@ -52,6 +77,10 @@ import numpy as np
 
 TAU = 2.0 * math.pi
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+ORDINALS = (
+    "one", "two", "three", "four", "five", "six",
+    "seven", "eight", "nine", "ten", "eleven", "twelve",
+)
 
 
 def log(msg: str) -> None:
@@ -59,12 +88,134 @@ def log(msg: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# GPT-2 activation capture + residual patch.
-# Verbatim (with provenance) from experiments/interchange/qwen_calendar_interchange.py:
-# load_model_and_tokenizer / resolve_layers / model_input_device / run_clean /
-# run_patched / candidate_token_ids. That harness is the single source of the
-# calendar hook path; copied here so E1 is a
-# self-contained, wheel-only-deployable script (no cross-experiment import).
+# Prompt banks.
+#
+# A HEAD is everything before the label. Because the model is causal, the
+# residual at the LABEL token's position depends on the head and nothing else —
+# so distinct heads are the ONLY source of cloud diversity, and two templates
+# that share a head contribute the same activation twice. The tail is fixed per
+# split so every row asks the same question of the readout.
+# --------------------------------------------------------------------------- #
+WEEKDAY_FIT_HEADS = (
+    "Today is", "If today is", "The weekday after", "On the calendar, the day after",
+    "Yesterday was", "The day that comes right after", "Immediately after",
+    "Counting forward from", "A day later than", "Following the calendar entry for",
+    "The meeting was moved to", "She always goes swimming on", "The shop is closed every",
+    "His flight departs on", "We agreed to meet next", "The report is due by",
+    "Rehearsal happens each", "The bins are collected on", "Payday falls on",
+    "The lecture is scheduled for", "I usually rest on", "The market opens only on",
+    "Their anniversary is on", "The deadline was last", "Practice starts this",
+    "The office reopens on", "He was born on a", "The storm arrived on",
+    "Classes resume on", "The train runs only on", "Dinner is served every",
+    "The results are announced each", "My appointment got pushed to",
+    "The gym is busiest on", "We launch the product on", "The bakery bakes fresh bread every",
+    "The council meets on the first", "The exam takes place on", "Volunteers arrive each",
+    "The newsletter goes out every",
+)
+WEEKDAY_BASE_HEADS = (
+    "The delivery is scheduled for", "Her shift begins on", "The festival opens on",
+    "The library closes early on", "They always argue on", "The audit is booked for",
+    "The choir practises on", "The ferry sails on", "The results were posted on",
+    "The renovation starts on",
+)
+WEEKDAY_FIT_TAIL = ". The next day is"
+WEEKDAY_BASE_TAIL = ", so the following day is"
+
+ORDINAL_FIT_HEADS = (
+    "Counting up, the number after", "In order, right after", "The next whole number after",
+    "Adding one to", "On the number line, immediately right of", "If you have",
+    "In the ascending sequence, the term after", "The successor of",
+    "Step forward once from", "One greater than", "She counted to", "The recipe calls for",
+    "He scored", "There were exactly", "The box holds", "They waited",
+    "The team has", "I bought", "The chapter covers", "We need at least",
+    "The shelf fits", "The building has", "She read", "The garden grows",
+    "He owns", "The list contains", "The clock struck", "They ordered",
+    "The class has", "The set includes", "The pack came with", "The queue held",
+    "She stacked", "The label says", "The tally reached", "The order was for",
+    "The batch produced", "The survey counted", "The album has", "The bundle contains",
+)
+ORDINAL_BASE_HEADS = (
+    "Starting at", "The ledger records", "The crate held", "He collected",
+    "The playlist has", "The form asks for", "The bin contained", "She packed",
+    "The report lists", "The tray carries",
+)
+ORDINAL_FIT_TAIL = ". Adding one gives"
+ORDINAL_BASE_TAIL = ", and one more makes"
+
+
+@dataclass(frozen=True)
+class Structure:
+    """Everything that differs between the cyclic and the non-cyclic arm."""
+
+    name: str
+    labels: tuple[str, ...]
+    topology: str                      # gam atom_topology
+    cyclic: bool
+    fit_heads: tuple[str, ...]
+    base_heads: tuple[str, ...]
+    fit_tail: str
+    base_tail: str
+    max_shift: int                     # largest source-label shift the grid may ask for
+
+    @property
+    def n_labels(self) -> int:
+        return len(self.labels)
+
+    def fit_templates(self) -> tuple[str, ...]:
+        return tuple(f"{h} {{label}}{self.fit_tail}" for h in self.fit_heads)
+
+    def base_templates(self) -> tuple[str, ...]:
+        return tuple(f"{h} {{label}}{self.base_tail}" for h in self.base_heads)
+
+    def base_label_indices(self, shifts: list[int]) -> list[int]:
+        """Source labels the interventions act on.
+
+        Cyclic: every label is a legal source. Ordinal: only sources for which
+        ``source + max(shift) + 1`` still lands inside the ladder, so the
+        non-cyclic arm never wraps and therefore never smuggles periodicity in.
+        """
+        if self.cyclic:
+            return list(range(self.n_labels))
+        top = self.n_labels - 1 - (max(shifts) + 1)
+        if top < 0:
+            raise ValueError(f"{self.name}: shift grid {shifts} cannot fit in {self.n_labels} labels")
+        return list(range(top + 1))
+
+    def continuation_index(self, source_index: int, shift: int) -> int:
+        """The label the prompt asks for after the source is moved by ``shift``."""
+        moved = source_index + shift + 1
+        if self.cyclic:
+            return moved % self.n_labels
+        if not 0 <= moved < self.n_labels:
+            raise ValueError(
+                f"{self.name}: source {source_index} + shift {shift} + 1 = {moved} leaves the "
+                "ladder; the non-cyclic grid must never wrap"
+            )
+        return moved
+
+    def moved_source_index(self, source_index: int, shift: int) -> int:
+        """The label the SOURCE token is being made to look like."""
+        moved = source_index + shift
+        return moved % self.n_labels if self.cyclic else moved
+
+
+STRUCTURES = {
+    "weekday": Structure(
+        name="weekday", labels=WEEKDAYS, topology="circle", cyclic=True,
+        fit_heads=WEEKDAY_FIT_HEADS, base_heads=WEEKDAY_BASE_HEADS,
+        fit_tail=WEEKDAY_FIT_TAIL, base_tail=WEEKDAY_BASE_TAIL, max_shift=6,
+    ),
+    "ordinal": Structure(
+        name="ordinal", labels=ORDINALS, topology="euclidean", cyclic=False,
+        fit_heads=ORDINAL_FIT_HEADS, base_heads=ORDINAL_BASE_HEADS,
+        fit_tail=ORDINAL_FIT_TAIL, base_tail=ORDINAL_BASE_TAIL, max_shift=4,
+    ),
+}
+
+
+# --------------------------------------------------------------------------- #
+# Model, capture, patch. Hook path from
+# experiments/interchange/qwen_calendar_interchange.py.
 # --------------------------------------------------------------------------- #
 def load_model_and_tokenizer(model_name: str, cache_dir: str, dtype_name: str):
     import torch
@@ -76,7 +227,8 @@ def load_model_and_tokenizer(model_name: str, cache_dir: str, dtype_name: str):
         kwargs["device_map"] = "auto"
     if cache_dir:
         kwargs["cache_dir"] = cache_dir
-    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, cache_dir=cache_dir or None)
+    tok = AutoTokenizer.from_pretrained(
+        model_name, trust_remote_code=True, cache_dir=cache_dir or None)
     model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
     model.eval()
     if not torch.cuda.is_available():
@@ -93,12 +245,15 @@ def resolve_layers(model: Any) -> Any:
         root = getattr(model, root_name, None)
         if root is not None and hasattr(root, layer_name):
             return getattr(root, layer_name)
+        inner = getattr(root, "model", None) if root is not None else None
+        if inner is not None and hasattr(inner, layer_name):
+            return getattr(inner, layer_name)
     raise ValueError("could not locate transformer block list on model")
 
 
-def candidate_token_ids(tokenizer: Any, prefix: str) -> list[int]:
+def label_token_ids(tokenizer: Any, labels: tuple[str, ...], prefix: str) -> list[int]:
     ids: list[int] = []
-    for label in WEEKDAYS:
+    for label in labels:
         enc = tokenizer.encode(prefix + label, add_special_tokens=False)
         if len(enc) != 1:
             raise ValueError(
@@ -109,7 +264,81 @@ def candidate_token_ids(tokenizer: Any, prefix: str) -> list[int]:
     return ids
 
 
+def candidate_token_ids(tokenizer: Any, prefix: str) -> list[int]:
+    """Weekday candidate ids (kept for the pinned measurement contract)."""
+    return label_token_ids(tokenizer, WEEKDAYS, prefix)
+
+
+def build_label_prompt(tokenizer: Any, template: str, label_token_id: int) -> tuple[list[int], int]:
+    """Token ids for ``template.format(label=...)`` plus the label token's position.
+
+    Built by concatenating token id lists rather than by re-tokenizing the joined
+    string, so the label occupies exactly one known position and the edit site is
+    unambiguous. ``{label}`` is preceded by a space in every template and the
+    label token carries that space, so the head is right-stripped before encoding.
+    """
+    if "{label}" not in template:
+        raise ValueError(f"template {template!r} has no {{label}} slot")
+    head, tail = template.split("{label}", 1)
+    head_ids = tokenizer.encode(head.rstrip(" "), add_special_tokens=False) if head.strip() else []
+    tail_ids = tokenizer.encode(tail, add_special_tokens=False) if tail else []
+    ids = list(head_ids) + [int(label_token_id)] + list(tail_ids)
+    return ids, len(head_ids)
+
+
+def run_clean_at(model: Any, layer: Any, token_ids: list[int], edit_position: int):
+    """Capture the residual at ``edit_position``; read logits at the LAST position."""
+    import torch
+
+    device = model_input_device(model)
+    ids = torch.tensor([token_ids], dtype=torch.long, device=device)
+    if not (0 <= edit_position < ids.shape[1]):
+        raise ValueError(f"edit position {edit_position} outside prompt of {ids.shape[1]} tokens")
+    captured: dict[str, Any] = {}
+
+    def hook(_m, _i, output):
+        hidden = output[0] if isinstance(output, tuple) else output
+        captured["activation"] = hidden[0, edit_position, :].detach().float().cpu()
+
+    handle = layer.register_forward_hook(hook)
+    try:
+        with torch.inference_mode():
+            out = model(input_ids=ids, use_cache=False)
+    finally:
+        handle.remove()
+    if "activation" not in captured:
+        raise ValueError("activation hook did not fire")
+    return captured["activation"], out.logits[0, -1, :].detach().float().cpu()
+
+
+def run_patched_at(model: Any, layer: Any, token_ids: list[int], edit_position: int,
+                   patched_activation: Any):
+    """Patch the residual at ``edit_position``; read logits at the LAST position."""
+    import torch
+
+    device = model_input_device(model)
+    ids = torch.tensor([token_ids], dtype=torch.long, device=device)
+
+    def hook(_m, _i, output):
+        hidden = output[0] if isinstance(output, tuple) else output
+        edited = hidden.clone()
+        edited[0, edit_position, :] = patched_activation.to(
+            device=hidden.device, dtype=hidden.dtype)
+        if isinstance(output, tuple):
+            return (edited,) + output[1:]
+        return edited
+
+    handle = layer.register_forward_hook(hook)
+    try:
+        with torch.inference_mode():
+            out = model(input_ids=ids, use_cache=False)
+    finally:
+        handle.remove()
+    return out.logits[0, -1, :].detach().float().cpu()
+
+
 def run_clean(model: Any, tokenizer: Any, layer: Any, prompt: str):
+    """Historical final-token capture site (``--capture-at last``)."""
     import torch
 
     enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
@@ -129,8 +358,7 @@ def run_clean(model: Any, tokenizer: Any, layer: Any, prompt: str):
         handle.remove()
     if "activation" not in captured:
         raise ValueError("activation hook did not fire")
-    logits = out.logits[0, position, :].detach().float().cpu()
-    return captured["activation"], logits
+    return captured["activation"], out.logits[0, position, :].detach().float().cpu()
 
 
 def run_patched(model: Any, tokenizer: Any, layer: Any, prompt: str, patched_activation: Any):
@@ -157,6 +385,9 @@ def run_patched(model: Any, tokenizer: Any, layer: Any, prompt: str, patched_act
     return out.logits[0, position, :].detach().float().cpu()
 
 
+# --------------------------------------------------------------------------- #
+# Readout metrics. Full vocabulary throughout.
+# --------------------------------------------------------------------------- #
 def _logits_array(logits: Any) -> np.ndarray:
     if hasattr(logits, "detach"):
         logits = logits.detach().cpu().numpy()
@@ -180,25 +411,29 @@ def token_probability(logits: Any, token_id: int) -> float:
     return float(math.exp(float(logp[token_id])))
 
 
-def weekday_token_probabilities(logits: Any, candidate_ids: list[int]) -> np.ndarray:
-    """Full-softmax probabilities for the seven weekday tokens (never renormalized)."""
+def label_probabilities(logits: Any, ids: list[int]) -> np.ndarray:
+    """Full-softmax probabilities for the label tokens (never renormalized)."""
     logp = _log_softmax(logits)
-    ids = np.asarray(candidate_ids, dtype=np.int64)
-    if ids.shape != (len(WEEKDAYS),) or np.any(ids < 0) or np.any(ids >= logp.size):
+    idx = np.asarray(ids, dtype=np.int64)
+    if idx.ndim != 1 or idx.size == 0 or np.any(idx < 0) or np.any(idx >= logp.size):
+        raise ValueError("candidate label token ids must be in-vocabulary ids, one per label")
+    return np.exp(logp[idx])
+
+
+def weekday_token_probabilities(logits: Any, candidate_ids: list[int]) -> np.ndarray:
+    """Full-softmax probabilities for the seven weekday tokens."""
+    if len(candidate_ids) != len(WEEKDAYS):
         raise ValueError("candidate weekday token ids must be seven in-vocabulary ids")
-    return np.exp(logp[ids])
+    return label_probabilities(logits, candidate_ids)
 
 
-def target_excluded_kl_model_to_base(
-    patched_logits: Any,
-    base_logits: Any,
-    target_token_id: int,
-) -> float:
-    """Collateral KL on non-target tokens: KL(patched || base), target excluded.
+def target_excluded_kl_model_to_base(patched_logits: Any, base_logits: Any,
+                                     target_token_id: int) -> float:
+    """Collateral KL on non-target tokens: ``KL(patched ‖ base)``, target excluded.
 
     Each arm is conditioned on "the next token is not the intended target" before
-    computing KL, so probability mass deliberately moved onto the target is not
-    charged again as collateral damage.
+    the KL, so probability mass deliberately moved onto the target is not charged
+    again as collateral damage.
     """
     patched = _logits_array(patched_logits)
     base = _logits_array(base_logits)
@@ -206,56 +441,12 @@ def target_excluded_kl_model_to_base(
         raise ValueError(f"patched/base vocabulary shapes differ: {patched.shape} vs {base.shape}")
     if not (0 <= target_token_id < patched.size):
         raise ValueError(
-            f"target token id {target_token_id} out of range for vocabulary size {patched.size}"
-        )
+            f"target token id {target_token_id} out of range for vocabulary size {patched.size}")
     keep = np.ones(patched.size, dtype=bool)
     keep[target_token_id] = False
     model_log = _log_softmax(patched[keep])
     base_log = _log_softmax(base[keep])
-    model_prob = np.exp(model_log)
-    return max(float(np.sum(model_prob * (model_log - base_log))), 0.0)
-
-
-# --------------------------------------------------------------------------- #
-# Calendar prompt bank. Templates {label} = a weekday; the last-token residual
-# encodes that weekday's day-of-week phase (the circle we fit + steer).
-# --------------------------------------------------------------------------- #
-FIT_TEMPLATES = (
-    "Today is {label}. Tomorrow is",
-    "If today is {label}, then tomorrow is",
-    "The weekday after {label} is",
-    "On a weekly calendar, {label} is followed by",
-    "Yesterday was {label}, so today is",
-    "The day that comes right after {label} is",
-    "After {label} comes",
-    "Counting forward from {label}, the next day is",
-    "A day later than {label} is",
-    "Following {label} on the calendar is",
-)
-# Held-out base contexts the steering interventions act on.
-BASE_TEMPLATES = (
-    "Starting on {label}, the next day is",
-    "Calendar note: the day after {label} is",
-)
-
-
-@dataclass(eq=False)  # holds torch tensors; identity equality avoids tensor-== on compare
-class CleanExample:
-    template_index: int
-    day_index: int
-    prompt: str
-    activation: Any  # torch tensor (p,)
-    logits: Any      # torch tensor (vocab,)
-
-
-def collect_cloud(model, tokenizer, layer, templates):
-    examples: list[CleanExample] = []
-    for ti, template in enumerate(templates):
-        for di, label in enumerate(WEEKDAYS):
-            prompt = template.format(label=label)
-            act, logits = run_clean(model, tokenizer, layer, prompt)
-            examples.append(CleanExample(ti, di, prompt, act, logits))
-    return examples
+    return max(float(np.sum(np.exp(model_log) * (model_log - base_log))), 0.0)
 
 
 def continuation_target_index(base_day_index: int, target_shift_days: int) -> int:
@@ -267,13 +458,14 @@ def continuation_target_index(base_day_index: int, target_shift_days: int) -> in
     return (base_day_index + target_shift_days + 1) % len(WEEKDAYS)
 
 
-def parse_target_shifts(spec: str) -> list[int]:
+def parse_target_shifts(spec: str, max_shift: int = 6) -> list[int]:
     try:
         shifts = [int(value.strip()) for value in spec.split(",") if value.strip()]
     except ValueError as error:
         raise ValueError("--target-shifts must be comma-separated integers") from error
-    if not shifts or len(set(shifts)) != len(shifts) or any(not 1 <= k <= 6 for k in shifts):
-        raise ValueError("--target-shifts must contain unique integers from 1 through 6")
+    if not shifts or len(set(shifts)) != len(shifts) or any(not 1 <= k <= max_shift for k in shifts):
+        raise ValueError(
+            f"--target-shifts must contain unique integers from 1 through {max_shift}")
     return shifts
 
 
@@ -290,161 +482,256 @@ def parse_dose_fractions(spec: str) -> list[float]:
         or fractions[-1] != 1.0
     ):
         raise ValueError(
-            "--dose-fractions must be strictly increasing finite values in [0,1], including 0 and 1"
-        )
+            "--dose-fractions must be strictly increasing finite values in [0,1], "
+            "including 0 and 1")
     if not any(0.0 < value < 1.0 for value in fractions):
         raise ValueError("--dose-fractions must include at least one fractional interior dose")
     return fractions
 
 
 # --------------------------------------------------------------------------- #
-# Atom / latent selection: which fitted component carries day-of-week phase.
+# Cloud collection.
 # --------------------------------------------------------------------------- #
-def _phase_design(day_indices: np.ndarray) -> np.ndarray:
-    """[cos θ, sin θ] design for the day-of-week phase θ = 2π·day/7."""
-    theta = TAU * day_indices.astype(np.float64) / 7.0
-    return np.column_stack([np.cos(theta), np.sin(theta)])
+@dataclass(eq=False)  # holds torch tensors; identity equality avoids tensor-== on compare
+class CleanExample:
+    template_index: int
+    label_index: int
+    prompt: str
+    activation: Any
+    logits: Any
+    token_ids: Any = None
+    edit_position: int = -1
 
 
-def _phase_r2(signal: np.ndarray, day_indices: np.ndarray) -> float:
-    """R^2 of a 1-D signal regressed on the day-of-week phase design."""
-    d = np.column_stack([np.ones(len(day_indices)), _phase_design(day_indices)])
-    coef, *_ = np.linalg.lstsq(d, signal, rcond=None)
-    resid = signal - d @ coef
-    tss = float(np.sum((signal - signal.mean()) ** 2))
-    return 1.0 - float(np.sum(resid ** 2)) / max(tss, 1e-30)
+def collect_cloud(model, tokenizer, layer, templates, labels, capture_at="label",
+                  candidate_ids=None) -> list[CleanExample]:
+    if capture_at == "label" and candidate_ids is None:
+        raise ValueError("capture_at='label' needs the label token ids")
+    examples: list[CleanExample] = []
+    for ti, template in enumerate(templates):
+        for li, label in enumerate(labels):
+            prompt = template.format(label=label)
+            if capture_at == "label":
+                ids, pos = build_label_prompt(tokenizer, template, candidate_ids[li])
+                act, logits = run_clean_at(model, layer, ids, pos)
+                examples.append(CleanExample(ti, li, prompt, act, logits, ids, pos))
+            else:
+                act, logits = run_clean(model, tokenizer, layer, prompt)
+                examples.append(CleanExample(ti, li, prompt, act, logits))
+    return examples
 
 
-def select_weekday_atom(model, day_indices: np.ndarray) -> tuple[int, int]:
-    """Return the weekday atom and its train-split chart orientation."""
-    best_k, best = 0, -np.inf
-    best_orientation = 1
-    truth = np.exp(1j * TAU * day_indices.astype(np.float64) / 7.0)
+# --------------------------------------------------------------------------- #
+# Structure recovery: how much of the KNOWN generator the fitted 1-D chart
+# coordinate reproduces. This is the number that decides whether E1 can measure
+# anything at all, and it must be reported beside every E1 result.
+# --------------------------------------------------------------------------- #
+def circular_recovery(coord: np.ndarray, label_index: np.ndarray, n_labels: int,
+                      period: float) -> tuple[float, int]:
+    """Squared circular correlation of ``coord`` (read with ``period``) with truth."""
+    truth = np.exp(1j * TAU * label_index.astype(np.float64) / n_labels)
+    chart = np.exp(1j * TAU * coord.astype(np.float64) / period)
+    forward = abs(np.mean(truth * np.conj(chart)))
+    reverse = abs(np.mean(truth * chart))
+    if forward >= reverse:
+        return float(forward ** 2), 1
+    return float(reverse ** 2), -1
+
+
+def linear_recovery(coord: np.ndarray, label_index: np.ndarray) -> tuple[float, float]:
+    """``R^2`` and slope of ``coord ~ label_index`` (the ordinal / non-cyclic case)."""
+    x = label_index.astype(np.float64)
+    d = np.column_stack([np.ones(x.size), x])
+    coef, *_ = np.linalg.lstsq(d, coord, rcond=None)
+    resid = coord - d @ coef
+    tss = float(np.sum((coord - coord.mean()) ** 2))
+    return 1.0 - float(np.sum(resid ** 2)) / max(tss, 1e-30), float(coef[1])
+
+
+def select_atom(structure: Structure, model: Any, label_index: np.ndarray):
+    """Pick the atom whose fitted coordinate best recovers the known generator.
+
+    Returns ``(atom, recovery_r2, period, orientation)``. For a circle the chart
+    PERIOD is a property of the fitted object and is MEASURED here (both the
+    period-one and the period-2π conventions are scored) rather than assumed: a
+    dose computed in the wrong unit is silently 2π short and produces a null that
+    is indistinguishable from "the fit found nothing".
+    """
+    best = (0, -np.inf, 1.0, 1)
     for k in range(len(model.coords)):
         c = np.asarray(model.coords[k], dtype=float)
         coord = c[:, 0] if c.ndim == 2 else c
-        chart = np.exp(1j * TAU * coord)
-        forward = abs(np.mean(truth * np.conj(chart)))
-        reverse = abs(np.mean(truth * chart))
-        score = max(forward, reverse) ** 2
-        orientation = 1 if forward >= reverse else -1
-        if score > best:
-            best, best_k, best_orientation = score, k, orientation
-    log(f"weekday atom = {best_k} (circular R2={best:.4f}, orientation={best_orientation:+d})")
-    return best_k, best_orientation
+        if structure.cyclic:
+            for period in (1.0, TAU):
+                score, orientation = circular_recovery(
+                    coord, label_index, structure.n_labels, period)
+                if score > best[1]:
+                    best = (k, score, period, orientation)
+        else:
+            score, slope = linear_recovery(coord, label_index)
+            if score > best[1]:
+                best = (k, score, float("inf"), 1 if slope >= 0 else -1)
+    atom, score, period, orientation = best
+    log(f"atom {atom}: structure recovery R2={score:.4f} "
+        f"(period={period}, orientation={orientation:+d})")
+    return atom, float(score), float(period), int(orientation)
 
 
-def select_flat_direction(flat_fit, X, day_indices):
-    """Flat-SAE weekday latent's unit decoder direction (the fixed-direction
-    control). Picks the latent whose code best separates days by phase R^2."""
+def label_coordinate_map(coord: np.ndarray, label_index: np.ndarray, n_labels: int,
+                         period: float) -> np.ndarray:
+    """The fitted chart's OWN empirical label→coordinate map.
+
+    The dose is read off this map rather than assumed to be ``period·k/n``, so a
+    non-uniform chart still gets the displacement that actually takes the source
+    label's fitted coordinate to the target label's.
+    """
+    out = np.zeros(n_labels, dtype=np.float64)
+    for li in range(n_labels):
+        rows = coord[label_index == li]
+        if rows.size == 0:
+            raise ValueError(f"label {li} has no fitted rows")
+        if np.isfinite(period):
+            ang = np.mean(np.exp(1j * TAU * rows / period))
+            out[li] = float(np.angle(ang)) * period / TAU
+        else:
+            out[li] = float(rows.mean())
+    return out
+
+
+def chart_displacement(label_map: np.ndarray, source: int, target: int, period: float) -> float:
+    """Signed chart displacement taking the source label to the target label."""
+    delta = float(label_map[target] - label_map[source])
+    if np.isfinite(period):
+        half = 0.5 * period
+        delta = (delta + half) % period - half
+    return delta
+
+
+def select_flat_directions(flat_fit, X: np.ndarray, label_index: np.ndarray,
+                           n_labels: int) -> tuple[np.ndarray, list[int]]:
+    """Per-label flat-SAE steering directions — the control, made as strong as possible.
+
+    A flat SAE steers by adding the decoder column of the latent that FIRES on the
+    feature you want. So for each target label we take the latent whose code is
+    most selective for that label on the train split (mean code on the label's
+    rows minus the mean elsewhere) and use its unit decoder direction. This is a
+    strictly stronger control than a single global "weekday direction": it is
+    allowed a different direction for every target, and it is exactly what a flat
+    SAE practitioner would do.
+    """
     tr = flat_fit.transform(X)
     k = int(flat_fit.decoder.shape[0])
     codes = np.zeros((X.shape[0], k), dtype=np.float64)
     rows = np.arange(X.shape[0])[:, None]
     codes[rows, tr.indices.astype(np.int64)] = tr.codes.astype(np.float64)
-    best_lat, best = 0, -np.inf
-    for lat in range(k):
-        col = codes[:, lat]
-        if np.allclose(col, 0.0):
-            continue
-        r2 = _phase_r2(col, day_indices)
-        if r2 > best:
-            best, best_lat = r2, lat
-    w = np.asarray(flat_fit.decoder[best_lat], dtype=np.float64)
-    w = w / max(np.linalg.norm(w), 1e-30)
-    log(f"flat weekday latent = {best_lat} (code phase R2={best:.4f})")
-    return w, best_lat
+    dirs = np.zeros((n_labels, int(flat_fit.decoder.shape[1])), dtype=np.float64)
+    chosen: list[int] = []
+    for li in range(n_labels):
+        mask = label_index == li
+        score = codes[mask].mean(0) - codes[~mask].mean(0)
+        lat = int(np.argmax(score))
+        w = np.asarray(flat_fit.decoder[lat], dtype=np.float64)
+        norm = float(np.linalg.norm(w))
+        dirs[li] = w / norm if norm > 0 else w
+        chosen.append(lat)
+    log(f"flat control latents per label: {chosen}")
+    return dirs, chosen
 
 
 # --------------------------------------------------------------------------- #
-def steer_records(lm_model, sae_model, tokenizer, layer, atom, chart_orientation,
+# The intervention sweep.
+# --------------------------------------------------------------------------- #
+def steer_records(structure, lm_model, sae_model, tokenizer, layer, atom,
                   base_examples, metric_rows, base_coords, base_amplitudes,
-                  candidate_ids, flat_dir, target_shifts, dose_fractions, lift=None):
-    """Run manifold + flat steering across contexts, targets, and dose fractions.
+                  candidate_ids, flat_dirs, label_map, period,
+                  target_shifts, dose_fractions, lift=None) -> list[dict[str, Any]]:
+    import torch
 
-    ``base_coords[i]`` is the fitted circle coordinate (length d_atom) of
-    ``base_examples[i]`` on the weekday atom.
-    """
     records: list[dict[str, Any]] = []
+    labels = structure.labels
     for base, metric_row, t0_in, amplitude in zip(
         base_examples, metric_rows, base_coords, base_amplitudes
     ):
-        b = base.day_index
-        base_weekday_probs = weekday_token_probabilities(base.logits, candidate_ids)
-        t0 = np.atleast_1d(np.asarray(t0_in, dtype=np.float64)).reshape(-1)
-        for target_shift in target_shifts:
-            target_index = continuation_target_index(b, target_shift)
-            target_token_id = candidate_ids[target_index]
-            base_target_probability = float(base_weekday_probs[target_index])
+        source = base.label_index
+        base_probs = label_probabilities(base.logits, candidate_ids)
+        t0 = np.asarray(t0_in, dtype=np.float64).reshape(-1)
+
+        def patch(vector):
+            if base.edit_position >= 0:
+                return run_patched_at(
+                    lm_model, layer, base.token_ids, base.edit_position, vector)
+            return run_patched(lm_model, tokenizer, layer, base.prompt, vector)
+
+        for shift in target_shifts:
+            try:
+                target_index = structure.continuation_index(source, shift)
+            except ValueError:
+                continue
+            moved_source = structure.moved_source_index(source, shift)
+            target_token_id = int(candidate_ids[target_index])
+            base_target_probability = float(base_probs[target_index])
+            full_displacement = chart_displacement(label_map, source, moved_source, period)
             for dose_fraction in dose_fractions:
-                dose_days = float(target_shift) * dose_fraction
-                dcoord = chart_orientation * dose_days / 7.0
+                dcoord = full_displacement * float(dose_fraction)
                 t_to = t0.copy()
-                t_to[0] = t0[0] + dcoord  # periodic evaluator wraps the period-one chart
+                t_to[0] = t0[0] + dcoord
                 plan = sae_model.steer(int(atom), int(metric_row), float(amplitude), t0, t_to)
-                delta = np.asarray(plan["delta"], dtype=np.float64)
+                delta = np.asarray(plan["delta"], dtype=np.float64).reshape(-1)
                 if lift is not None:
-                    # Exact ambient lift through the orthonormal PCA rows.
                     delta = delta @ lift
-                import torch
 
-                # --- on-manifold arm ---
                 patched = base.activation + torch.from_numpy(delta.astype(np.float32))
-                manifold_logits = run_patched(lm_model, tokenizer, layer, base.prompt, patched)
+                manifold_logits = patch(patched)
 
-                # --- flat control: matched-norm fixed-direction addition ---
-                flat_delta = np.linalg.norm(delta) * flat_dir
+                # Matched-L2-norm flat control, aimed at the SAME target label.
+                flat_delta = float(np.linalg.norm(delta)) * flat_dirs[moved_source]
+                if lift is not None:
+                    flat_delta = flat_delta @ lift
                 patched_flat = base.activation + torch.from_numpy(flat_delta.astype(np.float32))
-                flat_logits = run_patched(lm_model, tokenizer, layer, base.prompt, patched_flat)
+                flat_logits = patch(patched_flat)
 
-                for arm, patched_logits in (
-                    ("manifold", manifold_logits),
-                    ("flat", flat_logits),
-                ):
-                    weekday_probs = weekday_token_probabilities(patched_logits, candidate_ids)
-                    top = int(np.argmax(weekday_probs))
-                    target_probability = float(weekday_probs[target_index])
+                for arm, patched_logits in (("manifold", manifold_logits),
+                                            ("flat", flat_logits)):
+                    probs = label_probabilities(patched_logits, candidate_ids)
+                    top = int(np.argmax(probs))
+                    target_probability = float(probs[target_index])
                     collateral = target_excluded_kl_model_to_base(
-                        patched_logits, base.logits, target_token_id
-                    )
+                        patched_logits, base.logits, target_token_id)
                     records.append({
+                        "structure": structure.name,
                         "arm": arm,
                         "base_template": base.template_index,
-                        "base_day": WEEKDAYS[b],
-                        "base_day_index": b,
-                        "target_shift_days": int(target_shift),
-                        "target_day": WEEKDAYS[target_index],
-                        "target_day_index": target_index,
-                        "target_token_id": int(target_token_id),
+                        "base_label": labels[source],
+                        "base_label_index": source,
+                        "target_shift": int(shift),
+                        "moved_source_label": labels[moved_source],
+                        "target_label": labels[target_index],
+                        "target_label_index": target_index,
+                        "target_token_id": target_token_id,
                         "dose_fraction": float(dose_fraction),
-                        "coordinate_delta_turns": float(dcoord),
-                        "coordinate_delta_radians": float(dcoord * TAU),
+                        "chart_displacement": float(dcoord),
                         "delta_norm": float(np.linalg.norm(delta)),
                         "steer_off_manifold_norm": (
                             float(plan["off_manifold_norm"])
                             if arm == "manifold" and plan.get("off_manifold_norm") is not None
-                            else None
-                        ),
+                            else None),
                         "steer_predicted_nats": (
                             float(plan["predicted_nats"])
                             if arm == "manifold" and plan.get("predicted_nats") is not None
-                            else None
-                        ),
-                        "realized_top_weekday": WEEKDAYS[top],
-                        "realized_top_weekday_index": top,
+                            else None),
+                        "realized_top_label": labels[top],
+                        "realized_top_label_index": top,
                         "target_token_probability": target_probability,
                         "base_target_token_probability": base_target_probability,
                         "target_probability_mass_moved": (
-                            target_probability - base_target_probability
-                        ),
+                            target_probability - base_target_probability),
                         "collateral_kl_model_to_base_non_target": collateral,
-                        "weekday_token_probabilities": [float(x) for x in weekday_probs],
+                        "label_token_probabilities": [float(x) for x in probs],
                     })
     return records
 
 
-def summarize(records, target_shifts, dose_fractions):
-    """Endpoint accuracy and per-target fractional dose response for each arm."""
+def summarize(records, target_shifts, dose_fractions) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for arm in ("manifold", "flat"):
         rs = [r for r in records if r["arm"] == arm]
@@ -452,60 +739,58 @@ def summarize(records, target_shifts, dose_fractions):
             continue
         endpoint = [r for r in rs if r["dose_fraction"] == 1.0]
         acc = float(np.mean([
-            r["realized_top_weekday_index"] == r["target_day_index"] for r in endpoint
-        ]))
+            r["realized_top_label_index"] == r["target_label_index"] for r in endpoint]))
         dose_response: dict[str, Any] = {}
-        for target_shift in target_shifts:
+        for shift in target_shifts:
             by_fraction = {}
             for fraction in dose_fractions:
-                sample = [
-                    r for r in rs
-                    if r["target_shift_days"] == target_shift
-                    and r["dose_fraction"] == fraction
-                ]
+                sample = [r for r in rs
+                          if r["target_shift"] == shift and r["dose_fraction"] == fraction]
+                if not sample:
+                    continue
                 by_fraction[str(fraction)] = {
-                    "mean_target_token_probability": float(np.mean([
-                        r["target_token_probability"] for r in sample
-                    ])),
-                    "mean_target_probability_mass_moved": float(np.mean([
-                        r["target_probability_mass_moved"] for r in sample
-                    ])),
-                    "mean_collateral_kl_model_to_base_non_target": float(np.mean([
-                        r["collateral_kl_model_to_base_non_target"] for r in sample
-                    ])),
+                    "mean_target_token_probability": float(np.mean(
+                        [r["target_token_probability"] for r in sample])),
+                    "mean_target_probability_mass_moved": float(np.mean(
+                        [r["target_probability_mass_moved"] for r in sample])),
+                    "mean_collateral_kl_model_to_base_non_target": float(np.mean(
+                        [r["collateral_kl_model_to_base_non_target"] for r in sample])),
+                    "n": int(len(sample)),
                 }
-            dose_response[str(target_shift)] = by_fraction
+            dose_response[str(shift)] = by_fraction
         out[arm] = {
             "endpoint_target_accuracy": acc,
-            "mean_endpoint_target_token_probability": float(np.mean([
-                r["target_token_probability"] for r in endpoint
-            ])),
-            "mean_endpoint_target_probability_mass_moved": float(np.mean([
-                r["target_probability_mass_moved"] for r in endpoint
-            ])),
-            "mean_endpoint_collateral_kl_model_to_base_non_target": float(np.mean([
-                r["collateral_kl_model_to_base_non_target"] for r in endpoint
-            ])),
+            "mean_endpoint_target_token_probability": float(np.mean(
+                [r["target_token_probability"] for r in endpoint])),
+            "mean_endpoint_target_probability_mass_moved": float(np.mean(
+                [r["target_probability_mass_moved"] for r in endpoint])),
+            "mean_endpoint_collateral_kl_model_to_base_non_target": float(np.mean(
+                [r["collateral_kl_model_to_base_non_target"] for r in endpoint])),
             "dose_response": dose_response,
         }
     return out
 
 
-def write_outputs(out_dir: Path, meta, records, summary):
+def write_outputs(out_dir: Path, meta, records, summary) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "e1_records.jsonl", "w") as f:
         for r in records:
             f.write(json.dumps(r) + "\n")
-    (out_dir / "e1_summary.json").write_text(json.dumps({"meta": meta, "summary": summary}, indent=2) + "\n")
+    (out_dir / "e1_summary.json").write_text(
+        json.dumps({"meta": meta, "summary": summary}, indent=2) + "\n")
 
     lines = [
-        "# E1 — Calendar-circle steering (gam#2234)",
+        f"# E1 — chart-coordinate steering, structure `{meta['structure']}` (gam#2234)",
         "",
-        f"- Model `{meta['model']}` block `{meta['layer_index']}`; fit EV `{meta['fit_ev']:.4f}`; "
-        f"weekday atom `{meta['weekday_atom']}`.",
+        f"- Model `{meta['model']}` block `{meta['layer_index']}`, topology "
+        f"`{meta['topology']}`, chart PCA dim `{meta['pca_dim']}`, "
+        f"{meta['n_fit_rows']} fit rows / {meta['n_base_rows']} held-out rows.",
+        f"- **Structure recovery R² of the fitted coordinate: "
+        f"`{meta['structure_recovery_r2']:.4f}`** (fit EV `{meta['fit_ev']:.4f}`, "
+        f"chart PCA explained variance `{meta['pca_explained_variance']:.4f}`).",
         "",
         "| arm | endpoint target accuracy | endpoint target-token probability | "
-        "probability mass moved | target-excluded KL(model || base) |",
+        "probability mass moved | target-excluded KL(model‖base) |",
         "|---|---:|---:|---:|---:|",
     ]
     for arm in ("manifold", "flat"):
@@ -516,92 +801,97 @@ def write_outputs(out_dir: Path, meta, records, summary):
                 f"{s['mean_endpoint_target_token_probability']:.6f} | "
                 f"{s['mean_endpoint_target_probability_mass_moved']:.6f} | "
                 f"{s['mean_endpoint_collateral_kl_model_to_base_non_target']:.6f} |")
-    lines += ["", "## Fractional dose-response by target shift", ""]
-    lines.append("| target shift k | dose fraction | manifold mass moved | manifold collateral | "
-                 "flat mass moved | flat collateral |")
-    lines.append("|---:|---:|---:|---:|---:|---:|")
-    for target_shift, fractions in summary.get("manifold", {}).get("dose_response", {}).items():
+    lines += ["", "## Fractional dose-response by target shift", "",
+              "| shift k | dose fraction | manifold mass moved | manifold collateral | "
+              "flat mass moved | flat collateral |", "|---:|---:|---:|---:|---:|---:|"]
+    for shift, fractions in summary.get("manifold", {}).get("dose_response", {}).items():
         for fraction, manifold_row in fractions.items():
             flat_row = summary.get("flat", {}).get("dose_response", {}).get(
-                target_shift, {}
-            ).get(fraction, {})
+                shift, {}).get(fraction, {})
             lines.append(
-                f"| {target_shift} | {float(fraction):.3f} | "
+                f"| {shift} | {float(fraction):.3f} | "
                 f"{manifold_row['mean_target_probability_mass_moved']:.6f} | "
                 f"{manifold_row['mean_collateral_kl_model_to_base_non_target']:.6f} | "
                 f"{flat_row.get('mean_target_probability_mass_moved', float('nan')):.6f} | "
-                f"{flat_row.get('mean_collateral_kl_model_to_base_non_target', float('nan')):.6f} |"
-            )
-    lines += [
-        "",
-        "Prediction (gam#2234 E1): full-softmax mass moves smoothly toward the correct next-day "
-        "target as dose increases, while target-excluded KL(model || base) remains below the "
-        "matched-norm flat control at matched achieved effect.",
-        "",
-    ]
+                f"{flat_row.get('mean_collateral_kl_model_to_base_non_target', float('nan')):.6f} |")
+    lines.append("")
     (out_dir / "e1_results.md").write_text("\n".join(lines) + "\n")
     log(f"wrote {out_dir / 'e1_results.md'}")
 
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--model", default="gpt2")
+    ap.add_argument("--structure", choices=tuple(STRUCTURES), default="weekday",
+                    help="'weekday' = the day-of-week circle; 'ordinal' = the NON-CYCLIC "
+                         "number-word line (the 'do not overfit to cyclic' arm)")
+    ap.add_argument("--model", default="Qwen/Qwen3.5-4B-Base")
     ap.add_argument("--cache-dir", default="")
-    ap.add_argument("--layer-index", type=int, default=7,
-                    help="0-based block index to capture/patch (Engels GPT-2 calendar SAE is layer 7)")
-    ap.add_argument("--k-atoms", type=int, default=1, help="manifold SAE atom count K")
-    ap.add_argument("--flat-k", type=int, default=32, help="flat-SAE dictionary size (control)")
+    ap.add_argument("--layer-index", type=int, default=16)
+    ap.add_argument("--k-atoms", type=int, default=1)
+    ap.add_argument("--flat-k", type=int, default=32)
     ap.add_argument("--n-iter", type=int, default=60)
-    ap.add_argument("--target-shifts", default="1,2,3,4,5,6",
-                    help="comma-separated integer source-day shifts, each in 1..6")
-    ap.add_argument("--dose-fractions", default="0,0.25,0.5,0.75,1",
-                    help="strictly increasing target-dose fractions including 0, 1, and an interior value")
+    ap.add_argument("--target-shifts", default="")
+    ap.add_argument("--dose-fractions", default="0,0.25,0.5,0.75,1")
     ap.add_argument("--candidate-prefix", default=" ")
     ap.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="fp32")
-    ap.add_argument("--seed", type=int, default=20260709)
-    ap.add_argument("--pca-dim", type=int, default=64,
+    ap.add_argument("--seed", type=int, default=20260731)
+    ap.add_argument("--pca-dim", type=int, default=8,
                     help="fit-chart PCA dimension (0 disables; deltas are lifted back exactly)")
+    ap.add_argument("--capture-at", choices=("last", "label"), default="label",
+                    help="edit site: 'label' patches the label token's own position (logits are "
+                         "still read at the final token); 'last' is the historical final-token "
+                         "site, whose cloud carried 0.91%% of its variance in the label phase")
     ap.add_argument("--per-template-center", action="store_true",
-                    help="remove each prompt template's mean before charting. The cloud's leading "
-                         "variance is TEMPLATE identity, not the calendar phase (measured "
-                         "2026-07-31 on Qwen3.5-4B-Base L16: a raw PCA-64 chart of 70 rows gave "
-                         "fit EV 0.015 and weekday circular R2 0.0000 — the circle was buried "
-                         "under the template axes). This is a chart-construction nuisance removal "
-                         "only: the steering delta is still added to the RAW activation.")
+                    help="remove each context head's mean before charting (chart-construction "
+                         "nuisance removal only; the intervention still edits the RAW activation)")
+    ap.add_argument("--cloud-npz", default="",
+                    help="write the harvested ambient cloud here (for the CPU-side chart sweep)")
     ap.add_argument("--out-dir", default="experiments/steering_e1/out")
     return ap.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    target_shifts = parse_target_shifts(args.target_shifts)
+    structure = STRUCTURES[args.structure]
+    shift_spec = args.target_shifts or ",".join(str(k) for k in range(1, structure.max_shift + 1))
+    target_shifts = parse_target_shifts(shift_spec, structure.max_shift)
     dose_fractions = parse_dose_fractions(args.dose_fractions)
     np.random.seed(args.seed)
     import gamfit
 
+    log(f"structure={structure.name} topology={structure.topology} "
+        f"labels={structure.n_labels} shifts={target_shifts}")
     log(f"loading {args.model}")
     model_lm, tok = load_model_and_tokenizer(args.model, args.cache_dir, args.dtype)
     layers = resolve_layers(model_lm)
     if not (0 <= args.layer_index < len(layers)):
         raise ValueError(f"--layer-index must be in [0,{len(layers)}); got {args.layer_index}")
     layer = layers[args.layer_index]
-    candidate_ids = candidate_token_ids(tok, args.candidate_prefix)
-    log(f"candidate ids: {dict(zip(WEEKDAYS, candidate_ids))}")
+    candidate_ids = label_token_ids(tok, structure.labels, args.candidate_prefix)
+    log(f"candidate ids: {dict(zip(structure.labels, candidate_ids))}")
 
-    log("collecting disjoint fit and held-out weekday activation clouds")
-    fit_examples = collect_cloud(model_lm, tok, layer, FIT_TEMPLATES)
-    base_examples = collect_cloud(model_lm, tok, layer, BASE_TEMPLATES)
+    base_label_indices = structure.base_label_indices(target_shifts)
+    log(f"held-out source labels: {[structure.labels[i] for i in base_label_indices]}")
+
+    log("collecting disjoint fit and held-out clouds")
+    fit_examples = collect_cloud(model_lm, tok, layer, structure.fit_templates(),
+                                 structure.labels, args.capture_at, candidate_ids)
+    base_examples = [
+        ex for ex in collect_cloud(model_lm, tok, layer, structure.base_templates(),
+                                   structure.labels, args.capture_at, candidate_ids)
+        if ex.label_index in base_label_indices
+    ]
     X_fit_ambient = np.ascontiguousarray(
         np.stack([ex.activation.numpy().astype(np.float64) for ex in fit_examples]))
     X_base_ambient = np.ascontiguousarray(
         np.stack([ex.activation.numpy().astype(np.float64) for ex in base_examples]))
-    fit_day_indices = np.asarray([ex.day_index for ex in fit_examples])
+    fit_label_index = np.asarray([ex.label_index for ex in fit_examples])
     log(f"fit X shape {X_fit_ambient.shape}; held-out X shape {X_base_ambient.shape}")
+    if args.cloud_npz:
+        np.savez(args.cloud_npz, X=X_fit_ambient, label_index=fit_label_index,
+                 template_index=np.asarray([ex.template_index for ex in fit_examples]))
+        log(f"wrote ambient cloud to {args.cloud_npz}")
 
-    # Chart nuisance removal (opt-in). Each template contributes a large constant
-    # offset that dominates the singular spectrum; centering per template leaves
-    # the weekday phase as the leading structure. Applied to the CHART inputs
-    # only — the intervention below still edits the raw activation.
     X_fit_chart, X_base_chart = X_fit_ambient, X_base_ambient
     if args.per_template_center:
         X_fit_chart = X_fit_ambient.copy()
@@ -612,95 +902,93 @@ def main() -> int:
         for ti in {ex.template_index for ex in base_examples}:
             rows = [i for i, ex in enumerate(base_examples) if ex.template_index == ti]
             X_base_chart[rows] -= X_base_chart[rows].mean(0, keepdims=True)
-        log("per-template centering applied to the chart inputs")
-    X_fit_ambient, X_base_ambient = X_fit_chart, X_base_chart
+        log("per-head centering applied to the chart inputs")
 
-    # Wide-p treatment (same methodology as the committed OLMo fixtures): fit in
-    # a per-layer PCA chart. The steering DELTAS are lifted back to ambient
-    # through the orthonormal basis, so the intervention itself is exact —
-    # x' = x + (delta_pca @ Vr) — and norms are preserved (Vr rows orthonormal).
-    # Raw 3.5k-dim/84-row clouds put outer REML in the wide-p pathological
-    # regime (probe 2026-07-10: all preprocessing variants refused); rank-r PCA
-    # is where the calendar circle lives anyway (rank ~2-3).
-    if args.pca_dim and args.pca_dim < X_fit_ambient.shape[1]:
-        mu = X_fit_ambient.mean(0, keepdims=True)
-        X_fit_centered = X_fit_ambient - mu
-        _, svals, vt = np.linalg.svd(X_fit_centered, full_matrices=False)
+    # Wide-p treatment: fit in a train-only PCA chart; steering deltas are lifted
+    # back to ambient through the orthonormal rows, so the intervention is exact
+    # and norm-preserving.
+    pca_evr = 1.0
+    if args.pca_dim and args.pca_dim < X_fit_chart.shape[1]:
+        mu = X_fit_chart.mean(0, keepdims=True)
+        centered = X_fit_chart - mu
+        _, svals, vt = np.linalg.svd(centered, full_matrices=False)
         r = int(min(args.pca_dim, vt.shape[0]))
-        lift = np.ascontiguousarray(vt[:r])            # (r, p) orthonormal rows
-        X_fit = np.ascontiguousarray(X_fit_centered @ lift.T)
-        X_base = np.ascontiguousarray((X_base_ambient - mu) @ lift.T)
-        evr = float((svals[:r] ** 2).sum() / max((svals ** 2).sum(), 1e-30))
-        log(f"train-only PCA chart: {X_fit.shape} (fit explained variance {evr:.4f})")
+        lift = np.ascontiguousarray(vt[:r])
+        X_fit = np.ascontiguousarray(centered @ lift.T)
+        X_base = np.ascontiguousarray((X_base_chart - mu) @ lift.T)
+        pca_evr = float((svals[:r] ** 2).sum() / max((svals ** 2).sum(), 1e-30))
+        log(f"train-only PCA chart: {X_fit.shape} (explained variance {pca_evr:.4f})")
     else:
         lift = None
-        X_fit = X_fit_ambient
-        X_base = X_base_ambient
+        X_fit, X_base = X_fit_chart, X_base_chart
 
-    log("fitting gamfit.sae_manifold_fit (periodic circle, softmax assignment)")
+    log(f"fitting gamfit.sae_manifold_fit ({structure.topology}, softmax assignment)")
     sae_model = gamfit.sae_manifold_fit(
-        X_fit, K=args.k_atoms, d_atom=1, atom_topology="circle", assignment="softmax",
-        n_iter=args.n_iter, random_state=args.seed)
+        X_fit, K=args.k_atoms, d_atom=1, atom_topology=structure.topology,
+        assignment="softmax", n_iter=args.n_iter, random_state=args.seed)
     fit_ev = float(1.0 - np.sum((X_fit - np.asarray(sae_model.fitted)) ** 2)
                    / max(np.sum((X_fit - X_fit.mean(0)) ** 2), 1e-30))
-    atom, chart_orientation = select_weekday_atom(sae_model, fit_day_indices)
+    atom, recovery_r2, period, orientation = select_atom(structure, sae_model, fit_label_index)
+    fit_coord = np.asarray(sae_model.coords[atom], dtype=float)
+    fit_coord = fit_coord[:, 0] if fit_coord.ndim == 2 else fit_coord
+    label_map = label_coordinate_map(fit_coord, fit_label_index, structure.n_labels, period)
+    log(f"empirical label->coordinate map: "
+        f"{ {structure.labels[i]: round(float(label_map[i]), 4) for i in range(structure.n_labels)} }")
 
     log("fitting flat-SAE control (gamfit.sparse_dictionary_fit)")
     flat_fit = gamfit.sparse_dictionary_fit(
-        X_fit.astype(np.float32), min(args.flat_k, X_fit.shape[0] - 1),
-        active=1, max_epochs=40)
-    flat_dir, flat_lat = select_flat_direction(
-        flat_fit, X_fit.astype(np.float32), fit_day_indices)
-    if lift is not None:
-        flat_dir = np.asarray(flat_dir, dtype=np.float64) @ lift
-        norm = np.linalg.norm(flat_dir)
-        if norm > 0:
-            flat_dir = flat_dir / norm
+        X_fit.astype(np.float32), min(args.flat_k, X_fit.shape[0] - 1), active=1, max_epochs=40)
+    flat_dirs, flat_latents = select_flat_directions(
+        flat_fit, X_fit.astype(np.float32), fit_label_index, structure.n_labels)
 
-    # OOS chart state is inferred without refitting. `steer` accepts a fitted-row
-    # metric index, so each held-out point uses the nearest fitted point on the
-    # period-one circle; under the default Euclidean metric this choice is exactly
-    # immaterial, and it remains the chart-local choice for row-varying metrics.
     base_latents = sae_model.converged_latents(X_base)
     base_coords_array = np.asarray(base_latents["coords"][atom], dtype=float)
     base_assignments = np.asarray(base_latents["assignments"], dtype=float)
-    fit_coords_array = np.asarray(sae_model.coords[atom], dtype=float)
-    fit_turns = fit_coords_array[:, 0]
     base_turns = base_coords_array[:, 0]
     metric_rows = []
     for turn in base_turns:
-        circular_distance = np.abs((fit_turns - turn + 0.5) % 1.0 - 0.5)
-        metric_rows.append(int(np.argmin(circular_distance)))
+        if np.isfinite(period):
+            half = 0.5 * period
+            distance = np.abs((fit_coord - turn + half) % period - half)
+        else:
+            distance = np.abs(fit_coord - turn)
+        metric_rows.append(int(np.argmin(distance)))
     base_coords = [base_coords_array[row] for row in range(len(base_examples))]
     base_amplitudes = [float(base_assignments[row, atom]) for row in range(len(base_examples))]
 
-    log(
-        f"steering {len(base_examples)} base contexts × targets {target_shifts} × "
-        f"dose fractions {dose_fractions} (manifold + flat)"
-    )
+    log(f"steering {len(base_examples)} held-out contexts × shifts {target_shifts} × "
+        f"doses {dose_fractions} (manifold + flat)")
     records = steer_records(
-        model_lm, sae_model, tok, layer, atom, chart_orientation,
-        base_examples, metric_rows, base_coords, base_amplitudes,
-        candidate_ids, flat_dir, target_shifts, dose_fractions, lift=lift)
+        structure, model_lm, sae_model, tok, layer, atom, base_examples, metric_rows,
+        base_coords, base_amplitudes, candidate_ids, flat_dirs, label_map, period,
+        target_shifts, dose_fractions, lift=lift)
     summary = summarize(records, target_shifts, dose_fractions)
 
     meta = {
+        "structure": structure.name, "topology": structure.topology,
         "model": args.model, "layer_index": args.layer_index, "k_atoms": args.k_atoms,
-        "flat_k": int(flat_fit.decoder.shape[0]),
-        "flat_latent": int(flat_lat), "weekday_atom": int(atom), "fit_ev": fit_ev,
-        "chart_orientation": int(chart_orientation),
+        "flat_k": int(flat_fit.decoder.shape[0]), "flat_latents": flat_latents,
+        "atom": int(atom), "fit_ev": fit_ev,
+        "structure_recovery_r2": float(recovery_r2),
+        "pca_explained_variance": float(pca_evr),
+        "chart_period": (None if not np.isfinite(period) else float(period)),
+        "chart_orientation": int(orientation),
+        "label_coordinate_map": [float(v) for v in label_map],
+        "capture_at": args.capture_at,
+        "per_template_center": bool(args.per_template_center),
+        "pca_dim": int(args.pca_dim),
         "n_fit_rows": int(len(fit_examples)), "n_base_rows": int(len(base_examples)),
         "target_shifts": target_shifts, "dose_fractions": dose_fractions,
         "seed": args.seed,
     }
     write_outputs(Path(args.out_dir), meta, records, summary)
 
-    # E2 (gam#2234) is part of the acceptance result, so analysis failures are
-    # fatal rather than silently converting a missing verdict into a successful E1.
     import analyze_collateral
 
     analyze_collateral.run(Path(args.out_dir))
 
+    print(f"E1_STRUCTURE_RECOVERY_R2={recovery_r2:.6f} fit_ev={fit_ev:.6f} "
+          f"pca_evr={pca_evr:.6f}", flush=True)
     for arm in ("manifold", "flat"):
         s = summary.get(arm)
         if s:
@@ -708,9 +996,9 @@ def main() -> int:
                 f"E1_{arm.upper()} endpoint_accuracy={s['endpoint_target_accuracy']:.4f} "
                 f"endpoint_target_prob={s['mean_endpoint_target_token_probability']:.6f} "
                 f"endpoint_mass_moved={s['mean_endpoint_target_probability_mass_moved']:.6f} "
-                f"endpoint_collateral={s['mean_endpoint_collateral_kl_model_to_base_non_target']:.6f}",
-                flush=True,
-            )
+                f"endpoint_collateral="
+                f"{s['mean_endpoint_collateral_kl_model_to_base_non_target']:.6f}",
+                flush=True)
     return 0
 
 
