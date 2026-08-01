@@ -579,7 +579,7 @@ fn validate_config(config: &SparseDictConfig) -> Result<(), String> {
 #[cfg(test)]
 mod stream_tests {
     use super::{SparseDictConfig, SparseDictStreamState, TileScorer, route_and_code_all};
-    use crate::sparse_dict::update::run_linear_fast_kernel;
+    use crate::sparse_dict::update::{DecoderRecycleSpace, run_linear_fast_kernel};
     use ndarray::{Array2, ArrayView2};
 
     /// Deterministic synthetic corpus: `n` rows, each a scaled planted atom plus a
@@ -706,8 +706,13 @@ mod stream_tests {
         // increment). `run_linear_fast_kernel` at the shared default ridge IS
         // `run` (it sets both ridges to the one shared ρ and delegates), so this
         // is exactly the batch baseline the streaming path must reproduce.
-        let one_shot = run_linear_fast_kernel(x.view(), &config, config.decoder_ridge as f64)
-            .expect("one-shot fit");
+        let one_shot = run_linear_fast_kernel(
+            x.view(),
+            &config,
+            config.decoder_ridge as f64,
+            &mut DecoderRecycleSpace::new(config.n_atoms),
+        )
+        .expect("one-shot fit");
 
         // Four contiguous shards whose concatenation (row order) is exactly `x`.
         let chunk = n / 4;
