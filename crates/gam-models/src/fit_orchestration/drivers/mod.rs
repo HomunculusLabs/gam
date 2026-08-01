@@ -240,6 +240,10 @@ include!("adaptive_bounded_duchon_tests.rs");
 // — it moves the bound rather than the fit. Self-contained `#[cfg(test)] mod`.
 include!("constant_curvature_kappa_jet_fd_tests.rs");
 
+// PROBE (#2687/#2716): the κ criterion mapped across the whole admissible
+// interval on the fixture whose κ̂ is railed at the shipped box.
+include!("constant_curvature_kappa_box_probe_tests.rs");
+
 include!("zz_measure_2425_kappa_tests.rs");
 
 // #2450 criterion-identity instrumentation. A PAIRED A/B over `rho_prior` at
