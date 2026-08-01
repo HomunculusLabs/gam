@@ -572,8 +572,12 @@ def select_atom(structure: Structure, model: Any, label_index: np.ndarray):
             if score > best[1]:
                 best = (k, score, float("inf"), 1 if slope >= 0 else -1)
     atom, score, period, orientation = best
+    c = np.asarray(model.coords[atom], dtype=float)
+    coord = c[:, 0] if c.ndim == 2 else c
+    n_distinct = int(np.unique(np.round(coord, 6)).size)
     log(f"atom {atom}: structure recovery R2={score:.4f} "
-        f"(period={period}, orientation={orientation:+d})")
+        f"(period={period}, orientation={orientation:+d}, coord std={coord.std():.4g}, "
+        f"range=[{coord.min():.4g},{coord.max():.4g}], {n_distinct} distinct of {coord.size})")
     return atom, float(score), float(period), int(orientation)
 
 
@@ -980,6 +984,8 @@ def main() -> int:
         "flat_k": int(flat_fit.decoder.shape[0]), "flat_latents": flat_latents,
         "atom": int(atom), "fit_ev": fit_ev,
         "structure_recovery_r2": float(recovery_r2),
+        "chart_coord_std": float(np.std(fit_coord)),
+        "chart_coord_distinct": int(np.unique(np.round(fit_coord, 6)).size),
         "pca_explained_variance": float(pca_evr),
         "chart_period": (None if not np.isfinite(period) else float(period)),
         "chart_orientation": int(orientation),

@@ -195,6 +195,9 @@ def sweep(args) -> int:
 
     data = np.load(args.npz, allow_pickle=False)
     X0, label_idx, template_idx = data["X"], data["label_index"], data["template_index"]
+    if args.max_heads:
+        keep = template_idx < args.max_heads
+        X0, label_idx, template_idx = X0[keep], label_idx[keep], template_idx[keep]
     E1 = _sibling("run_e1")
     structure = E1.STRUCTURES[args.structure]
     n_labels = int(label_idx.max()) + 1
@@ -318,6 +321,8 @@ def main() -> int:
     s.add_argument("--structure", choices=("weekday", "ordinal"), default="weekday")
     s.add_argument("--pca-dims", default="2,3,4,6,8,12,16")
     s.add_argument("--k-atoms", default="1,2")
+    s.add_argument("--max-heads", type=int, default=0,
+                   help="restrict to the first N context heads, matching run_e1.py --max-heads")
     s.add_argument("--centerings", default="0,1",
                    help="which per-head-centering modes to sweep; measured 2026-07-31 on "
                         "Qwen3.5-4B-Base L16, the UNcentered cloud's best pair of the top 16 PCs "
