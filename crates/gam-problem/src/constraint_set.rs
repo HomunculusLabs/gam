@@ -25,6 +25,128 @@ use crate::linear_constraints::LinearInequalityConstraints;
 use ndarray::{Array1, Array2, ArrayView1};
 use std::sync::Arc;
 
+/// Primal-feasibility tolerance of the inequality-constrained active-set Newton
+/// solver, measured in the unit-normalized row metric this module defines:
+/// a point `β` is feasible for a [`ConstraintSet`] exactly when
+///
+/// ```text
+/// max_r  (b_r − a_r·β) / ‖a_r‖  ≤  PRIMAL_FEASIBILITY_TOL
+/// ```
+///
+/// over the non-vacuous rows — the quantity [`ConstraintSet::max_scaled_violation`]
+/// returns. This is the ONE definition of "feasible" in the codebase; the solver
+/// certifies its returned iterate against it, every entry gate admits against it,
+/// and [`ConstraintSet::max_contract_feasible_step`] sizes steps against it.
+///
+/// It lives beside the metric rather than in the solver because the two are the
+/// same statement: the metric says what is measured, this says at what resolution.
+/// `gam_solve::active_set` re-exports it as `ACTIVE_SET_PRIMAL_FEASIBILITY_TOL`.
+///
+/// Any consumer that re-derives a RAW (un-scaled) feasibility tolerance from a
+/// returned iterate must scale this value by the per-row normalization the
+/// constraint builder applied; demanding tighter feasibility than this is
+/// inconsistent with the solver contract and will spuriously reject valid
+/// boundary solutions (gam#2719: a step rule that demanded exact feasibility
+/// refused 314 steps that violated nothing at this tolerance).
+pub const PRIMAL_FEASIBILITY_TOL: f64 = 1e-8;
+
+/// Result of the contract-feasible ratio test
+/// ([`ConstraintSet::max_contract_feasible_step`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContractFeasibleStep {
+    /// Largest fraction in `[0, 1]` such that `β + fraction·δ` is feasible at
+    /// [`PRIMAL_FEASIBILITY_TOL`]. `1.0` means no row limits the step.
+    ///
+    /// `0.0` is a legitimate, non-exceptional answer: it says a row is active
+    /// at `β` and `δ` points strictly out of it by more than round-off, so no
+    /// positive multiple of `δ` is admissible. The remedy is a projection onto
+    /// the active face, not a smaller `δ` — the ratio test is invariant under
+    /// `δ ↦ cδ` once the numerator is zero, so shrinking a trust radius against
+    /// it cannot converge (gam#2719).
+    pub fraction: f64,
+    /// Row that limited `fraction`, if any.
+    pub blocking_row: Option<usize>,
+    /// Scaled slack `(a·β − b)/‖a‖` of `blocking_row` at `β`.
+    pub blocking_scaled_slack: f64,
+    /// Scaled drift `(a·δ)/‖a‖` of `blocking_row` (strictly negative when a
+    /// row blocks).
+    pub blocking_scaled_drift: f64,
+}
+
+impl ContractFeasibleStep {
+    /// The unlimited answer: the whole direction is admissible.
+    pub const UNLIMITED: Self = Self {
+        fraction: 1.0,
+        blocking_row: None,
+        blocking_scaled_slack: f64::INFINITY,
+        blocking_scaled_drift: 0.0,
+    };
+
+    /// True when a row drove the fraction to exactly zero — the direction is
+    /// blocked by an active face and needs a projection, not a shorter step.
+    pub fn is_blocked_by_active_face(&self) -> bool {
+        self.fraction == 0.0
+    }
+}
+
+/// Why the contract-feasible ratio test could not answer.
+///
+/// Every variant is a violated PRECONDITION of the ratio test, never a small
+/// step: "no admissible step exists" is reported as
+/// [`ContractFeasibleStep::fraction`] `== 0.0`, not as an error.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContractFeasibleStepError {
+    /// `beta` / `direction` widths disagree with the constraint carrier.
+    Dimension {
+        beta: usize,
+        direction: usize,
+        expected: usize,
+    },
+    /// The CURRENT iterate violates a row by more than
+    /// [`PRIMAL_FEASIBILITY_TOL`], so the ratio test has no feasible origin to
+    /// step from. This is the genuine "infeasible iterate" condition and stays
+    /// loud.
+    InfeasibleIterate { row: usize, scaled_slack: f64 },
+    /// A row's slack or drift is NaN.
+    NonFinite {
+        row: usize,
+        scaled_slack: f64,
+        scaled_drift: f64,
+    },
+    /// The carrier could not evaluate `Aβ` / `Aδ` or a row descriptor.
+    Carrier(String),
+}
+
+impl std::fmt::Display for ContractFeasibleStepError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContractFeasibleStepError::Dimension {
+                beta,
+                direction,
+                expected,
+            } => write!(
+                f,
+                "constraint step dimension mismatch: beta={beta}, direction={direction}, constraints={expected}"
+            ),
+            ContractFeasibleStepError::InfeasibleIterate { row, scaled_slack } => write!(
+                f,
+                "current iterate violates constraint row {row}: scaled slack={scaled_slack:.3e} \
+                 below the primal-feasibility contract {PRIMAL_FEASIBILITY_TOL:.3e}"
+            ),
+            ContractFeasibleStepError::NonFinite {
+                row,
+                scaled_slack,
+                scaled_drift,
+            } => write!(
+                f,
+                "constraint row {row} has a non-finite ratio test: scaled slack={scaled_slack:.3e}, \
+                 scaled drift={scaled_drift:.3e}"
+            ),
+            ContractFeasibleStepError::Carrier(reason) => write!(f, "{reason}"),
+        }
+    }
+}
+
 /// Nonnegativity cone `(e_k ⊗ ψ_i)ᵀ β ≥ 0` for a row-major Khatri-Rao block.
 ///
 /// The coefficient block is `β = vec(A)` with `A` reshaped row-major as
@@ -514,9 +636,12 @@ impl ConstraintSet {
         }
     }
 
-    /// Scaled violation sweep: `max_r (b_r − (Aβ)_r) / max(‖a_r‖, 1)` restricted
-    /// to non-vacuous rows, plus the arg-max row. Matches the canonicalized
-    /// dense geometry (unit rows) without materializing it.
+    /// Scaled violation sweep: `max_r (b_r − (Aβ)_r) / ‖a_r‖` restricted to
+    /// non-vacuous rows, plus the arg-max row. Matches the canonicalized dense
+    /// geometry (unit rows) without materializing it.
+    ///
+    /// This is THE feasibility metric: `β` is feasible exactly when the value
+    /// returned here is at or below [`PRIMAL_FEASIBILITY_TOL`].
     pub fn max_scaled_violation(
         &self,
         beta: ArrayView1<'_, f64>,
@@ -539,9 +664,16 @@ impl ConstraintSet {
     }
 
     /// Largest `t ∈ [0, 1]` with `β + t·δ` feasible for every row, together
-    /// with the first blocking row (the exact ratio test of a primal
-    /// active-set method). Rows already violated at `β` (beyond `tol` in
-    /// scaled units) are reported as blocking at `t = 0`.
+    /// with the first blocking row (the EXACT ratio test of a primal
+    /// active-set method — zero tolerance, raw slacks). Rows already violated
+    /// at `β` are reported as blocking at `t = 0`.
+    ///
+    /// This is the *pivot* rule: it answers "where does this chord cross a
+    /// hyperplane in exact arithmetic", and its consumers (the feasible-chord
+    /// clipper) want exactly that. It is NOT the rule for sizing a Newton step
+    /// — a globalization that demands exact feasibility rejects steps this
+    /// carrier's own contract calls feasible. Use
+    /// [`ConstraintSet::max_contract_feasible_step`] for that.
     pub fn max_feasible_step(
         &self,
         beta: ArrayView1<'_, f64>,
@@ -578,6 +710,111 @@ impl ConstraintSet {
             }
         }
         Ok((step, blocking))
+    }
+
+    /// Fraction-to-boundary limit denominated in the SAME metric and at the
+    /// SAME tolerance as the primal-feasibility contract
+    /// ([`PRIMAL_FEASIBILITY_TOL`]) — the globalization ratio test.
+    ///
+    /// The rule, per non-vacuous row, on scaled slack `s = (a·β − b)/‖a‖` and
+    /// scaled drift `d = (a·δ)/‖a‖`:
+    ///
+    /// * `s < −tol` — the current iterate is infeasible. There is no feasible
+    ///   origin to step from; report it
+    ///   ([`ContractFeasibleStepError::InfeasibleIterate`]) rather than
+    ///   returning a meaningless fraction.
+    /// * `d ≥ 0` — the row cannot block; a step along `δ` only increases slack.
+    /// * `s + d ≥ −tol` — the WHOLE step lands inside the feasibility band.
+    ///   The row does not limit it. This is the clause that
+    ///   [`max_feasible_step`](Self::max_feasible_step) lacks, and its absence
+    ///   is gam#2719: with `s == 0` the exact rule returns `0` for a drift of
+    ///   `−1e-15`, refusing a step whose endpoint the very same carrier calls
+    ///   feasible.
+    /// * otherwise — the row genuinely blocks. Limit at the TRUE boundary,
+    ///   `max(s, 0) / (−d)`, not at the band edge: aiming at `−tol` every step
+    ///   would walk the iterate to the edge of the contract and leave it there.
+    ///
+    /// The returned fraction is therefore never larger than the exact ratio
+    /// test's answer EXCEPT on steps whose whole excursion is sub-tolerance,
+    /// and the worst violation any accepted step can introduce is `tol` — the
+    /// contract, exactly.
+    ///
+    /// A fraction of `0.0` is an answer, not a failure: see
+    /// [`ContractFeasibleStep::is_blocked_by_active_face`].
+    pub fn max_contract_feasible_step(
+        &self,
+        beta: ArrayView1<'_, f64>,
+        direction: ArrayView1<'_, f64>,
+    ) -> Result<ContractFeasibleStep, ContractFeasibleStepError> {
+        if beta.len() != self.ncols() || direction.len() != self.ncols() {
+            return Err(ContractFeasibleStepError::Dimension {
+                beta: beta.len(),
+                direction: direction.len(),
+                expected: self.ncols(),
+            });
+        }
+        let values = self
+            .values(beta)
+            .map_err(ContractFeasibleStepError::Carrier)?;
+        // The constraint functional is linear, so its value at `δ` IS the
+        // directional derivative `Aδ`; the bounds do not enter.
+        let directional = self
+            .values(direction)
+            .map_err(ContractFeasibleStepError::Carrier)?;
+        let tol = PRIMAL_FEASIBILITY_TOL;
+        let mut limit = ContractFeasibleStep::UNLIMITED;
+        for row in 0..values.len() {
+            let norm = self.row_norm(row).map_err(ContractFeasibleStepError::Carrier)?;
+            let bound = self.bound(row).map_err(ContractFeasibleStepError::Carrier)?;
+            if !(norm.is_finite() && norm > 0.0) {
+                // A vacuous row constrains nothing unless its bound is
+                // positive, in which case the feasible set is empty and no
+                // step fraction exists. Same disposition as the solver's own
+                // violation scan.
+                if bound > 0.0 {
+                    return Err(ContractFeasibleStepError::InfeasibleIterate {
+                        row,
+                        scaled_slack: f64::NEG_INFINITY,
+                    });
+                }
+                continue;
+            }
+            let slack = (values[row] - bound) / norm;
+            let drift = directional[row] / norm;
+            if slack.is_nan() || drift.is_nan() {
+                return Err(ContractFeasibleStepError::NonFinite {
+                    row,
+                    scaled_slack: slack,
+                    scaled_drift: drift,
+                });
+            }
+            if slack < -tol {
+                return Err(ContractFeasibleStepError::InfeasibleIterate {
+                    row,
+                    scaled_slack: slack,
+                });
+            }
+            if drift >= 0.0 {
+                continue;
+            }
+            if slack + drift >= -tol {
+                // The endpoint of the FULL step is feasible on this row to the
+                // contract. Nothing to limit.
+                continue;
+            }
+            // `slack ≥ −tol` and `slack + drift < −tol` give `slack < −drift`,
+            // so this ratio is strictly below 1 and non-negative.
+            let fraction = (slack.max(0.0) / -drift).clamp(0.0, 1.0);
+            if fraction < limit.fraction {
+                limit = ContractFeasibleStep {
+                    fraction,
+                    blocking_row: Some(row),
+                    blocking_scaled_slack: slack,
+                    blocking_scaled_drift: drift,
+                };
+            }
+        }
+        Ok(limit)
     }
 
     /// Materialize the requested rows densely (KKT systems on the active set).
@@ -936,5 +1173,216 @@ mod tests {
         let (violation, row) = set.max_scaled_violation(beta.view()).expect("violation");
         assert_eq!(row, Some(1));
         assert!((violation - 1.0 / 2.0_f64.sqrt()).abs() < 1e-14);
+    }
+
+    /// `β ≥ 0` on two coordinates, expressed with a deliberately non-unit row
+    /// so the scaled/raw distinction is observable.
+    fn scaled_box() -> ConstraintSet {
+        // Row 0: 1e-3·β₀ ≥ 0 (‖a‖ = 1e-3). Row 1: β₁ ≥ 0 (‖a‖ = 1).
+        ConstraintSet::Dense(
+            LinearInequalityConstraints::new(
+                array![[1.0e-3_f64, 0.0], [0.0, 1.0]],
+                Array1::<f64>::zeros(2),
+            )
+            .expect("scaled box"),
+        )
+    }
+
+    /// gam#2719, the headline: at a coordinate sitting EXACTLY on its bound, a
+    /// drift far below the feasibility contract must not crush the step. The
+    /// exact ratio test answers 0 (its numerator is the exact slack); the
+    /// contract ratio test answers 1, because the endpoint of the full step is
+    /// a point this very carrier calls feasible.
+    #[test]
+    fn a_sub_tolerance_drift_off_an_active_row_does_not_limit_the_step() {
+        let set = scaled_box();
+        let beta = array![0.0_f64, 0.0];
+        let direction = array![1.0_f64, -1.0e-15];
+
+        let (exact, blocking) = set
+            .max_feasible_step(beta.view(), direction.view(), &[])
+            .expect("exact ratio test");
+        assert_eq!(exact, 0.0, "the exact rule crushes the step");
+        assert_eq!(blocking, Some(1));
+
+        let contract = set
+            .max_contract_feasible_step(beta.view(), direction.view())
+            .expect("contract ratio test");
+        assert_eq!(contract.fraction, 1.0);
+        assert_eq!(contract.blocking_row, None);
+
+        // And the claim the relief rests on: the endpoint really is feasible.
+        let endpoint = &beta + &direction;
+        let (violation, _) = set
+            .max_scaled_violation(endpoint.view())
+            .expect("endpoint violation");
+        assert!(violation <= PRIMAL_FEASIBILITY_TOL);
+    }
+
+    /// The relief is bounded by the contract, not open-ended: a drift one
+    /// order ABOVE the tolerance still blocks, and blocks at the true
+    /// boundary (fraction 0 here, since the slack is exactly 0).
+    #[test]
+    fn a_drift_above_the_contract_still_blocks_at_the_true_boundary() {
+        let set = scaled_box();
+        let beta = array![0.0_f64, 0.0];
+        let contract = set
+            .max_contract_feasible_step(beta.view(), array![0.0_f64, -1.0e-7].view())
+            .expect("contract ratio test");
+        assert_eq!(contract.fraction, 0.0);
+        assert_eq!(contract.blocking_row, Some(1));
+        assert!(contract.is_blocked_by_active_face());
+    }
+
+    /// A healthy interior step is limited exactly where the exact rule limits
+    /// it: the contract clause only ever fires on sub-tolerance excursions, so
+    /// ordinary fraction-to-boundary behaviour is untouched.
+    #[test]
+    fn an_interior_iterate_gets_the_ordinary_fraction_to_boundary() {
+        let set = scaled_box();
+        let beta = array![1.0_f64, 0.25];
+        let direction = array![0.0_f64, -1.0];
+        let contract = set
+            .max_contract_feasible_step(beta.view(), direction.view())
+            .expect("contract ratio test");
+        assert_eq!(contract.blocking_row, Some(1));
+        assert!((contract.fraction - 0.25).abs() < 1e-15);
+        let (exact, _) = set
+            .max_feasible_step(beta.view(), direction.view(), &[])
+            .expect("exact ratio test");
+        assert!((contract.fraction - exact).abs() < 1e-15);
+    }
+
+    /// The tolerance is a SCALED one. Row 0 has ‖a‖ = 1e-3, so a raw drift of
+    /// −1e-8 on β₀ is a scaled drift of −1e-8 · 1e-3 / 1e-3 = −1e-8 · … — the
+    /// point being that the rule must divide by ‖a‖ on BOTH slack and drift,
+    /// or the same geometric step gets different verdicts on differently
+    /// normalized rows. Two carriers that differ only by a positive per-row
+    /// rescaling must give the identical fraction.
+    #[test]
+    fn the_fraction_is_invariant_to_per_row_rescaling() {
+        let unit = ConstraintSet::Dense(
+            LinearInequalityConstraints::new(
+                array![[1.0_f64, 0.0], [0.0, 1.0]],
+                Array1::<f64>::zeros(2),
+            )
+            .expect("unit box"),
+        );
+        let beta = array![0.5_f64, 3.0];
+        let direction = array![-1.0_f64, 0.25];
+        let scaled = scaled_box();
+        let a = unit
+            .max_contract_feasible_step(beta.view(), direction.view())
+            .expect("unit");
+        let b = scaled
+            .max_contract_feasible_step(beta.view(), direction.view())
+            .expect("scaled");
+        assert_eq!(a.blocking_row, b.blocking_row);
+        assert!((a.fraction - b.fraction).abs() < 1e-15);
+        assert!((a.fraction - 0.5).abs() < 1e-15);
+    }
+
+    /// A round-off-negative slack inside the band is AT the boundary, not a
+    /// violation: the iterate is accepted and the step is limited at the true
+    /// boundary (fraction 0), never reported as an infeasible iterate.
+    #[test]
+    fn an_in_band_negative_slack_is_a_boundary_not_an_infeasible_iterate() {
+        let set = scaled_box();
+        let beta = array![0.0_f64, -1.0e-9];
+        let contract = set
+            .max_contract_feasible_step(beta.view(), array![0.0_f64, -1.0].view())
+            .expect("in-band slack is feasible");
+        assert_eq!(contract.fraction, 0.0);
+        assert_eq!(contract.blocking_row, Some(1));
+
+        // One order out of the band IS an infeasible iterate, and stays loud.
+        let outside = array![0.0_f64, -1.0e-7];
+        match set.max_contract_feasible_step(outside.view(), array![0.0_f64, 1.0].view()) {
+            Err(ContractFeasibleStepError::InfeasibleIterate { row, scaled_slack }) => {
+                assert_eq!(row, 1);
+                assert!((scaled_slack + 1.0e-7).abs() < 1e-20);
+            }
+            other => panic!("expected an infeasible-iterate report, got {other:?}"),
+        }
+    }
+
+    /// Repeated full steps whose excursion is individually sub-tolerance
+    /// cannot walk the iterate past the contract: the admitted violation is
+    /// bounded by the tolerance for any number of steps.
+    #[test]
+    fn sub_tolerance_relief_cannot_accumulate_past_the_contract() {
+        let set = scaled_box();
+        let direction = array![0.0_f64, -2.0e-9];
+        let mut beta = array![0.0_f64, 0.0];
+        for step in 0..64 {
+            let contract = set
+                .max_contract_feasible_step(beta.view(), direction.view())
+                .unwrap_or_else(|e| panic!("step {step} must keep a feasible origin: {e}"));
+            beta = &beta + &(&direction * contract.fraction);
+            let (violation, _) = set
+                .max_scaled_violation(beta.view())
+                .expect("violation sweep");
+            assert!(
+                violation <= PRIMAL_FEASIBILITY_TOL,
+                "step {step} left scaled violation {violation:.3e} outside the contract"
+            );
+        }
+    }
+
+    /// The factored cone answers identically to its dense materialization —
+    /// the ratio test must not be a dense-only rule.
+    #[test]
+    fn cone_and_dense_agree_on_the_contract_fraction() {
+        let cone = cone_fixture();
+        let set = ConstraintSet::KhatriRaoCone(cone.clone());
+        let dense = ConstraintSet::Dense(cone.to_dense().expect("dense"));
+        // A_{1,:} = A_{2,:} = (1, 1) makes every cone functional positive, so
+        // the ratio test has a feasible origin; the direction pulls A_{1,:}
+        // toward the ψ₁ = (2, −1) face, which binds first at t = 1/2.
+        let beta = array![9.0_f64, -4.0, 1.0, 1.0, 1.0, 1.0];
+        let direction = array![0.0_f64, 0.0, -1.0, 0.0, 0.0, 0.0];
+        let via_cone = set
+            .max_contract_feasible_step(beta.view(), direction.view())
+            .expect("cone");
+        let via_dense = dense
+            .max_contract_feasible_step(beta.view(), direction.view())
+            .expect("dense");
+        assert_eq!(via_cone.blocking_row, via_dense.blocking_row);
+        assert!((via_cone.fraction - via_dense.fraction).abs() < 1e-14);
+        assert_eq!(via_cone.blocking_row, Some(1));
+        assert!((via_cone.fraction - 0.5).abs() < 1e-14);
+    }
+
+    /// A vacuous row with a positive bound is an empty feasible set; no step
+    /// fraction exists and the ratio test says so instead of returning 1.
+    #[test]
+    fn a_vacuous_row_with_a_positive_bound_has_no_feasible_origin() {
+        let set = ConstraintSet::Dense(
+            LinearInequalityConstraints::new(array![[0.0_f64, 0.0]], array![1.0_f64])
+                .expect("vacuous row"),
+        );
+        match set.max_contract_feasible_step(array![1.0_f64, 1.0].view(), array![1.0_f64, 0.0].view())
+        {
+            Err(ContractFeasibleStepError::InfeasibleIterate { row, scaled_slack }) => {
+                assert_eq!(row, 0);
+                assert_eq!(scaled_slack, f64::NEG_INFINITY);
+            }
+            other => panic!("expected an empty-feasible-set report, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn width_mismatches_are_reported_before_any_arithmetic() {
+        let set = scaled_box();
+        match set.max_contract_feasible_step(array![0.0_f64].view(), array![0.0_f64, 0.0].view()) {
+            Err(ContractFeasibleStepError::Dimension {
+                beta,
+                direction,
+                expected,
+            }) => {
+                assert_eq!((beta, direction, expected), (1, 2, 2));
+            }
+            other => panic!("expected a dimension report, got {other:?}"),
+        }
     }
 }

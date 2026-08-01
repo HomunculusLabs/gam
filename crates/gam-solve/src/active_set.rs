@@ -15,18 +15,22 @@ use std::cell::Cell;
 use std::collections::HashSet;
 
 /// Primal-feasibility tolerance the inequality-constrained active-set Newton
-/// solver guarantees on its returned iterate, measured in the *scaled*
-/// constraint-row coordinate system in which `A * beta >= b` is expressed.
+/// solver guarantees on its returned iterate, measured in the unit-normalized
+/// constraint-row metric `(b_i − a_i·β)/‖a_i‖` that
+/// [`ConstraintSet::max_scaled_violation`] computes.
 ///
-/// The solver accepts a step when the worst scaled violation
-/// `max_i (b_i - a_i^T beta)` is below this threshold (see the acceptance
-/// gate in [`solve_linear_constrained_newton_step`] and the KKT diagnostics
-/// in [`compute_constraint_kkt_diagnostics`]). Any consumer that re-derives a
-/// raw (un-scaled) feasibility tolerance from a returned iterate must scale
-/// this value by the per-row normalization that the constraint builder
-/// applied; demanding tighter feasibility than this is inconsistent with the
-/// solver contract and will spuriously reject valid boundary solutions.
-pub const ACTIVE_SET_PRIMAL_FEASIBILITY_TOL: f64 = 1e-8;
+/// The solver accepts a step when the worst scaled violation is at or below
+/// this threshold (see the acceptance gate in
+/// [`solve_linear_constrained_newton_step`] and the KKT diagnostics in
+/// [`compute_constraint_kkt_diagnostics`]).
+///
+/// The definition lives with the metric, in `gam_problem::constraint_set`, and
+/// is re-exported here under the solver-facing name so that the tolerance and
+/// the quantity it bounds cannot drift apart. Every gate, validator and step
+/// rule that decides "is this feasible" must reference this one value; four
+/// sites once re-spelled the literal `1e-8` beside it and one step rule
+/// demanded exact feasibility instead (gam#2719).
+pub use gam_problem::PRIMAL_FEASIBILITY_TOL as ACTIVE_SET_PRIMAL_FEASIBILITY_TOL;
 
 /// Scaled slack tolerance for membership in an active working face.
 ///

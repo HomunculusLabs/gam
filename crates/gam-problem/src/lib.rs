@@ -83,7 +83,8 @@ pub use block_spec::{
 };
 pub use coefficient_prior_mean::{CoefficientPriorMean, PriorMeanError};
 pub use constraint_set::{
-    ConstraintRowId, ConstraintSet, KhatriRaoConeConstraints, PlacedConstraintBlock,
+    ConstraintRowId, ConstraintSet, ContractFeasibleStep, ContractFeasibleStepError,
+    KhatriRaoConeConstraints, PRIMAL_FEASIBILITY_TOL, PlacedConstraintBlock,
 };
 pub use custom_family_blockwise::{
     CUSTOM_FAMILY_RIDGE_FLOOR, ExactNewtonOuterCurvature, validate_blockspec_consistency,
