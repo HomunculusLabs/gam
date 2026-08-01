@@ -320,12 +320,19 @@ fn run() -> CliResult<()> {
         }
         None => gam::progress_log::init_logging(),
     }
+    // #2738 — a SETTING and a CAPACITY are not enough; report the policy too.
+    //
+    // This line used to print `rayon_current_num_threads` beside
+    // `std_available_parallelism`. Neither number is wrong, which is what made it
+    // misleading rather than merely partial: "rayon=4, available=8" reads as half
+    // the machine working, while the quantity that actually decides whether a
+    // factorization runs on one core is faer's PROCESS-GLOBAL parallelism — which
+    // a live `FaerSequentialScope` pins to `Par::Seq` for every thread. A line
+    // that is false gets caught in review; a line that is true and incomplete in a
+    // load-bearing way does not.
     log::info!(
-        "[STAGE] runtime threads | rayon_current_num_threads={} | std_available_parallelism={}",
-        rayon::current_num_threads(),
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(0),
+        "[STAGE] runtime threads | {}",
+        gam::faer_ndarray::parallelism_snapshot(),
     );
     match cli.command {
         Command::Fit(args) => run_fit(args).map_err(CliError::from),

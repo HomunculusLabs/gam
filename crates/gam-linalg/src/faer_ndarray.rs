@@ -10,6 +10,7 @@ use faer::{Conj, Mat, MatMut, MatRef, Par, Side, Unbind, get_global_parallelism}
 use ndarray::{Array1, Array2, ArrayBase, ArrayView1, ArrayViewMut1, Data, Ix1, Ix2};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 /// Apply a symmetric matrix through the crate-owned SIMD/FMA GEMV kernel.
@@ -86,6 +87,64 @@ pub fn with_nested_parallel<T>(body: impl FnOnce() -> T) -> T {
 #[inline]
 pub fn in_nested_parallel_region() -> bool {
     NESTED_PARALLEL_DEPTH.with(|depth| depth.get() > 0)
+}
+
+/// #2267 — process-global census of self-adjoint eigendecompositions.
+///
+/// A per-call duration answers "was this call slow"; a running count and total
+/// answer "was the step one slow call or many", which is the question that
+/// separates #2267's two candidate explanations and which no single timing can
+/// settle. `Relaxed` is right here: these are a diagnostic census with no
+/// happens-before relationship to anything, and the values are only ever read
+/// into a log line.
+static EIGH_CALLS: AtomicU64 = AtomicU64::new(0);
+static EIGH_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// #2738 — the parallelism actually in force, read INSIDE the running process.
+///
+/// A perf experiment that sweeps a thread count needs a manipulation check: proof
+/// the treatment took effect. A sweep whose treatment silently failed produces a
+/// perfectly flat curve, which is indistinguishable from saturation and points in
+/// whichever direction the experimenter expected. So this reports what the process
+/// observes, never what was exported.
+///
+/// Two quantities, and BOTH are needed because they can disagree:
+///
+/// * `rayon::current_num_threads()` — the pool width. This is the one existing
+///   diagnostics already print.
+/// * [`faer::get_global_parallelism`] — faer's PROCESS-GLOBAL policy, which is
+///   what every high-level faer factorization (`self_adjoint_eigen`, `Llt::new`,
+///   `Solve::solve`, SVD, col-pivoted QR) reads internally. A live
+///   [`FaerSequentialScope`] anywhere in the process pins this to `Par::Seq` for
+///   EVERY thread, so a decomposition can be single-threaded while the rayon pool
+///   reports 64. Reporting only the pool width would show a wide machine while
+///   the numerics ran on one core, which is exactly the failure this exists to
+///   make visible.
+///
+/// Deliberately NOT reported: [`effective_global_parallelism`]. That is
+/// thread-local and only governs the codebase's own `matmul` calls; it cannot
+/// reach faer's high-level entry points, so printing it beside a factorization
+/// would name a policy that did not apply to it.
+///
+/// There is no BLAS term because this workspace links no CPU BLAS — the numerics
+/// are faer and `ndarray`, both parallelised through Rayon. `OPENBLAS_NUM_THREADS`
+/// and `OMP_NUM_THREADS` are inert here (they do bind the Python lanes, where
+/// numpy and torch link OpenBLAS).
+pub fn parallelism_snapshot() -> String {
+    // `{:?}` rather than a match on the variants: `Par`'s variant names are not
+    // spelled anywhere in this workspace (it is only ever constructed via
+    // `Par::rayon(..)` / `Par::Seq` and compared with `==`), so matching them here
+    // would be asserting a shape this crate has never depended on. Debug renders
+    // the distinction that matters — sequential versus a rayon width.
+    format!(
+        "rayon_current_num_threads={} | faer_global_parallelism={:?} | \
+         std_available_parallelism={}",
+        rayon::current_num_threads(),
+        get_global_parallelism(),
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0),
+    )
 }
 
 /// faer parallelism policy that respects nested data-parallel regions: returns
@@ -2122,6 +2181,26 @@ impl<S: Data<Elem = f64>> FaerEigh for ArrayBase<S, Ix2> {
             side: Side,
         ) -> Result<(Array1<f64>, Array2<f64>), FaerLinalgError> {
             let faerview = FaerArrayView::new(matrix);
+            // #2267/#2738 — time the decomposition and name the parallelism that
+            // actually governed it.
+            //
+            // `self_adjoint_eigen` is one of faer's high-level entry points: it
+            // takes no parallelism argument and reads
+            // `faer::get_global_parallelism()` internally. So the policy that
+            // decides whether this runs on one core or many is the PROCESS-GLOBAL
+            // one — which a live `FaerSequentialScope` anywhere in the process
+            // pins to `Par::Seq` for every thread — and NOT
+            // `effective_global_parallelism`, whose nested-region guard cannot
+            // reach here. Reporting the wrong one would name a policy that did
+            // not apply.
+            //
+            // This is `O(dim^3)`, so at `dim` in the thousands the difference
+            // between sequential and a wide pool is hours. #2267 lost two
+            // three-hour jobs to a decomposition that was silent about both its
+            // duration and its parallelism; the count makes "one slow call or
+            // many?" answerable without a second run.
+            let eigh_started = std::time::Instant::now();
+            let eigh_par = get_global_parallelism();
             let eigen = catch_unwind(AssertUnwindSafe(|| {
                 faerview.as_ref().self_adjoint_eigen(side)
             }))
@@ -2129,6 +2208,19 @@ impl<S: Data<Elem = f64>> FaerEigh for ArrayBase<S, Ix2> {
                 context: "self-adjoint eigendecomposition panic boundary",
             })?
             .map_err(FaerLinalgError::SelfAdjointEigen)?;
+            let eigh_elapsed = eigh_started.elapsed();
+            let eigh_calls = EIGH_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+            let eigh_nanos_total = EIGH_NANOS
+                .fetch_add(eigh_elapsed.as_nanos() as u64, Ordering::Relaxed)
+                + eigh_elapsed.as_nanos() as u64;
+            log::debug!(
+                "[eigh] dim={} elapsed={:.3}s faer_global_parallelism={:?} \
+                 calls_so_far={eigh_calls} cumulative={:.3}s",
+                matrix.nrows(),
+                eigh_elapsed.as_secs_f64(),
+                eigh_par,
+                eigh_nanos_total as f64 / 1e9,
+            );
             let values = diag_to_array(eigen.S());
             let vectors = mat_to_array(eigen.U());
             Ok((values, vectors))
