@@ -2149,6 +2149,11 @@ where
     let mut beta_standard_errors = None;
     let mut beta_covariance_corrected = None;
     let mut beta_standard_errors_corrected = None;
+    // #2705 group A: carried from where the constrained-posterior correction is
+    // APPLIED to where the corrected covariance is READ, so the refusal below
+    // can say which producer's budget the negative diagonal is inside.
+    let mut constrained_diagonal_uncertainty: Option<Array1<f64>> = None;
+    let mut constrained_removed_variance: Option<Array1<f64>> = None;
     let mut beta_covariance_frequentist = None;
     let mut coefficient_influence = None;
     let mut weighted_gram = None;
@@ -2772,6 +2777,8 @@ where
                 })?
                 .flatten();
             if let Some(correction) = constrained_correction {
+                constrained_removed_variance = Some(correction.removed_variance_diagonal());
+                constrained_diagonal_uncertainty = Some(correction.diagonal_uncertainty());
                 correction.apply_to_covariance_in_place(&mut posterior_covariance);
             }
             beta_covariance = Some(gam_problem::dispersion_cov::PhiScaledCovariance::wrap(
@@ -3226,8 +3233,47 @@ where
             .map(se_from_covariance)
             .transpose()
             .map_err(|error| {
+                // #2705 group A. Three shape-constrained fits die here with one
+                // byte-identical message that names the CONSUMER's budget and
+                // nothing else, so the refusal cannot say which of the three
+                // producers summed into this diagonal overran, or by how much.
+                // The matrix being read is
+                //     Σ = φH⁻¹  −  GΔGᵀ  +  J V_ρ Jᵀ   (then optionally A·Σ·Aᵀ)
+                // and only the first term is accurate to floating point. Print
+                // the decomposition of the offending entry against each
+                // producer's OWN declared resolution.
+                let detail = match &error {
+                    gam_problem::CovarianceStandardErrorError::NegativeDiagonal {
+                        index,
+                        value,
+                        tolerance,
+                    } => {
+                        let removed = constrained_removed_variance
+                            .as_ref()
+                            .and_then(|d| d.get(*index).copied());
+                        let allowance = constrained_diagonal_uncertainty
+                            .as_ref()
+                            .and_then(|d| d.get(*index).copied());
+                        let base = beta_covariance
+                            .as_ref()
+                            .and_then(|c| c.as_array().diag().get(*index).copied());
+                        let smoothing = smoothing_correction
+                            .as_ref()
+                            .and_then(|c| c.diag().get(*index).copied());
+                        format!(
+                            " [#2705 attribution: index={index} value={value:.17e} arithmetic_tolerance={tolerance:.6e} post_constrained_diag={} smoothing_correction_diag={} removed_variance_diag={} cubature_allowance={} inside_cubature_allowance={} congruence_applied={}]",
+                            base.map_or("n/a".to_string(), |v| format!("{v:.6e}")),
+                            smoothing.map_or("n/a".to_string(), |v| format!("{v:.6e}")),
+                            removed.map_or("n/a".to_string(), |v| format!("{v:.6e}")),
+                            allowance.map_or("n/a".to_string(), |v| format!("{v:.6e}")),
+                            allowance.map_or("unknown".to_string(), |a| (-value <= a).to_string()),
+                            bias_correction_jacobian.is_some(),
+                        )
+                    }
+                    _ => String::new(),
+                };
                 EstimationError::RemlOptimizationFailed(format!(
-                    "corrected coefficient covariance is not a valid standard-error source: {error}"
+                    "corrected coefficient covariance is not a valid standard-error source: {error}{detail}"
                 ))
             })?;
     }

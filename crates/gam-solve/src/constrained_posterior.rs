@@ -206,6 +206,27 @@ impl ConstrainedPosteriorCorrection {
         diagonal
     }
 
+    /// The absolute per-coefficient uncertainty this correction contributes to
+    /// `diag(Σ − GΔGᵀ)`.
+    ///
+    /// `Δ` is a cubature result, not an exact quantity: it is certified to
+    /// `ORTHANT_MOMENT_RELATIVE_TOLERANCE` relative (`certify_removed_variance`),
+    /// and `(GΔGᵀ)_ii = g_iᵀ Δ g_i` is monotone in `Δ` in the PSD order, so a
+    /// relative error `ε` in `Δ` moves the removed variance by at most
+    /// `ε · (GΔGᵀ)_ii`. That product — and NOT the floating-point backward error
+    /// of the subtraction — is the resolution at which `diag(Σ − GΔGᵀ)` can be
+    /// read.
+    ///
+    /// This accessor exists so that `ORTHANT_MOMENT_RELATIVE_TOLERANCE` is
+    /// declared once and converted into a consumer-facing allowance once. #2705
+    /// group A is fits refused because the consumer (`se_from_covariance`,
+    /// budget `16·n·eps` ≈ 1e-14 relative) and the producer (this cubature,
+    /// budget 1e-3 relative) hold two independent budgets for one number, ~11
+    /// orders apart, with nothing carrying the producer's across the boundary.
+    pub fn diagonal_uncertainty(&self) -> Array1<f64> {
+        self.removed_variance_diagonal() * ORTHANT_MOMENT_RELATIVE_TOLERANCE
+    }
+
     /// `E_π[β] = β_unc + G·(E[u] − E_untrunc[u])`.
     pub fn posterior_mean(&self, unconstrained_center: &Array1<f64>) -> Array1<f64> {
         unconstrained_center + &self.lift.dot(&self.normal_mean_shift)
