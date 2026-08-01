@@ -228,8 +228,10 @@ pub(crate) struct OuterConfig {
     /// for minting a model, and it means two fits on the same data in the same
     /// call can be certified against bounds four orders apart -- measured on
     /// #2568 at `2.0708e-4` for one and **exactly `1.000e0`** for its
-    /// companion, the latter being the saturated
-    /// [`StationarityBoundSource::FlatValleyScoreCeiling`] value. A consumer
+    /// companion, the latter being the saturated score-relative flat-valley
+    /// value -- a rung since deleted (#2458), because it was a constant
+    /// selected by an exit reason and it won precisely where the probe-noise
+    /// MEASUREMENT had declined to license any bound. A consumer
     /// whose accuracy requirement is stricter than whatever the ladder happens
     /// to compute had no supported way to impose it.
     ///
@@ -2515,20 +2517,6 @@ pub(crate) fn certificate_railed_coordinates(
 pub(crate) enum StationarityBoundSource {
     /// `outer_stationarity_band_at(config, cost)` -- the raw band.
     SolverBand,
-    /// `flat_valley_converged_grad_bound(cost)`, gated on a `CostStallFlatValley`
-    /// exit, reported at the band its formula gives.
-    FlatValleyScore,
-    /// The SAME score-relative band reported at its absolute ceiling, because
-    /// `FLAT_VALLEY_CONVERGED_REL_GRAD*(1 + |score|)` exceeded
-    /// `FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP` (#2456/#2465).
-    ///
-    /// Split from [`Self::FlatValleyScore`] because a saturated value is not
-    /// the band its label names -- it is a constant, identical on objectives
-    /// three orders apart, and that is exactly why a `bound=1.000e0` could not
-    /// be reconciled against the objective printed beside it. The bound is
-    /// unchanged; what changes is that the message now says which of the two
-    /// the number is.
-    FlatValleyScoreCeiling,
     /// The cost-stall guard's measured probe-noise floor `σ̂/Δ` (#2241). Diverges
     /// as the step collapses, which is the regime it fires in.
     ProbeNoiseFloor,
@@ -2565,8 +2553,6 @@ impl StationarityBoundSource {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::SolverBand => "solver-band",
-            Self::FlatValleyScore => "flat-valley-score",
-            Self::FlatValleyScoreCeiling => "flat-valley-score-ceiling",
             Self::ProbeNoiseFloor => "probe-noise-floor",
             Self::CurvatureResolvability => "curvature-resolvability",
             Self::GradientReproducibility => "gradient-reproducibility",
@@ -3571,24 +3557,42 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // no longer does (#2613): see `outer_stationarity_band_at`.
     let solver_bound = outer_stationarity_band_at(config, evaluation.cost);
     let mut bound_source = StationarityBoundSource::SolverBand;
-    let mut stationarity_bound = if matches!(
-        result.operator_stop_reason,
-        Some(OperatorTrustRegionStopReason::CostStallFlatValley)
-    ) {
-        let flat_valley = flat_valley_converged_grad_bound(evaluation.cost);
-        if flat_valley > solver_bound {
-            bound_source = if flat_valley_score_saturates(evaluation.cost) {
-                StationarityBoundSource::FlatValleyScoreCeiling
-            } else {
-                StationarityBoundSource::FlatValleyScore
-            };
-            flat_valley
-        } else {
-            solver_bound
-        }
-    } else {
-        solver_bound
-    };
+    // #2458: this used to open with a rung gated on
+    // `operator_stop_reason == CostStallFlatValley` that installed
+    // `flat_valley_converged_grad_bound(cost)` — `1e-3·(1 + |score|)` capped at
+    // `1.0`. Two things were wrong with it, and they compound.
+    //
+    // First, the gate is an EXIT REASON and the bound is a pure function of the
+    // criterion value. The same point, with the same criterion, the same
+    // gradient and the same curvature, was judged against two different
+    // standards depending on which stop reason the operator happened to record.
+    // That is this issue's thesis in its purest form: a predicate answering
+    // "how did the loop stop?" consumed where a property of the objective is
+    // needed.
+    //
+    // Second, and worse, the constant was redundant with a MEASUREMENT taken in
+    // the same regime, and won exactly where the measurement had declined. A
+    // cost-stall exit carries the guard's probe-noise floor `σ̂/Δ`
+    // (`flat_noise_grad_bound`, applied just below) — the criterion's own
+    // demonstrated gradient resolution at the step scale the search actually
+    // probed. When `σ̂/Δ` exceeds `FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP` the guard
+    // reports `ProbeNoiseVerdict::Unresolvable` and licenses NO bound, because
+    // "the criterion resolves no gradient at this step scale" (`bridges.rs`).
+    // The deleted rung then supplied `min(1e-3·(1+|score|), 1.0)` anyway. So at
+    // precisely the points where the instrument measured itself too noisy to
+    // certify anything, the certificate substituted a constant and certified.
+    // A measurement that declines must make the certificate decline, not be
+    // replaced by a number that was never measured.
+    //
+    // What remains in the ladder below is, in every rung: the configured band,
+    // a measurement (`flat_noise_grad_bound`, gradient reproducibility), a
+    // derivation (`|Pg|·√(τ/Δpred)`), or the caller's own requirement. No rung
+    // is a magic relative constant, and none is selected by how the search
+    // exited. `FLAT_VALLEY_CONVERGED_REL_GRAD` / `_ABS_GRAD_CAP` are retained
+    // because the cost-stall guard itself still uses the cap as its resolution
+    // ceiling — that use is a measured ratio compared against a declared
+    // ceiling, which is a different thing from a bound built out of one.
+    let mut stationarity_bound = solver_bound;
     // #2241 — a cost-stall exit carries the guard's measured probe-noise-floor
     // gradient bound σ̂/Δ. The certificate must judge the re-measured final
     // gradient against the same flat band the guard certified, or the guard's

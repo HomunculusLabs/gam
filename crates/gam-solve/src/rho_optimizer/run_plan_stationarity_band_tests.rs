@@ -770,8 +770,6 @@ fn the_curvature_rung_still_refuses_genuine_nonstationarity_2458() {
 fn exactly_one_rung_is_the_derived_standard_2458() {
     let rungs = [
         StationarityBoundSource::SolverBand,
-        StationarityBoundSource::FlatValleyScore,
-        StationarityBoundSource::FlatValleyScoreCeiling,
         StationarityBoundSource::ProbeNoiseFloor,
         StationarityBoundSource::CurvatureResolvability,
         StationarityBoundSource::GradientReproducibility,

@@ -479,18 +479,6 @@ pub(crate) struct FlatValleyGradBound {
     pub(crate) probe_noise: ProbeNoiseVerdict,
 }
 
-/// Whether the score-relative flat-valley band is REPORTED AT ITS CEILING
-/// rather than at the band its formula gives (#2456/#2465).
-///
-/// `flat_valley_converged_grad_bound` returns `min(rel·(1+|score|), CAP)`, so on
-/// any objective with `|score| > 999` the answer is the constant `CAP` and two
-/// fits three orders apart report an identical bound. The certificate needs to
-/// say which of the two a reported number is; the value alone cannot.
-#[inline]
-pub(crate) fn flat_valley_score_saturates(score: f64) -> bool {
-    FLAT_VALLEY_CONVERGED_REL_GRAD * (1.0 + score.abs()) > FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP
-}
-
 impl FlatValleyGradBound {
     fn new(solver_band: f64, score: f64, probe_noise: ProbeNoiseVerdict) -> Self {
         let score_relative_raw = FLAT_VALLEY_CONVERGED_REL_GRAD * (1.0 + score.abs());
