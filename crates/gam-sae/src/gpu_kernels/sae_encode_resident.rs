@@ -1719,6 +1719,105 @@ mod tests {
         assert!(max_h <= 1e-7, "certificate h parity {max_h:.3e} > 1e-7");
     }
 
+    /// #2518 — QUANTIFY the device lane's exhaustive-routing cost, because
+    /// "GPU per-row cost rises" is a decision only once it carries a number.
+    ///
+    /// The kernel runs one row per block with the lead thread walking the row's
+    /// candidates serially, term-for-term identical to this emulator, so the
+    /// emulator's per-row time IS the kernel's per-row work profile — the
+    /// absolute seconds are host seconds, but the RATIO between two candidate
+    /// counts is the multiplier the device pays. That ratio is what the trade
+    /// needs, and it is measured here rather than asserted, because a wall-clock
+    /// bar in a test would be a machine-dependent gate on a shared runner.
+    ///
+    /// The correctness half IS asserted: the deleted `TOPK = 4` restriction must
+    /// never beat the exhaustive scan on reconstruction error, and wherever the
+    /// two returned coordinates differ, exhaustive must be the better one.
+    #[test]
+    fn device_exhaustive_routing_cost_multiplier_2518() {
+        for (d, deg, p) in [(1usize, 2usize, 6usize), (2, 2, 6)] {
+            let config = AtlasConfig::default();
+            let (atom, atlas) = build_atom_and_atlas(d, deg, p, config.clone());
+            let atom_atlas = &atlas.atoms[0];
+            let exhaustive =
+                EncodeAtomDevice::from_atom_atlas(&atom, atom_atlas, &config).unwrap();
+            let certifiable = exhaustive
+                .charts
+                .iter()
+                .filter(|c| c.certified_radius > 0.0)
+                .count();
+            // The deleted constant, reconstructed here ONLY as the cost baseline.
+            let mut old_topk = exhaustive.clone();
+            old_topk.topk = 4;
+
+            let rows: Vec<Vec<f64>> = (0..512)
+                .map(|k| {
+                    (0..p)
+                        .map(|c| 0.6 * (((k * 7 + c * 3) as f64) * 0.19).sin())
+                        .collect()
+                })
+                .collect();
+            let amps: Vec<f64> = (0..512)
+                .map(|k| 0.6 + 0.5 * ((k as f64) * 0.11).sin().abs())
+                .collect();
+
+            let time_it = |dev: &EncodeAtomDevice| -> f64 {
+                let start = std::time::Instant::now();
+                let out = emulate_certified_encode_batch(dev, &rows, &amps);
+                std::hint::black_box(&out);
+                start.elapsed().as_secs_f64() / rows.len() as f64
+            };
+            // One untimed pass each so neither arm pays first-touch page faults.
+            std::hint::black_box(emulate_certified_encode_batch(&exhaustive, &rows, &amps));
+            std::hint::black_box(emulate_certified_encode_batch(&old_topk, &rows, &amps));
+            let per_row_exhaustive = time_it(&exhaustive);
+            let per_row_top4 = time_it(&old_topk);
+
+            // Correctness: the restriction may only ever tie or lose.
+            let mut rows_where_top4_is_worse = 0usize;
+            let mut worst_penalty = 0.0_f64;
+            for (x, &amp) in rows.iter().zip(amps.iter()) {
+                let full = emulate_certified_encode_row(&exhaustive, x, amp);
+                let four = emulate_certified_encode_row(&old_topk, x, amp);
+                if !(full.cert.certified() && four.cert.certified()) {
+                    continue;
+                }
+                let err = |coord: &[f64]| -> f64 {
+                    let cv = Array1::from(coord.to_vec());
+                    let xv = Array1::from(x.to_vec());
+                    crate::encode::encode_reconstruction_error(
+                        &atom,
+                        atom.basis_evaluator.as_ref().unwrap().as_ref(),
+                        cv.view(),
+                        xv.view(),
+                        amp,
+                    )
+                };
+                let (e_full, e_four) = (err(&full.coord), err(&four.coord));
+                if e_four > e_full + 1.0e-9 * (1.0 + e_full) {
+                    rows_where_top4_is_worse += 1;
+                    worst_penalty = worst_penalty.max(e_four - e_full);
+                }
+                assert!(
+                    e_full <= e_four + 1.0e-9 * (1.0 + e_four),
+                    "exhaustive routing returned a WORSE encode than the deleted top-4 \
+                     restriction (full={e_full:.6e} four={e_four:.6e}) — the scan is supposed \
+                     to be a superset, so this would mean the prune or the ordering is wrong"
+                );
+            }
+
+            println!(
+                "[#2518-gpu-cost] d={d} deg={deg} p={p} charts={} certifiable={certifiable} \
+                 per_row_exhaustive={:.3}us per_row_top4={:.3}us multiplier={:.2}x \
+                 rows_top4_worse={rows_where_top4_is_worse} worst_penalty={worst_penalty:.3e}",
+                exhaustive.charts.len(),
+                per_row_exhaustive * 1.0e6,
+                per_row_top4 * 1.0e6,
+                per_row_exhaustive / per_row_top4.max(f64::MIN_POSITIVE),
+            );
+        }
+    }
+
     /// Pin: the CPU atlas routing (`crate::encode::nearest_charts_topk`) and the
     /// GPU-host routing ([`super::nearest_charts_topk`]) select IDENTICAL charts on
     /// a shared fixture. Both now funnel through the one shared comparator
