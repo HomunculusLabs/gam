@@ -113,6 +113,18 @@
 //! evidence; it is never sent downstream to a rank-flat score search and never
 //! converted into a fit.
 //!
+//! A capacity boundary is a boundary on WIDTH, and the level it stops is not
+//! all-or-nothing. When the complete candidate level would carry more penalized
+//! modes than the sample identifies or the certified spectrum can enclose, the
+//! cascade adds as many of its candidates as the budget allows — the largest
+//! `|g_j|` first, the same terms the bound is a sum of — and leaves the rest for
+//! the bound to certify. Refusing the whole level because the PROPOSAL was wide,
+//! while the gain it carried was concentrated far inside the budget, is #2700.
+//! The tolerance is still compared against the bound over the COMPLETE candidate
+//! set, and a truncated level's leftovers are re-assessed at their own radius
+//! before any fit is minted, so a partial level buys width, never a weaker
+//! certificate.
+//!
 //! Posterior. Coefficient covariance is `σ²(X'WX+λD)^{−1}`; pointwise
 //! prediction variance routes the basis row through one (certified) solve.
 //! Exact posterior samples come from perturb-and-solve: `c_s = A^{−1}(X'Wy +
@@ -578,7 +590,11 @@ pub struct CascadeCertificate {
 /// on the penalized-objective decrease available from one more level.
 #[derive(Clone, Copy, Debug)]
 pub struct RefinementCertificate {
-    /// `‖X_{L+1}'W r̂‖² / (λ·d_{L+1})` at the accepted fit.
+    /// `‖X₂'W r̂‖² / (λ·d)` at the accepted fit, maximized over every candidate
+    /// set the cascade could still add: the next level, and — when a capacity
+    /// budget forced the finest level to be partial — the candidates that level
+    /// left behind at its own radius. Every one of them is at or below
+    /// [`Self::tolerance`]; this is the largest.
     pub next_level_gain_bound: f64,
     /// The absolute tolerance it was compared against (`REFINE_TOL·rss_pen`).
     pub tolerance: f64,
@@ -3384,6 +3400,28 @@ fn extend_net(
     new_centers
 }
 
+/// Bit-exact key of a scaled center, so a planned selection can be checked
+/// against the candidates the nested net offers without a tolerance (both sides
+/// are copies of the same `extend_net` output, never a recomputation).
+fn center_key(center: &[f64; 3]) -> [u64; 3] {
+    [
+        center[0].to_bits(),
+        center[1].to_bits(),
+        center[2].to_bits(),
+    ]
+}
+
+/// One level of the cascade ladder: its resolution exponent `e` (radius
+/// `h = h₀·2⁻ᵉ`) and, when a capacity budget forced the level to take only part
+/// of what the net offered, the exact centers it carries.
+#[derive(Clone, Debug)]
+struct LevelPlan {
+    exponent: f64,
+    /// `None` is the complete dyadic level: every center the nested net plants
+    /// at this radius.
+    centers: Option<Vec<[f64; 3]>>,
+}
+
 impl ResidualCascadeDesign {
     /// Build the cascade design: validate, scale by the metric, grow `levels`
     /// nested nets, and assemble the sparse design plus its sufficient
@@ -3423,7 +3461,33 @@ impl ResidualCascadeDesign {
         sobolev_s: f64,
         level_exponents: &[f64],
     ) -> Result<Self, String> {
-        let levels = level_exponents.len();
+        let plan: Vec<LevelPlan> = level_exponents
+            .iter()
+            .map(|&exponent| LevelPlan {
+                exponent,
+                centers: None,
+            })
+            .collect();
+        Self::build_from_plan(xs, y, w, metric, sobolev_s, &plan)
+    }
+
+    /// Constructor the whole crate builds through: every level names its
+    /// resolution exponent and, when a capacity budget forced it to take only
+    /// part of the net's candidates, the EXACT centers it carries. Holding the
+    /// selection in the plan rather than re-deriving it is what makes a partial
+    /// level reproducible: the design is a pure function of the plan, so a
+    /// re-build at the same plan is the same basis.
+    fn build_from_plan(
+        xs: &[&[f64]],
+        y: &[f64],
+        w: &[f64],
+        metric: &[f64],
+        sobolev_s: f64,
+        plan: &[LevelPlan],
+    ) -> Result<Self, String> {
+        let levels = plan.len();
+        let level_exponents: Vec<f64> = plan.iter().map(|level| level.exponent).collect();
+        let level_exponents = level_exponents.as_slice();
         if levels == 0 || levels > MAX_LEVELS {
             return Err(format!(
                 "residual cascade: levels must be in 1..={MAX_LEVELS}, got {levels}"
@@ -3525,9 +3589,45 @@ impl ResidualCascadeDesign {
         let mut level_specs = Vec::with_capacity(levels);
         let mut col = dim + 1;
         let mut pen_logdet_const = 0.0;
-        for (l, &exponent) in level_exponents.iter().enumerate() {
+        for (l, planned) in plan.iter().enumerate() {
+            let exponent = planned.exponent;
             let h = h0 * 0.5_f64.powf(exponent);
-            let new_centers = extend_net(&mut net, &z, dim, h, &z_range);
+            // The candidate set is derived the SAME way for a complete and a
+            // partial level — one `extend_net` against the net built so far —
+            // so a selection can only ever name centers the nested net would
+            // have planted anyway. A partial level then plants exactly its
+            // selection, leaving the rest of the candidates for a later level
+            // to cover at a finer radius.
+            let mut probe = net.clone();
+            let candidates = extend_net(&mut probe, &z, dim, h, &z_range);
+            let new_centers = match &planned.centers {
+                None => {
+                    net = probe;
+                    candidates
+                }
+                Some(selection) => {
+                    let admissible: std::collections::HashSet<[u64; 3]> =
+                        candidates.iter().map(center_key).collect();
+                    if selection.is_empty() {
+                        return Err(format!(
+                            "residual cascade: level {l} selects no centers at exponent {exponent}"
+                        ));
+                    }
+                    let mut seen: std::collections::HashSet<[u64; 3]> =
+                        std::collections::HashSet::with_capacity(selection.len());
+                    for center in selection {
+                        let key = center_key(center);
+                        if !admissible.contains(&key) || !seen.insert(key) {
+                            return Err(format!(
+                                "residual cascade: level {l} selects {center:?}, which the nested \
+                                 net does not offer as a distinct candidate at exponent {exponent}"
+                            ));
+                        }
+                    }
+                    net.extend_from_slice(selection);
+                    selection.clone()
+                }
+            };
             if net.len() > MAX_CENTERS {
                 return Err(format!(
                     "residual cascade: center cap {MAX_CENTERS} exceeded at level {l}"
@@ -4068,13 +4168,45 @@ impl ResidualCascadeDesign {
         fit: &ResidualCascadeFit,
         exponent: f64,
     ) -> Result<NextLevelAssessment, String> {
+        Ok(self.plan_level_at_exponent(fit, exponent)?.assessment)
+    }
+
+    /// Assess the candidate level at `exponent` AND decide what the refinement
+    /// may actually take from it.
+    ///
+    /// The assessment (the `‖X₂'W r̂‖²/(λ·d)` bound) is always over the COMPLETE
+    /// candidate set, because that is the quantity the convergence tolerance
+    /// has to be compared against: a bound over a subset would certify nothing
+    /// about the candidates left out. The SELECTION is a different question,
+    /// and it is the one the capacity budgets answer — how many more penalized
+    /// modes this design may carry before automatic REML loses the rank it
+    /// needs (`n − nullity` identifiable directions) or the certified spectrum
+    /// outruns its memory ([`CERTIFIED_SPECTRUM_MAX`]).
+    ///
+    /// Those two questions used to share one answer: a candidate level wider
+    /// than the budget was refused whole, so a refinement whose gain is carried
+    /// by a handful of centers was blocked by the CARDINALITY of the proposal
+    /// rather than by anything about the gain (#2700). A capacity limit is now
+    /// a refusal only when the budget is exhausted — when nothing at all can be
+    /// added. Otherwise the level is taken partially, largest `|g_j|` first,
+    /// which is the ordering that maximizes the captured share of the same
+    /// `Σ_j g_j²` the bound is made of.
+    fn plan_level_at_exponent(
+        &self,
+        fit: &ResidualCascadeFit,
+        exponent: f64,
+    ) -> Result<NextLevelPlan, String> {
         let core = &self.core;
         if !Arc::ptr_eq(core, &fit.core) {
             return Err("residual cascade: fit does not belong to this design".into());
         }
         let next_l = core.levels.len();
         let h = core.levels[0].h * 0.5_f64.powf(exponent);
-        if !(exponent.is_finite() && h > 0.0 && h < core.levels[next_l - 1].h) {
+        // `h == h_L` is the RE-assessment of a level that capacity forced to be
+        // partial: the candidates it had to leave behind are exactly what
+        // `extend_net` still offers at that radius, and their gain is what
+        // decides whether the cascade has converged there.
+        if !(exponent.is_finite() && h > 0.0 && h <= core.levels[next_l - 1].h) {
             return Err(format!(
                 "residual cascade: next resolution exponent {exponent} does not refine the \
                  current radius {}",
@@ -4084,20 +4216,22 @@ impl ResidualCascadeDesign {
         let mut net = core.net.clone();
         let candidates = extend_net(&mut net, &core.z, core.dim, h, &core.z_range);
         if candidates.is_empty() {
-            return Ok(NextLevelAssessment::EmptyNet);
+            return Ok(NextLevelPlan::exhausted(NextLevelAssessment::EmptyNet));
         }
         if net.len() > MAX_CENTERS {
-            return Ok(NextLevelAssessment::CapacityExceeded {
-                obstruction: RefinementObstruction::CenterCapacity {
-                    centers: net.len(),
-                    maximum_centers: MAX_CENTERS,
+            return Ok(NextLevelPlan::exhausted(
+                NextLevelAssessment::CapacityExceeded {
+                    obstruction: RefinementObstruction::CenterCapacity {
+                        centers: net.len(),
+                        maximum_centers: MAX_CENTERS,
+                    },
+                    // The cap stopped candidate construction before every column
+                    // could contribute to ‖X₂'Wr̂‖². Infinity is the honest
+                    // conservative upper bound; a finite partial sum would not
+                    // certify the omitted columns.
+                    gain_bound: f64::INFINITY,
                 },
-                // The cap stopped candidate construction before every column
-                // could contribute to ‖X₂'Wr̂‖². Infinity is the honest
-                // conservative upper bound; a finite partial sum would not
-                // certify the omitted columns.
-                gain_bound: f64::INFINITY,
-            });
+            ));
         }
         let delta = OVERLAP * h;
         let mut grid = HashGrid::new(delta, core.dim);
@@ -4121,35 +4255,108 @@ impl ResidualCascadeDesign {
         let candidate_penalized_modes = net.len();
         let candidate_columns = core.nullity() + candidate_penalized_modes;
         let identifiable_directions = core.y.len().saturating_sub(core.nullity());
-        if candidate_penalized_modes > identifiable_directions {
-            return Ok(NextLevelAssessment::CapacityExceeded {
-                obstruction: RefinementObstruction::IdentifiabilityCapacity {
+        // A level finer than the current one is a NEW level; re-assessing the
+        // finest radius extends the level already there and cannot exhaust the
+        // level count.
+        let extends_last = h == core.levels[next_l - 1].h;
+        if !extends_last && next_l >= MAX_LEVELS {
+            return Ok(NextLevelPlan::exhausted(
+                NextLevelAssessment::CapacityExceeded {
+                    obstruction: RefinementObstruction::LevelCapacity {
+                        levels: next_l,
+                        maximum_levels: MAX_LEVELS,
+                    },
+                    gain_bound,
+                },
+            ));
+        }
+        // Penalized modes this design may still carry with the certified
+        // automatic route intact. Both bounds are structural, neither is a
+        // tuning parameter: past `identifiable_directions = n − nullity` the
+        // REML score is flat by rank deficiency, and past
+        // `CERTIFIED_SPECTRUM_MAX` columns the exact Schur eigendecomposition
+        // the score enclosure is built from exceeds its memory budget.
+        let spectrum_modes = CERTIFIED_SPECTRUM_MAX.saturating_sub(core.nullity());
+        let capacity_modes = identifiable_directions.min(spectrum_modes);
+        let budget = capacity_modes
+            .saturating_sub(core.net.len())
+            .min(candidates.len());
+        if budget == 0 {
+            // Nothing may be added at all — the only shape in which a capacity
+            // limit is a refusal. The obstruction names the bound that binds,
+            // and the evidence stays the COMPLETE proposal: that is what the
+            // cascade still has to add and cannot.
+            let obstruction = if identifiable_directions <= spectrum_modes {
+                RefinementObstruction::IdentifiabilityCapacity {
                     candidate_columns,
                     candidate_penalized_modes,
                     identifiable_directions,
-                },
-                gain_bound,
-            });
-        }
-        if candidate_columns > CERTIFIED_SPECTRUM_MAX {
-            return Ok(NextLevelAssessment::CapacityExceeded {
-                obstruction: RefinementObstruction::CertifiedSpectrumCapacity {
+                }
+            } else {
+                RefinementObstruction::CertifiedSpectrumCapacity {
                     candidate_columns,
                     certified_spectrum_max: CERTIFIED_SPECTRUM_MAX,
+                }
+            };
+            return Ok(NextLevelPlan::exhausted(
+                NextLevelAssessment::CapacityExceeded {
+                    obstruction,
+                    gain_bound,
                 },
-                gain_bound,
-            });
+            ));
         }
-        if next_l >= MAX_LEVELS {
-            Ok(NextLevelAssessment::CapacityExceeded {
-                obstruction: RefinementObstruction::LevelCapacity {
-                    levels: next_l,
-                    maximum_levels: MAX_LEVELS,
-                },
-                gain_bound,
-            })
+        let candidate_count = candidates.len();
+        let selection = if budget == candidate_count {
+            candidates
         } else {
-            Ok(NextLevelAssessment::GainBound(gain_bound))
+            // Largest |g_j| first. The ordering is on the very terms of
+            // `Σ_j g_j²`, so the retained subset carries the largest share of
+            // the bound any subset of this size can; ties break on candidate
+            // index, which `extend_net` fixes deterministically.
+            let mut order: Vec<usize> = (0..candidates.len()).collect();
+            order.sort_by(|&a, &b| {
+                g[b].abs()
+                    .partial_cmp(&g[a].abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.cmp(&b))
+            });
+            order.truncate(budget);
+            order.sort_unstable();
+            order.into_iter().map(|j| candidates[j]).collect()
+        };
+        let complete = selection.len() == candidate_count;
+        Ok(NextLevelPlan {
+            assessment: NextLevelAssessment::GainBound(gain_bound),
+            selection,
+            complete,
+            extends_last,
+        })
+    }
+}
+
+/// The next level's assessment together with the centers the refinement may
+/// take from it under the capacity budgets.
+struct NextLevelPlan {
+    assessment: NextLevelAssessment,
+    /// Centers the refinement may add; empty exactly when nothing may be added.
+    selection: Vec<[f64; 3]>,
+    /// Whether the selection is the complete candidate set. A partial level is
+    /// reproducible only from its explicit centers, so the plan carries them.
+    complete: bool,
+    /// Whether these centers extend the current finest level rather than
+    /// starting a new one.
+    extends_last: bool,
+}
+
+impl NextLevelPlan {
+    /// An assessment that admits no refinement: an empty net, or a capacity
+    /// with no room left in it.
+    fn exhausted(assessment: NextLevelAssessment) -> Self {
+        Self {
+            assessment,
+            selection: Vec::new(),
+            complete: false,
+            extends_last: false,
         }
     }
 }
@@ -4631,9 +4838,15 @@ pub fn fit_residual_cascade(
     metric: &[f64],
     sobolev_s: f64,
 ) -> Result<ResidualCascadeFit, ResidualCascadeError> {
-    let mut levels = INITIAL_LEVELS;
+    let mut plan: Vec<LevelPlan> = (0..INITIAL_LEVELS)
+        .map(|level| LevelPlan {
+            exponent: level as f64,
+            centers: None,
+        })
+        .collect();
     loop {
-        let design = ResidualCascadeDesign::build(xs, y, w, metric, sobolev_s, levels)?;
+        let design = ResidualCascadeDesign::build_from_plan(xs, y, w, metric, sobolev_s, &plan)?;
+        let levels = plan.len();
         // Quasi-uniformity guard (issue #1032, caveat 2): if the metric has
         // collapsed the cloud onto a near-degenerate sheet in scaled
         // coordinates, the BPX iteration bound no longer holds. Refuse the
@@ -4664,29 +4877,67 @@ pub fn fit_residual_cascade(
         // caller that wants to watch the bound reads them off the returned fit
         // instead of scraping log lines. (A library solve never writes to
         // stderr.)
-        let assessment = design.assess_next_level(&fit)?;
         let requested_tolerance = REFINE_TOL * fit.rss_pen;
-        match decide_refinement(assessment, requested_tolerance) {
-            RefinementDecision::Converged { gain_bound } => {
+        // Everything the cascade could still add has to be certified, not just
+        // the next dyadic level. When a capacity budget truncated the finest
+        // level, the candidates it left behind at ITS radius are still
+        // addable — so they are assessed first, and the next dyadic level only
+        // after they pass. A fit is minted only when EVERY pending candidate
+        // set is below the tolerance, which is the same per-level claim the
+        // complete-level ladder always made, asserted once per set.
+        let last = plan.last().expect("the plan always carries a level");
+        let mut pending: Vec<f64> = Vec::with_capacity(2);
+        if last.centers.is_some() {
+            pending.push(last.exponent);
+        }
+        pending.push(last.exponent + 1.0);
+        let mut certified_bound = 0.0_f64;
+        let mut refinement: Option<(f64, bool, bool, Vec<[f64; 3]>)> = None;
+        for exponent in pending {
+            let planned = design.plan_level_at_exponent(&fit, exponent)?;
+            let (complete, extends_last) = (planned.complete, planned.extends_last);
+            let selection = planned.selection;
+            match decide_refinement(planned.assessment, requested_tolerance) {
+                RefinementDecision::Converged { gain_bound } => {
+                    certified_bound = certified_bound.max(gain_bound);
+                }
+                RefinementDecision::Refine => {
+                    refinement = Some((exponent, complete, extends_last, selection));
+                    break;
+                }
+                RefinementDecision::Underresolved {
+                    gain_bound,
+                    obstruction,
+                } => {
+                    return Err(ResidualCascadeError::Underresolved {
+                        checkpoint: ResidualCascadeCheckpoint::new(fit),
+                        gain_bound,
+                        requested_tolerance,
+                        obstruction,
+                    });
+                }
+            }
+        }
+        match refinement {
+            None => {
                 fit.refinement = Some(RefinementCertificate {
-                    next_level_gain_bound: gain_bound,
+                    next_level_gain_bound: certified_bound,
                     tolerance: requested_tolerance,
                 });
                 return Ok(fit);
             }
-            RefinementDecision::Refine => {
-                levels += 1;
-            }
-            RefinementDecision::Underresolved {
-                gain_bound,
-                obstruction,
-            } => {
-                return Err(ResidualCascadeError::Underresolved {
-                    checkpoint: ResidualCascadeCheckpoint::new(fit),
-                    gain_bound,
-                    requested_tolerance,
-                    obstruction,
-                });
+            Some((exponent, complete, extends_last, mut selection)) => {
+                if extends_last {
+                    let last = plan.last_mut().expect("the plan always carries a level");
+                    let mut centers = last.centers.take().unwrap_or_default();
+                    centers.append(&mut selection);
+                    last.centers = Some(centers);
+                } else {
+                    plan.push(LevelPlan {
+                        exponent,
+                        centers: if complete { None } else { Some(selection) },
+                    });
+                }
             }
         }
     }
@@ -5064,7 +5315,16 @@ mod refinement_decision_tests {
                             identifiable_directions,
                         },
                 }) => {
-                    assert_eq!(checkpoint.num_levels(), current_levels);
+                    // The refusal is at the capacity FRONTIER, not before it
+                    // (#2700): the automatic route takes as much of the
+                    // over-wide level as the identifiability budget allows, so
+                    // the retained checkpoint carries one more (partial) level
+                    // and exactly `n − nullity` centers — the widest design
+                    // this sample can identify. What it cannot add is still the
+                    // complete candidate level, which is why the evidence
+                    // fields below are unchanged by that extra level.
+                    assert_eq!(checkpoint.num_levels(), current_levels + 1);
+                    assert_eq!(checkpoint.num_centers(), y.len() - next.core.nullity());
                     assert_eq!(candidate_columns, next.num_coeffs());
                     assert_eq!(
                         candidate_penalized_modes,

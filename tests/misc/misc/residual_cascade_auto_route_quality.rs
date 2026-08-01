@@ -238,11 +238,15 @@ fn cascade_quality_fixture_reports_the_measured_identifiability_boundary() {
                     identifiable_directions,
                 },
         }) => {
-            assert_eq!(checkpoint.num_levels(), 6);
-            assert_eq!(checkpoint.num_centers(), 1_759);
+            assert_eq!(checkpoint.num_levels(), 7);
             assert_eq!(candidate_columns, 6_971);
             assert_eq!(candidate_penalized_modes, 6_968);
             assert_eq!(identifiable_directions, 1_997);
+            // #2700: the seventh level is taken as far as the identifiability
+            // budget reaches (238 of its 5 209 candidates) before the route
+            // refuses, so the retained checkpoint is the rank-maximal design
+            // rather than the 1 759-center one it used to keep.
+            assert_eq!(checkpoint.num_centers(), identifiable_directions);
             assert!(
                 gain_bound > requested_tolerance,
                 "the next level may be refused only while its honest gain bound is above \

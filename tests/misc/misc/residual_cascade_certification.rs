@@ -905,9 +905,20 @@ fn cascade_matches_dense_wendland_kernel_solve() {
 ///
 /// The fifth-level gain is materially above tolerance, while its 504 penalized
 /// modes exceed the data's 237 identifiable directions. The automatic route
-/// must therefore retain the four-level checkpoint and return `Underresolved`
-/// at refinement. Entering the fifth-level score search would merely translate
-/// this one mathematical boundary into an exponential search-budget refusal.
+/// must therefore return `Underresolved` at refinement rather than enter the
+/// fifth-level score search, which would merely translate this one mathematical
+/// boundary into an exponential search-budget refusal.
+///
+/// What it retains changed with #2700. The 504 candidates are not refused
+/// whole any more: the route takes the 90 of them that the identifiability
+/// budget still admits (`237 − 147`), largest `|g_j|` first, refits, and only
+/// then finds that what remains is still above tolerance with no capacity left.
+/// So the checkpoint is the RANK-MAXIMAL design — five levels, 237 centers,
+/// exactly `n − nullity` — and the refusal names the boundary from the frontier
+/// instead of from 90 centers short of it. The candidate evidence is unchanged
+/// by that, and necessarily so: the candidates are mutually `h`-separated, so
+/// planting some of them makes none of the others covered, and the complete
+/// candidate set is the same 504 modes either way.
 #[test]
 fn wendland_fixture_names_underresolution_before_rank_deficient_score_search() {
     let n = 240;
@@ -925,11 +936,14 @@ fn wendland_fixture_names_underresolution_before_rank_deficient_score_search() {
                     identifiable_directions,
                 },
         }) => {
-            assert_eq!(checkpoint.num_levels(), 4);
-            assert_eq!(checkpoint.num_centers(), 147);
+            assert_eq!(checkpoint.num_levels(), 5);
             assert_eq!(candidate_columns, 507);
             assert_eq!(candidate_penalized_modes, 504);
             assert_eq!(identifiable_directions, 237);
+            // The retained work is the widest identified design, not a
+            // partial one: a capacity refusal may only fire once the capacity
+            // is actually spent.
+            assert_eq!(checkpoint.num_centers(), identifiable_directions);
             assert!(
                 gain_bound > requested_tolerance,
                 "capacity may refuse only while the honest gain bound remains above tolerance: \
