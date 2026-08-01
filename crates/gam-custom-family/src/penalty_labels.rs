@@ -112,7 +112,7 @@ pub(crate) fn penalty_label_layout_with_joint(
     specs: &[ParameterBlockSpec],
     penalty_counts: Vec<usize>,
     joint_specs: Vec<gam_problem::JointPenaltySpec>,
-) -> Result<PenaltyLabelLayout, String> {
+) -> Result<PenaltyLabelLayout, CustomFamilyError> {
     let mut label_to_outer = BTreeMap::<String, usize>::new();
     let mut physical_to_outer = Vec::<Option<usize>>::new();
     let mut fixed_log_lambdas = Vec::<Option<f64>>::new();
@@ -126,8 +126,7 @@ pub(crate) fn penalty_label_layout_with_joint(
                         reason: format!(
                             "block {block_idx} penalty {penalty_idx} fixed log-precision: {error}"
                         ),
-                    }
-                    .into());
+                    });
                 }
                 physical_to_outer.push(None);
                 fixed_log_lambdas.push(Some(fixed));
@@ -151,7 +150,7 @@ pub(crate) fn penalty_label_layout_with_joint(
                 if (first - rho0).abs() > 1e-10 {
                     return Err(CustomFamilyError::ConstraintViolation { reason: format!(
                         "precision label '{label}' has inconsistent initial log-precisions: {first} and {rho0}"
-                    ) }.into());
+                    ) });
                 }
                 outer
             } else {
@@ -190,8 +189,7 @@ pub(crate) fn penalty_label_layout_with_joint(
                     reason: format!(
                         "joint penalty label '{label}' has inconsistent initial log-precisions: {first} and {rho0}"
                     ),
-                }
-                .into());
+                });
             }
             outer
         } else {
@@ -218,7 +216,7 @@ pub(crate) fn penalty_label_layout_with_joint(
 pub(crate) fn expand_labeled_log_lambdas(
     rho: &Array1<f64>,
     layout: &PenaltyLabelLayout,
-) -> Result<Array1<f64>, String> {
+) -> Result<Array1<f64>, CustomFamilyError> {
     if rho.len() != layout.initial_rho.len() {
         return Err(CustomFamilyError::DimensionMismatch {
             reason: format!(
@@ -226,8 +224,7 @@ pub(crate) fn expand_labeled_log_lambdas(
                 rho.len(),
                 layout.initial_rho.len()
             ),
-        }
-        .into());
+        });
     }
     let mut expanded = Array1::<f64>::zeros(layout.physical_count());
     for (physical, outer) in layout.physical_to_outer.iter().enumerate() {
@@ -239,7 +236,6 @@ pub(crate) fn expand_labeled_log_lambdas(
                         "fixed penalty layout missing value at physical slot {physical}"
                     ),
                 }
-                .to_string()
             })?,
         };
     }
@@ -249,7 +245,7 @@ pub(crate) fn expand_labeled_log_lambdas(
 pub(crate) fn split_labeled_log_lambdas(
     rho: &Array1<f64>,
     layout: &PenaltyLabelLayout,
-) -> Result<Vec<Array1<f64>>, String> {
+) -> Result<Vec<Array1<f64>>, CustomFamilyError> {
     let expanded = expand_labeled_log_lambdas(rho, layout)?;
     split_log_lambdas(&expanded, &layout.penalty_counts)
 }
@@ -257,7 +253,7 @@ pub(crate) fn split_labeled_log_lambdas(
 pub(crate) fn aggregate_labeled_gradient(
     gradient: &Array1<f64>,
     layout: &PenaltyLabelLayout,
-) -> Result<Array1<f64>, String> {
+) -> Result<Array1<f64>, CustomFamilyError> {
     // The evaluator gradient is the per-block physical coords followed by the
     // appended joint coords (gam#1587). When no joint penalties are present this
     // is exactly the legacy per-block length.
@@ -271,8 +267,7 @@ pub(crate) fn aggregate_labeled_gradient(
                 layout.physical_count(),
                 layout.joint_specs.len(),
             ),
-        }
-        .into());
+        });
     }
     let mut out = Array1::<f64>::zeros(layout.initial_rho.len());
     for (physical, outer) in layout.physical_to_outer.iter().enumerate() {

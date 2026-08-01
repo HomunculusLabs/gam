@@ -325,7 +325,7 @@ pub(crate) fn custom_family_seed_screening_proxy_labeled<
 pub(crate) fn split_log_lambdas(
     flat: &Array1<f64>,
     penalty_counts: &[usize],
-) -> Result<Vec<Array1<f64>>, String> {
+) -> Result<Vec<Array1<f64>>, CustomFamilyError> {
     let expected: usize = penalty_counts.iter().sum();
     if flat.len() != expected {
         return Err(CustomFamilyError::DimensionMismatch {
@@ -333,8 +333,7 @@ pub(crate) fn split_log_lambdas(
                 "log-lambda length mismatch: got {}, expected {expected}",
                 flat.len()
             ),
-        }
-        .into());
+        });
     }
     // Certify the complete vector before producing any partial block output.
     // Every downstream physical conversion is therefore dominated by the
