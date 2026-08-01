@@ -1246,6 +1246,35 @@ pub enum CrossprodAccum {
     Add,
 }
 
+/// Rows per streaming chunk so each `chunk_rows × cols` `f64` tile stays near an
+/// 8 MiB working set, clamped to `[512, 131_072]` and never exceeding `n`.
+///
+/// One definition for the three streaming kernels below, which carried
+/// byte-identical inline copies of this arithmetic. The copies computed the same
+/// quantity from different column expressions (`p`, `px + q`, `pa + 2·pb`), so
+/// the only thing that ever differed between them was the argument — which is
+/// exactly the shape that should be a parameter rather than three transcriptions
+/// of one rule (#2469).
+///
+/// **This is NOT [`crate::utils::row_chunk_for_byte_budget`], and the difference
+/// is unresolved.** That function is documented as the "canonical home for the
+/// row-chunk heuristic", takes the same `(n, cols)` and computes the same 8 MiB
+/// budget — but clamps to `[256, 65_536]` rather than `[512, 131_072]`. These
+/// kernels have always used the wider band; routing them through the canonical
+/// helper would halve the floor and quarter the ceiling and is a behaviour
+/// change, not a cleanup. Collapsing three copies into one makes that single
+/// remaining divergence visible instead of triplicated; deciding which band is
+/// right needs a measurement nobody has taken.
+#[inline]
+fn streaming_chunk_rows(cols: usize, n: usize) -> usize {
+    const TARGET_BYTES: usize = 8 * 1024 * 1024;
+    const MIN_ROWS: usize = 512;
+    const MAX_ROWS: usize = 131_072;
+    (TARGET_BYTES / (cols.max(1) * 8))
+        .clamp(MIN_ROWS, MAX_ROWS)
+        .min(n)
+}
+
 /// Shared dense weighted-Gram kernel: accumulate `Xᵀ·diag(W)·X` into `out`.
 ///
 /// This is the single tuned implementation of the chunked row-scaling +
@@ -1303,12 +1332,7 @@ pub fn stream_weighted_crossprod_into<S1: Data<Elem = f64>, S2: Data<Elem = f64>
     }
 
     // Streaming chunked: peak allocation is chunk_rows × p instead of n × p.
-    const TARGET_BYTES: usize = 8 * 1024 * 1024;
-    const MIN_ROWS: usize = 512;
-    const MAX_ROWS: usize = 131_072;
-    let chunk_rows = (TARGET_BYTES / (p.max(1) * 8))
-        .clamp(MIN_ROWS, MAX_ROWS)
-        .min(n);
+    let chunk_rows = streaming_chunk_rows(p, n);
 
     // Triangular accumulation requires a zero baseline in the lower triangle
     // because each chunk's `Accum::Add` lands there; for a Replace request we
@@ -1452,13 +1476,8 @@ fn fast_xt_diag_y_impl<S1: Data<Elem = f64>, S2: Data<Elem = f64>, S3: Data<Elem
     }
 
     // Streaming: only allocate chunk_rows × q for the weighted Y slice.
-    const TARGET_BYTES: usize = 8 * 1024 * 1024;
-    const MIN_ROWS: usize = 512;
-    const MAX_ROWS: usize = 131_072;
     let total_cols = px + q;
-    let chunk_rows = (TARGET_BYTES / (total_cols.max(1) * 8))
-        .clamp(MIN_ROWS, MAX_ROWS)
-        .min(n);
+    let chunk_rows = streaming_chunk_rows(total_cols, n);
 
     let mut result = Array2::<f64>::zeros((px, q).f());
     // Row-major wy_chunk — same rationale as fast_xt_diag_x: stride-1
@@ -1602,14 +1621,9 @@ fn fast_joint_hessian_2x2_impl<
         return out;
     }
 
-    const TARGET_BYTES: usize = 8 * 1024 * 1024;
-    const MIN_ROWS: usize = 512;
-    const MAX_ROWS: usize = 131_072;
     // Need buffers for: waa_xa(chunk×pa) + wab_xb(chunk×pb) + wbb_xb(chunk×pb)
     let cols_needed = pa + 2 * pb;
-    let chunk_rows = (TARGET_BYTES / (cols_needed.max(1) * 8))
-        .clamp(MIN_ROWS, MAX_ROWS)
-        .min(n);
+    let chunk_rows = streaming_chunk_rows(cols_needed, n);
 
     let mut out = Array2::<f64>::zeros((total, total).f());
     // Row-major weighted buffers so the per-row scale loops have stride-1
