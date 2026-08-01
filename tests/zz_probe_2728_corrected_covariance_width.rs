@@ -24,6 +24,8 @@ use rand_distr::{Distribution, Normal};
 use std::time::Instant;
 
 const NOISE_SD: f64 = 0.30;
+/// Monte-Carlo replicate count. 1 = single-fit diagnostics only.
+const N_REPLICATES: usize = 1;
 const HYBRID_LENGTH_SCALE: f64 = 1.0;
 
 /// Route the library's `log` records to stdout so the probe sees the
@@ -228,17 +230,9 @@ fn probe_2728_corrected_vs_conditional_width() {
     let k_centers = 80usize;
     let n_train = 4_000usize;
     let n_eval = 400usize;
-    // This was an `env::var` read, which `build.rs` bans outright and which
-    // therefore made EVERY build of the workspace fail, not just this probe's.
-    // The value is the one every unset-environment run already took, so the
-    // observable behaviour of the probe is unchanged.
-    //
-    // NOTE FOR #2728: at 1 replicate the `n_replicates >= 3` Monte-Carlo arm
-    // below cannot fire. It could not fire before this commit either — nothing
-    // in the tree ever set the variable — so this makes an existing dead branch
-    // visible rather than creating one. Raising this constant is how that arm
-    // gets exercised; a re-added environment read is not.
-    let n_replicates: usize = 1;
+    // A `env::var` read here made EVERY build of the workspace fail (build.rs
+    // bans it outright), so the replicate count is a constant.
+    let n_replicates: usize = N_REPLICATES;
     let spec = duchon_aniso_pc_spec("duchon_pc_probe", pc_dim, k_centers);
 
     let (x_eval, _) = simulate_x(n_eval, pc_dim, 0x0EFA_1000_0000_0001);

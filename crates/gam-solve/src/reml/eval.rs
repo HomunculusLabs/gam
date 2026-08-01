@@ -1194,6 +1194,39 @@ impl<'a> RemlState<'a> {
             .into_iter()
             .map(|(cov_point, beta_point)| (cov_point.mapv(|v| dispersion_phi * v), beta_point))
             .collect();
+        // Per-sigma-point attribution. The two terms of the law of total
+        // covariance behave very differently off the optimum: `Cov_ρ[β̂]` is
+        // bounded by the range of β̂, but `E_ρ[φ̂·H(ρ)⁻¹]` is an average of
+        // inverse Hessians and diverges as a penalty switches off. Recording
+        // both, per point, is the only way to attribute a wide `Vp` to one of
+        // them after the fact (#2728).
+        if log::log_enabled!(log::Level::Info) {
+            let centre_cost = match self.compute_cost(final_rho) {
+                Ok(cost) => cost,
+                Err(_) => f64::NAN,
+            };
+            for (index, (cov_point, _)) in scaled_pairs.iter().enumerate() {
+                let requested: f64 = sigma_points[index]
+                    .iter()
+                    .zip(final_rho.iter())
+                    .map(|(point, centre)| (point - centre).abs())
+                    .fold(0.0_f64, f64::max);
+                // The quadratic model that PLACED this node predicts a
+                // criterion rise of exactly `rank/2` there (the node sits at
+                // `sqrt(rank·σ⁻¹)` along an eigendirection of curvature `σ`).
+                let rise = match self.compute_cost(&sigma_points[index]) {
+                    Ok(point_cost) => point_cost - centre_cost,
+                    Err(_) => f64::NAN,
+                };
+                log::info!(
+                    "[sigma-cubature] point={index} max|Δρ|(post-clamp)={requested:.4e} \
+                     tr(φ̂·H(ρ)⁻¹)={:.6e} tr(φ̂·H(ρ̂)⁻¹)={:.6e} ΔV={rise:.6e} ΔV_quad={:.3}",
+                    cov_point.diag().iter().sum::<f64>(),
+                    dispersion_phi * base_cov.diag().iter().sum::<f64>(),
+                    rank as f64 / 2.0,
+                );
+            }
+        }
         let mut total_cov = accumulate_sigma_cubature_total_covariance(&scaled_pairs, p);
         if !total_cov.iter().all(|v| v.is_finite()) {
             return self.finalize_smoothing_outcome(first_order_numerical(
@@ -1214,6 +1247,11 @@ impl<'a> RemlState<'a> {
         // which scales by exactly c², consistent with Vb (#582).
         let mut corr = total_cov - base_cov.mapv(|v| dispersion_phi * v);
         symmetrize_in_place(&mut corr);
+        log::info!(
+            "[sigma-cubature] tr(correction)={:.6e} tr(φ̂·H(ρ̂)⁻¹)={:.6e}",
+            corr.diag().iter().sum::<f64>(),
+            dispersion_phi * base_cov.diag().iter().sum::<f64>(),
+        );
 
         self.finalize_smoothing_outcome(SmoothingCorrectionOutcome::Cubature {
             correction: corr,
