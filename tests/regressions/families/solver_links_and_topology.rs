@@ -149,6 +149,10 @@ fn topology_selector_picks_lowest_cost_and_returns_fit_metadata() {
             AutoTopologyKind::Circle => TopologyAutoFitEvidence {
                 topology_name: "circle".to_string(),
                 raw_reml: 10.0,
+                // Exact synthetic literal: zero accumulated forward error. `None` would
+                // state that no bound was established (#2729), which makes the selector
+                // refuse to certify any margin -- the opposite of this fixture\'s intent.
+                raw_reml_roundoff: Some(0.0),
                 null_dim: 0.0,
                 null_space_logdet: None,
                 effective_dim: 2.0,
@@ -158,6 +162,10 @@ fn topology_selector_picks_lowest_cost_and_returns_fit_metadata() {
             AutoTopologyKind::Sphere => TopologyAutoFitEvidence {
                 topology_name: "sphere".to_string(),
                 raw_reml: 20.0,
+                // Exact synthetic literal: zero accumulated forward error. `None` would
+                // state that no bound was established (#2729), which makes the selector
+                // refuse to certify any margin -- the opposite of this fixture\'s intent.
+                raw_reml_roundoff: Some(0.0),
                 null_dim: 0.0,
                 null_space_logdet: None,
                 effective_dim: 2.0,
@@ -202,6 +210,10 @@ fn topology_selector_parallel_matches_sequential_winner() {
             AutoTopologyKind::Circle => TopologyAutoFitEvidence {
                 topology_name: "circle".to_string(),
                 raw_reml: 10.0,
+                // Exact synthetic literal: zero accumulated forward error. `None` would
+                // state that no bound was established (#2729), which makes the selector
+                // refuse to certify any margin -- the opposite of this fixture\'s intent.
+                raw_reml_roundoff: Some(0.0),
                 null_dim: 0.0,
                 null_space_logdet: None,
                 effective_dim: 2.0,
@@ -211,6 +223,10 @@ fn topology_selector_parallel_matches_sequential_winner() {
             AutoTopologyKind::Sphere => TopologyAutoFitEvidence {
                 topology_name: "sphere".to_string(),
                 raw_reml: 20.0,
+                // Exact synthetic literal: zero accumulated forward error. `None` would
+                // state that no bound was established (#2729), which makes the selector
+                // refuse to certify any margin -- the opposite of this fixture\'s intent.
+                raw_reml_roundoff: Some(0.0),
                 null_dim: 0.0,
                 null_space_logdet: None,
                 effective_dim: 2.0,
@@ -220,6 +236,10 @@ fn topology_selector_parallel_matches_sequential_winner() {
             AutoTopologyKind::Torus => TopologyAutoFitEvidence {
                 topology_name: "torus".to_string(),
                 raw_reml: 15.0,
+                // Exact synthetic literal: zero accumulated forward error. `None` would
+                // state that no bound was established (#2729), which makes the selector
+                // refuse to certify any margin -- the opposite of this fixture\'s intent.
+                raw_reml_roundoff: Some(0.0),
                 null_dim: 0.0,
                 null_space_logdet: None,
                 effective_dim: 2.0,
@@ -256,6 +276,10 @@ fn topology_selector_breaks_exact_ties_deterministically_by_candidate_order() {
         Ok::<_, String>(TopologyAutoFitEvidence {
             topology_name: kind.display_name(),
             raw_reml: 4.0,
+            // Exact synthetic literal: zero accumulated forward error. `None` would
+            // state that no bound was established (#2729), which makes the selector
+            // refuse to certify any margin -- the opposite of this fixture\'s intent.
+            raw_reml_roundoff: Some(0.0),
             null_dim: 0.0,
             null_space_logdet: None,
             effective_dim: 2.0,
