@@ -154,8 +154,8 @@ mod oracle_tests {
     //! `faa_top*` ever diverges from the universal rule these disagree.
     use super::*;
     use crate::jet_algebra::faa_di_bruno;
+    use crate::paired_timing::paired_interleaved;
     use std::hint::black_box;
-    use std::time::Instant;
 
     fn stream(seed: u64) -> impl FnMut() -> f64 {
         let mut s = seed;
@@ -372,44 +372,6 @@ mod oracle_tests {
         ]
     }
 
-    fn paired_medians<const INPUTS: usize, const OUTPUTS: usize>(
-        input: [f64; INPUTS],
-        iterations: usize,
-        compiled: fn([f64; INPUTS]) -> [f64; OUTPUTS],
-        hand: fn([f64; INPUTS]) -> [f64; OUTPUTS],
-    ) -> (f64, f64) {
-        let mut compiled_samples = [0.0; 7];
-        let mut hand_samples = [0.0; 7];
-        for round in 0..7 {
-            let compiled_first = round % 2 == 0;
-            for side in 0..2 {
-                let run_compiled = compiled_first == (side == 0);
-                let mut x = input;
-                let mut checksum = 0.0;
-                let started = Instant::now();
-                for _ in 0..iterations {
-                    x[0] += checksum * 1e-18;
-                    let output = if run_compiled {
-                        compiled(black_box(x))
-                    } else {
-                        hand(black_box(x))
-                    };
-                    checksum += output.into_iter().sum::<f64>();
-                }
-                black_box(checksum);
-                let ns = started.elapsed().as_secs_f64() * 1e9 / iterations as f64;
-                if run_compiled {
-                    compiled_samples[round] = ns;
-                } else {
-                    hand_samples[round] = ns;
-                }
-            }
-        }
-        compiled_samples.sort_by(f64::total_cmp);
-        hand_samples.sort_by(f64::total_cmp);
-        (compiled_samples[3], hand_samples[3])
-    }
-
     fn assert_close<const N: usize>(actual: [f64; N], expected: [f64; N]) {
         for channel in 0..N {
             let band = 2e-12 * actual[channel].abs().max(expected[channel].abs()).max(1.0);
@@ -458,27 +420,74 @@ mod oracle_tests {
         // So debug stops here, and the ratio is asserted only under `--release`,
         // matching `release_measure_multinomial_fisher_vs_strongest_hand_932`
         // (#932, `14395b5d7`), which reaches its timing assertion the same way.
+        //
+        // The "different loser each run" symptom above was the harness, not the
+        // lowering. This gate interleaved its arms per round, but it alternated
+        // them DETERMINISTICALLY across SEVEN rounds, so `compiled` ran first
+        // four times and second three -- a systematic first-versus-second
+        // advantage cannot cancel over an odd number of alternating rounds, it
+        // accrues 4:3. It then paired two per-arm medians, which discards the
+        // pairing that would have divided the drift out. `paired_interleaved`
+        // randomises the order, reports the realised imbalance as
+        // `first_position_bias`, and takes the median of the paired RATIOS.
         if cfg!(debug_assertions) {
             return;
         }
 
-        for (order, compiled_ns, hand_ns) in {
-            let (c3, h3) =
-                paired_medians(order3, 1_000_000, compiled_bundle3, strongest_hand_bundle3);
-            let (c4, h4) =
-                paired_medians(order4, 500_000, compiled_bundle4, strongest_hand_bundle4);
-            [(3, c3, h3), (4, c4, h4)]
-        } {
+        let mut losses: Vec<String> = Vec::new();
+        for (order, timing) in [
+            (
+                3,
+                paired_interleaved(
+                    15,
+                    200_000,
+                    0x5153_9320_0C03,
+                    |nudge| {
+                        let mut x = order3;
+                        x[0] += nudge;
+                        compiled_bundle3(black_box(x)).into_iter().sum::<f64>()
+                    },
+                    |nudge| {
+                        let mut x = order3;
+                        x[0] += nudge;
+                        strongest_hand_bundle3(black_box(x)).into_iter().sum::<f64>()
+                    },
+                ),
+            ),
+            (
+                4,
+                paired_interleaved(
+                    15,
+                    100_000,
+                    0x5153_9320_0C04,
+                    |nudge| {
+                        let mut x = order4;
+                        x[0] += nudge;
+                        compiled_bundle4(black_box(x)).into_iter().sum::<f64>()
+                    },
+                    |nudge| {
+                        let mut x = order4;
+                        x[0] += nudge;
+                        strongest_hand_bundle4(black_box(x)).into_iter().sum::<f64>()
+                    },
+                ),
+            ),
+        ] {
             eprintln!(
-                "CURVE-WIGGLE-BUNDLE-932 order={order} compiled={compiled_ns:.3} ns/row \
-                 strongest_hand={hand_ns:.3} ns/row hand_over_compiled={:.6}",
-                hand_ns / compiled_ns,
+                "CURVE-WIGGLE-BUNDLE-932 order={order} {}",
+                timing.summary("compiled", "strongest_hand"),
             );
-            assert!(
-                hand_ns > compiled_ns,
-                "order-{order} compiled curve/wiggle bundle must beat strongest hand: \
-                 compiled={compiled_ns:.3} ns/row hand={hand_ns:.3} ns/row"
-            );
+            if !(timing.median_ratio() > 1.0 && timing.wins_fraction() >= 0.75) {
+                losses.push(format!(
+                    "order-{order}: {}",
+                    timing.summary("compiled", "strongest_hand")
+                ));
+            }
         }
+        assert!(
+            losses.is_empty(),
+            "compiled curve/wiggle bundle must beat strongest hand:\n{}",
+            losses.join("\n"),
+        );
     }
 }
