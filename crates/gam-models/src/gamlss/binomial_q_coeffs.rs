@@ -460,28 +460,12 @@ mod oracle_tests {
     /// (`generic_tower_ns / faa_top_ns`); this is not a strongest-hand gate.
     #[test]
     fn release_measure_binomial_q_coeffs_faa_top_vs_generic_tower_932() {
-        use std::time::Instant;
 
-        // Feedback-coupled timing barrier (no `std::hint::black_box`): the
-        // perturbed input is nudged by a negligible multiple of the running
-        // checksum so neither racer can be hoisted or dropped, while the
+        // The feedback-coupled timing barrier lives in the shared harness now:
+        // it nudges the perturbed input by a negligible multiple of the running
+        // checksum, so neither racer can be hoisted or dropped while the
         // measured regime stays bit-adjacent to the parity-pinned fixture.
-        fn best_ns<F: FnMut(f64) -> f64>(iterations: usize, base: f64, mut evaluate: F) -> f64 {
-            let mut best = f64::INFINITY;
-            for _ in 0..5 {
-                let mut checksum = 0.0_f64;
-                let started = Instant::now();
-                for _ in 0..iterations {
-                    checksum += evaluate(base + checksum * 1e-18);
-                }
-                assert!(
-                    checksum.is_finite(),
-                    "binomial q-coeffs release-measure checksum must stay finite"
-                );
-                best = best.min(started.elapsed().as_secs_f64());
-            }
-            best * 1e9 / iterations as f64
-        }
+        use gam_math::paired_timing::paired_interleaved;
 
         let close = |label: &str, a: f64, b: f64| {
             let band = 1e-12 + 1e-9 * a.abs().max(b.abs());
@@ -503,10 +487,13 @@ mod oracle_tests {
                 hessian_coeff_fromobjective_q_terms(m1, m2, q_a, q_b, q_ab),
                 hessian_via_tower(m1, m2, q_a, q_b, q_ab),
             );
-            let production_ns = best_ns(500_000, q_a, |q| {
-                hessian_coeff_fromobjective_q_terms(m1, m2, q, q_b, q_ab)
-            });
-            let generic_ns = best_ns(500_000, q_a, |q| hessian_via_tower(m1, m2, q, q_b, q_ab));
+            let timing = paired_interleaved(
+                15,
+                200_000,
+                0x9320_0002,
+                |nudge| hessian_coeff_fromobjective_q_terms(m1, m2, q_a + nudge, q_b, q_ab),
+                |nudge| hessian_via_tower(m1, m2, q_a + nudge, q_b, q_ab),
+            );
             // At order 2 the top-coefficient extraction and the tiny
             // `Tower2<2>` are the same handful of fused multiplies — measured
             // identical to ±0.2% on every acceptance host — so there is no
@@ -528,14 +515,13 @@ mod oracle_tests {
             // test lane. The parity/correctness checks around it are
             // build-independent and still run in every build.
             assert!(
-                cfg!(debug_assertions) || production_ns <= generic_ns * 1.05,
-                "order-2 faa_top slower than the Tower2 it specializes: \
-                 faa_top={production_ns:.2} ns/row tower={generic_ns:.2} ns/row"
+                cfg!(debug_assertions) || timing.median_ratio() >= 1.0 / 1.05,
+                "order-2 faa_top slower than the Tower2 it specializes: {}",
+                timing.summary("faa_top", "tower"),
             );
             eprintln!(
-                "BINOMIAL-Q-COEFFS-932 order=2 production_faatop={production_ns:.2} ns/row \
-                 generic_tower={generic_ns:.2} ns/row tower_over_faatop={:.6}",
-                generic_ns / production_ns,
+                "BINOMIAL-Q-COEFFS-932 order=2 {}",
+                timing.summary("production_faatop", "generic_tower"),
             );
         }
 
@@ -553,18 +539,20 @@ mod oracle_tests {
                 ),
                 tower_order3(m1, m2, m3, dq, q_a, q_b, q_ab, dq_a, dq_b, dq_ab),
             );
-            let production_ns = best_ns(150_000, q_a, |q| {
-                directionalhessian_coeff_fromobjective_q_terms(
-                    m1, m2, m3, dq, q, q_b, q_ab, dq_a, dq_b, dq_ab,
-                )
-            });
-            let generic_ns = best_ns(150_000, q_a, |q| {
-                tower_order3(m1, m2, m3, dq, q, q_b, q_ab, dq_a, dq_b, dq_ab)
-            });
+            let timing = paired_interleaved(
+                15,
+                60_000,
+                0x9320_0003,
+                |nudge| {
+                    directionalhessian_coeff_fromobjective_q_terms(
+                        m1, m2, m3, dq, q_a + nudge, q_b, q_ab, dq_a, dq_b, dq_ab,
+                    )
+                },
+                |nudge| tower_order3(m1, m2, m3, dq, q_a + nudge, q_b, q_ab, dq_a, dq_b, dq_ab),
+            );
             eprintln!(
-                "BINOMIAL-Q-COEFFS-932 order=3 production_faatop={production_ns:.2} ns/row \
-                 generic_tower={generic_ns:.2} ns/row generic_tower_over_faatop={:.6}",
-                generic_ns / production_ns,
+                "BINOMIAL-Q-COEFFS-932 order=3 {}",
+                timing.summary("production_faatop", "generic_tower"),
             );
         }
 
@@ -600,22 +588,26 @@ mod oracle_tests {
                     dq_bv, d2q_a_uv, d2q_b_uv, dq_ab_u, dq_abv, d2q_ab_uv,
                 ),
             );
-            let production_ns = best_ns(50_000, q_a, |q| {
-                second_directionalhessian_coeff_fromobjective_q_terms(
-                    m1, m2, m3, m4, dq_u, dqv, d2q_uv, q, q_b, q_ab, dq_a_u, dq_av, dq_b_u, dq_bv,
-                    d2q_a_uv, d2q_b_uv, dq_ab_u, dq_abv, d2q_ab_uv,
-                )
-            });
-            let generic_ns = best_ns(50_000, q_a, |q| {
-                tower_order4(
-                    m1, m2, m3, m4, dq_u, dqv, d2q_uv, q, q_b, q_ab, dq_a_u, dq_av, dq_b_u, dq_bv,
-                    d2q_a_uv, d2q_b_uv, dq_ab_u, dq_abv, d2q_ab_uv,
-                )
-            });
+            let timing = paired_interleaved(
+                15,
+                20_000,
+                0x9320_0004,
+                |nudge| {
+                    second_directionalhessian_coeff_fromobjective_q_terms(
+                        m1, m2, m3, m4, dq_u, dqv, d2q_uv, q_a + nudge, q_b, q_ab, dq_a_u, dq_av,
+                        dq_b_u, dq_bv, d2q_a_uv, d2q_b_uv, dq_ab_u, dq_abv, d2q_ab_uv,
+                    )
+                },
+                |nudge| {
+                    tower_order4(
+                        m1, m2, m3, m4, dq_u, dqv, d2q_uv, q_a + nudge, q_b, q_ab, dq_a_u, dq_av,
+                        dq_b_u, dq_bv, d2q_a_uv, d2q_b_uv, dq_ab_u, dq_abv, d2q_ab_uv,
+                    )
+                },
+            );
             eprintln!(
-                "BINOMIAL-Q-COEFFS-932 order=4 production_faatop={production_ns:.2} ns/row \
-                 generic_tower={generic_ns:.2} ns/row generic_tower_over_faatop={:.6}",
-                generic_ns / production_ns,
+                "BINOMIAL-Q-COEFFS-932 order=4 {}",
+                timing.summary("production_faatop", "generic_tower"),
             );
         }
     }
@@ -626,8 +618,6 @@ mod oracle_tests {
     /// outlined ABI and are measured as paired, alternating-order medians.
     #[test]
     fn release_measure_binomial_q_order4_faa_top_vs_strongest_hand_932() {
-        use std::hint::black_box;
-        use std::time::Instant;
 
         #[inline(never)]
         fn production_order4(x: [f64; 19]) -> f64 {
@@ -669,42 +659,7 @@ mod oracle_tests {
                 + m1 * d2q_ab_uv
         }
 
-        fn paired_medians<const N: usize>(
-            input: [f64; N],
-            iterations: usize,
-            production: fn([f64; N]) -> f64,
-            hand: fn([f64; N]) -> f64,
-        ) -> (f64, f64) {
-            let mut production_samples = [0.0; 7];
-            let mut hand_samples = [0.0; 7];
-            for round in 0..7 {
-                let production_first = round % 2 == 0;
-                for side in 0..2 {
-                    let run_production = production_first == (side == 0);
-                    let mut x = input;
-                    let mut checksum = 0.0;
-                    let started = Instant::now();
-                    for _ in 0..iterations {
-                        x[0] += checksum * 1e-18;
-                        checksum += if run_production {
-                            production(black_box(x))
-                        } else {
-                            hand(black_box(x))
-                        };
-                    }
-                    black_box(checksum);
-                    let elapsed = started.elapsed().as_secs_f64() * 1e9 / iterations as f64;
-                    if run_production {
-                        production_samples[round] = elapsed;
-                    } else {
-                        hand_samples[round] = elapsed;
-                    }
-                }
-            }
-            production_samples.sort_by(f64::total_cmp);
-            hand_samples.sort_by(f64::total_cmp);
-            (production_samples[3], hand_samples[3])
-        }
+        use gam_math::paired_timing::paired_interleaved;
 
         let mut next = stream(0x9320_0bad);
         let input = std::array::from_fn(|_| next());
@@ -712,8 +667,22 @@ mod oracle_tests {
         let hand_value = hand_order4(input);
         close("order4 strongest hand", production_value, hand_value);
 
-        let (production_ns, hand_ns) =
-            paired_medians(input, 400_000, production_order4, hand_order4);
+        // This gate ALREADY interleaved (median-of-7 with alternating order), so
+        // the migration is not about ordering here -- it is about what the old
+        // helper could not report. `paired_medians` returned two medians and
+        // nothing else, so a verdict carried no way to tell whether its margin
+        // was larger than the measurement could resolve. `wins_fraction` and
+        // `ratio_resolution` are exactly that missing half, and this cell is one
+        // of the three release-gate failures where it decides the reading.
+        let timing = paired_interleaved(15, 60_000, 0x9320_0BAD, |nudge| {
+            let mut x = input;
+            x[0] += nudge;
+            production_order4(x)
+        }, |nudge| {
+            let mut x = input;
+            x[0] += nudge;
+            hand_order4(x)
+        });
         // #932: release-only -- but NOT because the test lane is unoptimized.
         // It is not: [profile.test] sets opt-level = 2. The difference is
         // CODEGEN LAYOUT. [profile.test.package.gam-models] sets
@@ -728,14 +697,15 @@ mod oracle_tests {
         // test lane. The parity/correctness checks around it are
         // build-independent and still run in every build.
         assert!(
-            cfg!(debug_assertions) || hand_ns > production_ns,
+            cfg!(debug_assertions)
+                || (timing.median_ratio() > 1.0 && timing.wins_fraction() >= 0.75),
             "order-four universal partition lowering must beat the strongest historical hand \
-             factorization: production={production_ns:.3} ns hand={hand_ns:.3} ns"
+             factorization: {}",
+            timing.summary("production", "strongest_hand"),
         );
         eprintln!(
-            "BINOMIAL-Q-HAND-932 order=4 production={production_ns:.3} ns/row \
-             strongest_hand={hand_ns:.3} ns/row hand_over_production={:.6}",
-            hand_ns / production_ns,
+            "BINOMIAL-Q-HAND-932 order=4 {}",
+            timing.summary("production", "strongest_hand"),
         );
     }
 }
