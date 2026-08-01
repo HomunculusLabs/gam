@@ -2029,6 +2029,105 @@ pub(crate) fn update_joint_trust_region_radius(
     }
 }
 
+/// Whether a cycle's rejections are a STEP-LENGTH fault or a
+/// MODEL-CONSISTENCY fault, decided from the trust ratio's behaviour under
+/// refinement rather than from its magnitude at any one attempt.
+///
+/// The trust ratio is `rho = (F(b) - F(b+d)) / (rhs·d - ½dᵀHd)`. If `rhs` is
+/// the gradient of the same `F` the numerator measures, then as `‖d‖ -> 0`
+/// both numerator and denominator are dominated by the SAME first-order term
+/// `g·d`, so `rho -> 1`. That limit is a property of the model being
+/// consistent with the objective, and it holds whatever the curvature is,
+/// whatever the constraints are, and however bad the current iterate is.
+///
+/// So a ladder that quarters the step and still reports `rho` sitting a fixed
+/// distance from 1 is not reporting "the region is too large". It is reporting
+/// that the two sides are measuring different functions — a wrong gradient, a
+/// wrong objective, a row measure that differs between them, or a step whose
+/// realized move is not the `d` the model was given. Shrinking cannot fix any
+/// of those, which is why such a cycle spends its whole attempt budget and
+/// terminates at the radius floor.
+///
+/// Measured on the #2695 witness (survival location-scale linkwiggle): across
+/// the six decades of step size from `1e-8` to `1e-3` the median `rho` per
+/// decade is `-0.092, -0.108, -0.070, -0.070, -0.091, -0.100` — flat, and
+/// nowhere near 1. That is the whole diagnosis of the fit's remaining
+/// "objective rejections", and before this it had to be re-derived by hand
+/// from a 4,900-line trace.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct TrustRatioRefinementWitness {
+    /// Smallest `‖d‖` seen with a finite `rho` and a strictly positive
+    /// predicted reduction (below that the ratio is noise over noise).
+    finest_step_norm: f64,
+    /// `rho` at that step.
+    finest_rho: f64,
+    /// Largest `‖d‖` seen under the same conditions, and its `rho`.
+    coarsest_step_norm: f64,
+    coarsest_rho: f64,
+    observations: usize,
+}
+
+/// How far `rho` may sit from 1 at the finest resolved step before the cycle
+/// is called model-inconsistent. Generous: a correct model at a step small
+/// enough to be first-order-dominated lands within a few percent, and the
+/// measured pathology sits at `|rho - 1| > 1`.
+const TRUST_RATIO_CONSISTENCY_BAND: f64 = 0.5;
+
+/// The ladder must actually span some resolution for its endpoints to say
+/// anything about a limit. Two decades is the smallest span on which "rho did
+/// not move toward 1" is a statement rather than a coincidence.
+const TRUST_RATIO_REFINEMENT_DECADES: f64 = 2.0;
+
+impl TrustRatioRefinementWitness {
+    pub(crate) fn observe(&mut self, step_norm: f64, rho: f64, predicted_reduction: f64) {
+        if !(step_norm.is_finite() && step_norm > 0.0)
+            || !rho.is_finite()
+            || !(predicted_reduction.is_finite() && predicted_reduction > 0.0)
+        {
+            return;
+        }
+        if self.observations == 0 || step_norm < self.finest_step_norm {
+            self.finest_step_norm = step_norm;
+            self.finest_rho = rho;
+        }
+        if self.observations == 0 || step_norm > self.coarsest_step_norm {
+            self.coarsest_step_norm = step_norm;
+            self.coarsest_rho = rho;
+        }
+        self.observations += 1;
+    }
+
+    /// `Some(reason)` when the ladder refined far enough to be conclusive AND
+    /// `rho` failed to approach 1. `None` means either not enough span or a
+    /// ratio that behaved — in which case the rejections really are about step
+    /// length and the ordinary trust-region story applies.
+    pub(crate) fn model_inconsistency(&self) -> Option<String> {
+        if self.observations < 2 {
+            return None;
+        }
+        let decades = (self.coarsest_step_norm / self.finest_step_norm).log10();
+        if !(decades.is_finite() && decades >= TRUST_RATIO_REFINEMENT_DECADES) {
+            return None;
+        }
+        if (self.finest_rho - 1.0).abs() <= TRUST_RATIO_CONSISTENCY_BAND {
+            return None;
+        }
+        Some(format!(
+            "trust ratio did not approach 1 under refinement: rho={:.6e} at |d|={:.6e} \
+             after {:.1} decades of shrinking from rho={:.6e} at |d|={:.6e}. \
+             rho -> 1 as |d| -> 0 holds for ANY model whose rhs is the gradient of the \
+             objective the numerator measures, so this is a first-order disagreement \
+             between the two -- not a region that is too large, and not something a \
+             smaller radius can repair",
+            self.finest_rho,
+            self.finest_step_norm,
+            decades,
+            self.coarsest_rho,
+            self.coarsest_step_norm,
+        ))
+    }
+}
+
 pub(crate) fn joint_objective_roundoff_slack(old_objective: f64, trial_objective: f64) -> f64 {
     (64.0 * f64::EPSILON * (1.0 + old_objective.abs() + trial_objective.abs())).max(1.0e-10)
 }

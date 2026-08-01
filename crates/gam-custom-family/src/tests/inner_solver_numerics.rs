@@ -2033,6 +2033,96 @@ pub(crate) fn a_blocked_active_face_is_an_answer_not_a_solver_error() {
 /// the witness fit re-derived the same zero.
 const JOINT_TRUST_MAX_ATTEMPTS_FOR_TEST: usize = 24;
 
+/// gam#2695. `rho -> 1` as `|d| -> 0` is a property of the MODEL being the
+/// objective's model — both sides of the ratio become the same first-order
+/// term. A ladder that shrinks and leaves `rho` parked away from 1 is
+/// therefore reporting a first-order disagreement, which no radius repairs.
+///
+/// The numbers here are the measured medians per decade from the #2695
+/// witness's own trust-region trace (survival location-scale linkwiggle,
+/// 4,964 log lines): flat at roughly `-0.07` from `|d| = 1e-3` down to
+/// `1e-8`.
+#[test]
+pub(crate) fn a_trust_ratio_that_ignores_refinement_is_named_a_model_fault() {
+    let measured = [
+        (1.0e-3_f64, -0.1003_f64),
+        (1.0e-4, -0.0906),
+        (1.0e-5, -0.0698),
+        (1.0e-6, -0.0697),
+        (1.0e-7, -0.1080),
+        (1.0e-8, -0.0918),
+    ];
+    let mut witness = TrustRatioRefinementWitness::default();
+    for (step, rho) in measured {
+        witness.observe(step, rho, 1.0);
+    }
+    let reason = witness
+        .model_inconsistency()
+        .expect("a ratio flat at -0.07 over five decades must be called out");
+    assert!(
+        reason.contains("first-order disagreement"),
+        "the verdict must name the fault, got: {reason}"
+    );
+    assert!(
+        reason.contains("-9.180000e-2") || reason.contains("9.180000e-2"),
+        "the verdict must carry the finest-step rho, got: {reason}"
+    );
+}
+
+/// The converse, and the reason this cannot fire on a healthy solve: a model
+/// that IS the objective's model has `rho` climb to 1 as the step shrinks, and
+/// the witness stays silent no matter how ugly the coarse end was.
+#[test]
+pub(crate) fn a_trust_ratio_that_converges_to_one_is_not_a_model_fault() {
+    let mut witness = TrustRatioRefinementWitness::default();
+    for (step, rho) in [
+        (1.0e-1_f64, -3.4_f64),
+        (1.0e-2, 0.21),
+        (1.0e-3, 0.83),
+        (1.0e-4, 0.98),
+        (1.0e-5, 0.999),
+    ] {
+        witness.observe(step, rho, 1.0);
+    }
+    assert_eq!(witness.model_inconsistency(), None);
+}
+
+/// Two guards against a false accusation. A ladder that never refined cannot
+/// speak about a limit, and neither can one whose ratios were noise over noise
+/// — `predicted_reduction <= 0` attempts are not observations of a ratio at
+/// all, so they must not establish the span either.
+#[test]
+pub(crate) fn a_model_fault_needs_a_refinement_span_of_real_observations() {
+    let mut narrow = TrustRatioRefinementWitness::default();
+    narrow.observe(1.0e-3, -0.07, 1.0);
+    narrow.observe(5.0e-4, -0.07, 1.0);
+    assert_eq!(
+        narrow.model_inconsistency(),
+        None,
+        "half a decade of shrinking says nothing about a limit"
+    );
+
+    let mut single = TrustRatioRefinementWitness::default();
+    single.observe(1.0e-8, -0.07, 1.0);
+    assert_eq!(single.model_inconsistency(), None);
+
+    // The wide end is a real observation; the fine end is a non-positive
+    // prediction, which is not a ratio. Without it the span is zero.
+    let mut noise_only = TrustRatioRefinementWitness::default();
+    noise_only.observe(1.0e-3, -0.07, 1.0);
+    noise_only.observe(1.0e-9, -0.07, -1.0e-14);
+    noise_only.observe(1.0e-9, -0.07, f64::NAN);
+    assert_eq!(
+        noise_only.model_inconsistency(),
+        None,
+        "a non-positive or non-finite predicted reduction is not an observation of rho"
+    );
+
+    // Add one genuine fine observation and the same ladder now speaks.
+    noise_only.observe(1.0e-9, -0.07, 1.0);
+    assert!(noise_only.model_inconsistency().is_some());
+}
+
 /// gam#979 (per-block exact-Newton arm; the bernoulli marginal-slope binary
 /// path). The per-block left-hand side is `lhs = H_data + S` with `S ⪰ 0` an
 /// over-smoothed block penalty. A naive Gershgorin bound on the *penalized*

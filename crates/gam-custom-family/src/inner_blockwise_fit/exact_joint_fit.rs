@@ -424,6 +424,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // the `joint_newton_collapsed_trust_region_all_reject_exits_before_grinding_budget`
     // unit test assert against one source of truth.
     let mut consecutive_all_reject_at_floor_cycles: usize = 0;
+    // Set by the most recent fully-rejected cycle whose trust ratio failed to
+    // approach 1 under refinement. Carried out of the cycle loop so the inner
+    // solve's refusal can name the fault as a model/objective disagreement
+    // instead of leaving the four reject counters to imply a step-length
+    // problem that shrinking would have fixed (gam#2695).
+    let mut trust_ratio_model_inconsistency: Option<String> = None;
     let mut last_joint_math: Option<JointNewtonMathDiagnostic> = None;
     // Cross-cycle cache of the joint Jeffreys/Firth triple `(β_key, ∇Φ, H_Φ)`
     // (gam#729/#826/#808). Computing `(∇Φ, H_Φ)` costs `p` family
@@ -2323,6 +2329,13 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // arm), so every converging fit is byte-identical.
         let mut feasibility_rejects = 0usize;
         let mut first_likelihood_reject: Option<String> = None;
+        // Watch the trust ratio across the attempt ladder, so a fully-rejected
+        // cycle can say WHICH kind of fault it hit. See the type's doc: `rho`
+        // tends to 1 under refinement for any model whose rhs is the gradient
+        // of the objective the numerator measures, so a ladder that shrinks
+        // two decades without `rho` moving toward 1 is a first-order
+        // disagreement, and no radius repairs it.
+        let mut trust_ratio_witness = TrustRatioRefinementWitness::default();
         // Snapshot every mutable input to the trust-region attempt loop
         // before it can shrink a radius. A later fully-rejected cycle is an
         // exact fixed point only if this state and the realized first trial
@@ -3360,6 +3373,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 old_objective,
                 objective_tol,
             );
+            trust_ratio_witness.observe(step_norm, trust_update.rho, predicted_reduction);
             let old_radius = joint_trust_radius;
             // Classify the outcome of this attempt so the diagnostic line
             // says *why* the step was taken or rejected rather than just
@@ -3667,6 +3681,23 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 first_likelihood_reject.as_deref().unwrap_or("none"),
                 cycle_started.elapsed().as_secs_f64(),
             );
+            // WHICH KIND OF FAULT (gam#2695). The four reject counters say
+            // which GATE refused; they do not say whether refusing was the
+            // right answer. The trust ratio's behaviour under refinement does:
+            // it tends to 1 as the step shrinks for any model whose rhs is the
+            // gradient of the objective the numerator measures. A ladder that
+            // shrank two decades without rho moving toward 1 is reporting a
+            // first-order disagreement between the model and the objective,
+            // and no radius can repair that -- which is exactly why such a
+            // cycle spends its whole attempt budget and lands on the floor.
+            if let Some(inconsistency) = trust_ratio_witness.model_inconsistency() {
+                trust_ratio_model_inconsistency = Some(inconsistency.clone());
+                log::info!(
+                    "[PIRLS/joint-Newton/model-consistency] cycle={} {}",
+                    cycle,
+                    inconsistency,
+                );
+            }
             // Restore original betas
             for (b, old) in old_beta.iter().enumerate() {
                 states[b].beta.assign(old);
@@ -3916,10 +3947,22 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 {
                     *termination_reason = typed_termination_reason;
                 }
+                // WHY no step was reachable, when the ladder can tell us
+                // (gam#2695). "No accepted descent step is reachable under the
+                // current local model" is true either way, but it reads as a
+                // hard problem when the model may simply not be the objective's
+                // model at all. If rho refused to approach 1 while the step
+                // shrank two decades, say so here: that is a first-order
+                // disagreement, it is a defect rather than a difficulty, and it
+                // sends the reader to the gradient instead of to the radius.
+                let model_consistency_note = trust_ratio_model_inconsistency
+                    .as_deref()
+                    .map(|reason| format!(" MODEL-CONSISTENCY FAULT: {reason}."))
+                    .unwrap_or_default();
                 log::warn!(
                     "[PIRLS/joint-Newton convergence] cycle {:>3} | fully-rejected stall \
                      early-exit: every trust-region attempt rejected (by any of the model / \
-                     likelihood / objective paths) — {} at joint trust radius {:.3e}. Reverted β \
+                     likelihood / objective paths) — {} at joint trust radius {:.3e}.{} Reverted β \
                      + identical Newton system mean the next cycle's step is byte-identical to \
                      this one's; no accepted descent step is reachable from this iterate under the \
                      current local model. {}. The strict KKT residual has not converged, so \
@@ -3927,6 +3970,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     cycle,
                     stall_trigger,
                     joint_trust_radius,
+                    model_consistency_note,
                     last_math_summary,
                 );
                 converged = false;
