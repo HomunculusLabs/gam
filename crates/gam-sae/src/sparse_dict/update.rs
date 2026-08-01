@@ -5984,7 +5984,11 @@ mod decoder_recycle_latch_scope_2742_tests {
         // not be readmitted by any of them; `run` may legitimately report typed
         // non-convergence at this budget, which is irrelevant to the latch.
         for iteration in 0..3usize {
-            let _ = run(x.view(), &config, &mut recycle);
+            // `run` may legitimately report typed non-convergence at this budget;
+            // the latch claim holds either way, so the outcome is named and
+            // dropped rather than discarded by `_` (the ban scanner rejects
+            // `let _ =`, and rightly: it hides which outcome was ignored).
+            drop(run(x.view(), &config, &mut recycle));
             assert!(
                 !recycle.admitted(),
                 "inner run {iteration} readmitted a correction already measured as a loss"
@@ -6001,7 +6005,9 @@ mod decoder_recycle_latch_scope_2742_tests {
         let config = config(k, 1);
         let mut recycle = DecoderRecycleSpace::new(k);
         assert!(recycle.admitted(), "a fresh recycle space must be admitted");
-        let _ = run(x.view(), &config, &mut recycle);
+        // Same contract as above: the run's own outcome is not what this test is
+        // about, and `drop` says so where `let _ =` would only hide it.
+        drop(run(x.view(), &config, &mut recycle));
     }
 
     #[test]
