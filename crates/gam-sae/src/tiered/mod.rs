@@ -59,8 +59,8 @@
 mod code_space;
 mod fit;
 pub use code_space::{
-    CodeSpacePromotionReport, harvest_code_space_pair_promotions, harvest_code_space_promotions,
-    linear_distortion_floor,
+    CensusPairVerdict, CodeSpacePromotionReport, PairChartFit, fit_pair_chart,
+    harvest_code_space_pair_promotions, harvest_code_space_promotions, linear_distortion_floor,
 };
 pub use fit::{
     LinearPeel, LinearPeelConfig, LinearPeelState, TieredFitConfig, TieredFitReport,

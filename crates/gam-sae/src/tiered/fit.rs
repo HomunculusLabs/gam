@@ -579,7 +579,7 @@ pub fn fit_tiered(
         code_space
             .pair_proposals
             .iter()
-            .map(|(_a, _b, proposal)| proposal),
+            .map(|verdict| &verdict.proposal),
     );
     for proposal in census_proposals {
         let evidence = MoveEvidence::from_dl_bits(proposal.dl_old - proposal.dl_new);

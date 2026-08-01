@@ -37,11 +37,17 @@
 //! wants from a manifold SAE: how much of the dictionary curves, feature by
 //! feature, with the refusals recorded next to the acceptances.
 
-use ndarray::{Array2, ArrayView2};
+use ndarray::{Array2, ArrayView2, Axis};
 
 use crate::atom_codes::SparseAtomCodes;
+use crate::front_door::admit_topk_manifold;
 use crate::manifold::curve_promotion::{
     CurvePromotionProposal, LinearCommunity, PromotionContext, propose_curve_promotion,
+};
+use crate::manifold::{
+    SaeSupportOuterRequest, SaeSupportSeedRequest, SaeSupportTermSeedRequest,
+    build_sae_support_seed, build_sae_support_term_seed, run_sae_support_outer,
+    sae_support_effective_atom_dims,
 };
 use crate::sparse_dict::BlockSparseFit;
 
@@ -60,7 +66,7 @@ pub struct CodeSpacePromotionReport {
     /// shape the Gemma Scope census found as "pairs of straight atoms whose
     /// joint amplitude law is a shell") is invisible to every single-block
     /// community; the union community is where it lives.
-    pub pair_proposals: Vec<(usize, usize, CurvePromotionProposal)>,
+    pub pair_proposals: Vec<CensusPairVerdict>,
     /// Total blocks in the Tier-1 dictionary (`G`).
     pub n_blocks_scanned: usize,
     /// Blocks whose community yielded a proposal (the eligible denominator).
@@ -265,11 +271,39 @@ pub fn harvest_code_space_promotions(
             continue;
         };
         n_communities += 1;
-        if proposal.accept {
+        let observed_saving = proposal.dl_old - proposal.dl_new;
+        let (ran, exceed) = if proposal.accept {
             n_accepted += 1;
-            dl_saved_bits += proposal.dl_old - proposal.dl_new;
-        }
-        pair_proposals.push((ga, gb, proposal));
+            dl_saved_bits += observed_saving;
+            pair_permutation_null(
+                atoms.view(),
+                codes.view(),
+                ga,
+                &ctx,
+                proposal.verdict.z_below_gaussian,
+                PAIR_NULL_PERMUTATIONS,
+            )?
+        } else {
+            (0, 0)
+        };
+        pair_proposals.push(CensusPairVerdict {
+            atom_a: ga,
+            atom_b: gb,
+            proposal,
+            null_permutations: ran,
+            null_exceedances: exceed,
+            null_p_hat: if ran > 0 {
+                (1.0 + exceed as f64) / (1.0 + ran as f64)
+            } else {
+                f64::NAN
+            },
+            // The tiered block-pair census defers topology to the joint-fit
+            // race that consumes its births; the standalone adjudication lives
+            // on the foreign-dictionary entry.
+            topology_kind: None,
+            topology_dim: None,
+            topology_error: None,
+        });
     }
 
     let fraction_curved = if n_communities > 0 {
@@ -290,6 +324,126 @@ pub fn harvest_code_space_promotions(
         l0,
     })
 }
+
+/// One adjudicated co-firing pair: the atomic DL proposal plus its permutation
+/// null. The null couples atom `a`'s weights to a deterministically PERMUTED
+/// copy of atom `b`'s weights over the same firing rows — both marginals and
+/// the firing pattern are preserved exactly; only the joint law is destroyed —
+/// and re-runs the identical accept rule. `null_p_hat` is the add-one estimate
+/// `(1 + #{null saving ≥ observed}) / (1 + permutations)`.
+///
+/// Cyclic ROTATIONS are deliberately not used: activation rows are
+/// time-ordered, so a rotation of `sin θ` against `cos θ` is still a smooth
+/// Lissajous trajectory (an ellipse at equal frequency) — a null that preserves
+/// the very structure under test is not a null — and so is any AFFINE
+/// permutation, which maps an arithmetic phase grid to a Lissajous curve (see
+/// [`hashed_permutation`]). The hash-order permutation scrambles the ordering
+/// deterministically, so identical inputs give identical verdicts (no RNG).
+#[derive(Clone, Debug)]
+pub struct CensusPairVerdict {
+    /// First atom (or block) of the pair, the smaller index.
+    pub atom_a: usize,
+    /// Second atom (or block) of the pair.
+    pub atom_b: usize,
+    /// The atomic bits adjudication of the observed joint cloud.
+    pub proposal: CurvePromotionProposal,
+    /// Number of permutation nulls run (0 when the observed pair was refused —
+    /// there is no discovery to error-control).
+    pub null_permutations: u32,
+    /// Nulls whose radial-concentration z matched or beat the observed one
+    /// (the coupling-sensitive statistic; the DL saving itself is a
+    /// marginal-moment functional every permutation preserves exactly).
+    pub null_exceedances: u32,
+    /// `(1 + exceedances) / (1 + permutations)`; NaN when no nulls were run.
+    pub null_p_hat: f64,
+    /// REML topology-race verdict on the accepted pair's ambient image
+    /// ([`crate::structure_harvest::discover_primary_atom_topologies`], the
+    /// same evidence race the seed dictionary uses): the winning basis kind's
+    /// `Debug` label (e.g. `Periodic` for a genuine ring, `EuclideanPatch` for
+    /// a flat cloud the DL ledger accepted on amplitude-law concentration
+    /// alone). `None` when the pair was refused or the race declined.
+    pub topology_kind: Option<String>,
+    /// Latent dimension the winning topology carries; `None` with the above.
+    pub topology_dim: Option<usize>,
+    /// The race's own refusal text when it declined to adjudicate (kept
+    /// verbatim so a declined race never reads as a flat verdict).
+    pub topology_error: Option<String>,
+}
+
+/// Deterministic hash-order permutation family for the pair null: the `m`-th
+/// permutation of `0..f` sorts indices by `splitmix64(i ⊕ (m+1)·2⁴⁸)`.
+///
+/// An AFFINE family `i ↦ (q·i + m) mod f` is NOT a valid null here, and this
+/// was measured, not theorized: on evenly-spaced ring phases an affine map
+/// sends `sin θᵢ` to `sin(q·θᵢ + φ)` — a Lissajous curve, which codes as well
+/// as the ring itself (50/63 "nulls" beat the planted ring). Structure-free
+/// scrambling needs a hash order; splitmix64 is deterministic (no RNG state),
+/// so identical inputs still give identical verdicts.
+fn hashed_permutation(f: usize, m: usize) -> Vec<usize> {
+    fn splitmix64(mut z: u64) -> u64 {
+        z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    let salt = ((m as u64) + 1) << 48;
+    let mut idx: Vec<usize> = (0..f).collect();
+    idx.sort_by_key(|&i| splitmix64(i as u64 ^ salt));
+    idx
+}
+
+/// Run the permutation null for one accepted pair cloud (`f×2`).
+///
+/// The null statistic is the ring verdict's radial-concentration z
+/// (`z_below_gaussian`), NOT the DL saving — and this distinction was paid for:
+/// the atomic bits ledger is a functional of the MARGINAL second moments
+/// (`var α`, `var β`, `m₂`), all of which a permutation preserves exactly, so
+/// every scrambled coupling carries the identical saving and a "null on bits"
+/// only counts how often the geometry screens pass on the corner-concentrated
+/// independent coupling of two bimodal marginals (measured p̂ ≈ 0.8 on a
+/// PLANTED ring). All coupling sensitivity lives in the radial law; the null
+/// therefore competes on it.
+fn pair_permutation_null(
+    atoms: ArrayView2<'_, f64>,
+    codes: ArrayView2<'_, f64>,
+    block_id: usize,
+    ctx: &PromotionContext,
+    observed_ring_z: f64,
+    n_perms: usize,
+) -> Result<(u32, u32), String> {
+    let f = codes.nrows();
+    let s = codes.ncols();
+    let split = s / 2; // columns [split..s) belong to the second atom/block
+    let mut exceed = 0u32;
+    let mut ran = 0u32;
+    for m in 1..=n_perms {
+        let perm = hashed_permutation(f, m);
+        let mut null_codes = codes.to_owned();
+        for i in 0..f {
+            let j = perm[i];
+            for c in split..s {
+                null_codes[[i, c]] = codes[[j, c]];
+            }
+        }
+        let community = LinearCommunity {
+            block_id,
+            atoms,
+            codes: null_codes.view(),
+        };
+        ran += 1;
+        if let Some(null_prop) = propose_curve_promotion(community, ctx)? {
+            if null_prop.verdict.z_below_gaussian >= observed_ring_z {
+                exceed += 1;
+            }
+        }
+    }
+    Ok((ran, exceed))
+}
+
+/// Permutation-null budget per accepted pair. 63 gives add-one p̂ resolution
+/// 1/64 — enough to separate "survives" from "artifact" per pair; family-level
+/// error control across pairs is the e-BH layer's job downstream.
+const PAIR_NULL_PERMUTATIONS: usize = 63;
 
 /// The atom-level census over ANY dictionary: every co-firing ATOM pair of an
 /// arbitrary atom bank (`decoder`, `K×P`) with solved codes on it is adjudicated
@@ -425,11 +579,63 @@ pub fn harvest_code_space_pair_promotions(
             continue;
         };
         n_communities += 1;
-        if proposal.accept {
+        let observed_saving = proposal.dl_old - proposal.dl_new;
+        let mut topology_kind = None;
+        let mut topology_dim = None;
+        let mut topology_error = None;
+        let (ran, exceed) = if proposal.accept {
             n_accepted += 1;
-            dl_saved_bits += proposal.dl_old - proposal.dl_new;
-        }
-        pair_proposals.push((atom_a, atom_b, proposal));
+            dl_saved_bits += observed_saving;
+            // Topology adjudication of the ACCEPTED pair: race the pair's
+            // ambient image through the seed dictionary's own evidence race,
+            // so "curved" never rests on the DL ledger alone (an exclusion
+            // mixture also concentrates its amplitude law; the race is where
+            // ring vs flat is decided by REML).
+            if f >= 16 {
+                let image = pair_codes.dot(&atoms);
+                match crate::structure_harvest::discover_primary_atom_topologies(
+                    image.view(),
+                    &vec![0usize; f],
+                    1,
+                    &[2],
+                ) {
+                    Ok(choices) => {
+                        if let Some(choice) = choices.first() {
+                            topology_kind = Some(format!("{:?}", choice.basis_kind));
+                            topology_dim = Some(choice.latent_dim);
+                        }
+                    }
+                    Err(error) => topology_error = Some(error),
+                }
+            } else {
+                topology_error = Some(format!("race needs >= 16 rows, pair has {f}"));
+            }
+            pair_permutation_null(
+                atoms.view(),
+                pair_codes.view(),
+                atom_a,
+                &ctx,
+                proposal.verdict.z_below_gaussian,
+                PAIR_NULL_PERMUTATIONS,
+            )?
+        } else {
+            (0, 0)
+        };
+        pair_proposals.push(CensusPairVerdict {
+            atom_a,
+            atom_b,
+            proposal,
+            null_permutations: ran,
+            null_exceedances: exceed,
+            null_p_hat: if ran > 0 {
+                (1.0 + exceed as f64) / (1.0 + ran as f64)
+            } else {
+                f64::NAN
+            },
+            topology_kind,
+            topology_dim,
+            topology_error,
+        });
     }
     let fraction_curved = if n_communities > 0 {
         n_accepted as f64 / n_communities as f64
@@ -447,6 +653,118 @@ pub fn harvest_code_space_pair_promotions(
         fraction_curved,
         tolerance,
         l0,
+    })
+}
+
+/// A REML-fitted curved chart on one accepted pair's 2-D code cloud: the full
+/// GAM machinery (grouped-LAML outer engine selecting the smoothing strengths,
+/// certified inner fixed point, outer stationarity certificate) applied to the
+/// discovery the census made. This is what upgrades a census verdict into a
+/// fitted object with a coordinate: the chart's smoothing is chosen by REML,
+/// never by a knob, and the certificate travels with the fit.
+#[derive(Clone, Debug)]
+pub struct PairChartFit {
+    /// Per-retained-atom smoothing strengths selected by the outer engine.
+    pub lambda_smooth: Vec<f64>,
+    /// Terminal LAML criterion at the certified smoothing optimum.
+    pub criterion: f64,
+    /// Chart explained variance of the centered cloud (`1 − RSS/TSS`).
+    pub explained_variance: f64,
+    /// Outer (smoothing-selection) iterations to the certified optimum.
+    pub outer_iterations: usize,
+    /// Whether the outer stationarity certificate certifies.
+    pub certified: bool,
+    /// Whether the inner fixed point recurred.
+    pub recurred: bool,
+    /// Retained curved atoms after dead-support pruning (≥ 1 on success).
+    pub retained_atoms: usize,
+}
+
+/// Fit a REML-smoothed periodic chart to one pair's joint code cloud (`f×2`,
+/// the two co-firing weights), through the canonical overcomplete support-sparse
+/// engine — the same lane the public curved fit uses, at the smallest admitted
+/// width (`K = 3 > P = 2`, TopK `s = 1`). The cloud is centered here and the
+/// chart fits the centered target; `random_state` seeds the deterministic
+/// support routing.
+pub fn fit_pair_chart(
+    cloud: ArrayView2<'_, f64>,
+    random_state: u64,
+) -> Result<PairChartFit, String> {
+    let (f, width) = cloud.dim();
+    if width != 2 {
+        return Err(format!("fit_pair_chart: cloud must be f×2, got f={f}×{width}"));
+    }
+    if f < 16 {
+        return Err(format!(
+            "fit_pair_chart: {f} rows cannot support a certified chart fit (need ≥ 16)"
+        ));
+    }
+    let mean = cloud
+        .mean_axis(Axis(0))
+        .ok_or_else(|| "fit_pair_chart: mean_axis failed".to_string())?;
+    let centered = &cloud - &mean.view().insert_axis(Axis(0));
+
+    // K=8/s=2 mirrors the in-crate curved-chart precedent (`chart_curved` in
+    // the tiered peel tests); the minimal K=3/s=1 shape starves an atom into a
+    // zero adjoint-majorizer eigenvalue the outer engine rightly refuses.
+    let n_atoms = 8usize;
+    let support_k = 2usize;
+    let atom_basis = vec!["periodic".to_string(); n_atoms];
+    let atom_dim = vec![1usize; n_atoms];
+    let effective = sae_support_effective_atom_dims(&atom_basis, &atom_dim)?;
+    let d_max = effective.iter().copied().max().unwrap_or(1);
+    let admission = admit_topk_manifold(f, 2, n_atoms, d_max, support_k)?;
+    let seed = build_sae_support_seed(SaeSupportSeedRequest {
+        target: centered.view(),
+        atom_basis: &atom_basis,
+        atom_dim: &atom_dim,
+        support_k,
+        random_state,
+        admission,
+    })?;
+    let retained = seed.retained_atom_indices.len();
+    let term_seed = build_sae_support_term_seed(SaeSupportTermSeedRequest {
+        assignment: seed.assignment,
+        atom_basis: vec!["periodic".to_string(); retained],
+        atom_dim: vec![1usize; retained],
+        output_dim: 2,
+        random_state,
+    })?;
+    let ard_precisions = (0..term_seed.term.k_atoms())
+        .map(|atom| vec![1.0; term_seed.term.assignment.atom_coord_dim(atom)])
+        .collect::<Vec<_>>();
+    let outer = run_sae_support_outer(SaeSupportOuterRequest {
+        term: term_seed.term,
+        target: centered.clone(),
+        initial_smoothness: 1.0,
+        ard_precisions,
+        max_outer_iter: 32,
+        max_inner_iter: 256,
+        // The public entry's relative inner tolerance (#2517).
+        inner_tolerance: 1.0e-4,
+        trust_radius: 1.0,
+        random_state,
+    })
+    .map_err(|error| error.to_string())?;
+
+    let recon = outer.term.reconstruct()?;
+    let mut rss = 0.0f64;
+    let mut tss = 0.0f64;
+    for i in 0..f {
+        for c in 0..2 {
+            let d = centered[[i, c]] - recon[[i, c]];
+            rss += d * d;
+            tss += centered[[i, c]] * centered[[i, c]];
+        }
+    }
+    Ok(PairChartFit {
+        lambda_smooth: outer.lambda_smooth,
+        criterion: outer.criterion,
+        explained_variance: crate::tiered::explained_variance_from_sums(rss, tss),
+        outer_iterations: outer.outer_iterations,
+        certified: outer.outer_certificate.certifies(),
+        recurred: outer.fixed_point.recurred,
+        retained_atoms: outer.term.k_atoms(),
     })
 }
 
@@ -640,11 +958,21 @@ mod code_space_tests {
             "single-atom communities cannot host a ring"
         );
         assert_eq!(report.pair_proposals.len(), 1, "one co-firing pair");
-        let (ga, gb, proposal) = &report.pair_proposals[0];
-        assert_eq!((*ga, *gb), (0, 1));
+        let verdict = &report.pair_proposals[0];
+        assert_eq!((verdict.atom_a, verdict.atom_b), (0, 1));
         assert!(
-            proposal.accept,
-            "the shattered ring must be promoted from the joint cloud: {proposal:?}"
+            verdict.proposal.accept,
+            "the shattered ring must be promoted from the joint cloud: {verdict:?}"
+        );
+        // The permutation null must NOT reproduce the ring: scrambling the
+        // sin coordinate against cos destroys the coupling, so the observed
+        // saving is extreme against the null family.
+        assert_eq!(verdict.null_permutations as usize, 63);
+        assert!(
+            verdict.null_p_hat <= 2.0 / 64.0,
+            "a planted ring must survive its permutation null, p̂={} ({} exceedances)",
+            verdict.null_p_hat,
+            verdict.null_exceedances
         );
         assert_eq!(report.n_accepted, 1);
         assert!(report.dl_saved_bits > 0.0);
@@ -673,11 +1001,25 @@ mod code_space_tests {
             harvest_code_space_pair_promotions(decoder.view(), &codes, n, 0.05).expect("runs");
         assert!(report.proposals.is_empty());
         assert_eq!(report.pair_proposals.len(), 1);
-        let (a, b, proposal) = &report.pair_proposals[0];
-        assert_eq!((*a, *b), (0, 1));
+        let verdict = &report.pair_proposals[0];
+        assert_eq!((verdict.atom_a, verdict.atom_b), (0, 1));
         assert!(
-            proposal.accept,
-            "an imported shattered ring must be promoted: {proposal:?}"
+            verdict.proposal.accept,
+            "an imported shattered ring must be promoted: {verdict:?}"
+        );
+        assert!(
+            verdict.null_p_hat <= 2.0 / 64.0,
+            "the imported ring must survive its permutation null, p̂={}",
+            verdict.null_p_hat
+        );
+        // The topology race must call the planted ring a RING, not a patch —
+        // "curved" never rests on the DL ledger alone.
+        assert_eq!(
+            verdict.topology_kind.as_deref(),
+            Some("Periodic"),
+            "race verdict on a planted ring: {:?} (err: {:?})",
+            verdict.topology_kind,
+            verdict.topology_error
         );
         assert!(report.dl_saved_bits > 0.0);
         assert!((report.l0 - 2.0).abs() < 1.0e-12);
@@ -687,6 +1029,39 @@ mod code_space_tests {
             harvest_code_space_pair_promotions(decoder.view(), &narrow, n, 0.05).is_err(),
             "a K mismatch must refuse"
         );
+    }
+
+    /// The full REML/GAM rung: a census-shaped noisy ring cloud, fit by the
+    /// canonical grouped-LAML outer engine through [`fit_pair_chart`] — the
+    /// smoothing is REML-selected, the inner fixed point recurs, the outer
+    /// certificate certifies, and the chart explains the planted structure.
+    #[test]
+    fn pair_chart_fit_is_certified_reml_on_a_noisy_ring() {
+        let n = 256;
+        let mut cloud = A2::<f64>::zeros((n, 2));
+        let mut z = 0x9E37_79B9_7F4A_7C15u64;
+        let mut noise = move || {
+            z ^= z >> 12;
+            z ^= z << 25;
+            z ^= z >> 27;
+            (z.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        for i in 0..n {
+            let theta = TAU * (i as f64) / (n as f64);
+            cloud[[i, 0]] = theta.cos() + 0.04 * noise();
+            cloud[[i, 1]] = theta.sin() + 0.04 * noise();
+        }
+        let fit = fit_pair_chart(cloud.view(), 0xC0FF_EE00_D15E_A5E5).expect("chart fit runs");
+        assert!(fit.recurred, "inner fixed point must recur: {fit:?}");
+        assert!(fit.certified, "outer certificate must certify: {fit:?}");
+        assert!(fit.retained_atoms >= 1);
+        assert_eq!(fit.lambda_smooth.len(), fit.retained_atoms);
+        assert!(
+            fit.explained_variance > 0.9,
+            "a REML chart must explain a clean ring, EV={}",
+            fit.explained_variance
+        );
+        assert!(fit.lambda_smooth.iter().all(|l| l.is_finite() && *l > 0.0));
     }
 
     /// The measured distortion floor: nonzero residual reads back as its RMS;

@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 
 use gam_sae::atom_codes::SparseAtomCodes;
-use gam_sae::tiered::harvest_code_space_pair_promotions;
+use gam_sae::tiered::{fit_pair_chart, harvest_code_space_pair_promotions};
 use ndarray::Array2;
 
 fn json_field(meta: &str, key: &str) -> Option<f64> {
@@ -86,21 +86,61 @@ fn main() -> Result<(), String> {
     let mut accepted: Vec<_> = report
         .pair_proposals
         .iter()
-        .filter(|(_, _, pr)| pr.accept)
+        .filter(|v| v.proposal.accept)
         .collect();
     accepted.sort_by(|x, y| {
-        (y.2.dl_old - y.2.dl_new).total_cmp(&(x.2.dl_old - x.2.dl_new))
+        (y.proposal.dl_old - y.proposal.dl_new).total_cmp(&(x.proposal.dl_old - x.proposal.dl_new))
     });
-    for (a, b, pr) in accepted.iter().take(200) {
+    for v in accepted.iter().take(200) {
+        let pr = &v.proposal;
         println!(
-            "{{\"pair\":[{a},{b}],\"bits_saved\":{:.1},\"radius\":{:.4},\"kappa\":{:.3},\"span\":{:.3},\"firings\":{:.0},\"prescreen\":{:.1}}}",
+            "{{\"pair\":[{},{}],\"bits_saved\":{:.1},\"radius\":{:.4},\"kappa\":{:.3},\"span\":{:.3},\"firings\":{:.0},\"prescreen\":{:.1},\"null_p_hat\":{:.4},\"null_exceedances\":{},\"topology\":{:?},\"topology_dim\":{:?},\"topology_err\":{:?}}}",
+            v.atom_a,
+            v.atom_b,
             pr.dl_old - pr.dl_new,
             pr.verdict.radius,
             pr.verdict.kappa,
             pr.span,
             pr.firing_rate * n_rows as f64,
-            pr.crossover_prescreen_bits
+            pr.crossover_prescreen_bits,
+            v.null_p_hat,
+            v.null_exceedances,
+            v.topology_kind,
+            v.topology_dim,
+            v.topology_error
         );
+    }
+    // Full REML chart fits on the top accepted pairs: rebuild each pair's
+    // joint cloud from the codes and run the grouped-LAML outer engine.
+    for v in accepted.iter().take(12) {
+        let mut cloud_rows: Vec<[f64; 2]> = Vec::new();
+        for row in codes.iter() {
+            if row.active_mask.get(v.atom_a) && row.active_mask.get(v.atom_b) {
+                cloud_rows.push([row.weights[v.atom_a], row.weights[v.atom_b]]);
+            }
+        }
+        let f = cloud_rows.len();
+        let mut cloud = Array2::<f64>::zeros((f, 2));
+        for (i, r) in cloud_rows.iter().enumerate() {
+            cloud[[i, 0]] = r[0];
+            cloud[[i, 1]] = r[1];
+        }
+        match fit_pair_chart(cloud.view(), 0xC0FF_EE00_D15E_A5E5) {
+            Ok(chart) => println!(
+                "{{\"chart_pair\":[{},{}],\"lambda\":{:?},\"chart_ev\":{:.4},\"certified\":{},\"recurred\":{},\"outer_iters\":{}}}",
+                v.atom_a,
+                v.atom_b,
+                chart.lambda_smooth,
+                chart.explained_variance,
+                chart.certified,
+                chart.recurred,
+                chart.outer_iterations
+            ),
+            Err(error) => println!(
+                "{{\"chart_pair\":[{},{}],\"chart_error\":{error:?}}}",
+                v.atom_a, v.atom_b
+            ),
+        }
     }
     Ok(())
 }
