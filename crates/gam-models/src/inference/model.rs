@@ -6115,6 +6115,7 @@ mod tests {
                 rho_covariance: None,
                 joint_log_lambdas: None,
                 firth_bias_reduction: false,
+                covariance_declined: None,
             },
             inner_cycles: 0,
         })

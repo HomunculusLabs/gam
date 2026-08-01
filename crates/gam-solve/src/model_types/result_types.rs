@@ -2164,6 +2164,75 @@ impl Default for AdaptiveRegularizationOptions {
     }
 }
 
+/// Why a fit that could have published a coefficient covariance deliberately
+/// did not (gam#2718, gam#2484).
+///
+/// A bare `None` on [`UnifiedFitResult::covariance_conditional`] or
+/// `FitInference::beta_covariance` is three states wearing one costume: *not
+/// requested*, *not computed*, and *computed but not valid to publish*. A
+/// consumer cannot tell them apart, so an absence that was a considered refusal
+/// reads exactly like an absence nobody thought about. This enum is the third
+/// state said out loud: it is `Some` only when a fit reached a point where a
+/// covariance was expected, decided it could not stand behind one, and minted
+/// the point estimates anyway.
+///
+/// It is deliberately not a log line. The behaviour this replaces was a hard
+/// `Err` that took the point estimates down with the covariance; the obvious
+/// alternative — publish the uncorrected covariance and warn — is worse than
+/// either, because on the wire a too-narrow interval is indistinguishable from
+/// a corrected one. Absence plus a typed reason is distinguishable, and the
+/// consumer that reads standard errors already destructures the `Option` this
+/// sits beside.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "kebab-case")]
+pub enum CovarianceDeclined {
+    /// Bernoulli marginal-slope, conditional latent-z calibration active, and a
+    /// second-stage latent measure that is not `StandardNormal`.
+    ///
+    /// The Murphy-Topel generated-regressor correction needs the per-row mixed
+    /// derivative `d2 l_i / d(beta) d(zeta_i)`, which is local in `i` only for
+    /// the rigid closed-form standard-normal kernel. An empirical measure is
+    /// built from the WHOLE calibrated-residual vector, so `l_i` depends on
+    /// `zeta_i` twice — directly, and through a grid every other `zeta_j`
+    /// helped build — and the honest object is a full `n x n` sensitivity. The
+    /// measure is also estimated from the same data, which is precisely the
+    /// known-second-stage-kernel assumption Murphy-Topel rests on.
+    ///
+    /// Point estimation is unaffected and IS published; only the second-stage
+    /// covariance and its standard errors are withheld.
+    BmsGeneratedRegressorLatentMeasureNotStandardNormal {
+        /// The measure the adequacy gate selected instead, as named by
+        /// `LatentMeasureKind`: `global-empirical` or `local-empirical`.
+        latent_measure: String,
+    },
+}
+
+impl CovarianceDeclined {
+    /// One-paragraph explanation suitable for a CLI line or an error surface.
+    /// Kept beside the variant so every consumer renders the same sentence.
+    pub fn explain(&self) -> String {
+        match self {
+            Self::BmsGeneratedRegressorLatentMeasureNotStandardNormal { latent_measure } => {
+                format!(
+                    "no coefficient covariance was published for this bernoulli marginal-slope \
+                     fit: the conditional latent-z location-scale calibration fired, its \
+                     calibrated residual then failed the standard-normal adequacy gate, and the \
+                     second-stage latent measure is therefore `{latent_measure}`. The \
+                     Murphy-Topel generated-regressor correction needs a per-row mixed derivative \
+                     of the score in the latent coordinate; an empirical measure is built from \
+                     the whole calibrated-residual vector, so that sensitivity is not local in \
+                     the row and the measure is itself estimated from the same data. Publishing \
+                     the UNCORRECTED covariance instead is not admissible: it omits the \
+                     first-stage uncertainty the correction exists to add, so the intervals \
+                     would be too narrow and, on the wire, indistinguishable from corrected \
+                     ones. The point estimates are unaffected and are published. See gam#2484 \
+                     for the non-local sensitivity and gam#2718 for this contract."
+                )
+            }
+        }
+    }
+}
+
 /// Post-fit artifacts needed by downstream diagnostics/inference without
 /// re-running PIRLS.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -2224,6 +2293,17 @@ pub struct FitArtifacts {
     /// (#2245 finding 16). `false` for fits that never engaged Firth.
     #[serde(default)]
     pub firth_bias_reduction: bool,
+    /// Set when this fit could have published a coefficient covariance and
+    /// deliberately did not (gam#2718). `None` is the ordinary case and carries
+    /// NO claim either way: a covariance may be present, or absent because it
+    /// was never requested. `Some` is a positive statement that one was
+    /// withheld, with the reason attached — see [`CovarianceDeclined`].
+    ///
+    /// Serialized, because the reason has to survive to a consumer reading a
+    /// saved model's standard errors; that consumer is exactly the one who
+    /// would otherwise misread the absence.
+    #[serde(default)]
+    pub covariance_declined: Option<CovarianceDeclined>,
 }
 
 impl std::fmt::Debug for FitArtifacts {
@@ -2254,6 +2334,7 @@ impl std::fmt::Debug for FitArtifacts {
                 "joint_log_lambdas",
                 &self.joint_log_lambdas.as_ref().map(|v| v.len()),
             )
+            .field("covariance_declined", &self.covariance_declined)
             .finish()
     }
 }

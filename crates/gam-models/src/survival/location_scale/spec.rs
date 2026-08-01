@@ -867,6 +867,9 @@ pub fn survival_fit_from_parts(
             // likelihood; the Firth/Jeffreys adjustment is a binary-separation
             // remedy and is never engaged here.
             firth_bias_reduction: false,
+            // Survival location-scale never reaches the BMS generated-regressor
+            // seam, so it never withholds a covariance it could have published.
+            covariance_declined: None,
         },
         inner_cycles: 0,
     })

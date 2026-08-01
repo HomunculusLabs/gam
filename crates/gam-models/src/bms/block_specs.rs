@@ -3007,41 +3007,58 @@ pub fn fit_bernoulli_marginal_slope_terms(
     // the same span-local cubic row calculus that produced their score and
     // Hessian, including every score_warp/link_dev coefficient. No active block
     // may be padded with zero sensitivity or skipped.
+    // gam#2718. This pair — a fired conditional location-scale calibration and a
+    // non-StandardNormal second-stage measure — is a legitimate POINT-ESTIMATION
+    // state, and the site that mints it (`build_latent_measure_with_geometry`)
+    // says so in as many words. It used to be minted there and destroyed HERE by
+    // a `return Err` that took the point estimates down with the covariance.
+    //
+    // gam#2484 kept the refusal at this site because the producing site "cannot
+    // know whether inference was requested". Measured at gam#2718: both
+    // production marginal-slope entry points set `compute_covariance = true`
+    // unconditionally, so no caller could decline inference and the state being
+    // protected was unreachable in practice — minted at measure selection and
+    // destroyed here, on every fit.
+    //
+    // So: withhold the covariance, DECLARE the withholding on the fit's own
+    // payload, and publish the point estimates. Publishing the UNCORRECTED
+    // covariance remains inadmissible — it omits the first-stage uncertainty the
+    // correction exists to add, so the intervals come out too narrow and are
+    // indistinguishable on the wire from corrected ones — but a typed absence is
+    // not that, and every consumer of these fields already destructures an
+    // `Option`. The real correction for this measure (`G_measure`) is gam#2484.
+    // The guard mirrors the refusal it replaces EXACTLY -- including
+    // `covariance_conditional.is_some()`. Without that clause a caller who
+    // declined inference (so there is no covariance to begin with) would be told
+    // one was *withheld*, which is a different claim and a false one: `Some` on
+    // this field must always mean "a covariance existed and was taken away".
+    if solved_fit.covariance_conditional.is_some()
+        && latent_z_conditional_calibration.is_some()
+        && !matches!(latent_measure, LatentMeasureKind::StandardNormal)
+    {
+        let latent_measure_label = match latent_measure {
+            LatentMeasureKind::StandardNormal => "standard-normal",
+            LatentMeasureKind::GlobalEmpirical { .. } => "global-empirical",
+            LatentMeasureKind::LocalEmpirical { .. } => "local-empirical",
+        };
+        solved_fit.covariance_conditional = None;
+        solved_fit.covariance_corrected = None;
+        if let Some(inference) = solved_fit.inference.as_mut() {
+            inference.beta_covariance = None;
+            inference.beta_standard_errors = None;
+            inference.beta_covariance_corrected = None;
+            inference.beta_standard_errors_corrected = None;
+        }
+        let declined = gam_solve::estimate::CovarianceDeclined::
+            BmsGeneratedRegressorLatentMeasureNotStandardNormal {
+                latent_measure: latent_measure_label.to_string(),
+            };
+        log::warn!("[BMS latent-z] {}", declined.explain());
+        solved_fit.artifacts.covariance_declined = Some(declined);
+    }
     if let Some(cal) = latent_z_conditional_calibration.as_ref()
         && let Some(vb) = solved_fit.covariance_conditional.clone()
     {
-        if !matches!(latent_measure, LatentMeasureKind::StandardNormal) {
-            // gam#2484 -- a CAPABILITY statement, not a missing match arm, and
-            // not a state any caller opted into. Reaching this line proves the
-            // conditional location-scale calibration fired and its calibrated
-            // residual then failed the standard-normal adequacy gate, so the
-            // latent measure is the global-empirical one built from that
-            // residual; the `[BMS latent-z]` warning at measure selection
-            // reports which clauses failed and by how much.
-            //
-            // Why the correction cannot simply be extended here: it needs the
-            // per-row mixed derivative d²ℓ_i/dβ dζ_i, which is local in `i` only
-            // for the rigid closed-form standard-normal kernel. An empirical
-            // measure is constructed from the WHOLE ζ vector, so ℓ_i depends on
-            // ζ_i twice -- directly, and through a grid every other ζ_j helped
-            // build -- and the honest object is a full n×n sensitivity. The
-            // measure is also ESTIMATED from the same data, which is exactly the
-            // known-second-stage-kernel assumption Murphy-Topel rests on.
-            //
-            // Why returning the uncorrected `covariance_conditional` is NOT the
-            // fallback: the correction exists to ADD the first-stage
-            // generated-regressor uncertainty, so omitting it is not neutral or
-            // conservative -- the intervals come out too NARROW, and on the wire
-            // they are indistinguishable from corrected ones.
-            return Err(
-                "BMS Murphy-Topel generated-regressor covariance is unavailable for a conditional latent-z calibration whose second-stage latent measure is not StandardNormal. \
-                 The conditional location-scale calibration fired and its calibrated residual then failed the standard-normal adequacy gate, so the latent measure is the global-empirical one built from that residual (the [BMS latent-z] log line at measure selection reports which adequacy clauses failed and by how much). \
-                 The correction needs a per-row mixed derivative of the score in the latent coordinate; an empirical measure is built from the whole calibrated-residual vector, so that sensitivity is not local in the row and the measure is itself estimated from the same data. \
-                 Returning the uncorrected conditional covariance is not an admissible fallback: it omits the first-stage uncertainty the correction exists to add, so the intervals would be too narrow and indistinguishable from corrected ones. \
-                 Remedy: fit without inference if only point estimates are needed, or supply a latent measure the closed-form kernel admits (gam#2484 tracks the non-local sensitivity)."
-                    .to_string(),
-            );
-        }
         let p_beta = vb.nrows();
         let calibration_marginal_dense = marginal_design
             .design
