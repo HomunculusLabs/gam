@@ -235,7 +235,10 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
             data: data.values.view(),
             spec,
             options: BlockwiseFitOptions {
-                compute_covariance: true,
+                // gam#2718: honor the caller instead of forcing `true`. `None`
+                // keeps the historical behaviour (compute it), so this is a
+                // widening -- no existing caller changes behaviour.
+                compute_covariance: config.compute_covariance.unwrap_or(true),
                 persistent_warm_start_store: config.persistent_warm_start_store.clone(),
                 // Robustness (Firth/Jeffreys stabilizer) is the unconditional
                 // default for bernoulli marginal-slope — no flag to thread.

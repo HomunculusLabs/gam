@@ -195,6 +195,7 @@ pub(crate) struct FitArgs {
             "adaptive_regularization",
             "scale_dimensions",
             "precompute_conformal",
+            "inference",
             "persistent_warm_start_root",
             "pilot_subsample_threshold",
             "ctn_stage1",
@@ -385,6 +386,16 @@ pub(crate) struct FitArgs {
     /// its training data, fits in batch, or never asks for conformal intervals.
     #[arg(long = "precompute-conformal", action = ArgAction::Set, default_value_t = true)]
     pub(crate) precompute_conformal: bool,
+    /// Whether to compute the coefficient covariance and the standard errors
+    /// derived from it. `--inference false` fits point estimates only.
+    ///
+    /// Added because the bernoulli marginal-slope path used to tell callers to
+    /// "fit without inference if only point estimates are needed" while forcing
+    /// inference on unconditionally (gam#2718). Turning it off skips work whose
+    /// result is never read; it does NOT make an unavailable covariance
+    /// available, and a fit that withholds its covariance still says so.
+    #[arg(long = "inference", action = ArgAction::Set, default_value_t = true)]
+    pub(crate) inference: bool,
     /// Opt in to cross-process warm starts at this exact root. Omit to keep the
     /// fit disk-silent; no ambient temp/cache path is used.
     #[arg(long = "persistent-warm-start-root", value_name = "DIR")]

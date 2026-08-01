@@ -716,12 +716,32 @@ pub struct FitConfig {
     /// retains its training data, fits in batch, or never asks for conformal
     /// intervals; leave it alone when the model has to stand on its own.
     pub precompute_conformal: Option<bool>,
+    /// Whether the fit computes and publishes a coefficient covariance (and the
+    /// standard errors derived from it). `None` keeps each family's own
+    /// default, which for every path that reaches this field today is "yes";
+    /// `Some(false)` asks for point estimates only.
+    ///
+    /// This exists because it was advice nobody could take (gam#2718). The
+    /// bernoulli marginal-slope refusal for a non-StandardNormal latent measure
+    /// told callers to "fit without inference if only point estimates are
+    /// needed", while `materialize/marginal_slope.rs` set
+    /// `compute_covariance = true` unconditionally, so there was no way to
+    /// comply. The mechanism was never missing — the latent survival/binary CLI
+    /// path has been passing `compute_covariance: false` in production all
+    /// along — only a way for a caller to reach it.
+    ///
+    /// Declining inference is not a way to make a bad covariance acceptable: a
+    /// fit that WOULD have withheld its covariance still withholds it and still
+    /// declares why (see `CovarianceDeclined`). This only avoids paying for one
+    /// that is never read.
+    pub compute_covariance: Option<bool>,
 }
 
 impl Default for FitConfig {
     fn default() -> Self {
         Self {
             precompute_conformal: None,
+            compute_covariance: None,
             family: None,
             negative_binomial_theta: None,
             link: None,

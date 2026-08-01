@@ -908,7 +908,10 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
         );
     }
     let mut options = blockwise_options_from_fit_args()?;
-    options.compute_covariance = true;
+    // gam#2718: was an unconditional `true`, which is what made this family's
+    // own "fit without inference if only point estimates are needed" advice
+    // impossible to follow.
+    options.compute_covariance = args.inference;
     let kappa_options = {
         let mut opts = SpatialLengthScaleOptimizationOptions::default();
         opts.pilot_subsample_threshold = args.pilot_subsample_threshold;
