@@ -195,6 +195,23 @@ pub struct ArrowSchurSystem {
     /// joint `(delta B, delta log-amplitude)` trajectory projection is owned by
     /// the SAE step application.
     pub beta_gauge_quotient: Option<ArrowBetaGaugeQuotient>,
+    /// CONTENT identity of the matrix-free `H_tβ` row operator, when its
+    /// installer can supply one (#2515).
+    ///
+    /// `row_hessian_fingerprint_for_system` otherwise hashes the operator's
+    /// `Arc` POINTER ADDRESS, which is an identity of the allocation and not of
+    /// the operator: two assemblies of the bit-identical system get different
+    /// fingerprints, and `validate_matrix_free_arrow_pair` then refuses a
+    /// perfectly valid system/cache pair. MEASURED on one state with the
+    /// collapse-prevention gates frozen for both assemblies — every `htt`,
+    /// `htbeta`, `gt`, `hbb` and `gb` block bit-identical (max |Δ| = 0.0) and the
+    /// row fingerprints still `15334315105555998529` vs `6998028885641800537`.
+    ///
+    /// When `Some`, it is hashed INSTEAD of the address, so a rebuild from the
+    /// same state reproduces the same fingerprint and a genuine change to the
+    /// operator's defining data still changes it. `None` keeps the historical
+    /// address behaviour for installers that cannot characterise their closure.
+    pub htbeta_operator_fingerprint: Option<u64>,
 }
 
 impl Clone for ArrowSchurSystem {
@@ -221,6 +238,7 @@ impl Clone for ArrowSchurSystem {
             cross_row_penalties: self.cross_row_penalties.clone(),
             row_gauge_deflation: self.row_gauge_deflation.clone(),
             beta_gauge_quotient: self.beta_gauge_quotient.clone(),
+            htbeta_operator_fingerprint: self.htbeta_operator_fingerprint,
         }
     }
 }
@@ -291,6 +309,7 @@ impl ArrowSchurSystem {
             cross_row_penalties: Vec::new(),
             row_gauge_deflation: None,
             beta_gauge_quotient: None,
+            htbeta_operator_fingerprint: None,
         }
     }
 
@@ -340,6 +359,7 @@ impl ArrowSchurSystem {
             cross_row_penalties: Vec::new(),
             row_gauge_deflation: None,
             beta_gauge_quotient: None,
+            htbeta_operator_fingerprint: None,
         }
     }
 
@@ -395,6 +415,7 @@ impl ArrowSchurSystem {
             cross_row_penalties: Vec::new(),
             row_gauge_deflation: None,
             beta_gauge_quotient: None,
+            htbeta_operator_fingerprint: None,
         }
     }
 
@@ -440,6 +461,7 @@ impl ArrowSchurSystem {
             cross_row_penalties: Vec::new(),
             row_gauge_deflation: None,
             beta_gauge_quotient: None,
+            htbeta_operator_fingerprint: None,
         }
     }
 
@@ -519,6 +541,7 @@ impl ArrowSchurSystem {
             cross_row_penalties: Vec::new(),
             row_gauge_deflation: None,
             beta_gauge_quotient: None,
+            htbeta_operator_fingerprint: None,
         }
     }
 
@@ -625,6 +648,31 @@ impl ArrowSchurSystem {
     {
         self.htbeta_matvec = Some(Arc::new(forward));
         self.htbeta_transpose_matvec = Some(Arc::new(transpose));
+        self.htbeta_operator_fingerprint = None;
+    }
+
+    /// [`Self::set_row_htbeta_operator`] with the operator's CONTENT identity
+    /// (#2515).
+    ///
+    /// `fingerprint` must be a hash of the data that defines the closure — the
+    /// same state must give the same value, and a different operator must give a
+    /// different one. Supplying it makes the row-Hessian fingerprint a function
+    /// of the OPERATOR rather than of its allocation, so a rebuild from an
+    /// unchanged state produces an unchanged fingerprint and the stale-pair guard
+    /// stops refusing valid system/cache pairs. See
+    /// [`ArrowSchurSystem::htbeta_operator_fingerprint`].
+    pub fn set_row_htbeta_operator_with_fingerprint<F, T>(
+        &mut self,
+        forward: F,
+        transpose: T,
+        fingerprint: u64,
+    ) where
+        F: for<'a> Fn(usize, ArrayView1<'a, f64>, &mut Array1<f64>) + Send + Sync + 'static,
+        T: for<'a> Fn(usize, ArrayView1<'a, f64>, &mut Array1<f64>) + Send + Sync + 'static,
+    {
+        self.htbeta_matvec = Some(Arc::new(forward));
+        self.htbeta_transpose_matvec = Some(Arc::new(transpose));
+        self.htbeta_operator_fingerprint = Some(fingerprint);
     }
 
     /// Register term-block column ranges for the block-Jacobi Schur preconditioner.

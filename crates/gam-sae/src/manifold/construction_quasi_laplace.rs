@@ -3173,7 +3173,33 @@ impl SaeManifoldTerm {
                 let forward_indices = std::sync::Arc::clone(&indices);
                 let transpose_blocks = std::sync::Arc::clone(&blocks);
                 let transpose_indices = std::sync::Arc::clone(&indices);
-                system.set_row_htbeta_operator(
+                // #2515 — the COMPOSED operator's content identity: the base
+                // operator's own identity (which the majorizer published when it
+                // was assembled) combined with the exact-A correction blocks this
+                // wraps it in. Falling back to the base's `Arc` address would
+                // reintroduce the allocation-identity defect one layer up, since
+                // this closure is freshly allocated on every call.
+                let composed_fingerprint = {
+                    let mut hasher = gam_runtime::warm_start::Fingerprinter::new();
+                    hasher.write_str("sae-exact-a-htbeta-composed-v1");
+                    match majorizer.htbeta_operator_fingerprint {
+                        Some(base_fp) => {
+                            hasher.write_bool(true);
+                            hasher.write_u64(base_fp);
+                        }
+                        None => hasher.write_bool(false),
+                    }
+                    hasher.write_usize(blocks.len());
+                    for block in blocks.iter() {
+                        hasher.write_f64_array2(block);
+                    }
+                    hasher.write_usize(indices.len());
+                    for &index in indices.iter() {
+                        hasher.write_usize(index);
+                    }
+                    hasher.finish_u64()
+                };
+                system.set_row_htbeta_operator_with_fingerprint(
                     move |row, x, out| {
                         base_forward(row, x, out);
                         let block = &forward_blocks[row];
@@ -3198,6 +3224,7 @@ impl SaeManifoldTerm {
                             }
                         }
                     },
+                    composed_fingerprint,
                 );
             }
             (Some(_), None) => {

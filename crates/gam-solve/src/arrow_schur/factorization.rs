@@ -1132,17 +1132,32 @@ pub(crate) fn row_hessian_fingerprint_for_system(sys: &ArrowSchurSystem) -> u64 
     hasher.write_usize(sys.k);
     // When htbeta_matvec is installed (Kronecker / matrix-free path),
     // row.htbeta is usually a zero slab that does not capture the operator
-    // state. Hash the Arc pointer address as a proxy: a new Arc is allocated
-    // per assemble call, so the fingerprint is invalidated each time the
-    // system is rebuilt with a fresh Kronecker operator. Analytic penalties may
-    // opt into a dense supplemental slab; when active, hash it as well.
+    // state, so the operator's identity has to be hashed some other way.
+    // Analytic penalties may opt into a dense supplemental slab; when active,
+    // hash it as well.
+    //
+    // #2515 — PREFER THE OPERATOR'S CONTENT IDENTITY WHEN ITS INSTALLER SUPPLIES
+    // ONE. The historical proxy is the `Arc` POINTER ADDRESS, and its own comment
+    // stated the intent: "a new Arc is allocated per assemble call, so the
+    // fingerprint is invalidated each time the system is rebuilt". That is an
+    // identity of the ALLOCATION, not of the operator, so two assemblies of a
+    // bit-identical system necessarily disagree — and
+    // `validate_matrix_free_arrow_pair` then refuses a valid system/cache pair.
+    // MEASURED on one state with the collapse-prevention gates frozen across both
+    // assemblies: every `htt`, `htbeta`, `gt`, `hbb` and `gb` block identical to
+    // max |Δ| = 0.0, and the row fingerprints still `15334315105555998529` vs
+    // `6998028885641800537`. A staleness guard that cannot be satisfied by an
+    // unchanged operator is not strict, it is inoperative.
+    //
+    // The address remains the fallback for installers that cannot characterise
+    // their closure, so their behaviour is unchanged.
     // SAFETY: We cast the fat pointer to a thin *const () to extract the data
     // pointer address as a fingerprint proxy. No dereference occurs; the only
     // use is as a usize hash input, which is sound for any aligned pointer.
-    let htbeta_op_addr: Option<usize> = sys
-        .htbeta_matvec
-        .as_ref()
-        .map(|op| Arc::as_ptr(op) as *const () as usize);
+    let htbeta_op_addr: Option<usize> = sys.htbeta_matvec.as_ref().map(|op| {
+        sys.htbeta_operator_fingerprint
+            .map_or_else(|| Arc::as_ptr(op) as *const () as usize, |fp| fp as usize)
+    });
     for row in sys.rows.iter() {
         hasher.write_f64_array2(&row.htt);
         match htbeta_op_addr {
