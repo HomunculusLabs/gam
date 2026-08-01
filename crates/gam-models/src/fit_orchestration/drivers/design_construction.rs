@@ -3435,6 +3435,21 @@ fn solve_lower_transpose_into(
     Ok(())
 }
 
+/// Largest latent magnitude at which `bounded()`'s interval map is still
+/// injective in binary64.
+///
+/// `bounded()` fits `beta = min + width*sigma(theta)`, and `sigma(theta)`
+/// rounds to exactly `1.0` as soon as `exp(-theta) < EPSILON/2` — that is, for
+/// `theta > ln(2/EPSILON)` (and symmetrically to `0.0` below `-ln(2/EPSILON)`).
+/// Past that point `beta` is frozen bit for bit while
+/// `dbeta/dtheta = width*sigma*(1-sigma)` stays strictly positive all the way
+/// out to the exponential's underflow near `|theta| = 745`, so the solver reads
+/// live first and second derivatives along a direction that cannot move the
+/// model at all. The bound is derived from the representation, not chosen.
+fn bounded_latent_injective_limit() -> f64 {
+    (2.0 / f64::EPSILON).ln()
+}
+
 fn bounded_latent_derivatives(theta: f64, min: f64, max: f64) -> (f64, f64, f64, f64, f64) {
     let jet = logit_inverse_link_jet5(theta);
     let z = jet.mu;
@@ -6167,6 +6182,63 @@ impl CustomFamily for BoundedLinearFamily {
 
     fn block_geometry_is_dynamic(&self) -> bool {
         true
+    }
+
+    /// Confine every bounded coefficient's latent coordinate to the range
+    /// where [`bounded_latent_injective_limit`] says the interval map is still
+    /// invertible.
+    ///
+    /// Without this the inner solve cannot certify a fit whose constrained
+    /// optimum sits ON a box bound. Once `theta` crosses the saturation point
+    /// the proposal keeps moving `theta` by order one while `beta`, the
+    /// linear predictor, the log-likelihood and the objective are all frozen —
+    /// the line search accepts the step (it does not increase the objective),
+    /// and the blockwise convergence certificate, which measures the step on
+    /// `theta` against `inner_tol*(1 + |theta|_inf)`, never fires. The loop
+    /// then spends its whole `inner_max_cycles` budget and the no-smoothing
+    /// path reports "coefficient optimization did not converge after N
+    /// cycles" (gam#2705 group C: three `bounded()` anchors whose optimum is a
+    /// bound — `bounded(x,0,1)` on `y = 2 + 5x`, and two `bounded(x,0,·)`
+    /// anchors whose slope binds at the lower bound).
+    ///
+    /// Clamping changes no fitted quantity: every clipped `theta` maps to the
+    /// same `beta` the clamp maps to. What it changes is reachability of the
+    /// fixed point — the next proposal is clipped to the same coordinate, the
+    /// accepted step is exactly zero, and the loop certifies at the boundary
+    /// optimum instead of grinding.
+    fn post_update_block_beta(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        block_spec: &ParameterBlockSpec,
+        beta: Array1<f64>,
+    ) -> Result<Array1<f64>, String> {
+        expect_block_idx_zero(
+            block_index,
+            "bounded linear family",
+            " for post-update beta",
+        )?;
+        // A clamp is only meaningful on coefficients that really are this
+        // block's, under this block's spec — so the proposal has to agree with
+        // both the spec's width and the width of the state it is replacing.
+        let current = expect_single_block_state(block_states, "bounded linear family")?;
+        if beta.len() != block_spec.design.ncols() || beta.len() != current.beta.len() {
+            return Err(SmoothError::dimension_mismatch(format!(
+                "bounded linear family post-update beta width mismatch: got {}, expected {} \
+                 (spec) / {} (current state)",
+                beta.len(),
+                block_spec.design.ncols(),
+                current.beta.len()
+            ))
+            .into());
+        }
+        let limit = bounded_latent_injective_limit();
+        let mut clamped = beta;
+        for term in &self.bounded_terms {
+            let theta = clamped[term.col_idx];
+            clamped[term.col_idx] = theta.clamp(-limit, limit);
+        }
+        Ok(clamped)
     }
 
     fn block_geometry_directional_derivative(
