@@ -3129,9 +3129,23 @@ fn sae_streaming_plan(
         "estimated_matrix_free_peak_bytes",
         plan.estimated_matrix_free_peak_bytes,
     )?;
+    // #2724 - the dense exact-A route's own ledger, kept inspectable
+    // alongside the full-batch one it was silently omitted from.
+    out.set_item(
+        "estimated_exact_stationarity_dim",
+        plan.estimated_exact_stationarity_dim,
+    )?;
+    out.set_item(
+        "estimated_exact_stationarity_bytes",
+        plan.estimated_exact_stationarity_bytes,
+    )?;
     out.set_item("in_core_budget_bytes", plan.in_core_budget_bytes)?;
     out.set_item("process_available_bytes", plan.process_available_bytes)?;
     out.set_item("direct_admitted", plan.direct_admitted)?;
+    out.set_item(
+        "exact_stationarity_admitted",
+        plan.exact_stationarity_admitted,
+    )?;
     out.set_item("matrix_free_admitted", plan.matrix_free_admitted)?;
     out.set_item(
         "route",
@@ -3170,9 +3184,23 @@ fn sae_streaming_plan_to_pydict<'py>(
         "estimated_matrix_free_peak_bytes",
         plan.estimated_matrix_free_peak_bytes,
     )?;
+    // #2724 - the dense exact-A route's own ledger, kept inspectable
+    // alongside the full-batch one it was silently omitted from.
+    out.set_item(
+        "estimated_exact_stationarity_dim",
+        plan.estimated_exact_stationarity_dim,
+    )?;
+    out.set_item(
+        "estimated_exact_stationarity_bytes",
+        plan.estimated_exact_stationarity_bytes,
+    )?;
     out.set_item("in_core_budget_bytes", plan.in_core_budget_bytes)?;
     out.set_item("process_available_bytes", plan.process_available_bytes)?;
     out.set_item("direct_admitted", plan.direct_admitted)?;
+    out.set_item(
+        "exact_stationarity_admitted",
+        plan.exact_stationarity_admitted,
+    )?;
     out.set_item("matrix_free_admitted", plan.matrix_free_admitted)?;
     out.set_item(
         "route",
