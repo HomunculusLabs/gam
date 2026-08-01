@@ -218,15 +218,45 @@ fn nystrom_recovers_noisy_circle_angle() {
             }
         })
         .collect();
+    // Eight matched-spectrum surrogate ledgers, NOT `obs.clone()`. A one-draw
+    // null has `sd == 0` by construction, and passing the observation as its own
+    // null is the only content that scores at all under that degeneracy (the
+    // z-score takes the `observed_residual == 0` escape) -- so this fixture used
+    // to calibrate against nothing and read healthy (#2699). The labels and
+    // weights are held fixed because the scorer requires the identical labeled
+    // ledger; only the recovered coordinate is phase-randomized, from the same
+    // seed the calibration declares.
+    let mut surrogate_state = 7u64;
+    let null_draws: Vec<Vec<ChartInterpObservation>> = (0..8)
+        .map(|_| {
+            obs.iter()
+                .map(|observation| {
+                    surrogate_state = surrogate_state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ChartInterpObservation {
+                        recovered_turns: (surrogate_state >> 11) as f64 / (1u64 << 53) as f64,
+                        label_turns: observation.label_turns,
+                        weight: observation.weight,
+                    }
+                })
+                .collect()
+        })
+        .collect();
     let calibration = ChartInterpNullCalibration::new(
         ChartInterpNullProtocol::MatchedSpectrumGaussianV1,
         ChartInterpReadout::FittedChartCoordinateV1,
         7,
-        1,
-        vec![obs.clone()],
+        8,
+        null_draws,
     )
     .expect("chart null calibration");
     let report = chart_interp_score(&obs, &calibration, 0.05).expect("chart interp");
+    assert!(
+        report.calibration.null_distribution.sd > 0.0,
+        "the null ensemble must have a spread before its calibration means anything: {:?}",
+        report.calibration.null_distribution
+    );
     assert!(
         report.observed.circular_correlation > 0.95,
         "noisy-circle circular correlation {} should exceed 0.95",

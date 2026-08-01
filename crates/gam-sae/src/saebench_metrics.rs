@@ -150,8 +150,23 @@ impl ChartInterpNullCalibration {
         expected_draws: usize,
         observation_draws: Vec<Vec<ChartInterpObservation>>,
     ) -> Result<Self, String> {
-        if expected_draws == 0 {
-            return Err("chart_interp: null calibration requires at least one draw".into());
+        // TWO draws is the floor, and it is a theorem about the statistic this
+        // type feeds, not a style preference. [`chart_interp_score`] always
+        // summarizes the calibration through
+        // [`crate::null_battery::summarize_null_distribution`], whose standard
+        // deviation carries `n - 1` degrees of freedom: at `n == 1` that `sd` is
+        // `0.0` BY CONSTRUCTION, so the null z-score is undefined unless the
+        // single draw coincides exactly with the observation. The only one-draw
+        // calibration that can be scored at all is therefore one whose "null" IS
+        // the observation, which calibrates nothing -- and three fixtures were
+        // passing on exactly that degenerate branch (#2699). Declaring the floor
+        // here names the reason at the seam that declares the draw count,
+        // instead of surfacing later as an undefined-z-score error whose cause
+        // is the declaration two frames up.
+        if expected_draws < 2 {
+            return Err(format!(
+                "chart_interp: null calibration requires at least two draws; {expected_draws} cannot supply the null spread the z-score is denominated in (sd carries n-1 degrees of freedom, so a one-draw null has sd == 0 by construction)"
+            ));
         }
         if observation_draws.len() != expected_draws {
             return Err(format!(

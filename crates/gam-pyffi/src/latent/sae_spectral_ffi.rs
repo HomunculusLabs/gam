@@ -2497,14 +2497,38 @@ mod ffi_completeness_tests {
                 (0.49, 0.51, 1.0),
                 (0.74, 0.26, 1.0),
             ];
+            // Eight matched-spectrum surrogate ledgers. Passing `observations`
+            // as its own null -- what this test used to do -- is the ONLY
+            // one-draw null that scores at all: `sd == 0` at `n == 1`, so the
+            // z-score is defined only on the `observed_residual == 0` escape,
+            // i.e. exactly when the "null" is the observation (#2699). The
+            // labels and weights are held fixed because the scorer requires the
+            // identical labeled ledger; only the recovered coordinate is
+            // phase-randomized.
+            let mut surrogate_state = 17u64;
+            let null_draws: Vec<Vec<(f64, f64, f64)>> = (0..8)
+                .map(|_| {
+                    observations
+                        .iter()
+                        .map(|&(_, label_turns, weight)| {
+                            surrogate_state = surrogate_state
+                                .wrapping_mul(6364136223846793005)
+                                .wrapping_add(1442695040888963407);
+                            let recovered =
+                                (surrogate_state >> 11) as f64 / (1u64 << 53) as f64;
+                            (recovered, label_turns, weight)
+                        })
+                        .collect()
+                })
+                .collect();
             let out = chart_interp_score(
                 py,
                 observations.clone(),
-                vec![observations],
+                null_draws,
                 "matched_spectrum_gaussian_v1".to_string(),
                 "fitted_chart_coordinate_v1".to_string(),
                 17,
-                1,
+                8,
                 0.05,
             )
             .expect("chart interp score");
@@ -2562,8 +2586,17 @@ mod ffi_completeness_tests {
                 .unwrap()
                 .extract()
                 .unwrap();
-            assert_eq!(samples.len(), 1);
+            assert_eq!(samples.len(), 8);
+            let sd: f64 = calibration.get_item("sd").unwrap().unwrap().extract().unwrap();
+            assert!(
+                sd > 0.0,
+                "the null ensemble must have a spread before any verdict means anything: sd = {sd}"
+            );
             let verdict: String = d.get_item("verdict").unwrap().unwrap().extract().unwrap();
+            // Eight draws floor the plus-one p-value at 1/9 = 0.111 > 0.05, so
+            // `null_compatible` here is arithmetic, not evidence about this
+            // ledger -- the evidential arm lives in the gam-sae fixture, which
+            // uses enough draws for 0.05 to be reachable.
             assert_eq!(verdict, "null_compatible");
         });
     }
