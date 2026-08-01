@@ -82,6 +82,53 @@ fn negbin_theta_stationarity_residual(theta: f64, score: f64, info: f64) -> f64 
     (log_theta_gradient / log_theta_curvature).abs()
 }
 
+/// Whether the point a fit is about to ship IS the point the outer certificate
+/// was minted at, compared over EVERY optimized coordinate.
+///
+/// The outer optimizer for a flexible-link fit searches the joint coordinate
+/// `theta = [rho (k entries), link-shape coordinates]`, so `certified` is that
+/// whole joint vector while the shipped `rho` is only its leading block — the
+/// link coordinates are shipped separately, inside the link state. Comparing
+/// the two vectors directly therefore compares a `K`-vector against a
+/// `K + link_dim` one and can never agree (#2727): it refused fits that had
+/// converged, whose certificate certified, at `|Pg|` as low as `1.446e-6`.
+///
+/// Comparing only the rho prefix would turn that over-strict gate into an
+/// under-strict one — it would stop checking the link coordinates entirely,
+/// and those are exactly the coordinates the flexible-link lane exists to
+/// optimize. So the shipped point is reassembled in the optimizer's OWN
+/// coordinate system and compared whole. It has to be the raw `theta`
+/// coordinates rather than the shipped link state, because the state stores
+/// values that have been through the smooth-bound maps
+/// (`sas_effective_epsilon`) while the certificate holds the pre-image.
+///
+/// The comparison stays BITWISE for the reason the rho-only one did: point
+/// identity is decided exactly by bit equality, and re-judging a gradient here
+/// would refuse honest noise-band certificates with coin-flip probability.
+///
+/// Reassembling one vector only to compare it against the vector it was sliced
+/// from looks circular, and is not: the check is TEMPORAL. `final_rho`,
+/// `final_link_coords` and `outer_result` are `let mut` bindings reassigned
+/// inside the alternation `loop`, so this asks whether the point being shipped
+/// at the END is still the certificate being held at the END. Seeds and
+/// nuisance refinements may initialize work between those two moments; they
+/// must never promote a different point under the old certificate. Comparing
+/// only the rho block would leave the link coordinates free to move across
+/// exactly that window.
+fn shipped_joint_point_is_certified(
+    rho: &Array1<f64>,
+    link_coords: &Array1<f64>,
+    certified: &Array1<f64>,
+) -> bool {
+    if certified.len() != rho.len() + link_coords.len() {
+        return false;
+    }
+    rho.iter()
+        .chain(link_coords.iter())
+        .zip(certified.iter())
+        .all(|(shipped, certified)| shipped.to_bits() == certified.to_bits())
+}
+
 #[derive(Clone)]
 struct NegbinJointCheckpoint {
     merit: f64,
@@ -875,6 +922,13 @@ where
     // second hidden tuning parameter; it returns a typed error carrying the best
     // measured checkpoint instead of minting the final iterate as a fit.
     let mut final_rho;
+    // #2727: the link-shape coordinates of the shipped point, in the OUTER
+    // optimizer's own coordinate system (raw `theta`, before the link state's
+    // smooth-bound maps). Empty on every rho-only arm. Carried separately
+    // because the shipped link STATE stores transformed values
+    // (`sas_effective_epsilon`), so it cannot be compared against the
+    // certificate's raw coordinates.
+    let mut final_link_coords: Array1<f64>;
     let mut final_mixture_state;
     let mut final_sas_state;
     let mut final_mixture_param_covariance;
@@ -887,6 +941,7 @@ where
     loop {
         (
             final_rho,
+            final_link_coords,
             final_mixture_state,
             final_sas_state,
             final_mixture_param_covariance,
@@ -1330,6 +1385,9 @@ where
             let accepted_rho = strategy_result.rho.clone();
             (
                 accepted_rho,
+                // Rho-only arm: the outer coordinate IS rho, so there are no
+                // link coordinates to carry and the joint point is the rho one.
+                Array1::zeros(0),
                 cfg.link_kind.mixture_state().cloned(),
                 cfg.link_kind.sas_state().copied(),
                 None,
@@ -1677,6 +1735,11 @@ where
             let outer_result = problem.run(&mut obj, "mixture/SAS flexible link")?;
             drop(obj);
             let final_rho = outer_result.rho.slice(s![..k]).to_owned();
+            // #2727: the remainder of the joint outer coordinate. `final_rho`
+            // above is only its leading rho block; these are the link-shape
+            // coordinates the same certificate covers, kept raw so the shipped
+            // point can be reassembled and compared whole.
+            let final_link_coords = outer_result.rho.slice(s![k..]).to_owned();
             let final_mix_state = if use_mixture {
                 let final_mix_rho = outer_result.rho.slice(s![k..(k + mixture_dim)]).to_owned();
                 Some(
@@ -1726,6 +1789,7 @@ where
             };
             (
                 final_rho,
+                final_link_coords,
                 final_mix_state,
                 final_sas_state,
                 mix_cov,
@@ -2574,11 +2638,11 @@ where
         );
         (value, gradient, projected)
     };
-    let shipped_point_is_certified = final_rho.len() == outer_result.rho.len()
-        && final_rho
-            .iter()
-            .zip(outer_result.rho.iter())
-            .all(|(shipped, certified)| shipped.to_bits() == certified.to_bits());
+    let shipped_point_is_certified = shipped_joint_point_is_certified(
+        &final_rho,
+        &final_link_coords,
+        &outer_result.rho,
+    );
     let certificate_valid = final_rho.is_empty()
         || (outer_result.converged()
             && outer_result
@@ -2591,9 +2655,13 @@ where
         return Err(EstimationError::RemlDidNotConverge {
             context: "standard REML final shipped point".to_string(),
             reason: format!(
-                "post-fit certificate identity check failed: shipped rho {:?} vs \
-                 certified rho {:?} (converged={}, certifies={}, |Pg| at shipped point {:.3e})",
-                final_rho.to_vec(),
+                "post-fit certificate identity check failed: shipped point {:?} vs \
+                 certified point {:?} (converged={}, certifies={}, |Pg| at shipped point {:.3e})",
+                final_rho
+                    .iter()
+                    .chain(final_link_coords.iter())
+                    .copied()
+                    .collect::<Vec<_>>(),
                 outer_result.rho.to_vec(),
                 outer_result.converged(),
                 outer_result
@@ -3396,6 +3464,114 @@ where
     drop(dense_covariance_reservation);
     drop(factorized_inference_reservation);
     conditioning.backtransform_external_result(result)
+}
+
+#[cfg(test)]
+mod shipped_joint_point_identity_2727_tests {
+    //! #2727 — the post-fit certificate identity check must compare the shipped
+    //! point against the certified one over EVERY optimized coordinate.
+    //!
+    //! The outer optimizer for a flexible-link fit searches
+    //! `theta = [rho, link-shape coords]`, so the certificate is minted at a
+    //! `K + link_dim` vector while the shipped rho block is `K`. The old check
+    //! compared those two directly and so could never agree: six SAS/mixture
+    //! fixtures were refused with `converged=true`, `certifies=true` and `|Pg|`
+    //! down to `1.446e-6`, on a `Vec::len()` mismatch alone.
+    //!
+    //! Two arms, and the second is the one that matters. Arm 1 is what the
+    //! defect broke — a faithfully shipped joint point must be ACCEPTED. Arm 2
+    //! is what the obvious wrong repair breaks: comparing only the rho prefix
+    //! turns this over-strict gate into an under-strict one, silently ceasing
+    //! to check the link coordinates, which are exactly the coordinates this
+    //! lane exists to optimize. Arm 2 fails under that repair and passes here,
+    //! so the two arms cannot both be satisfied by a prefix comparison.
+
+    use super::shipped_joint_point_is_certified;
+    use ndarray::Array1;
+
+    /// The SAS shape of the reproducer in #2727: one rho, two link coordinates
+    /// `(epsilon, log delta)`, i.e. the `1 vs 3` that the old check refused.
+    fn sas_reproducer() -> (Array1<f64>, Array1<f64>, Array1<f64>) {
+        let rho = Array1::from_vec(vec![-4.753038138161757]);
+        let link = Array1::from_vec(vec![0.6483514447757568, -1.2814780614332404]);
+        let certified = Array1::from_vec(vec![
+            -4.753038138161757,
+            0.6483514447757568,
+            -1.2814780614332404,
+        ]);
+        (rho, link, certified)
+    }
+
+    /// ARM 1 — a faithfully shipped joint point is accepted.
+    ///
+    /// This is the arm the defect broke. On the pre-fix code the operands are a
+    /// 1-vector and a 3-vector, so this returns false and the fit is refused.
+    #[test]
+    fn a_faithfully_shipped_joint_point_is_certified() {
+        let (rho, link, certified) = sas_reproducer();
+        assert!(
+            shipped_joint_point_is_certified(&rho, &link, &certified),
+            "the shipped point IS the certified point in every coordinate              (rho={rho:?}, link={link:?}, certified={certified:?}); refusing it              is #2727"
+        );
+    }
+
+    /// ARM 2 — a link coordinate that does not match must still be refused,
+    /// even though the rho prefix matches bitwise.
+    ///
+    /// This is the discriminating arm. A repair that compares only
+    /// `certified[..rho.len()]` passes arm 1 and FAILS this one, which is what
+    /// stops the over-strict gate from being repaired into an under-strict one.
+    /// Note the rho block here is bitwise identical to the certificate, so a
+    /// prefix comparison has nothing to catch.
+    #[test]
+    fn a_mismatched_link_coordinate_is_refused_though_the_rho_prefix_matches() {
+        let (rho, link, certified) = sas_reproducer();
+        let mut perturbed = link.clone();
+        // One ULP. The check is bitwise by design, so the smallest
+        // representable disagreement must already refuse — a tolerance here
+        // would be a second, unstated stationarity comparison.
+        perturbed[1] = f64::from_bits(perturbed[1].to_bits() + 1);
+        assert_ne!(perturbed[1].to_bits(), link[1].to_bits());
+
+        assert!(
+            rho.iter()
+                .zip(certified.iter())
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "precondition: the rho prefix must match bitwise, or this arm would              be refused for arm 1's reason instead of its own"
+        );
+        assert!(
+            !shipped_joint_point_is_certified(&rho, &perturbed, &certified),
+            "a shipped link coordinate differing from the certified one must be              refused; accepting it is the under-strict repair of #2727"
+        );
+    }
+
+    /// A missing link coordinate is a different point, not a shorter one — the
+    /// length conjunct the original check got right, kept.
+    #[test]
+    fn a_dropped_link_coordinate_is_refused() {
+        let (rho, _link, certified) = sas_reproducer();
+        let truncated = Array1::from_vec(vec![0.6483514447757568]);
+        assert!(
+            !shipped_joint_point_is_certified(&rho, &truncated, &certified),
+            "shipping 2 coordinates against a 3-coordinate certificate must be              refused"
+        );
+    }
+
+    /// The rho-only arm is unchanged: no link coordinates, and the shipped rho
+    /// vector is the whole certified point.
+    #[test]
+    fn the_rho_only_arm_still_compares_rho_against_the_whole_certificate() {
+        let rho = Array1::from_vec(vec![0.25, -1.5]);
+        let none = Array1::<f64>::zeros(0);
+        assert!(shipped_joint_point_is_certified(&rho, &none, &rho.clone()));
+
+        let mut moved = rho.clone();
+        moved[0] = f64::from_bits(moved[0].to_bits() + 1);
+        assert!(
+            !shipped_joint_point_is_certified(&moved, &none, &rho),
+            "a moved rho must still be refused on the rho-only arm"
+        );
+    }
 }
 
 #[cfg(test)]
