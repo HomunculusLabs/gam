@@ -2732,9 +2732,56 @@ pub fn gaussian_reml_multi_shared_dispersion_penalty_gradient_from_fit(
         );
     }
     let pooled_deviance = shared_sigma2 * shared_nu;
-    if !(pooled_deviance.is_finite() && pooled_deviance > 0.0) {
+    // DENOMINATE THE BAR IN WHAT PRODUCED THE QUANTITY.  The forward fit forms
+    // this pooled deviance by cancellation: `pooled_ywy - sum_k c_k^2/(1 +
+    // lambda*delta_k)` (see `gaussian_reml_multi_shared_dispersion_closed_form`),
+    // a difference of two accumulations that are individually bounded in
+    // magnitude by the pooled weighted response energy.  On the nearly
+    // interpolating chart the comment above describes, that difference is the
+    // roundoff residue of its own summation, and a bare `> 0.0` accepts it: a
+    // positive value at the arithmetic floor is indistinguishable from a real
+    // deviance to that predicate, and it then enters `deviance_scale` as a
+    // DENOMINATOR, so the accepted debris is amplified by `1/floor` into every
+    // entry the nested metric optimizer follows.
+    //
+    // The floor below is the standard `gamma_m` forward-error bound for the way
+    // the quantity is actually formed, exactly as
+    // `validate_weighted_block_orthogonality` bounds its own cancellation: two
+    // multiplications and one accumulation per weighted response entry
+    // (`n*d` of them), one reciprocal-scale multiply and one accumulation per
+    // penalty eigendirection (`p` of them), and the final subtraction.  It is
+    // derived from the machine epsilon, the problem dimensions and the measured
+    // response energy; there is no tolerance to tune.  Below it, the pooled
+    // deviance carries no significant digit, `1/pooled_deviance` has no
+    // meaning, and there is no finite limit to substitute -- `deviance_scale`
+    // diverges as the chart approaches interpolation -- so the honest branch is
+    // a named refusal rather than a fabricated derivative.
+    let mut pooled_response_energy = 0.0_f64;
+    for output in 0..d {
+        for row in 0..n {
+            let value = y[[row, output]];
+            pooled_response_energy += weight[row] * value * value;
+        }
+    }
+    let unit_roundoff = 0.5 * f64::EPSILON;
+    let operation_count = n
+        .saturating_mul(d)
+        .saturating_mul(3)
+        .saturating_add(p.saturating_mul(2))
+        .saturating_add(1);
+    let accumulated = operation_count as f64 * unit_roundoff;
+    if accumulated >= 1.0 {
         crate::bail_invalid_estim!(
-            "shared-dispersion REML penalty gradient requires positive forward deviance"
+            "shared-dispersion REML penalty gradient has no finite floating-point error bound for {n} rows, {d} responses and {p} coefficients"
+        );
+    }
+    let deviance_roundoff = (accumulated / (1.0 - accumulated)) * pooled_response_energy;
+    if !(pooled_deviance.is_finite()
+        && deviance_roundoff.is_finite()
+        && pooled_deviance > deviance_roundoff)
+    {
+        crate::bail_invalid_estim!(
+            "shared-dispersion REML penalty gradient requires a forward deviance resolved above the roundoff of its own formation; the chart is interpolating to arithmetic precision: pooled deviance {pooled_deviance:.6e} does not exceed the forward bound {deviance_roundoff:.6e} on the cancellation that produced it from pooled response energy {pooled_response_energy:.6e}"
         );
     }
 
