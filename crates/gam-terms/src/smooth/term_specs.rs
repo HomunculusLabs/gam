@@ -3650,27 +3650,56 @@ pub fn constant_curvature_term_spec(
         })
 }
 
-/// Hard positive cap on |κ| relative to the data's inverse squared chart
-/// radius. `|κ| = 1/R²` (R² = max squared chart radius) is the singular scale
-/// on **both** branches, for two different reasons, and the optimizer is boxed
-/// to a safe fraction of it on each side (#2687):
+/// The fraction of the way from κ = 0 to the nearest singular κ that the outer
+/// search is allowed to consume. Each branch has its own singularity and its own
+/// gauge, and this one fraction is the retreat applied to both (#2687):
 ///
-/// * **κ < 0.** The per-point chart gauge `1 + κ‖x‖²` reaches the chart edge for
-///   the farthest data point at `κ = −1/R²`.
-/// * **κ > 0.** That per-point gauge is vacuous (`‖x‖² ≥ 0`), so it is not what
-///   binds here — but it is also not what the kernel evaluates. Every distance
-///   goes through `w = (−x) ⊕_κ y`, whose Möbius denominator
-///   `1 + 2κ⟨x,y⟩ + κ²‖x‖²‖y‖²` is `(1 − κ‖x‖‖y‖)²` for an anti-aligned pair and
-///   **vanishes at `κ = +1/(‖x‖‖y‖)`**, worst case `+1/R²` over the cloud: the
-///   two points are then exactly antipodal and `w` passes through infinity.
-///   Past that fold the chart is not merely inaccurate but folded — the pair's
-///   scale-free geodesic separation is exactly invariant under
-///   `κ ↦ 1/(κ‖x‖²‖y‖²)`, so every κ beyond the fold duplicates one before it.
+/// * **κ < 0 — the chart edge, a PER-POINT gauge.** `λ(p) = 1 + κ‖p‖²` is the
+///   conformal factor's denominator and vanishes at `κ = −1/‖p‖²`: the point
+///   reaches the boundary of the Poincaré ball. The retreat is `λ ≥ 1 − F`, so
+///   the gauge may lose at most this fraction of its flat (κ = 0) value of 1.
+/// * **κ > 0 — the antipodal fold, a PER-PAIR gauge.** The per-point gauge is
+///   vacuous there (`‖p‖² ≥ 0`), and it is not what the kernel evaluates anyway.
+///   Every distance goes through `w = (−x) ⊕_κ c`, whose Möbius denominator
+///   `D = 1 + 2κ⟨x,c⟩ + κ²‖x‖²‖c‖²` is `(1 − κ‖x‖‖c‖)²` for an anti-aligned pair
+///   and **vanishes at `κ = +1/(‖x‖‖c‖)`** — the two points are exactly
+///   antipodal and `w` passes through infinity. Past the fold the chart is not
+///   merely inaccurate but folded: the pair's scale-free geodesic separation is
+///   exactly invariant under `κ ↦ 1/(κ‖x‖²‖c‖²)`, so every κ beyond it
+///   duplicates one before it. `√D` is the pair's gauge — literally
+///   `|1 ∓ κ‖x‖‖c‖|`, the same shape as `λ` — and the retreat is the same
+///   `√D ≥ 1 − F`, i.e. `κ‖x‖‖c‖ ≤ F`.
 ///
-/// The two reasons land on the same `1/R²`, which is why the window is
-/// symmetric; it is not one branch's constraint mirrored onto the other. Gated
-/// by `spherical_branch_folds_at_kappa_r2_one_so_the_kappa_window_is_symmetric_2687`
+/// Both gauges hit their wall at `|κ| = 1/R²` when `‖x‖ = ‖c‖ = R`, which is why
+/// the window is symmetric on a cloud whose centers reach the data radius; it is
+/// not one branch's constraint mirrored onto the other. Gated by
+/// `spherical_branch_folds_at_kappa_r2_one_so_the_kappa_window_is_symmetric_2687`
 /// in `gam-geometry`, which pins the fold, the refusal, and the involution.
+///
+/// ## What `0.5` buys, measured (#2687)
+///
+/// This is a MODELLING retreat, not a numerical one, and the measurement that
+/// separates the two is in
+/// `gam_geometry::manifolds::constant_curvature_antipodal_resolution_tests`.
+/// Differencing the shipped Möbius route against the cancellation-free closed
+/// form `d = (4/√κ)·arctan(√κ R)` gives
+///
+/// ```text
+///   rel_err(∂d/∂κ)   ≈ ε / D
+///   rel_err(∂²d/∂κ²) ≈ ε / D^{3/2}
+/// ```
+///
+/// At `F = 0.5` the worst evaluated pair has `D ≥ (1 − F)² = 0.25`, where the
+/// κ-Hessian the outer route consumes (`Derivative::Analytic`, exact `d²V/dκ²`)
+/// carries ~14 of 16 digits. Half the mantissa — the bar a Newton Hessian
+/// actually needs — is reached only at `D = ε^{1/3} ≈ 6.1e-6`, i.e. `κR² ≈
+/// 0.9975`. **The arithmetic permits a box 203× closer to the fold in `1 − κR²`
+/// than this fraction goes.** So moving `F` needs an argument about the
+/// ESTIMATOR, not about the arithmetic, and #2687 carries the measurement that
+/// argues against widening it: on the fixture whose κ̂ is railed here, the
+/// profiled criterion is monotone across the entire interval, so a wider box
+/// only moves the rail — to κ̂ = 2.78 against a planted 1.5, further from the
+/// truth than the shipped box gives.
 ///
 /// κ = 0 (flat) is the centre of the window, an interior point of the
 /// `S^d ← ℝ^d → H^d` family — exactly the reachability the raw-κ (not log-κ)
@@ -3683,36 +3712,68 @@ pub const CONSTANT_CURVATURE_KAPPA_CHART_FRACTION: f64 = 0.5;
 pub const CONSTANT_CURVATURE_MIN_CHART_RADIUS2: f64 = 1e-8;
 
 /// `(κ_min, κ_max)` outer-optimization window for a constant-curvature term,
-/// derived from the data's maximum squared chart radius `R²` so the κ-jets
-/// never leave the κ-stereographic chart. Symmetric about κ = 0:
-/// `±CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / R²`. The symmetry is derived,
-/// not mirrored — see the constant's docs for the separate κ<0 (chart-gauge)
-/// and κ>0 (antipodal-fold) arguments that both land on `|κ| = 1/R²`.
+/// derived over the configuration the basis actually EVALUATES.
+///
+/// The kernel is `K_κ(data, centers)`: `validate_chart_points` checks the chart
+/// gauge on data **and** centers, and `ConstantCurvature::distance` is called
+/// once per (data row, center) PAIR. So the two walls are taken over two
+/// different sets, and neither of them is `data` alone (gam#2716):
+///
+/// ```text
+///   κ_min = −F / max(R_x², R_c²)        per-point chart gauge, over data ∪ centers
+///   κ_max = +F / (R_x · R_c)            antipodal fold,        over data × centers
+/// ```
+///
+/// with `R_x = max‖x‖` over the term's feature columns and `R_c = max‖c‖` over
+/// the centers, bounded by
+/// [`constant_curvature_center_chart_radius2`](crate::basis::constant_curvature_center_chart_radius2)
+/// without materializing them. Every data-driven strategy selects data rows or
+/// convex combinations of them, so there `R_c = R_x` and both ends reduce to the
+/// pre-#2716 `±F/R_x²` **bit for bit**. Only `UserProvided` (verbatim, any
+/// radius) and `UniformGrid` (bounding-box corners, up to `√d·R_x`) move, and
+/// they move in the direction that was previously wrong:
+///
+/// * the OLD upper end passed the fold once `R_c ≥ 2·R_x`, admitting two κ that
+///   produce an identical scale-free geometry for the extreme pair;
+/// * the OLD lower end let the search reach a κ at which a center is outside the
+///   chart, which `validate_chart_points` refuses — turning a box excursion into
+///   a hard basis-build error mid-optimization rather than a rail.
+///
+/// See [`CONSTANT_CURVATURE_KAPPA_CHART_FRACTION`] for the two gauges and for
+/// what its `0.5` buys, measured.
 pub fn constant_curvature_kappa_bounds(
     data: ArrayView2<'_, f64>,
     spec: &TermCollectionSpec,
     term_idx: usize,
 ) -> (f64, f64) {
-    let feature_cols = match spec.smooth_terms.get(term_idx).map(|t| &t.basis) {
-        Some(SmoothBasisSpec::ConstantCurvature { feature_cols, .. }) => feature_cols,
+    let (feature_cols, cc) = match spec.smooth_terms.get(term_idx).map(|t| &t.basis) {
+        Some(SmoothBasisSpec::ConstantCurvature {
+            feature_cols, spec, ..
+        }) => (feature_cols, spec),
         _ => return (-1.0, 1.0),
     };
-    let mut max_r2 = CONSTANT_CURVATURE_MIN_CHART_RADIUS2;
-    for row in data.outer_iter() {
-        let mut r2 = 0.0_f64;
-        for &c in feature_cols.iter() {
-            if let Some(&v) = row.get(c)
-                && v.is_finite()
-            {
-                r2 += v * v;
-            }
-        }
-        if r2 > max_r2 {
-            max_r2 = r2;
-        }
-    }
-    let half = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / max_r2;
-    (-half, half)
+    let data_r2 = crate::basis::constant_curvature_data_chart_radius2(data, feature_cols)
+        .max(CONSTANT_CURVATURE_MIN_CHART_RADIUS2);
+    let center_r2 =
+        crate::basis::constant_curvature_center_chart_radius2(data, feature_cols, &cc.center_strategy)
+            .max(CONSTANT_CURVATURE_MIN_CHART_RADIUS2);
+    // κ<0: the chart gauge is per POINT, so it is the larger of the two radii
+    // that reaches the ball boundary first — data or center, whichever is worse.
+    let kappa_min = -CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / data_r2.max(center_r2);
+    // κ>0: the fold is per PAIR, and the nearest one over `data × centers` is at
+    // `κ = 1/(R_x·R_c)`, i.e. `1/√(R_x²·R_c²)`. That product is `R_x²` whenever
+    // the centers come from the cloud — but only *mathematically*: `(a·a).sqrt()`
+    // is not bitwise `a` for every `a`, and a 2-ulp drift in the box would move
+    // every rail comparison in the tree for no reason. Take the product only
+    // when the two radii genuinely differ, so every data-driven strategy keeps
+    // its pre-#2716 endpoint bit for bit.
+    let pair_r2 = if center_r2 < data_r2 || center_r2 > data_r2 {
+        (data_r2 * center_r2).sqrt()
+    } else {
+        data_r2
+    };
+    let kappa_max = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / pair_r2;
+    (kappa_min, kappa_max)
 }
 
 /// Write the optimized κ back into a constant-curvature term spec. Returns

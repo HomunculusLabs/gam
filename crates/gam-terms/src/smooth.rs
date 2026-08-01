@@ -70,3 +70,9 @@ pub use design_freezing::freeze_term_collection_from_design;
 
 #[cfg(test)]
 mod tests;
+
+/// gam#2716: the κ search box is derived over the configuration the
+/// constant-curvature basis evaluates (`data ∪ centers` for the chart gauge,
+/// `data × centers` for the antipodal fold), not over `data` alone.
+#[cfg(test)]
+mod constant_curvature_kappa_box_tests;

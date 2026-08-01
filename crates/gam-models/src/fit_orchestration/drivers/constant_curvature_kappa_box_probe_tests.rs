@@ -9,7 +9,6 @@
 // the region between the shipped cap and the antipodal fold is well behaved
 // rather than full of spurious structure. Neither has ever been looked at.
 #[cfg(test)]
-#[allow(clippy::print_stderr)]
 mod constant_curvature_kappa_box_probe_tests {
     use super::*;
     use gam_geometry::manifolds::constant_curvature::ConstantCurvature;

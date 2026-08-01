@@ -781,6 +781,111 @@ pub fn build_constant_curvature_basis(
 
 /// Select constant-curvature centers.
 ///
+/// Upper bound on `max‖c‖²`, the largest squared chart radius among the centers
+/// [`select_constant_curvature_centers`] will return for `strategy` on `data` —
+/// computed WITHOUT materializing them.
+///
+/// Every κ bound is denominated in a chart radius, and the set that radius must
+/// be taken over is the one the kernel EVALUATES: `K_κ` calls
+/// `ConstantCurvature::distance(x, c)` for each (data row, center) pair and
+/// `validate_chart_points` checks data **and** centers. Taking the radius over
+/// `data` alone is only correct while every center is inside the data hull
+/// (gam#2716). Two strategies break that:
+///
+/// * [`CenterStrategy::UserProvided`] — left verbatim by
+///   [`select_constant_curvature_centers`], so a center may sit at any radius.
+/// * [`CenterStrategy::UniformGrid`] — the Cartesian product of per-axis
+///   linspaces over the data's *bounding box*, so a corner center sits at the
+///   bounding box corner, radius up to `√d·max‖x‖`, outside the hull for `d ≥ 2`.
+///
+/// Every other strategy assigns either a data row verbatim (equal-mass leaves,
+/// farthest point) or a convex combination of data rows (k-means centroids), so
+/// `max‖c‖ ≤ max‖x‖` and this returns exactly the data radius — which is what
+/// makes the κ box bit-identical to its pre-#2716 value on every data-driven
+/// strategy. The origin-snap in [`select_constant_curvature_centers`] only ever
+/// moves a center toward the origin, so it cannot invalidate an upper bound.
+///
+/// The match is exhaustive rather than wildcarded: a new strategy has to state
+/// its own radius law instead of silently inheriting a wrong one.
+pub fn constant_curvature_center_chart_radius2(
+    data: ArrayView2<'_, f64>,
+    feature_cols: &[usize],
+    strategy: &CenterStrategy,
+) -> f64 {
+    match strategy {
+        CenterStrategy::Auto(inner) => {
+            constant_curvature_center_chart_radius2(data, feature_cols, inner)
+        }
+        CenterStrategy::DuchonSpectral { knots, .. } => {
+            constant_curvature_center_chart_radius2(data, feature_cols, knots)
+        }
+        CenterStrategy::UserProvided(centers) => {
+            let mut max_r2 = 0.0_f64;
+            for row in centers.outer_iter() {
+                let mut r2 = 0.0_f64;
+                for &v in row.iter() {
+                    if v.is_finite() {
+                        r2 += v * v;
+                    }
+                }
+                max_r2 = max_r2.max(r2);
+            }
+            max_r2
+        }
+        CenterStrategy::UniformGrid { .. } => {
+            // The grid spans `[min_c, max_c]` per axis, so the extreme center
+            // radius is realized at the bounding-box corner whose coordinate is
+            // `max(|min_c|, |max_c|)` on every axis simultaneously.
+            let mut corner_r2 = 0.0_f64;
+            for &c in feature_cols.iter() {
+                let mut lo = f64::INFINITY;
+                let mut hi = f64::NEG_INFINITY;
+                for row in data.outer_iter() {
+                    if let Some(&v) = row.get(c)
+                        && v.is_finite()
+                    {
+                        lo = lo.min(v);
+                        hi = hi.max(v);
+                    }
+                }
+                if lo.is_finite() && hi.is_finite() {
+                    let extreme = lo.abs().max(hi.abs());
+                    corner_r2 += extreme * extreme;
+                }
+            }
+            corner_r2
+        }
+        CenterStrategy::EqualMass { .. }
+        | CenterStrategy::EqualMassCovarRepresentative { .. }
+        | CenterStrategy::FarthestPoint { .. }
+        | CenterStrategy::KMeans { .. } => {
+            constant_curvature_data_chart_radius2(data, feature_cols)
+        }
+    }
+}
+
+/// `max‖x‖²` over the term's feature columns of `data`, the other half of the
+/// evaluated pair set. Non-finite coordinates are skipped rather than poisoning
+/// the maximum (the basis build refuses them separately, by row and name).
+pub fn constant_curvature_data_chart_radius2(
+    data: ArrayView2<'_, f64>,
+    feature_cols: &[usize],
+) -> f64 {
+    let mut max_r2 = 0.0_f64;
+    for row in data.outer_iter() {
+        let mut r2 = 0.0_f64;
+        for &c in feature_cols.iter() {
+            if let Some(&v) = row.get(c)
+                && v.is_finite()
+            {
+                r2 += v * v;
+            }
+        }
+        max_r2 = max_r2.max(r2);
+    }
+    max_r2
+}
+
 /// The stereographic constant-curvature chart has a distinguished pole: the
 /// chart origin.  Curvature sign is visible first in the radial geodesic map
 /// from that pole (`2 atan(√κ r)/√κ` versus `2 atanh(√|κ| r)/√|κ|`).  A pure
