@@ -782,7 +782,8 @@ pub(super) fn run(
              routing_resid={:.3e} births={} revived={} live={}/{} no_growth={} \
              support_saturated={} refresh_s={:.2} route_s={:.2} elapsed_s={:.1} \
              accumulate_s={:.3} sigma_s={:.3} graph_build_s={:.3} \
-             precond_s={:.3} cg_solve_s={:.3} block_sweeps={} precond_cost_ratio={:.3} \
+             precond_s={:.3} cg_solve_s={:.3} block_sweeps={} \
+             precond_cost_ratio={:.3} recycling_admitted={} \
              mean_degree={:.1} giant_fraction={:.4} max_component={} \
              max_component_nnz={} operator_build_s={:.3} \
              cg_columns={} cg_iterations={} recycled_rank={} tile_columns={} \
@@ -811,6 +812,7 @@ pub(super) fn run(
             decoder_solve_stats.cg_solve_seconds,
             decoder_solve_stats.cg_block_sweeps,
             decoder_solve_stats.cg_preconditioner_cost_ratio,
+            decoder_solve_stats.cg_recycling_admitted,
             decoder_solve_stats.mean_cofiring_degree,
             decoder_solve_stats.giant_component_fraction,
             decoder_solve_stats.max_component_size,
@@ -1997,6 +1999,14 @@ pub(super) struct DecoderRecycleSpace {
     directions: Vec<Vec<f64>>,
     next_candidates: Vec<DecoderRecycleCandidate>,
     next_capacity: usize,
+    /// Operator applications per decoder column observed at a rank-ZERO
+    /// (plain Jacobi) refresh of this fit — the baseline the recycled
+    /// correction has to beat. The first refresh always supplies it: there is
+    /// no history yet, so it necessarily runs at rank 0.
+    jacobi_sweeps_per_column: Option<f64>,
+    /// Whether the recycled correction is still admitted. See
+    /// [`Self::score_refresh`].
+    admitted: bool,
 }
 
 impl DecoderRecycleSpace {
@@ -2006,6 +2016,70 @@ impl DecoderRecycleSpace {
             directions: Vec::new(),
             next_candidates: Vec::new(),
             next_capacity: 0,
+            jacobi_sweeps_per_column: None,
+            admitted: true,
+        }
+    }
+
+    /// Whether a recycled correction may be built for the next component.
+    ///
+    /// Once [`Self::score_refresh`] has measured the correction failing to pay
+    /// for itself on THIS fit's operator, this is `false` for the rest of the
+    /// fit and every remaining refresh runs plain Jacobi block CG.
+    fn admitted(&self) -> bool {
+        self.admitted
+    }
+
+    /// Decide whether the recycled correction earned its cost on the refresh
+    /// that just finished, and latch it off if it did not.
+    ///
+    /// # Why this is measured rather than bounded
+    ///
+    /// [`decoder_recycle_rank_bound`] permits a rank whose apply work is up to
+    /// ONE extra operator application per sweep (`2mr ≤ m+nnz`). That is a
+    /// bound on what the correction may COST; nothing anywhere bounded what it
+    /// had to RETURN. So a correction that finds no useful direction is not
+    /// merely unhelpful — it is a guaranteed loss of up to a factor of two on
+    /// the dominant term of the refresh, taken silently.
+    ///
+    /// Measured on the sparse-dictionary decoder operator (`sae_decoder_refresh_scaling`,
+    /// same node, same binary, recycling forced to rank 0 as the only change):
+    /// the correction reduced operator applications by **0.3%-1.4%** across
+    /// five shapes spanning `P ∈ [256, 2048]` and `K ∈ [1024, 2048]`, while the
+    /// refresh itself ran **1.68×-2.89× slower**. Per-column iteration counts
+    /// were 22-29 with the correction and 23-29 without it, with zero
+    /// non-converged columns either way: the Jacobi-scaled operator is already
+    /// well enough conditioned that there is nothing for a coarse space to
+    /// remove. That is a property of this operator, not of the recycling
+    /// machinery, which is why the decision is taken from THIS fit's own
+    /// measurement instead of deleting the capability — a genuinely
+    /// ill-conditioned decoder still gets it, and keeps it.
+    ///
+    /// The break-even is the correction's own cost ratio, not a tuned number.
+    /// A rank-`r` correction adds `cost_ratio = 2mr/(m+nnz)` operator-equivalents
+    /// to every sweep, so it is worth having exactly when
+    /// `sweeps_recycled · (1 + cost_ratio) ≤ sweeps_jacobi`.
+    ///
+    /// The latch is one-way on purpose. Re-probing would reintroduce the cost
+    /// it exists to avoid on every probe, and the measurement above is not
+    /// marginal — nothing about a fit's later epochs makes a coarse space that
+    /// removed 1% of the work start removing 50% of it.
+    fn score_refresh(&mut self, sweeps: usize, columns: usize, rank: usize, cost_ratio: f64) {
+        if columns == 0 || sweeps == 0 {
+            return;
+        }
+        let per_column = sweeps as f64 / columns as f64;
+        if rank == 0 {
+            self.jacobi_sweeps_per_column = Some(match self.jacobi_sweeps_per_column {
+                Some(previous) => previous.min(per_column),
+                None => per_column,
+            });
+            return;
+        }
+        if let Some(baseline) = self.jacobi_sweeps_per_column
+            && per_column * (1.0 + cost_ratio) > baseline
+        {
+            self.admitted = false;
         }
     }
 
@@ -2263,6 +2337,9 @@ pub struct DecoderSolveStats {
     /// the sweeps to be worth building, and until this field existed nothing
     /// on the trace let anyone check whether it did.
     pub cg_preconditioner_cost_ratio: f64,
+    /// Whether the recycled correction is still admitted for this fit. Flips to
+    /// `false` for good on the first refresh where it fails its break-even.
+    pub cg_recycling_admitted: bool,
 }
 
 impl Default for DecoderSolveStats {
@@ -2290,6 +2367,7 @@ impl Default for DecoderSolveStats {
             cg_solve_seconds: 0.0,
             cg_block_sweeps: 0,
             cg_preconditioner_cost_ratio: 0.0,
+            cg_recycling_admitted: true,
         }
     }
 }
@@ -2670,7 +2748,7 @@ fn solve_decoder_recycled(
         "[SAE percolation] K={k} mean_degree={:.4} giant_fraction={:.4} \
          components={} max_component={} max_component_nnz={} operator_build_s={:.3} \
          graph_build_s={:.3} precond_s={:.3} cg_solve_s={:.3} block_sweeps={} \
-         precond_cost_ratio={:.3} \
+         precond_cost_ratio={:.3} recycling_admitted={} \
          direct_threshold={direct_threshold} \
          cg_columns={} cg_iterations={} recycled_rank={} tile_columns={} \
          cg_kappa_hat={:?} cg_kappa_bound={:?} \
@@ -2686,6 +2764,7 @@ fn solve_decoder_recycled(
         stats.cg_solve_seconds,
         stats.cg_block_sweeps,
         stats.cg_preconditioner_cost_ratio,
+        stats.cg_recycling_admitted,
         stats.cg_columns,
         stats.cg_iterations,
         stats.cg_recycled_rank,
@@ -2696,6 +2775,13 @@ fn solve_decoder_recycled(
         stats.cg_relative_residual,
         stats.cg_residual_stop,
     );
+    recycle.score_refresh(
+        stats.cg_block_sweeps,
+        stats.cg_columns,
+        stats.cg_recycled_rank,
+        stats.cg_preconditioner_cost_ratio,
+    );
+    stats.cg_recycling_admitted = recycle.admitted();
     recycle.finish_refresh();
     Ok(stats)
 }
@@ -3026,7 +3112,13 @@ fn solve_component(
     }
 
     let k_total = eq.diag.len();
-    let rank_bound = decoder_recycle_rank_bound(k_total, p, m, nnz);
+    // The correction is admitted only while it is still paying for itself on
+    // this fit's own operator (see `DecoderRecycleSpace::score_refresh`).
+    let rank_bound = if recycle.admitted() {
+        decoder_recycle_rank_bound(k_total, p, m, nnz)
+    } else {
+        0
+    };
     let preconditioner_start = Instant::now();
     let preconditioner = recycled_component_preconditioner(
         recycle,
@@ -4559,6 +4651,7 @@ mod exact_solve_tests {
             directions: vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 0.0, 1.0, 0.0]],
             next_candidates: Vec::new(),
             next_capacity: 0,
+            ..DecoderRecycleSpace::new(4)
         };
         let preconditioner = recycled_component_preconditioner(
             &recycle,
