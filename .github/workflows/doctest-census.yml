@@ -1,0 +1,58 @@
+name: Doctest census (#2732)
+
+# `cargo test --doc` runs in NO CI job (#2732). This is the measurement that has
+# to happen before any gate exists, and it is deliberately not a gate itself.
+#
+# It exists separately from the rustdoc ratchet because they are different
+# commands over different surfaces -- `cargo doc --no-deps` generates docs,
+# `cargo test --doc` compiles and RUNS every doctest -- and folding them into one
+# green would make both uninterpretable.
+#
+# Two things this run is for, in order:
+#   1. the per-crate table, so `scripts/doctest_red_crates.txt` is written from
+#      measurement instead of from a guess. One crate was measured by hand
+#      (gam-solve: 0 passed, 12 failed); the workspace-wide count is unknown and
+#      is not being extrapolated from it.
+#   2. the COST. `cargo test --doc` compiles and links each doctest, a different
+#      cost class from a `--no-deps` doc pass -- and the doc pass alone measured
+#      ~6 minutes for 24 crates, enough to move it off the shared push-gate job.
+#      Whether this can gate on push, and where, is decided on this number.
+#
+# The mistake this ordering exists to avoid was made one issue ago: the rustdoc
+# step went onto the push gate reasoning "the dependencies are already built, so
+# the marginal work is the passes alone" -- true, and never multiplied out
+# against the 5.2-minute baseline it was being added to.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: doctest-census-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  census:
+    name: cargo test --doc, per crate (measurement, gates nothing)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Doctest census
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: "0"
+        run: |
+          set +e
+          scripts/doctest_ratchet.sh --census
+          status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "::error title=Doctest census could not measure::The scan did not run to completion, so this run says nothing about the doctest surface. Treat it as a non-run, not as a pass."
+          fi
+          exit "$status"
