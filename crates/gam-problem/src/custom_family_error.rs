@@ -740,13 +740,21 @@ mod tests {
         );
     }
 
+    /// #2689 deleted `impl From<CustomFamilyError> for String` so that a
+    /// flattening is a compile error rather than a silent default. This test
+    /// used to assert that impl and so could not compile once it was gone.
+    ///
+    /// The behaviour worth keeping is what the impl *delegated to*: rendering
+    /// goes through `Display`, and an explicit `.to_string()` at a boundary
+    /// that genuinely owns a `String` contract must still produce the reason
+    /// verbatim. Asserting `Display` keeps that guarantee while leaving the
+    /// flattening un-resurrectable.
     #[test]
-    fn from_custom_family_error_for_string_uses_display() {
+    fn rendering_a_custom_family_error_uses_display() {
         let err = CustomFamilyError::NumericalFailure {
             reason: "singular".to_string(),
         };
-        let s = String::from(err);
-        assert_eq!(s, "singular");
+        assert_eq!(err.to_string(), "singular");
     }
 }
 
