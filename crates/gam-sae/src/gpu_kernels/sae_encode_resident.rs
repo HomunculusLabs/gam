@@ -3,8 +3,12 @@
 //! The production CPU encode is [`crate::encode::EncodeAtlas::certified_encode_row`]:
 //! for one atom and one target row `x` at fixed amplitude `z` it
 //!
-//!   1. **routes** the row to the `topk` nearest certified charts by ambient
-//!      reconstruction distance `‖BᵀΦ(t_c) − x‖²` (the *active-set routing*),
+//!   1. **routes** the row to the nearest certified charts by ambient
+//!      reconstruction distance `‖BᵀΦ(t_c) − x‖²` (the *active-set routing*).
+//!      Since #2518 both lanes consider EVERY certifiable chart: the CPU path
+//!      prunes by a rigorous per-chart residual bound, and this lane — whose
+//!      kernel is generated per `(d, m, p, topk, newton)` and so cannot express a
+//!      data-dependent exit — simply sets `topk` to the chart count,
 //!   2. **warm-starts** each candidate from that chart's distilled IFT affine
 //!      predictor `t̂ = t_c + (1/z)·A₁·(x − z·m₁)`,
 //!   3. runs the **per-row latent-coordinate Newton** solve inside the
@@ -75,7 +79,14 @@ pub struct EncodeAtomDevice {
     pub m: usize,
     /// Output dimension `p`.
     pub p: usize,
-    /// Number of nearest charts refined per row (`CERTIFIED_ROUTING_TOPK`).
+    /// Number of nearest charts refined per row — the atom's FULL certifiable
+    /// chart count since #2518, never the deleted `CERTIFIED_ROUTING_TOPK = 4`.
+    ///
+    /// The kernel is generated per `(d, m, p, topk, newton)`, so this lane needs a
+    /// count fixed at generation time and cannot express the CPU path's
+    /// proof-pruned early exit. Exhaustive is then the only value that keeps the
+    /// two lanes returning the SAME coordinate, which the emulator-vs-production
+    /// gate enforces.
     pub topk: usize,
     /// Online Newton refinement steps after a certified landing.
     pub newton_steps: usize,
@@ -199,7 +210,15 @@ impl EncodeAtomDevice {
             d,
             m,
             p,
-            topk: crate::encode::CERTIFIED_ROUTING_TOPK,
+            // #2518 — EXHAUSTIVE, not a constant and not a derived basin count.
+            // The CPU certified encode scans every certifiable chart and skips one
+            // only when a rigorous residual bound proves it cannot win, so the two
+            // lanes agree exactly iff this lane also considers them all (the CPU's
+            // prune removes only provably-worse candidates, which cannot change the
+            // returned encode). A smaller count here — 4, or a Bezout basin bound —
+            // would make the device silently return a different, worse coordinate
+            // than the CPU on precisely the folded atoms this issue is about.
+            topk: charts.len().max(1),
             newton_steps: config.newton_steps,
             exponents,
             decoder,

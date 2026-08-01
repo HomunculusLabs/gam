@@ -107,13 +107,6 @@ pub(crate) const ENCODE_BATCH_PARALLEL_ROW_MIN: usize = 256;
 /// recall — leaving only the fit-quality role described here.)
 pub(crate) const CANDIDATE_ROUTING_MIN_ALIGNMENT: f64 = 0.5;
 
-/// Number of nearest charts the CERTIFIED encode refines in before returning the
-/// lowest-reconstruction-error certified result. A single nearest chart is not
-/// globally sound where the decoded manifold folds near itself (both competing
-/// basins' charts reconstruct near the fold, so both rank among the nearest by
-/// ambient distance); refining the top few captures the global basin. For a
-/// unimodal atom all candidates converge to the same root, so K>1 is a no-op.
-pub(crate) const CERTIFIED_ROUTING_TOPK: usize = 4;
 
 /// Newton refinement convergence floor. Once a refinement step's length `‖δ‖`
 /// falls below this (relative to the coordinate scale `1 + ‖t‖`), the iterate has
@@ -703,6 +696,24 @@ pub struct CertifiedChart {
     /// GEMM sub-batch that degenerates to one row per group when `K ≫ N`). `None`
     /// exactly when `amortized_jacobian` is `None` (singular Gauss–Newton block).
     pub amortized_base: Option<Array1<f64>>,
+    /// Sup of the amplitude-1 reconstruction Jacobian `‖∂_t m‖` over this chart's
+    /// region — `reconstruction_jet_sups(..).jacobian`, already computed here to
+    /// build `lipschitz` and previously discarded (#2518 item 1).
+    ///
+    /// This is what turns distance-ordered routing from a hope into a bound. The
+    /// certified encode's returned root lies inside the chart's ball, so for any
+    /// `t` this chart can return,
+    ///
+    /// ```text
+    ///     ‖x − z·m(t)‖  ≥  ‖x − z·m(t_c)‖  −  z·‖m(t) − m(t_c)‖
+    ///                   ≥  dist_c          −  z·jacobian_sup·radius,
+    /// ```
+    ///
+    /// so a chart whose distance already exceeds the best certified residual by
+    /// more than its own slack cannot hold the global minimiser and may be
+    /// skipped WITH PROOF rather than because a constant said to stop.
+    /// `INFINITY` on the uncertifiable arms, where the chart is never routed.
+    pub jacobian_sup: f64,
 }
 
 /// The per-atom encode atlas: a set of certified charts covering the atom's
@@ -2394,6 +2405,7 @@ impl EncodeAtlas {
                     amortized_jacobian: None,
                     recon_center: Array1::<f64>::zeros(atom.output_dim()),
                     amortized_base: None,
+                    jacobian_sup: f64::INFINITY,
                 });
                 continue;
             }
@@ -2417,6 +2429,7 @@ impl EncodeAtlas {
                         amortized_jacobian: None,
                         recon_center: Array1::<f64>::zeros(atom.output_dim()),
                         amortized_base: None,
+                        jacobian_sup: recon_sups.jacobian,
                     });
                     continue;
                 }
@@ -2452,6 +2465,7 @@ impl EncodeAtlas {
                 amortized_jacobian,
                 recon_center,
                 amortized_base,
+                jacobian_sup: recon_sups.jacobian,
             });
         }
         Ok(AtomEncodeAtlas {
@@ -2635,18 +2649,25 @@ impl EncodeAtlas {
             ));
         };
 
-        // Route to the nearest chart centers by AMBIENT reconstruction distance.
-        // A single nearest chart is NOT globally sound on self-approaching atoms:
-        // where the decoded manifold folds near itself (two distant latent points
-        // map near the same output), the nearest-center chart can certify into the
-        // locally-worse basin while another chart holds the GLOBAL minimum (both
-        // branches' charts reconstruct near the crossing, so both are near in
-        // ambient distance). The certificate is honest about LOCAL convergence but
-        // cannot see the better far basin. So we refine in the top-K nearest charts
-        // and keep the lowest-reconstruction-error CERTIFIED result. For a unimodal
-        // atom every candidate chart converges to the same root, so this is a no-op
-        // (first-wins tie → the nearest chart), preserving the existing behavior.
-        let candidates = nearest_charts_topk(atom_atlas, x, amplitude, CERTIFIED_ROUTING_TOPK);
+        // #2518 item 1 — route over EVERY certifiable chart, ordered by ambient
+        // reconstruction distance, and stop by PROOF rather than by a constant.
+        //
+        // A single nearest chart is not globally sound on a self-approaching atom:
+        // where the decoded manifold folds near itself, the nearest-center chart
+        // can certify into the locally-worse basin while another chart holds the
+        // global minimum. The old code refined a fixed four and hoped the right
+        // chart was among them — which on a row with five competing basins returns
+        // an encode that is Kantorovich-certified and globally wrong.
+        //
+        // Each chart carries a rigorous lower bound on the residual it can reach
+        // (`dist_c − slack_c`, see `CertifiedChart::jacobian_sup`), so a chart is
+        // skipped only when it PROVABLY cannot beat the best certified residual
+        // found so far, and the distance-ordered scan stops once that holds for the
+        // running maximum slack. The scan itself costs exactly what it did before —
+        // the old selector already measured the distance to every chart to pick its
+        // four — so on a unimodal atom this does strictly LESS refinement work than
+        // the constant forced, while on a folded one it cannot miss the basin.
+        let candidates = certified_encode_candidates(atom_atlas, x, amplitude);
         if candidates.is_empty() {
             return Ok((
                 Array1::<f64>::zeros(d),
@@ -2663,7 +2684,24 @@ impl EncodeAtlas {
         // candidate certifies — the nearest chart owns the flagged row).
         let mut best: Option<(Array1<f64>, RowCertificate, f64)> = None;
         let mut nearest_fallback: Option<(Array1<f64>, RowCertificate)> = None;
-        for chart_idx in candidates {
+        // Largest slack seen so far. The candidates are distance-ordered, so once
+        // `dist − max_slack` exceeds the best certified residual, EVERY remaining
+        // candidate is at least as far and cannot do better either — that is the
+        // termination proof the old fixed count stood in for.
+        let mut max_slack = 0.0_f64;
+        for (chart_idx, dist, slack) in candidates {
+            max_slack = max_slack.max(slack);
+            if let Some((_, _, best_err)) = best.as_ref() {
+                // Whole-tail termination: nothing further can beat `best_err`.
+                if dist - max_slack >= *best_err {
+                    break;
+                }
+                // This chart alone cannot; a later, farther chart with a larger
+                // slack still might, so keep scanning.
+                if dist - slack >= *best_err {
+                    continue;
+                }
+            }
             let chart = &atom_atlas.charts[chart_idx];
             let Some(t) = amortized_warm_start(chart, x, amplitude) else {
                 if nearest_fallback.is_none() {
@@ -2708,12 +2746,11 @@ impl EncodeAtlas {
                 }
             }
         }
-        // #2518 item 1 — top-K ambient routing is sound only if the GLOBAL
-        // basin's chart is among the K nearest by reconstruction distance. That
-        // is a hope, not a bound: `CERTIFIED_ROUTING_TOPK` is a constant, and on
-        // a folded atom the right chart can be the fifth-nearest, which makes
-        // the row CERTIFIED AND WRONG — the one failure mode a certificate must
-        // not have.
+        // #2518 item 1 — the chart scan above is now complete over its own
+        // criterion (every certifiable chart, pruned only by a rigorous residual
+        // bound), but completeness over CHARTS is still not completeness over the
+        // FIBER: a basin whose minimiser lies where no certifiable chart covers it
+        // is invisible to any chart-based search, however exhaustive.
         //
         // For `d == 1` periodic atoms — the DEFAULT overcomplete atom, not a
         // corner case — the whole fiber is enumerable exactly, and the fit path
@@ -4111,9 +4148,13 @@ pub(crate) fn nearest_chart(
 /// ambient ‖·‖², returned as chart indices sorted by increasing distance (ties
 /// broken by chart index — deterministic). Only certifiable charts
 /// (`certified_radius > 0`) are considered, exactly like [`nearest_chart`], whose
-/// single result is `nearest_charts_topk(.., 1)[0]`. Used by the certified encode
-/// to refine the global basin on self-approaching atoms (see
-/// [`CERTIFIED_ROUTING_TOPK`]).
+/// single result is `nearest_charts_topk(.., 1)[0]`.
+///
+/// **No production caller since #2518.** The certified encode takes every
+/// certifiable chart from [`certified_encode_candidates`] and prunes by proof, so
+/// nothing in the shipped path asks for a fixed prefix any more. It survives
+/// `#[cfg(test)]`-only as the CPU side of the CPU/GPU routing-parity gate, which
+/// still needs to compare two selectors at a common `k`.
 /// The atom's exact stationary-point enumerator, for the one family where the
 /// whole fiber is enumerable in closed form: a period-one harmonic curve in one
 /// latent coordinate (#2518). `PeriodicHarmonicEvaluator` emits
@@ -4160,6 +4201,62 @@ fn nearest_chart_to_periodic_coordinate(
     best.map(|(index, _)| index)
 }
 
+/// EVERY certifiable chart of an atom, paired with its ambient routing distance
+/// `dist_c = ‖x − z·m(t_c)‖` and its own residual SLACK `z·jacobian_sup·radius`,
+/// sorted by increasing distance (#2518 item 1).
+///
+/// This is what replaced `CERTIFIED_ROUTING_TOPK = 4`. The old constant answered
+/// a question — *how many charts must I refine before I can be sure I have the
+/// global basin?* — that has an actual answer, and answering it with an integer
+/// meant a row with five competing basins got an encode that was locally
+/// Kantorovich-certified and globally the wrong branch. Certified and wrong is
+/// the one failure mode a certificate must not have.
+///
+/// The scan cost is UNCHANGED: `select_nearest_charts_topk` already evaluated
+/// the distance to every chart in order to pick the nearest four, so the only
+/// thing the old constant bounded was how many candidates got REFINED — and the
+/// caller now bounds that by proof instead ([`CertifiedChart::jacobian_sup`]):
+/// a chart may be skipped once `dist_c − slack_c` exceeds the best certified
+/// residual found so far, and the scan may STOP once that holds for the running
+/// maximum slack, since the list is distance-ordered. On a unimodal atom the
+/// first chart lands at a small residual and everything else prunes immediately,
+/// which is strictly less work than the four refinements the constant forced.
+pub(crate) fn certified_encode_candidates(
+    atom_atlas: &AtomEncodeAtlas,
+    x: ArrayView1<'_, f64>,
+    amplitude: f64,
+) -> Vec<(usize, f64, f64)> {
+    let scaled = if amplitude.is_finite() { amplitude.abs() } else { 0.0 };
+    select_nearest_charts_topk(
+        atom_atlas.charts.len(),
+        x,
+        amplitude,
+        atom_atlas.charts.len(),
+        |idx, out| {
+            let chart = &atom_atlas.charts[idx];
+            if chart.certified_radius <= 0.0 {
+                return false;
+            }
+            for (o, r) in out.iter_mut().zip(chart.recon_center.iter()) {
+                *o = *r;
+            }
+            true
+        },
+    )
+    .into_iter()
+    .map(|(idx, dist)| {
+        let chart = &atom_atlas.charts[idx];
+        // The certified encode returns a root inside the chart's ball, so the
+        // reachable reconstruction moves at most `‖∂m‖_sup · radius` from the
+        // center in amplitude-1 units. A non-finite sup yields an infinite slack,
+        // which disables pruning for that chart — never a false skip.
+        let slack = scaled * chart.jacobian_sup * chart.region.radius;
+        (idx, dist, if slack.is_finite() { slack } else { f64::INFINITY })
+    })
+    .collect()
+}
+
+#[cfg(test)]
 pub(crate) fn nearest_charts_topk(
     atom_atlas: &AtomEncodeAtlas,
     x: ArrayView1<'_, f64>,
@@ -5052,6 +5149,7 @@ mod encode_fix_tests {
             amortized_jacobian: None,
             recon_center: Array1::from(recon),
             amortized_base: None,
+            jacobian_sup: 0.0,
         }
     }
 

@@ -1459,7 +1459,8 @@ fn production_circle_readout_cross_seed_concordance_2260() {
 ///      reconstruction minimum, not a locally-worse basin. With single-chart
 ///      routing this FAILED (worst certified row reconstructed at err ≈ 0.094 vs
 ///      global ≈ 0.013, ~7x — a confident sub-global encode). The top-K chart
-///      routing fix (`CERTIFIED_ROUTING_TOPK`) refines the competing branches and
+///      routing fix (all certifiable charts, pruned by a rigorous residual bound —
+///      formerly the fixed `CERTIFIED_ROUTING_TOPK`) refines the competing branches and
 ///      keeps the lowest-reconstruction certified result, restoring global
 ///      soundness; this test now asserts the excess is ≈ 0.
 #[test]
@@ -1564,7 +1565,8 @@ fn certified_encode_is_globally_sound_near_self_crossing() {
         certified > steps * steps / 2,
         "fixture must certify most targets; got {certified}"
     );
-    // (B) GLOBAL soundness now HOLDS: top-K chart routing (CERTIFIED_ROUTING_TOPK)
+    // (B) GLOBAL soundness now HOLDS: complete chart routing (every certifiable
+    //     chart, pruned only by proof; formerly a fixed CERTIFIED_ROUTING_TOPK)
     //     refines the competing branches and returns the lowest-reconstruction
     //     certified result, so a certified encode lands within the GLOBAL minimum's
     //     neighborhood even at the self-crossing. Pre-fix this excess was ~0.08
