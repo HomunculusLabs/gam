@@ -434,6 +434,12 @@ struct Evaluation {
     profiled_deviance: f64,
     penalty_traces: Array1<f64>,
     lambdas: Array1<f64>,
+    /// `rank(Σ_j λ_j S_j)` in the PER-OUTPUT coefficient basis, carried out of
+    /// the evaluation that measured it. The fit boundary needs it to state the
+    /// joint penalty nullity `mp = p − rank(ΣS)` — the effective dimension no
+    /// amount of smoothing can remove — and re-deriving it there would be a
+    /// second spectral decision about the same matrix.
+    combined_penalty_rank: usize,
 }
 
 #[derive(Debug)]
@@ -545,26 +551,80 @@ pub fn fit_shared_tangent_reml(
 
     let evaluation = prepared.evaluate(&rho)?;
     let fitted = predict_from_coefficients(&prepared.design, &evaluation.coefficients)?;
-    let mut lambdas = Array1::<f64>::zeros(prepared.output_penalty_slots);
-    let mut edf_by_penalty = Array1::<f64>::zeros(prepared.output_penalty_slots);
-    for (active_index, penalty) in prepared.penalties.iter().enumerate() {
-        lambdas[penalty.output_slot] = evaluation.lambdas[active_index];
-        let upper = (penalty.rank * prepared.n_outputs) as f64;
-        let raw = upper - evaluation.penalty_traces[active_index];
-        edf_by_penalty[penalty.output_slot] =
-            bounded_roundoff_value(raw, 0.0, upper, "per-penalty effective degrees of freedom")?;
+    // The EDF accounting — which ceiling a per-block trace is admitted against,
+    // what a non-finite trace resolves to, what `edf_by_block` is measured
+    // against, and what floor `edf_total` may not fall below — is the SHARED one
+    // (`gam_solve::estimate::penalized_edf_bundle`, issue #2470). This route was
+    // the last one keeping its own, and it differed on every axis that matters:
+    //
+    // * **Floor.** It clamped `edf_total` to `[0, p]`. The attainable minimum is
+    //   the joint penalty nullity `mp = p − rank(Σ_j λ_j S_j)`: those directions
+    //   are unpenalized, so no amount of smoothing removes them. A `[0, p]`
+    //   clamp lets a noisy trace publish an effective dimension below the
+    //   mathematically possible one, and `σ̂² = D/(rows − edf)` and every SE off
+    //   this path inherit it silently.
+    // * **Saturation.** A redundant block driven to the λ ceiling can overflow
+    //   the raw product `λ_k·tr` to `+∞` on a ridge-stabilized system even
+    //   though the true value is exactly `rank_k` (#1379). The local
+    //   `bounded_roundoff_value` refuses any non-finite value, so this route
+    //   FAILED THE WHOLE FIT on a case the shared accounting resolves to the
+    //   saturated bound.
+    // * **Summation.** `edf_total` is a difference of two like-sized quantities,
+    //   so naive `.sum()` error lands directly in the reported dimension; the
+    //   shared path sums the admitted traces with compensated addition.
+    //
+    // Stating `mp` here is also what lets `collapsed_to_penalty_null_space` see
+    // a fit that kept none of the penalized directions its design offered — a
+    // state this route previously reported as an ordinary converged answer.
+    //
+    // The per-block ceiling is `rank(S_j)·D`: shared smoothing applies each
+    // penalty to the same column block in every one of the `D` outputs, so its
+    // rank in the joint `p = n_coefficients·D` space is `D` copies of the local
+    // rank. That is the ceiling this route already used, and it is the one the
+    // REML criterion prices, so it is carried over unchanged.
+    let block_ranks: Vec<usize> = prepared
+        .penalties
+        .iter()
+        .map(|penalty| penalty.rank * prepared.n_outputs)
+        .collect();
+    // Kept from the accounting this route used to own: a trace that is FINITE
+    // and materially outside `[0, rank]` is not saturation and not roundoff — it
+    // is broken linear algebra upstream, and admitting it at a bound would hide
+    // that. The shared accounting deliberately clamps (a non-finite product is
+    // the ceiling case above), so this input check stays here rather than
+    // becoming a second accounting policy.
+    for (active_index, &rank) in block_ranks.iter().enumerate() {
+        let raw = evaluation.penalty_traces[active_index];
+        if raw.is_finite() {
+            bounded_roundoff_value(raw, 0.0, rank as f64, "per-penalty penalty trace")?;
+        }
     }
     let total_coefficients = prepared
         .n_coefficients
         .checked_mul(prepared.n_outputs)
-        .ok_or_else(|| invalid("coefficient dimension overflow"))?
-        as f64;
-    let edf_total = bounded_roundoff_value(
-        total_coefficients - evaluation.penalty_traces.sum(),
-        0.0,
+        .ok_or_else(|| invalid("coefficient dimension overflow"))?;
+    let joint_penalty_nullity = prepared
+        .n_coefficients
+        .checked_sub(evaluation.combined_penalty_rank)
+        .ok_or_else(|| invalid("combined penalty rank exceeds coefficient dimension"))?
+        .checked_mul(prepared.n_outputs)
+        .ok_or_else(|| invalid("joint penalty nullity overflow"))?;
+    let bundle = gam_solve::estimate::penalized_edf_bundle(
+        evaluation
+            .penalty_traces
+            .as_slice()
+            .ok_or_else(|| invalid("penalty traces are not contiguous"))?,
+        &block_ranks,
         total_coefficients,
-        "total effective degrees of freedom",
-    )?;
+        joint_penalty_nullity as f64,
+    );
+    let mut lambdas = Array1::<f64>::zeros(prepared.output_penalty_slots);
+    let mut edf_by_penalty = Array1::<f64>::zeros(prepared.output_penalty_slots);
+    for (active_index, penalty) in prepared.penalties.iter().enumerate() {
+        lambdas[penalty.output_slot] = evaluation.lambdas[active_index];
+        edf_by_penalty[penalty.output_slot] = bundle.edf_by_block[active_index];
+    }
+    let edf_total = bundle.edf_total;
     let effective_joint_rows = prepared
         .effective_observations
         .checked_mul(prepared.n_outputs)
@@ -849,6 +909,7 @@ impl PreparedSharedTangent {
             profiled_deviance,
             penalty_traces,
             lambdas,
+            combined_penalty_rank: spectrum.rank,
         })
     }
 
@@ -970,6 +1031,7 @@ impl PreparedSharedTangent {
             profiled_deviance,
             penalty_traces,
             lambdas,
+            combined_penalty_rank: spectrum.rank,
         })
     }
 
