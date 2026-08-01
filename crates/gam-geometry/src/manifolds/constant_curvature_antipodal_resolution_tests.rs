@@ -48,8 +48,19 @@ fn probe_antipodal_resolution_law() {
     let y = ndarray::array![-R, 0.0];
     eprintln!("t=kappa*R^2   D=(1-t)^2      rel_err(d)    rel_err(d')   rel_err(d'')");
     for t in [
-        0.1_f64, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 0.999, 0.9999, 1.0 - 1e-6, 1.0 - 1e-8,
-        1.0 - 1e-10, 1.0 - 1e-12,
+        0.1_f64,
+        0.25,
+        0.5,
+        0.75,
+        0.9,
+        0.95,
+        0.99,
+        0.999,
+        0.9999,
+        1.0 - 1e-6,
+        1.0 - 1e-8,
+        1.0 - 1e-10,
+        1.0 - 1e-12,
     ] {
         let kappa = t / (R * R);
         let m = ConstantCurvature::new(2, kappa);
@@ -78,7 +89,15 @@ fn probe_antipodal_resolution_law() {
     eprintln!("\n[hyperbolic, aligned pair at (R,0) and (0.999R,0)]");
     eprintln!("|t|           lambda_min     rel_err(d)    rel_err(d')   rel_err(d'')");
     for t in [
-        0.1_f64, 0.5, 0.9, 0.99, 0.999, 0.9999, 1.0 - 1e-6, 1.0 - 1e-8, 1.0 - 1e-10,
+        0.1_f64,
+        0.5,
+        0.9,
+        0.99,
+        0.999,
+        0.9999,
+        1.0 - 1e-6,
+        1.0 - 1e-8,
+        1.0 - 1e-10,
     ] {
         let kappa = -t / (R * R);
         let m = ConstantCurvature::new(2, kappa);
@@ -109,7 +128,11 @@ fn probe_antipodal_resolution_law() {
                     ((jh - hh_ref) / hh_ref).abs()
                 );
             }
-            (dv, jv) => eprintln!("{t:<13.10} REFUSED d_err={} jet_err={}", dv.is_err(), jv.is_err()),
+            (dv, jv) => eprintln!(
+                "{t:<13.10} REFUSED d_err={} jet_err={}",
+                dv.is_err(),
+                jv.is_err()
+            ),
         }
     }
 

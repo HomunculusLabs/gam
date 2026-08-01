@@ -1652,6 +1652,12 @@ struct CurvatureInferenceRow {
     lo_at_bound: bool,
     /// `true` when the CI is right-open at the κ chart bound.
     hi_at_bound: bool,
+    /// Whether the POINT ESTIMATE `κ̂` is itself an endpoint of the κ search box
+    /// (gam#2687): `"interior"`, `"railed_at_lower_bound"`, or
+    /// `"railed_at_upper_bound"`. A railed κ̂ is a readout of the box rather
+    /// than of the data — the criterion never turned over inside it — and the
+    /// CI and flatness statistics below are conditioned on that same box.
+    kappa_hat_support: &'static str,
     /// Sign-of-CI geometry verdict: `"spherical"`, `"hyperbolic"`, `"flat"`, or
     /// `"indistinguishable"` (CI straddles 0).
     verdict: &'static str,
@@ -1800,6 +1806,7 @@ fn curvature_inference_dataset_json_impl(
             ci_hi: report.ci.ci_hi,
             lo_at_bound: report.ci.lo_at_bound,
             hi_at_bound: report.ci.hi_at_bound,
+            kappa_hat_support: report.ci.kappa_hat_support.label(),
             verdict: curvature_verdict_label(report.ci.verdict),
             flatness_lr_stat: report.flatness.lr_stat,
             flatness_p_value: report.flatness.p_value,

@@ -21,7 +21,7 @@ pub use closure_family::{
     profile_ci_from_grid,
 };
 pub use curvature_estimand::{
-    CurvatureVerdict, DesignCoordKappaJet, FlatnessTest, KappaProfileCi,
+    CurvatureVerdict, DesignCoordKappaJet, FlatnessTest, KappaEstimateSupport, KappaProfileCi,
     design_coord_kappa_derivative, flatness_lr_test, profile_ci_walk, wald_half_width,
 };
 pub use integrator::GeodesicIntegrator;
@@ -30,9 +30,8 @@ pub use manifold::{GeometryError, GeometryResult, ManifoldSpec, RiemannianManifo
 pub use manifolds::{
     CircleManifold, ConstantCurvature, EuclideanManifold, GrassmannManifold, ProductManifold,
     SpdManifold, SphereManifold, StiefelManifold, TorusManifold,
-    constant_curvature_dirichlet_penalty,
-    constant_curvature_dirichlet_penalty_kappa_derivative, distance_kappa_jet, exp_map_kappa_jet,
-    log_map_kappa_jet, spd_frechet_mean,
+    constant_curvature_dirichlet_penalty, constant_curvature_dirichlet_penalty_kappa_derivative,
+    distance_kappa_jet, exp_map_kappa_jet, log_map_kappa_jet, spd_frechet_mean,
 };
 pub use optimizer::{
     RiemannianLBFGS, RiemannianObjective, RiemannianTrustRegion, TrustRegionTermination,

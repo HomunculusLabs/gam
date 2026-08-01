@@ -8457,8 +8457,20 @@ where
     let relative_tolerance = relative_tolerance.max(f64::EPSILON.sqrt());
     let x_tolerance = relative_tolerance * (1.0 + kappa_min.abs().max(kappa_max.abs()));
     let score_tolerance = relative_tolerance * (1.0 + value_hat.abs());
+    // These two already exist because the stationarity check has to relax at a
+    // rail: at a bound, "stationary" means the score points OUT of the box, not
+    // that it vanishes. That is the routine knowing κ̂ is a box readout — and
+    // before #2687 it then threw the knowledge away and reported κ̂ as an
+    // estimate. It is now carried on the report.
     let at_lower = (kappa_hat - kappa_min).abs() <= x_tolerance;
     let at_upper = (kappa_hat - kappa_max).abs() <= x_tolerance;
+    let kappa_hat_support = if at_lower {
+        gam_geometry::curvature_estimand::KappaEstimateSupport::RailedAtLowerBound
+    } else if at_upper {
+        gam_geometry::curvature_estimand::KappaEstimateSupport::RailedAtUpperBound
+    } else {
+        gam_geometry::curvature_estimand::KappaEstimateSupport::Interior
+    };
     let stationary = if at_lower {
         score_hat >= -score_tolerance
     } else if at_upper {
@@ -8505,6 +8517,7 @@ where
         ci_hi,
         lo_at_bound,
         hi_at_bound,
+        kappa_hat_support,
         verdict,
     })
 }
@@ -8636,6 +8649,70 @@ mod curvature_profile_score_tests {
         assert_eq!(ci.ci_lo, -0.1);
         assert_eq!(ci.ci_hi, 0.1);
         assert!(ci.lo_at_bound && ci.hi_at_bound);
+        // κ̂ = 0 is interior to [−0.1, 0.1]: an open CI at both bounds is a
+        // statement about the interval, not about the estimate.
+        assert_eq!(
+            ci.kappa_hat_support,
+            gam_geometry::curvature_estimand::KappaEstimateSupport::Interior
+        );
+    }
+
+    /// gam#2687: the analytic-score route already had to KNOW κ̂ was railed —
+    /// its stationarity check relaxes to "the score points out of the box" at a
+    /// bound, which is only sound for a boundary optimum — and then reported κ̂
+    /// as an estimate anyway. Both halves are pinned here: the relaxed check
+    /// still accepts, and the report now carries the rail.
+    #[test]
+    fn a_railed_point_estimate_is_accepted_and_declared_by_the_analytic_route_2687() {
+        // V_p(κ) = −κ, score = −1: strictly decreasing, never stationary in the
+        // interior. κ̂ can only be the upper bound.
+        let kappa_max = 1.388_888_888_888_888_9_f64;
+        let mut monotone = |kappa: f64| -> Result<(f64, f64), String> { Ok((-kappa, -1.0)) };
+        let ci = curvature_profile_ci_from_analytic_score(
+            &mut monotone,
+            kappa_max,
+            -kappa_max,
+            kappa_max,
+            0.95,
+            1.0e-10,
+        )
+        .expect("a boundary optimum with the score pointing out of the box is stationary");
+        assert_eq!(
+            ci.kappa_hat_support,
+            gam_geometry::curvature_estimand::KappaEstimateSupport::RailedAtUpperBound,
+            "κ̂ = {kappa_max} is the box's own upper end"
+        );
+        // The mirrored sign, so the relaxation and the declaration agree on both
+        // sides rather than one of them being written for a single branch.
+        let mut increasing = |kappa: f64| -> Result<(f64, f64), String> { Ok((kappa, 1.0)) };
+        let ci_lo = curvature_profile_ci_from_analytic_score(
+            &mut increasing,
+            -kappa_max,
+            -kappa_max,
+            kappa_max,
+            0.95,
+            1.0e-10,
+        )
+        .expect("the mirrored boundary optimum");
+        assert_eq!(
+            ci_lo.kappa_hat_support,
+            gam_geometry::curvature_estimand::KappaEstimateSupport::RailedAtLowerBound
+        );
+        // An interior non-stationary point is still refused: the relaxation is
+        // tied to the rail, not a blanket loosening.
+        let mut interior_slope = |kappa: f64| -> Result<(f64, f64), String> { Ok((-kappa, -1.0)) };
+        assert!(
+            curvature_profile_ci_from_analytic_score(
+                &mut interior_slope,
+                0.0,
+                -kappa_max,
+                kappa_max,
+                0.95,
+                1.0e-10,
+            )
+            .is_err(),
+            "a non-stationary INTERIOR point is not an optimum and must still be refused"
+        );
     }
 }
 

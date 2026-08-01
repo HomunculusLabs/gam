@@ -16,15 +16,15 @@ pub mod circle;
 #[cfg(test)]
 mod conformance_tests;
 pub mod constant_curvature;
+/// PROBE (#2687): resolution of the shipped distance/κ-jet near the antipodal
+/// fold, measured against a cancellation-free closed form.
+#[cfg(test)]
+mod constant_curvature_antipodal_resolution_tests;
 /// Independent-oracle checks for the κ-stereographic family, which carries a
 /// continuous parameter and so is not a
 /// [`ManifoldSpec`](crate::manifold::ManifoldSpec) variant.
 #[cfg(test)]
 mod constant_curvature_conformance_tests;
-/// PROBE (#2687): resolution of the shipped distance/κ-jet near the antipodal
-/// fold, measured against a cancellation-free closed form.
-#[cfg(test)]
-mod constant_curvature_antipodal_resolution_tests;
 pub mod euclidean;
 pub mod grassmann;
 pub mod lie_so;
@@ -39,8 +39,8 @@ pub mod torus;
 pub use circle::CircleManifold;
 pub use constant_curvature::{
     ConstantCurvature, constant_curvature_dirichlet_penalty,
-    constant_curvature_dirichlet_penalty_kappa_derivative, distance_kappa_jet,
-    exp_map_kappa_jet, log_map_kappa_jet,
+    constant_curvature_dirichlet_penalty_kappa_derivative, distance_kappa_jet, exp_map_kappa_jet,
+    log_map_kappa_jet,
 };
 pub use euclidean::EuclideanManifold;
 pub use grassmann::GrassmannManifold;

@@ -113,6 +113,57 @@ pub enum CurvatureVerdict {
     Flat,
 }
 
+/// Where the point estimate `κ̂` sits relative to the chart-feasible search box
+/// it was optimized in — the provenance the CI's `*_at_bound` flags give for the
+/// interval's endpoints, and which `κ̂` itself did not carry (gam#2687).
+///
+/// `κ̂` is the argmin of `V_p` **over the box**. When the box constraint is
+/// active, that argmin is a readout of the box rather than of the data: the
+/// criterion never turned over inside it, and moving the box moves `κ̂` by
+/// exactly as much. #2687 measured that directly — on the coverage fixture
+/// `V_p` is strictly decreasing across the entire admissible interval, so
+/// `κ̂ = 1.391` is the endpoint `0.5/max‖x‖²` to four figures in every
+/// replicate, and widening the box to the resolution-derived end moves it to
+/// 2.78 against a planted 1.5.
+///
+/// Consumers must not read a railed `κ̂` as an estimate. Two statistics
+/// downstream of it change meaning when it is railed, and neither can detect it
+/// on its own:
+///
+/// * the **profile CI** thresholds `2[V_p(κ) − V_p(κ̂)]` against `χ²₁`, which is
+///   the Wilks region only when `κ̂` is an interior stationary point;
+/// * the **flatness LR** compares `V_p(0)` against `V_p(κ̂)`, so a railed `κ̂`
+///   understates the statistic (the true alternative optimum, if any, lies
+///   outside the box) — an error in the conservative direction, but an error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KappaEstimateSupport {
+    /// `κ̂` is an interior stationary point of `V_p`: an estimate.
+    Interior,
+    /// `κ̂` IS `kappa_min`. The criterion was still descending toward the
+    /// hyperbolic chart wall when the box stopped the search.
+    RailedAtLowerBound,
+    /// `κ̂` IS `kappa_max`. The criterion was still descending toward the
+    /// antipodal fold when the box stopped the search.
+    RailedAtUpperBound,
+}
+
+impl KappaEstimateSupport {
+    /// `true` when the box constraint was active at `κ̂`, i.e. the reported
+    /// curvature is a property of the search box and not only of the data.
+    pub fn is_railed(self) -> bool {
+        !matches!(self, Self::Interior)
+    }
+
+    /// Serialized provenance label, for the report surfaces.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Interior => "interior",
+            Self::RailedAtLowerBound => "railed_at_lower_bound",
+            Self::RailedAtUpperBound => "railed_at_upper_bound",
+        }
+    }
+}
+
 /// Profile-likelihood confidence interval for the fitted curvature `κ̂`.
 ///
 /// The set is the Wilks region `{κ : 2[V_p(κ) − V_p(κ̂)] ≤ χ²_{1,1−α}}` where
@@ -136,6 +187,11 @@ pub struct KappaProfileCi {
     /// `true` if the upper walk hit the `kappa_max` chart bound before the
     /// profile drop reached the threshold (CI is right-open at the bound).
     pub hi_at_bound: bool,
+    /// Whether the POINT ESTIMATE `κ̂` is itself a box endpoint (gam#2687).
+    /// The two flags above answer "is this CI endpoint real?"; this one answers
+    /// the prior question "is `κ̂` an estimate at all?", which nothing was
+    /// answering. See [`KappaEstimateSupport`].
+    pub kappa_hat_support: KappaEstimateSupport,
     /// Geometry verdict from the CI sign.
     pub verdict: CurvatureVerdict,
 }
@@ -231,6 +287,17 @@ where
     let (ci_lo, lo_at_bound) = walk_one_side(&mut v_p, &cfg, -1.0, kappa_min, &drop)?;
     let (ci_hi, hi_at_bound) = walk_one_side(&mut v_p, &cfg, 1.0, kappa_max, &drop)?;
 
+    // Is κ̂ itself a box endpoint? Denominated in the SAME `tol` the walk
+    // bisects to, so "κ̂ is at the bound" and "this side returned zero width"
+    // are one statement rather than two thresholds that can disagree.
+    let kappa_hat_support = if (kappa_hat - kappa_min).abs() <= tol {
+        KappaEstimateSupport::RailedAtLowerBound
+    } else if (kappa_max - kappa_hat).abs() <= tol {
+        KappaEstimateSupport::RailedAtUpperBound
+    } else {
+        KappaEstimateSupport::Interior
+    };
+
     let verdict = if ci_lo > 0.0 {
         CurvatureVerdict::Spherical
     } else if ci_hi < 0.0 {
@@ -245,6 +312,7 @@ where
         ci_hi,
         lo_at_bound,
         hi_at_bound,
+        kappa_hat_support,
         verdict,
     })
 }
@@ -617,5 +685,80 @@ mod tests {
             let fd1 = (cp[i] - cm[i]) / (2.0 * h);
             assert!((jet.d_kappa[i] - fd1).abs() < 1e-5, "flat d_kappa[{i}]");
         }
+    }
+
+    /// gam#2687: a MONOTONE profiled criterion has no interior optimum, so κ̂ is
+    /// the box endpoint the search stopped at and not an estimate. The walk must
+    /// say so — and must keep saying so when the box moves, since the whole
+    /// point is that κ̂ moves with it.
+    ///
+    /// This is exactly the shape measured on the #2687 fixture: `V_p` strictly
+    /// decreasing across the entire admissible interval, `κ̂` equal to the cap to
+    /// four figures in every replicate.
+    #[test]
+    fn a_monotone_criterion_rails_kappa_hat_and_the_walk_declares_it_2687() {
+        // V_p(κ) = −κ: strictly decreasing, so the box's upper end is the argmin
+        // wherever that end is put.
+        let monotone = |kappa: f64| -> Result<f64, String> { Ok(-kappa) };
+        for kappa_max in [1.389_f64, 2.78, 40.0] {
+            let ci = profile_ci_walk(monotone, kappa_max, -1.0, -kappa_max, kappa_max, 0.95, 1e-8)
+                .expect("a monotone profile is a legal input; it is a rail, not an error");
+            assert_eq!(
+                ci.kappa_hat_support,
+                KappaEstimateSupport::RailedAtUpperBound,
+                "κ̂ = {kappa_max} IS the box's upper end; the report must not call \
+                 it an estimate"
+            );
+            assert!(ci.kappa_hat_support.is_railed());
+            assert_eq!(ci.kappa_hat_support.label(), "railed_at_upper_bound");
+            // And the CI's own right endpoint is open at the same bound, which
+            // is the flag that already existed: the two answer different
+            // questions and must both be available.
+            assert!(
+                ci.hi_at_bound,
+                "the CI is right-open at the bound the estimate is railed against"
+            );
+        }
+        // The mirrored case, so the declaration is not accidentally one-sided.
+        let increasing = |kappa: f64| -> Result<f64, String> { Ok(kappa) };
+        let ci = profile_ci_walk(increasing, -2.0, -1.0, -2.0, 2.0, 0.95, 1e-8)
+            .expect("monotone increasing rails at the lower end");
+        assert_eq!(
+            ci.kappa_hat_support,
+            KappaEstimateSupport::RailedAtLowerBound
+        );
+        assert_eq!(ci.kappa_hat_support.label(), "railed_at_lower_bound");
+    }
+
+    /// The other half of the contract: an interior stationary point must NOT be
+    /// declared railed, however close the box happens to be. A declaration that
+    /// fired on every fit would be as useless as one that never fired.
+    #[test]
+    fn an_interior_optimum_is_not_declared_railed_2687() {
+        let kappa_star = -0.37_f64;
+        let a = 16.0_f64;
+        let quadratic = |kappa: f64| -> Result<f64, String> {
+            Ok(7.0 + 0.5 * a * (kappa - kappa_star) * (kappa - kappa_star))
+        };
+        let ci = profile_ci_walk(quadratic, kappa_star, a, -3.0, 3.0, 0.95, 1e-8)
+            .expect("quadratic profile CI");
+        assert_eq!(
+            ci.kappa_hat_support,
+            KappaEstimateSupport::Interior,
+            "an interior minimiser is an estimate"
+        );
+        assert!(!ci.kappa_hat_support.is_railed());
+        assert!(!ci.lo_at_bound && !ci.hi_at_bound);
+
+        // Squeeze the box until κ̂ sits ON its lower end. Same criterion, same
+        // κ̂ — only the box moved — and the declaration flips. That is the
+        // property #2687 needs: the flag reports the BOX's involvement, not a
+        // shape of the criterion.
+        let squeezed = profile_ci_walk(quadratic, kappa_star, a, kappa_star, 3.0, 0.95, 1e-8)
+            .expect("boxed-at-the-optimum profile CI");
+        assert_eq!(
+            squeezed.kappa_hat_support,
+            KappaEstimateSupport::RailedAtLowerBound
+        );
     }
 }

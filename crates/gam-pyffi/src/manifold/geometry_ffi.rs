@@ -1321,6 +1321,12 @@ fn response_geometry_fit_curvature<'py>(
     out.set_item("ci_hi", fit.profile_ci.ci_hi)?;
     out.set_item("ci_lo_at_bound", fit.profile_ci.lo_at_bound)?;
     out.set_item("ci_hi_at_bound", fit.profile_ci.hi_at_bound)?;
+    // gam#2687: whether κ̂ ITSELF is a box endpoint. The two flags above answer
+    // "is this CI endpoint real?"; this answers "is κ̂ an estimate at all?".
+    out.set_item(
+        "kappa_hat_support",
+        fit.profile_ci.kappa_hat_support.label(),
+    )?;
     out.set_item("verdict", verdict)?;
     out.set_item("flatness_lr", fit.flatness.lr_stat)?;
     out.set_item("flatness_pvalue", fit.flatness.p_value)?;
